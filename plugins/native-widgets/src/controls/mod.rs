@@ -1,4 +1,4 @@
-//! The six v1 controls (native-widgets Phase 1, PLAN 1.2): `Button`,
+//! The six v1 controls: `Button`,
 //! `Label`, `Switch`, `Slider`, `ProgressBar`, `Image` — each an internal
 //! [`NativeWidget`](crate::runtime::NativeWidget) impl over
 //! [`crate::runtime`], with every property write a direct platform setter on
@@ -16,10 +16,10 @@
 //!    under `src/android/`, which compiles on Android only);
 //! 2. a **platform half** — one `mod platform` per target, side by side in
 //!    the same file, each holding that platform's `NativeWidget` impl:
-//!    - `#[cfg(target_os = "android")] mod platform` (p1-04) — build the
+//!    - `#[cfg(target_os = "android")] mod platform` — build the
 //!      `android.widget.*` view, hand each planned [`Setter`] to
 //!      `platform::apply`, retain/release the global refs;
-//!    - `#[cfg(target_os = "ios")] mod platform` (p2-02) — build the UIKit
+//!    - `#[cfg(target_os = "ios")] mod platform` — build the UIKit
 //!      view, apply the **same plan** through typed `objc2-ui-kit` setters,
 //!      and let ARC own the references.
 //!
@@ -36,8 +36,8 @@
 //!
 //! # Property tiers — which setter you call is the whole cost story
 //!
-//! SPIKE.md's headline finding (Phase 0 spike 1, an optimized `--profile`
-//! build, 50 retained `TextView`s, method ids cached): the FFI crossing is
+//! An earlier on-device measurement (an optimized `--profile`
+//! build, 50 retained `TextView`s, method ids cached) found the FFI crossing is
 //! not what costs — *which* Android property you set is.
 //!
 //! | Tier | What it costs | Measured, per call | Setters |
@@ -56,17 +56,18 @@
 //! at all, which is why [`Setter::ImageBytes`] is emitted only when the bytes'
 //! *identity* changed (`crate::controls::image`), never per rebuild.
 //!
-//! Debug builds are 2–5× worse across the board (SPIKE.md) — only judge these
+//! Debug builds are 2–5× worse across the board — only judge these
 //! numbers on an optimized build.
 //!
 //! **The table is Android-measured, and [`Tier`] is deliberately not
-//! re-derived per platform.** No equivalent UIKit measurement exists (Phase 0
-//! spike 1 ran on Android only), so the iOS arm applies the same plan without
+//! re-derived per platform.** No equivalent UIKit measurement exists (the
+//! on-device measurement above ran on Android only), so the iOS arm applies
+//! the same plan without
 //! claiming the same costs. The *shape* is expected to carry — a UIKit
 //! caption/font change invalidates intrinsic content size and re-lays-out the
 //! view, a colour change only redisplays it — but the numbers above are not
 //! evidence for iOS and must not be cited as if they were. Re-measuring on
-//! device is p2-05's business, not a claim this module gets to make.
+//! device is future work, not a claim this module gets to make.
 //!
 //! # Field-level diffing is the control's job
 //!
@@ -112,7 +113,7 @@
 //! `with_runtime` re-entrancy drop above covers both if either bites — see
 //! `switch.rs`'s module doc, which is the reference description for this arm
 //! too. **Do not add a per-instance suppression flag on either platform**
-//! (f2-02 deleted Android's for good reasons; there is nothing to reinstate).
+//! (Android's was deleted for good reasons; there is nothing to reinstate).
 
 pub(crate) mod button;
 pub(crate) mod image;
@@ -134,7 +135,7 @@ use self::typeface::Typeface;
 // --- the params wire keys ---------------------------------------------------
 //
 // One definition per key, shared by every control that carries it, so the api
-// layer (p1-06) and the decoders here can never drift apart.
+// layer and the decoders here can never drift apart.
 
 /// `"text"` — a `Button`/`Label` caption.
 pub(crate) const TEXT: &str = "text";
@@ -170,7 +171,7 @@ pub(crate) const TINT: &str = "tint";
 /// `"fit"` — `Image`'s scale-type hint (see [`Fit`]).
 pub(crate) const FIT: &str = "fit";
 /// `"dark"` — whether the active theme's `Brightness` is `Dark` (theme
-/// ladder L1, p1-07): the input to the night-qualified `Context`
+/// ladder L1): the input to the night-qualified `Context`
 /// `crate::android`'s `create_control` builds every control's view against
 /// (`crate::android::theme::night_qualified_context`). Read straight off a
 /// slot's raw params by `crate::android::theme::brightness_is_dark` *before*
@@ -179,10 +180,10 @@ pub(crate) const FIT: &str = "fit";
 /// field on any control's own `Props`, unlike every other key in this list.
 pub(crate) const DARK: &str = "dark";
 /// `"cornerRadiusDp"` — [`Setter::ThemedBackground`]'s corner radius, dp
-/// (theme ladder L2, p1-07: `button::ButtonProps::corner_radius_dp`).
+/// (theme ladder L2: `button::ButtonProps::corner_radius_dp`).
 pub(crate) const CORNER_RADIUS_DP: &str = "cornerRadiusDp";
-/// `"typeface"` — [`Setter::Typeface`]'s wire spelling (theme ladder L3,
-/// p1-08: `typeface::Typeface::wire`/`decode`).
+/// `"typeface"` — [`Setter::Typeface`]'s wire spelling (theme ladder L3:
+/// `typeface::Typeface::wire`/`decode`).
 pub(crate) const TYPEFACE: &str = "typeface";
 
 // --- tiers ------------------------------------------------------------------
@@ -214,7 +215,7 @@ pub(crate) enum Tier {
 /// from the diff) is what makes every control's diff behaviour assertable on a
 /// host with no JNI — `plan(old, new)` **is** the setter-call plan the tests
 /// pin (`docs/DEVELOPMENT.md`'s host gate; the JNI calls themselves are
-/// device-gated in p1-10).
+/// device-gated separately).
 ///
 /// Each variant's doc names the exact Java setter and its [`Tier`]; the
 /// module doc's table is the same information grouped by tier.
@@ -320,7 +321,7 @@ pub(crate) enum Setter<'a> {
     /// (which this variant supersedes whenever a corner radius is also
     /// requested — see `Button`'s `plan`).
     ///
-    /// Theme ladder L2 (p1-07): `Button`'s background/corner-radius pinning
+    /// Theme ladder L2: `Button`'s background/corner-radius pinning
     /// ([`crate::api::theme::ResolvedTheme`]'s `accent_fill`/
     /// `corner_radius_dp`). A fill colour and a corner radius can't be two
     /// independent setters the way a colour and a tint list can: Android has
@@ -337,7 +338,7 @@ pub(crate) enum Setter<'a> {
     /// platform re-measures and re-lays-out the view exactly like
     /// [`Self::TextSizeSp`] — never a per-frame setter.
     ///
-    /// Theme ladder L3 (p1-08): the resolved
+    /// Theme ladder L3: the resolved
     /// [`typeface::Typeface`] a text-bearing control (`Button`/`Label`/
     /// `Switch`) renders in. [`typeface::Typeface::System`] plans this same
     /// setter with a `null` argument (`crate::android::fonts::typeface_for`
@@ -459,9 +460,9 @@ pub(crate) mod platform {
     //!
     //! The hot setters (the ones a per-frame path may touch) resolve their
     //! `JMethodID` **once per process** into [`HOT`] and call through
-    //! `Env::call_method_unchecked` — the spike's proven shape (commit
-    //! `92b7674`), and the reason its measured floor is ~0.14–0.27 µs per
-    //! crossing rather than three crossings plus a string lookup.
+    //! `Env::call_method_unchecked`, the proven shape behind its measured
+    //! floor of ~0.14–0.27 µs per crossing rather than three crossings plus a
+    //! string lookup.
     //! `JMethodID` is `Send + Sync` in `jni` 0.22 precisely so it can be
     //! cached this way, and the ids stay valid for the process because the
     //! framework classes they come from are never unloaded.
@@ -506,7 +507,7 @@ pub(crate) mod platform {
     /// `android.widget.ImageView$ScaleType` — [`Setter::ScaleType`]'s enum.
     pub(crate) const SCALE_TYPE_CLASS: &str = "android.widget.ImageView$ScaleType";
     /// `android.graphics.drawable.GradientDrawable` —
-    /// [`Setter::ThemedBackground`]'s drawable (theme ladder L2, p1-07).
+    /// [`Setter::ThemedBackground`]'s drawable (theme ladder L2).
     pub(crate) const GRADIENT_DRAWABLE_CLASS: &str = "android.graphics.drawable.GradientDrawable";
 
     /// How many local references a control's create/update frame reserves.
@@ -1115,7 +1116,7 @@ pub(crate) mod platform {
     }
 
     /// `view.layer.cornerRadius` + `masksToBounds` — the corner-radius half
-    /// of [`Setter::ThemedBackground`] (theme ladder L2, p1-07/p2-04); the
+    /// of [`Setter::ThemedBackground`] (theme ladder L2); the
     /// fill half is [`set_background_color`].
     ///
     /// UIKit's own coordinate system is already point-based
@@ -1135,7 +1136,7 @@ pub(crate) mod platform {
     /// A resolved [`UIFont`], from either the system font or a registered
     /// Glyph face — the two shapes [`resolve_font`] can hand back, unified
     /// behind one accessor so a control's `apply` never has to branch on
-    /// which arm it got (theme ladder L3, p2-04).
+    /// which arm it got (theme ladder L3).
     ///
     /// [`Self::Glyph`] holds a **sized** `CTFont`
     /// (`CTFont::with_font_descriptor` bakes the point size in, mirroring
@@ -1164,7 +1165,7 @@ pub(crate) mod platform {
     }
 
     /// Resolve `typeface` to a real [`UIFont`] at `size_sp` points — the
-    /// Apple half of theme ladder L3 (p2-04), mirroring
+    /// Apple half of theme ladder L3, mirroring
     /// `crate::android::fonts::typeface_for`'s contract:
     /// [`Typeface::System`] is the platform default ([`system_font`]); a
     /// Glyph face resolves through `crate::apple::fonts`'s thread-locally
@@ -1207,7 +1208,7 @@ pub(crate) mod platform {
     /// converge on iOS.
     const DEFAULT_POINT_SIZE: f32 = 17.0;
 
-    /// The per-control state theme ladder L3 (p2-04) needs on this arm to
+    /// The per-control state theme ladder L3 needs on this arm to
     /// keep [`Setter::TextSizeSp`]/[`Setter::Typeface`] independent, the way
     /// Android's `setTextSize`/`setTypeface` genuinely are (two calls,
     /// either one leaving the other alone).
@@ -1345,7 +1346,7 @@ mod tests {
         );
     }
 
-    // --- the Apple arm's shared pure logic (p2-02) -------------------------
+    // --- the Apple arm's shared pure logic -----------------------------------
 
     #[test]
     fn argb_splits_into_the_four_apple_channels_in_rgba_order() {

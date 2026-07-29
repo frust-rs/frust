@@ -1,9 +1,9 @@
-//! Desktop secret-store backend (Linux/Windows), Plan Phase 4 (task S04).
+//! Desktop secret-store backend (Linux/Windows).
 //!
 //! Routes through [`keyring-core`](https://docs.rs/keyring-core) — Linux via
 //! `zbus-secret-service-keyring-store` (pure-Rust Secret Service client, no
 //! libdbus to vendor), Windows via `windows-native-keyring-store` (Credential
-//! Manager) — the platform-store crates task S01b pinned in `Cargo.toml`. Both
+//! Manager) — the platform-store crates this crate's `Cargo.toml` pins. Both
 //! macOS desktop and iOS still share [`crate::apple`] (`target_vendor =
 //! "apple"`), so this module is `#[cfg(any(target_os = "linux", target_os =
 //! "windows"))]` only.
@@ -25,9 +25,9 @@
 //! across the two platform stores this backend pairs with: the Linux
 //! secret-service store implements it unconditionally (an attribute search
 //! over `service`/`username`), but the Windows store gates it behind a
-//! `search` feature this crate's `Cargo.toml` does not enable (S01b froze
-//! deps ahead of this task; adding a feature there is out of this task's
-//! scope guard). Rather than diverge — a Linux-only enumeration path today,
+//! `search` feature this crate's `Cargo.toml` does not enable (adding it is
+//! a separate, deliberately deferred change). Rather than diverge — a
+//! Linux-only enumeration path today,
 //! a silently different feature footprint on Windows if that feature were
 //! added later — [`DesktopStore`] maintains one **reserved index
 //! credential** per store (`user =` [`INDEX_USER`], holding a JSON array of
@@ -43,7 +43,7 @@
 //! `AuthPolicy::Required` never reaches this backend — [`crate::SecureStorage::open_with`]
 //! refuses it centrally before any backend is constructed, and stays refused
 //! on Linux/Windows permanently (no platform biometric primitive exists to
-//! back it here — see `PLAN.md` Phase 4).
+//! back it here).
 //!
 //! # Unverified pending a Linux/Windows host
 //!

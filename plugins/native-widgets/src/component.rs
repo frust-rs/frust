@@ -1,8 +1,5 @@
 //! [`NativeComponent`] — the **public** trait a plugin author writes a native
-//! component against, from pure Rust, with no per-component Kotlin or Swift
-//! (native-widgets Phase 3, p3-01;
-//! `workflow/plans/features/frust-native-widgets/research/RESEARCH-NATIVE-COMPONENT.md`
-//! is the verified design this productizes).
+//! component against, from pure Rust, with no per-component Kotlin or Swift.
 //!
 //! **An app crate cannot implement this trait today** — which is why the line
 //! above says *plugin* author. `create` has to construct real native views,
@@ -37,7 +34,7 @@
 //! `NativeWidget` impl,
 //! generic over every public component, so both kinds of implementation are
 //! dispatched by the same runtime, the same registry, the same props diff
-//! gate and the same disposal path. That is a deliberate p3-01 decision, on
+//! gate and the same disposal path. That is a deliberate design decision, on
 //! three grounds: the six controls' whole wire is `params_json` (they cannot
 //! use the typed props channel below without their api-layer builders changing
 //! shape), a public trait implemented *by* an internal one would either need a
@@ -112,7 +109,7 @@
 //! 5. **`dispose` is best-effort-prompt, and may be late.** See *Disposal
 //!    promptness* below.
 //!
-//! # The three decisions p3-01 owed (RESEARCH-NATIVE-COMPONENT's open points)
+//! # Three open design decisions this trait had to settle
 //!
 //! **1. What a third-party impl receives as a context.** [`ComponentCtx`] — an
 //! **opaque wrapper**, never the plugin's own per-platform `NativeCtx`. That
@@ -128,14 +125,14 @@
 //! escape-hatch types are already in this crate's public API (`AndroidHandle`
 //! names `jni`'s `Global<JObject>`, `AppleHandle` names objc2's
 //! `Retained<UIView>`), so no new dependency is exposed by admitting them
-//! here. The hierarchy-building half of that surface landed in p3-02 — see
+//! here. The hierarchy-building half of that surface is described next — see
 //! *A component owns its own native subtree* below.
 //!
 //! **2. How a component reaches the runtime's dispatch table.**
 //! [`register_component`], explicitly, from app or plugin init —
 //! `inventory`-style link-time auto-registration stays **banned** (it is
 //! exactly the mechanism that fails silently in a stripped, LTO'd device
-//! build; RESEARCH-NATIVE-COMPONENT §Open questions). Registration is
+//! build). Registration is
 //! **first-wins**: a kind string already registered — including any of the six
 //! built-in controls, which this build's backend registers when the thread's
 //! runtime is first touched — is refused with a warning rather than replaced,
@@ -143,7 +140,7 @@
 //!
 //! **3. Disposal promptness.** A public component gets **exactly the same
 //! guarantee the six controls get, and no more**: the framework's `retire()`
-//! (driven from the mounting widget's teardown, p1-09) is the primary path and
+//! (driven from the mounting widget's teardown) is the primary path and
 //! disposes promptly; the differ's missing-frame streak is the backstop, and
 //! it only advances on gate-`Run` frames, so on an idle screen a `dispose` can
 //! arrive many frames late — or after a replacement `create` already re-used
@@ -155,7 +152,7 @@
 //! `State` drops — which happens immediately after [`NativeComponent::dispose`]
 //! returns, alongside the runtime's paired delete of the [`NativeRoot`].
 //!
-//! # A component owns its own native subtree (p3-02)
+//! # A component owns its own native subtree
 //!
 //! One component may build a whole native view *hierarchy* — a parent with
 //! native children — and ship it as ONE slot, which is what lets a composite
@@ -185,16 +182,16 @@
 //! framework's own layout engine walks into native containers — because
 //! buying that would mean re-acquiring, per child, the frame-pairing
 //! synchronisation, shield collection, culling and accessibility bridging
-//! frust gets per slot today (`research/RESEARCH-P3.md` §4). **No wire
+//! frust gets per slot today. **No wire
 //! change**: a subtree costs the differ exactly what a single leaf control
 //! costs it. A11y comes out ahead, in fact — the platform owns the subtree,
 //! so it traverses it natively.
 //!
 //! ## Teardown: children are released with the parent
 //!
-//! Phase 0 spike 1 built 50 native children in ONE slot on device and
-//! measured **52 global refs at peak → 0 after the dispose cycle**
-//! (`research/SPIKE.md`); this surface keeps that property by construction:
+//! An earlier device experiment built 50 native children in ONE slot and
+//! measured **52 global refs at peak → 0 after the dispose cycle**; this
+//! surface keeps that property by construction:
 //!
 //! - A child that is merely *attached* needs no handle at all — the platform
 //!   parent owns it (Android's `ViewGroup` holds its own strong reference,
@@ -228,9 +225,10 @@
 //!
 //! Like every other slot-keyed table in this crate, the staging table is
 //! bounded by an explicit reaper (`forget`, from the mounting widget's
-//! teardown), never by disposal alone — the c1-01 leak shape
-//! (`crate::runtime`'s `forget_pending_callback`) applies here verbatim: a
-//! culled slot's dispose resolves by view identity and never sees this table.
+//! teardown), never by disposal alone — the same leak shape
+//! `crate::runtime`'s `forget_pending_callback` guards against applies here
+//! verbatim: a culled slot's dispose resolves by view identity and never sees
+//! this table.
 //!
 //! # A failed `update` is retried, up to a cap
 //!
@@ -279,9 +277,9 @@
 //!
 //! `kind` is passed twice — once to [`register_component`], once to the
 //! mounting builder — and nothing mechanically ties the two, so the mismatch
-//! cases are worth naming with their *actual* errors (m-01 item 4 corrects an
-//! earlier claim that all of them surface as the runtime's `UnknownControl`;
-//! only the first does):
+//! cases are worth naming with their *actual* errors, correcting an earlier
+//! claim that all of them surface as the runtime's `UnknownControl`; only
+//! the first does):
 //!
 //! | case | what surfaces | logged | slot |
 //! |---|---|---|---|
@@ -339,7 +337,7 @@
 //! already contains.
 
 // The publication half of this module (`publish`/`forget`/`component_params`)
-// got its production caller in p3-02: `crate::api::mount`'s generic builder
+// has its production caller in `crate::api::mount`'s generic builder, which
 // runs exactly the sequence the host tests below drive (`publish` → mount →
 // `create` → `update` → `forget`). `staged_count` stays test-only, and keeps
 // its own `allow` rather than a module-level one, so anything else falling
@@ -405,7 +403,7 @@ const PROPS_GENERATION_KEY: &str = "__frustProps";
 /// native containers — because frust's wire carries no hierarchical child
 /// geometry and buying one would mean re-acquiring, per child, the
 /// frame-pairing, shield collection, culling and accessibility bridging it
-/// gets per slot today (`research/RESEARCH-P3.md` §4).
+/// gets per slot today.
 pub trait NativeComponent: 'static {
     /// The Rust-side-diffed create/update payload: everything the app tells
     /// this component, as one value it constructs directly.
@@ -599,7 +597,7 @@ impl<'ctx, 'local, 'env> ComponentCtx<'ctx, 'local, 'env> {
     /// — but it is **logged rather than swallowed**: on a device the cascade's
     /// symptoms are what let a reader judge the root failure's blast radius,
     /// and a second platform failure that vanished without trace is exactly
-    /// the defect m-01 item 1 names.
+    /// the defect this guards against.
     fn latch(&mut self, error: NativeWidgetError) {
         match &self.error {
             Some(first) => log::warn!(
@@ -676,8 +674,8 @@ impl ComponentCtx<'_, '_, '_> {
     /// table; `capacity` is the JVM's pre-allocation hint, not a cap).
     ///
     /// Fifty children built without one would pin fifty-plus local references
-    /// for the whole `create` call; Phase 0 spike 1 built exactly that,
-    /// inside this frame, on device (`research/SPIKE.md`). A value the
+    /// for the whole `create` call; an earlier device experiment built exactly
+    /// that, inside this frame, and measured the difference. A value the
     /// closure returns must not *be* a local reference — that is what
     /// [`Self::retain_child`] is for, and its [`NativeChild`] outlives the
     /// frame.
@@ -697,10 +695,11 @@ impl ComponentCtx<'_, '_, '_> {
     ) -> Option<T> {
         // A *fresh* inner context is structurally forced here — the pushed
         // frame's references carry different lifetimes than this context's —
-        // but a fresh *latch* is not, and was the whole divergence (m-01 item
-        // 1): it made `failed()` read `false` inside a frame where the other
-        // two arms read `true`, and it re-latched the inner error on return,
-        // which silently dropped it whenever this context already held one.
+        // but a fresh *latch* is not, and was the whole divergence found by an
+        // earlier review: it made `failed()` read `false` inside a frame where
+        // the other two arms read `true`, and it re-latched the inner error on
+        // return, which silently dropped it whenever this context already
+        // held one.
         let mut latched = self.error.take();
         let outcome = self.inner.with_frame(capacity, |inner| {
             let mut cx = ComponentCtx {
@@ -1021,8 +1020,8 @@ impl Drop for HostChild {
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 thread_local! {
     /// How many host stand-in child handles are alive on this thread — the
-    /// mirror of ART's live-global-ref count (`research/SPIKE.md`'s "52 at
-    /// peak → 0 after the dispose cycle"). Thread-local for the same reason
+    /// mirror of ART's live-global-ref count ("52 at peak → 0 after the
+    /// dispose cycle" on device). Thread-local for the same reason
     /// [`STAGED`] is, which also keeps each `cargo test` thread's count its
     /// own.
     static LIVE_CHILDREN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -1102,7 +1101,7 @@ impl NativeEvent {
 ///
 /// Registration is explicit on purpose: `inventory`-style link-time discovery
 /// is banned in this crate, because a stripped, LTO'd device build is exactly
-/// where it fails silently (RESEARCH-NATIVE-COMPONENT §Open questions).
+/// where it fails silently.
 pub fn register_component<C: NativeComponent>(kind: &'static str) -> bool {
     if on_platform_main_thread() == Some(false) {
         log::error!(
@@ -1388,7 +1387,7 @@ fn clear_update_retry_budget(slot: SlotId) {
 
 /// Drop `slot`'s staged component and props — the teardown reaper, registered
 /// from the mounting widget's `on_cleanup` exactly like
-/// `crate::runtime`'s `forget_pending_callback` (c1-01).
+/// `crate::runtime`'s `forget_pending_callback`.
 ///
 /// **Disposal alone does not bound this table.** A culled slot's dispose
 /// resolves by native-view identity and never names a slot id, so a slot
@@ -1878,9 +1877,9 @@ mod tests {
     ///
     /// The latch keeps the first error and reports nothing else — by design —
     /// so "a later error is not silently swallowed" has exactly one observable
-    /// channel, and this is it (m-01 item 1). Shared across test threads and
-    /// never cleared: assertions match on a marker string unique to their own
-    /// test rather than on the sink's contents as a whole.
+    /// channel, and this is it. Shared across test threads and never cleared:
+    /// assertions match on a marker string unique to their own test rather
+    /// than on the sink's contents as a whole.
     struct CapturedLog;
 
     impl log::Log for CapturedLog {
@@ -1928,8 +1927,8 @@ mod tests {
         /// Where this component records what it did. `Rc` on purpose: a test
         /// holding the other end can assert both the calls *and* (via
         /// `strong_count`) that the runtime actually dropped the component
-        /// value rather than stranding it — the leak probe the c1-01/f2-03
-        /// tests established for every slot-keyed table in this crate.
+        /// value rather than stranding it — the same leak-probe pattern
+        /// established for every slot-keyed table in this crate.
         log: Rc<RefCell<Vec<String>>>,
         /// Distinguishes the component *value* from its props, so the tests
         /// can prove `update` sees the value the app published this rebuild
@@ -2087,7 +2086,7 @@ mod tests {
 
     #[test]
     fn a_component_outside_the_six_lives_the_whole_lifecycle() {
-        // The p3-01 acceptance bar: create → update → event → dispose, driven
+        // The acceptance bar: create → update → event → dispose, driven
         // by the real runtime through the public trait alone.
         let log = Rc::new(RefCell::new(Vec::new()));
         assert!(register_component::<Gauge>(GAUGE_KIND));
@@ -2351,7 +2350,7 @@ mod tests {
 
     #[test]
     fn the_staging_table_is_reaped_by_forget_and_strands_nothing() {
-        // The c1-01 leak shape, one table over: `forget` (the mounting
+        // The same leak shape, one table over: `forget` (the mounting
         // widget's `on_cleanup`) is the bound, not disposal — Android's
         // production dispose resolves by view identity and never names a slot.
         let log = Rc::new(RefCell::new(Vec::new()));
@@ -2380,7 +2379,7 @@ mod tests {
         assert_eq!(
             staged_count(),
             1,
-            "disposal alone leaves the staged entry — exactly the c1-01 shape"
+            "disposal alone leaves the staged entry — the same leak shape as above"
         );
 
         forget(2);
@@ -2504,7 +2503,7 @@ mod tests {
 
     #[test]
     fn a_failed_update_retries_even_when_the_app_republishes_identical_props() {
-        // m-01 item 2. Keeping the diff baseline (the test above) is only half
+        // Keeping the diff baseline (the test above) is only half
         // a retry: the runtime cannot re-apply anything it is never handed
         // again, and it is handed props only when the differ emits an
         // `UpdateParams`, which it does only when the wire changes. An app
@@ -2736,7 +2735,7 @@ mod tests {
 
     #[test]
     fn a_later_error_inside_a_local_frame_is_logged_rather_than_swallowed() {
-        // m-01 item 1, both halves at once.
+        // Both halves of the same fix, pinned at once.
         //
         // The latch is first-wins, so the frame's error cannot *replace* the
         // root failure — but before this fix it vanished without a trace, and
@@ -2784,16 +2783,16 @@ mod tests {
 
     #[test]
     fn every_dispatch_runs_the_boundary_exception_guard() {
-        // m-01 item 5, widened by batch-review M1. What a host can prove is the
-        // wiring: ALL FOUR dispatches run the guard. `create`, `update` and
-        // `dispose` reach it through their context; `on_event` carries none —
-        // `NativeWidget::on_event` takes `(state, event)` and nothing else — so
-        // it reaches a JNI env through the process VM instead
-        // (`guard_pending_exception_off_context`).
+        // What a host can prove is the wiring: ALL FOUR dispatches run the
+        // guard. `create`, `update` and `dispose` reach it through their
+        // context; `on_event` carries none — `NativeWidget::on_event` takes
+        // `(state, event)` and nothing else — so it reaches a JNI env through
+        // the process VM instead (`guard_pending_exception_off_context`).
         //
         // This assertion used to read `3`, with "on_event has no context to
-        // guard through" as the reason, which encoded the gap as intent for the
-        // Phase 4 author. It was wrong twice over: the export runs
+        // guard through" as the reason, which encoded the gap as intent for
+        // whoever eventually wires the missing attach path. It was wrong twice
+        // over: the export runs
         // `debug_assert_main_thread` and further JNI after `runtime.on_event`
         // returns, so a leftover exception is *ours* to trip over, and
         // `NativeRuntime::on_event` routes on the slot id alone, so a
@@ -2834,7 +2833,7 @@ mod tests {
         );
     }
 
-    // --- m-01 item 4: the four kind/type mismatch cases ---------------------
+    // --- The four kind/type mismatch cases -----------------------------------
 
     /// A component that shares [`Gauge`]'s `Props` type but not its identity —
     /// the case where the props downcast *succeeds* and the mismatch surfaces
@@ -2895,9 +2894,9 @@ mod tests {
     fn case_c_a_kind_registered_to_another_component_fails_at_decode() {
         // Registered to `Gauge`, mounted with `Card`: the staged props are
         // `CardProps`, so `Bridge::<Gauge>::decode_props` cannot downcast them.
-        // This is the case the p3-02 summary mis-described as `UnknownControl`
-        // — it is a `Params` error, and (before this task) one whose message
-        // read exactly like an ordinary reaped entry.
+        // This case used to be mis-described as `UnknownControl` — it is
+        // actually a `Params` error, whose message previously read exactly
+        // like an ordinary reaped entry.
         let log = Rc::new(RefCell::new(Vec::new()));
         register_component::<Gauge>(GAUGE_KIND);
         // A `Card` staged under the `Gauge` kind — the typo a `kind` string
@@ -2994,7 +2993,7 @@ mod tests {
         forget(73);
     }
 
-    // --- p3-02: a component owns its own native subtree ---------------------
+    // --- A component owns its own native subtree -----------------------------
 
     /// A **composite**: one component, one slot, a parent view with N native
     /// children under it — the card-with-an-image-and-two-buttons shape the
@@ -3037,7 +3036,7 @@ mod tests {
             let root = next_identity();
             ctx.record(format!("card create {root} '{}'", props.title));
             // Every child is built inside ONE local frame — the discipline
-            // spike 1 proved on device with fifty of them (module doc).
+            // proved on device with fifty of them (module doc).
             let children = ctx.with_local_frame(self.children + 2, |ctx| {
                 let mut retained = Vec::with_capacity(self.children);
                 for index in 0..self.children {
@@ -3102,8 +3101,9 @@ mod tests {
 
     #[test]
     fn a_component_builds_a_native_subtree_and_releases_every_child() {
-        // Spike 1's own stress count (`research/SPIKE.md`: 50 children in ONE
-        // slot, 52 global refs at peak → 0 after the dispose cycle).
+        // The same on-device stress count that motivated this design: 50
+        // children in ONE slot, 52 global refs at peak → 0 after the dispose
+        // cycle.
         const CHILDREN: usize = 50;
 
         assert_eq!(live_child_count(), 0, "this test thread starts clean");
@@ -3158,8 +3158,8 @@ mod tests {
         }
         forget(7);
 
-        // The teardown bar, counted rather than assumed: the M1/c1-01 leaks
-        // both looked fine until something counted.
+        // The teardown bar, counted rather than assumed: both leak shapes
+        // this design guards against looked fine until something counted.
         assert_eq!(
             live_child_count(),
             0,

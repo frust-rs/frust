@@ -48,17 +48,17 @@
 //! Nothing here (or in `crate::apple::factory`) touches
 //! `translatesAutoresizingMaskIntoConstraints` or any constraint API: the host
 //! positions a slot's content view by assigning `frame` from the differ's rect
-//! (`FrustViewHost.applyUpdate`), exactly as PLAN 2.2 specifies. A control
+//! (`FrustViewHost.applyUpdate`), exactly as this contract specifies. A control
 //! that installed constraints would fight it.
 //!
-//! # Hierarchy (p3-02): `addSubview`, and nothing else
+//! # Hierarchy: `addSubview`, and nothing else
 //!
 //! [`NativeCtx::add_child`] is this arm's whole subtree surface — the mirror
 //! of `crate::android::ctx`'s JNI `addView` wrapper, and the piece that did
-//! not exist here before p3-02. **The platform lays the subtree out**, not
+//! not exist here before. **The platform lays the subtree out**, not
 //! frust: a component positions its children with explicit frames or a
 //! `UIStackView` of its own making, and frust keeps seeing one opaque slot
-//! with one rect (`research/RESEARCH-P3.md` §4).
+//! with one rect.
 //!
 //! There is deliberately **no local-frame wrapper on this arm**: the
 //! discipline `crate::android::ctx`'s `with_frame` enforces (fifty children
@@ -69,10 +69,10 @@
 //! the same on both platforms.
 
 // Mirrors `crate::android::ctx`'s own module-level allow: this is the helper
-// surface the six Apple controls (p2-02) and their target-action objects
-// (p2-03) will build on, and this task lands the type before its consumers
-// exist. The attribute goes away with those tasks rather than growing
-// per-item `allow`s in the meantime.
+// surface the six Apple controls and their target-action objects
+// will build on, and this lands the type before its consumers
+// exist. The attribute goes away once those consumers land, rather than
+// growing per-item `allow`s in the meantime.
 #![allow(dead_code)]
 
 use std::marker::PhantomData;
@@ -121,7 +121,7 @@ impl NativeCtx<'_, '_> {
         self.mtm
     }
 
-    /// `parent.addSubview(child)` — hierarchy building (p3-02), the Apple
+    /// `parent.addSubview(child)` — hierarchy building, the Apple
     /// mirror of `crate::android::ctx`'s JNI `addView` wrapper.
     ///
     /// UIKit retains `child` for as long as it is a subview, and releases it

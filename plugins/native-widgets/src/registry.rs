@@ -1,25 +1,23 @@
-//! The retained-handle registry (native-widgets Phase 1,
-//! `workflow/plans/features/frust-native-widgets/PLAN.md`'s Global-ref
-//! discipline / Lifecycle races risk rows): tracks the one native view
+//! The retained-handle registry: tracks the one native view
 //! handle a `platform_view` slot currently owns, keyed by
 //! [`SlotId`], so a dispose reaching this crate can be resolved against
 //! the exact handle it targets.
 //!
-//! ## Idle-deferred dispose (SPIKE finding)
+//! ## Idle-deferred dispose
 //!
 //! The differ's `Dispose` command for a slot can arrive many frames after
 //! that slot's view was created — or even after a *replacement* `Create`
 //! already landed for the same (re-used) slot id, since Android's real
-//! dispose export (`nativeDisposeControl(view)`, mirroring the spike's
-//! proven shape) hands back the raw view object, not a slot id. A
+//! dispose export (`nativeDisposeControl(view)`) hands back the raw view
+//! object, not a slot id. A
 //! disposal must therefore be resolved **by identity** — the specific
 //! handle a Dispose command actually names via [`Registry::remove_matching`]
 //! — never by assuming "whichever handle currently occupies the slot" is
 //! the one being torn down; the latter would delete a *live, already-
 //! replaced-in* control out from under the app. [`Registry::remove`] (by
 //! `slot_id` alone) is the simpler counterpart for a caller that already
-//! knows the exact slot — a future widget-teardown path (PLAN.md's 0c
-//! design item), not the raw dispose export.
+//! knows the exact slot — a future widget-teardown path, not the raw
+//! dispose export.
 //!
 //! ## Design: generic core, cfg-gated handle types
 //!
@@ -34,15 +32,14 @@
 //!   view itself, plus any secondary refs (a listener object, a child
 //!   hierarchy) it retains. Removing (or replacing, or dropping the whole
 //!   registry) a [`Registry`] entry pair-deletes them all together — the
-//!   paired-delete discipline PLAN.md's risk row requires: ART aborts the
+//!   paired-delete discipline this design requires: ART aborts the
 //!   process at 51,200 live global refs process-wide, so a leaked ref here
 //!   is a crash, not a slow leak.
 //! - [`apple::AppleHandle`] is the ARC-managed `Retained<UIView>`
 //!   counterpart — memory-safe by construction (no paired-delete
 //!   discipline needed; `Retained`'s own `Drop` releases the object) — kept
 //!   behind the same slot-keyed shape so a surface-recreate replay's
-//!   replace-and-release-old contract (PLAN.md's Lifecycle races risk row)
-//!   behaves identically on both platforms.
+//!   replace-and-release-old contract behaves identically on both platforms.
 
 use std::collections::HashMap;
 
@@ -69,24 +66,24 @@ impl<H> Registry<H> {
 
     /// Record a freshly created `handle` for `slot_id`, **replacing**
     /// (never panicking on) any handle already live under the same id —
-    /// the surface-recreate-replay / rapid-recreate race PLAN.md's
-    /// Lifecycle races row calls out. Returns the replaced handle, if any,
+    /// the surface-recreate-replay / rapid-recreate race this registry
+    /// must handle. Returns the replaced handle, if any,
     /// so a caller can log the unexpected-replace path; dropping it
     /// releases its resources exactly like an explicit [`Self::remove`]
     /// would (the registry "treats attach-for-live-slot-id as replace-
-    /// and-release-old", per PLAN.md).
+    /// and-release-old").
     pub fn insert(&mut self, slot_id: SlotId, handle: H) -> Option<H> {
         self.live.insert(slot_id, handle)
     }
 
     /// Release the handle for `slot_id` directly, by the slot id itself —
     /// for a caller that already knows exactly which slot it means (a
-    /// future widget-teardown path, PLAN.md's 0c design item), as opposed
+    /// future widget-teardown path), as opposed
     /// to [`Self::remove_matching`]'s identity-based lookup for the real
     /// platform dispose export, which never receives a slot id at all. A
     /// dispose for a slot id that was already replaced or already removed
     /// is a silent no-op (late/duplicate dispose, both expected once
-    /// dispose can arrive idle-deferred — the module doc's SPIKE finding),
+    /// dispose can arrive idle-deferred — see the module doc),
     /// never an error.
     pub fn remove(&mut self, slot_id: SlotId) -> Option<H> {
         self.live.remove(&slot_id)
@@ -96,7 +93,7 @@ impl<H> Registry<H> {
     /// identity** — the real disposal contract every platform backend
     /// uses (Android: `Env::is_same_object` against the `JObject` the
     /// `nativeDisposeControl(view)` export receives, which carries no slot
-    /// id at all — the spike's proven shape). Never assumes "whichever
+    /// id at all). Never assumes "whichever
     /// slot was created most recently" is the one being disposed: a match
     /// against a handle that was already replaced (the module doc's
     /// idle-deferred-dispose case) or already removed finds nothing and is
@@ -126,14 +123,13 @@ impl<H> Registry<H> {
     }
 
     /// [`Self::get`]'s mutable counterpart, for a caller that mutates the
-    /// handle in place (the runtime's per-instance props/state — task p1-03).
+    /// handle in place (the runtime's per-instance props/state).
     pub fn get_mut(&mut self, slot_id: SlotId) -> Option<&mut H> {
         self.live.get_mut(&slot_id)
     }
 
     /// The number of live handles — the leak bar every create/dispose
-    /// cycle must return to `0` (PLAN.md's Global-ref discipline risk
-    /// row).
+    /// cycle must return to `0`.
     pub fn live_count(&self) -> usize {
         self.live.len()
     }
@@ -155,10 +151,10 @@ pub mod android {
 
     /// Every global ref a single control's `create` step allocated: the
     /// view itself, plus any secondary refs it retains (a listener object,
-    /// a stress-style child hierarchy — the spike's own `Registry` had the
-    /// same shape, one `HashMap` per kind of ref). Dropping (or removing
+    /// a stress-style child hierarchy — an earlier prototype `Registry` had
+    /// the same shape, one `HashMap` per kind of ref). Dropping (or removing
     /// from a [`Registry`](super::Registry)) this pairs-deletes all of
-    /// them together — the paired-delete discipline PLAN.md's risk row
+    /// them together — the paired-delete discipline this design
     /// requires; ART aborts the process at 51,200 live global refs
     /// process-wide, so a leaked ref here is a crash, not a slow leak.
     pub struct AndroidHandle {
@@ -283,8 +279,8 @@ mod tests {
 
     #[test]
     fn insert_replaces_and_releases_the_old_handle_for_a_reused_slot() {
-        // The surface-recreate-replay / rapid-recreate race PLAN.md's
-        // Lifecycle races row calls out: a fresh Create for an
+        // The surface-recreate-replay / rapid-recreate race this registry
+        // must handle: a fresh Create for an
         // already-live slot id must replace in place, not panic or leak.
         let count = Rc::new(RefCell::new(0));
         let mut registry: Registry<CountingHandle> = Registry::new();
@@ -304,8 +300,8 @@ mod tests {
         assert_eq!(registry.live_count(), 1);
     }
 
-    /// The idle-deferred-dispose case (module doc, PLAN.md's SPIKE
-    /// finding): a slot's original handle is replaced by a fresh Create
+    /// The idle-deferred-dispose case (see the module doc):
+    /// a slot's original handle is replaced by a fresh Create
     /// before that handle's own late Dispose is ever drained. The late
     /// Dispose carries the OLD handle's identity — `remove_matching` must
     /// find nothing (the old handle is already gone) and must NOT touch

@@ -8,12 +8,12 @@
 //! **are** Rust — the factory ([`factory`]) registered directly with the
 //! Objective-C runtime and looked up by name, the listener's target-action
 //! counterpart ([`events`]) constructed straight from live Rust code — **zero
-//! Swift** (PLAN Phase 0 spike 2, GO in a signed release build). Read
+//! Swift** (proven in a signed release build). Read
 //! [`factory`]'s module doc for the frozen protocol contract, the two
 //! load-bearing name pins, the non-nil failure contract, and why no
 //! `ios_exports!`/`#[used]` static is needed here; read [`events`]'s module
 //! doc for the target-action attach/detach contract and the per-slot
-//! retention story (task p2-03).
+//! retention story.
 //!
 //! # iOS only, not `target_vendor = "apple"`
 //!
@@ -31,21 +31,21 @@
 //! target-action ([`events`]) fires there too. Unlike the Android arm, that is
 //! not a `debug_assert` — both classes are `#[thread_kind = MainThreadOnly]`,
 //! so their methods can only be entered with a [`MainThreadMarker`] in hand,
-//! and [`NativeCtx`] carries that proof into every control call (PLAN 2.1).
+//! and [`NativeCtx`] carries that proof into every control call.
 //!
 //! [`MainThreadMarker`]: objc2::MainThreadMarker
 
 mod ctx;
 mod events;
 mod factory;
-// Theme ladder L3 (p2-04): resolving the embedded Glyph font bytes to a
+// Theme ladder L3: resolving the embedded Glyph font bytes to a
 // process-cached `CTFontDescriptor` via CoreText. `pub(crate)`, not private
 // like `ctx`/`events`: `controls::platform`'s `resolve_font` (theme ladder
 // L3's per-size `CTFont` construction) needs `fonts::descriptor_for` from
 // OUTSIDE this module's own subtree — the same reason
 // `crate::android::fonts` is `pub(crate)`.
 pub(crate) mod fonts;
-// Theme ladder L1 (p2-04): the night-qualified-`Context` mirror through
+// Theme ladder L1: the night-qualified-`Context` mirror through
 // `overrideUserInterfaceStyle`. Private — its only caller, `create_control`
 // below, lives inside this same module tree (unlike `fonts`, nothing outside
 // `apple` needs it: L2's corner radius needs no density conversion on this
@@ -76,8 +76,8 @@ pub(crate) type NativeView = crate::registry::apple::AppleHandle;
 ///
 /// The six controls live in the shared `crate::controls`, where the
 /// props/plan half is platform-neutral and host-tested and only the platform
-/// half is a per-target `mod platform` inside each control file (p1-04's
-/// Android arm, p2-02's Apple one). So the two backends register the same six
+/// half is a per-target `mod platform` inside each control file (the
+/// Android arm, the Apple one). So the two backends register the same six
 /// types under the same six `KIND` consts — never a literal here, which is
 /// what keeps the api layer's builders and both arms reading from one
 /// definition (`crate::controls::tests`'
@@ -85,8 +85,8 @@ pub(crate) type NativeView = crate::registry::apple::AppleHandle;
 /// is the host-visible half of that pin).
 ///
 /// Registration stays explicit and central by design: `inventory`-style
-/// link-time discovery is banned here (RESEARCH-NATIVE-COMPONENT §Open
-/// questions), which matters even more on this arm, where `lto = "fat"` +
+/// link-time discovery is banned here, which matters even more on this
+/// arm, where `lto = "fat"` +
 /// `strip = "symbols"` is the shipping configuration.
 pub(crate) fn register_controls(runtime: &mut NativeRuntime) {
     runtime.register::<button::Button>(button::KIND);

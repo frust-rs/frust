@@ -63,7 +63,7 @@
 //! failure, not only the ones [`create_control`] catches and throws for
 //! itself — a JNI-level error reading `paramsJson`, or a caught panic
 //! anywhere in the call, must throw too, or the contract and the code
-//! disagree again (`c1-02-create-contract-honesty.md`).
+//! disagree again.
 //! The only `unsafe` tokens in this module are the exports'
 //! `#[unsafe(no_mangle)]` attributes.
 //!
@@ -88,14 +88,14 @@
 //! again once shipped.
 
 mod ctx;
-// Theme ladder L3 (p1-08): registering Glyph font bytes with Android and
+// Theme ladder L3: registering Glyph font bytes with Android and
 // creating/caching the resulting `Typeface` objects. `pub(crate)`, not
 // private like `ctx`: `controls::platform`'s `Setter::Typeface` apply arm
 // needs `fonts::typeface_for` from OUTSIDE this module's own subtree, the
 // same reason `theme` below is `pub(crate)`.
 pub(crate) mod fonts;
 // `pub(crate)`, not private like `ctx`: `controls::platform`'s
-// `Setter::ThemedBackground` apply arm (theme ladder L2, p1-07) needs
+// `Setter::ThemedBackground` apply arm (theme ladder L2) needs
 // `theme::dp_to_px` from OUTSIDE this module's own subtree.
 pub(crate) mod theme;
 
@@ -132,8 +132,8 @@ pub(crate) type NativeView = crate::registry::android::AndroidHandle;
 /// runtime is first touched (`crate::runtime`'s `seeded_runtime`).
 ///
 /// Registration is explicit and central by design — `inventory`-style
-/// link-time discovery is banned here (RESEARCH-NATIVE-COMPONENT §Open
-/// questions). This table and the api layer's builders (p1-06) are the two
+/// link-time discovery is banned here. This table and the api layer's
+/// builders are the two
 /// ends of the same kind strings, which is why each one is a `KIND` const in
 /// its own control module rather than a literal here.
 pub(crate) fn register_controls(runtime: &mut NativeRuntime) {
@@ -161,7 +161,7 @@ pub(crate) fn register_controls(runtime: &mut NativeRuntime) {
 /// of those (a JNI-level error reading `paramsJson`, and a caught panic
 /// anywhere in this call) — every other export in this module resolves via
 /// the quieter `LogErrorAndDefault` instead, since only this one export's
-/// contract promises a throw (`c1-02-create-contract-honesty.md`).
+/// contract promises a throw.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_frust_nativewidgets_FrustNativeControlFactory_nativeCreateControl<
     'local,
@@ -191,11 +191,10 @@ pub extern "system" fn Java_dev_frust_nativewidgets_FrustNativeControlFactory_na
 /// re-entrant call): [`reentrant_create_failure`] turns that into the same
 /// `NativeWidgetError` shape every other failure takes, so it rides the
 /// identical `match outcome` / `throw_create_failed` path below instead of
-/// `?`-ing straight past it the way it used to
-/// (`c1-02-create-contract-honesty.md` — f2-05 left this one path silently
-/// returning `null`).
+/// `?`-ing straight past it the way it used to (an earlier fix found this
+/// one path was silently returning `null`).
 ///
-/// Theme ladder L1 (p1-07): builds every control against a night-qualified
+/// Theme ladder L1: builds every control against a night-qualified
 /// `Context` (`theme::night_qualified_context`) before dispatching to the
 /// runtime — see `theme`'s module doc for why. A qualification failure
 /// degrades to the factory's own unqualified `context` (logged), never a
@@ -247,7 +246,7 @@ fn create_control<'local>(
     // `log::warn!`s that at the point of detection; folding it into the
     // same `Result` shape here is what makes it fall through the `match
     // outcome` arm below and throw, instead of `?`-ing straight past the
-    // throwing contract like before (`c1-02-create-contract-honesty.md`).
+    // throwing contract like before.
     .unwrap_or_else(reentrant_create_failure);
 
     match outcome {
@@ -264,7 +263,7 @@ fn create_control<'local>(
 }
 
 /// The typed failure [`create_control`] reports in place of the bare `?`
-/// early return `f2-05` left over `runtime::with_runtime`'s `None` arm (the
+/// early return an earlier version left over `runtime::with_runtime`'s `None` arm (the
 /// runtime's `RefCell` already borrowed) — see that function's doc. Kept as
 /// its own function, mirroring [`create_failure_message`] below, so the
 /// message is host-testable the same way.
@@ -275,7 +274,7 @@ fn reentrant_create_failure() -> Result<(SlotId, jobject), NativeWidgetError> {
 }
 
 /// Throws a Java exception reporting a create failure — the fix for
-/// `f2-05-null-create-npe.md`: `createView` returns a non-null `View` by
+/// a null-create NPE: `createView` returns a non-null `View` by
 /// contract (`FrustPlatformViewFactory`'s KDoc), so a failure must surface
 /// as a thrown exception rather than a `null` return that later NPEs on
 /// `view.visibility` in the embedding's `FrustViewHost.applyCreate`.
@@ -304,7 +303,7 @@ fn throw_create_failed(env: &mut Env<'_>, error: &NativeWidgetError) {
 /// embedded-JVM test harness (confirmed by inspection — no other plugin's
 /// Android arm has one either), so no host process can actually execute a
 /// `Java_..._nativeCreateControl` call and observe a pending exception.
-/// This task's acceptance criteria's "documented compile-gated equivalent"
+/// This crate's own "documented compile-gated equivalent"
 /// is the test below plus `cargo check --target aarch64-linux-android -p
 /// frust-native-widgets --tests`, which type-checks it; it cannot *run*
 /// without an Android device/emulator test runner, the same limitation as
@@ -326,8 +325,8 @@ mod create_failure_message_tests {
     }
 }
 
-/// Host-testable coverage for the re-entrancy path
-/// (`c1-02-create-contract-honesty.md`): [`reentrant_create_failure`] is
+/// Host-testable coverage for the re-entrancy path:
+/// [`reentrant_create_failure`] is
 /// the pure function that stands in for `runtime::with_runtime`'s `None`
 /// arm, so it can be exercised the same way [`create_failure_message_tests`]
 /// exercises the create-failed message above, without a JVM.
@@ -450,7 +449,7 @@ fn dispose_control(env: &mut Env<'_>, view: &JObject<'_>) {
 /// registered callback (`crate::runtime::NativeRuntime::set_callback`).
 ///
 /// Runs on the main thread, so the control's handler — typically a signal
-/// write, which wakes exactly one frust frame (SPIKE.md's receipt) — runs
+/// write, which wakes exactly one frust frame — runs
 /// there too.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_frust_nativewidgets_FrustNativeListener_nativeOnEvent<'local>(

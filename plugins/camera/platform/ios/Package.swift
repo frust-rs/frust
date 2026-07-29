@@ -2,15 +2,13 @@
 import PackageDescription
 
 // `frust-camera`'s iOS Swift package — the FIRST plugin Swift package
-// (`docs/ARCHITECTURE.md`'s Module Structure; `workflow/plans/features/
-// frust-camera/PLAN.md`'s iOS-packaging risk). Mirrors
+// (`docs/ARCHITECTURE.md`'s Module Structure). Mirrors
 // `platform/ios/FrustEmbedding/Package.swift`'s shape exactly: one
 // header-only C target declaring an `extern "C"` surface resolved at the
 // consuming app's final link, plus a Swift target consuming it.
 //
 // TWO differences from that one-package precedent, both new ground this
-// plugin proves (task 08's step 0 spike — see the task file's completion
-// summary for what's proven-here vs owed-to-mac):
+// plugin proves:
 //
 // 1. This is a SECOND local package beside `FrustEmbedding` in the same
 //    consuming app — its own C target (`CFrustCamera`) resolving symbols
@@ -24,7 +22,7 @@ import PackageDescription
 //    manifest declares a LOCAL package dependency on the sibling
 //    `FrustEmbedding` package by relative path — the first inter-plugin/
 //    embedding Swift package dependency in this repo. A generated app's
-//    `Contribution::SwiftPackageRef` (task 03) adds this package as an
+//    `Contribution::SwiftPackageRef` adds this package as an
 //    `XCLocalSwiftPackageReference` beside `FrustEmbedding`, resolving both
 //    from the same project — SwiftPM/Xcode dedupes the shared
 //    `FrustEmbedding` reference rather than vendoring it twice.

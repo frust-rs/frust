@@ -1,4 +1,4 @@
-//! The generic mounting builder (native-widgets Phase 3, p3-02):
+//! The generic mounting builder:
 //! [`native_component`] turns a registered
 //! [`NativeComponent`](crate::component::NativeComponent) plus its typed
 //! `Props` into a frust [`View`], composing exactly the one `platform_view`
@@ -6,8 +6,8 @@
 //!
 //! # Why this exists
 //!
-//! p3-01 shipped the public trait — define a component, register it — and
-//! flagged its own gap: *there was no public way to MOUNT one into a frust
+//! An earlier design shipped the public trait — define a component, register
+//! it — and flagged its own gap: *there was no public way to MOUNT one into a frust
 //! view tree*. A third party could implement `NativeComponent` and never use
 //! it. This module closes that loop, and is what makes
 //!
@@ -44,7 +44,7 @@
 //! [`tests::a_refused_component_slot_publishes_no_platform_view_frame`]
 //! asserts it directly.
 //!
-//! **The six are deliberately NOT rewritten to route through here** (p3-01's
+//! **The six are deliberately NOT rewritten to route through here** (a
 //! standing decision, unchanged): their whole wire is `params_json` decoded
 //! inside an internal `NativeWidget`, while a component's props are typed
 //! Rust values staged beside the wire — one builder cannot be both without
@@ -223,7 +223,7 @@ impl<C: NativeComponent> Component for NativeComponentView<C> {
         let slot = next_local_slot();
         // The staging table's reaper (`crate::component::forget`), tied to
         // this Component's own lifetime rather than to the native
-        // create/dispose lifecycle — the c1-01/f2-03 shape, one table over:
+        // create/dispose lifecycle — the same leak shape, one table over:
         // a culled slot's dispose resolves by native-view identity and never
         // names a slot id, so disposal alone would strand the staged entry.
         // `init` runs exactly once, under this component's own `Owner`, so
@@ -361,7 +361,7 @@ mod tests {
 
     #[test]
     fn a_component_defined_outside_the_six_mounts_and_publishes_exactly_one_slot() {
-        // The p3-02 acceptance bar: define → register → mount → create,
+        // The acceptance bar: define → register → mount → create,
         // end to end, through the public surface alone.
         assert!(register_component::<Meter>(METER_KIND));
 

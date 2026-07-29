@@ -1,4 +1,4 @@
-//! Theme ladder L2 (native-widgets Phase 1, p1-07): platform-neutral token
+//! Theme ladder L2: platform-neutral token
 //! resolution. [`resolve`] folds the active [`frust::Theme`] into the packed
 //! primitives ([`u32`] ARGB, [`f32`] dp/sp) [`crate::api::builders`] writes
 //! into each control's `params_json` and Android's `NativeWidget::update`/
@@ -10,7 +10,7 @@
 //!
 //! # Mapping table (pinning, not full token fidelity)
 //!
-//! Per PLAN.md's approximation policy: this folds a *representative* subset
+//! This crate's approximation policy: this folds a *representative* subset
 //! of `Theme` into each control, not full design-token fidelity (no
 //! elevation/motion/glass, no per-state — hover/pressed/disabled — variants
 //! the platform's own drawables already provide for free).
@@ -21,15 +21,15 @@
 //! | `accent_fill` | `scheme().primary_container` | `Button` background, `Switch` track tint, `Slider`/`ProgressBar` progress tint |
 //! | `on_accent_fill` | `scheme().on_primary_container` | `Button` text colour |
 //! | `body_text` | `scheme().on_surface` | `Label` text colour |
-//! | `surface_bg` | `scheme().surface` | `Label`/`ProgressBar` background (explicit — followup f1-01, narrowed by followup f2-04; see *Explicit backgrounds* below for why `Switch`/`Slider` are deliberately excluded) |
+//! | `surface_bg` | `scheme().surface` | `Label`/`ProgressBar` background (explicit — added by an earlier fix, later narrowed; see *Explicit backgrounds* below for why `Switch`/`Slider` are deliberately excluded) |
 //! | `corner_radius_dp` | `shape.small` | `Button` background (via a `GradientDrawable`) |
 //! | `button_text_size_sp` | `type_scale.label_large.size` | `Button` text size |
 //! | `body_text_size_sp` | `type_scale.body_large.size` | `Label` text size |
 //! | `dark` | `brightness == Brightness::Dark` | every control (L1's `Context` qualification) |
-//! | `button_typeface` | `design_language == Glyph` ⇒ Space Mono, else the platform's own | `Button` `Typeface` (theme ladder L3, p1-08) |
-//! | `body_typeface` | `design_language == Glyph` ⇒ IBM Plex Mono, else the platform's own | `Label`/`Switch` `Typeface` (theme ladder L3, p1-08) |
+//! | `button_typeface` | `design_language == Glyph` ⇒ Space Mono, else the platform's own | `Button` `Typeface` (theme ladder L3) |
+//! | `body_typeface` | `design_language == Glyph` ⇒ IBM Plex Mono, else the platform's own | `Label`/`Switch` `Typeface` (theme ladder L3) |
 //!
-//! # Theme ladder L3 (p1-08): typography, gated on `design_language`
+//! # Theme ladder L3: typography, gated on `design_language`
 //!
 //! Unlike every other row above (folded unconditionally from whichever
 //! `Theme` is active), the two typeface rows first check
@@ -53,10 +53,10 @@
 //! would corrupt its content, and no builder method exposes an explicit tint
 //! yet (`crate::api::builders`' own "left for a future task" note).
 //!
-//! # Explicit backgrounds (followup f1-01, narrowed by followup f2-04):
-//! closing the light-theme dark-on-dark defect without defeating the ripple
+//! # Explicit backgrounds: closing the light-theme dark-on-dark defect
+//! without defeating the ripple
 //!
-//! `VERIFY-P1.md` bar 3 (the Phase 1 Android device gate) found `Label`,
+//! An Android device gate found `Label`,
 //! `Switch`, `Slider` and `ProgressBar` all keeping a DARK background after a
 //! live flip to a light theme — worst for `Label`, whose text colour DID
 //! follow the theme (via the ordinary `TEXT_COLOR` setter below), landing
@@ -67,10 +67,10 @@
 //! brightness the control was born under; only an EXPLICIT L2 setter
 //! re-applies live on a theme flip (the ordinary Props-diff-then-setter path
 //! every property already rides). `Button` never showed this defect because
-//! p1-07 already gave it an explicit background (`corner_radius_dp` row
+//! an explicit background fold already gave it one (`corner_radius_dp` row
 //! above, via `Setter::ThemedBackground`).
 //!
-//! f1-01's original fix widened this to ALL FOUR controls with no explicit
+//! The original fix widened this to ALL FOUR controls with no explicit
 //! background setter — too broadly: `android.widget.Switch`
 //! (`Widget.Material.CompoundButton.Switch`) and `AbsSeekBar` (`Slider`'s
 //! superclass) both carry `?attr/selectableItemBackgroundBorderless` as their
@@ -79,9 +79,9 @@
 //! that drawable outright, so folding `surface_bg` into every themed
 //! `Switch`/`Slider` silently killed their ripple — directly contradicting
 //! [`crate::android::theme`]'s own reason for existing (getting the default
-//! ripple/state-layer colour right for exactly these controls). The Phase 1
+//! ripple/state-layer colour right for exactly these controls). The
 //! device re-gate didn't catch it because it checked contrast, not
-//! interaction chrome. **f2-04 is the fix**: narrow the explicit background
+//! interaction chrome. **The fix**: narrow the explicit background
 //! to only the controls that actually needed it.
 //!
 //! ## Which controls get an explicit background, and why
@@ -92,7 +92,7 @@
 //! | `ProgressBar` | **Yes** | Display-only — `ProgressBar` (unlike `Switch`/`AbsSeekBar`) is never clickable, so it carries no ripple to defeat; kept for the same "reads as part of the page, not a floating rectangle" reason as `Label`, matching `examples/glyph-catalog`'s root `AppBackground` fill. |
 //! | `Switch` | **No** | `?attr/selectableItemBackgroundBorderless` is its default background — an explicit fill would replace the ripple. Its `thumb_tint`/`track_tint` fold already carries the theme with no such tradeoff. |
 //! | `Slider` | **No** | Same reasoning as `Switch` — `AbsSeekBar` carries the same borderless-ripple background attr. Its `progress_tint`/`thumb_tint` fold already carries the theme. |
-//! | `Button` | N/A (already covered) | Gets `Setter::ThemedBackground` (accent-filled, p1-07) instead — a deliberately opaque fill, not the page's `surface_bg` role. |
+//! | `Button` | N/A (already covered) | Gets `Setter::ThemedBackground` (accent-filled) instead — a deliberately opaque fill, not the page's `surface_bg` role. |
 //! | `Image` | **No** | A tint or background fill would corrupt app-supplied photo content (see the paragraph below). |
 //!
 //! **If a future task wants `Switch`/`Slider` to carry a themed background
@@ -140,9 +140,9 @@
 //! # No explicit-override precedence yet
 //!
 //! `docs/CODE_STANDARDS.md`'s Theming conventions rank precedence as
-//! *explicit builder value > theme > fallback*. This task folds theme tokens
+//! *explicit builder value > theme > fallback*. This module folds theme tokens
 //! unconditionally (no builder method sets a competing explicit colour/
-//! radius/size yet — `crate::api::builders`' p1-06 completion summary
+//! radius/size yet — `crate::api::builders`'s own builders
 //! deliberately left those out), so there is no explicit value to rank above
 //! the theme here; a future task adding `.text_color()`/`.background_color()`
 //! overrides must thread an explicit value through [`resolve`]'s callers
@@ -153,7 +153,7 @@ use frust::{Brightness, Color, DesignLanguage, Theme};
 use crate::controls::typeface::Typeface;
 
 /// Whether `theme`'s active brightness is [`Brightness::Dark`] — L1's input
-/// (theme ladder, p1-07): [`crate::android::theme::night_qualified_context`]
+/// (theme ladder): [`crate::android::theme::night_qualified_context`]
 /// wraps a control's construction `Context` off this same bit.
 pub(crate) fn is_dark(theme: &Theme) -> bool {
     theme.brightness == Brightness::Dark
@@ -192,7 +192,7 @@ pub(crate) struct ResolvedTheme {
     pub(crate) body_text: u32,
     /// `scheme().surface` — the page-background role a native control's
     /// EXPLICIT background resolves to (module doc's *Explicit backgrounds*
-    /// section, followup f1-01, narrowed by followup f2-04): only `Label`/
+    /// section): only `Label`/
     /// `ProgressBar`'s background, so it re-paints live on a brightness flip
     /// instead of pinning to L1's creation-time `Context` the way an unset
     /// (platform default) background would. Deliberately NOT folded into
@@ -209,10 +209,10 @@ pub(crate) struct ResolvedTheme {
     pub(crate) button_text_size_sp: f32,
     /// `type_scale.body_large.size`, sp.
     pub(crate) body_text_size_sp: f32,
-    /// `Button`'s `Typeface` (theme ladder L3, p1-08) — see the module doc's
+    /// `Button`'s `Typeface` (theme ladder L3) — see the module doc's
     /// *typography, gated on `design_language`* section.
     pub(crate) button_typeface: Typeface,
-    /// `Label`/`Switch`'s `Typeface` (theme ladder L3, p1-08) — see the
+    /// `Label`/`Switch`'s `Typeface` (theme ladder L3) — see the
     /// module doc's *typography, gated on `design_language`* section.
     pub(crate) body_typeface: Typeface,
 }
@@ -247,7 +247,7 @@ pub(crate) fn resolve(theme: &Theme) -> ResolvedTheme {
 }
 
 /// Publish `frust-theme`'s embedded Glyph font bytes to the Android backend,
-/// once per process (theme ladder L3, p1-08) — the api→runtime seam
+/// once per process (theme ladder L3) — the api→runtime seam
 /// `crate::android::fonts`'s module doc describes: this crate's `Cargo.toml`
 /// allows a `frust-theme` dependency only behind this crate's own
 /// `frust-api` feature, and only this function ever names it, so the
@@ -276,7 +276,7 @@ fn publish_glyph_font_bytes() {
     });
 }
 
-/// iOS half of the same publish (theme ladder L3, p2-04) —
+/// iOS half of the same publish (theme ladder L3) —
 /// `crate::apple::fonts::set_glyph_bytes` mirrors the Android call above
 /// exactly (same indices into `frust_theme::glyph::font_data()`, same
 /// idempotent-publish contract).
@@ -406,7 +406,7 @@ mod tests {
         assert_eq!(argb_u32(red), 0xFFFF_0000);
     }
 
-    // --- followup f1-01: the light-theme dark-on-dark regression guard -----
+    // --- The light-theme dark-on-dark regression guard ---------------------
 
     /// WCAG 2.x relative luminance, `[0.0, 1.0]`, of a packed ARGB colour —
     /// test-only, used solely to compute [`contrast_ratio`] below.
@@ -434,11 +434,11 @@ mod tests {
 
     #[test]
     fn text_bearing_controls_pair_a_contrasting_background_and_foreground_in_both_brightnesses() {
-        // VERIFY-P1.md bar 3: flipping to a light theme left `Label`'s
+        // An earlier device gate found flipping to a light theme left `Label`'s
         // background pinned dark (L1, baked at creation) while its text
         // colour (L2) followed the theme live, landing dark text on a dark
-        // background — unreadable. A bare `!=` check (the p1-06 test style
-        // elsewhere in this crate) would NOT catch this: two colours can
+        // background — unreadable. A bare `!=` check (the test style
+        // used elsewhere in this crate) would NOT catch this: two colours can
         // differ and still both be dark. A WCAG contrast-ratio floor would —
         // this is that test, for every control this crate actually renders
         // visible text on (`Button`, `Label`), across BOTH brightnesses.
@@ -458,8 +458,8 @@ mod tests {
                 t.surface_bg
             );
 
-            // Button already had an explicit background (p1-07's
-            // `Setter::ThemedBackground`) — pinned here so a future change
+            // Button already had an explicit background
+            // (`Setter::ThemedBackground`) — pinned here so a future change
             // can't silently regress the one control this bug never hit.
             let button = contrast_ratio(t.on_accent_fill, t.accent_fill);
             assert!(

@@ -1,7 +1,6 @@
-//! The plugin-internal [`NativeWidget`] runtime (native-widgets Phase 1,
-//! `workflow/plans/features/frust-native-widgets/research/RESEARCH-NATIVE-COMPONENT.md`):
-//! ONE trait every control implements, dispatched through ONE generic
-//! platform factory — **no per-control Kotlin/Swift, ever**.
+//! The plugin-internal [`NativeWidget`] runtime: ONE trait every control
+//! implements, dispatched through ONE generic platform factory — **no
+//! per-control Kotlin/Swift, ever**.
 //!
 //! Everything in this module is platform-agnostic: it dispatches, diffs and
 //! book-keeps, and hands the two platform-shaped types
@@ -17,7 +16,7 @@
 //! - the **six built-in controls** (`crate::controls`), whose props arrive
 //!   decoded from the slot's `params_json`; and
 //! - every **public [`NativeComponent`](crate::component::NativeComponent)** a
-//!   plugin author writes (p3-01; an app crate cannot implement one — see that
+//!   plugin author writes (an app crate cannot implement one — see that
 //!   trait's own doc for the FFI wall), reaching this trait through the one
 //!   `crate::component::Bridge<C>` impl, whose props arrive as already-typed
 //!   Rust values staged beside the wire.
@@ -45,7 +44,7 @@
 //! Objective-C runtime name `FrustNativeControlFactory` on iOS (a Rust
 //! `define_class!` class, `crate::apple::factory`; same three methods, no
 //! Swift and no exports at all). Which *control* a slot means is carried in
-//! the slot's `params_json`, under two reserved keys the api layer (p1-06)
+//! the slot's `params_json`, under two reserved keys the api layer
 //! injects and this module reads back:
 //!
 //! - [`CONTROL_KEY`] (`"__frustControl"`) — the registered kind
@@ -55,8 +54,7 @@
 //!   platform factory's `createView` is **not** handed the slot id (the
 //!   embedding's `FrustPlatformViewFactory` contract predates this plugin),
 //!   so injecting it into the params is the additive fix; widening
-//!   `createView`'s signature was the rejected, breaking alternative
-//!   (RESEARCH-NATIVE-COMPONENT §Runtime mechanics 2).
+//!   `createView`'s signature was the rejected, breaking alternative.
 //!
 //! [`with_identity`] is the encoder half of that contract, and
 //! [`Params::identity`] the decoder half — the pair round-trips (see `tests`).
@@ -103,18 +101,18 @@
 //! `PartialEq` **before** any platform call. An unchanged rebuild therefore
 //! costs one JSON decode plus one comparison — nanoseconds — and **zero** FFI
 //! crossings; every prior-art framework diffs before crossing for the same
-//! reason (RESEARCH-NATIVE-COMPONENT §Diffing lesson). Field-level diffing
+//! reason. Field-level diffing
 //! *within* a changed props struct is the impl's job in
-//! [`NativeWidget::update`] (p1-04), since only it knows which setter is
+//! [`NativeWidget::update`], since only it knows which setter is
 //! cheap (~0.8 µs, invalidate-only) and which triggers a re-layout (~29 µs,
-//! the `setText` class — SPIKE.md's tier table).
+//! the `setText` class).
 //!
 //! # Late and duplicate disposal are normal
 //!
 //! The differ disposes a slot on a *missing streak of ingests*, and ingests
 //! only happen on gate-`Run` frames, so an unmounted control's `Dispose` can
 //! arrive many frames late — or after a replacement `Create` already re-used
-//! the same slot id (SPIKE.md's idle-deferred-dispose finding). Both
+//! the same slot id. Both
 //! platforms' dispose entry point is handed the **view object**, not a slot
 //! id, so disposal resolves by identity ([`NativeRuntime::take_matching`], over
 //! [`Registry::remove_matching`]); a dispose naming a view that is already
@@ -247,7 +245,7 @@ impl<'a> Params<'a> {
 /// own flat-JSON `body` — the fields *without* the enclosing braces, e.g.
 /// `"text":"Save","enabled":true` — with the two reserved identity keys.
 ///
-/// The api layer (p1-06) is the production caller; the round trip through
+/// The api layer is the production caller; the round trip through
 /// [`Params::identity`] is pinned by this module's tests.
 ///
 /// # This is also the iOS factory-registration trigger
@@ -524,13 +522,13 @@ pub(crate) struct NativeEvent {
 /// Rust.
 ///
 /// Every method runs on the platform main thread. The trait stays **`pub(crate)`
-/// — permanently** (p3-01's public-surface decision): it is this crate's
+/// — permanently**: it is this crate's
 /// *internal* dispatch contract, and the app/plugin-facing shape is
 /// [`crate::component::NativeComponent`], bridged onto this one by
 /// `component::Bridge<C>`. Keeping the two separate is what lets the wire-facing
 /// half here (a `decode_props` step, `Result` returns, an `EventPayload`
 /// callback channel) keep evolving without breaking a third-party impl — and it
-/// is why the six controls (p1-04/p2-02) did not have to move when the public
+/// is why the six controls did not have to move when the public
 /// trait landed.
 ///
 /// The methods are associated functions, not `&self` methods: a registration
@@ -550,7 +548,7 @@ pub(crate) trait NativeWidget: 'static {
 
     /// Decode this control's typed props out of a slot's `params_json`.
     ///
-    /// The api layer (p1-06) encodes the same fields; a missing optional
+    /// The api layer encodes the same fields; a missing optional
     /// field should fall back to the control's default rather than failing,
     /// so a params payload from an older/newer api layer degrades instead of
     /// killing the slot.
@@ -600,9 +598,9 @@ pub(crate) trait NativeWidget: 'static {
     /// `None` to swallow an event this crate has no vocabulary for.
     /// [`NativeRuntime::on_event`] forwards whatever this returns to the
     /// slot's registered `Arc<dyn Fn(EventPayload) + Send + Sync>` callback
-    /// (the app-facing api, p1-06, wraps that into a signal write).
+    /// (the app-facing api wraps that into a signal write).
     ///
-    /// **This `None` seam is not the echo guard** (c1-03). A programmatic
+    /// **This `None` seam is not the echo guard.** A programmatic
     /// echo — the listener a control's own `update` provokes synchronously —
     /// never reaches this method at all: it re-enters the thread-local
     /// runtime, fails `try_borrow_mut`, and is dropped one layer up in
@@ -729,7 +727,7 @@ pub(crate) struct Instance {
     vtable: KindVTable,
     /// The callback a slot's decoded [`EventPayload`]s are handed to. Set at
     /// birth from [`NativeRuntime::create`]'s pending table (module doc's
-    /// *two-phase identity* 3) — the app-facing api, p1-06, registers via
+    /// *two-phase identity* 3) — the app-facing api registers via
     /// [`NativeRuntime::set_callback`] a frame or more earlier — and `None`
     /// only for a slot nobody ever registered one for. Not type-erased like
     /// `props`/`state`: its type
@@ -827,11 +825,11 @@ pub(crate) struct NativeRuntime {
     /// entry here and a live instance for the same slot are mutually
     /// exclusive — [`Self::set_callback`] writes to exactly one of the two.
     ///
-    /// **Not bounded by [`Self::dispose_slot`] alone (c1-01).** An earlier
+    /// **Not bounded by [`Self::dispose_slot`] alone.** An earlier
     /// version of this doc claimed `dispose_slot` clearing this table was
     /// enough to keep it from stranding a closure — wrong for the same
     /// reason `crate::controls::image`'s "bounded by the live image slots"
-    /// claim was (f2-03): Android's production dispose
+    /// claim was: Android's production dispose
     /// (`FrustNativeControlFactory.disposeView` →
     /// `crate::android::dispose_control` → [`Self::take_matching`]) resolves
     /// by view identity and never calls `dispose_slot` at all, so a slot
@@ -863,8 +861,7 @@ impl NativeRuntime {
     ///
     /// Explicit registration is deliberate: `inventory`-style auto-registration
     /// is banned here (link-time discovery is exactly the kind of thing that
-    /// silently fails on a device build — RESEARCH-NATIVE-COMPONENT §Open
-    /// questions).
+    /// silently fails on a device build).
     ///
     /// Re-registering a kind replaces its vtable and returns `false`, which
     /// only a double-registration bug can produce; live instances of the old
@@ -1017,7 +1014,7 @@ impl NativeRuntime {
     /// (an event this crate has no vocabulary for) — invoke the slot's
     /// registered callback with it.
     ///
-    /// That `None` is **not** how a programmatic echo is suppressed (c1-03):
+    /// That `None` is **not** how a programmatic echo is suppressed:
     /// an echo never reaches this method, because it re-enters
     /// [`with_runtime`] mid-borrow and is dropped there. See
     /// [`NativeWidget::on_event`]'s doc and `crate::controls`'s module doc.
@@ -1058,8 +1055,8 @@ impl NativeRuntime {
 
     /// Register (or replace) the callback a slot's decoded [`EventPayload`]s
     /// are handed to, invoked on the platform main thread from
-    /// [`Self::on_event`] — the seam the app-facing api (p1-06) wraps into a
-    /// signal write (PLAN 1.3).
+    /// [`Self::on_event`] — the seam the app-facing api wraps into a
+    /// signal write.
     ///
     /// A slot with **no live instance yet** — the ordinary case, since this
     /// runs during the rebuild that mounts the slot and the create only on
@@ -1114,8 +1111,8 @@ impl NativeRuntime {
     /// doc's *late and duplicate disposal*) — except for one thing it always
     /// does: drop any *pending* registration for the slot too.
     ///
-    /// **Not the production reclaim path for [`Self::pending_callbacks`]
-    /// (c1-01).** Android's production dispose resolves by view identity
+    /// **Not the production reclaim path for [`Self::pending_callbacks`].**
+    /// Android's production dispose resolves by view identity
     /// through [`Self::take_matching`] and never calls this method — it is
     /// reached only by the create-rollback branch (a successful create whose
     /// local reference then fails to hand back to Kotlin) and by tests. A
@@ -1140,8 +1137,8 @@ impl NativeRuntime {
 
     /// Remove `slot`'s pending callback registration unconditionally,
     /// whatever the table currently holds for it — the Component-teardown
-    /// reaper for [`Self::pending_callbacks`] (c1-01), applying
-    /// `crate::controls::image::retire`'s f2-03 remedy to the identical leak
+    /// reaper for [`Self::pending_callbacks`], applying the same remedy
+    /// `crate::controls::image::retire` uses to the identical leak
     /// shape one table over. Registered via `on_cleanup` in each interactive
     /// builder's `Component::init` (`crate::api::builders`), so it runs
     /// exactly once per mounted Component regardless of how many times (if
@@ -1193,7 +1190,7 @@ fn seeded_runtime() -> NativeRuntime {
 /// the re-entrancy case the module doc describes (a platform setter firing its
 /// own listener synchronously). Dropping that callback is strictly better than
 /// panicking near an FFI boundary, and the control-side fix is the
-/// set-without-notify idiom (p1-04).
+/// set-without-notify idiom.
 pub(crate) fn with_runtime<T>(f: impl FnOnce(&mut NativeRuntime) -> T) -> Option<T> {
     RUNTIME
         .try_with(|cell| match cell.try_borrow_mut() {
@@ -1219,7 +1216,7 @@ pub(crate) mod host {
     //! Objective-C runtime at all.
     //!
     //! Both mobile arms swap in a real pair — `crate::android`'s
-    //! `Env`-borrowing context plus its global-ref handle, and (since p2-01)
+    //! `Env`-borrowing context plus its global-ref handle, and
     //! `crate::apple`'s `MainThreadMarker` context plus its `Retained<UIView>`
     //! handle — so this module is now the non-mobile hosts' arm only.
 
@@ -1640,7 +1637,7 @@ mod tests {
 
     #[test]
     fn a_late_dispose_for_a_replaced_view_never_touches_the_live_one() {
-        // SPIKE.md's idle-deferred dispose: the Dispose command for the first
+        // The idle-deferred-dispose case: the Dispose command for the first
         // view arrives only after a replacement Create already re-used the
         // slot id. It names the OLD view object, which identity resolution
         // must simply not find.
@@ -1736,7 +1733,7 @@ mod tests {
 
     #[test]
     fn a_callback_registered_before_create_is_born_with_the_instance() {
-        // f2-01: the production order. The api layer registers during the
+        // The production order: the api layer registers during the
         // rebuild that mounts the slot; the host's post-frame poll creates
         // the native view only afterwards. Before the pending table this
         // registration was dropped on the floor — permanently, since nothing
@@ -1779,7 +1776,7 @@ mod tests {
 
     #[test]
     fn a_replay_create_inherits_the_replaced_instance_callback() {
-        // The f2-01 amendment's regression pin: a surface-recreate replay
+        // The regression pin for a later amendment: a surface-recreate replay
         // re-creates the slot with NO intervening registration (no frust
         // rebuild ran), so the only surviving copy of the callback is the
         // instance being replaced.
@@ -1854,7 +1851,7 @@ mod tests {
         assert!(fired.lock().unwrap().is_empty());
     }
 
-    // --- c1-01: `forget_pending_callback` is the actual bound -------------
+    // --- `forget_pending_callback` is the actual bound -----------------------
     //
     // `dispose_slot`'s own clear (the test above) is a secondary safety net
     // for its own callers — it is not Android's production dispose path
@@ -1865,9 +1862,9 @@ mod tests {
 
     #[test]
     fn the_culled_dispose_then_republish_leak_is_reaped_on_component_teardown() {
-        // Mirrors `image.rs`'s identically-shaped f2-03 regression test.
-        // Steps 1-5 from the task's defect trace, using `take_matching` (not
-        // `dispose_slot`) for the culled dispose — the real production path.
+        // Mirrors `image.rs`'s identically-shaped regression test.
+        // Steps 1-5 reproduce the original defect trace, using `take_matching`
+        // (not `dispose_slot`) for the culled dispose — the real production path.
         let mut runtime = runtime();
         let mut calls = Vec::new();
         let mut ctx = NativeCtx::new(&mut calls);

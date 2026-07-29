@@ -7,11 +7,11 @@
 //! `Vec<String>` with empty strings/unicode entries — against any fresh,
 //! empty [`Backend`].
 //!
-//! `file::tests::conformance` is this task's caller (against a
-//! tempdir-isolated [`crate::file::FileStore`]); task 06's Android/Apple
+//! `file::tests::conformance` is one caller (against a
+//! tempdir-isolated [`crate::file::FileStore`]); the Android/Apple
 //! backend test modules are expected to call the same function (on-target
-//! or manual where CI can't run them — see the plugin-system plan's Phase 2
-//! milestone), so a single assertion set validates every backend.
+//! or manual where CI can't run them), so a single assertion set validates
+//! every backend.
 
 use crate::{Backend, PrefValue};
 

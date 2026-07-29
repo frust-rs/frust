@@ -1,19 +1,18 @@
 //! The Android backend — CameraX, driven from a `dev.frust.camera.FrustCameraHost`
 //! Kotlin helper (`plugins/camera/platform/android/`) over this crate's own
-//! JNI surface. **Task 06** drove the real Rust→Kotlin calls and filled the
-//! `nativeOn*` export bodies against the frozen contract task 02 fixed;
-//! **task 09** (this module's current state) added the image stream —
+//! JNI surface, filling the `nativeOn*` export bodies against a frozen
+//! contract, including the image stream —
 //! [`AndroidSession::start_image_stream`]/[`AndroidSession::stop_image_stream`],
 //! the host's `startImageStream`/`stopImageStream`, and the one contract
-//! addition task 02 reserved,
+//! addition the frozen table reserved,
 //! [`Java_dev_frust_camera_FrustCameraHost_nativeOnImageFrame`]. Every
 //! operation this backend exposes is now real.
 //!
 //! # The frozen contract
 //!
-//! **Tasks 05 (`FrustCameraHost.kt`) and 06 (this module's real backend)
-//! build to this table — changing it means updating both task files
-//! first.** The one **widening since the freeze** is round-1 fix f1's
+//! **`FrustCameraHost.kt` and this module's real backend
+//! build to this table — changing it means updating both files
+//! first.** The one **widening since the freeze** is a follow-up fix's
 //! still-capture request id (`takePicture`'s `long requestId`, echoed back by
 //! `nativeOnPictureTaken`) — see *Correlating a completion* below;
 //! `FrustCameraHost.kt`'s copy of this table was updated in the same change.
@@ -44,7 +43,7 @@
 //! - [`Java_dev_frust_camera_FrustCameraHost_nativeOnPermissionResult`]`(env, class, granted: jboolean)`
 //! - [`Java_dev_frust_camera_FrustCameraHost_nativeOnCameraState`]`(env, class, session: jint, state: jint)` — `0` Configuring / `1` Running / `2` Closed / `3` Error
 //! - [`Java_dev_frust_camera_FrustCameraHost_nativeOnPictureTaken`]`(env, class, session: jint, request_id: jlong, ok: jboolean, path: JString)` — `request_id` is the value the matching `takePicture` was given, echoed back unchanged (*Correlating a completion* below)
-//! - [`Java_dev_frust_camera_FrustCameraHost_nativeOnImageFrame`]`(env, class, session: jint, format: jint, width: jint, height: jint, rotationDegrees: jint, planeCount: jint, plane0: JByteBuffer, rowStride0: jint, pixelStride0: jint, plane1: …, plane2: …)` — **the task-09 contract addition.** Three fixed plane slots (never an array: an array would allocate on the Kotlin side once per frame at camera rate); slots past `planeCount` are null. Called on the host's own analyzer executor, and `ImageProxy.close()` runs only after it returns — see [`AndroidSession::start_image_stream`]'s close-deadline contract.
+//! - [`Java_dev_frust_camera_FrustCameraHost_nativeOnImageFrame`]`(env, class, session: jint, format: jint, width: jint, height: jint, rotationDegrees: jint, planeCount: jint, plane0: JByteBuffer, rowStride0: jint, pixelStride0: jint, plane1: …, plane2: …)` — **a later contract addition.** Three fixed plane slots (never an array: an array would allocate on the Kotlin side once per frame at camera rate); slots past `planeCount` are null. Called on the host's own analyzer executor, and `ImageProxy.close()` runs only after it returns — see [`AndroidSession::start_image_stream`]'s close-deadline contract.
 //!
 //! Each export upgrades its [`jni::EnvUnowned`] via
 //! [`jni::EnvUnowned::with_env`], which wraps the body in `catch_unwind` — the
@@ -64,7 +63,7 @@
 //! | Call | Blocking? |
 //! |---|---|
 //! | [`request_permission`] | **Blocks** on [`PERMISSION_TIMEOUT`] when the host reports `3` (dialog shown), waking on `nativeOnPermissionResult`; a timeout reports [`PermissionStatus::Denied`]. `0`/`1`/`2` return immediately. |
-//! | [`AndroidSession::open`] | **Never blocks.** `openCamera` returns the session id and this returns immediately with a live [`AndroidSession`]; CameraX configuration continues on the host's main thread and lands via `nativeOnCameraState`. A caller reads [`AndroidSession::preview_aspect_ratio`] (`0.0` until the first `TransformationInfo`) to learn when geometry is ready — this is the same contract [`crate::Camera::open`]'s doc already states, and the one task 11's catalog page consumes. |
+//! | [`AndroidSession::open`] | **Never blocks.** `openCamera` returns the session id and this returns immediately with a live [`AndroidSession`]; CameraX configuration continues on the host's main thread and lands via `nativeOnCameraState`. A caller reads [`AndroidSession::preview_aspect_ratio`] (`0.0` until the first `TransformationInfo`) to learn when geometry is ready — this is the same contract [`crate::Camera::open`]'s doc already states, and the one the example catalog's own preview page consumes. |
 //! | [`AndroidSession::take_picture`] | **Blocks** on [`PICTURE_TIMEOUT`] until `nativeOnPictureTaken` answers the capture it started (`spawn_blocking`-paired by convention — the crate doc's *Blocking API*). |
 //!
 //! Every blocking wait happens **outside** the scoped JNI attachment
@@ -163,7 +162,7 @@ use crate::{
 /// fully-qualified class name the embedding module's `FrustViewHost` looks
 /// up via the app classloader (`docs/CODE_STANDARDS.md`'s platform-view
 /// factory `viewType` LAW). Shipped by `plugins/camera/platform/android/`'s
-/// `CameraPreviewFactory.kt` (task 05).
+/// `CameraPreviewFactory.kt`.
 const PREVIEW_VIEW_TYPE: &str = "dev.frust.camera.CameraPreviewFactory";
 
 /// The Kotlin host's fully-qualified class name in **binary/dotted** form, as
@@ -1260,7 +1259,7 @@ struct FrameHeader {
 /// The zero-copy byte view of one plane's direct `ByteBuffer`.
 ///
 /// `GetDirectBufferAddress`/`GetDirectBufferCapacity` (the sanctioned
-/// `ImageAnalysis` pattern — the plan's RESEARCH §5) hand back the buffer's
+/// `ImageAnalysis` pattern) hand back the buffer's
 /// own memory, so the returned slice aliases the platform's in-flight image
 /// with **no copy**. `None` if the buffer is null or not direct.
 ///
@@ -1476,7 +1475,7 @@ pub extern "system" fn Java_dev_frust_camera_FrustCameraHost_nativeOnPictureTake
 
 /// `Java_dev_frust_camera_FrustCameraHost_nativeOnImageFrame` — one
 /// `ImageAnalysis` frame, delivered on the host's analyzer executor (contract
-/// table above; **the task-09 contract addition**).
+/// table above; **a later contract addition**).
 ///
 /// Runs the user callback **synchronously**: the host closes the `ImageProxy`
 /// only after this returns, which is what makes the plane views zero-copy and

@@ -3,7 +3,7 @@
 //! Kotlin at all** (`docs/DEVELOPMENT.md` says so explicitly) — only a real
 //! Gradle build does. A Rust-side source scan runs in the standard verify
 //! gate, needs no Android toolchain, and fails loudly instead of relying on
-//! a reviewer checklist (`TASKS.md`'s M4/M5 items).
+//! a reviewer checklist.
 //!
 //! Precedent for the shape: `crates/frust/tests/surface_mode_conformance.rs`
 //! and `frust-drive/tests/print_free_cores.rs` — a plain `std::fs` source
@@ -12,14 +12,14 @@
 //! substring/line scan, not a parser — correct for the small, hand-written
 //! shapes these two files actually take today.
 //!
-//! **Relocated by task c1-04** from `crates/frust/tests/plugin_kotlin_conformance.rs`,
-//! which f2-06 originally placed in the published facade crate — coupling the
+//! **Relocated** from `crates/frust/tests/plugin_kotlin_conformance.rs`,
+//! which was originally placed in the published facade crate — coupling the
 //! facade's own test suite to one plugin's Kotlin and one example's hand
 //! copy, in tension with `docs/ARCHITECTURE.md`'s "the facade never depends
 //! on or re-exports a plugin." This half (the `frust-native-widgets`-specific
 //! parity/packing checks) now lives beside the code it protects, in this
 //! crate's own test tree. The cross-cutting `dev.frust` bare-package scan
-//! (f2-06's Part 2) moved to
+//! (the other half) moved to
 //! `crates/frust-drive/tests/plugin_package_conformance.rs` instead, since it
 //! must see every plugin under `plugins/**`, not just this one.
 //!
@@ -41,7 +41,7 @@
 //! are never textually identical, so the two sides are compared as parsed
 //! numbers instead).
 //!
-//! # The byte-identity check is gone, and that is the point (task p3-03)
+//! # The byte-identity check is gone, and that is the point
 //!
 //! A third test used to pin this crate's canonical `platform/android/*.kt`
 //! byte-for-byte against a hand-copied duplicate in
@@ -59,9 +59,9 @@
 //! independent duplication (Kotlin arithmetic vs Rust arithmetic) that
 //! packaging does not remove.
 //!
-//! # Package/class-name ↔ JNI-export-symbol parity (task m-03/R1-d)
+//! # Package/class-name ↔ JNI-export-symbol parity
 //!
-//! p3-03 renamed the package to `dev.frust.nativewidgets` and the exports to
+//! An earlier rename moved the package to `dev.frust.nativewidgets` and the exports to
 //! `Java_dev_frust_nativewidgets_*`. `android/ctx.rs`'s `LISTENER_CLASS`, the
 //! Android-cfg'd `VIEW_TYPE` in `api/builders.rs`, and every `Java_*` export
 //! name in `android/mod.rs` are matched to the two Kotlin files' `package`/

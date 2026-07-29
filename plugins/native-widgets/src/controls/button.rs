@@ -1,6 +1,6 @@
 //! `Button` — a real `android.widget.Button`, built and driven from Rust.
 //!
-//! Six properties (PLAN 1.2's "the 5–8 things apps actually set"): caption,
+//! Six properties (the 5–8 things apps actually set): caption,
 //! enabled, text colour, background colour, text size, accessibility label.
 //! The caption and the two layout-affecting properties are
 //! [`Tier::Relayout`](super::Tier::Relayout); the rest are
@@ -9,7 +9,7 @@
 //! Clicks are platform-owned: `create` attaches the shared
 //! `dev.frust.nativewidgets.FrustNativeListener` as an `OnClickListener` on
 //! Android, and a `FrustNativeControlTarget` as the `TouchUpInside` action on iOS
-//! (`crate::apple::events`, task p2-03); both arms'
+//! (`crate::apple::events`); both arms'
 //! [`on_event`](crate::runtime::NativeWidget::on_event) decode the firing via
 //! the SAME [`crate::events::decode_click`] into the runtime's event
 //! dispatch. Nothing about that goes through `RenderRoot::event` (the crate
@@ -55,14 +55,14 @@ pub(crate) struct ButtonProps {
     pub(crate) text_size_sp: Option<f32>,
     /// The TalkBack label; `None` lets the platform fall back to the caption.
     pub(crate) content_description: Option<String>,
-    /// Corner radius, dp — theme ladder L2 (p1-07:
+    /// Corner radius, dp — theme ladder L2 (see
     /// `crate::api::theme::ResolvedTheme::corner_radius_dp`, folded in by
     /// `api::builders`). `Some` alongside a `Some` [`Self::background_color`]
     /// plans [`Setter::ThemedBackground`]; a background colour with no radius
-    /// keeps the pre-p1-07 flat [`Setter::BackgroundColor`] path (see
+    /// keeps the plain flat [`Setter::BackgroundColor`] path (see
     /// [`Self::plan`]).
     pub(crate) corner_radius_dp: Option<f32>,
-    /// Theme ladder L3 (p1-08): the resolved
+    /// Theme ladder L3: the resolved
     /// [`crate::api::theme::ResolvedTheme::button_typeface`], or
     /// [`Typeface::System`] when absent (an older api layer, or a control
     /// built with no theme threaded).
@@ -143,10 +143,10 @@ impl ButtonProps {
 
 /// Plan [`Self::background_color`]/[`Self::corner_radius_dp`] together — the
 /// two need ONE combined [`Setter::ThemedBackground`] whenever a corner
-/// radius is present (theme ladder L2, p1-07), because Android has no "round
+/// radius is present (theme ladder L2), because Android has no "round
 /// this `ColorDrawable`'s corners" call; a background colour with no radius
-/// keeps the pre-p1-07 flat [`Setter::BackgroundColor`] (a possible future
-/// explicit-colour-only override, and the exact plan every p1-04 test still
+/// keeps the plain flat [`Setter::BackgroundColor`] (a possible future
+/// explicit-colour-only override, and the exact plan every test still
 /// pins, since a payload with no `cornerRadiusDp` key decodes `None` on both
 /// sides of any diff).
 ///
@@ -272,14 +272,14 @@ pub(crate) mod platform {
     //! `Widget.Material.Button`.
     //!
     //! Together with the fill and title colour the theme ladder folds into
-    //! `Props` (p1-07), that closes the Phase 0 spike's *"black box with
-    //! text"* cosmetic gap: the spike hand-built a `Custom` button and got
+    //! `Props`, that closes an earlier prototype's *"black box with
+    //! text"* cosmetic gap: a hand-built `Custom` button had gotten
     //! exactly that.
     //!
     //! # Clicks are platform-owned, exactly like Android's
     //!
     //! `create` attaches a [`FrustNativeControlTarget`] as the button's
-    //! `TouchUpInside` action (task p2-03), and `on_event` decodes its firing
+    //! `TouchUpInside` action, and `on_event` decodes its firing
     //! via [`crate::events::decode_click`] into the runtime's event dispatch —
     //! the same decoder Android's `on_event` calls, so kind/detail parity is
     //! automatic (`crate::apple::events`'s module doc). Nothing about that
@@ -320,7 +320,7 @@ pub(crate) mod platform {
         /// released) alongside the rest of `State` when
         /// `Instance::dispose` tears this slot down.
         target: Retained<FrustNativeControlTarget>,
-        /// Theme ladder L3 (p2-04): the combined typeface/size state
+        /// Theme ladder L3: the combined typeface/size state
         /// `Setter::TextSizeSp`/`Setter::Typeface` share — see
         /// `crate::controls::platform::FontState`'s doc for why a `Button`
         /// needs this at all.
@@ -545,8 +545,8 @@ mod tests {
 
     #[test]
     fn a_fill_with_no_radius_keeps_the_pre_p1_07_flat_setter() {
-        // No `cornerRadiusDp` key at all: exactly the p1-04 shape, still the
-        // plan a future explicit-colour-only override takes.
+        // No `cornerRadiusDp` key at all: exactly the plain-fill shape, still
+        // the plan a future explicit-colour-only override takes.
         let props = decode("\"backgroundColor\":255");
         assert_eq!(props.corner_radius_dp, None);
         assert_eq!(

@@ -1,5 +1,5 @@
-//! The typed native-widget event vocabulary (native-widgets Phase 1, PLAN
-//! 1.3) plus the primitive `detail` codec every interactive control's
+//! The typed native-widget event vocabulary plus the primitive `detail`
+//! codec every interactive control's
 //! Android listener packs into — the layer above [`crate::runtime`]'s raw
 //! `(kind, detail)` transport.
 //!
@@ -15,13 +15,13 @@
 //! *Native-widget events bypass `RenderRoot::event`*, and
 //! `docs/CODE_STANDARDS.md`'s Interaction Semantics, which this vocabulary
 //! is deliberately exempt from — a native control's interaction is entirely
-//! platform-owned). The app-facing api (p1-06) wraps a decoded
+//! platform-owned). The app-facing api wraps a decoded
 //! [`EventPayload`] straight into a signal write, which is what wakes
-//! exactly one frust frame (SPIKE.md's receipt).
+//! exactly one frust frame.
 //!
 //! # One listener, five kinds, no JSON
 //!
-//! `FrustNativeListener` (p1-03's file) implements every listener interface
+//! `FrustNativeListener` implements every listener interface
 //! a v1 control needs — `View.OnClickListener`,
 //! `CompoundButton.OnCheckedChangeListener`,
 //! `SeekBar.OnSeekBarChangeListener` — and funnels all of them into the one
