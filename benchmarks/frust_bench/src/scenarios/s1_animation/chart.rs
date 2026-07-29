@@ -79,8 +79,8 @@ struct BubbleVisual {
     symbol_too_wide: bool,
     percent: TextLayout,
     percent_size: Size,
-    /// The radial fill's [`Gradient`] object, built once here (task 10.E S1
-    /// gradient-brush reuse, PLAN.md Phase 10.E) with its stops fixed for the
+    /// The radial fill's [`Gradient`] object, built once here for
+    /// gradient-brush reuse, with its stops fixed for the
     /// bubble's lifetime — paint only mutates `kind`'s center/radius in place
     /// per frame (the bubble's only per-frame-changing input, from physics)
     /// instead of reallocating a fresh `Gradient` + `ColorStops` every paint.

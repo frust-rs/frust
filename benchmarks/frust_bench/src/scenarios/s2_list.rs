@@ -2,7 +2,7 @@
 //!
 //! # Why a hand-rolled list instead of `frust::ListView`
 //!
-//! `frust-widgets::ListView` (spec §6.4/PLAN.md D4) virtualizes a row window,
+//! `frust-widgets::ListView` virtualizes a row window,
 //! but its scroll offset is driven **only** by real `InputEvent`s routed
 //! through `RenderRoot::event` (drag/wheel) — there is no programmatic
 //! "scroll-to"/controller API, and app code (this scenario) has no access to
@@ -159,8 +159,8 @@ impl Scenario for S2 {
 
 struct LongListPage;
 
-/// [`LongListPage`]'s retained local state (spec §5.5's `Component::State`) —
-/// deliberately NOT part of the shared `BenchState` (task scope: this file
+/// [`LongListPage`]'s retained local state (the `Component::State` model) —
+/// deliberately NOT part of the shared `BenchState` (kept local to this file
 /// only), scoped instead to this component's own reactive [`frust::Owner`].
 struct LongListState {
     /// How many of [`TOTAL_ROWS`] rows are currently "available".

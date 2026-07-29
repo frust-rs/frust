@@ -6,19 +6,19 @@ publish = false
 
 # `cdylib` is the shared library Android's `System.loadLibrary` loads (the JNI
 # bridge); `staticlib` is the archive the iOS Xcode target links (the C-ABI
-# `frust_*` bridge, spec §10.2); `rlib` keeps the crate usable as a normal Rust
-# library for the desktop `main.rs` preview binary (spec §12.9).
+# `frust_*` bridge); `rlib` keeps the crate usable as a normal Rust
+# library for the desktop `main.rs` preview binary.
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 # NOTE: temporary path dependency pointing at the Frust repo checkout
-# that generated this project (spec §12.3: "frust_path" mechanism is
-# explicitly temporary). Once Frust crates are published, `frust
+# that generated this project ("frust_path" is explicitly a temporary
+# mechanism). Once Frust crates are published, `frust
 # create` will emit a version dependency here instead.
 frust = { path = "{{ frust_path }}" }
 
-# `--arch clean-signals` demo (plugin-system spec, task 09): the Frust
+# `--arch clean-signals` demo: the Frust
 # bridge for `clean-signals` (component-scoped controller lifecycle,
 # `async_view`, etc.) — an in-repo plugin, added like any other Frust
 # plugin (`frust_path` resolves to `crates/frust`, so
@@ -51,7 +51,7 @@ log = "0.4"
 lean = ["log/release_max_level_warn"]
 
 # `--release` mode: fully optimized, stripped, single-panic-path binary for
-# store distribution (spec §12.2). Mirrors the default template's
+# store distribution. Mirrors the default template's
 # `Cargo.toml.tmpl` block verbatim (not covered by the `profile_sync`
 # tripwire test, which only compares the root/default-template/huddle
 # manifests, but kept in sync by hand for a consistent scaffold).
@@ -62,7 +62,7 @@ strip = "symbols"
 panic = "abort"
 
 # `--profile` mode: release performance with symbols + tracing kept for
-# on-device performance measurement (spec §12.2). Artifacts land in
+# on-device performance measurement. Artifacts land in
 # `target/<triple>/profile/` (custom-profile name, verified legal).
 [profile.profile]
 inherits = "release"

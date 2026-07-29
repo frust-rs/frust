@@ -16,15 +16,15 @@ publish = false
 
 # `cdylib` is the shared library Android's `System.loadLibrary` loads (the JNI
 # bridge); `staticlib` is the archive the iOS Xcode target links (the C-ABI
-# `frust_*` bridge, spec §10.2); `rlib` keeps the crate usable as a normal Rust
-# library for the desktop `main.rs` preview binary (spec §12.9).
+# `frust_*` bridge); `rlib` keeps the crate usable as a normal Rust
+# library for the desktop `main.rs` preview binary.
 [lib]
 name = "frustbench"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 # NOTE: temporary path dependencies pointing at the Frust repo checkout that
-# owns this benchmark (spec §12.3: the `frust_path` mechanism is explicitly
+# owns this benchmark (the `frust_path` mechanism is explicitly
 # temporary). Once Frust crates are published, these become version deps.
 frust = { path = "../../crates/frust" }
 
@@ -82,7 +82,7 @@ frust-scene = { path = "../../crates/frust-scene" }
 reactive_graph = "0.2"
 
 # `--release` mode: fully optimized, stripped, single-panic-path binary for
-# store distribution (spec §12.2). Hand-synced with Frust's own root
+# store distribution. Hand-synced with Frust's own root
 # `Cargo.toml` and `examples/huddle/Cargo.toml` (see `docs/DEVELOPMENT.md`'s
 # Version-Pin Policy hand-sync rule) — see either of those manifests for the
 # full measured rationale behind `lto = "fat"` + `codegen-units = 1`.
@@ -101,7 +101,7 @@ strip = "symbols"
 panic = "abort"
 
 # `--profile` mode: release performance with symbols + tracing kept for
-# on-device performance measurement (spec §12.2). Artifacts land in
+# on-device performance measurement. Artifacts land in
 # `target/<triple>/profile/` (custom-profile name, verified legal). This is
 # the profile the benchmark harness (task 06/07) builds each bench run with,
 # since `FRUST_TRACE`/`FRUST_TRACE_RAW`'s log lines must survive.

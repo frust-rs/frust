@@ -82,9 +82,8 @@ tree_arena = "0.2.0"
 pollster = "0.4"
 # image decoding (frust-widgets' Image widget) — pinned exactly: 0.25.10 is
 # the only 0.25.x release whose MSRV is exactly the workspace's (1.88), not
-# lower (see workflow/plans/.../research/RESEARCH.md §Image); like the
-# rendering-stack pins in docs/DEVELOPMENT.md's Version-Pin Policy, do not
-# bump this independently without re-verifying the MSRV.
+# lower; like the rendering-stack pins in docs/DEVELOPMENT.md's Version-Pin
+# Policy, do not bump this independently without re-verifying the MSRV.
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
 # frust-tui terminal UI (Phase 1) — ratatui 0.30 / crossterm 0.29, pinned to
 # minor per the Version-Pin Policy (pre-1.0 ratatui churn). These pins are used
@@ -93,7 +92,7 @@ image = { version = "=0.25.10", default-features = false, features = ["png", "jp
 # dev-only snapshot harness for the TUI's TestBackend render tests.
 ratatui = "0.30"
 crossterm = "0.29"
-# ANSI-colored log parsing for the TUI session log view (PLAN.md D5): converts a
+# ANSI-colored log parsing for the TUI session log view: converts a
 # process's raw ANSI/SGR output into styled `ratatui::text::Text`. Pinned to a
 # known-good release tied to the ratatui-0.30 line (it builds on `ratatui-core`,
 # the same split-out core ratatui 0.30 re-exports); `cargo test -p frust-tui` is
@@ -103,7 +102,7 @@ crossterm = "0.29"
 ansi-to-tui = { version = "8.0.1", default-features = false }
 insta = "1"
 # Format-preserving TOML editing for `frust-tui`'s recent-projects store
-# (`~/.config/frust/tui.toml`, PLAN.md D6b's project switcher) — a document
+# (`~/.config/frust/tui.toml`, the project switcher) — a document
 # edit (not a deserialize-mutate-reserialize round trip) so a user's
 # hand-added comments/keys in the file survive a save. Pinned to minor per
 # the Version-Pin Policy (pre-1.0, alongside the ratatui/crossterm pins
@@ -123,8 +122,8 @@ toml = "1"
 anyhow = "1"
 thiserror = "2"
 ctrlc = "3"
-# `frust run --watch`'s desktop rebuild-relaunch loop (PLAN.md Phase 9.D step
-# 2) — file-watcher backing the loop's change-detection seam. Pinned to
+# `frust run --watch`'s desktop rebuild-relaunch loop — file-watcher backing
+# the loop's change-detection seam. Pinned to
 # minor per the Version-Pin Policy; `frust-cli`-only (see its Cargo.toml
 # comment for why this is a targeted exception, direct precedent: `ctrlc`
 # above).
@@ -167,18 +166,19 @@ objc2-foundation = "0.3"
 # transitive dep of wgpu-hal on Android, so promoting it to direct adds no
 # new crates/size (see frust-render/Cargo.toml)
 android_system_properties = "0.1"
-# accessibility (frust-core's semantics seam, spec §9 / phase-6c D1) —
-# core data crate ONLY (no accesskit_* platform adapters; those are phase 6d).
+# accessibility (frust-core's semantics seam) —
+# core data crate ONLY (no accesskit_* platform adapters; those ship as
+# separate per-shell adapters below).
 # Pinned to minor per the Version-Pin Policy (a pure-data, MSRV-compatible,
 # Android-compiling vocabulary crate); do not float to a new minor without a
 # fresh `cargo tree -d` / Android-compile check.
 accesskit = "0.24"
-# accessibility platform adapters (phase 6d D3) — each shell's seam onto its
+# accessibility platform adapters — each shell's seam onto its
 # native a11y API, all unifying on the `accesskit = "0.24"` pin above
 # (verified: accesskit_winit 0.33.2 needs accesskit ^0.24.1 + winit ^0.30.5 —
 # we're on winit 0.30.13; accesskit_android 0.7.5 and accesskit_ios 0.1.2 both
 # need accesskit ^0.24.1 too). Pinned to minor like the `accesskit` line
-# above, except accesskit_ios which is pinned exact per PLAN.md D3 (its 0.1.x
+# above, except accesskit_ios which is pinned exact (its 0.1.x
 # line is younger/less proven and never compiled on this host — see
 # docs/DEVELOPMENT.md's Version-Pin Policy).
 accesskit_winit = "0.33"
@@ -189,8 +189,8 @@ accesskit_ios = "=0.1.2"
 # unstable API, isolated behind the encode adapter so a breaking bump never
 # reaches the default GPU path.
 vello_cpu = "=0.0.9"
-# frust-secure-storage's Apple Keychain + LocalAuthentication bindings (task
-# S01b, Plan Phases 2/5) — same rationale/precedent as `objc2`/
+# frust-secure-storage's Apple Keychain + LocalAuthentication bindings —
+# same rationale/precedent as `objc2`/
 # `objc2-foundation` above: plain version strings (no `default-features`
 # set) so a member can pick its own minimal feature list and
 # `default-features = false` without Cargo's workspace-inheritance
@@ -198,14 +198,13 @@ vello_cpu = "=0.0.9"
 # Pinned to minor per the Version-Pin Policy, matching `objc2`/
 # `objc2-foundation`'s existing rows; the tripwire is
 # `cargo check --target aarch64-apple-ios-sim -p frust-secure-storage`
-# (verified buildable against a scratch crate during S01b — objc2-security
-# 0.3.2, objc2-local-authentication 0.3.2, both actively maintained per
-# research/RESEARCH.md).
+# (verified buildable against a scratch crate — objc2-security
+# 0.3.2, objc2-local-authentication 0.3.2, both actively maintained).
 objc2-security = "0.3"
 objc2-local-authentication = "0.3"
-# frust-secure-storage's desktop (Linux/Windows) secret-store backend (task
-# S01b, Plan Phase 4) — `keyring` 4.x's re-architecture fronts `keyring-core`
-# + separate opt-in per-platform store crates (research/RESEARCH.md §6).
+# frust-secure-storage's desktop (Linux/Windows) secret-store backend —
+# `keyring` 4.x's re-architecture fronts `keyring-core`
+# + separate opt-in per-platform store crates.
 # Linux's zbus-based secret-service store is pure Rust (no libdbus to
 # vendor); Windows' wraps Credential Manager. Pinned to minor per the
 # Version-Pin Policy; the tripwire is `cargo check -p frust-secure-storage`
@@ -215,20 +214,20 @@ objc2-local-authentication = "0.3"
 keyring-core = "1.0"
 zbus-secret-service-keyring-store = "1.0"
 windows-native-keyring-store = "1.1"
-# frust-camera's Apple AVFoundation bindings (task 02, Plan Phase 1 preamble
-# — see plugins/camera/Cargo.toml's comment): the same plain-version-string
+# frust-camera's Apple AVFoundation bindings
+# (see plugins/camera/Cargo.toml's comment): the same plain-version-string
 # shape as `objc2`/`objc2-foundation` above (Cargo's workspace-dependency
 # inheritance forbids a member from overriding `default-features` unless the
 # workspace-level entry already sets it), so `plugins/camera/Cargo.toml`
 # repeats each version literal with its own `default-features = false` +
 # minimal feature list rather than inheriting. `objc2-av-foundation 0.3.2`
-# requires `objc2 >=0.6.2, <0.8.0` (RESEARCH-REFRESH.md §5 — narrower than
+# requires `objc2 >=0.6.2, <0.8.0` (narrower than
 # 0.3.0's `^0.6.0`, but do not write "requires objc2 ^0.6" anywhere; 0.7.x is
 # permitted). `objc2-quartz-core` is pinned here for `CALayer` only —
 # `AVCaptureVideoPreviewLayer` itself lives in `objc2-av-foundation`, not
-# `objc2-quartz-core` (a RESEARCH-REFRESH correction to the original plan).
+# `objc2-quartz-core`.
 # `dispatch2` backs the serial dispatch queue the video-data-output sample
-# delegate runs on (Plan Phase 3). Pinned to minor per the Version-Pin
+# delegate runs on. Pinned to minor per the Version-Pin
 # Policy; the tripwire is
 # `cargo check --target aarch64-apple-ios-sim -p frust-camera`.
 objc2-av-foundation = "0.3"
@@ -236,8 +235,7 @@ objc2-core-media = "0.3"
 objc2-core-video = "0.3"
 objc2-quartz-core = "0.3"
 dispatch2 = "0.3"
-# frust-native-widgets's Apple control surface
-# (`workflow/plans/features/frust-native-widgets/PLAN.md`'s pin-row note) —
+# frust-native-widgets's Apple control surface —
 # `UIView`/`UIButton`/etc. bindings for the plugin's Rust-built native
 # controls. Fresh pin: no prior root-workspace consumer (the spike crate at
 # `plugins/native-widgets-spike/` is a standalone, excluded workspace).
@@ -249,7 +247,7 @@ dispatch2 = "0.3"
 # frust-native-widgets`.
 objc2-ui-kit = "0.3"
 # reactive stack (frust-reactive) — do not add reactive_graph's `effects`
-# feature anywhere (see docs/DEVELOPMENT.md / phase-5.5 research doc)
+# feature anywhere (see docs/DEVELOPMENT.md's Version-Pin Policy)
 reactive_graph = "0.2"
 any_spawner = "0.3"
 tokio = { version = "1", default-features = false }
@@ -276,24 +274,23 @@ frust-shell-android = { path = "crates/frust-shell-android" }
 frust-shell-ios = { path = "crates/frust-shell-ios" }
 frust = { path = "crates/frust" }
 
-# `[profile.dev]` per-package overrides for the render/shader-compile stack
-# (6e Finding 5 / 6e-fix-1 task 03): vello/wgpu/naga's shader-pipeline
+# `[profile.dev]` per-package overrides for the render/shader-compile stack:
+# vello/wgpu/naga's shader-pipeline
 # translation runs at `opt-level = 0` by default, which is slow enough on a
 # physical iOS device that the OS SIGKILLs a debug `frust run` before the
 # synchronous, main-thread launch-time shader compile finishes. The app's own
 # code stays at the default dev opt-level (fast incremental rebuilds) — only
-# these dependencies are bumped. `docs/spec.md` §12.9 documents
-# `opt-level = 1` for deps generally; `opt-level = 2` is used here for the
-# shader-compile-heavy crates specifically, since 1 measurably helps but a
-# thin margin isn't enough headroom against the 6e repro's SIGKILL, and 2's
-# extra shader-compile speed only costs incremental-build time on these few
-# packages, not the whole dependency graph (`opt-level = 3`'s further gain
-# over 2 is marginal for straight-line shader-translation code and not worth
-# its added compile-time cost). This is frust's own workspace dev
-# workflow (building/testing the crates in this workspace directly); the
-# same override lands in `templates/app/Cargo.toml.tmpl` (every generated
-# app) and `examples/huddle/Cargo.toml` (the 6e repro vehicle, formerly
-# the now-deleted `catalog` example, before phase 8's examples-convergence).
+# these dependencies are bumped. Workspace-wide dev builds otherwise default
+# deps to `opt-level = 1` (see the wildcard override below); `opt-level = 2`
+# is used here for the shader-compile-heavy crates specifically, since 1
+# measurably helps but a thin margin isn't enough headroom against the
+# SIGKILL, and 2's extra shader-compile speed only costs incremental-build
+# time on these few packages, not the whole dependency graph (`opt-level =
+# 3`'s further gain over 2 is marginal for straight-line shader-translation
+# code and not worth its added compile-time cost). This is frust's own
+# workspace dev workflow (building/testing the crates in this workspace
+# directly); the same override lands in `templates/app/Cargo.toml.tmpl`
+# (every generated app) and `examples/huddle/Cargo.toml`.
 [profile.dev.package.vello]
 opt-level = 2
 
@@ -332,13 +329,12 @@ opt-level = 2
 opt-level = 1
 
 # `--release` mode: fully optimized, stripped, single-panic-path binary for
-# store distribution (spec §12.2). Previously absent here — examples built
+# store distribution. Previously absent here — examples built
 # from the root workspace (`hello`/`counter`/`notes`/`gallery`/`navdemo`)
 # silently fell back to Cargo's own release defaults (no LTO, cgu=16,
 # opt-level 3, no strip/abort). `lto = "fat"` + `codegen-units = 1`
-# (phase 7 task 11, measured 2026-07-18 against the now-deleted `catalog`
-# example's release arm64-v8a `.so` via `scripts/size-report.sh` — see
-# `workflow/plans/features/frust-phase-7-performance/research/BASELINE.md`):
+# (measured 2026-07-18 against the now-deleted `catalog`
+# example's release arm64-v8a `.so` via `scripts/size-report.sh`):
 # fat LTO + cgu=1 alone (opt-level 3, the default — no override needed) shrank the
 # prior baseline (lto="thin", no cgu override) from 8.46MB to 7.52MB
 # unstripped, an 11.1% win taken unconditionally. `opt-level` "s"/"z" were

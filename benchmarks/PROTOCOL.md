@@ -1,13 +1,10 @@
 # Frust vs Flutter Benchmark Protocol
 
-This document is the published methodology for the paired benchmark suite
-(`benchmarks/frust_bench`, `benchmarks/flutter_bench`, `benchmarks/harness`)
-built by Phase 9.E of `workflow/plans/features/frust-phase-9-rust-advantage/PLAN.md`.
-It is transcribed from that plan's Phase 9.E, step 1 (binding) plus the
-supporting corrections in `research/RESEARCH.md` §7/§8 — nothing below is
-invented beyond what is explicitly marked as *our declared convention* (no
-industry-standard cross-framework benchmark protocol exists; see the
-refuted-claims ledger in `research/RESEARCH.md`).
+This document is the published, binding methodology for the paired benchmark
+suite (`benchmarks/frust_bench`, `benchmarks/flutter_bench`,
+`benchmarks/harness`) — nothing below is invented beyond what is explicitly
+marked as *our declared convention* (no industry-standard cross-framework
+benchmark protocol exists).
 
 Both apps' full source ships in this tree for scrutiny. Every number in
 `RESULTS.md` must be reproducible by re-running `./benchmarks/harness/run.sh`
@@ -128,8 +125,8 @@ Applied identically to both apps, every run, every device:
 ## 4. Run count and warmup (our declared convention)
 
 **No industry-standard convention exists for run count, warmup discard, or
-run duration in cross-framework UI benchmarking** (RESEARCH.md §8's
-corrections). This suite declares and uses:
+run duration in cross-framework UI benchmarking.** This suite declares and
+uses:
 
 - **≥10 runs × 30 seconds** per scenario per app per device.
 - **The first 2 runs of each set are discarded** (JIT/cache/thermal
@@ -138,8 +135,8 @@ corrections). This suite declares and uses:
   `benchmarks/raw/` alongside the computed table, so a reader can verify
   the discard didn't cherry-pick.
 
-This diverges from Flutter's own perf-testing guidance (~100 runs,
-RESEARCH.md §7) for practicality on a person-driven physical-device matrix;
+This diverges from Flutter's own perf-testing guidance (~100 runs) for
+practicality on a person-driven physical-device matrix;
 the divergence is recorded, not hidden.
 
 ## 5. Statistics — one shared script, both sides
@@ -170,10 +167,10 @@ Per scenario, per app, per device, the harness reports:
 Both apps must clear these before a run counts toward `RESULTS.md`:
 
 - **Android high-refresh opt-in.** Flutter does not call
-  `Surface.setFrameRate` by default (RESEARCH.md §7) — the Flutter bench
+  `Surface.setFrameRate` by default — the Flutter bench
   app must wire the equivalent opt-in explicitly (plugin or platform
   channel) wherever the device supports >60Hz, exactly mirroring Frust's
-  own `Surface.setFrameRate` hint (`docs/spec.md`/`docs/ARCHITECTURE.md`'s
+  own `Surface.setFrameRate` hint (`docs/ARCHITECTURE.md`'s
   High refresh-rate hints).
 - **iOS `CADisableMinimumFrameDurationOnPhone`.** The Flutter bench app's
   Info.plist must set this, mirroring Frust's `CADisplayLink`
@@ -255,7 +252,7 @@ by scenario without any other coupling to the app.
 `benchmarks/flutter_bench` (task `05-flutter-bench`) MUST emit a parseable
 line per `FrameTiming`, captured via
 `SchedulerBinding.addTimingsCallback` (works in profile mode on-device
-with no host test runner — RESEARCH.md §7), in a format the same harness
+with no host test runner), in a format the same harness
 can parse with a symmetrical field set:
 
 ```
@@ -289,8 +286,9 @@ native pass breakdown, not force-unified into a single column.
 
 ## 8. Scenarios (S1–S8)
 
-Verbatim from `PLAN.md` Phase 9.E (each app implements all eight, selected
-via a launch arg / deep link so one binary drives the whole matrix):
+Every scenario below is the full specification (each app implements all
+eight, selected via a launch arg / deep link so one binary drives the
+whole matrix):
 
 | ID | Scenario | What it stresses | Rust-advantage claim under test |
 |----|----------|------------------|-------------------------------|
@@ -356,7 +354,7 @@ via a launch arg / deep link so one binary drives the whole matrix):
   the platform's own tools (`adb shell dumpsys cpuinfo`/`meminfo` on
   Android; Instruments or `xcrun` equivalents on iOS). Memory deltas are
   compared **within a platform only** (Android PSS vs iOS RSS are not
-  directly comparable units — RESEARCH.md §8) — no cross-platform memory
+  directly comparable units) — no cross-platform memory
   column is published.
 
 ### S8-specific fairness rules

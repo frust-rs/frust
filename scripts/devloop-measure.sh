@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # scripts/devloop-measure.sh — repeatable desktop dev-loop timing baseline.
 #
-# Measures the numbers phase-9 task 06 (see
-# workflow/plans/features/frust-phase-9-rust-advantage/tasks/06-devloop-measure.md
-# and its research/DEVLOOP_BASELINE.md) records: an app-crate-only
-# incremental `cargo build` wall time (default toolchain config), the same
+# Measures the desktop dev-loop baseline this repo tracks (see
+# docs/DEVELOPMENT.md's Dev Loop section for the recorded numbers): an
+# app-crate-only incremental `cargo build` wall time (default toolchain
+# config), the same
 # incremental measurement under an alternate linker where one is found on
 # PATH, and under the `cranelift` codegen backend where the installed
 # nightly toolchain supports it. Each variant reports the median of
@@ -254,5 +254,5 @@ fi
 echo
 
 echo "== End of report =="
-echo "See workflow/plans/features/frust-phase-9-rust-advantage/research/DEVLOOP_BASELINE.md"
+echo "See docs/DEVELOPMENT.md's Dev Loop section"
 echo "for the recorded baseline and methodology this script reproduces."

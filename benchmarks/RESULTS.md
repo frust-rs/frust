@@ -560,7 +560,7 @@ reproducing the retired iPhone series' ~13–30× at full-form sample counts.
    comparison is impossible; only framework-self-reported spans captured.
 6. **No idle-CPU or memory CLI on iOS** — both S7 idle axes are n/a (the
    protocol's PSS axis is Android-only; RSS would not be cross-comparable
-   anyway per RESEARCH.md §8).
+   anyway).
 7. **S8 burst-during-animation variant not run** (matches all prior passes).
 8. **Environmental controls uncontrolled** (no iOS CLI for brightness/
    airplane/charger/thermal); cooldown was a fixed 60s inter-app-block wait
@@ -929,8 +929,7 @@ run this pass (deviation 3).
 
 **Purpose:** bound the delta introduced by the release-lean methodology break
 (PROTOCOL §2.5): Frust perf runs moved `--release` → `--profile` because
-release now compiles instrumentation out entirely. Run per task
-`workflow/plans/features/frust-release-lean/tasks/09-device-ab-gate.md`.
+release now compiles instrumentation out entirely.
 
 **Setup / deviations (labeled):** single session, this device (serial
 `53f887ac`), 120Hz mode. Profile APK = `frust build apk --profile --define

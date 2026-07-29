@@ -1,5 +1,5 @@
-//! frust_bench — the Frust side of the Phase 9.E cross-framework benchmark
-//! suite (PLAN.md Phase 9.E). A single app hosting all eight scenarios (S1–S8)
+//! frust_bench — the Frust side of the cross-framework benchmark
+//! suite. A single app hosting all eight scenarios (S1–S8)
 //! behind one [`scenarios::Scenario`] driver contract, selected via a deep link
 //! (`frustbench://<id>`) or the `FRUST_BENCH_SCENARIO` env var and switchable at
 //! runtime from a HUD button row.
@@ -28,7 +28,7 @@ use frust::{
 
 use scenarios::{BenchState, SCENARIOS};
 
-/// The root [`Component`] (spec §5.5): owns the shared [`BenchState`], forces
+/// The root [`Component`]: owns the shared [`BenchState`], forces
 /// the dark M3 theme (matching S1's `0xFF0D1421` canvas), and drives the
 /// scenario switch — reconciling the HUD/deep-link `selected` request against
 /// the mounted `active` scenario each rebuild and firing the
@@ -109,7 +109,7 @@ fn scenario_switcher(state: &BenchState) -> AnyView<BenchState> {
     ))
 }
 
-// The generated app's sole entry point (spec §5.5/§10): one line binds
+// The generated app's sole entry point: one line binds
 // `BenchApp` to all three platforms — the Android JNI exports
 // (`target_os = "android"` only), the iOS C-ABI exports (self-gated to
 // `target_os = "ios"`), and (on desktop) the hidden `__frust_main` that
