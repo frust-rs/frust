@@ -1,6 +1,6 @@
 //! S7 — Cold start + idle.
 //!
-//! Two halves of the same "thin runtime" story (PLAN 9.E's S7):
+//! Two halves of the same "thin runtime" story:
 //!
 //! 1. **Cold start.** No app-side code is needed here — every shell already
 //!    records the [`StartupSpans`](frust_shell_common::perf::StartupSpans)

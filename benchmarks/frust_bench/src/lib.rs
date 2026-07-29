@@ -4,15 +4,14 @@
 //! (`frustbench://<id>`) or the `FRUST_BENCH_SCENARIO` env var and switchable at
 //! runtime from a HUD button row.
 //!
-//! Task 02 lands the scaffold: the driver, the registry, S1 (animation storm,
-//! ported from the since-removed `examples/bubblebench`; see
-//! `scenarios::s1_animation`'s module doc for the provenance) and S7 (cold
-//! start + idle). S2–S6 and S8 are compiling stubs each filled by tasks 03/04
-//! in place.
+//! The driver, the registry, and all eight scenarios live here: S1 (animation
+//! storm, ported from the since-removed `examples/bubblebench`; see
+//! `scenarios::s1_animation`'s module doc for the provenance) through S8
+//! (plugin-call overhead).
 //!
 //! Measure a run with `FRUST_TRACE=1 FRUST_TRACE_RAW=1` — the shell emits one
 //! parseable `frust-perf raw ...` line per frame plus the driver's
-//! `bench-scenario-start/end <id>` markers, which the harness (task 06) slices
+//! `bench-scenario-start/end <id>` markers, which the harness slices
 //! by (see `docs/DEVELOPMENT.md`'s Instrumentation).
 //!
 //! Run it with `cargo run` (desktop preview, S1 by default) or

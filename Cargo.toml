@@ -5,15 +5,15 @@ resolver = "2"
 # only, no frust-* framework deps), unlike the excluded facade-tier
 # plugins/clean-signals-frust below, which stays out of the root graph.
 members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets"]
-# examples/huddle (renamed from its prior directory name, task 09) is the
-# sole example (phase 8 examples-convergence: hello/counter/notes/gallery/navdemo/
+# examples/huddle (renamed from its prior directory name) is the
+# sole example (examples-convergence: hello/counter/notes/gallery/navdemo/
 # catalog/inbox were folded into it and deleted) — standalone (its own
 # [workspace] root, own Cargo.lock) for two independent reasons: (1) its
 # `clean-signals`/`clean-signals-forgekit` path deps point at a sibling
 # `clean-signals-rs` checkout, which must never enter the root workspace
 # graph (see docs/DEVELOPMENT.md's Version-Pin Policy); (2) its generated
-# Android AND iOS projects (`frust run`/`build` install targets, gained in
-# phase 8) need a project-local `target/` dir — the generated iOS Xcode
+# Android AND iOS projects (`frust run`/`build` install targets) need a
+# project-local `target/` dir — the generated iOS Xcode
 # build phase resolves `target/<triple>/<profile>/libhuddle.a` relative to
 # the project directory, which a root-workspace member's shared `target/`
 # would break (the same rationale the now-deleted `catalog` example carried).
@@ -26,14 +26,14 @@ members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secu
 # the same reason as shadertoy: a full `frust create` scaffold with its own
 # project-local `target/` dir and hand-synced `[profile.*]` blocks (its
 # generated Android/iOS projects need a project-local `target/`).
-# examples/layer-bench (the retained-layers Phase-0 composite-cost spike bench,
+# examples/layer-bench (the retained-layers composite-cost exploratory bench,
 # a THROWAWAY LAB) is standalone for the same reason as the examples above: a
 # full `frust create` scaffold with its own project-local `target/` dir and
 # hand-synced `[profile.*]` blocks. It also reaches below the facade into
 # frust-render's shipped composite primitives to measure vello composite
 # economics — see its src/lib.rs top-of-file note; it never enters the root
 # graph.
-# plugins/clean-signals-frust (Phase 4 facade-tier plugin) is a standalone
+# plugins/clean-signals-frust (a facade-tier plugin) is a standalone
 # excluded workspace like huddle: its `clean-signals` core dep is a sibling
 # path dep that must never enter the root graph (see docs/DEVELOPMENT.md's
 # Version-Pin Policy). Excluding a not-yet-migrated dir is harmless.
@@ -48,7 +48,7 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 # rendering stack — pins are LAW (vello 0.9 requires wgpu 29.0.3; do not bump independently)
 #
-# Feature trim (phase 7 task 15): the framework only ever drives vello
+# Feature trim: the framework only ever drives vello
 # through wgpu (no CPU-side vello-only build), so `default-features = false`
 # + explicit `features = ["wgpu"]` drops vello's `wgpu_default` default
 # feature, which otherwise pulls in plain `wgpu/default` below it. `wgpu`
@@ -62,9 +62,9 @@ license = "MIT OR Apache-2.0"
 # shaders GLES can't provide, so a GLES fallback was never a real path; the
 # `cpu-tier` `vello_cpu` feature is the documented CPU fallback story
 # instead, see `docs/ARCHITECTURE.md`'s `RenderTier` row) and `webgpu` (wasm
-# target only, Frust ships no wasm shell). See task 15's completion
-# summary for the `cargo tree -e features` proof these two (and their naga
-# frontends/backends) are absent from every target's dependency graph.
+# target only, Frust ships no wasm shell). Confirmed via `cargo tree -e
+# features`: these two (and their naga frontends/backends) are absent from
+# every target's dependency graph.
 vello = { version = "0.9.0", default-features = false, features = ["wgpu"] }
 wgpu = { version = "29.0.3", default-features = false, features = [
     "std",
@@ -85,7 +85,7 @@ pollster = "0.4"
 # lower; like the rendering-stack pins in docs/DEVELOPMENT.md's Version-Pin
 # Policy, do not bump this independently without re-verifying the MSRV.
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
-# frust-tui terminal UI (Phase 1) — ratatui 0.30 / crossterm 0.29, pinned to
+# frust-tui terminal UI — ratatui 0.30 / crossterm 0.29, pinned to
 # minor per the Version-Pin Policy (pre-1.0 ratatui churn). These pins are used
 # ONLY by `frust-tui`, which is isolated from the framework render stack (it
 # depends on `frust-drive`, never on `frust-core`/`vello`/`wgpu`). `insta` is a
@@ -135,7 +135,7 @@ jni = "0.22"
 ndk = "0.9"
 ndk-sys = "0.6"
 android_logger = "0.15"
-# Platform priority self-boost for the render-thread split (phase-11 fix F6):
+# Platform priority self-boost for the render-thread split:
 # `frust-shell-android` calls `setpriority(THREAD_PRIORITY_DISPLAY)` and
 # `frust-shell-ios` calls `pthread_set_qos_class_self_np(USER_INTERACTIVE)` at
 # the top of their render loops. Target-gated in both shells (only compiles for
@@ -144,7 +144,7 @@ android_logger = "0.15"
 # transitively (via ndk/wgpu-hal/objc2), so adding this edge bumps no version.
 # Floats on 0.2 minor: a ubiquitous, stable platform-binding crate, no pin.
 libc = "0.2"
-# plugin platform-handle storage (frust-plugin, Design Decision 2) — the
+# plugin platform-handle storage (frust-plugin) — the
 # `(JavaVM, application Context)` slot the Android shell writes at
 # `nativeInitPlatform` and plugins read via `frust-plugin::android`.
 # Target-gated in every consumer (Android only), so it lands in Cargo.lock but
@@ -153,13 +153,12 @@ libc = "0.2"
 # apps for free. Pinned to minor per the Version-Pin Policy; the tripwire for a
 # breaking bump is `cargo check --target aarch64-linux-android -p frust-plugin`.
 ndk-context = "0.1"
-# Apple ObjC runtime bridge for platform plugins — consumed by a later wave-1
-# task's Apple backend (frust-plugin's Apple sibling work + the
-# shared-preferences NSUserDefaults backend), NOT by anything today. The pins
-# land here so this stays the only root-manifest edit of wave 1; being an
-# unreferenced workspace dep, neither enters Cargo.lock until that task adds a
-# consumer. Pinned to minor per the Version-Pin Policy; that later task adds
-# the `cargo check --target aarch64-apple-ios-sim` tripwire.
+# Apple ObjC runtime bridge for platform plugins — consumed by
+# `frust-shared-preferences`'s NSUserDefaults backend, `frust-secure-storage`'s
+# Keychain backend, and `frust-camera`'s AVFoundation backend, each via
+# `{ workspace = true }`. Pinned to minor per the Version-Pin Policy; see
+# `docs/DEVELOPMENT.md`'s Version-Pin Policy table for the full list of
+# dependent mobile compile gates.
 objc2 = "0.6"
 objc2-foundation = "0.3"
 # android emulator detection (frust-render) — target-gated; already a
@@ -184,7 +183,7 @@ accesskit = "0.24"
 accesskit_winit = "0.33"
 accesskit_android = "0.7"
 accesskit_ios = "=0.1.2"
-# experimental CPU render-tier fallback (phase 6d D4) — optional, feature-gated
+# experimental CPU render-tier fallback — optional, feature-gated
 # (`cpu-tier` on frust-render, NOT default), exact-pinned: pre-1.0 with an
 # unstable API, isolated behind the encode adapter so a breaking bump never
 # reaches the default GPU path.
@@ -237,9 +236,7 @@ objc2-quartz-core = "0.3"
 dispatch2 = "0.3"
 # frust-native-widgets's Apple control surface —
 # `UIView`/`UIButton`/etc. bindings for the plugin's Rust-built native
-# controls. Fresh pin: no prior root-workspace consumer (the spike crate at
-# `plugins/native-widgets-spike/` is a standalone, excluded workspace).
-# Plain version string (no `default-features` set), matching
+# controls. Plain version string (no `default-features` set), matching
 # `objc2`/`objc2-foundation`'s shape above, so the member crate can pick its
 # own minimal feature list without Cargo's workspace-inheritance
 # restriction tripping. Pinned to minor per the Version-Pin Policy; the
@@ -312,7 +309,7 @@ opt-level = 2
 [profile.dev.package.naga]
 opt-level = 2
 
-# Debug dep opt widening (phase 7 task 11): non-workspace-member dependencies
+# Debug dep opt widening: non-workspace-member dependencies
 # build at `opt-level = 1` in debug (Cargo's `"*"` package selector excludes
 # workspace members and the profile's own package — verified against Cargo's
 # profile-override docs); every crate/example in this workspace stays at the
@@ -321,7 +318,7 @@ opt-level = 2
 # takes precedence over `"*"`. Targets emulator/debug first-frame cost —
 # parley/swash/image/kurbo compiled at `opt-level = 0` are part of that cost.
 # Hand-synced across `templates/app/Cargo.toml.tmpl` and `examples/huddle/
-# Cargo.toml` (phase 8's examples-convergence dropped the other two
+# Cargo.toml` (examples-convergence dropped the other two
 # manifests this used to be hand-synced against — the now-deleted `catalog`
 # and `inbox` examples' own `Cargo.toml`s — along with the examples
 # themselves).
@@ -342,12 +339,12 @@ opt-level = 1
 # carve-out back to `opt-level = 3` — the config that would actually ship,
 # since sacrificing encode-path CPU perf isn't acceptable — and under that
 # carve-out "s" measured 7.36MB (-2.1% vs the 7.52MB opt-3 config) and "z"
-# measured 7.28MB (-3.2%): neither clears the task's ">5% meaningfully wins"
+# measured 7.28MB (-3.2%): neither clears the >5% meaningfully-wins
 # bar once the carve-out that protects render-path perf is in place, so
 # `opt-level` stays at its default (3) and no carve-out is needed. This
 # block and the wildcard dev override above are hand-synced across
 # `templates/app/Cargo.toml.tmpl` and `examples/huddle/Cargo.toml`
-# (docs/DEVELOPMENT.md's Version-Pin Policy hand-sync rule; phase 8's
+# (docs/DEVELOPMENT.md's Version-Pin Policy hand-sync rule;
 # examples-convergence dropped the other two manifests this used to be
 # hand-synced against — the now-deleted `catalog` and `inbox` examples' own
 # `Cargo.toml`s — along with the examples themselves).

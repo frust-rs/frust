@@ -4,7 +4,7 @@
 //! workload: physics-driven gradient bubbles (seed 42) with shaped text runs,
 //! repainted every frame, plus a Pause/Play + Reset + FPS HUD. The physics
 //! ([`physics`]) and canvas widget ([`chart`]) were **copied** into this
-//! package rather than path-included from `examples/bubblebench` (PLAN 9.E's
+//! package rather than path-included from `examples/bubblebench` (the
 //! "embed or path-include" choice — embed): bubblebench was a standalone
 //! crate excluded from the root workspace, and a cross-package `#[path]`
 //! include of its source would have coupled this benchmark to that example's

@@ -82,7 +82,7 @@ so those environmental controls and S7 metrics are uncontrolled/unavailable
   compiled in, exactly as Flutter's profile mode does. See the METHODOLOGY
   BREAK section below for comparability notes.
 
-## 2.5 Methodology Break (2026-07-23, post–Phase-11.A)
+## 2.5 Methodology Break (2026-07-23)
 
 **Results recorded before 2026-07-23 are not directly comparable with results
 recorded after without an A/B measurement to bound the delta.**
@@ -102,12 +102,13 @@ baseline — this is analogous to the documented Flutter profile-vs-release
 difference (§2).
 
 **Comparability:** To quantify the release-vs-profile delta on Frust and ensure
-results are interpreted correctly, **task 09 (device A/B gate)** runs S1 + S3
+results are interpreted correctly, a device A/B gate runs S1 + S3
 scenarios in both modes on a controlled device (OnePlus 9), recording both
-release and profile measurements side-by-side. That bounded delta is then
-documented in `RESULTS.md` as a deviation note for the associated run. All new
-results going forward use `--profile` and should not be directly compared
-against pre-2026-07-23 baselines without reference to the task-09 delta.
+release and profile measurements side-by-side. That bounded delta is
+documented in `RESULTS.md`'s release-vs-profile comparability-bound section as
+a deviation note for the associated run. All new results going forward use
+`--profile` and should not be directly compared against pre-2026-07-23
+baselines without reference to that bound.
 
 ## 3. Environmental controls
 
@@ -203,7 +204,7 @@ field order (`format_raw_frame_line`):
 frust-perf raw n=<u64> total_us=<u128> rebuild_us=<u128> layout_us=<u128> paint_us=<u128> encode_us=<u128> acquire_us=<u128> submit_us=<u128> skipped=<0|1>
 ```
 
-> **Raw-format change — v3, 2026-07-22 (Phase 11.A).** The single `present_us`
+> **Raw-format change — v3, 2026-07-22.** The single `present_us`
 > field of v2 was split into separate `acquire_us` + `submit_us` fields so the
 > blocking swapchain-acquire (vsync) wait is attributable separately from the
 > blit/queue-submit work — the S5 GPU-saturation-vs-blit-cost question. No
@@ -211,7 +212,7 @@ frust-perf raw n=<u64> total_us=<u128> rebuild_us=<u128> layout_us=<u128> paint_
 > `present_us` corresponds to `acquire_us + submit_us` in v3 — sum the two when
 > comparing a post-split capture against a v2 (2026-07-21…) baseline.
 >
-> **Raw-format change — v2, 2026-07-21 (Phase 10.A).** The single
+> **Raw-format change — v2, 2026-07-21.** The single
 > `encode_present_us` field of v1 was split into separate `encode_us` +
 > `present_us` fields so GPU/CPU encode cost and the swapchain-acquire
 > (vsync) wait are separately attributable (the render-thread-split GO/NO-GO
@@ -249,7 +250,7 @@ by scenario without any other coupling to the app.
 
 ### Flutter: required equivalent
 
-`benchmarks/flutter_bench` (task `05-flutter-bench`) MUST emit a parseable
+`benchmarks/flutter_bench` MUST emit a parseable
 line per `FrameTiming`, captured via
 `SchedulerBinding.addTimingsCallback` (works in profile mode on-device
 with no host test runner), in a format the same harness
@@ -383,8 +384,8 @@ whole matrix):
   impact of the plugin boundary from raw call latency.
 - **The claim under test is call/boundary latency, not on-disk storage
   format.** `frust-shared-preferences` and Flutter's `shared_preferences`
-  package deliberately use different storage encodings by design (see
-  the plugin plan's Design Decision 4) — S8 never compares file formats,
+  package deliberately use different storage encodings by design — S8
+  never compares file formats,
   only round-trip call latency for equivalent logical operations across
   all five value types (`bool`/`i64`/`f64`/`String`/`Vec<String>`).
 - **Errors are counted, not swallowed.** Both sides carry an `err=0|1`

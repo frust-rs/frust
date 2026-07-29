@@ -69,8 +69,8 @@ inherits = "release"
 debug = true
 strip = "none"
 
-# `[profile.dev]` per-package overrides for the render/shader-compile stack
-# (6e Finding 5 / 6e-fix-1 task 03): vello/wgpu/naga's shader-pipeline
+# `[profile.dev]` per-package overrides for the render/shader-compile stack:
+# vello/wgpu/naga's shader-pipeline
 # translation runs at `opt-level = 0` by default, which is slow enough on a
 # physical iOS device that the OS SIGKILLs a debug `frust run` before the
 # synchronous, main-thread launch-time shader compile finishes.
@@ -95,7 +95,7 @@ opt-level = 2
 [profile.dev.package.naga]
 opt-level = 2
 
-# Debug dep opt widening (phase 7 task 11): non-workspace-member dependencies
+# Debug dep opt widening: non-workspace-member dependencies
 # build at `opt-level = 1` in debug; this app's own code stays at the fast
 # default dev opt-level, and the named shader-stack overrides above
 # (opt-level 2) still win over this wildcard since a named package override

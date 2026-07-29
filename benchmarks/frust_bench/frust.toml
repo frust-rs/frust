@@ -4,7 +4,7 @@ org = "it.f0x"
 description = "Frust benchmark app (Phase 9.E scenario suite)"
 
 # Deep-link scheme registered in the generated Android manifest / iOS
-# Info.plist (task 07). Informational here — Frust tooling doesn't parse
+# Info.plist. Informational here — Frust tooling doesn't parse
 # this section; it documents what `frust create --deeplink-scheme` baked
 # into the platform templates. Editing it does NOT re-render the manifest/
 # Info.plist — re-run `frust create --overwrite` (or edit the platform

@@ -119,7 +119,7 @@ opt-level = 2
 [profile.dev.package.naga]
 opt-level = 2
 
-# Debug dep opt widening (phase 7 task 11): non-workspace-member dependencies
+# Debug dep opt widening: non-workspace-member dependencies
 # build at `opt-level = 1` in debug (Cargo's `"*"` package selector excludes
 # workspace members and the profile's own package — verified against Cargo's
 # profile-override docs); this app's own code stays at the fast default dev

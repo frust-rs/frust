@@ -105,7 +105,7 @@ android {
                         "android/key.properties — see frust.toml [signing]",
                 )
             }
-            // R8 + resource shrink (Phase 7 task 12): the Kotlin/Java side is
+            // R8 + resource shrink: the Kotlin/Java side is
             // small (this app's `MainActivity` plus the `:frust-embedding`
             // module) so the dex win is modest, but shipping unminified
             // release code is not the
