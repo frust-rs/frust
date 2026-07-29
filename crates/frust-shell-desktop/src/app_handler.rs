@@ -254,6 +254,65 @@ fn base_theme(seeded: Option<Theme>) -> Theme {
     seeded.unwrap_or_else(Theme::glyph_baseline)
 }
 
+/// The theme a cleared app-theme override reverts to: the seeded base
+/// ([`base_theme`] — a design system's `set_default_theme`, else the built-in
+/// fallback) at the platform's *current* brightness, never the cleared
+/// override's own pinned one.
+///
+/// Extracted so the `clear_app_theme` arm below and its unit tests run one
+/// implementation: a test that recomputed this in its own body would stay green
+/// if the arm regressed to an unconditional `Theme::glyph_baseline()` — the
+/// exact regression this ladder exists to prevent.
+fn reverted_theme(seeded: Option<Theme>, platform: Brightness) -> Theme {
+    let mut theme = base_theme(seeded);
+    theme.brightness = platform;
+    theme
+}
+
+/// The active-theme decision for one [`ThemeOverrideWatcher::poll`] result —
+/// the precedence ladder's top two rungs as one pure function, shared by the
+/// per-frame poll arm in `RedrawRequested` and its unit tests.
+///
+/// Returns `None` when the poll reported no change (the shell leaves its theme
+/// alone), else the new active theme paired with whether an app-forced override
+/// is now pinning it (`ShellHandler::theme_override_active`).
+///
+/// `seeded`/`platform` are suppliers rather than values because only the
+/// cleared-override arm needs them: reading the process-global default slot
+/// ([`default_theme`] — a `Mutex` lock plus a whole-`Theme` clone) and querying
+/// the window's reported appearance would otherwise become per-frame cost for a
+/// poll that reports "nothing changed" on all but a handful of frames.
+fn theme_after_override_poll(
+    polled: Option<Option<Theme>>,
+    seeded: impl FnOnce() -> Option<Theme>,
+    platform: impl FnOnce() -> Brightness,
+) -> Option<(Theme, bool)> {
+    match polled {
+        // `set_app_theme`: the forced theme wins wholesale — neither the seeded
+        // default nor the platform's brightness is even consulted (the
+        // override-wins rule).
+        Some(Some(theme)) => Some((theme, true)),
+        // `clear_app_theme`: back to the seeded base at the platform's own
+        // current brightness.
+        Some(None) => Some((reverted_theme(seeded(), platform()), false)),
+        None => None,
+    }
+}
+
+/// Re-derive `theme`'s brightness from a platform appearance report, honouring
+/// the override-wins rule ([`effective_brightness_for_platform_change`]): an
+/// app-forced override pins brightness, a design-system-seeded default does not
+/// — `theme` still IS that base, so flipping it in place re-derives light/dark
+/// against the design system's own tokens.
+///
+/// Extracted for the same reason as [`reverted_theme`]: the
+/// `WindowEvent::ThemeChanged` arm and the seed-ladder tests share one
+/// implementation.
+fn follow_platform_brightness(theme: &mut Theme, override_active: bool, platform: Brightness) {
+    theme.brightness =
+        effective_brightness_for_platform_change(override_active, theme.brightness, platform);
+}
+
 /// Bundled Glyph font auto-registration: registers
 /// `frust_theme::glyph::font_data()`'s bundled Space Mono / IBM Plex Mono
 /// faces into `cx` when `theme`'s [`DesignLanguage`] is [`DesignLanguage::Glyph`]
@@ -912,9 +971,9 @@ where
             // flipping its brightness in place re-derives light/dark from the
             // design system's own theme.
             WindowEvent::ThemeChanged(winit_theme) => {
-                self.theme.brightness = effective_brightness_for_platform_change(
+                follow_platform_brightness(
+                    &mut self.theme,
                     self.theme_override_active,
-                    self.theme.brightness,
                     brightness_from_winit(Some(winit_theme)),
                 );
                 self.apply_theme(&window);
@@ -1022,25 +1081,24 @@ where
                 // frame-callback poll. `Some(Some(theme))` is a new forced
                 // theme; `Some(None)` is a `clear_app_theme` reverting to the
                 // platform-derived default; `None` means nothing changed.
-                match self.theme_override.poll() {
-                    Some(Some(theme)) => {
-                        self.theme = theme;
-                        self.theme_override_active = true;
-                        self.apply_theme(&window);
-                    }
-                    Some(None) => {
-                        // Reverting an override lands on the base this shell
-                        // seeded itself from — the design-system default when
-                        // one was supplied, else the built-in fallback
-                        // (`base_theme`) — with brightness re-derived from the
-                        // window's current preference rather than inherited
-                        // from the cleared override.
-                        self.theme = base_theme(default_theme());
-                        self.theme.brightness = brightness_from_winit(window.theme());
-                        self.theme_override_active = false;
-                        self.apply_theme(&window);
-                    }
-                    None => {}
+                //
+                // Reverting an override lands on the base this shell seeded
+                // itself from — the design-system default when one was
+                // supplied, else the built-in fallback — with brightness
+                // re-derived from the window's current preference rather than
+                // inherited from the cleared override; that whole ladder lives
+                // in `theme_after_override_poll` so this arm and its unit tests
+                // share one implementation. Both inputs stay lazy: an
+                // unchanged poll pays neither the default-slot read nor the
+                // window appearance query.
+                if let Some((theme, override_active)) =
+                    theme_after_override_poll(self.theme_override.poll(), default_theme, || {
+                        brightness_from_winit(window.theme())
+                    })
+                {
+                    self.theme = theme;
+                    self.theme_override_active = override_active;
+                    self.apply_theme(&window);
                 }
 
                 // Poll the app-facing pending-font registry once per
@@ -1225,9 +1283,9 @@ where
 mod tests {
     use super::{
         ComposeLatch, ElementState, Ime, Tree, TreeId, WinitKey, WinitNamedKey, WinitTheme,
-        base_theme, brightness_from_winit, build_tree_update, default_theme,
-        effective_brightness_for_platform_change, finish, map_key_event, map_modifiers,
-        map_named_key, physical_to_logical, register_glyph_fonts_if_active,
+        base_theme, brightness_from_winit, build_tree_update, default_theme, finish,
+        follow_platform_brightness, map_key_event, map_modifiers, map_named_key,
+        physical_to_logical, register_glyph_fonts_if_active, theme_after_override_poll,
     };
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{Node, NodeId, Role};
@@ -1671,95 +1729,196 @@ mod tests {
         );
     }
 
-    // --- base_theme (the default-theme seed ladder) ---
+    // --- the default-theme precedence ladder (seed / appearance / override) ---
+    //
+    // Every assertion below drives the SAME functions the production seed
+    // (`run_desktop`'s `theme:` field), appearance (`WindowEvent::ThemeChanged`)
+    // and override-poll (`RedrawRequested`) arms call. That sharing is the whole
+    // point: a test that recomputed the ladder in its own body would stay green
+    // if one of those arms regressed to an unconditional
+    // `Theme::glyph_baseline()`. `crates/frust/tests/theme_ladder_conformance.rs`
+    // pins the other half — that the arms still call these, and that the two
+    // mobile shells' copies stay identical to the ones exercised here.
 
     #[test]
-    fn unset_default_seeds_the_builtin_fallback() {
-        // No design system seeded a default: the shell falls back to its own
+    fn an_unseeded_shell_starts_on_the_builtin_fallback_at_the_platform_brightness() {
+        // Behavior 1. Nothing seeded: the seed site lands on the shell's own
         // built-in theme, byte-identical to the hardcoded
-        // `Theme::glyph_baseline()` seed this seam replaced (Phase A ships zero
-        // observable change).
-        assert_eq!(base_theme(None), Theme::glyph_baseline());
+        // `Theme::glyph_baseline()` seed this seam replaced...
+        let mut theme = base_theme(None);
+        assert_eq!(theme, Theme::glyph_baseline());
+
+        // ...and the platform's first appearance report drives brightness
+        // (`resumed`'s seed, then every `ThemeChanged`), so the Glyph
+        // fallback's dark-first default never leaks onto a light-preference
+        // platform.
+        follow_platform_brightness(&mut theme, false, brightness_from_winit(None));
+        assert_eq!(
+            theme,
+            Theme::glyph_baseline().with_brightness(Brightness::Light)
+        );
     }
 
     #[test]
-    fn seeded_default_is_used_and_still_follows_platform_brightness() {
-        // A design system's `set_default_theme` supplies the base...
+    fn a_seeded_default_is_the_base_and_still_follows_platform_brightness() {
+        // Behavior 2. A design system's `set_default_theme` supplies the base...
         let seeded = Theme::m3_baseline();
         let mut theme = base_theme(Some(seeded.clone()));
-        assert_eq!(theme.design_language, seeded.design_language);
+        assert_eq!(theme, seeded);
         assert_ne!(
             theme.design_language,
             Theme::glyph_baseline().design_language
         );
 
-        // ...and brightness still comes from the platform, exactly as the seed
-        // (`resumed`), reset (`clear_app_theme`) and appearance-change
-        // (`WindowEvent::ThemeChanged`) sites derive it — a seeded default is a
-        // starting point, not a pin.
-        theme.brightness = brightness_from_winit(Some(WinitTheme::Dark));
-        assert_eq!(theme.brightness, Brightness::Dark);
-        assert_eq!(theme.design_language, seeded.design_language);
-        theme.brightness = brightness_from_winit(Some(WinitTheme::Light));
-        assert_eq!(theme.brightness, Brightness::Light);
+        // ...and unlike an app-forced override it does NOT pin brightness: the
+        // appearance arm keeps flipping the seeded base in place, both ways.
+        follow_platform_brightness(
+            &mut theme,
+            false,
+            brightness_from_winit(Some(WinitTheme::Dark)),
+        );
+        assert_eq!(theme, seeded.clone().with_brightness(Brightness::Dark));
+        follow_platform_brightness(
+            &mut theme,
+            false,
+            brightness_from_winit(Some(WinitTheme::Light)),
+        );
+        assert_eq!(theme, seeded.with_brightness(Brightness::Light));
     }
 
     #[test]
-    fn app_theme_override_beats_a_seeded_default() {
-        // `set_app_theme` still wins: the override poll's `Some(Some(theme))`
-        // arm assigns the forced theme wholesale and never consults
-        // `base_theme`, so the seeded base is out of the picture...
+    fn an_app_theme_override_beats_a_seeded_default_and_pins_brightness() {
+        // Behavior 3. The override poll's `Some(Some(theme))` arm takes the
+        // forced theme wholesale. The suppliers panic rather than answer, which
+        // proves more than an inequality could: the arm cannot even observe the
+        // seeded default or the platform brightness, so no seeded value and no
+        // platform preference can influence what an override resolves to.
+        let forced = Theme::cupertino_baseline().with_brightness(Brightness::Light);
+        let decided = theme_after_override_poll(
+            Some(Some(forced.clone())),
+            || panic!("an active override must not consult the seeded default"),
+            || panic!("an active override must not consult the platform brightness"),
+        );
+        assert_eq!(decided, Some((forced, true)));
+
+        // ...and it keeps winning against a *later* live platform flip
+        // (`ThemeChanged`'s override-wins rule), exactly where the seeded
+        // default of the test above followed the platform instead.
+        let mut active = Theme::cupertino_baseline().with_brightness(Brightness::Light);
+        follow_platform_brightness(&mut active, true, Brightness::Dark);
+        assert_eq!(active.brightness, Brightness::Light);
+    }
+
+    #[test]
+    fn clearing_an_override_reverts_to_the_seeded_default_not_the_builtin() {
+        // Behavior 4. The `Some(None)` arm with a design system's default
+        // seeded: the revert lands on THAT base at the window's current
+        // brightness — not on the built-in fallback, and not on the cleared
+        // override's pinned brightness.
         let seeded = Theme::m3_baseline();
-        let forced = Theme::cupertino_baseline();
+        let decided = theme_after_override_poll(
+            Some(None),
+            || Some(seeded.clone()),
+            || brightness_from_winit(Some(WinitTheme::Dark)),
+        );
+        assert_eq!(
+            decided,
+            Some((seeded.with_brightness(Brightness::Dark), false))
+        );
+        // Spelled out, since this is the arm the ladder exists for: a seeded
+        // shell must NOT revert to the built-in Glyph fallback.
         assert_ne!(
-            base_theme(Some(seeded)).design_language,
-            forced.design_language
-        );
-
-        // ...and unlike a seeded default it pins brightness against a live
-        // platform flip (`WindowEvent::ThemeChanged`'s override-wins rule).
-        assert_eq!(
-            effective_brightness_for_platform_change(true, Brightness::Light, Brightness::Dark),
-            Brightness::Light
-        );
-        assert_eq!(
-            effective_brightness_for_platform_change(false, Brightness::Light, Brightness::Dark),
-            Brightness::Dark
+            decided.map(|(theme, _)| theme.design_language),
+            Some(Theme::glyph_baseline().design_language)
         );
     }
 
     #[test]
-    fn clear_app_theme_falls_back_to_the_seeded_default_not_the_builtin() {
-        // The override poll's `Some(None)` arm, line for line: a cleared
-        // override reverts to the *seeded* base with the platform's brightness.
-        let seeded = Theme::m3_baseline();
-        let mut reverted = base_theme(Some(seeded.clone()));
-        reverted.brightness = brightness_from_winit(Some(WinitTheme::Dark));
-        assert_eq!(reverted, seeded.with_brightness(Brightness::Dark));
-
-        // With nothing seeded, the same arm lands on the built-in fallback —
-        // the pre-seam behavior, unchanged.
-        let mut fallback = base_theme(None);
-        fallback.brightness = brightness_from_winit(Some(WinitTheme::Dark));
+    fn clearing_an_override_with_nothing_seeded_reverts_to_the_builtin() {
+        // Behavior 5. The same arm with an empty slot: the pre-seam behavior,
+        // unchanged — the built-in fallback at the platform's brightness.
+        let decided = theme_after_override_poll(
+            Some(None),
+            || None,
+            || brightness_from_winit(Some(WinitTheme::Dark)),
+        );
         assert_eq!(
-            fallback,
-            Theme::glyph_baseline().with_brightness(Brightness::Dark)
+            decided,
+            Some((
+                Theme::glyph_baseline().with_brightness(Brightness::Dark),
+                false
+            ))
         );
     }
 
     #[test]
-    fn seed_sites_read_the_process_global_default_slot() {
-        // The wiring check the argument-taking `base_theme` tests above can't
-        // make: what every call site actually passes is
-        // `frust_shell_common::default_theme()`, so a plugin's
-        // `set_default_theme` really does reach the shell's seed.
+    fn a_poll_reporting_no_change_leaves_the_active_theme_alone() {
+        // The `None` arm: no `set_app_theme`/`clear_app_theme` since the last
+        // frame, so the shell must not touch its theme — and must pay neither
+        // the process-global slot read nor the window appearance query, both of
+        // which run on every frame if this arm ever stops being lazy.
+        let decided = theme_after_override_poll(
+            None,
+            || panic!("an unchanged poll must not read the process-global default slot"),
+            || panic!("an unchanged poll must not query the window's appearance"),
+        );
+        assert_eq!(decided, None);
+    }
+
+    #[test]
+    fn a_seeded_default_reaches_both_ladder_sites_through_the_process_global_slot() {
+        // The wiring the argument-taking helpers above cannot check: what the
+        // production sites actually pass is `frust_shell_common::default_theme`,
+        // so a plugin's `set_default_theme` really does reach both the seed and
+        // the revert.
         //
-        // Deliberately the only test in this binary that touches the
-        // process-wide slot (it has no reset), so nothing here is
-        // order-dependent: every other test passes its `Option<Theme>`
-        // explicitly.
+        // `theme_default` deliberately exposes no reset (a shell needs the same
+        // base again on every appearance change, so the slot is
+        // non-destructive), which is why this must remain the ONLY test in this
+        // binary that writes it — `the_default_slot_has_exactly_one_test_writer`
+        // pins that. Asserting the pristine state first turns a future second
+        // writer into a loud failure here instead of a silent order dependency
+        // in whichever test happens to run after it.
+        assert_eq!(
+            default_theme(),
+            None,
+            "another test in this binary seeded the process-global default slot first — \
+             the slot has no reset, so tests that read it cannot be order-independent"
+        );
+
         let seeded = Theme::cupertino_baseline();
         frust_shell_common::set_default_theme(seeded.clone());
+
+        // The seed site (`run_desktop`'s `theme:` field), verbatim...
         assert_eq!(base_theme(default_theme()), seeded);
+        // ...and the revert arm, reading that same slot through the same
+        // supplier the production arm passes.
+        assert_eq!(
+            theme_after_override_poll(Some(None), default_theme, || Brightness::Dark),
+            Some((seeded.with_brightness(Brightness::Dark), false))
+        );
+    }
+
+    #[test]
+    fn the_default_slot_has_exactly_one_test_writer() {
+        // Pins the uniqueness the test above depends on. A plain substring scan
+        // of this very file (the `print_free_cores.rs`/`surface_mode_conformance.rs`
+        // idiom — this repo has no lint-plugin tooling), not a parser: every
+        // real call sits on its own statement line and comment-only lines (every
+        // doc mention of the seam) are stripped. The needle is assembled from
+        // two pieces so this line is not itself a hit.
+        let needle = concat!("set_default_theme", "(");
+        let writers = include_str!("app_handler.rs")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .filter(|line| line.contains(needle))
+            .count();
+        assert_eq!(
+            writers, 1,
+            "the process-global default-theme slot has no reset, so exactly one test in this \
+             binary may write it (found {writers}); serialize them behind a lock the way \
+             `frust-shell-common::theme_override`'s own tests do, or fold the new assertion \
+             into the existing writer"
+        );
     }
 }
