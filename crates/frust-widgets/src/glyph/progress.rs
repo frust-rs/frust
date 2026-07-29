@@ -1,4 +1,4 @@
-//! Glyph shimmer progress bar (task 21, glyph-design-system): a determinate
+//! Glyph shimmer progress bar: a determinate
 //! fill in the Glyph accent (bright amber) over the Glyph "progress track"
 //! role, with a continuously sweeping shimmer highlight over the filled
 //! region.
@@ -8,7 +8,7 @@
 //! Fill = `colors.primary_container` (Glyph's bright-fill amber role, uniform
 //! across both brightnesses — see `frust_theme::glyph::color`'s module docs'
 //! accent-role convention); track = `colors.surface_container_highest`, the
-//! Glyph "overlay" surface role (RESEARCH §1.1's `bg-overlay` row: "overlays,
+//! Glyph "overlay" surface role ("overlays,
 //! toggles, **progress track**" — a source-cited role assignment, not a
 //! guess). Unthemed fallbacks below match the Glyph **dark** hex values
 //! exactly, per this catalog's charter (`glyph::mod`'s module docs).
@@ -21,8 +21,8 @@
 //! end)` points translate across the filled width every frame, so the
 //! highlight band enters from the left, sweeps across, and exits right,
 //! looping continuously. [`SHIMMER_PERIOD`]/[`SHIMMER_HIGHLIGHT_MIX`]/
-//! [`SHIMMER_BAND_FRACTION`] are this task's own authored values — the Glyph
-//! HTML references don't dimension a progress-bar shimmer, so there is no
+//! [`SHIMMER_BAND_FRACTION`] are original authored values — no Glyph
+//! design-reference dimensions a progress-bar shimmer, so there is no
 //! source to cite (unlike the durations/easings on `MotionScheme::glyph`,
 //! which *are* exact source values).
 //!
@@ -47,29 +47,29 @@ use peniko::{Brush, Color, Gradient};
 
 /// Progress-bar track thickness, in logical px.
 ///
-/// This task's own choice — the Glyph HTML references don't dimension a
+/// An original, hand-picked value — no Glyph design-reference dimensions a
 /// progress bar — picked to read as a slim, minimalist bar consistent with
-/// Glyph's borders-first aesthetic (RESEARCH §1.3).
+/// Glyph's borders-first aesthetic.
 const TRACK_HEIGHT: f64 = 6.0;
 
 /// The shimmer sweep's full period (`AnimationController::repeat`, linear).
 ///
-/// This task's own choice (no Glyph source value — see the [module docs](self)).
+/// An original, hand-picked value (no Glyph source value — see the [module docs](self)).
 const SHIMMER_PERIOD: Duration = Duration::from_millis(1600);
 
 /// How far toward white the shimmer's highlight stop leans, `0.0..=1.0`
-/// (`0.0` = no visible highlight, `1.0` = pure white). This task's own choice.
+/// (`0.0` = no visible highlight, `1.0` = pure white). An original, hand-picked value.
 const SHIMMER_HIGHLIGHT_MIX: f64 = 0.4;
 
 /// The shimmer highlight band's width, as a fraction of the filled width.
-/// This task's own choice.
+/// An original, hand-picked value.
 const SHIMMER_BAND_FRACTION: f64 = 0.5;
 
 /// Unthemed fill fallback — the Glyph dark accent (`#ffb627`, same both
 /// brightnesses; see `frust_theme::glyph::color`'s accent-role convention).
 const FALLBACK_FILL: Color = Color::from_rgb8(0xff, 0xb6, 0x27);
-/// Unthemed track fallback — Glyph dark's `bg-overlay` (`#272d3d`, RESEARCH
-/// §1.1: "overlays, toggles, progress track").
+/// Unthemed track fallback — Glyph dark's `bg-overlay` (`#272d3d`;
+/// "overlays, toggles, progress track").
 const FALLBACK_TRACK: Color = Color::from_rgb8(0x27, 0x2d, 0x3d);
 
 const WHITE: Color = Color::from_rgb8(0xff, 0xff, 0xff);
@@ -203,7 +203,7 @@ impl Widget for ProgressWidget {
             &Brush::Gradient(gradient),
         );
         // The shimmer overlay is a decorative loop — its exact cadence is
-        // imperceptible, so the mobile frame gate may pace it (task 08).
+        // imperceptible, so the mobile frame gate may pace it.
         ctx.request_frame_paced();
     }
 

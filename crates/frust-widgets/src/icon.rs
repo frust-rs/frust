@@ -1,6 +1,5 @@
 //! The `Icon` widget: paints a vector icon from `kurbo::BezPath` path data,
-//! scaled from its design box to a requested logical size (spec §6.4, Huddle
-//! showcase task 02).
+//! scaled from its design box to a requested logical size.
 //!
 //! [`icon`] takes any [`IconData`] — either a generated [`IconSource`] from the
 //! vendored Material Symbols set ([`crate::icons`]) or a user-built
@@ -485,7 +484,7 @@ mod tests {
 
     #[test]
     fn generated_home_icon_is_usable_end_to_end() {
-        // Mirrors the task's acceptance criterion: `icon(icons::HOME).size(28.0)`
+        // `icon(icons::HOME).size(28.0)`
         // builds and paints in a bare-core (no-theme) test.
         let view = icon(super::super::icons::HOME).size(28.0);
         let mut w = build(&view);
@@ -497,18 +496,16 @@ mod tests {
     // -- semantics ----------------------------------------------------------
 
     /// Slack allowed on either side of the `0..MATERIAL_DESIGN_BOX` design box
-    /// when checking a generated icon's parsed geometry (review followup,
-    /// huddle-showcase re-review R1's one remaining Major).
+    /// when checking a generated icon's parsed geometry.
     ///
     /// `scripts/gen_icons.py`'s `normalize_path_d` renormalizes each glyph's
     /// coordinates from its source SVG's `viewBox` into the `0..24` box via an
     /// affine transform, but a handful of upstream Material Symbols exports
     /// author raw path data that itself extends a little past their own
-    /// declared `viewBox` (optical overshoot at a glyph's rounded tips) — see
-    /// `workflow/plans/features/huddle-showcase/followups/phase-fix-1/TASKS.md`'s
-    /// F2 RESULT note, which independently verified via a Python bbox walker
-    /// that "for 4 icons, a few percent past" the box is genuine upstream
-    /// geometry, not a transform bug. A direct measurement of the 41 icons
+    /// declared `viewBox` (optical overshoot at a glyph's rounded tips) — an
+    /// independent Python bbox walker confirmed that, for a handful of icons,
+    /// a few percent past the box is genuine upstream geometry, not a
+    /// transform bug. A direct measurement of the 41 icons
     /// currently vendored in `icons/mod.rs` (this test, run standalone) finds
     /// zero icons actually bleeding past `0..24` today — every glyph's bbox
     /// currently lands strictly inside — so this constant is pure headroom:

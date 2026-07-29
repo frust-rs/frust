@@ -1,4 +1,4 @@
-//! `CupertinoNavBar` (Phase 6c, PLAN.md D5, task 13): the iOS top navigation
+//! `CupertinoNavBar`: the iOS top navigation
 //! bar — a 44pt content-height bar with an absolutely-centered title, optional
 //! leading/trailing slots hugging the edges, and a hairline bottom separator.
 //!
@@ -17,22 +17,22 @@
 //! slots) — the platform convention. A title wide enough to collide with a slot
 //! is clamped to the available centered width.
 //!
-//! # Background: Liquid Glass (task 6f-11)
+//! # Background: Liquid Glass
 //!
 //! The bar background is read from the theme's `bar`-tier glass token
 //! (`Theme.glass.bar`, [`frust_theme::glass`]), not a hardcoded fill. On the
 //! Cupertino design language that tier is a translucent Liquid-Glass lens
 //! ([`GlassScale::ios27`](frust_theme::GlassScale::ios27)'s `r=45` recipe:
 //! over-light `white a=0.07` + `white a=0.03`); the bar composites that wash
-//! stack over the live content behind it (no real backdrop blur yet — that is a
-//! later spike), then draws a **specular hairline** along its content-facing
-//! bottom edge whose alpha is the tier's `hairline_alpha`, plus the tier's drop
-//! shadow (the `bar` tier's is zero, so effectively none). The wash stack for
-//! the active brightness (over-light vs over-dark) is chosen from the token.
+//! stack over the live content behind it (no real backdrop blur yet), then
+//! draws a **specular hairline** along its content-facing bottom edge whose
+//! alpha is the tier's `hairline_alpha`, plus the tier's drop shadow (the
+//! `bar` tier's is zero, so effectively none). The wash stack for the active
+//! brightness (over-light vs over-dark) is chosen from the token.
 //!
 //! The navbar keeps its full-width, square, docked geometry — only the
-//! *background* becomes glass (the floating-pill idiom is the tab bar's, task
-//! 11). On the **Material** design language (or a bare-core/unthemed bar) the
+//! *background* becomes glass (the floating-pill idiom is the tab bar's). On
+//! the **Material** design language (or a bare-core/unthemed bar) the
 //! same code takes the opaque path instead: `glass.bar` is opaque
 //! ([`GlassScale::opaque_material`](frust_theme::GlassScale::opaque_material)),
 //! so the bar paints an opaque `surface` fill + an `outline_variant` separator
@@ -103,8 +103,8 @@ const SEPARATOR: Color = Color::from_rgb8(0xE0, 0xE0, 0xE0);
 /// (`GlassMaterial::hairline_alpha`); white is the specular color the glass
 /// module documents the consuming widget draws over light content. The
 /// load-bearing value (alpha) is read from the token — this is the fixed
-/// specular color, not a recipe rgba (task 11 acceptance: no hardcoded recipe
-/// rgba in the widget).
+/// specular color, not a recipe rgba (no hardcoded recipe rgba lives in the
+/// widget).
 const SPECULAR: Color = Color::WHITE;
 
 /// The resolved `(container, separator)` colors for the **opaque** path
@@ -123,7 +123,7 @@ fn resolve_colors(theme: Option<&Theme>) -> (Color, Color) {
 /// a theme whose `glass.bar` is opaque (the Material design language — see
 /// [`frust_theme::glass::GlassScale::opaque_material`]). This is the
 /// single-API branch that keeps Material bars opaque while Cupertino bars read
-/// glass (task 11 acceptance 4).
+/// glass.
 fn glass_bar(theme: Option<&Theme>) -> Option<&GlassMaterial> {
     let material = &theme?.glass.bar;
     (!material.is_opaque()).then_some(material)
@@ -364,7 +364,7 @@ impl Widget for CupertinoNavBarWidget {
             // Cupertino Liquid Glass: layered translucent wash stack +
             // specular hairline (+ shadow spec), all read from the `bar` tier
             // token — the navbar keeps its full-width geometry, adopting only
-            // the glass background/hairline (task 11).
+            // the glass background/hairline.
             Some(material) => {
                 let brightness = theme.map(|t| t.brightness).unwrap_or_default();
                 // Drop shadow: the ios27 `bar` tier carries none
@@ -572,7 +572,7 @@ mod tests {
 
     #[test]
     fn material_theme_keeps_the_bar_opaque() {
-        // Acceptance 4: an M3 theme's `glass.bar` is opaque, so the same code
+        // An M3 theme's `glass.bar` is opaque, so the same code
         // paints the opaque surface fill + outline_variant separator — the
         // pre-glass look, never the glass wash stack.
         let theme = Theme::m3_baseline();

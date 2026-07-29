@@ -1,8 +1,8 @@
-//! `CupertinoAlertDialog` (Phase 6c, PLAN.md D3/D5, task 13): the iOS alert —
+//! `CupertinoAlertDialog`: the iOS alert —
 //! a centered ~270pt panel with a title, optional message, and vertically
 //! stacked action buttons separated by hairlines, over a dimming scrim.
 //!
-//! It is pushed as a **transparent** navigator page (task 06) via the
+//! It is pushed as a **transparent** navigator page via the
 //! [`show_cupertino_alert`] convenience, entering with the
 //! [`PageTransition::M3FadeThrough`](crate::PageTransition::M3FadeThrough)
 //! preset (a fade is idiom-appropriate for an alert). An action tap pops the
@@ -13,14 +13,14 @@
 //! # Colors & metrics
 //!
 //! The panel corner radius is ~14pt (**community-approximate** — Apple
-//! publishes no alert corner-radius spec, per this task's C13 flag). The title
+//! publishes no alert corner-radius spec). The title
 //! is themed `on_surface` (iOS `label`) and the message `on_surface_variant`
 //! (secondaryLabel), so both live-swap with the theme. Action labels are tinted
 //! by [`CupertinoActionStyle`] from *community-measured* systemBlue/systemRed
 //! (baked explicit — see [`crate::cupertino::tabbar`]'s Label color note for why
 //! these accent colors don't live-swap).
 //!
-//! # Keyboard operability (task 07, 6d)
+//! # Keyboard operability
 //!
 //! **Escape-to-dismiss now works, once the alert has focus.** A `Down`
 //! anywhere in the alert (scrim, panel background, or an action) claims focus
@@ -29,20 +29,20 @@
 //! focus-routed `Key(Escape)` invokes the same `controller.pop()` dismiss path
 //! as a scrim tap. **There is still no hook to focus the alert on appear**
 //! (auto-focus-on-appear) — a caller must complete one pointer interaction
-//! with the alert before Escape does anything; that gap is deferred to a
-//! future focus-manager work item, not this task.
+//! with the alert before Escape does anything; that gap is deferred to
+//! future focus-manager work.
 //!
 //! Its semantics node carries [`Role::AlertDialog`] but **no** accesskit modal
 //! flag (unlike [`crate::material::dialog`]/[`crate::material::sheet`]), so
 //! there is nothing to reconcile with a future adapter on that front.
 //!
-//! # State layer (task 07, 6d)
+//! # State layer
 //!
 //! This alert has no `StateLayer` surface of its own (the scrim, panel, and
 //! action rows are plain fills/hairlines, not an M3 interactive surface) —
 //! there is nothing here for `StateLayer::set_focused` to wire into.
 //!
-//! # Liquid Glass panel (task 6f-14)
+//! # Liquid Glass panel
 //!
 //! When a [`Theme`] is threaded and its `glass.chrome` recipe is not the
 //! opaque-material path ([`GlassMaterial::is_opaque`] — true on the Material
@@ -57,18 +57,18 @@
 //! hairline-separator-row layout this widget always painted. The panel
 //! corner radius itself also grows under a theme (`shape.extra_large`,
 //! iOS-26+'s larger panel radii) versus the flat, pre-26 [`PANEL_RADIUS`]
-//! fallback. Real background blur is out of scope (spike 16) — the fill
+//! fallback. Real background blur is out of scope — the fill
 //! washes composite over whatever the scrim already painted, not a blurred
 //! backdrop.
 //!
-//! Kit sizing evidence (RESEARCH.md, action-sheet container/action-row
-//! records, **partially-verified** — cited as guidance, not adopted
-//! verbatim): mined action-sheet containers ran 260×424-524px, action rows
-//! 232×48px. This widget keeps its own established [`PANEL_W`]/[`ACTION_H`]
-//! geometry (task 07's community-approximate ~270pt/~44pt) rather than
-//! matching those mined figures exactly — changing panel/row *sizing* is out
-//! of this task's scope (only the *material* and *corner radii* are
-//! re-skinned).
+//! Kit sizing evidence (community-mined from iOS system UI screenshots'
+//! action-sheet container/action-row records, **partially-verified** —
+//! cited as guidance, not adopted verbatim): mined action-sheet containers
+//! ran 260×424-524px, action rows 232×48px. This widget keeps its own
+//! established [`PANEL_W`]/[`ACTION_H`] geometry (this widget's
+//! community-approximate ~270pt/~44pt) rather than matching those mined
+//! figures exactly — changing panel/row *sizing* is out of scope here (only
+//! the *material* and *corner radii* are re-skinned).
 
 use frust_core::accesskit::Role;
 use frust_core::{
@@ -87,17 +87,17 @@ use crate::text::ThemeTextColor;
 /// Panel width, in logical px.
 ///
 /// **Community-approximate**: iOS does not publish an exact alert width; ~270pt
-/// is the community-converged value (per this task's C13 flag).
+/// is the community-converged value.
 const PANEL_W: f64 = 270.0;
 /// Unthemed-fallback panel corner radius, in logical px (**community-approximate**,
-/// ~13-14pt — no published Apple alert corner spec, per C13). A themed panel
+/// ~13-14pt — no published Apple alert corner spec). A themed panel
 /// uses the larger `shape.extra_large` iOS-26+ Liquid Glass radius instead
 /// (see [`resolve_panel_radius`] and the module docs' Liquid Glass panel
 /// section) — this constant is now only the no-theme (bare-core test) path.
 const PANEL_RADIUS: f64 = 14.0;
 /// Inset, in logical px, between a nested action-row "button" capsule and the
-/// glass panel's own edge/neighboring rows (task 6f-14's iOS-26+ idiom:
-/// distinct rounded glass buttons rather than hairline-divided flush rows).
+/// glass panel's own edge/neighboring rows (the iOS-26+ idiom: distinct
+/// rounded glass buttons rather than hairline-divided flush rows).
 ///
 /// **Community-approximate**: iOS 26 groups alert/action-sheet actions as
 /// separated glass elements with a visible gap; Apple publishes no exact gap
@@ -141,7 +141,7 @@ pub(crate) const SYSTEM_BLUE: Color = Color::from_rgb8(0x00, 0x87, 0xFF);
 /// systemRed — the destructive action tint.
 ///
 /// **Kit-measured** (2026-07-18 refresh): the iOS 27 UI Kit's `System
-/// Colors/Light/1 Red` swatch (`kit-colors-type-metrics.json`, `colors`),
+/// Colors/Light/1 Red` swatch,
 /// matching `ColorScheme::cupertino_light().error` exactly (see `color.rs`'s
 /// module docs) — refines the pre-refresh community value `#FF3B30`.
 pub(crate) const SYSTEM_RED: Color = Color::from_rgb8(0xFF, 0x38, 0x3C);
@@ -694,7 +694,7 @@ mod tests {
 
     /// Records filled rounded rects, shadows, and stroked paths — enough to
     /// assert the Liquid Glass panel's fill stack, hairline, and nested
-    /// concentric-radius button capsules reach paint (task 6f-14).
+    /// concentric-radius button capsules reach paint.
     #[derive(Default)]
     struct Recorder {
         rrects: Vec<(Point, Size, f64, Color)>,
@@ -1021,7 +1021,7 @@ mod tests {
         assert_eq!(nav.state.received, Some(0));
     }
 
-    // --- Focus + Escape opt-in (task 07, 6d). ---
+    // --- Focus + Escape opt-in. ---
 
     #[test]
     fn escape_after_a_panel_tap_claims_focus_and_dismisses() {

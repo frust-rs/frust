@@ -1,9 +1,8 @@
-//! `CupertinoTabBar` (Phase 6c, PLAN.md D5; re-skinned to Liquid Glass in
-//! phase 6f, task 11): the iOS bottom tab bar — a 49pt content-height band of
+//! `CupertinoTabBar`: the iOS bottom tab bar — a 49pt content-height band of
 //! icon+label destinations, systemBlue when selected and secondaryLabel
 //! otherwise.
 //!
-//! # Floating glass pill (task 6f-11)
+//! # Floating glass pill
 //!
 //! The bar is a **floating inset pill** (the iOS 26 Liquid-Glass idiom: it
 //! floats above content with horizontal margins and capsule corners) rather
@@ -12,15 +11,14 @@
 //! a hardcoded fill: on the Cupertino design language that tier is a
 //! translucent Liquid-Glass lens, so the pill composites the token's wash stack
 //! (chosen by the active brightness) over the live content behind it (no real
-//! backdrop blur yet — a later spike), then strokes a **specular hairline**
+//! backdrop blur yet), then strokes a **specular hairline**
 //! whose alpha is the tier's `hairline_alpha` as a concentric inset outline
 //! (radius via [`ShapeScale::concentric_inner`], nested inside the pill). On the
 //! **Material** design language (or a bare-core/unthemed bar) `glass.bar` is
 //! opaque, so the same code fills the pill with the opaque surface color and
-//! draws the token's elevation shadow instead — the opaque path (task 11
-//! acceptance 4).
+//! draws the token's elevation shadow instead — the opaque path.
 //!
-//! # Minimize-on-scroll (task 6f-11)
+//! # Minimize-on-scroll
 //!
 //! The floating bar **minimizes on downward scroll and restores on upward
 //! scroll**, spring-animated with the theme's Cupertino
@@ -38,7 +36,7 @@
 //! signal exposed today. A floating bar minimizing in response to a *sibling*
 //! `ScrollView`'s content scroll (rather than a scroll that lands on the bar
 //! itself) would need a scroll-delta signal `crate::scroll` does not expose;
-//! wiring one is out of this task's two-file scope (see the task file). The
+//! wiring one is out of scope here. The
 //! minimize state machine and spring wiring are exercised at the state level
 //! regardless.
 //!
@@ -64,13 +62,14 @@
 //! systemBlue is *community-measured*, not Apple-published, and has no
 //! deferred-color `Text` role to resolve from, so it is baked at build time
 //! (a light↔dark systemBlue nuance therefore does not live-swap — an accepted,
-//! documented limitation; the widgets' runtime iOS look is a phase-6e item).
+//! documented limitation, pending future work on the widgets' runtime iOS
+//! look).
 //!
 //! # Safe area
 //!
 //! This widget lays out only the 49pt content band. The home-indicator safe-area
-//! inset a real iOS tab bar extends into is **shell-future work** (documented,
-//! PLAN.md D5) — an app currently supplies its own bottom padding.
+//! inset a real iOS tab bar extends into is **shell-future work**, not yet
+//! wired — an app currently supplies its own bottom padding.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -110,7 +109,7 @@ const LABEL_LINE_HEIGHT: f32 = 12.0;
 /// systemBlue (the selected item tint).
 ///
 /// **Kit-measured** (2026-07-18 refresh): the iOS 27 UI Kit's `System
-/// Colors/Light/8 Blue` swatch (`kit-colors-type-metrics.json`, `colors`) is
+/// Colors/Light/8 Blue` swatch is
 /// `#0087FF`, matching `ColorScheme::cupertino_light().primary` exactly —
 /// Apple does not publish an exact hex for the system accent colors (they
 /// vary by trait environment), so this remains a design-tool snapshot rather
@@ -179,8 +178,7 @@ fn resolve_colors(theme: Option<&Theme>) -> (Color, Color) {
 /// should take the **opaque** path instead: no theme, or a theme whose
 /// `glass.bar` is opaque (the Material design language). Mirrors
 /// [`super::navbar`]'s helper of the same name — the single-API branch that
-/// keeps Material bars opaque while Cupertino bars read glass (task 11
-/// acceptance 4).
+/// keeps Material bars opaque while Cupertino bars read glass.
 fn glass_bar(theme: Option<&Theme>) -> Option<&GlassMaterial> {
     let material = &theme?.glass.bar;
     (!material.is_opaque()).then_some(material)
@@ -486,7 +484,7 @@ const FALLBACK_SPRING: SpringDesc = SpringDesc {
     damping_ratio: 0.5753,
 };
 
-/// The floating tab bar's minimize-on-scroll state machine (task 6f-11): a pure
+/// The floating tab bar's minimize-on-scroll state machine: a pure
 /// toggle (`minimized`) plus the spring-driven `0.0` (shown) → `1.0`
 /// (minimized) `progress` the paint pass animates.
 ///
@@ -562,7 +560,7 @@ impl MinimizeState {
 /// The retained widget for a [`CupertinoTabBarView`].
 pub struct CupertinoTabBarWidget {
     items: Vec<ChildPod>,
-    /// The floating pill's minimize-on-scroll animation state (task 6f-11).
+    /// The floating pill's minimize-on-scroll animation state.
     minimize: MinimizeState,
 }
 
@@ -871,7 +869,7 @@ mod tests {
 
     #[test]
     fn layout_is_a_floating_pill_dividing_the_inset_width_evenly() {
-        // Task 6f-11: the bar is now a floating inset pill — the band is
+        // The bar is a floating inset pill — the band is
         // `HEIGHT + 2*MARGIN_V` tall, and items divide the horizontally-inset
         // pill width, laid out at `MARGIN_V` from the band top.
         let view: CupertinoTabBarView<()> =
@@ -939,7 +937,7 @@ mod tests {
 
     #[test]
     fn cupertino_theme_paints_the_glass_pill_wash_stack() {
-        // Task 6f-11: the cupertino `bar` tier is a glass lens, so the pill
+        // The cupertino `bar` tier is a glass lens, so the pill
         // composites the token's over-light wash stack (read purely from
         // `Theme.glass.bar.fills_light`) as rounded-rect washes — the fill
         // stack reaches the paint layer.
@@ -978,7 +976,7 @@ mod tests {
 
     #[test]
     fn material_theme_keeps_the_bar_opaque() {
-        // Acceptance 4: an M3 theme's `glass.bar` is opaque, so the same code
+        // An M3 theme's `glass.bar` is opaque, so the same code
         // fills the pill with the opaque surface color — never the wash stack.
         let theme = Theme::m3_baseline();
         assert!(theme.glass.bar.is_opaque());
@@ -998,8 +996,7 @@ mod tests {
 
     #[test]
     fn minimize_state_machine_toggles_on_scroll_direction() {
-        // Task 6f-11 acceptance 1: scroll-down → minimized, scroll-up →
-        // restored, at the state level.
+        // Scroll-down → minimized, scroll-up → restored, at the state level.
         let mut m = MinimizeState::new();
         assert!(!m.minimized, "starts fully shown");
 

@@ -1,10 +1,8 @@
-//! Filled by task 20-glyph-status-feedback (Alert).
-//!
 //! [`alert`]/[`AlertView`]: an icon + title + body inline banner with four
-//! semantic variants (`research/glyph-design-system.html`'s `.alert*` rules,
-//! retrieved 2026-07-21) — "Layout refresh is every 3 seconds" (info),
+//! semantic variants (the Glyph design system's `.alert*` rules, retrieved
+//! 2026-07-21) — "Layout refresh is every 3 seconds" (info),
 //! "Session synced" (success), "Certificate expires in 6 days" (warning),
-//! "Connection lost" (error) in the reference build's demo section.
+//! "Connection lost" (error) in the design system's demo section.
 //!
 //! # Color resolution
 //!
@@ -105,7 +103,7 @@ pub enum AlertVariant {
     Error,
 }
 
-/// The reference build's default icon glyph per variant ("i"/"✓"/"!"/"×").
+/// The Glyph design system's default icon glyph per variant ("i"/"✓"/"!"/"×").
 fn default_icon(variant: AlertVariant) -> &'static str {
     match variant {
         AlertVariant::Info => "i",
@@ -124,7 +122,7 @@ pub struct AlertView {
 }
 
 /// Create an alert of `variant` with `title`/`body` text, defaulting to the
-/// reference build's icon glyph for that variant (override with
+/// Glyph design system's icon glyph for that variant (override with
 /// [`AlertView::icon`]).
 pub fn alert(
     variant: AlertVariant,

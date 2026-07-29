@@ -1,5 +1,4 @@
-//! `CupertinoSwitch` (Phase 6c, PLAN.md D5, task 13; re-skinned to iOS-27 kit
-//! metrics by 6f task 13): the iOS toggle switch, a controlled component
+//! `CupertinoSwitch`: the iOS toggle switch, a controlled component
 //! mirroring [`crate::material::switch`]'s architecture, with the kit-cited
 //! 64×28pt track, a systemGreen "on" track, and a white spring-driven thumb
 //! carrying a static specular-highlight/drop-shadow "glassy knob" treatment
@@ -12,23 +11,21 @@
 //! own `checked` field; the app mutates its state and the next `rebuild` feeds
 //! the confirmed value back in.
 //!
-//! # Track metric resolution (6f task 13)
+//! # Track metric resolution
 //!
 //! The module previously shipped a **community-approximate** 51×31pt track
 //! (Flutter's `CupertinoSwitch` value; a competing Apple developer-forums
-//! thread claimed 49×31pt — see PLAN.md's Edge Cases, which flagged both as
-//! refuter-contested). This task resolved the dispute against the Apple iOS 27
-//! UI Kit's own mined data (`workflow/plans/features/frust-phase-6f-design-modernization/research/kit-colors-type-metrics.json`,
-//! `component_metrics.Toggles`): the kit's `Toggles/{Light,Dark}/{On,Off}/{1 -
+//! thread claimed 49×31pt — both were contested, with neither independently
+//! verified). This was resolved against the Apple iOS 27 UI Kit's own mined
+//! design-file data: the kit's `Toggles/{Light,Dark}/{On,Off}/{1 -
 //! Idle,3 - Pressed,4 - Disabled}` layer records — 8 of 8 — unanimously give a
-//! `64×28` track. That is a real, citable kit record (unlike the flagged
-//! `research/RESEARCH.md` summary claim of the same number, which lacked a
-//! page/layer citation), so per this task's resolution rule ("adopt the kit
-//! numbers ONLY if they come from a real kit record you can cite") the track
-//! ships at **64×28** — see [`TRACK_W`]/[`TRACK_H`]. The thumb inset stays the
-//! pre-existing community-approximate derivation (see [`THUMB_INSET`]'s doc
-//! comment for why the kit's own ambiguous `"Knob"` record wasn't adopted for
-//! it).
+//! `64×28` track. That is a real, citable kit record (unlike an earlier
+//! community-sourced summary claiming the same number without an actual
+//! page/layer citation), so — adopting kit numbers only when they trace to a
+//! real, citable kit record — the track ships at **64×28** — see
+//! [`TRACK_W`]/[`TRACK_H`]. The thumb inset stays the pre-existing
+//! community-approximate derivation (see [`THUMB_INSET`]'s doc comment for
+//! why the kit's own ambiguous `"Knob"` record wasn't adopted for it).
 //!
 //! # Thumb travel
 //!
@@ -43,22 +40,22 @@
 //! animation's last-driven target (`anim_target`) — the one place a theme (and
 //! thus a spring) is in scope — exactly as [`crate::material::switch`] does.
 //!
-//! # Reflective knob (6f task 13)
+//! # Reflective knob
 //!
 //! iOS 26+'s native switch renders a reflective/glassy knob; vello 0.9 has no
-//! backdrop-blur or lensing primitive (PLAN.md's Renderer reality note), so
-//! this ships a **static approximation**: a soft drop shadow beneath the knob
-//! sourced from `theme.glass.control`'s [`frust_theme::elevation::ShadowSpec`]
-//! (the same "buttons/toggles" glass tier [`crate::cupertino`]'s other 6f
+//! backdrop-blur or lensing primitive, so this ships a **static
+//! approximation**: a soft drop shadow beneath the knob sourced from
+//! `theme.glass.control`'s [`frust_theme::elevation::ShadowSpec`]
+//! (the same "buttons/toggles" glass tier [`crate::cupertino`]'s other
 //! widgets read — see `frust-theme/src/glass.rs`'s module docs; unthemed
 //! falls back to [`GlassScale::ios27`]'s `control` tier, the same values a
 //! Cupertino-themed paint resolves), then a radial specular-gradient highlight
 //! offset toward the upper-left, peaked at the tier's `hairline_alpha`. The
-//! kit's own `Toggles/Toggles/𝛘/{Light,Dark}/Knob` records
-//! (`research/glass-recipes.json`) carry a soft ambient glow (blur 20) plus
-//! tight top/bottom rim shadows (blur 0.5) around the knob — this is the
-//! source the shadow+highlight pairing approximates, not a literal replay of
-//! those blur radii (vello has no blur-layer primitive to replay them with).
+//! kit's own `Toggles/Toggles/𝛘/{Light,Dark}/Knob` records carry a soft
+//! ambient glow (blur 20) plus tight top/bottom rim shadows (blur 0.5) around
+//! the knob — this is the source the shadow+highlight pairing approximates,
+//! not a literal replay of those blur radii (vello has no blur-layer
+//! primitive to replay them with).
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -74,10 +71,9 @@ use peniko::{Brush, Color, Gradient};
 
 /// Track width, in logical px.
 ///
-/// **Kit-cited** (2026-07-18, 6f task 13): the Apple iOS 27 UI Kit's
+/// **Kit-cited** (retrieved 2026-07-18): the Apple iOS 27 UI Kit's
 /// `Toggles/{Light,Dark}/{On,Off}/{1 - Idle,3 - Pressed,4 - Disabled}` layer
-/// records (`kit-colors-type-metrics.json`, `component_metrics.Toggles`) —
-/// 8 of 8 — unanimously give `64`. This resolves the module's prior
+/// records — 8 of 8 — unanimously give `64`. This resolves the module's prior
 /// community-approximate 51×31 (Flutter's `CupertinoSwitch` value; a
 /// competing Apple developer-forums thread claimed 49×31) in the kit's favor
 /// — see the module docs' Track metric resolution section.
@@ -88,17 +84,17 @@ const TRACK_H: f64 = 28.0;
 /// Inset from the track edge to the thumb, in logical px.
 ///
 /// **Community-approximate**, kept rather than kit-adopted: the kit also
-/// carries a flat `"Knob"` record (`component_metrics.Toggles.Knob`, `38×24`)
+/// carries a flat `"Knob"` record (`38×24`)
 /// but it is not attributable with confidence to the standard `64×28` track
 /// group above — unlike every track record it carries no `Light|Dark`/
 /// `On|Off` prefix, and sits alongside a `Toggles/𝛘/{Light,Dark}/Knob` pair
 /// at `59×37` naming a *different* (icon) toggle variant the kit also ships,
 /// so `"Knob"` may belong to that variant instead. Its 38pt width would also
 /// leave only ~22pt of thumb travel inside a 64pt track — implausibly little
-/// for a resting thumb. Per this task's evidence rule ("adopt the kit numbers
-/// ONLY if they come from a real kit record you can cite"), an ambiguous
-/// record isn't citable, so this module keeps the pre-existing derivation
-/// instead: iOS does not publish the thumb inset, and ~2pt is the value
+/// for a resting thumb. Since kit numbers are adopted only when they trace
+/// to a real, citable kit record, an ambiguous record isn't citable, so this
+/// module keeps the pre-existing derivation instead: iOS does not publish
+/// the thumb inset, and ~2pt is the value
 /// community reimplementations converge on (thumb diameter = `TRACK_H -
 /// 2*THUMB_INSET`). The 24pt result this derivation lands on for the new 28pt
 /// track does, at least, corroborate the ambiguous record's own height field.
@@ -109,12 +105,12 @@ const THUMB_DIAM: f64 = TRACK_H - 2.0 * THUMB_INSET;
 /// systemGreen (light), the "on" track fill.
 ///
 /// **Kit-measured** (2026-07-18 refresh): the iOS 27 UI Kit's `System
-/// Colors/Light/4 Green` swatch (`kit-colors-type-metrics.json`, `colors`) is
+/// Colors/Light/4 Green` swatch is
 /// `#34C658` — Apple does not publish an exact hex for the system accent
 /// colors (they vary by trait environment), so this remains a design-tool
 /// snapshot rather than a guarantee, just a newer/more-precise one than the
 /// pre-refresh community value it replaces (`#34C759`), mirroring the same
-/// kind of 1-bit-per-channel refinement `color.rs`'s wave-1 Cupertino
+/// kind of 1-bit-per-channel refinement `color.rs`'s Cupertino
 /// refresh documents for systemBlue/Red/Purple.
 const SYSTEM_GREEN_LIGHT: Color = Color::from_rgb8(0x34, 0xC6, 0x58);
 /// systemGreen (dark) — the kit's `System Colors/Dark/4 Green` swatch,
@@ -128,8 +124,8 @@ const SYSTEM_GREEN_DARK: Color = Color::from_rgb8(0x2F, 0xD1, 0x57);
 /// toggle's off-track fill actually uses, unlike the on-track's directly-named
 /// `System Colors/*/4 Green` swatch above — adopting one by positional guess
 /// (`Grays/Light/Gray 5` is `#E5E5E9`, close but not identical to the value
-/// below) would violate this task's cite-a-real-record evidence rule, so the
-/// pre-refresh community value stays.
+/// below) would violate the cite-a-real-record evidence rule this module
+/// follows, so the pre-refresh community value stays.
 const TRACK_OFF_LIGHT: Color = Color::from_rgb8(0xE9, 0xE9, 0xEA);
 /// The "off" track fill (dark) — iOS systemGray5 dark (see
 /// [`TRACK_OFF_LIGHT`]'s re-check note; kept unchanged for the same reason —
@@ -208,7 +204,7 @@ fn resolve_spring(theme: Option<&Theme>) -> SpringDesc {
 /// resting color. Keeps a settled switch pixel-identical to its resting fill,
 /// matching the crate's unthemed/themed-exact paint guarantee (mirrors
 /// [`crate::material::switch`]'s helper of the same shape, reimplemented here
-/// since material/* is a read-only dep for this task).
+/// since that helper is private to its own module).
 fn lerp_color_exact(begin: Color, end: Color, t: f64) -> Color {
     if t <= 0.0 {
         begin

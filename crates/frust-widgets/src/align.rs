@@ -1,4 +1,4 @@
-//! Align layout container (spec §6.2): positions a single child within the
+//! Align layout container: positions a single child within the
 //! space the align itself is given.
 //!
 //! [`AlignView`]/[`AlignWidget`] loosen the incoming constraints for the child
@@ -290,7 +290,7 @@ mod tests {
         );
     }
 
-    // -- Capture routing (review R1: a captured child must keep receiving
+    // -- Capture routing (a captured child must keep receiving
     // events regardless of hit geometry, not just while the point is still
     // over it) --
 
@@ -443,7 +443,7 @@ mod tests {
         );
     }
 
-    // -- Type-swap capture clearing (re-review round 1: `rebuild_child` must
+    // -- Type-swap capture clearing (`rebuild_child` must
     // clear a stale capture on an AnyView type swap, matching
     // `rebuild_children`'s semantics for `Flex`/`Stack`) --
 

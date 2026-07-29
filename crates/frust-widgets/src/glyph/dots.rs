@@ -1,4 +1,4 @@
-//! Glyph three-dot loader (task 21, glyph-design-system): three dots
+//! Glyph three-dot loader: three dots
 //! opacity-pulsing on a 1.2s cycle, each offset 0.15s behind the last — the
 //! classic "typing indicator" loop.
 //!
@@ -7,19 +7,20 @@
 //! A single repeating [`AnimationController`] (`AnimationController::repeat`,
 //! [`CYCLE_PERIOD`] = 1.2s, linear) drives a shared clock phase
 //! `0.0..=1.0`; each dot `i`'s own pulse phase is `(clock + i *
-//! PHASE_OFFSET_FRACTION).rem_euclid(1.0)` — task 07's per-index phase-offset
+//! PHASE_OFFSET_FRACTION).rem_euclid(1.0)` — a per-index phase-offset
 //! idiom (`frust_core::anim::StaggerSpec`'s "item i starts `i *
 //! per_item_delay` later" shape), generalized to a **wrapping** loop via
 //! `rem_euclid` (`StaggerSpec::item_progress` itself is a one-shot reveal
 //! that saturates at `1.0` past its window — it has no wrap concept, so it
 //! doesn't fit a continuously-repeating pulse; the per-index phase-offset
-//! math is what's reused, via [`Curve::interval`] below, task 07's other
-//! primitive). Each dot's local phase then maps to an opacity pulse via two
+//! math is what's reused, via [`Curve::interval`] below). Each dot's local
+//! phase then maps to an opacity pulse via two
 //! [`Curve::interval`] halves (`EaseInOut` rising over `[0.0, 0.5]`, falling
 //! over `[0.5, 1.0]`) — see [`dot_pulse`].
 //!
-//! [`CYCLE_PERIOD`]/[`PHASE_OFFSET_SECONDS`]/[`MIN_OPACITY`] are this task's
-//! own authored values (no Glyph HTML source dimensions a dot loader).
+//! [`CYCLE_PERIOD`]/[`PHASE_OFFSET_SECONDS`]/[`MIN_OPACITY`] are
+//! original authored values (no Glyph design-reference source dimensions a
+//! dot loader).
 //!
 //! `reduce_motion` freezes every dot at full opacity (no pulse, no
 //! `request_frame`) — the Details' "shimmer/dots become static" rule.
@@ -36,22 +37,22 @@ use peniko::Color;
 
 /// Number of dots.
 const DOT_COUNT: usize = 3;
-/// Each dot's diameter, in logical px. This task's own choice.
+/// Each dot's diameter, in logical px. An original, hand-picked value.
 const DOT_DIAMETER: f64 = 8.0;
-/// Gap between adjacent dots, in logical px. This task's own choice.
+/// Gap between adjacent dots, in logical px. An original, hand-picked value.
 const DOT_GAP: f64 = 6.0;
 
 /// The shared clock's full period (`AnimationController::repeat`, linear).
-/// This task's own choice — see the [module docs](self).
+/// An original, hand-picked value — see the [module docs](self).
 const CYCLE_PERIOD: Duration = Duration::from_millis(1200);
 /// Per-dot phase offset, in seconds (dot `i` lags dot `0` by `i *
-/// PHASE_OFFSET_SECONDS`). This task's own choice.
+/// PHASE_OFFSET_SECONDS`). An original, hand-picked value.
 const PHASE_OFFSET_SECONDS: f64 = 0.15;
 /// [`PHASE_OFFSET_SECONDS`] expressed as a fraction of [`CYCLE_PERIOD`].
 const PHASE_OFFSET_FRACTION: f64 = PHASE_OFFSET_SECONDS / 1.2;
 
 /// The pulse's opacity floor, `0.0..=1.0` (a dot never fully disappears).
-/// This task's own choice.
+/// An original, hand-picked value.
 const MIN_OPACITY: f64 = 0.25;
 
 /// Unthemed dot fallback — the Glyph dark accent (`#ffb627`), mirroring
@@ -60,7 +61,7 @@ const FALLBACK_COLOR: Color = Color::from_rgb8(0xff, 0xb6, 0x27);
 
 /// A single dot's smoothed opacity pulse at local phase `t` (`0.0..=1.0`,
 /// already wrapped): rises `0.0 → 1.0` over `[0.0, 0.5]`, falls `1.0 → 0.0`
-/// over `[0.5, 1.0]`, both eased via [`Curve::EaseInOut`] — task 07's
+/// over `[0.5, 1.0]`, both eased via [`Curve::EaseInOut`] via
 /// [`Curve::interval`] (see the [module docs](self)). Never negative or
 /// above `1.0` (both halves are themselves `[0, 1]`-bounded).
 fn dot_pulse(t: f64) -> f64 {
@@ -174,7 +175,7 @@ impl Widget for DotsLoaderWidget {
 
         if !reduce_motion {
             // A dot pulse is a decorative loop — its exact cadence is
-            // imperceptible, so the mobile frame gate may pace it (task 08).
+            // imperceptible, so the mobile frame gate may pace it.
             ctx.request_frame_paced();
         }
     }
@@ -247,7 +248,7 @@ mod tests {
     #[test]
     fn per_dot_phase_offsets_are_staggered_and_wrap() {
         // At clock phase 0.0, dot 0 is at local phase 0.0; dot 1/2 are
-        // offset forward by PHASE_OFFSET_FRACTION each (task 07's per-index
+        // offset forward by PHASE_OFFSET_FRACTION each (the per-index
         // phase-offset shape).
         let p0 = DotsLoaderWidget::local_phase(0.0, 0);
         let p1 = DotsLoaderWidget::local_phase(0.0, 1);

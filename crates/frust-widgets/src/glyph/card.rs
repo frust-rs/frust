@@ -1,9 +1,7 @@
-//! Filled by task 24-glyph-content-widgets (Card).
-//!
 //! [`glyph_card`]/[`GlyphCardView`]: the Glyph content card — a `surface`
 //! container with a bright hairline border and the `radius-lg` corner, holding
 //! up to three optional child-view **slots** stacked vertically: `title`,
-//! `desc`, and `footer` (the reference build's `§content` `.card` with
+//! `desc`, and `footer` (the Glyph design system's `.card` with
 //! `.card-title`/`.card-desc`/`.card-footer`).
 //!
 //! Each slot is an arbitrary child [`frust_core::View`] (not a fixed text run),

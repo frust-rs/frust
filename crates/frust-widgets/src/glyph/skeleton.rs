@@ -1,21 +1,21 @@
-//! Glyph skeleton placeholder (task 21, glyph-design-system): a fixed-size
+//! Glyph skeleton placeholder: a fixed-size
 //! box painted with a repeating 3-stop gradient sweep — the "content is
 //! loading" shimmer placeholder pattern.
 //!
 //! # Tokens
 //!
-//! Base = `colors.surface_container` (Glyph's `bg-surface` — "cards, inputs",
-//! RESEARCH §1.1); highlight = `colors.surface_container_high` (Glyph's
+//! Base = `colors.surface_container` (Glyph's `bg-surface` — "cards, inputs");
+//! highlight = `colors.surface_container_high` (Glyph's
 //! `bg-raised` — "raised surfaces"), giving a subtle raised sheen as it
 //! sweeps. Radius defaults to the themed `shape.small` (Glyph's canonical
-//! `--radius-sm` = 6px, RESEARCH §1.3), overridable via [`SkeletonView::radius`].
+//! `--radius-sm` = 6px), overridable via [`SkeletonView::radius`].
 //! Unthemed fallbacks below match the Glyph **dark** hex values exactly, per
 //! this catalog's charter (`glyph::mod`'s module docs).
 //!
 //! # Sweep
 //!
 //! `AnimationController::repeat`, [`SWEEP_PERIOD`] = 1.6s, `Curve::EaseInOut` —
-//! this task's own authored values (no Glyph HTML source dimensions a
+//! original authored values (no Glyph design-reference source dimensions a
 //! skeleton loader). The sweep is a linear gradient (base → highlight → base,
 //! both real `ColorScheme` roles — no synthetic white-blend) whose `(start,
 //! end)` band translates across the box every frame, the same band-translate
@@ -34,16 +34,15 @@ use frust_theme::Theme;
 use kurbo::{Point, Size};
 use peniko::{Brush, Color, Gradient};
 
-/// The sweep's full period (`AnimationController::repeat`, ease-in-out). This
-/// task's own choice — see the [module docs](self).
+/// The sweep's full period (`AnimationController::repeat`, ease-in-out). An
+/// original, hand-picked value — see the [module docs](self).
 const SWEEP_PERIOD: Duration = Duration::from_millis(1600);
 
-/// The sweep band's width, as a fraction of the box width. This task's own
-/// choice.
+/// The sweep band's width, as a fraction of the box width. An original,
+/// hand-picked value.
 const SWEEP_BAND_FRACTION: f64 = 0.6;
 
-/// Unthemed corner-radius fallback — Glyph's canonical `--radius-sm` (6px,
-/// RESEARCH §1.3).
+/// Unthemed corner-radius fallback — Glyph's canonical `--radius-sm` (6px).
 const FALLBACK_RADIUS: f64 = 6.0;
 
 /// Unthemed base fallback — Glyph dark's `bg-surface` (`#161a23`).
@@ -194,7 +193,7 @@ impl Widget for SkeletonWidget {
             Self::sweep_gradient(origin, size.width, size.height, phase, base, highlight);
         scene.fill_rounded_rect_brush(origin, size, radius, &Brush::Gradient(gradient));
         // A shimmer sweep is a decorative loop — its exact cadence is
-        // imperceptible, so the mobile frame gate may pace it (task 08).
+        // imperceptible, so the mobile frame gate may pace it.
         ctx.request_frame_paced();
     }
 }

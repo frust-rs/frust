@@ -1,9 +1,7 @@
-//! Filled by task 24-glyph-content-widgets (EmptyState).
-//!
 //! [`empty_state`]/[`EmptyStateView`]: the "nothing here yet" placeholder — a
 //! dashed-border panel with a large, faint centered glyph char (Space Mono
 //! display face), a title, a description, and an optional action child-view
-//! slot (the reference build's `§content` `.empty-state`).
+//! slot (the Glyph design system's `.empty-state`).
 //!
 //! The title, description, and centered glyph are the widget's own text runs
 //! (shaped/painted directly, like [`super::badge`]); the action slot is an

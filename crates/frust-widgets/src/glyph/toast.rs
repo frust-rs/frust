@@ -113,14 +113,14 @@ pub enum ToastVariant {
 }
 
 /// The row height floor, in logical px (a one-line toast never shrinks below
-/// this). This task's own choice.
+/// this). An original, hand-picked value.
 const MIN_HEIGHT: f64 = 44.0;
-/// Horizontal padding around the content row. This task's own choice.
+/// Horizontal padding around the content row. An original, hand-picked value.
 const PAD_X: f64 = 14.0;
 /// Vertical padding above/below the content when the message wraps taller
-/// than [`MIN_HEIGHT`] would otherwise need. This task's own choice.
+/// than [`MIN_HEIGHT`] would otherwise need. An original, hand-picked value.
 const PAD_Y: f64 = 10.0;
-/// Gap between the status dot and the message text. This task's own choice.
+/// Gap between the status dot and the message text. An original, hand-picked value.
 const DOT_GAP: f64 = 10.0;
 /// Status-dot diameter. This widget's own choice.
 const DOT_DIAMETER: f64 = 8.0;
@@ -379,8 +379,8 @@ const HOLD_DURATION: Duration = Duration::from_millis(2400);
 /// `nav::transition::REDUCE_MOTION_DURATION`).
 const REDUCE_MOTION_DURATION: Duration = Duration::from_millis(120);
 /// The enter slide's starting offset above the resting position, as a
-/// fraction of the toast's own height ("from -140%" — the task's phrasing).
-/// This task's own choice.
+/// fraction of the toast's own height ("from -140%").
+/// An original, hand-picked value.
 const ENTER_OFFSET_FRACTION: f64 = 1.4;
 
 /// The `(enter, exit)` [`Timing`]s for the current `reduce_motion` state:
@@ -457,9 +457,9 @@ impl ToastAnchor {
 }
 
 /// Margin from the anchored edge(s), in logical px — matches the glyph
-/// catalog's pre-this-task top margin (`lib.rs`'s `EdgeInsets { top: 10.0,
-/// .. }` wrapper this task's host-side anchoring supersedes). This task's own
-/// choice, additionally widened by [`frust_core::WindowInsets::padding`] on
+/// catalog's earlier top margin (`lib.rs`'s `EdgeInsets { top: 10.0,
+/// .. }` wrapper this host-side anchoring supersedes). An original,
+/// hand-picked value, additionally widened by [`frust_core::WindowInsets::padding`] on
 /// the anchored edges (see the [module docs](self)'s Anchoring section).
 const EDGE_MARGIN: f64 = 10.0;
 
@@ -947,7 +947,7 @@ mod tests {
         assert_eq!(active.phase, ToastPhase::Enter);
     }
 
-    // -- ToastHost: rebuild flags (the bug this task fixes — a structural
+    // -- ToastHost: rebuild flags (a structural
     // queue change (start or teardown of the active pod) MUST report LAYOUT,
     // or a layout-skip shell (Android) leaves a fresh/torn-down child pod
     // unlaid-out — see the module's diagnosis doc comment) -----------------
@@ -1197,7 +1197,7 @@ mod tests {
         );
     }
 
-    // -- ToastHost: anchoring (task 07, framework-side positioning) -----
+    // -- ToastHost: anchoring (framework-side positioning) -------------------
 
     /// Lay `host` out under `bc` with a fresh (empty) `TextContext` — every
     /// active toast contains a `Text` child needing one threaded (mirrors

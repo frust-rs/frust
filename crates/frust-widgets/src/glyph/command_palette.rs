@@ -1,4 +1,4 @@
-//! Glyph command palette (task 26, glyph-design-system): the signature
+//! Glyph command palette: the signature
 //! amber-ring overlay — a prompt-prefixed search field over a filtered result
 //! list, the Glyph recipe over the existing navigator transparent-push modal
 //! plumbing.
@@ -27,8 +27,8 @@
 //! (see [`crate::glyph::dialog`]'s rationale): the **panel** scales `0.96 → 1.0`
 //! over the spatial `fast` duration (150ms) while the **scrim** cross-fades on
 //! its own progress; exit reverses over the even-faster `instant` duration
-//! (100ms) — snappier by design than the dialog (RESEARCH §1.4: "exits always
-//! faster than entrances"). A scrim/Escape cancel flips the widget into its exit
+//! (100ms) — snappier by design than the dialog (the design system's rule:
+//! "exits always faster than entrances"). A scrim/Escape cancel flips the widget into its exit
 //! phase and fires the state-free close callback only once the exit completes
 //! (from paint — sound because `NavigatorController::pop` merely enqueues an op).
 //!
@@ -1546,7 +1546,7 @@ mod tests {
         root.paint(&mut Recorder::default(), ft_ms(300.0));
         assert_eq!(controller.depth(), 2);
 
-        // Route a back press (task 02's entry point) instead of a scrim tap.
+        // Route a back press (the `BackPolicy` entry point) instead of a scrim tap.
         controller.request_back();
         root.rebuild(&mut app, &mut state);
         root.layout_with_text(area, &mut tcx as &mut dyn Any);
