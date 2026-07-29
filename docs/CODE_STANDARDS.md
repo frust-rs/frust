@@ -183,8 +183,8 @@ these conventions:
   deliberately asymmetric: Android bakes it at control-construction time
   (`createConfigurationContext` yields a `Context` consumed once, so a live brightness
   toggle needs a rebuilt view), while iOS re-pins `overrideUserInterfaceStyle` on every
-  `update` and re-themes live. Mirroring one platform's constraint onto the other is the
-  exact defect a p2-05 gate caught — match each platform's own capability, not its sibling's.
+  `update` and re-themes live. Mirroring one platform's constraint onto the other is a
+  real defect class — match each platform's own capability, not its sibling's.
 - **A native listener callback is wrapped into a plain signal-writing closure, not routed
   through frust's event machinery.** `frust-native-widgets`' events-as-signals convention
   (`crate::api::signals`) decodes each control's raw platform callback (Android JNI, iOS
@@ -279,7 +279,7 @@ against every drive core outside a small CLI-entry allowlist.
 
 ## Interaction Semantics
 
-Conventions for `Widget::event` implementations (spec §9), followed by every interactive
+Conventions for `Widget::event` implementations, followed by every interactive
 widget in `frust-widgets`:
 
 - **Fire on up-inside, not down.** A press captures the pointer on `Down` and tracks a
@@ -343,7 +343,7 @@ widget in `frust-widgets`:
 
 ## Semantics Conventions
 
-Conventions for `Widget::semantics` (spec §9, `docs/ARCHITECTURE.md`'s Semantics pass):
+Conventions for `Widget::semantics` (see `docs/ARCHITECTURE.md`'s Semantics pass):
 
 - **The method defaults to a no-op.** Only override it if the widget has a role/label/state
   worth reporting; a widget with nothing to say about itself needs no impl at all.
