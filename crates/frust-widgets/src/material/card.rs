@@ -1,12 +1,12 @@
-//! The M3 `Card` container (Phase 6c, PLAN.md D5, task 08): elevated /
-//! filled / outlined variants, wrapping a single [`frust_core::AnyView`]
-//! child (the same single-child `ChildPod` wrapper shape as [`crate::Padding`]).
+//! The M3 `Card` container: elevated / filled / outlined variants, wrapping a
+//! single [`frust_core::AnyView`] child (the same single-child `ChildPod`
+//! wrapper shape as [`crate::Padding`]).
 //!
-//! # Variants (ledger R10/R11)
+//! # Variants
 //!
 //! All three variants share the medium shape (12dp, `shape.medium`) and
 //! `CARD_PADDING` (16dp) content inset — the standard M3 card spec
-//! (m3.material.io/components/cards/specs). Per ledger R11:
+//! (m3.material.io/components/cards/specs):
 //!
 //! * **Elevated**: container `surfaceContainerLow`, M3 elevation level 1
 //!   (1dp), painted via [`frust_core::PaintScene::draw_shadow`].
@@ -20,13 +20,13 @@
 //! # Outlined stroke primitive choice
 //!
 //! No stroked-rounded-rect primitive exists on [`frust_core::PaintScene`]
-//! (only `stroke_line` and the task-05 `stroke_path`/`fill_path` pair). Rather
-//! than approximate the rounded stroke with four `stroke_line` calls (visibly
+//! (only `stroke_line` and the `stroke_path`/`fill_path` pair). Rather than
+//! approximate the rounded stroke with four `stroke_line` calls (visibly
 //! square corners), this module builds a real rounded-rect outline via
 //! `kurbo::RoundedRect` (a [`kurbo::Shape`], so `.to_path(tolerance)` yields a
 //! `BezPath`) and paints it with [`frust_core::PaintScene::stroke_path`] —
-//! the precedent this task sets for any future widget needing a stroked
-//! rounded shape.
+//! establishing the precedent for any future widget needing a stroked rounded
+//! shape.
 //!
 //! # Interactivity
 //!
@@ -44,9 +44,9 @@
 //! child's own semantics become the button's accesskit children — a card has
 //! no single-line text label of its own to flatten into the node, unlike
 //! `Button`). A non-interactive card contributes a [`Role::GenericContainer`]
-//! ("group") node instead of transparently forwarding like `Padding` — the
-//! task's explicit choice to keep a card's content grouped as one semantic
-//! unit even when it isn't clickable.
+//! ("group") node instead of transparently forwarding like `Padding` — a
+//! deliberate choice to keep a card's content grouped as one semantic unit
+//! even when it isn't clickable.
 
 use std::rc::Rc;
 
@@ -64,7 +64,7 @@ use super::state_layer::StateLayer;
 /// Content padding on all four edges, in logical px (M3 card spec).
 const CARD_PADDING: f64 = 16.0;
 /// Corner radius (unthemed fallback; a theme resolves this from
-/// `shape.medium`, ledger R12's 12dp token).
+/// `shape.medium`, a 12dp token).
 const RADIUS: f64 = 12.0;
 /// Outline stroke width, in logical px (M3 card spec: hairline 1dp).
 const STROKE_WIDTH: f64 = 1.0;
@@ -83,7 +83,7 @@ const FILLED_CONTAINER: Color = Color::from_rgb8(0xE6, 0xE0, 0xE9);
 /// `colors.surface`).
 const OUTLINED_CONTAINER: Color = Color::from_rgb8(0xFE, 0xF7, 0xFF);
 /// Unthemed-fallback outline stroke color (a theme resolves this from
-/// `colors.outline_variant` — the enabled-state stroke, ledger R11).
+/// `colors.outline_variant` — the enabled-state stroke).
 const OUTLINE_VARIANT: Color = Color::from_rgb8(0xCA, 0xC4, 0xD0);
 /// Unthemed-fallback state-layer content color for an interactive card (a
 /// theme resolves this from `colors.on_surface`).
@@ -98,7 +98,7 @@ const FALLBACK_SHADOW_BLUR: f64 = 1.0;
 /// `0.3` alpha).
 const FALLBACK_SHADOW_COLOR: Color = Color::new([0.0, 0.0, 0.0, 0.3]);
 
-/// The M3 card container variant (ledger R10/R11). See the [module docs](self).
+/// The M3 card container variant. See the [module docs](self).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CardVariant {
     Elevated,
@@ -164,7 +164,7 @@ fn resolve_content_color(theme: Option<&Theme>) -> Color {
 }
 
 /// The resolved `(blur_std_dev, y_offset, color)` shadow parameters at M3
-/// elevation level 1 (the elevated variant's resting elevation, ledger R11).
+/// elevation level 1 (the elevated variant's resting elevation).
 /// Themed: `theme.elevation.level1`'s `ShadowSpec`, colored by `colors.shadow`
 /// at the spec's `color_alpha`. Unthemed: the [`FALLBACK_SHADOW_BLUR`]/
 /// [`FALLBACK_SHADOW_Y_OFFSET`]/[`FALLBACK_SHADOW_COLOR`] constants exactly.
@@ -553,7 +553,7 @@ mod tests {
 
     #[test]
     fn themed_elevated_paint_shadow_is_unchanged_on_m3_light() {
-        // Task 06: `ElevationLevel::shadow` gained a per-brightness split
+        // `ElevationLevel::shadow` carries a per-brightness split
         // (`shadow_light`/`shadow_dark`), and the M3 v1 mapping duplicates
         // the same value into both slots. This pins the elevated card's
         // rendered shadow on `Brightness::Light` to `theme.elevation.level1`'s

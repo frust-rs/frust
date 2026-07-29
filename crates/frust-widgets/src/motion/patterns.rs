@@ -1,8 +1,8 @@
-//! Core transition patterns (glyph-design-system task 16): the object-safe
-//! [`TransitionPattern`] trait plus the three source-verified core patterns —
-//! [`FadeThrough`], [`SharedAxis`] (X/Y/Scaled), and [`FadeScale`] — that
+//! Core transition patterns: the object-safe [`TransitionPattern`] trait plus
+//! the three source-verified core patterns — [`FadeThrough`], [`SharedAxis`]
+//! (X/Y/Scaled), and [`FadeScale`] — that
 //! [`super::switcher::PatternSwitcher`] stages an outgoing/incoming child pair
-//! under, plus (task 19) the remaining Glyph patterns: [`ContainerTransform`]
+//! under, plus the remaining Glyph patterns: [`ContainerTransform`]
 //! (rect-to-rect morph + fade-through composite), [`GlyphSlide`] (directional
 //! 16dp slide + fade), and [`GlyphStagger`] (per-item log-reveal, driven either
 //! as a switch pattern or as a plain per-item helper).
@@ -29,16 +29,16 @@
 //! # Source-verified staging numbers
 //!
 //! Every constant below is either a Material 3 published value or a
-//! source-verified Flutter `animations`-package number (research §7.3), cited
-//! per constant per `docs/CODE_STANDARDS.md`'s named-constant rule.
+//! source-verified Flutter `animations`-package number, cited per constant
+//! per `docs/CODE_STANDARDS.md`'s named-constant rule.
 //!
-//! # Scaffold contract (glyph-design-system task 12) & task 19
+//! # Scaffold contract
 //!
-//! This file is written by **task 16** (the [`TransitionPattern`] trait + the
-//! three core patterns) and later **extended by task 19** (ContainerTransform +
-//! Glyph patterns) — both write *only this file* and never edit
+//! This file owns its own contents only — the [`TransitionPattern`] trait,
+//! the three core patterns, and the extended Glyph patterns
+//! (ContainerTransform + Glyph patterns) all live here and never edit
 //! `motion/mod.rs`'s module list or re-export block (see that module's docs).
-//! The trait's `size` parameter is the deliberate extension point task 19's
+//! The trait's `size` parameter is a deliberate extension point the
 //! hero-rect-bearing patterns hang off of, kept in the signature now so a
 //! boxed `dyn TransitionPattern` never needs a shape change.
 
@@ -48,31 +48,30 @@ use frust_core::Curve;
 use frust_core::anim::{Lerp, StaggerSpec};
 use kurbo::{Point, Rect, Size};
 
-// --- Fade-through staging (source-verified, research §7.3) -------------------
+// --- Fade-through staging (source-verified) -------------------
 
 /// Fade-through progress split: the outgoing child finishes its fade-out and
 /// the incoming child begins its fade-in + scale-up at this fraction — the
 /// verified Flutter `FadeThroughTransition` staging boundary (the first
-/// **6/20** of the timeline; research §7.3).
+/// **6/20** of the timeline).
 const FADE_THROUGH_SPLIT: f64 = 0.30;
 
 /// Fade-through *outgoing* fade-out easing — Flutter `Cubic(0.4,0,1,1)` applied
 /// over `[0, `[`FADE_THROUGH_SPLIT`]`]`, after which the outgoing child holds at
-/// `0` opacity (research §7.3).
+/// `0` opacity.
 const FADE_THROUGH_OUT_CURVE: Curve = Curve::Cubic(0.4, 0.0, 1.0, 1.0);
 
 /// Fade-through *incoming* fade-in + scale-up easing — Flutter `Cubic(0,0,0.2,1)`
-/// applied over `[`[`FADE_THROUGH_SPLIT`]`, 1]` (research §7.3). Both the
+/// applied over `[`[`FADE_THROUGH_SPLIT`]`, 1]`. Both the
 /// opacity `0→1` and the scale [`FADE_THROUGH_SCALE_START`]`→1.0` track this one
 /// eased segment.
 const FADE_THROUGH_IN_CURVE: Curve = Curve::Cubic(0.0, 0.0, 0.2, 1.0);
 
 /// Fade-through incoming scale start (the incoming child scales 92% → 100% as it
-/// fades in) — the verified Flutter `FadeThroughTransition` staging
-/// (research §7.3).
+/// fades in) — the verified Flutter `FadeThroughTransition` staging.
 const FADE_THROUGH_SCALE_START: f64 = 0.92;
 
-// --- Shared-axis staging (M3 published + research §7.3) ---------------------
+// --- Shared-axis staging (M3 published + Flutter source-verified) ---------------------
 
 /// Shared-axis slide distance, in logical px (dp). Material 3 motion "shared
 /// axis" transitions translate by 30dp along the axis. Source: Material Design 3
@@ -82,37 +81,37 @@ const SHARED_AXIS_SLIDE_DP: f64 = 30.0;
 /// Shared-axis "scaled" incoming scale start (92% → 100%). Flutter
 /// `SharedAxisTransition(transitionType: scaled)` scales the entering child up
 /// from `0.80`; Material 3's own shared-axis-scaled uses a subtler start —
-/// `0.80` is the source-verified Flutter value (research §7.3).
+/// `0.80` is the source-verified Flutter value.
 const SHARED_AXIS_SCALE_IN_START: f64 = 0.80;
 
 /// Shared-axis "scaled" exiting scale end (100% → 110%): the leaving child
 /// scales *up and out* while fading, the source-verified Flutter
-/// `SharedAxisTransition` scaled staging (research §7.3).
+/// `SharedAxisTransition` scaled staging.
 const SHARED_AXIS_SCALE_OUT_END: f64 = 1.10;
 
-// --- Fade-scale staging (source-verified, research §7.3) --------------------
+// --- Fade-scale staging (source-verified) --------------------
 
 /// Fade-scale fade interval end: the incoming child's opacity ramps `0→1` over
 /// `[0, `[`FADE_SCALE_FADE_END`]`]` (Flutter `FadeScaleTransition`'s
-/// `Interval(0, 0.3)`; research §7.3), while its scale runs the full timeline.
+/// `Interval(0, 0.3)`), while its scale runs the full timeline.
 const FADE_SCALE_FADE_END: f64 = 0.30;
 
 /// Fade-scale incoming scale start (`0.80 → 1.00` over the full timeline) —
-/// Flutter `FadeScaleTransition` (research §7.3).
+/// Flutter `FadeScaleTransition`.
 const FADE_SCALE_SCALE_START: f64 = 0.80;
 
 /// Fade-scale scale easing — Flutter `Easing.legacyDecelerate`
-/// (`Cubic(0,0,0.2,1)`; research §7.3).
+/// (`Cubic(0,0,0.2,1)`).
 const FADE_SCALE_SCALE_CURVE: Curve = Curve::Cubic(0.0, 0.0, 0.2, 1.0);
 
 /// Fade-scale default *forward* duration — Flutter `FadeScaleTransition`'s
-/// 150ms enter (research §7.3). A source-verified pattern-native constant the
+/// 150ms enter. A source-verified pattern-native constant the
 /// switcher's caller can pass to [`.timing(...)`](super::switcher::PatternSwitcherView::timing);
 /// the switcher's own default resolves from the theme instead.
 pub const FADE_SCALE_FORWARD: Duration = Duration::from_millis(150);
 
 /// Fade-scale default *reverse* duration — Flutter `FadeScaleTransition`'s 75ms
-/// exit ("exits always faster than entrances"; research §7.3). See
+/// exit ("exits always faster than entrances"). See
 /// [`FADE_SCALE_FORWARD`].
 pub const FADE_SCALE_REVERSE: Duration = Duration::from_millis(75);
 
@@ -151,8 +150,8 @@ impl PatternLayer {
 /// contract.
 ///
 /// **Object-safe by contract.** The trait takes only scalar/`Copy` arguments
-/// and returns a concrete `(PatternLayer, PatternLayer)`, so a future task
-/// (19) can hold a `Box<dyn TransitionPattern>` without a signature change —
+/// and returns a concrete `(PatternLayer, PatternLayer)`, so any future
+/// pattern can hold a `Box<dyn TransitionPattern>` without a signature change —
 /// the `size` parameter is the reserved extension point for a hero-rect-bearing
 /// container-transform pattern.
 pub trait TransitionPattern {
@@ -162,7 +161,9 @@ pub trait TransitionPattern {
     fn resolve(&self, p: f64, reverse: bool, size: Size) -> (PatternLayer, PatternLayer);
 }
 
-// A compile-time proof the trait stays object-safe (task 19 boxes it).
+// A compile-time proof the trait stays object-safe, even though no consumer
+// in this crate currently boxes it (`PatternSwitcher` is generic over `P:
+// TransitionPattern` instead).
 const _: fn() = || {
     let _: Option<&dyn TransitionPattern> = None;
 };
@@ -170,7 +171,7 @@ const _: fn() = || {
 /// The eased `(incoming, outgoing)` fade progresses shared by [`FadeThrough`]
 /// and [`SharedAxis`]: the outgoing child fades out over `[0, split]` and the
 /// incoming child fades in over `[split, 1]`, both from the clamped progress
-/// `pc` — Material 3's "fade through" opacity staging (research §7.3).
+/// `pc` — Material 3's "fade through" opacity staging.
 fn fade_through_progress(pc: f64) -> (f64, f64) {
     let out = FADE_THROUGH_OUT_CURVE
         .interval(0.0, FADE_THROUGH_SPLIT)
@@ -183,7 +184,7 @@ fn fade_through_progress(pc: f64) -> (f64, f64) {
 
 // --- FadeThrough ------------------------------------------------------------
 
-/// Material 3 "fade through" (research §7.3): the outgoing child fades `1→0`
+/// Material 3 "fade through": the outgoing child fades `1→0`
 /// over the first 6/20 of the timeline then holds, while the incoming child
 /// holds at [`FADE_THROUGH_SCALE_START`] scale / `0` opacity for that 6/20 then
 /// fades in **and** scales up to `1.0` over the remaining 14/20. Non-directional
@@ -289,7 +290,7 @@ impl TransitionPattern for SharedAxis {
 
 // --- FadeScale --------------------------------------------------------------
 
-/// Material 3 "fade scale" (Flutter `FadeScaleTransition`, research §7.3): the
+/// Material 3 "fade scale" (Flutter `FadeScaleTransition`): the
 /// incoming child fades in over the first 30% of the timeline while scaling
 /// [`FADE_SCALE_SCALE_START`]`→1.0` over the full timeline
 /// ([`FADE_SCALE_SCALE_CURVE`]); the exiting child **fades only** (no scale).
@@ -324,24 +325,23 @@ impl TransitionPattern for FadeScale {
     }
 }
 
-// --- ContainerTransform (research §7.3, OpenContainer) ----------------------
+// --- ContainerTransform (OpenContainer) ----------------------
 
 /// ContainerTransform default duration — the Material 3 container-transform /
-/// Flutter `OpenContainer` 300ms morph (research §7.3).
+/// Flutter `OpenContainer` 300ms morph.
 pub const CONTAINER_TRANSFORM_DURATION: Duration = Duration::from_millis(300);
 
 /// The container-transform bounds (rect-morph) easing — Flutter `OpenContainer`
-/// tweens its container bounds on `Curves.fastOutSlowIn` (`Cubic(0.4,0,0.2,1)`;
-/// research §7.3).
+/// tweens its container bounds on `Curves.fastOutSlowIn` (`Cubic(0.4,0,0.2,1)`).
 const CONTAINER_TRANSFORM_MORPH_CURVE: Curve = Curve::Cubic(0.4, 0.0, 0.2, 1.0);
 
 /// The plain-`Fade` variant's cross-fade easing — the same decelerate curve the
-/// fade-through incoming segment uses (`Cubic(0,0,0.2,1)`; research §7.3), run
+/// fade-through incoming segment uses (`Cubic(0,0,0.2,1)`), run
 /// over the full timeline for both children simultaneously.
 const CONTAINER_TRANSFORM_FADE_CURVE: Curve = Curve::Cubic(0.0, 0.0, 0.2, 1.0);
 
 /// How a [`ContainerTransform`] stages opacity while its bounds morph
-/// (research §7.3's fade / fadeThrough variants).
+/// (the fade / fadeThrough variants).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ContainerFade {
     /// Fade-through: the source content fades out over the first
@@ -353,7 +353,7 @@ pub enum ContainerFade {
     Fade,
 }
 
-/// Material 3 "container transform" (research §7.3, Flutter `OpenContainer`
+/// Material 3 "container transform" (Flutter `OpenContainer`
 /// semantics): the incoming content morphs from a captured `source` rect to a
 /// `target` rect while opacity fades the source content out and the incoming
 /// content in.
@@ -485,19 +485,19 @@ impl TransitionPattern for ContainerTransform {
     }
 }
 
-// --- GlyphSlide (research §1.4 #10) -----------------------------------------
+// --- GlyphSlide -----------------------------------------
 
 /// GlyphSlide travel distance, 16 logical px (dp). The Glyph directional
-/// enter/exit slide distance (research §1.4 #10).
+/// enter/exit slide distance.
 const GLYPH_SLIDE_DISTANCE_DP: f64 = 16.0;
 
-/// GlyphSlide enter duration — a 340ms spatial slide-in + fade (research §1.4
-/// #10). A pattern-native constant the switcher's caller can pass to
+/// GlyphSlide enter duration — a 340ms spatial slide-in + fade. A
+/// pattern-native constant the switcher's caller can pass to
 /// [`.timing(...)`](super::switcher::PatternSwitcherView::timing); the theme's
 /// glyph `MotionScheme` resolves the effective timing otherwise.
 pub const GLYPH_SLIDE_ENTER: Duration = Duration::from_millis(340);
 
-/// GlyphSlide exit duration — a 150ms exit-curve slide-out (research §1.4 #10);
+/// GlyphSlide exit duration — a 150ms exit-curve slide-out;
 /// exits run faster than entrances. See [`GLYPH_SLIDE_ENTER`].
 pub const GLYPH_SLIDE_EXIT: Duration = Duration::from_millis(150);
 
@@ -518,7 +518,7 @@ const GLYPH_SLIDE_EXIT_CURVE: Curve = Curve::Cubic(0.3, 0.0, 1.0, 1.0);
 /// The leading fraction of the shared transition timeline the (faster) exit
 /// slide-out completes within — 150ms exit over the 340ms enter timeline — so
 /// the outgoing child clears before the incoming child settles. Mirrors the
-/// fade-through split idiom above (research §1.4 #10).
+/// fade-through split idiom above.
 const GLYPH_SLIDE_EXIT_FRACTION: f64 = 150.0 / 340.0;
 
 /// Which way a [`GlyphSlide`] entering child travels (the incoming child moves
@@ -547,7 +547,7 @@ impl SlideDirection {
     }
 }
 
-/// Glyph's directional slide (research §1.4 #10): the incoming child slides in
+/// Glyph's directional slide: the incoming child slides in
 /// [`GLYPH_SLIDE_DISTANCE_DP`] along [`SlideDirection`] over the enter timeline
 /// while fading in; the outgoing child slides out the same way over the faster
 /// [`GLYPH_SLIDE_EXIT_FRACTION`] of the timeline while fading out. `reverse`
@@ -609,26 +609,25 @@ impl TransitionPattern for GlyphSlide {
     }
 }
 
-// --- GlyphStagger (research §1.4; StaggerSpec, task 07) ----------------------
+// --- GlyphStagger (StaggerSpec) ----------------------
 
 /// GlyphStagger per-item reveal duration — a 150ms `effects`-curve fade-in
-/// (the reference build's rendered value; research §1.4).
+/// (the reference build's rendered value).
 const GLYPH_STAGGER_ITEM_MS: f64 = 150.0;
 
-/// GlyphStagger inter-item delay — 90ms. **Prose-vs-JS discrepancy** (PLAN Edge
-/// Cases): Glyph's spec *prose* cites a different figure, but 90ms is the value
-/// the reference build actually *renders*; the rendered value wins here
-/// (research §1.4).
+/// GlyphStagger inter-item delay — 90ms. **Prose-vs-rendered discrepancy**:
+/// Glyph's spec *prose* cites a different figure, but 90ms is the value
+/// the reference build actually *renders*; the rendered value wins here.
 const GLYPH_STAGGER_DELAY_MS: f64 = 90.0;
 
 /// GlyphStagger per-item easing — the Glyph `effects` curve (`Cubic(0.2,0,0,1)`;
 /// an opacity reveal, never overshoots).
 const GLYPH_STAGGER_CURVE: Curve = Curve::Cubic(0.2, 0.0, 0.0, 1.0);
 
-/// Glyph's staggered log-reveal (research §1.4): each item fades in over
+/// Glyph's staggered log-reveal: each item fades in over
 /// [`GLYPH_STAGGER_ITEM_MS`], successive items offset by [`GLYPH_STAGGER_DELAY_MS`],
 /// all driven off one shared `0.0..=1.0` controller value via `frust-core`'s
-/// [`StaggerSpec`] (task 07) — no per-item controller.
+/// [`StaggerSpec`] — no per-item controller.
 ///
 /// Unlike the two-child [`TransitionPattern`]s above, a stagger reveals an
 /// N-item *list*, so it isn't expressible as the trait's `(incoming, exiting)`
@@ -702,7 +701,7 @@ mod tests {
 
     const SIZE: Size = Size::new(400.0, 800.0);
 
-    // --- FadeThrough (source-verified staging, research §7.3) ---------------
+    // --- FadeThrough (source-verified staging) ---------------
 
     #[test]
     fn fade_through_staged_opacity_and_scale_table() {
@@ -813,7 +812,7 @@ mod tests {
         assert_eq!(out.alpha, 0.0);
     }
 
-    // --- FadeScale (source-verified staging, research §7.3) -----------------
+    // --- FadeScale (source-verified staging) -----------------
 
     #[test]
     fn fade_scale_incoming_fades_early_scales_full_exiting_fades_only() {
@@ -876,7 +875,7 @@ mod tests {
         );
     }
 
-    // --- ContainerTransform (research §7.3, OpenContainer) ------------------
+    // --- ContainerTransform (OpenContainer) ------------------
 
     const SRC: Rect = Rect::new(100.0, 200.0, 200.0, 400.0); // 100x200 @ (100,200)
 
@@ -958,7 +957,7 @@ mod tests {
         }
     }
 
-    // --- GlyphSlide (research §1.4 #10) ------------------------------------
+    // --- GlyphSlide ------------------------------------
 
     #[test]
     fn glyph_slide_up_offsets_and_alphas_forward_and_reverse() {
@@ -1021,7 +1020,7 @@ mod tests {
         assert!((GLYPH_SLIDE_EXIT_FRACTION - 150.0 / 340.0).abs() < 1e-12);
     }
 
-    // --- GlyphStagger (research §1.4; StaggerSpec, task 07) -----------------
+    // --- GlyphStagger (StaggerSpec) -----------------
 
     #[test]
     fn glyph_stagger_item_progress_matches_staggerspec_for_five_items() {
@@ -1071,7 +1070,7 @@ mod tests {
 
     #[test]
     fn transition_patterns_reduce_motion_collapse_target_removes_motion() {
-        // Criterion 3: the switcher collapses ANY pattern to a fast FadeThrough
+        // The switcher collapses ANY pattern to a fast FadeThrough
         // crossfade under reduce_motion. Prove the collapse *removes spatial
         // motion* — FadeThrough (the collapse target) is non-directional (no
         // slide) where GlyphSlide and ContainerTransform translate, at a shared

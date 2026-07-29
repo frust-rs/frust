@@ -1,12 +1,11 @@
-//! The M3 bottom `NavigationBar` (Phase 6c, PLAN.md D5, task 09): 64dp
-//! current-baseline height (androidx `NavigationBarTokens`; the pre-Expressive
-//! 80dp value is noted as a constant, per C11), using the shared
-//! [`super::state_layer`] interaction overlay on each destination.
+//! The M3 bottom `NavigationBar`: 64dp current-baseline height (androidx
+//! `NavigationBarTokens`; the pre-Expressive 80dp value is noted as a
+//! constant), using the shared [`super::state_layer`] interaction overlay on
+//! each destination.
 //!
 //! `NavigationBarView`/`NavigationBarWidget` follow the widget-authoring
-//! recipe (`research/RESEARCH.md`'s `widget-authoring-patterns`): a
-//! **controlled** component — [`NavigationBarView`] reports the *requested*
-//! selection through `on_select(index)` and never self-mutates; the app
+//! recipe: a **controlled** component — [`NavigationBarView`] reports the
+//! *requested* selection through `on_select(index)` and never self-mutates; the app
 //! feeds the confirmed `selected` index back in on the next rebuild, exactly
 //! like [`crate::Checkbox`]/[`crate::Slider`].
 //!
@@ -81,8 +80,8 @@ const LABEL_GAP: f64 = 4.0;
 /// *color* resolution past `View::build`, never size/weight). Matches
 /// `frust-theme::typography`'s `LABEL_MEDIUM_EMPHASIZED` token: same
 /// size/line-height/letter-spacing as the baseline `LABEL_MEDIUM`, weight
-/// stepped up from Medium to Bold (task 6f-10's emphasized-type
-/// consumption — was `FontWeight::MEDIUM` prior to this task).
+/// stepped up from Medium to Bold (the emphasized-type consumption — was
+/// `FontWeight::MEDIUM` previously).
 const LABEL_SIZE: f32 = 12.0;
 const LABEL_LINE_HEIGHT: f32 = 16.0;
 const LABEL_LETTER_SPACING: f32 = 0.5;

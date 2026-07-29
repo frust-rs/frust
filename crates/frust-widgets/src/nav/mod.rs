@@ -1,21 +1,20 @@
-//! Imperative navigation (Phase 6b): a retained page stack with push/pop/replace
+//! Imperative navigation: a retained page stack with push/pop/replace
 //! and per-page result callbacks, opaque-page paint culling, and test-pinned
 //! capture/focus/IME page-switch semantics.
 //!
 //! # Module map
 //!
-//! Every navigation module is pre-declared here so wave-2 tasks add their code to
-//! their own file and never edit this module list:
+//! Every navigation module is pre-declared here so each module's code lives
+//! in its own file and never spills into this module list:
 //!
 //! * [`navigator`] — the page stack, [`NavigatorController`](navigator::NavigatorController),
 //!   opaque-page paint culling, and the page-switch capture/focus/IME contract.
-//!   Instant page switches only — transitions arrive in task 03.
-//! * [`transition`] — page-transition animations (task 03). A doc-only stub today.
-//! * [`hero`] — shared-element ("hero") transition wrapper (task 07): the
+//! * [`transition`] — page-transition animations.
+//! * [`hero`] — shared-element ("hero") transition wrapper: the
 //!   [`hero(tag, child)`](hero::hero) view that morphs a tagged element between
 //!   two pages during a transition.
-//! * [`router`] — declarative route table (a later task). A doc-only stub today.
-//! * [`path`] — path/URL parsing for the router (a later task). A doc-only stub today.
+//! * [`router`] — declarative route table (a go_router-subset layer).
+//! * [`path`] — path/URL parsing for the router.
 
 pub mod hero;
 pub mod navigator;

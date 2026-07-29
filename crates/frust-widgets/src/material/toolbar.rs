@@ -1,10 +1,9 @@
-//! The M3 Expressive **floating/docked toolbar** (Phase 6f, PLAN.md Phase B
-//! item 5, task 09; RESEARCH.md:84; m3.material.io/components/toolbars/specs;
-//! Compose `HorizontalFloatingToolbar`/`DockedToolbar`).
+//! The M3 Expressive **floating/docked toolbar**
+//! (m3.material.io/components/toolbars/specs; Compose
+//! `HorizontalFloatingToolbar`/`DockedToolbar`).
 //!
-//! [`ToolbarView`]/[`ToolbarWidget`] follow the widget-authoring recipe
-//! (`research/RESEARCH.md`'s `widget-authoring-patterns`) and mirror
-//! [`super::appbar`]'s slot conventions (read that module first): **leading**,
+//! [`ToolbarView`]/[`ToolbarWidget`] follow the widget-authoring recipe and
+//! mirror [`super::appbar`]'s slot conventions (read that module first): **leading**,
 //! **center**, and **trailing** slots, each an ordered `Vec` of opaque
 //! [`AnyView`] children this widget lays out and routes events to but never
 //! paints or tints itself — exactly like `AppBarView`'s leading/actions slots,
@@ -44,8 +43,8 @@
 //! All metrics are theme tokens ([`frust_theme::ShapeScale`]/
 //! [`frust_theme::Elevation`]/[`frust_theme::ColorScheme`]), each with
 //! an unthemed-fallback constant below documenting its themed source. [`GAP`]/
-//! [`PAD_X`] have no independently-cited research-ledger figure for this task
-//! (marked **community-approximate** per `docs/CODE_STANDARDS.md`).
+//! [`PAD_X`] have no independently-verified published figure (marked
+//! **community-approximate** per `docs/CODE_STANDARDS.md`).
 //!
 //! # Semantics
 //!
@@ -59,9 +58,9 @@
 //! # Out of scope (v1)
 //!
 //! Overflow menus, a vertical floating-toolbar orientation (Compose also
-//! ships `VerticalFloatingToolbar` — deferred to a future task), scroll-hide
+//! ships `VerticalFloatingToolbar` — deferred to a future addition), scroll-hide
 //! behavior (the Cupertino tab bar's minimize-on-scroll, a separate mechanism
-//! task 11 of this phase owns), and catalog exhibits.
+//! owned elsewhere in the catalog), and catalog exhibits.
 
 use frust_core::accesskit::Role;
 use frust_core::{
@@ -82,18 +81,17 @@ const BAR_HEIGHT: f64 = 64.0;
 /// Horizontal inset from the bar's leading/trailing edges to the outermost
 /// slot content, in logical px (both variants).
 ///
-/// **Community-approximate**: no independently-cited research-ledger figure
-/// for this task; mirrors [`super::fab_menu`]'s `EDGE_MARGIN` (itself
-/// community-approximate), the closest in-repo precedent for a floating M3X
-/// surface's edge inset.
+/// **Community-approximate**: no independently-verified published figure;
+/// mirrors [`super::fab_menu`]'s `EDGE_MARGIN` (itself community-approximate),
+/// the closest in-repo precedent for a floating M3X surface's edge inset.
 const PAD_X: f64 = 16.0;
 
 /// Gap between adjacent slot elements (within a group, and between groups),
 /// in logical px.
 ///
-/// **Community-approximate**: no independently-cited research-ledger figure
-/// for this task; scaled up from [`super::appbar`]'s `GAP` (4.0) to suit a
-/// toolbar's typically larger action targets.
+/// **Community-approximate**: no independently-verified published figure;
+/// scaled up from [`super::appbar`]'s `GAP` (4.0) to suit a toolbar's
+/// typically larger action targets.
 const GAP: f64 = 8.0;
 
 /// Unthemed-fallback container fill (a theme resolves this from

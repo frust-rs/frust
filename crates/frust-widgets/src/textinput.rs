@@ -1,4 +1,4 @@
-//! The `TextInput` interactive widget (spec §6.4 / Phase 4B): an editable text
+//! The `TextInput` interactive widget: an editable text
 //! field, single-line by default and optionally wrapped multi-line.
 //!
 //! [`text_input`] produces a [`TextInputView`] carrying the current `value`, a
@@ -6,7 +6,7 @@
 //! other interactive widgets it is a **controlled component** (see
 //! `docs/CODE_STANDARDS.md`): it never owns the durable value. Each edit reports
 //! the *requested* text through `on_change`, and the next `rebuild` reconciles
-//! the app-confirmed `value` back into the underlying [`TextEditor`] (task 52) —
+//! the app-confirmed `value` back into the underlying [`TextEditor`] —
 //! set-if-different, preserving the selection while the text is unchanged. The
 //! content text's style (family/weight/style/size/letter-spacing/line-height,
 //! plus color when set explicitly) can be set with [`TextInputView::text_style`];
@@ -34,12 +34,12 @@
 //! # Focus, IME and blink
 //!
 //! A `Down` inside the field requests focus, places the caret, and publishes an
-//! [`ImeState`] (task 51's focus/IME channel) so the shell can drive the platform
+//! [`ImeState`] (the focus/IME channel) so the shell can drive the platform
 //! input method. Keyboard editing (`Key`) and IME composition/state-sync (`Ime`)
 //! route down the focus path; after any edit the widget fires `on_change`, resets
 //! the caret to visible, and republishes the IME surface. The caret blinks while
 //! focused, its phase measured from the shared shell frame clock
-//! ([`PaintCtx::frame_time`], spec §8 — no wall-clock reads in widget code) in
+//! ([`PaintCtx::frame_time`] — no wall-clock reads in widget code) in
 //! `paint` via [`PaintCtx::request_frame`] — the same animation contract the
 //! scroll fling uses. An edit/focus during the (clockless) event pass flags the
 //! blink for reset; the next paint records the blink epoch from `frame_time`.
@@ -110,7 +110,7 @@ const SELECTION: Color = Color::from_rgb8(0xBF, 0xDB, 0xFE);
 const CARET: Color = Color::from_rgb8(0x1D, 0x4E, 0xD8);
 /// Alpha applied to `primary` for the themed selection highlight (a v1
 /// simplification — a translucent primary stands in for a dedicated selection
-/// role; see task 07).
+/// role).
 const SELECTION_ALPHA: f32 = 0.30;
 
 /// The resolved text-field chrome colors. Themed (v1 simplification): background
@@ -260,7 +260,7 @@ impl<State: 'static> TextInputView<State> {
 
 /// The retained widget for a [`TextInputView`].
 pub struct TextInputWidget {
-    /// The editing engine (task 52). Driven through the widget-owned `text_ctx`.
+    /// The editing engine. Driven through the widget-owned `text_ctx`.
     editor: TextEditor,
     /// The widget's own font/layout context — see the [module docs](self).
     text_ctx: TextContext,
@@ -288,7 +288,7 @@ pub struct TextInputWidget {
     /// The soft-wrap width last installed on `editor` (`None` sentinel = not
     /// yet applied / editor just rebuilt). `layout` only calls
     /// [`TextEditor::set_wrap_width`] when the desired width differs from this —
-    /// the phase-10.B mirror of `Text`'s cached-shape reuse. parley's
+    /// mirroring `Text`'s cached-shape reuse. parley's
     /// `PlainEditor::set_width` unconditionally marks its layout dirty and the
     /// next `refresh_layout` re-shapes, so an unconditional per-pass call
     /// re-shaped every frame; guarding it here reshapes only on an actual
@@ -622,7 +622,7 @@ impl TextInputWidget {
                 EventResult::Handled
             }
             ImeEvent::Commit(s) => {
-                // iOS Return contract (task 56 / RESEARCH §ios): the Return key on a
+                // iOS Return contract: the Return key on a
                 // UITextInput arrives as `insertText("\n")` → `Commit("\n")`. On a
                 // single-line (or submit-on-enter) widget a lone newline commit means
                 // SUBMIT, exactly like `NamedKey::Enter` — it must never insert a
@@ -762,7 +762,7 @@ impl<State: 'static> View<State> for TextInputView<State> {
         }
         element.submit_on_enter =
             resolve_submit_on_enter(self.max_visible_lines, self.submit_on_enter);
-        // Text style reconcile (task 03): a changed declared style or explicit-
+        // Text style reconcile: a changed declared style or explicit-
         // flag invalidates the style actually installed on the editor. The
         // editor itself is only rebuilt in `layout` (`effective_style`/
         // `apply_style`), mirroring `Text::rebuild`'s cache-invalidate-now,
@@ -809,7 +809,7 @@ impl Widget for TextInputWidget {
         // resetting any stale wrap left by a dropped `.multiline(..)`). Only
         // re-install it when it actually changed — parley re-shapes on every
         // `set_width` regardless, so an unconditional per-pass call was the
-        // TextInput mirror of `Text`'s re-shape-every-frame defect (phase 10.B).
+        // TextInput mirror of `Text`'s re-shape-every-frame defect.
         let desired_wrap: Option<f32> = self
             .max_visible_lines
             .map(|_| (width - 2.0 * PAD_X).max(0.0) as f32);
@@ -1160,8 +1160,8 @@ mod tests {
             &named(NamedKey::Backspace, Modifiers::default()),
         );
 
-        // The whole emoji code point is removed as a unit (grapheme integrity via
-        // task 52), not a single byte.
+        // The whole emoji code point is removed as a unit (the editor's
+        // grapheme integrity), not a single byte.
         assert_eq!(widget(&root).editor.text(), "a");
         assert_eq!(state.value, "a");
     }
@@ -1478,7 +1478,7 @@ mod tests {
 
     #[test]
     fn caret_blink_phase_advances_from_paint_frame_time() {
-        // Two-frame blink test (task 07): the caret is painted in the visible half
+        // Two-frame blink test: the caret is painted in the visible half
         // of the cycle and absent in the hidden half, with the phase measured
         // purely from the injected `RenderRoot::paint` frame time — proving the
         // blink advances off the shell clock, not a hidden wall clock.
@@ -1515,7 +1515,7 @@ mod tests {
         assert_eq!(f3.caret_fills, 1, "caret visible again in the next cycle");
     }
 
-    // --- Themed chrome (task 07) ---
+    // --- Themed chrome ---
 
     /// Records rounded-rect (chrome) and rect (selection/caret) fill colors.
     #[derive(Default)]
@@ -1606,7 +1606,7 @@ mod tests {
         );
     }
 
-    // --- Themed text color (task 03) ---
+    // --- Themed text color ---
 
     /// Records each glyph run's solid brush color (mirrors `text.rs`'s
     /// `GlyphRecorder`).
@@ -1633,7 +1633,7 @@ mod tests {
         *rec.colors.first().expect("one glyph run painted")
     }
 
-    // --- Placeholder family resolution (task gf3) ---
+    // --- Placeholder family resolution ---
 
     /// Records font bytes from each glyph run, enabling font-resolution testing.
     #[derive(Default)]
@@ -1848,7 +1848,7 @@ mod tests {
         // Tap the sibling button, below the field (a container-routed blur): the
         // field's pod focus is cleared by `route_event`, but its own `event()` is
         // never called on this dispatch. The `Up` completes the button's own
-        // tap cycle (glyph-design-system task 22 gave `Button` a press-scale
+        // tap cycle (`Button` has a press-scale
         // animation that lazily launches at the next `paint` — completing the
         // gesture here, with no paint in between, cancels the retarget before
         // it ever launches, so this stays a pure blur probe rather than also
@@ -1944,7 +1944,7 @@ mod tests {
         fn draw_text(&mut self, _o: Point, _t: &str) {}
     }
 
-    // --- Multi-line mode (task: textinput-multiline) ---
+    // --- Multi-line mode ---
 
     /// A 3-visible-line multi-line field (newline-on-Enter default).
     fn multiline_logic(state: &mut AppState) -> TextInputView<AppState> {
@@ -2290,7 +2290,7 @@ mod tests {
 
     #[test]
     fn placeholder_font_reflects_configured_style_family() {
-        // Genuine shaped-output assertion (task gf3): verify that an empty,
+        // Genuine shaped-output assertion: verify that an empty,
         // unfocused field's placeholder shapes with the input's configured font
         // family, not a fallback. Two TextInputs—one with default family (SystemUi),
         // one with an explicit named family—must resolve to different fonts in

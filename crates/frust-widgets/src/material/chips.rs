@@ -1,7 +1,6 @@
-//! M3 assist + filter `Chips` (Phase 6c, PLAN.md D5, task 07): 32dp height,
-//! 8dp corner radius pill-shaped controls, using the shared
-//! [`super::state_layer`] interaction overlay. Input/suggestion chip variants
-//! are deferred (PLAN.md D5, out of v1 scope).
+//! M3 assist + filter `Chips`: 32dp height, 8dp corner radius pill-shaped
+//! controls, using the shared [`super::state_layer`] interaction overlay.
+//! Input/suggestion chip variants are deferred (out of v1 scope).
 //!
 //! [`assist_chip`] fires a plain `on_press` callback (an inert, non-toggling
 //! action chip — its optional [`AssistChipView::leading`] glyph/icon is
@@ -21,7 +20,7 @@
 //! label role is `on_secondary_container`, tonally close to `on_surface` in
 //! the M3 baseline palette (both dark-on-light) — a documented v1
 //! approximation, not a fabricated value, pending a dedicated role added to
-//! `TextView` in a later task.
+//! `TextView`.
 
 use std::rc::Rc;
 

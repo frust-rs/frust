@@ -1,7 +1,6 @@
-//! The Material 3 Expressive **FAB menu** (Phase 6f, PLAN.md Phase B item 5,
-//! task 08): a trigger FAB that reveals a vertical stack of large menu items
-//! on tap, replacing the older speed-dial pattern (RESEARCH.md:78;
-//! m3.material.io/blog/building-with-m3-expressive; Compose
+//! The Material 3 Expressive **FAB menu**: a trigger FAB that reveals a
+//! vertical stack of large menu items on tap, replacing the older speed-dial
+//! pattern (m3.material.io/blog/building-with-m3-expressive; Compose
 //! `FloatingActionButtonMenu`).
 //!
 //! [`fab_menu`] takes the trigger's icon, the controlled `open` flag, and a
@@ -37,7 +36,8 @@
 //! uniformly regardless of which container family the item sits on, the same
 //! choice [`super::button_group`] documents (selection/emphasis is conveyed by
 //! the container fill, not the label color, to avoid adding a new
-//! `on_*_container` text role to `text.rs` — a file this task does not own).
+//! `on_*_container` text role to `text.rs` — a file outside this module's
+//! scope).
 //!
 //! # Open/close motion (v1: fade, not slide)
 //!
@@ -51,9 +51,9 @@
 //! item/icon/label geometry is always laid out at its rest position, and
 //! `PaintScene` has no generic layer-opacity primitive to fade an arbitrary
 //! child subtree, so the icon/label pop in at full opacity once the spring
-//! value is non-zero while only the container rect fades. A future task could
-//! add a translate-in slide once per-child paint offsetting has a supported
-//! pattern (no consumer in this crate does that yet).
+//! value is non-zero while only the container rect fades. A future addition
+//! could add a translate-in slide once per-child paint offsetting has a
+//! supported pattern (no consumer in this crate does that yet).
 //!
 //! # Hit-testing while closed
 //!
@@ -67,10 +67,10 @@
 //! # No `StateLayer` (v1)
 //!
 //! Unlike [`super::fab`], this widget paints no hover/press `StateLayer`
-//! overlay on the trigger or the items — a future task can add one mirroring
+//! overlay on the trigger or the items — a future addition can mirror
 //! `fab.rs`'s.
 //!
-//! # Keyboard operability (task 6f-fix-1/02)
+//! # Keyboard operability
 //!
 //! **Escape-to-dismiss now works, once the menu has focus.** A `Down` on the
 //! trigger, or (while `open`) on an item or the scrim, claims focus via
@@ -115,8 +115,7 @@ const MAIN_RADIUS: f64 = 16.0;
 /// logical px.
 ///
 /// **Community-approximate**: a FAB's screen-edge margin is a common M3
-/// layout convention (16dp), not an independently-cited research-ledger value
-/// for this task.
+/// layout convention (16dp), not an independently-verified published value.
 const EDGE_MARGIN: f64 = 16.0;
 
 /// Fixed height of a menu-item row, in logical px — mirrors [`super::fab`]'s
@@ -977,7 +976,7 @@ mod tests {
         assert_eq!(state.toggles, 0);
     }
 
-    // --- Focus + Escape opt-in (task 6f-fix-1/02). ---
+    // --- Focus + Escape opt-in. ---
 
     fn escape_event() -> InputEvent {
         InputEvent::Key(KeyEvent {

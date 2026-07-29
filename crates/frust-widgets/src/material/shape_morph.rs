@@ -1,15 +1,14 @@
-//! A minimal shape-morphing primitive (Phase 6f, PLAN.md Phase B item 2):
-//! interpolation between rounded regular polygons, producing a closed
-//! [`kurbo::BezPath`].
+//! A minimal shape-morphing primitive: interpolation between rounded regular
+//! polygons, producing a closed [`kurbo::BezPath`].
 //!
 //! # Scope
 //!
-//! This is **deliberately not** the full M3 Expressive 35-shape library
-//! (deferred per the plan's scope-control note). It covers exactly what the
-//! [`super::loading_indicator`] and (task 07) button-group state morphs need:
-//! interpolate between two rounded polygons at a parameter `t ∈ 0..1`. A later
-//! phase can replace [`RoundedPolygon`]'s radial model with the real M3X
-//! feature-point curve set without changing this module's `morph_path` seam.
+//! This is **deliberately not** the full M3 Expressive 35-shape library. It
+//! covers exactly what the [`super::loading_indicator`] and button-group
+//! state morphs need: interpolate between two rounded polygons at a
+//! parameter `t ∈ 0..1`. A future addition can replace [`RoundedPolygon`]'s
+//! radial model with the real M3X feature-point curve set without changing
+//! this module's `morph_path` seam.
 //!
 //! # Model
 //!

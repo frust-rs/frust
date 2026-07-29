@@ -1,13 +1,11 @@
-//! The shared M3 interaction-state overlay (Phase 6c, PLAN.md D5 "State
-//! layers" row, task 01): a fill painted over a widget's shape, in the
-//! widget's own content color, at an opacity selected by its current
-//! hover/focus/pressed/dragged interaction state.
+//! The shared M3 interaction-state overlay: a fill painted over a widget's
+//! shape, in the widget's own content color, at an opacity selected by its
+//! current hover/focus/pressed/dragged interaction state.
 //!
 //! **Source:** androidx Compose Material3 `StateTokens` (`v0_210`, retrieval
 //! 2026-07-17) — hover 8%, **focus 10%, pressed 10%**, dragged 16%. This
 //! supersedes the older material-web `v0.192` table (hover 8%, focus/pressed
-//! 12%, dragged 16%) cited elsewhere in the research ledger (R18); `v0_210`
-//! is the table this helper ships.
+//! 12%, dragged 16%); `v0_210` is the table this helper ships.
 //!
 //! [`StateLayer`] carries no theme dependency and no interaction-detection
 //! logic of its own — a widget's own `event` handler calls the `set_*`
@@ -34,10 +32,10 @@
 //!   has only Down/Move/Up/Cancel — no
 //!   Enter/Leave/hover phase — so no widget can detect hover without future
 //!   input-pipeline work adding one.
-//! - **`focused` — the focus-routing prerequisite landed in 6d (task 07:
-//!   `material::dialog`/`sheet`, `cupertino::alert_dialog`/`action_sheet` all
-//!   now call `EventCtx::request_focus` on a `Down` and dismiss on a
-//!   focus-routed `Key(Escape)`), but **still unwired here**: none of those
+//! - **`focused` — the focus-routing prerequisite landed** (`material::dialog`/
+//!   `sheet`, `cupertino::alert_dialog`/`action_sheet` all now call
+//!   `EventCtx::request_focus` on a `Down` and dismiss on a focus-routed
+//!   `Key(Escape)`), but **still unwired here**: none of those
 //!   four modals paint their own `StateLayer`-shaped actionable surface — each
 //!   is a plain scrim + panel modal barrier (fills/hairlines), not an M3
 //!   interactive surface with a content color a state layer would tint. There

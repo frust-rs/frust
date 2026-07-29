@@ -1,34 +1,32 @@
-//! The M3 top `AppBar` (Phase 6c, PLAN.md D5, task 09): small (64dp),
-//! center-aligned variant only — medium/large flexible variants are deferred
-//! (PLAN.md D5). Navigation icon tint resolves to `onSurface` (R8).
+//! The M3 top `AppBar`: small (64dp), center-aligned variant only —
+//! medium/large flexible variants are deferred. Navigation icon tint resolves
+//! to `onSurface`.
 //!
-//! `AppBarView`/`AppBarWidget` follow the widget-authoring recipe
-//! (`research/RESEARCH.md`'s `widget-authoring-patterns`): a `leading` slot
-//! (a nav icon, typically) and a `Vec<AnyView>` of trailing `actions` are
+//! `AppBarView`/`AppBarWidget` follow the widget-authoring recipe: a `leading`
+//! slot (a nav icon, typically) and a `Vec<AnyView>` of trailing `actions` are
 //! opaque caller-supplied children routed through `ChildPod`s exactly like
 //! [`crate::Row`]'s children — this widget lays them out and routes events to
 //! them, but does **not** paint or tint their content itself (the leading
-//! slot's `onSurface`/actions' `onSurfaceVariant` tinting guidance from
-//! `TASKS.md` is the *caller's* responsibility to apply to whatever `AnyView`
-//! it supplies, e.g. an icon button — this widget has no icon primitive to
-//! tint). The **title** is the one child this widget fully owns: composed as
-//! a child [`crate::text::TextView`] (per the contested-C1 recipe note — no
-//! hand-shaped text), styled at the M3 `titleLarge` type-scale token and
-//! themed `onSurface` (the `Text` default role), so it participates in a live
-//! theme swap through `Text`'s own layout-time color resolution (see
-//! `docs/ARCHITECTURE.md`'s Theme delivery). The title consumes the M3
-//! Expressive **emphasized** `titleLarge` sibling (`titleLargeEmphasized`;
-//! see `frust-theme::typography`'s "Emphasized type scale" module docs) —
-//! same size/line-height as the baseline token, weight stepped from Regular
-//! to Medium (task 6f-10).
+//! slot's `onSurface`/actions' `onSurfaceVariant` tinting guidance is the
+//! *caller's* responsibility to apply to whatever `AnyView` it supplies, e.g.
+//! an icon button — this widget has no icon primitive to tint). The
+//! **title** is the one child this widget fully owns: composed as a child
+//! [`crate::text::TextView`] (no hand-shaped text), styled at the M3
+//! `titleLarge` type-scale token and themed `onSurface` (the `Text` default
+//! role), so it participates in a live theme swap through `Text`'s own
+//! layout-time color resolution (see `docs/ARCHITECTURE.md`'s Theme
+//! delivery). The title consumes the M3 Expressive **emphasized**
+//! `titleLarge` sibling (`titleLargeEmphasized`; see
+//! `frust-theme::typography`'s "Emphasized type scale" module docs) — same
+//! size/line-height as the baseline token, weight stepped from Regular to
+//! Medium.
 //!
 //! Layout is a fixed 64dp-tall row: the leading slot (if any) hugs the left
 //! edge, actions hug the right edge in reading order, and the title fills the
 //! remaining middle space, vertically centered throughout. The container
 //! itself paints a `colors.surface`-filled background (the M3 "surface
 //! container" role for a small/center-aligned app bar); no elevation shadow is
-//! painted (not requested by this task — FAB/Card own the elevation-token
-//! precedent, task 08).
+//! painted (FAB/Card own the elevation-token precedent).
 //!
 //! # Semantics
 //!
@@ -56,9 +54,8 @@ use crate::text;
 /// Source: m3.material.io/components/top-app-bars/specs (also
 /// material-components-android `docs/components/TopAppBar.md`). This is the
 /// *only* height this widget ships — the flexible medium (112/136dp)/large
-/// (120/152dp) variants are deferred (PLAN.md D5; R6/R13 corrected the
-/// research ledger's initial medium/large figures — those variants are not
-/// deprecated, just out of v1 scope here).
+/// (120/152dp) variants are deferred (not deprecated, just out of v1 scope
+/// here).
 const HEIGHT: f64 = 64.0;
 /// Horizontal inset from the bar's leading/trailing edges to the
 /// leading/action slots, in logical px.
@@ -75,8 +72,7 @@ const GAP: f64 = 4.0;
 /// `frust-theme::typography`'s `TITLE_LARGE_EMPHASIZED` token: same
 /// size/line-height as the baseline `TITLE_LARGE` (m3.material.io, weight
 /// 400 — not the contested 500 secondary-source claim), weight stepped up to
-/// Medium (task 6f-10's emphasized-type consumption; was `REGULAR` prior to
-/// this task).
+/// Medium (the emphasized-type consumption; was `REGULAR` previously).
 const TITLE_SIZE: f32 = 22.0;
 const TITLE_LINE_HEIGHT: f32 = 28.0;
 const TITLE_WEIGHT: FontWeight = FontWeight::MEDIUM;
