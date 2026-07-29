@@ -27,8 +27,8 @@ use frust::{
     list_item, scroll_view, text, use_context,
 };
 
-/// CircleAvatar diameter — radius 20 → 40 (RESEARCH.md "Material sizing
-/// reference"), matching the roster's leading avatars.
+/// CircleAvatar diameter — radius 20 → 40 (Material sizing
+/// reference), matching the roster's leading avatars.
 const AVATAR_SIZE: f64 = 40.0;
 
 use crate::HuddleState;

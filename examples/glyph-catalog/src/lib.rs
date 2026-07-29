@@ -371,7 +371,7 @@ fn home_page(state: &CatalogState) -> AnyView<CatalogState> {
     ]))
 }
 
-/// The root [`Component`] (spec §5.5). The shell default theme is already
+/// The root [`Component`]. The shell default theme is already
 /// Glyph (every shell seeds `Theme::glyph_baseline()`), so `init` forces
 /// nothing — it only wires the reactive [`CatalogState`].
 #[derive(Default)]
@@ -390,15 +390,15 @@ impl Component for CatalogApp {
         // same stack. Glyph page transitions for any pushed overlay.
         //
         // `frust::navigator` (not `frust_widgets::navigator`) — the facade
-        // wrapper auto-wires Android/gesture back handling for `state.nav`
-        // (glyph-refinements task 08), so back-dismiss (overlay → pop → app
+        // wrapper auto-wires Android/gesture back handling for `state.nav`,
+        // so back-dismiss (overlay → pop → app
         // exit at the root) works with zero catalog-side back code.
         let handles = state.clone();
         any(navigator(&state.nav, move || home_page(&handles)).transition(TransitionSpec::glyph()))
     }
 }
 
-// The generated app's sole entry point (spec §5.5/§10): one line binds
+// The generated app's sole entry point: one line binds
 // `CatalogApp` to all three platforms — the Android JNI exports
 // (`target_os = "android"` only), the iOS C-ABI exports (self-gated to
 // `target_os = "ios"`), and (on desktop) the hidden `__frust_main` that

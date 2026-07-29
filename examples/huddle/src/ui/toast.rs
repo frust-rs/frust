@@ -1,4 +1,4 @@
-//! The overlay toast/snackbar service (PLAN.md's "Toasts/snackbars + undo").
+//! The overlay toast/snackbar service.
 //!
 //! [`ToastController`] is a cheap, cloneable, `Send + Sync` handle — the same
 //! shape as `NavigatorController`: callers only *record* a request (via

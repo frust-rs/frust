@@ -1,18 +1,17 @@
-//! [`SearchController`] — the Search tab's view model (huddle
-//! clean-architecture refactor, task 04; moved verbatim apart from repo
-//! threading from the former flat `features/search/mod.rs`).
+//! [`SearchController`] — the Search tab's view model (moved verbatim apart
+//! from repo threading from the former flat `features/search/mod.rs`).
 //!
 //! Owns the query `RwSignal<String>` and a `Memo`-derived
 //! [`SearchResults`](crate::features::search::domain::SearchResults)
-//! (`PLAN.md`'s "Search live filter" row: `signals + Memo`, the same
-//! "roster pattern" it names). There is no async use case here: the whole
+//! (the "Search live filter" convention: `signals + Memo`, the same
+//! "roster pattern" the channel roster uses). There is no async use case here: the whole
 //! dataset is already resident (behind the injected
 //! [`SearchRepository`](crate::features::search::domain::SearchRepository)),
 //! so filtering is a pure, synchronous function of the query string — no
 //! `ControllerCore`/`UseCase` composition is needed the way
 //! `features::settings` uses one for its (also synchronous) theme
-//! application; this feature's spec item is explicit that search "is
-//! instant/local" (PLAN Design Decision 8).
+//! application; search is explicitly instant/local, unlike the
+//! async-fallible features.
 //!
 //! # Why a thread-local instance, not a `Component`
 //!

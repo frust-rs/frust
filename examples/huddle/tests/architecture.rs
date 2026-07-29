@@ -1,14 +1,11 @@
-//! Architecture conformance test (huddle clean-architecture refactor, task 06
-//! — `workflow/plans/features/huddle-clean-architecture/`; hardened by
-//! followups/fix-1 task F1 against review r0's three demonstrated bypass
-//! vectors, then followups/fix-2 task F2 against review r1's two
-//! reproduced gaps in that hardening — see the "What this is NOT" section
-//! below).
+//! Architecture conformance test: enforces huddle's per-feature
+//! clean-architecture layering, hardened across several passes against
+//! reviewer-found bypasses in the scan itself — see the "What this is NOT"
+//! section below.
 //!
 //! A plain `std::fs` source scan over `src/`, run as an ordinary `cargo test`
 //! (this repo has no lint-plugin/static-analysis tooling — see
-//! `docs/CODE_STANDARDS.md`), enforcing the per-feature layering rules PLAN's
-//! Design Decisions 2/3/7 established:
+//! `docs/CODE_STANDARDS.md`), enforcing the per-feature layering rules:
 //!
 //! (a) a `features/*/domain/**` file never mentions `frust::`, or a
 //!     `data`/`presentation` path segment banned below (see
@@ -28,8 +25,8 @@
 //!     construction AND a facade re-export (`pub use` of a concrete repo
 //!     type from a feature `mod.rs`) outside the sanctioned sites;
 //! (f) `features::search`/`features::profile`'s `domain`+`data` never mention
-//!     `HuddleFailure`, `ControllerCore`, or `async fn` — the Design
-//!     Decision 8 ratchet keeping both features' sync-infallible shape from
+//!     `HuddleFailure`, `ControllerCore`, or `async fn` — a ratchet
+//!     keeping both features' sync-infallible shape from
 //!     regressing toward the `ControllerCore`/`HuddleFailure` spine the other
 //!     four features use.
 //!
@@ -40,36 +37,41 @@
 //! last-in-file, verified per file below) and every doc/line-comment-only
 //! line are stripped before matching (see [`production_lines`]). This is
 //! deliberate, not a loophole: controller unit tests legitimately construct
-//! the real `Store<Feature>Repository` under `#[cfg(test)]` (task 02's
-//! documented mini-composition-root pattern, task 04/05's precedent) so
+//! the real `Store<Feature>Repository` under `#[cfg(test)]` (an established
+//! mini-composition-root pattern) so
 //! their assertions can target the real dataset shape without a test-logic
-//! rewrite (PLAN Design Decision 5's hard behavior-preserving bar). Doc
-//! comments are stripped for the same reason tasks 02-05 flagged repeatedly:
+//! rewrite (the behavior-preserving bar: import-path edits only, never a
+//! test-logic change). Doc
+//! comments are stripped for the same reason, seen repeatedly:
 //! several domain/data files carry historical or intra-doc-link prose
 //! mentioning `crate::mock`/`crate::data::store`/`frust::` (e.g.
-//! `profile/domain/entities.rs`'s task-01-inherited link) that names, not
+//! `profile/domain/entities.rs`'s inherited doc link) that names, not
 //! imports, the thing it's talking about. Checks (a)/(b)/(e) additionally
 //! run over `production_lines`' *use-joined* output (see
 //! [`join_use_statements`]) so a `use` tree can't be split across lines to
 //! dodge detection; checks (c)/(d)/(f) don't need this (see each check's own
 //! comment).
 //!
-//! # What this is NOT (review r0/r1's boundary notes)
+//! # What this is NOT
 //!
 //! This is a **substring/token scan, not a parser** — it has no `syn`/AST
-//! understanding of Rust `use` trees, paths, or types. Review r0 (round 0)
-//! demonstrated three concrete ways a substring scan can be defeated; fix-1
-//! closed those three, but review r1's adversarial re-review reproduced two
-//! more gaps *in that hardening itself* (both closed here, by fix-2). Review
-//! r2's convergence re-review then found one more, LATENT (fails-safe, never
-//! a bypass) gap, closed here by fix-3 (below):
+//! understanding of Rust `use` trees, paths, or types. An initial adversarial
+//! review demonstrated three concrete ways a substring scan can be defeated;
+//! the first hardening pass closed those three, but a follow-up adversarial
+//! re-review reproduced two more gaps *in that hardening itself* (both
+//! closed here, by the second hardening pass). A convergence re-review then
+//! found one more, LATENT (fails-safe, never a bypass) gap, closed here by
+//! the third hardening pass (below):
 //!
-//! 1. **Alias/use-form bypass — CLOSED (fix-1).** A single `"::data::"`/
+//! 1. **Alias/use-form bypass — CLOSED (first hardening pass).** A single
+//!    `"::data::"`/
 //!    `"::presentation::"` needle missed `use ...::data as msgdata;` (no
-//!    trailing `::`). Superseded by fix-2's segment tokenizer (gap B below),
+//!    trailing `::`). Superseded by the second pass's segment tokenizer (gap
+//!    B below),
 //!    which makes every use-form terminator (`;`, ` as `, `}`, `,`, a
 //!    brace-list member, …) irrelevant — see [`has_exact_segment`].
-//! 2. **Concrete-repo-name bypass — CLOSED (fix-1).** A facade re-export
+//! 2. **Concrete-repo-name bypass — CLOSED (first hardening pass).** A
+//!    facade re-export
 //!    (`pub use data::repositories::StoreChannelRepository;` from a feature
 //!    `mod.rs`) never matched the old `::data::`/`::presentation::` needles
 //!    at all — the banned type crosses the layer boundary by name, not by
@@ -77,12 +79,14 @@
 //!    `Store[A-Za-z]*Repository`/`InMemory[A-Za-z]*Repository` name pattern
 //!    itself anywhere outside the data layer/composition root/allowlist (see
 //!    check (e)), covering both direct construction and a re-export.
-//! 3. **Split-use bypass — CLOSED (fix-1).** A `use` tree spanning multiple
+//! 3. **Split-use bypass — CLOSED (first hardening pass).** A `use` tree
+//!    spanning multiple
 //!    physical lines could put a banned segment on a different physical line
 //!    than the rest of the path, defeating a needle scanned line-by-line.
 //!    [`join_use_statements`] concatenates a `use ...;` statement's physical
 //!    lines into one logical line before any check runs.
-//! 4. **Gap A — `pub use` join trigger — CLOSED (fix-2).** Fix-1's
+//! 4. **Gap A — `pub use` join trigger — CLOSED (second hardening pass).**
+//!    The first pass's
 //!    [`join_use_statements`] only recognized a joinable statement by the
 //!    literal `"use "` prefix, so a split `pub use`/`pub(crate) use`/
 //!    `pub(super) use` re-export (the exact facade-re-export shape check (e)
@@ -90,25 +94,27 @@
 //!    bypass for the join-trigger's own blind spot. [`is_use_trigger_line`]
 //!    now recognizes bare `use `, and any `pub`/`pub(...)`-prefixed `use `,
 //!    as a join trigger — see its doc comment for the exact accepted forms.
-//! 5. **Gap B — brace-list membership forms — CLOSED (fix-2).** Every fix-1
-//!    needle required a `::` immediately before the banned segment; a
+//! 5. **Gap B — brace-list membership forms — CLOSED (second hardening
+//!    pass).** Every needle from the first pass
+//!    required a `::` immediately before the banned segment; a
 //!    rustfmt-produced grouped import puts a segment straight after `{`, `, `,
 //!    or inside a nested `{self, ...}` group with no `::` prefix at all
 //!    (`use x::{domain::Foo, data::Bar};` — the `data` member sits right
-//!    after `, `, not `::`) — none of fix-1's needles matched. [`has_exact_segment`]
+//!    after `, `, not `::`) — none of those needles matched. [`has_exact_segment`]
 //!    replaces the whole needle-list approach: a joined `use` line is split on
 //!    every non-identifier delimiter (`::`, `{`, `}`, `,`, `;`, whitespace,
 //!    `(`, `)` — see [`tokenize_segments`]) and an *exact* `data`/`presentation`
 //!    segment token is banned regardless of which punctuation surrounds it, so
-//!    no enumeration of use-form terminators is needed at all — the r1
-//!    reviewers' own recommended fix shape.
-//! 6. **Trailing-comment false positive — CLOSED (fix-3).** Review r2's one
+//!    no enumeration of use-form terminators is needed at all — the
+//!    recommended fix shape from that re-review.
+//! 6. **Trailing-comment false positive — CLOSED (third hardening pass).**
+//!    The convergence re-review's one
 //!    confirmed Major: [`has_exact_segment`]'s segment tokenizer ran over
 //!    un-comment-stripped `use`-line text, so a trailing `// … data …`
 //!    comment on an otherwise-clean `use` line could trip an exact-token
 //!    false positive on the comment's own prose — LATENT (fails-safe: a loud
 //!    spurious failure naming file+line, never a silent bypass; the opposite
-//!    direction from the bypass class rounds 0-2 hunted). [`join_use_statements`]
+//!    direction from the bypass class the earlier rounds hunted). [`join_use_statements`]
 //!    now strips a trailing `//`-to-end-of-line suffix from each physical
 //!    line on the use-statement path only, via [`strip_trailing_comment`],
 //!    before any joining/tokenizing happens — see that function's doc
@@ -121,8 +127,8 @@
 //! - **Keyword-adjacent `use\n<path>` split**: a theoretical `use` statement
 //!   split immediately after the `use` keyword itself, e.g. `use\n    crate::…;`
 //!   (as opposed to every split this scan's fixtures/injections exercise,
-//!   which break at a punctuation/path boundary further in) — pre-existing
-//!   since fix-1, r2 optional minor. `rustfmt` never emits this shape (it
+//!   which break at a punctuation/path boundary further in) — a pre-existing,
+//!   optional-severity gap. `rustfmt` never emits this shape (it
 //!   only breaks a `use` item at `::`/`{`/`,` boundaries), so it is
 //!   documented here rather than fixed.
 //! - **Renames**: `type StoreChannelRepositoryAlias = StoreChannelRepository;`
@@ -137,10 +143,10 @@
 //! - **Mid-file `#[cfg(test)]` over-stripping**: [`production_lines`]
 //!   truncates a file at its *first* `#[cfg(test)]`/`mod tests` marker,
 //!   assuming huddle's test-module-last-in-file convention (verified true
-//!   for every file in this crate with one, per task 06's completion summary
-//!   audit); a future file breaking that convention would have everything
+//!   for every file in this crate with one); a future file breaking that
+//!   convention would have everything
 //!   after an early marker silently excluded from scanning, not just the
-//!   real test module (review r0 minor 4 — self-flagged, no action taken).
+//!   real test module (a self-flagged, accepted limitation — no action taken).
 //!
 //! # Sanctioned exemptions (explicit, file-scoped, comment-documented)
 //!
@@ -150,13 +156,13 @@
 //! own doc comment for the full rationale:
 //!
 //! 1. `features/messages/presentation/controllers.rs`'s `resolve_repo()`
-//!    fallback (task 03 ripple) — see
+//!    fallback — see
 //!    [`presentation_never_imports_data_directly`] and (the same fallback,
 //!    now also matching the concrete-name needle)
 //!    [`no_concrete_repo_type_name_outside_data_layer_or_composition_root`].
 //! 2. `features/settings/domain/{models.rs, accent.rs,
 //!    use_cases/set_theme.rs}`'s `frust::` value-type/side-effect imports
-//!    (task 05 ripple) — see [`domain_never_imports_frust_presentation_or_data`].
+//!    — see [`domain_never_imports_frust_presentation_or_data`].
 //!
 //! Every exemption below is also asserted **used** (fired at least once) —
 //! an exemption nobody's code needs any more is exactly as stale as a
@@ -220,10 +226,10 @@ struct Line {
 /// `//` line-comment-only line dropped, everything from the file's
 /// `#[cfg(test)]`/`mod tests` marker onward truncated (huddle convention
 /// keeps the test module last-in-file — verified true for every file in this
-/// crate that currently has one, per task 06's completion summary audit),
+/// crate that currently has one),
 /// and finally a multi-line `use` statement's physical lines joined into one
 /// logical [`Line`] (see [`join_use_statements`] — closes the split-use
-/// bypass review r0 demonstrated).
+/// bypass an early adversarial review demonstrated).
 ///
 /// The marker check is anchored on the line's own (non-comment) start, so a
 /// *prose* mention of `#[cfg(test)]` inside a doc comment (several files
@@ -256,8 +262,9 @@ fn production_lines(contents: &str) -> Vec<Line> {
 /// parenthesized visibility qualifier, then `"use "`. A prefix check, not a
 /// full attribute/visibility parser (deliberately: this crate's `use`/
 /// `pub use` style never carries an attribute or doc comment on the same
-/// physical line as the keyword itself), but it closes review r1's **gap
-/// A**: fix-1's join trigger matched only the literal `"use "` prefix, so a
+/// physical line as the keyword itself), but it closes a follow-up
+/// re-review's **gap A**: the first pass's join trigger matched only the
+/// literal `"use "` prefix, so a
 /// split `pub use`/`pub(crate) use` facade re-export — exactly the shape
 /// check (e) exists to police — was never joined at all, reopening the
 /// split-use bypass for that one form (see the module header's "What this is
@@ -281,13 +288,15 @@ fn is_use_trigger_line(trimmed: &str) -> bool {
 }
 
 /// Join a `use ...;` statement's physical lines into one logical [`Line`] so
-/// a banned segment can't straddle a line break (review r0's third
+/// a banned segment can't straddle a line break (an early adversarial
+/// review's third
 /// demonstrated bypass — a `use` tree split across lines, with the banned
 /// segment on a different physical line than where a line-by-line scan would
 /// expect it). Deliberately simple and deterministic, not a real `use`-tree
 /// parser: any non-comment line (comments are already stripped by the time
 /// this runs) whose trimmed text opens a `use` statement (see
-/// [`is_use_trigger_line`] — broadened to `pub`-prefixed forms by fix-2's gap
+/// [`is_use_trigger_line`] — broadened to `pub`-prefixed forms by the second
+/// hardening pass's gap
 /// A closure) has subsequent lines appended (each trimmed) until the
 /// accumulated text contains a `;` — the one character every `use` statement
 /// in this codebase's style (one item per statement, `rustfmt`-formatted)
@@ -297,8 +306,8 @@ fn is_use_trigger_line(trimmed: &str) -> bool {
 /// `#[cfg(test)]` region — ends) just stops accumulating rather than
 /// panicking; the resulting text is scanned as-is like anything else.
 ///
-/// **Trailing `//` comments are stripped on this path only (fix-3, review
-/// r2).** Every physical line that's part of a `use` statement — the trigger
+/// **Trailing `//` comments are stripped on this path only (the third
+/// hardening pass, closing a convergence re-review finding).** Every physical line that's part of a `use` statement — the trigger
 /// line and every line appended to it — is run through
 /// [`strip_trailing_comment`] before it's checked for `;` or joined, so a
 /// trailing `// … data …` comment can no longer feed a banned segment token
@@ -368,7 +377,7 @@ fn join_use_statements(lines: Vec<Line>) -> Vec<Line> {
 /// a string literal (there is no such thing as `use "foo";`), so a naive
 /// first-`//` split can't misfire the way it could on a general expression
 /// line, where a `"https://…"` string literal's `//` would be truncated
-/// mid-string and corrupt the line. This is exactly why review r2's fix is
+/// mid-string and corrupt the line. This is exactly why this fix is
 /// scoped to the use-statement path rather than folded into
 /// [`production_lines`]'s general per-line stripping (which only ever drops
 /// a line whose *entire* trimmed text is a comment, never a trailing one on
@@ -421,7 +430,8 @@ fn is_data_layer_file(relp: &str) -> bool {
 /// (`:` is one of the delimiter chars, so `"a::b"` yields `["a", "", "b"]`
 /// before empty segments are filtered).
 ///
-/// This is fix-2's answer to review r1's **gap B**: fix-1's needle list
+/// This is the second hardening pass's answer to that re-review's **gap
+/// B**: the first pass's needle list
 /// required a `::` immediately before a banned segment, which a brace-list
 /// member (`use x::{domain::Foo, data::Bar};` — `data` sits right after
 /// `", "`, not `"::"`) or a nested `{self, ...}` group never supplies. Once
@@ -459,9 +469,10 @@ fn has_exact_segment(text: &str, segment: &str) -> bool {
 /// qualified expression like
 /// `crate::features::messages::data::repositories::Foo::new()` that isn't
 /// part of a `use` tree at all, so has no `use`-statement structure for
-/// [`has_exact_segment`] to apply to. Reduced from fix-1's five-entry
+/// [`has_exact_segment`] to apply to. Reduced from the first pass's
+/// five-entry
 /// use-form needle list (`DATA_NEEDLES`/`PRESENTATION_NEEDLES`, deleted by
-/// fix-2): every `use`-line termination form that list enumerated is now
+/// the second pass): every `use`-line termination form that list enumerated is now
 /// covered by [`has_exact_segment`] instead, so only the plain
 /// fully-qualified-path form — a leading and trailing `::` around the banned
 /// segment — remains here. This is also part of the false-positive guard:
@@ -555,13 +566,13 @@ fn assert_all_used(check: &str, exemptions: &[Exemption], used: &[bool]) {
 //     ::data (any use-form)
 // ---------------------------------------------------------------------------
 
-/// PLAN's third exception category (task 05 ripple): settings is the one
+/// A documented exception category: settings is the one
 /// feature whose domain use cases ARE theming, so three of its files import
 /// `frust::` value types (`Theme`/`Color`/`ColorScheme`/`Brightness`/etc,
 /// composed by `compose()`) plus `use_cases/set_theme.rs`'s
 /// `set_app_theme`/`clear_app_theme` calls — the app's single theming
-/// side-effect site (pre-existing behavior, preserved verbatim per PLAN
-/// Design Decision 5). This exemption covers ONLY the `frust::` needle for
+/// side-effect site (pre-existing behavior, preserved verbatim per the
+/// behavior-preserving bar). This exemption covers ONLY the `frust::` needle for
 /// exactly these three files — every other domain ban (`presentation`,
 /// `data`, in any form the segment tokenizer or expression needle covers)
 /// still applies to settings' domain like every other feature's; only the
@@ -662,17 +673,17 @@ fn domain_never_imports_frust_presentation_or_data() {
 // (b) presentation never mentions ::data (any use-form)
 // ---------------------------------------------------------------------------
 
-/// Sanctioned exemption (task 03 ripple, PLAN's second exception category):
-/// `MessagesController::resolve_repo()`'s `StoreMessageRepository` fallback
+/// A second sanctioned exemption category: `MessagesController::resolve_repo()`'s
+/// `StoreMessageRepository` fallback
 /// is a documented composition-root reference in production code — the ONE
 /// presentation->data edge in the whole crate that isn't `#[cfg(test)]`-gated
-/// (unlike task 02's channels precedent). It exists because
+/// (unlike the channels feature's precedent). It exists because
 /// `new`/`with_latency`/`for_channel` are public constructors external
 /// integration-test crates call with a channel id only, so a repo parameter
-/// would force non-import-line test edits (forbidden by Design Decision 5);
+/// would force non-import-line test edits (forbidden by the
+/// behavior-preserving bar);
 /// the injected and fallback repos are the identical `StoreMessageRepository`
-/// type, so behavior is unchanged either way (task 03 completion summary,
-/// Notable Decisions #1).
+/// type, so behavior is unchanged either way.
 #[test]
 fn presentation_never_imports_data_directly() {
     let exemptions = [Exemption {
@@ -776,10 +787,10 @@ fn only_data_layer_reads_the_shared_store_directly() {
 
 /// Unlike (a)-(c)/(e), this scans **every line, including comments and test
 /// regions** (raw `contents.lines()`, not [`production_lines`]) — `src/mock/`
-/// and `src/screens/` no longer exist anywhere in this crate (task 01/05/06),
+/// and `src/screens/` no longer exist anywhere in this crate,
 /// so there is no legitimate reason for even a doc-comment prose mention of
-/// either path to survive; any hit means a stale reference this task's own
-/// deletion should have caught.
+/// either path to survive; any hit means a stale reference the migration that
+/// deleted them should have caught.
 #[test]
 fn no_file_mentions_deleted_mock_or_screens_modules() {
     let mut failures = Vec::new();
@@ -811,11 +822,11 @@ fn no_file_mentions_deleted_mock_or_screens_modules() {
 // ---------------------------------------------------------------------------
 // (e) no file outside */data/**, src/lib.rs, or the messages resolve_repo
 //     allowlist entry names a concrete Store*Repository/InMemory*Repository
-//     type — closes review r0's concrete-repo-name bypass (both direct
+//     type — closes a concrete-repo-name bypass (both direct
 //     construction and a facade re-export)
 // ---------------------------------------------------------------------------
 
-/// Review r0's second demonstrated bypass: a facade re-export
+/// An early adversarial review's second demonstrated bypass: a facade re-export
 /// (`pub use data::repositories::StoreChannelRepository;` from a feature's
 /// `mod.rs`) crosses the layer boundary by *type name*, not by path, so
 /// neither the `::data`/`::presentation` needles above nor the `crate::
@@ -892,10 +903,10 @@ fn no_concrete_repo_type_name_outside_data_layer_or_composition_root() {
 
 // ---------------------------------------------------------------------------
 // (f) search/profile domain+data never mention HuddleFailure, ControllerCore,
-//     or async fn (Design Decision 8 ratchet)
+//     or async fn (a sync-infallible-shape ratchet)
 // ---------------------------------------------------------------------------
 
-/// PLAN Design Decision 8: `search` and `profile` are the two
+/// A documented design decision: `search` and `profile` are the two
 /// sync-infallible features (`filter`/`load` return a plain value, never a
 /// `Result<_, HuddleFailure>` behind a `ControllerCore`/`async fn` spine like
 /// channels/messages/activity/settings). This is a ratchet against future
@@ -943,10 +954,11 @@ fn search_and_profile_domain_and_data_stay_sync_infallible() {
 
 // ---------------------------------------------------------------------------
 // (g) trailing `//` comments on a use line don't trip the segment scan
-//     (review r2's one confirmed Major, LATENT/fails-safe; closed by fix-3)
+//     (one confirmed Major, LATENT/fails-safe; closed by the third
+//     hardening pass)
 // ---------------------------------------------------------------------------
 
-/// Review r2's finding: before fix-3, [`has_exact_segment`] ran over
+/// A convergence re-review's finding: before the third hardening pass, [`has_exact_segment`] ran over
 /// un-comment-stripped `use`-line text, so a trailing `// … data …` comment
 /// on an otherwise-clean `use` line could trip an exact-token false positive
 /// on the comment's own prose, not on anything actually imported. This test

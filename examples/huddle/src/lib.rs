@@ -60,7 +60,7 @@ use features::search::domain::repositories::SearchRepository;
 use shell::Tab;
 use ui::toast::{ToastController, toast_overlay};
 
-/// The Huddle app's retained state (spec §5.5's `Component::State`): the
+/// The Huddle app's retained state (the framework's `Component::State`): the
 /// deep-link-wired router, the selected-tab signal (the bottom bar highlight),
 /// and the app-wide toast handle.
 pub struct HuddleState {
@@ -190,6 +190,6 @@ impl Component for HuddleApp {
     }
 }
 
-// The showcase's sole entry point (spec §5.5/§10): one line binds `HuddleApp`
+// The showcase's sole entry point: one line binds `HuddleApp`
 // to all three platforms.
 frust::app!(HuddleApp);

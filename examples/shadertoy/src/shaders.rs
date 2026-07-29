@@ -10,7 +10,7 @@
 //! (`@fragment fn fs_main(in: FrustVsOut) -> @location(0) vec4<f32>`) and
 //! reads the uniforms as `frust_u.resolution` / `frust_u.time`. Every shader
 //! here writes **opaque** output (`vec4<f32>(color, 1.0)`) — the v1
-//! [`frust_scene::ShaderProgram`] contract (RESEARCH.md §Q1: vello's
+//! [`frust_scene::ShaderProgram`] contract (vello's
 //! image-override copy only agrees with Frust's premultiplied render target
 //! at alpha = 1.0).
 
@@ -21,8 +21,7 @@ use frust_scene::ShaderProgram;
 /// including its iquilezles cosine-palette `palette()` helper
 /// (<https://iquilezles.org/articles/palettes/>).
 ///
-/// Port notes (`workflow/plans/features/frust-shader-showcase/research/RESEARCH.md`
-/// §Q5): `@builtin(position)` is top-left-origin (shadertoy's `fragCoord` is
+/// Port notes: `@builtin(position)` is top-left-origin (shadertoy's `fragCoord` is
 /// bottom-left), so the y-flip below restores shadertoy parity; the loop
 /// counter is an `f32` accumulator like the original; `d = abs(sin(...))`
 /// keeps the following `pow(0.01 / d, 1.2)` in its defined domain (`pow` is
@@ -83,10 +82,10 @@ fn fs_main(in: FrustVsOut) -> @location(0) vec4<f32> {
 "#;
 
 /// *Synthwave sunset* — a port of a CC0 neon/synthwave landscape shadertoy
-/// (`research/glsl-sources/synthwave.glsl`; the source header gives no
+/// (the source header gives no
 /// shadertoy URL, just "CC0: For the neon style enjoyers").
 ///
-/// Per-function licenses carried over from the original (task 09 rule 9):
+/// Per-function licenses carried over from the original:
 /// - `hsv2rgb`: WTFPL, author sam hocevar (<https://stackoverflow.com/a/17897228/418488>)
 /// - `atan_approx`: MIT, author Pascal Gilcher (<https://www.shadertoy.com/view/flSXRV>)
 /// - `srgb`: author nmz (twitter: @stormoid), license unknown (<https://www.shadertoy.com/view/NdfyRM>)
@@ -101,7 +100,7 @@ fn fs_main(in: FrustVsOut) -> @location(0) vec4<f32> {
 /// write-only locals (`tp` in `skyRender`, `op`/`gp` in `triRender`) are
 /// dropped for the same reason.
 ///
-/// Port notes (task 09's WGSL porting rules):
+/// Port notes (this crate's WGSL porting rules):
 /// - Every `mod`/`mod1`/`mod2` call is floor-mod (`mod_f`/`mod_v2` below, not
 ///   WGSL's trunc-mod `%`) — the fractal (`city_of_kali`), the ground grid,
 ///   and the mountain silhouette all wrap negative coordinates.
@@ -704,11 +703,11 @@ fn fs_main(in: FrustVsOut) -> @location(0) vec4<f32> {
 "#;
 
 /// *Glassy field* — a port of Shane's ["Abstract Glassy
-/// Field"](https://www.shadertoy.com/view/WlSSzK)
-/// (`research/glsl-sources/glassy-field.glsl`). No explicit license header in
+/// Field"](https://www.shadertoy.com/view/WlSSzK).
+/// No explicit license header in
 /// the source; shadertoy's default license is CC BY-NC-SA 3.0.
 ///
-/// **Documented visual deviation (task 09 rule 8):** v1 has no `iChannel`
+/// **Documented visual deviation:** v1 has no `iChannel`
 /// texture binding, so the original's two texture lookups are substituted
 /// procedurally, both built on the shader's own `n3D` value-noise function:
 /// - `tpl` (tri-planar texture blend) samples a procedural `tex_noise`
@@ -724,13 +723,13 @@ fn fs_main(in: FrustVsOut) -> @location(0) vec4<f32> {
 ///   `db`'s only other input (`iChannel0`) has no real texture to bump
 ///   against here anyway — the geometric shape and glass/glow shading read
 ///   fine without it. This is a candidate for follow-up refinement, not a
-///   blocker (task notes).
+///   blocker.
 ///
 /// Dead-code note: the original's `rot2` helper (Fabrice Neyret's rotation
 /// trick, credited in its own comment) is defined but never called there
 /// either — omitted here.
 ///
-/// Port notes (task 09's WGSL porting rules):
+/// Port notes (this crate's WGSL porting rules):
 /// - Every `mod` call (the field's sinusoidal wrap in `map`, the two hash
 ///   terms in `n3D`, the purple electric-charge modulus in `mainImage`) is
 ///   floor-mod (`mod_f`/`mod_v3`/`mod_v4` below), not WGSL's trunc-mod `%`.

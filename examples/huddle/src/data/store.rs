@@ -1,5 +1,5 @@
-//! The shared mock dataset the whole Huddle app renders (PLAN.md's
-//! "All data mocked/static").
+//! The shared mock dataset the whole Huddle app renders — all data is
+//! mocked/static.
 //!
 //! This is a hub file: only a feature's `data/` layer reads it directly
 //! (through the accessor functions below), never `domain`/`presentation` (see
@@ -10,8 +10,8 @@
 //! own the signals, seeding them from these accessors via the feature's
 //! repository.
 //!
-//! Entity struct definitions live in their owning feature's `domain::entities`
-//! (huddle clean-architecture refactor, task 01); this module owns only the
+//! Entity struct definitions live in their owning feature's `domain::entities`;
+//! this module owns only the
 //! dataset + accessors, the app's transport-equivalent.
 //!
 //! # Shape (per PLAN)

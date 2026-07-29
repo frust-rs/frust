@@ -1,6 +1,6 @@
 # Standalone package: excluded from the root workspace (see root Cargo.toml's
 # `[workspace] exclude` and docs/DEVELOPMENT.md's Version-Pin Policy) so the
-# generated debug APK pipeline (task 01) can be gated on its own, and this
+# generated debug APK pipeline can be gated on its own, and this
 # example's own [workspace] root gets its own Cargo.lock rather than joining
 # the root workspace's.
 [workspace]
@@ -13,45 +13,43 @@ publish = false
 
 # `cdylib` is the shared library Android's `System.loadLibrary` loads (the JNI
 # bridge); `staticlib` is the archive the iOS Xcode target links (the C-ABI
-# `frust_*` bridge, spec §10.2); `rlib` keeps the crate usable as a normal Rust
-# library for the desktop `main.rs` preview binary (spec §12.9).
+# `frust_*` bridge); `rlib` keeps the crate usable as a normal Rust
+# library for the desktop `main.rs` preview binary.
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 # NOTE: temporary path dependency pointing at the Frust repo checkout
-# that generated this project (spec §12.3: "frust_path" mechanism is
+# that generated this project (the `frust_path` mechanism is
 # explicitly temporary). Once Frust crates are published, `frust
 # create` will emit a version dependency here instead.
 frust = { path = "../../crates/frust" }
 
 # clean-signals (the async/use-case/controller/retry substrate) stays a path
 # dependency to the sibling `clean-signals-rs` checkout; its Frust glue now
-# lives in-repo as `plugins/clean-signals-frust` (plugin-system-shared-
-# preferences plan, task 05 — repointed from the sibling checkout's
-# pre-migration glue crate). Both this crate and the
+# lives in-repo as `plugins/clean-signals-frust` (repointed from the sibling
+# checkout's pre-migration glue crate). Both this crate and the
 # in-repo glue plugin resolve `clean-signals` by the SAME canonical sibling
 # path — a hard requirement, not a convenience. If `clean-signals` came in by
 # `git`+`rev` while the glue plugin resolved `clean-signals` by path, Cargo
 # would build TWO distinct crate identities for `clean-signals`, and the
 # controller's `AsyncState`/`ControllerCore`/`Failure` types would NOT unify
 # with the glue crate's `use_controller`/`async_view`/`use_failure_listener`
-# bounds (type-identity rule — see docs/DEVELOPMENT.md's Version-Pin Policy
-# and workflow/plans/features/team-demo-android/research/RESEARCH.md §3).
+# bounds (type-identity rule — see docs/DEVELOPMENT.md's Version-Pin Policy).
 # Requires the sibling checkout at `../../../clean-signals-rs` (i.e. next to
 # `../frust`) on its `develop` branch. Swap both to a git+rev spec together,
 # never one at a time, once clean-signals gains a remote.
 clean-signals = { path = "../../../clean-signals-rs/crates/clean-signals" }
 clean-signals-frust = { path = "../../plugins/clean-signals-frust" }
 
-# `frust-core` + `kurbo` + `peniko`: the Home screen (Phase C, task 11)
+# `frust-core` + `kurbo` + `peniko`: the Home screen
 # reintroduces the facade's documented "low-level escape hatch" (see
 # `docs/ARCHITECTURE.md`) for the small hand-rolled `View`/`Widget` pairs no
 # facade widget covers — `ui/swipeable.rs`'s horizontal swipe-to-action row,
 # `ui/sheet.rs`'s modal sheet, `ui/fill_box.rs`'s arbitrary-color rounded-rect
 # `fill_box` leaf (avatar/badge/status-dot/composer-tile fill) and `filled_box`
 # single-child container (compact attachment tiles — the card-inset-free box the
-# feed restyle uses; device-parity-round2 task R2 promoted these out of
+# feed restyle uses, promoted out of
 # `features/channels/presentation/pages/home.rs`), that same home page's
 # animated loading `Shimmer`, and `ui/toast.rs`'s paint-driven
 # `toast_entrance` slide/fade wrapper. This is the same production
@@ -74,8 +72,7 @@ peniko = "0.6.1"
 # builds only (riding the same features plumbing that turns on
 # `frust/perf-trace` for debug/profile), so release strips stray info/debug
 # log lines while keeping warn/error crash diagnostics, and profile keeps its
-# `frust-perf` output. Mirrors `templates/app/Cargo.toml.tmpl`'s block verbatim
-# (release-lean plan, task 04/05).
+# `frust-perf` output. Mirrors `templates/app/Cargo.toml.tmpl`'s block verbatim.
 log = "0.4"
 
 # Dev-only: the headless screen tests drive Frust's `RenderRoot` directly
@@ -104,16 +101,14 @@ tokio = { version = "1", default-features = false, features = ["rt", "macros", "
 lean = ["log/release_max_level_warn"]
 
 # `--release` mode: fully optimized, stripped, single-panic-path binary for
-# store distribution (spec §12.2). `lto = "fat"` + `codegen-units = 1`
-# (phase 7 task 11, measured 2026-07-18 against the now-deleted `catalog`
-# example's release arm64-v8a `.so` via `scripts/size-report.sh` — see
-# `workflow/plans/features/frust-phase-7-performance/research/
-# BASELINE.md`; this package's own arm64 `.so` could not be measured
-# directly in the worktree that ran this task, since the sibling
+# store distribution. `lto = "fat"` + `codegen-units = 1`
+# (measured 2026-07-18 against the now-deleted `catalog`
+# example's release arm64-v8a `.so` via `scripts/size-report.sh`;
+# this package's own arm64 `.so` could not be measured
+# directly in the worktree that produced this measurement, since the sibling
 # `clean-signals-rs` checkout `examples/huddle` requires wasn't present —
-# see BASELINE.md's `scripts/size-report.sh` first-run note for the
-# structural reason and the now-deleted `catalog` example's stand-in this
-# task's measurement reused): fat LTO + cgu=1 alone (opt-level 3, the
+# the now-deleted `catalog` example stood in for it instead): fat LTO +
+# cgu=1 alone (opt-level 3, the
 # default — no override needed) shrank the prior baseline (lto="thin", no
 # cgu override) from 8.46MB to 7.52MB unstripped, an 11.1% win taken
 # unconditionally. `opt-level` "s"/"z" were also measured, but only *with* a
@@ -121,15 +116,14 @@ lean = ["log/release_max_level_warn"]
 # — the config that would actually ship, since sacrificing encode-path CPU
 # perf isn't acceptable — and under that carve-out "s" measured 7.36MB
 # (-2.1% vs the 7.52MB opt-3 config) and "z" measured 7.28MB (-3.2%):
-# neither clears the task's ">5% meaningfully wins" bar once the carve-out
+# neither clears a >5%-meaningful-win bar once the carve-out
 # that protects render-path perf is in place, so `opt-level` stays at its
 # default (3) and no carve-out is needed. This block, its `[profile.profile]`
 # counterpart, and the `[profile.dev.package."*"]` wildcard below are
 # hand-synced across the root `Cargo.toml` and `templates/app/
 # Cargo.toml.tmpl` (docs/DEVELOPMENT.md's Version-Pin Policy hand-sync rule;
-# phase 8's examples-convergence dropped the other two manifests this used
-# to be hand-synced against — the now-deleted `catalog` and `inbox`
-# examples' own `Cargo.toml`s — along with the examples themselves).
+# the `catalog` and `inbox` examples this used to also be hand-synced
+# against were later deleted along with the examples themselves).
 [profile.release]
 lto = "fat"
 codegen-units = 1
@@ -137,23 +131,21 @@ strip = "symbols"
 panic = "abort"
 
 # `--profile` mode: release performance with symbols + tracing kept for
-# on-device performance measurement (spec §12.2). Artifacts land in
+# on-device performance measurement. Artifacts land in
 # `target/<triple>/profile/` (custom-profile name, verified legal).
 [profile.profile]
 inherits = "release"
 debug = true
 strip = "none"
 
-# `[profile.dev]` per-package overrides for the render/shader-compile stack
-# (6e Finding 5 / 6e-fix-1 task 03, task 08 of the examples-convergence plan):
+# `[profile.dev]` per-package overrides for the render/shader-compile stack:
 # vello/wgpu/naga's shader-pipeline translation runs at `opt-level = 0` by
 # default, which is slow enough on a physical iOS device that the OS SIGKILLs
 # a debug `frust run` before the synchronous, main-thread launch-time
-# shader compile finishes — huddle is now the iOS device vehicle (task 08),
+# shader compile finishes — huddle is the iOS device vehicle,
 # so it needs this fix too. Identical values to the root `Cargo.toml`/
 # `templates/app/Cargo.toml.tmpl` — hand-synced, `cargo test -p frust-cli
-# --test profile_sync` is the automated tripwire (task 09 rewires that test
-# to include this manifest).
+# --test profile_sync` is the automated tripwire.
 [profile.dev.package.vello]
 opt-level = 2
 
@@ -175,16 +167,15 @@ opt-level = 2
 [profile.dev.package.naga]
 opt-level = 2
 
-# Debug dep opt widening (phase 7 task 11): non-workspace-member dependencies
+# Debug dep opt widening: non-workspace-member dependencies
 # build at `opt-level = 1` in debug (Cargo's `"*"` package selector excludes
 # workspace members and the profile's own package — verified against Cargo's
 # profile-override docs); this app's own code stays at the fast default dev
 # opt-level, and the named shader-stack overrides above (opt-level 2) still
 # win over this wildcard since a named package override takes precedence over
 # `"*"`. Hand-synced across the root `Cargo.toml` and `templates/app/
-# Cargo.toml.tmpl` (phase 8's examples-convergence dropped the other two
-# manifests this used to be hand-synced against — the now-deleted `catalog`
-# and `inbox` examples' own `Cargo.toml`s — along with the examples
+# Cargo.toml.tmpl` (the `catalog` and `inbox` examples this used to also be
+# hand-synced against were later deleted along with the examples
 # themselves).
 [profile.dev.package."*"]
 opt-level = 1

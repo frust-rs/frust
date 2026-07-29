@@ -1,12 +1,10 @@
 //! The twelve catalog sections, one module per section, mirroring the
 //! reference builds' section list (foundations, buttons+forms, feedback,
-//! navigation, content, overlays, motion) plus `interactions`
-//! (glyph-refinements task 19), `appbar` (glyph-refinements task 20),
-//! `platform_views` (platform-views task 10), `camera` (frust-camera task
-//! 11), and `native_widgets` (native-widgets task p1-06) — five sections with
+//! navigation, content, overlays, motion) plus `interactions`, `appbar`,
+//! `platform_views`, `camera`, and `native_widgets` — five sections with
 //! no reference-build section-list precedent of their own.
 //!
-//! # Page-fn contract (fixed by `c01`; every fill task keeps it exactly)
+//! # Page-fn contract (fixed across every section)
 //!
 //! Each section module exposes exactly:
 //!
@@ -54,8 +52,8 @@ use frust::AnyView;
 use crate::CatalogState;
 
 /// The twelve section tab labels, in order. Indexed by `CatalogState::section`
-/// and dispatched by [`current`]. "Native Widgets" (native-widgets task
-/// p1-06) is the newest addition, appended at the end so every existing
+/// and dispatched by [`current`]. "Native Widgets" is the newest addition,
+/// appended at the end so every existing
 /// section's index stays stable.
 pub const SECTION_LABELS: [&str; 12] = [
     "Foundations",

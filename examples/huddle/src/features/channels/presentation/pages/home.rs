@@ -112,7 +112,7 @@ fn status_color(status: UserStatus) -> Color {
 }
 
 // ---------------------------------------------------------------------------
-// Material list metrics (RESEARCH.md "Material sizing reference")
+// Material list metrics (Material sizing reference measurements)
 // ---------------------------------------------------------------------------
 
 /// CircleAvatar diameter — radius 20 → 40 (`circle_avatar.dart:136-138`).
@@ -139,11 +139,11 @@ const BADGE_TEXT_SIZE: f32 = 11.0;
 // ---------------------------------------------------------------------------
 
 // `FillBox`/`fill_box` were promoted to `crate::ui::fill_box`
-// (device-parity-round2 task R2) so the feed restyle can share the avatar/
+// so the feed restyle can share the avatar/
 // status-dot/badge/composer-tile primitive; imported at the top of this module.
 
 /// A skeleton shimmer bar: a gray rounded rect whose alpha pulses via an
-/// [`AnimationController`] (spec §8's paint-driven animation contract).
+/// [`AnimationController`] (the framework's paint-driven animation contract).
 struct Shimmer {
     size: Size,
     radius: f64,
@@ -569,7 +569,7 @@ fn row_with_long_press_menu(
 /// …))` (the `profile.rs` idiom) — a bare `Align` directly under the `Stack`
 /// shrink-wraps to the glyph and lands at the stack origin (top-left), so the
 /// tight-sized box is what gives `Align` the bounded constraints it centers
-/// within (RESEARCH.md issue 1).
+/// within.
 fn channel_circle() -> AnyView<HomeState> {
     any(Stack(vec![
         any(fill_box(

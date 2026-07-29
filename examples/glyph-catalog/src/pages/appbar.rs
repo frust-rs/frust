@@ -1,21 +1,19 @@
-//! AppBar section (glyph-refinements task 20): six demo blocks mirroring
-//! `research/glyph-appbar.html` §01-§06 (`frust_widgets::glyph::appbar`'s own
-//! module docs cite the same sections) — anatomy, scroll collapse, back-nav
+//! AppBar section: six demo blocks — anatomy, scroll collapse, back-nav
 //! title crossfade, the overflow menu, selection mode, and the connection
-//! banner. The catalog's own root [`AppBar`](frust::glyph::app_bar) (task 18)
+//! banner. The catalog's own root [`AppBar`](frust::glyph::app_bar)
 //! is the real integration; this section is the reference showcase, kept
 //! visually consistent with it.
 //!
 //! # Structure
 //!
 //! `pub fn page(state)` is a launcher: one inline anatomy diagram
-//! ([`demo_anatomy`], the "01 Anatomy" moment, kept inline per this task's
-//! own Details) over a [`glyph_list`] of six variation rows. Each row's
+//! ([`demo_anatomy`], the "Anatomy" moment, kept inline deliberately)
+//! over a [`glyph_list`] of six variation rows. Each row's
 //! `on_press` routes through [`open_variation`] to one of six `open_*`
 //! functions (`pub` — see their own docs), which `state.nav.push`es a real,
 //! full-screen page built by the matching `variation_*` fn: a real
 //! [`app_bar`] at top (so inset consumption/scroll-collapse/elevation are
-//! exercised for real, not simulated inline — Ed's report this task fixes)
+//! exercised for real, not simulated inline)
 //! over a [`variation_frame`]-wrapped scrollable body, with a
 //! [`back_button`] leading slot popping the *outer* (root) navigator back to
 //! this launcher. Page-local demo state is cached in a self-healing
@@ -29,10 +27,10 @@
 //!
 //! [`frust::glyph::show_glyph_menu`]'s anchor is a caller-reported
 //! window-coordinate `kurbo::Rect` (`frust_widgets::glyph::menu`'s module
-//! docs: "an `AppBar`'s trailing icon records its own painted bounds during
-//! `paint`... task 20's own wiring") — there is no ancestor-bounds query a
+//! docs describe how an `AppBar`'s trailing icon records its own painted
+//! bounds during `paint`) — there is no ancestor-bounds query a
 //! widget can make mid-layout, and no facade widget reports a child's
-//! painted bounds back to app code. [`AnchorReporter`] is this task's minimal
+//! painted bounds back to app code. [`AnchorReporter`] is this crate's minimal
 //! answer: a hand-rolled `View`/`Widget` pair built directly against
 //! `frust-core`/`kurbo` (this crate's `Cargo.toml` now carries both as real
 //! dependencies — see its own comment for the full rationale), mirroring
@@ -44,7 +42,7 @@
 //!
 //! # Timer-driven demos with no `tokio` dependency
 //!
-//! The connection-banner countdown (§06) needs a real interval, but this
+//! The connection-banner countdown needs a real interval, but this
 //! crate has no direct `tokio` dependency (`interactions.rs`'s module docs:
 //! the framework's blessed `tokio::time::sleep` idiom needs one this crate
 //! doesn't carry). [`Delay`] is a minimal, dependency-free one-shot timer
@@ -159,11 +157,11 @@ fn block(children: Vec<FlexChild<CatalogState>>) -> FlexChild<CatalogState> {
 // ---------------------------------------------------------------------------
 
 /// A small leading "‹" icon button popping the *outer* (root) navigator back
-/// to the launcher list — every variation page's own back affordance (this
-/// task's "back working via the auto-wired navigator" acceptance criterion).
+/// to the launcher list — every variation page's own back affordance, working
+/// via the auto-wired navigator.
 /// `nav` is the page's own captured [`NavigatorController`] clone, threaded
 /// in by [`open_variation`] at push time (mirrors the dialog demos' push
-/// pattern this task's Details cite).
+/// pattern).
 fn back_button(nav: NavigatorController<CatalogState>) -> AnyView<CatalogState> {
     any(button("\u{2039}", move |_: &mut CatalogState| nav.pop())
         .style(ButtonStyle::Icon)
@@ -380,9 +378,9 @@ fn mark_cell(color: Color) -> AnyView<CatalogState> {
     any(SizedBox(Some(8.0), Some(8.0)).child(Image(solid_source(color)).fit(ImageFit::Fill)))
 }
 
-/// The research's 2×2 grid brand mark, composed from four small filled
-/// squares — a checkerboard of `accent`/a faded `accent` (§01's leading
-/// slot: "a back arrow / brand mark / nothing").
+/// The design's 2×2 grid brand mark, composed from four small filled
+/// squares — a checkerboard of `accent`/a faded `accent` (the anatomy demo's
+/// leading slot: a back arrow / brand mark / nothing).
 fn brand_mark() -> AnyView<CatalogState> {
     let accent = amber();
     let faded = with_alpha(accent, 0.4);
@@ -445,7 +443,8 @@ local_sig!(collapse_progress_sig, f64, 0.0);
 local_sig!(collapse_elevated_sig, bool, false);
 
 /// Scroll offset (logical px) past which [`AppBarView::large`] is fully
-/// collapsed — mirrors the research HTML's own `min(1, offset/60)` mapping
+/// collapsed — matches `AppBarView::collapse_progress`'s own `min(1,
+/// offset/60)` mapping
 /// (`frust_widgets::glyph::appbar::AppBarView::collapse_progress`'s docs).
 const COLLAPSE_SPAN_PX: f64 = 60.0;
 /// Scroll offset (logical px) past which the bar also raises its scrolled
@@ -454,10 +453,10 @@ const COLLAPSE_SPAN_PX: f64 = 60.0;
 /// charter — see the [module docs](self)).
 const ELEVATED_THRESHOLD_PX: f64 = 4.0;
 
-/// A short "connected + latency" meta row — a lightweight stand-in for task
-/// 19's fuller connection-heartbeat composition (its own `demo_heartbeat` is
-/// private and this task's Notes permit a small duplicate over editing that
-/// file). Shown under the large variant's big title (§02).
+/// A short "connected + latency" meta row — a lightweight stand-in for the
+/// interactions section's fuller connection-heartbeat composition (its own
+/// `demo_heartbeat` is private, so a small duplicate here was preferred over
+/// editing that file). Shown under the large variant's big title.
 fn collapse_meta_row() -> AnyView<CatalogState> {
     any(FlexView::new(
         Axis::Horizontal,
@@ -536,14 +535,15 @@ pub fn open_scroll_collapse(state: &mut CatalogState) {
         .push(move || variation_scroll_collapse(nav.clone()));
 }
 
-/// Read §02's scroll-collapse progress signal — the value
+/// Read the scroll-collapse demo's progress signal — the value
 /// [`variation_scroll_collapse`]'s `ScrollView::on_scroll` feeds from the live
 /// scroll offset (`(offset / COLLAPSE_SPAN_PX).clamp(0.0, 1.0)`). The headless
 /// scroll-repro regression test (`tests/smoke.rs`) reads it back after
 /// dispatching a real drag through a `RenderRoot` to prove the pushed page's
 /// `ScrollView` offset actually moved (a nonzero progress means `on_scroll`
 /// fired, i.e. the drag reached the scroll widget instead of dying in the
-/// navigator/routing chain — the exact 0px-movement defect this task probes).
+/// navigator/routing chain — the exact 0px-movement defect this regression
+/// test guards against).
 /// `pub`-for-test only, mirroring [`open_scroll_collapse`]'s own seam rationale
 /// and `interactions::start_heartbeat_for_test`'s precedent; never called from
 /// `build`.
@@ -551,7 +551,7 @@ pub fn scroll_collapse_progress_for_test() -> f64 {
     collapse_progress_sig().get_untracked()
 }
 
-/// Reset §02's scroll-collapse signals to their at-rest defaults — the
+/// Reset the scroll-collapse demo's signals to their at-rest defaults — the
 /// deterministic baseline the scroll-repro test establishes *after* settling a
 /// push transition and *before* dispatching its drag, so the subsequent
 /// [`scroll_collapse_progress_for_test`] assertion reads only this drag's
@@ -572,8 +572,8 @@ local_sig!(backnav_back_sig, bool, false);
 
 const BACKNAV_TITLES: [&str; 2] = ["Sessions", "dev · session"];
 
-/// The fake screen underneath the bar for the current `page` index (§03: "a
-/// two-button demo swapping title... and sliding a fake screen underneath").
+/// The fake screen underneath the bar for the current `page` index — a
+/// two-button demo swapping title and sliding a fake screen underneath.
 fn backnav_screen(page: usize) -> AnyView<CatalogState> {
     if page == 0 {
         any(FlexView::new(
@@ -673,8 +673,7 @@ pub fn open_backnav(state: &mut CatalogState) {
 
 local_sig!(overflow_caption_sig, String, String::new());
 
-/// The kebab's overflow entries: a Danger "Kill session" + a separator (the
-/// task's Details).
+/// The kebab's overflow entries: a Danger "Kill session" + a separator.
 fn overflow_menu_entries() -> Vec<MenuEntry> {
     vec![
         menu_item("Rename session"),
@@ -847,11 +846,10 @@ local_sig!(banner_phase_sig, BannerPhase, BannerPhase::Idle);
 // generated `fn`).
 local_sig!(banner_gen_sig, u64, 0);
 
-/// Countdown length, seconds (this task's own choice — long enough to watch
-/// the warning tick down, short enough to stay a snappy demo).
+/// Countdown length, seconds — long enough to watch
+/// the warning tick down, short enough to stay a snappy demo.
 const BANNER_DISCONNECT_SECS: u32 = 3;
-/// Auto-hide delay after the "Reconnected" flash (the task's Details: "~1.2s
-/// later").
+/// Auto-hide delay after the "Reconnected" flash (~1.2s).
 const BANNER_AUTO_HIDE: Duration = Duration::from_millis(1200);
 
 /// Kick off (or restart) the disconnect → countdown → reconnected →
@@ -937,10 +935,10 @@ pub fn open_banner(state: &mut CatalogState) {
 }
 
 // ---------------------------------------------------------------------------
-// 00 — compact + elevate-on-scroll (this task's own addition — no §-numbered
-// inline precedent; every other variation mirrors an existing research-HTML
-// section, but "a plain compact bar raising its shadow on scroll" had none of
-// its own since the inline anatomy demo (§01) never scrolled)
+// 00 — compact + elevate-on-scroll (an addition beyond the six original
+// demo moments; every other variation mirrors an existing design-reference
+// demo, but "a plain compact bar raising its shadow on scroll" had none of
+// its own since the inline anatomy demo never scrolled)
 // ---------------------------------------------------------------------------
 
 local_sig!(compact_elevated_sig, bool, false);
@@ -978,7 +976,7 @@ pub fn open_compact_elevate(state: &mut CatalogState) {
 }
 
 // ---------------------------------------------------------------------------
-// Launcher list — the section page itself (this task's Details)
+// Launcher list — the section page itself
 // ---------------------------------------------------------------------------
 
 /// The six variation rows, in launcher order: `(glyph, title, sub)`. Index
@@ -1027,7 +1025,7 @@ fn open_variation(state: &mut CatalogState, index: usize) {
 }
 
 /// See the page-fn contract in [`crate::pages`]. A launcher: the inline
-/// anatomy diagram (this task's "keep one inline anatomy diagram" Details)
+/// anatomy diagram (deliberately kept inline rather than pushed)
 /// over a [`glyph_list`] of the six variation pages (see the [module
 /// docs](self)'s "Structure" section) — each row pushes a real full-screen
 /// page via [`open_variation`].

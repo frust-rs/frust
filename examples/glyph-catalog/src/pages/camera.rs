@@ -1,20 +1,21 @@
-//! Camera page (frust-camera task 11): live Mode B preview behind frust
+//! Camera page: live Mode B preview behind frust
 //! chrome, permission flow, still capture, and an image-stream readout — the
-//! **device-gate vehicle for the whole `frust-camera` feature** (task 14
-//! owns the actual on-device proof; this page only owns wiring +
-//! compile/gate correctness — see this module's Acceptance in the task
-//! file).
+//! **device-gate vehicle for the whole `frust-camera` feature** (on-device
+//! proof is a separate, human-run gate — see `docs/DEVELOPMENT.md`'s Camera
+//! manual test; this page only owns wiring + compile/gate correctness).
 //!
 //! # Mode B slot, reusing the platform-views test bed
 //!
 //! [`crate::home_page`] already wraps every section's content in a
-//! `scroll_view` (task 18) and paints an [`crate::AppBackground`] base layer
-//! under the whole app (platform-views task 10's Mode B host arrangement) —
-//! both reused here unchanged, per this task's "reuse, don't re-derive"
-//! note. This page's own [`preview_block`] is therefore already inside the
-//! shared scroll view: scrolling it off/on-screen exercises the platform
-//! view's real dispose→create cycle (task 11's own Details point, PLAN.md's
-//! A6 decision) exactly like `platform_views.rs`'s Mode B slot does.
+//! `scroll_view` and paints an [`crate::AppBackground`] base layer
+//! under the whole app (the Mode B host's required opaque app-root
+//! background, `docs/CODE_STANDARDS.md`'s Platform-View Conventions) — both
+//! reused here unchanged rather than re-derived. This page's own
+//! [`preview_block`] is therefore already inside the shared scroll view:
+//! scrolling it off/on-screen exercises the platform view's real
+//! dispose→create cycle — the camera session itself lives independent of
+//! the view and outlives it, exactly like `platform_views.rs`'s Mode B slot
+//! does.
 //!
 //! # Flow
 //!
@@ -23,10 +24,10 @@
 //! rule: registered under [`CameraPage`]'s [`Component`] owner). Denied
 //! shows the typed error state; [`PermissionStatus::Granted`] opens a
 //! [`CameraSession`] and the preview slot appears. [`PermissionStatus::NeedsUi`]
-//! is Android-specific and documented on the type itself; PLAN.md's
-//! "Permission plumbing" risk names a proxy-Activity as the escalation if a
-//! manual retry doesn't resolve it on device (task 14's call, not this
-//! page's).
+//! is Android-specific and documented on the type itself; the recorded
+//! escalation if a manual retry doesn't resolve it on device is a
+//! transparent proxy Activity — a decision for the on-device gate, not this
+//! page's.
 //!
 //! # Session lifecycle
 //!
@@ -42,15 +43,15 @@
 //!
 //! [`CameraSession::start_image_stream`]'s callback runs on a plugin-owned
 //! thread and must never write a signal directly
-//! (`plugins/camera`'s own module docs, PLAN.md Phase 3): this page hands
+//! (`plugins/camera`'s own module docs): this page hands
 //! frames off through a plain `Arc<`[`StreamStats`]`>` of atomics instead of
 //! any reactive primitive (see [`start_stream`], which wires the real
 //! callback), and reads it back from [`CameraPage::build`] while a
 //! [`FrameTicker`] (the same escape hatch `interactions.rs` documents) keeps
 //! that rebuild running once per frame. The stream is real and wired on both
 //! shipped backends — the device gate measured it delivering frames at
-//! ~29 fps on Android and ~22 fps on iOS through this exact path (task 14's
-//! gate rows); this page's readout is the live proof of that, not a stub.
+//! ~29 fps on Android and ~22 fps on iOS through this exact path; this
+//! page's readout is the live proof of that, not a stub.
 //! [`ImageFormat::Bgra`] stays Apple-only (see that variant's doc), so this
 //! page always requests [`ImageFormat::Yuv420`], the cross-platform format
 //! both backends deliver.
@@ -398,8 +399,8 @@ fn permission_block(
             true,
         ),
         // Android-specific: no cached Activity yet for the system dialog.
-        // PLAN.md's "Permission plumbing" risk documents a proxy-Activity as
-        // the escalation if a manual retry doesn't resolve this on device.
+        // The recorded escalation if a manual retry doesn't resolve this on
+        // device is a transparent proxy-Activity.
         AsyncValue::Ready(PermissionStatus::NeedsUi) => (
             "No foreground activity cached yet for the permission dialog \u{2014} retry once \
              the app is in the foreground (PLAN.md's permission-plumbing note)."

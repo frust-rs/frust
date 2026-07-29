@@ -1,8 +1,8 @@
 # layer-bench — retained-layers composite-cost spike (THROWAWAY LAB)
 
-A standalone measurement bench for the retained-layers feature's **Phase-0
-device spike** (`workflow/plans/features/frust-retained-layers/`). It answers
-the research sweep's one unanswered question with device numbers: does
+A standalone measurement bench for the retained-layers feature's early
+device spike. It answers
+one open question with device numbers: does
 compositing pre-rendered textures beat re-rasterizing the equivalent vector
 content in vello 0.9's pipeline?
 
