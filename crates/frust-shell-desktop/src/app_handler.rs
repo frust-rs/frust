@@ -1873,8 +1873,8 @@ mod tests {
         // the revert.
         //
         // `theme_default` deliberately exposes no reset (a shell needs the same
-        // base again on every appearance change, so the slot is
-        // non-destructive), which is why this must remain the ONLY test in this
+        // seeded base again when `clear_app_theme` reverts an override, so the
+        // slot is non-destructive), which is why this must remain the ONLY test in this
         // binary that writes it — `the_default_slot_has_exactly_one_test_writer`
         // pins that. Asserting the pristine state first turns a future second
         // writer into a loud failure here instead of a silent order dependency
