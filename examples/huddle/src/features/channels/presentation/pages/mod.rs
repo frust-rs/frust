@@ -1,5 +1,5 @@
-//! The channels feature's pages (huddle clean-architecture refactor, task 02;
-//! moved verbatim from the former `src/screens/`):
+//! The channels feature's pages (moved verbatim from the former
+//! `src/screens/`):
 //!
 //! - [`home`] — the Home tab (channels + DMs roster).
 //! - [`workspace_drawer`] — the workspace switcher, a documented controller-less

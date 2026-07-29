@@ -1,8 +1,6 @@
-//! Filled by task 24-glyph-content-widgets (Avatar).
-//!
 //! [`avatar`]/[`AvatarView`]: an initials box — a small rounded square with a
 //! faint accent wash, an accent hairline border, and centered accent-colored
-//! initials (the reference build's `§content` `.avatar` rule). Purely a leaf
+//! initials (the Glyph design system's `.avatar` rule). Purely a leaf
 //! display widget (no interaction), so — like [`super::badge`] — it shapes and
 //! paints its own glyph run rather than nesting a [`crate::text::TextView`],
 //! and its `View` impl is generic over any `State`.
@@ -36,7 +34,7 @@ use peniko::{Brush, Color};
 /// [`super::badge`]'s constant of the same name).
 const PATH_TOLERANCE: f64 = 0.1;
 
-/// Default box edge length, in logical px (the reference build's `.avatar`
+/// Default box edge length, in logical px (the Glyph design system's `.avatar`
 /// square).
 const AVATAR_DEFAULT_SIZE: f64 = 40.0;
 /// The initials font size as a fraction of the box edge.

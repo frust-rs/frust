@@ -19,8 +19,8 @@ log = { workspace = true }
 frust-render = { workspace = true }
 
 # Unconditional: `ffi_support::build_tree_update` (the pure `SemanticsUpdate` →
-# `accesskit::TreeUpdate` assembly the iOS accesskit adapter pushes, phase 6d
-# task 05) is host-testable — it touches only the `accesskit` *core data crate*
+# `accesskit::TreeUpdate` assembly the iOS accesskit adapter pushes) is
+# host-testable — it touches only the `accesskit` *core data crate*
 # (a data vocabulary crate that compiles on every target, already in the
 # workspace via frust-core). The iOS platform adapter (`accesskit_ios`) that
 # *consumes* the assembled update stays target-gated below.
@@ -47,7 +47,7 @@ kurbo = { workspace = true }
 peniko = { workspace = true }
 pollster = { workspace = true }
 anyhow = { workspace = true }
-# Load-bearing (plan phase 11.B, render-thread split): the split's dedicated
+# Load-bearing (render-thread split): the split's dedicated
 # render thread acquires the Metal drawable (`nextDrawable`) off the UIKit main
 # thread, which has no runloop-managed autorelease pool — so each frame's GPU
 # work in `app::render_scene` is wrapped in an explicit `objc2::rc::autoreleasepool`
@@ -56,15 +56,14 @@ anyhow = { workspace = true }
 # plugin crates, and transitively via accesskit_ios), so this adds no new crate —
 # only a dependency edge. Target-gated like the rest of the render/GPU stack.
 objc2 = { workspace = true }
-# Render-thread QoS self-boost (phase-11 fix F6): the split's dedicated render
+# Render-thread QoS self-boost: the split's dedicated render
 # thread calls `pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)` at
 # the top of its loop so the scheduler treats its GPU submit work at the UI tier.
 # Confined to the sanctioned-unsafe `ffi_glue` zone; target-gated like the rest
 # of the render/GPU stack.
 libc = { workspace = true }
-# iOS accesskit adapter (phase 6d D3, structurally wired in task 05; never
-# compiled on this host — no macOS, see docs/DEVELOPMENT.md — compiled +
-# verified in phase 6e). Target-gated like the rest of this block.
+# iOS accesskit adapter (never compiled on this host — no macOS, see
+# docs/DEVELOPMENT.md). Target-gated like the rest of this block.
 accesskit_ios = { workspace = true }
 
 # Only the macro-expansion smoke test (`ffi_glue::macro_expansion`) needs a
@@ -78,7 +77,7 @@ frust-widgets = { workspace = true }
 # and frust-render/perf-trace. Empty by default (opt-in survives cargo's additive
 # unification; the CLI is the sole enabler).
 perf-trace = ["frust-shell-common/perf-trace", "frust-render/perf-trace"]
-# Forwards into frust-theme's own `glyph-fonts` (gf2 opt-out chain) — see
+# Forwards into frust-theme's own `glyph-fonts` (opt-out chain) — see
 # `frust-shell-common`'s Cargo.toml for the shape rationale. The frust-theme
 # edge this targets only exists in the iOS-gated dependency block above;
 # like `perf-trace`'s forwarding above, this is a no-op off-iOS.

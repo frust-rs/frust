@@ -4,7 +4,7 @@
 //! Six properties: value, min, max, indeterminate, progress tint,
 //! accessibility label — all [`Tier::Cheap`](super::Tier::Cheap), which makes
 //! this the one control in the set whose *whole* property surface is safe to
-//! drive at frame rate (PLAN 4's streaming-surface use case).
+//! drive at frame rate.
 //!
 //! Display-only: it emits no events, so its
 //! [`on_event`](crate::runtime::NativeWidget::on_event) stays the trait's
@@ -61,7 +61,7 @@ pub(crate) struct ProgressProps {
     pub(crate) max: i32,
     /// Spinner mode: `true` ignores the value entirely.
     pub(crate) indeterminate: bool,
-    /// Packed ARGB background fill (theme ladder L2 followup, f1-01 — see
+    /// Packed ARGB background fill (theme ladder L2 followup — see
     /// `crate::controls::label::LabelProps::background_color`'s doc for the
     /// full "why explicit" account), matching the page surface this
     /// `ProgressBar` sits on. `None` leaves the platform's own default when
@@ -317,8 +317,8 @@ pub(crate) mod platform {
     //!
     //! UIKit splits the two modes across two classes: `UIProgressView` is
     //! determinate-only, and the spinner is `UIActivityIndicatorView` — a
-    //! different view, which a live control cannot become. PLAN 2.1's parity
-    //! set names `UIProgressView`, so this arm honours every other property
+    //! different view, which a live control cannot become. This control
+    //! targets `UIProgressView`, so this arm honours every other property
     //! and reports [`Setter::Indeterminate`] as an unsupported request
     //! ([`crate::controls::platform::warn_indeterminate_unsupported`]) rather
     //! than silently pretending. Closing it needs a container hosting both
@@ -511,7 +511,7 @@ mod tests {
         );
     }
 
-    // --- theme ladder L2 followup (f1-01): the explicit background setter --
+    // --- theme ladder L2 followup: the explicit background setter ----------
 
     #[test]
     fn a_background_color_alone_plans_exactly_one_setter() {
@@ -539,7 +539,7 @@ mod tests {
         );
     }
 
-    // --- the Apple arm's fraction mapping (p2-02) --------------------------
+    // --- the Apple arm's fraction mapping -----------------------------------
 
     #[test]
     fn the_planned_span_and_value_become_a_unit_fraction() {

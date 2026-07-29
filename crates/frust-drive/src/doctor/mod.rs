@@ -1,6 +1,6 @@
-//! Pluggable doctor validators (spec §12.7). Each validator is independent
-//! and returns an actionable pass/partial/fail result; `frust doctor`
-//! prints `[✓]`/`[!]`/`[✗]` per validator and exits 1 if any is `Fail`.
+//! Pluggable doctor validators. Each validator is independent and returns
+//! an actionable pass/partial/fail result; `frust doctor` prints
+//! `[✓]`/`[!]`/`[✗]` per validator and exits 1 if any is `Fail`.
 
 mod android_sdk;
 mod cargo_ndk;
@@ -58,7 +58,7 @@ pub trait Validator {
     fn validate(&self, ctx: &DoctorCtx) -> Validation;
 }
 
-/// The v1 validator set (spec §12.7), in report order.
+/// The v1 validator set, in report order.
 pub fn default_validators() -> Vec<Box<dyn Validator>> {
     vec![
         Box::new(RustToolchainValidator),

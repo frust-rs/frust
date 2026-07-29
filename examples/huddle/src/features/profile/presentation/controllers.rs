@@ -1,7 +1,7 @@
 //! [`ProfileController`] — a **synchronous** lookup against the shared
-//! dataset (huddle clean-architecture refactor, task 05; moved verbatim apart
-//! from repo threading from the former flat `features::profile` module), no
-//! `clean-signals` controller/use-case spine needed: there is no async work
+//! dataset (moved verbatim apart from repo threading from the former flat
+//! `features::profile` module), no `clean-signals` controller/use-case spine
+//! needed: there is no async work
 //! here and nothing that can fail, so [`ProfileController::load`] is a plain
 //! function taking the injected [`ProfileRepository`], not a
 //! `clean_signals_frust::use_controller`-hosted `ControllerCore` (contrast
@@ -87,10 +87,11 @@ mod tests {
     use super::*;
     use crate::features::profile::data::repositories::StoreProfileRepository;
 
-    /// A composition-root-equivalent mini-root (task 02's precedent): these
-    /// tests assert against the real dataset shape (Grace Hopper/id 2,
-    /// `dm-2`), so a fake repository would force assertion rewrites — the
-    /// HARD behavior-preserving bar forbids that.
+    /// A composition-root-equivalent mini-root: these tests assert against
+    /// the real dataset shape (Grace Hopper/id 2, `dm-2`), so a fake
+    /// repository would force assertion rewrites — this suite is
+    /// deliberately behavior-preserving, exercising the real store-backed
+    /// repository rather than a fake.
     fn store_repo() -> StoreProfileRepository {
         StoreProfileRepository::new()
     }

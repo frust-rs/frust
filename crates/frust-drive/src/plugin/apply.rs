@@ -1485,7 +1485,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // `Contribution::SwiftPackageRef` (task 03)
+    // `Contribution::SwiftPackageRef`
     //
     // Driven through `apply_swift_package_ref` directly rather than
     // `add_plugin`: no registry entry carries this contribution yet (the

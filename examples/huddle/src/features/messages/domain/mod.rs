@@ -1,6 +1,5 @@
 //! `messages` domain — entities, the owned feed models, the repository
-//! contract, and the use cases (huddle clean-architecture refactor: entities
-//! landed in task 01; models/repositories/use_cases in task 03).
+//! contract, and the use cases.
 
 pub mod entities;
 pub mod models;

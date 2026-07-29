@@ -3,7 +3,7 @@
 /// while a continuous animation runs; the harness reads the animation's frame
 /// percentiles during the parse plus the parse wall time.
 ///
-/// This is the head-to-head for PLAN 9.E's S4 claim: `Isolate.run` COPIES the
+/// This is the head-to-head for the S4 claim under test: `Isolate.run` COPIES the
 /// payload into the worker isolate (the idiom under test), versus the frust
 /// side's `spawn_blocking` MOVE. The parse window is bracketed by the
 /// `s4-parse` marker pair (its own wall-time series); the animation runs the

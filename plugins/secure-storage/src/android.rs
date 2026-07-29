@@ -1,7 +1,7 @@
 //! The Android [`Backend`] — AES-256-GCM in `AndroidKeyStore`, ciphertext in a
 //! per-store `SharedPreferences` file, all over plain JNI (no Kotlin glue).
 //!
-//! # Design (task S03, Plan Phase 3 — storage only)
+//! # Design (storage only)
 //!
 //! One AES-256-GCM key per store lives **inside** `AndroidKeyStore` under the
 //! alias `frust.ss.<store>` ([`framing::store_id`]) — generated directly with
@@ -9,7 +9,7 @@
 //! (`PURPOSE_ENCRYPT | PURPOSE_DECRYPT`, `GCM`/`NoPadding`, 256-bit). There is
 //! **no RSA key-wrap layer** — `flutter_secure_storage` carries that only for
 //! backward migration; a fresh backend generates the AES key straight in the
-//! Keystore (research `RESEARCH.md` §2). Values are `Cipher
+//! Keystore. Values are `Cipher
 //! "AES/GCM/NoPadding"` ciphertext, persisted `iv_len || iv || ciphertext`,
 //! Base64, via `SharedPreferences.putString` in a file named `frust.ss.<store>`
 //! (the same per-store namespace, so `clear` never touches another store's or
@@ -41,10 +41,10 @@
 //! `KeyPermanentlyInvalidatedException` → [`SecureStorageError::KeyInvalidated`]
 //! (a biometric re-enrollment invalidated an auth-bound key), everything else →
 //! [`SecureStorageError::Storage`]`("<class>: <message>")`. No OEM-specific
-//! branches — every Keystore exception is handled tolerantly (research §2:
-//! OEM quirks are unconfirmed anecdotes, so we map, not special-case).
+//! branches — every Keystore exception is handled tolerantly (OEM quirks
+//! are unconfirmed anecdotes, so we map, not special-case).
 //!
-//! # Biometric gate (S05, Plan Phase 5)
+//! # Biometric gate
 //!
 //! When a store is opened with [`AuthPolicy::Required`](crate::AuthPolicy) the
 //! [`AuthOptions`](crate::AuthOptions) travel in as [`AndroidStore::auth`] and
@@ -109,7 +109,7 @@ const BLOCK_MODE_GCM: &str = "GCM";
 /// `KeyProperties.ENCRYPTION_PADDING_NONE`.
 const ENCRYPTION_PADDING_NONE: &str = "NoPadding";
 
-// --- Biometric gate (S05) ---------------------------------------------------
+// --- Biometric gate -----------------------------------------------------
 
 /// The framework `BiometricPrompt` requires API 28 (`Build.VERSION_CODES.P`);
 /// a gated open below this fails with [`Unavailability::UnsupportedApiLevel`].
@@ -154,7 +154,7 @@ pub(crate) struct AndroidStore {
     /// `SharedPreferences` file name (see the module doc).
     store_id: String,
     /// The per-store biometric policy: `None` for a plain store, `Some` for a
-    /// gated one (S05). Held as plain data so [`AndroidStore`] stays
+    /// gated one. Held as plain data so [`AndroidStore`] stays
     /// `Send + Sync` — the `Cipher`/`CryptoObject`/`BiometricPrompt` objects
     /// are all frame-scoped locals inside a fresh JNI attachment per op.
     auth: Option<AuthOptions>,
@@ -168,7 +168,7 @@ impl AndroidStore {
     /// installed the `(JavaVM, Context)` handles (an old scaffold predating
     /// `nativeInitPlatform`) — probed here so the failure is loud and early
     /// rather than on the first read (matching `frust-shared-preferences`'
-    /// `AndroidStore::standard`). For a **gated** store (S05):
+    /// `AndroidStore::standard`). For a **gated** store:
     /// [`SecureStorageError::NotAvailable`]`(`[`Unavailability::UnsupportedApiLevel`]`)`
     /// on API < 28 (the framework `BiometricPrompt` floor), or
     /// `NotAvailable(`[`Unavailability::HelperMissing`]`)` if the
@@ -270,7 +270,7 @@ fn take_pending_exception(env: &mut Env) -> SecureStorageError {
     }
 
     // The one class we distinguish: an auth-bound key invalidated by a
-    // biometric re-enrollment (research §2). Match on the simple class name so
+    // biometric re-enrollment. Match on the simple class name so
     // the framework and any legacy package variant both map.
     if class_name.ends_with("KeyPermanentlyInvalidatedException") {
         SecureStorageError::KeyInvalidated
@@ -285,7 +285,7 @@ fn take_pending_exception(env: &mut Env) -> SecureStorageError {
 /// use. Framework classes (`java.security.*`, `javax.crypto.*`,
 /// `android.security.keystore.*`) resolve through the default (bootstrap)
 /// class loader — no application-classloader lookup is needed for these; that
-/// is only required for app-defined classes (the S05 biometric helper).
+/// is only required for app-defined classes (the biometric helper class).
 fn get_or_create_key<'local>(
     env: &mut Env<'local>,
     alias: &str,
@@ -343,7 +343,7 @@ fn load_keystore<'local>(env: &mut Env<'local>) -> Result<JObject<'local>, jni::
 
 /// Generate the store's AES-256-GCM key directly in `AndroidKeyStore` via
 /// `KeyGenParameterSpec` (no RSA wrap). When `auth` is `Some` the key is bound
-/// to a fresh authentication (S05): `setUserAuthenticationRequired(true)` plus
+/// to a fresh authentication: `setUserAuthenticationRequired(true)` plus
 /// enrollment-invalidation and validity/auth-type per the options (see
 /// [`apply_auth_binding`]).
 fn generate_key<'local>(
@@ -410,7 +410,7 @@ fn generate_key<'local>(
         )?
         .l()?;
 
-    // Gated store (S05): bind the key to a fresh authentication. `builder` is
+    // Gated store: bind the key to a fresh authentication. `builder` is
     // rebound to the (same) builder the auth setters return.
     let builder = match auth {
         Some(opts) => apply_auth_binding(env, builder, opts)?,
@@ -458,7 +458,7 @@ fn string_array<'local>(
     Ok(array.into())
 }
 
-// --- Biometric gate (S05) ---------------------------------------------------
+// --- Biometric gate -----------------------------------------------------
 
 /// `Build.VERSION.SDK_INT` — the device's API level. Read reflectively via a
 /// static field so the backend needs no compile-time SDK constant.
@@ -528,7 +528,7 @@ fn find_helper_class<'local>(
 }
 
 /// Chain the auth-binding setters onto a `KeyGenParameterSpec.Builder` for a
-/// gated key (S05): `setUserAuthenticationRequired(true)`,
+/// gated key: `setUserAuthenticationRequired(true)`,
 /// `setInvalidatedByBiometricEnrollment(invalidate_on_enrollment)`, and the
 /// validity/auth-type binding — `setUserAuthenticationParameters` on API 30+,
 /// the deprecated `setUserAuthenticationValidityDurationSeconds` on 28–29.
@@ -602,8 +602,8 @@ fn apply_auth_binding<'local>(
     }
 }
 
-/// Block on the framework `BiometricPrompt` for one gated cipher operation
-/// (S05): wrap `cipher` in a `BiometricPrompt.CryptoObject`, then call the
+/// Block on the framework `BiometricPrompt` for one gated cipher operation:
+/// wrap `cipher` in a `BiometricPrompt.CryptoObject`, then call the
 /// `dev.frust.securestorage.FrustBiometric.authenticate(...)` static helper,
 /// which posts the prompt to the main executor, subclasses the abstract
 /// `AuthenticationCallback`, and latches the result on this background thread.
@@ -679,8 +679,8 @@ fn authenticate<'local>(
 }
 
 /// Map a framework `BiometricPrompt.BIOMETRIC_ERROR_*` code (as the Kotlin
-/// helper returns it) to a typed [`SecureStorageError`] — the S05 exception
-/// taxonomy. Codes per `android.hardware.biometrics.BiometricPrompt`.
+/// helper returns it) to a typed [`SecureStorageError`] — the biometric
+/// exception taxonomy. Codes per `android.hardware.biometrics.BiometricPrompt`.
 fn map_prompt_error(code: i32) -> SecureStorageError {
     match code {
         // ERROR_USER_CANCELED (10), ERROR_NEGATIVE_BUTTON (13).
@@ -765,7 +765,7 @@ pub(crate) fn can_authenticate() -> CanAuthenticate {
 /// random IV at init (`setRandomizedEncryptionRequired` defaults on), read
 /// back via `Cipher.getIV()`. Split from the final step so a gated store can
 /// interpose the biometric prompt ([`authenticate`]) between init and
-/// `doFinal` (S05); a plain store runs the two back to back.
+/// `doFinal`; a plain store runs the two back to back.
 fn init_encrypt<'local>(
     env: &mut Env<'local>,
     key: &JObject,
@@ -985,7 +985,7 @@ impl Backend for AndroidStore {
                 )
             })?;
             // Decrypt (JNI). The key must already exist to read an existing
-            // value; `get_or_create_key` returns it. A gated store (S05)
+            // value; `get_or_create_key` returns it. A gated store
             // interposes the biometric prompt between cipher init and
             // `doFinal`, unlocking the auth-bound key via the `CryptoObject`;
             // a plain store runs the two back to back. GCM tag verification in
@@ -1009,7 +1009,7 @@ impl Backend for AndroidStore {
     fn set(&self, key: &str, value: &str) -> Result<(), SecureStorageError> {
         with_context(|env, context| {
             // Encrypt (JNI) — a fresh random IV per write. As in `get`, a
-            // gated store (S05) interposes the biometric prompt between cipher
+            // gated store interposes the biometric prompt between cipher
             // init and `doFinal`; a plain store runs them back to back.
             let (cipher, iv) = run_jni(env, |env| {
                 let cipher_key = get_or_create_key(env, &self.store_id, self.auth.as_ref())?;

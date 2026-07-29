@@ -1,7 +1,6 @@
 //! `PlatformViewSlot`: the app-facing leaf that reserves layout space for a
 //! native platform view and publishes a
-//! [`PlatformViewFrame`](frust_core::widget::PlatformViewFrame) every paint
-//! (spec's platform-views feature, task 02).
+//! [`PlatformViewFrame`](frust_core::widget::PlatformViewFrame) every paint.
 //!
 //! [`platform_view`] takes the `"dev.frust.<Factory>"`-style native factory
 //! name and returns a builder ([`PlatformViewView`]) over the params/size
@@ -25,8 +24,8 @@
 //! app backdrop painted below it (the catalog's `AppBackground`, or any app-root
 //! fill). The earlier "paints nothing in Mode B" contract was
 //! device-disproven: a translucent app whose page fills the screen sealed every
-//! hole opaque, and the hosted native view could never show (research VERIFY.md
-//! D1). The clear is a real destination-clearing composite, not a skipped paint,
+//! hole opaque, and the hosted native view could never show. The clear is a
+//! real destination-clearing composite, not a skipped paint,
 //! so it erases whatever the backdrop drew beneath the slot.
 //!
 //! The widget can't see the surface mode directly (that lives in the shell); it
@@ -38,16 +37,16 @@
 //! keeps the paints-nothing behavior. In every mode
 //! [`PlatformViewWidget::paint`] also *publishes* the [`PlatformViewFrame`]
 //! describing where/how the native view should be placed; the actual
-//! composition happens downstream (task 03's differ, the per-shell channel
-//! tasks). See `docs/CODE_STANDARDS.md`'s platform-view paint-contract entry
-//! (task 12) for the full writeup.
+//! composition happens downstream (the differ, the per-shell channel). See
+//! `docs/CODE_STANDARDS.md`'s platform-view paint-contract entry for the full
+//! writeup.
 //!
 //! # Identity
 //!
 //! `slot_id` is allocated once per **widget instance**
 //! ([`frust_core::widget::next_slot_id`], called from
 //! [`View::build`](frust_core::View::build)) — never derived from tree
-//! position, so a keyed reorder (spec §6.3) preserves it automatically along
+//! position, so a keyed reorder preserves it automatically along
 //! with the rest of the retained widget. A `view_type` change across a
 //! rebuild is treated like swapping in a widget of a different concrete type
 //! (matching the framework's type-swap reconciliation conventions
@@ -61,7 +60,7 @@
 //! override — it relies on the trait's `Ignored` default. Mode A routes
 //! input to the native sibling view at the OS level (frust never sees it);
 //! Mode B has frust own the whole surface, but a platform-view slot's own
-//! input contract is out of scope for v1 (see the feature's research notes).
+//! input contract is out of scope for v1.
 //!
 //! # Z-shields ([`shield`])
 //!
@@ -84,7 +83,7 @@
 //! A removed slot reports its `slot_id` to `frust-core`'s pending-retire list
 //! ([`frust_core::widget::report_retired_slot`]) so the shell can dispose the
 //! native view on its very next frame, instead of waiting out the differ's
-//! ~30-frame missing-streak heuristic (Phase 0 spike finding). A merely
+//! ~30-frame missing-streak heuristic. A merely
 //! *culled* slot never runs `teardown`, so it keeps the missing-streak
 //! backstop — which is exactly what keeps a scrolled-offscreen camera preview
 //! alive.
@@ -154,7 +153,7 @@ impl PlatformViewView {
     /// Set the opaque creation params handed to the native factory (default
     /// empty). Changing this across a rebuild bumps the widget's retained
     /// `params_generation` counter exactly once (see the module's Identity
-    /// notes) — the differ (task 03) uses the bump to decide whether to
+    /// notes) — the differ uses the bump to decide whether to
     /// re-create or merely update the native view.
     pub fn params_json(mut self, params_json: impl Into<String>) -> Self {
         self.params_json = params_json.into();
@@ -199,7 +198,7 @@ impl PlatformViewView {
         self
     }
 
-    /// Mode B input forwarding (native-widgets spike 3): mark this slot's
+    /// Mode B input forwarding: mark this slot's
     /// native view as pointer-interactive. A touch-DOWN inside the slot's
     /// rect — and outside every shield rect ([`Self::shield_local`]) — hands
     /// the whole gesture to the native sibling instead of the frust surface.
@@ -370,7 +369,7 @@ impl Widget for PlatformViewWidget {
                 .collect(),
         });
 
-        // Mode B hole-punch (research VERIFY.md D1): on a translucent surface,
+        // Mode B hole-punch: on a translucent surface,
         // actively clear the slot's rect so an opaque app backdrop painted below
         // it (the catalog's `AppBackground`) doesn't seal the hole the hosted
         // native view shows through. Gated on the threaded translucent flag —
@@ -684,12 +683,12 @@ mod tests {
         );
     }
 
-    // -- Mode B hole-punch (D1) ---------------------------------------------
+    // -- Mode B hole-punch ---------------------------------------------
 
     #[test]
     fn translucent_surface_punches_the_slot_rect() {
         // Mode B: the slot actively clears its rect so an opaque backdrop below
-        // it doesn't seal the hole (research VERIFY.md D1).
+        // it doesn't seal the hole.
         let view = platform_view("dev.frust.MapFactory").size(100.0, 80.0);
         let mut w = build(&view);
         let mut lctx = LayoutCtx::new();
@@ -732,12 +731,12 @@ mod tests {
         assert_eq!(pctx.take_platform_views().len(), 1);
     }
 
-    // -- resolved-translucency flip (review M1) -----------------------------
+    // -- Resolved-translucency flip -----------------------------
 
     /// Count the `ClearRect` commands in a real display list — the punch as the
     /// GPU backend will actually see it, one level below the recording
-    /// `PaintScene` the tests above use (the t11-redo D4 lesson: a
-    /// recording-level assertion missed a real defect in this exact path).
+    /// `PaintScene` the tests above use (a recording-level assertion once
+    /// missed a real defect in this exact path).
     fn clear_rects(scene: &frust_scene::Scene) -> usize {
         scene
             .commands()
@@ -921,7 +920,7 @@ mod tests {
         assert_eq!(after[1].slot_id, id_a, "key 1's slot survives the reorder");
     }
 
-    // -- z-shield auto-collection (p1-09) ------------------------------------
+    // -- Z-shield auto-collection ------------------------------------
 
     #[test]
     fn shield_reports_its_absolute_painted_rect_and_paints_the_child_unchanged() {
@@ -1005,7 +1004,7 @@ mod tests {
         );
     }
 
-    // -- teardown retire (p1-09) ---------------------------------------------
+    // -- Teardown retire ---------------------------------------------
 
     /// Serializes the tests draining `frust-core`'s process-wide retire list,
     /// which `cargo test`'s parallel threads would otherwise interleave.

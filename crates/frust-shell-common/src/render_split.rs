@@ -1,11 +1,11 @@
-//! Render-thread-split plumbing shared by every shell (plan phase 11.B.1).
+//! Render-thread-split plumbing shared by every shell.
 //!
 //! # What lives here
 //!
 //! The split moves `encode→acquire→blit→present` off the UI thread onto a
-//! dedicated render thread (plan phase 11.B): the UI thread keeps
+//! dedicated render thread: the UI thread keeps
 //! `rebuild→layout→paint`, then hands the finished [`Scene`] across. This
-//! module is the *vocabulary* for that handoff — the shells (tasks 08/09/10)
+//! module is the *vocabulary* for that handoff — the shells
 //! own the threads and the `wgpu`/`vello` resources, this crate owns the
 //! platform-free channel types and the pure lifecycle/kill-switch logic they
 //! coordinate through.
@@ -15,11 +15,11 @@
 //!   render thread always takes the freshest, dropping stale frames) fused with
 //!   a FIFO lifecycle-command queue behind **one** [`std::sync::Condvar`], so
 //!   the render thread has a single wait point ([`RenderReceiver::wait_next`]).
-//!   Depth 1 is deliberate — Flutter's merged-mode precedent (RESEARCH.md Q9:
-//!   pipeline depth drops to 1 when threads merge); deeper queues add latency
+//!   Depth 1 is deliberate — Flutter's merged-mode precedent shows pipeline
+//!   depth drops to 1 when threads merge; deeper queues add latency
 //!   for no mobile win.
-//! - [`scene_return_channel`] — the reverse, render→UI give-back link (review
-//!   finding F5): a **non-blocking, depth-1** [`Mutex`]-only slot (no
+//! - [`scene_return_channel`] — the reverse, render→UI give-back link: a
+//!   **non-blocking, depth-1** [`Mutex`]-only slot (no
 //!   [`Condvar`] — the UI thread only ever polls it, never parks) the render
 //!   thread pushes a drained scene back through once it is done reading it, so
 //!   a shell's split `submit_frame` can `Scene::reset()` and reuse the buffer
@@ -34,14 +34,14 @@
 //! - [`Ack`] / [`AckWaiter`] — the cross-thread acknowledgment barrier that
 //!   makes [`RenderCommand::Pause`] and [`RenderCommand::SurfaceDestroyed`]
 //!   *synchronous*: the UI thread blocks until the render thread has honored
-//!   the command. This is the correctness anchor for the two platform hazards
-//!   the plan flags — Android can destroy the `ANativeWindow` while the render
+//!   the command. This is the correctness anchor for two platform hazards:
+//!   Android can destroy the `ANativeWindow` while the render
 //!   thread still holds the surface, and iOS can kill a process that submits
 //!   Metal work after the app backgrounds. Both are barriers, not shared
 //!   mutable flags.
 //! - [`SceneFrame`] / [`FrameMeta`] / [`SurfaceSize`] — the per-frame payload
 //!   crossing the handoff: the scene plus the frame clock, the surface
-//!   dimensions, and (for the single-emitter perf recording, plan phase 11.B.3)
+//!   dimensions, and (for the single-emitter perf recording)
 //!   the UI thread's [`UiSpans`] half of the frame timing, which the render
 //!   thread folds together with its own [`RenderSpans`] via
 //!   [`FramePasses::from_split`](crate::perf::FramePasses::from_split).
@@ -49,7 +49,8 @@
 //!   switch the shells consult, parsed exactly like [`crate::frame_gate`]'s
 //!   `FRUST_NO_FRAME_GATE` (compile-time define *or* runtime env, any non-`"0"`
 //!   value). When engaged, a shell keeps the pre-split single-thread path (kept
-//!   until 11.E validates the split).
+//!   as an escape hatch until the split's on-device throughput is fully
+//!   validated).
 //!
 //! # Layering choice
 //!
@@ -63,10 +64,11 @@
 //! = its own raw-window wrapper, while these host tests instantiate cheap
 //! stand-ins, so the whole channel is exercised without a GPU or a platform.
 //!
-//! # Wiring is a later task
+//! # Wiring
 //!
-//! This module ships the channel types + pure logic only; no shell spawns a
-//! render thread yet (tasks 08/09/10 wire the desktop/Android/iOS shells).
+//! This module ships the channel types + pure logic; the desktop, Android,
+//! and iOS shells each spawn their own render thread on top of it, gated by
+//! [`render_thread_enabled`].
 //!
 //! [`Scene`]: https://docs.rs/frust-scene
 //! [`UiSpans`]: crate::perf::UiSpans
@@ -92,7 +94,7 @@ use crate::perf::UiSpans;
 pub const NO_RENDER_THREAD_VAR: &str = "FRUST_NO_RENDER_THREAD";
 
 /// Whether a shell should run the render-thread split — the **single switch**
-/// every shell consults (plan phase 11.B.3). `true` unless the
+/// every shell consults. `true` unless the
 /// [`NO_RENDER_THREAD_VAR`] kill switch is engaged (compile-time define or
 /// runtime env, any non-`"0"` value), mirroring [`crate::perf::enabled`]'s and
 /// [`crate::frame_gate`]'s `option_env!` + runtime-env parsing precedent.
@@ -139,7 +141,7 @@ pub struct SurfaceSize {
 }
 
 /// Per-frame metadata riding the scene-handoff channel alongside the scene
-/// itself (plan phase 11.B.1's "frame metadata").
+/// itself.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrameMeta {
     /// The shell's frame clock for this frame (`Choreographer`/`CADisplayLink`/
@@ -158,9 +160,9 @@ pub struct FrameMeta {
 }
 
 /// One frame handed from the UI thread to the render thread across
-/// [`render_channel`] (plan phase 11.B): the finished scene, its
+/// [`render_channel`]: the finished scene, its
 /// [`FrameMeta`], and the UI thread's [`UiSpans`] half of the frame timing
-/// (the render thread is the single perf emitter — plan phase 11.B.3).
+/// (the render thread is the single perf emitter).
 ///
 /// Generic over the scene type `S` so this crate stays render-free: a shell
 /// instantiates `SceneFrame<frust_scene::Scene>`, host tests use a cheap
@@ -201,12 +203,12 @@ pub enum RenderEvent {
     Resume,
 }
 
-/// The render thread's view of surface lifecycle state (plan phase 11.B),
+/// The render thread's view of surface lifecycle state,
 /// modelled on `frust-render`'s `SurfacePhase`: the render loop renders a
 /// handed-off [`SceneFrame`] only while [`can_render`](Self::can_render) — i.e.
 /// only in [`RenderPhase::Active`]. [`RenderPhase::Paused`] is the cross-thread
 /// backgrounding barrier (a leftover scene must NOT be submitted after a
-/// `Pause`, per the iOS process-kill hazard the plan flags).
+/// `Pause`, per the iOS process-kill hazard).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderPhase {
     /// No usable surface: nothing to render into (initial state, or after a
@@ -230,7 +232,7 @@ impl RenderPhase {
     }
 }
 
-/// Pure render-phase transition table (plan phase 11.B), the analogue of
+/// Pure render-phase transition table, the analogue of
 /// `frust-render`'s `next_phase`. Total by design:
 ///
 /// - `SurfaceCreated` → [`Active`](RenderPhase::Active) (create or recreate),
@@ -377,7 +379,7 @@ impl AckWaiter {
 // ---------------------------------------------------------------------
 
 /// A lifecycle command the UI thread sends to the render thread across
-/// [`render_channel`] (plan phase 11.B.1), as an **owned** value — not a shared
+/// [`render_channel`], as an **owned** value — not a shared
 /// mutable flag. Generic over the surface-handle type `W` a
 /// [`Self::SurfaceCreated`] carries (`frust-render`'s raw-window wrapper in a
 /// real shell; a stand-in in host tests), keeping this crate render-free.
@@ -477,7 +479,7 @@ struct Inbox<S, W> {
     /// (rather than queue) new work: an ack-carrying command dropped here fires
     /// its [`Ack`]'s [`Drop`] safety net, so a UI thread blocked on the paired
     /// [`AckWaiter`] can never wedge on a command the departed render thread will
-    /// never drain (review finding F1). Symmetric with [`Self::sender_alive`].
+    /// never drain. Symmetric with [`Self::sender_alive`].
     receiver_alive: bool,
 }
 
@@ -487,7 +489,7 @@ struct Channel<S, W> {
     signal: Condvar,
 }
 
-/// The UI-thread handle to the render channel (plan phase 11.B.1): sends scenes
+/// The UI-thread handle to the render channel: sends scenes
 /// (latest-wins) and lifecycle commands (FIFO). Single-producer by design (the
 /// UI thread), so it is deliberately not [`Clone`].
 #[derive(Debug)]
@@ -495,7 +497,7 @@ pub struct RenderSender<S, W> {
     channel: Arc<Channel<S, W>>,
 }
 
-/// The render-thread handle to the render channel (plan phase 11.B.1): the
+/// The render-thread handle to the render channel: the
 /// single wait point ([`Self::wait_next`]) draining pending commands plus the
 /// freshest scene each wakeup.
 #[derive(Debug)]
@@ -520,7 +522,7 @@ pub struct RenderBatch<S, W> {
     pub disconnected: bool,
 }
 
-/// Create the UI→render channel (plan phase 11.B.1): a depth-1 latest-wins
+/// Create the UI→render channel: a depth-1 latest-wins
 /// scene slot fused with a FIFO lifecycle-command queue behind one condvar.
 ///
 /// `S` is the scene payload type (`frust_scene::Scene` in a real shell), `W`
@@ -550,8 +552,8 @@ impl<S, W> RenderSender<S, W> {
     /// Hand a finished frame to the render thread (**depth-1 latest-wins**): if
     /// an un-taken scene is still in the slot it is replaced (the drop counter
     /// still increments — see [`Inbox::dropped`]) and **returned** to the
-    /// caller instead of being silently dropped in the lock (review finding
-    /// F5) — a shell can reclaim the stale frame's scene buffer the same way
+    /// caller instead of being silently dropped in the lock — a shell can
+    /// reclaim the stale frame's scene buffer the same way
     /// it reclaims one off [`scene_return_channel`]. `None` if the slot was
     /// empty. A pure widening of the original fire-and-forget signature — a
     /// caller that doesn't care may still ignore the return value. Wakes the
@@ -585,7 +587,7 @@ impl<S, W> RenderSender<S, W> {
             // command rather than queue it forever. Releasing the inbox lock first,
             // then dropping `command`, fires any embedded `Ack`'s `Drop` safety net
             // (Pause/SurfaceDestroyed), so a UI thread blocked on the paired
-            // `AckWaiter` unblocks instead of deadlocking (review finding F1).
+            // `AckWaiter` unblocks instead of deadlocking.
             drop(inbox);
             drop(command);
             return;
@@ -638,7 +640,7 @@ impl<S, W> Drop for RenderReceiver<S, W> {
         // Without this, that command would sit in the inbox forever (kept alive by
         // the `Arc<Channel>` the still-blocked UI side holds), the safety net would
         // never fire, and `AckWaiter::wait()` would deadlock the UI/main thread —
-        // review finding F1, the load-bearing correctness fix.
+        // the load-bearing correctness fix this drop impl provides.
         let mut inbox = self.channel.inbox.lock().unwrap();
         inbox.receiver_alive = false;
         let commands = std::mem::take(&mut inbox.commands);
@@ -700,14 +702,15 @@ fn drain<S, W>(inbox: &mut Inbox<S, W>) -> RenderBatch<S, W> {
 }
 
 // ---------------------------------------------------------------------
-// Scene give-back: a non-blocking depth-1 return slot (review finding F5)
+// Scene give-back: a non-blocking depth-1 return slot
 // ---------------------------------------------------------------------
 
 /// The render-thread handle to [`scene_return_channel`]: pushes a drained
 /// scene back for the UI thread to reclaim (`Scene::reset` + reuse) instead
-/// of a shell allocating a fresh one every frame — the buffer-reuse gap
-/// review finding F5 flagged (a scene crossing [`render_channel`] never came
-/// back, so every split `submit_frame` replaced it with `Scene::new()`).
+/// of a shell allocating a fresh one every frame — closing the buffer-reuse
+/// gap a scene crossing [`render_channel`] would otherwise leave (a scene
+/// with no way back, so every split `submit_frame` replaced it with
+/// `Scene::new()`).
 #[derive(Debug)]
 pub struct SceneReturnSender<S> {
     slot: Arc<Mutex<Option<S>>>,
@@ -720,7 +723,7 @@ pub struct SceneReturnReceiver<S> {
     slot: Arc<Mutex<Option<S>>>,
 }
 
-/// Create the render→UI scene give-back channel (review finding F5): a
+/// Create the render→UI scene give-back channel: a
 /// non-blocking, depth-1 return slot — the reverse-direction, pull-based
 /// counterpart to [`render_channel`]'s UI→render handoff. `Mutex<Option<S>>`
 /// only, no [`Condvar`] and no new dependency: nothing should ever park
@@ -746,8 +749,7 @@ impl<S> SceneReturnSender<S> {
     /// off a [`RenderReceiver`] — whether the scene is actually rendered or
     /// the frame is phase-gated out ([`RenderPhase::Paused`]/[`RenderPhase::NoSurface`]
     /// after a `Pause`/`SurfaceDestroyed`) — so a scene is never silently
-    /// dropped instead of given back (review finding F5's "never silently
-    /// dropped" requirement).
+    /// dropped instead of given back.
     pub fn give_back(&self, scene: S) {
         let mut slot = self.slot.lock().unwrap();
         *slot = Some(scene);
@@ -996,7 +998,7 @@ mod tests {
 
     #[test]
     fn send_scene_returns_the_overwritten_stale_frame() {
-        // Review finding F5: an untaken scene replaced by a newer send must be
+        // An untaken scene replaced by a newer send must be
         // handed back to the caller (to reclaim its buffer), not silently
         // dropped in the lock.
         let (tx, rx) = render_channel::<u32, ()>();
@@ -1028,7 +1030,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Scene give-back channel (review finding F5): non-blocking depth-1
+    // Scene give-back channel: non-blocking depth-1
     // return slot, render thread -> UI thread.
     // -----------------------------------------------------------------
 
@@ -1263,7 +1265,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Receiver-liveness (review finding F1): a render thread that exits
+    // Receiver-liveness: a render thread that exits
     // before draining an ack-carrying command must never deadlock the UI
     // thread. Every assertion here is timeout-bounded so a *regression* FAILS
     // (the timeout expires, returning `false`) rather than hanging the suite.

@@ -1,4 +1,4 @@
-//! iOS accesskit adapter wiring (phase 6d D3-ios) — **NOT COMPILED ON THIS
+//! iOS accesskit adapter wiring — **NOT COMPILED ON THIS
 //! HOST**.
 //!
 //! This module is `#[cfg(target_os = "ios")]`: it depends on `accesskit_ios`,
@@ -6,7 +6,7 @@
 //! It is written structurally mirroring the Android adapter (a
 //! `SubclassingAdapter` held in the app handle, a full `TreeUpdate` pushed
 //! post-layout from `frame()`, and an `ActionRequest` → `perform_accessibility_action`
-//! routing path) so the phase-6e compile pass on a macOS host is mechanical.
+//! routing path) so a compile pass on a macOS host is mechanical.
 //! The pure, host-testable half — the `SemanticsUpdate` → `accesskit::TreeUpdate`
 //! assembly — lives in [`crate::ffi_support::build_tree_update`], covered by
 //! `cargo test --workspace`.
@@ -23,10 +23,10 @@
 //! handler never re-enters the tree — it only enqueues the request onto a plain
 //! [`RefCell`]-guarded queue that `frame()` drains outside the adapter — so no
 //! borrow of the app tree is ever held across `raise()`. This is the same
-//! deadlock-avoidance the research (RESEARCH.md accesskit-adapter-apis, iOS
-//! `QueuedEvents::raise` caveat) calls for. accesskit_ios enforces main-thread-ness
-//! only via a one-time runtime `MainThreadMarker` panic in the adapter constructor
-//! (refuted-claim R4), not compile-time typestate, so this is a documented contract.
+//! deadlock-avoidance accesskit_ios's `QueuedEvents::raise` caveat calls for.
+//! accesskit_ios enforces main-thread-ness
+//! only via a one-time runtime `MainThreadMarker` panic in the adapter constructor,
+//! not compile-time typestate, so this is a documented contract.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -50,7 +50,7 @@ type ActionQueue = Rc<RefCell<VecDeque<ActionRequest>>>;
 /// accesskit `ActionHandler` that never touches the widget tree directly: it just
 /// enqueues each request for `IosAppHandle::frame()` to drain.
 ///
-/// Enqueue-don't-execute is deliberate (spec §9 / research iOS `raise()` caveat):
+/// Enqueue-don't-execute is deliberate:
 /// the handler is owned by the adapter, which is owned by the app handle, so it
 /// *cannot* borrow the handle to run the action here without aliasing — and even
 /// if it could, running the action (which mutates state) from inside the adapter
@@ -83,7 +83,7 @@ impl ActionHandler for QueueingActionHandler {
 /// This snapshot is what lets `publish_semantics`'s generation gate safely
 /// *skip* re-pushing an unchanged tree without starving a late-activating AT —
 /// the same design the Android adapter's `ForgeActivationHandler`/`tree_snapshot`
-/// uses (phase-6d D3). It reaches only the shared snapshot slot, never the app
+/// uses. It reaches only the shared snapshot slot, never the app
 /// tree it cannot borrow (see [`QueueingActionHandler`]). Runs on the UIKit main
 /// thread.
 struct SnapshotActivationHandler {
@@ -187,7 +187,7 @@ impl IosA11yAdapter {
     /// ([`SnapshotActivationHandler`]), and hands it to `update_if_active` — which
     /// pushes only while an assistive technology is active (a cheap no-op
     /// otherwise) and returns the `QueuedEvents` to raise. Full-tree every push is
-    /// valid because our node ids are stable across frames (phase-6d D1) and
+    /// valid because our node ids are stable across frames and
     /// accesskit dedupes unchanged nodes internally.
     ///
     /// `generation` is the tree's current

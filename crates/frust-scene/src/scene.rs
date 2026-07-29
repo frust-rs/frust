@@ -8,7 +8,7 @@ use crate::shader::ShaderProgram;
 
 /// How a [`Command::Path`] is rendered: filled or stroked.
 ///
-/// Kept intentionally minimal (task 05, PLAN.md D2b): the fill/stroke shape
+/// Kept intentionally minimal: the fill/stroke shape
 /// widgets need for arcs (circular progress, activity indicators) — a
 /// nonzero-fill, or a stroke with a fixed width and round caps/joins. No
 /// dash pattern, miter limit, or even-odd fill rule yet; extend here (and in
@@ -159,7 +159,7 @@ pub enum Command {
 pub struct Scene {
     commands: Vec<Command>,
     /// [`crate::SceneBuilder`]'s transform stack, parked here between frames
-    /// (task 10.E, PLAN.md Phase 10.E) so its backing `Vec` allocation is
+    /// so its backing `Vec` allocation is
     /// reused across every `SceneBuilder::new` call instead of reallocating
     /// per frame — a `SceneBuilder` borrows it via `&mut Scene` and resets it
     /// to `[Affine::IDENTITY]` on construction, so behavior is unchanged.

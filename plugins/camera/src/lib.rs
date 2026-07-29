@@ -21,18 +21,18 @@
 //! [`CameraSession::preview_view_type`] returns the `viewType` string an app
 //! feeds straight into `frust::platform_view` (the `frust-widgets`
 //! `platform_view` module) — the native-sibling compositing slot
-//! `workflow/plans/features/frust-camera/PLAN.md`'s Phase 0 device-proved.
-//! The string is deliberately **target-gated** (platform-views W5 finding,
-//! restated on [`CameraSession::preview_view_type`]'s doc): Android returns a
+//! an earlier device test proved.
+//! The string is deliberately **target-gated** (see
+//! [`CameraSession::preview_view_type`]'s doc): Android returns a
 //! fully-qualified class name, iOS a bare runtime name — never one shared
 //! literal.
 //!
 //! # Backends
 //!
-//! The crate landed as the **crate + frozen contract** (Plan Phase 1
-//! preamble, task 02) and the real backends filled in behind that unchanged
-//! API: [`android`] (task 06, CameraX via `FrustCameraHost.kt`), [`apple`]
-//! (task 07, AVFoundation), and the image stream on both (task 09). On every
+//! The crate landed as the **crate + frozen contract** first,
+//! and the real backends filled in behind that unchanged
+//! API: [`android`] (CameraX via `FrustCameraHost.kt`), [`apple`]
+//! (AVFoundation), and the image stream on both. On every
 //! other target — desktop preview, wasm, anything without a camera backend —
 //! [`unsupported`] fails every call soft with
 //! [`CameraError::PlatformNotInitialized`], never a panic (the
@@ -72,8 +72,8 @@
 //! decided (granted/denied/restricted) returns straight away and is never
 //! refused — only the prompt-and-wait path is guarded.
 
-// Platform backends (Plan Phase 1 preamble lands the crate + frozen contract;
-// Phases 1-3 / tasks 06/07/09 fill the real implementations behind the same
+// Platform backends (the crate + frozen contract landed first; the real
+// implementations filled in behind the same
 // `SessionBackend` trait). Every real target routes through `Camera::open`'s
 // selection point below.
 #[cfg(target_os = "android")]
@@ -142,7 +142,7 @@ pub enum PermissionStatus {
     Denied,
     /// No cached Activity exists yet to show the system permission dialog
     /// (Android-specific — see the module doc's *Preview is a platform
-    /// view* / PLAN.md's permission-plumbing risk: request again once a
+    /// view*: request again once a
     /// `platform_view` preview slot exists).
     NeedsUi,
     /// The system dialog is showing; the resolved status arrives
@@ -359,8 +359,8 @@ impl Camera {
     /// AVFoundation): a returned [`CameraSession`] does not yet guarantee a
     /// live camera — read [`CameraSession::preview_aspect_ratio`] (`0.0`
     /// until the platform reports its first frame geometry) and drive
-    /// [`Self::request_permission`] alongside it, per PLAN.md's permission-
-    /// plumbing note (permission is requested once a `platform_view` preview
+    /// [`Self::request_permission`] alongside it (permission is requested
+    /// once a `platform_view` preview
     /// slot exists, not necessarily before `open`).
     ///
     /// # Errors
@@ -405,8 +405,8 @@ impl CameraSession {
     /// The `viewType` string to pass to `frust::platform_view` for this
     /// session's live preview slot.
     ///
-    /// **Target-gated — never one shared literal** (platform-views W5
-    /// finding, `docs/CODE_STANDARDS.md`'s Naming Conventions LAW): Android
+    /// **Target-gated — never one shared literal** (see
+    /// `docs/CODE_STANDARDS.md`'s Naming Conventions LAW): Android
     /// returns the fully-qualified `"dev.frust.camera.CameraPreviewFactory"`
     /// (the embedding module's `FrustViewHost` resolves it via the app
     /// classloader), iOS the bare `"CameraPreviewFactory"` (resolved via

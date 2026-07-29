@@ -1,6 +1,6 @@
 //! exportOptions plist generation + `-exportArchive` argument assembly for
-//! `frust build ipa` (spec §12.6). The plist is a tiny fixed-schema XML
-//! string — `method` (required) plus `teamID` (when known) — hand-rolled so
+//! `frust build ipa`. The plist is a tiny fixed-schema XML string —
+//! `method` (required) plus `teamID` (when known) — hand-rolled so
 //! `ios_build` needs no plist/serde dependency.
 
 use super::xcodebuild::ARCHIVE_PATH;

@@ -1,7 +1,7 @@
 //! parley layout -> `frust_scene` glyph-run conversion.
 //!
-//! This module owns the parley -> vello-0.9 glyph-mapping contract (task 06
-//! consumes the resulting [`frust_scene::GlyphRun`]s on the vello side).
+//! This module owns the parley -> vello-0.9 glyph-mapping contract
+//! (`frust-render` consumes the resulting [`frust_scene::GlyphRun`]s on the vello side).
 //!
 //! # Coordinate convention
 //!

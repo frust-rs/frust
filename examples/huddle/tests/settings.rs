@@ -1,9 +1,8 @@
-//! Integration coverage for the theming engine + notification prefs (Huddle
-//! showcase, task 15).
+//! Integration coverage for the theming engine + notification prefs.
 //!
 //! These drive the public [`huddle::features::settings`] API at the crate
 //! boundary — the same `compose` test seam the appearance screen's `SetTheme`
-//! use case runs through, plus the accent/type/notification axes this task adds.
+//! use case runs through, plus the accent/type/notification axes.
 //! No render harness is needed: the theming decision is a pure function of the
 //! four selections against the ambient theme.
 

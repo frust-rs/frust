@@ -1,12 +1,11 @@
 //! Feedback section — status/feedback widgets from the `frust::glyph`
 //! catalog: badges, removable tags, alerts, toast triggers, and the three
-//! loader/placeholder shapes (`research/INVENTORY.md`'s "Section 04: Status +
-//! Feedback").
+//! loader/placeholder shapes.
 //!
 //! # Page-local state
 //!
-//! This page's file-scope contract (`c04`'s task) is `src/pages/feedback.rs`
-//! only — `CatalogState` (owned by `c01`'s scaffold, `src/lib.rs`) can't grow
+//! This page's file-scope contract is `src/pages/feedback.rs`
+//! only — `CatalogState` (owned by `src/lib.rs`'s scaffold) can't grow
 //! a tags field for this page's removable-tags demo. Instead the whole page
 //! body is a nested [`frust::component`] with its **own** retained local
 //! state (the tags `Vec` signal), mirroring `examples/huddle`'s

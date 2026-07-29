@@ -1,8 +1,7 @@
 //! The iOS platform-view factory: ONE Rust `define_class!` Objective-C class
 //! implementing the embedding's `FrustPlatformViewFactory` protocol — the
 //! whole platform surface this plugin will ever need on Apple, however many
-//! controls [`crate::runtime`] grows, and **zero Swift** (PLAN.md's Phase 0
-//! spike 2, GO).
+//! controls [`crate::runtime`] grows, and **zero Swift**.
 //!
 //! # The frozen ObjC ↔ Rust contract
 //!
@@ -12,7 +11,7 @@
 //! | `updateParams(_:paramsJson:)` (optional) | `updateParams:paramsJson:` | [`FrustNativeControlFactory::update_params`] | Props change, Rust-diffed before any setter runs |
 //! | `disposeView(_:)` (optional) | `disposeView:` | [`FrustNativeControlFactory::dispose_view`] | Release everything the control retained |
 //!
-//! ## Two name pins, both load-bearing (Phase 0 spike 2's findings)
+//! ## Two name pins, both load-bearing
 //!
 //! 1. **The class's runtime name is pinned to
 //!    [`FACTORY_CLASS_NAME`]** via `define_class!`'s `#[name = "…"]`. `#[name]`
@@ -32,9 +31,9 @@
 //!    — because Swift would otherwise register it under its mangled name
 //!    (`_TtP14FrustEmbedding24FrustPlatformViewFactory_`) and no non-Swift
 //!    implementor could ever attach a conformance the host's
-//!    `class_conformsToProtocol` check can see. That was spike 2's first
+//!    `class_conformsToProtocol` check can see. That was an earlier
 //!    on-device failure (a black hole where the control should be); the Swift
-//!    fix shipped with the spike.
+//!    fix shipped alongside it.
 //!
 //! [`FrustNativeControlFactory::createView_paramsJson`]: FrustNativeControlFactory
 //! [`FrustNativeControlFactory::update_params`]: FrustNativeControlFactory
@@ -59,7 +58,7 @@
 //! because iOS has no exception channel to throw into: Android *throws* into
 //! `applyCreate`'s `catch (Throwable)`, Apple *returns something harmless*.
 //! `FrustPlatformViewFactory.swift`'s doc comment states the same contract; if
-//! you change one, change the other (the c1-02 lesson).
+//! you change one, change the other.
 //!
 //! [cv]: FrustNativeControlFactory
 //!
@@ -119,9 +118,9 @@
 //! ObjC class registered into the runtime *from live Rust code*
 //! ([`ensure_registered`], reached from the api layer) and then found by name
 //! through the ObjC runtime's own class table — nothing crosses the linker as
-//! an orphan C export, so there is nothing for LTO to drop. Spike 2 proved
-//! exactly this in a signed release build (`lto = "fat"` + `strip =
-//! "symbols"`), and PLAN.md records it. Adding a `#[used]` static here would
+//! an orphan C export, so there is nothing for LTO to drop. An earlier
+//! device test proved exactly this in a signed release build (`lto = "fat"`
+//! + `strip = "symbols"`). Adding a `#[used]` static here would
 //! keep alive a symbol that does not exist; do not "fix" this.
 //!
 //! # No unwind across FFI
@@ -131,7 +130,7 @@
 //! `docs/CODE_STANDARDS.md`'s no-unwind-across-FFI rule, the Apple mirror of
 //! what `jni::EnvUnowned::with_env` does for the Android exports.
 //!
-//! **One precise exception, stated rather than glossed** (p2-01 validation):
+//! **One precise exception, stated rather than glossed**:
 //! `createViewWithParamsJson:` acquires its `MainThreadMarker` *before*
 //! entering the guard, because it must return a `UIView` on every path and so
 //! its `Err` arm needs a marker as well — acquiring one there instead would
@@ -171,7 +170,7 @@ use crate::runtime::{self, Params, UpdateOutcome};
 /// `platform_view(...)` slot publishes and what `FrustViewHost.resolveFactory`
 /// feeds to `NSClassFromString`. A mismatch is silent: the lookup returns nil,
 /// the host takes its unresolvable-factory branch, and every native control on
-/// iOS renders nothing at all (`research/RESEARCH-P2-REFRESH.md` §6b). The
+/// iOS renders nothing at all. The
 /// name matches the Android Kotlin class
 /// (`dev.frust.nativewidgets.FrustNativeControlFactory`)
 /// minus its package, which iOS does not have (`docs/CODE_STANDARDS.md`'s
@@ -192,7 +191,7 @@ extern_protocol!(
     /// public protocol` (`platform/ios/FrustEmbedding/Sources/FrustEmbedding/
     /// FrustPlatformViewFactory.swift`), declared here by **runtime name** so
     /// the Rust class below can register a conformance the host's
-    /// `class_conformsToProtocol` check actually sees (spike 2's finding 2).
+    /// `class_conformsToProtocol` check actually sees.
     ///
     /// Only the required method is declared. The two optional ones
     /// (`updateParams:paramsJson:`, `disposeView:`) are implemented as plain
@@ -224,7 +223,7 @@ define_class!(
     // `FrustViewHost`'s own `CADisplayLink`-driven poll), and every UIKit type
     // a control touches is main-thread-only — so is this class. That is what
     // lets `MainThreadMarker::from(self)` below be a free, compile-time proof
-    // rather than a runtime check (PLAN 2.1).
+    // rather than a runtime check.
     #[thread_kind = MainThreadOnly]
     // See `FACTORY_CLASS_NAME`'s doc: this literal must equal that constant,
     // and both must equal `api::builders`' iOS `VIEW_TYPE`.
@@ -333,9 +332,9 @@ define_class!(
 /// (`Cargo.toml`'s comment on the `log` dependency). `eprintln!` rather than
 /// `log::info!` because a `--release` build carries the `lean` log ceiling
 /// (`log/release_max_level_warn`), which compiles info-level logs out
-/// entirely — and this receipt is *the* artifact task p2-05's bar 2 collects
-/// ("`devicectl … launch --console` capture of the registration eprintln, as
-/// the spike did") to prove the zero-Swift factory really did resolve in a
+/// entirely — and this receipt is *the* artifact a device gate can collect
+/// (a `devicectl … launch --console` capture of the registration eprintln)
+/// to prove the zero-Swift factory really did resolve in a
 /// signed release build. Stderr reaches both `xcrun devicectl … process
 /// launch --console` and `simctl launch --console-pty`.
 pub(crate) fn ensure_registered() {
@@ -351,7 +350,7 @@ pub(crate) fn ensure_registered() {
             protocol.is_some(),
         );
         if !conforms {
-            // Spike 2's finding 1, should it ever regress: without
+            // A regression this guards against: without
             // `@objc(FrustPlatformViewFactory)` on the Swift protocol, Swift
             // registers it under a mangled name and no Rust-attached
             // conformance is visible to `class_conformsToProtocol` — so the
@@ -381,7 +380,7 @@ pub(crate) fn ensure_registered() {
 /// `Retained` clone — an infallible ARC retain — so a successful
 /// `NativeRuntime::create` is always a successful `createView`.
 ///
-/// Theme ladder L1 (p2-04): applies `overrideUserInterfaceStyle` to the
+/// Theme ladder L1: applies `overrideUserInterfaceStyle` to the
 /// finished control's own top-level view (`crate::apple::theme`'s module doc
 /// — the single generic choke point every control's `createView` passes
 /// through, mirroring `crate::android::create_control`'s own context-wrapping
@@ -406,9 +405,8 @@ fn create_control(mtm: MainThreadMarker, params: &str) -> Option<Retained<UIView
     // fired its own action back into create). It logs that at the point of
     // detection; folding it into the same `Result` shape here is what makes it
     // fall through the one reporting path below instead of silently returning
-    // a placeholder with no explanation (the Android arm's
-    // `c1-02-create-contract-honesty.md` lesson, applied before it could
-    // happen here).
+    // a placeholder with no explanation — the same create-contract-honesty
+    // lesson the Android arm learned, applied here before it could bite.
     .unwrap_or_else(reentrant_create_failure);
 
     match outcome {
@@ -430,8 +428,8 @@ fn update_control(mtm: MainThreadMarker, params: &str) {
         let mut ctx = NativeCtx::new(mtm);
         match runtime.update_params(&mut ctx, params) {
             Ok(UpdateOutcome::Applied | UpdateOutcome::Unchanged) => {
-                // L1 is re-pinned on EVERY update, not only at create
-                // (p2-05 gate finding). `overrideUserInterfaceStyle` is a
+                // L1 is re-pinned on EVERY update, not only at create.
+                // `overrideUserInterfaceStyle` is a
                 // plain mutable `UIView` property, so unlike Android's
                 // `Context` there is nothing forcing this to be baked —
                 // see `crate::apple::theme`'s module doc. Re-pinning here is

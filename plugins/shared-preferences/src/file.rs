@@ -6,10 +6,11 @@
 //! desktop-facing storage site delegates to (see `docs/ARCHITECTURE.md`'s
 //! `frust-paths` row).
 //!
-//! This module is also the **temporary routing target** for
-//! iOS/macOS/Android (see `crate`'s module doc) until task 06 lands the
-//! native `apple`/`android` backends — its own JSON encoding is otherwise
-//! irrelevant to those targets.
+//! This module also compiles under `#[cfg(test)]` on every target, including
+//! iOS/macOS/Android (see `crate`'s module doc), so its own unit tests and
+//! the shared conformance suite always run — it is not the real dispatch
+//! target on those platforms, which route to the native `apple`/`android`
+//! backends instead.
 //!
 //! # On-disk shape
 //!

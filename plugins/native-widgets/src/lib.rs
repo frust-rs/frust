@@ -1,13 +1,11 @@
 //! `frust-native-widgets`: render REAL platform widgets (Android `View`s /
 //! UIKit views) from pure Rust — `native_button("Save")`, `native_switch(...)`
-//! etc. (Phase 3's app-facing API) compose the framework's `platform_view`
+//! etc. compose the framework's `platform_view`
 //! slots for placement, while this plugin creates and mutates the actual
 //! native views through direct, same-thread FFI: `with_jni_env` + hand-curated
 //! JNI bindings on Android, `objc2-ui-kit` on iOS (the factory itself a Rust
-//! `define_class!` class — zero Swift, Phase 0 spike 2, GO). See
-//! `workflow/plans/features/frust-native-widgets/PLAN.md` for the full plan;
-//! this crate lands incrementally across that plan's tasks — today it is the
-//! retained-handle [`registry`] every phase's create/update/dispose path is
+//! `define_class!` class — zero Swift). This crate holds the
+//! retained-handle [`registry`] every control's create/update/dispose path is
 //! built over, the `runtime` those paths dispatch through, the six `controls`
 //! (`Button`, `Label`, `Switch`, `Slider`, `ProgressBar`, `Image`) that
 //! runtime serves, the typed `events` vocabulary their listeners decode into,
@@ -15,11 +13,11 @@
 //! control now carries **both** platform halves — a
 //! `#[cfg(target_os = "android")] mod platform` and a
 //! `#[cfg(target_os = "ios")] mod platform`, side by side in the same file,
-//! executing the same shared setter plan (p1-04/p2-02) and, since p2-03,
+//! executing the same shared setter plan and
 //! reporting a tap/toggle/drag back to the app through the same event
 //! dispatch on both platforms (`crate::apple::events`'s Rust target-action
 //! object, mirroring Android's shared listener). The theme ladder's Apple
-//! arm (p2-04) is also in: L1 (`crate::apple::theme`) pins brightness via
+//! arm is also in: L1 (`crate::apple::theme`) pins brightness via
 //! `overrideUserInterfaceStyle` at control-creation time; L2 applies the
 //! same folded `Props` tokens through typed `objc2-ui-kit`/`CALayer`
 //! setters, including a themed background's corner radius; L3
@@ -29,7 +27,7 @@
 //!
 //! # One factory, one listener, N controls
 //!
-//! Adding a control never adds Kotlin or Swift — and since Phase 3 (p3-01)
+//! Adding a control never adds Kotlin or Swift — and
 //! that holds for **your** components too: `NativeComponent` is the public
 //! trait a plugin author implements to drive a native view (or view
 //! hierarchy) from pure Rust, registered with `register_component` and served
@@ -78,9 +76,9 @@
 //!
 //! Placement is **static-first**: app bars, bottom bars, and full-body
 //! surfaces have no desync by construction, while a *scroll-hosted* native
-//! widget is a documented, degraded tier (the camera scroll-sync spike
-//! measured cross-pipeline desync only while a slot's rect moves relative to
-//! frust content — `research/RESEARCH-PLACEMENT.md` §1/§3). Nothing in v1
+//! widget is a documented, degraded tier (an earlier device measurement of a
+//! scrolled native camera preview found cross-pipeline desync only while a
+//! slot's rect moves relative to frust content). Nothing in v1
 //! may *require* hosting a native widget inside a scroller; the headline use
 //! case is a high-rate native surface (a live chart, a streaming dashboard)
 //! updating at panel rate while frust's own frame loop idles.
@@ -96,11 +94,11 @@
 //! capture, focus, fire-on-up-inside, `Cancel`-never-mutates-state,
 //! `reduce_motion`/state-layer conventions) simply does not apply to a
 //! native control — this is a defining property of hosting real platform
-//! widgets, not a gap to close. The app-facing API (Phase 3) wraps a
+//! widgets, not a gap to close. The app-facing API wraps a
 //! native event straight into a signal write, which is what wakes exactly
 //! one frust frame.
 
-// The app-facing builders (p1-06): default-on so an app that just adds this
+// The app-facing builders: default-on so an app that just adds this
 // crate to its `Cargo.toml` gets `native_button`/`native_label`/etc. for
 // free, but fully feature-gated — see `api`'s module doc and `Cargo.toml`'s
 // comment on why the crate stays a pure platform plugin without it.
@@ -108,11 +106,11 @@
 pub mod api;
 // Flat re-export at the crate root, mirroring the `frust` facade's own
 // flatten-every-widget convention — `native_button(...)` rather than
-// `api::native_button(...)`, matching PLAN.md's own call-shape example.
+// `api::native_button(...)`.
 #[cfg(feature = "frust-api")]
 pub use api::*;
 
-// The public `NativeComponent` trait (Phase 3, p3-01) — see its module doc.
+// The public `NativeComponent` trait — see its module doc.
 // Behind the same `frust-api` gate as the builders above, for one reason: a
 // component is only *mountable* through a `platform_view` slot, which is
 // facade glue this crate only has with the feature on. With it off the crate
@@ -127,7 +125,7 @@ pub use component::{
     ComponentCtx, NativeChild, NativeComponent, NativeEvent, NativeRoot, register_component,
 };
 
-// The demo composite (Phase 3, p3-08) — ONE `NativeComponent` owning a real
+// The demo composite — ONE `NativeComponent` owning a real
 // native subtree, behind the NON-default `demo-components` feature (which
 // enables `frust-api` above, since a component is only mountable through that
 // facade glue). It lives in this crate rather than in an example app because an
@@ -144,7 +142,7 @@ pub use demo::{
 
 #[cfg(target_os = "android")]
 mod android;
-// The Apple arm (p2-01): ONE Rust `define_class!` factory class conforming to
+// The Apple arm: ONE Rust `define_class!` factory class conforming to
 // the embedding's `FrustPlatformViewFactory` protocol — no Swift, no exports.
 // iOS only, not `target_vendor = "apple"`: see `Cargo.toml`'s comment on why
 // (UIKit doesn't exist on macOS).

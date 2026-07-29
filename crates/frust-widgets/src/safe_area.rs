@@ -1,11 +1,10 @@
-//! `SafeArea` layout container (device-parity #3): pads its child by the
+//! `SafeArea` layout container: pads its child by the
 //! window's safe-area insets, per enabled edge, floored at a per-edge
-//! `.minimum` (Flutter parity — `safe_area.dart:118-127`, see
-//! `workflow/plans/features/device-parity/research/RESEARCH.md`).
+//! `.minimum` (Flutter parity — `safe_area.dart:118-127`).
 //!
 //! Unlike [`Padding`](crate::Padding), the inset amount is resolved
-//! dynamically every layout pass from `LayoutCtx::window_insets()` (task 01's
-//! `WindowInsets`) rather than a view-declared constant — a live inset push
+//! dynamically every layout pass from `LayoutCtx::window_insets()`
+//! (`WindowInsets`) rather than a view-declared constant — a live inset push
 //! (rotation, IME show/hide) must re-pad the child with no view rebuild, so
 //! [`SafeAreaWidget`] mirrors `PaddingWidget`'s deflate/offset layout math but
 //! recomputes the inset amount itself each pass instead of wrapping a

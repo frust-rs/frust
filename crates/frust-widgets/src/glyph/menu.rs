@@ -1,10 +1,10 @@
-//! Glyph anchored dropdown menu (task 16, glyph-refinements): the framework's
+//! Glyph anchored dropdown menu: the framework's
 //! first anchored popup — a small chooser that scales in from an anchor's own
 //! corner rather than the screen center, the Glyph recipe over the existing
-//! navigator transparent-push modal plumbing. `research/glyph-appbar.html`'s
-//! §04 "overflow menu" section (retrieved 2026-07-23) is the primary source:
-//! the AppBar's overflow kebab is its first consumer (catalog task 20 wires
-//! that usage), but the API is anchor-agnostic — any widget that can report
+//! navigator transparent-push modal plumbing. The Glyph design system's
+//! "overflow menu" section (retrieved 2026-07-23) is the primary source:
+//! the AppBar's overflow kebab is its first consumer,
+//! but the API is anchor-agnostic — any widget that can report
 //! its own painted window-coordinate rect can open one.
 //!
 //! # Navigator-modal architecture (reuse, don't fork)
@@ -29,24 +29,24 @@
 //! full-page layout in, so no coordinate conversion is needed at the push
 //! site). The caller is responsible for capturing that rect itself (e.g. an
 //! `AppBar`'s trailing icon records its own painted bounds during `paint`,
-//! mirroring how `HeroFrames` report bounds via paint — task 20's own
-//! wiring). There is no ancestor-bounds query a widget can make mid-layout
+//! mirroring how `HeroFrames` report bounds via paint). There is no
+//! ancestor-bounds query a widget can make mid-layout
 //! (the layout protocol gives a widget no visibility upward), so this
 //! caller-reports-its-own-rect shape is the simplest anchoring contract that
-//! works with the existing paint pipeline; a future task could add an
-//! automatic bounds-reporting channel, but that is out of this task's scope.
+//! works with the existing paint pipeline; a future addition could add an
+//! automatic bounds-reporting channel, but that is out of scope here.
 //!
 //! The menu positions **below-trailing** the anchor by default: its trailing
 //! (right) edge aligns with the anchor's trailing edge, and its top edge
 //! sits just below the anchor's bottom edge — the standard "kebab in the
-//! corner" shape research §04 depicts. The whole panel is then clamped
+//! corner" shape the design system depicts. The whole panel is then clamped
 //! inside the window bounds with an 8px margin on every side (an anchor near
 //! a window edge — e.g. a kebab icon flush against the trailing edge — would
 //! otherwise paint the panel partially off-window). The scale
 //! transform-origin is pinned to the panel's own top-right corner
-//! (`transform-origin:top right` in research §04's CSS) — a v1
+//! (`transform-origin:top right` in the design system's CSS) — a v1
 //! simplification matching the fixed "AppBar kebab in the top-right" shape
-//! research §04 depicts; a future consumer opening a menu from a
+//! the design system depicts; a future consumer opening a menu from a
 //! bottom/leading anchor would want a dynamically-chosen corner, but nothing
 //! in this catalog needs that yet.
 //!
@@ -58,16 +58,16 @@
 //! it is pushed with [`TransitionSpec::NONE`] — the navigator gives the
 //! modal contract, the widget gives the motion. The panel **scales**
 //! `0.85 → 1.0` about its top-right corner while sliding down from `-8px` to
-//! `0px` (research §04: `transform:scale(0.85) translateY(-8px)` →
+//! `0px` (the design system: `transform:scale(0.85) translateY(-8px)` →
 //! `scale(1) translateY(0)`); unlike the dialog/palette, the panel's own
 //! fill/border/shadow are **never alpha-faded** — only geometry animates,
 //! matching this catalog's established modal-panel precedent (dialog/palette
 //! panels are likewise opacity-stable, animating scale only). Exit reverses
-//! over a faster duration (RESEARCH §1.4: "exits always faster than
+//! over a faster duration ("exits always faster than
 //! entrances", the same rule dialog/palette apply).
 //!
 //! Independently, each **item** fades/slides in on its own staggered
-//! sub-timeline (research §04: "items stagger in over ~90ms rather than
+//! sub-timeline ("items stagger in over ~90ms rather than
 //! appearing all at once") — a `crate::motion::patterns::GlyphStagger`
 //! (`per_item_delay: 90ms`) driven by its own dedicated
 //! `frust_core::AnimationController`, sized to
@@ -101,11 +101,11 @@
 //!
 //! # Always dismissable (no `dismissable(bool)`)
 //!
-//! Unlike the dialog/palette's `dismissable(bool)` barrier flag (task 12), a
+//! Unlike the dialog/palette's `dismissable(bool)` barrier flag, a
 //! `GlyphMenuView` has none — a menu is a transient chooser the user can
 //! always back out of with no answer required, never a modal gate guarding
 //! an unavoidable decision. [`show_glyph_menu`] always pushes with
-//! [`BackPolicy::DismissAnimated`] (task 02's seam): a routed back press
+//! [`BackPolicy::DismissAnimated`]: a routed back press
 //! bumps the shared dismiss-signal cell the widget's `paint` pass observes
 //! (`observe_dismiss_signal`, mirroring dialog/palette's identical
 //! back-press handling) and stages the same animated exit a scrim tap or
@@ -146,31 +146,31 @@ use crate::motion::patterns::GlyphStagger;
 use crate::nav::navigator::{BackPolicy, NavigatorController, PopResult, PushOptions};
 use crate::nav::transition::{TransitionDriver, TransitionSpec, make_driver};
 
-/// The window-edge clamp margin, in logical px (this task's own choice, kept
+/// The window-edge clamp margin, in logical px (an original, hand-picked value, kept
 /// aligned with the dialog/palette catalog's typical panel gutter).
 const WINDOW_MARGIN: f64 = 8.0;
-/// Panel padding on all four edges (research §04: `.dropdown{padding:6px}`).
+/// Panel padding on all four edges (the design system: `.dropdown{padding:6px}`).
 const PANEL_PAD: f64 = 6.0;
-/// Horizontal padding inside an item row (research §04: `.dd-item{padding:9px 11px}`).
+/// Horizontal padding inside an item row (the design system: `.dd-item{padding:9px 11px}`).
 const ITEM_PAD_X: f64 = 11.0;
-/// An item row's height, in logical px (this task's own choice, sized off
+/// An item row's height, in logical px (an original, hand-picked value, sized off
 /// `.dd-item`'s `9px` vertical padding plus its `11.5px` label at a `1.4`
 /// line height).
 const ITEM_ROW_H: f64 = 34.0;
-/// A separator's total vertical footprint, in logical px (research §04:
+/// A separator's total vertical footprint, in logical px (the design system:
 /// `.dd-sep{height:1px;margin:5px 4px}` — `1px` line plus `5px` margin above
 /// and below).
 const SEP_TOTAL_H: f64 = 11.0;
-/// A separator's horizontal inset from the panel's padded edges (research
-/// §04: `.dd-sep{margin:5px 4px}`'s `4px`).
+/// A separator's horizontal inset from the panel's padded edges (the design
+/// system: `.dd-sep{margin:5px 4px}`'s `4px`).
 const SEP_INSET_X: f64 = 4.0;
-/// Minimum panel width (research §04: `.dropdown{min-width:170px}`).
+/// Minimum panel width (the design system: `.dropdown{min-width:170px}`).
 const MIN_WIDTH: f64 = 170.0;
-/// Maximum panel width (this task's own choice — research §04 leaves it
+/// Maximum panel width (an original, hand-picked value — the design system leaves it
 /// unbounded, but an anchored popup needs a cap to stay a "small chooser").
 const MAX_WIDTH: f64 = 280.0;
 
-/// Item label font size (research §04: `.dd-item{font-size:11.5px}`).
+/// Item label font size (the design system: `.dd-item{font-size:11.5px}`).
 const ITEM_FONT_SIZE: f32 = 11.5;
 const ITEM_LINE_HEIGHT: f32 = 1.4;
 
@@ -189,45 +189,46 @@ const SEP_INK: Color = Color::from_rgb8(0x2a, 0x2f, 0x3a);
 /// Unthemed-fallback pressed-row hover wash (Glyph dark `bg-hover`).
 const HOVER: Color = Color::from_rgb8(0x22, 0x28, 0x35);
 /// Unthemed-fallback danger pressed-row wash alpha over the error color
-/// (research §04: `--error-faint: rgba(255,107,107,0.13)`).
+/// (the design system: `--error-faint: rgba(255,107,107,0.13)`).
 const DANGER_HOVER_ALPHA: f32 = 0.13;
-/// Panel corner radius (research §04: `.dropdown{border-radius:var(--radius-md)}`, 10px).
+/// Panel corner radius (the design system: `.dropdown{border-radius:var(--radius-md)}`, 10px).
 const RADIUS: f64 = 10.0;
-/// Item corner radius (research §04: `.dd-item{border-radius:var(--radius-sm)}`, 6px).
+/// Item corner radius (the design system: `.dd-item{border-radius:var(--radius-sm)}`, 6px).
 const ITEM_RADIUS: f64 = 6.0;
 const BORDER_WIDTH: f64 = 1.0;
 /// Corner-rounding tolerance for border strokes (mirrors
 /// `crate::glyph::dialog`'s constant of the same name).
 const PATH_TOLERANCE: f64 = 0.1;
 
-/// Chrome-level shadow fallback (research §04: `.dropdown{box-shadow:0 16px 40px rgba(0,0,0,0.45)}`).
+/// Chrome-level shadow fallback (the design system: `.dropdown{box-shadow:0 16px 40px rgba(0,0,0,0.45)}`).
 const SHADOW_Y: f64 = 16.0;
 const SHADOW_BLUR: f64 = 40.0;
 const SHADOW_ALPHA: f32 = 0.45;
 const SHADOW_BASE: Color = Color::from_rgb8(0x00, 0x00, 0x00);
 
-/// Panel enter scale start (research §04: `transform:scale(0.85)`).
+/// Panel enter scale start (the design system: `transform:scale(0.85)`).
 const ENTER_SCALE_START: f64 = 0.85;
-/// Panel enter slide-in start, in logical px (research §04: `translateY(-8px)`).
+/// Panel enter slide-in start, in logical px (the design system: `translateY(-8px)`).
 const ENTER_SLIDE_START: f64 = -8.0;
-/// Per-item slide-in start, in logical px (research §04:
+/// Per-item slide-in start, in logical px (the design system:
 /// `.dd-item{transform:translateY(-4px)}`).
 const ITEM_SLIDE_START: f64 = -4.0;
 
-/// Enter duration fallback (research §04's own `.dropdown` transition:
+/// Enter duration fallback (the design system's own `.dropdown` transition:
 /// `.2s var(--ease-spring)`).
 const ENTER_DURATION: Duration = Duration::from_millis(200);
-/// Enter easing fallback — research §04's own `--ease-spring` literal
+/// Enter easing fallback — the design system's own `--ease-spring` literal
 /// (`cubic-bezier(0.34,1.4,0.55,1)`), a slightly different overshoot than
 /// the dialog/palette's own spring constant (each catalog widget cites its
 /// own primary source rather than sharing one blended value).
 const ENTER_CURVE: Curve = Curve::Cubic(0.34, 1.4, 0.55, 1.0);
-/// Exit duration fallback — faster than the enter, per RESEARCH §1.4's
-/// "exits always faster than entrances" rule (research §04's own isolated
-/// demo does not differentiate open/close timing, so this task applies the
-/// site-wide rule directly, mirroring dialog/palette's identical override).
+/// Exit duration fallback — faster than the enter, per the design system's
+/// "exits always faster than entrances" rule (the design system's own
+/// isolated demo does not differentiate open/close timing, so this widget
+/// applies the site-wide rule directly, mirroring dialog/palette's identical
+/// override).
 const EXIT_DURATION: Duration = Duration::from_millis(120);
-/// Exit easing fallback — research §04's own `--ease-exit` literal
+/// Exit easing fallback — the design system's own `--ease-exit` literal
 /// (`cubic-bezier(0.4,0,1,1)`).
 const EXIT_CURVE: Curve = Curve::Cubic(0.4, 0.0, 1.0, 1.0);
 /// `reduce_motion`'s collapsed crossfade duration (mirrors
@@ -293,7 +294,7 @@ fn resolve_label(theme: Option<&Theme>) -> Color {
     }
 }
 
-/// Danger-item ink: the `error` role directly (task detail — "Danger uses
+/// Danger-item ink: the `error` role directly ("Danger uses
 /// the error role").
 fn resolve_danger(theme: Option<&Theme>) -> Color {
     match theme {
@@ -311,7 +312,7 @@ fn resolve_hover(theme: Option<&Theme>) -> Color {
 
 /// The danger pressed-row wash: a soft error-tinted background (no
 /// `ColorScheme` field for an "error faint" role exists, so this resolves
-/// the `error` role itself down to research §04's own literal alpha — a
+/// the `error` role itself down to the design system's own literal alpha — a
 /// genuine token-scale gap, documented per the Theming Conventions).
 fn resolve_danger_hover(theme: Option<&Theme>) -> Color {
     with_alpha(resolve_danger(theme), DANGER_HOVER_ALPHA)
@@ -368,7 +369,7 @@ fn item_style(color: Color) -> TextStyle {
 }
 
 /// A selectable menu item's visual emphasis — `Danger` for a destructive
-/// action (task detail: "Danger uses the error role").
+/// action ("Danger uses the error role").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuItemVariant {
     Normal,
@@ -401,7 +402,7 @@ impl MenuItem {
 }
 
 /// One row of a [`GlyphMenuView`]: a selectable [`MenuItem`], or a
-/// non-selectable [`MenuEntry::Separator`] (research §04's `.dd-sep`).
+/// non-selectable [`MenuEntry::Separator`] (the design system's `.dd-sep`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MenuEntry {
     Item(MenuItem),
@@ -442,7 +443,7 @@ pub struct GlyphMenuView {
     anchor: Rect,
     entries: Vec<MenuEntry>,
     on_dismiss: Option<OnDismiss>,
-    /// The shared back-press dismiss-signal cell (task 02's `DismissAnimated`
+    /// The shared back-press dismiss-signal cell (the `DismissAnimated`
     /// seam) — wired internally by [`show_glyph_menu`].
     dismiss_signal: Option<Rc<Cell<u64>>>,
 }
@@ -864,7 +865,7 @@ impl Widget for GlyphMenuWidget {
             ctx.origin().y + self.panel.y0 + slide,
         );
         let panel_size = self.panel.size();
-        // Scale about the panel's own top-right corner (research §04:
+        // Scale about the panel's own top-right corner (the design system:
         // `transform-origin:top right` — see the module docs' Anchoring note).
         let pivot = Point::new(panel_origin.x + panel_size.width, panel_origin.y);
         let transform = Affine::translate(pivot.to_vec2())

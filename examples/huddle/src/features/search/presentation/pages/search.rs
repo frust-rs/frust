@@ -281,8 +281,8 @@ fn message_row(
         }))
 }
 
-/// A fixed-size initials badge (leading slot of a person row) — the
-/// "initials-circle escape-hatch" `PLAN.md` names, approximated here with a
+/// A fixed-size initials badge (leading slot of a person row) — an
+/// "initials-circle escape-hatch," approximated here with a
 /// filled card (no dedicated circular-avatar primitive exists yet in the
 /// widget catalog).
 fn avatar_badge(initials: &str) -> impl frust::View<HuddleState> {

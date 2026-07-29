@@ -1,9 +1,9 @@
 //! `profile` data — [`StoreProfileRepository`], the sole store reader for the
-//! profile feature (huddle clean-architecture refactor, task 05).
+//! profile feature.
 //!
-//! Synchronous and infallible (PLAN Design Decision 8): every method is a
-//! direct passthrough to a [`crate::data::store`] accessor, so — like
-//! `search`'s data impl (task 04) — there is no failure-mapping site.
+//! Synchronous and infallible: every method is a direct passthrough to a
+//! [`crate::data::store`] accessor, so — like `search`'s data impl — there
+//! is no failure-mapping site.
 
 use crate::features::channels::domain::Dm;
 use crate::features::profile::domain::User;

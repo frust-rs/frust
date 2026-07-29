@@ -1,4 +1,4 @@
-//! Render-tier selection seam (spec §8, PLAN.md's phase-6d D4).
+//! Render-tier selection seam.
 //!
 //! [`RenderTier::Gpu`] is the vello 0.9 GPU compute path (the only tier a
 //! device is actually created for today); [`RenderTier::Cpu`] is the
@@ -7,7 +7,7 @@
 //! and not yet wired into device creation (that lands alongside the
 //! `cpu-tier` encode path). The `Hybrid` (`vello_hybrid`) tier is deferred
 //! entirely — its own scene type and pre-1.0 instability make it out of
-//! scope for this phase (see PLAN.md D4).
+//! scope for now.
 //!
 //! [`select_render_tier`] is pure decision logic over [`TierCaps`] (a plain
 //! struct a caller builds from a real `wgpu::Adapter`'s downlevel flags +
@@ -26,7 +26,7 @@ pub enum RenderTier {
     #[default]
     Gpu,
     /// Experimental CPU fallback (`vello_cpu` 0.0.9), only selectable when
-    /// the `cpu-tier` feature is compiled in (PLAN.md D4). Not yet wired
+    /// the `cpu-tier` feature is compiled in. Not yet wired
     /// into device creation.
     Cpu,
 }
@@ -66,13 +66,12 @@ pub enum TierOutcome {
     /// selected it. An override wins **among available tiers**: a `Cpu` override
     /// always applies, but a `Gpu` override still requires the adapter to support
     /// [`GPU_REQUIRED_DOWNLEVEL_FLAGS`] — an incapable `Gpu` override is
-    /// [`TierOutcome::Unavailable`], not `Available` (PLAN.md D4).
+    /// [`TierOutcome::Unavailable`], not `Available`.
     Available(RenderTier),
     /// No tier is usable in this build. `would_be` names the tier that
-    /// *would* have been selected had it been compiled in (spec Phase 6's
-    /// intent: "returning Gpu or a diagnosed failure naming the tier that
-    /// would apply" — PLAN.md D4) — e.g. `Cpu` when the adapter lacks the
-    /// GPU tier's flags but the `cpu-tier` feature is off.
+    /// *would* have been selected had it been compiled in — a diagnosed
+    /// failure naming the tier that would apply, e.g. `Cpu` when the adapter
+    /// lacks the GPU tier's flags but the `cpu-tier` feature is off.
     Unavailable { would_be: RenderTier },
 }
 
@@ -94,7 +93,7 @@ pub struct TierSelection {
 ///   [`GPU_REQUIRED_DOWNLEVEL_FLAGS`]. A `Gpu` override onto an incapable
 ///   adapter is **refused** — [`TierOutcome::Unavailable`] naming `Gpu` — since
 ///   an override cannot conjure a missing GPU capability; the caller then keeps
-///   the same fail-fast behavior a failed probe produces (PLAN.md D4's override
+///   the same fail-fast behavior a failed probe produces (the override
 ///   plumbing: `FRUST_RENDER_TIER` / `frust run --render-tier`).
 /// - Without an override: `caps` supporting [`GPU_REQUIRED_DOWNLEVEL_FLAGS`]
 ///   selects [`RenderTier::Gpu`]. Otherwise, if the `cpu-tier` feature is
@@ -180,7 +179,7 @@ pub fn select_render_tier(caps: &TierCaps, override_tier: Option<RenderTier>) ->
     }
 }
 
-/// The env var [`render_tier_override_from_env`] reads (PLAN.md D4's
+/// The env var [`render_tier_override_from_env`] reads (the
 /// override plumbing) — set directly, or by `frust run --render-tier
 /// gpu|cpu` for the spawned desktop process (mobile: not plumbed in v1, see
 /// `frust-cli`'s `--render-tier` flag help text).

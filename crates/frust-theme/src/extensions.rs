@@ -1,5 +1,5 @@
 //! [`ThemeExtensions`]: the no-lock-in typed extension slot [`crate::theme::Theme`]
-//! carries (spec's Flutter `ThemeExtension` analog, PLAN.md Phase 2 step 2).
+//! carries (a Flutter `ThemeExtension` analog).
 //!
 //! `Theme` is a fixed 9(+1)-field struct — every widget in this repo reads a
 //! named field, and that stays true. But a third-party design system (or an

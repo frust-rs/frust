@@ -1,5 +1,5 @@
-//! Location parsing and path-pattern matching for the [`router`](super::router)
-//! (Phase 6b, task 04): the go_router-subset path layer.
+//! Location parsing and path-pattern matching for the [`router`](super::router):
+//! the go_router-subset path layer.
 //!
 //! Two pieces, both dependency-free (hand-rolled, no `regex`):
 //!
@@ -15,7 +15,7 @@
 //!
 //! No wildcards in v1 (only static segments and `:param`); percent-decoding is
 //! minimal (`%XX` hex escapes), enough for the custom-scheme deep links this
-//! phase targets.
+//! router targets.
 
 use std::collections::BTreeMap;
 

@@ -230,9 +230,9 @@ fn fps_signal_publishes_a_sane_rate_after_a_second() {
 
 #[test]
 fn fps_measures_presented_rate_not_paint_cadence_when_wired() {
-    // The OP9 split scenario (task 10): the UI thread paints ~120 frames/s but
+    // The OP9 split scenario: the UI thread paints ~120 frames/s but
     // the render thread presents only ~12 — the HUD must report the presented
-    // rate (~12), NOT the paint cadence (the deferred round-1 Minor: it showed
+    // rate (~12), NOT the paint cadence (a previously observed defect showed
     // ~121). We drive the real `RenderRoot` paint seam, pushing a presented
     // counter that advances once per 10 paints, and assert the published rate
     // tracks the presented deltas.

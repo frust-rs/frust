@@ -5,13 +5,13 @@
 //! (compact rows, keyed list), and a reply composer at the bottom —
 //! consuming [`features::messages`](crate::features::messages)' controller
 //! API (`message`/`replies_for`/`reply_count`/`reply_in_thread`, built for
-//! this screen in task 12 — see that module's docs).
+//! this screen — see that module's docs).
 //!
-//! # Flat rows (device-parity-round2 task R2b)
+//! # Flat rows
 //!
 //! The root/reply rows are now FLAT, matching `screens::channel_feed`'s own
-//! R2 restyle: no `elevated_card`/`outlined_card` wrapper (this screen's own
-//! last shadow-in-scroll site, per R2's B3 shadow check) — a plain
+//! restyle: no `elevated_card`/`outlined_card` wrapper (this screen's own
+//! last shadow-in-scroll site) — a plain
 //! `Padding(12h/6v)` content column instead, and the avatar is a 40px
 //! [`crate::ui::fill_box::fill_box`] disc rather than a `filled_card` tile.
 //! Attachment tiles use [`crate::ui::fill_box::filled_box`] (`filled_card`
@@ -34,8 +34,8 @@
 //!
 //! Its [`MessagesController`] now comes from the shared per-channel-id
 //! registry
-//! ([`MessagesController::for_channel`](crate::features::messages::MessagesController::for_channel),
-//! task 19) rather than a screen-local instance — see that module's docs'
+//! ([`MessagesController::for_channel`](crate::features::messages::MessagesController::for_channel))
+//! rather than a screen-local instance — see that module's docs'
 //! "One shared controller per channel" section for why that closes this
 //! screen's former cross-page consistency gap: a reply composed here now
 //! updates the exact same signals an already-open `channel_feed` page (or a
@@ -70,10 +70,10 @@ use crate::ui::sheet::{action_menu, emoji_grid, sheet, sheet_action_row};
 use crate::ui::swipeable::press_pop;
 
 // ---------------------------------------------------------------------------
-// Flat-row metrics (device-parity-round2 task R2b) — duplicated with the same
-// names from `screens::channel_feed`'s own R2 constants rather than shared
-// through a new module (R2b's spec: "prefer whatever is cleanest without
-// creating a new module"); each feature's presentation owns its own visual
+// Flat-row metrics — duplicated with the same
+// names from `screens::channel_feed`'s own constants rather than shared
+// through a new module (deliberately: prefer whatever is cleanest without
+// creating a new module); each feature's presentation owns its own visual
 // helpers per `src/README-phase-c.md`'s feature-slice convention (see this
 // module's own `avatar` doc below).
 // ---------------------------------------------------------------------------
@@ -125,7 +125,7 @@ fn composer_for(root_id: u32) -> RwSignal<String> {
             RefCell::new(HashMap::new());
     }
     COMPOSERS.with(|cell| {
-        // Self-heal (task 22 hardening): a signal disposed by a prior owner
+        // Self-heal: a signal disposed by a prior owner
         // (reused test thread) returns `None` from `try_get_untracked` and is
         // recreated rather than handed back to panic on the next get/set — the
         // same fix `screens::channel_feed`/`screens::workspace_drawer` apply.
@@ -140,7 +140,7 @@ fn composer_for(root_id: u32) -> RwSignal<String> {
     })
 }
 
-/// Which message-action sheet (if any) is open over the thread (task 20).
+/// Which message-action sheet (if any) is open over the thread.
 /// Screen-local, cached behind [`thread_sheet_for`] like the composer text.
 #[derive(Clone, PartialEq)]
 enum ThreadSheet {
@@ -161,7 +161,7 @@ fn thread_sheet_for(root_id: u32) -> RwSignal<ThreadSheet> {
             RefCell::new(HashMap::new());
     }
     SHEETS.with(|cell| {
-        // Same disposed-signal self-heal as `composer_for` above (task 22).
+        // Same disposed-signal self-heal as `composer_for` above.
         if let Some(sig) = cell.borrow().get(&root_id).copied()
             && sig.try_get_untracked().is_some()
         {
@@ -376,10 +376,10 @@ fn reply_list(
 
 /// The root message, rendered prominently: avatar + author + time header,
 /// body, and a reactions row — the same FLAT visual vocabulary as
-/// `channel_feed::message_bubble` (task R2b), just a single content column
+/// `channel_feed::message_bubble`, just a single content column
 /// rather than a left/right-aligned row (this is the thread's one parent, not
 /// a feed row). No `elevated_card` wrapper any more — that was this screen's
-/// last shadow-in-scroll site R2's B3 check flagged.
+/// last shadow-in-scroll site.
 fn root_bubble(
     controller: &Arc<MessagesController>,
     root: &FeedMessage,
@@ -436,9 +436,9 @@ fn root_bubble(
 
 /// The root message's body — text, link preview, or file stub (mirrors
 /// `channel_feed::message_body`). Attachment tiles keep a boxed look but
-/// COMPACT (task R2b, matching R2's item 5 exactly): `filled_box(radius 8) +
+/// COMPACT, matching the channel feed's tiles exactly: `filled_box(radius 8) +
 /// Padding(10)`, not an `outlined_card` (whose 16px inset would balloon the
-/// tile the same way it did the old feed — BUG.md B2).
+/// tile the same way it did the old feed).
 fn root_body(body: &FeedBody) -> AnyView<HuddleState> {
     match body {
         FeedBody::Text(t) => any(text(t.clone()).size(16.0)),
@@ -525,10 +525,10 @@ fn reaction_chips(
 /// with `channel_feed`'s own copy (each feature's presentation owns its own
 /// visual helpers, keeping the two files disjoint per `src/README-phase-c.md`), but
 /// now built off the same `fill_box` disc + `SizedBox+Align` monogram idiom
-/// as `channel_feed::avatar` (task R2b) rather than a `filled_card` tile.
+/// as `channel_feed::avatar` rather than a `filled_card` tile.
 /// Wrapped in a `hero("avatar-{author_id}")` shared element + a tap opening
 /// the author's profile (`/user/:id`) — the same "avatar tap anywhere"
-/// contract the feed avatar carries (task 22).
+/// contract the feed avatar carries.
 fn avatar(controller: &Arc<MessagesController>, author_id: u32) -> AnyView<HuddleState> {
     let initials = controller
         .user(author_id)
@@ -637,7 +637,7 @@ fn composer_bar(
 
     let send_icon = icon(icons::SEND).size(24.0);
     let send_btn: AnyView<HuddleState> = if has_text {
-        // press_pop adds the pressed-state scale dip (task 22 micro-interaction).
+        // press_pop adds the pressed-state scale dip.
         any(press_pop(GestureDetector(send_icon).on_tap(
             move |_s: &mut HuddleState| {
                 let text = composer.get_untracked();

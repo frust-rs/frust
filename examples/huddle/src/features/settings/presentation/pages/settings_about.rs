@@ -1,5 +1,4 @@
-//! About page (`/you/settings/about`) — app icon, version, and a few card rows
-//! (Huddle showcase, task 15).
+//! About page (`/you/settings/about`) — app icon, version, and a few card rows.
 //!
 //! The app icon is painted from `assets/logo.png` via [`Image`] when the bytes
 //! decode, degrading to an initials block (the same solid-tile escape hatch the
@@ -98,7 +97,7 @@ fn initials_block(initial: &str, fill: Color, on_fill: Color) -> AnyView<HuddleS
     let tile =
         any(SizedBox(Some(72.0), Some(72.0)).child(Image(solid_source(fill)).fit(ImageFit::Fill)));
     // Center the monogram with the SizedBox+Align idiom (a bare `Align` under a
-    // `Stack` shrink-wraps to the origin — RESEARCH.md issue 1;
+    // `Stack` shrink-wraps to the origin;
     // `profile::presentation::pages::profile`'s `initials_tile` is the
     // precedent).
     let label = any(SizedBox(Some(72.0), Some(72.0)).child(Align(

@@ -1,18 +1,17 @@
-//! frust_bench — the Frust side of the Phase 9.E cross-framework benchmark
-//! suite (PLAN.md Phase 9.E). A single app hosting all eight scenarios (S1–S8)
+//! frust_bench — the Frust side of the cross-framework benchmark
+//! suite. A single app hosting all eight scenarios (S1–S8)
 //! behind one [`scenarios::Scenario`] driver contract, selected via a deep link
 //! (`frustbench://<id>`) or the `FRUST_BENCH_SCENARIO` env var and switchable at
 //! runtime from a HUD button row.
 //!
-//! Task 02 lands the scaffold: the driver, the registry, S1 (animation storm,
-//! ported from the since-removed `examples/bubblebench`; see
-//! `scenarios::s1_animation`'s module doc for the provenance) and S7 (cold
-//! start + idle). S2–S6 and S8 are compiling stubs each filled by tasks 03/04
-//! in place.
+//! The driver, the registry, and all eight scenarios live here: S1 (animation
+//! storm, ported from the since-removed `examples/bubblebench`; see
+//! `scenarios::s1_animation`'s module doc for the provenance) through S8
+//! (plugin-call overhead).
 //!
 //! Measure a run with `FRUST_TRACE=1 FRUST_TRACE_RAW=1` — the shell emits one
 //! parseable `frust-perf raw ...` line per frame plus the driver's
-//! `bench-scenario-start/end <id>` markers, which the harness (task 06) slices
+//! `bench-scenario-start/end <id>` markers, which the harness slices
 //! by (see `docs/DEVELOPMENT.md`'s Instrumentation).
 //!
 //! Run it with `cargo run` (desktop preview, S1 by default) or
@@ -28,7 +27,7 @@ use frust::{
 
 use scenarios::{BenchState, SCENARIOS};
 
-/// The root [`Component`] (spec §5.5): owns the shared [`BenchState`], forces
+/// The root [`Component`]: owns the shared [`BenchState`], forces
 /// the dark M3 theme (matching S1's `0xFF0D1421` canvas), and drives the
 /// scenario switch — reconciling the HUD/deep-link `selected` request against
 /// the mounted `active` scenario each rebuild and firing the
@@ -109,7 +108,7 @@ fn scenario_switcher(state: &BenchState) -> AnyView<BenchState> {
     ))
 }
 
-// The generated app's sole entry point (spec §5.5/§10): one line binds
+// The generated app's sole entry point: one line binds
 // `BenchApp` to all three platforms — the Android JNI exports
 // (`target_os = "android"` only), the iOS C-ABI exports (self-gated to
 // `target_os = "ios"`), and (on desktop) the hidden `__frust_main` that

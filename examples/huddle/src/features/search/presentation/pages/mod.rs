@@ -1,3 +1,3 @@
-//! Search feature pages (huddle clean-architecture refactor, task 04).
+//! Search feature pages.
 
 pub mod search;

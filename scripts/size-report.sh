@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # scripts/size-report.sh — repeatable release-binary size report.
 #
-# Measures the numbers every phase-7 size-affecting task (see
-# workflow/plans/features/frust-phase-7-performance/tasks/11 and 15)
-# measures against: the release arm64-v8a `.so` (unstripped/stripped), any
+# Measures the release-binary size numbers this repo tracks (see
+# docs/DEVELOPMENT.md's Build section for the recorded baselines): the
+# release arm64-v8a `.so` (unstripped/stripped), any
 # already-built APK/AAB's per-ABI `.so` + dex sizes, and (best-effort) a
 # desktop cargo-bloat top-20 crate breakdown as a host-proxy for the
 # device-targeted build.

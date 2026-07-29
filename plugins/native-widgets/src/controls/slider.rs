@@ -29,16 +29,17 @@
 //! (`SeekBar`'s `onProgressRefresh` override) is synchronous-only too, on
 //! every supported API level.
 //!
-//! # No explicit background (f2-04)
+//! # No explicit background
 //!
 //! Unlike `Label`/`ProgressBar`, `SliderProps` deliberately carries no
 //! `background_color` field — `AbsSeekBar` (this control's superclass) also
 //! draws its default background from
 //! `?attr/selectableItemBackgroundBorderless`, so an explicit
-//! `View.setBackgroundColor` (the fix f1-01 shipped, and this followup
-//! reverts for this control) would replace the Material touch ripple exactly
-//! as `switch.rs`'s own *No explicit background* section describes. The
-//! progress/thumb tints below already carry the theme with no such tradeoff.
+//! `View.setBackgroundColor` (the explicit-background-fill added for
+//! `Label`/`ProgressBar`, reverted for this control) would replace the
+//! Material touch ripple exactly as `switch.rs`'s own *No explicit
+//! background* section describes. The progress/thumb tints below already
+//! carry the theme with no such tradeoff.
 
 use super::{
     CONTENT_DESCRIPTION, ENABLED, MAX, MIN, PROGRESS_TINT, Plan, Setter, THUMB_TINT, VALUE, color,
@@ -361,8 +362,8 @@ pub(crate) mod platform {
     pub(crate) struct SliderState {
         view: Retained<UISlider>,
         /// The target-action object `create` attached as `view`'s
-        /// `ValueChanged`/`TouchDown`/`TouchUpInside|TouchUpOutside` actions
-        /// (task p2-03). `UIControl` holds it weakly, so this field is the
+        /// `ValueChanged`/`TouchDown`/`TouchUpInside|TouchUpOutside` actions.
+        /// `UIControl` holds it weakly, so this field is the
         /// only thing keeping it alive for the slot's lifetime
         /// (`crate::apple::events`'s module doc's *Target retention*) —
         /// dropped alongside the rest of `State` when `Instance::dispose`
@@ -586,7 +587,7 @@ mod tests {
         );
     }
 
-    // f2-04: `SliderProps` carries no `background_color` field at all
+    // `SliderProps` carries no `background_color` field at all
     // (module doc's *No explicit background* section) — there is no
     // wire-shape left to plan a `Setter::BackgroundColor` for, so the two
     // background-setter tests that used to live here (mirroring
@@ -618,7 +619,7 @@ mod tests {
         assert_eq!(observed, Some(5), "observed stays platform-space");
     }
 
-    // f2-02: there is no per-instance suppression parameter to test an echo
+    // There is no per-instance suppression parameter to test an echo
     // against anymore. `ProgressBar.setProgress`'s listener notification is
     // synchronous-only (same AOSP-source basis as `switch.rs`'s), so the ONLY
     // guard against a `Setter::Progress` echo is

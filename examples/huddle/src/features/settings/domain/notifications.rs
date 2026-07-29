@@ -1,9 +1,8 @@
-//! Notification preferences — the pure preference-selection vocabulary
-//! (Huddle showcase, task 15; split into domain vs. presentation in the
-//! huddle clean-architecture refactor, task 05 —
+//! Notification preferences — the pure preference-selection vocabulary,
+//! split into domain vs. presentation:
 //! [`NotificationsController`](crate::features::settings::presentation::controllers::NotificationsController)
-//! now lives in `presentation::controllers`, hosting this enum's selection as
-//! an `RwSignal`).
+//! lives in `presentation::controllers`, hosting this enum's selection as
+//! an `RwSignal`.
 
 /// How often the app raises a notification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

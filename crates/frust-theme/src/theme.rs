@@ -1,5 +1,5 @@
 //! [`Theme`]: the aggregate design-token bundle an app wires through to its
-//! widget tree. The value is delivered two ways (task 05): to app code through
+//! widget tree. The value is delivered two ways: to app code through
 //! the reactive context (`use_context::<Theme>()` via the facade), and to
 //! widgets through the type-erased `PaintCtx`/`LayoutCtx` theme slot — the
 //! [`Theme::from_paint_ctx`]/[`Theme::from_layout_ctx`] wrappers below recover
@@ -20,7 +20,7 @@ use crate::status::StatusPalette;
 use crate::typography::TypeScale;
 
 /// Which design language a [`Theme`] was built from — a `Theme` itself stays
-/// a single, language-agnostic aggregate struct (spec §17.1); this is just a
+/// a single, language-agnostic aggregate struct; this is just a
 /// tag app/shell code can branch on (e.g. to pick per-platform interaction
 /// affordances), not a second `Theme` type. See `crate::color`'s "Cupertino
 /// (iOS) mapping" module docs for how [`ColorScheme::cupertino_light`]/
@@ -33,11 +33,9 @@ pub enum DesignLanguage {
     Material3,
     /// Cupertino (iOS).
     Cupertino,
-    /// Glyph — this crate's own design language (PLAN.md Phase 2). Not yet
-    /// the default and has no baseline constructor yet (no
-    /// `Theme::glyph_baseline` — that lands with the Glyph token module,
-    /// task 15); this variant exists so downstream exhaustive matches can be
-    /// patched ahead of the baseline landing.
+    /// Glyph — this crate's own design language. Not the derived-default
+    /// enum variant; [`Theme::glyph_baseline`] is what shells construct
+    /// explicitly to use it.
     Glyph,
 }
 
@@ -52,14 +50,14 @@ pub struct Theme {
     pub shape: ShapeScale,
     pub elevation: Elevation,
     pub motion: MotionScheme,
-    /// The glass material scale (task 6f-01): [`GlassScale::opaque_material`]
-    /// on the Material baseline, [`GlassScale::ios27`] on Cupertino. No widget
-    /// consumes it yet — a later wave paints from it.
+    /// The glass material scale: [`GlassScale::opaque_material`]
+    /// on the Material baseline, [`GlassScale::ios27`] on Cupertino.
+    /// Consumed by the Cupertino chrome widgets that paint from it.
     pub glass: GlassScale,
     pub brightness: Brightness,
     pub design_language: DesignLanguage,
-    /// The no-lock-in typed extension slot (PLAN.md Phase 2 step 2, spec's
-    /// Flutter `ThemeExtension` analog) — see `crate::extensions` and
+    /// The no-lock-in typed extension slot (a Flutter
+    /// `ThemeExtension` analog) — see `crate::extensions` and
     /// [`Theme::extension`]. `Arc`-backed internally, so cloning a `Theme`
     /// (required at both delivery paths — the process-global override slot
     /// and the reactive `provide_context` copy) stays cheap regardless of
@@ -138,8 +136,8 @@ impl Theme {
     /// (both of which hardcode `Brightness::Light`) before handing the result to
     /// `set_app_theme`.
     ///
-    /// Framework footgun this closes (6e Finding 6, bug 2): `set_app_theme`
-    /// stores its argument as the override-wins theme (spec's override-wins
+    /// Framework footgun this closes: `set_app_theme`
+    /// stores its argument as the override-wins theme (the override-wins
     /// rule — an app-set theme always beats further OS appearance reports,
     /// intentionally). A caller that forces a design language via
     /// `set_app_theme(Theme::m3_baseline())` therefore also silently pins
@@ -179,7 +177,7 @@ impl Theme {
     }
 
     /// Start a [`crate::builder::ThemeBuilder`] over `self` as the baseline —
-    /// the `defineTheme`/`copyWith` analog (PLAN.md Phase 2 step 1). See
+    /// the `defineTheme`/`copyWith` analog. See
     /// `crate::builder`'s module docs for the full layered-precedence
     /// contract (baseline → whole-group swaps → per-token closure edits →
     /// extensions).
@@ -271,7 +269,7 @@ mod tests {
 
     #[test]
     fn with_brightness_forces_design_language_without_discarding_brightness() {
-        // Regression for 6e Finding 6, bug 2: forcing a design language via a
+        // Regression: forcing a design language via a
         // baseline constructor used to silently reset brightness to `Light`
         // even when the caller's live brightness was `Dark`.
         let theme = Theme::m3_baseline().with_brightness(Brightness::Dark);
@@ -291,7 +289,7 @@ mod tests {
 
     #[test]
     fn both_baselines_carry_a_status_palette_extension() {
-        // Acceptance criterion 1: `extension::<StatusPalette>()` is `Some`
+        // `extension::<StatusPalette>()` is `Some`
         // for both built-in baselines.
         use crate::status::StatusPalette;
 
@@ -307,7 +305,7 @@ mod tests {
 
     #[test]
     fn custom_extension_type_round_trips() {
-        // Acceptance criterion 1: a custom user type round-trips
+        // A custom user type round-trips
         // insert -> get, alongside the pre-attached `StatusPalette`.
         #[derive(Debug, PartialEq)]
         struct AppTokens {

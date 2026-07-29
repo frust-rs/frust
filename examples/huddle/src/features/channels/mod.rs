@@ -1,7 +1,6 @@
-//! The `channels` feature slice (huddle clean-architecture refactor, task 02):
+//! The `channels` feature slice (huddle clean-architecture refactor):
 //! `domain` ← `data` / `domain` ← `presentation`, per the inward-only
-//! dependency rule (PLAN Design Decisions 1–3). The Home tab's channel + DM
-//! roster.
+//! dependency rule. The Home tab's channel + DM roster.
 //!
 //! The former flat `features/channels/mod.rs` (controller + use cases + derived
 //! models) split across the layers:

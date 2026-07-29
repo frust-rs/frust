@@ -1,4 +1,4 @@
-//! [`SurfaceRenderer`]: the surface-lifecycle state machine (spec §8.1) that
+//! [`SurfaceRenderer`]: the surface-lifecycle state machine that
 //! renders a [`frust_scene::Scene`] into one window's swapchain each frame.
 //!
 //! Wraps the pure lifecycle logic in [`crate::lifecycle`] around the actual
@@ -13,7 +13,7 @@
 //!
 //! - **Direct-to-surface** (surface supports `Rgba8Unorm` + `STORAGE_BINDING`):
 //!   acquire → `render_to_texture` straight into the acquired swapchain texture
-//!   → present. No intermediate, no blit (phase 11.C).
+//!   → present. No intermediate, no blit.
 //! - **Blit fallback** (`Bgra8`-only surfaces, or the `cpu-tier` path): encode →
 //!   `render_to_texture` (intermediate) → acquire → blit (intermediate → acquired
 //!   swapchain view) → present.
@@ -38,8 +38,8 @@ use crate::lifecycle::{
 };
 use crate::shader_effects::{ShaderEffects, clamp_size};
 
-/// Caller-requested alpha-compositing behavior for a surface configuration
-/// (platform-views task 04) — the `frust-render` public seam a shell picks
+/// Caller-requested alpha-compositing behavior for a surface configuration —
+/// the `frust-render` public seam a shell picks
 /// between an opaque (today's default) and a translucent-preferred surface;
 /// the resolved `wgpu::CompositeAlphaMode` itself never crosses this boundary
 /// (mirrors [`DetachedSurface`]'s opacity — see `docs/CODE_STANDARDS.md`'s
@@ -53,8 +53,8 @@ pub enum SurfaceAlphaRequest {
     /// Today's behavior for every existing caller: `wgpu::CompositeAlphaMode::Auto`,
     /// bit-for-bit unchanged.
     Opaque,
-    /// Prefer a translucent alpha-compositing mode (Mode B platform views —
-    /// see `workflow/plans/features/frust-platform-views/PLAN.md`), trying
+    /// Prefer a translucent alpha-compositing mode (Mode B platform views),
+    /// trying
     /// `Inherit` (Android's only reported mode) then `PostMultiplied` (iOS's
     /// translucent mode) then `PreMultiplied`, in that order, against the
     /// surface's reported `alpha_modes`. Falls back to `Opaque`'s `Auto` (and
@@ -64,9 +64,9 @@ pub enum SurfaceAlphaRequest {
     /// **This is a request, not an outcome.** Never key a paint contract off
     /// it: read
     /// [`SurfaceRenderer::surface_resolved_translucent`](SurfaceRenderer::surface_resolved_translucent)
-    /// after the surface is installed instead (review finding M1 — a fallback
+    /// after the surface is installed instead — a fallback
     /// must degrade to the opaque Mode A contract, or the hole punch presents
-    /// black rectangles on an opaque swapchain).
+    /// black rectangles on an opaque swapchain.
     TranslucentPreferred,
 }
 
@@ -153,8 +153,8 @@ enum SurfaceState {
 /// present command buffer, `waitUntilScheduled`, then `drawable.present()`) —
 /// it simply runs it on whichever thread calls [`Self::present`]. Under the
 /// render-thread split that thread commits no transaction, so the drawable is
-/// never handed to the compositor at all (measured: total loss of presentation,
-/// `research/SPIKE-SYNC.md` §3.2). Handing this value to the UI thread and
+/// never handed to the compositor at all (measured: total loss of presentation).
+/// Handing this value to the UI thread and
 /// presenting *there* is what lets frust's surface land in the same transaction
 /// as the platform-view geometry while the split stays on.
 ///
@@ -185,15 +185,15 @@ impl DeferredPresent {
     }
 }
 
-/// Per-surface renderer and lifecycle state machine (spec §8.1).
+/// Per-surface renderer and lifecycle state machine.
 ///
 /// Holds a device-independent, reusable `vello::Scene` (so it survives surface
 /// transitions) plus the current [`SurfaceState`]. Constructed empty with
 /// [`SurfaceRenderer::new`]; the shell brings it online with
 /// [`on_surface_created`](Self::on_surface_created).
 pub struct SurfaceRenderer {
-    /// Reused across frames; `reset()` each frame rather than reallocated
-    /// (spec §7). Device-independent, so it outlives surface transitions.
+    /// Reused across frames; `reset()` each frame rather than reallocated.
+    /// Device-independent, so it outlives surface transitions.
     scene: vello::Scene,
     state: SurfaceState,
     /// Consecutive `AcquireStatus::Invalid` acquires retried via `Reconfigure`
@@ -210,7 +210,7 @@ pub struct SurfaceRenderer {
     /// `PIPELINE_CACHE` (Vulkan/Android); validated and discarded elsewhere.
     initial_cache_data: Option<Vec<u8>>,
     /// The swapchain texture [`Self::acquire`] acquired and stashed for
-    /// [`Self::submit`] to blit into and present (Phase 11.A present-span split).
+    /// [`Self::submit`] to blit into and present (the acquire/submit span split).
     /// `None` outside an in-flight `acquire`→`submit` pair — set only on an
     /// [`AcquireOutcome::Acquired`] result, taken by the next [`Self::submit`].
     /// A `wgpu::SurfaceTexture` is owned (it does not borrow the surface), so
@@ -289,8 +289,7 @@ impl SurfaceRenderer {
 
     /// Whether the **live** surface actually resolved to a translucent
     /// (alpha-compositing) mode — the truth a shell's Mode B paint contract
-    /// must key off, replacing the `SurfaceAlphaRequest` it *asked* for
-    /// (review finding M1).
+    /// must key off, replacing the `SurfaceAlphaRequest` it *asked* for.
     ///
     /// [`SurfaceAlphaRequest::TranslucentPreferred`] is a *preference*: the
     /// configure step resolves it against the platform's advertised alpha modes
@@ -320,7 +319,7 @@ impl SurfaceRenderer {
         }
     }
 
-    /// The current lifecycle phase (spec §8.1).
+    /// The current lifecycle phase.
     pub fn phase(&self) -> SurfacePhase {
         match self.state {
             SurfaceState::NoSurface => SurfacePhase::NoSurface,
@@ -339,7 +338,7 @@ impl SurfaceRenderer {
     /// (`wgpu::SurfaceTarget`); no `winit` dependency is imposed here.
     ///
     /// Presentation uses vsync (`PresentMode::AutoVsync`), matching the
-    /// vsync-driven frame pacing the platform shells provide (spec §8).
+    /// vsync-driven frame pacing the platform shells provide.
     pub async fn on_surface_created(
         &mut self,
         ctx: &mut RenderContext,
@@ -364,7 +363,7 @@ impl SurfaceRenderer {
     /// Brings the surface online from a [`DetachedSurface`] that was created on
     /// the windowing/main thread via
     /// [`RenderContext::surface_factory`](crate::RenderContext::surface_factory),
-    /// transitioning to [`SurfacePhase::SurfaceReady`] (plan phase 11.B, the
+    /// transitioning to [`SurfacePhase::SurfaceReady`] (the
     /// render-thread split).
     ///
     /// The desktop counterpart of [`on_surface_created`](Self::on_surface_created)
@@ -449,7 +448,7 @@ impl SurfaceRenderer {
     /// [`on_surface_created_from_android_window`](Self::on_surface_created_from_android_window).
     ///
     /// Presentation uses `Fifo` — the only present mode guaranteed on
-    /// iOS/Metal (spec §8; vsync-equivalent, matching the desktop/Android
+    /// iOS/Metal (vsync-equivalent, matching the desktop/Android
     /// `AutoVsync` paths in spirit).
     ///
     /// # Safety
@@ -497,7 +496,7 @@ impl SurfaceRenderer {
         // `pipeline_cache_data()` still has the handle).
         let pipeline_cache = ctx.create_pipeline_cache(self.initial_cache_data.as_deref());
 
-        // Pick the tier backend the context's probe selected (task 02 / task 06).
+        // Pick the tier backend the context's probe selected.
         // Only `Gpu` is reachable without the `cpu-tier` feature (the probe
         // never returns `Cpu` there, and `ensure_device` guards it), so the
         // default build creates a `vello::Renderer` exactly as before.
@@ -510,8 +509,9 @@ impl SurfaceRenderer {
                 // below): `RendererOptions::default()` compiles shader
                 // permutations for every `AaConfig` (`AaSupport::all()`), ~3x
                 // unnecessary pipeline compiles at init that contribute to the
-                // slow, synchronous, main-thread launch-time shader compile
-                // behind 6e Finding 5's iOS SIGKILL (6e-fix-1 task 03).
+                // slow, synchronous, main-thread launch-time shader compile that
+                // can trip the iOS launch watchdog (`docs/DEVELOPMENT.md`'s
+                // dev-profile shader-stack override note).
                 // Verified against the vello 0.9.0 source
                 // (`RendererOptions::antialiasing_support: AaSupport`,
                 // `AaSupport::area_only()` — both public, non-`non_exhaustive`).
@@ -538,7 +538,7 @@ impl SurfaceRenderer {
         debug_assert_eq!(
             next_phase(self.phase(), SurfaceEvent::Created),
             SurfacePhase::SurfaceReady,
-            "Created must reach SurfaceReady (spec §8.1)"
+            "Created must reach SurfaceReady"
         );
         // Seed the shader-showcase effects engine with a clone of the same
         // pipeline cache handed to vello, so its per-program shader pipelines
@@ -552,8 +552,8 @@ impl SurfaceRenderer {
         // `PIPELINE_CACHE`.
         let pipeline_cache = pipeline_cache.map(|cache| (cache, ctx.adapter_cache_key()));
         // Dropping the previous `SurfaceState` here tears down any prior surface
-        // before the new one goes live (spec §8.1: no surface outlives a
-        // transition).
+        // before the new one goes live: no surface outlives a
+        // transition.
         self.state = SurfaceState::Ready(Box::new(ReadySurface {
             surface,
             backend,
@@ -592,12 +592,12 @@ impl SurfaceRenderer {
     /// [`SurfacePhase::NoSurface`].
     ///
     /// Drops the `RenderSurface` (and its renderer) so no surface or texture
-    /// outlives the platform's underlying window (spec §8.1). Idempotent.
+    /// outlives the platform's underlying window. Idempotent.
     pub fn on_surface_destroyed(&mut self) {
         debug_assert_eq!(
             next_phase(self.phase(), SurfaceEvent::Destroyed),
             SurfacePhase::NoSurface,
-            "Destroyed must reach NoSurface (spec §8.1)"
+            "Destroyed must reach NoSurface"
         );
         self.state = SurfaceState::NoSurface;
     }
@@ -609,14 +609,14 @@ impl SurfaceRenderer {
     /// [`Self::encode`] + [`Self::present`]: it encodes, and — unless the frame
     /// was skipped for want of a renderable surface — presents. A caller that
     /// wants to attribute GPU encode cost separately from the swapchain-acquire
-    /// (vsync) wait — the render-thread-split decision hinges on that split
-    /// (Phase 10.A) — calls the two entry points directly and times each with
+    /// (vsync) wait — the render-thread-split decision hinges on that split —
+    /// calls the two entry points directly and times each with
     /// its own clock (timing stays shell-owned; this crate reads no clock — see
     /// `frust-shell-common::perf`'s layering note).
     ///
     /// In [`SurfacePhase::NoSurface`]/[`SurfacePhase::SurfaceLost`] the frame is
-    /// dropped ([`FrameOutcome::Skipped`]) — never panicking, never queueing
-    /// (spec §8.1). On an `Outdated` acquire the surface is reconfigured and
+    /// dropped ([`FrameOutcome::Skipped`]) — never panicking, never queueing.
+    /// On an `Outdated` acquire the surface is reconfigured and
     /// [`FrameOutcome::Redraw`] asks the shell to try again; on `Lost` the
     /// surface is dropped, the machine moves to [`SurfacePhase::SurfaceLost`],
     /// and [`FrameOutcome::SurfaceLost`] tells the shell to recreate it.
@@ -643,13 +643,13 @@ impl SurfaceRenderer {
     ///
     /// - **Blit arm**: also renders (clearing to `base_color`) into the
     ///   intermediate `Rgba8Unorm` target — so `encode_us` includes the GPU
-    ///   render, as before 11.C.
+    ///   render, as it always has on this path.
     /// - **Direct arm**: does ONLY the CPU-side scene build and stashes
     ///   `base_color`; the GPU render moves to [`Self::submit`] (it needs the
     ///   acquired swapchain texture). `encode_us` is then just the CPU encode.
     ///
     /// Returns [`EncodeOutcome::Skipped`] (no work done, nothing queued) in any
-    /// phase but [`SurfacePhase::SurfaceReady`] (spec §8.1); otherwise
+    /// phase but [`SurfacePhase::SurfaceReady`]; otherwise
     /// [`EncodeOutcome::Encoded`], after which [`Self::present`] finishes the
     /// frame. The internal scene is `reset()` every call; nothing accumulates
     /// across frames.
@@ -659,7 +659,7 @@ impl SurfaceRenderer {
         scene: &frust_scene::Scene,
         base_color: peniko::Color,
     ) -> Result<EncodeOutcome> {
-        // Frames are dropped in every phase but SurfaceReady (spec §8.1).
+        // Frames are dropped in every phase but SurfaceReady.
         if !self.phase().can_render() {
             return Ok(EncodeOutcome::Skipped);
         }
@@ -692,7 +692,7 @@ impl SurfaceRenderer {
                 // program-id → `ImageData` map `encode_into` lowers each quad
                 // against. Runs (and submits its own encoder) BEFORE vello's
                 // `render_to_texture` so the atlas copy reads a complete texture
-                // — wgpu serializes queue submissions in order (RESEARCH.md §Q3).
+                // — wgpu serializes queue submissions in order.
                 //
                 // `adapter_max` is captured once and threaded into both the
                 // pre-pass (which keys the map by clamped physical size) and the
@@ -720,7 +720,7 @@ impl SurfaceRenderer {
                     crate::context::shader_effects_disabled(),
                 );
                 match &ready.surface.path {
-                    // Direct-to-surface (deliverable 1): the vello render targets the
+                    // Direct-to-surface: the vello render targets the
                     // acquired swapchain texture, which does not exist until
                     // `acquire`. So `encode` does ONLY the CPU-side scene build here;
                     // the GPU `render_to_texture` moves to `submit`. See `submit`'s
@@ -736,8 +736,8 @@ impl SurfaceRenderer {
                         // Carry `base_color` to `submit`, where the render runs.
                         *pending_base_color = Some(base_color);
                     }
-                    // Direct-premultiplied (translucent, premultiplied-expecting —
-                    // defect D3): unlike the plain direct arm, the intermediate
+                    // Direct-premultiplied (translucent, premultiplied-expecting):
+                    // unlike the plain direct arm, the intermediate
                     // already exists at encode time, so vello renders into it now
                     // (like the blit arm); `submit`'s premultiply compute pass then
                     // writes `(rgb*a, a)` into the acquired swapchain texture.
@@ -845,8 +845,8 @@ impl SurfaceRenderer {
     /// wait) and, on success, blits/submits/presents it.
     ///
     /// A caller wanting the finer **acquire** (blocking vsync wait) vs
-    /// **submit** (blit + queue-submit + present) attribution — the S5
-    /// GPU-saturation-vs-blit-cost question (Phase 11.A) — calls
+    /// **submit** (blit + queue-submit + present) attribution — to separate
+    /// GPU saturation from blit cost — calls
     /// [`Self::acquire`] and [`Self::submit`] directly, timing each with its own
     /// clock (timing stays shell-owned; this crate reads no clock — see
     /// `frust-shell-common::perf`'s layering note). `present`'s combined span
@@ -854,7 +854,7 @@ impl SurfaceRenderer {
     ///
     /// Assumes [`Self::encode`] has already filled the intermediate target this
     /// frame. In any phase but [`SurfacePhase::SurfaceReady`] the call is a
-    /// no-op returning [`FrameOutcome::Skipped`] (spec §8.1). On an `Outdated`
+    /// no-op returning [`FrameOutcome::Skipped`]. On an `Outdated`
     /// acquire the surface is reconfigured and [`FrameOutcome::Redraw`] asks the
     /// shell to try again; on `Lost` the surface is dropped, the machine moves
     /// to [`SurfacePhase::SurfaceLost`], and [`FrameOutcome::SurfaceLost`] tells
@@ -870,11 +870,11 @@ impl SurfaceRenderer {
 
     /// Phase 2a of the frame — the **acquire** sub-span: acquire the swapchain
     /// texture (the blocking vsync/present wait, per the surface's present mode),
-    /// classify the result (spec §8.1), and — on a usable acquire — stash the
+    /// classify the result, and — on a usable acquire — stash the
     /// texture for [`Self::submit`] to blit into. Timing this call in isolation
     /// attributes the blocking present/vsync wait separately from [`Self::submit`]'s
-    /// blit/queue-submit work — the split the S5 GPU-saturation-vs-blit-cost
-    /// question is answered on (Phase 11.A).
+    /// blit/queue-submit work — the split needed to separate GPU saturation
+    /// from blit cost.
     ///
     /// Returns [`AcquireOutcome::Acquired`] when a texture was stashed (the
     /// caller must follow with [`Self::submit`]); otherwise a terminal outcome —
@@ -882,9 +882,9 @@ impl SurfaceRenderer {
     /// [`AcquireOutcome::Lost`] (surface dropped, now `SurfaceLost`), or
     /// [`AcquireOutcome::Skipped`] (no renderable surface or a transient failure).
     /// In any phase but [`SurfacePhase::SurfaceReady`] it is a no-op returning
-    /// [`AcquireOutcome::Skipped`] (spec §8.1).
+    /// [`AcquireOutcome::Skipped`].
     pub fn acquire(&mut self, ctx: &RenderContext) -> Result<AcquireOutcome> {
-        // Frames are dropped in every phase but SurfaceReady (spec §8.1).
+        // Frames are dropped in every phase but SurfaceReady.
         if !self.phase().can_render() {
             return Ok(AcquireOutcome::Skipped);
         }
@@ -913,7 +913,7 @@ impl SurfaceRenderer {
         };
 
         let action = decide_acquire(status, *consecutive_invalid);
-        // Reset-on-success / increment-on-retry / reset-on-give-up (spec §8.1
+        // Reset-on-success / increment-on-retry / reset-on-give-up (the same
         // discipline mirrored from iOS's `recreate_failures`) — pure and
         // unit-tested in `next_invalid_streak` itself.
         if status == AcquireStatus::Invalid && action == AcquireAction::Lose {
@@ -950,10 +950,10 @@ impl SurfaceRenderer {
                 debug_assert_eq!(
                     next_phase(SurfacePhase::SurfaceReady, SurfaceEvent::Lost),
                     SurfacePhase::SurfaceLost,
-                    "Lost must reach SurfaceLost from SurfaceReady (spec §8.1)"
+                    "Lost must reach SurfaceLost from SurfaceReady"
                 );
                 // Drop the surface and its outstanding resources before returning
-                // (spec §8.1) so the shell can recreate cleanly. `consecutive_invalid`
+                // so the shell can recreate cleanly. `consecutive_invalid`
                 // was already reset above (`next_invalid_streak`); the shell's own
                 // recovery path (recreate on resize/redraw/surfaceChanged) starts a
                 // fresh episode.
@@ -967,15 +967,15 @@ impl SurfaceRenderer {
     /// Phase 2b of the frame — the **submit** sub-span: turn the swapchain
     /// texture [`Self::acquire`] stashed into a presented frame, then present it.
     /// Timing this call in isolation attributes the submit work separately from
-    /// [`Self::acquire`]'s blocking vsync wait (Phase 11.A).
+    /// [`Self::acquire`]'s blocking vsync wait.
     ///
-    /// What the submit span contains depends on the render path (deliverable 5,
-    /// the v3 span mapping):
+    /// What the submit span contains depends on the render path (the v3 span
+    /// mapping):
     ///
     /// - **Blit arm** (`Bgra8`-only/probe-refused/`cpu-tier`): the intermediate
     ///   target was already filled in [`Self::encode`], so `submit` = create the
     ///   swapchain view + `TextureBlitter::copy` + queue-submit + present. This is
-    ///   the pre-11.C behavior, unchanged.
+    ///   the pre-direct-to-surface behavior, unchanged.
     /// - **Direct arm** (`Rgba8Unorm` + `STORAGE_BINDING`): the vello
     ///   `render_to_texture` runs HERE, targeting the acquired swapchain texture
     ///   directly (it does not exist until [`Self::acquire`]), then present — no
@@ -1096,7 +1096,7 @@ impl SurfaceRenderer {
                     ));
                 }
             },
-            // Direct-premultiplied (defect D3): vello already rendered the
+            // Direct-premultiplied: vello already rendered the
             // straight-alpha frame into the intermediate in `encode`; premultiply
             // it into the acquired swapchain texture so a premultiplied-expecting
             // compositor (Android `Inherit`) blends it correctly. No blit, no
@@ -1160,7 +1160,7 @@ impl SurfaceRenderer {
 /// [`physical_size`]/[`clamp_size`] (with the same `adapter_max`) to look each
 /// entry up.
 ///
-/// Ordering (RESEARCH.md §Q3): all quad passes share ONE command encoder,
+/// Ordering: all quad passes share ONE command encoder,
 /// submitted BEFORE the caller's `render_to_texture`, so wgpu's in-order queue
 /// serialization guarantees each shader texture is complete before vello's
 /// atlas copy reads it. Registration happens once per target (via
@@ -1303,7 +1303,7 @@ mod tests {
 
     #[test]
     fn resolved_translucent_is_false_without_a_live_surface() {
-        // The Mode A default (review finding M1): with no surface installed
+        // The Mode A default: with no surface installed
         // there is nothing proven translucent, so a shell reading this before
         // its first install keeps the opaque paint contract rather than
         // punching holes it can't back.
@@ -1408,8 +1408,8 @@ mod tests {
     /// kill switch's full-no-op contract: `run_shader_prepass(.., disabled:
     /// true)` returns zero map entries AND never calls `ensure_pipeline` — the
     /// actual compiled-pipeline cache stays empty, not just "the caller
-    /// ignored the result" — matching this task's "zero GPU work" acceptance
-    /// criterion. `disabled` is passed directly rather than going through
+    /// ignored the result" — confirming the kill switch is a true "zero GPU
+    /// work" no-op. `disabled` is passed directly rather than going through
     /// `context::shader_effects_disabled()`'s process-cached `OnceLock`, so
     /// this test needs no env-var mutation (the flag-parsing itself is
     /// covered by `context::tests`' `env_flag_*` cases). The resulting empty

@@ -1,4 +1,4 @@
-//! The `GestureDetector` widget (spec §6.4): a transparent wrapper that
+//! The `GestureDetector` widget: a transparent wrapper that
 //! recognises a tap and a long-press on its child and forwards raw events
 //! through.
 //!
@@ -9,7 +9,7 @@
 //! wrapper is transparent — every event is still forwarded to the child, so
 //! interactive descendants keep working. v1 recognises **tap + long-press**;
 //! double-tap is still deferred (and, lacking an input-kind flag on events, the
-//! slop is [`TOUCH_SLOP`] uniformly — see `research/RESEARCH.md`).
+//! slop is [`TOUCH_SLOP`] uniformly).
 //!
 //! # Long-press firing semantics
 //!
@@ -535,7 +535,7 @@ mod tests {
         assert_eq!(state.taps, 0);
     }
 
-    // --- Long-press (task 03) ------------------------------------------------
+    // --- Long-press ------------------------------------------------------------
     //
     // The long-press timer is measured across paints, so these tests drive the
     // real paint path through `RenderRoot` (the only place a `FrameTime` is
@@ -673,7 +673,7 @@ mod tests {
         assert_eq!(state.long_presses, 0);
     }
 
-    // --- Tap-only held-press regression (review A1 / fix F1) -----------------
+    // --- Tap-only held-press regression --------------------------------------
     //
     // The event-only `only_on_tap_still_behaves_as_before` above never paints,
     // so it never advanced the clock past the threshold and missed the bug: a
@@ -761,7 +761,7 @@ mod tests {
         assert_eq!(state.taps, 0, "both wired: a long-press never also taps");
     }
 
-    // --- Hold-progress observation (task 15) ----------------------------------
+    // --- Hold-progress observation ---------------------------------------------
     //
     // `on_hold_progress` rides the same paint-clock timer as `on_long_press`:
     // paint records the latest 0.0..=1.0 observation, and it's delivered on the
@@ -933,7 +933,7 @@ mod tests {
         assert_eq!(state.long_presses, 0);
     }
 
-    // --- Cancel staleness gap + zero-threshold NaN guard (followup f2) -------
+    // --- Cancel staleness gap + zero-threshold NaN guard ---------------------
 
     #[test]
     fn cancel_leaves_progress_stale_until_fresh_down_cycle_delivers_clean_value() {

@@ -1,8 +1,6 @@
-//! Filled by task 23-glyph-nav-chrome (SegmentedControl).
-//!
 //! [`segmented_control`]/[`SegmentedControlView`]: a pill container of
 //! mutually-exclusive segments — the active one gets a raised surface fill and
-//! accent text (`research/glyph-design-system.html`'s `.segmented`/`.segmented
+//! accent text (the Glyph design system's `.segmented`/`.segmented
 //! button`/`.segmented button.active` rules, retrieved 2026-07-21).
 //!
 //! # Controlled selection
@@ -14,7 +12,7 @@
 //! # Per-brightness active treatment (the source's dark/light split)
 //!
 //! The source deliberately treats the active segment differently per
-//! brightness (`glyph-design-system-light.html` §navigation: "segmented-control
+//! brightness ("segmented-control
 //! fill gets a subtle shadow instead of a glow on light surfaces — glow reads
 //! as haze on white, a shadow reads as lift"):
 //!

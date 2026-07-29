@@ -1,4 +1,4 @@
-// Top-level build file — plugin classpath only (spec Phase 2 task 22).
+// Top-level build file — plugin classpath only.
 // AGP 9's built-in Kotlin support means no separate
 // `org.jetbrains.kotlin.android` plugin is applied here or in `app/`.
 //

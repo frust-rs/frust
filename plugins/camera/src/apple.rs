@@ -1,7 +1,7 @@
 //! The Apple (iOS; macOS desktop preview shares this arm like every other
 //! plugin) backend — AVFoundation, driven **from Rust directly** via
-//! `objc2-av-foundation` (no Swift camera glue; the Swift package task 08
-//! ships is the preview `CameraPreviewFactory` view only).
+//! `objc2-av-foundation` (no Swift camera glue; the Swift package
+//! ships only the preview `CameraPreviewFactory` view).
 //!
 //! # What this module owns
 //!
@@ -20,9 +20,9 @@
 //!   an arbitrary background queue) that writes the JPEG bytes to the
 //!   caller's path and unblocks the waiting call.
 //! - **The preview seam** ([`frust_camera_session_handle`]): the C symbol the
-//!   Swift `CameraPreviewFactory` (task 08) calls to attach an
+//!   Swift `CameraPreviewFactory` calls to attach an
 //!   `AVCaptureVideoPreviewLayer` to a live session.
-//! - **The image stream** ([`SessionInner::start_image_stream`], task 09): an
+//! - **The image stream** ([`SessionInner::start_image_stream`]): an
 //!   `AVCaptureVideoDataOutput` plus a [`SampleBufferDelegate`]
 //!   (`define_class!`, [`AnyThread`](objc2::AnyThread) — same shape as the
 //!   photo delegate) delivering `CVPixelBuffer` planes zero-copy on its own
@@ -33,8 +33,8 @@
 //! Every session mutation (`addInput`/`addOutput`, the configuration
 //! transaction, `startRunning`/`stopRunning`, and the capture request) runs on
 //! one plugin-owned **serial** `dispatch2` queue — never on the caller's
-//! thread, and never on the `CADisplayLink`/UI thread mid-frame (PLAN.md's
-//! iOS *Threading* risk). Object *allocation* (`AVCaptureSession::new()` and
+//! thread, and never on the `CADisplayLink`/UI thread mid-frame. Object
+//! *allocation* (`AVCaptureSession::new()` and
 //! friends) happens on the calling thread, which mutates no live session.
 //!
 //! A running image stream gets a **second**, dedicated serial queue
@@ -125,7 +125,7 @@ use crate::{
 /// `NSClassFromString` (`docs/CODE_STANDARDS.md`'s platform-view factory
 /// `viewType` LAW — iOS carries no package, unlike Android's fully-qualified
 /// form). Shipped by `plugins/camera/platform/ios/`'s
-/// `CameraPreviewFactory.swift` (task 08).
+/// `CameraPreviewFactory.swift`.
 const PREVIEW_VIEW_TYPE: &str = "CameraPreviewFactory";
 
 /// The label of this plugin's serial session queue (module doc's
@@ -186,7 +186,7 @@ const CAPTURE_TIMEOUT: Duration = Duration::from_secs(10);
 /// v1 pins portrait rather than tracking device orientation: the plugin has
 /// no `UIWindowScene` handle to read an interface orientation from, and
 /// `AVCaptureDevice.RotationCoordinator` (iOS 17+) needs a preview layer
-/// that lives on the Swift side (task 08). Rotation tracking is a follow-up,
+/// that lives on the Swift side. Rotation tracking is a follow-up,
 /// not a v1 gap this constant hides — see the module doc.
 ///
 /// `f64` rather than `CGFloat` to avoid a direct `objc2-core-foundation`
@@ -666,7 +666,7 @@ impl Drop for AppleSession {
     /// Without this, an app that drops its `CameraSession` without calling
     /// [`crate::CameraSession::close`] would leave the capture device (and
     /// its registry entry) live for the rest of the process — the exact
-    /// leak Flutter's "dispose on inactive" lesson is about (RESEARCH.md §1).
+    /// leak Flutter's "dispose on inactive" lesson is about.
     /// [`SessionInner::close`] is idempotent, so an explicit `close()` first
     /// costs nothing here.
     fn drop(&mut self) {
@@ -681,8 +681,8 @@ impl SessionBackend for AppleSession {
 
     fn params_json(&self) -> String {
         // `session` (not Android's `sessionId`): each platform's factory owns
-        // its own payload shape, and the iOS factory (task 08's
-        // `CameraPreviewFactory.swift`) parses `{"session": N}` before calling
+        // its own payload shape, and the iOS factory
+        // (`CameraPreviewFactory.swift`) parses `{"session": N}` before calling
         // `frust_camera_session_handle(N)`.
         format!(r#"{{"session":{}}}"#, self.inner.id)
     }
@@ -715,7 +715,7 @@ impl SessionBackend for AppleSession {
 // --- The preview seam ------------------------------------------------------
 
 /// `frust_camera_session_handle`: resolve a session id to its live
-/// `AVCaptureSession`, for the Swift preview factory (task 08).
+/// `AVCaptureSession`, for the Swift preview factory.
 ///
 /// The id is the `"session"` value from
 /// [`CameraSession::params_json`](crate::CameraSession::params_json), which
@@ -752,8 +752,8 @@ impl SessionBackend for AppleSession {
 /// This is the repo's first Swift-called `#[unsafe(no_mangle)]` export
 /// defined in a **dependency** crate rather than stamped into the app crate
 /// by a macro (`ios_app!`). Whether it survives the release profile's
-/// `lto = "fat"` + `strip = "symbols"` into the linked staticlib is untested
-/// (PLAN.md's *Symbol survival* risk). [`ios_exports`] is the fallback an
+/// `lto = "fat"` + `strip = "symbols"` into the linked staticlib is untested.
+/// [`ios_exports`] is the fallback an
 /// app invokes if it does not.
 ///
 /// # Safety
@@ -1614,8 +1614,7 @@ mod tests {
     //! below is exercised by `cargo check/clippy --target
     //! aarch64-apple-ios-sim --all-targets` on any host, while *running* them
     //! needs an Apple host (and, for anything touching a camera, a physical
-    //! device — the Simulator has none). Behavior is device-gated by design
-    //! (task 14).
+    //! device — the Simulator has none). Behavior is device-gated by design.
 
     /// [`crate::ios_exports`] expands and type-checks.
     ///
@@ -1634,7 +1633,7 @@ mod tests {
     /// Only the permissive direction is assertable here: the test harness
     /// already runs each test on a spawned thread, and nothing in a `cargo
     /// test` process can *become* the main thread to check the rejecting one
-    /// (that half is the device gate's, task 14). This still pins the guard's
+    /// (that half is the device gate's). This still pins the guard's
     /// signature and its "off the main run loop is always fine" contract.
     #[test]
     fn main_thread_guard_admits_a_worker_thread() {

@@ -79,8 +79,8 @@ struct BubbleVisual {
     symbol_too_wide: bool,
     percent: TextLayout,
     percent_size: Size,
-    /// The radial fill's [`Gradient`] object, built once here (task 10.E S1
-    /// gradient-brush reuse, PLAN.md Phase 10.E) with its stops fixed for the
+    /// The radial fill's [`Gradient`] object, built once here for
+    /// gradient-brush reuse, with its stops fixed for the
     /// bubble's lifetime — paint only mutates `kind`'s center/radius in place
     /// per frame (the bubble's only per-frame-changing input, from physics)
     /// instead of reallocating a fresh `Gradient` + `ColorStops` every paint.
@@ -299,8 +299,8 @@ impl Widget for BubbleChartWidget {
             // radius, gradient radius 0.95r, 0.7→0.3 alpha — the repro's
             // `RadialGradient` verbatim. Brush geometry is in absolute scene
             // coordinates (the recorded command transform is identity here).
-            // The `Gradient` object itself is cached on `vis` (task 10.E S1
-            // gradient-brush reuse) — only the position updates in place per
+            // The `Gradient` object itself is cached on `vis`
+            // (gradient-brush reuse) — only the position updates in place per
             // frame; the stops were fixed once in `init`.
             if let GradientKind::Radial(pos) = &mut vis.fill.kind {
                 let gradient_center = Point::new(center.x - 0.2 * r, center.y - 0.2 * r);

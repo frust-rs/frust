@@ -3,7 +3,7 @@
 //! premultiplied-RGBA8 [`Pixmap`](vello_cpu::Pixmap).
 //!
 //! Compiled only behind the non-default `cpu-tier` feature (see
-//! `frust-render/Cargo.toml` and PLAN.md D4c). The GPU (vello 0.9) path is
+//! `frust-render/Cargo.toml`). The GPU (vello 0.9) path is
 //! unaffected when the feature is off — this whole module, and every `vello_cpu`
 //! type it names, then vanishes from the build.
 //!
@@ -25,14 +25,14 @@
 //! `Command` variant is routed through one `match` shared with vello — there is
 //! no second command-coverage list to keep in sync. Where `vello_cpu` 0.0.9's
 //! API cannot reproduce a GPU-path effect exactly, the downgrade is documented
-//! inline and collected in the list below for the phase 6e visual review:
+//! inline and collected in the list below for manual visual verification:
 //!
 //! - **Image *brushes*** (a `Brush::Image` handed to a fill, as opposed to the
 //!   dedicated `Command::Image`) are painted transparent — no shipping widget
 //!   emits one, so this is a theoretical gap, not a visible one.
 //! - **`Command::Image`** is best-effort: the peniko `ImageData` is converted to
 //!   a `vello_cpu` image paint and sampled into `dest`. Pixel fidelity is
-//!   untested against the GPU path (no headless image golden yet) — see phase 6e.
+//!   untested against the GPU path (no headless image golden yet).
 //! - Everything else (solid/gradient fills, rounded rects, lines, arbitrary
 //!   fill/stroke paths, clips, opacity layers, blurred-rounded-rect shadows,
 //!   glyph runs) maps onto a direct `vello_cpu` equivalent.
@@ -134,7 +134,7 @@ impl CpuTierRenderer {
                 resources: &mut self.resources,
             };
             // Reuse the *same* command walk the GPU path uses (`convert`), so
-            // command coverage stays single-sourced (PLAN.md D4c).
+            // command coverage stays single-sourced.
             encode_into(scene, &mut sink);
         }
 
@@ -356,7 +356,7 @@ mod tests {
         // A 20x20 target, cleared to white, with a red rect over the top-left
         // 10x10 quadrant. Assert a pixel inside the rect is red and one outside
         // it is (the white) background — the CPU tier runs fully headless, so we
-        // can assert real rasterized pixels (task 06 acceptance criterion).
+        // can assert real rasterized pixels with no GPU dependency.
         let mut scene = Scene::new();
         {
             let mut builder = SceneBuilder::new(&mut scene);

@@ -1,5 +1,5 @@
 //! Pointer-event resampling + deadline-aware pacing helpers shared by the
-//! mobile shells (plan phase 10.C, `research/RESEARCH.md` finding 4).
+//! mobile shells.
 //!
 //! # What lives here
 //!
@@ -12,10 +12,10 @@
 //!   never dropped, never repositioned — so only `Move` positions are ever
 //!   resampled (Flutter's `PointerEventResampler` contract, adapted).
 //! - [`frame_interval_nanos`] / [`deadline_overrun`] — the deadline-aware
-//!   scheduling helpers (10.C.2): estimate a frame-target budget from the
+//!   scheduling helpers: estimate a frame-target budget from the
 //!   tick-to-tick timestamp delta, and decide whether a frame's measured work
 //!   overran it. **Instrumentation only** — no work-dropping heuristics live
-//!   here (see the module's plan entry).
+//!   here.
 //!
 //! # Layering choice
 //!
@@ -74,8 +74,7 @@ pub const SAMPLE_OFFSET_NANOS: u64 = 5_000_000;
 ///
 /// **Community-approximate**: Flutter caps pointer prediction at roughly one
 /// half-refresh window to keep a paused/again-moving finger from overshooting;
-/// half of a 60Hz frame (~8.33ms) is that Flutter-parity half-frame window
-/// (the plan's stated latency-vs-smoothness mitigation).
+/// half of a 60Hz frame (~8.33ms) is that Flutter-parity half-frame window.
 pub const PREDICTION_WINDOW_NANOS: u64 = 8_333_333;
 
 /// Fallback frame-target interval (60Hz) used by [`frame_interval_nanos`] when
@@ -118,8 +117,8 @@ impl RawPointerSample {
     }
 }
 
-/// Buffers raw pointer samples and emits frame-boundary-resampled events
-/// (plan phase 10.C.1). See the module docs for the interpolation/prediction
+/// Buffers raw pointer samples and emits frame-boundary-resampled events.
+/// See the module docs for the interpolation/prediction
 /// contract; construct one per app handle and drive it from the shell's touch
 /// and frame paths.
 #[derive(Debug)]
@@ -364,7 +363,7 @@ fn lerp_point(a: Point, b: Point, t: f64) -> Point {
 }
 
 /// Estimate this frame's deadline budget (the frame-target interval) from two
-/// consecutive tick timestamps (plan phase 10.C.2). Returns the tick-to-tick
+/// consecutive tick timestamps. Returns the tick-to-tick
 /// delta when it is plausible (`[`[`MIN_PLAUSIBLE_INTERVAL_NANOS`]`,
 /// `[`MAX_PLAUSIBLE_INTERVAL_NANOS`]`]`), else [`DEFAULT_REFRESH_INTERVAL_NANOS`]
 /// (60Hz) — covering the first tick (no prior), a clock glitch, and a long idle
@@ -383,8 +382,8 @@ pub fn frame_interval_nanos(prev_tick: Option<u64>, cur_tick: u64) -> u64 {
     }
 }
 
-/// Whether a frame's measured `work` overran its `budget_nanos` deadline (plan
-/// phase 10.C.2). **Instrumentation only** — the shell records the overrun
+/// Whether a frame's measured `work` overran its `budget_nanos` deadline.
+/// **Instrumentation only** — the shell records the overrun
 /// (a counter, gated behind `perf::enabled()`); it never drops or reshapes work
 /// on the strength of this.
 pub fn deadline_overrun(work: Duration, budget_nanos: u64) -> bool {

@@ -3,15 +3,14 @@
 //! these tests are the automated backstop (there is no CI — the verify gate
 //! is the only enforcement):
 //!
-//! - `[profile.dev.package.<shader-crate>]` overrides (spec §12.9, 6e
-//!   Finding 5) live in THREE manifests (root, template, huddle) — drift
+//! - `[profile.dev.package.<shader-crate>]` overrides live in THREE
+//!   manifests (root, template, huddle) — drift
 //!   silently reopens the iOS launch-watchdog crash.
 //! - `[profile.release]` hardening and the `[profile.dev.package."*"]`
-//!   wildcard (phase 7 task 11) live in the SAME three manifests (root,
-//!   template, huddle — phase 8's examples-convergence deleted `catalog`
+//!   wildcard live in the SAME three manifests (root,
+//!   template, huddle — an earlier examples-convergence deleted `catalog`
 //!   and `inbox`, folding their hand-sync role into `huddle`) — drift
-//!   silently reopens the measured size/perf regression (review round-0
-//!   finding 4).
+//!   silently reopens the measured size/perf regression.
 //!
 //! The template manifest contains minijinja placeholders elsewhere in the
 //! file, so the blocks are extracted line-wise rather than TOML-parsed.
@@ -60,8 +59,8 @@ fn section_pairs(manifest: &str, header: &str) -> BTreeMap<String, String> {
     out
 }
 
-/// The three manifests carrying the phase-7 hand-synced profile blocks
-/// (root, template, huddle — phase 8's examples-convergence deleted the
+/// The three manifests carrying the hand-synced profile blocks
+/// (root, template, huddle — an earlier examples-convergence deleted the
 /// `catalog` and `inbox` examples, the other two manifests this used to
 /// compare).
 fn three_manifests() -> Vec<std::path::PathBuf> {
@@ -86,8 +85,8 @@ fn assert_section_identical(header: &str, expect_keys: &[&str]) {
     for key in expect_keys {
         assert!(
             blocks[0].contains_key(*key),
-            "root Cargo.toml's {header} is missing `{key}` — the phase-7 \
-             hardening (task 11) has been removed?"
+            "root Cargo.toml's {header} is missing `{key}` — has the \
+             profile hardening been removed?"
         );
     }
     for (path, other) in manifests.iter().zip(&blocks).skip(1) {
@@ -139,7 +138,7 @@ fn shader_stack_dev_overrides_identical_across_all_three_manifests() {
             other,
             "[profile.dev.package.*] overrides in {} have drifted from the \
              root Cargo.toml — the three manifests must stay identical \
-             (DEVELOPMENT.md, spec §12.9)",
+             (see DEVELOPMENT.md's profile-sync rule)",
             path.display()
         );
     }

@@ -1,7 +1,7 @@
-//! Arc-to-path helper (task 05, PLAN.md D2b).
+//! Arc-to-path helper.
 //!
-//! Circular progress indicators (task 10) and `CupertinoActivityIndicator`
-//! (task 13) both need to paint a stroked arc — this is the one non-rect,
+//! Circular progress indicators and `CupertinoActivityIndicator`
+//! both need to paint a stroked arc — this is the one non-rect,
 //! non-glyph shape the baseline widget set needs, so a tiny helper lives here
 //! rather than being duplicated in each widget. It's a thin wrapper over
 //! `kurbo::Arc::to_path` (`kurbo::Shape`'s tessellation into a `BezPath`),

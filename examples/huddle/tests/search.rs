@@ -297,8 +297,8 @@ fn a_channel_result_row_navigates_to_its_channel_feed() {
     );
 }
 
-/// Regression for the `12-huddle-search-structure` restructuring (and an
-/// app-tree integration check for task 02's sibling focus-preservation fix):
+/// Regression for the search-structure restructuring (and an
+/// app-tree integration check for a sibling focus-preservation fix):
 /// typing a second character — which narrows/changes the matched result set
 /// and therefore `results_container`'s internal content — must not disturb
 /// the search field's own focus/IME state.
@@ -361,10 +361,9 @@ fn typing_a_second_character_keeps_the_field_focused() {
     assert!(scene.glyph_runs > 0);
 }
 
-/// Regression for `12b-search-field-stable-row`: `search_field`'s own row —
+/// Regression test: `search_field`'s own row —
 /// not `results_container` — must never itself change concrete type across
-/// the empty/non-empty query boundary (see that task's file, and
-/// `12-huddle-search-structure`'s completion summary, Risks item 1, which
+/// the empty/non-empty query boundary (see below for the mechanism that
 /// first surfaced this defect). Unlike
 /// [`typing_a_second_character_keeps_the_field_focused`] above (which
 /// deliberately seeds the query non-empty first, precisely to dodge this

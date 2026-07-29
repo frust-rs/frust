@@ -1,5 +1,5 @@
 //! The channels feature's domain repository contract (huddle
-//! clean-architecture refactor, task 02).
+//! clean-architecture refactor).
 //!
 //! [`ChannelRepository`] is the seam between the presentation controller / its
 //! use cases and the data layer: the [`LoadChannels`](super::use_cases::LoadChannels)

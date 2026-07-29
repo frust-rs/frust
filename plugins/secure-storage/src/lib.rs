@@ -11,15 +11,14 @@
 //! crate to its own `Cargo.toml` alongside `frust`, the Flutter-pubspec
 //! model; the `frust` facade does not depend on or re-export it.
 //!
-//! # Phased delivery
+//! # Backends
 //!
-//! This module started as the **storage core** (plan Phase 1): the full
-//! public API, a [`file`] fallback backend, and a conformance suite, with
-//! **no platform FFI**. Later phases route [`SecureStorage::open`] to native
-//! backends behind the same API by `#[cfg(target_os = ...)]` (Phase 2 Apple
-//! Keychain, Phase 3 Android Keystore, Phase 4 desktop keyring — all landed:
-//! Apple targets route to [`apple`], Android to [`android`], Linux/Windows to
-//! [`desktop`]). **Phase 5 (task S05) — landed**: the biometric gate is real
+//! This crate ships the full public API, a [`file`] fallback backend used
+//! only by its own conformance suite, and [`SecureStorage::open`] routes to
+//! native backends behind the same API by `#[cfg(target_os = ...)]`:
+//! Apple targets route to [`apple`] (Keychain), Android to [`android`]
+//! (Keystore), Linux/Windows to
+//! [`desktop`] (the `keyring` stack). The biometric gate is real
 //! on the Apple ([`apple`], `SecAccessControl` + `LAContext`) and Android
 //! ([`android`], framework `BiometricPrompt` + an app-supplied Kotlin helper)
 //! backends; a store opened with [`AuthPolicy::Required`] there gates every
@@ -43,18 +42,18 @@
 //! synchronous; a gated call **blocks on the system biometric prompt**, so it
 //! must never run on the UI thread — an app pairs it with
 //! `frust-reactive`'s `spawn_blocking` (the plugin itself stays framework-free
-//! per charter). See the plugin `README.md` (Phase 5) for the full contract.
+//! per charter). See the plugin `README.md` for the full contract.
 
-// S04 (Plan Phase 4) landed `desktop` for linux/windows (see `open_with`'s
+// `desktop` handles linux/windows (see `open_with`'s
 // selection point below), so `file` is no longer dispatched to there — it's
 // now purely the `#[cfg(test)]` conformance-suite target on that arm,
 // mirroring `frust-shared-preferences`' backend-routing structure. Every
-// real target now routes to a platform backend (S02/S03/S04 landed), so
+// real target now routes to a platform backend, so
 // the file backend is the conformance-harness backend only.
 #[cfg(test)]
 mod file;
 
-// Platform backends (Plan Phases 2-5, all landed): every real target routes
+// Platform backends: every real target routes
 // to its own `#[cfg]`-gated `Backend` impl via `open_with`'s selection point
 // below — Apple Keychain, Android Keystore, Linux/Windows keyring.
 #[cfg(target_os = "android")]
@@ -66,8 +65,8 @@ mod desktop;
 
 // Pure-Rust (FFI-free) helpers for the Android Keystore backend — Base64, IV
 // framing, and store-id/alias derivation. Split out of `android` (which is
-// `jni`-gated and so host-uncompilable) precisely so these are **host-tested**
-// (task S03 requirement 6). Compiled only where used or tested — on Android, or
+// `jni`-gated and so host-uncompilable) precisely so these are **host-tested**.
+// Compiled only where used or tested — on Android, or
 // in any `cargo test` build — so it is never dead code in a host non-test build.
 #[cfg(any(target_os = "android", test))]
 mod framing;
@@ -114,7 +113,7 @@ pub enum AuthPolicy {
     /// Every gated call blocks on the system biometric prompt.
     ///
     /// Honored on the Apple (`SecAccessControl` + `LAContext`) and Android
-    /// (framework `BiometricPrompt`) backends (S05). On Linux/Windows — no
+    /// (framework `BiometricPrompt`) backends. On Linux/Windows — no
     /// platform biometric primitive — opening a store with this policy fails
     /// with
     /// [`SecureStorageError::NotAvailable`]`(`[`Unavailability::UnsupportedPlatform`]`)`.
@@ -213,8 +212,8 @@ pub enum Unavailability {
     /// R8-stripped build missing the keep rule).
     HelperMissing,
     /// The current platform/build has no implementation for this operation —
-    /// including every biometric-gated open while the storage core (plan
-    /// Phase 1) ships no platform backend yet.
+    /// including every biometric-gated open on a target this crate ships no
+    /// platform backend for at all.
     UnsupportedPlatform,
 }
 
@@ -345,11 +344,11 @@ impl SecureStorage {
     /// [`AuthPolicy::Required`] — a platform without a biometric primitive
     /// (Linux/Windows) fails with
     /// [`SecureStorageError::NotAvailable`]`(`[`Unavailability::UnsupportedPlatform`]`)`.
-    /// On the Apple and Android backends the gate is honored per store
-    /// (S05): the `Required` options travel into the backend, and every
+    /// On the Apple and Android backends the gate is honored per store:
+    /// the `Required` options travel into the backend, and every
     /// subsequent gated call blocks on the system biometric prompt.
     pub fn open_with(name: &str, options: StoreOptions) -> Result<Self, SecureStorageError> {
-        // The per-store biometric policy (S05): `None` for a plain store,
+        // The per-store biometric policy: `None` for a plain store,
         // `Some(opts)` for a gated one. Cloned out of `options` here so each
         // platform arm below can move it into (or, on Linux/Windows, refuse
         // it before constructing) its backend.
@@ -358,9 +357,9 @@ impl SecureStorage {
             AuthPolicy::Required(ref opts) => Some(opts.clone()),
         };
 
-        // FINAL backend routing: apple targets -> `apple`, android ->
-        // `android`, linux/windows -> `desktop`. Each backend now takes the
-        // optional biometric policy directly (S05); the Apple/Android arms
+        // Backend routing: apple targets -> `apple`, android ->
+        // `android`, linux/windows -> `desktop`. Each backend takes the
+        // optional biometric policy directly; the Apple/Android arms
         // implement the gate, the Linux/Windows arm has no platform primitive
         // to back it and so refuses a gated open with a typed, non-panicking
         // `NotAvailable(UnsupportedPlatform)` (never a silent downgrade to

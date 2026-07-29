@@ -1,5 +1,5 @@
 //! [`StoreMessageRepository`] — the [`MessageRepository`] implementation this
-//! app wires up (huddle clean-architecture refactor, task 03).
+//! app wires up.
 //!
 //! Adapts the shared in-memory [`crate::data::store`] to the messages domain
 //! trait and owns this feature's single failure-mapping boundary. The store
@@ -11,8 +11,9 @@
 //! `map_*_error -> HuddleFailure` conversion lands here, at this one site, and
 //! nothing above the data layer changes.
 //!
-//! This is the **only** messages file that mentions [`crate::data::store`] (the
-//! inward dependency rule, PLAN Design Decision 3).
+//! This is the **only** messages file that mentions [`crate::data::store`] —
+//! the inward dependency rule: only the `data` layer may depend on the
+//! concrete shared store; `domain` and `presentation` never do.
 
 use crate::failure::HuddleFailure;
 use crate::features::channels::domain::{Channel, Dm};

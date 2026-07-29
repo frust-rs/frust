@@ -1,4 +1,4 @@
-//! Desktop preview entry point (spec §12.9 dev loop / §5.5 canonical app shape).
+//! Desktop preview entry point.
 //!
 //! Never hand-edit this file: `frust::app!` (in `lib.rs`) generates the
 //! hidden `__frust_main` this one line calls — add screens/state to

@@ -1,4 +1,4 @@
-//! Integration tests for the Activity tab (Phase C task 14).
+//! Integration tests for the Activity tab.
 //!
 //! The screen (`src/screens/activity.rs`) is a private module — `src/lib.rs`
 //! declares `mod screens;`, not `pub mod screens;` (see
@@ -312,7 +312,7 @@ fn mark_all_read_clears_the_unread_indicators() {
 }
 
 /// Tapping a row navigates to the mentioned channel's real `/channel/:id`
-/// feed (task 18: replacing task 14's local in-tab drill-down workaround —
+/// feed (replacing an earlier local in-tab drill-down workaround —
 /// see `src/screens/activity.rs`'s module docs), and popping back returns to
 /// Activity with its feed state retained: the thread-local
 /// [`huddle::features::activity::ActivityController`] instance already holds

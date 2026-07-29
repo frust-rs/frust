@@ -1,5 +1,5 @@
 //! Accent themes — the three prebuilt brand palettes the appearance screen
-//! composes onto the active baseline (Huddle showcase, task 15).
+//! composes onto the active baseline.
 //!
 //! # Why hand-derived, not HCT-computed
 //!

@@ -68,10 +68,10 @@ impl Mode {
 }
 
 /// How many offscreen layers the composite scenes (B / B+1relayer) split the
-/// content into — within the plan's "3-6 offscreen textures" window. Four
+/// content into — within a 3-6 offscreen-textures window. Four
 /// full-width horizontal bands tile the screen exactly once, so the total
 /// composite texture footprint is ~one full-screen layer (see
-/// [`layer_memory_bytes`]), matching PLAN.md's "full-screen layer ≈ 10.4MB".
+/// [`layer_memory_bytes`]) — approximately 10.4MB.
 pub const NUM_LAYERS: usize = 4;
 
 /// A rounded-rectangle fill (chips, cards, buttons, progress track/fill,
@@ -110,8 +110,8 @@ pub struct IconSpec {
     pub color: Color,
 }
 
-/// The pure command counts, asserted by the T0 tests and reported for the
-/// SPIKE.md calibration table.
+/// The pure command counts, asserted by the T0 tests and reported on the
+/// on-screen HUD's calibration display.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct SceneCounts {
     pub rounded_rects: usize,
@@ -130,7 +130,7 @@ pub struct ScenePlan {
 }
 
 impl ScenePlan {
-    /// Command counts (for the T0 assertions + SPIKE.md calibration).
+    /// Command counts (for the T0 assertions + the on-screen HUD's calibration display).
     pub fn counts(&self) -> SceneCounts {
         SceneCounts {
             rounded_rects: self.rects.len(),

@@ -9,13 +9,13 @@
 #
 # Facade tier: this plugin is deliberately nothing more than a crate
 # depending on `frust` (+ `clean-signals`) — the first facade-tier plugin
-# migrated into this repo (plugin-system-shared-preferences plan, task 03),
-# renamed and adopted from the sibling `clean-signals-rs` checkout's
-# pre-migration Frust glue crate. `frust*` deps below resolve in-repo (this
-# plugin lives inside the `frust` checkout, unlike huddle's example); only
-# `clean-signals` stays a sibling-checkout path dep, matching huddle's own
-# `clean-signals` path so the two resolve the identical crate identity
-# (type-identity rule — see docs/DEVELOPMENT.md's Version-Pin Policy).
+# migrated into this repo, renamed and adopted from the sibling
+# `clean-signals-rs` checkout's pre-migration Frust glue crate. `frust*` deps
+# below resolve in-repo (this plugin lives inside the `frust` checkout,
+# unlike huddle's example); only `clean-signals` stays a sibling-checkout
+# path dep, matching huddle's own `clean-signals` path so the two resolve
+# the identical crate identity (type-identity rule — see
+# docs/DEVELOPMENT.md's Version-Pin Policy).
 [workspace]
 
 [package]

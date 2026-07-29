@@ -1,4 +1,4 @@
-//! `frust build apk|appbundle|ios|ipa` (spec §12.5/12.6): validates the
+//! `frust build apk|appbundle|ios|ipa`: validates the
 //! full `BuildTarget` flag surface into a [`BuildInfo`] + platform artifact
 //! enum, resolves the project root (mirrors `run`'s `frust.toml`
 //! detection), and dispatches to the `android_build`/`ios_build` pipelines.
@@ -15,7 +15,7 @@ use frust_drive::ios_build::{self, IosArtifact};
 use frust_drive::ios_run;
 use frust_drive::process::ProcessRunner;
 
-/// `--target-platform` value -> Gradle ABI name (spec §12.5).
+/// `--target-platform` value -> Gradle ABI name.
 const TARGET_PLATFORMS: &[(&str, &str)] = &[
     ("android-arm64", "arm64-v8a"),
     ("android-arm", "armeabi-v7a"),
@@ -63,8 +63,8 @@ pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path, target: BuildTarge
             let info = BuildInfo::from_args(build.into_drive(), BuildMode::Release)
                 .map_err(|err| anyhow::anyhow!(err))?;
             // Validated for a clear error even though `Appbundle` doesn't
-            // carry the resolved ABI list itself (spec §12.5: Gradle's
-            // bundle task packages every ABI in one `.aab`).
+            // carry the resolved ABI list itself (Gradle's bundle task
+            // packages every ABI in one `.aab`).
             resolve_abis(target_platform.as_deref())?;
             build_android(runner, project_dir, &info, AndroidArtifact::Appbundle)
         }
@@ -166,7 +166,7 @@ fn print_artifacts(paths: &[std::path::PathBuf]) {
 }
 
 /// Maps `--target-platform`'s comma-separated `android-*` values to Gradle
-/// ABI names (spec §12.5); `None` defaults to all three.
+/// ABI names; `None` defaults to all three.
 fn resolve_abis(target_platform: Option<&str>) -> Result<Vec<String>> {
     let Some(csv) = target_platform else {
         return Ok(TARGET_PLATFORMS
@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn build_apk_reaches_the_android_build_pipeline() {
-        // `android_build::build` (task 64) is real now, not a stub — with no
+        // `android_build::build` is real, not a stub — with no
         // `ProcessRunner` fixtures registered at all, the pipeline reaches
         // (and fails at) its own preflight, proving `run_in` dispatches into
         // it rather than stopping at project detection.
@@ -401,7 +401,7 @@ mod tests {
     fn build_ios_reaches_the_ios_pipeline_on_macos() {
         // With the macOS gate bypassed and an empty runner, dispatch reaches
         // `ios_build`'s pipeline, which fails at its first preflight check
-        // (Xcode presence) rather than at the removed task-65 stub.
+        // (Xcode presence) — the pipeline is real now, not a stub.
         let dir = ios_project_dir("ios-pipeline");
         let runner = FakeProcessRunner::new();
         let target = BuildTarget::Ios {

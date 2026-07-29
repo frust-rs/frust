@@ -15,9 +15,9 @@ import android.widget.TextView
  * own counter at ~20Hz on a plain [Handler] loop — deliberately **not** the
  * template's `TestLabelFactory` (which ticks on [android.view.Choreographer],
  * i.e. the display's own vsync rate): this factory exists specifically to
- * prove the zero-frust-frames self-update property (platform-views task 11's
- * device trace) with an update cadence visibly independent of both the
- * display refresh rate and the frust frame loop.
+ * prove the zero-frust-frames self-update property with an update cadence
+ * visibly independent of both the display refresh rate and the frust frame
+ * loop.
  *
  * `updateParams` (the widget's `params_json` "updateParams" stress toggle)
  * is shown inline in the label so a params bump is visible without disposing

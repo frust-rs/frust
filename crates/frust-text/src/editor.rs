@@ -1,5 +1,5 @@
 //! [`TextEditor`]: the editing engine behind the `TextInput` widget and the
-//! platform IME bridges (spec §4, §9 / Phase 4B).
+//! platform IME bridges.
 //!
 //! Wraps parley 0.11's [`parley::PlainEditor`] behind a renderer-agnostic API:
 //! all mutation flows through [`TextEditor::apply`] (an [`EditOp`] plus a
@@ -16,8 +16,7 @@
 //!   parley owns the preedit buffer and reports it via `raw_compose`.
 //! - **Android / iOS** own composition against a platform-side mirror buffer and
 //!   push the whole editing value ([`EditOp::ApplyEditingState`]) — a state-sync
-//!   model, not op-forwarding (the Flutter-canonical contract; see
-//!   `research/RESEARCH.md`). On this path parley's compose machinery is *not*
+//!   model, not op-forwarding (the Flutter-canonical contract). On this path parley's compose machinery is *not*
 //!   used: the platform is authoritative for the composing region, so we track
 //!   it in [`TextEditor::platform_composing`] purely for paint styling and echo
 //!   it back out in the editing state. A value-equality short-circuit guards the
@@ -503,8 +502,8 @@ mod tests {
         let after = ed.text();
         // parley deletes by code point, not byte: the trailing 4-byte emoji
         // is removed as a unit and the result stays valid UTF-8. (Full
-        // ZWJ-grapheme-cluster awareness is a widget/bridge-layer concern per
-        // research/RESEARCH.md, not parley's guarantee.)
+        // ZWJ-grapheme-cluster awareness is a widget/bridge-layer concern,
+        // not parley's guarantee.)
         assert_eq!(before - after.len(), 4, "one 4-byte code point removed");
         assert!(after.starts_with('x'));
     }

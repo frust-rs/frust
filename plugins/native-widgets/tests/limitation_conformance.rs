@@ -1,13 +1,13 @@
 //! Source-scan conformance test for the two documented limitations of the
-//! public `NativeComponent` seam (task m-04): **one list, kept honest in both
+//! public `NativeComponent` seam: **one list, kept honest in both
 //! directions.**
 //!
 //! # Read this if you are the author who makes a limitation stop being true
 //!
-//! Phase 3's review found an *incomplete routing*: two true facts about this
+//! An earlier review found an *incomplete routing*: two true facts about this
 //! plugin were asserted in some files and contradicted in others. The fix
 //! wrote the same claim into nine places, which closed the defect and left the
-//! mirror-image hazard: **when Phase 4 wires listener attachment, whoever does
+//! mirror-image hazard: **when someone wires listener attachment, whoever does
 //! it must find and update every surface, or this repo ends up documenting a
 //! limitation it no longer has.** That is what this file exists to prevent.
 //!
@@ -21,7 +21,7 @@
 //!    a list of zero claims proves nothing).
 //! 3. Update the one surface this scan deliberately cannot see, by hand:
 //!    `examples/glyph-catalog/src/pages/native_widgets.rs`. This crate's tests
-//!    do not reach into `examples/**` — the boundary p3-03 established, see
+//!    do not reach into `examples/**` — a deliberate boundary, see
 //!    `tests/kotlin_conformance.rs`'s own module doc — so nothing enforces
 //!    that page, which is exactly why it is named here. **Search it for both
 //!    claims and rewrite whatever states the one you just made false**, rather
@@ -55,7 +55,7 @@
 //! actually fire") and an **unlisted hit fails**
 //! (`surface_mode_conformance`'s ban direction).
 //!
-//! # What is actually true about the two claims (as of m-04)
+//! # What is actually true about the two claims
 //!
 //! The markers below are phrased the way they are on purpose:
 //!
@@ -67,7 +67,7 @@
 //!   has no effect. It is NOT "can never fire" — `NativeRuntime::on_event`
 //!   routes on the slot id alone, and Android's `nativeOnEvent` export
 //!   validates only that the incoming `jlong` is non-negative
-//!   (`SlotId::try_from`, task m-02), so a listener carrying a *fabricated*
+//!   (`SlotId::try_from`), so a listener carrying a *fabricated*
 //!   non-negative id that names a live component's slot is delivered like any
 //!   other — a misroute rather than a route, which is exactly why
 //!   `src/demo.rs` warns against fabricating one. A future edit that
@@ -81,7 +81,7 @@
 //! charter docs `docs/*.md` (top level only). Deliberately excluded:
 //! `tests/**` (this very file quotes every marker, and would match itself),
 //! `docs/learning/**` (lab curriculum, not a contract surface) and
-//! `examples/**` (the p3-03 boundary above). `src/demo.rs` is scanned even
+//! `examples/**` (the boundary above). `src/demo.rs` is scanned even
 //! though it only compiles under the non-default `demo-components` feature —
 //! a doc claim does not stop being wrong when its file is feature-gated out.
 //!
@@ -354,7 +354,8 @@ fn every_listed_surface_still_states_its_limitation() {
 ///
 /// This is the half whose absence let the bare-`dev.frust` allowlist go
 /// vacuous (module doc). Without it, a tenth surface could restate either
-/// claim and the Phase 4 author would have no way to discover it.
+/// claim and whoever wires the missing behavior would have no way to
+/// discover it.
 #[test]
 fn no_unlisted_surface_states_a_limitation() {
     let files = scanned_files();

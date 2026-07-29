@@ -13,9 +13,9 @@ peniko = { workspace = true }
 # TypeScale fields are frust-text::TextStyle values (family/weight/size/
 # letter-spacing/line-height) — the M3 type-scale surface.
 frust-text = { workspace = true }
-# The delivery helpers `Theme::from_paint_ctx`/`from_layout_ctx` (task 05, the
-# theme-delivery surface task 03 deferred) name `frust_core::PaintCtx`/
-# `LayoutCtx` to wrap their type-erased `theme_as::<Theme>()` accessor into one
+# The delivery helpers `Theme::from_paint_ctx`/`from_layout_ctx` name
+# `frust_core::PaintCtx`/`LayoutCtx` to wrap their type-erased
+# `theme_as::<Theme>()` accessor into one
 # obvious line for widgets. `frust-core` never depends on `frust-theme`
 # (core stays theme-agnostic — see docs/ARCHITECTURE.md), so this reverse edge
 # introduces no cycle.
@@ -23,8 +23,8 @@ frust-core = { workspace = true }
 
 [features]
 default = ["glyph-fonts"]
-# Embeds Space Mono + IBM Plex Mono TTF bytes (glyph::fonts::font_data(),
-# task 18) via include_bytes! — no filesystem/network access at runtime.
+# Embeds Space Mono + IBM Plex Mono TTF bytes (glyph::fonts::font_data())
+# via include_bytes! — no filesystem/network access at runtime.
 # `--no-default-features` compiles the crate without them (fonts module
 # absent, every other token table unaffected).
 glyph-fonts = []

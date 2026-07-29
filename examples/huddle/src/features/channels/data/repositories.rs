@@ -1,5 +1,5 @@
 //! [`StoreChannelRepository`] — the [`ChannelRepository`] implementation this
-//! app wires up (huddle clean-architecture refactor, task 02).
+//! app wires up (huddle clean-architecture refactor).
 //!
 //! Adapts the shared in-memory [`crate::data::store`] to the channels domain
 //! trait: it materializes the roster from the immutable dataset and owns this
@@ -11,7 +11,8 @@
 //! lands here, at this one site, and nothing above the data layer changes.
 //!
 //! This is the **only** channels file that mentions [`crate::data::store`] (the
-//! inward dependency rule, PLAN Design Decision 3).
+//! inward dependency rule: only the data layer may reach into the shared
+//! store; domain/presentation never do).
 
 use std::time::Duration;
 

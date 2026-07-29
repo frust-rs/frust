@@ -12,25 +12,25 @@
 //! layering rationale), the [`perf`] module's frame-timing/startup-span
 //! instrumentation, the [`frame_gate`] module's shared skip-frame decision
 //! ([`FrameGate`]/[`FrameInputs`]/[`FrameDecision`]) the mobile shells consult
-//! to idle on unchanged frames (spec §14 phase 7), the [`resample`]
+//! to idle on unchanged frames, the [`resample`]
 //! module's pointer-event resampling ([`PointerResampler`]) plus deadline-aware
-//! pacing helpers the mobile shells drive from their touch + frame paths (plan
-//! phase 10.C), and the [`render_split`] module's UI→render-thread plumbing
+//! pacing helpers the mobile shells drive from their touch + frame paths, and
+//! the [`render_split`] module's UI→render-thread plumbing
 //! ([`render_channel`]'s latest-wins scene handoff + [`RenderCommand`]/[`Ack`]
 //! lifecycle vocabulary, gated by [`render_thread_enabled`], plus
 //! [`scene_return_channel`]'s reverse give-back slot restoring buffer reuse
-//! across the split) the shells split the frame pipeline across (plan phase
-//! 11.B). The [`platform_view`] module is the differ turning `frust-core`'s
+//! across the split) the shells split the frame pipeline across. The
+//! [`platform_view`] module is the differ turning `frust-core`'s
 //! per-paint-pass platform-view frames into an idempotent
 //! [`ViewCommand`]/[`PlatformViewState`] backlog both mobile shells' FFI peek
-//! getters serve (platform-views task 03), and [`surface_mode`] is the
+//! getters serve, and [`surface_mode`] is the
 //! process-global translucent-surface pair: the host **declaration** latch
 //! ([`declare_host_translucent_surface`]/[`SurfaceModeWatcher`]) — settable
 //! only by each shell's own JNI/C-ABI host-glue callback, never re-exported
-//! past this crate (review-fix-2 t01, review M3) — each shell's
+//! past this crate — each shell's
 //! surface-creation path reads pre-configure, plus the **resolved** slot
-//! ([`publish_resolved_surface_mode`]/[`resolved_surface_mode`], native-widgets
-//! task p1-01) each mobile shell publishes the live surface's actual verdict
+//! ([`publish_resolved_surface_mode`]/[`resolved_surface_mode`]) each mobile
+//! shell publishes the live surface's actual verdict
 //! into, so app code can observe a `RefusedTranslucent` platform refusal
 //! instead of an invisible native sibling.
 //!

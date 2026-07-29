@@ -1,4 +1,4 @@
-//! The `Text` widget (spec §6.4): a leaf that lays out and paints a string.
+//! The `Text` widget: a leaf that lays out and paints a string.
 //!
 //! [`text`] is the declarative view-fn; it produces a [`TextView`] descriptor
 //! that materialises into a retained [`TextWidget`]. The widget shapes its
@@ -48,14 +48,14 @@ pub(crate) enum ThemeTextColor {
     /// [`crate::material::fab`]'s extended-FAB visible label).
     OnPrimaryContainer,
     /// `colors.error` — a label reading as a destructive/error action (used
-    /// by [`crate::Button`]'s `ButtonStyle::Danger`, task 22).
+    /// by [`crate::Button`]'s `ButtonStyle::Danger`).
     Error,
 }
 
 /// A declarative description of a run of text.
 ///
 /// Content does not read application state in v0 — `app_logic` interpolates the
-/// string and hands the finished text in (spec §5). Styling is applied with the
+/// string and hands the finished text in. Styling is applied with the
 /// [`TextView::size`]/[`TextView::color`]/[`TextView::weight`]/
 /// [`TextView::family`]/[`TextView::italic`]/[`TextView::letter_spacing`]/
 /// [`TextView::line_height`] builder methods, or in bulk with
@@ -203,8 +203,8 @@ pub struct TextWidget {
     layout: Option<TextLayout>,
     /// The `max_width` the cached [`layout`](Self::layout) was shaped/broken at.
     /// A layout pass with the same width, same effective style, and a live
-    /// cache reuses the shaped layout instead of re-shaping — the phase-10.B
-    /// fix for the verified defect where `layout` re-shaped unconditionally
+    /// cache reuses the shaped layout instead of re-shaping — the fix for a
+    /// verified defect where `layout` re-shaped unconditionally
     /// every pass (see [`Widget::layout`]).
     laid_out_max_width: Option<f32>,
     /// The effective (themed-color-resolved) style the cached `layout` was
@@ -261,7 +261,7 @@ impl Widget for TextWidget {
         // changed since the last pass. `layout` is `Some` only while content /
         // base style / role are unchanged (rebuild clears it otherwise), so the
         // remaining variables are the wrap width and the effective (themed)
-        // style — both compared here. This is the phase-10.B fix for the
+        // style — both compared here. This is the fix for a
         // verified defect where every layout pass re-shaped unconditionally,
         // and it preserves the theme-swap contract: a live appearance flip
         // changes `style.color`, which mismatches `laid_out_style` and forces a
@@ -334,7 +334,7 @@ mod tests {
         assert_eq!(view.style, custom);
     }
 
-    // --- Themed color resolution (task 07) ---
+    // --- Themed color resolution ---
 
     use frust_core::{BoxConstraints, LayoutCtx, PaintCtx, PaintScene, Widget};
     use frust_scene::GlyphRun;
@@ -433,7 +433,7 @@ mod tests {
         assert_eq!(painted_color(text("x").color(custom), Some(&theme)), custom);
     }
 
-    // --- Cached-shape reuse (phase 10.B, the verified defect) ---
+    // --- Cached-shape reuse (the verified defect) ---
 
     #[test]
     fn unchanged_layout_pass_skips_reshaping_entirely() {

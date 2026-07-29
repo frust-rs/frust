@@ -1,9 +1,9 @@
 /// Deterministic dataset generators shared across scenarios — the concrete,
 /// documented parameters that make the two apps' inputs byte-identical (the
-/// PLAN 9.E fairness gate: "same seed, same dataset bytes").
+/// fairness gate: "same seed, same dataset bytes").
 ///
 /// Each generator is seeded through [SplitMix64], which is a byte-for-byte port
-/// of the frust PRNG, so the frust side (tasks 9E-03/04) reproduces the same
+/// of the frust PRNG, so the frust side reproduces the same
 /// values by using the same seed + the same algorithm documented here. Where a
 /// container encoding cannot be byte-identical across languages (PNG bytes,
 /// float text formatting), the parity target is the *pre-encode pixel/logical

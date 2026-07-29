@@ -1,6 +1,6 @@
-//! `profile` feature — a **synchronous** lookup against the shared dataset
-//! (huddle clean-architecture refactor, task 05), no `clean-signals`
-//! controller/use-case spine needed: there is no async work here and nothing
+//! `profile` feature — a **synchronous** lookup against the shared dataset,
+//! no `clean-signals` controller/use-case spine needed: there is no async
+//! work here and nothing
 //! that can fail, so [`ProfileController::load`] is a plain function taking
 //! the injected [`ProfileRepository`](domain::ProfileRepository), not a
 //! `clean_signals_frust::use_controller`-hosted `ControllerCore` (contrast

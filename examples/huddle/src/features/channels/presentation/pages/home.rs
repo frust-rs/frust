@@ -1,4 +1,4 @@
-//! Home tab — channels + DMs (Phase C, task 11).
+//! Home tab — channels + DMs.
 //!
 //! A [`Component`] hosting a [`ChannelsController`](crate::features::channels)
 //! (via `clean_signals_frust::use_controller`, the same seam
@@ -13,8 +13,8 @@
 //! # Why the escape hatch
 //!
 //! No facade widget paints an arbitrary-color filled circle or an animated
-//! shimmer, so [`fill_box`](crate::ui::fill_box) (promoted to `crate::ui` in
-//! device-parity-round2 task R2 so the feed can share it) and [`Shimmer`] below
+//! shimmer, so [`fill_box`](crate::ui::fill_box) (promoted to `crate::ui` so
+//! the feed can share it) and [`Shimmer`] below
 //! are small hand-rolled `View`/`Widget` pairs built directly against
 //! `frust-core` — the same
 //! precedent the pre-skeleton theme screen used for its `ColorBoxView`
@@ -27,27 +27,26 @@
 //! `ListView`: `ScrollView` is the only facade widget exposing
 //! `on_refresh_release` (pull-to-refresh), which this screen needs.
 //!
-//! # Home actions (task 21)
+//! # Home actions
 //!
 //! The app bar's leading "HQ" tile is the workspace-switcher's first real
-//! entry point (`/workspace-switcher` existed since the skeleton but nothing
+//! entry point (the `/workspace-switcher` route already existed but nothing
 //! pushed it — see `screens::workspace_drawer`'s module docs); the trailing
 //! `icons::ADD` action opens a create-channel bottom sheet (reusing
-//! [`crate::ui::sheet`], task 20's primitive) that appends straight to
+//! [`crate::ui::sheet`]'s existing sheet primitive) that appends straight to
 //! [`ChannelsController`]'s live list via
 //! [`ChannelsController::create_channel`]. Long-pressing a row (channel or
 //! DM — [`GestureDetector::on_long_press`]) opens a Mute/Unmute · Archive ·
 //! Invite people · Cancel action-sheet menu; Mute/Archive reuse the exact
 //! controller ops + undo toast [`swipe_wrap`] already wires (swipe parity).
-//! **"Invite people" is this task's one chosen entry point into the invite
-//! modal** (the task spec offered a second option — a row on the
-//! create-channel sheet's success toast — but a toast action is a
-//! `ToastController` affordance meant for *undo*, not for opening a second
-//! modal on top of a just-dismissed one, so the long-press menu is the
-//! cleaner single seam): it pushes a `dialog`/`cupertino_alert` (picked by
-//! the live [`DesignLanguage`]) confirm/cancel modal onto the app's outer
-//! navigator, and confirming toasts "Invites sent (mock)" — see
-//! [`show_invite_modal`].
+//! **"Invite people" is the one chosen entry point into the invite
+//! modal** (a row on the create-channel sheet's success toast was also
+//! considered, but a toast action is a `ToastController` affordance meant
+//! for *undo*, not for opening a second modal on top of a just-dismissed
+//! one, so the long-press menu is the cleaner single seam): it pushes a
+//! `dialog`/`cupertino_alert` (picked by the live [`DesignLanguage`])
+//! confirm/cancel modal onto the app's outer navigator, and confirming
+//! toasts "Invites sent (mock)" — see [`show_invite_modal`].
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -112,7 +111,7 @@ fn status_color(status: UserStatus) -> Color {
 }
 
 // ---------------------------------------------------------------------------
-// Material list metrics (RESEARCH.md "Material sizing reference")
+// Material list metrics (Material sizing reference measurements)
 // ---------------------------------------------------------------------------
 
 /// CircleAvatar diameter — radius 20 → 40 (`circle_avatar.dart:136-138`).
@@ -139,11 +138,11 @@ const BADGE_TEXT_SIZE: f32 = 11.0;
 // ---------------------------------------------------------------------------
 
 // `FillBox`/`fill_box` were promoted to `crate::ui::fill_box`
-// (device-parity-round2 task R2) so the feed restyle can share the avatar/
+// so the feed restyle can share the avatar/
 // status-dot/badge/composer-tile primitive; imported at the top of this module.
 
 /// A skeleton shimmer bar: a gray rounded rect whose alpha pulses via an
-/// [`AnimationController`] (spec §8's paint-driven animation contract).
+/// [`AnimationController`] (the framework's paint-driven animation contract).
 struct Shimmer {
     size: Size,
     radius: f64,
@@ -227,7 +226,7 @@ struct HomeState {
     toasts: crate::ui::toast::ToastController,
     /// A decoded image used for a couple of DM avatars (`None` if decode fails).
     logo: Option<ImageSource>,
-    /// Which Home overlay sheet (if any) is open (task 21) — plain retained
+    /// Which Home overlay sheet (if any) is open — plain retained
     /// `Component` state, not an `RwSignal`: a tap/long-press callback mutates
     /// it directly via `EventCtx::state_mut::<HomeState>()`, and the change is
     /// picked up on the very next rebuild like any other retained field (see
@@ -264,7 +263,7 @@ impl frust::Component for HomeScreen {
         // Recover the repository the composition root published under the root
         // Owner (see `crate::HuddleApp::init`) — the injection seam that reaches
         // both this page's route-table construction and its in-screen
-        // `nav.push` re-construction (PLAN Design Decision 4).
+        // `nav.push` re-construction.
         let repo = use_context::<Arc<dyn ChannelRepository + Send + Sync>>()
             .expect("the composition root provides a ChannelRepository");
         let controller = use_controller::<ChannelsController, HuddleFailure>(move || {
@@ -311,10 +310,10 @@ impl frust::Component for HomeScreen {
             .map(|t| t.design_language)
             .unwrap_or(DesignLanguage::Material3);
 
-        // The app bar clears the top status-bar/cutout inset (device-parity
-        // task 14, item 1) — its own background still only fills the
-        // un-padded bar height (see `shell::bottom_bar`'s doc for the same
-        // known v1 gap on the opposite edge).
+        // The app bar clears the top status-bar/cutout inset — its own
+        // background still only fills the un-padded bar height (see
+        // `shell::bottom_bar`'s doc for the same known v1 gap on the
+        // opposite edge).
         let bar = any(safe_area(
             app_bar::<HomeState>("Huddle")
                 .leading(workspace_tile(&state.nav))
@@ -328,7 +327,7 @@ impl frust::Component for HomeScreen {
         );
 
         // The open Home overlay sheet mounts in the screen's own `Stack` top
-        // layer (mirrors `screens::channel_feed`'s `feed_sheet`, task 20); when
+        // layer (mirrors `screens::channel_feed`'s `feed_sheet`); when
         // closed it is an inert zero-size box, so the roster stays interactive.
         let overlay = home_sheet_overlay(state, design);
         any(Stack(vec![screen, overlay]))
@@ -336,7 +335,7 @@ impl frust::Component for HomeScreen {
 }
 
 // ---------------------------------------------------------------------------
-// App-bar actions (task 21)
+// App-bar actions
 // ---------------------------------------------------------------------------
 
 /// The app bar's leading "HQ" initials tile — the same [`fill_box`] +
@@ -344,7 +343,7 @@ impl frust::Component for HomeScreen {
 /// than `filled_card`, whose 16px content inset would balloon a 40px tile
 /// past the 64dp bar's own height). Tapping it pushes `/workspace-switcher`
 /// onto the outer app navigator (see the [module docs](self)' "Home actions"
-/// section) — the entry point the drawer never had before this task.
+/// section) — an entry point the drawer previously lacked.
 fn workspace_tile(nav: &NavigatorController<HuddleState>) -> AnyView<HomeState> {
     let nav = nav.clone();
     let tile = Padding(
@@ -569,7 +568,7 @@ fn row_with_long_press_menu(
 /// …))` (the `profile.rs` idiom) — a bare `Align` directly under the `Stack`
 /// shrink-wraps to the glyph and lands at the stack origin (top-left), so the
 /// tight-sized box is what gives `Align` the bounded constraints it centers
-/// within (RESEARCH.md issue 1).
+/// within.
 fn channel_circle() -> AnyView<HomeState> {
     any(Stack(vec![
         any(fill_box(
@@ -743,7 +742,7 @@ fn swipe_wrap(
 }
 
 // ---------------------------------------------------------------------------
-// Home overlay sheets (task 21)
+// Home overlay sheets
 // ---------------------------------------------------------------------------
 
 /// The open Home overlay sheet, or an inert zero-size box when nothing is
@@ -838,7 +837,7 @@ fn create_channel_form(state: &HomeState) -> AnyView<HomeState> {
 /// Mute/Archive reuse [`ChannelsController`]'s existing `set_muted`/
 /// `set_archived` ops + an undo toast — the exact [`swipe_wrap`] shape, so a
 /// long-press and a swipe converge on the same controller call. "Invite
-/// people" is this task's one entry point into [`show_invite_modal`] (see
+/// people" is the one entry point into [`show_invite_modal`] (see
 /// the [module docs](self)).
 fn row_action_rows(
     state: &HomeState,
@@ -904,8 +903,8 @@ fn row_action_rows(
 }
 
 /// Push the invite confirmation modal onto the outer app navigator: `dialog`
-/// on Material 3, `cupertino_alert` on Cupertino — this task's exercise of
-/// the modal widget the matrix promises (see the [module docs](self)).
+/// on Material 3, `cupertino_alert` on Cupertino (see the [module
+/// docs](self)).
 ///
 /// Neither builds an explicit Cancel action: both `show_dialog` and
 /// `show_cupertino_alert` already auto-wire a scrim tap to a plain dismiss (an
@@ -915,7 +914,7 @@ fn row_action_rows(
 /// "Invites sent (mock)"; a scrim-tap cancel does nothing.
 fn show_invite_modal(nav: &NavigatorController<HuddleState>, design: DesignLanguage) {
     match design {
-        // Glyph has no modal chrome baseline yet (task 28 replaces this) —
+        // Glyph has no modal chrome baseline yet —
         // falls through to the Material3 arm for now.
         DesignLanguage::Material3 | DesignLanguage::Glyph => {
             let confirm_nav = nav.clone();

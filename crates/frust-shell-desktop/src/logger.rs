@@ -1,5 +1,4 @@
-//! A minimal `log::Log` sink for the desktop shell (spec §14 phase 7, task
-//! 10), writing to stderr.
+//! A minimal `log::Log` sink for the desktop shell, writing to stderr.
 //!
 //! Rationale: `cargo run`'s stdout/stderr is already captured directly by the
 //! terminal/CI runner, so a stderr sink is enough — no new dependency
@@ -9,7 +8,7 @@
 //! exactly (same `FRUST_LOG` override, same default level, same line
 //! format) so the two shells' perf output reads identically — desktop was
 //! the one shell with no logger installed at all before this (Android's
-//! `android_logger`, iOS's `StderrLogger` both predate this task; see
+//! `android_logger`, iOS's `StderrLogger` both predate this one; see
 //! `docs/ARCHITECTURE.md`'s Module Structure for why each shell owns its own
 //! platform-appropriate sink).
 //!
@@ -22,8 +21,7 @@
 //! One target-specific carve-out: vello 0.9's bitmap-emoji decode path logs
 //! certain unfixed-upstream errors/warnings (e.g. "Unsupported `output_color_type`",
 //! "Invalid PNG in font") once per paint for glyphs it can't decode
-//! (`workflow/plans/features/device-parity/tasks/15-emoji-colortype.md`,
-//! linebender/vello#1031). These specific messages are suppressed at the default
+//! (linebender/vello#1031). These specific messages are suppressed at the default
 //! level to avoid per-frame spam; other vello errors/warnings still surface. Pass
 //! `FRUST_LOG=debug` (or `trace`) to see all vello log lines again when
 //! actually debugging the render stack.
@@ -99,12 +97,11 @@ impl log::Log for StderrLogger {
 /// convention `frust-shell-ios`'s logger uses.
 ///
 /// Also emits one unconditional (NOT `perf-trace`-gated) `log::info!` marker
-/// line — `scripts/release-lean-check.sh`'s F1 contrast check needs a
+/// line — `scripts/release-lean-check.sh`'s contrast check needs a
 /// first-party info-level string that is guaranteed present in a normal
 /// (profile) build and constant-folded out under the release `lean` feature's
 /// `log/release_max_level_warn` ceiling, since every existing info-level site
-/// is either `perf-trace`-gated or mobile-shell-only (release-lean followup
-/// fix-1, task f1).
+/// is either `perf-trace`-gated or mobile-shell-only.
 pub fn init_once() {
     static LOGGER: Once = Once::new();
     LOGGER.call_once(|| {

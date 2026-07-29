@@ -1,4 +1,4 @@
-//! SizedBox layout container (spec §6.2): forces a specific size on the given
+//! SizedBox layout container: forces a specific size on the given
 //! axes, passing the others through.
 //!
 //! [`SizedBoxView`]/[`SizedBoxWidget`] tighten each axis for which a `width`/

@@ -1,8 +1,7 @@
-//! The M3 `Switch` toggle (Phase 6c, PLAN.md D5, task 07): a controlled
-//! component reporting a requested on/off value, painted as a 52×32dp track
-//! (androidx `SwitchTokens`, R14) with a spring-driven thumb (16dp unselected /
-//! 24dp selected, 28dp while pressed) and the shared [`super::state_layer`]
-//! interaction overlay.
+//! The M3 `Switch` toggle: a controlled component reporting a requested
+//! on/off value, painted as a 52×32dp track (androidx `SwitchTokens`) with a
+//! spring-driven thumb (16dp unselected / 24dp selected, 28dp while pressed)
+//! and the shared [`super::state_layer`] interaction overlay.
 //!
 //! [`switch`] produces a [`SwitchView`] carrying the current `checked` value
 //! and an `on_toggle` closure — a controlled component mirroring
@@ -39,23 +38,22 @@ use peniko::Color;
 
 use super::state_layer::StateLayer;
 
-/// Track width, in logical px (androidx `SwitchTokens.TrackWidth`, R14). No
+/// Track width, in logical px (androidx `SwitchTokens.TrackWidth`). No
 /// `Theme` size token exists for a fixed control dimension like this
 /// (`ShapeScale` publishes corner radii, not track/thumb sizes) — hoisted as
-/// a named constant per task 6f-10's metric-hardcode-migration pass rather
-/// than left as a bare literal.
+/// a named constant rather than left as a bare literal.
 const TRACK_W: f64 = 52.0;
-/// Track height, in logical px (androidx `SwitchTokens.TrackHeight`, R14).
+/// Track height, in logical px (androidx `SwitchTokens.TrackHeight`).
 /// See [`TRACK_W`]'s doc comment — no suitable `Theme` token exists.
 const TRACK_H: f64 = 32.0;
 /// Thumb diameter while unselected, in logical px (androidx
-/// `SwitchTokens.UnselectedHandleWidth`, R14). See [`TRACK_W`]'s doc comment.
+/// `SwitchTokens.UnselectedHandleWidth`). See [`TRACK_W`]'s doc comment.
 const THUMB_UNSELECTED: f64 = 16.0;
 /// Thumb diameter while selected, in logical px (androidx
-/// `SwitchTokens.SelectedHandleWidth`, R14). See [`TRACK_W`]'s doc comment.
+/// `SwitchTokens.SelectedHandleWidth`). See [`TRACK_W`]'s doc comment.
 const THUMB_SELECTED: f64 = 24.0;
 /// Thumb diameter while pressed (either state), in logical px (androidx
-/// `SwitchTokens.PressedHandleWidth`, R14) — overrides the
+/// `SwitchTokens.PressedHandleWidth`) — overrides the
 /// unselected/selected interpolation while a press is in progress. See
 /// [`TRACK_W`]'s doc comment.
 const THUMB_PRESSED: f64 = 28.0;

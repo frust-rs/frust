@@ -1,10 +1,10 @@
-//! App-facing pending-font registry (glyph-design-system task 08):
+//! App-facing pending-font registry:
 //! `frust::register_app_fonts`.
 //!
 //! # The gap this closes
 //!
 //! Before this module, custom font registration
-//! ([`frust_text::TextContext::register_fonts`], task 01) was reachable only
+//! ([`frust_text::TextContext::register_fonts`]) was reachable only
 //! from code holding a `&mut TextContext` — the shell itself, never app code.
 //! An app wanting to bundle a custom font (a brand typeface, an icon font)
 //! had no seam to push bytes in before the shell's `TextContext` exists (app
@@ -25,8 +25,8 @@
 //! Like `theme_override`, this is a plain `Mutex`-guarded slot with **no
 //! thread restriction** — [`register_app_fonts`] may be called from any
 //! thread (documented, not enforced by a panic). Each shell only *drains*
-//! the slot on its own UI thread (construction time, and once per frame —
-//! see task 14), so a write racing in from a background thread is simply
+//! the slot on its own UI thread (construction time, and once per frame),
+//! so a write racing in from a background thread is simply
 //! picked up (or not) on the next drain.
 //!
 //! # Payload shape
@@ -57,8 +57,7 @@ static PENDING: Mutex<PendingSlot> = Mutex::new(PendingSlot {
 
 /// Push raw font bytes (TTF/OTF, or a TTC/OTC collection) to be registered
 /// into the shell-owned [`TextContext`] the next time a running shell drains
-/// this registry (construction time, and once per frame — see task 14's
-/// shell wiring).
+/// this registry (construction time, and once per frame).
 ///
 /// Callable from any thread (see the module docs' thread contract) — the
 /// process-wide slot is a plain `Mutex`. Multiple pushes before a drain all
@@ -110,8 +109,8 @@ impl FontRegistryWatcher {
     /// Mirrors the caller-visible relayout contract
     /// [`TextContext::register_fonts`] documents: a shell calling this after
     /// it has already laid out text must force `ChangeFlags::LAYOUT | PAINT`
-    /// on a `true` return, the same way a theme swap does (task 14's job —
-    /// this module only owns the drain half of that contract).
+    /// on a `true` return, the same way a theme swap does — this module only
+    /// owns the drain half of that contract.
     pub fn drain_into(&mut self, cx: &mut TextContext) -> bool {
         let payloads = self.poll();
         let mut applied = false;
@@ -136,7 +135,7 @@ mod tests {
     static TEST_LOCK: StdMutex<()> = StdMutex::new(());
 
     /// A tiny valid TTF face (shared with `frust-text`'s own registration
-    /// tests, glyph-design-system task 01) — kept as the cross-crate smoke
+    /// tests) — kept as the cross-crate smoke
     /// fixture rather than duplicating a font asset in this crate.
     const TUFFY: &[u8] = include_bytes!("../../frust-text/tests/fonts/Tuffy-Subset.ttf");
 

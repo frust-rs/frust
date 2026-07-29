@@ -1,7 +1,7 @@
-//! Project detection for `frust run`'s Android path (spec §12.4 step 1):
-//! locates `frust.toml` in the current directory and resolves the
-//! Android application id; `android/` is checked separately since the
-//! desktop-fallback path doesn't need it.
+//! Project detection for `frust run`'s Android path: locates `frust.toml`
+//! in the current directory and resolves the Android application id;
+//! `android/` is checked separately since the desktop-fallback path doesn't
+//! need it.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -173,10 +173,10 @@ mod tests {
 
     #[test]
     fn detect_bails_on_hostile_explicit_identifier_before_any_adb_call() {
-        // spec §12.4 injection path: `[android] identifier` flows verbatim
-        // into `adb shell am start -n <id>/…` / `adb shell pidof <id>` if
-        // not validated here — `detect` must reject it before `frust
-        // run` ever reaches the adb-invoking pipeline (see android_id.rs).
+        // Injection path: `[android] identifier` flows verbatim into `adb
+        // shell am start -n <id>/…` / `adb shell pidof <id>` if not
+        // validated here — `detect` must reject it before `frust run`
+        // ever reaches the adb-invoking pipeline (see android_id.rs).
         let dir = unique_temp_dir("hostile-explicit");
         fs::write(
             dir.join("frust.toml"),

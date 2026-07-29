@@ -1,10 +1,10 @@
-//! Layer 3: vector scene / display list, renderer-agnostic scene builder (spec §4).
+//! Layer 3: vector scene / display list, renderer-agnostic scene builder.
 //!
 //! `Scene`/`SceneBuilder`/`Command` are the stable seam between widgets (layer
 //! 1+2) and the GPU backend (layer 4, `frust-render`). Only `kurbo`
 //! (geometry) and `peniko` (brushes/fonts) appear in this crate's public API —
 //! `vello`/`wgpu` types are forbidden here so the render backend can be swapped
-//! later (spec §7).
+//! later.
 
 mod arc;
 mod builder;
@@ -22,12 +22,10 @@ pub use shader::ShaderProgram;
 ///
 /// This tripwire is a refactor guard: any future field added to [`Scene`]
 /// that is `!Send` will fail this assertion with a helpful compiler message
-/// pointing to this site and the SPIKE note at
-/// `workflow/plans/features/frust-phase-9-rust-advantage/research/RENDER_SPLIT_SPIKE.md`.
+/// pointing to this site.
 ///
-/// The assertion is necessary to keep the render-thread-split path (a future
-/// optimization after benchmarking phase-9 scenarios) viable without building
-/// it — splitting render onto a dedicated thread requires the scene to move
+/// The assertion is necessary to keep the render-thread-split path viable —
+/// splitting render onto a dedicated thread requires the scene to move
 /// safely across thread boundaries.
 const _: () = {
     /// Zero-cost static assertion that `T: Send`.

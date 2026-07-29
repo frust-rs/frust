@@ -1,4 +1,4 @@
-//! Thread screen tests (Phase C task 17).
+//! Thread screen tests.
 //!
 //! The screen is a private `mod screens` item (`src/lib.rs`, per
 //! `src/README-phase-c.md`'s hub-file contract), so — mirroring
@@ -6,8 +6,8 @@
 //! mounted [`HuddleApp`] and navigate through its real
 //! [`frust::NavigatorController`] rather than constructing the screen's
 //! view function directly. Paint output is asserted the same black-box way
-//! every other Phase C screen test does (`RecScene`'s glyph and rounded-rect
-//! geometry — no GPU, no window).
+//! every other screen test in this suite does (`RecScene`'s glyph and
+//! rounded-rect geometry — no GPU, no window).
 //!
 //! Root message id `8` (`#engineering`, a plain `Text` body with no
 //! reactions — see `src/mock/mod.rs`) is used throughout: its id is a
@@ -29,13 +29,13 @@
 //! its own doc comment); [`settle_transitions`] is the same wait, reused after
 //! a later push/pop.
 //!
-//! # The cross-page consistency task 19 closed
+//! # The cross-page consistency gap closed
 //!
 //! An earlier version of this suite documented (but deliberately did not
 //! assert) a limitation: `screens::thread` and `screens::channel_feed` each
 //! constructed their own independent `MessagesController` for the same
 //! channel, so a reply composed here never showed up on an already-open
-//! feed's "N replies" affordance. Task 19 closed that gap with
+//! feed's "N replies" affordance. That gap was closed with
 //! [`MessagesController::for_channel`](huddle::features::messages::MessagesController::for_channel),
 //! a shared per-channel-id registry both screens now source their instance
 //! from — see that module's docs. `a_reply_composed_in_the_thread_is_visible_on_the_feeds_shared_controller`

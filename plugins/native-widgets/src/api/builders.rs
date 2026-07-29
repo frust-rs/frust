@@ -1,8 +1,7 @@
-//! The six app-facing builders (native-widgets Phase 1, p1-06): `native_button`/
+//! The six app-facing builders: `native_button`/
 //! `native_label`/`native_switch`/`native_slider`/`native_progress`/
 //! `native_image`, each composing exactly one [`platform_view`] slot behind
-//! this crate's one Android factory (PLAN.md 3.1's "N controls = N slots"
-//! envelope).
+//! this crate's one Android factory (the "N controls = N slots" envelope).
 //!
 //! # Retained identity via `Component`, not a hand-rolled `Widget`
 //!
@@ -33,11 +32,11 @@
 //! # No public `NativeWidget` trait
 //!
 //! None of this reaches for `crate::runtime::NativeWidget` (which stays
-//! `pub(crate)`, Phase 3's business) — a builder only ever calls the
+//! `pub(crate)` by design) — a builder only ever calls the
 //! runtime's already-`pub(crate)` `with_runtime`/`set_callback` seam, same
 //! crate.
 //!
-//! # The translucency-refused fallback (Ed's Phase 1 ruling)
+//! # The translucency-refused fallback
 //!
 //! Every builder consults `frust::resolved_surface_mode()` before composing
 //! its native slot: on [`ResolvedSurfaceMode::RefusedTranslucent`], it
@@ -86,16 +85,16 @@ use super::theme::{self, ResolvedTheme};
 /// - **iOS**: the bare Objective-C runtime name `FrustNativeControlFactory`,
 ///   which `FrustViewHost.resolveFactory` feeds to `NSClassFromString`
 ///   (`docs/CODE_STANDARDS.md`'s Naming Conventions: iOS has no package
-///   prefix). Since p2-01 that class is a Rust `define_class!` class — no
+///   prefix). That class is a Rust `define_class!` class — no
 ///   Swift — and **this string must stay byte-identical to
 ///   `crate::apple::factory::FACTORY_CLASS_NAME`**, which is the name that
 ///   class registers under. A mismatch is silent: the lookup returns nil, the
 ///   host takes its unresolvable-factory branch, and every native control on
-///   iOS renders nothing (`research/RESEARCH-P2-REFRESH.md` §6b).
+///   iOS renders nothing.
 /// - **Anywhere else**: no factory exists; the Android spelling stands in so
 ///   the constant is always defined.
 ///
-/// `pub(super)` rather than private since p3-02: the generic mounting builder
+/// `pub(super)` rather than private: the generic mounting builder
 /// ([`crate::api::mount`]) composes the same one factory these six do —
 /// a public component is served by the same runtime, so it must resolve
 /// through the same class.
@@ -113,7 +112,7 @@ pub(super) const VIEW_TYPE: &str = "dev.frust.nativewidgets.FrustNativeControlFa
 /// `frust-core`'s widget-tree internals for a value nothing downstream reads
 /// as a differ id.
 ///
-/// `pub(super)` since p3-02 — the generic mounting builder
+/// `pub(super)` — the generic mounting builder
 /// ([`crate::api::mount`]) draws its slot ids from the same counter, so a
 /// public component and a built-in control can never collide on one.
 pub(super) fn next_local_slot() -> SlotId {
@@ -122,7 +121,7 @@ pub(super) fn next_local_slot() -> SlotId {
 }
 
 /// Log the translucency-refused fallback exactly once, crate-wide — never
-/// once per control, never once per frame (the task's "Log once" rule).
+/// once per control, never once per frame.
 static REFUSAL_LOGGED: Once = Once::new();
 
 fn warn_refusal_once() {
@@ -140,10 +139,10 @@ fn warn_refusal_once() {
 /// [`ResolvedSurfaceMode::RefusedTranslucent`]: a sized box, a warning fill
 /// (`frust::glyph::alert`'s `Warning` variant, which also contributes a
 /// `Role::Alert` semantics node carrying `control` as its label — the
-/// "semantics label" half of the task's fallback spec), instead of an
+/// semantics-label half of this fallback's contract), instead of an
 /// invisible, untappable native slot.
 ///
-/// # Device-gate bar 7 fix (`research/VERIFY-P1.md`)
+/// # The clip-to-slot fix for oversized placeholder prose
 ///
 /// `alert`'s explanatory body prose is longer than most slot boxes allow
 /// (e.g. `native_switch`'s 70x40, `native_progress`'s 260x24) — `SizedBox`
@@ -155,15 +154,14 @@ fn warn_refusal_once() {
 /// (`docs/CODE_STANDARDS.md`'s Semantics Conventions — a widget's `body`
 /// text doubles as both its painted prose and its accessibility
 /// description), and it lives in `frust-widgets`, outside this crate's
-/// charter to change for this task (`docs/ARCHITECTURE.md`'s Plugin
-/// Conventions: a platform plugin depends on `frust`/`frust-core` only, and
-/// this task's own scope is `builders.rs`). Clipping the whole banner's
+/// charter to change (a platform plugin depends on `frust`/`frust-core`
+/// only). Clipping the whole banner's
 /// paint to the slot rect (below) is what lets the full explanation stay in
 /// the semantics tree and the one-time [`warn_refusal_once`] log while
 /// guaranteeing the placeholder never paints outside its own slot, at any
 /// slot size the builders allow.
 ///
-/// `pub(super)` since p3-02: the generic mounting builder
+/// `pub(super)`: the generic mounting builder
 /// ([`crate::api::mount`]) degrades through this same placeholder — including
 /// its clip wrapper — rather than re-deriving the refusal path.
 pub(super) fn placeholder<State: 'static>(
@@ -246,9 +244,9 @@ impl Widget for ClipToSlotWidget {
 
 /// Apply an explicit `.size(w, h)` if the caller provided one, else leave the
 /// slot at [`PlatformViewView`]'s own default (fill the parent) — v1 has no
-/// measure step either way (the task spec: "explicit `.size(w,h)` required
-/// (no measure in v1)"), so an omitted call degrades to filling the parent
-/// rather than a made-up constant. `pub(super)` since p3-02, for
+/// measure step either way, so an explicit `.size(w,h)` is required and an
+/// omitted call degrades to filling the parent rather than a made-up
+/// constant. `pub(super)`, for
 /// [`crate::api::mount`]'s generic builder.
 pub(super) fn resolve_size(size: Option<(f64, f64)>, view: PlatformViewView) -> PlatformViewView {
     match size {
@@ -257,14 +255,14 @@ pub(super) fn resolve_size(size: Option<(f64, f64)>, view: PlatformViewView) -> 
     }
 }
 
-/// The active theme's resolved tokens (theme ladder L2, p1-07), or `None`
+/// The active theme's resolved tokens (theme ladder L2), or `None`
 /// when no theme has been threaded — `use_context::<Theme>()`'s own
 /// documented `None` cases (a bare-core test, a build running outside any
 /// reactive `Owner`; `reactive_graph::owner::use_context`'s own doc: "Panics
 /// if no value is found" only applies to its `expect_context` sibling, never
 /// this one). Every builder's `Component::build` calls this once per
-/// rebuild — spike 4a's proven mechanism (`crates/frust/tests/
-/// theme_reactivity_spike.rs`) is what makes that rebuild re-run, and
+/// rebuild — the mechanism `crates/frust/tests/
+/// theme_reactivity_spike.rs` proves is what makes that rebuild re-run, and
 /// therefore re-resolve, on `set_app_theme` — and threads the result into
 /// `build_with_mode` explicitly, the same "thread it as a parameter so a
 /// test can force it" shape `resolved_surface_mode()` already uses above.
@@ -378,7 +376,7 @@ impl NativeButtonView {
 
     /// The encoded `params_json` for `slot` — split out from
     /// [`Component::build`] so a test can snapshot it directly. `tokens`
-    /// (theme ladder L2, p1-07) folds the active theme's background/text
+    /// (theme ladder L2) folds the active theme's background/text
     /// colour, corner radius, and text size in, threaded explicitly like
     /// `mode` below so a test can pin an exact resolved value without a live
     /// reactive context.
@@ -437,7 +435,7 @@ impl Component for NativeButtonView {
         let slot = next_local_slot();
         // Ties this slot's `NativeRuntime::pending_callbacks` entry to the
         // Component's own lifetime, not to the native create/dispose
-        // lifecycle (c1-01, applying `NativeImageView::init`'s f2-03 fix to
+        // lifecycle (the same remedy `NativeImageView::init` applies to
         // the identical leak shape one table over — see
         // `crate::runtime`'s doc on `pending_callbacks` and
         // `NativeRuntime::forget_pending_callback`). `init` runs exactly
@@ -501,13 +499,13 @@ impl NativeLabelView {
         self
     }
 
-    /// `tokens` (theme ladder L2, p1-07 + the f1-01 followup) folds the
+    /// `tokens` (theme ladder L2, including a later followup) folds the
     /// active theme's background/body-text colour and size in — see
     /// [`NativeButtonView::params_for`]'s doc for why it's threaded
     /// explicitly, and [`crate::api::theme`]'s module doc's *Explicit
     /// backgrounds* section for why an EXPLICIT background is folded here
-    /// too (f1-01: it used to be entirely absent, pinning `Label` to
-    /// whichever brightness it was created under).
+    /// too — it used to be entirely absent, pinning `Label` to
+    /// whichever brightness it was created under.
     fn params_for(&self, slot: SlotId, tokens: Option<ResolvedTheme>) -> String {
         let mut body = ParamsBody::new();
         body.push_str(TEXT, &self.text);
@@ -547,7 +545,7 @@ impl NativeLabelView {
 impl Component for NativeLabelView {
     type State = SlotId;
 
-    // No `on_cleanup` here (c1-01): `Label` is display-only and never calls
+    // No `on_cleanup` here: `Label` is display-only and never calls
     // `set_callback`, so its slot never has a `pending_callbacks` entry to
     // reap. `NativeButtonView::init`'s doc explains the cleanup this
     // Component deliberately omits.
@@ -618,10 +616,10 @@ impl NativeSwitchView {
         self
     }
 
-    /// `tokens` (theme ladder L2, p1-07) folds the active theme's
+    /// `tokens` (theme ladder L2) folds the active theme's
     /// thumb/track tints in — see [`NativeButtonView::params_for`]'s doc for
     /// why it's threaded explicitly. Deliberately **no** background fold
-    /// (f2-04, reversing the f1-01 followup): see [`crate::api::theme`]'s
+    /// (reversing an earlier followup that added one): see [`crate::api::theme`]'s
     /// module doc's *Explicit backgrounds* section for why `Switch` is
     /// excluded — a flat `View.setBackgroundColor` here would replace
     /// `?attr/selectableItemBackgroundBorderless`'s touch ripple, and the
@@ -675,7 +673,7 @@ impl Component for NativeSwitchView {
 
     fn init(&self) -> SlotId {
         let slot = next_local_slot();
-        // See `NativeButtonView::init`'s doc (c1-01) — `Switch` registers a
+        // See `NativeButtonView::init`'s doc — `Switch` registers a
         // callback via `Self::on_toggle`, so it needs the same
         // `pending_callbacks` reaper.
         on_cleanup(move || {
@@ -749,10 +747,10 @@ impl NativeSliderView {
         self
     }
 
-    /// `tokens` (theme ladder L2, p1-07) folds the active theme's
+    /// `tokens` (theme ladder L2) folds the active theme's
     /// progress/thumb tints in — see [`NativeButtonView::params_for`]'s doc
     /// for why it's threaded explicitly. Deliberately **no** background fold
-    /// (f2-04, reversing the f1-01 followup): see [`crate::api::theme`]'s
+    /// (reversing an earlier followup that added one): see [`crate::api::theme`]'s
     /// module doc's *Explicit backgrounds* section for why `Slider` is
     /// excluded — a flat `View.setBackgroundColor` here would replace
     /// `AbsSeekBar`'s `?attr/selectableItemBackgroundBorderless` touch
@@ -803,7 +801,7 @@ impl Component for NativeSliderView {
 
     fn init(&self) -> SlotId {
         let slot = next_local_slot();
-        // See `NativeButtonView::init`'s doc (c1-01) — `Slider` registers a
+        // See `NativeButtonView::init`'s doc — `Slider` registers a
         // callback via `Self::on_change`, so it needs the same
         // `pending_callbacks` reaper.
         on_cleanup(move || {
@@ -866,7 +864,7 @@ impl NativeProgressView {
         self
     }
 
-    /// `tokens` (theme ladder L2, p1-07 + the f1-01 followup) folds the
+    /// `tokens` (theme ladder L2, including a later followup) folds the
     /// active theme's background/progress tint in — see
     /// [`NativeButtonView::params_for`]'s doc for why it's threaded
     /// explicitly.
@@ -909,7 +907,7 @@ impl NativeProgressView {
 impl Component for NativeProgressView {
     type State = SlotId;
 
-    // No `on_cleanup` here (c1-01): `ProgressBar` is display-only and never
+    // No `on_cleanup` here: `ProgressBar` is display-only and never
     // calls `set_callback` — see `NativeLabelView::init`'s doc.
     fn init(&self) -> SlotId {
         next_local_slot()
@@ -998,7 +996,7 @@ impl NativeImageView {
     /// [`crate::controls::image::publish_bytes`] already returned — split out
     /// from [`Self::build_with_mode`] so a test can snapshot it without
     /// re-publishing. `tokens` only ever contributes [`DARK`] here (theme
-    /// ladder L1, p1-07): an app-supplied image's *content* is arbitrary
+    /// ladder L1): an app-supplied image's *content* is arbitrary
     /// bytes, so folding an accent tint over it the way the other five
     /// controls fold colour tokens would corrupt a real photo rather than
     /// theme a control — [`NativeImageView`] exposes no tint builder yet for
@@ -1046,7 +1044,7 @@ impl Component for NativeImageView {
     fn init(&self) -> SlotId {
         let slot = next_local_slot();
         // Tie the publish-table entry's lifetime to this Component, not to
-        // the native create/dispose lifecycle (f2-03,
+        // the native create/dispose lifecycle (see
         // `docs/CODE_STANDARDS.md`'s "Teardown disposes the component's
         // `Owner`; register cleanup via `on_cleanup`, not `Drop`"). `init`
         // runs exactly once, under this component's own `Owner`, so
@@ -1055,8 +1053,8 @@ impl Component for NativeImageView {
         // `claim_bytes`/`release_bytes` pair to zero and back on the
         // platform side in between (`crate::controls::image`'s module doc).
         //
-        // No second `on_cleanup` for `NativeRuntime::pending_callbacks`
-        // (c1-01): `Image` is display-only and never calls `set_callback` —
+        // No second `on_cleanup` for `NativeRuntime::pending_callbacks`:
+        // `Image` is display-only and never calls `set_callback` —
         // see `NativeLabelView::init`'s doc for the same reasoning.
         on_cleanup(move || image::retire(slot));
         slot
@@ -1156,7 +1154,7 @@ mod tests {
     // `None` is exactly what `ambient_theme_tokens()` returns absent a live
     // reactive context (this module's own doc comment) — every snapshot
     // below carries a plain `"dark":false` and no other theme field, the
-    // p1-06 shape plus theme ladder L1's always-present flag.
+    // original shape plus theme ladder L1's always-present flag.
 
     #[test]
     fn button_params_snapshot() {
@@ -1285,7 +1283,7 @@ mod tests {
 
     #[test]
     fn switch_folds_thumb_and_track_tint_but_never_a_background() {
-        // f2-04: `Switch` deliberately folds no background — the thumb/track
+        // `Switch` deliberately folds no background — the thumb/track
         // tints already carry the theme, and an explicit `backgroundColor`
         // would replace `?attr/selectableItemBackgroundBorderless`'s ripple
         // (`crate::api::theme`'s module doc's *Explicit backgrounds*
@@ -1312,7 +1310,7 @@ mod tests {
 
     #[test]
     fn slider_folds_progress_and_thumb_tint_but_never_a_background() {
-        // f2-04: same rationale as the Switch test above — `AbsSeekBar` also
+        // Same rationale as the Switch test above — `AbsSeekBar` also
         // carries `?attr/selectableItemBackgroundBorderless`.
         let view = native_slider(25, 0, 50);
         let tokens = dark_tokens();
@@ -1454,8 +1452,8 @@ mod tests {
         assert!(!frames[0].interactive, "Label never forwards native input");
     }
 
-    // --- device-gate bar 7 (`research/VERIFY-P1.md`): the refusal
-    // placeholder's prose must never paint outside its own slot rect -------
+    // --- The refusal placeholder's prose must never paint outside its own
+    // slot rect -------------------------------------------------------------
 
     /// A recording [`PaintScene`] that actually honours the clip stack
     /// (unlike [`NullScene`] above), so it models what a real backend would
@@ -1608,7 +1606,7 @@ mod tests {
         }
     }
 
-    /// p1-06's refusal test must still pass unchanged after the clip wrapper
+    /// The original refusal test must still pass unchanged after the clip wrapper
     /// — re-asserted here (mirrors `a_refused_slot_publishes_no_platform_view_frame`
     /// above) against the `BoundsRecorder`'s clip-aware scene too, so both
     /// scenes agree the refusal path never touches platform-view frames.

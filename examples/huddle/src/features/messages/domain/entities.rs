@@ -1,20 +1,21 @@
-//! Message entities — moved verbatim from the former `mock` module (huddle
-//! clean-architecture refactor, task 01). The shared dataset that
-//! materializes these types now lives in [`crate::data::store`].
+//! Message entities — moved verbatim from the former `mock` module. The
+//! shared dataset that materializes these types now lives in
+//! [`crate::data::store`].
 
 /// The body of a [`Message`] — text, a link preview stub, or a file stub.
 #[derive(Clone, Copy, Debug)]
 pub enum MessageBody {
     /// Plain text (may include an `@mention`).
     Text(&'static str),
-    /// A link with a preview title (a `Card`-rendered link preview in Phase C).
+    /// A link with a preview title (rendered as a `Card` link preview).
     Link {
         /// The URL.
         url: &'static str,
         /// A human title for the preview card.
         title: &'static str,
     },
-    /// A file attachment stub (no real bytes — a non-goal per PLAN).
+    /// A file attachment stub (no real bytes — real file attachments are out
+    /// of scope for this dataset).
     File {
         /// The file name.
         name: &'static str,
@@ -26,7 +27,7 @@ pub enum MessageBody {
 /// A single emoji reaction with a count.
 #[derive(Clone, Copy, Debug)]
 pub struct Reaction {
-    /// The emoji (color-glyph rendering is a Phase A/C item).
+    /// The emoji (real color-glyph rendering).
     pub emoji: &'static str,
     /// How many members reacted.
     pub count: u32,

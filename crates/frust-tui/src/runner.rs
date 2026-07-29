@@ -4,7 +4,7 @@
 //! mode + mouse capture, a panic hook that restores the terminal before the
 //! default hook prints, the tokio runtime's `select!` over the crossterm
 //! `EventStream` / the engine channel / a tick interval, and the dirty-frame
-//! skip (D2: only `terminal.draw` when the state changed or something is
+//! skip (only `terminal.draw` when the state changed or something is
 //! animating).
 
 use std::io::{self, Stdout, Write};
@@ -40,7 +40,8 @@ use crate::ui::mouse::MouseRegions;
 use crate::ui::theme::Theme;
 
 /// Frame tick cadence. Cheap because of the dirty-frame skip — a tick only
-/// forces a draw while something is animating (nothing, in Phase 1).
+/// forces a draw while something is animating (the toast stack's own
+/// auto-dismiss aging is the only thing that does today).
 const TICK: Duration = Duration::from_millis(50);
 
 /// Lines a `PageUp`/`PageDown` scrolls the log view. A fixed step (the event
@@ -71,9 +72,10 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     let mut engine = Engine::new(AppState::new());
     let mut rx = engine.take_receiver();
     // The session supervisor and the channel every supervised session feeds.
-    // Sessions are *started* by later tasks (run-config, TUI2-04); this loop
-    // wires the channel and the kill/copy effect path so those tasks only add
-    // start calls. On return the supervisor's `Drop` stops+joins every session.
+    // Sessions are started elsewhere (`launch_sessions`, driven by the
+    // run-config modal / device panel / palette); this loop
+    // wires the channel and the kill/copy effect path every start call rides.
+    // On return the supervisor's `Drop` stops+joins every session.
     let (mut supervisor, mut session_rx) = Supervisor::new(Arc::new(RealProcessRunner));
     // A cloneable handle background tasks (device discovery, session
     // registration) post `Message`s back through.
@@ -89,11 +91,11 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     let mut next_adhoc_id: u64 = u64::MAX;
 
     // Kick an initial device discovery + doctor preflight so the panel/chip
-    // populate on open (TUI2-07: the doctor run is the titlebar chip's cached
+    // populate on open (the doctor run is the titlebar chip's cached
     // startup source, refreshed on demand via `d`/the chip/the panel re-run).
     let _ = msg_tx.send(Message::RefreshDevices);
     let _ = msg_tx.send(Message::RunDoctor);
-    // The component-level report (D6a): seeds the titlebar toolchain-chip
+    // The component-level report: seeds the titlebar toolchain-chip
     // rollup and the bootstrap wizard, and drives the fresh-machine auto-open
     // when the core toolchain is missing.
     let _ = msg_tx.send(Message::RunBootstrapReport);
@@ -212,7 +214,7 @@ fn apply_effect(
     }
 }
 
-/// Enact a mouse-capture toggle (T04 / D4): a failure (a terminal that rejects
+/// Enact a mouse-capture toggle: a failure (a terminal that rejects
 /// the sequence) is logged and ignored — the whole UI has keyboard parity, so
 /// capture is never load-bearing.
 fn set_mouse_capture(on: bool) {
@@ -224,7 +226,7 @@ fn set_mouse_capture(on: bool) {
     if let Err(e) = result {
         eprintln!("frust-tui: toggling mouse capture failed: {e}");
     }
-    // T05 settings persistence: the terminal-level toggle and the persisted
+    // The terminal-level toggle and the persisted
     // preference always travel together (this effect only ever fires from
     // `Message::ToggleMouseCapture`) — best-effort, like every other
     // settings write.
@@ -242,7 +244,7 @@ fn next_adhoc_session_id(next_adhoc_id: &mut u64) -> SessionId {
 
 /// Run `frust-drive`'s validator set off the UI thread (blocking `rustc`/
 /// `cargo-ndk`/`xcrun` invocations), posting the flattened results back as
-/// [`Message::DoctorResults`] — the titlebar chip's live source (TUI2-07).
+/// [`Message::DoctorResults`] — the titlebar chip's live source.
 fn spawn_doctor_run(tx: UnboundedSender<Message>) {
     tokio::task::spawn_blocking(move || {
         let env = RealEnv;
@@ -268,7 +270,7 @@ fn spawn_doctor_run(tx: UnboundedSender<Message>) {
 /// blocking probes `spawn_doctor_run` runs, reshaped by `build_report` into the
 /// grouped Prerequisites/Android/iOS/Desktop components + fix commands the
 /// bootstrap wizard consumes), posting it back as [`Message::BootstrapReport`]
-/// — the titlebar chip's rollup source (D6a).
+/// — the titlebar chip's rollup source.
 fn spawn_bootstrap_report(tx: UnboundedSender<Message>) {
     tokio::task::spawn_blocking(move || {
         let env = RealEnv;
@@ -288,7 +290,7 @@ fn spawn_bootstrap_report(tx: UnboundedSender<Message>) {
 /// [`launch_clean_session`] uses (`RegisterSession` + a `run_streaming` line
 /// sink into the session's log tab, never the raw-mode tty), and on exit
 /// re-runs the preflight report ([`Message::RunBootstrapReport`]) so the chip
-/// and wizard reflect the now-fixed component — D6a's fresh-machine flow.
+/// and wizard reflect the now-fixed component — the fresh-machine flow.
 fn launch_bootstrap_fix_session(
     program: String,
     args: Vec<String>,
@@ -556,7 +558,7 @@ fn probe_clean_signals(tx: UnboundedSender<Message>) {
 /// via [`frust_drive::plugin::add_plugin`] (format-preserving file edits, so
 /// cheap), posting [`Message::AddPluginSucceeded`] with the per-edit report, or
 /// [`Message::AddPluginFailed`] with the typed error rendered — the Add Plugin
-/// dialog's apply step (`frust-secure-storage` Phase 7).
+/// dialog's apply step.
 fn spawn_add_plugin(
     project_root: PathBuf,
     id: String,
@@ -635,7 +637,7 @@ fn resolve_dest(directory: &str) -> Result<PathBuf> {
 }
 
 /// The dev-time path to the `frust` facade crate (`<repo>/crates/frust`),
-/// mirroring `frust create`'s default (spec §12.3's temporary `frust_path`
+/// mirroring `frust create`'s default (a temporary `frust_path`
 /// mechanism until the crates are published).
 fn resolve_frust_path() -> String {
     let raw = Path::new(env!("CARGO_MANIFEST_DIR")).join("../frust");
@@ -739,7 +741,7 @@ fn translate_event(event: Event, state: &AppState, regions: &MouseRegions) -> Ve
             match m.kind {
                 MouseEventKind::Moved => vec![Message::HoverChanged(regions.hover_at(x, y))],
                 // Right-click opens a context menu for the row/pane under the
-                // cursor (T04 / D4); over empty space it closes an open menu.
+                // cursor; over empty space it closes an open menu.
                 MouseEventKind::Down(CtMouseButton::Right) => match regions.context_at(x, y) {
                     Some(target) => vec![Message::OpenContextMenu { x, y, target }],
                     None if state.context_menu.is_some() => vec![Message::CloseContextMenu],
@@ -809,13 +811,13 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         return vec![Message::Quit];
     }
 
-    // Alt+m toggles mouse capture from anywhere (T04 / D4) — off hands the
+    // Alt+m toggles mouse capture from anywhere — off hands the
     // terminal its native text selection back; keyboard operation stays whole.
     if alt && matches!(code, KeyCode::Char('m')) {
         return vec![Message::ToggleMouseCapture];
     }
 
-    // An open context menu (T04) captures navigation keys — it sits on the top
+    // An open context menu captures navigation keys — it sits on the top
     // z-layer above everything, so route to it before any modal/screen keys.
     if state.context_menu.is_some() {
         return match code {
@@ -828,7 +830,7 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
     }
 
     // While a modal is open it captures every other key. `active_modal` is
-    // the single priority source (G3) — an exhaustive match here means a new
+    // the single priority source — an exhaustive match here means a new
     // modal variant that isn't handled fails to compile rather than silently
     // falling through to the keys below.
     if let Some(modal) = state.active_modal() {
@@ -839,7 +841,7 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
             ActiveModal::AddPlugin(dialog) => translate_add_plugin_key(code, dialog),
             ActiveModal::RunConfig(modal) => translate_modal_key(code, mods, modal),
             ActiveModal::ProjectSwitcher => translate_switcher_key(code, state),
-            // D4-style modal exclusivity — see `crate::ui::render`'s
+            // Modal exclusivity — see `crate::ui::render`'s
             // workbench-modal dispatch, which shares this same priority order.
             ActiveModal::DoctorPanel => translate_doctor_key(code),
             ActiveModal::BuildLauncher(launcher) => translate_build_key(code, mods, launcher),
@@ -859,8 +861,8 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         };
     }
 
-    // `?` opens the keyboard/help overlay from either top-level screen (T05 /
-    // D5) — checked here, after the modal/search-capture blocks above (so it
+    // `?` opens the keyboard/help overlay from either top-level screen —
+    // checked here, after the modal/search-capture blocks above (so it
     // never fires while typing `?` into a text field) and before every other
     // key below.
     if !ctrl && !alt && matches!(code, KeyCode::Char('?')) {
@@ -895,7 +897,7 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
     if ctrl && matches!(code, KeyCode::Char('o')) && workbench {
         return vec![Message::ToggleProjectSwitcher];
     }
-    // Keyboard focus heuristic (a full focus system is Phase 3): with no
+    // Keyboard focus heuristic (this crate has no true focus system yet): with no
     // session open the devices panel owns the arrows/Space/Enter; once a
     // session is running the log view owns them (devices stay mouse- and
     // `r`-driven).
@@ -906,7 +908,7 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         KeyCode::Char('q') => vec![Message::Quit],
 
         // `i` opens the toolchain bootstrap wizard from either screen (mouse
-        // parity: the titlebar toolchain chip) — D6a's fresh-machine flow.
+        // parity: the titlebar toolchain chip) — the fresh-machine flow.
         KeyCode::Char('i') => vec![Message::OpenBootstrapWizard],
 
         // `a` opens the Add Plugin dialog from either screen (mouse parity: the
@@ -949,7 +951,7 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         KeyCode::Char('c') if has_active_session => vec![Message::CopyBuiltArtifacts],
         KeyCode::Char('c') if workbench => vec![Message::OpenCleanConfirm],
 
-        // `s` toggles the narrow-terminal sidebar overlay (T05 / D5
+        // `s` toggles the narrow-terminal sidebar overlay (the
         // responsive breakpoint) — harmless above the narrow width, where
         // the sidebar already renders inline (see `views::workbench::render`).
         KeyCode::Char('s') if workbench => vec![Message::ToggleSidebarOverlay],
@@ -959,8 +961,7 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
 
         // ── Log-view / tab controls (only meaningful with a session open) ──
         KeyCode::Char('x') if has_active_session => vec![Message::StopSession],
-        // `t` toggles the active session's perf sparkline panel (T05 / D6 —
-        // "the unique Frust advantage").
+        // `t` toggles the active session's perf sparkline panel.
         KeyCode::Char('t') if has_active_session => vec![Message::TogglePerfPanel],
         KeyCode::Tab if has_active_session => vec![Message::NextTab],
         KeyCode::BackTab if has_active_session => vec![Message::PrevTab],
@@ -1107,7 +1108,7 @@ fn translate_bootstrap_key(code: KeyCode, wizard: &BootstrapWizard) -> Vec<Messa
 }
 
 /// Translate one key press while the Add Plugin dialog is open, honoring the
-/// current step (`frust-secure-storage` Phase 7). `Esc` steps back / closes
+/// current step. `Esc` steps back / closes
 /// everywhere; the select step moves the card highlight and `Enter` chooses;
 /// the options step moves the feature cursor, `Space` toggles the focused
 /// feature, and `Enter` applies; the report/error steps advance on `Enter`.
@@ -1197,8 +1198,8 @@ fn translate_clean_confirm_key(code: KeyCode) -> Vec<Message> {
     }
 }
 
-/// Translate one key press while the keyboard/help overlay is open (T05 /
-/// D5) — read-only reference content, so `Esc` or `?` again are its only
+/// Translate one key press while the keyboard/help overlay is open —
+/// read-only reference content, so `Esc` or `?` again are its only
 /// bindings.
 fn translate_help_key(code: KeyCode) -> Vec<Message> {
     match code {
@@ -1559,7 +1560,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&project_dir);
     }
 
-    // ── Help overlay (T05 / D5) ───────────────────────────────────────────────
+    // ── Help overlay ──────────────────────────────────────────────────────────
 
     #[test]
     fn question_mark_opens_the_help_overlay_from_either_screen() {
@@ -1602,7 +1603,7 @@ mod tests {
         );
     }
 
-    // ── Responsive breakpoints (T05 / D5) ────────────────────────────────────
+    // ── Responsive breakpoints ────────────────────────────────────────────────
 
     #[test]
     fn s_toggles_the_sidebar_overlay_from_the_workbench_only() {
@@ -1636,7 +1637,7 @@ mod tests {
         );
     }
 
-    // ── Perf sparkline panel (T05 / D6) ──────────────────────────────────────
+    // ── Perf sparkline panel ──────────────────────────────────────────────────
 
     #[test]
     fn t_toggles_the_perf_panel_only_with_an_active_session() {

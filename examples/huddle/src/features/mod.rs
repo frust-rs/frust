@@ -1,5 +1,5 @@
 //! Feature slices — the clean-architecture spine each stateful screen plugs
-//! into (PLAN.md's "Clean-signals spine").
+//! into.
 //!
 //! Each feature owns its own `{domain,data,presentation}/` slice under
 //! `features/<name>/`, with pages hosted inside `presentation/pages/` as a

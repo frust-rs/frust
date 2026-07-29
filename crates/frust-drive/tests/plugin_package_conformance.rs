@@ -5,11 +5,9 @@
 //!
 //! # Scope: Kotlin only, by design — not "every file under `plugins/**`"
 //!
-//! **Task p3-04 narrowed this claim (Option B)** after a conformance sweep
-//! found the scan reporting green while silently skipping Swift
-//! (`workflow/plans/features/frust-native-widgets/research/RESEARCH-P3.md`
-//! §8; flagged as a latent trap earlier in
-//! `RESEARCH-P2-REFRESH.md` §7). The bare-`dev.frust`-package rule this test
+//! An earlier version of this scan reported green while silently skipping
+//! Swift entirely — a latent trap, since an empty scan proves nothing. This
+//! version is explicit about that boundary instead. The bare-`dev.frust`-package rule this test
 //! pins is a **Kotlin/JNI-export-symbol-naming concept**: a Java-style
 //! `package` declaration gets baked verbatim into a JNI export's mangled
 //! symbol name (`docs/CODE_STANDARDS.md`'s "JNI export names are LAW"), which
@@ -36,16 +34,15 @@
 //! it ever needs a conformance scan of its own, belongs in a differently-named
 //! test, not a broadened version of this one.
 //!
-//! **Relocated by task c1-04** from
-//! `crates/frust/tests/plugin_kotlin_conformance.rs`'s Part 2 (f2-06), which
-//! originally lived in the published facade crate's own test suite —
-//! coupling `cargo test -p frust` to every plugin's Kotlin layout, in tension
+//! This test lives in `frust-drive` rather than the published facade crate's
+//! own test suite, since coupling `cargo test -p frust` to every plugin's
+//! Kotlin layout would be in tension
 //! with `docs/ARCHITECTURE.md`'s "the facade never depends on or re-exports a
 //! plugin." `frust-drive` is the right host instead: it is an explicit leaf
 //! with no `frust-*`/framework-crate dependencies, it already owns the
 //! analogous `print_free_cores.rs` source scan, and it is not the app-facing
 //! published facade. The `frust-native-widgets`-specific parity/packing
-//! checks from the same original file moved to
+//! checks live in
 //! `plugins/native-widgets/tests/kotlin_conformance.rs` instead, beside the
 //! code they protect.
 //!
@@ -64,12 +61,12 @@
 //! `plugins/camera`'s `dev.frust.camera`). `dev.frust` itself belongs
 //! exclusively to the embedding module.
 //!
-//! **The one exception is closed (task p3-03).** `frust-native-widgets` used
+//! **The one exception is closed.** `frust-native-widgets` used
 //! to put its two generic classes (`FrustNativeControlFactory`,
 //! `FrustNativeListener`) directly in the bare `dev.frust` package and
 //! hand-copy them into the consuming app, on the grounds that the package is
-//! baked into their JNI export symbol names. p3-03 did the breaking symbol
-//! rename: both classes now sit in `dev.frust.nativewidgets` inside
+//! baked into their JNI export symbol names. A breaking symbol
+//! rename fixed this: both classes now sit in `dev.frust.nativewidgets` inside
 //! `plugins/native-widgets/platform/android`, this plugin's own
 //! `com.android.library` module, and the exports are spelled
 //! `Java_dev_frust_nativewidgets_*`. So the allowlist below is **empty**, and
@@ -108,8 +105,8 @@ fn rel(path: &Path) -> String {
 }
 
 /// Directory names excluded from the walk wholesale — build outputs, never
-/// source (task m-03/R1-b). `plugins/native-widgets/platform/android` is a
-/// real `com.android.library` module as of p3-03: a direct Gradle invocation
+/// source. `plugins/native-widgets/platform/android` is a
+/// real `com.android.library` module: a direct Gradle invocation
 /// there populates `build/`/`.gradle/` with **generated** Kotlin, which would
 /// otherwise be judged by the bare-package rule below (wrongly — generated
 /// code is not a plugin author's hand-written package declaration) and would
@@ -125,8 +122,8 @@ fn is_excluded_dir_name(name: &std::ffi::OsStr) -> bool {
         .is_some_and(|name| EXCLUDED_DIR_NAMES.contains(&name))
 }
 
-/// The walk's single root-level entry point — **loud, not silent** (task
-/// f1-02): a swallowed `read_dir` error here used to make `all_plugin_files()`
+/// The walk's single root-level entry point — **loud, not silent**: a
+/// swallowed `read_dir` error here used to make `all_plugin_files()`
 /// return an empty `Vec` if `plugins/` itself were missing, renamed, or
 /// unreadable, and an empty scan made every assertion below pass vacuously.
 /// Precedent: `print_free_cores.rs`'s own `walk` panics the same way. Every
@@ -139,7 +136,7 @@ fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// Recurse into `dir`, tolerating a `read_dir` failure as "already gone,
-/// nothing to scan" rather than panicking (task m-03/R1-b) — unlike
+/// nothing to scan" rather than panicking — unlike
 /// [`walk_files`]'s root-level call, a subdirectory reached during recursion
 /// can legitimately vanish between the parent listing it and this call
 /// visiting it (a concurrent or incremental Gradle run under one of
@@ -160,7 +157,7 @@ fn walk_entries(dir: &Path, entries: fs::ReadDir, out: &mut Vec<PathBuf>) {
         // (which silently reports `false` on any error, broken symlink
         // included), surfaces a broken symlink as `Err` — skipped outright
         // here instead of falling into the `else` arm below, getting pushed
-        // onto `out`, and panicking `read_to_string` later (task m-03/R1-b).
+        // onto `out`, and panicking `read_to_string` later.
         let Ok(meta) = path.metadata() else {
             continue;
         };
@@ -190,8 +187,8 @@ fn all_plugin_files() -> Vec<PathBuf> {
 
 /// Files allowed to declare the bare `package dev.frust` under `plugins/**`.
 ///
-/// **Empty, and meant to stay empty** (task p3-03 closed the one exception —
-/// see the module doc). It is kept as a named, empty constant rather than
+/// **Empty, and meant to stay empty** (see the module doc). It is kept as a
+/// named, empty constant rather than
 /// deleted so that adding an entry is a deliberate, reviewable act with an
 /// obvious place to justify itself, instead of a quiet edit to the assertion
 /// below. `docs/CODE_STANDARDS.md`'s Plugin Conventions has no exception
@@ -220,11 +217,11 @@ fn no_plugin_kotlin_uses_the_bare_dev_frust_package() {
         .filter(|path| path.extension().is_some_and(|ext| ext == "kt"))
         .collect();
 
-    // Liveness guard (task f1-02): the two assertions below are satisfied
+    // Liveness guard: the two assertions below are satisfied
     // vacuously by an empty set, so a scan that silently walked nothing would
-    // make this test pass while proving nothing — the same defect class p3-04
-    // was written to eliminate, reintroduced when the allowlist below went
-    // empty (p3-03 closed the one legitimate exception; see the module doc).
+    // make this test pass while proving nothing — the exact failure mode this
+    // test exists to catch, since the allowlist below is empty (see the
+    // module doc).
     // This has to hold for the scan's current, real shape: as of this writing
     // `plugins/secure-storage`, `plugins/camera`, and
     // `plugins/native-widgets` each ship real `.kt` files under `plugins/**`,
@@ -267,8 +264,8 @@ fn no_plugin_kotlin_uses_the_bare_dev_frust_package() {
          plugins/secure-storage's `dev.frust.securestorage`, plugins/camera's `dev.frust.camera`, \
          plugins/native-widgets's `dev.frust.nativewidgets`); `dev.frust` itself belongs \
          exclusively to the embedding module. There is no exception clause to point at — \
-         frust-native-widgets's time-boxed one was closed by task p3-03, which renamed its JNI \
-         exports to `Java_dev_frust_nativewidgets_*` rather than keep the bare package",
+         frust-native-widgets's time-boxed one was closed when its JNI \
+         exports were renamed to `Java_dev_frust_nativewidgets_*` rather than keep the bare package",
         unexpected.len(),
         unexpected,
     );
@@ -276,8 +273,7 @@ fn no_plugin_kotlin_uses_the_bare_dev_frust_package() {
     // Stale-allowlist check: the allowlist is empty by design (its own doc
     // comment) and has nothing to go stale today, but the check itself stays
     // live — the moment a future entry is added without a matching bare-`dev.
-    // frust` file to justify it, this is what catches the drift, exactly the
-    // defect class the p3-04 version of this test was built to catch.
+    // frust` file to justify it, this is what catches the drift.
     let mut missing: Vec<&str> = BARE_DEV_FRUST_ALLOWLIST
         .iter()
         .filter(|p| !found_bare.contains(&p.to_string()))

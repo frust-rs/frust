@@ -1,5 +1,5 @@
 //! Layer 2 input: pointer/scroll events and the [`EventCtx`] a widget mutates
-//! while handling them (spec §9).
+//! while handling them.
 //!
 //! The pipeline mirrors Masonry's corrected pointer model: an [`InputEvent`]
 //! enters the tree at the root ([`crate::app::RenderRoot::event`]) and is routed
@@ -14,7 +14,7 @@
 //! enclosing container reads the flag ([`EventCtx::is_pointer_captured`]) and
 //! records which child was active so it can route later moves/releases directly.
 //! Capture auto-releases on [`PointerPhase::Up`]/[`PointerPhase::Cancel`] (never
-//! on window-leave). See `research/RESEARCH.md` for the upstream rationale.
+//! on window-leave).
 
 use std::any::Any;
 
@@ -161,9 +161,8 @@ pub struct KeyEvent {
 /// **An `EditingState` crossing the `AppTree`/shell seam is UTF-16 code-unit
 /// indexed** (`selection_*`/`composing_*` count UTF-16 units, the platform-native
 /// unit for both Android `Editable` and iOS `NSMutableString`). Widgets and
-/// `frust-text` convert to/from Rust byte offsets at their own boundary
-/// (task 52 owns the conversion helpers). Core carries the value opaquely and
-/// makes no index interpretation.
+/// `frust-text` convert to/from Rust byte offsets at their own boundary.
+/// Core carries the value opaquely and makes no index interpretation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EditingState {
     /// The full text content.
@@ -182,8 +181,8 @@ pub struct EditingState {
 ///
 /// Desktop drives [`ImeEvent::Compose`]/[`ImeEvent::Commit`] from winit's
 /// `Ime::Preedit`/`Ime::Commit`; the mobile bridges push whole values via
-/// [`ImeEvent::ApplyEditingState`] (state-sync, not op-forwarding — see
-/// `research/RESEARCH.md`). [`ImeEvent::Enabled`]/[`ImeEvent::Disabled`] bracket a
+/// [`ImeEvent::ApplyEditingState`] (state-sync, not op-forwarding).
+/// [`ImeEvent::Enabled`]/[`ImeEvent::Disabled`] bracket a
 /// composition session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ImeEvent {

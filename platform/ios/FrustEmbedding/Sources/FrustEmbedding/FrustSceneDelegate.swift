@@ -10,7 +10,7 @@ import UIKit
 //
 // Roots the window at the Frust render surface's view controller.
 //
-// Deep links (task 07): a frust app is scene-based (see the generated
+// Deep links: a frust app is scene-based (see the generated
 // `Info.plist`'s `UIApplicationSceneManifest`), so — per Apple's documented
 // deep-link contract for scene apps — a cold-start link arrives as
 // `connectionOptions.urlContexts` in `scene(_:willConnectTo:options:)`, and a

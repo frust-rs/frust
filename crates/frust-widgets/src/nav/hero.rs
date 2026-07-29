@@ -1,6 +1,6 @@
-//! Shared-element ("hero") transition wrapper (task 07): a transparent
-//! single-child container that lets a [`navigator`](super::navigator) morph a
-//! tagged element between two pages during a page transition.
+//! Shared-element ("hero") transition wrapper: a transparent single-child
+//! container that lets a [`navigator`](super::navigator) morph a tagged
+//! element between two pages during a page transition.
 //!
 //! # How it works
 //!

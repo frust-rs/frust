@@ -1,4 +1,4 @@
-//! Theme ladder L3's Apple half (native-widgets Phase 2, p2-04): mirrors
+//! Theme ladder L3's Apple half: mirrors
 //! `crate::android::fonts`'s "resolve the embedded Glyph bytes to a real,
 //! process-cached platform font object, once" shape, but via CoreText rather
 //! than a cache-file write + `Typeface.createFromFile` — see *Registration,

@@ -1,4 +1,4 @@
-//! Glyph modal dialog (task 26, glyph-design-system): a scrim + centered
+//! Glyph modal dialog: a scrim + centered
 //! surface panel confirmation dialog — the Glyph recipe over the existing
 //! navigator transparent-push modal plumbing.
 //!
@@ -28,7 +28,7 @@
 //! contract; the widget gives the motion).
 //!
 //! Exit reverses over the faster `exit` duration (150ms) — "exits always faster
-//! than entrances" (RESEARCH §1.4). A dismiss gesture does **not** pop
+//! than entrances" (the Glyph design system's rule). A dismiss gesture does **not** pop
 //! immediately: it flips the widget into its exit phase, and only when the exit
 //! animation completes is the app-supplied close callback ([`on_close`] /
 //! [`show_glyph_dialog`]'s auto-wired `controller.pop()`) fired — from paint,
@@ -50,8 +50,8 @@
 //!
 //! # Actions
 //!
-//! Action buttons are app-provided [`AnyView`]s (task 22 button styles: a ghost
-//! cancel + a danger/primary confirm). They pop the navigator **directly** on
+//! Action buttons are app-provided [`AnyView`]s ([`crate::ButtonStyle`] button
+//! styles: a ghost cancel + a danger/primary confirm). They pop the navigator **directly** on
 //! tap (e.g. `controller.pop_with_result(PopResult::of(true))`), bypassing the
 //! widget's own exit animation — the same immediacy the material dialog's
 //! actions have. Only the scrim-tap / Escape *cancel* path plays the exit
@@ -63,7 +63,7 @@
 //! navigator's) concern — this widget does not police it. Pushing a second
 //! transparent page simply stacks another modal on top.
 //!
-//! # `dismissable(bool)` + back-dismiss (task 12)
+//! # `dismissable(bool)` + back-dismiss
 //!
 //! [`GlyphDialogView::dismissable`] (default `true`) is the single barrier
 //! flag gating the scrim tap, `Escape`, and an Android back press together —
@@ -108,12 +108,12 @@ use crate::nav::navigator::{BackPolicy, NavigatorController, PopResult, PushOpti
 use crate::nav::transition::{TransitionDriver, TransitionSpec, make_driver};
 use crate::text::{ThemeTextColor, text};
 
-/// Scrim opacity behind the panel at full enter (this task's own choice — a
-/// terminal-dark modal barrier, heavier than M3's 32% so the amber panel reads
-/// against the void surface).
+/// Scrim opacity behind the panel at full enter (an original, hand-picked
+/// value — a terminal-dark modal barrier, heavier than M3's 32% so the amber
+/// panel reads against the void surface).
 const SCRIM_ALPHA: f32 = 0.6;
-/// Panel padding on all four edges, in logical px (this task's own choice —
-/// Glyph's roomy `--space-5` gutter).
+/// Panel padding on all four edges, in logical px (an original, hand-picked
+/// value — Glyph's roomy `--space-5` gutter).
 const DIALOG_PADDING: f64 = 20.0;
 /// Vertical spacing between the title and body, in logical px.
 const TITLE_BODY_GAP: f64 = 10.0;
@@ -148,7 +148,7 @@ const SHADOW_Y: f64 = 12.0;
 const SHADOW_BLUR: f64 = 32.0;
 const SHADOW_ALPHA: f32 = 0.45;
 
-/// Title type role: Glyph `display` family (Space Mono) at 15/700 (task detail).
+/// Title type role: Glyph `display` family (Space Mono) at 15/700.
 const TITLE_SIZE: f32 = 15.0;
 const TITLE_WEIGHT: FontWeight = FontWeight::BOLD;
 const TITLE_LINE_HEIGHT: f32 = 20.0;
@@ -156,7 +156,7 @@ const TITLE_LINE_HEIGHT: f32 = 20.0;
 const BODY_SIZE: f32 = 12.5;
 const BODY_LINE_HEIGHT: f32 = 18.0;
 
-/// Panel enter scale start (`0.94 → 1.0` over the spatial enter — task detail).
+/// Panel enter scale start (`0.94 → 1.0` over the spatial enter).
 const ENTER_SCALE_START: f64 = 0.94;
 /// Enter duration fallback (`durations.base` = 220ms) when no theme is threaded.
 const ENTER_DURATION: Duration = Duration::from_millis(220);
@@ -178,7 +178,7 @@ fn with_alpha(color: Color, alpha: f32) -> Color {
 
 /// The `(enter, exit)` [`Timing`]s for the current `reduce_motion` state: the
 /// authored spatial/exit durations+curves, or both collapsed to a fast linear
-/// crossfade (RESEARCH §1.4's hard accessibility rule).
+/// crossfade (a hard accessibility rule).
 fn resolve_timings(theme: Option<&Theme>) -> (Timing, Timing) {
     if theme.map(|t| t.motion.reduce_motion).unwrap_or(false) {
         let t = Timing::Duration(REDUCE_MOTION_DURATION, Curve::Linear);
@@ -291,7 +291,7 @@ pub struct GlyphDialogView<State: 'static> {
     scrim_dismissible: bool,
     on_close: Option<OnClose>,
     dismissable: bool,
-    /// The shared back-press dismiss-signal cell (task 02's `DismissAnimated`
+    /// The shared back-press dismiss-signal cell (the `DismissAnimated`
     /// seam) — wired internally by [`show_glyph_dialog`], never part of the
     /// public builder surface (see the [module docs](self)).
     dismiss_signal: Option<Rc<Cell<u64>>>,
@@ -404,7 +404,7 @@ pub fn show_glyph_dialog<State, B, R>(
 {
     let close_ctrl = controller.clone();
     // Peeked once, at show-time: the back policy/dismiss-signal wiring is
-    // fixed for the life of this pushed page (mirrors task 02's push-time
+    // fixed for the life of this pushed page (mirrors the back-press seam's push-time
     // `PushOptions` contract), even though `build` is re-invoked on every
     // later navigator rebuild to diff the page's content.
     let dismissable = build().dismissable;
@@ -455,7 +455,7 @@ pub struct GlyphDialogWidget {
     scrim_dismissible: bool,
     on_close: Option<OnClose>,
     dismissable: bool,
-    /// The shared back-press dismiss-signal cell (task 02's `DismissAnimated`
+    /// The shared back-press dismiss-signal cell (the `DismissAnimated`
     /// seam) — see [`observe_dismiss_signal`](Self::observe_dismiss_signal).
     dismiss_signal: Option<Rc<Cell<u64>>>,
     /// The last generation observed from `dismiss_signal` (0 with no signal
@@ -821,7 +821,7 @@ impl Widget for GlyphDialogWidget {
             return EventResult::Handled;
         }
         // Escape (once focused) begins the exit/cancel — gated by `dismissable`
-        // (task 12: a non-dismissable dialog ignores it, same as the scrim).
+        // (a non-dismissable dialog ignores it, same as the scrim).
         if let InputEvent::Key(key_event) = event {
             if self.dismissable && key_event.key == Key::Named(NamedKey::Escape) {
                 self.begin_exit();
@@ -1231,7 +1231,7 @@ mod tests {
         );
     }
 
-    // -- Task 12: `dismissable(bool)` gates the scrim and Escape together --
+    // -- `dismissable(bool)` gates the scrim and Escape together --
 
     #[test]
     fn dismissable_false_gates_scrim_tap() {
@@ -1277,7 +1277,7 @@ mod tests {
         assert_eq!(w.phase, Phase::Enter, "dismissable(false) gates Escape");
     }
 
-    // -- Task 12: back request routes through dismissable/BackPolicy --
+    // -- back request routes through dismissable/BackPolicy --
 
     #[test]
     fn back_request_dismissable_true_animates_exit_then_pops() {

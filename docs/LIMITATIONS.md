@@ -1,9 +1,9 @@
 # Frust - Known Limitations
 
 A register of accepted, known limitations an app author can actually hit —
-not a bug list and not a TODO list. Open bugs and unshipped fixes live in
-`workflow/plans/`; this doc is for a degrade that is **measured, understood,
-and deliberately shipped anyway** (accepted by Ed, or blocked on a documented
+not a bug list and not a TODO list. Open bugs and unshipped fixes are tracked
+separately; this doc is for a degrade that is **measured, understood, and
+deliberately shipped anyway** (accepted by Ed, or blocked on a documented
 constraint), so it is discoverable from the docs instead of only from a gate
 report or an old chat.
 
@@ -25,7 +25,7 @@ instead of translucent, so the native view sits behind an opaque frust
 surface. Measured: the preview slot's pixels are pure page background (std
 5.4, exactly `bg-surface`); every other chrome renders normally.
 
-**The app is now told** (native-widgets p1-01, `translucencyRefused` shipped):
+**The app is now told** (`translucencyRefused` shipped):
 `frust::resolved_surface_mode()` answers
 `ResolvedSurfaceMode::RefusedTranslucent` on exactly this surface — a poll,
 read during rebuild like any other process-global shell state, never a
@@ -53,9 +53,8 @@ a documented limitation rather than a merge blocker, binding before Mode B GA
 on Android. `translucencyRefused` has since shipped (above), so what remains
 here is the *invisible sibling* itself, not the silence.
 
-**Evidence**: `workflow/plans/features/frust-camera/research/VERIFY-CAMERA.md`
-§R2 and its "the reach, corrected" subsection; `followups/review-fix-2/03`;
-the signal: `workflow/plans/features/frust-native-widgets/tasks/p1-01-translucency-refused.md`.
+**Evidence**: on-device verification of the blit-path surface (Android); the
+app-facing signal shipped as `translucencyRefused`.
 
 ---
 
@@ -80,10 +79,8 @@ arm that speculatively latches the regime on touch-down via a new
 Kotlin→Rust signal — is more invasive and awaits a ruling; it is not
 automatic.
 
-**Evidence**: `research/SPIKE-SYNC.md` §2.8 (computed diagnosis) and §2.9
-(measured, does not reproduce the computed gain);
-`followups/gate-fix-1` is unrelated — this is a task-12b/main-loop result,
-recorded in `VERIFY-CAMERA.md`'s Known issues #2.
+**Evidence**: on-device A/B measurement (Android, cupid) — see Why not fixed
+above for the result.
 
 ---
 
@@ -106,8 +103,8 @@ stays load-bearing regardless: the catalog's own camera page deliberately
 scrolls the slot to exercise the dispose/revive cycle, and `platform_views`
 remains a scrolling Mode B testbed.
 
-**Evidence**: `research/VERIFY-CAMERA.md` §B, §G, ruling R1 (closed,
-accepted).
+**Evidence**: on-device measurement (cupid); closed and accepted per Ed's
+ruling above.
 
 ---
 
@@ -130,8 +127,8 @@ call while one is already in flight on the same session, or (b) an app
 disables its capture control while a request is outstanding, leaving the
 crate itself permissive.
 
-**Evidence**: `workflow/reviews/frust-camera/REVIEW.md` Round 1 "Deferred to
-Ed"; `research/VERIFY-CAMERA.md` Known issues #1.
+**Evidence**: on-device reproduction (Android); deferral ruling recorded
+above.
 
 ---
 
@@ -150,8 +147,8 @@ both platforms and is the cross-platform choice for an app that must run on
 both; Flutter's own `camera` plugin draws the identical line (`bgra8888` is
 iOS-only there too). `Bgra` remains available and works correctly on Apple.
 
-**Evidence**: `plugins/camera` task 09 completion summary; crate rustdoc/
-README caveats.
+**Evidence**: CameraX capability survey (Android); crate rustdoc/README
+caveats.
 
 ---
 
@@ -172,5 +169,5 @@ project accumulating many plugin Swift packages over its lifetime.
 of plugins in realistic use; failing loudly and leaving the file untouched
 was chosen over silently guessing at a wider scheme.
 
-**Evidence**: `workflow/reviews/frust-camera/REVIEW.md` round 0 minors list;
-`plugins/camera` task 03 completion summary, Risks/Limitations #2.
+**Evidence**: flagged during the camera plugin's implementation and review;
+documented as a known constraint, not a regression.

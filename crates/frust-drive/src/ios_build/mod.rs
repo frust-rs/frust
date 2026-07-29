@@ -1,5 +1,5 @@
-//! iOS release build pipeline (spec §12.6): `frust build ios` (device or
-//! simulator `.app`) and `frust build ipa` (archive + `-exportArchive`).
+//! iOS release build pipeline: `frust build ios` (device or simulator
+//! `.app`) and `frust build ipa` (archive + `-exportArchive`).
 //!
 //! The [`build`] signature and the [`IosArtifact`]/[`BuiltArtifacts`] types
 //! are load-bearing for `commands::build` and stay frozen; this module owns
@@ -9,9 +9,8 @@
 
 mod export;
 mod schemes;
-// `pub(crate)`: `doctor::report`'s Signing component (Plan D6a) reuses
-// `team::detect` rather than re-implementing `security find-identity`
-// parsing.
+// `pub(crate)`: `doctor::report`'s Signing component reuses `team::detect`
+// rather than re-implementing `security find-identity` parsing.
 pub(crate) mod team;
 pub(crate) mod xcodebuild;
 
@@ -27,7 +26,7 @@ use crate::process::{Output, ProcessRunner, tail_lines};
 
 use self::xcodebuild::{Invocation, Signing};
 
-/// The artifact `frust build ios`/`ipa` requests (spec §12.6).
+/// The artifact `frust build ios`/`ipa` requests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IosArtifact {
     /// A `.app` build for a device or the Simulator.
@@ -94,10 +93,10 @@ fn build_with_env(
     schemes::verify(runner, project_dir, &sc)?;
 
     let defines_b64 = encode_defines(&info.defines);
-    // Release-lean preflight (followup F2): a legacy app that predates the
-    // `lean` feature has it dropped here (with a one-time warning through the
-    // `on_line` sink) so xcodebuild never threads an undeclared `--features
-    // lean` down to `cargo` — cargo's opaque hard error. A declaring app keeps
+    // Release-lean preflight: a legacy app that predates the `lean` feature
+    // has it dropped here (with a one-time warning through the `on_line`
+    // sink) so xcodebuild never threads an undeclared `--features lean`
+    // down to `cargo` — cargo's opaque hard error. A declaring app keeps
     // byte-identical features and warns nothing.
     let (features, warning) =
         crate::cargo_manifest::resolve_release_features(project_dir, info.mode);
@@ -210,7 +209,7 @@ fn preflight(runner: &dyn ProcessRunner, simulator: bool) -> Result<(), String> 
 /// Streams an `xcrun xcodebuild …` invocation, prefixing each line, and turns
 /// a non-zero exit into an error whose message tails both stdout and stderr
 /// (xcodebuild reports most errors on stdout) plus a `frust doctor` hint —
-/// signing errors pass through verbatim (spec §16).
+/// signing errors pass through verbatim.
 fn run_xcodebuild(
     runner: &dyn ProcessRunner,
     root: &Path,
@@ -287,7 +286,7 @@ fn encode_defines(defines: &HashMap<String, String>) -> Option<String> {
 
 /// base64-encodes the resolved cargo `features` as `feat,feat` for the
 /// `FRUST_FEATURES` build setting, matching the template run-script's
-/// `base64 -d` decode into `--features <csv>` (release-lean plan, task 04).
+/// `base64 -d` decode into `--features <csv>`.
 /// `None` when there are no features to pass — the release-lean preflight can
 /// legitimately produce an empty list for a legacy app whose `lean` feature
 /// was dropped (`cargo_manifest::resolve_release_features`), in which case no
@@ -469,10 +468,10 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Followup F2, legacy direction: a `--release` build against an app whose
-    /// Cargo.toml declares no `lean` feature drops it and warns once through
-    /// `on_line`; the xcodebuild invocation carries NO `FRUST_FEATURES=` build
-    /// setting (the fixture omits it), so a regression that kept `lean` would
+    /// Legacy direction: a `--release` build against an app whose Cargo.toml
+    /// declares no `lean` feature drops it and warns once through `on_line`;
+    /// the xcodebuild invocation carries NO `FRUST_FEATURES=` build setting
+    /// (the fixture omits it), so a regression that kept `lean` would
     /// surface via the absent warning. No-codesign device build for simplicity.
     #[test]
     fn release_legacy_app_drops_lean_and_warns() {
@@ -505,7 +504,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Followup F2, declaring direction: an app that declares `lean` keeps it —
+    /// Declaring direction: an app that declares `lean` keeps it —
     /// `FRUST_FEATURES=bGVhbg==` (base64 "lean"), registered exactly, so a
     /// regression that dropped it would produce a shorter, non-matching argv
     /// and error early — and warns nothing.

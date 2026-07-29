@@ -1,9 +1,9 @@
 //! Writes `android/local.properties`' `frust.versionName`/
-//! `frust.versionCode` keys (spec §12.5, PLAN.md decision 2), the
-//! Flutter-canonical version-plumbing mechanism the Gradle template (task
-//! 62) reads via `Properties`/`getProperty(...)` with defaults. This is a
-//! **merge-write**: any other key already in the file (e.g. `sdk.dir`,
-//! written by Android Studio/the Gradle wrapper) is preserved untouched.
+//! `frust.versionCode` keys, the Flutter-canonical version-plumbing
+//! mechanism the Gradle template reads via `Properties`/`getProperty(...)`
+//! with defaults. This is a **merge-write**: any other key already in the
+//! file (e.g. `sdk.dir`, written by Android Studio/the Gradle wrapper) is
+//! preserved untouched.
 
 use std::fs;
 use std::path::Path;

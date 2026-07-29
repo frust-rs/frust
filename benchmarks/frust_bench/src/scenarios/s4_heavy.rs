@@ -1,6 +1,6 @@
 //! S4 — Heavy-work responsiveness (parse ~50MB while animating).
 //!
-//! The head-to-head for PLAN 9.E's S4 claim: `use_task` + `spawn_blocking`
+//! The head-to-head for the S4 claim under test: `use_task` + `spawn_blocking`
 //! (which **moves** the payload into the worker) vs Flutter's `Isolate.run`
 //! (which **copies** it across the isolate boundary). A deterministic ~50MB
 //! JSON payload is generated and parsed entirely on a blocking-pool thread,
@@ -8,7 +8,7 @@
 //! continuous [`SpinBox`] animation runs on the UI thread the whole time — so
 //! the raw frame series inside the parse window shows any UI-thread impact.
 //!
-//! ## Dataset parity (PLAN 9.E addendum — binding)
+//! ## Dataset parity (binding)
 //!
 //! The payload generator is a byte-for-byte Rust port of the Flutter bench's
 //! `generateS4JsonPayload` (`benchmarks/flutter_bench/lib/bench/datasets.dart`):

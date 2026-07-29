@@ -1,11 +1,11 @@
 //! [`FrameGate`]: the shared skip-frame decision the mobile shells consult
-//! each tick (spec §14 phase 7).
+//! each tick.
 //!
 //! # What lives here
 //!
 //! - [`FrameInputs`] — the OR-list of per-frame "something changed" signals a
 //!   shell gathers from its own state (see the struct's field docs, each
-//!   naming the shell-side source and its `research/RESEARCH.md` §C entry).
+//!   naming the shell-side source).
 //! - [`FrameGate`] — a plain struct owning the resume-warmup counter and the
 //!   kill-switch flag; [`FrameGate::decide`] folds [`FrameInputs`] plus the
 //!   warmup into one [`FrameDecision`] (`Run`/`Skip`).
@@ -18,7 +18,7 @@
 //! dependency**: the reactive "did any tracked signal change" answer arrives
 //! as the plain [`FrameInputs::signals_dirty`] bool, which the shells fill
 //! themselves by calling `frust_reactive::ReactiveRuntime::take_signals_dirty`
-//! (task 07) after their per-frame `pump_local` (that crate's documented
+//! after their per-frame `pump_local` (that crate's documented
 //! pump-first ordering contract). This keeps shell-common's compiles-everywhere,
 //! reactive-free charter intact (see `docs/ARCHITECTURE.md`'s Layer
 //! Dependencies).
@@ -90,7 +90,7 @@ pub const NO_ANIM_PACING_VAR: &str = "FRUST_NO_ANIM_PACING";
 ///
 /// Both are shell-owned: [`now`](Self::now) is the platform frame clock
 /// (Choreographer / `CADisplayLink` timestamp — never a wall clock read inside
-/// `frust-core`, spec §8), and [`interval`](Self::interval) is `1 /
+/// `frust-core`), and [`interval`](Self::interval) is `1 /
 /// MotionScheme::cosmetic_loop_rate` resolved from the *active* theme each
 /// frame (so an app that retunes the token via `ThemeBuilder` re-paces live).
 #[derive(Debug, Clone, Copy)]
@@ -133,14 +133,13 @@ impl FrameDecision {
 /// The per-frame OR-list a shell gathers and hands to [`FrameGate::decide`].
 ///
 /// Every field is a "something that needs this frame to run" signal; the gate
-/// runs the frame if **any** is `true`. The list matches
-/// `research/RESEARCH.md` §C item-for-item, with two deliberate deltas noted
+/// runs the frame if **any** is `true`, with two deliberate deltas noted
 /// in the field docs:
 ///
-/// - **Semantics adapter needs** (§C's last item) is *not* a field here:
-///   semantics-publish gating stays shell-side (Android is already
-///   generation-gated via `AppTree::semantics_if_changed`; iOS is handled in
-///   task 18), so it never gates whole-frame production.
+/// - **Semantics adapter needs** is *not* a field here:
+///   semantics-publish gating stays shell-side (both Android and iOS are
+///   generation-gated via `AppTree::semantics_if_changed`), so it never gates
+///   whole-frame production.
 /// - **[`resumed_recently`](Self::resumed_recently)** is the added input for
 ///   the resume warmup (see [`WARMUP_FRAMES`]); the gate also drives this same
 ///   condition internally via [`FrameGate::note_resumed`], so a shell may
@@ -150,25 +149,25 @@ impl FrameDecision {
 /// [`FrameGate::decide`] turns into a [`FrameDecision::Skip`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FrameInputs {
-    /// §C: *tracked-signal dirty*. A tracked signal changed since the last
-    /// frame. Source: `frust_reactive::ReactiveRuntime::take_signals_dirty`
-    /// (task 07), read by the shell *after* its per-frame `pump_local` per
+    /// *tracked-signal dirty*. A tracked signal changed since the last
+    /// frame. Source: `frust_reactive::ReactiveRuntime::take_signals_dirty`,
+    /// read by the shell *after* its per-frame `pump_local` per
     /// that crate's pump-first ordering contract.
     pub signals_dirty: bool,
-    /// §C: *events dispatched since last frame*. A pointer/scroll/key/IME
+    /// *events dispatched since last frame*. A pointer/scroll/key/IME
     /// event reached `RenderRoot::event` between frames. Source: a shell-side
     /// latch set by the `nativeOnTouch`/IME entry points and cleared each
-    /// frame (see task 17).
+    /// frame.
     pub events_since_last_frame: bool,
-    /// §C: *active pointer capture*. A gesture is mid-drag and the captured
+    /// *active pointer capture*. A gesture is mid-drag and the captured
     /// widget may animate/track the pointer. Source:
     /// `AppTree`/`RenderRoot::is_pointer_captured`.
     pub pointer_capture_active: bool,
-    /// §C: *focus/IME active surface*. Something holds keyboard/IME focus, so
+    /// *focus/IME active surface*. Something holds keyboard/IME focus, so
     /// caret/selection chrome may need repainting. Source:
     /// `RenderRoot::is_focus_active` (and/or a published `ime_state`).
     pub focus_or_ime_active: bool,
-    /// §C: *last paint's `needs_frame`*. The previous paint advanced an
+    /// *last paint's `needs_frame`*. The previous paint advanced an
     /// animation/transition and asked for another frame. Source:
     /// `PaintOutcome::needs_frame`, latched by the shell from the prior
     /// frame's `AppTree::paint` return.
@@ -182,21 +181,21 @@ pub struct FrameInputs {
     /// signal [`FrameGate::decide_paced`] throttles to the theme's cadence. Any
     /// concurrent transition/input clears it, so the frame runs immediately.
     pub last_needs_frame_paced_only: bool,
-    /// §C: *pending `ChangeFlags`*. A rebuild (or `set_theme`) left layout/
+    /// *pending `ChangeFlags`*. A rebuild (or `set_theme`) left layout/
     /// paint dirtiness undrained. Source:
     /// [`AppTree::has_pending_change_flags`](crate::AppTree::has_pending_change_flags)
     /// (a non-draining peek, so a skipped frame preserves the flags).
     pub change_flags_pending: bool,
-    /// §C: *theme-override/appearance change*. The app-facing theme override
+    /// *theme-override/appearance change*. The app-facing theme override
     /// or the platform light/dark preference changed this tick. Source: the
     /// shell's per-frame `ThemeOverrideWatcher`/appearance poll (see
     /// [`crate::theme_override`]).
     pub theme_or_appearance_changed: bool,
-    /// §C: *surface resize/recreation*. The GPU surface was created, resized,
+    /// *surface resize/recreation*. The GPU surface was created, resized,
     /// or recreated (rotation/backgrounding). Source: the shell's
     /// `nativeOnSurfaceChanged`/`frust_resize` path.
     pub surface_changed_or_resized: bool,
-    /// §C: *accessibility actions*. A platform `accesskit_*` action was
+    /// *accessibility actions*. A platform `accesskit_*` action was
     /// performed this tick, mutating state. Source: the shell's a11y-action
     /// drain feeding `AppTree::perform_accessibility_action`.
     pub a11y_action_performed: bool,
@@ -253,15 +252,15 @@ impl FrameInputs {
     }
 }
 
-/// The per-shell skip-frame gate (spec §14 phase 7): a plain struct — no
+/// The per-shell skip-frame gate: a plain struct — no
 /// globals — a shell constructs once and drives each frame via
 /// [`decide`](Self::decide).
 ///
 /// Owns two pieces of state: whether the gate is enabled at all (the
 /// [`NO_FRAME_GATE_VAR`] kill switch, resolved once at construction) and the
 /// resume-warmup countdown ([`WARMUP_FRAMES`], seeded by
-/// [`note_resumed`](Self::note_resumed)). No shell constructs one yet — this
-/// is the standalone, host-testable decision type tasks 17/18 wire in.
+/// [`note_resumed`](Self::note_resumed)) — the standalone, host-testable
+/// decision type the mobile shells wire in.
 #[derive(Debug)]
 pub struct FrameGate {
     /// When `false`, [`decide`](Self::decide) always returns
@@ -351,8 +350,8 @@ impl FrameGate {
     /// - the resume warmup is active (decrementing it by one), or
     /// - any [`FrameInputs`] field is set ([`FrameInputs::any_set`]) —
     ///
-    /// otherwise [`FrameDecision::Skip`]. Every input maps to a
-    /// `research/RESEARCH.md` §C OR-list entry (see [`FrameInputs`]'s docs).
+    /// otherwise [`FrameDecision::Skip`]. See [`FrameInputs`]'s docs for what
+    /// each input signal means.
     ///
     /// Takes `&mut self` because it advances the resume-warmup countdown.
     ///
@@ -587,7 +586,7 @@ mod tests {
         assert_eq!(
             ALL_INPUTS.len(),
             11,
-            "the OR-list must have all ten RESEARCH §C-derived inputs plus the \
+            "the OR-list must have all ten wake inputs plus the \
              paced-only signal"
         );
         for field in ALL_INPUTS {

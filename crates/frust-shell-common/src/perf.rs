@@ -1,11 +1,10 @@
-//! Frame-timing and startup-span perf instrumentation shared by every shell
-//! (spec §14 phase 7, plan phase 7.A).
+//! Frame-timing and startup-span perf instrumentation shared by every shell.
 //!
 //! # What lives here
 //!
 //! - [`FrameStats`] — a per-shell recorder of one frame's pass durations
 //!   (rebuild/layout/paint/encode/acquire/submit, plus a `skipped` marker the
-//!   mobile dirty-gate (task 16+) will set), aggregated into a ring buffer
+//!   mobile dirty-gate sets), aggregated into a ring buffer
 //!   plus running totals; [`FrameStats::summary`] reports p50/p95/p99 total
 //!   frame time, per-pass p95, and frames-over-budget counts against the
 //!   16.6ms/8.3ms (60Hz/120Hz) targets.
@@ -15,7 +14,7 @@
 //!   summarized into one log line.
 //! - [`enabled`] — the process-wide on/off switch every recording API is a
 //!   no-op behind (see its own docs).
-//! - [`raw_enabled`] (Phase 9.C) — a second dial that, alongside
+//! - [`raw_enabled`] — a second dial that, alongside
 //!   [`enabled`], makes [`FrameStats::record`] additionally emit one
 //!   `frust-perf raw` line per recorded frame (instead of only the
 //!   rate-limited ~2s `frust-perf frame` summary [`FrameStats::emit_log`]
@@ -35,11 +34,11 @@
 //! itself, and [`StartupSpans`] is generic over an injectable [`Clock`] —
 //! this crate's own logic stays fully host-testable without a real clock.
 //!
-//! # Wiring is a later task
+//! # Wiring
 //!
-//! This module ships the recorder + switch only; no shell constructs or
-//! feeds a [`FrameStats`]/[`StartupSpans`] yet (tasks 08/09/10 wire the
-//! Android/iOS/desktop shells respectively).
+//! This module ships the recorder + switch; the Android, iOS, and desktop
+//! shells each construct and feed a [`FrameStats`]/[`StartupSpans`] of
+//! their own.
 
 use std::collections::VecDeque;
 #[cfg(feature = "perf-trace")]
@@ -57,8 +56,8 @@ pub const BUDGET_60HZ: Duration = Duration::from_micros(16_667);
 pub const BUDGET_120HZ: Duration = Duration::from_micros(8_333);
 
 /// Minimum span of recorded frame time between two [`FrameStats::emit_log`]
-/// calls that [`FrameStats::should_emit`] requires — "one line every ~2s of
-/// frames" per the task spec, measured in accumulated frame time rather than
+/// calls that [`FrameStats::should_emit`] requires — one line every ~2s of
+/// frames, measured in accumulated frame time rather than
 /// wall-clock time so it needs no clock of its own.
 const EMIT_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -78,21 +77,21 @@ const EMIT_INTERVAL: Duration = Duration::from_secs(2);
 // compiles identically in both configurations; only the string-bearing
 // emission internals are gated, so no shell call site changes.
 //
-// Sink decision (feeds release-lean task 04's log-level ceiling): `frust-perf`
+// Sink decision (feeds the release-lean log-level ceiling): `frust-perf`
 // lines keep flowing through the `log` facade (`log::info!`), NOT a bypassing
 // `eprintln!`/platform sink. Rationale — this crate is deliberately
 // platform-free (no `android_logger`/NDK), so it cannot replicate each
 // platform's real channel (logcat on Android, the desktop/iOS stderr logger),
 // and moving Android's lines off logcat would break the benchmark harness's
 // log parsing; keeping `log::info!` guarantees byte-identical output on every
-// platform. The consequence task 04 MUST honor: perf is stripped from release
-// by THIS FEATURE (off ⇒ code+strings gone), never by the log level. So task
-// 04's `release_max_level_warn` must be applied to RELEASE ONLY (e.g. a
+// platform. The consequence this MUST honor: perf is stripped from release
+// by THIS FEATURE (off ⇒ code+strings gone), never by the log level. So
+// `release_max_level_warn` must be applied to RELEASE ONLY (e.g. a
 // CLI-toggled `log/release_max_level_warn` cargo feature enabled for
 // `--release` and omitted for `--profile`), never as an always-on manifest
 // feature: `release_max_level_*` keys off `debug_assertions`, which is OFF in
 // the profile profile too, so an always-on ceiling would silence profile-mode
-// perf lines (research §Q4's trap). Release perf lines don't exist to strip
+// perf lines. Release perf lines don't exist to strip
 // (feature off), so a release-only ceiling only removes stray non-perf
 // info/debug while profile keeps its `frust-perf` output intact.
 
@@ -100,7 +99,7 @@ const EMIT_INTERVAL: Duration = Duration::from_secs(2);
 /// call. `true` when either:
 ///
 /// - the compile-time `FRUST_TRACE` define is set to a non-`"0"` value
-///   (the `--define`/`--profile` path — task 03 makes `--profile` builds
+///   (the `--define`/`--profile` path — `--profile` builds
 ///   pass `FRUST_TRACE=1` by default; `option_env!` reads whatever a
 ///   build script/cargo-ndk env var set at compile time), or
 /// - the runtime `FRUST_TRACE` process environment variable is set to a
@@ -158,7 +157,7 @@ fn trace_switch(compile_time: Option<&str>, runtime: Option<&str>) -> bool {
     is_set_non_zero(compile_time) || is_set_non_zero(runtime)
 }
 
-/// The process-wide raw-per-frame-export switch (Phase 9.C), cached after
+/// The process-wide raw-per-frame-export switch, cached after
 /// the first call — parsed exactly the same compile-time-or-runtime way as
 /// [`enabled`] (via the same [`trace_switch`] decision), but reading
 /// `FRUST_TRACE_RAW` instead of `FRUST_TRACE`. This is a **second dial**,
@@ -200,7 +199,7 @@ fn runtime_trace_raw_var() -> Option<String> {
 /// One frame's measured pass durations, as recorded by a shell's frame
 /// callback (`AndroidAppHandle::frame` / `frust_render_frame` /
 /// desktop's `RedrawRequested` handler — see `docs/ARCHITECTURE.md`'s Frame
-/// pipeline). `skipped` is set by the mobile dirty-gate (a later task) for a
+/// pipeline). `skipped` is set by the mobile dirty-gate for a
 /// frame whose passes never ran; its pass durations are `Duration::ZERO` in
 /// that case and it is excluded from the percentile computation in
 /// [`FrameStats::summary`] (see that method's docs) while still counting
@@ -213,7 +212,7 @@ pub struct FramePasses {
     /// GPU/CPU encode cost — the [`SurfaceRenderer::encode`] span
     /// (`vello` encode + `render_to_texture`, or the CPU rasterize+upload),
     /// with no swapchain-acquire wait folded in. Split out from the old
-    /// combined `encode_present` (Phase 10.A) so encode work and the vsync/
+    /// combined `encode_present` so encode work and the vsync/
     /// present wait are separately attributable — the number the
     /// render-thread-split GO/NO-GO decision is made on.
     ///
@@ -221,7 +220,7 @@ pub struct FramePasses {
     pub encode: Duration,
     /// Swapchain-**acquire** cost — the [`SurfaceRenderer::acquire`] span,
     /// dominated by the blocking vsync wait (per the surface's present mode).
-    /// Split out from the old combined `present` (Phase 11.A) so the blocking
+    /// Split out from the old combined `present` so the blocking
     /// vsync wait is attributable separately from the blit/submit work below —
     /// the S5 GPU-saturation-vs-blit-cost question. `acquire + submit` equals the
     /// old v2 `present` span, so cross-baseline math is unchanged.
@@ -244,9 +243,9 @@ impl FramePasses {
     }
 
     /// Recombine a render-thread-split frame's two half-measurements into the
-    /// one [`FramePasses`] the single emitter records (Phase 11.B).
+    /// one [`FramePasses`] the single emitter records.
     ///
-    /// In the render-thread split (plan phase 11.B) the UI thread measures
+    /// In the render-thread split the UI thread measures
     /// `rebuild`/`layout`/`paint` ([`UiSpans`]) while the render thread measures
     /// `encode`/`acquire`/`submit` ([`RenderSpans`]); the UI half rides across
     /// the scene-handoff channel
@@ -270,8 +269,8 @@ impl FramePasses {
     }
 }
 
-/// The UI-thread half of a render-thread-split frame's timing (plan phase
-/// 11.B): the `rebuild`/`layout`/`paint` spans measured on the UI thread,
+/// The UI-thread half of a render-thread-split frame's timing: the
+/// `rebuild`/`layout`/`paint` spans measured on the UI thread,
 /// plus the frame gate's `skipped` verdict (the gate stays UI-side — see
 /// [`crate::frame_gate`]). Rides the scene-handoff channel across to the
 /// render thread, which folds it together with its own [`RenderSpans`] via
@@ -286,8 +285,8 @@ pub struct UiSpans {
     pub skipped: bool,
 }
 
-/// The render-thread half of a render-thread-split frame's timing (plan phase
-/// 11.B): the `encode`/`acquire`/`submit` spans measured on the render thread,
+/// The render-thread half of a render-thread-split frame's timing: the
+/// `encode`/`acquire`/`submit` spans measured on the render thread,
 /// folded together with the UI thread's [`UiSpans`] via
 /// [`FramePasses::from_split`]. See [`FramePasses::encode`]/[`FramePasses::acquire`]/
 /// [`FramePasses::submit`] for each span's exact boundary (the v3 attribution
@@ -330,17 +329,17 @@ pub struct FrameSummary {
     pub skipped_frames: u64,
 }
 
-/// Per-shell frame-timing recorder (spec §14 phase 7.A): a ring buffer of
+/// Per-shell frame-timing recorder: a ring buffer of
 /// the last [`RING_CAPACITY`] frames' [`FramePasses`] plus lifetime running
 /// counters, aggregated on demand by [`FrameStats::summary`] and rate-limit
 /// logged by [`FrameStats::should_emit`]/[`FrameStats::emit_log`].
 ///
-/// No shell constructs one of these yet (see the module docs) — this is the
-/// standalone, host-testable recorder tasks 08/09/10 wire in.
+/// The Android, iOS, and desktop shells each construct one of these — a
+/// standalone, host-testable recorder.
 #[derive(Debug)]
 pub struct FrameStats {
     enabled: bool,
-    /// Raw-per-frame-export mode (Phase 9.C, see [`raw_enabled`]) — always
+    /// Raw-per-frame-export mode (see [`raw_enabled`]) — always
     /// `false` when `enabled` is `false` (the two-dial contract
     /// [`Self::with_capacity_enabled_and_raw`] enforces). Only *read* by the
     /// `perf-trace`-gated raw emission path in [`Self::record`], so it is dead
@@ -414,8 +413,8 @@ impl FrameStats {
                 String::new()
             },
             ring_capacity: capacity,
-            // Disabled: never reserve — nothing will ever be pushed, and
-            // "allocates nothing after init" (acceptance criterion 2) holds
+            // Disabled: never reserve — nothing will ever be pushed, so
+            // "allocates nothing after init" holds
             // trivially for the whole recorder's lifetime, not just after
             // construction.
             ring: if is_enabled {
@@ -590,7 +589,7 @@ fn nearest_rank_percentile(sorted: &[Duration], p: u32) -> Duration {
 }
 
 // ---------------------------------------------------------------------
-// Raw per-frame export + scenario markers (Phase 9.C)
+// Raw per-frame export + scenario markers
 // ---------------------------------------------------------------------
 
 /// Log-line prefix for [`FrameStats::record`]'s raw per-frame export line —
@@ -613,10 +612,10 @@ const RAW_FRAME_PREFIX: &str = "frust-perf raw";
 /// `encode_us`, `acquire_us`, `submit_us`, `skipped` (`0`/`1`) — microsecond
 /// resolution so a sub-millisecond pass still shows nonzero.
 ///
-/// **Format v3 (Phase 11.A, 2026-07-22):** the single `present_us` field of v2
+/// **Format v3 (2026-07-22):** the single `present_us` field of v2
 /// was split into separate `acquire_us` + `submit_us` fields (no combined field
 /// is kept); `acquire_us + submit_us` equals the old v2 `present_us` for
-/// cross-baseline math. **Format v2 (Phase 10.A, 2026-07-21):** the single
+/// cross-baseline math. **Format v2 (2026-07-21):** the single
 /// `encode_present_us` field of v1 was split into `encode_us` + `present_us`.
 /// Any harness parsing this line must handle the current field set; see
 /// `benchmarks/PROTOCOL.md`'s format-change note. Compiled only under
@@ -695,7 +694,7 @@ pub fn mark_scenario_end(name: &str) {
     }
 }
 
-/// Emit one already-formatted benchmark trace line (Phase 9.E) into the same
+/// Emit one already-formatted benchmark trace line into the same
 /// `log::info!` stream the per-frame `frust-perf raw` lines and the
 /// `bench-scenario-*` markers land in.
 ///
@@ -732,7 +731,7 @@ pub const SPAN_DEVICE_READY: &str = "device_ready";
 /// Startup-span name: the vello renderer (and surface) are ready to
 /// present.
 pub const SPAN_RENDERER_READY: &str = "renderer_ready";
-/// Startup-span name (Phase 10.A first-frame decomposition): a persisted GPU
+/// Startup-span name: a persisted GPU
 /// pipeline cache blob was restored before surface creation — its *presence* in
 /// the startup line is the warm-start (cache-**hit**) signal, its *absence* the
 /// cold-start (cache-**miss**) one, so a slow first frame can be attributed to
@@ -741,7 +740,7 @@ pub const SPAN_RENDERER_READY: &str = "renderer_ready";
 pub const SPAN_PIPELINE_CACHE_RESTORED: &str = "pipeline_cache_restored";
 /// Startup-span name: the app's first `rebuild` pass has completed.
 pub const SPAN_FIRST_REBUILD_DONE: &str = "first_rebuild_done";
-/// Startup-span name (Phase 10.A first-frame decomposition): the app's first
+/// Startup-span name: the app's first
 /// frame's GPU/CPU **encode** has completed — the boundary between the first
 /// frame's paint/encode work and its swapchain-acquire (present) wait, so a
 /// first-frame outlier (a 3646ms-class span) decomposes into encode vs present
@@ -795,7 +794,7 @@ impl Clock for SystemClock {
     }
 }
 
-/// Named monotonic timestamps from a `begin()` epoch (spec §14 phase 7.A) —
+/// Named monotonic timestamps from a `begin()` epoch —
 /// a shell records one named span at each startup milestone (see the
 /// `SPAN_*` consts), then calls [`Self::emit_log`] once for a single
 /// summary line.
@@ -1089,7 +1088,7 @@ mod tests {
 
     #[test]
     fn summary_attributes_encode_acquire_and_submit_spans_separately() {
-        // Phase 11.A: the old combined present is now two spans (acquire +
+        // The old combined present is now two spans (acquire +
         // submit) beside encode. A frame that spends 6ms encoding, 9ms on the
         // blocking acquire (vsync wait), and 3ms on the blit/submit must report
         // each p95 independently — not one conflated number.
@@ -1125,7 +1124,7 @@ mod tests {
 
     #[test]
     fn from_split_recombines_the_two_half_frames_without_changing_the_record() {
-        // Phase 11.B: the UI thread measures rebuild/layout/paint, the render
+        // The UI thread measures rebuild/layout/paint, the render
         // thread measures encode/acquire/submit. `from_split` folds them into
         // the exact same FramePasses a single-thread frame would have built —
         // the render-thread split moves *where* spans are measured, not the
@@ -1241,7 +1240,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Raw per-frame export + scenario markers (Phase 9.C)
+    // Raw per-frame export + scenario markers
     // ---------------------------------------------------------------
 
     /// A raw per-frame line's parsed fields — this module's own round-trip

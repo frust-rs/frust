@@ -20,8 +20,8 @@ use crate::process::{Output, ProcessRunner};
 
 /// The absolute path a successful [`build`] should have produced the app
 /// bundle at, given the project `root` and the `-configuration` it was built
-/// with (task 66: derived from `BuildMode::xcode_configuration()`, not
-/// hardcoded `Debug`) — e.g. `build/ios/Build/Products/Profile-iphonesimulator/Runner.app`.
+/// with (derived from `BuildMode::xcode_configuration()`, not hardcoded
+/// `Debug`) — e.g. `build/ios/Build/Products/Profile-iphonesimulator/Runner.app`.
 pub fn app_bundle_path(root: &Path, configuration: &str) -> PathBuf {
     root.join(format!(
         "build/ios/Build/Products/{configuration}-iphonesimulator/Runner.app"
@@ -34,8 +34,8 @@ pub fn app_bundle_path(root: &Path, configuration: &str) -> PathBuf {
 /// build` in `root`, streaming each line of output through `on_line`
 /// (prefixed `[xcodebuild] `). The `ARCHS` pin (module doc comment) is
 /// unconditional — every call here targets the Simulator. `features_b64` is
-/// `ios_build::encode_features`' output (release-lean plan, task 04): the
-/// pbxproj run-script decodes it into `--features <csv>`, so a debug/profile
+/// `ios_build::encode_features`' output: the pbxproj run-script decodes it
+/// into `--features <csv>`, so a debug/profile
 /// simulator run compiles instrumentation in while a release run gets the
 /// `lean` log ceiling — the same seam `frust build` threads `FRUST_FEATURES`
 /// through. Unlike user `--define`s, the feature set is mode-derived (never a

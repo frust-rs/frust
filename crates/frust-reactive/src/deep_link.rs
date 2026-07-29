@@ -1,6 +1,6 @@
-//! Process-wide deep-link source (spec §19, research ledger #7's `app_links`
-//! semantics): a shell delivers a platform link (cold-start intent data, or a
-//! running app's `onNewIntent`/`openURLContexts`) via [`push_deep_link`]; app
+//! Process-wide deep-link source (`app_links` semantics): a shell delivers a
+//! platform link (cold-start intent data, or a running app's
+//! `onNewIntent`/`openURLContexts`) via [`push_deep_link`]; app
 //! code reads the current state through [`deep_links`]/[`DeepLinks`] — the
 //! `frust` facade re-exports both as `frust::deep_links()`/
 //! `frust::DeepLinks`, so app code never names this crate directly.
@@ -14,14 +14,14 @@
 //! ([`DeepLinks::latest`]), so a subscriber that only tracks `latest` sees
 //! both uniformly. [`DeepLinks::initial`] additionally snapshots the very
 //! first link ever pushed in this process — set at most once, readable any
-//! number of times — for callers (the router glue, task 08) that need
+//! number of times — for callers (the router glue) that need
 //! cold-start precedence without setting up a subscription.
 //!
 //! **Documented limitation**: a push carries no "this is the cold-start link"
 //! flag, so `initial` is simply "whichever link arrived first" in this
 //! process. That is correct for the intended case (a real cold-start link
-//! always arrives before the first app rebuild, per task 07's queue-until-
-//! handle-exists contract), but a session with no real cold-start link whose
+//! always arrives before the first app rebuild, per the shell's
+//! queue-until-handle-exists contract), but a session with no real cold-start link whose
 //! first-ever push happens to race ahead of the first [`deep_links`] call
 //! would also see that push recorded as `initial`. Not a concern in practice
 //! given the shell init order.
@@ -54,7 +54,7 @@ use crate::executor::is_ui_thread;
 
 /// One delivered deep link: the raw platform-provided URL/location string
 /// (e.g. `myapp://profile/42`), unparsed — turning it into a route is the
-/// router layer's job (task 08's router/deep-link glue), not this crate's.
+/// router layer's job (the router/deep-link glue), not this crate's.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeepLink {
     pub url: String,
@@ -120,7 +120,7 @@ fn slot() -> &'static Slot {
 }
 
 /// Deliver a platform deep link (cold-start or warm) into the process-wide
-/// source. Called by a shell (task 07's Android/iOS FFI glue) on the UI
+/// source. Called by a shell (the Android/iOS FFI glue) on the UI
 /// thread; app code never calls this directly.
 ///
 /// The first call in a process snapshots its URL into
@@ -150,7 +150,7 @@ pub fn push_deep_link(url: impl Into<String>) {
         eprintln!(
             "frust-reactive: push_deep_link(\"{url}\") dropped — ReactiveRuntime::init has \
              not run yet. A shell should queue a link platform-side until its native handle \
-             exists (see task 07); reaching this indicates an odd init-ordering race, not normal \
+             exists; reaching this indicates an odd init-ordering race, not normal \
              operation."
         );
         return;

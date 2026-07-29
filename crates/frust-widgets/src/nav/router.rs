@@ -1,5 +1,5 @@
-//! The declarative router (Phase 6b, task 04): a go_router-subset layer over the
-//! imperative [`navigator`](super::navigator).
+//! The declarative router: a go_router-subset layer over the imperative
+//! [`navigator`](super::navigator).
 //!
 //! # Shape
 //!
@@ -27,8 +27,8 @@
 //! [`go_named`](Router::go_named)/[`push_named`](Router::push_named) resolve a
 //! named route's params into a path first. Every one drives the owned
 //! [`NavigatorController`] — no reactive types here; the signal glue that feeds
-//! [`handle_location`](Router::handle_location) deep links lives in the facade
-//! (task 08), keeping `frust-widgets` reactive-free.
+//! [`handle_location`](Router::handle_location) deep links lives in the facade,
+//! keeping `frust-widgets` reactive-free.
 //!
 //! The router is plain data + logic an app keeps in its `Component::State`
 //! alongside the controller — no global registry.
@@ -41,11 +41,10 @@
 //!   the replaced page's state — correct for the common flat case and for the
 //!   depth-1 root case. Resetting a deeper stack to a shorter chain (dropping
 //!   pages *below* the top) needs a controller reset op; recorded for a later
-//!   navigator revision rather than reaching across into `navigator.rs` (owned by
-//!   a wave peer).
+//!   navigator revision rather than reaching across into `navigator.rs`.
 //! * **ShellRoute-style wrappers.** Nested routes compose paths and build one page
 //!   per chain route today; a parent route that *wraps* its child's page in shared
-//!   chrome is left for a later task.
+//!   chrome is left for a future addition.
 
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -371,7 +370,7 @@ impl<State: 'static> Router<State> {
     }
 
     /// The single entry point a deep link resolves through — same reset semantics
-    /// as [`go`](Self::go). The facade (task 08) tracks the deep-link signal and
+    /// as [`go`](Self::go). The facade tracks the deep-link signal and
     /// calls this; this crate stays reactive-free.
     pub fn handle_location(&self, location: &str) {
         self.go(location);
@@ -648,7 +647,7 @@ mod tests {
         })
     }
 
-    // ================= Criterion 1: matcher =================
+    // ================= Matcher =================
 
     #[test]
     fn matches_static_route() {
@@ -704,7 +703,7 @@ mod tests {
         assert!(matches!(res, Resolution::Error { .. }));
     }
 
-    // ================= Criterion 2: redirects =================
+    // ================= Redirects =================
 
     #[test]
     fn per_route_redirect_follows_chain() {
@@ -756,7 +755,7 @@ mod tests {
         assert!(router.resolve("/x").is_matched());
     }
 
-    // ================= Criterion 4: named navigation =================
+    // ================= Named navigation =================
 
     #[test]
     fn named_resolves_params_into_path() {
@@ -802,7 +801,7 @@ mod tests {
         );
     }
 
-    // ================= Criterion 3: go vs push, real navigator =================
+    // ================= Go vs push, real navigator =================
 
     fn drive_paint(root: &mut RenderRoot<(), NavigatorView<()>>) -> Vec<(Point, Size)> {
         root.layout(Size::new(100.0, 100.0));

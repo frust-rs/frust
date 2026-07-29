@@ -1,4 +1,4 @@
-//! Desktop preview shell: the primary dev-loop platform embedding (spec §12.9).
+//! Desktop preview shell: the primary dev-loop platform embedding.
 //!
 //! Wraps winit 0.30's [`ApplicationHandler`](winit::application::ApplicationHandler)
 //! event loop around the Frust render stack (`frust-render` + vello), so a

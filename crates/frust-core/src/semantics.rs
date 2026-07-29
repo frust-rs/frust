@@ -1,5 +1,4 @@
-//! Layer 2: the semantics seam — a pull-based accessibility tree pass (spec §9,
-//! phase-6c D1).
+//! Layer 2: the semantics seam — a pull-based accessibility tree pass.
 //!
 //! Each widget *optionally* contributes an [`accesskit::Node`] describing its
 //! role, label, and state ([`Widget::semantics`](crate::widget::Widget::semantics),
@@ -14,7 +13,7 @@
 //! layout (so bounds are valid) and returns a [`SemanticsUpdate`]: a flat
 //! `(NodeId, Node)` list plus the root id and the focused node id, ready for a
 //! platform adapter (`accesskit_*`) to consume. This crate owns **no** platform
-//! wiring or per-frame scheduling — those are phase 6d.
+//! wiring or per-frame scheduling — those live in each platform shell.
 //!
 //! # Contributing a node
 //!
@@ -36,12 +35,12 @@ use kurbo::{Point, Size, Vec2};
 /// ([`RenderRoot::semantics`](crate::app::RenderRoot::semantics) always roots the
 /// tree here). It is a fixed constant — the one id never drawn from the
 /// per-`ChildPod` allocator — so a platform adapter can treat "the root" as a
-/// stable anchor across every frame (phase-6d D1). Pod-derived ids start well
+/// stable anchor across every frame. Pod-derived ids start well
 /// above it (see [`SemanticsCtx::alloc_base`]).
 pub const ROOT_NODE_ID: NodeId = NodeId(1);
 
 /// Number of low bits of a composed [`NodeId`] reserved for a widget's per-pod
-/// sub-node *slot* ordinal (phase-6d D1).
+/// sub-node *slot* ordinal.
 ///
 /// A [`ChildPod`](crate::widget::ChildPod)'s stable base id occupies the high
 /// bits; the low [`SLOT_BITS`] bits distinguish the (at most `2^SLOT_BITS`)
@@ -55,7 +54,7 @@ pub const ROOT_NODE_ID: NodeId = NodeId(1);
 const SLOT_BITS: u32 = 16;
 
 /// Compose a stable [`NodeId`] from a pod's `base` id and a per-pod sub-node
-/// `slot` ordinal (phase-6d D1 — see [`SLOT_BITS`]).
+/// `slot` ordinal (see [`SLOT_BITS`]).
 ///
 /// `base` is a monotonically-allocated, never-reused per-pod id (`>= 2`, so the
 /// composed value never collides with the reserved [`ROOT_NODE_ID`]); `slot`
@@ -79,7 +78,7 @@ pub(crate) fn compose_node_id(base: NonZeroU64, slot: u16) -> NodeId {
 /// consumes; `root` is the id of the enclosing window node (always present, even
 /// for an empty tree); `focus` is the node a focused widget claimed via
 /// [`SemanticsCtx::set_focused`], or `None` when nothing in the tree is focused
-/// (a 6d adapter defaults the platform focus to `root` in that case).
+/// (a platform adapter defaults the platform focus to `root` in that case).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SemanticsUpdate {
     /// The flat node map, root first, then each contributed node in the order it
@@ -98,7 +97,7 @@ impl SemanticsUpdate {
     ///
     /// accesskit's `TreeUpdate::focus` is a non-optional [`NodeId`]: an adapter
     /// must always name *some* focus target, and the window root is the
-    /// conventional fallback (phase-6d D1). This is the value a shell feeds
+    /// conventional fallback. This is the value a shell feeds
     /// straight into the adapter, versus reading [`focus`](SemanticsUpdate::focus)
     /// when it needs to distinguish "root, because focused" from "root, because
     /// nothing is focused".
@@ -111,7 +110,7 @@ impl SemanticsUpdate {
 /// absolute origin/size (mirroring paint's origin threading) and the
 /// parent/child structure.
 ///
-/// Node ids are **stable across passes** (phase-6d D1): each node's id is
+/// Node ids are **stable across passes**: each node's id is
 /// composed from the owning [`ChildPod`](crate::widget::ChildPod)'s persistent
 /// base id (assigned on first visit from a monotonic, never-reused
 /// [`RenderRoot`](crate::app::RenderRoot) allocator and threaded in through
@@ -273,7 +272,7 @@ impl SemanticsCtx {
 
     /// Like [`push_container`](SemanticsCtx::push_container) but with an explicit,
     /// caller-chosen `id` — used for the reserved [`ROOT_NODE_ID`] window node,
-    /// which is not owned by any pod (phase-6d D1).
+    /// which is not owned by any pod.
     pub(crate) fn push_container_with_id(
         &mut self,
         id: NodeId,
@@ -492,7 +491,7 @@ mod tests {
     fn compose_node_id_is_collision_free_across_bases_and_slots() {
         // Distinct (base, slot) pairs must map to distinct ids, and one base's
         // slot range must never overlap the next base's — the property the
-        // stable-id scheme relies on (phase-6d D1).
+        // stable-id scheme relies on.
         use std::collections::HashSet;
         let mut seen = HashSet::new();
         for base in 2u64..40 {

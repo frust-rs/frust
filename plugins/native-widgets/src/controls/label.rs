@@ -41,21 +41,20 @@ pub(crate) struct LabelProps {
     pub(crate) enabled: bool,
     /// Packed ARGB text colour, or `None` to leave the theme's own.
     pub(crate) text_color: Option<i32>,
-    /// Packed ARGB background fill (theme ladder L2 followup, f1-01:
+    /// Packed ARGB background fill (theme ladder L2 followup:
     /// `crate::api::theme::ResolvedTheme::surface_bg`), matching the page
     /// surface this `Label` sits on — EXPLICIT so it re-paints live on a
     /// brightness flip instead of pinning to whatever the platform's own
     /// default background resolved to under L1's creation-time
     /// night-qualified `Context` (`crate::android::theme`'s "Baked at
-    /// construction, not live" note — the exact defect this field closes,
-    /// `VERIFY-P1.md` bar 3). `None` leaves the platform's own default when
-    /// no theme is threaded.
+    /// construction, not live" note — the exact defect this field closes).
+    /// `None` leaves the platform's own default when no theme is threaded.
     pub(crate) background_color: Option<i32>,
     /// Text size in scale-independent pixels, or `None` for the platform's.
     pub(crate) text_size_sp: Option<f32>,
     /// The TalkBack label; `None` lets the platform read the text itself.
     pub(crate) content_description: Option<String>,
-    /// Theme ladder L3 (p1-08): the resolved
+    /// Theme ladder L3: the resolved
     /// [`crate::api::theme::ResolvedTheme::body_typeface`], or
     /// [`Typeface::System`] when absent.
     pub(crate) typeface: Typeface,
@@ -237,7 +236,7 @@ pub(crate) mod platform {
     /// reference is enough on this arm).
     pub(crate) struct LabelState {
         view: Retained<UILabel>,
-        /// Theme ladder L3 (p2-04): the combined typeface/size state
+        /// Theme ladder L3: the combined typeface/size state
         /// `Setter::TextSizeSp`/`Setter::Typeface` share — see
         /// `crate::controls::platform::FontState`'s doc.
         font: platform::FontState,
@@ -380,7 +379,7 @@ mod tests {
         );
     }
 
-    // --- theme ladder L2 followup (f1-01): the explicit background setter --
+    // --- theme ladder L2 followup: the explicit background setter ----------
 
     #[test]
     fn a_background_color_alone_plans_exactly_one_setter() {

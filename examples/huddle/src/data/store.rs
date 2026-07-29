@@ -1,5 +1,5 @@
-//! The shared mock dataset the whole Huddle app renders (PLAN.md's
-//! "All data mocked/static").
+//! The shared mock dataset the whole Huddle app renders — all data is
+//! mocked/static.
 //!
 //! This is a hub file: only a feature's `data/` layer reads it directly
 //! (through the accessor functions below), never `domain`/`presentation` (see
@@ -10,19 +10,19 @@
 //! own the signals, seeding them from these accessors via the feature's
 //! repository.
 //!
-//! Entity struct definitions live in their owning feature's `domain::entities`
-//! (huddle clean-architecture refactor, task 01); this module owns only the
+//! Entity struct definitions live in their owning feature's `domain::entities`;
+//! this module owns only the
 //! dataset + accessors, the app's transport-equivalent.
 //!
-//! # Shape (per PLAN)
+//! # Shape
 //!
 //! - 10 [`users`] (name, initials, [`UserStatus`]).
 //! - 6 [`channels`], one of them [`Channel::private`].
 //! - 9 [`dms`] (each a 1:1 conversation with a [`User`]) — one of them
 //!   (`dm-9`) deliberately carries no messages, so the channel feed's
 //!   empty-conversation state ("No messages yet — say hi") has a real
-//!   destination (task 22's empty-states audit; the frozen-hub rule is lifted
-//!   for this one addition).
+//!   destination (this hub file's usual freeze is lifted for this one
+//!   addition).
 //! - ~40 [`messages`] spread across the channels (varied: text lengths, a
 //!   link, a file stub, reactions).
 //! - one 120-message channel ([`FIREHOSE_ID`], `#firehose`) for pagination,
@@ -189,7 +189,7 @@ const DMS: [Dm; 9] = [
         preview: "Routes converged.",
     },
     // An empty DM: no messages in `MESSAGES`, so `messages_for("dm-9")` is
-    // empty and the feed shows its empty-conversation state (task 22).
+    // empty and the feed shows its empty-conversation state.
     Dm {
         id: "dm-9",
         user_id: 9,
@@ -634,7 +634,7 @@ mod tests {
             1,
             "exactly one private channel",
         );
-        assert_eq!(dms().len(), 9, "9 DMs (one an empty DM — task 22)");
+        assert_eq!(dms().len(), 9, "9 DMs (one an empty DM)");
         assert_eq!(messages().len(), 40, "~40 authored messages");
     }
 
@@ -646,7 +646,7 @@ mod tests {
         );
         assert!(
             messages_for("dm-9").is_empty(),
-            "dm-9 carries no messages (drives the empty-feed state — task 22)"
+            "dm-9 carries no messages (drives the empty-feed state)"
         );
     }
 

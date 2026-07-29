@@ -1,12 +1,12 @@
-//! The modal M3 `BottomSheet` (Phase 6c, PLAN.md D3/D5, task 11): a full-area
-//! widget = **scrim** (32% scrim-color fill; tap outside the sheet dismisses) +
-//! a **bottom-anchored panel** (top corners extra-large 28dp — ledger R12/R16,
-//! `surfaceContainerLow`, a centered drag handle **32dp wide × 4dp tall** in a
-//! 48dp touch target — ledger R16), pushed as a transparent navigator page via
+//! The modal M3 `BottomSheet`: a full-area widget = **scrim** (32%
+//! scrim-color fill; tap outside the sheet dismisses) + a **bottom-anchored
+//! panel** (top corners extra-large 28dp, `surfaceContainerLow`, a centered
+//! drag handle **32dp wide × 4dp tall** in a 48dp touch target), pushed as a
+//! transparent navigator page via
 //! [`NavigatorController::push_transparent_for_result`] and entering via the
-//! [`PageTransition::SlideUp`] preset (task 06).
+//! [`PageTransition::SlideUp`] preset.
 //!
-//! # Navigator-modal architecture (D3)
+//! # Navigator-modal architecture
 //!
 //! Like [`crate::material::dialog`], the scrim is part of *this* widget (the
 //! navigator provides none and routes input only to the top page), and the
@@ -28,7 +28,7 @@
 //! drag does nothing. A richer interactive settle (mirroring
 //! [`crate::NavigatorWidget`]'s held-transition edge-swipe) is deferred.
 //!
-//! # Panel anatomy (ledger R12/R16)
+//! # Panel anatomy
 //!
 //! The panel spans the full width, anchored to the bottom edge, with its **top**
 //! two corners rounded to the extra-large (28dp) shape and its bottom corners
@@ -40,7 +40,7 @@
 //!
 //! A `BottomSheet` is a plain widget: it works inside a [`crate::Stack`] too
 //! (the scrim is still its own). The navigator path is the primary, documented
-//! one. This module does **not** edit any nav file — task 06 owns those.
+//! one. This module does **not** edit any nav file.
 //!
 //! # Semantics
 //!
@@ -50,7 +50,7 @@
 //! dialog-ish surface (the same role the [`crate::material::dialog`] uses). Its
 //! content becomes the node's accesskit children.
 //!
-//! # Keyboard operability (task 07, 6d)
+//! # Keyboard operability
 //!
 //! **Escape-to-dismiss now works, once the sheet has focus.** A `Down`
 //! anywhere in the sheet (scrim, handle, or panel background) claims focus
@@ -63,24 +63,24 @@
 //! barrier does). **There is still no hook to focus the sheet on appear**
 //! (auto-focus-on-appear) — a caller must complete one pointer interaction
 //! with the sheet before Escape does anything; that gap is deferred to a
-//! future focus-manager work item, not this task.
+//! future focus-manager work item.
 //!
 //! The accesskit **modal** flag set above is nonetheless **kept deliberately**,
 //! not dropped. No platform `accesskit_*` adapter is wired yet (see
 //! `docs/ARCHITECTURE.md`'s Semantics pass), so there is no live assistive-tech
 //! audience the flag could currently mislead.
 //!
-//! # State layer (task 07, 6d)
+//! # State layer
 //!
 //! This sheet has no `StateLayer` surface of its own (the scrim, panel, and
 //! drag handle are plain fills, not an M3 interactive surface) — there is
 //! nothing here for `StateLayer::set_focused` to wire into.
 //!
-//! # `dismissable(bool)` + back-dismiss (task 12)
+//! # `dismissable(bool)` + back-dismiss
 //!
 //! [`BottomSheetView::dismissable`] (default `true`) is Flutter's
-//! `isDismissible`+`enableDrag` collapsed into one v1 flag (spec parity,
-//! task 12's Scope): `false` disables the scrim tap, the handle drag (a drag
+//! `isDismissible`+`enableDrag` collapsed into one v1 flag (spec parity):
+//! `false` disables the scrim tap, the handle drag (a drag
 //! past the threshold simply settles back without firing `on_dismiss`), and
 //! `Escape`, and [`show_bottom_sheet`] pushes the page with
 //! [`BackPolicy::Veto`](crate::nav::navigator::BackPolicy::Veto) so a back
@@ -115,19 +115,19 @@ use crate::nav::navigator::{BackPolicy, NavigatorController, PopResult, PushOpti
 use crate::nav::transition::{PageTransition, TransitionSpec};
 
 /// Scrim opacity behind a modal bottom sheet (M3 spec: 32%, matching the
-/// dialog scrim, ledger R15).
+/// dialog scrim).
 const SCRIM_ALPHA: f32 = 0.32;
 /// Unthemed-fallback panel top-corner radius (a theme resolves this from
-/// `shape.extra_large`, ledger R12's 28dp token).
+/// `shape.extra_large`, a 28dp token).
 const RADIUS: f64 = 28.0;
 /// Drag-handle visual indicator width, in logical px (M3 token
-/// `m3_comp_sheet_bottom_docked_drag_handle_width`, ledger R16).
+/// `m3_comp_sheet_bottom_docked_drag_handle_width`).
 const HANDLE_WIDTH: f64 = 32.0;
 /// Drag-handle visual indicator height, in logical px (M3 token
-/// `m3_comp_sheet_bottom_docked_drag_handle_height`, ledger R16).
+/// `m3_comp_sheet_bottom_docked_drag_handle_height`).
 const HANDLE_HEIGHT: f64 = 4.0;
 /// Drag-handle interactive touch-target strip height, in logical px (M3
-/// enforces a 48dp minimum touch target on the handle, ledger R16). The whole
+/// enforces a 48dp minimum touch target on the handle). The whole
 /// full-width strip at the top of the sheet is the drag zone.
 const HANDLE_TOUCH_TARGET: f64 = 48.0;
 /// Flattening tolerance for the top-rounded panel path (a visually-lossless
@@ -143,7 +143,7 @@ const PATH_TOLERANCE: f64 = 0.1;
 const DRAG_DISMISS_FRACTION: f64 = 0.5;
 
 /// Unthemed-fallback panel container fill (a theme resolves this from
-/// `colors.surface_container_low`, ledger R16).
+/// `colors.surface_container_low`).
 const CONTAINER: Color = Color::from_rgb8(0xF7, 0xF2, 0xFA);
 /// Unthemed-fallback drag-handle color (a theme resolves this from
 /// `colors.on_surface_variant`, the M3 drag-handle color role).
@@ -200,7 +200,7 @@ fn finite_or_zero(v: f64) -> f64 {
 /// A view-held, typed scrim/drag-dismiss callback (erased on build).
 type OnDismiss<State> = Rc<dyn Fn(&mut State)>;
 
-/// The shared back-press dismiss-signal cell (task 02's `DismissAnimated`
+/// The shared back-press dismiss-signal cell (the `DismissAnimated`
 /// seam) paired with the state-free pop it fires — see the
 /// [module docs](self)'s `dismissable(bool)` section.
 type DismissSignal = (Rc<Cell<u64>>, Rc<dyn Fn()>);
@@ -211,7 +211,7 @@ pub struct BottomSheetView<State: 'static> {
     content: AnyView<State>,
     on_dismiss: Option<OnDismiss<State>>,
     dismissable: bool,
-    /// The shared back-press dismiss-signal cell (task 02's `DismissAnimated`
+    /// The shared back-press dismiss-signal cell (the `DismissAnimated`
     /// seam) plus the state-free pop it fires — wired internally by
     /// [`show_bottom_sheet`], never part of the public builder surface (see
     /// the [module docs](self)).
@@ -277,9 +277,10 @@ pub fn show_bottom_sheet<State, B, R>(
     let dismiss_ctrl = controller.clone();
     let signal_ctrl = controller.clone();
     // Peeked once, at show-time: the back policy/dismiss-signal wiring is
-    // fixed for the life of this pushed page (mirrors task 02's push-time
-    // `PushOptions` contract, and `crate::glyph::dialog::show_glyph_dialog`'s
-    // identical peek), even though `build` is re-invoked on every later
+    // fixed for the life of this pushed page (mirrors the navigator's
+    // push-time `PushOptions` contract, and
+    // `crate::glyph::dialog::show_glyph_dialog`'s identical peek), even
+    // though `build` is re-invoked on every later
     // navigator rebuild to diff the page's content.
     let dismissable = build().dismissable;
     let signal = dismissable.then(|| Rc::new(Cell::new(0u64)));
@@ -314,7 +315,7 @@ pub struct BottomSheetWidget {
     content: ChildPod,
     on_dismiss: Option<crate::ErasedCallback>,
     dismissable: bool,
-    /// The shared back-press dismiss-signal cell (task 02's `DismissAnimated`
+    /// The shared back-press dismiss-signal cell (the `DismissAnimated`
     /// seam) plus its state-free pop — see
     /// [`observe_dismiss_signal`](Self::observe_dismiss_signal).
     dismiss_signal: Option<DismissSignal>,
@@ -826,7 +827,7 @@ mod tests {
         assert_eq!(state.dismissed, 1);
     }
 
-    // --- Task 12: `dismissable(false)` gates the scrim + drag together. ---
+    // --- `dismissable(false)` gates the scrim + drag together. ---
 
     fn laid_out_non_dismissable_flag_sheet() -> BottomSheetWidget {
         let view: BottomSheetView<Flag> = bottom_sheet(leaf_any_flag(300.0, 200.0))
@@ -929,7 +930,7 @@ mod tests {
         );
     }
 
-    // --- Focus + Escape opt-in (task 07, 6d). ---
+    // --- Focus + Escape opt-in. ---
 
     #[test]
     fn escape_after_a_short_handle_press_claims_focus_and_dismisses_via_navigator() {
@@ -1044,7 +1045,7 @@ mod tests {
         );
     }
 
-    // --- Task 12: `dismissable(false)` gates Escape too (via the navigator). ---
+    // --- `dismissable(false)` gates Escape too (via the navigator). ---
 
     #[test]
     fn dismissable_false_gates_escape_via_navigator() {
@@ -1102,7 +1103,7 @@ mod tests {
         );
     }
 
-    // --- Task 12: back request routes through dismissable/BackPolicy. ---
+    // --- Back request routes through dismissable/BackPolicy. ---
 
     #[test]
     fn back_request_dismissable_true_dismisses_via_navigator() {

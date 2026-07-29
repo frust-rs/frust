@@ -2,9 +2,7 @@
 
 Two paired apps implementing eight identical scenarios (S1–S8), one
 harness that drives both and computes identical statistics from their raw
-frame series, published methodology, and a results table. This is the
-deliverable of Phase 9.E in
-`workflow/plans/features/frust-phase-9-rust-advantage/PLAN.md`.
+frame series, published methodology, and a results table.
 
 ## What's here
 
@@ -26,8 +24,7 @@ number published in `RESULTS.md` is reproducible by anyone with the same
 device via the commands below; every methodology decision (run count,
 warmup discard, statistics) is declared explicitly in `PROTOCOL.md` because
 no industry-standard cross-framework UI benchmark protocol exists to defer
-to (see `research/RESEARCH.md` §7/§8's refuted-claims ledger in the parent
-plan).
+to.
 
 ## How to run
 
@@ -50,8 +47,7 @@ from its own directory for iteration:
 
 ## Status
 
-Both apps and the harness are being built out across Phase 9.E's tasks
-(`workflow/plans/features/frust-phase-9-rust-advantage/9e/TASKS.md`).
+Both apps and the harness are actively being built out.
 `RESULTS.md` reflects real device runs only — it starts empty and fills in
 as the matrix is actually executed, never with placeholder or projected
 numbers.

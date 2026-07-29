@@ -14,7 +14,7 @@
 //! same `FRUST_TRACE_RAW` per-frame stream the shell's `FrameStats` emits
 //! (`frust_shell_common::perf::mark_scenario_start`/`mark_scenario_end` — see
 //! `docs/ARCHITECTURE.md`'s `FrameStats`/`StartupSpans` row), so the harness
-//! (task 06) can slice the raw series per scenario. The default impls stamp
+//! can slice the raw series per scenario. The default impls stamp
 //! the scenario's [`id`](Scenario::id); a scenario that needs finer per-op
 //! sub-markers (S3's `s3-create1k` etc.) calls the same `perf::mark_scenario_*`
 //! functions directly with its own sub-names.
@@ -77,8 +77,7 @@ pub trait Scenario: Sync {
 }
 
 /// All eight scenarios, in id order. Index into this from [`BenchState::active`]
-/// / [`BenchState::selected`]. S1 and S7 are implemented (task 02); S2–S6 and
-/// S8 are compiling stubs each task 03/04 fills in place.
+/// / [`BenchState::selected`].
 pub static SCENARIOS: [&dyn Scenario; 8] = [
     &s1_animation::S1,
     &s2_list::S2,
@@ -186,9 +185,8 @@ pub fn index_from_id(id: &str) -> Option<usize> {
     SCENARIOS.iter().position(|s| s.id() == id)
 }
 
-/// A shared labeled placeholder view for the not-yet-implemented scenario
-/// stubs (S2–S6, S8) — a centered title so a desktop run visibly switches to
-/// it. Task 03/04 replace their scenario's `build` body with the real view.
+/// A shared labeled placeholder view for a not-yet-implemented scenario
+/// stub — a centered title so a desktop run visibly switches to it.
 pub fn placeholder(scenario: &dyn Scenario) -> AnyView<BenchState> {
     any(text(format!(
         "{} — {}\n(scenario stub — not yet implemented)",

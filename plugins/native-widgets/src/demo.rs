@@ -1,13 +1,13 @@
 //! [`DemoCard`] — ONE composite [`NativeComponent`], shipped inside this
-//! plugin behind the **non-default `demo-components` feature** (native-widgets
-//! Phase 3, p3-08).
+//! plugin behind the **non-default `demo-components` feature**.
 //!
-//! p3-02 shipped the native-subtree surface —
+//! The native-subtree surface —
 //! [`ComponentCtx::with_local_frame`] + [`ComponentCtx::add_child`] +
 //! [`ComponentCtx::retain_child`] — and the generic
-//! [`native_component`](crate::api::native_component) mounting builder, but
-//! nothing outside a host test ever called them: on iOS in particular
-//! `addSubview` had **no caller anywhere**. This module is that caller. It is a
+//! [`native_component`](crate::api::native_component) mounting builder
+//! already existed, but nothing outside a host test ever called them: on iOS
+//! in particular `addSubview` had **no caller anywhere**. This module is that
+//! caller. It is a
 //! parent view with a title label and two buttons under it, published as
 //! exactly **one** `platform_view` slot no matter how many children it grows.
 //!
@@ -78,8 +78,8 @@
 //! **no production path attaches a listener** to a [`NativeComponent`] in this
 //! build, its root as much as its children, so **no [`NativeComponent`] can
 //! receive events in this build**, and there is no supported way to arrange one.
-//! [`NativeComponent::on_event`] owns the full reasoning and names the
-//! deferred Phase 4 gap; the short version is that attaching this crate's
+//! [`NativeComponent::on_event`] owns the full reasoning and names the gap
+//! this defers; the short version is that attaching this crate's
 //! shared `FrustNativeListener`/`FrustNativeControlTarget` needs the slot's
 //! id, and a component is never handed one (`create` receives `&self`, a
 //! [`ComponentCtx`] and its props).
@@ -337,7 +337,7 @@ mod platform {
                 }
                 let [primary, secondary] = <[_; 2]>::try_from(buttons).ok()?;
 
-                // Deliberate double retain (R0-5): `retain_child(&parent)`
+                // Deliberate double retain: `retain_child(&parent)`
                 // below and `ctx.root(&parent)` two lines down each allocate
                 // their own JNI global ref to the SAME Java object, so this
                 // one Java view ends up with two live global refs. Not a
@@ -473,9 +473,9 @@ mod platform {
     ///
     /// Delegates to `crate::android::run_jni` (a re-export of
     /// `android/ctx.rs`'s already-`pub(crate)` helper of the same name,
-    /// added this wave so a module outside `android`'s private `ctx`
-    /// submodule can reach it) rather than a hand-rolled check-and-clear
-    /// (R0-8's fix): that helper's `take_pending_exception`
+    /// exposed here so a module outside `android`'s private `ctx`
+    /// submodule can reach it) rather than a hand-rolled check-and-clear:
+    /// that helper's `take_pending_exception`
     /// extracts the throwable's class name and message before clearing it,
     /// so `ctx.report_error` now reports e.g. `"native-widgets platform
     /// error: android native-widgets: setPadding:
@@ -797,7 +797,7 @@ mod tests {
 
     #[test]
     fn the_demo_composite_ships_one_slot_and_releases_every_child() {
-        // p3-08's acceptance bar, and the reason this test exists at all: this
+        // The reason this test exists at all: this
         // feature has already shipped two leaks that looked fine until
         // something counted.
         assert_eq!(live_child_count(), 0, "this test thread starts clean");

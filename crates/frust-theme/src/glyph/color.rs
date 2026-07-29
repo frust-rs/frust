@@ -6,15 +6,15 @@
 //!
 //! - **Dark** ([`ColorScheme::glyph_dark`]): `glyph-design-system.html`'s
 //!   `:root` CSS custom properties (the canonical brightness), retrieved
-//!   2026-07-21 (RESEARCH §1.1).
+//!   2026-07-21.
 //! - **Light** ([`ColorScheme::glyph_light`]): `glyph-design-system-light.html`'s
-//!   `:root` block, retrieved 2026-07-21 (RESEARCH §1.1b). Not a value flip —
+//!   `:root` block, retrieved 2026-07-21. Not a value flip —
 //!   the accent, semantic hues, and surface ordering are independently
 //!   re-tuned for AA on paper.
 //! - **Ink** ([`GlyphInk`]) and **status** ([`StatusPalette::glyph`]) sources
 //!   are cited on those items.
 //!
-//! # Accent-role convention (uniform across brightnesses; PLAN.md Phase 3)
+//! # Accent-role convention (uniform across brightnesses)
 //!
 //! Glyph is a **single-accent** system whose accent plays two roles the way
 //! Material 3 splits `primary` (text/icon) from `primary_container` (a filled
@@ -103,7 +103,7 @@ impl ColorScheme {
     /// The Glyph **dark** color scheme — the canonical brightness. Maps
     /// `glyph-design-system.html`'s flat token set onto the 46 M3 roles per
     /// this module's accent-role convention and nearest-role mappings
-    /// (retrieved 2026-07-21, RESEARCH §1.1).
+    /// (retrieved 2026-07-21).
     pub const fn glyph_dark() -> Self {
         Self {
             // Accent (text/icon) + bright-fill container split (see module docs).
@@ -147,7 +147,7 @@ impl ColorScheme {
             error_container: Color::from_rgb8(0x32, 0x24, 0x2C),
             on_error_container: D_ERROR,
 
-            // Surface ramp: void→hover, monotonic (RESEARCH §1.1).
+            // Surface ramp: void→hover, monotonic.
             surface: D_BG_SURFACE,
             on_surface: D_FG,
             on_surface_variant: D_FG_MUTED,
@@ -172,9 +172,9 @@ impl ColorScheme {
         }
     }
 
-    /// The Glyph **light** color scheme — "same tokens · accent re-tuned for
-    /// AA on paper surfaces" (`glyph-design-system-light.html`, retrieved
-    /// 2026-07-21, RESEARCH §1.1b). Not a value flip: the accent splits into a
+    /// The Glyph **light** color scheme — same tokens, accent re-tuned for
+    /// AA on paper surfaces (`glyph-design-system-light.html`, retrieved
+    /// 2026-07-21). Not a value flip: the accent splits into a
     /// darkened text tone and the still-bright fill, the semantic hues darken,
     /// and the surface ramp is re-ordered (`surface` = white is the *lightest*
     /// slot, unlike dark's monotonic ramp).
@@ -215,7 +215,7 @@ impl ColorScheme {
             error_container: Color::from_rgb8(0xF9, 0xED, 0xEC),
             on_error_container: L_ERROR,
 
-            // Surface ramp: white is the *lightest* slot (RESEARCH §1.1b) —
+            // Surface ramp: white is the *lightest* slot —
             // the container ladder darkens as it rises (M3 light convention).
             surface: L_BG_SURFACE,
             on_surface: L_FG,
@@ -270,9 +270,9 @@ const FIXED_ON_TERTIARY_VARIANT: Color = L_CYAN;
 // ---- GlyphInk: brightness-invariant terminal/tooltip tokens ------------
 
 /// The Glyph "ink" tokens: the terminal/code block and tooltip stay **dark
-/// in both brightnesses** by source mandate (RESEARCH §1.1b(c)) — "shell
-/// output is read against a dark background by habit and convention", and a
-/// tooltip "is a floating overlay, not page content". These are
+/// in both brightnesses** by source mandate — shell
+/// output is read against a dark background by habit and convention, and a
+/// tooltip is a floating overlay, not page content. These are
 /// brightness-invariant, so they live in a [`crate::extensions::ThemeExtensions`]
 /// entry ([`crate::theme::Theme::glyph_baseline`] attaches one) rather than
 /// as brightness-swapped [`ColorScheme`] roles.
@@ -306,7 +306,7 @@ pub struct GlyphInk {
 }
 
 impl GlyphInk {
-    /// The default Glyph ink token set (RESEARCH §1.1b(c); retrieved
+    /// The default Glyph ink token set (retrieved
     /// 2026-07-21).
     pub const fn default_ink() -> Self {
         Self {
@@ -331,7 +331,7 @@ impl Default for GlyphInk {
 // ---- Glyph StatusPalette (success/warning/info) ------------------------
 
 impl StatusPalette {
-    /// The Glyph success/warning/info palette (RESEARCH §1.1/§1.1b; retrieved
+    /// The Glyph success/warning/info palette (retrieved
     /// 2026-07-21). `info` maps to Glyph's `cyan` token. Container tints are
     /// each semantic hue's own faint wash pre-flattened over `bg-surface`
     /// (`#161a23` dark, `#ffffff` light) per this module's alpha convention;
@@ -504,7 +504,7 @@ mod tests {
     #[test]
     fn glyph_light_surface_is_lightest_and_ramp_darkens_upward() {
         let l = ColorScheme::glyph_light();
-        // Deliberate: `surface` = white is the lightest slot (RESEARCH §1.1b),
+        // Deliberate: `surface` = white is the lightest slot,
         // unlike dark's monotonic ramp.
         assert_eq!(l.surface, Color::from_rgb8(0xff, 0xff, 0xff));
         assert_eq!(

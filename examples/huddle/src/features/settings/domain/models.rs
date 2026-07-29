@@ -1,19 +1,18 @@
 //! `settings` domain — the design-language + brightness selection model plus
-//! the [`compose`] decision function (huddle clean-architecture refactor,
-//! task 05; moved verbatim from the former flat `features::settings` module).
+//! the [`compose`] decision function (moved verbatim from the former flat
+//! `features::settings` module).
 //!
-//! # Domain → `frust` exception (flagged for task 06's conformance-scan allowlist)
+//! # Domain → `frust` exception
 //!
 //! This file imports `frust::{Brightness, DesignLanguage, Theme, TypeScale}`
 //! directly — the first domain file in the crate to mention `frust::` at
-//! all. These are plain value types [`compose`] composes (not view/widget/
-//! reactive vocabulary), and the task's scope note is explicit: "keep
-//! SetTheme/notifications ops as-is (they're infallible ops, not new
-//! ceremony)" — preserved verbatim per PLAN Design Decision 5's hard
-//! behavior-preserving bar rather than introduced as new ceremony to route
-//! around the import ban. See [`super::use_cases::set_theme`] for the
-//! companion (and sharper) exception: the single call site of
-//! `set_app_theme`/`clear_app_theme`.
+//! all, allowlisted by the crate's architecture-conformance test. These are
+//! plain value types [`compose`] composes (not view/widget/reactive
+//! vocabulary), so the import stays within the domain layer's data-only
+//! contract; `SetTheme`/the notification ops stay infallible ops rather than
+//! being wrapped in new ceremony to route around the import ban. See
+//! [`super::use_cases::set_theme`] for the companion (and sharper)
+//! exception: the single call site of `set_app_theme`/`clear_app_theme`.
 
 use frust::{Brightness, DesignLanguage, Theme, TypeScale};
 
@@ -39,9 +38,8 @@ pub fn slider_to_type_factor(value: f64) -> f32 {
 
 /// Multiply every [`TypeScale`] role's font size by `factor` in place — the
 /// dynamic-type transform composed onto the active baseline's type scale before
-/// `set_app_theme`. Only the `size` knob is scaled (the M3 spec's line-height /
-/// letter-spacing tokens are left as authored), matching the task's "multiplies
-/// every role's size" contract.
+/// `set_app_theme`. Only the `size` knob is scaled uniformly across every role
+/// (the M3 spec's line-height / letter-spacing tokens are left as authored).
 pub fn scale_type_scale(type_scale: &mut TypeScale, factor: f32) {
     macro_rules! scale_roles {
         ($ts:ident, $factor:ident, $($role:ident),+ $(,)?) => {
@@ -209,7 +207,7 @@ pub enum ThemeDecision {
 /// Resolving a `System` axis against `current` is what lets "force Dark while
 /// keeping the platform's Material/Cupertino default" work without discarding
 /// the other axis — the `with_brightness` footgun `examples/catalog` documents.
-/// Extends the two-axis composition with the theming-engine axes (task 15): the
+/// Extends the two-axis composition with the theming-engine axes: the
 /// [`AccentChoice`] palette re-tint and the dynamic-type `type_factor`.
 ///
 /// - Clear (follow the platform outright) only when *every* axis is at its
@@ -265,9 +263,9 @@ pub fn compose(
 pub struct SetThemeParams {
     pub design: DesignChoice,
     pub brightness: BrightnessChoice,
-    /// The accent palette re-tint (task 15).
+    /// The accent palette re-tint.
     pub accent: AccentChoice,
-    /// The dynamic-type multiplier (task 15).
+    /// The dynamic-type multiplier.
     pub type_factor: f32,
     /// The ambient theme active at the moment the change was requested.
     pub current: Theme,
@@ -400,7 +398,7 @@ mod tests {
         );
     }
 
-    // --- Theming-engine axes (task 15) -----------------------------------
+    // --- Theming-engine axes ----------------------------------------------
 
     #[test]
     fn an_accent_forces_apply_even_with_system_axes() {

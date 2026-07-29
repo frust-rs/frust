@@ -26,7 +26,7 @@ use crate::supervise::{SessionEvent, SessionId};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RegionId {
     /// The single large "Create a new Frust project" button on the welcome
-    /// screen (D6b); opens the create wizard.
+    /// screen; opens the create wizard.
     CreateButton,
     /// The workbench "New project" action (sidebar ACTIONS row); opens the
     /// create wizard.
@@ -71,9 +71,9 @@ pub enum RegionId {
     /// A row inside the open titlebar switcher dropdown (0-based index into
     /// `AppState::projects`); click switches and closes the dropdown.
     ProjectMenuItem(usize),
-    /// The titlebar toolchain chip; click opens the bootstrap wizard (D6a —
-    /// the workbook's toolchain chip → bootstrap flow; the doctor detail panel
-    /// stays reachable via `d` / the sidebar "Doctor" action).
+    /// The titlebar toolchain chip; click opens the bootstrap wizard (the
+    /// doctor detail panel stays reachable via `d` / the sidebar "Doctor"
+    /// action).
     DoctorChip,
     /// A step-tree row in the bootstrap wizard (0-based index into the wizard's
     /// visible node list); click selects it (a `Platforms` header row toggles
@@ -151,15 +151,15 @@ pub enum RegionId {
     /// The command palette's `[Esc] Close` title affordance.
     PaletteClose,
     /// A row in the open context menu (0-based index into the menu's entries);
-    /// hover highlights it, click activates it (T04 / D4).
+    /// hover highlights it, click activates it.
     ContextMenuItem(usize),
-    /// The keyboard/help overlay (T05 / D5) — a click anywhere in the panel
+    /// The keyboard/help overlay — a click anywhere in the panel
     /// closes it (mouse parity for `Esc`).
     HelpClose,
 }
 
 /// The kind of an in-progress drag, identifying which draggable chrome the
-/// pointer grabbed (T04 / D4). Each variant carries the layout geometry
+/// pointer grabbed. Each variant carries the layout geometry
 /// captured from the registered drag region at press time, so the pure engine
 /// maps a later pointer position to a result (a sidebar width, or a log scroll
 /// anchor) without ever knowing the terminal layout itself.
@@ -186,7 +186,7 @@ pub enum DragKind {
 }
 
 /// What a right-click landed on — the context a [`super::ContextMenu`] is built
-/// from (T04 / D4). Each variant names the row/pane under the cursor so
+/// from. Each variant names the row/pane under the cursor so
 /// [`super::context_menu::entries_for`] can offer target-specific entries whose
 /// messages already exist (never a menu-only command — see that module).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,8 +206,9 @@ pub enum ContextTarget {
 pub enum Message {
     /// Quit requested (`q` / `Ctrl+Q`). Sets `should_quit`; the loop exits.
     Quit,
-    /// A tick from the frame interval. The skeleton has no animation, so this
-    /// is a no-op (dirty-frame skip keeps it from forcing a draw).
+    /// A tick from the frame interval — ages the toast stack (the app's only
+    /// animated state) and is otherwise a no-op (dirty-frame skip keeps it
+    /// from forcing a draw when nothing is animating).
     Tick,
     /// The terminal was resized; forces a redraw at the new size.
     Resize(u16, u16),
@@ -224,7 +225,7 @@ pub enum Message {
     /// clears the pressed chrome without activating.
     CreateCancel,
 
-    // ── Create-project wizard (D6b) ─────────────────────────────────────────
+    // ── Create-project wizard ───────────────────────────────────────────────
     /// Open the create wizard (the workbench "New project" action / `n`, or
     /// the palette). Primes an off-thread clean-signals sibling probe.
     OpenCreateWizard,
@@ -256,7 +257,7 @@ pub enum Message {
     /// retry.
     ScaffoldFailed(String),
 
-    // ── Sessions (D2/D6b): the supervisor feeds `Session`; the rest are
+    // ── Sessions: the supervisor feeds `Session`; the rest are
     //    user-driven tab/log-view interactions. ──────────────────────────────
     /// A lifecycle/line event from a supervised session (see
     /// [`crate::supervise`]) — routed into the matching session's view-model.
@@ -315,7 +316,7 @@ pub enum Message {
     /// as an [`super::Effect::Copy`].
     CopySelection,
 
-    // ── Devices panel + run-config modal (D6b) ──────────────────────────────
+    // ── Devices panel + run-config modal ─────────────────────────────────────
     /// Refresh the device list (`r` from the panel with no modal, or the
     /// panel refresh affordance) — routed to the runner as
     /// [`super::Effect::RefreshDevices`], which discovers off-thread.
@@ -358,7 +359,7 @@ pub enum Message {
     /// [`super::Effect::LaunchSessions`].
     RunConfigLaunch,
 
-    // ── Project switcher + recent-projects persistence (F5 / D6b) ──────────
+    // ── Project switcher + recent-projects persistence ──────────────────────
     /// Toggle the titlebar `▾` project-switcher dropdown open/closed (click,
     /// or `Ctrl+O`/`p` from the workbench).
     ToggleProjectSwitcher,
@@ -375,7 +376,7 @@ pub enum Message {
     /// ([`super::Effect::RecordRecentProject`]).
     SwitchProject(usize),
 
-    // ── Doctor panel + titlebar chip (TUI2-07) ──────────────────────────────
+    // ── Doctor panel + titlebar chip ──────────────────────────────────────────
     /// Run the validator set off-thread (`d` from the workbench, the sidebar
     /// "Doctor" action, the titlebar chip, or the panel's re-run affordance)
     /// — routed to the runner as [`super::Effect::RunDoctor`]. Also fired
@@ -388,7 +389,7 @@ pub enum Message {
     /// Close the doctor panel (`Esc`).
     CloseDoctorPanel,
 
-    // ── Bootstrap wizard + titlebar toolchain chip (D6a) ───────────────────
+    // ── Bootstrap wizard + titlebar toolchain chip ───────────────────────────
     /// Run the component-level toolchain report off-thread
     /// ([`frust_drive::doctor::build_report`]) — routed to the runner as
     /// [`super::Effect::RunBootstrapReport`]. Fired once at startup to seed the
@@ -429,7 +430,7 @@ pub enum Message {
     /// / the "copy" affordance) — routed as [`super::Effect::Copy`].
     BootstrapCopyFix,
 
-    // ── Add plugin dialog (frust-secure-storage Phase 7) ────────────────────
+    // ── Add plugin dialog ─────────────────────────────────────────────────────
     /// Open the Add Plugin dialog for the active project (`a`, the sidebar
     /// "Add plugin" action, or the palette). Primes an off-thread sibling
     /// probe (shared with the create wizard's clean-signals gating). A no-op
@@ -460,7 +461,7 @@ pub enum Message {
     /// retry.
     AddPluginFailed(String),
 
-    // ── Build launcher (TUI2-07) ────────────────────────────────────────────
+    // ── Build launcher ────────────────────────────────────────────────────────
     /// Open the build launcher, primed for the active project (`b` from the
     /// workbench, or the sidebar "Build" action).
     OpenBuildLauncher,
@@ -491,7 +492,7 @@ pub enum Message {
     /// the runner as [`super::Effect::LaunchBuild`].
     BuildLaunch,
 
-    // ── Clean confirm dialog (TUI2-07) ──────────────────────────────────────
+    // ── Clean confirm dialog ──────────────────────────────────────────────────
     /// Open the clean-confirm dialog for the active project (`c` from the
     /// workbench, or the sidebar "Clean" action).
     OpenCleanConfirm,
@@ -501,14 +502,14 @@ pub enum Message {
     /// [`super::Effect::RunClean`].
     ConfirmClean,
 
-    // ── Build artifact copy-path (TUI2-07) ──────────────────────────────────
+    // ── Build artifact copy-path ──────────────────────────────────────────────
     /// Copy the active (build) session's reported artifact path(s) to the
     /// clipboard (`c` on a session tab with built artifacts, or the log
     /// status row's copy affordance) — routed to the runner as
     /// [`super::Effect::Copy`].
     CopyBuiltArtifacts,
 
-    // ── Command palette (D5) ─────────────────────────────────────────────────
+    // ── Command palette ───────────────────────────────────────────────────────
     /// Open the fuzzy command palette (`Ctrl+P` / `:` from the base layer of
     /// either top-level screen).
     OpenPalette,
@@ -530,7 +531,7 @@ pub enum Message {
     /// Execute a palette command by ranked-row index (mouse click parity).
     PaletteExecuteAt(usize),
 
-    // ── Drag-to-resize + scrollbar thumb (T04 / D4) ─────────────────────────
+    // ── Drag-to-resize + scrollbar thumb ──────────────────────────────────────
     /// A drag started on a draggable region (the sidebar splitter or the log
     /// scrollbar thumb) — records the active drag so subsequent move/up events
     /// route to it (`crate::runner` gates them on `AppState::active_drag`).
@@ -542,7 +543,7 @@ pub enum Message {
     /// The drag button was released — clears the active drag.
     DragEnd,
 
-    // ── Context menus (T04 / D4) ────────────────────────────────────────────
+    // ── Context menus ─────────────────────────────────────────────────────────
     /// Open a right-click context menu at `(x, y)` for whatever row/pane the
     /// click landed on — builds target-specific entries (see
     /// [`super::context_menu`]). Focuses the target row (mouse parity with a
@@ -568,7 +569,7 @@ pub enum Message {
     /// Activate a context-menu entry by index (mouse click parity).
     ContextMenuActivateAt(usize),
 
-    // ── Mouse-capture toggle (T04 / D4) ─────────────────────────────────────
+    // ── Mouse-capture toggle ──────────────────────────────────────────────────
     /// Toggle crossterm mouse capture on/off (`Alt+m`, the palette command, or
     /// the status-bar indicator) — routed to the runner as
     /// [`super::Effect::SetMouseCapture`] so users can fall back to the
@@ -576,26 +577,26 @@ pub enum Message {
     /// while capture is off.
     ToggleMouseCapture,
 
-    // ── Run on all devices (D6b palette / device-header action) ──────────────
+    // ── Run on all devices (palette / device-header action) ─────────────────
     /// Launch one supervised session per discovered device (debug mode) for the
     /// active project — the palette's "run on all devices" action, routed to the
     /// runner as [`super::Effect::LaunchSessions`]. A no-op with no project or
     /// no discovered devices.
     RunOnAllDevices,
 
-    // ── Perf sparkline panel (T05 / PLAN.md D5/D6) ──────────────────────────
+    // ── Perf sparkline panel ──────────────────────────────────────────────────
     /// Toggle the active session's perf sparkline panel (`t`) — a no-op with
     /// no active session.
     TogglePerfPanel,
 
-    // ── Responsive breakpoints (T05 / D5) ───────────────────────────────────
+    // ── Responsive breakpoints ────────────────────────────────────────────────
     /// Toggle the narrow-terminal sidebar overlay (`s` from the workbench, or
     /// `Esc` while it's open) — meaningless (but harmless) above
     /// `crate::ui::layout::NARROW_WIDTH`, where the sidebar already renders
     /// inline.
     ToggleSidebarOverlay,
 
-    // ── Help overlay (T05 / D5) ──────────────────────────────────────────────
+    // ── Help overlay ──────────────────────────────────────────────────────────
     /// Open the keyboard/help overlay (`?` from either top-level screen).
     OpenHelpOverlay,
     /// Close the help overlay (`Esc` / `?` again).

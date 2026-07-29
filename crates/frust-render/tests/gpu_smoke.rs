@@ -1,7 +1,7 @@
 //! GPU smoke test: render a red `FillRect` scene headlessly and read the pixels
 //! back. This exercises the real vello 0.9 / wgpu 29 pipeline end to end (the
-//! version-pin de-risking called out in task 06), so it is `#[ignore]`d and run
-//! manually on hardware with a GPU:
+//! version-pin de-risking this workspace's rendering stack needs), so it is
+//! `#[ignore]`d and run manually on hardware with a GPU:
 //!
 //! ```text
 //! cargo test -p frust-render -- --ignored
@@ -171,7 +171,7 @@ async fn run() {
 /// vello as an image override (`register_texture`), and draw it through Frust's
 /// scene encode — the exact `draw_image` a `Command::ShaderQuad` lowers to.
 /// Reads the presented pixels back and asserts the shader's color survived the
-/// override→atlas copy (RESEARCH.md §Q1), with no uncaptured validation error.
+/// override→atlas copy, with no uncaptured validation error.
 ///
 /// The crate-private `ShaderEffects` wrapper is unit-tested in-crate; this
 /// covers the real-device GPU path it drives, which no headless surface can.
@@ -200,7 +200,7 @@ async fn run_shader() {
     let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 
     // The shader pre-pass target: Rgba8Unorm + RENDER_ATTACHMENT (our pass) +
-    // COPY_SRC (vello's override copy reads it — RESEARCH.md §Q1).
+    // COPY_SRC (vello's override copy reads it).
     let shader_tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("frust gpu_smoke shader target"),
         size: wgpu::Extent3d {
@@ -387,8 +387,8 @@ async fn run_shader() {
     );
 }
 
-/// Pixel-level regression test for the Mode B hole punch (platform-views
-/// t11-fix 01 + the t11-redo D4 follow-up): a `clear_rect` recorded INSIDE a
+/// Pixel-level regression test for the Mode B hole punch: a `clear_rect`
+/// recorded INSIDE a
 /// clip/opacity layer group must still erase an opaque backdrop painted
 /// OUTSIDE the group (the encode walk hoists the punch to root — a
 /// group-local erase would be sealed in by the group composite), and the

@@ -1,8 +1,6 @@
-//! Filled by task 24-glyph-content-widgets (Accordion).
-//!
 //! [`accordion`]/[`AccordionView`]: a disclosure panel — a pressable header row
 //! (title + a chevron that rotates 90° as it opens) over a height-animated body
-//! child view (the reference build's `§content` `.accordion`). **Controlled**:
+//! child view (the Glyph design system's `.accordion`). **Controlled**:
 //! the caller owns the `open: bool` and receives `on_toggle` on a header
 //! press; the widget never mutates its own open state (the same never-self-
 //! mutating contract [`crate::material::navbar`] uses).
@@ -19,7 +17,7 @@
 //! The reveal is driven by an implicit tween ([`RevealDriver`]): a fresh
 //! `0..1` [`AnimationController`] launched from the current value on each
 //! toggle, over the theme's `motion.durations.base` (220ms) with the
-//! `motion.easing.spatial` curve — the "220ms spatial" the task specifies.
+//! `motion.easing.spatial` curve — the design system's "220ms spatial" timing.
 //! Because the animation clock lives on [`PaintCtx`] (not [`LayoutCtx`]), the
 //! reveal is advanced during paint and the freshest value is read by the next
 //! layout pass — but the *height* this widget reports is computed from that
@@ -762,7 +760,7 @@ mod tests {
 
     #[test]
     fn paint_requests_layout_while_reveal_is_animating() {
-        // Acceptance criterion 1: after `set_target` flips open (via a
+        // After `set_target` flips open (via a
         // rebuild), each paint during the reveal animation must report
         // `PaintOutcome::needs_layout == true`; once settled, false. Driven
         // through `RenderRoot` (not a bare `PaintCtx`) since only
@@ -826,7 +824,7 @@ mod tests {
 
     #[test]
     fn multi_instance_toggle_only_animates_the_toggled_instance() {
-        // Acceptance criterion 2: three accordions in a Column — toggling
+        // Three accordions in a Column — toggling
         // only the middle one must animate only its own body clip/height,
         // leaving the other two closed and clip-free throughout. Regression
         // guard for the "content on wrong instance" symptom now that

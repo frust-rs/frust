@@ -1,4 +1,4 @@
-//! Home screen tests (Phase C, task 11): the loading→loaded transition, the
+//! Home screen tests: the loading→loaded transition, the
 //! swipe-to-archive undo toast, unread badges, and pull-to-refresh — driven
 //! headlessly through the full `HuddleApp` shell (the same harness `shell.rs`
 //! uses). Every test takes the [`support::serial`] lock first, since the roster

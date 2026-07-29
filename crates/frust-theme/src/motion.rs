@@ -18,9 +18,7 @@
 //! # Cupertino (iOS) mapping
 //!
 //! [`MotionScheme::cupertino`] is built from the single community-documented
-//! iOS spring baseline (per
-//! `workflow/plans/features/frust-phase-6c-widget-catalog/research/RESEARCH.md`'s
-//! `cupertino-tokens-idioms` claims, retrieved 2026-07-17): mass `1.0`,
+//! iOS spring baseline (retrieved 2026-07-17): mass `1.0`,
 //! stiffness `170.0`, damping (coefficient, not ratio) `15.0` — the
 //! "start with a damping of 15 and a stiffness of 170" convention cited
 //! across multiple SwiftUI community sources. [`MotionSpring`] stores a
@@ -92,8 +90,7 @@ pub struct MotionDurations {
 }
 
 /// The `CosmeticLoop` tick-rate cap (Hz) — an app-tunable pacing token
-/// (Ed's decision) consumed by the animation-performance fix's frame-gate
-/// pacing (see `workflow/plans/bugs/catalog-animation-performance`): a
+/// consumed by the frame gate's pacing: a
 /// purely cosmetic, indefinitely-looping animation (a shimmer/pulse with no
 /// user-visible endpoint) is capped to this rate rather than repainting
 /// every display frame. **Uncapped (0/`None`) is not an allowed value** —
@@ -103,8 +100,7 @@ pub struct MotionDurations {
 /// than paced.
 ///
 /// This token only *declares* the cap; nothing in `frust-theme` reads a
-/// clock or paces a loop — the frame-gate consumer (a later task in the
-/// same bug fix) is what actually honors it.
+/// clock or paces a loop — the frame-gate consumer is what actually honors it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CosmeticLoopRate(f32);
 
@@ -243,15 +239,14 @@ impl MotionScheme {
     /// publishes no named multi-tier duration scale or curve-category
     /// vocabulary — UIKit/SwiftUI animations are conventionally
     /// spring-authored (the six presets above), not bezier-timed. The one
-    /// citable data point is `workflow/plans/features/frust-phase-6c-widget-catalog/research/RESEARCH.md`'s
-    /// `cupertino-tokens-idioms` claim (retrieved 2026-07-17, citing Apple's
+    /// citable data point (retrieved 2026-07-17, citing Apple's
     /// WWDC23 "Animate with springs" talk): SwiftUI's `.bouncy` spring
     /// preset defaults to a 0.5s duration — anchoring `slow` at 500ms here.
     /// The remaining four slots (`instant`/`fast`/`base`/`deliberate`) are a
     /// community-approximate scale around that anchor, loosely following
     /// commonly-cited iOS interaction timings (a ~0.2s "quick" feel, a
-    /// ~0.35s modal-presentation-adjacent "base" feel); a future task should
-    /// replace them if a citable per-tier iOS source turns up. The easing
+    /// ~0.35s modal-presentation-adjacent "base" feel); replace them if a
+    /// citable per-tier iOS source turns up. The easing
     /// vocabulary has the same gap as the springs: no published
     /// spatial/effects/exit distinction, so [`Curve::EaseInOut`] (UIKit's
     /// default `UIView.AnimationOptions` curve) is applied uniformly to all

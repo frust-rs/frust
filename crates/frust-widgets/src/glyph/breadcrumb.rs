@@ -1,8 +1,6 @@
-//! Filled by task 23-glyph-nav-chrome (Breadcrumb).
-//!
 //! [`breadcrumb`]/[`BreadcrumbView`]: an inline path of tappable crumbs joined
 //! by `/` separators, the last crumb being the current (non-link) location
-//! (`research/glyph-design-system.html`'s `.breadcrumb`/`.breadcrumb a`/
+//! (the Glyph design system's `.breadcrumb`/`.breadcrumb a`/
 //! `.breadcrumb .sep`/`.breadcrumb .current` rules, retrieved 2026-07-21).
 //!
 //! Each non-final crumb fires its own per-crumb callback on release-inside

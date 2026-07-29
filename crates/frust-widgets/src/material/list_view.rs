@@ -1,4 +1,4 @@
-//! The virtualized `ListView` (Phase 6c, PLAN.md D4/D5, task 12):
+//! The virtualized `ListView`:
 //! `ListView::builder(item_count, item_extent, |index| -> AnyView)` with a
 //! uniform, required `item_extent` (variable-extent lazy layout is deferred).
 //!
@@ -54,7 +54,7 @@
 //! `prev.builder(i)`. Until it lands, treat a mid-list mutation as a
 //! full-replace (or accept the misattachment).
 //!
-//! # Viewport staleness (plan-verify correction a)
+//! # Viewport staleness
 //!
 //! [`frust_core::BuildCtx`] carries no viewport size, so the widget caches
 //! `viewport: Size` from the previous layout pass (the exact `ScrollWidget`
@@ -73,7 +73,7 @@
 //! pump exactly like [`crate::ScrollView`] (see `scroll.rs`). During a scroll
 //! drag the ListView captures the pointer and, on takeover, cancels any armed
 //! child (a `ListItem`'s press) via the structural-change contract — the
-//! accepted, Flutter-like tradeoff (PLAN.md D4). Offset changes request a
+//! accepted, Flutter-like tradeoff. Offset changes request a
 //! redraw so the next frame's rebuild re-windows; the fling advances the offset
 //! at paint and requests a continuation frame, so the shell's next
 //! rebuild→layout→paint re-windows as the fling carries the list.
@@ -157,7 +157,7 @@ impl<State: 'static> ListView<State> {
     ) -> Self {
         assert!(
             item_extent > 0.0,
-            "ListView item_extent must be positive (uniform extent, PLAN.md D4)"
+            "ListView item_extent must be positive (uniform extent)"
         );
         Self {
             item_count,
@@ -248,7 +248,7 @@ pub struct ListViewWidget {
     /// Active fling velocity (px/s of offset), or `None` when not flinging.
     fling: Option<f64>,
     /// Last painted frame time, reused as the event-pass timestamp for velocity
-    /// tracking (the event pass carries no clock — spec §8).
+    /// tracking (the event pass carries no clock).
     last_frame_time: FrameTime,
     /// Last animation frame time for the paint-time fling pump; `None` seeds the
     /// clock (zero-delta) on the first paint after a release.
@@ -578,7 +578,7 @@ impl ListViewWidget {
                     } else if (p.position.y - self.down_start.y).abs() > TOUCH_SLOP {
                         // Take the gesture over: cancel the armed child, stop
                         // forwarding — the documented window-shift capture-loss
-                        // tradeoff's sibling (PLAN.md D4).
+                        // tradeoff's sibling.
                         self.scrolling = true;
                         self.last_drag = p.position;
                         self.cancel_children(ctx, p.position);

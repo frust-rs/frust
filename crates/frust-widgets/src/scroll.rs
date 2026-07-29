@@ -1,4 +1,4 @@
-//! The `ScrollView` widget (spec §6.4): a vertical scroll surface with drag,
+//! The `ScrollView` widget: a vertical scroll surface with drag,
 //! fling, and wheel support and clipped, offset content.
 //!
 //! [`scroll_view`] wraps a child that is laid out with unbounded height; the
@@ -18,14 +18,14 @@
 //! scrolling mode — it sends the child a synthetic `Cancel` (disarming any
 //! armed descendant tap/press), stops forwarding, and consumes the drag itself.
 //! This is how a scroll can be *taken* from a child after the slop, matching
-//! masonry (`research/RESEARCH.md`).
+//! masonry.
 //!
 //! # Fling driver (v1)
 //!
 //! On release with sufficient velocity a fling begins, integrated
 //! frame-by-frame with [`ScrollWidget::tick`] (pure, unit-tested). [`paint`]
-//! pumps the fling from the shared shell frame clock ([`PaintCtx::frame_time`],
-//! spec §8 — no wall-clock reads in widget code) so it animates for free on the
+//! pumps the fling from the shared shell frame clock ([`PaintCtx::frame_time`]
+//! — no wall-clock reads in widget code) so it animates for free on the
 //! continuous-loop mobile shells, and calls [`PaintCtx::request_frame`] while the
 //! fling is still in flight so the desktop shell (event-driven
 //! `ControlFlow::Wait`) keeps scheduling frames via `window.request_redraw()`;
@@ -198,7 +198,7 @@ pub struct ScrollWidget {
     fling: Option<f64>,
     /// The most recent frame time observed during [`Widget::paint`], reused as the
     /// event-pass timestamp for velocity tracking (the event pass carries no clock
-    /// of its own — spec §8 provides time only at paint; the fling starts from the
+    /// of its own — time is provided only at paint; the fling starts from the
     /// last paint clock, which is today's behavior too).
     last_frame_time: FrameTime,
     /// Last animation frame time for the paint-time fling pump; `None` seeds the
@@ -920,7 +920,7 @@ mod tests {
 
     #[test]
     fn fling_advances_from_injected_paint_frame_time() {
-        // End-to-end through the real paint path (task 07 clock retrofit): the
+        // End-to-end through the real paint path: the
         // event pass reads the last painted frame time for velocity tracking, and
         // the fling pump advances off the injected `RenderRoot::paint` frame time
         // — no wall clock anywhere. Paints are interleaved with the drag so the
@@ -963,7 +963,7 @@ mod tests {
 
     /// A perpetual animator: requests a continuation frame on every paint.
     /// Stands in for an offscreen shimmer/spinner whose frame requests
-    /// paint-time culling must suppress (task 07).
+    /// paint-time culling must suppress.
     struct Ticker;
     struct TickerWidget;
     impl View<()> for Ticker {
@@ -986,7 +986,7 @@ mod tests {
 
     #[test]
     fn offscreen_flex_animator_culled_until_scrolled_into_view() {
-        // End-to-end frame suppression (task 07 AC #2): a perpetual animator below
+        // End-to-end frame suppression: a perpetual animator below
         // the fold in a Column inside a ScrollView is culled from paint, so its
         // request_frame never bubbles and the root PaintOutcome asks for no
         // continuation frame. Scroll it into view and the requests resume.

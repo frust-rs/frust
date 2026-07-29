@@ -1,20 +1,21 @@
-//! Camera page (frust-camera task 11): live Mode B preview behind frust
+//! Camera page: live Mode B preview behind frust
 //! chrome, permission flow, still capture, and an image-stream readout — the
-//! **device-gate vehicle for the whole `frust-camera` feature** (task 14
-//! owns the actual on-device proof; this page only owns wiring +
-//! compile/gate correctness — see this module's Acceptance in the task
-//! file).
+//! **device-gate vehicle for the whole `frust-camera` feature** (on-device
+//! proof is a separate, human-run gate — see `docs/DEVELOPMENT.md`'s Camera
+//! manual test; this page only owns wiring + compile/gate correctness).
 //!
 //! # Mode B slot, reusing the platform-views test bed
 //!
 //! [`crate::home_page`] already wraps every section's content in a
-//! `scroll_view` (task 18) and paints an [`crate::AppBackground`] base layer
-//! under the whole app (platform-views task 10's Mode B host arrangement) —
-//! both reused here unchanged, per this task's "reuse, don't re-derive"
-//! note. This page's own [`preview_block`] is therefore already inside the
-//! shared scroll view: scrolling it off/on-screen exercises the platform
-//! view's real dispose→create cycle (task 11's own Details point, PLAN.md's
-//! A6 decision) exactly like `platform_views.rs`'s Mode B slot does.
+//! `scroll_view` and paints an [`crate::AppBackground`] base layer
+//! under the whole app (the Mode B host's required opaque app-root
+//! background, `docs/CODE_STANDARDS.md`'s Platform-View Conventions) — both
+//! reused here unchanged rather than re-derived. This page's own
+//! [`preview_block`] is therefore already inside the shared scroll view:
+//! scrolling it off/on-screen exercises the platform view's real
+//! dispose→create cycle — the camera session itself lives independent of
+//! the view and outlives it, exactly like `platform_views.rs`'s Mode B slot
+//! does.
 //!
 //! # Flow
 //!
@@ -23,10 +24,10 @@
 //! rule: registered under [`CameraPage`]'s [`Component`] owner). Denied
 //! shows the typed error state; [`PermissionStatus::Granted`] opens a
 //! [`CameraSession`] and the preview slot appears. [`PermissionStatus::NeedsUi`]
-//! is Android-specific and documented on the type itself; PLAN.md's
-//! "Permission plumbing" risk names a proxy-Activity as the escalation if a
-//! manual retry doesn't resolve it on device (task 14's call, not this
-//! page's).
+//! is Android-specific and documented on the type itself; the recorded
+//! escalation if a manual retry doesn't resolve it on device is a
+//! transparent proxy Activity — a decision for the on-device gate, not this
+//! page's.
 //!
 //! # Session lifecycle
 //!
@@ -42,15 +43,15 @@
 //!
 //! [`CameraSession::start_image_stream`]'s callback runs on a plugin-owned
 //! thread and must never write a signal directly
-//! (`plugins/camera`'s own module docs, PLAN.md Phase 3): this page hands
+//! (`plugins/camera`'s own module docs): this page hands
 //! frames off through a plain `Arc<`[`StreamStats`]`>` of atomics instead of
 //! any reactive primitive (see [`start_stream`], which wires the real
 //! callback), and reads it back from [`CameraPage::build`] while a
 //! [`FrameTicker`] (the same escape hatch `interactions.rs` documents) keeps
 //! that rebuild running once per frame. The stream is real and wired on both
 //! shipped backends — the device gate measured it delivering frames at
-//! ~29 fps on Android and ~22 fps on iOS through this exact path (task 14's
-//! gate rows); this page's readout is the live proof of that, not a stub.
+//! ~29 fps on Android and ~22 fps on iOS through this exact path; this
+//! page's readout is the live proof of that, not a stub.
 //! [`ImageFormat::Bgra`] stays Apple-only (see that variant's doc), so this
 //! page always requests [`ImageFormat::Yuv420`], the cross-platform format
 //! both backends deliver.
@@ -196,8 +197,8 @@ impl Component for CameraPage {
 
         // `take_picture` blocks up to 15s (Android) / 10s (Apple) — same
         // "pair with `spawn_blocking`, never call on the UI thread" contract
-        // as `request_permission` above (f1 documents this on the crate
-        // side). Extracting the session is a brief-lock `Arc` *clone* (see
+        // as `request_permission` above (the crate's own "Blocking API"
+        // doc). Extracting the session is a brief-lock `Arc` *clone* (see
         // `session_cell`'s doc comment), never a lock held across the
         // blocking call itself. `T = Option<String>`: `None` covers both
         // "no active session" and this task's own automatic first fetch at
@@ -354,9 +355,9 @@ fn block(children: Vec<FlexChild<CameraPageState>>) -> FlexChild<CameraPageState
 }
 
 /// A bounded list of filler rows so the preview slot can scroll fully
-/// off-screen and back (task 11's Details point 4; the M1 device-viewport
-/// lesson `platform_views.rs`'s own `filler_rows` doc comment tells in
-/// full) — duplicated locally per that module's own precedent (private,
+/// off-screen and back — see `platform_views.rs`'s own `filler_rows` doc
+/// comment for the device-viewport lesson behind the row count —
+/// duplicated locally per that module's own precedent (private,
 /// per-module, not shared).
 fn filler_rows() -> AnyView<CameraPageState> {
     let rows: Vec<AnyView<CameraPageState>> = (1..=64)
@@ -398,11 +399,11 @@ fn permission_block(
             true,
         ),
         // Android-specific: no cached Activity yet for the system dialog.
-        // PLAN.md's "Permission plumbing" risk documents a proxy-Activity as
-        // the escalation if a manual retry doesn't resolve this on device.
+        // The recorded escalation if a manual retry doesn't resolve this on
+        // device is a transparent proxy-Activity.
         AsyncValue::Ready(PermissionStatus::NeedsUi) => (
             "No foreground activity cached yet for the permission dialog \u{2014} retry once \
-             the app is in the foreground (PLAN.md's permission-plumbing note)."
+             the app is in the foreground."
                 .to_string(),
             true,
         ),
@@ -435,7 +436,7 @@ fn retry_permission_handler(state: &mut CameraPageState) {
 }
 
 // ---------------------------------------------------------------------------
-// Lens switch (C5)
+// Lens switch
 // ---------------------------------------------------------------------------
 
 /// Close the current session (if any) and flip [`CameraPageState::lens`],
@@ -443,7 +444,7 @@ fn retry_permission_handler(state: &mut CameraPageState) {
 /// existing open branch — not a second one — reopens on the new lens next
 /// rebuild. A no-op while no session is open (guarded by the early
 /// `let...else` below), matching this control's "disabled (or a no-op)
-/// while no session exists" contract (this task's Acceptance).
+/// while no session exists" contract.
 ///
 /// `Camera::open` isn't itself one of the crate's two blocking calls (only
 /// [`Camera::request_permission`]/[`CameraSession::take_picture`] are — the
@@ -472,7 +473,7 @@ fn switch_lens_handler(state: &mut CameraPageState) {
     state.open_error = None;
 
     // Capture/stream state belongs to the outgoing session — reset both so
-    // nothing from it leaks into the new one (this task's Acceptance).
+    // nothing from it leaks into the new one.
     state.streaming = false;
     state.stream_started_at = None;
     state.stream_error = None;
@@ -570,8 +571,7 @@ fn preview_block(state: &CameraPageState) -> FlexChild<CameraPageState> {
 // ---------------------------------------------------------------------------
 
 /// A timestamped capture path under the OS temp directory — plain, no
-/// `frust-paths` dependency added for this device-gate page (out of this
-/// task's file scope).
+/// `frust-paths` dependency added for this device-gate page.
 fn capture_path() -> PathBuf {
     let epoch_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

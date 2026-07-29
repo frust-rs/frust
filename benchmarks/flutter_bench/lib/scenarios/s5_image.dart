@@ -2,7 +2,7 @@
 /// the UI thread via Flutter's async image pipeline (`ui.decodeImageFromPixels`)
 /// from the SAME deterministic bytes the frust side uses (see `datasets.dart`'s
 /// `generateS5ImageRgba` parity contract). Tests off-thread decode + composite
-/// under scroll — PLAN 9.E's `decode_async` claim.
+/// under scroll — the `decode_async` claim under test.
 ///
 /// The pixel source is byte-identical across both apps (same SplitMix64 seed +
 /// generator params). We feed raw RGBA straight into the engine's async pixel

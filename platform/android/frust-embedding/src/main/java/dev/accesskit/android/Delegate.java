@@ -4,14 +4,14 @@
 // the LICENSE-MIT file), at your option.
 //
 // Vendored verbatim from accesskit_android 0.7.5's `java/` directory. The
-// `frust-shell-android` crate's `InjectingAdapter` (phase 6d) locates this
+// `frust-shell-android` crate's `InjectingAdapter` locates this
 // class at runtime via `env.find_class("dev/accesskit/android/Delegate")` and
 // registers its native methods dynamically, so the package and class name
 // (`dev.accesskit.android.Delegate`) are load-bearing — do not rename or move.
 // The `embedded-dex` Cargo feature is deliberately NOT used (it needs API 26's
 // InMemoryDexClassLoader, above the generated project's minSdk 24), so the class
 // ships as source compiled into the app instead. Release/profile builds enable
-// R8 minification + resource shrinking (Phase 7 task 12); the generated
+// R8 minification + resource shrinking; the generated
 // `android/app/proguard-rules.pro` keeps `dev.accesskit.android.**` whole for
 // exactly this dynamic-lookup reason — see that file's comments.
 

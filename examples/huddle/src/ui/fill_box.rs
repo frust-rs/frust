@@ -1,6 +1,6 @@
 //! `fill_box` / `filled_box` — the arbitrary-color rounded-rect escape-hatch
-//! primitives no facade widget paints (promoted here from `screens::home` in
-//! device-parity-round2 task R2, so the feed restyle can share them).
+//! primitives no facade widget paints (promoted here from `screens::home`
+//! so the feed restyle can share them).
 //!
 //! Two small hand-rolled [`View`]/[`Widget`] pairs built directly against
 //! `frust-core` — the facade's documented "low-level escape hatch" pattern
@@ -18,7 +18,7 @@
 //!   material card's hardcoded 16px content inset (`material/card.rs`). This is
 //!   what lets a compact attachment tile keep a boxed look
 //!   (`filled_box(Padding(10‥12, …), color, 8)`) without the card inset that
-//!   ballooned the whole feed (device-parity-round2 BUG.md B2).
+//!   ballooned the whole feed.
 
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,

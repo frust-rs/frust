@@ -1,7 +1,6 @@
 //! Baseline widget set: Text, Button, Image, Column/Row, Stack, ScrollView, etc.
-//! (spec §6.4).
 //!
-//! Ships the [`text`] leaf plus the spec §6.2 primitive layout containers —
+//! Ships the [`text`] leaf plus the primitive layout containers —
 //! [`Row`]/[`Column`] ([`FlexView`]), [`Stack`], [`Padding`], [`Align`], and
 //! [`SizedBox`] — built as `View`/`Widget` pairs over `frust-core`'s
 //! [`AnyView`](frust_core::AnyView)/[`ChildPod`](frust_core::ChildPod)
@@ -89,10 +88,9 @@ pub use text::{TextView, TextWidget, text};
 pub use textinput::{TextInput, TextInputView, TextInputWidget, text_input};
 
 // ---------------------------------------------------------------------
-// Material 3 Expressive widget catalog (Phase 6c, task 14) — flat
-// re-exports so app code (via the `frust` facade) never has to name
-// `frust_widgets::material::*` directly, mirroring the baseline
-// widgets' flat re-export shape above.
+// Material 3 Expressive widget catalog — flat re-exports so app code (via
+// the `frust` facade) never has to name `frust_widgets::material::*`
+// directly, mirroring the baseline widgets' flat re-export shape above.
 // ---------------------------------------------------------------------
 pub use material::appbar::{AppBar, AppBarView, AppBarWidget, app_bar};
 pub use material::button_group::{ButtonGroup, ButtonGroupView, ButtonGroupWidget, button_group};
@@ -133,8 +131,8 @@ pub use material::toolbar::{
 };
 
 // ---------------------------------------------------------------------
-// Cupertino (iOS) widget catalog (Phase 6c, task 14) — same flat
-// re-export rationale as the Material block above.
+// Cupertino (iOS) widget catalog — same flat re-export rationale as the
+// Material block above.
 // ---------------------------------------------------------------------
 pub use cupertino::action_sheet::{
     CupertinoActionSheetView, CupertinoActionSheetWidget, show_action_sheet,
@@ -177,7 +175,7 @@ pub(crate) type TypedArgCallback<State, A> = std::rc::Rc<dyn Fn(&mut State, A)>;
 /// A stable identity for a list child, so a container's reconciliation can match
 /// a child to its live widget *by key* across reorders/inserts instead of by
 /// position — the difference between "the third row's widget" and "row #42's
-/// widget" when the list is shuffled (spec §6.3).
+/// widget" when the list is shuffled.
 ///
 /// Built from any [`Hash`] value (an item id, a string name, an index) via the
 /// `From` impls below and [`keyed`](crate::keyed); the hashed `u64` is what the
@@ -479,8 +477,8 @@ pub(crate) fn rebuild_children<State: 'static, C>(
 /// every-frame rebuild never breaks a captured drag *or* dismisses the keyboard
 /// for an unchanged sibling (the huddle search-field bug this fixes).
 ///
-/// This is Flutter's focus/IME retention behavior (see the feature's
-/// RESEARCH.md): only a child whose identity actually changes loses focus.
+/// This is Flutter's focus/IME retention behavior: only a child whose
+/// identity actually changes loses focus.
 /// Positional matching cannot distinguish a same-typed prepend from a
 /// content-change-plus-append — an index `< k` that positionally kept its widget
 /// but semantically moved keeps its recorded path (the documented positional
@@ -920,9 +918,9 @@ pub(crate) mod test_support {
     }
 
     /// A GPU-free [`PaintScene`] that records filled rects in paint order, plus
-    /// (glyph-design-system task 12) `push_layer`/`push_transform` calls and
-    /// their pop counts — the `motion::animated` wrappers' recording-scene
-    /// tests assert against these alongside the pre-existing `rects`.
+    /// `push_layer`/`push_transform` calls and their pop counts — the
+    /// `motion::animated` wrappers' recording-scene tests assert against
+    /// these alongside the pre-existing `rects`.
     #[derive(Default)]
     pub(crate) struct RecordingScene {
         pub(crate) rects: Vec<(Point, Size)>,
@@ -952,8 +950,8 @@ pub(crate) mod test_support {
     }
 }
 
-/// Mechanism-level tests for [`rebuild_child`]'s type-swap capture handling
-/// (re-review round 1): every single-child container (`Padding`/`Align`/
+/// Mechanism-level tests for [`rebuild_child`]'s type-swap capture handling:
+/// every single-child container (`Padding`/`Align`/
 /// `SizedBox`, interactive widgets' labels) reconciles its child through this
 /// helper, so the clear-on-swap behavior is proven once here at the shared
 /// substrate, and each container's own test module (see `padding`/`align`/

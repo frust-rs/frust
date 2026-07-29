@@ -1,6 +1,6 @@
-//! Device discovery (spec §12.4). Each discoverer is independent and must
-//! not fail `frust devices` just because its underlying tool is absent
-//! (e.g. no Android SDK on a Mac) — it returns an empty list plus a `-v` note.
+//! Device discovery. Each discoverer is independent and must not fail
+//! `frust devices` just because its underlying tool is absent (e.g. no
+//! Android SDK on a Mac) — it returns an empty list plus a `-v` note.
 
 mod android;
 mod ios_physical;
@@ -34,8 +34,8 @@ pub struct Device {
     pub kind: Kind,
     /// The device's OS version, if trivially available from its discoverer
     /// (e.g. `devicectl`'s `osVersionNumber` for a physical iOS device,
-    /// parsed by `ios_run::run_physical`'s iOS-17+ gate — task 67). `None`
-    /// when the discoverer doesn't surface one (Android, iOS Simulator).
+    /// parsed by `ios_run::run_physical`'s iOS-17+ gate). `None` when the
+    /// discoverer doesn't surface one (Android, iOS Simulator).
     pub os_version: Option<String>,
     /// The discoverer's raw connection-state string, surfaced in the
     /// `frust devices` listing (e.g. devicectl's `tunnelState`:
@@ -57,7 +57,7 @@ pub trait DeviceDiscovery {
     fn discover(&self, runner: &dyn ProcessRunner) -> Result<DiscoveryResult>;
 }
 
-/// The v1 discoverer set (spec §12.4), in report order.
+/// The v1 discoverer set, in report order.
 pub fn default_discoverers() -> Vec<Box<dyn DeviceDiscovery>> {
     vec![
         Box::new(AndroidDeviceDiscovery),

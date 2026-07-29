@@ -4,8 +4,7 @@
 # (they only apply in a workspace root) — the same shape as
 # `examples/huddle`. The root workspace's globs
 # (`crates/*`, `examples/*`, `plugins/shared-preferences`) never reach
-# `benchmarks/`, so no root-manifest `exclude` entry is required for it (see
-# task 02's completion summary for the check).
+# `benchmarks/`, so no root-manifest `exclude` entry is required for it.
 [workspace]
 
 [package]
@@ -16,15 +15,15 @@ publish = false
 
 # `cdylib` is the shared library Android's `System.loadLibrary` loads (the JNI
 # bridge); `staticlib` is the archive the iOS Xcode target links (the C-ABI
-# `frust_*` bridge, spec §10.2); `rlib` keeps the crate usable as a normal Rust
-# library for the desktop `main.rs` preview binary (spec §12.9).
+# `frust_*` bridge); `rlib` keeps the crate usable as a normal Rust
+# library for the desktop `main.rs` preview binary.
 [lib]
 name = "frustbench"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 # NOTE: temporary path dependencies pointing at the Frust repo checkout that
-# owns this benchmark (spec §12.3: the `frust_path` mechanism is explicitly
+# owns this benchmark (the `frust_path` mechanism is explicitly
 # temporary). Once Frust crates are published, these become version deps.
 frust = { path = "../../crates/frust" }
 
@@ -51,8 +50,8 @@ peniko = "0.6.1"
 # it is safe as an unconditional dependency here.
 frust-shell-common = { path = "../../crates/frust-shell-common" }
 
-# `frust-shared-preferences`: pre-wired for the S8 plugin-overhead scenario
-# (task 04 fills the `s8_prefs.rs` stub without touching this manifest). A
+# `frust-shared-preferences`: used by the S8 plugin-overhead scenario
+# (`s8_prefs.rs`) without needing any change to this manifest. A
 # platform plugin an app adds directly (the Flutter-pubspec model — the facade
 # never re-exports a plugin; see `docs/CODE_STANDARDS.md`'s Plugin
 # Conventions).
@@ -69,8 +68,7 @@ frust-shared-preferences = { path = "../../plugins/shared-preferences" }
 # builds only (riding the same features plumbing that turns on
 # `frust/perf-trace` for debug/profile), so release strips stray info/debug
 # log lines while keeping warn/error crash diagnostics, and profile keeps its
-# `frust-perf` output. Mirrors `templates/app/Cargo.toml.tmpl`'s block verbatim
-# (release-lean plan, task 04/05; frust_bench synced at task 09).
+# `frust-perf` output. Mirrors `templates/app/Cargo.toml.tmpl`'s block verbatim.
 log = "0.4"
 
 # Dev-only: the headless tests drive Frust's `RenderRoot` directly (the
@@ -82,7 +80,7 @@ frust-scene = { path = "../../crates/frust-scene" }
 reactive_graph = "0.2"
 
 # `--release` mode: fully optimized, stripped, single-panic-path binary for
-# store distribution (spec §12.2). Hand-synced with Frust's own root
+# store distribution. Hand-synced with Frust's own root
 # `Cargo.toml` and `examples/huddle/Cargo.toml` (see `docs/DEVELOPMENT.md`'s
 # Version-Pin Policy hand-sync rule) — see either of those manifests for the
 # full measured rationale behind `lto = "fat"` + `codegen-units = 1`.
@@ -101,17 +99,17 @@ strip = "symbols"
 panic = "abort"
 
 # `--profile` mode: release performance with symbols + tracing kept for
-# on-device performance measurement (spec §12.2). Artifacts land in
+# on-device performance measurement. Artifacts land in
 # `target/<triple>/profile/` (custom-profile name, verified legal). This is
-# the profile the benchmark harness (task 06/07) builds each bench run with,
+# the profile the benchmark harness builds each bench run with,
 # since `FRUST_TRACE`/`FRUST_TRACE_RAW`'s log lines must survive.
 [profile.profile]
 inherits = "release"
 debug = true
 strip = "none"
 
-# `[profile.dev]` per-package overrides for the render/shader-compile stack
-# (6e Finding 5): vello/wgpu/naga's shader-pipeline translation runs at
+# `[profile.dev]` per-package overrides for the render/shader-compile stack:
+# vello/wgpu/naga's shader-pipeline translation runs at
 # `opt-level = 0` by default, slow enough on a physical iOS device that the OS
 # SIGKILLs a debug `frust run` before the synchronous launch-time shader
 # compile finishes. This app's own code stays at the default dev opt-level
@@ -139,7 +137,7 @@ opt-level = 2
 [profile.dev.package.naga]
 opt-level = 2
 
-# Debug dep opt widening (phase 7 task 11): non-workspace-member dependencies
+# Debug dep opt widening: non-workspace-member dependencies
 # build at `opt-level = 1` in debug (Cargo's `"*"` package selector excludes
 # workspace members and the profile's own package); this app's own code stays
 # at the fast default dev opt-level, and the named shader-stack overrides

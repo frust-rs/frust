@@ -139,7 +139,7 @@ impl ReactiveRuntime {
     }
 
     /// Fires the current frame waker. Used by the executor's `spawn_local` and
-    /// by the signals dirty-bridge (task 03).
+    /// by the signals dirty-bridge.
     pub fn wake(&self) {
         // Clone the Arc out before invoking so the lock is not held across the
         // callback (which may re-enter the runtime).
@@ -193,7 +193,7 @@ impl ReactiveRuntime {
 
 /// Runs a one-off, blocking CPU workload on the background runtime's blocking
 /// thread pool, returning a [`JoinHandle`](tokio::task::JoinHandle) to `.await`
-/// its result (phase 9.A).
+/// its result.
 ///
 /// This is the CPU-bound entry point of the heavy-work routing convention:
 ///

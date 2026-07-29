@@ -1,5 +1,4 @@
-//! `profile` presentation — [`ProfileController`] plus the profile/you pages
-//! (huddle clean-architecture refactor, task 05).
+//! `profile` presentation — [`ProfileController`] plus the profile/you pages.
 
 pub mod controllers;
 pub mod pages;

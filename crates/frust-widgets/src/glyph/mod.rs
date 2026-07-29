@@ -18,27 +18,25 @@
 //! # Catalog scaffold (this module)
 //!
 //! Every catalog module is **pre-declared here with a wholesale re-export**
-//! (`pub use badge::*;`) so each fill task (20, 21, 23-26) adds its `View`/
-//! `Widget`/spec types to its own stub file and its public items ride along
+//! (`pub use badge::*;`) so a new widget adds its `View`/
+//! `Widget`/spec types to its own file and its public items ride along
 //! with **no edit to this module list** (the icons-precedent same-file
-//! discipline — a fill task that discovers it needs a `mod.rs` edit must STOP
-//! and report an overlap-contract violation). The crate root
+//! discipline). The crate root
 //! (`frust-widgets/src/lib.rs`) exposes this module as `pub mod glyph;` and the
 //! `frust` facade re-exports it wholesale (`pub use frust_widgets::glyph;`), so
 //! app code names `frust::glyph::*`.
 //!
-//! Each stub file's own module doc names its owning fill task.
-//!
 //! **Scaffold-only lint note:** the wholesale `pub use <module>::*;` lines
-//! below re-export nothing while every submodule is an empty doc-only stub, so
-//! rustc's `unused_imports` fires under the workspace's `-D warnings` gate
-//! (task 17's Notes anticipated this possibility). Rather than drop the
+//! below would re-export nothing if a submodule were an empty doc-only stub,
+//! which would fire rustc's `unused_imports` under the workspace's `-D
+//! warnings` gate. Rather than drop the
 //! re-exports to plain `pub mod` visibility — which would break the flattening
 //! contract the facade's wholesale `pub use frust_widgets::glyph;` relies on
-//! (fill-task `pub` items must reach `frust::glyph::*` with no `mod.rs` edit) —
+//! (a new widget's `pub` items must reach `frust::glyph::*` with no `mod.rs`
+//! edit) —
 //! this one `#![allow(unused_imports)]` masks the **transient** empty-stub
-//! warning. It self-clears per module the moment its fill task (20, 21, 23-26)
-//! adds a first `pub` item, and stays harmless thereafter.
+//! warning. It self-clears per module the moment
+//! a first `pub` item is added, and stays harmless thereafter.
 #![allow(unused_imports)]
 
 pub mod accordion;

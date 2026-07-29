@@ -1,4 +1,4 @@
-//! iOS platform shell: the Rust half of the C-ABI bridge (spec §10.2).
+//! iOS platform shell: the Rust half of the C-ABI bridge.
 //!
 //! This crate is the iOS counterpart to `frust-shell-desktop`/
 //! `frust-shell-android`. Where the desktop shell owns a `winit` event loop
@@ -12,7 +12,7 @@
 //!
 //! Like the other shells, this is an integration crate: on iOS it composes
 //! `frust-core` (the retained tree / `RenderRoot`), `frust-scene`,
-//! `frust-render` (the `SurfaceRenderer` §8.1 state machine) and
+//! `frust-render` (the `SurfaceRenderer` state machine) and
 //! `frust-text`. The platform-agnostic plumbing (the `AppTree` erasure and the
 //! `guard`/`sanitize_scale`/`logical_size` helpers) is reused from
 //! `frust-shell-common` rather than duplicated. All of the C-ABI/render
@@ -22,7 +22,7 @@
 //!
 //! # Unsafe
 //!
-//! This crate is a sanctioned `unsafe` zone (spec §10.2): the framework crates
+//! This crate is a sanctioned `unsafe` zone: the framework crates
 //! stay `unsafe`-free, but a platform shell must cross the FFI boundary. The
 //! crate's `unsafe` surface is [`ffi_glue`]'s `unsafe` code — the call into
 //! `on_surface_created_from_metal_layer`, the
@@ -63,23 +63,23 @@ pub mod ffi_glue;
 pub use frust_shell_common::{AppTree, new_boxed_app, new_boxed_app_with};
 
 /// Bind a generated app's `State`/`app_logic` to the fixed iOS C-ABI exports
-/// (spec §10.2, Makepad `app_main!` precedent).
+/// (Makepad `app_main!` precedent).
 ///
 /// Stamps out the nineteen `frust_*` symbols the generated Swift app declares
 /// (the seven lifecycle/input exports, the three text-input exports —
 /// `frust_ime_apply`, `frust_ime_state_json`, `frust_string_free` —
-/// `frust_set_appearance` (task 08's dark-mode export),
-/// `frust_on_deep_link` (task 07's cold-start/running deep-link delivery),
-/// `frust_init_accessibility` (phase-6d task 05's accesskit adapter
+/// `frust_set_appearance` (the dark-mode export),
+/// `frust_on_deep_link` (cold-start/running deep-link delivery),
+/// `frust_init_accessibility` (the accesskit adapter
 /// attach — the one export whose UIView pointer the CAMetalLayer-only
-/// `frust_init` cannot supply), `frust_set_insets` (device-parity
-/// task 06's SafeArea inset delivery), `frust_system_ui_state`
-/// (glyph-refinements task 10's system-UI override peek — see
+/// `frust_init` cannot supply), `frust_set_insets` (the
+/// SafeArea inset delivery), `frust_system_ui_state`
+/// (the system-UI override peek — see
 /// `ffi_glue::system_ui_state`), plus `frust_set_surface_mode` and
-/// `frust_platform_view_commands_json` (platform-views task 06's
+/// `frust_platform_view_commands_json` (the
 /// translucent-surface opt-in latch and command-backlog peek getter — see
 /// `ffi_glue::set_surface_mode`/`ffi_glue::platform_view_commands_json`),
-/// plus `frust_set_present_sync` and `frust_present_frame` (camera task 13's
+/// plus `frust_set_present_sync` and `frust_present_frame` (the
 /// present-sync latch and its per-tick UI-thread present — see
 /// `ffi_glue::set_present_sync`/`ffi_glue::present_frame`)),
 /// each delegating to the non-generic runtime in
@@ -134,7 +134,7 @@ macro_rules! ios_app {
         }
 
         /// `frust_init_accessibility`: attach the accesskit adapter to the
-        /// app's `FrustView` (phase-6d task 05, D3-ios).
+        /// app's `FrustView`.
         ///
         /// Separate from `frust_init` because the accesskit `SubclassingAdapter`
         /// needs the **UIView** pointer, whereas `frust_init` only receives the
@@ -167,9 +167,9 @@ macro_rules! ios_app {
         ///
         /// `timestamp_ns` is the `CADisplayLink` tick's `timestamp`
         /// (`CFTimeInterval` seconds) converted to nanoseconds by the Swift
-        /// caller — the shell-owned monotonic frame clock (spec §8).
+        /// caller — the shell-owned monotonic frame clock.
         ///
-        /// Returns `u8` (phase-11 fix F2): `0` = a fatal render-thread failure
+        /// Returns `u8`: `0` = a fatal render-thread failure
         /// (first-surface install could not succeed), on which Swift's
         /// `renderFrame` latches `initFailed` and invalidates its `CADisplayLink`;
         /// `1` = keep driving frames. The bridging header's `void` return becomes
@@ -183,7 +183,7 @@ macro_rules! ios_app {
             $crate::ffi_glue::render_frame(handle, timestamp_ns)
         }
 
-        /// `frust_dispatch_touch`: deliver one touch contact (spec §9).
+        /// `frust_dispatch_touch`: deliver one touch contact.
         ///
         /// `phase` is the fixed code (`0`=began, `1`=moved, `2`=ended,
         /// `3`=cancelled — an ABI shared with the Swift `FrustView`); `x`/`y`
@@ -200,7 +200,7 @@ macro_rules! ios_app {
         }
 
         /// `frust_ime_apply`: push a whole editing state from the Swift
-        /// `UITextInput` mirror into the focused widget (spec §9 state-sync path).
+        /// `UITextInput` mirror into the focused widget (the state-sync path).
         ///
         /// `text` is UTF-8; `sel_*`/`comp_*` are UTF-16 code-unit indices (`-1` =
         /// none) — the ABI shared with the Swift `FrustTextInput` mirror.
@@ -258,15 +258,15 @@ macro_rules! ios_app {
         }
 
         /// `frust_set_appearance`: flip the app's theme brightness (a
-        /// dark-mode change) between light and dark (task 08). `dark` is `0`/`1`.
+        /// dark-mode change) between light and dark. `dark` is `0`/`1`.
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub extern "C" fn frust_set_appearance(handle: *mut ::core::ffi::c_void, dark: u8) {
             $crate::ffi_glue::set_appearance(handle, dark)
         }
 
-        /// `frust_set_insets`: deliver the platform window insets (task 06 —
-        /// SafeArea). The eight `f32`s are `view_padding` (`vp_*`: from
+        /// `frust_set_insets`: deliver the platform window insets
+        /// (SafeArea). The eight `f32`s are `view_padding` (`vp_*`: from
         /// `safeAreaInsets`) then `view_insets` (`vi_*`: the keyboard frame),
         /// each l/t/r/b, in **logical points** (no scale division — the same
         /// asymmetry `frust_dispatch_touch` uses). Swift calls this from
@@ -289,7 +289,7 @@ macro_rules! ios_app {
         }
 
         /// `frust_on_deep_link`: deliver a platform deep link (cold-start
-        /// or running — task 07) into the process-wide deep-link source.
+        /// or running) into the process-wide deep-link source.
         /// `url` is the URL's `absoluteString` as a UTF-8 C string.
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
@@ -301,7 +301,7 @@ macro_rules! ios_app {
         }
 
         /// `frust_system_ui_state`: peek the process-wide system-UI override
-        /// slot (task 03) for `FrustViewController`'s per-frame poll — see
+        /// slot for `FrustViewController`'s per-frame poll — see
         /// `ffi_glue::system_ui_state`'s doc comment for the returned `u64`'s
         /// packing scheme and the iOS status-bar/home-indicator mapping table.
         #[cfg(target_os = "ios")]
@@ -311,7 +311,7 @@ macro_rules! ios_app {
         }
 
         /// `frust_set_surface_mode`: latch the process-wide translucent-surface
-        /// opt-in (platform-views task 06) — callable BEFORE `frust_init`.
+        /// opt-in — callable BEFORE `frust_init`.
         /// `translucent` is `0`/`1` (no `<stdbool.h>` precedent in this crate's
         /// ABI, mirroring `frust_set_appearance`'s `dark: u8`). Takes no handle:
         /// the slot is process-global.
@@ -322,7 +322,7 @@ macro_rules! ios_app {
         }
 
         /// `frust_platform_view_commands_json`: the platform-view command
-        /// backlog (platform-views task 06) as a heap-allocated JSON C string
+        /// backlog as a heap-allocated JSON C string
         /// the caller must release with `frust_string_free`. `ack_generation`
         /// is the generation the caller last finished applying (`0` on the
         /// first call); returns null on the no-change fast path
@@ -337,7 +337,7 @@ macro_rules! ios_app {
         }
 
         /// `frust_set_present_sync`: latch the process-wide present-sync
-        /// opt-in (camera task 13) — callable BEFORE `frust_init`, like
+        /// opt-in — callable BEFORE `frust_init`, like
         /// `frust_set_surface_mode`, and paired in the same host branch with
         /// `CAMetalLayer.presentsWithTransaction = true`. `enabled` is `0`/`1`.
         /// Armed, the render thread hands each submitted frame to the UI
@@ -352,7 +352,7 @@ macro_rules! ios_app {
         }
 
         /// `frust_present_frame`: present the frame the render thread parked
-        /// for the UI thread (camera task 13). Called once per
+        /// for the UI thread. Called once per
         /// `CADisplayLink` tick, right after `FrustViewHost.poll`. A no-op
         /// when present-sync is unarmed, on the inline render path, or on a
         /// gate-skipped tick (see `ffi_glue::present_frame`).

@@ -1,4 +1,4 @@
-# Bundled Glyph fonts (task 18)
+# Bundled Glyph fonts
 
 Raw TTF bytes embedded into `frust-theme` via `include_bytes!`
 (`crates/frust-theme/src/glyph/fonts.rs`), gated behind the default-on
@@ -9,8 +9,8 @@ modified.
 
 This crate stays pure-data: these bytes are only ever returned by
 `glyph::fonts::font_data()`. Registering them into a live
-`frust_text::TextContext` is a shell's job (task 27), via the task 08
-pending-font registry.
+`frust_text::TextContext` is a shell's job, via `frust-shell-common`'s
+font-registry pending-font queue.
 
 ## Space Mono
 
@@ -40,7 +40,7 @@ pending-font registry.
 - **License**: OFL-1.1, `ibm-plex-mono/LICENSE.txt` inside the release asset
   (`github.com/IBM/plex/releases/download/%40ibm/plex-mono%402.5.0/ibm-plex-mono.zip`)
 - **Faces bundled** (4 of the family's much larger weight range — Regular/
-  Medium/SemiBold/Italic only, matching the task's scope):
+  Medium/SemiBold/Italic only, matching what the Glyph type scale uses):
 
   | File | Source (within `ibm-plex-mono.zip`) | Size |
   |---|---|---|
@@ -53,10 +53,10 @@ pending-font registry.
 
 ## Total
 
-**7 faces, 1,020,408 B (~996.5 KiB / ~0.97 MiB).** This is over the task's
+**7 faces, 1,020,408 B (~996.5 KiB / ~0.97 MiB).** This is over an
 ~800KB soft target — IBM Plex Mono's "complete" TTF build is the hinted,
 full-glyph-set release artifact (no pre-subsetted TTF variant is published
 upstream; only smaller OTF and unicode-range-split WOFF/WOFF2 exist, neither
-of which match the TTF format this task specified). Subsetting to a smaller
+of which match the bundled TTF format). Subsetting to a smaller
 glyph range (e.g. Latin-1 + common punctuation) is a documented **deferred
-optimization**, not part of this task — see task 18's Notes.
+optimization**.

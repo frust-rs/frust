@@ -1,4 +1,4 @@
-//! The `Slider` interactive widget (spec §6.4): a horizontal track with a thumb
+//! The `Slider` interactive widget: a horizontal track with a thumb
 //! that reports a `0.0..=1.0` value as it is dragged.
 //!
 //! [`slider`] produces a [`SliderView`] carrying the current `value` and an
@@ -8,31 +8,30 @@
 //! its own source of truth — it fires `on_change` and the next rebuild feeds the
 //! new value back in. Horizontal only for v1.
 //!
-//! # Design-language branch (6f task 13)
+//! # Design-language branch
 //!
 //! `paint` reads [`Theme::design_language`] and re-skins the knob only when it
 //! is [`DesignLanguage::Cupertino`] — groove/fill geometry, colors, event
 //! handling, and the entire `Material3`/unthemed path are **untouched**: a
-//! Material-tagged or unthemed paint runs the exact pre-task-13 sequence (same
-//! `fill_rounded_rect` call count/order/values), so Material rendering stays
-//! byte-identical (this task's acceptance criterion 2). The kit's mined data
+//! Material-tagged or unthemed paint runs the exact same sequence as before
+//! this branch was added (same `fill_rounded_rect` call count/order/values),
+//! so Material rendering stays byte-identical. The kit's mined data
 //! (`kit-colors-type-metrics.json`) has **no `Sliders` size record at all**
 //! (only shadow recipes for the knob in `glass-recipes.json`, with no
 //! width/height fields) — a strictly more inconclusive case than
 //! [`crate::cupertino::switch`]'s, which at least had an ambiguous record to
-//! reject. Per this task's evidence rule, [`CUPERTINO_THUMB`] is therefore
-//! **community-approximate**, not kit-cited (see its doc comment); the groove
-//! thickness ([`TRACK_H`]) is shared with the Material path unchanged, since
-//! there is no evidence either way to diverge it. The knob's reflective
-//! treatment (drop shadow + specular gradient) mirrors
-//! [`crate::cupertino::switch`]'s exactly, reading the same `theme.glass.control`
-//! tier (buttons/toggles/sliders — the kit's "control" glass tier covers
-//! interactive controls generally, see `frust-theme/src/glass.rs`'s module
-//! docs). iOS 26.2's "Liquid Glass slider" claims (a user-facing OS
-//! tint-adjustment control, `research/RESEARCH.md`'s CONTESTED section) are
-//! **not** what this branch re-skins — this is Frust's `Slider` widget, a
-//! different control; per PLAN.md's scope note this task ships a visual
-//! re-skin only, no behavior changes.
+//! reject. Per the same evidence rule applied elsewhere in this catalog,
+//! [`CUPERTINO_THUMB`] is therefore **community-approximate**, not kit-cited
+//! (see its doc comment); the groove thickness ([`TRACK_H`]) is shared with
+//! the Material path unchanged, since there is no evidence either way to
+//! diverge it. The knob's reflective treatment (drop shadow + specular
+//! gradient) mirrors [`crate::cupertino::switch`]'s exactly, reading the same
+//! `theme.glass.control` tier (buttons/toggles/sliders — the kit's "control"
+//! glass tier covers interactive controls generally, see
+//! `frust-theme/src/glass.rs`'s module docs). iOS 26.2's "Liquid Glass
+//! slider" claims (a user-facing OS tint-adjustment control) are **not**
+//! what this branch re-skins — this is Frust's `Slider` widget, a different
+//! control; this widget ships a visual re-skin only, no behavior changes.
 
 use std::rc::Rc;
 
@@ -237,7 +236,7 @@ impl Widget for SliderWidget {
         );
 
         if is_cupertino(theme) {
-            // Cupertino re-skin (6f task 13): larger reflective knob — see
+            // Cupertino re-skin: larger reflective knob — see
             // the module docs' Design-language branch section. Mirrors
             // `cupertino::switch`'s shadow+highlight treatment exactly.
             let diam = CUPERTINO_THUMB;
@@ -269,7 +268,7 @@ impl Widget for SliderWidget {
                 &Brush::Gradient(highlight),
             );
         } else {
-            // Material path (and unthemed): byte-identical to pre-task-13
+            // Material path (and unthemed): byte-identical to the pre-Cupertino
             // behavior — thumb (rounded-rect stand-in for a circle in v1).
             scene.fill_rounded_rect(
                 Point::new(thumb_x - THUMB / 2.0, mid_y - THUMB / 2.0),
@@ -477,7 +476,7 @@ mod tests {
 
     #[test]
     fn material_and_unthemed_paint_have_no_reflective_treatment() {
-        // Acceptance criterion 2: byte-identical to pre-task-13 behavior — no
+        // Byte-identical to the pre-Cupertino behavior — no
         // draw_shadow/fill_rounded_rect_brush calls leak into the Material
         // (or unthemed) path.
         let mut unthemed = widget(0.5);

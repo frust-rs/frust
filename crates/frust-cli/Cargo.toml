@@ -21,11 +21,11 @@ frust-tui = { path = "../frust-tui" }
 # Tokio runtime for executing `frust tui`'s async entry point; rt-multi-thread required for Runtime::new().
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 # Targeted exception, direct precedent `ctrlc` (frust-drive's Cargo.toml):
-# `frust run --watch`'s desktop rebuild-relaunch loop (PLAN.md Phase 9.D
-# step 2) needs a filesystem watcher to detect source changes, and that
-# loop lives in this crate's `commands::run` (not `frust-drive`) since it's
-# CLI-loop orchestration over `frust-drive`'s existing `spawn_streaming`
-# seam, not a new drive pipeline of its own.
+# `frust run --watch`'s desktop rebuild-relaunch loop needs a filesystem
+# watcher to detect source changes, and that loop lives in this crate's
+# `commands::run` (not `frust-drive`) since it's CLI-loop orchestration
+# over `frust-drive`'s existing `spawn_streaming` seam, not a new drive
+# pipeline of its own.
 notify.workspace = true
 # `frust run --watch` moves the streamed `cargo run` child into its own
 # process group (so a kill reaches the compiled preview binary it forks — the

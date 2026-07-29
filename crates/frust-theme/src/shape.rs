@@ -1,23 +1,20 @@
 //! Material 3 shape scale: 10 corner-radius tokens (post-Expressive scale).
 //!
 //! Source: <https://m3.material.io/styles/shape/corner-radius-scale>
-//! (refuter-verified 2026-07-17; the pre-Expressive scale had 7 tokens, not
-//! 10 — see
-//! `workflow/plans/features/frust-phase-6a-foundations/research/RESEARCH.md`'s
-//! refuted-claims list). Radii are dp, treated 1:1 as logical px, matching
+//! (verified 2026-07-17; the pre-Expressive scale had 7 tokens, not
+//! 10). Radii are dp, treated 1:1 as logical px, matching
 //! this crate's other length fields.
 //!
 //! # Cupertino (iOS) mapping
 //!
 //! [`ShapeScale::cupertino`] fills the same 10 slots with iOS-idiom corner
 //! radii. Apple does not publish a numeric corner-radius scale the way M3
-//! does — every value below is a **community-approximate** convention (see
-//! `workflow/plans/features/frust-phase-6c-widget-catalog/research/RESEARCH.md`'s
-//! `cupertino-tokens-idioms` claims, retrieved 2026-07-17): `small` (8pt) is
+//! does — every value below is a **community-approximate** convention
+//! (retrieved 2026-07-17): `small` (8pt) is
 //! the widely-cited standard `UIButton`/control corner radius; `medium`
 //! (10pt) approximates a text field/small card; `large`/`large_increased`
 //! (13pt/14pt) bracket the community-cited alert/action-sheet radius range
-//! (C13-adjacent: Apple's own HIG text does not publish this figure);
+//! (Apple's own HIG text does not publish this figure);
 //! `extra_large`/`extra_large_increased` (20pt/24pt) approximate a sheet or
 //! large modal card; `extra_extra_large` (36pt) has no iOS precedent at all
 //! and is a Frust linear extrapolation to fill the scale's largest slot.

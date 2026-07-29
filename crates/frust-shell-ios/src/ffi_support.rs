@@ -19,7 +19,7 @@ use accesskit::{Node, NodeId, Tree, TreeId, TreeUpdate};
 use frust_render::SurfacePhase;
 
 /// Assemble an `accesskit::TreeUpdate` from the flat pieces of a
-/// `frust_core::SemanticsUpdate` (phase-6d task 05, D3-ios).
+/// `frust_core::SemanticsUpdate`.
 ///
 /// This is the pure, host-testable core of the iOS accesskit push: the iOS
 /// adapter ([`crate::accessibility`]) calls it inside `Adapter::update_if_active`
@@ -29,7 +29,7 @@ use frust_render::SurfacePhase;
 /// that consumes the result is only ever compiled for iOS.
 ///
 /// v1 pushes the **whole tree every update** (allowed because our node ids are
-/// stable across frames — phase-6d D1), so:
+/// stable across frames), so:
 /// - `tree` is always `Some(Tree::new(root))` (the whole-tree metadata accesskit
 ///   requires on every full update);
 /// - `tree_id` is [`TreeId::ROOT`] — Frust exposes a single root tree, no
@@ -114,7 +114,7 @@ pub(crate) enum Appearance {
 
 /// Map the `frust_set_appearance` C-ABI flag (Swift's `traitCollection.
 /// userInterfaceStyle == .dark`) into an [`Appearance`] — the pure core of the
-/// appearance state-machine transition task 08 wires up.
+/// appearance state-machine transition.
 #[inline]
 pub(crate) fn appearance_from_dark(dark: bool) -> Appearance {
     if dark {
@@ -131,7 +131,7 @@ pub(crate) fn appearance_from_dark(dark: bool) -> Appearance {
 /// command submission from a backgrounded app can get the process killed
 /// (belt-and-suspenders with the Swift side pausing its `CADisplayLink`); the
 /// ready gate mirrors the desktop/Android shells' "no rendering outside
-/// SurfaceReady" (spec §8.1).
+/// SurfaceReady" rule.
 #[inline]
 pub(crate) fn should_render_frame(surface_ready: bool, paused: bool) -> bool {
     surface_ready && !paused
@@ -173,11 +173,10 @@ pub(crate) fn should_recreate_surface(
     matches!(phase, SurfacePhase::SurfaceLost) && !paused && failed_attempts < MAX_RECREATE_ATTEMPTS
 }
 
-/// `frust_render_frame`'s "keep driving frames" return code (phase-11 fix F2).
+/// `frust_render_frame`'s "keep driving frames" return code.
 pub(crate) const FRAME_ALIVE: u8 = 1;
 
-/// `frust_render_frame`'s "fatal — stop the CADisplayLink" return code
-/// (phase-11 fix F2).
+/// `frust_render_frame`'s "fatal — stop the CADisplayLink" return code.
 pub(crate) const FRAME_FATAL: u8 = 0;
 
 /// Map the render thread's fatal-flag state onto `frust_render_frame`'s `u8`
@@ -304,7 +303,7 @@ pub(crate) fn json_escape_into(s: &str, out: &mut String) {
 /// ([`crate::app::IosAppHandle`]) has already converted logical px into
 /// **physical** px (`* scale`) before building one of these — the
 /// physical-at-FFI/logical-inside rule, applied outbound (matches
-/// `frust-shell-android`'s `nativePlatformViewCommands` JSON, task 05).
+/// `frust-shell-android`'s `nativePlatformViewCommands` JSON).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PvRect {
     /// Left edge (physical px).
@@ -348,10 +347,9 @@ pub(crate) enum PlatformViewCommand {
 }
 
 /// Serialize the platform-view command backlog into the wire JSON
-/// `frust_platform_view_commands_json` returns (platform-views task 06) —
-/// byte-identical schema to `frust-shell-android`'s `nativePlatformViewCommands`
-/// (task 05), so a shared Kotlin/Swift-side parser (a future template task)
-/// need not branch on platform:
+/// `frust_platform_view_commands_json` returns — byte-identical schema to
+/// `frust-shell-android`'s `nativePlatformViewCommands`, so a shared
+/// Kotlin/Swift-side parser need not branch on platform:
 ///
 /// ```text
 /// {"generation":7,"commands":[
@@ -457,7 +455,7 @@ fn push_command_json(out: &mut String, cmd: &PlatformViewCommand) {
 /// non-finite component to `0`** — `NaN`/`±inf` have no JSON representation
 /// and would emit an unparseable token, breaking the whole batch for the Swift
 /// host. Parity with `frust-shell-android`'s `platform_view_rect_json`
-/// (review Minor 13) and with [`push_num_or_null`]'s caret guard above.
+/// and with [`push_num_or_null`]'s caret guard above.
 fn push_rect_json(out: &mut String, rect: PvRect) {
     out.push('[');
     push_finite(out, rect.x);
@@ -483,7 +481,7 @@ fn push_finite(out: &mut String, v: f64) {
 }
 
 /// Publish a surface (re)install's **resolved** translucency onto the shared,
-/// cross-thread flag the UI thread reads each frame (review finding M1).
+/// cross-thread flag the UI thread reads each frame.
 ///
 /// `resolved` is `Some(translucent)` for a successful install — the value
 /// `frust_render::SurfaceRenderer::surface_resolved_translucent` reports for
@@ -521,7 +519,7 @@ pub(crate) fn read_resolved_translucency(flag: &std::sync::atomic::AtomicBool) -
 }
 
 /// This frame's base clear color, chosen from the surface's **resolved**
-/// translucency (review finding M1).
+/// translucency.
 ///
 /// A surface that really came up translucent clears to `transparent` so a
 /// native sibling view behind it shows through wherever nothing painted (Mode
@@ -785,7 +783,7 @@ mod tests {
         assert!(json.contains(r#""caretX":null,"caretY":null,"caretW":2,"caretH":10"#));
     }
 
-    // --- Platform-view commands JSON (platform-views task 06) --------------
+    // --- Platform-view commands JSON --------------
 
     fn rect(x: f64, y: f64, w: f64, h: f64) -> PvRect {
         PvRect { x, y, w, h }
@@ -874,7 +872,7 @@ mod tests {
 
     #[test]
     fn platform_view_rect_json_sanitizes_non_finite_components() {
-        // Android parity (review Minor 13): a `NaN`/`inf` rect component must
+        // Android parity: a `NaN`/`inf` rect component must
         // never emit an unparseable JSON token — the Swift host parses the
         // whole batch, so one bad number would drop every command in it.
         let commands = vec![PlatformViewCommand::Update {

@@ -1,4 +1,4 @@
-//! Native Widgets section (native-widgets p1-06, redesigned in p3-05): all
+//! Native Widgets section: all
 //! six v1 controls (`Button`/`Label`/`Switch`/`Slider`/`ProgressBar`/`Image`)
 //! rendered from pure Rust via `frust-native-widgets`'s `frust-api` builders,
 //! each one **beside its glyph (frust-drawn) counterpart** — this crate's
@@ -35,18 +35,18 @@
 //! `ProgressBar` beside it (native → signal → **native**), proving the same
 //! signal can fan out to more than one control.
 //!
-//! # Write-back affordance (closes p2-05 bar 8's gap)
+//! # Write-back affordance
 //!
-//! The Phase 2 device gate's echo bar could only be *partially* executed:
-//! `research/VERIFY-P2.md`'s Finding 1 recorded that this page was a plain
+//! An earlier device-gate pass's echo test could only be *partially*
+//! executed: this page was a plain
 //! signal mirror — it echoed whatever the control reported and never wrote a
 //! *different* value back, so the **rejecting** round trip had no affordance
 //! to exercise. [`writeback_toggle`] is that affordance: with it on, both
 //! [`confirm_switch`] and [`confirm_slider`] echo the app's OWN (unchanged)
 //! value back during the change handler instead of accepting the requested
-//! one, which is exactly the scenario `research/RESEARCH-P2-REFRESH.md` §3's
-//! Caveat B describes (a filed report that `setOn:` called from inside a
-//! `valueChanged` handler can re-enter it).
+//! one, which is exactly the re-entrancy scenario a filed report describes:
+//! `setOn:` called from inside a
+//! `valueChanged` handler can re-enter it.
 //!
 //! ## Why the rejection also has to move a prop (a finding, not a hack)
 //!
@@ -63,15 +63,17 @@
 //! ([`switch_description`]/[`slider_description`]). That is a real, app-owned
 //! prop, so it moves the wire, which is what lets `plan` see
 //! `observed != app value` and actually plan the setter — and the setter is
-//! what p3-07 needs in order to test the echo guard at all. Accept mode is
-//! untouched: its params are byte-for-byte what the p2 gate measured.
+//! what a later regression test needs in order to test the echo guard at
+//! all. Accept mode is
+//! untouched: its params are byte-for-byte what an earlier device gate
+//! measured.
 //!
 //! The glyph column rejects too, which is the instructive contrast: frust's
 //! own controlled `Switch`/`Slider` snap back within the same frame (their
 //! `rebuild` re-applies the app value), while the native ones have to be
 //! driven back across the wire a frame later.
 //!
-//! ## R0-15: `content_description` is a deliberate, LABELED test-only affordance
+//! ## `content_description` is a deliberate, LABELED test-only affordance
 //!
 //! `content_description` is Android's accessibility label — TalkBack would
 //! announce "…refused 4 times" — so this needed an actual investigation, not
@@ -103,10 +105,11 @@
 //! affordance** — a real app must never carry test telemetry in its
 //! accessibility label, since a screen reader user hears every word of it.
 //!
-//! # The composite lives in the plugin, and mounts behind a toggle (p3-08)
+//! # The composite lives in the plugin, and mounts behind a toggle
 //!
-//! p3-02 shipped native-subtree support and the generic
-//! `native_component(kind, component, props)` mounting builder, and this page
+//! Native-subtree support and the generic
+//! `native_component(kind, component, props)` mounting builder shipped
+//! earlier, and this page
 //! is where a reader meets a composite — one component owning a whole native
 //! hierarchy frust does not lay out. [`composite_block`] mounts
 //! `frust_native_widgets::DemoCard`: a parent view with a title label and two
@@ -155,14 +158,14 @@
 //! translucency ON process-wide) — nothing on this page needs to special-case
 //! that; it is the builders' own contract.
 //!
-//! # Theme ladder (L1 brightness pinning + L2 token pinning, p1-07)
+//! # Theme ladder (L1 brightness pinning + L2 token pinning)
 //!
 //! [`theme_toggle_demo`] is a page-local light/dark toggle proving the six
 //! controls above re-theme LIVE: `frust_native_widgets::api`'s builders read
 //! `use_context::<Theme>()` every rebuild and fold the resolved tokens
 //! (background/text/accent colour, corner radius, text size) into each
-//! control's `params_json`, so a `set_app_theme` write (spike 4a's proven
-//! re-run mechanism, `crates/frust/tests/theme_reactivity_spike.rs`) repaints
+//! control's `params_json`, so a `set_app_theme` write (the proven
+//! re-run mechanism `crates/frust/tests/theme_reactivity_spike.rs` tests) repaints
 //! every mounted native view through the ordinary `UpdateParams` diff path —
 //! no remount, no flicker of a fresh platform view. It mirrors the header's
 //! own brightness toggle (`crate::catalog_app_bar`) exactly, kept as its own
@@ -174,23 +177,21 @@
 //! control was first created under — a documented approximation
 //! (`plugins/native-widgets/src/android/theme.rs`'s module doc), not a bug.
 //!
-//! # GATE HARNESS (task p1-11): a measurement rig, not a demo
+//! # GATE HARNESS: a measurement rig, not a demo
 //!
-//! [`gate_harness_block`]'s section exists solely to give
-//! `tasks/p1-10-android-device-gate.md`'s bars 5 and 6 something to measure —
-//! the Phase 1 decomposition assigned those measurements to the device gate
-//! but never assigned anyone to build the affordances they need. It is
-//! marked GATE HARNESS in its own UI copy too (not a design-system section
-//! like the ones above), and **Phase 3 may delete it outright** once the
-//! on-device gate has run: a live [`frust_native_widgets::live_slot_count`]
-//! readout (diagnostics-only, not a supported production API — see that
-//! fn's own doc comment), a mount/unmount cycler running its OWN six-control
-//! group (bar 5: proves the p1-09 teardown-retire path disposes promptly
-//! rather than waiting out the differ's idle missing-streak backstop —
+//! [`gate_harness_block`]'s section exists solely to give an on-device test
+//! something to measure. It is marked GATE HARNESS in its own UI copy too
+//! (not a design-system section like the ones above), and **may be deleted
+//! outright** once that on-device gate has run: a live
+//! [`frust_native_widgets::live_slot_count`] readout (diagnostics-only, not
+//! a supported production API — see that fn's own doc comment), a
+//! mount/unmount cycler running its OWN six-control group (proves the
+//! teardown-retire path disposes promptly rather than waiting out the
+//! differ's idle missing-streak backstop —
 //! `plugins/native-widgets/src/registry.rs`'s module doc's Idle-deferred
-//! dispose finding), and a 50-slot `native_label` stress toggle, off by
-//! default (bar 6: the Phase 0-deferred measurement feeding PLAN's
-//! shared-container escalation decision). No nested `ScrollView` here: the
+//! dispose section), and a 50-slot `native_label` stress toggle, off by
+//! default (feeds a shared-container scroll-batch-jank / differ
+//! batch-sizing measurement). No nested `ScrollView` here: the
 //! whole "Native Widgets" page already rides one scroll view
 //! (`crate::home_page`'s `scroll_view(pages::current(...))` wrapper), so
 //! appending content to this page's own column is already scrollable.
@@ -279,24 +280,26 @@ local_sig!(tap_count_sig, u32, 0);
 local_sig!(switch_checked_sig, bool, false);
 local_sig!(slider_value_sig, i32, 30);
 // Native EVENT counters, distinct from the values above (which a rejected
-// change deliberately leaves untouched): p2-05 bar 8's measurable half is
-// "one user interaction produces exactly ONE counter advance", and a re-entrant
-// echo (`RESEARCH-P2-REFRESH.md` §3's Caveat B) would show up here as two.
+// change deliberately leaves untouched): the measurable half of the
+// write-back affordance is
+// "one user interaction produces exactly ONE counter advance", and a
+// re-entrant echo (the same Caveat B a filed report describes) would show
+// up here as two.
 local_sig!(switch_events_sig, u32, 0);
 local_sig!(slider_events_sig, u32, 0);
 // The glyph column's own tap counter — deliberately NOT `tap_count_sig`, which
 // is the device gate's `Taps:` readout and must count native presses only.
 local_sig!(glyph_tap_count_sig, u32, 0);
-// Write-back affordance (p2-05 bar 8, module doc's *Write-back affordance*).
+// Write-back affordance (module doc's *Write-back affordance* section).
 local_sig!(reject_writeback_sig, bool, false);
 local_sig!(switch_refused_sig, u32, 0);
 local_sig!(slider_refused_sig, u32, 0);
-// The composite toggle (p3-08), OFF by default — see [`composite_block`]. This
+// The composite toggle, OFF by default — see [`composite_block`]. This
 // default is load-bearing, not a preference: ON makes the page mount a SEVENTH
-// native slot, and `Total live: 6` is a gate constant every device gate since
-// Phase 1 has keyed on (module doc's *Exactly six native slots at rest*).
+// native slot, and `Total live: 6` is a gate constant every device gate has
+// keyed on (module doc's *Exactly six native slots at rest*).
 local_sig!(composite_visible_sig, bool, false);
-// GATE HARNESS state (task p1-11) — see [`gate_harness_block`]'s doc comment.
+// GATE HARNESS state — see [`gate_harness_block`]'s doc comment.
 local_sig!(cycle_target_sig, u32, 0); // 0 == no cycler run started yet
 local_sig!(stress_visible_sig, bool, false); // 50-slot stress toggle, off by default
 
@@ -354,7 +357,7 @@ fn block(children: Vec<FlexChild<CatalogState>>) -> FlexChild<CatalogState> {
 }
 
 // ---------------------------------------------------------------------------
-// Side-by-side comparison chrome (p3-05)
+// Side-by-side comparison chrome
 // ---------------------------------------------------------------------------
 
 /// One comparison column's width (logical px). Two of these plus [`PAIR_GAP`]
@@ -370,7 +373,8 @@ const PAIR_GAP: f64 = 12.0;
 /// (the native slot declares it, the glyph cell is boxed to it), so a pair
 /// reads as one control shown twice.
 ///
-/// Provenance: these are exactly the heights the pre-p3-05 page already gave
+/// Provenance: these are exactly the heights the page's earlier
+/// single-column layout already gave
 /// its native slots, kept unchanged so the device gate's touch targets do not
 /// move. Only the *widths* changed, and only because two columns have to fit
 /// ([`PAIR_CELL_W`]'s own doc).
@@ -446,7 +450,7 @@ fn pair_row(
 }
 
 // ---------------------------------------------------------------------------
-// The write-back affordance (p2-05 bar 8) — see the [module docs](self)
+// The write-back affordance — see the [module docs](self)
 // ---------------------------------------------------------------------------
 
 /// Confirm (or refuse) one requested `Switch` value, from EITHER column.
@@ -454,7 +458,8 @@ fn pair_row(
 /// Accept mode is the plain controlled-component confirmation
 /// (`docs/CODE_STANDARDS.md`'s Interaction Semantics). Reject mode writes the
 /// app's own current value straight back instead — the rejecting round trip
-/// p2-05 bar 8 could not exercise (module doc's *Write-back affordance*) —
+/// an earlier device gate could not exercise (module doc's *Write-back
+/// affordance*) —
 /// and bumps [`switch_refused_sig`], which is what puts the refusal on the
 /// wire at all.
 ///
@@ -492,7 +497,7 @@ fn confirm_slider(requested: i32) {
 ///
 /// This is the module doc's *Why the rejection also has to move a prop*: in
 /// accept mode the string is constant, so this page's params stay byte-for-byte
-/// what the Phase 2 gate measured; in reject mode it changes on every refusal,
+/// what an earlier device gate measured; in reject mode it changes on every refusal,
 /// which is the only reason the differ emits an `UpdateParams` for a change the
 /// app deliberately did not make — and therefore the only reason
 /// `SwitchProps::plan`'s write-back branch runs at all.
@@ -514,7 +519,7 @@ fn slider_description(rejecting: bool, refused: u32) -> String {
 }
 
 /// The write-back mode toggle itself — labelled on-screen so someone holding
-/// the phone knows what it does without reading this file (p3-05 acceptance).
+/// the phone knows what it does without reading this file.
 fn writeback_toggle(rejecting: bool) -> AnyView<CatalogState> {
     any(checkbox(
         rejecting,
@@ -678,7 +683,7 @@ fn theme_toggle_demo(brightness: Brightness) -> AnyView<CatalogState> {
 }
 
 // ---------------------------------------------------------------------------
-// The native composite (p3-08) — see the [module docs](self)'s "The composite
+// The native composite — see the [module docs](self)'s "The composite
 // lives in the plugin" section. Unlike the GATE HARNESS region below, this is a
 // real feature demo and outlives the device gate.
 // ---------------------------------------------------------------------------
@@ -748,7 +753,7 @@ fn composite_demo(title: String, background: Color, ink: Color) -> AnyView<Catal
 /// `Total live:` reading in both positions, so a person holding the phone can
 /// check the one number that proves the design (7, not 9).
 ///
-/// **Always returns exactly two elements (R0-7).** [`page`]'s `children` is an
+/// **Always returns exactly two elements.** [`page`]'s `children` is an
 /// unkeyed [`FlexView`], reconciled positionally, and this fn's output sits
 /// BEFORE [`gate_harness_block`]'s several elements — a 1-vs-2 return shape
 /// would shift every later child's position on every toggle, diffing each
@@ -775,7 +780,7 @@ fn composite_block(visible: bool, slider_value: i32) -> Vec<FlexChild<CatalogSta
              UpdateParams diff as the six controls.",
         )),
         gap(6.0),
-        // R0-14/R1-e: the card's own copy explains the architecture but never
+        // The card's own copy explains the architecture but never
         // told a device tester the buttons do nothing when tapped — confirmed
         // on a real OnePlus 9 (press feedback, no effect). Wording matches
         // `plugins/native-widgets/src/demo.rs`'s "No event wiring, and why"
@@ -809,7 +814,7 @@ fn composite_block(visible: bool, slider_value: i32) -> Vec<FlexChild<CatalogSta
         )),
     ]);
 
-    // R0-7: always return exactly two elements, visible or not — a
+    // Always return exactly two elements, visible or not — a
     // stable-length shape, not a 1-vs-2 one. `page`'s `children` list is
     // unkeyed (`FlexView` reconciles by position), and this fn sits BEFORE
     // `gate_harness_block`'s several blocks, so a 1-vs-2 shape shifted every
@@ -837,22 +842,22 @@ fn composite_block(visible: bool, slider_value: i32) -> Vec<FlexChild<CatalogSta
 }
 
 // ---------------------------------------------------------------------------
-// GATE HARNESS (task p1-11) — a measurement rig, not a demo. See the
-// [module docs](self)'s "GATE HARNESS" section. Phase 3 may delete this
-// whole region outright once `tasks/p1-10-android-device-gate.md`'s bars 5/6
-// have run on device.
+// GATE HARNESS — a measurement rig, not a demo. See the
+// [module docs](self)'s "GATE HARNESS" section. This whole region may be
+// deleted outright once the underlying device gate (leak + lifecycle,
+// 50-slot stress — see below) has run on device.
 // ---------------------------------------------------------------------------
 
-/// How many single-control slots the bar-6 stress toggle mounts — 50, per
-/// the task's own spec (`native_label`, "the cheapest control").
+/// How many single-control slots the stress toggle mounts — 50
+/// (`native_label`, "the cheapest control").
 const STRESS_SLOT_COUNT: u32 = 50;
 
 /// The mount/unmount cycler's per-half-step duration (mount, then unmount, is
 /// two half-steps = one cycle): slow enough that a human watching the page
-/// can see the group blink in and out, fast enough that a 100-cycle run (bar
-/// 5's own target count) finishes in `100 * 2 * CYCLE_STEP_MS` = 30s, well
-/// under a minute. **Community-approximate**: no spec pins this, it's just a
-/// human-observable-but-not-glacial pace.
+/// can see the group blink in and out, fast enough that a 100-cycle run (the
+/// cycler's own target count) finishes in `100 * 2 * CYCLE_STEP_MS` = 30s,
+/// well under a minute. **Community-approximate**: no spec pins this, it's
+/// just a human-observable-but-not-glacial pace.
 const CYCLE_STEP_MS: f64 = 150.0;
 
 /// A zero-size sentinel [`View`]/[`Widget`] pair whose only job is an
@@ -957,8 +962,8 @@ fn cycle_state(target: u32) -> (bool, u32, bool) {
 /// The mount/unmount cycler's own six-control group — deliberately SEPARATE
 /// instances from the six-control showcase above, so cycling never disrupts
 /// that section's own round-trip demo. Each mount allocates six fresh native
-/// slots; each unmount tears all six down — the p1-09 teardown-retire path
-/// bar 5 exercises. Deliberately display-only (no callbacks/round-trip
+/// slots; each unmount tears all six down, exercising the teardown-retire
+/// path. Deliberately display-only (no callbacks/round-trip
 /// wiring): the point is create/dispose churn, not interaction.
 fn cycle_group(mounted: bool) -> AnyView<CatalogState> {
     if !mounted {
@@ -995,7 +1000,7 @@ fn cycle_group(mounted: bool) -> AnyView<CatalogState> {
     ))
 }
 
-/// The 50-slot stress toggle's content (bar 6): [`STRESS_SLOT_COUNT`]
+/// The 50-slot stress toggle's content: [`STRESS_SLOT_COUNT`]
 /// single-control (`native_label`) slots in a plain vertical column. No
 /// nested `ScrollView` here — see the [module docs](self)'s note on why the
 /// whole page's own scroll view already covers this.
@@ -1026,8 +1031,8 @@ fn gate_harness_block(
         inflexible(label("GATE HARNESS \u{2014} measurement rig, not a demo")),
         gap(6.0),
         inflexible(caption(
-            "Built for task p1-10's device-gate bars 5/6 (leak + lifecycle, 50-slot stress). \
-             Phase 3 may delete this whole section once the on-device gate has run \u{2014} it \
+            "Built for the device-gate leak + lifecycle bars (50-slot stress). This whole \
+             section may be deleted once the on-device gate has run \u{2014} it \
              proves the registry's teardown-retire path, not a design pattern.",
         )),
     ]);
@@ -1061,7 +1066,7 @@ fn gate_harness_block(
             "Runs its OWN six-control group (separate from the showcase above), so cycling \
              never disturbs that demo. Watch \u{201c}Total live\u{201d} above dip by 6 on every \
              unmount and climb back by 6 on every mount \u{2014} it should settle back down \
-             immediately, not linger for a few frames (that lag is exactly what the p1-09 \
+             immediately, not linger for a few frames (that lag is exactly what the \
              teardown-retire fix eliminated).",
         )),
         gap(6.0),
@@ -1143,11 +1148,11 @@ pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
     let switch_refused = switch_refused_sig().get();
     let slider_refused = slider_refused_sig().get();
 
-    // The composite toggle (p3-08) — tracked for the same reason as the gate
+    // The composite toggle — tracked for the same reason as the gate
     // harness's own reads below.
     let composite_visible = composite_visible_sig().get();
 
-    // GATE HARNESS (task p1-11) — tracked `.get()`s so a button tap (a
+    // GATE HARNESS — tracked `.get()`s so a button tap (a
     // signal write) wakes the page even while it's otherwise idle (0fps at
     // rest), per `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions:
     // "an untracked read is a silent wake hazard".
@@ -1194,11 +1199,11 @@ pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
         inflexible(theme_toggle_demo(brightness)),
     ]);
 
-    // The write-back affordance (p2-05 bar 8) — placed BEFORE the pairs so a
+    // The write-back affordance — placed BEFORE the pairs so a
     // person gating this page picks the mode, then interacts.
     let writeback_block = block(vec![
         inflexible(label(
-            "Write-back mode (p2-05 bar 8: the rejecting round trip)",
+            "Write-back mode (the rejecting round trip)",
         )),
         gap(6.0),
         inflexible(caption(
@@ -1208,7 +1213,8 @@ pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
              the Slider or flip the Switch in EITHER column: the glyph widget snaps back within \
              the frame, and the native one has to be driven back across the wire a frame later. \
              \u{201c}Switch events\u{201d} below must advance by exactly 1 per toggle \u{2014} 2 \
-             would be the re-entrant echo RESEARCH-P2-REFRESH \u{00a7}3's Caveat B warns about.",
+             would be a re-entrant echo, the exact feedback loop write-back mode exists to \
+             catch.",
         )),
         gap(6.0),
         inflexible(writeback_toggle(rejecting)),
@@ -1219,9 +1225,9 @@ pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
             if rejecting { "REJECT" } else { "ACCEPT" }
         ))),
         gap(4.0),
-        // R0-15: labeled plainly so nobody copies this into a real app — see
-        // the module doc's "R0-15" section for the investigation that ruled
-        // out every non-a11y alternative.
+        // Labeled plainly so nobody copies this into a real app — see
+        // the module doc's "test-only affordance" section for the
+        // investigation that ruled out every non-a11y alternative.
         inflexible(caption(
             "TEST-ONLY: while REJECT is on, the refusal count above also rides each control's \
              accessibility label (`content_description`), the only prop that moves the wire \
@@ -1325,7 +1331,7 @@ pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
         readout_block,
     ];
     // The composite goes BEFORE the gate harness: it is a feature demo that
-    // outlives the harness (which Phase 3 may delete), and a person turning it
+    // outlives the harness (which may be deleted), and a person turning it
     // on scrolls straight down into the `Total live:` readout that proves it
     // cost exactly one slot.
     children.extend(composite_block(composite_visible, slider_value));

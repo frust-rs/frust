@@ -1,23 +1,21 @@
-//! Filled by task 25-glyph-term-tooltip (TermBlock).
-//!
 //! [`term_block`]/[`TermBlockView`]: a rounded terminal-style output block —
-//! `research/glyph-design-system-light.html`'s `.term-block`/`.term-head`/
+//! the Glyph design system's `.term-block`/`.term-head`/
 //! `.term-body` rules (retrieved 2026-07-21): a three-dot header strip over a
 //! monospace body of [`TermLine`]s, each typed `Prompt`/`Output`/`Comment`
 //! with its own ink color.
 //!
-//! # Brightness invariance (the task's own mandate)
+//! # Brightness invariance
 //!
 //! Every painted color here is either a [`GlyphInk`] field or one of this
 //! module's own literal fallback constants — **never** a brightness-swapped
-//! `ColorScheme`/`StatusPalette` role, even though the reference build's own
+//! `ColorScheme`/`StatusPalette` role, even though the design system's own
 //! CSS does source the header dots from `var(--error)`/`var(--warning)`/
 //! `var(--success)` (brightness-swapped tokens) and the border/shadow from
 //! brightness-swapped `var(--border...)` roles. This is a deliberate
-//! deviation from literal source fidelity: the task's acceptance criterion
-//! requires **identical paint under Light and Dark [`Theme::glyph_baseline`]
+//! deviation from literal source fidelity: this widget requires **identical
+//! paint under Light and Dark [`Theme::glyph_baseline`]
 //! brightness**, so the dot/border colors below are fixed to the **dark**
-//! scheme's literal values (RESEARCH §1.1) rather than resolved dynamically —
+//! scheme's literal values rather than resolved dynamically —
 //! consistent with [`GlyphInk`]'s own "stays dark in both brightnesses"
 //! precedent (`frust_theme::glyph::color`'s module docs).
 //!
@@ -26,7 +24,7 @@
 //! token-resolution convention, just applied to a token table that happens to
 //! never vary by brightness.
 //!
-//! # Header dots and border (this task's own choices)
+//! # Header dots and border
 //!
 //! The `border-bright` hairline (`rgba(242,234,217,.18)`) is pre-flattened
 //! over [`GlyphInk::terminal_bg`] (`#1c1912`) into [`TERM_BORDER`] — the same
@@ -34,13 +32,13 @@
 //! use for opaque roles composited over a known background. The header strip
 //! paints as a plain rectangle (not clipped to the block's own rounded
 //! corners — the scene has no rounded-rect clip primitive), so its two top
-//! corners sit square against the block's rounded corner arc: a small, this
-//! task's own accepted v1 visual simplification, not a rounded clip.
+//! corners sit square against the block's rounded corner arc: a small,
+//! accepted v1 visual simplification, not a rounded clip.
 //!
 //! # Optional staggered line reveal
 //!
 //! [`TermBlockView::staggered`] opts into a one-shot, mount-time reveal built
-//! on [`crate::motion::patterns::GlyphStagger::glyph`] (task 19's
+//! on [`crate::motion::patterns::GlyphStagger::glyph`] (the
 //! `StaggerSpec` idiom, explicitly documented there as a `TermBlock` consumer)
 //! — 90ms per-line delay, 150ms `effects`-eased per-line fade-in — driven by
 //! one `AnimationController` sized to
@@ -50,7 +48,7 @@
 //! [`GlyphStagger::item_progress`](crate::motion::patterns::GlyphStagger::item_progress)'s
 //! own collapse: every line reveals together on the shared timeline with no
 //! per-line delay, a single fast synchronized fade rather than a cascade
-//! (task 19's documented contract — not an instantaneous jump to fully
+//! (a documented contract — not an instantaneous jump to fully
 //! shown). Lines render fully visible immediately, with no controller built
 //! at all, only when `staggered` is left at its `false` default.
 
@@ -70,7 +68,7 @@ use peniko::{Brush, Color};
 
 use crate::motion::patterns::GlyphStagger;
 
-// ---- Layout constants (this task's own choices, from the source CSS) -----
+// ---- Layout constants (from the design system's source CSS) --------------
 
 /// Header strip horizontal padding (`.term-head{padding:9px 12px}`).
 const HEAD_PAD_X: f64 = 12.0;
@@ -587,7 +585,7 @@ mod tests {
 
     #[test]
     fn brightness_invariance_recording_scene_identical_dark_vs_light() {
-        // Acceptance criterion 1: identical paint under Light and Dark
+        // Identical paint under Light and Dark
         // glyph_baseline() brightness.
         let dark = Theme::glyph_baseline();
         let light = dark.clone().with_brightness(frust_theme::Brightness::Light);
@@ -660,7 +658,7 @@ mod tests {
         let mut ctx = PaintCtx::new(Point::ZERO, Size::new(400.0, 200.0));
         w.paint(&mut ctx, &mut Recorder::default());
 
-        // Advance far past the whole stagger timeline (task 19's
+        // Advance far past the whole stagger timeline (`GlyphStagger`'s
         // `total_duration`) via a second `RenderRoot`-free paint at a later
         // synthetic frame time — done by re-invoking the widget's own
         // controller directly through another `paint` call using a
@@ -688,7 +686,7 @@ mod tests {
 
     #[test]
     fn reduce_motion_synchronizes_lines_to_a_single_fade_no_cascade() {
-        // task 19's documented `GlyphStagger::item_progress` contract: under
+        // `GlyphStagger::item_progress`'s documented contract: under
         // `reduce_motion` every item tracks the shared `overall` progress
         // directly (no per-item delay) instead of cascading — a single fast
         // fade, not an instantaneous full reveal.

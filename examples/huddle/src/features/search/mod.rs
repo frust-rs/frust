@@ -1,8 +1,7 @@
-//! Search feature — live filter over channels, people, and messages (huddle
-//! clean-architecture refactor, task 04: sliced into
-//! `domain`/`data`/`presentation`). **Sync, infallible** (PLAN Design
-//! Decision 8): see [`domain::repositories::SearchRepository`]'s module docs
-//! for why this slice carries no `HuddleFailure`/`ControllerCore`/async.
+//! Search feature — live filter over channels, people, and messages, sliced
+//! into `domain`/`data`/`presentation`. **Sync, infallible**: see
+//! [`domain::repositories::SearchRepository`]'s module docs for why this
+//! slice carries no `HuddleFailure`/`ControllerCore`/async.
 //!
 //! See [`data::repositories::StoreSearchRepository`] for the store-backed
 //! repository implementation and

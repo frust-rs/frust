@@ -1,5 +1,4 @@
-/// Fairness gates the paired benchmark's credibility depends on (PLAN 9.E
-/// "Fairness gates (binding)").
+/// Fairness gates the paired benchmark's credibility depends on.
 ///
 /// - **Android high refresh**: Flutter does NOT opt into >60Hz display modes by
 ///   default; a fair comparison against a frust app that runs at the panel's

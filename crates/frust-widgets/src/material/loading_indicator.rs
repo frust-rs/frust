@@ -1,8 +1,8 @@
-//! The Material 3 Expressive loading indicator (Phase 6f, PLAN.md Phase B
-//! item 2): a continuously-morphing sequence of seven Material shapes.
+//! The Material 3 Expressive loading indicator: a continuously-morphing
+//! sequence of seven Material shapes.
 //!
 //! On a linear timer, the indicator steps through [`SHAPE_CYCLE`] one shape
-//! every [`PER_SHAPE_PERIOD`] (650 ms — RESEARCH.md:80-81,
+//! every [`PER_SHAPE_PERIOD`] (650 ms —
 //! m3.material.io/components/loading-indicator). The morph *between* two
 //! consecutive shapes is driven by a spring (stiffness `200`, damping ratio
 //! `0.6` — [`LOADING_SPRING`], same source), so each shape springs into the
@@ -61,12 +61,13 @@ fn shape_radius(diameter: f64) -> f64 {
 }
 
 /// Period the indicator dwells on / morphs through one shape before advancing
-/// to the next (source: RESEARCH.md:80-81 — see the [module docs](self)).
+/// to the next (source: m3.material.io/components/loading-indicator — see
+/// the [module docs](self)).
 const PER_SHAPE_PERIOD: Duration = Duration::from_millis(650);
 
 /// The per-morph spring: stiffness `200`, damping ratio `0.6`.
 ///
-/// Source: RESEARCH.md:80-81 (m3.material.io/components/loading-indicator).
+/// Source: m3.material.io/components/loading-indicator.
 /// Under-damped (ζ `0.6 < 1`), so each morph overshoots slightly before
 /// settling — the expressive "spring into the next shape" feel. Mass is `1.0`
 /// (every M3 spring preset is mass-1; see `frust_theme::MotionSpring`).
@@ -209,8 +210,7 @@ impl Widget for LoadingIndicatorWidget {
 
         if !reduce_motion {
             // A perpetually looping morph is a decorative loop — its exact
-            // cadence is imperceptible, so the mobile frame gate may pace it
-            // (task 08).
+            // cadence is imperceptible, so the mobile frame gate may pace it.
             ctx.request_frame_paced();
         }
     }

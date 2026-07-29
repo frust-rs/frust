@@ -1,6 +1,6 @@
 //! S8 — Plugin-call overhead (`frust-shared-preferences` write+read loops).
 //!
-//! The head-to-head for PLAN 9.E's S8 claim: direct in-process FFI
+//! The head-to-head for the S8 claim under test: direct in-process FFI
 //! (`frust-shared-preferences`'s `objc2`/`jni`/file backend, zero codec) vs
 //! Flutter's `shared_preferences` MethodChannel round-trip. This scenario runs
 //! write + read loops across all five value types (`bool`/`i64`/`f64`/`String`/
@@ -19,8 +19,7 @@
 //! - **No cache layer on the frust side.** `frust-shared-preferences` has no
 //!   Dart-style read cache, so every read is a real in-process backend call —
 //!   there is no `read_cached` vs `read_crossing` split to make (unlike the
-//!   Flutter side, which must separate the two). This divergence is noted in the
-//!   task's completion summary.
+//!   Flutter side, which must separate the two).
 //! - **Error accounting.** `write_one`'s `Result` is no longer discarded: a
 //!   failed write increments a running `write_errors` count and marks that
 //!   key as write-failed so the read phase never double-counts it. Every
@@ -488,14 +487,13 @@ mod tests {
     // store — `SharedPreferences::standard()` is the crate's sole public
     // constructor and its `Backend` trait is crate-private (see
     // `plugins/shared-preferences/src/lib.rs`), so there is no seam from this
-    // out-of-tree bench crate to force a write failure. Per this task's
-    // acceptance criteria, the counters are instead exercised via the
-    // derived-value mismatch path: `read_and_verify` (the test-only
-    // `read_one` + `verify_read` composition below) is called against a
-    // deliberately wrong `i` (or an absent key) on the real desktop backend,
-    // so the *verification logic* — the actual new behavior this task adds —
-    // is directly covered even though a genuine backend I/O failure isn't
-    // reproducible here.
+    // out-of-tree bench crate to force a write failure. The counters are
+    // instead exercised via the derived-value mismatch path:
+    // `read_and_verify` (the test-only `read_one` + `verify_read`
+    // composition below) is called against a deliberately wrong `i` (or an
+    // absent key) on the real desktop backend, so the *verification logic*
+    // — the error-accounting mechanism itself — is directly covered even
+    // though a genuine backend I/O failure isn't reproducible here.
 
     /// Test-only composition mirroring `run_prefs_bench`'s two-step
     /// read-then-verify shape (`read_one` timed, `verify_read` after) without

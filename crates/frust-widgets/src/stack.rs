@@ -1,4 +1,4 @@
-//! Stack layout container (spec §6.2): a z-ordered overlay of children.
+//! Stack layout container: a z-ordered overlay of children.
 //!
 //! [`StackView`]/[`StackWidget`] lay every child under the same loose
 //! constraints, positioned at the stack origin so they overlap. The stack sizes

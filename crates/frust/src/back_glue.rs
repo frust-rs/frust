@@ -1,17 +1,17 @@
-//! Back-press ⇄ navigator glue (device-parity task 05; predictive-back + facade
-//! auto-wiring, glyph-refinements tasks 02/08): the facade is the only crate
+//! Back-press ⇄ navigator glue (predictive-back + facade
+//! auto-wiring): the facade is the only crate
 //! that sees both `frust-widgets`' [`NavigatorController`] and `frust-reactive`'s
 //! back-press source together — mirroring [`router_glue`](crate::router_glue)
 //! exactly (`frust-widgets` stays reactive-free, `frust-reactive` stays
 //! navigator-free).
 //!
-//! # The Android back contract (RESEARCH.md "Android back")
+//! # The Android back contract
 //!
 //! A shell delivers a hardware/gesture back press → the framework attempts an
 //! async back → the framework maintains a "handles back" boolean the shell reads
 //! so a *root-level* back falls through to the platform (activity finish). This
 //! module is the framework half. A back press is consumed exactly once and
-//! routed through [`NavigatorController::request_back`] (task 02), which applies
+//! routed through [`NavigatorController::request_back`], which applies
 //! the top page's `BackPolicy` — `Pop` pops, `DismissAnimated` fires the
 //! overlay's dismiss signal, `Veto` swallows it — rather than a bare
 //! [`pop`](NavigatorController::pop). The "handles back" answer is computed from
@@ -25,10 +25,10 @@
 //! Back handling reaches a controller two ways, and both funnel through the same
 //! process-wide consumption marker so a press is consumed *exactly once*:
 //!
-//! - **Automatic** (task 08): the facade's [`navigator`](crate::navigator)
+//! - **Automatic**: the facade's [`navigator`](crate::navigator)
 //!   wrapper calls [`auto_wire`] on every rebuild, so any app using
 //!   `frust::navigator` gets back handling with ZERO back-specific app code.
-//! - **Explicit**: [`BackHandler`]/[`attach_back_handler`] — the pre-task-08
+//! - **Explicit**: [`BackHandler`]/[`attach_back_handler`] — the original
 //!   surface an app constructs in `Component::init` and drives with
 //!   [`track`](BackHandler::track) from every `Component::build`. Still fully
 //!   supported (Huddle uses it); it now shares the same consumption marker and
@@ -145,7 +145,7 @@ fn refresh_interest<State: 'static>(controller: &NavigatorController<State>) {
 }
 
 /// Consume any new back press against the shared marker, routing it through
-/// [`NavigatorController::request_back`] (task 02 applies the top page's
+/// [`NavigatorController::request_back`] (applies the top page's
 /// `BackPolicy`). The tracked read of the back-press counter subscribes THIS
 /// rebuild, so a later `push_back_press` wakes it (State & Reactivity: the
 /// track-per-rebuild contract).
@@ -196,7 +196,7 @@ fn seed_consumed() {
     });
 }
 
-/// Auto-wire back handling for `controller` (task 08): the entry point the
+/// Auto-wire back handling for `controller`: the entry point the
 /// facade's [`navigator`](crate::navigator) wrapper calls on every rebuild.
 /// Consumes a new back press (routing it through `request_back`) and refreshes
 /// the `handles_back` interest — so an app using `frust::navigator` gets the
@@ -214,7 +214,7 @@ pub(crate) fn auto_wire<State: 'static>(controller: &NavigatorController<State>)
 }
 
 /// A [`NavigatorController`] wired to the process-wide back-press source (see
-/// the module docs) — the **explicit** back-wiring surface predating task 08's
+/// the module docs) — the **explicit** back-wiring surface predating the
 /// automatic [`navigator`](crate::navigator) auto-wiring.
 ///
 /// App code using `frust::navigator` no longer needs this: back handling is
@@ -275,7 +275,7 @@ impl<State: 'static> BackHandler<State> {
 /// for the mirrored API shape.
 ///
 /// Note that back handling is **automatic** for any app using
-/// [`frust::navigator`](crate::navigator) (task 08); this explicit surface is
+/// [`frust::navigator`](crate::navigator); this explicit surface is
 /// only needed when an app wants a handle it drives directly (e.g. Huddle).
 ///
 /// ```no_run
@@ -455,7 +455,7 @@ mod tests {
     /// even though a raw `pop()` *would* remove it (the stack is poppable),
     /// `request_back` honors the Veto policy and pops nothing. (A Veto policy on
     /// the depth-1 *root* itself is not expressible through the public push API
-    /// — the root is always `BackPolicy::Pop` — and is covered by task 02's
+    /// — the root is always `BackPolicy::Pop` — and is covered by a
     /// widget-level `compute_back_interest` test.)
     #[test]
     fn veto_overlay_claims_back_but_does_not_pop() {
@@ -488,7 +488,7 @@ mod tests {
     }
 
     /// The EXPLICIT `BackHandler` path still works on its own (regression for
-    /// the pre-task-08 surface, now routing through `request_back`): a press
+    /// the original surface, now routing through `request_back`): a press
     /// pops one page and `handles_back()` tracks the depth with no settle frame
     /// (the live provider closes the stale-window).
     #[test]

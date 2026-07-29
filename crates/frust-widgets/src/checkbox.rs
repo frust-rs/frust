@@ -1,4 +1,4 @@
-//! The `Checkbox` interactive widget (spec §6.4): a labelled box that reports a
+//! The `Checkbox` interactive widget: a labelled box that reports a
 //! requested toggle but is **not** its own source of truth.
 //!
 //! [`checkbox`] produces a [`CheckboxView`] carrying the current `checked` value,
@@ -6,7 +6,6 @@
 //! `on_toggle(state, !checked)` — it does **not** flip its own `checked` field.
 //! The app mutates its state in the callback and the next rebuild feeds the new
 //! value back in (the masonry rule: application state is the source of truth).
-//! See `research/RESEARCH.md`.
 
 use std::rc::Rc;
 

@@ -1,6 +1,6 @@
-//! Keyed single-slot child-switch container (glyph-design-system task 16):
-//! [`PatternSwitcher`], Flutter's `PageTransitionSwitcher`/`AnimatedSwitcher`
-//! analog. It stages an outgoing/incoming child pair under a
+//! Keyed single-slot child-switch container: [`PatternSwitcher`], Flutter's
+//! `PageTransitionSwitcher`/`AnimatedSwitcher` analog. It stages an
+//! outgoing/incoming child pair under a
 //! [`TransitionPattern`](super::patterns::TransitionPattern) whenever its
 //! declared child changes *identity* (a [`ChildKey`](crate::ChildKey)).
 //!
@@ -51,11 +51,12 @@
 //! ([`REDUCE_MOTION_DURATION`]) linear [`FadeThrough`] crossfade — the same hard
 //! accessibility rule `nav::transition::resolve_spec` enforces.
 //!
-//! # Scaffold contract (glyph-design-system task 12)
+//! # Scaffold contract
 //!
-//! Task 16 writes **only this file** — it never edits `motion/mod.rs`'s module
-//! list or re-export block (see that module's docs; the facade re-exports
-//! `motion` wholesale, so these types ride along under `frust::motion::*`).
+//! This file owns its own contents only — it never edits `motion/mod.rs`'s
+//! module list or re-export block (see that module's docs; the facade
+//! re-exports `motion` wholesale, so these types ride along under
+//! `frust::motion::*`).
 
 use std::time::Duration;
 
@@ -78,8 +79,8 @@ use crate::nav::transition::{TransitionDriver, make_driver};
 pub const FALLBACK_DURATION: Duration = Duration::from_millis(220);
 
 /// The reduced-motion collapse duration: `reduce_motion` flattens every pattern
-/// to a `≤120ms` linear [`FadeThrough`] crossfade — research §1.4's hard
-/// accessibility rule, matching `nav::transition`'s
+/// to a `≤120ms` linear [`FadeThrough`] crossfade — the Glyph design system's
+/// hard accessibility rule, matching `nav::transition`'s
 /// [`REDUCE_MOTION_DURATION`](crate::nav::transition) collapse.
 pub const REDUCE_MOTION_DURATION: Duration = Duration::from_millis(120);
 
@@ -455,7 +456,7 @@ mod tests {
     /// An interactive child that captures the pointer + takes focus on `Down`,
     /// records a synthetic `Cancel` into a shared cell, and records its own
     /// teardown (a drop) into a shared counter — the recording interactive child
-    /// criterion 2/3 assert against (mirrors the navigator's recording tests).
+    /// the tests below assert against (mirrors the navigator's recording tests).
     struct Recorder {
         cancelled: Rc<Cell<bool>>,
         torn: Rc<Cell<u32>>,
@@ -525,7 +526,7 @@ mod tests {
         theme
     }
 
-    // --- Criterion 2 (part): identity change transitions; same identity doesn't ---
+    // --- Identity change transitions; same identity doesn't ---
 
     #[test]
     fn same_identity_rebuild_does_not_transition_but_changed_identity_does() {
@@ -557,7 +558,7 @@ mod tests {
         assert_eq!(w.key, 2u32.into());
     }
 
-    // --- Criterion 2: exiting child gets Cancel + focus/IME clear ---
+    // --- Exiting child gets Cancel + focus/IME clear ---
 
     #[test]
     fn identity_change_cancels_focus_and_clears_ime_on_the_exiting_child() {
@@ -609,7 +610,7 @@ mod tests {
         assert!(!w.needs_ime_clear, "the queued clear was consumed");
     }
 
-    // --- Criterion 3: exiting retained until progress 1.0, then torn down ---
+    // --- Exiting retained until progress 1.0, then torn down ---
 
     #[test]
     fn exiting_child_is_retained_until_settle_then_torn_down() {
@@ -675,7 +676,7 @@ mod tests {
         assert!(w.driver.is_none());
     }
 
-    // --- Criterion 4: reduce_motion collapses to a fast crossfade ---
+    // --- reduce_motion collapses to a fast crossfade ---
 
     #[test]
     fn reduce_motion_collapses_to_fast_crossfade() {

@@ -1,9 +1,7 @@
-//! Filled by task 24-glyph-content-widgets (StatCard).
-//!
 //! [`stat_card`]/[`StatCardView`]: a compact metric readout — an uppercase dim
 //! **label**, a large display-family **value**, and an optional semantic
 //! **delta** (a signed change badge) — inside the same surface/bright-border/
-//! radius-lg chrome as [`super::card`] (the reference build's `§content`
+//! radius-lg chrome as [`super::card`] (the Glyph design system's
 //! `.stat-card`). A leaf display widget with no interaction and three
 //! text runs, so — like [`super::badge`] — it shapes and paints its own glyph
 //! runs rather than nesting [`crate::text::TextView`] children, and its `View`

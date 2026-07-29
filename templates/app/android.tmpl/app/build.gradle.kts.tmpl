@@ -2,7 +2,7 @@
 // separate `org.jetbrains.kotlin.android` plugin is applied —
 // `com.android.application` alone is enough.
 //
-// This is the full Frust build-mode matrix (spec §12.2/§12.5): debug,
+// This is the full Frust build-mode matrix: debug,
 // profile, and release build types, key.properties release signing, optional
 // per-ABI splits, version plumbing via local.properties, and a
 // `-P`-parameterized cargo-ndk step. Every input the Frust CLI passes is a
@@ -82,7 +82,7 @@ android {
         // otherwise release falls back to debug signing (with a warning) so an
         // unsigned local build still succeeds. `frust build` (CLI) makes a
         // missing keystore a hard error — this fallback is the escape hatch for
-        // Android-Studio-driven builds (spec §12.5).
+        // Android-Studio-driven builds.
         if (keystoreProperties.isNotEmpty()) {
             create("release") {
                 keyAlias = keystoreProperties["keyAlias"] as String
@@ -105,7 +105,7 @@ android {
                         "android/key.properties — see frust.toml [signing]",
                 )
             }
-            // R8 + resource shrink (Phase 7 task 12): the Kotlin/Java side is
+            // R8 + resource shrink: the Kotlin/Java side is
             // small (this app's `MainActivity` plus the `:frust-embedding`
             // module) so the dex win is modest, but shipping unminified
             // release code is not the
@@ -121,7 +121,7 @@ android {
             )
         }
         // Profile: release codegen with a debug-signed, non-debuggable package
-        // for on-device performance measurement (spec §12.2). Its cargo profile
+        // for on-device performance measurement. Its cargo profile
         // (`--profile profile`) keeps symbols/tracing on — see cargoNdkBuild.
         // `initWith(release)` copies every build-type property, including
         // `isMinifyEnabled`/`isShrinkResources`/`proguardFiles` above, so

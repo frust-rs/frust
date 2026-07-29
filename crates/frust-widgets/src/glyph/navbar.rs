@@ -1,9 +1,7 @@
-//! Filled by task 23-glyph-nav-chrome (GlyphNavBar).
-//!
 //! [`glyph_nav_bar`]/[`GlyphNavBarView`]: the Glyph bottom navigation bar — a
 //! raised, bordered bar of 2-5 destinations, each a glyph/icon above a tiny
-//! `9.5px` micro label, the active one tinted accent (`research/
-//! glyph-design-system.html`'s `.bottom-nav-demo`/`.bottom-nav-item`/
+//! `9.5px` micro label, the active one tinted accent (the Glyph design
+//! system's `.bottom-nav-demo`/`.bottom-nav-item`/
 //! `.bottom-nav-item.active`/`.bottom-nav-glyph` rules, retrieved 2026-07-21).
 //!
 //! # Controlled selection

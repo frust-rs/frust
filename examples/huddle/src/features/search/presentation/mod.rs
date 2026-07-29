@@ -1,5 +1,4 @@
-//! The search feature's presentation layer (huddle clean-architecture
-//! refactor, task 04).
+//! The search feature's presentation layer.
 
 pub mod controllers;
 pub mod pages;

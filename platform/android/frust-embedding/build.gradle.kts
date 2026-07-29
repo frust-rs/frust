@@ -1,7 +1,7 @@
 // The Frust Android embedding — the framework-owned `com.android.library`
 // module every generated app builds against, replacing the four platform files
 // `frust create` used to copy into each project. A generated app wires it up
-// out-of-tree (verified in the Phase 0 spike, `research/SPIKE_ANDROID.md`):
+// out-of-tree:
 //
 //     include(":frust-embedding")
 //     project(":frust-embedding").projectDir =
@@ -10,7 +10,8 @@
 // plus a `gradle.lifecycle.beforeProject` build-directory redirect, so two apps
 // can share one frust checkout without either polluting it. The consuming app's
 // `frust.embedding.dir` must point at THIS directory, and it must be writable
-// (Gradle 9 refuses a read-only `projectDir` — spike §7).
+// (Gradle 9 refuses a read-only `projectDir` — a hard configuration failure,
+// not a build-time one).
 //
 // AGP 9's built-in Kotlin support means no separate
 // `org.jetbrains.kotlin.android` plugin is applied, exactly as in the app

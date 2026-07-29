@@ -1,13 +1,12 @@
-//! The Material 3 Expressive **split button** (Phase 6f, PLAN.md Phase B
-//! item 4): a leading action button joined to a trailing menu button by a
-//! hairline divider.
+//! The Material 3 Expressive **split button**: a leading action button
+//! joined to a trailing menu button by a hairline divider.
 //!
 //! [`split_button`] takes the leading label, an `on_press` (leading action)
 //! callback, an `on_open` (trailing menu) callback, and the controlled `open`
 //! flag. The two halves fire **distinct** callbacks: a tap on the leading half
 //! runs `on_press`, a tap on the trailing half runs `on_open`. The menu popup
 //! itself is out of scope — `on_open` is where an app hosts one (the dialog /
-//! bottom-sheet machinery can present it; the catalog task wires a demo).
+//! bottom-sheet machinery can present it; the catalog wires a demo).
 //!
 //! # Trailing shape morph (chevron rotation)
 //!

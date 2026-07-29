@@ -10,12 +10,12 @@ Every table below must be reproducible from `benchmarks/raw/<device>/<scenario>/
 `./benchmarks/harness/run.sh <scenario> --device <serial>`.
 
 > **Results reset 2026-07-21.** All prior series (OnePlus 9 2026-07-20/21,
-> iPhone SE 2026-07-20/21, and the phase-10 attribution re-run) were retired
+> iPhone SE 2026-07-20/21, and the optimization-attribution re-run) were retired
 > in one sweep — see git history for the retired tables. Reasons: (a) the
 > **S5 layout-parity v2** fix (frust previously composited a ~66%-width cell
 > vs Flutter's actual edge-to-edge render — PROTOCOL §8 S5 notes), (b) the
-> build now carries the full phase-10 optimization set (shape cache,
-> resampling, warmup, micro-wins) making earlier frust series stale, and
+> build now carries the full shape-cache/resampling/warmup/micro-optimization
+> set making earlier frust series stale, and
 > (c) the device matrix changes to: **Xiaomi 12 (cupid, Snapdragon 8 Gen 1)**,
 > **iPhone SE 2 (A13)**, and **OnePlus 9 (Adreno 660)** re-run later.
 > Raw logs are now committed (sanitized); the pre-reset raws were never
@@ -75,7 +75,8 @@ capture time by `run.sh`) committed under
   `crates/frust-shell-common/src/perf.rs` mtime-only touch to force the
   recompile past the release `--define` gap (long-standing recipe;
   `git status` stayed clean). Repo `main` @ `a55e09e` (includes the S5
-  layout-parity v2 fix and the phase-10 optimization set). **v2 raw emission
+  layout-parity v2 fix and the shape-cache/resampling/warmup optimization set).
+  **v2 raw emission
   (`encode_us=`/`present_us=` split fields) confirmed on-device before any
   scored run**; stale differently-signed prior installs of both apps were
   uninstalled first.
@@ -105,7 +106,7 @@ with a p95 past the 60Hz budget (18.6ms) and 5.4% of frames dropping 60Hz.
 Frust's only blemish is a taller single worst (63.5ms vs 38.6ms). At the
 same v3 workload, vello's single-dispatch renderer runs this scenario at
 roughly half Flutter/Impeller's per-frame cost across the whole
-distribution — the plan's marquee S1 claim, previously proven only on
+distribution — the marquee S1 claim under test, previously proven only on
 Adreno 840, now reproduces on Adreno 730. Neither app's field settled
 within any 30s window (0 skipped frames on both) — no settled tail exists
 in this dataset, same genuine finding as the OnePlus 9.
@@ -150,7 +151,7 @@ across all 10 kept runs — the same structural
 `SchedulerBinding.addTimingsCallback` async-delivery gap documented on both
 pre-reset devices (timing data arrives after the synchronous marker-close;
 a `flutter_bench` marker-placement fix remains the recorded follow-up, out
-of a run-matrix task's scope). No cross-app per-op comparison exists on
+of scope for these benchmark runs). No cross-app per-op comparison exists on
 this device either.
 
 **Overall S3 frame series** (whole capture incl. settle gaps — *not*
@@ -206,7 +207,7 @@ tail on this device.
 | Frust (release) | **6.21** | 11.20 | 12.58 | 50.63 | 50 | 8,081 | 26,410 (~88 fps) |
 | Flutter (profile) | 7.43 | **9.72** | **10.69** | **13.35** | **0** | 9,724 | 35,914 (~119.7 fps) |
 
-**Split — Frust wins the median, Flutter wins the tail.** The phase-10
+**Split — Frust wins the median, Flutter wins the tail.** The
 shape cache keeps Frust's typical shaping frame cheaper (6.2ms vs 7.4ms
 p50, a 16% lead — the first device where Frust leads S6's median in a
 same-day cross-app pass), but Flutter's distribution is much tighter
@@ -337,7 +338,8 @@ contain only perf/marker/blank lines).
   gate §6 satisfied).
 - Frust: **RELEASE** (`frust build ios --release`, signed
   `FRUST_IOS_TEAM=<team-id>`), one build for all scenarios, repo `main`
-  @ `82dc949` (S5 layout-parity v2 + full phase-10 optimization set).
+  @ `82dc949` (S5 layout-parity v2 + the full shape-cache/resampling/warmup
+  optimization set).
   `FRUST_TRACE=1 FRUST_TRACE_RAW=1` baked via `--define` (the iOS
   run-script's `FRUST_DEFINES`/`option_env!` path — no `perf.rs` touch
   needed on iOS, unlike Android). **v2 raw emission
@@ -481,7 +483,7 @@ drops.
 | Flutter work-sum (profile) | 4.24 | 4.96 | 5.26 | 16.80 | 1 | N/A | 18,563 (~61.9 fps) |
 
 Near-parity (frust work ~4.7 vs flutter 4.2ms p50, ~11% apart). The
-phase-10 shape cache holds on iOS: frust layout (re-shaping) p50 is only
+shape cache holds on iOS: frust layout (re-shaping) p50 is only
 0.20ms — the frame is encode-bound (4.07ms), not text-bound, matching the
 Android attribution finding.
 
@@ -502,7 +504,7 @@ cold start and both idle axes are n/a on this platform).
 Frust span decomposition (medians of 12): adapter/device/renderer_ready
 ~22ms → font_preinit_joined 71ms → first_rebuild_done 71ms →
 first_encode_done 83ms → presented 85ms. **The retired iPhone series'
-~188ms is down to ~85ms** (phase-10 warmup set) — the first-frame floor on
+~188ms is down to ~85ms** (the warmup optimization set) — the first-frame floor on
 iOS is now the ~49ms font/TextContext preload, which (unlike Android,
 where its measured delta is 0) does **not** fully overlap GPU init here;
 first-frame *encode* is only ~12ms on the A13 (vs ~71ms on Adreno 660).
@@ -560,7 +562,7 @@ reproducing the retired iPhone series' ~13–30× at full-form sample counts.
    comparison is impossible; only framework-self-reported spans captured.
 6. **No idle-CPU or memory CLI on iOS** — both S7 idle axes are n/a (the
    protocol's PSS axis is Android-only; RSS would not be cross-comparable
-   anyway per RESEARCH.md §8).
+   anyway).
 7. **S8 burst-during-animation variant not run** (matches all prior passes).
 8. **Environmental controls uncontrolled** (no iOS CLI for brightness/
    airplane/charger/thermal); cooldown was a fixed 60s inter-app-block wait
@@ -596,7 +598,8 @@ reproducing the retired iPhone series' ~13–30× at full-form sample counts.
 ## App size (release) — re-measured post-reset
 
 Host-side snapshot via `benchmarks/harness/app_size.sh`, 2026-07-21, after
-the phase-10 build set (supersedes the retired pre-reset numbers; Android
+the shape-cache/resampling/warmup optimization set (supersedes the retired
+pre-reset numbers; Android
 frust universal grew ~0.1 MB vs the retired 22,188,018-byte figure).
 
 | Axis | Frust | Flutter |
@@ -665,8 +668,9 @@ under `raw/oneplus9/frust_release/<scenario>/run-NN.log` and
   `27.0.12077973`, `FRUST_TRACE=1 FRUST_TRACE_RAW=1` exported in the build
   shell + `perf.rs` mtime touch (the long-standing release `--define`-gap
   recipe). **Byte-identical APK to the Xiaomi 12 pass** (code state
-  `a55e09e`-equivalent: S5 layout-parity v2 + the full phase-10 optimization
-  set; repo HEAD at run time `c92e795`, a docs-only delta). **v2 raw
+  `a55e09e`-equivalent: S5 layout-parity v2 + the full
+  shape-cache/resampling/warmup optimization set; repo HEAD at run time
+  `c92e795`, a docs-only delta). **v2 raw
   emission (`encode_us=`/`present_us=` split fields) confirmed on-device
   before any scored run**; stale prior installs of both apps were
   uninstalled and both APKs installed fresh first.
@@ -712,7 +716,7 @@ Health-gated: frust `layout_us > 0` on 18,037/18,047 kept frames (p50
 
 **Frust wins S2** — median 10.9 vs 14.6ms, p95 15.0 vs 24.0ms, and a ~20×
 lower 60Hz-miss rate (1.6% vs 31.5% of frames attempted). Reproduces both
-the retired series (11.04/15.52) and the phase-10 re-run (10.87/14.98 —
+the retired series (11.04/15.52) and the shape-cache-era re-run (10.87/14.98 —
 p50 identical to the digit). Flutter's lower @8.33ms absolute count reflects
 its ~3× smaller frame total (event-driven paint), not better per-frame cost.
 
@@ -740,7 +744,7 @@ three prior device passes (fourth device in a row); the `flutter_bench`
 marker-placement fix remains the recorded follow-up. No cross-app per-op
 comparison exists on this device.
 
-Frust's per-op medians all improved vs its retired pre-phase-10 numbers
+Frust's per-op medians all improved vs its retired pre-optimization numbers
 (create1k 12.48→11.31, create10k 24.02→22.52, update 19.31→16.96, swap
 17.81→16.05, clear 17.91→17.50ms); create10k's 22.5ms is the only per-op
 median outside a single 60Hz frame, and create1k keeps its first-occurrence
@@ -802,8 +806,8 @@ present-path bottleneck in S5 that the old undersized cell masked.
 | Flutter (profile) | 8.35 | **9.75** | **10.19** | **11.93** | **0** | 18,032 | 35,747 (~119.2 fps) |
 
 **Split — Frust wins the median (by 32%), Flutter wins the tail.** Same
-shape as the Xiaomi 12 verdict. The phase-10 shape cache holds exactly on
-this device: frust p50/p95 5.67/10.75ms vs the phase-10 re-run's 5.67/10.86
+shape as the Xiaomi 12 verdict. The shape cache holds exactly on
+this device: frust p50/p95 5.67/10.75ms vs the shape-cache-era re-run's 5.67/10.86
 (and 10.66/14.52 retired pre-cache — a 47% median improvement carried
 forward). Flutter's distribution is tighter (p95 9.75 vs 10.75ms, worst
 11.9 vs 58.1ms, zero dropped 60Hz frames) at ~119fps vs Frust's ~104fps;
@@ -830,7 +834,7 @@ and the run-to-run spread is now <1 MB on both, vs Flutter's 88–149 MB
 variance in the retired pass). The framework-self-reported first-frame
 still favors Flutter (76 vs 128ms) as on every device; Frust's
 `first_frame_presented` median improved 147→131.5→128ms across the three
-passes (phase-10 startup work carried forward; GPU init `adapter_ready`
+passes (startup optimization work carried forward; GPU init `adapter_ready`
 ≈ 55ms is the floor on this Adreno 660). Both apps idle at 0% CPU in every
 sample (frame gate / event-driven idle; frust's instrumented build emits
 ~71 skipped-frame trace lines/s while idle — a trace-build artifact, not
@@ -912,10 +916,10 @@ run this pass (deviation 3).
 
 - **Reproduction quality is excellent** where the workload didn't change:
   S1/S2/S4 frame percentiles, S3 frust per-op, S7 idle CPU and S8 latencies
-  all land within noise (or the phase-10-expected improvement) of the
-  retired numbers — S2's frust p50 matches the phase-10 re-run to the digit
-  (10.87ms).
-- **Phase-10 gains carried forward:** S6 median 10.66→5.67ms (shape cache),
+  all land within noise (or the expected optimization improvement) of the
+  retired numbers — S2's frust p50 matches the shape-cache-era re-run to the
+  digit (10.87ms).
+- **Optimization gains carried forward:** S6 median 10.66→5.67ms (shape cache),
   S3 per-op medians all lower, external cold start 215→185ms,
   `first_frame_presented` 147→128ms.
 - **S5 is the one verdict flip, and it is honest:** the retired split
@@ -925,28 +929,28 @@ run this pass (deviation 3).
   finding the undersized cell had masked. The Xiaomi 12 (Adreno 730) shows
   the same direction at much smaller magnitude (5.7 vs 5.3ms).
 
-### Task-09 A/B — release-vs-profile comparability bound (2026-07-23)
+### Release-vs-profile comparability bound — A/B (2026-07-23)
 
 **Purpose:** bound the delta introduced by the release-lean methodology break
 (PROTOCOL §2.5): Frust perf runs moved `--release` → `--profile` because
-release now compiles instrumentation out entirely. Run per task
-`workflow/plans/features/frust-release-lean/tasks/09-device-ab-gate.md`.
+release now compiles instrumentation out entirely.
 
 **Setup / deviations (labeled):** single session, this device (serial
 `53f887ac`), 120Hz mode. Profile APK = `frust build apk --profile --define
 FRUST_TRACE_RAW=1` (25,555,162 B; `frust.cargoFeatures` → `frust/perf-trace`
 via the release-lean gradle plumbing, hand-synced into frust_bench this
-session — it sat outside task 05's `examples/*` scope). Release APK =
+session — it previously sat outside the profile-sync tripwire's coverage
+(root, template, and `examples/huddle` only)). Release APK =
 `frust build apk --release` **with both trace defines deliberately passed**
 (24,926,234 B). Airplane on, `dumpsys battery unplug` spoof (USB attached
 for adb, as the 2026-07-21 pass), brightness 128, thermal gate ≤38°C
 (session range 25.1–31.9°C). **Deviation:** 12 runs in ONE block per
 scenario (no multi-day repetition); raw logs committed under
 `raw/oneplus9/frust_profile_task09/` and `frust_release_task09_oneoff/`.
-**Code-version caveat:** the 2026-07-21 release baseline ran phase-10-era
-code; today's HEAD adds the phase-11 render split, shader pre-pass, glyph
-and release-lean — the cross-methodology rows below are therefore ALSO
-cross-code-version and labeled as such.
+**Code-version caveat:** the 2026-07-21 release baseline predates the
+render-thread split, shader pre-pass, glyph design language, and
+release-lean work that today's HEAD adds — the cross-methodology rows
+below are therefore ALSO cross-code-version and labeled as such.
 
 **Release genuinely cannot emit (sanity arm):** one 30s run of S1 and S3
 each on the release APK captured ZERO Rust-side perf lines despite both
@@ -960,9 +964,9 @@ on this session's artifact (0 frust-perf / 0 bench-scenario, 21
 
 | Scenario | Series | p50 (ms) | p95 | p99 | worst | missed @16.67ms | active frames |
 |---|---|---|---|---|---|---|---|
-| S1 | release 2026-07-21 (phase-10 code, v2) | 9.70 | 12.19 | 15.49 | 56.49 | 149 (0.77%) | 19,351 |
+| S1 | release 2026-07-21 (pre-render-split code, v2) | 9.70 | 12.19 | 15.49 | 56.49 | 149 (0.77%) | 19,351 |
 | S1 | **profile 2026-07-23 (current HEAD, v3)** | 14.79 | 15.87 | 16.51 | 63.91 | 162 (0.79%) | 20,445 |
-| S3 | release 2026-07-21 (phase-10 code, v2) | 8.99 | 12.20 | 20.43 | 54.34 | 546 (2.76%) | 19,782 |
+| S3 | release 2026-07-21 (pre-render-split code, v2) | 8.99 | 12.20 | 20.43 | 54.34 | 546 (2.76%) | 19,782 |
 | S3 | **profile 2026-07-23 (current HEAD, v3)** | 10.25 | 12.53 | 20.88 | 52.65 | 957 (3.10%) | 30,880 |
 
 **Presented-rate mode A/B (same HEAD, same conditions, HUD presented-fps):**
@@ -973,9 +977,9 @@ user-visible presented-frame level (screencap-verified both).
 methodology break — p95 +2.7% (S3) / p99 +2.2% (S3) and p99 +6.6% (S1),
 with @16.67ms miss RATES near-identical (0.77→0.79% S1) — and the same-HEAD
 presented-fps A/B shows 0% mode delta. MEDIANS are NOT comparable
-(+52% S1, +14% S3): per the task's >5% rule this is flagged — but the S1/S3
+(+52% S1, +14% S3): per the >5% rule this is flagged — but the S1/S3
 median shift cannot be attributed to profile-mode overhead because the code
-version moved too (phase-11 split's known pacing change; S3 processes +56%
+version moved too (the render-thread split's known pacing change; S3 processes +56%
 more frames in the same window on current HEAD). PROTOCOL §2.5's break note
 therefore stands as: **tail/jank metrics and miss rates carry across the
 break within ~3–7%; medians and raw-cadence comparisons against
