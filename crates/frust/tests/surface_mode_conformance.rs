@@ -1,8 +1,8 @@
-//! Source-scan conformance test for review M3's fix (review-fix-2 t01):
+//! Source-scan conformance test enforcing one invariant:
 //! ONLY the two shell FFI-glue callers may declare host translucency, and
 //! the `frust` facade must never re-export the declaration fn.
 //!
-//! Extended by native-widgets task p1-01 with the same pin over the RESOLVED
+//! Also pins the RESOLVED
 //! slot's writer (`publish_resolved_surface_mode`, whose sanctioned callers
 //! are the two shells' `app.rs` UI-thread sync points), plus the app-facing
 //! half's positive checks: the facade DOES re-export the *reader*
@@ -12,8 +12,8 @@
 //! Precedent: `frust-drive/tests/print_free_cores.rs` (a plain `std::fs`
 //! source scan run as an ordinary `cargo test` — this repo has no
 //! lint-plugin tooling, see `docs/CODE_STANDARDS.md`). Chosen over a doc
-//! statement + unit test alone because the whole point of review M3's fix is
-//! a workspace-wide invariant ("nothing outside these two files may set the
+//! statement + unit test alone because the whole point of this invariant is
+//! a workspace-wide guarantee ("nothing outside these two files may set the
 //! latch") that a single crate's unit test can't see across crate
 //! boundaries — a cheap scan here catches a future caller added anywhere in
 //! the workspace, not just a regression local to `frust-shell-common`.
@@ -105,7 +105,7 @@ const ALLOWLIST: &[&str] = &[
     "crates/frust-shell-ios/src/ffi_glue.rs",
 ];
 
-/// Files allowed to call `publish_resolved_surface_mode(` (task p1-01) — each
+/// Files allowed to call `publish_resolved_surface_mode(` — each
 /// mobile shell's `app.rs`, which owns the one UI-thread beat that reads the
 /// live surface's resolved translucency and pushes it into the render root,
 /// plus `surface_mode.rs` itself (the definition and its own unit tests).
@@ -165,11 +165,11 @@ fn only_shell_glue_may_declare_host_translucent_surface() {
     );
 }
 
-/// Task p1-01's writer pin: the RESOLVED slot is shell-published, exactly like
+/// The RESOLVED slot's writer pin: the RESOLVED slot is shell-published, exactly like
 /// the declaration latch is shell-declared. App code reads it and nothing
 /// else — a stray publish would let an app fake a platform verdict it never
-/// got, which is the same class of defect review M3 removed on the
-/// declaration side.
+/// got, the same class of defect as an app declaring host translucency
+/// directly.
 #[test]
 fn only_shell_app_loops_may_publish_the_resolved_surface_mode() {
     let failures = call_sites_outside("publish_resolved_surface_mode(", RESOLVED_PUBLISH_ALLOWLIST);
@@ -225,7 +225,7 @@ fn facade_does_not_reexport_the_translucency_declaration() {
     }
 }
 
-/// The multi-line-group blind spot the round-2 review flagged: a grouped
+/// The multi-line-group blind spot this scan must catch: a grouped
 /// `pub use` must be caught on its continuation lines, not just its first.
 #[test]
 fn facade_reexport_scan_sees_multi_line_groups() {
@@ -254,7 +254,7 @@ fn facade_reexport_scan_sees_multi_line_groups() {
     );
 }
 
-/// The reader half is app-facing by design (task p1-01): this test failing to
+/// The reader half is app-facing by design: this test failing to
 /// *compile* is the real assertion — `frust::resolved_surface_mode` and
 /// `frust::ResolvedSurfaceMode` must both be reachable from the facade alone,
 /// since app code never depends on `frust-shell-common` directly.

@@ -73,7 +73,7 @@ pub struct AndroidAppHandle {
     executor: FrameExecutor,
     text_ctx: TextContext,
     /// Polls the process-wide app-facing pending-font registry
-    /// (`frust::register_app_fonts`, task 14) once per frame (see [`Self::frame`],
+    /// (`frust::register_app_fonts`) once per frame (see [`Self::frame`],
     /// beside the theme-override poll) — draining any late registration into
     /// `text_ctx`. Also drained once at construction ([`Self::new`], after the
     /// background prewarm join, on this UI thread) before the first rebuild. See
@@ -133,7 +133,7 @@ pub struct AndroidAppHandle {
     /// *while* an override was active (during which `self.theme.brightness`
     /// itself does not move — see `effective_brightness_for_platform_change`).
     platform_brightness: Brightness,
-    /// The accessibility adapter state (phase 6d D3), attached lazily by
+    /// The accessibility adapter state, attached lazily by
     /// `nativeInitAccessibility` after `nativeInit` (see
     /// [`Self::attach_accessibility`]). `None` until then — a11y is best-effort
     /// and its wiring never gates the render path. This field is independent of
@@ -298,7 +298,7 @@ pub struct AndroidAppHandle {
 }
 
 /// One finished frame's payload crossing the UI→render-thread handoff in the
-/// split (plan phase 11.B): the painted [`Scene`] plus the clear color it was
+/// split: the painted [`Scene`] plus the clear color it was
 /// painted for (the live theme's surface color — it must ride *with* the frame
 /// so a mid-frame theme flip clears to the right color, mirroring the desktop
 /// shell's `PaintedScene`). This is the `S` type parameter of
@@ -310,7 +310,7 @@ pub(crate) struct PaintedScene {
     pub(crate) base_color: peniko::Color,
 }
 
-/// The render-path half of the Android frame loop (plan phase 11.B): either the
+/// The render-path half of the Android frame loop: either the
 /// render-thread split ([`Self::Split`], default) or the pre-split inline
 /// fallback ([`Self::Inline`], `FRUST_NO_RENDER_THREAD`). Chosen once at
 /// construction from
@@ -348,8 +348,8 @@ pub(crate) enum FrameExecutor {
 ///   ([`crate::sync_tail`]): acquire-bound means every frame is
 ///   equally late behind the same queue — a constant-shaped residual a hold can
 ///   close — while submit-bound means there is no queue to correct for. An
-///   `Arc` field beside the two above, deliberately not the spike's
-///   process-global.
+///   `Arc` field beside the two above, deliberately scoped to this instance
+///   rather than a process-global.
 #[derive(Debug, Default)]
 pub(crate) struct RenderSignals {
     count: AtomicU64,
@@ -413,7 +413,7 @@ pub(crate) struct InlineExecutor {
     /// gate then reads one uniform signal across both arms with no special
     /// case.
     frame_id: u64,
-    /// What this executor publishes about its rendered frames (task 10's
+    /// What this executor publishes about its rendered frames (the presented
     /// count + the release gate's frame id + the tail's acquire EWMA — see
     /// [`RenderSignals`]). Inline renders on the UI thread, so this is written
     /// and read on the same thread — the `Arc` shape matches the split's
@@ -518,7 +518,7 @@ pub(crate) struct SplitExecutor {
     surface_active: bool,
     /// Monotonically increasing per-frame id stamped into [`FrameMeta`].
     frame_id: u64,
-    /// Fatal-signal flag (phase-11 fix F2): the render thread stores `true` here
+    /// Fatal-signal flag: the render thread stores `true` here
     /// if its **first** surface install fails — unrecoverable (an incapable
     /// GPU/driver can't change mid-process). The UI thread reads it via
     /// [`AndroidAppHandle::render_fatal`] each `nativeOnFrame` and returns `false`
@@ -526,8 +526,8 @@ pub(crate) struct SplitExecutor {
     /// frames against a permanent black screen. One clone here, one in the render
     /// thread ([`crate::jni_glue::render_loop`]).
     fatal: Arc<AtomicBool>,
-    /// The UI-side half of the render thread's scene give-back channel (review
-    /// finding F5): polled once per [`Self::submit_frame`] for a scene the
+    /// The UI-side half of the render thread's scene give-back channel:
+    /// polled once per [`Self::submit_frame`] for a scene the
     /// render thread has finished with, so its buffer is reused instead of
     /// reallocating a fresh `Scene` every frame.
     scene_return: SceneReturnReceiver<Scene>,
@@ -537,7 +537,7 @@ pub(crate) struct SplitExecutor {
     /// [`Self::scene_return`] on the next [`Self::take_reusable_scene`] call
     /// so that buffer is reused too, rather than dropped.
     spare_scene: Option<Scene>,
-    /// What the render side publishes about its rendered frames (task 10's
+    /// What the render side publishes about its rendered frames (the presented
     /// count, the release gate's frame id, the scroll-sync tail's acquire
     /// EWMA): one clone here (read by the UI thread before paint via
     /// `FrameExecutor::presented_frames`/`presented_frame_id`/
@@ -686,7 +686,7 @@ impl FrameExecutor {
     /// (`FrameOutcome::Rendered`). The UI thread loads this once per frame and
     /// pushes it into `AppTree::set_presented_frames` before paint, so a widget
     /// measuring FPS reports the presented rate — under the split, that is far
-    /// below the Choreographer's paint cadence (task 10). Both variants share
+    /// below the Choreographer's paint cadence. Both variants share
     /// the counter with their render side via an `Arc<AtomicU64>`.
     fn presented_frames(&self) -> u64 {
         match self {
@@ -740,8 +740,8 @@ impl FrameExecutor {
     }
 
     /// Record a gate-skipped frame. Inline accumulates it in its UI-side
-    /// `FrameStats`; the split sends **nothing** on a skip (task 09 contract —
-    /// the render thread is the single emitter and never sees skipped frames), so
+    /// `FrameStats`; the split sends **nothing** on a skip (the render thread is
+    /// the single emitter and never sees skipped frames), so
     /// this is a no-op there.
     fn record_skip(&mut self) {
         if let FrameExecutor::Inline(inline) = self {
@@ -811,7 +811,7 @@ pub(crate) fn render_scene(
     let encode_outcome = renderer.encode(render_cx, scene, base_color);
     let encode_time = encode_start.map_or(Duration::ZERO, |t| t.elapsed());
 
-    // First-frame decomposition (task 10.A): stamp the first encode-complete
+    // First-frame decomposition: stamp the first encode-complete
     // boundary once (only when something was actually encoded).
     if matches!(encode_outcome, Ok(EncodeOutcome::Encoded))
         && let Some(spans) = startup_spans.as_mut()
@@ -829,7 +829,7 @@ pub(crate) fn render_scene(
     // module's perf convention — see `docs/CODE_STANDARDS.md`'s Instrumentation
     // conventions): the acquire wait is not instrumentation here, it is the
     // shape-aware scroll-sync tail's live regime input (`RenderSignals::
-    // acquire_ewma_us`, camera task 12), which must be readable in a plain
+    // acquire_ewma_us`), which must be readable in a plain
     // profile/release build with tracing off. One `Instant` pair per rendered
     // frame on the render thread; the perf span itself still resolves to
     // `Duration::ZERO` when tracing is off, so nothing else changes.
@@ -872,7 +872,7 @@ pub(crate) fn render_scene(
         }
         Ok(FrameOutcome::Rendered) => {
             // A presented frame: bump the shared counter the UI thread reads
-            // before paint (task 10) and publish WHICH frame is now on screen
+            // before paint and publish WHICH frame is now on screen
             // for the platform-view release gate. `Skipped` presents nothing,
             // so it does neither.
             signals.record_present(frame_id);
@@ -886,7 +886,7 @@ pub(crate) fn render_scene(
         Err(err) => log::error!("frust-shell-android: render error: {err:#}"),
     }
 
-    // One folded frame record through the single emitter (plan phase 11.B.3).
+    // One folded frame record through the single emitter.
     frame_stats.record(FramePasses::from_split(
         ui,
         RenderSpans {
@@ -902,7 +902,7 @@ pub(crate) fn render_scene(
     encode_time
 }
 
-/// Per-handle accessibility state (phase 6d D3): the injecting accesskit Android
+/// Per-handle accessibility state: the injecting accesskit Android
 /// adapter plus the two UI-thread-shared channels its handlers use to talk to
 /// the frame loop.
 ///
@@ -1008,7 +1008,7 @@ impl ActionHandler for ForgeActionHandler {
     }
 }
 
-/// Assemble an accesskit [`TreeUpdate`] from a [`SemanticsUpdate`] (phase 6d D3).
+/// Assemble an accesskit [`TreeUpdate`] from a [`SemanticsUpdate`].
 ///
 /// v1 always publishes the whole tree (`RenderRoot::semantics` recomputes it in
 /// full): every node is a "new or changed" entry, `tree` names the root, and
@@ -1032,7 +1032,7 @@ impl AndroidAppHandle {
     /// frame. No `unsafe` here — the window acquisition and surface creation
     /// happen at the FFI boundary.
     ///
-    /// Seeds the Glyph baseline theme (task 27; dark-first per
+    /// Seeds the Glyph baseline theme (dark-first per
     /// `Theme::glyph_baseline`, until Kotlin's follow-up `nativeSetAppearance`
     /// reports the real preference — `platform_brightness` defaults `Light` and
     /// unconditionally overwrites `theme.brightness` on that call, so a
@@ -1044,7 +1044,7 @@ impl AndroidAppHandle {
     /// no-op.
     ///
     /// `executor` is the render-path half [`crate::jni_glue::create_handle`]
-    /// already built (plan phase 11.B): the render-thread split
+    /// already built: the render-thread split
     /// ([`FrameExecutor::Split`], with the render thread already spawned and its
     /// initial `SurfaceCreated` sent) or the inline fallback
     /// ([`FrameExecutor::Inline`], with the surface + early startup spans already
@@ -1054,7 +1054,7 @@ impl AndroidAppHandle {
     /// handed-off scene.
     ///
     /// `text_ctx` is the [`TextContext`] `create_handle` already resolved
-    /// (phase 10.D) — the pre-built one from `JNI_OnLoad`'s background
+    /// — the pre-built one from `JNI_OnLoad`'s background
     /// font-preload thread when it finished in time, or a synchronous
     /// fallback otherwise (see `jni_glue::take_preinit_text_context`) — so
     /// this method never itself pays the font-DB load cost.
@@ -1067,7 +1067,7 @@ impl AndroidAppHandle {
         translucent_resolved: Arc<AtomicBool>,
         mut app: Box<dyn AppTree>,
     ) -> Self {
-        // Construction-time font drain (task 14): apply any fonts registered via
+        // Construction-time font drain: apply any fonts registered via
         // `frust::register_app_fonts` before this handle existed into the joined
         // `TextContext`, on this (the UI) thread after the background prewarm
         // join — NOT inside the spawned prewarm closure. `create_handle` funnels
@@ -1080,7 +1080,7 @@ impl AndroidAppHandle {
 
         let theme = Theme::glyph_baseline();
 
-        // Bundled Glyph font auto-registration (task 27): the default theme
+        // Bundled Glyph font auto-registration: the default theme
         // above is the Glyph baseline, so register the bundled Space Mono /
         // IBM Plex Mono faces (`frust_theme::glyph::font_data()` — an empty
         // slice, so a no-op, when the `glyph-fonts` feature is off) directly
@@ -1194,7 +1194,7 @@ impl AndroidAppHandle {
     }
 
     /// Attach the accesskit Android adapter to the host `FrustSurfaceView`
-    /// (phase 6d D3, `nativeInitAccessibility`).
+    /// (`nativeInitAccessibility`).
     ///
     /// `env`/`host` are the bridged (this shell's `jni` 0.22 → accesskit_android's
     /// `jni` 0.21) references built at the FFI boundary in
@@ -1216,7 +1216,7 @@ impl AndroidAppHandle {
     }
 
     /// Drain and apply any accessibility actions assistive tech queued since the
-    /// last frame (phase 6d D3), routing each to
+    /// last frame, routing each to
     /// [`AppTree::perform_accessibility_action`](frust_shell_common::AppTree::perform_accessibility_action).
     ///
     /// Drained into a local `Vec` first so the shared queue lock is released
@@ -1243,7 +1243,7 @@ impl AndroidAppHandle {
         performed
     }
 
-    /// Publish the current accessibility tree to the adapter (phase 6d D3), if it
+    /// Publish the current accessibility tree to the adapter, if it
     /// changed since the last push. Must run **after** [`Self::frame`]'s layout
     /// so node bounds are valid.
     ///
@@ -1275,7 +1275,7 @@ impl AndroidAppHandle {
     }
 
     /// `nativeSetAppearance`: flip the theme's brightness and re-push it to both
-    /// delivery paths (mirrors the desktop shell's `apply_theme`, task 05).
+    /// delivery paths (mirrors the desktop shell's `apply_theme`).
     ///
     /// Runs the `provide_context` re-provide under the process-wide root
     /// [`ReactiveRuntime`]'s owner (fetched fresh here, since — unlike
@@ -1288,14 +1288,14 @@ impl AndroidAppHandle {
             crate::ffi_support::Appearance::Light => Brightness::Light,
         };
         self.platform_brightness = platform;
-        // Override-wins rule (task 6c-04): while an app-forced theme override
+        // Override-wins rule: while an app-forced theme override
         // is active, this platform-appearance report must not flip brightness.
         self.theme.brightness = effective_brightness_for_platform_change(
             self.theme_override_active,
             self.theme.brightness,
             platform,
         );
-        // Frame-gate input (task 17): an appearance change must force the next
+        // Frame-gate input: an appearance change must force the next
         // frame to run so the re-themed tree repaints. `push_theme` below also
         // marks LAYOUT|PAINT change flags, so this is belt-and-suspenders with
         // `change_flags_pending` — but it maps the appearance edit onto its own
@@ -1338,7 +1338,7 @@ impl AndroidAppHandle {
     }
 
     /// Whether the render thread signalled a fatal, unrecoverable first-surface
-    /// install failure (phase-11 fix F2), read by
+    /// install failure, read by
     /// [`crate::jni_glue::native_on_frame`] to tell Kotlin to stop the
     /// Choreographer loop. The split reads its shared `fatal` flag; the inline
     /// fallback never faults here — a failed first install returns `Err` from
@@ -1408,7 +1408,7 @@ impl AndroidAppHandle {
             );
         }
         // Surface (re)creation: force the next frame to run + lay out at the new
-        // dimensions and open the resume-warmup window (task 17).
+        // dimensions and open the resume-warmup window.
         self.surface_dirty = true;
         self.frame_gate.note_resumed();
         // The old surface (and everything Kotlin's `FrustSurfaceView` composited
@@ -1487,15 +1487,15 @@ impl AndroidAppHandle {
         self.physical = physical;
         self.scale = density;
         // In-place resize: force the next frame to run and relayout at the new
-        // size, and open the warmup window (task 17) — same rationale as
+        // size, and open the warmup window — same rationale as
         // `set_window`.
         self.surface_dirty = true;
         self.frame_gate.note_resumed();
     }
 
     /// `nativeOnInsetsChanged`: convert the platform's physical-px per-edge insets
-    /// to logical px with the stored scale and push them onto the render root
-    /// (device-parity task 06). Mirrors [`Self::set_appearance`]'s two-path
+    /// to logical px with the stored scale and push them onto the render root.
+    /// Mirrors [`Self::set_appearance`]'s two-path
     /// delivery shape but for insets: [`AppTree::set_insets`] threads them into
     /// layout/paint (widget path — a `SafeArea`'s `LayoutCtx::window_insets`), and
     /// [`Self::push_insets`] re-`provide_context`s them for app code
@@ -1505,7 +1505,7 @@ impl AndroidAppHandle {
     /// then `view_insets`, each l/t/r/b — see [`logical_insets`]). No-op-guarded on
     /// `PartialEq`: a shell that re-reports unchanged insets neither relayouts nor
     /// re-provides. On a real change, `RenderRoot::set_insets` marks `LAYOUT |
-    /// PAINT` pending (task 01), which the frame gate already treats as
+    /// PAINT` pending, which the frame gate already treats as
     /// dirty (`change_flags_pending`) — no new gate input needed. The continuous
     /// Choreographer loop repaints the next tick with no extra wake.
     pub(crate) fn set_insets(&mut self, physical: [f64; 8]) {
@@ -1583,7 +1583,7 @@ impl AndroidAppHandle {
         // process (found on cupid: the tail read a steady depth 3 while the
         // measured band stayed at the gate-only residual).
         let tip = self.platform_view_state.commands().0;
-        // Then the shape-aware tail (camera task 12), which can only ever delay
+        // Then the shape-aware tail, which can only ever delay
         // what the gate already released — and only while the surface is in the
         // acquire-bound regime where the leftover residual is constant-shaped.
         // Everywhere else (submit-bound device, below API 33, nothing hosted)
@@ -1595,7 +1595,7 @@ impl AndroidAppHandle {
 
     /// `nativeSetFrameTimeline`: record this tick's Choreographer frame-timeline
     /// delta (`expectedPresentationTimeNanos − frameTimeNanos`, API 33+) for the
-    /// scroll-sync tail's depth derivation (camera task 12). Kotlin pushes it
+    /// scroll-sync tail's depth derivation. Kotlin pushes it
     /// once per frame while a platform view is actually hosted, and pushes `0`
     /// otherwise — see [`crate::sync_tail`] for why every no-sample path is
     /// gate-only. Untrusted JNI input: a negative value clamps to `0` and an
@@ -1605,7 +1605,7 @@ impl AndroidAppHandle {
     }
 
     /// Tell the differ the native side has finished applying everything
-    /// through `generation` (task 05) — delegates to
+    /// through `generation` — delegates to
     /// [`PlatformViewState::acknowledge`], and drops the matching release-gate
     /// bookkeeping so it tracks the live backlog rather than growing for the
     /// process lifetime.
@@ -1655,14 +1655,14 @@ impl AndroidAppHandle {
             TouchPhase::Up => PointerPhase::Up,
             TouchPhase::Cancel => PointerPhase::Cancel,
         };
-        // Frame-gate latch (task 17): an event between frames must force the
+        // Frame-gate latch: an event between frames must force the
         // next frame to run so the tree reflects the dispatch. Set even on a
         // no-op dispatch — correctness beats savings, and the gate defaults to
         // "must run" when in doubt.
         self.events_since_last_frame = true;
 
-        // Gesture markers for the scroll-sync onset measurement (camera task
-        // 12b): the tail's own display-frame counter stamped at the start and
+        // Gesture markers for the scroll-sync onset measurement: the
+        // tail's own display-frame counter stamped at the start and
         // end of a gesture, so the frames between the first touch and the hold
         // reaching its depth can be read straight out of a trace instead of
         // eyeballed against logcat wall-clock stamps. Down/Up only (a Move line
@@ -1680,7 +1680,7 @@ impl AndroidAppHandle {
             );
         }
 
-        // Pointer resampling (plan phase 10.C.1): buffer the raw sample (stamped
+        // Pointer resampling: buffer the raw sample (stamped
         // on the shared resample clock) so [`Self::frame`] can emit a
         // frame-boundary-interpolated position; Down/Up/Cancel still pass through
         // losslessly. When the kill switch disabled the resampler, deliver
@@ -1712,7 +1712,7 @@ impl AndroidAppHandle {
     ///
     /// [`ImeEvent::ApplyEditingState`]: frust_core::event::ImeEvent::ApplyEditingState
     pub(crate) fn ime_apply(&mut self, state: EditingState) {
-        // Frame-gate latch (task 17): an IME edit between frames forces the next
+        // Frame-gate latch: an IME edit between frames forces the next
         // frame to run (see `dispatch_touch`).
         self.events_since_last_frame = true;
         let _ = self.app.ime_apply(state);
@@ -1834,12 +1834,12 @@ impl AndroidAppHandle {
         // controller-driven `spawn_local` task must keep draining every
         // Choreographer tick even while the surface is torn down (e.g.
         // mid-rotation) or not yet created, not just once it's ready — otherwise
-        // local tasks stall through surface churn. Pumping first is also task
-        // 07's documented ordering contract: a signal a just-drained local task
+        // local tasks stall through surface churn. Pumping first also matters
+        // for correctness: a signal a just-drained local task
         // writes must be observed by *this* frame's dirty check below.
         crate::jni_glue::pump_reactive_runtime();
 
-        // Poll the app-facing theme override slot (task 6c-04) once per
+        // Poll the app-facing theme override slot once per
         // frame, before the surface-ready gate — theme delivery needs no
         // renderer, so this stays in sync even while the surface is torn down
         // (mirroring the reactive-runtime pump just above). A poll that changes
@@ -1862,7 +1862,7 @@ impl AndroidAppHandle {
             None => {}
         }
 
-        // Poll the app-facing pending-font registry (task 14) once per frame,
+        // Poll the app-facing pending-font registry once per frame,
         // beside the theme poll above and before the surface-ready gate — the
         // drain needs no renderer, so it stays in sync through surface churn.
         // `drain_into` applies any late-registered fonts to `text_ctx` (clearing
@@ -1880,7 +1880,7 @@ impl AndroidAppHandle {
         }
 
         // Apply accessibility actions queued by assistive tech since the last
-        // frame (phase 6d D3), before the surface-ready gate and before the
+        // frame, before the surface-ready gate and before the
         // rebuild below so an action's state change is reflected this frame.
         // Cheap (a no-op) whenever nothing is queued, which is the common case.
         // Whether anything was applied is a frame-gate input.
@@ -1900,7 +1900,7 @@ impl AndroidAppHandle {
             return;
         }
 
-        // Resolved-translucency sync (review finding M1), before the gate
+        // Resolved-translucency sync, before the gate
         // inputs are gathered: a render-thread fallback-to-opaque flips
         // `RenderRoot::set_surface_translucent` to `false`, which marks
         // `ChangeFlags::PAINT` and therefore forces THIS frame to run (via
@@ -1909,7 +1909,7 @@ impl AndroidAppHandle {
         // clear color and the punch contract can never disagree.
         let translucent_resolved = self.sync_translucent_resolved();
 
-        // Reactive signals-dirty (task 07), drained only past the surface-ready
+        // Reactive signals-dirty, drained only past the surface-ready
         // gate — mirroring the iOS shell — so a signal written during a
         // not-ready window is never consumed by a tick that can't render; it is
         // observed by the first ready frame instead. The pump-first ordering
@@ -1936,7 +1936,7 @@ impl AndroidAppHandle {
             signals_dirty,
             // Pending buffered pointer samples (a sample too new for this tick's
             // instant) must keep frames running until drained — the resampler's
-            // pending signal ORs into the events input (plan phase 10.C.1's
+            // pending signal ORs into the events input (the
             // "never starves the gate" contract; default-to-run rule).
             events_since_last_frame: std::mem::take(&mut self.events_since_last_frame)
                 || self.resampler.has_pending(),
@@ -1996,11 +1996,11 @@ impl AndroidAppHandle {
         };
 
         if self.frame_gate.decide_paced(inputs, pacing).is_skip() {
-            // Skip path (task 17): nothing changed — return before rebuild, so
+            // Skip path: nothing changed — return before rebuild, so
             // CPU/GPU stay near idle. Inline records a `skipped` FramePasses
             // (all-zero pass durations) so the skip counter accumulates in the
             // perf log line. In the render-thread split a Skip sends **nothing**
-            // across the channel (task 09 contract — the render thread is the
+            // across the channel (the render thread is the
             // single emitter and never sees skipped frames), so `record_skip` is a
             // no-op there. Either way only frame *production* stops; the
             // Choreographer keeps re-posting callbacks, so the loop cadence is
@@ -2011,10 +2011,10 @@ impl AndroidAppHandle {
 
         // ---------------------------------------------------------------
         // Run path: rebuild -> (layout iff needed) -> paint -> encode/present,
-        // timed as before (task 08's instrumentation preserved).
+        // timed as before.
         // ---------------------------------------------------------------
 
-        // Pointer resampling (plan phase 10.C.1): drain buffered samples up to
+        // Pointer resampling: drain buffered samples up to
         // this frame's sample instant and feed the interpolated events into the
         // tree BEFORE the rebuild, so the rebuild reflects this frame's
         // resampled input. Uses the same `resample_clock` domain the raw samples
@@ -2040,7 +2040,7 @@ impl AndroidAppHandle {
         // `FrameInputs::signals_dirty`), so the frame gate runs the frame that
         // paints the change. Without the `scope.track` wrap a completed async
         // load's write would notify no subscriber and the gate would skip until a
-        // touch forced a `Run` (device-parity task 09's device-only "stuck on
+        // touch forced a `Run` (a device-only "stuck on
         // loading" stall). Mirrors the desktop shell
         // (`app_handler.rs` `scope.track` site) and `create_handle`'s initial
         // construction; fields are borrowed disjointly so the tracking closure
@@ -2095,17 +2095,17 @@ impl AndroidAppHandle {
         }
         let layout_time = layout_start.map_or(Duration::ZERO, |t| t.elapsed());
 
-        // Publish the accessibility tree post-layout (phase 6d D3), so node
+        // Publish the accessibility tree post-layout, so node
         // bounds are valid. A cheap no-op unless the tree changed AND a screen
         // reader is active (double-gated inside).
         self.publish_semantics();
 
         // Push the render side's presented-frame count so a widget measuring FPS
-        // reports the presented rate, not its Choreographer paint cadence (task
-        // 10). A pure observation — `set_presented_frames` marks no ChangeFlags,
+        // reports the presented rate, not its Choreographer paint cadence. A pure
+        // observation — `set_presented_frames` marks no ChangeFlags,
         // so a ticking counter never dirties layout NOR feeds the frame gate (the
         // gate decision already ran above and never reads this), keeping the
-        // task-08 menu-idle behavior intact.
+        // menu-idle behavior intact.
         self.app
             .set_presented_frames(self.executor.presented_frames());
 
@@ -2136,7 +2136,7 @@ impl AndroidAppHandle {
         let paint_time = paint_start.map_or(Duration::ZERO, |t| t.elapsed());
 
         // Ingest this RUN frame's published platform-view frames into the
-        // differ (task 03/05), right after paint — the source paint just
+        // differ, right after paint — the source paint just
         // populated. Never reached on a Skip (this whole block is behind the
         // gate's early `return` above), so the differ's skip-safety contract
         // (a rect can't "move" during a skip) holds by construction. There is
@@ -2147,7 +2147,7 @@ impl AndroidAppHandle {
         // When the differ produced something, pair that batch with the frame
         // that painted it — the one submitted just below, i.e. the submission
         // cursor plus one — so the release gate holds the batch until that
-        // frame is on screen (camera task 01). Both statements sit behind the
+        // frame is on screen. Both statements sit behind the
         // gate's early `return`, so a Skip records nothing AND submits nothing:
         // the recorded id can never run ahead of what will actually be sent.
         if self
@@ -2159,7 +2159,7 @@ impl AndroidAppHandle {
                 .record(generation, self.executor.submitted_frame_id() + 1);
         }
 
-        // Hand the finished frame to the render-path executor (plan phase 11.B).
+        // Hand the finished frame to the render-path executor.
         // The inline fallback runs the encode→acquire→submit tail synchronously
         // here (via the shared [`render_scene`]) and returns its encode span; the
         // split moves the painted scene out (replacing `self.scene` with a fresh
@@ -2170,19 +2170,19 @@ impl AndroidAppHandle {
         // milestones are stamped, and SurfaceLost/Redraw are handled — the exact
         // pre-split tail, only relocated. The clear color (the live theme's
         // surface color, not white) rides *with* the scene so a mid-frame theme
-        // flip clears correctly (6e Finding 6).
+        // flip clears correctly.
         let ui = UiSpans {
             rebuild: rebuild_time,
             layout: layout_time,
             paint: paint_time,
             skipped: false,
         };
-        // Platform-views translucent mode (task 05, corrected by review M1): a
+        // Platform-views translucent mode: a
         // surface that RESOLVED translucent (`translucent_resolved`, read at
         // the top of this frame — not the request latch) must clear to alpha-0,
         // not the theme's opaque surface color, so a native sibling view placed
         // behind it shows through wherever this frame painted nothing (Mode B —
-        // see `docs/ARCHITECTURE.md`/the platform-views PLAN). Opaque —
+        // see `docs/ARCHITECTURE.md`'s Platform-view flow). Opaque —
         // requested-but-unavailable included: bit-for-bit today's behavior.
         let base_color = crate::ffi_support::base_clear_color(
             translucent_resolved,
@@ -2199,7 +2199,7 @@ impl AndroidAppHandle {
             self.executor
                 .submit_frame(&mut self.scene, base_color, ui, frame_time, size, perf_on);
 
-        // Deadline-aware pacing overrun (plan phase 10.C.2): this frame's *work*
+        // Deadline-aware pacing overrun: this frame's *work*
         // (everything but the vsync `present` wait, which is expected to block)
         // overrunning the tick-to-tick budget is counted and logged. Gated
         // behind `perf_on` so a non-perf build reads no clocks and logs nothing;
@@ -2222,7 +2222,7 @@ impl AndroidAppHandle {
     }
 }
 
-/// Unit tests for the pure accessibility-tree assembly (phase 6d D3).
+/// Unit tests for the pure accessibility-tree assembly.
 ///
 /// This module is inside the `#[cfg(target_os = "android")]` `app` module, so it
 /// only compiles/runs for the Android target — the assembly references

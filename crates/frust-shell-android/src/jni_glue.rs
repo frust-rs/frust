@@ -20,12 +20,12 @@
 //! path's [`build_inline_executor`]/[`native_on_surface_changed`], and the
 //! render-thread split's [`install_surface`]), the `unsafe impl Send` for
 //! [`SendableWindowPtr`] — the raw window pointer that crosses the UI→render
-//! channel in the split (plan phase 11.B) — and the render-thread priority
+//! channel in the split — and the render-thread priority
 //! self-boost `libc::setpriority(PRIO_PROCESS, gettid(), THREAD_PRIORITY_DISPLAY)`
-//! at the top of [`render_loop`] (phase-11 fix F6: a bare libc syscall scoping
+//! at the top of [`render_loop`] (a bare libc syscall scoping
 //! itself to the calling thread, best-effort and non-fatal).
 //!
-//! # Render-thread split (plan phase 11.B)
+//! # Render-thread split
 //!
 //! When [`render_thread_enabled`](frust_shell_common::render_thread_enabled) is
 //! set (the default; `FRUST_NO_RENDER_THREAD` opts out), [`create_handle`] spawns
@@ -74,15 +74,15 @@ use crate::ffi_support::{
     platform_view_commands_up_to_date, publish_resolved_translucency, write_pipeline_cache_atomic,
 };
 
-/// Startup-span name (task 13): the persisted pipeline-cache blob has been read
+/// Startup-span name: the persisted pipeline-cache blob has been read
 /// from disk (or found absent) and handed to the renderer, recorded just before
-/// surface creation. Bracketed by task 08's cold-start recorder so the
+/// surface creation. Bracketed by the cold-start recorder so the
 /// warm-start win shows up in the `frust-perf startup` line between
 /// `init_entry` and `renderer_ready`. A crate-local literal rather than a
 /// `perf::SPAN_*` const because it is Android-pipeline-cache-specific.
 const SPAN_CACHE_LOADED: &str = "cache_loaded";
 
-/// Startup-span name (task 19): `create_handle` is about to join the background
+/// Startup-span name: `create_handle` is about to join the background
 /// GPU pre-init thread [`JNI_OnLoad`] spawned at native-library load. Paired
 /// with [`SPAN_PREINIT_JOINED`] so the `frust-perf startup` line shows how
 /// long `nativeInit` blocked on the pre-init — i.e. the wgpu adapter/device
@@ -91,12 +91,12 @@ const SPAN_CACHE_LOADED: &str = "cache_loaded";
 /// was ready before the join); a large one means the pre-init was still running.
 const SPAN_PREINIT_STARTED: &str = "preinit_started";
 
-/// Startup-span name (task 19): the background GPU pre-init join returned — the
+/// Startup-span name: the background GPU pre-init join returned — the
 /// pre-built device was adopted, or `create_handle` fell back to synchronous
 /// init. See [`SPAN_PREINIT_STARTED`].
 const SPAN_PREINIT_JOINED: &str = "preinit_joined";
 
-/// Startup-span name (phase 10.D): `create_handle` is about to join the
+/// Startup-span name: `create_handle` is about to join the
 /// background font-preload thread [`JNI_OnLoad`] spawned at native-library
 /// load (see [`spawn_font_preinit`]). Mirrors [`SPAN_PREINIT_STARTED`]'s shape
 /// for the GPU pre-init thread — a near-zero delta to
@@ -104,12 +104,12 @@ const SPAN_PREINIT_JOINED: &str = "preinit_joined";
 /// overlapped the window-acquire/GPU-init work above it.
 const SPAN_FONT_PREINIT_STARTED: &str = "font_preinit_started";
 
-/// Startup-span name (phase 10.D): the background font-preload join returned —
+/// Startup-span name: the background font-preload join returned —
 /// the pre-built [`TextContext`] was adopted, or `create_handle` fell back to
 /// a synchronous [`TextContext::new`]. See [`SPAN_FONT_PREINIT_STARTED`].
 const SPAN_FONT_PREINIT_JOINED: &str = "font_preinit_joined";
 
-/// Task 19: the GPU pre-init join handle spawned by [`JNI_OnLoad`]. The
+/// The GPU pre-init join handle spawned by [`JNI_OnLoad`]. The
 /// background thread builds a [`frust_render::RenderContext`] and creates its
 /// logical device (wgpu instance + adapter + device, no surface — see
 /// [`frust_render::RenderContext::ensure_device_headless`]) off the JVM main
@@ -123,7 +123,7 @@ const SPAN_FONT_PREINIT_JOINED: &str = "font_preinit_joined";
 type PreInitResult = Option<frust_render::RenderContext>;
 static GPU_PREINIT: OnceLock<Mutex<Option<JoinHandle<PreInitResult>>>> = OnceLock::new();
 
-/// Phase 10.D: the GPU pre-init thread's font-warmup counterpart, spawned by
+/// The GPU pre-init thread's font-warmup counterpart, spawned by
 /// [`JNI_OnLoad`] alongside it. Builds a [`TextContext`] (parley's
 /// `FontContext`/`LayoutContext` — the font-DB load `Widget::layout`'s first
 /// text pass would otherwise pay for) off the JVM main thread, overlapping the
@@ -137,8 +137,8 @@ static GPU_PREINIT: OnceLock<Mutex<Option<JoinHandle<PreInitResult>>>> = OnceLoc
 /// fallible step — until [`take_preinit_text_context`] takes it.
 static FONT_PREINIT: OnceLock<Mutex<Option<JoinHandle<TextContext>>>> = OnceLock::new();
 
-/// The process [`JavaVM`](jni::JavaVM) pointer, captured at [`JNI_OnLoad`]
-/// (task 01, plugin system). The JVM hands `JNI_OnLoad` the `JavaVM` before any
+/// The process [`JavaVM`](jni::JavaVM) pointer, captured at [`JNI_OnLoad`].
+/// The JVM hands `JNI_OnLoad` the `JavaVM` before any
 /// `nativeInit`, but the plugin platform bridge needs it later, at
 /// [`native_init_platform`] — so stash the raw pointer here rather than
 /// discarding it. `AtomicPtr` because `JNI_OnLoad` (library-load thread) writes
@@ -160,8 +160,8 @@ static PLATFORM_INIT: Once = Once::new();
 /// it). Set exactly once, under [`PLATFORM_INIT`]; never taken out or dropped.
 static CONTEXT_GLOBAL: OnceLock<Global<JObject<'static>>> = OnceLock::new();
 
-/// Process-wide "a surface has begun being created" flag (platform-views
-/// task 05): stored `true` at the top of [`create_handle`], read by
+/// Process-wide "a surface has begun being created" flag: stored `true` at
+/// the top of [`create_handle`], read by
 /// [`native_set_surface_mode`] to warn on a too-late latch call. The
 /// translucent-surface opt-in ([`frust_shell_common::surface_mode`]'s module
 /// docs' Latch contract) is pre-init-only — the surface format is fixed at
@@ -172,9 +172,9 @@ static ANY_SURFACE_CREATED: AtomicBool = AtomicBool::new(false);
 
 /// Resolve the [`frust_render::SurfaceAlphaRequest`] a surface-creation call
 /// should pass, from the process-wide translucent-surface latch
-/// ([`SurfaceModeWatcher::current`], platform-views task 03/05):
+/// ([`SurfaceModeWatcher::current`]):
 /// [`SurfaceMode::Translucent`] resolves to
-/// [`frust_render::SurfaceAlphaRequest::TranslucentPreferred`] (task 04's
+/// [`frust_render::SurfaceAlphaRequest::TranslucentPreferred`] (a
 /// capability-probed resolution table then picks the actual
 /// `wgpu::CompositeAlphaMode`), [`SurfaceMode::Opaque`] (the default) to
 /// today's unchanged [`frust_render::SurfaceAlphaRequest::Opaque`]. Read
@@ -185,8 +185,8 @@ static ANY_SURFACE_CREATED: AtomicBool = AtomicBool::new(false);
 ///
 /// This produces the REQUEST only. Whether the surface actually came up
 /// translucent is a separate, per-install value the UI thread reads from the
-/// `translucent_resolved` flag [`install_surface`] publishes (review finding
-/// M1) — never re-derive "am I translucent?" from this function.
+/// `translucent_resolved` flag [`install_surface`] publishes — never
+/// re-derive "am I translucent?" from this function.
 fn surface_alpha_request() -> frust_render::SurfaceAlphaRequest {
     match SurfaceModeWatcher::current() {
         SurfaceMode::Translucent => frust_render::SurfaceAlphaRequest::TranslucentPreferred,
@@ -229,7 +229,7 @@ pub extern "system" fn JNI_OnLoad(vm: *mut c_void, _reserved: *mut c_void) -> ji
 /// `nativeInitPlatform`: install the `(JavaVM, application Context)` pair into
 /// `ndk-context`'s process-wide slot so any Rust code — most importantly
 /// `frust-plugin`-backed platform plugins — can make JNI calls with zero
-/// per-plugin native code (task 01, plugin system Phase 1).
+/// per-plugin native code.
 ///
 /// Kotlin's generated `FrustSurfaceView` calls this with
 /// `context.applicationContext` right before `nativeInit`. The **application**
@@ -299,7 +299,7 @@ fn native_init_platform(mut env: EnvUnowned, context: JObject) {
     });
 }
 
-/// Spawn the single background GPU pre-init thread (task 19), best-effort and
+/// Spawn the single background GPU pre-init thread, best-effort and
 /// single-shot: it builds a [`frust_render::RenderContext`] and creates its
 /// device with no surface, off the JVM main thread, so [`create_handle`] can join
 /// finished work. Idempotent — a second call (e.g. the library re-loaded in the
@@ -329,7 +329,7 @@ fn spawn_gpu_preinit() {
     }));
 }
 
-/// Join the [`JNI_OnLoad`] GPU pre-init thread (task 19) and return the
+/// Join the [`JNI_OnLoad`] GPU pre-init thread and return the
 /// [`frust_render::RenderContext`] [`create_handle`] should use: the pre-built
 /// one (instance + adapter + device already created off-thread) when the
 /// background init succeeded, or a fresh synchronous `RenderContext` on any
@@ -337,7 +337,7 @@ fn spawn_gpu_preinit() {
 /// handle was already taken by a prior `nativeInit`), the thread panicked, or its
 /// device init failed.
 ///
-/// The `.join()` is timeout-free and never slower than the pre-task-19 status
+/// The `.join()` is timeout-free and never slower than the pre-pre-init status
 /// quo: the same adapter/device work ran serially inside `nativeInit` before, so
 /// at worst this blocks for the remainder of work already in flight. The
 /// adopt-vs-fallback decision itself is the host-tested
@@ -359,7 +359,7 @@ fn take_preinit_context() -> frust_render::RenderContext {
     crate::ffi_support::resolve_preinit(joined, frust_render::RenderContext::new)
 }
 
-/// Spawn the single background font-preload thread (phase 10.D), best-effort
+/// Spawn the single background font-preload thread, best-effort
 /// and single-shot, mirroring [`spawn_gpu_preinit`]'s shape exactly: it builds
 /// a [`TextContext`] (parley font-DB/`FontContext` + `LayoutContext`
 /// construction) off the JVM main thread during the same `JNI_OnLoad` window
@@ -380,7 +380,7 @@ fn spawn_font_preinit() {
     *slot_guard = Some(std::thread::spawn(TextContext::new));
 }
 
-/// Join the [`JNI_OnLoad`] font-preload thread (phase 10.D) and return the
+/// Join the [`JNI_OnLoad`] font-preload thread and return the
 /// [`TextContext`] [`create_handle`] should use: the pre-built one (font-DB
 /// already loaded off-thread) when the background build finished, or a fresh
 /// synchronous [`TextContext::new`] on any best-effort fallback case — pre-init
@@ -389,7 +389,7 @@ fn spawn_font_preinit() {
 /// a fallback here degrades to the cold path with a log line, never a
 /// crash/block.
 ///
-/// The `.join()` is never slower than the pre-phase-10.D status quo: the same
+/// The `.join()` is never slower than the pre-font-preload status quo: the same
 /// `TextContext::new()` work ran synchronously inside `AndroidAppHandle::new`
 /// before, so at worst this blocks for the remainder of work already in
 /// flight.
@@ -473,11 +473,11 @@ fn window_physical_size(window: &NativeWindow) -> (u32, u32) {
 }
 
 // ---------------------------------------------------------------------
-// Render-thread split (plan phase 11.B)
+// Render-thread split
 // ---------------------------------------------------------------------
 
 /// A raw `ANativeWindow*` made `Send` so it can cross the UI→render-thread
-/// scene-handoff channel as the `SurfaceCreated` payload (plan phase 11.B) — the
+/// scene-handoff channel as the `SurfaceCreated` payload — the
 /// `W` type parameter of the shared
 /// [`render_channel`](frust_shell_common::render_channel), which each shell picks
 /// (desktop pairs a `DetachedSurface`; Android passes this raw pointer, since
@@ -520,7 +520,7 @@ impl SendableWindowPtr {
 }
 
 /// Install (or reinstall) a `wgpu::Surface` on `renderer` from the raw
-/// `ANativeWindow*` `window_ptr`, on the render thread (plan phase 11.B). On the
+/// `ANativeWindow*` `window_ptr`, on the render thread. On the
 /// **first** install it also seeds + persists the pipeline cache and records the
 /// cache/adapter/device/renderer startup spans, mirroring the pre-split
 /// [`create_handle`] flow (which now happens render-side in the split).
@@ -573,8 +573,8 @@ fn install_surface(
     })
     .context("frust-shell-android: failed to create Android render surface")?;
 
-    // Publish the surface's RESOLVED translucency to the UI thread (review
-    // finding M1): `surface_alpha_request()` above is only what we ASKED for —
+    // Publish the surface's RESOLVED translucency to the UI thread:
+    // `surface_alpha_request()` above is only what we ASKED for —
     // `frust-render` resolves it against the platform's advertised alpha modes
     // and can fall back to an opaque swapchain. The UI thread reads this flag
     // every frame (`AndroidAppHandle::sync_translucent_resolved`) before
@@ -603,8 +603,7 @@ fn install_surface(
     Ok(())
 }
 
-/// Android render-thread nice value: `android.os.Process.THREAD_PRIORITY_DISPLAY`
-/// (phase-11 fix F6).
+/// Android render-thread nice value: `android.os.Process.THREAD_PRIORITY_DISPLAY`.
 ///
 /// `-4` is a **published platform constant** — the nice value Android's own
 /// UI/display pipeline threads run at, one band above the default (`0`) and below
@@ -616,7 +615,7 @@ fn install_surface(
 /// is logged, never fatal.
 const THREAD_PRIORITY_DISPLAY: libc::c_int = -4;
 
-/// The dedicated render thread's loop (plan phase 11.B): adopt the `JNI_OnLoad`
+/// The dedicated render thread's loop: adopt the `JNI_OnLoad`
 /// GPU pre-init [`RenderContext`](frust_render::RenderContext) *on this thread*,
 /// own the `SurfaceRenderer` + surface wholesale, drain lifecycle commands and
 /// the freshest handed-off scene from the channel, and run encode→acquire→submit
@@ -626,15 +625,15 @@ const THREAD_PRIORITY_DISPLAY: libc::c_int = -4;
 /// `init_entry` + the font-preinit spans before moving the recorder here). Exits
 /// cleanly when the [`RenderSender`](frust_shell_common::RenderSender) is dropped.
 ///
-/// `fatal` is the per-shell fatal flag (phase-11 fix F2): this thread stores
+/// `fatal` is the per-shell fatal flag: this thread stores
 /// `true` into it if the **first** surface install fails, so the UI thread's
 /// [`native_on_frame`] returns `false` and Kotlin stops the Choreographer loop
 /// (a first-install failure — an incapable GPU/driver — is unrecoverable and
 /// otherwise leaves a permanent black screen with no platform signal). Later
 /// reinstall failures stay log-only.
 ///
-/// `translucent_resolved` is the resolved-translucency seam (review finding
-/// M1): this thread creates the surface, so only it can see whether the
+/// `translucent_resolved` is the resolved-translucency seam: this thread
+/// creates the surface, so only it can see whether the
 /// requested translucent alpha mode was actually granted. It stores the
 /// outcome on every (re)install (and clears it on a failed one) for the UI
 /// thread — which owns the `RenderRoot` and the per-frame base color — to read
@@ -652,7 +651,7 @@ pub(crate) fn render_loop(
     signals: Arc<RenderSignals>,
     translucent_resolved: Arc<AtomicBool>,
 ) {
-    // Render-thread priority self-boost (phase-11 fix F6): raise this dedicated
+    // Render-thread priority self-boost: raise this dedicated
     // render thread to the display band so a busy UI thread can't starve the GPU
     // submit path. Best-effort — a backgrounded cpuset can refuse it, so a
     // non-zero return is logged, never fatal (this loop never panics).
@@ -680,7 +679,7 @@ pub(crate) fn render_loop(
     let mut startup_spans = Some(startup_spans);
 
     // Adopt the background GPU pre-init context here — the "pre-init handoff lands
-    // on the render thread" contract (plan phase 11.B). Bracketed by the
+    // on the render thread" contract. Bracketed by the
     // preinit_started/joined spans exactly as the pre-split `create_handle` did.
     if let Some(spans) = startup_spans.as_mut() {
         spans.record(SPAN_PREINIT_STARTED);
@@ -721,7 +720,7 @@ pub(crate) fn render_loop(
                             // A failed (re)install leaves no surface whose
                             // translucency we can vouch for — clear the flag
                             // rather than leaving the previous surface's value
-                            // standing (review M1: never punch a hole you
+                            // standing (never punch a hole you
                             // can't prove is a window).
                             publish_resolved_translucency(&translucent_resolved, None);
                             log::error!(
@@ -732,7 +731,7 @@ pub(crate) fn render_loop(
                             // change mid-process). Signal the UI thread so
                             // `nativeOnFrame` returns false and Kotlin stops the
                             // Choreographer loop instead of driving doomed frames
-                            // against a permanent black screen (phase-11 fix F2).
+                            // against a permanent black screen.
                             // Later reinstall failures stay log-only.
                             if first_install {
                                 fatal.store(true, Ordering::Release);
@@ -747,7 +746,7 @@ pub(crate) fn render_loop(
                     // Drop the surface resources FIRST, then acknowledge — the UI
                     // thread blocks on this ack before releasing the
                     // `ANativeWindow`, so the window is never touched after
-                    // release (the plan's Android surface-lifecycle-race hazard).
+                    // release (a known Android surface-lifecycle-race hazard).
                     renderer.on_surface_destroyed();
                     ack.acknowledge();
                 }
@@ -792,12 +791,12 @@ pub(crate) fn render_loop(
                     // Which frame this scene is — the UI thread stamped it into
                     // `FrameMeta` at submission; `render_scene` publishes it back
                     // out on an actual present, for the platform-view release
-                    // gate to pair a geometry batch against (camera task 01).
+                    // gate to pair a geometry batch against.
                     frame.meta.frame_id,
                 );
             }
-            // Give the drained scene back for the UI thread to reclaim (review
-            // finding F5) — whether it was actually rendered above or
+            // Give the drained scene back for the UI thread to reclaim —
+            // whether it was actually rendered above or
             // phase-gated out (`Paused`/`NoSurface`); `render_scene`'s encode
             // step has already fully consumed the scene's commands by this
             // point, so its buffer is safe to reuse. Never silently dropped.
@@ -895,7 +894,7 @@ fn create_handle(
         .context("frust-shell-android: ANativeWindow_fromSurface returned null")?;
     let physical = window_physical_size(&window);
 
-    // Build the render-path executor (plan phase 11.B), chosen once by the
+    // Build the render-path executor, chosen once by the
     // `FRUST_NO_RENDER_THREAD` kill switch:
     //
     // - Split (default): spawn the dedicated render thread that owns the
@@ -911,7 +910,7 @@ fn create_handle(
     // Both retain `window` in `AndroidAppHandle` (the UI thread owns the
     // `NativeWindow` and releases it only after the render thread — split — acks
     // dropping the surface built from its pointer).
-    // The resolved-translucency seam (review finding M1). SEEDED FROM THE
+    // The resolved-translucency seam. SEEDED FROM THE
     // REQUEST: the surface is created asynchronously on the render thread in
     // the default split, and an all-but-certain grant (the shipped Android
     // config resolves `Inherit`) should not cost a Mode-A flash on frame 1 —
@@ -982,7 +981,7 @@ fn create_handle(
 
 /// Build the **inline** (`FRUST_NO_RENDER_THREAD`) executor: create the renderer +
 /// surface on this UI thread and record the full startup line, exactly as the
-/// pre-split shell did (plan phase 11.B, kill-switch path). Returns the executor
+/// pre-split shell did (kill-switch path). Returns the executor
 /// plus the joined [`TextContext`] the handle needs for layout.
 ///
 /// `cache_dir` (when `Some`) is the app cache directory the pipeline-cache blob
@@ -997,7 +996,7 @@ fn build_inline_executor(
 ) -> Result<(FrameExecutor, TextContext)> {
     let mut renderer = frust_render::SurfaceRenderer::new();
 
-    // Pipeline-cache persistence (task 13): restore the blob a prior launch
+    // Pipeline-cache persistence: restore the blob a prior launch
     // persisted so vello's Vulkan shader pipelines are reused rather than
     // recompiled. Set BEFORE the surface install (where vello's renderer + cache
     // are created). Done before the pre-init join so the disk read overlaps the
@@ -1005,7 +1004,7 @@ fn build_inline_executor(
     let cache_path = cache_dir.as_deref().map(pipeline_cache_path);
     let loaded_cache = cache_path.as_deref().and_then(load_pipeline_cache);
 
-    // Log loaded blob size + validation outcome (perf-gated, task 03).
+    // Log loaded blob size + validation outcome (perf-gated).
     if perf::enabled() {
         if let Some(ref blob) = loaded_cache {
             log::info!(
@@ -1023,7 +1022,7 @@ fn build_inline_executor(
         startup_spans.record(perf::SPAN_PIPELINE_CACHE_RESTORED);
     }
 
-    // Adopt the `JNI_OnLoad` GPU pre-init context (task 19), or fall back to a
+    // Adopt the `JNI_OnLoad` GPU pre-init context, or fall back to a
     // fresh synchronous one. Bracketed by preinit_started/joined.
     startup_spans.record(SPAN_PREINIT_STARTED);
     let mut render_cx = take_preinit_context();
@@ -1045,8 +1044,8 @@ fn build_inline_executor(
     })
     .context("frust-shell-android: failed to create Android render surface")?;
 
-    // Replace the request-seeded optimism with the real resolution (review
-    // finding M1) — on this path the renderer lives on the UI thread, so the
+    // Replace the request-seeded optimism with the real resolution —
+    // on this path the renderer lives on the UI thread, so the
     // handle's per-frame sync re-reads it from the renderer anyway; storing it
     // here keeps the flag correct for the construction-time push too.
     publish_resolved_translucency(
@@ -1058,12 +1057,12 @@ fn build_inline_executor(
     startup_spans.record(perf::SPAN_DEVICE_READY);
     startup_spans.record(perf::SPAN_RENDERER_READY);
 
-    // Persist the pipeline cache the driver populated, if it changed (task 13).
+    // Persist the pipeline cache the driver populated, if it changed.
     if let Some(path) = cache_path {
         persist_pipeline_cache_if_changed(path, loaded_cache.as_deref(), &renderer);
     }
 
-    // Font/`TextContext` warmup (phase 10.D): join the font-preload thread as
+    // Font/`TextContext` warmup: join the font-preload thread as
     // late as possible (max overlap with the GPU work above).
     startup_spans.record(SPAN_FONT_PREINIT_STARTED);
     let text_ctx = take_preinit_text_context();
@@ -1077,8 +1076,8 @@ fn build_inline_executor(
     Ok((executor, text_ctx))
 }
 
-/// Spawn the **split** (default) render thread and return its executor handle
-/// (plan phase 11.B). The GPU work — pre-init context adoption, surface creation,
+/// Spawn the **split** (default) render thread and return its executor handle.
+/// The GPU work — pre-init context adoption, surface creation,
 /// pipeline cache, adapter/device/renderer spans — happens *on the render thread*
 /// ([`render_loop`]), so `nativeInit` never blocks the UI thread on it. Only the
 /// font-preload join (needed by UI-side layout) and the reactive-runtime claim
@@ -1091,7 +1090,7 @@ fn spawn_split_executor(
     cache_dir: Option<String>,
     translucent_resolved: Arc<AtomicBool>,
 ) -> (FrameExecutor, TextContext) {
-    // Font/`TextContext` warmup (phase 10.D) stays UI-side — layout runs on the
+    // Font/`TextContext` warmup stays UI-side — layout runs on the
     // UI thread. The GPU work is off-thread now, so this join's ordering vs GPU
     // bring-up no longer matters; record it before the recorder is moved into the
     // render thread below.
@@ -1108,13 +1107,13 @@ fn spawn_split_executor(
         scale: scale as f64,
     };
 
-    // Per-shell fatal flag (phase-11 fix F2): one clone lives in the render
+    // Per-shell fatal flag: one clone lives in the render
     // thread (set on a first-install failure), one in the `SplitExecutor` (read
     // by `native_on_frame`). A plain `Arc<AtomicBool>` — no channel/protocol.
     let fatal = Arc::new(AtomicBool::new(false));
     let fatal_render = Arc::clone(&fatal);
 
-    // Present bookkeeping (task 10's counter + camera task 01's presented frame
+    // Present bookkeeping (the presented counter + the presented frame
     // id): one clone drives into the render thread (recorded on each
     // `FrameOutcome::Rendered`), one stays in the `SplitExecutor` for the UI
     // thread to read before paint. Mirrors the `fatal` flag's shape.
@@ -1164,7 +1163,7 @@ fn spawn_split_executor(
 }
 
 /// Persist the current pipeline-cache blob to `path` on a background thread if it
-/// differs from `loaded` (task 13).
+/// differs from `loaded`.
 ///
 /// Reads [`SurfaceRenderer::pipeline_cache_data`](frust_render::SurfaceRenderer::pipeline_cache_data)
 /// (framed + adapter-fingerprinted; `None` without Vulkan `PIPELINE_CACHE`), and
@@ -1193,7 +1192,7 @@ fn persist_pipeline_cache_if_changed(
                 data_len,
                 path.display()
             );
-            // Log persisted size + whether it changed (perf-gated, task 03).
+            // Log persisted size + whether it changed (perf-gated).
             if perf_enabled {
                 log::info!(
                     "frust-shell-android: persisted pipeline cache ({} bytes, changed: {})",
@@ -1220,7 +1219,7 @@ fn persist_pipeline_cache_if_changed(
 /// density change are delivered together by Android's `SurfaceHolder.Callback`.
 /// This is a **breaking** signature change from the pre-parity export: the
 /// Kotlin `external` declaration and `FrustSurfaceView` call site gain the
-/// trailing `density` argument in the same phase (task 08).
+/// trailing `density` argument together.
 pub fn native_on_surface_changed(
     env: EnvUnowned,
     handle: jlong,
@@ -1351,7 +1350,7 @@ pub fn native_on_touch(handle: jlong, action: jint, x: jfloat, y: jfloat) {
 }
 
 /// `nativeOnResume`: activity resumed. Bookkeeping only in v0 — the Choreographer
-/// loop is started/stopped in Kotlin (spec Phase 2 §10.1).
+/// loop is started/stopped in Kotlin.
 pub fn native_on_resume(handle: jlong) {
     guard("nativeOnResume", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
@@ -1362,7 +1361,7 @@ pub fn native_on_resume(handle: jlong) {
 }
 
 /// `nativeOnPause`: activity paused. Bookkeeping only in v0 (see
-/// [`native_on_resume`]), plus (platform-views task 05) hiding every
+/// [`native_on_resume`]), plus hiding every
 /// currently-visible platform-view slot: a backgrounded app's native
 /// sibling views should disappear with it rather than linger on top of
 /// whatever now shows behind the (possibly composited-away) frust surface.
@@ -1473,8 +1472,8 @@ pub fn native_ime_action(handle: jlong, action: jint) {
 }
 
 /// `nativeSetAppearance`: flip the app's theme brightness (config/uiMode
-/// change), re-publishing it through both delivery paths (mirrors task 05's
-/// desktop `apply_theme`). `dark` is a JNI `jboolean` (this `jni` crate's
+/// change), re-publishing it through both delivery paths (mirrors the
+/// desktop shell's `apply_theme`). `dark` is a JNI `jboolean` (this `jni` crate's
 /// `jni-sys` 0.4 backing type is a real `bool`, not the `u8` older bindings
 /// use); the continuous Choreographer loop repaints the next tick with no
 /// extra wake needed. A missing handle is a no-op.
@@ -1488,15 +1487,15 @@ pub fn native_set_appearance(handle: jlong, dark: jboolean) {
 }
 
 /// `nativeSystemUiState`: return the process-wide system-UI override slot's
-/// packed `(generation, mode)` state (task 09) for Kotlin's `doFrame` to poll,
+/// packed `(generation, mode)` state for Kotlin's `doFrame` to poll,
 /// mirroring the proven `nativeImeState`-in-`doFrame` per-frame-poll idiom.
 ///
 /// Returns [`frust_shell_common::encoded_state`] verbatim — the packing
 /// scheme (`(generation << 8) | mode_bits`) and its unit tests live in
-/// `frust_shell_common::system_ui`'s module docs, which task 14's Kotlin
+/// `frust_shell_common::system_ui`'s module docs, which the Kotlin
 /// decoder is written against; this export is a thin, `guard`-wrapped
-/// one-liner over that already-tested encoding fn, per this task's contract.
-/// The slot is process-global (task 03), not per-handle, so no
+/// one-liner over that already-tested encoding fn.
+/// The slot is process-global, not per-handle, so no
 /// `AndroidAppHandle` lookup is needed beyond the standard liveness check
 /// every native call makes: a missing handle returns `0` (generation `0`,
 /// `EdgeToEdge` — "nothing to apply", matching the slot's own initial state
@@ -1512,19 +1511,19 @@ pub fn native_system_ui_state(handle: jlong) -> jlong {
 }
 
 /// `nativeSetSurfaceMode`: declare a translucent (alpha-channel) GPU surface
-/// before the surface is created (platform-views task 05).
+/// before the surface is created.
 ///
 /// The generated Kotlin glue calls this **only** from the same
 /// `FRUST_TRANSLUCENT_SURFACE`-gated branch that already set
 /// `SurfaceHolder`'s `PixelFormat.TRANSLUCENT` and arranged the
-/// native-sibling z-order, and always **before** `nativeInit` (template
-/// task 08's contract) — forwarding straight to
+/// native-sibling z-order, and always **before** `nativeInit` — forwarding
+/// straight to
 /// [`declare_host_translucent_surface`], the process-wide, one-way pre-init
 /// latch (`frust_shell_common::surface_mode`'s module docs' Latch contract:
 /// the surface format is fixed at creation, so there is no "revert" call and
 /// no live re-flip). Calling this from anywhere other than that host-glue
 /// branch — e.g. without the matching `PixelFormat` already set — is a
-/// host-template bug, not a supported opt-in (review M3); this is why the
+/// host-template bug, not a supported opt-in; this is why the
 /// underlying function is not re-exported past `frust-shell-common`. A call
 /// after [`ANY_SURFACE_CREATED`] is already set (i.e. after some
 /// `nativeInit` in this process has begun) is logged and is a no-op for the
@@ -1534,8 +1533,8 @@ pub fn native_system_ui_state(handle: jlong) -> jlong {
 ///
 /// Declaring only sets the *request*: a device advertising no translucent
 /// alpha mode still comes up opaque, and the paint contract follows the
-/// RESOLVED outcome (`frust_render::SurfaceRenderer::surface_resolved_translucent`,
-/// review finding M1), not this latch.
+/// RESOLVED outcome (`frust_render::SurfaceRenderer::surface_resolved_translucent`),
+/// not this latch.
 pub fn native_set_surface_mode(translucent: jboolean) {
     guard("nativeSetSurfaceMode", (), || {
         if !translucent {
@@ -1554,7 +1553,7 @@ pub fn native_set_surface_mode(translucent: jboolean) {
 }
 
 /// `nativePlatformViewCommands`: return the native-sibling-compositor command
-/// backlog (task 03's differ) as JSON, for Kotlin's per-frame poll —
+/// backlog (the differ) as JSON, for Kotlin's per-frame poll —
 /// mirrors [`native_ime_state`]'s shape exactly (fresh JSON per call,
 /// JNI-owned `JString`, guard-wrapped, `null` on a missing handle).
 ///
@@ -1568,7 +1567,7 @@ pub fn native_set_surface_mode(translucent: jboolean) {
 /// (untrusted JNI input) clamps to `0` rather than wrapping through the
 /// `as u64` cast.
 ///
-/// **Frozen JSON wire contract** (byte-identical, served by task 06's iOS
+/// **Frozen JSON wire contract** (byte-identical, served by the iOS
 /// shell too — see [`build_platform_view_commands_json`]):
 ///
 /// ```text
@@ -1602,7 +1601,7 @@ pub fn native_platform_view_commands(
         let ack_generation = ack_generation.max(0) as u64;
         app.acknowledge_platform_view_commands(ack_generation);
         // Read the scale up front: the release peek borrows the handle mutably
-        // (the scroll-sync tail records this poll's hold — camera task 12), so
+        // (the scroll-sync tail records this poll's hold), so
         // it cannot be re-borrowed while `commands` is alive.
         let scale = app.sanitized_scale();
         let (generation, commands) = app.platform_view_commands();
@@ -1619,7 +1618,7 @@ pub fn native_platform_view_commands(
 
 /// `nativeSetFrameTimeline`: hand this tick's Choreographer frame-timeline
 /// delta (`expectedPresentationTimeNanos − frameTimeNanos`, API 33+) to the
-/// scroll-sync tail (camera task 12) — the one signal in this shell only the
+/// scroll-sync tail — the one signal in this shell only the
 /// JVM side can read (`Choreographer.postVsyncCallback` has no NDK equivalent
 /// in this crate's dependency set).
 ///
@@ -1638,7 +1637,7 @@ pub fn native_set_frame_timeline(handle: jlong, expected_present_delta_nanos: jl
     })
 }
 
-/// Map the differ's [`ViewCommand`] backlog (task 03) onto the host-testable
+/// Map the differ's [`ViewCommand`] backlog onto the host-testable
 /// [`PlatformViewCommandJson`] the JSON builder consumes, converting each
 /// rect/clip from the differ's logical px to **physical** px at this FFI
 /// boundary — mirrors [`ime_state_to_json`]'s caret-rect conversion.
@@ -1701,8 +1700,8 @@ fn scale_rect(rect: kurbo::Rect, scale: f64) -> (f32, f32, f32, f32) {
 /// `nativeOnDeepLink`: deliver a platform deep link (cold-start, forwarded
 /// from `FrustActivity.onCreate`'s `intent?.data`, or running, from
 /// `FrustActivity.onNewIntent` — see `platform/android/frust-embedding/src/main/kotlin/dev/frust/`'s
-/// `FrustActivity`/`FrustSurfaceView` queue-until-handle-ready contract,
-/// task 07) into the process-wide deep-link source
+/// `FrustActivity`/`FrustSurfaceView` queue-until-handle-ready contract)
+/// into the process-wide deep-link source
 /// ([`frust_reactive::push_deep_link`]).
 ///
 /// `url` is the Kotlin `Intent.data` `Uri`'s `toString()`, read into a Rust
@@ -1904,7 +1903,7 @@ mod macro_expansion {
 }
 
 /// Compile-only smoke of [`crate::android_app!`]'s 3-arg (state-factory) arm,
-/// covering acceptance criterion 2: a `State` with **no** `Default` impl —
+/// exercising a `State` with **no** `Default` impl —
 /// the only way to construct it is through the factory closure passed as the
 /// macro's second argument. See [`macro_expansion`] for why this lives in its
 /// own `cfg(test)`-only module (both expand to the same fixed JNI symbol names,

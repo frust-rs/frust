@@ -5,12 +5,12 @@ use peniko::{Brush, FontData};
 
 /// Opaque wrapper around a loaded font resource (blob + collection index).
 ///
-/// `frust-text` (spec Phase C) constructs `FontHandle`s from `peniko::FontData`;
+/// `frust-text` constructs `FontHandle`s from `peniko::FontData`;
 /// `frust-render` (layer 4) unwraps them when building glyph draw calls.
 /// `peniko::FontData` is the shared Linebender vocabulary re-exported by vello — it
 /// does not count as a vello type for the purposes of this crate's "no vello in
-/// the public API" rule (see spec §7 / task 03 rationale). Note: peniko 0.6.1 names
-/// this type `FontData`, not `Font` as sketched in the task description; the shape
+/// the public API" rule. Note: peniko 0.6.1 names
+/// this type `FontData`, not `Font`; the shape
 /// (blob + collection index) is unchanged.
 #[derive(Clone, Debug)]
 pub struct FontHandle(FontData);

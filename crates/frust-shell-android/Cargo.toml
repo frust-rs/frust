@@ -10,7 +10,7 @@ license.workspace = true
 # *expands* to real code where its call site is `#[cfg(target_os = "android")]`),
 # and the panic-guard helper is host-testable, so `log` builds everywhere.
 log = { workspace = true }
-# Platform-agnostic atomic write and directory resolution (task 05).
+# Platform-agnostic atomic write and directory resolution.
 frust-paths = { workspace = true }
 
 # The JNI runtime and the whole render/text stack are only ever compiled for an
@@ -38,12 +38,12 @@ anyhow = { workspace = true }
 jni = { workspace = true }
 ndk = { workspace = true }
 ndk-sys = { workspace = true }
-# Render-thread priority self-boost (phase-11 fix F6): the split's dedicated
+# Render-thread priority self-boost: the split's dedicated
 # render thread calls `setpriority(PRIO_PROCESS, gettid(), THREAD_PRIORITY_DISPLAY)`
 # at the top of its loop so a busy UI thread can't starve GPU submit. Confined to
 # the sanctioned-unsafe `jni_glue` zone; target-gated like the JNI/NDK deps above.
 libc = { workspace = true }
-# Plugin platform bridge (task 01 / Design Decision 2, fix F1): the shell
+# Plugin platform bridge: the shell
 # *writes* the captured `(JavaVM, application Context)` at `nativeInitPlatform`
 # via `frust_plugin::android::initialize`, which owns the `ndk-context` install
 # and arms the pre-init flag; plugins *read* them back through `frust-plugin`.
@@ -53,7 +53,7 @@ libc = { workspace = true }
 # lives in `frust-plugin` now. Target-gated like the JNI deps above.
 frust-plugin = { workspace = true }
 android_logger = { workspace = true }
-# Android accesskit adapter (phase 6d D3, wired in task 04) — target-gated
+# Android accesskit adapter — target-gated
 # like the JNI deps above; nothing off-Android references it.
 accesskit_android = { workspace = true }
 
@@ -68,7 +68,7 @@ frust-widgets = { workspace = true }
 # and frust-render/perf-trace. Empty by default (opt-in survives cargo's additive
 # unification; the CLI is the sole enabler).
 perf-trace = ["frust-shell-common/perf-trace", "frust-render/perf-trace"]
-# Forwards into frust-theme's own `glyph-fonts` (gf2 opt-out chain) — see
+# Forwards into frust-theme's own `glyph-fonts` (opt-out chain) — see
 # `frust-shell-common`'s Cargo.toml for the shape rationale. The frust-theme
 # edge this targets only exists in the Android-gated dependency block above;
 # like `perf-trace`'s forwarding above, this is a no-op off-Android.

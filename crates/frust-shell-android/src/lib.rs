@@ -39,7 +39,7 @@
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod ffi_support;
 
-// The shape-aware scroll-sync tail (camera task 12): pure logic — two scalars
+// The shape-aware scroll-sync tail: pure logic — two scalars
 // per display frame in, a hold depth out — deliberately kept out of the
 // Android-only modules below so its regime state machine and hold aging are
 // unit-testable on the host (the same "platform-agnostic brain" split the
@@ -98,22 +98,22 @@ pub mod __jni {
 /// flips the app's theme brightness from the platform's dark-mode
 /// preference. `nativeOnDeepLink` delivers a cold-start/running
 /// platform deep link into the process-wide deep-link source.
-/// `nativeInitAccessibility` (phase 6d, task 04) attaches the accesskit Android
-/// adapter to the host view. The two device-parity exports (task 06):
+/// `nativeInitAccessibility` attaches the accesskit Android
+/// adapter to the host view. Two more exports:
 /// `nativeOnInsetsChanged` delivers the platform window insets (SafeArea), and
 /// `nativeOnBackPress` routes a hardware/gesture back press through the framework
 /// (returning whether it consumed it). `nativeOnSurfaceChanged` also gained a
-/// trailing `density` argument in the same task. `nativeSystemUiState` (task
-/// 09) returns the app-facing `frust::set_system_ui_mode` override slot's
+/// trailing `density` argument alongside these. `nativeSystemUiState`
+/// returns the app-facing `frust::set_system_ui_mode` override slot's
 /// packed `(generation, mode)` state for a per-frame Kotlin poll. Two more,
-/// additive over those seventeen (platform-views task 05): `nativeSetSurfaceMode`
+/// additive over those seventeen: `nativeSetSurfaceMode`
 /// latches a translucent GPU surface pre-init (a one-way opt-in — see
 /// `frust_shell_common::surface_mode`'s module docs), and
 /// `nativePlatformViewCommands` returns the native-sibling-compositor command
-/// backlog (task 03's differ) as JSON for Kotlin's own per-frame poll, mirroring
-/// `nativeSystemUiState`'s generation-gated shape but JSON-encoded (task 03's
-/// `ViewCommand` vocabulary) rather than packed into a `jlong`. One more
-/// (camera task 12): `nativeSetFrameTimeline` pushes the Choreographer frame
+/// backlog (the differ) as JSON for Kotlin's own per-frame poll, mirroring
+/// `nativeSystemUiState`'s generation-gated shape but JSON-encoded (the
+/// `ViewCommand` vocabulary) rather than packed into a `jlong`. One more:
+/// `nativeSetFrameTimeline` pushes the Choreographer frame
 /// timeline's `expectedPresentationTimeNanos − frameTimeNanos` (API 33+, the
 /// one signal only the JVM side can read) into the scroll-sync tail — additive
 /// and optional, `0`/never-called leaves the platform-view release path
@@ -151,7 +151,7 @@ macro_rules! android_app {
     ($state_ty:ty, $state_init:expr, $app_logic:expr $(,)?) => {
         /// JNI `nativeInit`: create the native handle for one surface.
         ///
-        /// `cache_dir` is the app's `context.cacheDir.absolutePath` (task 13),
+        /// `cache_dir` is the app's `context.cacheDir.absolutePath`,
         /// used to persist the wgpu pipeline cache across launches so a warm
         /// start skips Vulkan shader-pipeline compilation. Same export name as
         /// before — the mangled JNI symbol does not encode Java-side params — but
@@ -172,10 +172,10 @@ macro_rules! android_app {
 
         /// JNI `nativeOnSurfaceChanged`: (re)create or resize the surface.
         ///
-        /// `density` (task 06) is the display's `displayMetrics.density` for this
+        /// `density` is the display's `displayMetrics.density` for this
         /// configuration — a **breaking** signature change from the pre-parity
         /// export (the Kotlin `external` declaration gains the trailing argument
-        /// in the same phase, task 08) so a density-altering config change
+        /// alongside it) so a density-altering config change
         /// re-sanitizes the stored scale used for layout/paint/insets.
         #[unsafe(no_mangle)]
         pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeOnSurfaceChanged<'local>(
@@ -204,7 +204,7 @@ macro_rules! android_app {
 
         /// JNI `nativeOnFrame`: run one Choreographer-driven frame.
         ///
-        /// Returns `jboolean` (phase-11 fix F2): `false` = a fatal render-thread
+        /// Returns `jboolean`: `false` = a fatal render-thread
         /// failure (first-surface install could not succeed), on which Kotlin's
         /// `doFrame` stops the Choreographer loop. The JNI symbol name is
         /// unchanged; the Kotlin `external` declaration gains the `Boolean` return
@@ -316,7 +316,7 @@ macro_rules! android_app {
         }
 
         /// JNI `nativeSetAppearance`: flip the app's theme brightness (config/
-        /// uiMode change) between light and dark (task 08).
+        /// uiMode change) between light and dark.
         #[unsafe(no_mangle)]
         pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeSetAppearance<'local>(
             _env: $crate::__jni::EnvUnowned<'local>,
@@ -328,7 +328,7 @@ macro_rules! android_app {
         }
 
         /// JNI `nativeOnDeepLink`: deliver a platform deep link (cold-start or
-        /// running — task 07) into the process-wide deep-link source.
+        /// running) into the process-wide deep-link source.
         ///
         /// `url` is the Kotlin `Intent.data` `Uri`'s `toString()`.
         #[unsafe(no_mangle)]
@@ -407,10 +407,10 @@ macro_rules! android_app {
         }
 
         /// JNI `nativeSystemUiState`: return the process-wide system-UI
-        /// override slot's packed `(generation, mode)` state (task 09) for
+        /// override slot's packed `(generation, mode)` state for
         /// Kotlin's `doFrame` to poll each frame, generation-gated like
         /// `nativeImeState`'s established per-frame-poll idiom, and apply via
-        /// `WindowInsetsControllerCompat` on change (task 14 wires the Kotlin
+        /// `WindowInsetsControllerCompat` on change (the Kotlin
         /// decoder). Additive: older generated Kotlin that never calls this is
         /// unaffected.
         #[unsafe(no_mangle)]
@@ -423,9 +423,9 @@ macro_rules! android_app {
         }
 
         /// JNI `nativeSetSurfaceMode`: latch a translucent (alpha-channel) GPU
-        /// surface before it is created (platform-views task 05). Takes no
+        /// surface before it is created. Takes no
         /// handle — a process-wide, pre-init-only opt-in the generated glue
-        /// calls BEFORE `nativeInit` (template task 08); a call after a
+        /// calls BEFORE `nativeInit`; a call after a
         /// surface already exists in this process is logged and has no
         /// effect on it.
         #[unsafe(no_mangle)]
@@ -438,8 +438,8 @@ macro_rules! android_app {
         }
 
         /// JNI `nativePlatformViewCommands`: return the native-sibling-
-        /// compositor command backlog (task 03's differ) as JSON for
-        /// Kotlin's per-frame poll (platform-views task 05).
+        /// compositor command backlog (the differ) as JSON for
+        /// Kotlin's per-frame poll.
         /// `ack_generation` round-trips the generation Kotlin's own last
         /// poll returned (`0` on the first call); returns `null` on the
         /// no-change fast path or a missing handle.
@@ -457,8 +457,8 @@ macro_rules! android_app {
 
         /// JNI `nativeSetFrameTimeline`: push this tick's Choreographer
         /// frame-timeline delta (`expectedPresentationTimeNanos −
-        /// frameTimeNanos`, API 33+) into the scroll-sync tail (camera task
-        /// 12). `0` means "no sample" — below API 33, or no platform view is
+        /// frameTimeNanos`, API 33+) into the scroll-sync tail.
+        /// `0` means "no sample" — below API 33, or no platform view is
         /// hosted, in which case Kotlin never samples the timeline at all —
         /// and leaves the platform-view release path gate-only. The value is
         /// only ever a hold *depth* input; nothing about correctness depends

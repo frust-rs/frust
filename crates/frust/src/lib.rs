@@ -107,9 +107,9 @@ pub use frust_widgets::{
 /// Rust: that constant drives, in one host-glue branch, the native window's
 /// pixel format (`PixelFormat.TRANSLUCENT`/`CAMetalLayer.isOpaque = false`),
 /// the native-sibling z-order/subview arrangement, and the
-/// `nativeSetSurfaceMode`/`frust_set_surface_mode` call together (review
-/// M3/M4 — flipping only some of these is a host-template defect). There is
-/// no app-Rust opt-in call; the generated project's template (task 08/09) is
+/// `nativeSetSurfaceMode`/`frust_set_surface_mode` call together
+/// (flipping only some of these is a host-template defect). There is
+/// no app-Rust opt-in call; the generated project's template is
 /// the sole route into Mode B.
 ///
 /// ```no_run
@@ -147,7 +147,7 @@ pub use frust_widgets::{
 /// with the slot's placement.
 pub use frust_widgets::{PlatformViewView, ShieldView, platform_view, shield};
 
-/// The vendored Material Symbols starter icon set (Huddle showcase, Phase A),
+/// The vendored Material Symbols starter icon set,
 /// flat-re-exported so app code names `frust::icons::HOME` rather than the
 /// underlying `frust-widgets` crate. Each entry is an
 /// [`IconSource`](crate::IconSource) usable directly with [`icon`](crate::icon);
@@ -206,9 +206,9 @@ pub use frust_widgets::{
     show_cupertino_alert, tab_item,
 };
 
-/// The `motion` module (glyph-design-system task 12): declarative
+/// The `motion` module: declarative
 /// implicit-animation wrappers (`AnimatedOpacity`/`AnimatedScale` today;
-/// `switcher`/`patterns` land in later tasks) over `frust-core`'s `anim`
+/// `switcher`/`patterns` land later) over `frust-core`'s `anim`
 /// vocabulary. Re-exported **wholesale**
 /// (`pub use frust_widgets::motion;`), mirroring `frust_widgets::icons`'s
 /// existing wholesale-module precedent — the only other one in this facade —
@@ -225,7 +225,7 @@ pub use frust_widgets::{
 /// ```
 pub use frust_widgets::motion;
 
-/// The Glyph widget catalog (glyph-design-system tasks 17/20-26): the
+/// The Glyph widget catalog: the
 /// terminal-native components with no Material/Cupertino equivalent
 /// (badges/tags/alerts, loaders + toast, nav chrome, content cards, the
 /// terminal block + tooltip, and the command-palette overlay). Re-exported
@@ -240,7 +240,7 @@ pub use frust_widgets::glyph;
 mod back_glue;
 mod router_glue;
 
-/// Android back-press ⇄ navigator auto-wiring (device-parity task 05):
+/// Android back-press ⇄ navigator auto-wiring:
 /// [`attach_back_handler`]/[`BackHandler`] pop a [`NavigatorController`] on a
 /// platform back press and keep `frust-reactive`'s `handles_back` flag in
 /// sync with the stack depth, so a shell knows whether a root-level back should
@@ -253,7 +253,7 @@ mod router_glue;
 pub use back_glue::{BackHandler, attach_back_handler};
 
 /// Build a [`NavigatorView`] driven by `controller` — the facade's back-aware
-/// wrapper over [`frust_widgets::navigator`] (glyph-refinements task 08).
+/// wrapper over [`frust_widgets::navigator`].
 ///
 /// Interposes on the flat widget re-export: same signature and return shape, but
 /// every rebuild it *additionally* auto-wires Android/gesture back handling for
@@ -306,7 +306,7 @@ pub fn navigator<State: 'static>(
     frust_widgets::navigator(controller, initial)
 }
 
-/// Router ⇄ deep-link auto-wiring (Phase 6b, task 08): [`router_with_deep_links`]/
+/// Router ⇄ deep-link auto-wiring: [`router_with_deep_links`]/
 /// [`RouterDeepLinks`] resolve a [`Router`]'s start location from the process's
 /// cold-start deep link (falling back to an app-supplied default) and keep
 /// navigating it on every subsequent warm link — see [`RouterDeepLinks`]'s doc
@@ -331,7 +331,7 @@ pub use router_glue::{RouterDeepLinks, router_with_deep_links};
 /// assert!(!glass.control.is_opaque());
 /// ```
 ///
-/// Also the composable-theming surface (glyph-design-system tasks 04/05/09/11/15):
+/// Also the composable-theming surface:
 /// [`ThemeBuilder`] (`defineTheme`/`copyWith` analog), the no-lock-in typed
 /// extension slot ([`ThemeExtensions`]) plus its first two consumers
 /// [`StatusPalette`]/[`StatusColors`] (success/warning/info) and [`GlyphInk`]
@@ -379,14 +379,14 @@ pub use peniko::Color;
 /// ```
 pub use frust_shell_common::{clear_app_theme, set_app_theme};
 
-/// App-facing system-UI (system-bar) override (glyph-refinements task 03):
+/// App-facing system-UI (system-bar) override:
 /// [`set_system_ui_mode`] requests a status-/navigation-bar visibility mode —
 /// the Flutter `SystemChrome.setEnabledSystemUIMode` analog — reaching
 /// whichever shell is running the next time it polls (once per frame,
 /// mirroring [`set_app_theme`]'s delivery timing). See
 /// `frust_shell_common::system_ui`'s module docs for the full layering
 /// rationale, the thread contract (a plain `Mutex`-guarded process-global,
-/// callable from any thread), the FFI wire format tasks 09/10 export, and
+/// callable from any thread), the FFI wire format each mobile shell exports, and
 /// where Android/iOS diverge from the five-mode vocabulary.
 ///
 /// ```no_run
@@ -397,11 +397,11 @@ pub use frust_shell_common::{clear_app_theme, set_app_theme};
 /// ```
 pub use frust_shell_common::{SystemUiMode, SystemUiOverlay, set_system_ui_mode};
 
-/// App-facing pending-font registry (glyph-design-system task 08):
+/// App-facing pending-font registry:
 /// [`register_app_fonts`] pushes raw font bytes (TTF/OTF, or a TTC/OTC
 /// collection) to be registered into the running shell's `TextContext` the
 /// next time it drains this registry (construction time, and once per
-/// frame -- task 14's shell wiring). See
+/// frame -- each shell's own wiring). See
 /// `frust_shell_common::font_registry`'s module docs for the full layering
 /// rationale and thread contract (mirrors [`set_app_theme`]'s: a plain
 /// `Mutex`-guarded process-global, callable from any thread).
@@ -415,8 +415,8 @@ pub use frust_shell_common::{SystemUiMode, SystemUiOverlay, set_system_ui_mode};
 /// ```
 pub use frust_shell_common::font_registry::register_app_fonts;
 
-// No app-facing translucent-surface opt-in lives here (review-fix-2 t01,
-// review M3): Mode B is a build-time HOST configuration selected by the
+// No app-facing translucent-surface opt-in lives here: Mode B is a
+// build-time HOST configuration selected by the
 // generated template's `FRUST_TRANSLUCENT_SURFACE`/`translucentSurface`
 // constant, never a runtime Rust call — see [`platform_view`]'s Mode B
 // section above. `frust_shell_common::declare_host_translucent_surface`
@@ -494,7 +494,7 @@ pub use frust_reactive::{RwSignal, on_cleanup, provide_context, use_context};
 /// plus the live, trackable [`DeepLinks::latest`] signal a
 /// [`Component::build`] reads to react to cold-start and subsequent links
 /// uniformly. Router auto-wiring (resolving `deep_links()` against a
-/// [`Router`]) is a separate opt-in (task 08), not automatic here.
+/// [`Router`]) is a separate opt-in, not automatic here.
 ///
 /// ```no_run
 /// use frust::{AnyView, Route, Router, any, deep_links, text};
@@ -519,13 +519,13 @@ pub use frust_reactive::{RwSignal, on_cleanup, provide_context, use_context};
 /// # let _ = app_logic;
 /// ```
 /// [`push_deep_link`] is normally called by a mobile shell's platform-link
-/// handler; it is also re-exported here as the desktop dev seam Phase 6b's
-/// task 06 documents (no shell writes on desktop yet) — `examples/navdemo`'s
+/// handler; it is also re-exported here as the desktop dev seam
+/// (no shell writes on desktop yet) — `examples/navdemo`'s
 /// "simulate deep link" button calls it directly to demonstrate warm-link
 /// navigation without a real platform link.
 pub use frust_reactive::{DeepLink, DeepLinks, deep_links, push_deep_link};
 
-/// The Android back-press source (device-parity task 05; `frust-reactive`'s
+/// The Android back-press source (`frust-reactive`'s
 /// process-wide back source — see its `back` module docs). A mobile shell
 /// delivers a hardware/gesture back press via [`push_back_press`], and the
 /// facade's [`BackHandler`] reads it via [`back_presses`] to pop a navigator;
@@ -560,7 +560,7 @@ pub fn spawn_local(fut: impl std::future::Future<Output = ()> + 'static) {
     any_spawner::Executor::spawn_local(fut);
 }
 
-/// The heavy-work idiom (phase 9.A): [`AsyncValue`] state,
+/// The heavy-work idiom: [`AsyncValue`] state,
 /// [`use_task`] (the blessed load/compute helper), [`UseTask`] handle, and
 /// [`spawn_blocking`] (the CPU-bound entry point) — Frust's counterpart to
 /// Flutter's `compute()`/`FutureBuilder`, with explicit cancellation on
@@ -572,7 +572,7 @@ pub use frust_reactive::{AsyncValue, TaskError, UseTask, spawn_blocking, use_tas
 
 mod image_async;
 
-/// Off-thread image decode (Phase 9.B step 1): [`decode_image_async`] wraps
+/// Off-thread image decode: [`decode_image_async`] wraps
 /// the existing synchronous `ImageSource::decode` in `spawn_blocking`, so it
 /// composes with [`use_task`] for the full load/error/ready idiom without
 /// ever blocking the UI thread on a decode. See `image_async`'s module docs
@@ -758,7 +758,7 @@ macro_rules! app {
 }
 
 /// Compile-only smoke of [`app!`]: a `Component + Default` fixture bound to
-/// all three platforms in one call, exercising acceptance criteria 1-3 —
+/// all three platforms in one call —
 /// `cargo test --workspace` compiles this on host (criterion 1: `__frust_main`
 /// present, no Android JNI symbols), and `cargo check --target
 /// aarch64-linux-android -p frust --tests` / `--target
@@ -794,7 +794,7 @@ mod macro_expansion {
     crate::app!(TestApp);
 }
 
-/// Facade-level regression test for review F1: [`run`] runs a root
+/// Facade-level regression test: [`run`] runs a root
 /// [`Component`]'s `init` under the process-wide root [`Owner`], so a
 /// `provide_context` there actually registers (rather than silently no-opping
 /// with no ambient owner). Opening a preview window isn't testable headless, so
@@ -848,7 +848,7 @@ mod root_owner_wrap {
     }
 }
 
-/// Facade-level check for task 6f-01: the glass material tokens
+/// Facade-level check that the glass material tokens
 /// ([`GlassScale`]/[`GlassMaterial`]/[`GlassFill`]) re-export through the
 /// `frust` facade, and the two baselines carry the matching scale.
 #[cfg(test)]

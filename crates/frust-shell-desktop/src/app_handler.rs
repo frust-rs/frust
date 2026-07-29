@@ -11,7 +11,7 @@
 //! (the v0 subset) on this thread — rebuild → layout → paint — then hands the
 //! finished scene to the executor for encode → acquire → submit.
 //!
-//! It also owns an `accesskit_winit` [`Adapter`] (phase 6d D3): created in
+//! It also owns an `accesskit_winit` [`Adapter`]: created in
 //! `resumed` with the same [`EventLoopProxy`](winit::event_loop::EventLoopProxy)
 //! the [`ShellUserEvent`] wake mechanism already uses (extended with an
 //! [`ShellUserEvent::Accessibility`] variant), forwarded every
@@ -79,7 +79,7 @@ const WINDOW_TITLE: &str = "Frust";
 /// a unit type) so future user-driven events can be added without changing the
 /// loop's user-event type.
 ///
-/// [`ShellUserEvent::Accessibility`] (phase 6d D3) is the second producer of
+/// [`ShellUserEvent::Accessibility`] is the second producer of
 /// this same proxy: `accesskit_winit`'s [`Adapter::with_event_loop_proxy`]
 /// requires its `T: From<accesskit_winit::Event>` bound, satisfied below. Its
 /// payload (an [`accesskit::ActionRequest`](frust_core::accesskit::ActionRequest)
@@ -162,10 +162,10 @@ where
     let runtime = ReactiveRuntime::init(waker);
 
     // Pick the frame executor once at startup from the `FRUST_NO_RENDER_THREAD`
-    // kill switch (plan phase 11.B). The split path spawns a dedicated render
+    // kill switch. The split path spawns a dedicated render
     // thread that owns the `RenderContext` + `SurfaceRenderer` wholesale (both
     // `Send`); the inline path keeps them on this (the UI) thread — the fallback
-    // preserved until 11.E validates the split.
+    // preserved for comparison against the split.
     let executor = if render_thread_enabled() {
         let render_proxy = event_loop.create_proxy();
         FrameExecutor::Split(crate::render::spawn_render_thread(render_proxy))
@@ -197,7 +197,7 @@ where
         semantics_seen: 0,
         fatal: None,
         epoch,
-        // Glyph baseline (task 27), Dark until `resumed` seeds the window's real
+        // Glyph baseline, Dark until `resumed` seeds the window's real
         // preference (`brightness_from_winit` below overwrites `brightness`
         // unconditionally, so the baseline's own dark-first default never leaks
         // into a light-preference platform).
@@ -210,14 +210,14 @@ where
         anim_pacing: !frust_shell_common::anim_pacing_kill_switch_engaged(),
     };
 
-    // Construction-time font drain (task 14): apply any fonts registered via
+    // Construction-time font drain: apply any fonts registered via
     // `frust::register_app_fonts` before `run` (app construction) into the
     // shell-owned `TextContext` before the first layout — inline, on this UI
     // thread. Pre-first-layout, so no invalidation/relayout is needed; the
     // per-frame poll in `RedrawRequested` picks up any later registration.
     handler.font_registry.drain_into(&mut handler.text_ctx);
 
-    // Bundled Glyph font auto-registration (task 27): the default theme just
+    // Bundled Glyph font auto-registration: the default theme just
     // constructed above is the Glyph baseline, so register the bundled Space
     // Mono / IBM Plex Mono faces directly into the shell's `TextContext`
     // before the first layout — same pre-first-layout timing as the drain
@@ -229,7 +229,7 @@ where
     finish(handler.fatal)
 }
 
-/// Bundled Glyph font auto-registration (task 27): registers
+/// Bundled Glyph font auto-registration: registers
 /// `frust_theme::glyph::font_data()`'s bundled Space Mono / IBM Plex Mono
 /// faces into `cx` when `theme`'s [`DesignLanguage`] is [`DesignLanguage::Glyph`]
 /// — a no-op otherwise (an app whose default theme is Material/Cupertino gets
@@ -290,8 +290,8 @@ fn physical_to_logical(x: f64, y: f64, scale: f64) -> Point {
     Point::new(x / scale, y / scale)
 }
 
-/// Map a winit [`WinitNamedKey`] to our editing-semantics [`NamedKey`] set
-/// (task 51), or `None` for a named key we carry no editing semantics for
+/// Map a winit [`WinitNamedKey`] to our editing-semantics [`NamedKey`] set,
+/// or `None` for a named key we carry no editing semantics for
 /// (function keys, media keys, etc. — those fall through to `KeyboardInput`
 /// being dropped rather than misreported as text).
 fn map_named_key(key: WinitNamedKey) -> Option<NamedKey> {
@@ -452,7 +452,7 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     scope: TrackedScope,
     root: RenderRoot<State, V>,
     text_ctx: TextContext,
-    /// The frame executor (plan phase 11.B): either the render-thread split or
+    /// The frame executor: either the render-thread split or
     /// the single-thread fallback, chosen once at startup from the
     /// `FRUST_NO_RENDER_THREAD` kill switch. Owns the `RenderContext` +
     /// `SurfaceRenderer` (inline) or the render-thread handle (split), and all
@@ -483,17 +483,17 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     /// Created lazily in `resumed()` (macOS requires window creation there).
     window: Option<Arc<Window>>,
     /// A clone of the wake proxy handed to the `accesskit_winit` [`Adapter`] at
-    /// creation (phase 6d D3) — kept separate from the `FrameWaker`'s own clone
+    /// creation — kept separate from the `FrameWaker`'s own clone
     /// (`run_desktop`) so `resumed` can construct the adapter without needing
     /// to unpick it from the (already-moved-into-a-closure) waker.
     accesskit_proxy: winit::event_loop::EventLoopProxy<ShellUserEvent>,
-    /// The `accesskit_winit` platform adapter (phase 6d D3), created once in
+    /// The `accesskit_winit` platform adapter, created once in
     /// `resumed` alongside the window (it must be constructed before the
     /// window is first shown — see [`Adapter::with_event_loop_proxy`]'s
     /// contract). `None` only before the first `resumed` call.
     adapter: Option<Adapter>,
     /// The [`RenderRoot::semantics_generation`] value last pushed to the
-    /// adapter (phase 6d D3's dirty gate) — compared every `RedrawRequested`
+    /// adapter (the dirty gate) — compared every `RedrawRequested`
     /// via [`RenderRoot::semantics_if_changed`] so an unchanged tree is never
     /// re-walked/re-pushed.
     semantics_seen: u64,
@@ -563,7 +563,7 @@ where
     /// a single `request_redraw()` so the `Wait` loop wakes for exactly one frame.
     ///
     /// Also re-syncs the platform IME ([`ShellHandler::sync_ime`]) after every
-    /// dispatch (task 54): a focus change, blur, or caret move can all happen as
+    /// dispatch: a focus change, blur, or caret move can all happen as
     /// a side effect of any event, not just keyboard/IME ones.
     fn dispatch(&mut self, window: &Window, event: InputEvent) {
         let outcome = self.root.event(&mut self.state, &event);
@@ -621,7 +621,7 @@ where
     }
 
     /// Handle one `accesskit_winit` adapter event delivered through the
-    /// event-loop proxy (phase 6d D3).
+    /// event-loop proxy.
     ///
     /// * `InitialTreeRequested` — the adapter activated (an AT client
     ///   connected) and has no tree yet: pull one fresh
@@ -662,8 +662,8 @@ where
     }
 }
 
-/// Build an accesskit [`TreeUpdate`] from one [`RenderRoot::semantics`] pull
-/// (phase 6d D3): a full-tree push every time (stable node ids make this valid
+/// Build an accesskit [`TreeUpdate`] from one [`RenderRoot::semantics`] pull:
+/// a full-tree push every time (stable node ids make this valid
 /// — see `frust_core::semantics`'s module docs), rooted with
 /// [`TreeId::ROOT`] and the update's already-root-defaulted focus id
 /// ([`SemanticsUpdate::focus_id`]). Pure and unit-testable without a live
@@ -850,7 +850,7 @@ where
         };
 
         // Every `WindowEvent` must reach the accesskit adapter (its documented
-        // `process_event` contract — phase 6d D3): it derives root-window
+        // `process_event` contract): it derives root-window
         // bounds/focus state from `Moved`/`Resized`/`Focused` regardless of
         // what the match below does with the same event.
         if let Some(adapter) = self.adapter.as_mut() {
@@ -876,7 +876,7 @@ where
             // next paint resolves the dark scheme through `PaintCtx::theme_as`
             // and the next rebuild sees the new `use_context::<Theme>()` value.
             //
-            // Override-wins rule (task 6c-04): while an app-forced theme
+            // Override-wins rule: while an app-forced theme
             // override is active, this platform change must not flip
             // brightness — `effective_brightness_for_platform_change` passes
             // the current brightness through unchanged in that case.
@@ -956,7 +956,7 @@ where
             }
 
             // Not repeat-filtered — `repeat` passes through to the framework
-            // event (task 54) so a widget can decide whether to honor
+            // event so a widget can decide whether to honor
             // auto-repeat (e.g. held Backspace). Dropped entirely (`None`) on
             // key-up, an unmapped named key, or a composing-suppressed
             // character (see `map_key_event`'s dedupe rule).
@@ -986,7 +986,7 @@ where
                 // frame. Cheap no-op when the queue is empty.
                 self.runtime.pump_local();
 
-                // Poll the app-facing theme override slot (task 6c-04) once
+                // Poll the app-facing theme override slot once
                 // per frame, before rebuild — mirrors the mobile shells'
                 // frame-callback poll. `Some(Some(theme))` is a new forced
                 // theme; `Some(None)` is a `clear_app_theme` reverting to the
@@ -1006,7 +1006,7 @@ where
                     None => {}
                 }
 
-                // Poll the app-facing pending-font registry (task 14) once per
+                // Poll the app-facing pending-font registry once per
                 // frame, beside the theme poll above. `drain_into` applies any
                 // late-registered fonts to `text_ctx` (clearing the shape cache
                 // internally) and returns whether anything registered. On a
@@ -1039,17 +1039,17 @@ where
                 let state = &mut self.state;
                 let _flags = runtime.with_owner(|| scope.track(|| root.rebuild(app_logic, state)));
                 let rebuild_dur = rebuild_start.elapsed();
-                // Perf instrumentation (task 10): the app's first-ever rebuild,
+                // Perf instrumentation: the app's first-ever rebuild,
                 // recorded once. Inline records it here; in the split path the
                 // render thread owns the startup line, so this is a no-op there
                 // (it records the milestone when the first scene arrives).
                 self.executor.record_first_rebuild();
                 // A rebuild can change which widget is focused / what it
                 // publishes without an intervening event (e.g. state-driven
-                // focus), so re-sync the platform IME here too (task 54).
+                // focus), so re-sync the platform IME here too.
                 self.sync_ime(&window);
 
-                // HiDPI (spec task 08): lay out in logical pixels, then scale
+                // HiDPI: lay out in logical pixels, then scale
                 // the whole scene by the device pixel ratio so glyph outlines
                 // are re-rasterised sharp at physical resolution.
                 let physical = window.inner_size();
@@ -1064,7 +1064,7 @@ where
                 let layout_dur = layout_start.elapsed();
 
                 // Push a fresh semantics tree to the accesskit adapter if it may
-                // have changed since the last push (phase 6d D3's dirty gate —
+                // have changed since the last push (the dirty gate —
                 // `RenderRoot::semantics_if_changed`); post-layout so bounds are
                 // valid. A no-op (`update_if_active` never runs the closure)
                 // while no AT client has activated the adapter.
@@ -1078,12 +1078,12 @@ where
                 self.scene.reset();
                 // Sample the shell-owned monotonic clock once per frame and hand
                 // it to paint; every animating widget differences it against its
-                // own stored time (task 06 swaps this single expression for a
-                // platform vsync timestamp on mobile).
+                // own stored time (the mobile shells swap this single expression for a
+                // platform vsync timestamp instead).
                 let frame_time = FrameTime::from_nanos(self.epoch.elapsed().as_nanos() as u64);
                 // Push the render side's presented-frame count so a widget
-                // measuring FPS reports the presented rate, not its paint cadence
-                // (task 10). A pure observation — `set_presented_frames` dirties
+                // measuring FPS reports the presented rate, not its paint cadence.
+                // A pure observation — `set_presented_frames` dirties
                 // nothing, so it neither forces a relayout nor (as the setter's
                 // contract notes) would ever feed a frame gate.
                 self.root
@@ -1150,7 +1150,7 @@ where
 
                 // Hand the finished frame to the executor. In the single-thread
                 // fallback this runs encode→acquire→submit inline (clearing to
-                // the live theme's surface color — 6e Finding 6); in the split
+                // the live theme's surface color); in the split
                 // path it moves the scene across the depth-1 latest-wins channel
                 // and the render thread runs the tail, recording its own
                 // `RenderSpans` folded with these `UiSpans` via
@@ -1528,7 +1528,7 @@ mod tests {
         assert_eq!(mapped, ImeEvent::Enabled);
     }
 
-    // --- build_tree_update (phase 6d D3) ---
+    // --- build_tree_update ---
     //
     // Pure-function coverage of the `SemanticsUpdate` -> `accesskit::TreeUpdate`
     // assembly; no winit event loop or live adapter needed.
@@ -1569,7 +1569,7 @@ mod tests {
         assert_eq!(tree_update.focus, root_id);
     }
 
-    // --- register_glyph_fonts_if_active (task 27) ---
+    // --- register_glyph_fonts_if_active ---
 
     /// Extracts the raw font-file bytes a shaped `GlyphRun` resolved against,
     /// mirroring `frust-text/tests/register_fonts.rs`'s helper of the same
@@ -1583,7 +1583,7 @@ mod tests {
 
     #[test]
     fn glyph_theme_auto_registers_and_shapes_space_mono_with_no_explicit_call() {
-        // Acceptance criterion 3: post-init (no `frust::register_app_fonts`
+        // Post-init (no `frust::register_app_fonts`
         // call anywhere in this test), a Glyph-themed shell resolves "Space
         // Mono" to the bundled face, not a SystemUi fallback.
         let mut cx = TextContext::new();
