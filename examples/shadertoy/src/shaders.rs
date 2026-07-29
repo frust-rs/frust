@@ -743,7 +743,7 @@ fn fs_main(in: FrustVsOut) -> @location(0) vec4<f32> {
 const GLASSY_FIELD_WGSL: &str = r#"
 const FAR: f32 = 50.0;
 
-// Accumulated raymarch glow (task 09 port-notes bullet above) — mutated by
+// Accumulated raymarch glow (per the port notes above) — mutated by
 // `trace`, read back in `fs_main`.
 var<private> accum: f32 = 0.0;
 

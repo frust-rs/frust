@@ -793,7 +793,7 @@ mod tests {
         assert_eq!(backend.get("token").unwrap(), None);
     }
 
-    /// Fix F2 (review M2): a value written while a store is **plain** gets
+    /// Regression test: a value written while a store is **plain** gets
     /// its Keychain protection re-asserted the moment it's overwritten
     /// through a **gated** store opened on the same service — exercising
     /// the `errSecDuplicateItem` arm's gated delete+re-add path. Host-safe:

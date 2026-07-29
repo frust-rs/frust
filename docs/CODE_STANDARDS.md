@@ -211,7 +211,7 @@ these conventions:
   different override mechanisms per platform, not a symmetric API) must drive the window
   pixel format, the host's native-sibling z-order, and the
   `declare_host_translucent_surface` call *together*, in the same branch — splitting them is
-  the exact defect review M3 fixed. App Rust has no matching call; only the two shells' own
+  the exact defect that once shipped black rectangles. App Rust has no matching call; only the two shells' own
   FFI-glue may declare it (see `docs/ARCHITECTURE.md`'s Platform-view flow).
 - **Mode B paint contract: an unpainted region is a window, not a compositor bug.**
   `platform_view` punches its own slot rect automatically; any other chrome region left

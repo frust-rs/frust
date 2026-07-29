@@ -2608,7 +2608,7 @@ mod tests {
 
     #[test]
     fn a_permanently_failing_update_stops_retrying_at_the_cap() {
-        // Batch-review M4. The retry mechanism above is unbounded on its own:
+        // The retry mechanism above is unbounded on its own:
         // every failed dispatch re-marks the slot, the next rebuild's `publish`
         // bumps the generation for byte-identical props, the differ emits an
         // `UpdateParams`, the retry fails and re-marks — one FFI dispatch plus
