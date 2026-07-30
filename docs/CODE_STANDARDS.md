@@ -29,7 +29,7 @@
     the Keychain/`SecAccessControl` calls, `# Safety`-noted.
   - `frust-render`'s `RenderContext::create_pipeline_cache` — one call building a
     `wgpu::PipelineCache` from a shell-persisted, adapter-fingerprint-validated blob (see
-    `docs/ARCHITECTURE.md`'s GPU pipeline cache).
+    `docs/RENDER_ARCHITECTURE.md`'s `RenderContext` module row).
   - `frust-drive`'s `process` module — a `kill(2)` FFI shim (std exposes no `killpg`) that
     group-kills a streamed child's Unix process group.
   - `frust-camera`'s `apple` backend — AVFoundation message sends behind one `QueueBound<T>`
@@ -135,7 +135,7 @@ unchecked.
 
 ## Plugin Conventions
 
-Both plugin tiers under `plugins/` (see `docs/ARCHITECTURE.md`'s Module Structure) follow
+Both plugin tiers under `plugins/` (see `docs/ARCHITECTURE.md`'s Doc Map, PLUGINS + NATIVE_WIDGETS rows) follow
 these conventions:
 
 - **Backends are `#[cfg]`-gated modules** (`apple`/`android`/`file`) behind one
@@ -191,7 +191,7 @@ these conventions:
 - **A generated-project mutation is idempotent, never a blind overwrite.** Adding an OS-side
   contribution (a Cargo dependency, a manifest permission, an Info.plist key, or a Gradle
   module include) checks first and no-ops if already present — the contract
-  `frust-drive::plugin::add_plugin` implements (see `docs/ARCHITECTURE.md`'s Plugin flow).
+  `frust-drive::plugin::add_plugin` implements (see `docs/CLI_ARCHITECTURE.md`'s plugin-add data flow).
 - **A call that blocks pairs with `spawn_blocking`, and every blockable path is
   UI-thread-guarded.** A gated/platform-answer call (secure-storage's biometric prompt;
   camera's `request_permission`/`take_picture`) fails fast with a typed error
@@ -323,12 +323,12 @@ widget in `frust-widgets`:
   delivers occlusion in physical px (Android `Insets`) or already-logical points (iOS
   `safeAreaInsets`); either way the FFI-boundary `logical_insets` helper reconciles it —
   widget code only ever sees a resolved `WindowInsets` in logical px
-  (`docs/ARCHITECTURE.md`'s Inset delivery).
+  (`docs/SHELLS_ARCHITECTURE.md`'s cross-cutting host-signal flow).
 
 - **A `Cancel` arm must never call `EventCtx::state_mut`.** It may only clear internal flags
   (`self.pressed`/`self.captured`/`self.armed`) and request a redraw. A structural container
   rebuild can synthesize a `Cancel` to a still-captured child delivered over a throwaway
-  `()` state (`docs/ARCHITECTURE.md`'s Event pipeline) — a handler reaching for real state
+  `()` state (`docs/CORE_ARCHITECTURE.md`'s event-routing data flow) — a handler reaching for real state
   there panics on the `()` downcast, a deliberate tripwire.
 
 - **A container that suppresses routing to its children must cancel their capture, clear
@@ -339,7 +339,7 @@ widget in `frust-widgets`:
 
 ## Semantics Conventions
 
-Conventions for `Widget::semantics` (see `docs/ARCHITECTURE.md`'s Semantics pass):
+Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantics` module):
 
 - **The method defaults to a no-op.** Only override it if the widget has a role/label/state
   worth reporting; a widget with nothing to say about itself needs no impl at all.
@@ -366,7 +366,7 @@ Conventions for `Widget::semantics` (see `docs/ARCHITECTURE.md`'s Semantics pass
 - **Frame-gate inputs default to must-run, never to skip.** A `FrameInputs` field with no
   precise signal should stay `true`/fed conservatively rather than guessed `false` —
   over-running costs a wasted frame, over-skipping drops real work (see
-  `docs/ARCHITECTURE.md`'s Frame gate). `FRUST_NO_FRAME_GATE=1` (parsed like `FRUST_TRACE`)
+  `docs/SHELLS_ARCHITECTURE.md`'s `frame_gate` module). `FRUST_NO_FRAME_GATE=1` (parsed like `FRUST_TRACE`)
   forces every tick to `Run`; reach for it first when diagnosing a suspected stuck-UI
   report.
 
@@ -441,7 +441,7 @@ Conventions for `Widget::semantics` (see `docs/ARCHITECTURE.md`'s Semantics pass
   it returns `true`, calls `PaintCtx::request_frame()`. **A layout-affecting animation calls
   `request_layout()` instead** (implies `request_frame`) — reserve bare `request_frame` for
   a paint-only animation, or the mobile intra-frame layout skip leaves it unresized
-  (`docs/ARCHITECTURE.md`'s Frame pipeline).
+  (`docs/SHELLS_ARCHITECTURE.md`'s frame-pipeline data flow).
 - **State-layer opacity has one source: `material::state_layer`'s constants**
   (`HOVER_OPACITY`/`FOCUS_OPACITY`/`PRESSED_OPACITY`/ `DRAGGED_OPACITY`, M3 `StateTokens`) —
   a catalog widget imports them rather than hardcoding overlay opacity, taking the
