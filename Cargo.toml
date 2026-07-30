@@ -20,8 +20,8 @@ members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secu
 # sole example (examples-convergence: hello/counter/notes/gallery/navdemo/
 # catalog/inbox were folded into it and deleted) — standalone (its own
 # [workspace] root, own Cargo.lock) for two independent reasons: (1) its
-# `clean-signals`/`clean-signals-forgekit` path deps point at a sibling
-# `clean-signals-rs` checkout, which must never enter the root workspace
+# `clean-signals` path dep points at a sibling `clean-signals-rs`
+# checkout, which must never enter the root workspace
 # graph (see docs/DEVELOPMENT.md's Version-Pin Policy); (2) its generated
 # Android AND iOS projects (`frust run`/`build` install targets) need a
 # project-local `target/` dir — the generated iOS Xcode

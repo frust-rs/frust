@@ -43,5 +43,6 @@ it also covers conditional steps (e.g. the `huddle`/`clean-signals-frust` siblin
   gates from their own directories.
 - `workflow/` is a separate nested repo — never commit it.
 - Doc edits must respect the budgets recorded in [docs/DOC_POLICY.md](docs/DOC_POLICY.md).
-- The `clean-signals`/`clean-signals-forgekit` strings and sibling-checkout path deps are
-  load-bearing — do not "fix" them.
+- The `clean-signals` sibling-checkout path deps are load-bearing — `examples/huddle` and
+  `plugins/clean-signals-frust` must resolve it by the same canonical `../clean-signals-rs`
+  path (two resolution routes would give Cargo two crate identities) — do not "fix" them.
