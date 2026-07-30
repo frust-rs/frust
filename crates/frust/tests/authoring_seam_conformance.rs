@@ -2,7 +2,9 @@
 //! shut for every migrated production consumer: no `benchmarks/frust_bench`,
 //! `examples/huddle`, `examples/shadertoy`, `examples/glyph-catalog`, or
 //! `examples/layer-bench` production source file may name `frust_core`,
-//! `frust_scene`, `frust_text`, `kurbo`, or `peniko` as a crate path. Those
+//! `frust_scene`, `frust_text`, `accesskit`, `kurbo`, or `peniko` as a crate
+//! path (the last three only outside their sanctioned `frust::`-prefixed
+//! valve — see below). Those
 //! five app-tier consumers were migrated onto `frust::authoring` (this
 //! feature's own `PLAN.md`); this test is what makes reopening that escape
 //! hatch a build failure instead of a silent regression the next PR review
@@ -29,27 +31,34 @@
 //!    `frust_text::` — these three crates are never legitimately named by an
 //!    app-tier consumer; every path through them is fully covered by
 //!    `frust::authoring`/`frust::authoring::text`/`frust::authoring::scene`.
-//! 2. Any bare reference to `kurbo::` or `peniko::` that is NOT itself part
-//!    of the `frust::kurbo`/`frust::peniko` long-tail valve (`crates/frust/
-//!    src/lib.rs`'s whole-crate re-exports, for the handful of types
-//!    `authoring` does not lift by name) — see "The `frust::`-prefixed valve"
+//!    They have no whole-crate valve, so ANY appearance is a violation.
+//! 2. Any bare reference to `accesskit::`, `kurbo::` or `peniko::` that is
+//!    NOT itself part of the `frust::accesskit`/`frust::kurbo`/`frust::peniko`
+//!    long-tail valve (`crates/frust/src/lib.rs`'s whole-crate re-exports,
+//!    for the types `authoring` does not lift by name) — see
+//!    "The `frust::`-prefixed valve"
 //!    below for how that distinction is made.
 //!
 //! # The `frust::`-prefixed valve
 //!
-//! `kurbo`/`peniko`, unlike the other three crates, have a SANCTIONED bare
-//! spelling: `frust::kurbo::X`/`frust::peniko::X` (this crate's own
+//! `accesskit`/`kurbo`/`peniko`, unlike the other three crates, have a
+//! SANCTIONED bare spelling: `frust::accesskit::X`/`frust::kurbo::X`/
+//! `frust::peniko::X` (this crate's own `pub use frust_core::accesskit;`/
 //! `pub use kurbo;`/`pub use peniko;`), used for the long tail of types
-//! `frust::authoring` does not lift by name (see this feature's `PLAN.md`
-//! §Conductor Amendments for the exact by-name list: `Affine, BezPath, Line,
+//! `frust::authoring` does not lift by name: `Affine, BezPath, Line,
 //! Point, Rect, RoundedRect, Shape, Size, Stroke, Vec2` from kurbo; `Brush,
-//! Color, Fill, ImageData` from peniko — everything else goes through the
-//! valve). A scan for a bare `kurbo::`/`peniko::` substring would false-flag
+//! Color, Fill, ImageData` from peniko; `Action, Live, Node, NodeId, Role,
+//! Toggled` from accesskit — everything else goes through the valve. The
+//! accesskit valve is not hypothetical: `Node::add_action(Action)` is what
+//! any accessible custom button needs, and `frust-widgets` calls it in eight
+//! of its own widgets. A scan for a bare `accesskit::`/`kurbo::`/`peniko::`
+//! substring would false-flag
 //! every one of these legitimate uses, so a reference only counts as a
 //! violation when it is NEITHER:
 //!
 //! - immediately prefixed by `frust::` on the same line (`frust::kurbo::
-//!   Circle`, `frust::peniko::color::DynamicColor`), NOR
+//!   Circle`, `frust::peniko::color::DynamicColor`, `frust::accesskit::
+//!   Action`), NOR
 //! - a sub-item inside an active multi-line `use frust::{ ... };` brace
 //!   group (e.g. `examples/huddle/.../thread.rs`'s `use frust::{ ..., keyed,
 //!   kurbo::Size, scroll_view, ... };` — the literal text on `kurbo::Size`'s
@@ -61,7 +70,10 @@
 //!
 //! `frust_core`/`frust_scene`/`frust_text` get no such valve — there is no
 //! `frust::frust_core` re-export, so any bare occurrence of these three is a
-//! violation regardless of surrounding context.
+//! violation regardless of surrounding context. That asymmetry is the whole
+//! reason [`NO_VALVE_CRATES`] and [`VALVED_CRATES`] are separate lists: a
+//! crate placed in the wrong one either lets a real regression through, or
+//! rejects the very valve spelling this crate's own docs advertise.
 //!
 //! # What is excluded, and why (each a correctness requirement)
 //!
@@ -84,9 +96,14 @@
 //!   `examples/glyph-catalog/Cargo.toml`'s own comment on its `tests/
 //!   smoke.rs` dev-deps: "`RenderRoot` is deliberately not in
 //!   `frust::authoring`... production code names none of them").
-//! - **`#[cfg(test)]` modules** — every real line inside one is skipped by
-//!   brace-depth tracking from the `#[cfg(test)]` attribute's very next line
-//!   (a `mod ... {`) to its matching closing brace. Same dev-only reasoning
+//! - **`#[cfg(test)]` items** — everything a `#[cfg(test)]` attribute gates
+//!   is skipped: the remainder of the attribute's own line when the item
+//!   shares it, otherwise the following line, plus (when that opens a brace)
+//!   every line through the matching close. This covers all the shapes that
+//!   occur in practice — `#[cfg(test)]` + `mod tests {`, the same-line
+//!   `#[cfg(test)] mod tests {`, `pub`/`pub(crate)` variants, the one-line
+//!   `#[cfg(test)] mod tests { ... }`, the out-of-line `#[cfg(test)] mod x;`,
+//!   and a bare `#[cfg(test)] use ...;`. Same dev-only reasoning
 //!   as the previous bullet, just inlined instead of a separate `tests/`
 //!   file — confirmed present and skipped in this migrated tree at
 //!   `examples/huddle/src/ui/sheet.rs` (~line 973: `frust_core::{BuildCtx,
@@ -104,9 +121,9 @@
 //! `//!`/`///`, trimmed) are stripped BEFORE any check runs, deliberately:
 //! several migrated files legitimately *mention* these crate names in prose
 //! (`examples/glyph-catalog/src/pages/navigation.rs`'s module doc explains,
-//! in comment text, why huddle's icon path carries a one-off `frust-core`/
-//! `kurbo`/`peniko` escape-hatch dependency that this catalog does NOT
-//! repeat) — flagging that prose would be a false positive annoying every
+//! in comment text, why this catalog reaches vector icons through
+//! `frust::IconSource` rather than hand-building a `BezPath`) — flagging that
+//! prose would be a false positive annoying every
 //! future contributor. String literals are not stripped separately: checked
 //! against the actual tree (see this module's own development — no
 //! consumer's production `src/` currently spells one of these five crate
@@ -231,28 +248,28 @@ fn is_comment_only(line: &str) -> bool {
 
 /// The crates with NO sanctioned bare spelling for an app-tier consumer:
 /// every path through them is fully covered by `frust::authoring`/
-/// `frust::authoring::text`/`frust::authoring::scene`, so a bare reference is
-/// always a violation, unlike `kurbo`/`peniko` below.
-///
-/// `accesskit` earns its place here for a subtler reason than the other three.
-/// It is the one crate a widget could otherwise be *forced* to name directly:
-/// `SemanticsCtx::push_node`/`push_container` take `accesskit::Role` and
-/// `&mut accesskit::Node`, so any widget contributing (not merely forwarding)
-/// an accessibility node must spell those types. `frust::authoring` lifts
-/// `Node`/`NodeId`/`Role` by name and `frust::accesskit` is the whole-crate
-/// valve, so a bare `accesskit::` here means a consumer re-declared a direct
-/// dependency on a crate whose version is pinned in exactly one place
-/// (`docs/DEVELOPMENT.md` § Version-Pin Policy, `accesskit 0.24`) — precisely
-/// the version-forgeability hole this seam exists to close.
-const NO_VALVE_CRATES: &[&str] = &["frust_core", "frust_scene", "frust_text", "accesskit"];
+/// `frust::authoring::text`/`frust::authoring::scene`, so ANY reference is a
+/// violation — there is no whole-crate valve to except, unlike [`VALVED_CRATES`].
+const NO_VALVE_CRATES: &[&str] = &["frust_core", "frust_scene", "frust_text"];
 
-/// The two crates with a sanctioned long-tail escape valve —
-/// `frust::kurbo::X`/`frust::peniko::X` — for types `authoring` does not lift
-/// by name. A bare reference is a violation ONLY when it is neither
-/// same-line-prefixed by `frust::` nor part of an active multi-line
-/// `use frust::{ ... }` group (see this module's "The `frust::`-prefixed
-/// valve" doc).
-const VALVED_CRATES: &[&str] = &["kurbo", "peniko"];
+/// The crates with a sanctioned long-tail escape valve —
+/// `frust::accesskit::X`/`frust::kurbo::X`/`frust::peniko::X` — for types
+/// `authoring` does not lift by name. A bare reference is a violation ONLY
+/// when it is neither same-line-prefixed by `frust::` nor part of an active
+/// multi-line `use frust::{ ... }` group (see this module's
+/// "The `frust::`-prefixed valve" doc).
+///
+/// `accesskit` belongs here, not in [`NO_VALVE_CRATES`], and the distinction
+/// is load-bearing: `SemanticsCtx::push_node`/`push_container` take
+/// `accesskit::Role` and `&mut accesskit::Node`, so any widget that
+/// *contributes* (rather than merely forwards) an accessibility node must
+/// spell those types, and `Node::add_action` needs `Action` — which the
+/// by-name list does not lift. `frust::accesskit` is exactly the valve for
+/// that tail. What stays forbidden is the **bare** spelling, which means a
+/// consumer re-declared a direct dependency on a crate whose version is
+/// pinned in one place (`docs/DEVELOPMENT.md` § Version-Pin Policy,
+/// `accesskit 0.24`) — the version-forgeability hole this seam exists to close.
+const VALVED_CRATES: &[&str] = &["accesskit", "kurbo", "peniko"];
 
 /// Every byte offset in `line` where `<crate_name>::` starts a genuine
 /// top-level crate-path reference — bounded on the left by a non-identifier
@@ -338,35 +355,44 @@ fn violations_in(path: &Path, contents: &str) -> Vec<String> {
             continue;
         }
 
-        if trimmed.starts_with("#[cfg(test)]") {
-            pending_cfg_test = true;
-            continue;
-        }
-        if pending_cfg_test {
-            pending_cfg_test = false;
-            // Tolerate a `pub`/`pub(crate)` prefix: `#[cfg(test)] pub mod tests {`
-            // is as legitimate a shape as the bare `mod tests {` every current
-            // consumer happens to use, and silently failing to recognise it
-            // would turn dev-only code into spurious violations.
-            let after_vis = trimmed
-                .strip_prefix("pub(crate) ")
-                .or_else(|| trimmed.strip_prefix("pub "))
-                .unwrap_or(trimmed);
-            if after_vis.starts_with("mod ") {
-                let opens = line.matches('{').count() as i32;
-                let closes = line.matches('}').count() as i32;
-                // ONLY enter skip mode when the line actually opens a block.
-                // An out-of-line `#[cfg(test)] mod tests;` (or a one-line
-                // `mod tests { }`) opens nothing, and arming the skip there
-                // would consume exactly one following production line
-                // unscanned — a silent false negative, the failure mode this
-                // scan exists to prevent.
-                if opens > closes {
-                    skip_until_depth = Some(depth);
-                    depth += opens - closes;
-                    continue;
-                }
+        // Whatever a `#[cfg(test)]` attribute gates is dev-only, never
+        // production. The attribute may stand alone on its line (the common
+        // form) or share a line with the item it gates; either way this
+        // resolves to "the gated text", which is then skipped.
+        //
+        // Deliberately shape-agnostic rather than matching `mod ...`: the
+        // previous `mod`-prefix heuristic mis-handled the same-line form
+        // (`#[cfg(test)] mod tests {` matched the attribute branch and
+        // `continue`d WITHOUT counting its brace, leaving `depth` off by one
+        // for the whole rest of the file), and rejected `pub mod` outright.
+        let gated = if let Some(rest) = trimmed.strip_prefix("#[cfg(test)]") {
+            let rest = rest.trim_start();
+            if rest.is_empty() {
+                // Attribute alone — the NEXT line is the gated item.
+                pending_cfg_test = true;
+                continue;
             }
+            Some(rest)
+        } else if pending_cfg_test {
+            pending_cfg_test = false;
+            Some(trimmed)
+        } else {
+            None
+        };
+        if gated.is_some() {
+            let opens = line.matches('{').count() as i32;
+            let closes = line.matches('}').count() as i32;
+            // Only arm the multi-line skip when this line actually leaves a
+            // block open. An out-of-line `mod tests;` (0/0) or a complete
+            // one-line `mod tests { ... }` (1/1) is fully contained on this
+            // line: arming the skip there would swallow the NEXT line, a
+            // silent false negative — the failure mode this scan exists to
+            // prevent. Either way the gated line itself is never a violation.
+            if opens > closes {
+                skip_until_depth = Some(depth);
+                depth += opens - closes;
+            }
+            continue;
         }
         depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
 
@@ -404,7 +430,10 @@ fn violations_in(path: &Path, contents: &str) -> Vec<String> {
                 if same_line_frust_prefixed(line, idx) || this_line_in_frust_use {
                     continue;
                 }
-                let authoring_hint = if *crate_name == "kurbo" {
+                let authoring_hint = if *crate_name == "accesskit" {
+                    "`frust::authoring` (for a by-name-lifted type: Action, Live, Node, \
+                     NodeId, Role, Toggled) or the long-tail valve `frust::accesskit`"
+                } else if *crate_name == "kurbo" {
                     "`frust::authoring` (for a by-name-lifted type: Affine, BezPath, Line, \
                      Point, Rect, RoundedRect, Shape, Size, Stroke, Vec2) or the long-tail \
                      valve `frust::kurbo`"
@@ -597,6 +626,120 @@ use frust::{
             bare_crate_path_positions("let x = kurbo::Point::ZERO;", "kurbo").len(),
             1,
             "the exact identifier `kurbo::` must still be detected"
+        );
+    }
+
+    /// `accesskit` is a VALVED crate, not a no-valve one.
+    ///
+    /// Regression guard for a bug this scan actually shipped with for one
+    /// commit: `accesskit` was added to `NO_VALVE_CRATES`, whose loop has no
+    /// `frust::`-prefix exemption, so `use frust::accesskit::Action;` — the
+    /// exact spelling `crates/frust/src/lib.rs`'s own doc comment advertises
+    /// — was reported as a conformance violation, and the error message
+    /// didn't even name the valve it was rejecting. No consumer uses
+    /// `accesskit` today, so nothing failed; the contradiction was invisible
+    /// until someone wrote the first accessible custom widget.
+    #[test]
+    fn frust_prefixed_accesskit_valve_is_not_flagged() {
+        let src = "use frust::accesskit::Action;\nuse frust::accesskit::Live;\n";
+        assert!(
+            scan(src).is_empty(),
+            "the sanctioned `frust::accesskit::X` valve must never be flagged"
+        );
+    }
+
+    #[test]
+    fn bare_accesskit_is_flagged() {
+        let src = "use accesskit::Role;\n";
+        let hits = scan(src);
+        assert_eq!(
+            hits.len(),
+            1,
+            "a bare `accesskit::` reference is a violation"
+        );
+        assert!(
+            hits[0].contains("frust::accesskit"),
+            "the message must name the valve to use, got: {}",
+            hits[0]
+        );
+    }
+
+    #[test]
+    fn accesskit_inside_a_multiline_frust_use_group_is_not_flagged() {
+        let src = "use frust::{\n    Component,\n    accesskit::Action,\n    text,\n};\n";
+        assert!(
+            scan(src).is_empty(),
+            "a valved crate inside a `use frust::{{ ... }}` group must not be flagged"
+        );
+    }
+
+    // --- `#[cfg(test)]` shapes -------------------------------------------
+    //
+    // Every shape below was either mishandled or untested at some point in
+    // this file's history; each assertion is a specific regression guard.
+
+    #[test]
+    fn cfg_test_attribute_on_its_own_line_skips_the_module() {
+        let src = "#[cfg(test)]\nmod tests {\n    use frust_core::Widget;\n}\n";
+        assert!(scan(src).is_empty(), "dev-only module must be skipped");
+    }
+
+    #[test]
+    fn cfg_test_same_line_as_mod_skips_the_module_and_keeps_depth() {
+        // The shape that silently broke depth tracking for the rest of the
+        // file: the attribute branch matched and `continue`d without ever
+        // counting this line's `{`.
+        let src = "#[cfg(test)] mod tests {\n    use frust_core::Widget;\n}\nuse kurbo::Point;\n";
+        let hits = scan(src);
+        assert_eq!(
+            hits.len(),
+            1,
+            "the module must be skipped AND the trailing production line still scanned, got: {hits:?}"
+        );
+        assert!(hits[0].contains("kurbo"), "got: {}", hits[0]);
+    }
+
+    #[test]
+    fn cfg_test_pub_mod_is_skipped() {
+        let src = "#[cfg(test)]\npub mod tests {\n    use frust_core::Widget;\n}\n";
+        assert!(
+            scan(src).is_empty(),
+            "`pub mod` is as valid a shape as `mod`"
+        );
+        let src = "#[cfg(test)]\npub(crate) mod tests {\n    use kurbo::Size;\n}\n";
+        assert!(scan(src).is_empty(), "`pub(crate) mod` likewise");
+    }
+
+    #[test]
+    fn out_of_line_cfg_test_mod_does_not_swallow_the_next_line() {
+        // The round-0 false negative: arming the skip on a brace-less
+        // `mod tests;` consumed exactly one following production line.
+        let src = "#[cfg(test)]\nmod tests;\nuse kurbo::Point;\n";
+        let hits = scan(src);
+        assert_eq!(
+            hits.len(),
+            1,
+            "the line after an out-of-line test mod must still be scanned, got: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn one_line_cfg_test_mod_is_skipped_without_swallowing_the_next_line() {
+        let src = "#[cfg(test)] mod tests { use kurbo::Size; }\nuse kurbo::Point;\n";
+        let hits = scan(src);
+        assert_eq!(
+            hits.len(),
+            1,
+            "the one-line module is dev-only; the line after it is not, got: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn cfg_test_gating_a_non_mod_item_is_skipped() {
+        let src = "#[cfg(test)]\nuse frust_core::Widget;\nuse frust::authoring::Size;\n";
+        assert!(
+            scan(src).is_empty(),
+            "a `#[cfg(test)] use ...` is dev-only, not a violation"
         );
     }
 }

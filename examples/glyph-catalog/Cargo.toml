@@ -67,9 +67,9 @@ frust-camera = { path = "../../plugins/camera" }
 # feature: `DemoCard`, one `NativeComponent` owning a real native subtree. It
 # ships inside the plugin rather than here because implementing that trait needs
 # `jni::objects::JObject` (Android) / `objc2-ui-kit` (iOS) in the *implementing*
-# crate, and `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions sanction
-# only a `frust-core`/`kurbo`/`peniko` escape hatch for an `examples/*` app —
-# see `plugins/native-widgets/src/demo.rs`'s module doc. Turning the feature on
+# crate, and `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions put an
+# `examples/*` app on `frust` plus plugin crates only — never a raw FFI
+# dependency — see `plugins/native-widgets/src/demo.rs`'s module doc. Turning the feature on
 # adds NO dependency to this app (it resolves to the same `frust-api` set the
 # default already pulls); the page mounts the card behind an on-page toggle that
 # is OFF by default, so the six-slot gate constant is unchanged at rest.

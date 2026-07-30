@@ -386,13 +386,21 @@ pub mod authoring {
     /// accessors hand it.
     pub use frust_core::{WindowEdgeInsets, WindowInsets};
 
-    /// The accessibility-node vocabulary [`SemanticsCtx::push_node`] and
-    /// [`SemanticsCtx::push_container`] take: both are
-    /// `(role: Role, build: impl FnOnce(&mut Node)) -> NodeId`, so a widget that
-    /// *contributes* a semantics node (rather than only forwarding a child's)
-    /// must be able to name these three. See also the whole-crate
-    /// [`frust::accesskit`](crate::accesskit) valve for the rest of the crate.
-    pub use frust_core::accesskit::{Node, NodeId, Role};
+    /// The accessibility-node vocabulary a widget that *contributes* a
+    /// semantics node needs — as opposed to one that only forwards a child's.
+    ///
+    /// [`SemanticsCtx::push_node`] is
+    /// `(role: Role, build: impl FnOnce(&mut Node)) -> NodeId`;
+    /// [`SemanticsCtx::push_container`] takes the same two plus a
+    /// `visit: impl FnOnce(&mut SemanticsCtx)` for its children. `Action`,
+    /// `Live` and `Toggled` are lifted alongside them because they are what
+    /// the `build` closure actually reaches for — `node.add_action(Action::Click)`
+    /// is in eight of `frust-widgets`' own widgets, and a list of exports that
+    /// stopped at `Node` would not be closed over `Node`'s own signature.
+    ///
+    /// For the rest of the crate, use the whole-crate
+    /// [`frust::accesskit`](crate::accesskit) valve.
+    pub use frust_core::accesskit::{Action, Live, Node, NodeId, Role, Toggled};
 
     // tier 2 — child/event/callback plumbing, verbatim
     pub use frust_widgets::authoring::*;
@@ -424,8 +432,11 @@ pub mod authoring {
         /// The index bridge between the two `EditingState`s this seam exposes:
         /// [`super::EditingState`] (core/IME) counts UTF-16 code units, while
         /// [`EditingStateBytes`] counts bytes. A widget driving its own
-        /// [`TextEditor`] against the IME surface needs both directions —
-        /// `frust_widgets::textinput` uses exactly these.
+        /// [`TextEditor`] against the IME surface needs to convert between
+        /// them — `frust_widgets::textinput` calls `utf16_to_byte` to place an
+        /// IME-supplied cursor into its byte-indexed editor; `byte_to_utf16`
+        /// is the return direction, used inside `frust-text` itself to build
+        /// an `EditingState` back out of editor state.
         pub use frust_text::{byte_to_utf16, utf16_to_byte};
     }
 

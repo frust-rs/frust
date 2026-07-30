@@ -17,8 +17,10 @@
 //! construct real native views, which means naming `jni::objects::JObject` on
 //! Android and `objc2-ui-kit`'s classes on iOS *in the implementing crate*;
 //! this plugin re-exports neither FFI crate, and `docs/CODE_STANDARDS.md`'s
-//! State & Reactivity Conventions sanction only a `frust-core`/`kurbo`/`peniko`
-//! escape hatch for an `examples/*` app. So the demo ships here, where both FFI
+//! State & Reactivity Conventions put an `examples/*` app on `frust` plus
+//! plugin crates only — a raw FFI dependency is not among them, and
+//! `frust::authoring` does not (and should not) cover one. So the demo ships
+//! here, where both FFI
 //! crates are already dependencies and all three target gates already run in
 //! CI, and the consuming app merely turns the feature on, calls
 //! [`register_demo_components`] and mounts the result.

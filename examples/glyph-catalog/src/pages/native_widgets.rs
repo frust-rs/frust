@@ -927,8 +927,8 @@ fn start_cycle_run(target: u32) {
 /// Where a `target`-cycle run currently stands, purely as a function of
 /// wall-clock elapsed time since [`start_cycle_run`] — the same "read a wall
 /// clock directly, no discrete per-tick signal write" idiom
-/// `interactions.rs`'s `demo_heartbeat` uses (this file's own escape-hatch
-/// comment above), so nothing here can drift out of sync with what actually
+/// `interactions.rs`'s `demo_heartbeat` uses (this file's own module doc
+/// above), so nothing here can drift out of sync with what actually
 /// painted. `target == 0` is the settled idle state (no run started yet).
 ///
 /// Returns `(mounted, completed, running)`: whether the cycler's own

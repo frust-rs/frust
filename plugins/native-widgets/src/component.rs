@@ -6,8 +6,8 @@
 //! which means naming `jni::objects::JObject` on Android and `objc2-ui-kit`'s
 //! classes on iOS *in the implementing crate*; this plugin re-exports neither
 //! FFI crate, and `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions
-//! sanction only a `frust-core`/`kurbo`/`peniko` escape hatch, and only for an
-//! `examples/*` app. So the practical audience today is plugin authors, not
+//! put an `examples/*` app on `frust` plus plugin crates only — a raw FFI
+//! dependency is not among them. So the practical audience today is plugin authors, not
 //! app authors, and the only implementor in this repo is this crate's own
 //! non-default `demo-components` composite (`crate::demo`, which spells the
 //! same wall out at length). Closing the gap — re-exporting a curated

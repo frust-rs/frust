@@ -400,10 +400,14 @@ Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantic
   only, never `reactive_graph`/`any_spawner`/`frust-reactive` directly.** A reactive field
   is typed `RwSignal<T>`, read/written through the facade's `Get`/`Set`/`Update` traits.
 - **An app authors a custom `View`/`Widget` pair through `frust::authoring`, never a direct
-  `frust-core`/`frust-scene`/`frust-text`/`kurbo`/`peniko` dependency.** `frust::authoring`
-  (plus its `text`/`scene` submodules) re-exports the full trait lifecycle, child/event/
-  callback plumbing, and geometry/paint types a custom widget needs, so an `examples/*`/app
-  crate's `Cargo.toml` depends on `frust` plus plugin crates only. Mechanically enforced
+  `frust-core`/`frust-scene`/`frust-text`/`accesskit`/`kurbo`/`peniko` dependency.**
+  `frust::authoring` (plus its `text`/`scene` submodules) re-exports the full trait
+  lifecycle, child/event/callback plumbing, semantics, and geometry/paint types a custom
+  widget needs, so an `examples/*`/app crate's `Cargo.toml` depends on `frust` plus plugin
+  crates only. For the long tail, reach through the whole-crate valves `frust::kurbo`,
+  `frust::peniko`, `frust::accesskit` rather than re-declaring the dependency — each of
+  those crates is version-pinned in exactly one place (`docs/DEVELOPMENT.md` §
+  Version-Pin Policy). Mechanically enforced
   across `benchmarks/frust_bench` and the four in-repo example apps by
   `crates/frust/tests/authoring_seam_conformance.rs`; the plugin tier is exempt (Plugin
   Conventions above).

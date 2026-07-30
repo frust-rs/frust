@@ -30,12 +30,14 @@ log = { workspace = true }
 # builders (`src/api/builders.rs`) hand-implement `View<Outer>` for every
 # outer app-state type (mirroring `ComponentView<C>`'s own blanket impl,
 # unreachable from outside `frust-core` since its `component: C` field is
-# private) — that impl's own method signatures need `BuildCtx`/`ChangeFlags`,
-# which the `frust` facade does not re-export (its own re-export list stops at
-# `Component`/`ComponentView`/`component`). The same documented
-# `frust-core`/`kurbo`(/`peniko`) escape hatch `examples/*` apps use
-# (`docs/CODE_STANDARDS.md`'s State & Reactivity Conventions) applies here for
-# the same reason: a gap no facade widget covers.
+# private) — that impl's own method signatures need `BuildCtx`/`ChangeFlags`.
+# Those ARE reachable as `frust::authoring::{BuildCtx, ChangeFlags}` since the
+# facade gained its authoring seam, but a plugin deliberately does not take
+# that route: `docs/ARCHITECTURE.md`'s facade/plugin boundary places plugins
+# BESIDE the facade, never inside it, so the plugin tier names `frust-core`
+# directly and is explicitly exempt from the app-tier facade-first rule
+# (`docs/CODE_STANDARDS.md`'s Plugin Conventions). This is a permanent,
+# sanctioned exception, not a migration that was missed.
 frust = { workspace = true, optional = true }
 frust-core = { workspace = true, optional = true }
 # The `ClipToSlot` wrapper (`src/api/builders.rs`'s refusal-placeholder
