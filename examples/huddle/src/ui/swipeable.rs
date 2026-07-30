@@ -1,10 +1,9 @@
 //! `swipeable_row` — a reusable horizontal swipe-to-action row.
 //!
 //! A small hand-rolled [`View`]/[`Widget`] pair built directly against
-//! `frust-core` — the facade's documented "low-level escape hatch" pattern
-//! (`frust::App::new`, see `crates/frust/src/lib.rs`) applied one layer
-//! down, the same precedent the pre-skeleton theme/motion screens used for
-//! their `ColorBoxView` (`git show d02ad77~1:examples/huddle/src/screens/theme.rs`).
+//! `frust::authoring` — the same precedent the pre-skeleton theme/motion
+//! screens used for their `ColorBoxView` (`git show
+//! d02ad77~1:examples/huddle/src/screens/theme.rs`).
 //! No facade widget reveals action areas under a horizontally dragged child, so
 //! this widget captures the pointer, tracks a horizontal drag, and paints a
 //! left/right action strip behind its child.
@@ -31,14 +30,12 @@
 
 use std::rc::Rc;
 
-use frust::Theme;
-use frust_core::{
-    AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, FrameTime,
-    InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerButton, PointerEvent, PointerPhase,
-    SemanticsCtx, TOUCH_SLOP, View, Widget, any,
+use frust::authoring::{
+    Affine, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
+    InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerButton, PointerEvent, PointerPhase,
+    SemanticsCtx, Size, View, Widget, any,
 };
-use kurbo::{Affine, Point, Size};
-use peniko::Color;
+use frust::{FrameTime, Theme, input::TOUCH_SLOP};
 
 /// Fraction of the row width the drag must pass, on release, to commit the
 /// action (fire the callback). Below it, the row just springs closed.
@@ -74,11 +71,11 @@ fn resolve_marker_color(theme: Option<&Theme>) -> Color {
 }
 
 /// The affordance glyph painted in a revealed swipe strip. A real Material
-/// icon glyph (`icons::REPLY`) can't be shaped from this facade-only escape-hatch
-/// widget (glyph shaping lives in `frust-text`, unreachable from a raw
-/// `frust-core` `Widget` — see the module docs), so the reply affordance is a
-/// hand-drawn left-pointing arrow rendered with `stroke_line`, delivering the
-/// "later polish" the base marker's doc comment deferred.
+/// icon glyph (`icons::REPLY`) can't be shaped from this `frust::authoring`-built
+/// widget (glyph shaping lives behind `frust::authoring::text`, a separate seam
+/// this hand-rolled `Widget` doesn't reach — see the module docs), so the reply
+/// affordance is a hand-drawn left-pointing arrow rendered with `stroke_line`,
+/// delivering the "later polish" the base marker's doc comment deferred.
 #[derive(Clone, Copy)]
 pub enum SwipeMarker {
     /// A plain rounded-square marker — the generic archive/mute default

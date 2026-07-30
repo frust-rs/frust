@@ -15,7 +15,7 @@
 //! 60-bubble field (v1/v2) over-fills a phone-sized play area and never
 //! settles.
 
-use kurbo::Point;
+use frust::authoring::Point;
 
 /// One animated bubble: a ticker symbol, a fixed performance percentage
 /// (colors the bubble and its `+x.x%` label), and mutable position/velocity.

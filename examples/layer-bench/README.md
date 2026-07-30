@@ -6,10 +6,10 @@ one open question with device numbers: does
 compositing pre-rendered textures beat re-rasterizing the equivalent vector
 content in vello 0.9's pipeline?
 
-This is a **lab, not shipped API surface.** It deliberately reaches below the
-`frust` facade into `frust-core`/`frust-scene` (the documented escape hatch) to
-drive vello's composite primitives directly. See `src/lib.rs`'s top-of-file
-note.
+This is a **lab, not shipped API surface.** It drives vello's composite
+primitives directly through `frust::authoring`, the facade's widget-authoring
+seam — `frust` is the only framework dependency it carries. See `src/lib.rs`'s
+top-of-file note.
 
 ## The three scenes (tap anywhere to cycle: A → B → B+1relayer → A)
 

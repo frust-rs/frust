@@ -23,14 +23,14 @@
 
 use std::time::Duration;
 
+use frust::authoring::{
+    BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent, LayoutCtx,
+    PaintCtx, PaintScene, SemanticsCtx, Size, View, Widget,
+};
 use frust::{
-    Align, Alignment, AnyView, Color, Component, Get, RwSignal, Set, Stack, any, component, text,
+    Align, Alignment, AnimationController, AnyView, Color, Component, Get, RwSignal, Set, Stack,
+    any, component, text,
 };
-use frust_core::{
-    AnimationController, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult,
-    InputEvent, LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget,
-};
-use kurbo::Size;
 
 use super::{BenchState, Scenario};
 

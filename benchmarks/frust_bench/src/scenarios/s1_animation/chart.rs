@@ -1,6 +1,7 @@
 //! The bubble-chart canvas — the benchmark's whole GPU workload, as one
-//! hand-rolled `View`/`Widget` pair (the facade's documented low-level escape
-//! hatch, the same pattern as huddle's `FillBox`/`Shimmer`).
+//! hand-rolled `View`/`Widget` pair authored entirely through
+//! `frust::authoring` (the facade's custom-widget seam), the same pattern as
+//! huddle's `FillBox`/`Shimmer`.
 //!
 //! Per frame it paints exactly what the Flutter repro's `CustomPainter` does:
 //! one radial-gradient circle fill + one stroked circle border + two shaped
@@ -19,15 +20,15 @@
 //! [`TextLayout`]s as glyph runs. The repro hand-rolls the same caching with
 //! `TextPainter`s.
 
-use frust::{FrameTime, RwSignal, Set};
-use frust_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx,
-    PaintScene, PointerPhase, View, Widget,
+use frust::authoring::text::{FontWeight, TextContext, TextLayout, TextStyle};
+use frust::authoring::{
+    BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, EventCtx, EventResult,
+    InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Shape, Size, View, Widget,
 };
-use frust_text::{FontWeight, TextContext, TextLayout, TextStyle};
-use kurbo::{BezPath, Circle, Point, Shape, Size};
-use peniko::color::DynamicColor;
-use peniko::{Brush, Color, ColorStop, Gradient, GradientKind};
+use frust::kurbo::Circle;
+use frust::peniko::color::DynamicColor;
+use frust::peniko::{ColorStop, Gradient, GradientKind};
+use frust::{FrameTime, RwSignal, Set};
 
 /// The fixed seed, matching the repro's `Random(42)`.
 pub const SEED: u64 = 42;

@@ -49,14 +49,13 @@
 
 use std::rc::Rc;
 
+use frust::authoring::{
+    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, View, Widget,
+};
 use frust::{
     AnyView, Axis, Component, EdgeInsets, FlexView, Padding, SizedBox, Stack, any, component,
     flexible, inflexible, list_view, text,
 };
-use frust_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, View, Widget,
-};
-use kurbo::Size;
 
 use super::{BenchState, Scenario};
 

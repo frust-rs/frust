@@ -25,6 +25,15 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # `glyph-fonts` feature is left ON — this catalog showcases the Glyph
 # design language, so it needs the bundled Space Mono / IBM Plex Mono bytes.
 frust = { path = "../../crates/frust" }
+# `frust` is the ONLY framework line this catalog ships for widget authoring.
+# `AppBackground` (`lib.rs`), `AnchorReporter` (`pages/appbar.rs`), the
+# `FrameTicker`/`GateFrameTicker` pair (`pages/interactions.rs`,
+# `pages/native_widgets.rs`), and `StaticRoundedRectView` (`pages/foundations.rs`)
+# — every hand-rolled `View`/`Widget` pair this catalog needs — reach the full
+# trait vocabulary plus geometry through `frust::authoring` (and
+# `frust::kurbo`/`frust::peniko`, the long-tail valve, where a type isn't
+# lifted by name); no production code names `frust-core`/`kurbo`/`peniko`
+# directly any more.
 
 # `log` facade dependency, present only so the release-only `lean` feature
 # below can raise the compiled-in log ceiling (release-lean build mode).
@@ -39,23 +48,6 @@ frust = { path = "../../crates/frust" }
 # log lines while keeping warn/error crash diagnostics, and profile keeps its
 # `frust-perf` output. Mirrors `examples/huddle/Cargo.toml`'s block.
 log = "0.4"
-
-# Low-level escape hatch: the AppBar section's
-# overflow-menu demo anchors `frust::glyph::show_glyph_menu` at the kebab
-# icon's own painted window-coordinate rect — a documented "caller
-# reports its own rect" contract (`crates/frust-widgets/src/glyph/menu.rs`'s
-# module docs name this the anchor's own wiring): no
-# ancestor-bounds query exists, so the anchor icon must capture its own
-# bounds during paint). No facade widget reports a child's painted bounds,
-# so this is a genuine gap — the same shape `examples/huddle`'s
-# `frust-core`/`kurbo`/`peniko` escape hatch documents
-# (`docs/CODE_STANDARDS.md`'s State & Reactivity Conventions); `peniko` isn't
-# needed here (the wrapper widget paints nothing of its own — only its
-# child). `examples/glyph-catalog/src/pages/interactions.rs` ruled out the
-# same promotion for its own (avoidable) `ContainerTransform` use — this one
-# is unavoidable, since `glyph_menu`'s anchor has no facade-level substitute.
-frust-core = { path = "../../crates/frust-core" }
-kurbo = "0.13.1"
 
 # frust-camera: the device-gate vehicle for the whole
 # feature — see `src/pages/camera.rs`. Path dep out of this checkout, the
@@ -75,9 +67,9 @@ frust-camera = { path = "../../plugins/camera" }
 # feature: `DemoCard`, one `NativeComponent` owning a real native subtree. It
 # ships inside the plugin rather than here because implementing that trait needs
 # `jni::objects::JObject` (Android) / `objc2-ui-kit` (iOS) in the *implementing*
-# crate, and `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions sanction
-# only a `frust-core`/`kurbo`/`peniko` escape hatch for an `examples/*` app —
-# see `plugins/native-widgets/src/demo.rs`'s module doc. Turning the feature on
+# crate, and `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions put an
+# `examples/*` app on `frust` plus plugin crates only — never a raw FFI
+# dependency — see `plugins/native-widgets/src/demo.rs`'s module doc. Turning the feature on
 # adds NO dependency to this app (it resolves to the same `frust-api` set the
 # default already pulls); the page mounts the card behind an on-page toggle that
 # is OFF by default, so the six-slot gate constant is unchanged at rest.
@@ -85,12 +77,18 @@ frust-native-widgets = { path = "../../plugins/native-widgets", features = [
     "demo-components",
 ] }
 
-# Dev-only: the headless smoke test drives Frust's `RenderRoot` directly (the
-# desktop shell's own rebuild/layout/paint seam) — no GPU, no window — the
-# same harness shape as `examples/huddle`'s own headless `tests/*.rs`. `frust-core`/
-# `kurbo` above are already real dependencies (see the block above), so only
-# the test-only pieces stay dev-only here.
+# Test-harness-only, NOT an escape hatch: the headless smoke test
+# (`tests/smoke.rs`) drives Frust's `RenderRoot` directly — the desktop
+# shell's own rebuild/layout/paint seam, no GPU, no window — the same harness
+# shape as `examples/huddle`'s own headless `tests/*.rs` and
+# `examples/layer-bench`/`examples/shadertoy`'s identical `[dev-dependencies]`
+# block. `RenderRoot` is deliberately not in `frust::authoring` (it is
+# shell-owned, not something an app constructs), so the harness still names
+# these crates the long way; migrating headless test harnesses onto the
+# facade is a separate design question. Production code names none of them.
 [dev-dependencies]
+frust-core = { path = "../../crates/frust-core" }
+kurbo = "0.13.1"
 frust-text = { path = "../../crates/frust-text" }
 frust-reactive = { path = "../../crates/frust-reactive" }
 frust-scene = { path = "../../crates/frust-scene" }

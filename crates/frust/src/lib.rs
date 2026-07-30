@@ -250,6 +250,221 @@ pub use frust_widgets::motion;
 #[cfg(feature = "glyph")]
 pub use frust_widgets::glyph;
 
+/// Everything needed to author a custom `View`/`Widget` pair.
+///
+/// **`frust` alone is sufficient**: an app that implements its own
+/// layout/paint/event widget should need no framework dependency but this
+/// crate. If something is reachable through neither this module nor the flat
+/// facade, that is a bug — file it rather than reaching for `frust-core`
+/// directly.
+///
+/// `use frust::authoring::*;` covers the widget-authoring vocabulary proper.
+/// Two neighbouring surfaces are deliberately *not* duplicated here because
+/// they are already reachable flat, and a real widget usually wants them too:
+///
+/// - [`frust::input`](crate::input) — gesture constants such as `TOUCH_SLOP`.
+/// - The animation vocabulary — [`AnimationController`](crate::AnimationController),
+///   [`Curve`](crate::Curve), [`FrameTime`](crate::FrameTime) and friends.
+///
+/// For anything the by-name lists below omit, reach for the whole-crate valves:
+/// [`frust::kurbo`](crate::kurbo), [`frust::peniko`](crate::peniko),
+/// [`frust::accesskit`](crate::accesskit).
+///
+/// Not feature-gated (unlike the design-system re-exports above): an app that
+/// disables every catalog (`--no-default-features`) still needs this seam to
+/// build its own design system, so it always resolves.
+///
+/// # The `EditingState` split
+///
+/// `frust_core::event::EditingState` (flat, right here in `authoring`) and
+/// `frust_text::editor::EditingState` (nested in [`text`](authoring::text))
+/// are **two genuinely distinct types** — the first is the retained
+/// IME-surface payload an event-routing widget publishes/receives
+/// (`ImeState`/`ImeEvent`), the second is `TextEditor`'s own byte-indexed
+/// editing snapshot. A glob importing both into one scope will not compile
+/// (`use frust::authoring::*; use frust::authoring::text::*;` collides on the
+/// name); reach for the flat one for event/IME plumbing and
+/// `authoring::text::EditingState` only alongside a `TextEditor` you're
+/// driving yourself.
+///
+/// # Example: a one-child container widget
+///
+/// A container that offsets its single child, wired through the full
+/// lifecycle — build, rebuild, teardown, layout, paint, event routing,
+/// semantics forwarding — with **only** `frust` named. Ported from
+/// `frust_widgets::authoring`'s own worked example (the toolkit this module
+/// re-exports), which an app cannot reach directly without depending on
+/// `frust-widgets` itself.
+///
+/// ```
+/// use frust::authoring::*;
+///
+/// /// The declarative half: a child plus the offset to apply to it.
+/// struct OffsetView<State: 'static> {
+///     offset: Point,
+///     child: AnyView<State>,
+/// }
+///
+/// /// The view-fn app code calls; `any` erases the concrete child view.
+/// fn offset<State: 'static, V: View<State>>(offset: Point, child: V) -> OffsetView<State> {
+///     OffsetView { offset, child: any(child) }
+/// }
+///
+/// /// The retained half: the live child pod plus the applied offset.
+/// struct OffsetWidget {
+///     offset: Point,
+///     child: ChildPod,
+/// }
+///
+/// impl<State: 'static> View<State> for OffsetView<State> {
+///     type Element = OffsetWidget;
+///
+///     fn build(&self, ctx: &mut BuildCtx<'_>) -> OffsetWidget {
+///         OffsetWidget { offset: self.offset, child: build_child(&self.child, ctx) }
+///     }
+///
+///     fn rebuild(
+///         &self,
+///         prev: &Self,
+///         element: &mut OffsetWidget,
+///         ctx: &mut BuildCtx<'_>,
+///     ) -> ChangeFlags {
+///         let mut flags = ChangeFlags::NONE;
+///         if prev.offset != self.offset {
+///             element.offset = self.offset;
+///             flags |= ChangeFlags::LAYOUT;
+///         }
+///         flags | rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
+///     }
+///
+///     fn teardown(&self, element: &mut OffsetWidget, ctx: &mut BuildCtx<'_>) {
+///         teardown_child(&self.child, &mut element.child, ctx);
+///     }
+/// }
+///
+/// impl Widget for OffsetWidget {
+///     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+///         let size = self.child.layout_child(ctx, bc);
+///         self.child.set_origin(self.offset);
+///         bc.constrain(size)
+///     }
+///
+///     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+///         self.child.paint_child(ctx, scene);
+///     }
+///
+///     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+///         // Never re-hit-test a captured child by hand — this helper owns the
+///         // capture/focus fast paths and the blur-on-outside-tap rule.
+///         route_event_single(&mut self.child, ctx, event)
+///     }
+///
+///     fn semantics(&self, ctx: &mut SemanticsCtx) {
+///         // A transparent wrapper still MUST forward, or the child's whole
+///         // subtree drops out of the accessibility tree.
+///         self.child.semantics_child(ctx);
+///     }
+/// }
+/// # fn main() {}
+/// ```
+pub mod authoring {
+    // tier 1 — the trait vocabulary (frust-core)
+    pub use frust_core::{
+        AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventOutcome,
+        EventResult, HeroDirective, HeroFrames, InputEvent, Key, KeyEvent, LayoutCtx, Modifiers,
+        NamedKey, PaintCtx, PaintOutcome, PaintScene, PointerButton, PointerEvent, PointerPhase,
+        ScrollDelta, SemanticsCtx, SemanticsUpdate, TickClass, View, Widget, WidgetId, any,
+    };
+    /// The event-pass/IME-surface `EditingState` — see this module's own docs
+    /// for the split against [`text::EditingState`](self::text::EditingState),
+    /// `frust_text::editor`'s distinct, byte-indexed type.
+    pub use frust_core::{EditingState, ImeEvent, ImeState};
+
+    /// The inset vocabulary [`LayoutCtx::window_insets`]/[`PaintCtx::window_insets`]
+    /// return — lifted because a widget that lays itself out around the status
+    /// bar, notch, or on-screen keyboard cannot otherwise name the value those
+    /// accessors hand it.
+    pub use frust_core::{WindowEdgeInsets, WindowInsets};
+
+    /// The accessibility-node vocabulary a widget that *contributes* a
+    /// semantics node needs — as opposed to one that only forwards a child's.
+    ///
+    /// [`SemanticsCtx::push_node`] is
+    /// `(role: Role, build: impl FnOnce(&mut Node)) -> NodeId`;
+    /// [`SemanticsCtx::push_container`] takes the same two plus a
+    /// `visit: impl FnOnce(&mut SemanticsCtx)` for its children. `Action`,
+    /// `Live` and `Toggled` are lifted alongside them because they are what
+    /// the `build` closure actually reaches for — `node.add_action(Action::Click)`
+    /// is in eight of `frust-widgets`' own widgets, and a list of exports that
+    /// stopped at `Node` would not be closed over `Node`'s own signature.
+    ///
+    /// For the rest of the crate, use the whole-crate
+    /// [`frust::accesskit`](crate::accesskit) valve.
+    pub use frust_core::accesskit::{Action, Live, Node, NodeId, Role, Toggled};
+
+    // tier 2 — child/event/callback plumbing, verbatim
+    pub use frust_widgets::authoring::*;
+
+    // tier 3 — geometry/paint. NOTE the split: `Stroke` is kurbo, `Fill` is peniko
+    // (see `crates/frust-render/src/convert.rs`'s own import lines).
+    pub use kurbo::{Affine, BezPath, Line, Point, Rect, RoundedRect, Shape, Size, Stroke, Vec2};
+    pub use peniko::{Brush, Color, Fill, ImageData};
+
+    /// Text shaping/measurement for widgets laying out their own glyph runs.
+    ///
+    /// Nests `EditingState` deliberately: `frust_text::editor::EditingState` is
+    /// `TextEditor`'s own byte-indexed editing snapshot, a **distinct type**
+    /// from the flat `authoring::EditingState` (the retained IME-surface
+    /// payload) — see this module's parent docs for the full split. Keeping it
+    /// nested here rather than flattened avoids the glob collision a flat
+    /// re-export of both would cause.
+    pub mod text {
+        pub use frust_text::{EditOp, EditingState, EditingStateBytes, TextEditor};
+        pub use frust_text::{
+            FamilyName, FontFamily, FontStyle, FontWeight, GenericSlot, LineHeight, TextContext,
+            TextLayout, TextStyle,
+        };
+        /// Types named in [`TextContext`]'s own public signatures —
+        /// `register_fonts() -> Result<Vec<RegisteredFamily>, FontError>` and
+        /// `shape_cache_stats() -> ShapeCacheStats`. Without these an app could
+        /// call the methods but never name what they return.
+        pub use frust_text::{FontError, RegisteredFamily, ShapeCacheStats};
+        /// The index bridge between the two `EditingState`s this seam exposes:
+        /// [`super::EditingState`] (core/IME) counts UTF-16 code units, while
+        /// [`EditingStateBytes`] counts bytes. A widget driving its own
+        /// [`TextEditor`] against the IME surface needs to convert between
+        /// them — `frust_widgets::textinput` calls `utf16_to_byte` to place an
+        /// IME-supplied cursor into its byte-indexed editor; `byte_to_utf16`
+        /// is the return direction, used inside `frust-text` itself to build
+        /// an `EditingState` back out of editor state.
+        pub use frust_text::{byte_to_utf16, utf16_to_byte};
+    }
+
+    /// The renderer-agnostic display list, for widgets painting below `PaintScene`.
+    pub mod scene {
+        pub use frust_scene::{
+            Command, FontHandle, Glyph, GlyphRun, PathStyle, Scene, SceneBuilder, ShaderProgram,
+            arc_path,
+        };
+    }
+}
+
+/// The accessibility vocabulary crate, whole — the long-tail valve behind
+/// [`authoring`]'s by-name `Node`/`NodeId`/`Role`, for the rest of what a
+/// semantics-contributing widget may need (`Action`, `Live`, `Toggled`, …).
+/// Re-exported through `frust-core`, which owns the `accesskit` version pin
+/// (see `docs/DEVELOPMENT.md` § Version-Pin Policy) — naming it here keeps an
+/// app on that single pinned version rather than declaring its own.
+pub use frust_core::accesskit;
+/// The geometry crate, whole, for types [`authoring`] does not lift by name
+/// (e.g. `kurbo::Circle`) — the long-tail escape valve alongside the by-name
+/// list above.
+pub use kurbo;
+/// The brush/color crate, whole, for types [`authoring`] does not lift by name
+/// (e.g. `peniko::Blob`, `peniko::color::DynamicColor`) — the long-tail escape
+/// valve alongside [`Color`]/the by-name list above.
+pub use peniko;
+
 mod back_glue;
 mod router_glue;
 

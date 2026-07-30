@@ -6,20 +6,19 @@
 //! deliberate mock latency so the loading **skeletons** are visible. Each row
 //! is a [`swipeable_row`](crate::ui::swipeable::swipeable_row): swipe right to
 //! archive, left to mute, each raising an undo toast. A status-dot avatar (two
-//! rendered with [`Image`], the rest an initials circle painted via the
-//! `frust-core` escape hatch), an unread badge, and a lock icon for private
+//! rendered with [`Image`], the rest an initials circle painted via
+//! `frust::authoring`), an unread badge, and a lock icon for private
 //! channels complete each row. Pull-to-refresh re-runs the loader.
 //!
-//! # Why the escape hatch
+//! # Why the hand-rolled widgets
 //!
 //! No facade widget paints an arbitrary-color filled circle or an animated
 //! shimmer, so [`fill_box`](crate::ui::fill_box) (promoted to `crate::ui` so
 //! the feed can share it) and [`Shimmer`] below
 //! are small hand-rolled `View`/`Widget` pairs built directly against
-//! `frust-core` — the same
-//! precedent the pre-skeleton theme screen used for its `ColorBoxView`
-//! (`docs/ARCHITECTURE.md`'s "low-level escape hatch"). Everything else goes
-//! through the `frust` facade.
+//! `frust::authoring` — the same
+//! precedent the pre-skeleton theme screen used for its `ColorBoxView`.
+//! Everything else goes through the `frust` facade.
 //!
 //! # ListView vs. ScrollView
 //!
@@ -51,6 +50,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use frust::authoring::{
+    BoxConstraints, BuildCtx, ChangeFlags, Color, LayoutCtx, PaintCtx, PaintScene, Size, Widget,
+};
 use frust::{
     Align, Alignment, AnimationController, AnyView, Axis, Column, CrossAxisAlignment,
     DesignLanguage, EdgeInsets, FlexView, GestureDetector, Get, Image, ImageFit, ImageSource,
@@ -59,9 +61,6 @@ use frust::{
     icons, inflexible, safe_area, scroll_view, show_cupertino_alert, show_dialog, switch, text,
     text_input, use_context,
 };
-use frust_core::{BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Widget};
-use kurbo::Size;
-use peniko::Color;
 
 use clean_signals_frust::use_controller;
 

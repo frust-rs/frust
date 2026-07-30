@@ -1,9 +1,10 @@
-//! `BenchView`: the escape-hatch `View`/`Widget` pair that paints the bench's
-//! three scenes directly through `frust-scene`'s `PaintScene` vocabulary — the
-//! same hand-rolled pattern as `examples/shadertoy/src/shader_view.rs`.
+//! `BenchView`: the hand-rolled `View`/`Widget` pair that paints the bench's
+//! three scenes directly through the `PaintScene` vocabulary reached via
+//! `frust::authoring` — the same pattern as
+//! `examples/shadertoy/src/shader_view.rs`.
 //!
-//! THROWAWAY LAB (see `lib.rs`'s top-of-file note). This widget reaches below
-//! the `frust` facade on purpose: it drives `draw_image` (scene B's composited
+//! THROWAWAY LAB (see `lib.rs`'s top-of-file note). This widget paints below
+//! the widget set on purpose: it drives `draw_image` (scene B's composited
 //! cached-layer quads), `draw_shader` (mode C's `render_to_texture`-style live
 //! layer, resolved by `frust-render`'s `shader_effects` texture-override
 //! pre-pass), and the raw fill/glyph/path primitives (scene A's vector
@@ -15,13 +16,12 @@
 //! and the measurement compares steady-state per-frame cost.
 
 use frust::FrameTime;
-use frust_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, View, Widget,
+use frust::authoring::scene::ShaderProgram;
+use frust::authoring::text::{TextContext, TextLayout, TextStyle};
+use frust::authoring::{
+    BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, ImageData, LayoutCtx, PaintCtx,
+    PaintScene, Point, Rect, Size, Vec2, View, Widget,
 };
-use frust_scene::ShaderProgram;
-use frust_text::{TextContext, TextLayout, TextStyle};
-use kurbo::{Point, Rect, Size, Vec2};
-use peniko::{Brush, Color};
 
 use crate::scene::{self, BACKGROUND, Mode};
 
@@ -61,7 +61,7 @@ struct BuiltContent {
     /// Shaped labels paired with their widget-relative baseline origins.
     labels: Vec<(TextLayout, Point)>,
     bands: Vec<Rect>,
-    images: Vec<peniko::ImageData>,
+    images: Vec<ImageData>,
     memory_bytes: u64,
 }
 

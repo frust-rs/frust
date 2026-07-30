@@ -25,6 +25,16 @@
 //! are how a widget labels a child [`text`](crate::text) run with the themed color
 //! role it should default to, instead of hardcoding a color.
 //!
+//! # Authoring from an application
+//!
+//! This module is the `frust-widgets`-level surface. **Application code should
+//! prefer `frust::authoring`**, which re-exports everything below *plus* the
+//! `frust-core` trait vocabulary and the `kurbo`/`peniko` geometry the example
+//! below names — so an app depends on `frust` alone. The example below spells
+//! its imports the long way because this crate cannot name `frust` without a
+//! dev-dependency cycle; a facade-spelled version of the same example is in
+//! `frust::authoring`'s own module docs.
+//!
 //! # Stability
 //!
 //! **Pre-1.0.** This is a real, supported public API — not `#[doc(hidden)]`

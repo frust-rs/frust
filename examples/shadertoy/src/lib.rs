@@ -1,5 +1,5 @@
 //! Shadertoy — a Frust shader showcase: WGSL fragment-shader ports painted
-//! full-screen through the [`shader_view::ShaderView`] escape-hatch widget,
+//! full-screen through the hand-rolled [`shader_view::ShaderView`] widget,
 //! behind a menu picker and an FPS HUD in the same style as
 //! `benchmarks/frust_bench`'s S1 scenario.
 //!
@@ -13,12 +13,12 @@
 pub mod shader_view;
 pub mod shaders;
 
+use frust::authoring::scene::ShaderProgram;
 use frust::{
     AnyView, Axis, Brightness, Color, Component, EdgeInsets, FlexView, Get, Padding, RwSignal,
     SizedBox, Stack, SystemUiMode, Theme, any, button, flexible, inflexible, safe_area,
     set_app_theme, set_system_ui_mode, text,
 };
-use frust_scene::ShaderProgram;
 
 use shader_view::shader_view;
 

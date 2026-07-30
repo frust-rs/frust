@@ -47,7 +47,7 @@
 //! frames off through a plain `Arc<`[`StreamStats`]`>` of atomics instead of
 //! any reactive primitive (see [`start_stream`], which wires the real
 //! callback), and reads it back from [`CameraPage::build`] while a
-//! [`FrameTicker`] (the same escape hatch `interactions.rs` documents) keeps
+//! [`FrameTicker`] (the same hand-rolled widget `interactions.rs` documents) keeps
 //! that rebuild running once per frame. The stream is real and wired on both
 //! shipped backends — the device gate measured it delivering frames at
 //! ~29 fps on Android and ~22 fps on iOS through this exact path; this
@@ -70,15 +70,12 @@ use frust_camera::{
     Camera, CameraError, CameraSession, ImageFormat, Lens, PermissionStatus, Resolution,
 };
 
-// Low-level escape hatch (mirrors `interactions.rs`'s `FrameTicker` /
-// `appbar.rs`'s `AnchorReporter` — this crate's `Cargo.toml` already carries
-// `frust-core`/`kurbo` as real dependencies for those uses): only
-// [`FrameTicker`] below reaches for this; every other widget on this page
-// comes from the `frust` facade.
-use frust_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, View, Widget,
+// FrameTicker (mirrors `interactions.rs`'s `FrameTicker` / `appbar.rs`'s
+// `AnchorReporter`) is a hand-rolled `View`/`Widget` pair — reached, like
+// every other widget on this page, entirely through the `frust` facade.
+use frust::authoring::{
+    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, View, Widget,
 };
-use kurbo::Size;
 
 use crate::CatalogState;
 

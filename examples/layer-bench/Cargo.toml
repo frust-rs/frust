@@ -28,24 +28,15 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # language, so the fonts would be dead weight.
 frust = { path = "../../crates/frust", default-features = false }
 
-# `frust-core` + `frust-scene` + `frust-text` + `kurbo` + `peniko`: the
-# facade's documented "low-level escape hatch" (see `docs/ARCHITECTURE.md`,
-# `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions), the same
-# production dependency `examples/shadertoy`/`examples/huddle` carry for
-# hand-rolled widgets. Here it backs the `BenchView` widget — a custom
-# `View`/`Widget` pair painting both the vector scene (scene A) and the
-# composited-quads scene (scene B) directly through `frust-scene`'s
-# `PaintScene`/`Command` vocabulary (`fill_rounded_rect`/`draw_glyph_run`/
-# `fill_path`/`draw_image`/`draw_shader`), which no facade widget covers, plus
-# `frust-text`'s `TextContext` to shape the on-screen labels into glyph runs.
-# THROWAWAY LAB: this bench reaches below the facade deliberately to measure
-# vello's composite economics on device — it is NOT shipped API surface (see
-# `src/lib.rs`'s top-of-file note).
-frust-core = { path = "../../crates/frust-core" }
-frust-scene = { path = "../../crates/frust-scene" }
-frust-text = { path = "../../crates/frust-text" }
-kurbo = "0.13.1"
-peniko = "0.6.1"
+# `frust` is the ONLY framework line this bench ships. The `BenchView`
+# `View`/`Widget` pair reaches everything it needs through `frust::authoring`
+# (trait vocabulary + geometry), `frust::authoring::text` (shaping its own
+# labels), `frust::authoring::scene` (`ShaderProgram`, the `PaintScene`/
+# `Command` vocabulary) and the `frust::peniko` long-tail valve — nothing
+# production pins a framework internal like `kurbo`/`peniko` any more.
+#
+# Note this crate is also the canary proving `frust::authoring` is NOT
+# feature-gated: it resolves under `default-features = false` above.
 
 # `log` facade dependency, present only so the release-only `lean` feature
 # below can raise the compiled-in log ceiling (release-lean build mode).
@@ -61,12 +52,20 @@ peniko = "0.6.1"
 # `frust-perf` output.
 log = "0.4"
 
-# Dev-only: the headless T0 scene tests drive Frust's `RenderRoot` directly
-# (the desktop shell's own rebuild/layout/paint seam) — no GPU, no window —
-# the same harness shape as `examples/shadertoy/tests/showcase.rs`.
-# `frust-core`/`frust-scene`/`frust-text`/`kurbo`/`peniko` above are already
-# real dependencies, so only the reactive test-only pieces stay dev-only here.
 [dev-dependencies]
+# Test-harness-only, NOT an escape hatch: the headless T0 scene tests
+# (`tests/scene.rs`) drive Frust's `RenderRoot` directly — the desktop shell's
+# own rebuild/layout/paint seam, no GPU, no window, the same harness shape as
+# `examples/shadertoy/tests/showcase.rs`. `RenderRoot` is deliberately not in
+# `frust::authoring` (it is shell-owned, not something an app constructs), so
+# the harness still names these crates the long way; migrating headless test
+# harnesses onto the facade is a separate design question (see this feature's
+# TASKS.md § Deferred). Production code names none of them.
+frust-core = { path = "../../crates/frust-core" }
+frust-scene = { path = "../../crates/frust-scene" }
+frust-text = { path = "../../crates/frust-text" }
+kurbo = "0.13.1"
+peniko = "0.6.1"
 frust-reactive = { path = "../../crates/frust-reactive" }
 reactive_graph = "0.2"
 

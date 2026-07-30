@@ -25,15 +25,14 @@
 
 use std::time::Duration;
 
+use frust::authoring::{
+    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Point, Size, View,
+    Widget,
+};
 use frust::{
-    Align, Alignment, AnyView, AsyncValue, Color, Component, Get, Stack, UseTask, any, component,
-    spawn_blocking, text, use_task,
+    Align, Alignment, AnimationController, AnyView, AsyncValue, Color, Component, Get, Stack,
+    UseTask, any, component, spawn_blocking, text, use_task,
 };
-use frust_core::{
-    AnimationController, BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene,
-    View, Widget,
-};
-use kurbo::{Point, Size};
 
 use super::{BenchState, Scenario};
 

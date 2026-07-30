@@ -2,10 +2,10 @@
 //! feature.
 //!
 //! ============================ THROWAWAY LAB ============================
-//! This is a **measurement lab, not shipped API surface.** It deliberately
-//! reaches below the `frust` facade into `frust-core`/`frust-scene`
-//! (`docs/CODE_STANDARDS.md`'s documented escape hatch) to drive vello's
-//! composite primitives directly, so the spike can answer the one
+//! This is a **measurement lab, not shipped API surface.** It drives vello's
+//! composite primitives directly through `frust::authoring` — the facade's
+//! widget-authoring seam (`docs/CODE_STANDARDS.md`'s State & Reactivity
+//! Conventions) — so the spike can answer the one
 //! open question with device numbers: does compositing pre-rendered
 //! textures beat re-rasterizing the equivalent vector content in vello 0.9?
 //! Nothing here is meant to become framework code — the real feature (if the

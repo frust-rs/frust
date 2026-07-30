@@ -23,19 +23,18 @@
 //! these six moments rendered inline, so a variation's state now simply
 //! survives a push→pop→push round-trip instead of a rebuild.
 //!
-//! # The overflow-menu anchor: a genuine escape hatch
+//! # The overflow-menu anchor: a genuine framework gap
 //!
 //! [`frust::glyph::show_glyph_menu`]'s anchor is a caller-reported
-//! window-coordinate `kurbo::Rect` (`frust_widgets::glyph::menu`'s module
-//! docs describe how an `AppBar`'s trailing icon records its own painted
-//! bounds during `paint`) — there is no ancestor-bounds query a
-//! widget can make mid-layout, and no facade widget reports a child's
-//! painted bounds back to app code. [`AnchorReporter`] is this crate's minimal
-//! answer: a hand-rolled `View`/`Widget` pair built directly against
-//! `frust-core`/`kurbo` (this crate's `Cargo.toml` now carries both as real
-//! dependencies — see its own comment for the full rationale), mirroring
-//! `examples/huddle::ui::fill_box::FilledBox`'s documented low-level
-//! escape-hatch pattern exactly: it paints its child unchanged and, on every
+//! window-coordinate `Rect` (`frust::kurbo::Rect`, flat-re-exported by
+//! `frust::authoring`; `frust_widgets::glyph::menu`'s module docs describe how an `AppBar`'s
+//! trailing icon records its own painted bounds during `paint`) — there is
+//! no ancestor-bounds query a widget can make mid-layout, and no facade
+//! widget reports a child's painted bounds back to app code. [`AnchorReporter`]
+//! is this crate's minimal answer: a hand-rolled `View`/`Widget` pair reached
+//! entirely through `frust::authoring`, mirroring
+//! `examples/huddle::ui::fill_box::FilledBox`'s documented low-level widget
+//! pattern exactly: it paints its child unchanged and, on every
 //! paint pass, stashes `ctx.origin()`/`ctx.size()` into a shared
 //! `Rc<Cell<Rect>>` the kebab's `on_press` handler reads back when opening
 //! the menu.
@@ -60,15 +59,13 @@ use std::rc::Rc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-// Low-level escape hatch (see the module docs' "genuine escape hatch"
-// section) — `frust-core`/`kurbo` back only `AnchorReporter` below; every
-// other widget in this file comes from the `frust` facade.
-use frust_core::{
+// AnchorReporter (see the module docs' "genuine framework gap" section) is a
+// hand-rolled `View`/`Widget` pair — reached, like every other widget in this
+// file, entirely through the `frust` facade.
+use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent, LayoutCtx,
-    PaintCtx, PaintScene, SemanticsCtx, Widget,
+    PaintCtx, PaintScene, Point, Rect, SemanticsCtx, Size, Widget,
 };
-use kurbo::{Point, Rect, Size};
-
 use frust::glyph::{
     BadgeVariant, BannerVariant, MenuEntry, TitleDirection, app_bar, banner_spec, glyph_list,
     glyph_list_item, large_config, menu_item, menu_item_danger, menu_separator, selection_bar,
@@ -209,12 +206,12 @@ macro_rules! local_sig {
 }
 
 // ---------------------------------------------------------------------------
-// AnchorReporter — the overflow-menu anchor escape hatch (see module docs)
+// AnchorReporter — the overflow-menu anchor (see module docs)
 // ---------------------------------------------------------------------------
 
 /// Paints `child` unchanged but records its own window-coordinate rect into
 /// `target` on every paint pass — see the [module docs](self)'s "genuine
-/// escape hatch" section. Mirrors `examples/huddle::ui::fill_box::FilledBox`'s
+/// framework gap" section. Mirrors `examples/huddle::ui::fill_box::FilledBox`'s
 /// single-child `ChildPod` shape exactly.
 struct AnchorReporter<State: 'static> {
     child: AnyView<State>,
