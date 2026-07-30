@@ -15,7 +15,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how WIDGETS relates to the other unit
 
 | Module | Responsibility |
 |--------|-----------------|
-| `frust-widgets::authoring` | Public container/callback toolkit every widget in the crate builds from, instead of touching `frust-core` primitives directly |
+| `frust-widgets::authoring` | Public container/callback toolkit every widget in the crate builds from, instead of touching `frust-core` primitives directly — reachable by app code as `frust::authoring` (the facade's re-export, CORE unit); the toolkit itself is unchanged |
 | `frust-widgets` (baseline) | Baseline layout containers and interactive leaf widgets (text, forms, gestures, scrolling) |
 | `frust-widgets::material` | Material 3 (+Expressive) widget catalog |
 | `frust-widgets::cupertino` | iOS-styled widget catalog painting from `Theme.glass`, degrading to opaque fill when unsupported |

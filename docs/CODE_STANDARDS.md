@@ -156,10 +156,12 @@ these conventions:
   -p <crate> --no-default-features` still resolves to the platform-plugin charter line.
   Splitting would have left an almost-empty platform-core crate here; the charter line is
   what actually matters, and it is mechanically checkable either way (`cargo tree -p <crate>
-  --no-default-features -e normal`). `frust-native-widgets` needs `frust-core` alongside
-  `frust` (not the facade alone) because its builders hand-implement `View<Outer>`, which
-  needs `BuildCtx`/`ChangeFlags` the facade does not re-export — the same
-  `frust-core`/`kurbo`/`peniko` escape hatch `examples/*` crates already use.
+  --no-default-features -e normal`). `frust-native-widgets` needs `frust-core`/`kurbo`
+  directly alongside `frust` (not the facade alone) because its builders hand-implement
+  `View<Outer>`/`Widget` in the plugin's own crate — the plugin tier's sanctioned, permanent
+  exception to the app-tier facade-first rule (State & Reactivity Conventions below);
+  plugins sit beside the facade, never inside it (`docs/ARCHITECTURE.md`'s facade/plugin
+  boundary), and are not expected to migrate onto `frust::authoring`.
 - **A store shared with the OS namespaces its keys `frust.`** (NSUserDefaults, Android
   SharedPreferences) so plugin keys can't collide with other libraries'.
 - **`dev.frust` is the embedding module's exclusive package; a plugin's Android Kotlin ships
@@ -397,9 +399,14 @@ Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantic
 - **`Component::State` holds `RwSignal`s directly; app code depends on the `frust` facade
   only, never `reactive_graph`/`any_spawner`/`frust-reactive` directly.** A reactive field
   is typed `RwSignal<T>`, read/written through the facade's `Get`/`Set`/`Update` traits.
-  **An `examples/*`/app crate's `Cargo.toml` depends on `frust` plus plugin crates only** —
-  a documented `frust-core`/`kurbo`(/`peniko`) escape hatch is sanctioned, for gaps no
-  facade widget covers.
+- **An app authors a custom `View`/`Widget` pair through `frust::authoring`, never a direct
+  `frust-core`/`frust-scene`/`frust-text`/`kurbo`/`peniko` dependency.** `frust::authoring`
+  (plus its `text`/`scene` submodules) re-exports the full trait lifecycle, child/event/
+  callback plumbing, and geometry/paint types a custom widget needs, so an `examples/*`/app
+  crate's `Cargo.toml` depends on `frust` plus plugin crates only. Mechanically enforced
+  across `benchmarks/frust_bench` and the four in-repo example apps by
+  `crates/frust/tests/authoring_seam_conformance.rs`; the plugin tier is exempt (Plugin
+  Conventions above).
 - **A rebuild must run inside a `TrackedScope` for a signal write to wake it later — an
   untracked read is a silent wake hazard, not a stale value.** `.get()` subscribes only from
   *inside* a live `TrackedScope::track` closure; both shells guarantee this for their
