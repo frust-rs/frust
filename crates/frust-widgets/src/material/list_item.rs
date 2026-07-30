@@ -40,7 +40,8 @@ use kurbo::{Point, Rect, Size};
 use peniko::Color;
 
 use super::state_layer::StateLayer;
-use crate::text::{ThemeTextColor, text};
+use crate::authoring::ThemeTextColor;
+use crate::text::text;
 
 /// Horizontal padding on the leading and trailing edges (M3 list spec, 16dp).
 const HPAD: f64 = 16.0;
@@ -174,7 +175,7 @@ impl<State: 'static> ListItem<State> {
 /// Which entry of [`ListItemWidget::children`] each logical slot occupies. The
 /// headline is always present; the others are optional. Storing every child in
 /// one `Vec` lets a non-interactive row route events through
-/// [`crate::route_event`] and recurse uniformly for paint/semantics.
+/// [`crate::authoring::route_event`] and recurse uniformly for paint/semantics.
 #[derive(Clone, Copy)]
 struct Slots {
     leading: Option<usize>,
@@ -192,7 +193,7 @@ pub struct ListItemWidget {
     pressed: bool,
     captured: bool,
     state_layer: StateLayer,
-    on_press: Option<crate::ErasedCallback>,
+    on_press: Option<crate::authoring::ErasedCallback>,
 }
 
 /// Build the ordered child window `[leading?, headline, supporting?, trailing?]`
@@ -203,17 +204,17 @@ fn build_children<State: 'static>(
 ) -> (Vec<ChildPod>, Slots) {
     let mut children = Vec::new();
     let leading = view.leading.as_ref().map(|v| {
-        children.push(crate::build_child(v, ctx));
+        children.push(crate::authoring::build_child(v, ctx));
         children.len() - 1
     });
-    children.push(crate::build_child(&view.headline_view(), ctx));
+    children.push(crate::authoring::build_child(&view.headline_view(), ctx));
     let headline = children.len() - 1;
     let supporting = view.supporting_view().map(|v| {
-        children.push(crate::build_child(&v, ctx));
+        children.push(crate::authoring::build_child(&v, ctx));
         children.len() - 1
     });
     let trailing = view.trailing.as_ref().map(|v| {
-        children.push(crate::build_child(v, ctx));
+        children.push(crate::authoring::build_child(v, ctx));
         children.len() - 1
     });
     (
@@ -253,7 +254,7 @@ impl<State: 'static> View<State> for ListItem<State> {
             pressed: false,
             captured: false,
             state_layer: StateLayer::new(),
-            on_press: self.on_press.as_ref().map(crate::erase_callback),
+            on_press: self.on_press.as_ref().map(crate::authoring::erase_callback),
         }
     }
 
@@ -280,9 +281,9 @@ impl<State: 'static> View<State> for ListItem<State> {
             if let (Some(pi), Some(ni)) = (prev.leading.as_ref(), self.leading.as_ref())
                 && let Some(idx) = slots.leading
             {
-                flags |= crate::rebuild_child(pi, ni, &mut element.children[idx], ctx);
+                flags |= crate::authoring::rebuild_child(pi, ni, &mut element.children[idx], ctx);
             }
-            flags |= crate::rebuild_child(
+            flags |= crate::authoring::rebuild_child(
                 &prev.headline_view(),
                 &self.headline_view(),
                 &mut element.children[slots.headline],
@@ -291,12 +292,12 @@ impl<State: 'static> View<State> for ListItem<State> {
             if let (Some(pv), Some(nv)) = (prev.supporting_view(), self.supporting_view())
                 && let Some(idx) = slots.supporting
             {
-                flags |= crate::rebuild_child(&pv, &nv, &mut element.children[idx], ctx);
+                flags |= crate::authoring::rebuild_child(&pv, &nv, &mut element.children[idx], ctx);
             }
             if let (Some(pi), Some(ni)) = (prev.trailing.as_ref(), self.trailing.as_ref())
                 && let Some(idx) = slots.trailing
             {
-                flags |= crate::rebuild_child(pi, ni, &mut element.children[idx], ctx);
+                flags |= crate::authoring::rebuild_child(pi, ni, &mut element.children[idx], ctx);
             }
         }
 
@@ -315,7 +316,7 @@ impl<State: 'static> View<State> for ListItem<State> {
             }
             flags |= ChangeFlags::PAINT;
         }
-        element.on_press = self.on_press.as_ref().map(crate::erase_callback);
+        element.on_press = self.on_press.as_ref().map(crate::authoring::erase_callback);
         flags
     }
 
@@ -338,17 +339,17 @@ fn teardown_children<State: 'static>(
         if Some(index) == slots.leading
             && let Some(v) = view.leading.as_ref()
         {
-            crate::teardown_child(v, pod, ctx);
+            crate::authoring::teardown_child(v, pod, ctx);
         } else if index == slots.headline {
-            crate::teardown_child(&view.headline_view(), pod, ctx);
+            crate::authoring::teardown_child(&view.headline_view(), pod, ctx);
         } else if Some(index) == slots.supporting
             && let Some(v) = view.supporting_view()
         {
-            crate::teardown_child(&v, pod, ctx);
+            crate::authoring::teardown_child(&v, pod, ctx);
         } else if Some(index) == slots.trailing
             && let Some(v) = view.trailing.as_ref()
         {
-            crate::teardown_child(v, pod, ctx);
+            crate::authoring::teardown_child(v, pod, ctx);
         }
     }
 }
@@ -422,13 +423,13 @@ impl Widget for ListItemWidget {
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         if !self.interactive {
-            return crate::route_event(&mut self.children, ctx, event);
+            return crate::authoring::route_event(&mut self.children, ctx, event);
         }
         // Non-pointer events (Key, Ime, focus-routed) must be forwarded to
         // children, even when interactive. Only pointer events drive the
         // interactive row's own capture/press behavior.
         let InputEvent::Pointer(p) = event else {
-            return crate::route_event(&mut self.children, ctx, event);
+            return crate::authoring::route_event(&mut self.children, ctx, event);
         };
         let on_press = self
             .on_press

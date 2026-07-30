@@ -638,7 +638,7 @@ pub struct AppBarWidget {
     /// Whether `interactive[0]` is the normal-face leading slot.
     has_leading: bool,
     selection_present: bool,
-    on_close: Option<crate::ErasedCallback>,
+    on_close: Option<crate::authoring::ErasedCallback>,
     title_direction: TitleDirection,
     elevated_target: bool,
     // --- large variant ---
@@ -698,14 +698,14 @@ impl<State: 'static> View<State> for AppBarView<State> {
     fn build(&self, ctx: &mut BuildCtx<'_>) -> AppBarWidget {
         let interactive = face_views(self)
             .iter()
-            .map(|v| crate::build_child(v, ctx))
+            .map(|v| crate::authoring::build_child(v, ctx))
             .collect();
         let selection_present = self.selection.is_some();
         let large_present = self.large.is_some();
         let meta = self
             .large
             .as_ref()
-            .map(|l| crate::build_child(&l.meta, ctx));
+            .map(|l| crate::authoring::build_child(&l.meta, ctx));
         let banner_present = self.banner.is_some();
         AppBarWidget {
             title: ShapedRun::new(self.title.clone()),
@@ -720,7 +720,7 @@ impl<State: 'static> View<State> for AppBarView<State> {
             on_close: self
                 .selection
                 .as_ref()
-                .map(|s| crate::erase_callback(&s.on_close)),
+                .map(|s| crate::authoring::erase_callback(&s.on_close)),
             title_direction: self.title_direction,
             elevated_target: self.elevated,
             large_present,
@@ -822,11 +822,11 @@ impl<State: 'static> View<State> for AppBarView<State> {
                 .into_iter()
                 .zip(element.interactive.iter_mut())
             {
-                crate::teardown_child(view, pod, ctx);
+                crate::authoring::teardown_child(view, pod, ctx);
             }
             element.interactive = face_views(self)
                 .iter()
-                .map(|v| crate::build_child(v, ctx))
+                .map(|v| crate::authoring::build_child(v, ctx))
                 .collect();
             element.selection_present = selection_present;
             element.has_leading = !selection_present && self.leading.is_some();
@@ -835,13 +835,13 @@ impl<State: 'static> View<State> for AppBarView<State> {
             element.on_close = self
                 .selection
                 .as_ref()
-                .map(|s| crate::erase_callback(&s.on_close));
+                .map(|s| crate::authoring::erase_callback(&s.on_close));
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         } else {
             // Same face: reconcile children in place, refresh the close adapter.
             let prev_views = face_views(prev);
             let next_views = face_views(self);
-            flags |= crate::rebuild_children(
+            flags |= crate::authoring::rebuild_children(
                 &prev_views,
                 &next_views,
                 &mut element.interactive,
@@ -856,7 +856,7 @@ impl<State: 'static> View<State> for AppBarView<State> {
             element.on_close = self
                 .selection
                 .as_ref()
-                .map(|s| crate::erase_callback(&s.on_close));
+                .map(|s| crate::authoring::erase_callback(&s.on_close));
         }
 
         // Large variant reconcile. Collapse is input-driven — a progress
@@ -874,18 +874,18 @@ impl<State: 'static> View<State> for AppBarView<State> {
                     flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
                 }
                 if let Some(pod) = element.meta.as_mut() {
-                    flags |= crate::rebuild_child(&prev_l.meta, &next_l.meta, pod, ctx);
+                    flags |= crate::authoring::rebuild_child(&prev_l.meta, &next_l.meta, pod, ctx);
                 }
             }
             (None, Some(next_l)) => {
                 element.big_title = ShapedRun::new(next_l.big_title.clone());
                 element.big_title_text = next_l.big_title.clone();
-                element.meta = Some(crate::build_child(&next_l.meta, ctx));
+                element.meta = Some(crate::authoring::build_child(&next_l.meta, ctx));
                 flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
             }
             (Some(prev_l), None) => {
                 if let Some(pod) = element.meta.as_mut() {
-                    crate::teardown_child(&prev_l.meta, pod, ctx);
+                    crate::authoring::teardown_child(&prev_l.meta, pod, ctx);
                 }
                 element.meta = None;
                 flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
@@ -917,10 +917,10 @@ impl<State: 'static> View<State> for AppBarView<State> {
             .into_iter()
             .zip(element.interactive.iter_mut())
         {
-            crate::teardown_child(view, pod, ctx);
+            crate::authoring::teardown_child(view, pod, ctx);
         }
         if let (Some(large), Some(pod)) = (&self.large, element.meta.as_mut()) {
-            crate::teardown_child(&large.meta, pod, ctx);
+            crate::authoring::teardown_child(&large.meta, pod, ctx);
         }
     }
 }
@@ -1489,12 +1489,12 @@ impl AppBarWidget {
         }
         // Row-1 / face children first, then the large variant's meta row (which
         // may itself hold interactive views).
-        let result = crate::route_event(&mut self.interactive, ctx, event);
+        let result = crate::authoring::route_event(&mut self.interactive, ctx, event);
         if result == EventResult::Handled {
             return result;
         }
         if let Some(pod) = self.meta.as_mut() {
-            let meta_result = crate::route_event_single(pod, ctx, event);
+            let meta_result = crate::authoring::route_event_single(pod, ctx, event);
             if meta_result == EventResult::Handled {
                 return meta_result;
             }

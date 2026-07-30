@@ -309,7 +309,7 @@ fn build_items(items: &[GlyphNavItem]) -> Vec<NavEntry> {
 pub struct GlyphNavBarWidget {
     items: Vec<NavEntry>,
     selected: usize,
-    on_select: crate::ErasedArgCallback<usize>,
+    on_select: crate::authoring::ErasedArgCallback<usize>,
     height: f64,
     pressed: Option<usize>,
     captured: Option<usize>,
@@ -322,7 +322,7 @@ impl<State: 'static> View<State> for GlyphNavBarView<State> {
         GlyphNavBarWidget {
             items: build_items(&self.items),
             selected: self.selected,
-            on_select: crate::erase_callback_arg(&self.on_select),
+            on_select: crate::authoring::erase_callback_arg(&self.on_select),
             height: 0.0,
             pressed: None,
             captured: None,
@@ -335,7 +335,7 @@ impl<State: 'static> View<State> for GlyphNavBarView<State> {
         element: &mut GlyphNavBarWidget,
         _ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        element.on_select = crate::erase_callback_arg(&self.on_select);
+        element.on_select = crate::authoring::erase_callback_arg(&self.on_select);
         let mut flags = ChangeFlags::NONE;
         let structural = prev.items.len() != self.items.len()
             || prev

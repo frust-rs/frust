@@ -266,7 +266,7 @@ impl<State: 'static> ToolbarView<State> {
 
 /// Collect `view`'s leading, center, trailing, and fab (if any) slots into
 /// one ordered slice of [`AnyView`] references — the shared shape both
-/// `build`/`teardown` and the [`crate::rebuild_children`] reconciliation walk
+/// `build`/`teardown` and the [`crate::authoring::rebuild_children`] reconciliation walk
 /// over (mirrors [`super::appbar`]'s `interactive_views`).
 fn slot_views<State: 'static>(view: &ToolbarView<State>) -> Vec<&AnyView<State>> {
     let mut views = Vec::with_capacity(
@@ -286,7 +286,7 @@ pub struct ToolbarWidget {
     variant: ToolbarVariant,
     /// Every slot pod, in the fixed order [`slot_views`] produces: leading,
     /// then center, then trailing, then the fab slot (if any) — the one list
-    /// [`crate::route_event`] hit-tests and [`crate::rebuild_children`]
+    /// [`crate::authoring::route_event`] hit-tests and [`crate::authoring::rebuild_children`]
     /// reconciles.
     slots: Vec<ChildPod>,
     leading_count: usize,
@@ -301,7 +301,7 @@ impl<State: 'static> View<State> for ToolbarView<State> {
     fn build(&self, ctx: &mut BuildCtx<'_>) -> ToolbarWidget {
         let slots = slot_views(self)
             .into_iter()
-            .map(|view| crate::build_child(view, ctx))
+            .map(|view| crate::authoring::build_child(view, ctx))
             .collect();
         ToolbarWidget {
             variant: self.variant,
@@ -323,7 +323,7 @@ impl<State: 'static> View<State> for ToolbarView<State> {
 
         let prev_views = slot_views(prev);
         let next_views = slot_views(self);
-        flags |= crate::rebuild_children(
+        flags |= crate::authoring::rebuild_children(
             &prev_views,
             &next_views,
             &mut element.slots,
@@ -359,7 +359,7 @@ impl<State: 'static> View<State> for ToolbarView<State> {
 
     fn teardown(&self, element: &mut ToolbarWidget, ctx: &mut BuildCtx<'_>) {
         for (view, pod) in slot_views(self).into_iter().zip(element.slots.iter_mut()) {
-            crate::teardown_child(view, pod, ctx);
+            crate::authoring::teardown_child(view, pod, ctx);
         }
     }
 }
@@ -480,7 +480,7 @@ impl Widget for ToolbarWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        crate::route_event(&mut self.slots, ctx, event)
+        crate::authoring::route_event(&mut self.slots, ctx, event)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {

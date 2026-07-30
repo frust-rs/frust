@@ -44,7 +44,7 @@ use frust_core::{
 };
 use kurbo::{Point, Rect, Size};
 
-use crate::{ErasedArgCallback, ErasedCallback};
+use crate::authoring::{ErasedArgCallback, ErasedCallback};
 
 /// iOS-style rubber-band resistance applied to the past-edge portion of a drag:
 /// the visible out-of-range displacement is `raw_excess * OVERSCROLL_RESISTANCE`.
@@ -545,9 +545,15 @@ impl<State: 'static> View<State> for ScrollView<State> {
     type Element = ScrollWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> ScrollWidget {
-        let mut widget = ScrollWidget::new(crate::build_child(&self.child, ctx));
-        widget.on_scroll = self.on_scroll.as_ref().map(crate::erase_callback_arg);
-        widget.on_refresh_release = self.on_refresh_release.as_ref().map(crate::erase_callback);
+        let mut widget = ScrollWidget::new(crate::authoring::build_child(&self.child, ctx));
+        widget.on_scroll = self
+            .on_scroll
+            .as_ref()
+            .map(crate::authoring::erase_callback_arg);
+        widget.on_refresh_release = self
+            .on_refresh_release
+            .as_ref()
+            .map(crate::authoring::erase_callback);
         widget
     }
 
@@ -558,13 +564,19 @@ impl<State: 'static> View<State> for ScrollView<State> {
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         // Closures are not comparable — always reinstall the erased adapters.
-        element.on_scroll = self.on_scroll.as_ref().map(crate::erase_callback_arg);
-        element.on_refresh_release = self.on_refresh_release.as_ref().map(crate::erase_callback);
-        crate::rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
+        element.on_scroll = self
+            .on_scroll
+            .as_ref()
+            .map(crate::authoring::erase_callback_arg);
+        element.on_refresh_release = self
+            .on_refresh_release
+            .as_ref()
+            .map(crate::authoring::erase_callback);
+        crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
     }
 
     fn teardown(&self, element: &mut ScrollWidget, ctx: &mut BuildCtx<'_>) {
-        crate::teardown_child(&self.child, &mut element.child, ctx);
+        crate::authoring::teardown_child(&self.child, &mut element.child, ctx);
     }
 }
 

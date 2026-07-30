@@ -60,7 +60,7 @@
 //! While `open` is `false`, only the trigger's own rect is interactive — a
 //! `Down` anywhere else in the widget's (full-area) bounds returns
 //! [`EventResult::Ignored`], which `Stack::event`'s reverse-order routing
-//! (`crate::route_event`) then hands to whatever sits below in the Z-order.
+//! (`crate::authoring::route_event`) then hands to whatever sits below in the Z-order.
 //! Once `open` is `true`, every other point in the area is treated as the
 //! scrim (dismiss-on-tap) — see [`Target::Scrim`].
 //!
@@ -99,7 +99,8 @@ use frust_theme::Theme;
 use kurbo::{Point, Rect, Size};
 use peniko::Color;
 
-use crate::text::{self, ThemeTextColor};
+use crate::authoring::ThemeTextColor;
+use crate::text;
 
 /// Container size of the trigger FAB, in logical px — matches [`super::fab`]'s
 /// regular-tier `REGULAR_CONTAINER` (androidx `FabBaselineTokens.ContainerWidth`).
@@ -376,7 +377,7 @@ impl<State: 'static> FabMenuView<State> {
 struct FabMenuItemPod {
     icon: ChildPod,
     label: ChildPod,
-    on_select: crate::ErasedCallback,
+    on_select: crate::authoring::ErasedCallback,
 }
 
 /// The retained widget for a [`FabMenuView`]. See the [module docs](self).
@@ -400,7 +401,7 @@ pub struct FabMenuWidget {
     /// Whether the armed pointer is currently inside the armed target's rect
     /// (always `true` for [`Target::Scrim`] — see [`Widget::event`]).
     pressed_inside: bool,
-    on_toggle: crate::ErasedCallback,
+    on_toggle: crate::authoring::ErasedCallback,
 }
 
 impl FabMenuWidget {
@@ -423,9 +424,9 @@ impl<State: 'static> View<State> for FabMenuView<State> {
             .items
             .iter()
             .map(|item| FabMenuItemPod {
-                icon: crate::build_child(&item.icon, ctx),
-                label: crate::build_child(&label_view::<State>(item.label.clone()), ctx),
-                on_select: crate::erase_callback(&item.on_select),
+                icon: crate::authoring::build_child(&item.icon, ctx),
+                label: crate::authoring::build_child(&label_view::<State>(item.label.clone()), ctx),
+                on_select: crate::authoring::erase_callback(&item.on_select),
             })
             .collect();
         let mut reveal_anim = AnimationController::new(REVEAL_ANIM_PERIOD);
@@ -435,7 +436,7 @@ impl<State: 'static> View<State> for FabMenuView<State> {
             reveal_anim.fling(FLING_VELOCITY, REVEAL_SPRING);
         }
         FabMenuWidget {
-            icon: crate::build_child(&self.icon, ctx),
+            icon: crate::authoring::build_child(&self.icon, ctx),
             items,
             item_labels: self.items.iter().map(|i| i.label.clone()).collect(),
             open: self.open,
@@ -445,7 +446,7 @@ impl<State: 'static> View<State> for FabMenuView<State> {
             item_rects: Vec::new(),
             armed: None,
             pressed_inside: false,
-            on_toggle: crate::erase_callback(&self.on_toggle),
+            on_toggle: crate::authoring::erase_callback(&self.on_toggle),
         }
     }
 
@@ -455,10 +456,10 @@ impl<State: 'static> View<State> for FabMenuView<State> {
         element: &mut FabMenuWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        element.on_toggle = crate::erase_callback(&self.on_toggle);
+        element.on_toggle = crate::authoring::erase_callback(&self.on_toggle);
         let mut flags = ChangeFlags::NONE;
 
-        flags |= crate::rebuild_child(&prev.icon, &self.icon, &mut element.icon, ctx);
+        flags |= crate::authoring::rebuild_child(&prev.icon, &self.icon, &mut element.icon, ctx);
 
         if prev.open != self.open {
             element.open = self.open;
@@ -481,17 +482,20 @@ impl<State: 'static> View<State> for FabMenuView<State> {
             // ones for the new list (mirrors `super::fab`'s icon/label
             // teardown-then-rebuild path for a structural swap).
             for (old_item, pod) in prev.items.iter().zip(element.items.iter_mut()) {
-                crate::teardown_child(&old_item.icon, &mut pod.icon, ctx);
+                crate::authoring::teardown_child(&old_item.icon, &mut pod.icon, ctx);
                 let old_label_view = label_view::<State>(old_item.label.clone());
-                crate::teardown_child(&old_label_view, &mut pod.label, ctx);
+                crate::authoring::teardown_child(&old_label_view, &mut pod.label, ctx);
             }
             element.items = self
                 .items
                 .iter()
                 .map(|item| FabMenuItemPod {
-                    icon: crate::build_child(&item.icon, ctx),
-                    label: crate::build_child(&label_view::<State>(item.label.clone()), ctx),
-                    on_select: crate::erase_callback(&item.on_select),
+                    icon: crate::authoring::build_child(&item.icon, ctx),
+                    label: crate::authoring::build_child(
+                        &label_view::<State>(item.label.clone()),
+                        ctx,
+                    ),
+                    on_select: crate::authoring::erase_callback(&item.on_select),
                 })
                 .collect();
             element.item_labels = self.items.iter().map(|i| i.label.clone()).collect();
@@ -502,14 +506,24 @@ impl<State: 'static> View<State> for FabMenuView<State> {
             for (i, (prev_item, next_item)) in prev.items.iter().zip(self.items.iter()).enumerate()
             {
                 let pod = &mut element.items[i];
-                flags |= crate::rebuild_child(&prev_item.icon, &next_item.icon, &mut pod.icon, ctx);
+                flags |= crate::authoring::rebuild_child(
+                    &prev_item.icon,
+                    &next_item.icon,
+                    &mut pod.icon,
+                    ctx,
+                );
                 if prev_item.label != next_item.label {
                     let prev_view = label_view::<State>(prev_item.label.clone());
                     let next_view = label_view::<State>(next_item.label.clone());
-                    flags |= crate::rebuild_child(&prev_view, &next_view, &mut pod.label, ctx);
+                    flags |= crate::authoring::rebuild_child(
+                        &prev_view,
+                        &next_view,
+                        &mut pod.label,
+                        ctx,
+                    );
                     element.item_labels[i] = next_item.label.clone();
                 }
-                pod.on_select = crate::erase_callback(&next_item.on_select);
+                pod.on_select = crate::authoring::erase_callback(&next_item.on_select);
             }
         }
 
@@ -517,11 +531,11 @@ impl<State: 'static> View<State> for FabMenuView<State> {
     }
 
     fn teardown(&self, element: &mut FabMenuWidget, ctx: &mut BuildCtx<'_>) {
-        crate::teardown_child(&self.icon, &mut element.icon, ctx);
+        crate::authoring::teardown_child(&self.icon, &mut element.icon, ctx);
         for (item, pod) in self.items.iter().zip(element.items.iter_mut()) {
-            crate::teardown_child(&item.icon, &mut pod.icon, ctx);
+            crate::authoring::teardown_child(&item.icon, &mut pod.icon, ctx);
             let label_view = label_view::<State>(item.label.clone());
-            crate::teardown_child(&label_view, &mut pod.label, ctx);
+            crate::authoring::teardown_child(&label_view, &mut pod.label, ctx);
         }
     }
 }

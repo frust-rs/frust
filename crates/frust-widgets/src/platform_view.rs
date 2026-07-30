@@ -442,7 +442,7 @@ impl<State: 'static> View<State> for ShieldView<State> {
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> ShieldWidget {
         ShieldWidget {
-            child: crate::build_child(&self.child, ctx),
+            child: crate::authoring::build_child(&self.child, ctx),
         }
     }
 
@@ -452,11 +452,11 @@ impl<State: 'static> View<State> for ShieldView<State> {
         element: &mut ShieldWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        crate::rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
+        crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
     }
 
     fn teardown(&self, element: &mut ShieldWidget, ctx: &mut BuildCtx<'_>) {
-        crate::teardown_child(&self.child, &mut element.child, ctx);
+        crate::authoring::teardown_child(&self.child, &mut element.child, ctx);
     }
 }
 
@@ -477,7 +477,7 @@ impl Widget for ShieldWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        crate::route_event_single(&mut self.child, ctx, event)
+        crate::authoring::route_event_single(&mut self.child, ctx, event)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {

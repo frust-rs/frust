@@ -148,7 +148,7 @@ struct CrumbEntry {
     is_link: bool,
     x: f64,
     size: Size,
-    on_tap: Option<crate::ErasedCallback>,
+    on_tap: Option<crate::authoring::ErasedCallback>,
 }
 
 /// The crumb/separator style (fixed family/weight/size; only color varies).
@@ -185,7 +185,7 @@ fn build_crumbs<State: 'static>(crumbs: &[Crumb<State>]) -> Vec<CrumbEntry> {
             x: 0.0,
             size: Size::ZERO,
             on_tap: if i != last {
-                c.on_tap.as_ref().map(crate::erase_callback)
+                c.on_tap.as_ref().map(crate::authoring::erase_callback)
             } else {
                 None
             },
@@ -233,7 +233,7 @@ impl<State: 'static> View<State> for BreadcrumbView<State> {
                 .enumerate()
             {
                 entry.on_tap = if i != last {
-                    spec.on_tap.as_ref().map(crate::erase_callback)
+                    spec.on_tap.as_ref().map(crate::authoring::erase_callback)
                 } else {
                     None
                 };

@@ -93,7 +93,7 @@ use frust_core::{
 };
 use kurbo::{Point, Size};
 
-use crate::ErasedCallback;
+use crate::authoring::ErasedCallback;
 
 /// Extra items materialized above and below the visible window, so a small
 /// scroll (or a fling's per-frame advance) reveals already-built rows instead of
@@ -514,13 +514,13 @@ impl ListViewWidget {
             position: pos,
             button: PointerButton::Primary,
         });
-        crate::route_event(&mut self.children, ctx, &cancel);
+        crate::authoring::route_event(&mut self.children, ctx, &cancel);
     }
 
     /// The event body, parameterised on an explicit timestamp so velocity math
     /// is deterministic in tests; [`Widget::event`] supplies the real clock.
     /// Adapted from [`crate::ScrollWidget`], routing to the *window* of children
-    /// via [`crate::route_event`] rather than a single child.
+    /// via [`crate::authoring::route_event`] rather than a single child.
     fn event_at(&mut self, ctx: &mut EventCtx, event: &InputEvent, t_ms: f64) -> EventResult {
         // A fling-driven near-start fire recorded at paint time is delivered on
         // the next event — except a Cancel, which clears it without firing.
@@ -533,7 +533,7 @@ impl ListViewWidget {
         }
         match event {
             InputEvent::Key(_) | InputEvent::Ime(_) => {
-                crate::route_event(&mut self.children, ctx, event)
+                crate::authoring::route_event(&mut self.children, ctx, event)
             }
             InputEvent::Scroll { delta, .. } => {
                 let dy = match delta {
@@ -559,12 +559,12 @@ impl ListViewWidget {
                     self.tracker.clear();
                     self.tracker.record(t_ms, p.position.y);
                     ctx.capture_pointer();
-                    crate::route_event(&mut self.children, ctx, event);
+                    crate::authoring::route_event(&mut self.children, ctx, event);
                     EventResult::Handled
                 }
                 PointerPhase::Move => {
                     if !self.down_active {
-                        return crate::route_event(&mut self.children, ctx, event);
+                        return crate::authoring::route_event(&mut self.children, ctx, event);
                     }
                     self.tracker.record(t_ms, p.position.y);
                     if self.scrolling {
@@ -584,7 +584,7 @@ impl ListViewWidget {
                         self.cancel_children(ctx, p.position);
                         ctx.request_redraw();
                     } else {
-                        crate::route_event(&mut self.children, ctx, event);
+                        crate::authoring::route_event(&mut self.children, ctx, event);
                     }
                     EventResult::Handled
                 }
@@ -596,7 +596,7 @@ impl ListViewWidget {
                             self.last_anim = None;
                         }
                     } else {
-                        crate::route_event(&mut self.children, ctx, event);
+                        crate::authoring::route_event(&mut self.children, ctx, event);
                     }
                     self.scrolling = false;
                     self.down_active = false;
@@ -604,7 +604,7 @@ impl ListViewWidget {
                     EventResult::Handled
                 }
                 PointerPhase::Cancel => {
-                    crate::route_event(&mut self.children, ctx, event);
+                    crate::authoring::route_event(&mut self.children, ctx, event);
                     self.scrolling = false;
                     self.down_active = false;
                     // Cancel never fires a callback: drop any pending
@@ -624,9 +624,15 @@ impl<State: 'static> View<State> for ListView<State> {
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> ListViewWidget {
         let mut widget = ListViewWidget::new(self.item_count, self.item_extent);
-        widget.on_near_start = self.on_near_start.as_ref().map(crate::erase_callback);
+        widget.on_near_start = self
+            .on_near_start
+            .as_ref()
+            .map(crate::authoring::erase_callback);
         widget.near_start_threshold = self.near_start_threshold;
-        widget.on_near_end = self.on_near_end.as_ref().map(crate::erase_callback);
+        widget.on_near_end = self
+            .on_near_end
+            .as_ref()
+            .map(crate::authoring::erase_callback);
         widget.near_end_threshold = self.near_end_threshold;
         // Conservative initial window from a zero viewport (converges within one
         // extra frame via paint's continuation request — see the module docs).
@@ -634,7 +640,7 @@ impl<State: 'static> View<State> for ListView<State> {
         for index in start..end {
             widget
                 .children
-                .push(crate::build_child(&(self.builder)(index), ctx));
+                .push(crate::authoring::build_child(&(self.builder)(index), ctx));
             widget.keys.push(index);
         }
         widget.sync_child_origins();
@@ -648,9 +654,15 @@ impl<State: 'static> View<State> for ListView<State> {
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         // Closures are not comparable — always reinstall the erased adapter.
-        element.on_near_start = self.on_near_start.as_ref().map(crate::erase_callback);
+        element.on_near_start = self
+            .on_near_start
+            .as_ref()
+            .map(crate::authoring::erase_callback);
         element.near_start_threshold = self.near_start_threshold;
-        element.on_near_end = self.on_near_end.as_ref().map(crate::erase_callback);
+        element.on_near_end = self
+            .on_near_end
+            .as_ref()
+            .map(crate::authoring::erase_callback);
         element.near_end_threshold = self.near_end_threshold;
 
         let mut flags = ChangeFlags::NONE;
@@ -685,10 +697,10 @@ impl<State: 'static> View<State> for ListView<State> {
                 // (reconstructed from the pure builder) — state preserved.
                 let prev_view = (prev.builder)(index);
                 let next_view = (self.builder)(index);
-                flags |= crate::rebuild_child(&prev_view, &next_view, &mut pod, ctx);
+                flags |= crate::authoring::rebuild_child(&prev_view, &next_view, &mut pod, ctx);
                 new_children.push(pod);
             } else {
-                new_children.push(crate::build_child(&(self.builder)(index), ctx));
+                new_children.push(crate::authoring::build_child(&(self.builder)(index), ctx));
                 structural = true;
             }
             new_keys.push(index);
@@ -697,7 +709,7 @@ impl<State: 'static> View<State> for ListView<State> {
         // Indices that left the window are torn down (cancel-if-active inside
         // teardown_child unwinds an armed child).
         for (index, mut pod) in old.drain() {
-            crate::teardown_child(&(prev.builder)(index), &mut pod, ctx);
+            crate::authoring::teardown_child(&(prev.builder)(index), &mut pod, ctx);
             structural = true;
         }
 
@@ -713,7 +725,7 @@ impl<State: 'static> View<State> for ListView<State> {
 
     fn teardown(&self, element: &mut ListViewWidget, ctx: &mut BuildCtx<'_>) {
         for (index, pod) in element.keys.iter().zip(element.children.iter_mut()) {
-            crate::teardown_child(&(self.builder)(*index), pod, ctx);
+            crate::authoring::teardown_child(&(self.builder)(*index), pod, ctx);
         }
     }
 }
@@ -1146,7 +1158,7 @@ mod tests {
         w.viewport = Size::new(200.0, 200.0);
         w.near_start_threshold = threshold;
         let cb: Rc<dyn Fn(&mut Loads)> = Rc::new(|s: &mut Loads| s.count += 1);
-        w.on_near_start = Some(crate::erase_callback(&cb));
+        w.on_near_start = Some(crate::authoring::erase_callback(&cb));
         w.near_start_armed = true;
         w
     }
@@ -1269,7 +1281,7 @@ mod tests {
         w.viewport = Size::new(200.0, 200.0);
         w.near_end_threshold = threshold;
         let cb: Rc<dyn Fn(&mut Loads)> = Rc::new(|s: &mut Loads| s.count += 1);
-        w.on_near_end = Some(crate::erase_callback(&cb));
+        w.on_near_end = Some(crate::authoring::erase_callback(&cb));
         w.near_end_armed = true;
         w.offset = w.max_offset();
         w

@@ -197,7 +197,10 @@ impl<State: 'static> View<State> for EmptyStateView<State> {
             desc: GlyphLabel::new(self.desc.clone()),
             desc_text: self.desc.clone(),
             desc_size: Size::ZERO,
-            action: self.action.as_ref().map(|v| crate::build_child(v, ctx)),
+            action: self
+                .action
+                .as_ref()
+                .map(|v| crate::authoring::build_child(v, ctx)),
             action_size: Size::ZERO,
             _state: std::marker::PhantomData,
         }
@@ -225,14 +228,16 @@ impl<State: 'static> View<State> for EmptyStateView<State> {
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         match (&prev.action, &self.action, element.action.as_mut()) {
-            (Some(p), Some(n), Some(pod)) => flags |= crate::rebuild_child(p, n, pod, ctx),
+            (Some(p), Some(n), Some(pod)) => {
+                flags |= crate::authoring::rebuild_child(p, n, pod, ctx)
+            }
             (None, Some(n), _) => {
-                element.action = Some(crate::build_child(n, ctx));
+                element.action = Some(crate::authoring::build_child(n, ctx));
                 flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
             }
             (Some(p), None, Some(_)) => {
                 if let Some(mut pod) = element.action.take() {
-                    crate::teardown_child(p, &mut pod, ctx);
+                    crate::authoring::teardown_child(p, &mut pod, ctx);
                 }
                 flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
             }
@@ -243,7 +248,7 @@ impl<State: 'static> View<State> for EmptyStateView<State> {
 
     fn teardown(&self, element: &mut EmptyStateWidget<State>, ctx: &mut BuildCtx<'_>) {
         if let (Some(v), Some(pod)) = (self.action.as_ref(), element.action.as_mut()) {
-            crate::teardown_child(v, pod, ctx);
+            crate::authoring::teardown_child(v, pod, ctx);
         }
     }
 }
@@ -432,7 +437,7 @@ impl<State: 'static> Widget for EmptyStateWidget<State> {
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         if let Some(pod) = self.action.as_mut() {
-            return crate::route_event_single(pod, ctx, event);
+            return crate::authoring::route_event_single(pod, ctx, event);
         }
         EventResult::Ignored
     }

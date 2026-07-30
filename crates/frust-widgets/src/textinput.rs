@@ -315,8 +315,8 @@ pub struct TextInputWidget {
     /// reset; the next paint records `blink_epoch` from `frame_time` and clears
     /// this. `true` initially so the first painted frame seeds the epoch.
     blink_reset_pending: bool,
-    on_change: crate::ErasedArgCallback<String>,
-    on_submit: Option<crate::ErasedArgCallback<String>>,
+    on_change: crate::authoring::ErasedArgCallback<String>,
+    on_submit: Option<crate::authoring::ErasedArgCallback<String>>,
 }
 
 /// Whether `pos` (widget-local) lies within a `size`-sized field.
@@ -727,11 +727,11 @@ impl<State: 'static> View<State> for TextInputView<State> {
             captured: false,
             blink_epoch: FrameTime::ZERO,
             blink_reset_pending: true,
-            on_change: crate::erase_callback_arg(&self.on_change),
+            on_change: crate::authoring::erase_callback_arg(&self.on_change),
             on_submit: self
                 .on_submit
                 .as_ref()
-                .map(crate::erase_callback_arg::<State, String>),
+                .map(crate::authoring::erase_callback_arg::<State, String>),
         }
     }
 
@@ -742,11 +742,11 @@ impl<State: 'static> View<State> for TextInputView<State> {
         _ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         // Closures aren't comparable; reinstall the erased adapters unconditionally.
-        element.on_change = crate::erase_callback_arg(&self.on_change);
+        element.on_change = crate::authoring::erase_callback_arg(&self.on_change);
         element.on_submit = self
             .on_submit
             .as_ref()
-            .map(crate::erase_callback_arg::<State, String>);
+            .map(crate::authoring::erase_callback_arg::<State, String>);
 
         let mut flags = ChangeFlags::NONE;
         if prev.placeholder != self.placeholder {

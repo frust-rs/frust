@@ -202,7 +202,7 @@ impl<State: 'static> CupertinoNavBarView<State> {
 
 /// Collect `view`'s leading (if any) then trailing (if any) into one ordered
 /// slice of [`AnyView`] references — the shared shape both build/teardown and
-/// [`crate::rebuild_children`] walk over.
+/// [`crate::authoring::rebuild_children`] walk over.
 fn interactive_views<State: 'static>(view: &CupertinoNavBarView<State>) -> Vec<&AnyView<State>> {
     let mut views = Vec::with_capacity(2);
     if let Some(leading) = &view.leading {
@@ -219,8 +219,8 @@ pub struct CupertinoNavBarWidget {
     title: ChildPod,
     title_text: String,
     /// The leading slot (if any) then the trailing slot (if any), in that fixed
-    /// order — the one list [`crate::route_event`] hit-tests and
-    /// [`crate::rebuild_children`] reconciles.
+    /// order — the one list [`crate::authoring::route_event`] hit-tests and
+    /// [`crate::authoring::rebuild_children`] reconciles.
     interactive: Vec<ChildPod>,
     has_leading: bool,
     has_trailing: bool,
@@ -233,13 +233,13 @@ impl<State: 'static> View<State> for CupertinoNavBarView<State> {
         let title_view = title_view::<State>(self.title.clone());
         let mut interactive = Vec::with_capacity(2);
         if let Some(leading) = &self.leading {
-            interactive.push(crate::build_child(leading, ctx));
+            interactive.push(crate::authoring::build_child(leading, ctx));
         }
         if let Some(trailing) = &self.trailing {
-            interactive.push(crate::build_child(trailing, ctx));
+            interactive.push(crate::authoring::build_child(trailing, ctx));
         }
         CupertinoNavBarWidget {
-            title: crate::build_child(&title_view, ctx),
+            title: crate::authoring::build_child(&title_view, ctx),
             title_text: self.title.clone(),
             interactive,
             has_leading: self.leading.is_some(),
@@ -258,11 +258,12 @@ impl<State: 'static> View<State> for CupertinoNavBarView<State> {
             element.title_text = self.title.clone();
             let prev_view = title_view::<State>(prev.title.clone());
             let next_view = title_view::<State>(self.title.clone());
-            flags |= crate::rebuild_child(&prev_view, &next_view, &mut element.title, ctx);
+            flags |=
+                crate::authoring::rebuild_child(&prev_view, &next_view, &mut element.title, ctx);
         }
         let prev_views = interactive_views(prev);
         let next_views = interactive_views(self);
-        flags |= crate::rebuild_children(
+        flags |= crate::authoring::rebuild_children(
             &prev_views,
             &next_views,
             &mut element.interactive,
@@ -282,12 +283,12 @@ impl<State: 'static> View<State> for CupertinoNavBarView<State> {
 
     fn teardown(&self, element: &mut CupertinoNavBarWidget, ctx: &mut BuildCtx<'_>) {
         let title_view = title_view::<State>(self.title.clone());
-        crate::teardown_child(&title_view, &mut element.title, ctx);
+        crate::authoring::teardown_child(&title_view, &mut element.title, ctx);
         for (view, pod) in interactive_views(self)
             .into_iter()
             .zip(element.interactive.iter_mut())
         {
-            crate::teardown_child(view, pod, ctx);
+            crate::authoring::teardown_child(view, pod, ctx);
         }
     }
 }
@@ -404,7 +405,7 @@ impl Widget for CupertinoNavBarWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        crate::route_event(&mut self.interactive, ctx, event)
+        crate::authoring::route_event(&mut self.interactive, ctx, event)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {

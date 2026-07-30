@@ -99,7 +99,7 @@ pub struct CheckboxWidget {
     /// Gates all `Move`/`Up` handling so a hover `Move` never latches `pressed`
     /// or fires `on_toggle` without a preceding press.
     captured: bool,
-    on_toggle: crate::ErasedArgCallback<bool>,
+    on_toggle: crate::authoring::ErasedArgCallback<bool>,
 }
 
 fn inside(pos: Point, size: Size) -> bool {
@@ -113,11 +113,11 @@ impl<State: 'static> View<State> for CheckboxView<State> {
         let label_view = any::<State, _>(text(self.label.clone()));
         CheckboxWidget {
             checked: self.checked,
-            label: crate::build_child(&label_view, ctx),
+            label: crate::authoring::build_child(&label_view, ctx),
             label_text: self.label.clone(),
             pressed: false,
             captured: false,
-            on_toggle: crate::erase_callback_arg(&self.on_toggle),
+            on_toggle: crate::authoring::erase_callback_arg(&self.on_toggle),
         }
     }
 
@@ -127,7 +127,7 @@ impl<State: 'static> View<State> for CheckboxView<State> {
         element: &mut CheckboxWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        element.on_toggle = crate::erase_callback_arg(&self.on_toggle);
+        element.on_toggle = crate::authoring::erase_callback_arg(&self.on_toggle);
         let mut flags = ChangeFlags::NONE;
         if prev.checked != self.checked {
             // The app is the source of truth: adopt the new value on rebuild.
@@ -138,14 +138,15 @@ impl<State: 'static> View<State> for CheckboxView<State> {
             element.label_text = self.label.clone();
             let prev_view = any::<State, _>(text(prev.label.clone()));
             let next_view = any::<State, _>(text(self.label.clone()));
-            flags |= crate::rebuild_child(&prev_view, &next_view, &mut element.label, ctx);
+            flags |=
+                crate::authoring::rebuild_child(&prev_view, &next_view, &mut element.label, ctx);
         }
         flags
     }
 
     fn teardown(&self, element: &mut CheckboxWidget, ctx: &mut BuildCtx<'_>) {
         let label_view = any::<State, _>(text(self.label.clone()));
-        crate::teardown_child(&label_view, &mut element.label, ctx);
+        crate::authoring::teardown_child(&label_view, &mut element.label, ctx);
     }
 }
 

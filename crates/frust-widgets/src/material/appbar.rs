@@ -147,7 +147,7 @@ impl<State: 'static> AppBarView<State> {
 
 /// Collect `view`'s leading (if any) and actions into one ordered slice of
 /// [`AnyView`] references — the shared shape both `build`/`teardown` and the
-/// [`crate::rebuild_children`] reconciliation walk over.
+/// [`crate::authoring::rebuild_children`] reconciliation walk over.
 fn interactive_views<State: 'static>(view: &AppBarView<State>) -> Vec<&AnyView<State>> {
     let mut views = Vec::with_capacity(1 + view.actions.len());
     if let Some(leading) = &view.leading {
@@ -163,8 +163,8 @@ pub struct AppBarWidget {
     /// The title text, retained for the semantics node's label.
     title_text: String,
     /// The leading slot (if any) followed by every action, in that fixed
-    /// order — the one list [`crate::route_event`] hit-tests and
-    /// [`crate::rebuild_children`] reconciles.
+    /// order — the one list [`crate::authoring::route_event`] hit-tests and
+    /// [`crate::authoring::rebuild_children`] reconciles.
     interactive: Vec<ChildPod>,
     /// Whether `interactive[0]` is the leading slot (vs. the first action).
     has_leading: bool,
@@ -177,13 +177,13 @@ impl<State: 'static> View<State> for AppBarView<State> {
         let title_view = title_view::<State>(self.title.clone());
         let mut interactive = Vec::with_capacity(1 + self.actions.len());
         if let Some(leading) = &self.leading {
-            interactive.push(crate::build_child(leading, ctx));
+            interactive.push(crate::authoring::build_child(leading, ctx));
         }
         for action in &self.actions {
-            interactive.push(crate::build_child(action, ctx));
+            interactive.push(crate::authoring::build_child(action, ctx));
         }
         AppBarWidget {
-            title: crate::build_child(&title_view, ctx),
+            title: crate::authoring::build_child(&title_view, ctx),
             title_text: self.title.clone(),
             interactive,
             has_leading: self.leading.is_some(),
@@ -201,11 +201,12 @@ impl<State: 'static> View<State> for AppBarView<State> {
             element.title_text = self.title.clone();
             let prev_view = title_view::<State>(prev.title.clone());
             let next_view = title_view::<State>(self.title.clone());
-            flags |= crate::rebuild_child(&prev_view, &next_view, &mut element.title, ctx);
+            flags |=
+                crate::authoring::rebuild_child(&prev_view, &next_view, &mut element.title, ctx);
         }
         let prev_views = interactive_views(prev);
         let next_views = interactive_views(self);
-        flags |= crate::rebuild_children(
+        flags |= crate::authoring::rebuild_children(
             &prev_views,
             &next_views,
             &mut element.interactive,
@@ -222,12 +223,12 @@ impl<State: 'static> View<State> for AppBarView<State> {
 
     fn teardown(&self, element: &mut AppBarWidget, ctx: &mut BuildCtx<'_>) {
         let title_view = title_view::<State>(self.title.clone());
-        crate::teardown_child(&title_view, &mut element.title, ctx);
+        crate::authoring::teardown_child(&title_view, &mut element.title, ctx);
         for (view, pod) in interactive_views(self)
             .into_iter()
             .zip(element.interactive.iter_mut())
         {
-            crate::teardown_child(view, pod, ctx);
+            crate::authoring::teardown_child(view, pod, ctx);
         }
     }
 }
@@ -282,7 +283,7 @@ impl Widget for AppBarWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        crate::route_event(&mut self.interactive, ctx, event)
+        crate::authoring::route_event(&mut self.interactive, ctx, event)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {

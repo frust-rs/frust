@@ -21,9 +21,12 @@
 //!
 //! That toolkit is **public** — see the [`authoring`] module — so a design
 //! system can be authored outside this crate at parity with the three built-in
-//! catalogs, which consume exactly the same surface. The crate-root re-export
-//! below (`pub(crate) use authoring::*`) is what keeps the in-crate call sites
-//! spelled `crate::build_child(...)`.
+//! catalogs, which consume exactly the same surface. Every in-crate call site,
+//! including the three built-in catalogs, spells it out as
+//! `crate::authoring::build_child(...)` — there is no crate-root re-export
+//! shortcut, so a catalog reaching past the public `authoring` surface fails to
+//! compile rather than silently resolving through a compatibility shim (see
+//! `crates/frust-widgets/tests/authoring_only_conformance.rs`).
 
 mod align;
 pub mod authoring;
@@ -188,11 +191,6 @@ pub use cupertino::tabbar::{
     CupertinoTabBar, CupertinoTabBarView, CupertinoTabBarWidget, TabItem, cupertino_tab_bar,
     tab_item,
 };
-
-// The widget-authoring toolkit lives in `authoring` (public, documented, and
-// consumed by design systems outside this crate); this crate-visible glob is what
-// keeps every in-crate call site spelled `crate::build_child(...)`.
-pub(crate) use authoring::*;
 
 /// A stable identity for a list child, so a container's reconciliation can match
 /// a child to its live widget *by key* across reorders/inserts instead of by

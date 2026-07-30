@@ -256,7 +256,7 @@ pub struct CupertinoSwitchWidget {
     anim_target: bool,
     /// Armed by a `Down` (alongside `capture_pointer`), cleared on `Up`/`Cancel`.
     captured: bool,
-    on_toggle: crate::ErasedArgCallback<bool>,
+    on_toggle: crate::authoring::ErasedArgCallback<bool>,
 }
 
 fn inside(pos: Point, size: Size) -> bool {
@@ -278,7 +278,7 @@ impl<State: 'static> View<State> for CupertinoSwitchView<State> {
             anim,
             anim_target: self.checked,
             captured: false,
-            on_toggle: crate::erase_callback_arg(&self.on_toggle),
+            on_toggle: crate::authoring::erase_callback_arg(&self.on_toggle),
         }
     }
 
@@ -288,7 +288,7 @@ impl<State: 'static> View<State> for CupertinoSwitchView<State> {
         element: &mut CupertinoSwitchWidget,
         _ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        element.on_toggle = crate::erase_callback_arg(&self.on_toggle);
+        element.on_toggle = crate::authoring::erase_callback_arg(&self.on_toggle);
         if prev.checked != self.checked {
             // The app is the source of truth: adopt the new value. The fling
             // starts lazily in `paint`, once a theme (spring) is in scope.

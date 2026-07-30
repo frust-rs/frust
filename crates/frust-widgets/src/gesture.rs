@@ -108,7 +108,7 @@ pub struct GestureDetectorView<State: 'static> {
     child: AnyView<State>,
     on_tap: Option<GestureCallback<State>>,
     on_long_press: Option<GestureCallback<State>>,
-    on_hold_progress: Option<crate::TypedArgCallback<State, f64>>,
+    on_hold_progress: Option<crate::authoring::TypedArgCallback<State, f64>>,
     hold_threshold_ms: Option<u64>,
 }
 
@@ -209,9 +209,9 @@ enum Recognizer {
 pub struct GestureDetectorWidget {
     child: ChildPod,
     state: Recognizer,
-    on_tap: Option<crate::ErasedCallback>,
-    on_long_press: Option<crate::ErasedCallback>,
-    on_hold_progress: Option<crate::ErasedArgCallback<f64>>,
+    on_tap: Option<crate::authoring::ErasedCallback>,
+    on_long_press: Option<crate::authoring::ErasedCallback>,
+    on_hold_progress: Option<crate::authoring::ErasedArgCallback<f64>>,
     /// Resolved hold threshold in ms — [`GestureDetectorView::hold_threshold_ms`]
     /// if set, else [`LONG_PRESS_MS`]. Shared by the long-press timer and the
     /// hold-progress computation.
@@ -223,14 +223,17 @@ impl<State: 'static> View<State> for GestureDetectorView<State> {
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> GestureDetectorWidget {
         GestureDetectorWidget {
-            child: crate::build_child(&self.child, ctx),
+            child: crate::authoring::build_child(&self.child, ctx),
             state: Recognizer::Idle,
-            on_tap: self.on_tap.as_ref().map(crate::erase_callback),
-            on_long_press: self.on_long_press.as_ref().map(crate::erase_callback),
+            on_tap: self.on_tap.as_ref().map(crate::authoring::erase_callback),
+            on_long_press: self
+                .on_long_press
+                .as_ref()
+                .map(crate::authoring::erase_callback),
             on_hold_progress: self
                 .on_hold_progress
                 .as_ref()
-                .map(crate::erase_callback_arg),
+                .map(crate::authoring::erase_callback_arg),
             // `.max(1)` guards against a 0ms override: `f64::clamp` passes
             // NaN through unchanged, so an unguarded `0.0 / 0.0` divisor in
             // paint's progress computation would poison every subsequent
@@ -248,22 +251,25 @@ impl<State: 'static> View<State> for GestureDetectorView<State> {
         element: &mut GestureDetectorWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        element.on_tap = self.on_tap.as_ref().map(crate::erase_callback);
-        element.on_long_press = self.on_long_press.as_ref().map(crate::erase_callback);
+        element.on_tap = self.on_tap.as_ref().map(crate::authoring::erase_callback);
+        element.on_long_press = self
+            .on_long_press
+            .as_ref()
+            .map(crate::authoring::erase_callback);
         element.on_hold_progress = self
             .on_hold_progress
             .as_ref()
-            .map(crate::erase_callback_arg);
+            .map(crate::authoring::erase_callback_arg);
         // Same NaN guard as `build` above — see `hold_threshold_ms`'s doc comment.
         element.threshold_ms = self
             .hold_threshold_ms
             .map(|ms| ms.max(1) as f64)
             .unwrap_or(LONG_PRESS_MS);
-        crate::rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
+        crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
     }
 
     fn teardown(&self, element: &mut GestureDetectorWidget, ctx: &mut BuildCtx<'_>) {
-        crate::teardown_child(&self.child, &mut element.child, ctx);
+        crate::authoring::teardown_child(&self.child, &mut element.child, ctx);
     }
 }
 

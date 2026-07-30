@@ -128,7 +128,7 @@ pub struct RadioWidget {
     /// Gates all `Move`/`Up` handling so a hover `Move` never latches `pressed`
     /// or fires `on_select` without a preceding press.
     captured: bool,
-    on_select: Option<crate::ErasedCallback>,
+    on_select: Option<crate::authoring::ErasedCallback>,
 }
 
 fn inside(pos: Point, size: Size) -> bool {
@@ -142,11 +142,14 @@ impl<State: 'static> View<State> for RadioView<State> {
         let label_view = any::<State, _>(text(self.label.clone()));
         RadioWidget {
             selected: self.selected,
-            label: crate::build_child(&label_view, ctx),
+            label: crate::authoring::build_child(&label_view, ctx),
             label_text: self.label.clone(),
             pressed: false,
             captured: false,
-            on_select: self.on_select.as_ref().map(crate::erase_callback),
+            on_select: self
+                .on_select
+                .as_ref()
+                .map(crate::authoring::erase_callback),
         }
     }
 
@@ -157,7 +160,10 @@ impl<State: 'static> View<State> for RadioView<State> {
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         // Closures are not comparable — always reinstall the adapter.
-        element.on_select = self.on_select.as_ref().map(crate::erase_callback);
+        element.on_select = self
+            .on_select
+            .as_ref()
+            .map(crate::authoring::erase_callback);
         let mut flags = ChangeFlags::NONE;
         if prev.selected != self.selected {
             // The app is the source of truth: adopt the new value on rebuild.
@@ -168,14 +174,15 @@ impl<State: 'static> View<State> for RadioView<State> {
             element.label_text = self.label.clone();
             let prev_view = any::<State, _>(text(prev.label.clone()));
             let next_view = any::<State, _>(text(self.label.clone()));
-            flags |= crate::rebuild_child(&prev_view, &next_view, &mut element.label, ctx);
+            flags |=
+                crate::authoring::rebuild_child(&prev_view, &next_view, &mut element.label, ctx);
         }
         flags
     }
 
     fn teardown(&self, element: &mut RadioWidget, ctx: &mut BuildCtx<'_>) {
         let label_view = any::<State, _>(text(self.label.clone()));
-        crate::teardown_child(&label_view, &mut element.label, ctx);
+        crate::authoring::teardown_child(&label_view, &mut element.label, ctx);
     }
 }
 

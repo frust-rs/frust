@@ -13,7 +13,7 @@
 //!
 //! # Label color simplification
 //!
-//! Both chip kinds paint their label through [`crate::text::ThemeTextColor::OnSurface`]
+//! Both chip kinds paint their label through [`crate::authoring::ThemeTextColor::OnSurface`]
 //! — the only themed-default label role `TextView` supports today besides
 //! `OnPrimary` (button's role, wrong contrast against a chip's `surface`/
 //! `secondary_container` fill). The M3 spec's exact selected-filter-chip
@@ -34,7 +34,8 @@ use kurbo::{Point, Rect, Size};
 use peniko::Color;
 
 use super::state_layer::StateLayer;
-use crate::text::{self, ThemeTextColor};
+use crate::authoring::ThemeTextColor;
+use crate::text;
 
 /// Fixed chip height, in logical px (M3 chip spec).
 const CHIP_HEIGHT: f64 = 32.0;
@@ -182,7 +183,7 @@ pub struct AssistChipWidget {
     /// Armed by a `Down` (alongside `capture_pointer`), cleared on `Up`/`Cancel`.
     captured: bool,
     state_layer: StateLayer,
-    on_press: crate::ErasedCallback,
+    on_press: crate::authoring::ErasedCallback,
 }
 
 impl<State: 'static> View<State> for AssistChipView<State> {
@@ -190,19 +191,18 @@ impl<State: 'static> View<State> for AssistChipView<State> {
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> AssistChipWidget {
         let label_view = assist_label_view::<State>(self.label.clone());
-        let leading = self
-            .leading
-            .as_ref()
-            .map(|glyph| crate::build_child(&assist_label_view::<State>(glyph.clone()), ctx));
+        let leading = self.leading.as_ref().map(|glyph| {
+            crate::authoring::build_child(&assist_label_view::<State>(glyph.clone()), ctx)
+        });
         AssistChipWidget {
             leading,
             leading_text: self.leading.clone(),
-            label: crate::build_child(&label_view, ctx),
+            label: crate::authoring::build_child(&label_view, ctx),
             label_text: self.label.clone(),
             pressed: false,
             captured: false,
             state_layer: StateLayer::new(),
-            on_press: crate::erase_callback(&self.on_press),
+            on_press: crate::authoring::erase_callback(&self.on_press),
         }
     }
 
@@ -212,14 +212,15 @@ impl<State: 'static> View<State> for AssistChipView<State> {
         element: &mut AssistChipWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        element.on_press = crate::erase_callback(&self.on_press);
+        element.on_press = crate::authoring::erase_callback(&self.on_press);
         let mut flags = ChangeFlags::NONE;
 
         if prev.label != self.label {
             element.label_text = self.label.clone();
             let prev_view = assist_label_view::<State>(prev.label.clone());
             let next_view = assist_label_view::<State>(self.label.clone());
-            flags |= crate::rebuild_child(&prev_view, &next_view, &mut element.label, ctx);
+            flags |=
+                crate::authoring::rebuild_child(&prev_view, &next_view, &mut element.label, ctx);
         }
 
         match (&prev.leading, &self.leading) {
@@ -232,11 +233,11 @@ impl<State: 'static> View<State> for AssistChipView<State> {
                     .leading
                     .as_mut()
                     .expect("leading pod present when prev.leading is Some");
-                flags |= crate::rebuild_child(&prev_view, &next_view, pod, ctx);
+                flags |= crate::authoring::rebuild_child(&prev_view, &next_view, pod, ctx);
             }
             (None, Some(next_glyph)) => {
                 element.leading_text = self.leading.clone();
-                element.leading = Some(crate::build_child(
+                element.leading = Some(crate::authoring::build_child(
                     &assist_label_view::<State>(next_glyph.clone()),
                     ctx,
                 ));
@@ -249,7 +250,7 @@ impl<State: 'static> View<State> for AssistChipView<State> {
                     .leading
                     .take()
                     .expect("leading pod present when prev.leading is Some");
-                crate::teardown_child(&prev_view, &mut pod, ctx);
+                crate::authoring::teardown_child(&prev_view, &mut pod, ctx);
                 flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
             }
         }
@@ -259,10 +260,10 @@ impl<State: 'static> View<State> for AssistChipView<State> {
 
     fn teardown(&self, element: &mut AssistChipWidget, ctx: &mut BuildCtx<'_>) {
         let label_view = assist_label_view::<State>(self.label.clone());
-        crate::teardown_child(&label_view, &mut element.label, ctx);
+        crate::authoring::teardown_child(&label_view, &mut element.label, ctx);
         if let (Some(glyph), Some(pod)) = (&self.leading, &mut element.leading) {
             let leading_view = assist_label_view::<State>(glyph.clone());
-            crate::teardown_child(&leading_view, pod, ctx);
+            crate::authoring::teardown_child(&leading_view, pod, ctx);
         }
     }
 }
@@ -419,7 +420,7 @@ pub struct FilterChipWidget {
     /// Armed by a `Down` (alongside `capture_pointer`), cleared on `Up`/`Cancel`.
     captured: bool,
     state_layer: StateLayer,
-    on_select: crate::ErasedArgCallback<bool>,
+    on_select: crate::authoring::ErasedArgCallback<bool>,
 }
 
 impl<State: 'static> View<State> for FilterChipView<State> {
@@ -429,12 +430,12 @@ impl<State: 'static> View<State> for FilterChipView<State> {
         let label_view = filter_label_view::<State>(self.label.clone());
         FilterChipWidget {
             selected: self.selected,
-            label: crate::build_child(&label_view, ctx),
+            label: crate::authoring::build_child(&label_view, ctx),
             label_text: self.label.clone(),
             pressed: false,
             captured: false,
             state_layer: StateLayer::new(),
-            on_select: crate::erase_callback_arg(&self.on_select),
+            on_select: crate::authoring::erase_callback_arg(&self.on_select),
         }
     }
 
@@ -444,7 +445,7 @@ impl<State: 'static> View<State> for FilterChipView<State> {
         element: &mut FilterChipWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        element.on_select = crate::erase_callback_arg(&self.on_select);
+        element.on_select = crate::authoring::erase_callback_arg(&self.on_select);
         let mut flags = ChangeFlags::NONE;
         if prev.selected != self.selected {
             // The app is the source of truth: adopt the new value on rebuild.
@@ -455,14 +456,15 @@ impl<State: 'static> View<State> for FilterChipView<State> {
             element.label_text = self.label.clone();
             let prev_view = filter_label_view::<State>(prev.label.clone());
             let next_view = filter_label_view::<State>(self.label.clone());
-            flags |= crate::rebuild_child(&prev_view, &next_view, &mut element.label, ctx);
+            flags |=
+                crate::authoring::rebuild_child(&prev_view, &next_view, &mut element.label, ctx);
         }
         flags
     }
 
     fn teardown(&self, element: &mut FilterChipWidget, ctx: &mut BuildCtx<'_>) {
         let label_view = filter_label_view::<State>(self.label.clone());
-        crate::teardown_child(&label_view, &mut element.label, ctx);
+        crate::authoring::teardown_child(&label_view, &mut element.label, ctx);
     }
 }
 

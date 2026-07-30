@@ -19,13 +19,13 @@
 //!
 //! Structural ops are drained and applied in [`NavigatorView::rebuild`] (a
 //! `BuildCtx` pass), *not* inside `NavigatorWidget::event`: building a new page
-//! pod ([`crate::build_child`]) and tearing a popped one down
-//! ([`crate::teardown_child`]) both need a `BuildCtx`, and a rebuild always runs
+//! pod ([`crate::authoring::build_child`]) and tearing a popped one down
+//! ([`crate::authoring::teardown_child`]) both need a `BuildCtx`, and a rebuild always runs
 //! every frame so a *programmatic* push/pop (from a background task, with no
 //! triggering event) still lands. On every stack mutation the widget then applies
 //! the explicit page-switch contract the structural-rebuild machinery does not
 //! cover for a hand-managed stack: (a) it cancels an in-flight capture on the
-//! outgoing top ([`crate::cancel_pod`]'s synthetic-`Cancel`), (b) clears its focus
+//! outgoing top ([`crate::authoring::cancel_pod`]'s synthetic-`Cancel`), (b) clears its focus
 //! flag, and (c) publishes a *cleared* IME surface on the next paint so the
 //! platform keyboard hides deterministically rather than waiting for the lazy
 //! event-pass convergence `RenderRoot` otherwise relies on.
@@ -808,14 +808,14 @@ impl<State: 'static> NavigatorWidget<State> {
     /// Cancel any in-flight capture and clear the focus flag on the *current* top
     /// page — the page being covered/replaced/popped by a stack mutation.
     ///
-    /// Capture unwinds via [`crate::cancel_pod`]'s synthetic `Cancel` (the outgoing
+    /// Capture unwinds via [`crate::authoring::cancel_pod`]'s synthetic `Cancel` (the outgoing
     /// widget's state machine must not fire on a later `Up`); focus is a reflected
     /// pod flag, so clearing it is enough (no widget-internal blur to drive) — the
     /// same asymmetry the container reconcilers document.
     fn cancel_top(&mut self) {
         if let Some(top) = self.pages.last_mut() {
             if top.pod.is_active() {
-                crate::cancel_pod(&mut top.pod);
+                crate::authoring::cancel_pod(&mut top.pod);
                 top.pod.set_active(false);
             }
             if top.pod.is_focused() {
@@ -903,7 +903,7 @@ impl<State: 'static> NavigatorWidget<State> {
                     {
                         self.pending_results.push((callback, PopResult::empty()));
                     }
-                    crate::teardown_child(&stashed.view, &mut stashed.pod, ctx);
+                    crate::authoring::teardown_child(&stashed.view, &mut stashed.pod, ctx);
                 }
             }
         }
@@ -1077,7 +1077,7 @@ impl<State: 'static> NavigatorWidget<State> {
     /// Route an event to the top page via the shared single-child router.
     fn route_top(&mut self, ctx: &mut EventCtx<'_>, event: &InputEvent) -> EventResult {
         if let Some(top) = self.pages.last_mut() {
-            crate::route_event_single(&mut top.pod, ctx, event)
+            crate::authoring::route_event_single(&mut top.pod, ctx, event)
         } else {
             EventResult::Ignored
         }
@@ -1196,7 +1196,7 @@ impl<State: 'static> NavigatorWidget<State> {
                 // on settle (a pop reverses its transition).
                 self.start_transition(spec, true, Some(popped), ctx);
             } else {
-                crate::teardown_child(&popped.view, &mut popped.pod, ctx);
+                crate::authoring::teardown_child(&popped.view, &mut popped.pod, ctx);
             }
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
@@ -1255,7 +1255,7 @@ impl<State: 'static> NavigatorWidget<State> {
                     // (mirrors the capture/focus-clearing `cancel_top` contract).
                     self.edge.armed = false;
                     let view = builder();
-                    let pod = crate::build_child(&view, ctx);
+                    let pod = crate::authoring::build_child(&view, ctx);
                     self.pages.push(PageEntry {
                         builder,
                         view,
@@ -1292,7 +1292,7 @@ impl<State: 'static> NavigatorWidget<State> {
                     // (mirrors the `cancel_top` capture/focus-clearing contract).
                     self.edge.armed = false;
                     let view = builder();
-                    let pod = crate::build_child(&view, ctx);
+                    let pod = crate::authoring::build_child(&view, ctx);
                     if let Some(top) = self.pages.last_mut() {
                         let entry = PageEntry {
                             builder,
@@ -1312,7 +1312,7 @@ impl<State: 'static> NavigatorWidget<State> {
                             let old = std::mem::replace(top, entry);
                             self.start_transition(spec, false, Some(old), ctx);
                         } else {
-                            crate::teardown_child(&top.view, &mut top.pod, ctx);
+                            crate::authoring::teardown_child(&top.view, &mut top.pod, ctx);
                             *top = entry;
                         }
                     } else {
@@ -1662,7 +1662,7 @@ impl<State: 'static> View<State> for NavigatorView<State> {
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> NavigatorWidget<State> {
         let view = (self.initial)();
-        let pod = crate::build_child(&view, ctx);
+        let pod = crate::authoring::build_child(&view, ctx);
         let mut widget = NavigatorWidget {
             pages: vec![PageEntry {
                 builder: self.initial.clone(),
@@ -1730,7 +1730,7 @@ impl<State: 'static> View<State> for NavigatorView<State> {
         //    widget state, is preserved; only the view descriptor is rebuilt.
         for entry in &mut element.pages {
             let next_view = (entry.builder)();
-            flags |= crate::rebuild_child(&entry.view, &next_view, &mut entry.pod, ctx);
+            flags |= crate::authoring::rebuild_child(&entry.view, &next_view, &mut entry.pod, ctx);
             entry.view = next_view;
         }
         // Republish depth + back-interest at rebuild time — the rebuild-time
@@ -1745,7 +1745,7 @@ impl<State: 'static> View<State> for NavigatorView<State> {
         // Tear down a transition's retained (leaving) page first, then the stack.
         element.finalize_transition(ctx);
         for entry in &mut element.pages {
-            crate::teardown_child(&entry.view, &mut entry.pod, ctx);
+            crate::authoring::teardown_child(&entry.view, &mut entry.pod, ctx);
         }
     }
 }

@@ -243,7 +243,7 @@ impl Row {
 /// The retained widget for a [`GlyphListView`].
 pub struct GlyphListWidget {
     rows: Vec<Row>,
-    on_press: Option<crate::ErasedArgCallback<usize>>,
+    on_press: Option<crate::authoring::ErasedArgCallback<usize>>,
     /// The row currently pressed (armed by a `Down`), if any.
     pressed_row: Option<usize>,
     /// The row that captured the active gesture, if any.
@@ -256,7 +256,10 @@ impl<State: 'static> View<State> for GlyphListView<State> {
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> GlyphListWidget {
         GlyphListWidget {
             rows: self.items.iter().map(Row::from_item).collect(),
-            on_press: self.on_press.as_ref().map(crate::erase_callback_arg),
+            on_press: self
+                .on_press
+                .as_ref()
+                .map(crate::authoring::erase_callback_arg),
             pressed_row: None,
             captured_row: None,
         }
@@ -286,7 +289,10 @@ impl<State: 'static> View<State> for GlyphListView<State> {
         }
         // Always refresh the callback (a cheap closure swap, never a structural
         // change) so the newest app state is captured.
-        element.on_press = self.on_press.as_ref().map(crate::erase_callback_arg);
+        element.on_press = self
+            .on_press
+            .as_ref()
+            .map(crate::authoring::erase_callback_arg);
         flags
     }
 }

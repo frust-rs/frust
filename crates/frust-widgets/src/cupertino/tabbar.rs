@@ -49,7 +49,7 @@
 //! Each item is a small retained [`TabItemWidget`] (not `View`/[`AnyView`]-erased
 //! — there is only one concrete item type) wrapped in a [`ChildPod`] purely so
 //! the bar can route pointer/semantics through the shared
-//! [`crate::route_event`]/[`ChildPod::semantics_child`] helpers. Each item lays
+//! [`crate::authoring::route_event`]/[`ChildPod::semantics_child`] helpers. Each item lays
 //! out an optional caller-supplied `icon` (an opaque [`AnyView`] — tint is the
 //! caller's responsibility) above a `label` (a real child [`crate::text`]),
 //! and fires `on_select` on release-inside like [`crate::Button`].
@@ -86,8 +86,8 @@ use frust_theme::{Brightness, GlassFill, GlassMaterial, ShapeScale, Theme};
 use kurbo::{Point, Rect, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
 
+use crate::authoring::ThemeTextColor;
 use crate::text;
-use crate::text::ThemeTextColor;
 
 /// Content height of the iOS tab bar, in logical px (source: Apple HIG — the
 /// standard tab bar content band is 49pt, excluding the home-indicator safe
@@ -328,7 +328,7 @@ pub fn CupertinoTabBar<State: 'static, F: Fn(&mut State, usize) + 'static>(
 fn item_on_select<State: 'static>(
     on_select: &OnSelect<State>,
     idx: usize,
-) -> crate::ErasedCallback {
+) -> crate::authoring::ErasedCallback {
     let callback = on_select.clone();
     Box::new(move |ctx: &mut EventCtx| {
         let state = ctx.state_mut::<State>();
@@ -342,7 +342,7 @@ struct TabItemWidget {
     label: ChildPod,
     label_text: String,
     selected: bool,
-    on_select: crate::ErasedCallback,
+    on_select: crate::authoring::ErasedCallback,
     /// Armed by a `Down`, cleared on `Up`/`Cancel` — the fire-on-up-inside
     /// contract [`crate::button`] uses.
     captured: bool,
@@ -357,8 +357,11 @@ fn build_item<State: 'static>(
     ctx: &mut BuildCtx<'_>,
 ) -> ChildPod {
     let label_view = label_view::<State>(item.label.clone(), selected);
-    let icon = item.icon.as_ref().map(|icon| crate::build_child(icon, ctx));
-    let label = crate::build_child(&label_view, ctx);
+    let icon = item
+        .icon
+        .as_ref()
+        .map(|icon| crate::authoring::build_child(icon, ctx));
+    let label = crate::authoring::build_child(&label_view, ctx);
     let widget = TabItemWidget {
         icon,
         label,
@@ -606,7 +609,7 @@ impl<State: 'static> View<State> for CupertinoTabBarView<State> {
 
             match (&prev_item.icon, &next_item.icon) {
                 (Some(p), Some(n)) => {
-                    flags |= crate::rebuild_child(
+                    flags |= crate::authoring::rebuild_child(
                         p,
                         n,
                         widget.icon.as_mut().expect("icon pod present"),
@@ -614,12 +617,12 @@ impl<State: 'static> View<State> for CupertinoTabBarView<State> {
                     );
                 }
                 (None, Some(n)) => {
-                    widget.icon = Some(crate::build_child(n, ctx));
+                    widget.icon = Some(crate::authoring::build_child(n, ctx));
                     flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
                 }
                 (Some(p), None) => {
                     if let Some(mut old) = widget.icon.take() {
-                        crate::teardown_child(p, &mut old, ctx);
+                        crate::authoring::teardown_child(p, &mut old, ctx);
                     }
                     flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
                 }
@@ -631,7 +634,8 @@ impl<State: 'static> View<State> for CupertinoTabBarView<State> {
                 widget.selected = now_selected;
                 let prev_view = label_view::<State>(prev_item.label.clone(), was_selected);
                 let next_view = label_view::<State>(next_item.label.clone(), now_selected);
-                flags |= crate::rebuild_child(&prev_view, &next_view, &mut widget.label, ctx);
+                flags |=
+                    crate::authoring::rebuild_child(&prev_view, &next_view, &mut widget.label, ctx);
                 flags |= ChangeFlags::PAINT;
             }
 
@@ -664,10 +668,10 @@ impl<State: 'static> View<State> for CupertinoTabBarView<State> {
                     .downcast_mut::<TabItemWidget>()
                     .expect("tab item pod holds a TabItemWidget");
                 if let (Some(icon_view), Some(icon_pod)) = (&item.icon, widget.icon.as_mut()) {
-                    crate::teardown_child(icon_view, icon_pod, ctx);
+                    crate::authoring::teardown_child(icon_view, icon_pod, ctx);
                 }
                 let label_view = label_view::<State>(item.label.clone(), idx == prev.selected);
-                crate::teardown_child(&label_view, &mut widget.label, ctx);
+                crate::authoring::teardown_child(&label_view, &mut widget.label, ctx);
             }
             element.items.truncate(common);
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
@@ -683,10 +687,10 @@ impl<State: 'static> View<State> for CupertinoTabBarView<State> {
                 .downcast_mut::<TabItemWidget>()
                 .expect("tab item pod holds a TabItemWidget");
             if let (Some(icon_view), Some(icon_pod)) = (&item.icon, widget.icon.as_mut()) {
-                crate::teardown_child(icon_view, icon_pod, ctx);
+                crate::authoring::teardown_child(icon_view, icon_pod, ctx);
             }
             let label_view = label_view::<State>(item.label.clone(), i == self.selected);
-            crate::teardown_child(&label_view, &mut widget.label, ctx);
+            crate::authoring::teardown_child(&label_view, &mut widget.label, ctx);
         }
     }
 }
@@ -824,7 +828,7 @@ impl Widget for CupertinoTabBarWidget {
             }
             return EventResult::Handled;
         }
-        crate::route_event(&mut self.items, ctx, event)
+        crate::authoring::route_event(&mut self.items, ctx, event)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {

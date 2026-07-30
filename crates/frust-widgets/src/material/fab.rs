@@ -14,7 +14,7 @@
 //!
 //! Container/content roles are `primaryContainer`/`onPrimaryContainer`,
 //! resolved via [`resolve_colors`]. The extended FAB's visible label is
-//! tagged [`crate::text::ThemeTextColor::OnPrimaryContainer`] (a text.rs role
+//! tagged [`crate::authoring::ThemeTextColor::OnPrimaryContainer`] (a text.rs role
 //! addition mirroring the `OnSurfaceVariant` role — see
 //! `docs/CODE_STANDARDS.md`'s explicit/theme/fallback precedence).
 //!
@@ -57,7 +57,8 @@ use kurbo::{Point, Rect, Size};
 use peniko::Color;
 
 use super::state_layer::StateLayer;
-use crate::text::{self, ThemeTextColor};
+use crate::authoring::ThemeTextColor;
+use crate::text;
 
 /// Container size for the small FAB, in logical px (androidx
 /// `FabSmallTokens.ContainerWidth` — not deprecated).
@@ -317,18 +318,21 @@ pub struct FabWidget {
     pressed: bool,
     captured: bool,
     state_layer: StateLayer,
-    on_press: crate::ErasedCallback,
+    on_press: crate::authoring::ErasedCallback,
 }
 
 impl<State: 'static> View<State> for FabView<State> {
     type Element = FabWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> FabWidget {
-        let icon = self.icon.as_ref().map(|icon| crate::build_child(icon, ctx));
+        let icon = self
+            .icon
+            .as_ref()
+            .map(|icon| crate::authoring::build_child(icon, ctx));
         let visible_label = if self.extended {
-            self.label
-                .as_ref()
-                .map(|label| crate::build_child(&label_view::<State>(label.clone()), ctx))
+            self.label.as_ref().map(|label| {
+                crate::authoring::build_child(&label_view::<State>(label.clone()), ctx)
+            })
         } else {
             None
         };
@@ -341,12 +345,12 @@ impl<State: 'static> View<State> for FabView<State> {
             pressed: false,
             captured: false,
             state_layer: StateLayer::new(),
-            on_press: crate::erase_callback(&self.on_press),
+            on_press: crate::authoring::erase_callback(&self.on_press),
         }
     }
 
     fn rebuild(&self, prev: &Self, element: &mut FabWidget, ctx: &mut BuildCtx<'_>) -> ChangeFlags {
-        element.on_press = crate::erase_callback(&self.on_press);
+        element.on_press = crate::authoring::erase_callback(&self.on_press);
         let mut flags = ChangeFlags::NONE;
 
         if prev.size != self.size {
@@ -362,15 +366,15 @@ impl<State: 'static> View<State> for FabView<State> {
             (None, None) => {}
             (Some(p), Some(n)) => {
                 let pod = element.icon.as_mut().expect("icon pod present");
-                flags |= crate::rebuild_child(p, n, pod, ctx);
+                flags |= crate::authoring::rebuild_child(p, n, pod, ctx);
             }
             (None, Some(n)) => {
-                element.icon = Some(crate::build_child(n, ctx));
+                element.icon = Some(crate::authoring::build_child(n, ctx));
                 flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
             }
             (Some(p), None) => {
                 let mut pod = element.icon.take().expect("icon pod present");
-                crate::teardown_child(p, &mut pod, ctx);
+                crate::authoring::teardown_child(p, &mut pod, ctx);
                 flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
             }
         }
@@ -384,24 +388,28 @@ impl<State: 'static> View<State> for FabView<State> {
                     if let Some(pod) = element.visible_label.as_mut() {
                         let prev_view = label_view::<State>(prev.label.clone().unwrap_or_default());
                         let next_view = label_view::<State>(n.clone());
-                        flags |= crate::rebuild_child(&prev_view, &next_view, pod, ctx);
+                        flags |= crate::authoring::rebuild_child(&prev_view, &next_view, pod, ctx);
                     } else {
-                        element.visible_label =
-                            Some(crate::build_child(&label_view::<State>(n.clone()), ctx));
+                        element.visible_label = Some(crate::authoring::build_child(
+                            &label_view::<State>(n.clone()),
+                            ctx,
+                        ));
                         flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
                     }
                 }
                 (None, Some(n)) => {
                     element.label_text = Some(n.clone());
-                    element.visible_label =
-                        Some(crate::build_child(&label_view::<State>(n.clone()), ctx));
+                    element.visible_label = Some(crate::authoring::build_child(
+                        &label_view::<State>(n.clone()),
+                        ctx,
+                    ));
                     flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
                 }
                 (Some(_), None) => {
                     element.label_text = None;
                     if let Some(mut pod) = element.visible_label.take() {
                         let prev_view = label_view::<State>(prev.label.clone().unwrap_or_default());
-                        crate::teardown_child(&prev_view, &mut pod, ctx);
+                        crate::authoring::teardown_child(&prev_view, &mut pod, ctx);
                     }
                     flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
                 }
@@ -418,13 +426,13 @@ impl<State: 'static> View<State> for FabView<State> {
 
     fn teardown(&self, element: &mut FabWidget, ctx: &mut BuildCtx<'_>) {
         if let (Some(icon_view), Some(pod)) = (&self.icon, element.icon.as_mut()) {
-            crate::teardown_child(icon_view, pod, ctx);
+            crate::authoring::teardown_child(icon_view, pod, ctx);
         }
         if self.extended
             && let (Some(label), Some(pod)) = (&self.label, element.visible_label.as_mut())
         {
             let label_view = label_view::<State>(label.clone());
-            crate::teardown_child(&label_view, pod, ctx);
+            crate::authoring::teardown_child(&label_view, pod, ctx);
         }
     }
 }

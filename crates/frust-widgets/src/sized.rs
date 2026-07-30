@@ -56,7 +56,7 @@ impl<State: 'static> View<State> for SizedBoxView<State> {
             child: self
                 .child
                 .as_ref()
-                .map(|view| crate::build_child(view, ctx)),
+                .map(|view| crate::authoring::build_child(view, ctx)),
         }
     }
 
@@ -74,14 +74,14 @@ impl<State: 'static> View<State> for SizedBoxView<State> {
         }
         match (&prev.child, &self.child, &mut element.child) {
             (Some(prev_view), Some(next_view), Some(pod)) => {
-                flags |= crate::rebuild_child(prev_view, next_view, pod, ctx);
+                flags |= crate::authoring::rebuild_child(prev_view, next_view, pod, ctx);
             }
             (None, Some(next_view), _) => {
-                element.child = Some(crate::build_child(next_view, ctx));
+                element.child = Some(crate::authoring::build_child(next_view, ctx));
                 flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
             }
             (Some(prev_view), None, Some(pod)) => {
-                crate::teardown_child(prev_view, pod, ctx);
+                crate::authoring::teardown_child(prev_view, pod, ctx);
                 element.child = None;
                 flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
             }
@@ -92,7 +92,7 @@ impl<State: 'static> View<State> for SizedBoxView<State> {
 
     fn teardown(&self, element: &mut SizedBoxWidget, ctx: &mut BuildCtx<'_>) {
         if let (Some(view), Some(pod)) = (&self.child, &mut element.child) {
-            crate::teardown_child(view, pod, ctx);
+            crate::authoring::teardown_child(view, pod, ctx);
         }
     }
 }
@@ -143,7 +143,7 @@ impl Widget for SizedBoxWidget {
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         match &mut self.child {
-            Some(pod) => crate::route_event_single(pod, ctx, event),
+            Some(pod) => crate::authoring::route_event_single(pod, ctx, event),
             None => EventResult::Ignored,
         }
     }

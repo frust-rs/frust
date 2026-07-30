@@ -178,7 +178,7 @@ fn scale_about(pivot: Point, scale: f64) -> Affine {
         * Affine::translate((-pivot.x, -pivot.y))
 }
 
-/// A view-held, typed press callback (erased to [`crate::ErasedCallback`] on build).
+/// A view-held, typed press callback (erased to [`crate::authoring::ErasedCallback`] on build).
 type OnPress<State> = Rc<dyn Fn(&mut State)>;
 
 /// Visual style variant for [`Button`]. Additive: the default
@@ -470,7 +470,7 @@ pub struct ButtonWidget {
     /// desktop shell on every cursor motion) never latches `pressed` or fires
     /// the callback without a preceding press.
     captured: bool,
-    on_press: crate::ErasedCallback,
+    on_press: crate::authoring::ErasedCallback,
     style: ButtonStyle,
     small: bool,
     loading: bool,
@@ -535,11 +535,11 @@ impl<State: 'static> View<State> for ButtonView<State> {
             .with_curve(Curve::Linear);
         spinner.repeat();
         ButtonWidget {
-            label: crate::build_child(&label_view, ctx),
+            label: crate::authoring::build_child(&label_view, ctx),
             label_text: self.label.clone(),
             pressed: false,
             captured: false,
-            on_press: crate::erase_callback(&self.on_press),
+            on_press: crate::authoring::erase_callback(&self.on_press),
             style: self.style,
             small: self.small,
             loading: self.loading,
@@ -555,13 +555,14 @@ impl<State: 'static> View<State> for ButtonView<State> {
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         // Closures are not comparable — always reinstall the adapter.
-        element.on_press = crate::erase_callback(&self.on_press);
+        element.on_press = crate::authoring::erase_callback(&self.on_press);
         let mut flags = ChangeFlags::NONE;
         if prev.label != self.label || prev.style != self.style {
             element.label_text = self.label.clone();
             let prev_view = label_view::<State>(prev.label.clone(), prev.style);
             let next_view = label_view::<State>(self.label.clone(), self.style);
-            flags |= crate::rebuild_child(&prev_view, &next_view, &mut element.label, ctx);
+            flags |=
+                crate::authoring::rebuild_child(&prev_view, &next_view, &mut element.label, ctx);
         }
         if prev.style != self.style {
             element.style = self.style;
@@ -589,7 +590,7 @@ impl<State: 'static> View<State> for ButtonView<State> {
 
     fn teardown(&self, element: &mut ButtonWidget, ctx: &mut BuildCtx<'_>) {
         let label_view = label_view::<State>(self.label.clone(), self.style);
-        crate::teardown_child(&label_view, &mut element.label, ctx);
+        crate::authoring::teardown_child(&label_view, &mut element.label, ctx);
     }
 }
 

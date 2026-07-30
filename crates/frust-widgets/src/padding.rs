@@ -83,7 +83,7 @@ impl<State: 'static> View<State> for PaddingView<State> {
     fn build(&self, ctx: &mut BuildCtx<'_>) -> PaddingWidget {
         PaddingWidget {
             insets: self.insets,
-            child: crate::build_child(&self.child, ctx),
+            child: crate::authoring::build_child(&self.child, ctx),
         }
     }
 
@@ -98,12 +98,12 @@ impl<State: 'static> View<State> for PaddingView<State> {
             element.insets = self.insets;
             flags |= ChangeFlags::LAYOUT;
         }
-        flags |= crate::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
+        flags |= crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
         flags
     }
 
     fn teardown(&self, element: &mut PaddingWidget, ctx: &mut BuildCtx<'_>) {
-        crate::teardown_child(&self.child, &mut element.child, ctx);
+        crate::authoring::teardown_child(&self.child, &mut element.child, ctx);
     }
 }
 
@@ -134,7 +134,7 @@ impl Widget for PaddingWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        crate::route_event_single(&mut self.child, ctx, event)
+        crate::authoring::route_event_single(&mut self.child, ctx, event)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
