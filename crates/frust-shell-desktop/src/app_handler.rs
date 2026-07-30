@@ -53,7 +53,7 @@ use frust_shell_common::{
     render_thread_enabled,
 };
 use frust_text::TextContext;
-use frust_theme::{Brightness, DesignLanguage, Theme};
+use frust_theme::{Brightness, Theme};
 use kurbo::{Affine, Point, Size};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
@@ -198,11 +198,11 @@ where
         fatal: None,
         epoch,
         // The seeded base theme (`base_theme`: a design system's
-        // `set_default_theme`, else the built-in fallback), carrying that
-        // base's own brightness only until `resumed` seeds the window's real
-        // preference (`brightness_from_winit` there overwrites `brightness`
-        // unconditionally, so the Glyph fallback's dark-first default never
-        // leaks into a light-preference platform).
+        // `set_default_theme`, else the built-in `Theme::neutral()` fallback),
+        // carrying that base's own brightness only until `resumed` seeds the
+        // window's real preference (`brightness_from_winit` there overwrites
+        // `brightness` unconditionally, so a seeded base's own starting
+        // brightness never leaks into a light-preference platform).
         theme: base_theme(default_theme()),
         theme_seeded: false,
         theme_override: ThemeOverrideWatcher::new(),
@@ -219,14 +219,6 @@ where
     // per-frame poll in `RedrawRequested` picks up any later registration.
     handler.font_registry.drain_into(&mut handler.text_ctx);
 
-    // Bundled Glyph font auto-registration: when the base theme just
-    // constructed above is a Glyph one (the built-in fallback always is; a
-    // seeded default may not be), register the bundled Space Mono / IBM Plex
-    // Mono faces directly into the shell's `TextContext` before the first
-    // layout — same pre-first-layout timing as the drain above, so the first
-    // frame shapes with Glyph fonts with no relayout needed.
-    register_glyph_fonts_if_active(&handler.theme, &mut handler.text_ctx);
-
     event_loop.run_app(&mut handler)?;
     finish(handler.fatal)
 }
@@ -234,24 +226,26 @@ where
 /// The base [`Theme`] this shell seeds itself from: the design-system-supplied
 /// default (`frust_shell_common::set_default_theme`, read back through
 /// [`default_theme`]) when a plugin seeded one, else the shell's own built-in
-/// fallback.
+/// [`Theme::neutral`] fallback.
 ///
 /// A seeded default supplies only the *starting point*: unlike an app-forced
 /// override (`set_app_theme`) it does not pin brightness — every call site
 /// below still derives `brightness` from the platform's own preference against
 /// this base, so a design-system default keeps following system dark mode.
 ///
-/// **Phase B**: the fallback below becomes `Theme::neutral()` once the Glyph
-/// design system ships as a plugin that seeds itself through
-/// `set_default_theme`; grep `Phase B` for the two mobile shells' twins of this
-/// function.
+/// The fallback is deliberately the design-language-free
+/// [`Theme::neutral`] — system fonts, no bundled font bytes: a shell names no
+/// design system of its own, so an app that installs none gets the neutral
+/// floor rather than someone's brand. A design system supplies both halves
+/// itself (its base theme through `set_default_theme`, its font bytes through
+/// `frust_shell_common::font_registry::register_app_fonts`).
 ///
 /// Takes the slot's value as an argument rather than reading the process-global
 /// itself, so the fallback ladder is unit-testable without touching a
 /// process-wide slot that has no reset; every call site passes
 /// [`default_theme()`](default_theme).
 fn base_theme(seeded: Option<Theme>) -> Theme {
-    seeded.unwrap_or_else(Theme::glyph_baseline)
+    seeded.unwrap_or_else(Theme::neutral)
 }
 
 /// The theme a cleared app-theme override reverts to: the seeded base
@@ -261,8 +255,8 @@ fn base_theme(seeded: Option<Theme>) -> Theme {
 ///
 /// Extracted so the `clear_app_theme` arm below and its unit tests run one
 /// implementation: a test that recomputed this in its own body would stay green
-/// if the arm regressed to an unconditional `Theme::glyph_baseline()` — the
-/// exact regression this ladder exists to prevent.
+/// if the arm regressed to an unconditional `Theme::neutral()` — the exact
+/// regression this ladder exists to prevent.
 fn reverted_theme(seeded: Option<Theme>, platform: Brightness) -> Theme {
     let mut theme = base_theme(seeded);
     theme.brightness = platform;
@@ -311,27 +305,6 @@ fn theme_after_override_poll(
 fn follow_platform_brightness(theme: &mut Theme, override_active: bool, platform: Brightness) {
     theme.brightness =
         effective_brightness_for_platform_change(override_active, theme.brightness, platform);
-}
-
-/// Bundled Glyph font auto-registration: registers
-/// `frust_theme::glyph::font_data()`'s bundled Space Mono / IBM Plex Mono
-/// faces into `cx` when `theme`'s [`DesignLanguage`] is [`DesignLanguage::Glyph`]
-/// — a no-op otherwise (an app whose default theme is Material/Cupertino gets
-/// no bundled Glyph fonts registered), and also a no-op when the
-/// `glyph-fonts` feature is off (`font_data()` returns an empty slice then).
-/// Gated on the theme passed in at the call site (the just-constructed
-/// default) — a later `set_app_theme` swap away from Glyph does not
-/// un-register these faces (harmless; an unused registered family costs
-/// nothing at shape time, see the task's Details).
-///
-/// Pulled out as a free function so the gating + registration is
-/// unit-testable without a live window.
-fn register_glyph_fonts_if_active(theme: &Theme, cx: &mut TextContext) {
-    if theme.design_language == DesignLanguage::Glyph {
-        for bytes in frust_theme::glyph::font_data() {
-            let _ = cx.register_fonts(bytes.to_vec());
-        }
-    }
 }
 
 /// Turns a post-loop `ShellHandler::fatal` into the `run_desktop` result.
@@ -1285,15 +1258,13 @@ mod tests {
         ComposeLatch, ElementState, Ime, Tree, TreeId, WinitKey, WinitNamedKey, WinitTheme,
         base_theme, brightness_from_winit, build_tree_update, default_theme, finish,
         follow_platform_brightness, map_key_event, map_modifiers, map_named_key,
-        physical_to_logical, register_glyph_fonts_if_active, theme_after_override_poll,
+        physical_to_logical, theme_after_override_poll,
     };
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{Node, NodeId, Role};
     use frust_core::event::{ImeEvent, Key, KeyEvent, Modifiers, NamedKey};
-    use frust_text::{FontFamily, TextContext, TextStyle};
-    use frust_theme::{Brightness, DesignLanguage, Theme};
+    use frust_theme::{Brightness, Theme};
     use kurbo::Point;
-    use peniko::Color;
     use winit::keyboard::ModifiersState;
 
     // --- brightness_from_winit ---
@@ -1665,98 +1636,43 @@ mod tests {
         assert_eq!(tree_update.focus, root_id);
     }
 
-    // --- register_glyph_fonts_if_active ---
-
-    /// Extracts the raw font-file bytes a shaped `GlyphRun` resolved against,
-    /// mirroring `frust-text/tests/register_fonts.rs`'s helper of the same
-    /// shape, so a test can assert *which* face actually shaped the text.
-    fn shaped_font_bytes(cx: &mut TextContext, text: &str, sty: &TextStyle) -> Vec<u8> {
-        let layout = cx.layout(text, sty, None);
-        let runs = layout.to_scene_runs(Point::ORIGIN);
-        let run = runs.first().expect("expected at least one glyph run");
-        run.font.font().data.as_ref().to_vec()
-    }
-
-    #[test]
-    fn glyph_theme_auto_registers_and_shapes_space_mono_with_no_explicit_call() {
-        // Post-init (no `frust::register_app_fonts`
-        // call anywhere in this test), a Glyph-themed shell resolves "Space
-        // Mono" to the bundled face, not a SystemUi fallback.
-        let mut cx = TextContext::new();
-        register_glyph_fonts_if_active(&Theme::glyph_baseline(), &mut cx);
-
-        let sty = TextStyle {
-            family: FontFamily::named("Space Mono"),
-            ..TextStyle::new(16.0, Color::BLACK)
-        };
-        let glyph_bytes = shaped_font_bytes(&mut cx, "frust", &sty);
-
-        // A pristine context (no auto-registration) shaping the same request
-        // falls back to whatever the host resolves "Space Mono" to via the
-        // system font database (almost certainly not installed) — compare
-        // against the exact bundled bytes instead of a fallback-inequality
-        // check, since a real system match would make inequality flaky.
-        let bundled = frust_theme::glyph::font_data();
-        assert!(
-            !bundled.is_empty(),
-            "expected the default `glyph-fonts` feature to ship bundled bytes"
-        );
-        assert!(
-            bundled.iter().any(|face| face.to_vec() == glyph_bytes),
-            "expected \"Space Mono\" to resolve to one of the bundled Glyph \
-             font faces with no explicit `register_app_fonts` call"
-        );
-    }
-
-    #[test]
-    fn non_glyph_theme_does_not_auto_register_bundled_fonts() {
-        let mut cx = TextContext::new();
-        let mut m3 = Theme::m3_baseline();
-        m3.design_language = DesignLanguage::Material3;
-        register_glyph_fonts_if_active(&m3, &mut cx);
-
-        let sty = TextStyle {
-            family: FontFamily::named("Space Mono"),
-            ..TextStyle::new(16.0, Color::BLACK)
-        };
-        let bytes = shaped_font_bytes(&mut cx, "frust", &sty);
-
-        let bundled = frust_theme::glyph::font_data();
-        assert!(
-            bundled.iter().all(|face| face.to_vec() != bytes),
-            "a non-Glyph default theme must not auto-register the bundled \
-             Glyph fonts"
-        );
-    }
-
     // --- the default-theme precedence ladder (seed / appearance / override) ---
     //
-    // Every assertion below drives the SAME functions the production seed
-    // (`run_desktop`'s `theme:` field), appearance (`WindowEvent::ThemeChanged`)
-    // and override-poll (`RedrawRequested`) arms call. That sharing is the whole
+    // Every assertion below drives the SAME ladder helpers (`base_theme`,
+    // `reverted_theme` via `theme_after_override_poll`,
+    // `follow_platform_brightness`) the production seed (`run_desktop`'s
+    // `theme:` field), appearance (`WindowEvent::ThemeChanged`) and
+    // override-poll (`RedrawRequested`) arms call. That sharing is the whole
     // point: a test that recomputed the ladder in its own body would stay green
-    // if one of those arms regressed to an unconditional
-    // `Theme::glyph_baseline()`. `crates/frust/tests/theme_ladder_conformance.rs`
-    // pins the other half — that the arms still call these, and that the two
-    // mobile shells' copies stay identical to the ones exercised here.
+    // if one of those arms regressed to an unconditional `Theme::neutral()`.
+    //
+    // What it does NOT cover: how a production arm *composes* those helpers —
+    // `base_theme(default_theme())` at the seed site, versus a
+    // default-discarding `base_theme(None)`. Both type-check and both drive the
+    // same helper, so no assertion here can tell them apart.
+    // `crates/frust/tests/theme_ladder_conformance.rs` pins that other half
+    // instead: that each arm still calls these helpers, that the seed site
+    // still passes `default_theme()` into `base_theme`, and that the two mobile
+    // shells' helper copies stay identical to the ones exercised here.
 
     #[test]
     fn an_unseeded_shell_starts_on_the_builtin_fallback_at_the_platform_brightness() {
         // Behavior 1. Nothing seeded: the seed site lands on the shell's own
-        // built-in theme, byte-identical to the hardcoded
-        // `Theme::glyph_baseline()` seed this seam replaced...
+        // built-in, design-language-free floor...
         let mut theme = base_theme(None);
-        assert_eq!(theme, Theme::glyph_baseline());
+        assert_eq!(theme, Theme::neutral());
 
         // ...and the platform's first appearance report drives brightness
-        // (`resumed`'s seed, then every `ThemeChanged`), so the Glyph
-        // fallback's dark-first default never leaks onto a light-preference
-        // platform.
+        // (`resumed`'s seed, then every `ThemeChanged`), so the fallback's own
+        // starting brightness never leaks onto a dark-preference platform.
         follow_platform_brightness(&mut theme, false, brightness_from_winit(None));
-        assert_eq!(
-            theme,
-            Theme::glyph_baseline().with_brightness(Brightness::Light)
+        assert_eq!(theme, Theme::neutral().with_brightness(Brightness::Light));
+        follow_platform_brightness(
+            &mut theme,
+            false,
+            brightness_from_winit(Some(WinitTheme::Dark)),
         );
+        assert_eq!(theme, Theme::neutral().with_brightness(Brightness::Dark));
     }
 
     #[test]
@@ -1765,10 +1681,8 @@ mod tests {
         let seeded = Theme::m3_baseline();
         let mut theme = base_theme(Some(seeded.clone()));
         assert_eq!(theme, seeded);
-        assert_ne!(
-            theme.design_language,
-            Theme::glyph_baseline().design_language
-        );
+        // ...in place of the built-in floor, not layered over it.
+        assert_ne!(theme, Theme::neutral());
 
         // ...and unlike an app-forced override it does NOT pin brightness: the
         // appearance arm keeps flipping the seeded base in place, both ways.
@@ -1826,17 +1740,17 @@ mod tests {
             Some((seeded.with_brightness(Brightness::Dark), false))
         );
         // Spelled out, since this is the arm the ladder exists for: a seeded
-        // shell must NOT revert to the built-in Glyph fallback.
+        // shell must NOT revert to the built-in fallback.
         assert_ne!(
-            decided.map(|(theme, _)| theme.design_language),
-            Some(Theme::glyph_baseline().design_language)
+            decided.map(|(theme, _)| theme),
+            Some(Theme::neutral().with_brightness(Brightness::Dark))
         );
     }
 
     #[test]
     fn clearing_an_override_with_nothing_seeded_reverts_to_the_builtin() {
-        // Behavior 5. The same arm with an empty slot: the pre-seam behavior,
-        // unchanged — the built-in fallback at the platform's brightness.
+        // Behavior 5. The same arm with an empty slot: the built-in fallback at
+        // the platform's brightness.
         let decided = theme_after_override_poll(
             Some(None),
             || None,
@@ -1844,10 +1758,7 @@ mod tests {
         );
         assert_eq!(
             decided,
-            Some((
-                Theme::glyph_baseline().with_brightness(Brightness::Dark),
-                false
-            ))
+            Some((Theme::neutral().with_brightness(Brightness::Dark), false))
         );
     }
 
@@ -1889,7 +1800,12 @@ mod tests {
         let seeded = Theme::cupertino_baseline();
         frust_shell_common::set_default_theme(seeded.clone());
 
-        // The seed site (`run_desktop`'s `theme:` field), verbatim...
+        // The same composition the seed site (`run_desktop`'s `theme:` field)
+        // performs — re-typed here, not shared with it, so this asserts only
+        // that the composition resolves the seeded default, never that the
+        // production site still spells it this way. That second half is
+        // `theme_ladder_conformance.rs`'s
+        // `every_shell_seeds_base_theme_from_the_default_slot` source scan.
         assert_eq!(base_theme(default_theme()), seeded);
         // ...and the revert arm, reading that same slot through the same
         // supplier the production arm passes.

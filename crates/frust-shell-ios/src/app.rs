@@ -58,7 +58,7 @@ use frust_shell_common::{
     publish_resolved_surface_mode, sanitize_scale,
 };
 use frust_text::TextContext;
-use frust_theme::{Brightness, DesignLanguage, Theme};
+use frust_theme::{Brightness, Theme};
 use kurbo::{Affine, Point, Size};
 use objc2::rc::autoreleasepool;
 
@@ -1004,17 +1004,19 @@ pub(crate) fn render_scene(
 /// (`frust_set_appearance` → [`IosAppHandle::platform_brightness`]) against
 /// this base, so a design-system default keeps following system dark mode.
 ///
-/// **Phase B**: the fallback below becomes `Theme::neutral()` once the Glyph
-/// design system ships as a plugin that seeds itself through
-/// `set_default_theme`; grep `Phase B` for the desktop and Android shells'
-/// twins of this function.
+/// The fallback is deliberately the design-language-free
+/// [`Theme::neutral`] — system fonts, no bundled font bytes: a shell names no
+/// design system of its own, so an app that installs none gets the neutral
+/// floor rather than someone's brand. A design system supplies both halves
+/// itself (its base theme through `set_default_theme`, its font bytes through
+/// `frust_shell_common::font_registry::register_app_fonts`).
 ///
 /// Takes the slot's value as an argument rather than reading the process-global
 /// itself, so the fallback ladder is unit-testable without touching a
 /// process-wide slot that has no reset; every call site passes
 /// [`default_theme()`](default_theme).
 fn base_theme(seeded: Option<Theme>) -> Theme {
-    seeded.unwrap_or_else(Theme::glyph_baseline)
+    seeded.unwrap_or_else(Theme::neutral)
 }
 
 /// The theme a cleared app-theme override reverts to: the seeded base
@@ -1026,7 +1028,7 @@ fn base_theme(seeded: Option<Theme>) -> Theme {
 /// Extracted so the `clear_app_theme` arm in [`IosAppHandle::frame`] and its
 /// unit tests run one implementation: a test that recomputed this in its own
 /// body would stay green if the arm regressed to an unconditional
-/// `Theme::glyph_baseline()` — the exact regression this ladder exists to
+/// `Theme::neutral()` — the exact regression this ladder exists to
 /// prevent. `crates/frust/tests/theme_ladder_conformance.rs` pins this body
 /// identical to the desktop shell's twin, whose unit tests DO run in a host
 /// `cargo test --workspace` (this module's cannot — see its own docs).
@@ -1142,8 +1144,9 @@ impl IosAppHandle {
     /// frame. No `unsafe` here — the surface creation happens at the FFI boundary.
     ///
     /// Seeds the base theme ([`base_theme`]: a design system's
-    /// `set_default_theme`, else the built-in Glyph fallback — dark-first per
-    /// `Theme::glyph_baseline`, until Swift's follow-up `frust_set_appearance`
+    /// `set_default_theme`, else the built-in [`Theme::neutral`] fallback,
+    /// carrying that base's own brightness until Swift's follow-up
+    /// `frust_set_appearance`
     /// reports the real preference; called synchronously right after
     /// `frust_init` returns, before the display link starts, so a
     /// light-preference device still ends up light before the first
@@ -1191,25 +1194,15 @@ impl IosAppHandle {
         font_registry.drain_into(&mut text_ctx);
 
         // The seeded base theme (`base_theme`: a design system's
-        // `set_default_theme`, else the built-in fallback), carrying that
-        // base's own brightness until Swift's follow-up `frust_set_appearance`
-        // overwrites it with the device's real preference.
+        // `set_default_theme`, else the built-in `Theme::neutral()` fallback),
+        // carrying that base's own brightness until Swift's follow-up
+        // `frust_set_appearance` overwrites it with the device's real
+        // preference. A design system that needs its own font bytes shaped from
+        // the first frame registers them through
+        // `frust_shell_common::font_registry::register_app_fonts`, which the
+        // construction-time drain above applies — the shell itself bundles no
+        // fonts.
         let theme = base_theme(default_theme());
-
-        // Bundled Glyph font auto-registration: when the base theme
-        // above is a Glyph one (the built-in fallback always is; a seeded
-        // default may not be), register the bundled Space Mono /
-        // IBM Plex Mono faces (`frust_theme::glyph::font_data()` — an empty
-        // slice, so a no-op, when the `glyph-fonts` feature is off) directly
-        // into `text_ctx` before the first rebuild — same pre-first-rebuild
-        // timing as the drain above, so the first frame shapes with Glyph
-        // fonts with no relayout needed. Gated on the *default* theme's
-        // design language, not re-checked on a later `set_app_theme` swap.
-        if theme.design_language == DesignLanguage::Glyph {
-            for bytes in frust_theme::glyph::font_data() {
-                let _ = text_ctx.register_fonts(bytes.to_vec());
-            }
-        }
 
         app.set_theme(Box::new(theme.clone()));
         // Thread the surface's RESOLVED translucency into the render root so
@@ -2275,34 +2268,35 @@ mod tests {
     use super::{base_theme, follow_platform_brightness, theme_after_override_poll};
     use frust_theme::{Brightness, Theme};
 
-    // Every assertion below drives the SAME functions the production seed
+    // Every assertion below drives the SAME ladder helpers the production seed
     // ([`IosAppHandle::new`]), appearance (`frust_set_appearance`) and
     // override-poll ([`IosAppHandle::frame`]) arms call — a test that
     // recomputed the ladder in its own body would stay green if one of those
-    // arms regressed to an unconditional `Theme::glyph_baseline()`.
+    // arms regressed to an unconditional `Theme::neutral()`. What no assertion
+    // here can see is how an arm *composes* those helpers (a seed site passing
+    // `None` instead of `default_theme()` drives the same `base_theme`).
     //
     // These do not run in a host `cargo test --workspace` (see this module's
     // own docs), so they are not this ladder's only guard:
     // `crates/frust/tests/theme_ladder_conformance.rs` pins each arm's call
-    // site AND pins these helpers' bodies identical to the desktop shell's,
-    // whose twin of every test below does run on the host.
+    // site — including the seed site's `base_theme(default_theme())` — AND pins
+    // these helpers' bodies identical to the desktop shell's, whose twin of
+    // every test below does run on the host.
 
     #[test]
     fn an_unseeded_shell_starts_on_the_builtin_fallback_at_the_platform_brightness() {
         // Behavior 1. Nothing seeded: the seed site lands on the shell's own
-        // built-in theme, byte-identical to the hardcoded
-        // `Theme::glyph_baseline()` seed this seam replaced...
+        // built-in, design-language-free floor...
         let mut theme = base_theme(None);
-        assert_eq!(theme, Theme::glyph_baseline());
+        assert_eq!(theme, Theme::neutral());
 
         // ...and Swift's follow-up `frust_set_appearance` drives brightness, so
-        // the Glyph fallback's dark-first default never leaks onto a
-        // light-preference device.
+        // the fallback's own starting brightness never leaks onto a
+        // dark-preference device.
         follow_platform_brightness(&mut theme, false, Brightness::Light);
-        assert_eq!(
-            theme,
-            Theme::glyph_baseline().with_brightness(Brightness::Light)
-        );
+        assert_eq!(theme, Theme::neutral().with_brightness(Brightness::Light));
+        follow_platform_brightness(&mut theme, false, Brightness::Dark);
+        assert_eq!(theme, Theme::neutral().with_brightness(Brightness::Dark));
     }
 
     #[test]
@@ -2311,10 +2305,8 @@ mod tests {
         let seeded = Theme::m3_baseline();
         let mut theme = base_theme(Some(seeded.clone()));
         assert_eq!(theme, seeded);
-        assert_ne!(
-            theme.design_language,
-            Theme::glyph_baseline().design_language
-        );
+        // ...in place of the built-in floor, not layered over it.
+        assert_ne!(theme, Theme::neutral());
 
         // ...and unlike an app-forced override it does NOT pin brightness: the
         // `set_appearance` arm keeps flipping the seeded base in place.
@@ -2361,24 +2353,21 @@ mod tests {
             Some((seeded.with_brightness(Brightness::Dark), false))
         );
         // Spelled out, since this is the arm the ladder exists for: a seeded
-        // shell must NOT revert to the built-in Glyph fallback.
+        // shell must NOT revert to the built-in fallback.
         assert_ne!(
-            decided.map(|(theme, _)| theme.design_language),
-            Some(Theme::glyph_baseline().design_language)
+            decided.map(|(theme, _)| theme),
+            Some(Theme::neutral().with_brightness(Brightness::Dark))
         );
     }
 
     #[test]
     fn clearing_an_override_with_nothing_seeded_reverts_to_the_builtin() {
-        // Behavior 5. The same arm with an empty slot: the pre-seam behavior,
-        // unchanged — the built-in fallback at the platform's brightness.
+        // Behavior 5. The same arm with an empty slot: the built-in fallback at
+        // the platform's brightness.
         let decided = theme_after_override_poll(Some(None), || None, || Brightness::Dark);
         assert_eq!(
             decided,
-            Some((
-                Theme::glyph_baseline().with_brightness(Brightness::Dark),
-                false
-            ))
+            Some((Theme::neutral().with_brightness(Brightness::Dark), false))
         );
     }
 

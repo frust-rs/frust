@@ -1,6 +1,6 @@
 //! Source-scan conformance test for the three shells' default-theme
 //! precedence ladder (`docs/ARCHITECTURE.md`'s Theme delivery): app override >
-//! design-system-seeded default > the shell's built-in `Theme::glyph_baseline()`
+//! design-system-seeded default > the shell's built-in `Theme::neutral()`
 //! fallback.
 //!
 //! # Why a source scan
@@ -20,16 +20,30 @@
 //!
 //! # What this checks
 //!
-//! 1. **No shell's production code calls `Theme::glyph_baseline()`.** The
+//! 1. **No shell's production code calls `Theme::neutral()`.** The
 //!    built-in fallback is reachable only through `base_theme`'s
-//!    `unwrap_or_else(Theme::glyph_baseline)`, so a seed or reset site that
-//!    reverts to an unconditional `Theme::glyph_baseline()` — silently
+//!    `unwrap_or_else(Theme::neutral)`, so a seed or reset site that
+//!    reverts to an unconditional `Theme::neutral()` — silently
 //!    discarding a design system's seeded default — fails here.
-//! 2. **Each shell's override-poll and appearance arms still route through the
+//! 2. **Each shell's seed site still reads the default slot**: exactly one
+//!    `base_theme(default_theme())` per shell. This is the hole the shells'
+//!    own unit tests structurally cannot see — they call `base_theme(None)`
+//!    and `base_theme(Some(..))` directly, so a *production* seed rewritten to
+//!    `base_theme(None)` (disabling `set_default_theme` outright, the whole
+//!    point of the `theme_default` seam) keeps every one of them green. Only
+//!    the desktop shell even has a seed-site test, and it re-types the
+//!    composition rather than sharing it with the arm.
+//! 3. **Each shell's override-poll and appearance arms still route through the
 //!    extracted helpers**, exactly once each: deleting the call and inlining
 //!    the ladder back into the arm fails here even if the helper itself is
 //!    left behind, unused.
-//! 3. **The three shells' ladder helpers are byte-identical** (modulo comments
+//! 4. **No shell names the Glyph design system.** A shell must compile with
+//!    `frust-theme`'s `glyph` feature off, so neither `Theme::glyph_baseline()`
+//!    nor `frust_theme::glyph::*` may appear in shell *code* — the Glyph
+//!    tokens and their bundled fonts arrive through the same
+//!    `set_default_theme` + `register_app_fonts` seams as any other design
+//!    system's. Prose mentions are fine (the scan strips comments).
+//! 5. **The three shells' ladder helpers are byte-identical** (modulo comments
 //!    and whitespace). The desktop copy is the one covered by real, host-run
 //!    unit tests (`frust-shell-desktop`'s `app_handler::tests`); this pins the
 //!    two mobile copies to it, so a divergence in a body no host test can
@@ -40,7 +54,10 @@
 //! A substring/line scan, not a parser — comment-only lines and trailing `//`
 //! comments are stripped, which is correct for this codebase because every
 //! call in scope sits on its own statement line and no helper body contains a
-//! string literal.
+//! string literal. Check 4 widens the same scan to a whole shell file
+//! (production plus test module), so a *string literal* there that happened to
+//! spell a banned name would count as code — a false positive with an obvious
+//! message, preferred over teaching this scan to lex Rust.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -153,7 +170,7 @@ fn helper_body(rel: &str, src: &str, name: &str) -> String {
 
 /// Check 1: the built-in fallback is reachable only through `base_theme`.
 ///
-/// `base_theme`'s own `seeded.unwrap_or_else(Theme::glyph_baseline)` passes the
+/// `base_theme`'s own `seeded.unwrap_or_else(Theme::neutral)` passes the
 /// constructor as a *value* (no parentheses), so this ban on the *call* form
 /// leaves the one sanctioned use alone while catching every seed/reset site
 /// that hardcodes the fallback and throws a design system's seeded default
@@ -163,10 +180,10 @@ fn no_shell_hardcodes_the_builtin_fallback_outside_base_theme() {
     for rel in SHELL_SOURCES {
         let contents = read_shell(rel);
         let production = production_region(rel, &contents);
-        let found = hits(&production, "Theme::glyph_baseline()");
+        let found = hits(&production, "Theme::neutral()");
         assert!(
             found.is_empty(),
-            "{rel} calls `Theme::glyph_baseline()` in production code ({} site(s)). The \
+            "{rel} calls `Theme::neutral()` in production code ({} site(s)). The \
              built-in fallback belongs behind `base_theme`'s `unwrap_or_else` alone — a \
              seed or reset site that constructs it directly ignores a design system's \
              `set_default_theme` (docs/ARCHITECTURE.md's Theme delivery):\n{}",
@@ -176,7 +193,42 @@ fn no_shell_hardcodes_the_builtin_fallback_outside_base_theme() {
     }
 }
 
-/// Check 2: the per-frame override poll really goes through the extracted
+/// Check 2: the seed site really reads the design-system default slot.
+///
+/// The gap this closes: every ladder unit test calls `base_theme` with a value
+/// it supplies itself, so none of them can observe what the *production* seed
+/// passes in. A seed rewritten to `base_theme(None)` still compiles, still
+/// drives the same helper, and still leaves the whole ladder suite green — while
+/// silently making `set_default_theme` a no-op at the one site it exists for.
+/// Exactly one occurrence is expected per shell: its single seed site
+/// (`run_desktop`'s `theme:` field, `AndroidAppHandle::new`,
+/// `IosAppHandle::new`).
+///
+/// The `clear_app_theme` reset arm is pinned separately — it passes
+/// `default_theme` as a *supplier* into `theme_after_override_poll` (check 3),
+/// deliberately lazily, so it does not spell this call form.
+#[test]
+fn every_shell_seeds_base_theme_from_the_default_slot() {
+    for rel in SHELL_SOURCES {
+        let contents = read_shell(rel);
+        let production = production_region(rel, &contents);
+        let found = hits(&production, "base_theme(default_theme())");
+        assert_eq!(
+            found.len(),
+            1,
+            "{rel} must contain exactly one `base_theme(default_theme())` occurrence in \
+             production code — the shell's single seed site. A seed that stops passing \
+             `default_theme()` (say `base_theme(None)`) disables `set_default_theme` \
+             entirely while every ladder unit test stays green, because those tests supply \
+             `base_theme`'s argument themselves (docs/ARCHITECTURE.md's Theme delivery); \
+             found {}:\n{}",
+            found.len(),
+            found.join("\n"),
+        );
+    }
+}
+
+/// Check 3: the per-frame override poll really goes through the extracted
 /// decision, in every shell.
 ///
 /// Two occurrences are expected per file — the `fn` definition and the single
@@ -201,7 +253,7 @@ fn every_shell_routes_its_override_poll_through_the_shared_decision() {
     }
 }
 
-/// Check 2b: the platform-appearance arm likewise.
+/// Check 3b: the platform-appearance arm likewise.
 #[test]
 fn every_shell_routes_its_appearance_change_through_the_shared_decision() {
     for rel in SHELL_SOURCES {
@@ -220,7 +272,44 @@ fn every_shell_routes_its_appearance_change_through_the_shared_decision() {
     }
 }
 
-/// Check 3: the three copies stay in lockstep, so the desktop shell's host-run
+/// Check 4: no shell names the Glyph design system, in production code OR in
+/// its own test module.
+///
+/// `frust-theme`'s Glyph token module sits behind its `glyph` feature, so a
+/// shell that spells `Theme::glyph_baseline()` or reaches into
+/// `frust_theme::glyph::*` stops compiling with that feature off. The mobile
+/// shells' test modules matter as much as their production code here: they are
+/// only type-checked by an explicit `--all-targets` cross-check
+/// (`docs/DEVELOPMENT.md`), so a stale reference there would otherwise sit
+/// undetected. The whole file is scanned for that reason, not just the
+/// production region.
+///
+/// Comment-stripped, so prose may still discuss Glyph (this repo's shells carry
+/// incidental "glyph outlines"/"sharp glyphs" text-rendering comments that have
+/// nothing to do with the design system).
+#[test]
+fn no_shell_names_the_glyph_design_system() {
+    const GLYPH_NEEDLES: &[&str] = &["glyph_baseline", "frust_theme::glyph", "theme::glyph::"];
+    for rel in SHELL_SOURCES {
+        let contents = read_shell(rel);
+        for needle in GLYPH_NEEDLES {
+            let found = hits(&contents, needle);
+            assert!(
+                found.is_empty(),
+                "{rel} names `{needle}` in code ({} site(s)). No shell may depend on the \
+                 Glyph design system: its tokens live behind `frust-theme`'s `glyph` \
+                 feature, and a shell must compile with that feature off (the built-in \
+                 fallback is `Theme::neutral()`). A design system reaches a shell through \
+                 `set_default_theme` + `register_app_fonts`, never the other way \
+                 round:\n{}",
+                found.len(),
+                found.join("\n"),
+            );
+        }
+    }
+}
+
+/// Check 5: the three copies stay in lockstep, so the desktop shell's host-run
 /// unit tests transitively cover the mobile arms.
 #[test]
 fn the_three_shells_ladder_helpers_are_identical() {
@@ -252,11 +341,11 @@ fn the_three_shells_ladder_helpers_are_identical() {
 #[test]
 fn the_comment_stripper_sees_code_and_ignores_prose() {
     let planted = "\
-// prose about Theme::glyph_baseline() in a doc comment
-let a = Theme::glyph_baseline(); // a real call with a trailing comment
-    // an indented comment-only line mentioning Theme::glyph_baseline()
+// prose about Theme::neutral() in a doc comment
+let a = Theme::neutral(); // a real call with a trailing comment
+    // an indented comment-only line mentioning Theme::neutral()
 ";
-    let found = hits(planted, "Theme::glyph_baseline()");
+    let found = hits(planted, "Theme::neutral()");
     assert_eq!(
         found.len(),
         1,
