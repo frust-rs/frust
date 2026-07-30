@@ -37,18 +37,14 @@
     `frust_camera_session_handle`'s raw-pointer C export (retain contract **+1** — a +0
     borrow proved unhonourable across the FFI boundary).
   - `frust-native-widgets`'s Android backend — cached `JMethodID` + `call_method_unchecked`
-    for the hot per-frame property setters (colour, checked, progress, enabled, text, image
-    bitmap), confined to one `# Safety`-documented helper (`call_void_cached`) in
-    `plugins/native-widgets/src/controls/mod.rs`'s `platform` submodule, with a `# Safety`
-    note at each call site pairing the cached id to its exact class and JNI signature. Cold
-    setters (tints, scale type, text size, background, content description) stay on the
-    checked, `jni_sig!`-typed `NativeCtx::call_void` path. Its Apple backend has its own
-    zone: objc2 marks a generated setter `unsafe` whenever the ObjC header leaves an
-    argument's nullability unannotated (not a memory-safety claim — "the header didn't
-    say"), so each of this arm's property wrappers is a **safe** function closing that
-    question by construction, with a `// SAFETY:` note at its one call site; the same arm's
-    `define_class!`/`extern_protocol!` factory and event-target registration, and the
-    `addTarget:action:` attach/detach pair, are the other confined `unsafe` sites.
+    for hot per-frame property setters, confined to one `# Safety`-documented helper
+    (`call_void_cached`, `plugins/native-widgets/src/controls/mod.rs`'s `platform` submodule)
+    with a per-call-site note pairing the cached id to its class/signature; cold setters use
+    the checked, `jni_sig!`-typed `NativeCtx::call_void` path instead. Its Apple backend
+    closes objc2's nullability-unannotated `unsafe` (not a memory-safety claim) behind
+    **safe** property wrappers, each `// SAFETY:`-noted at its one call site; the same arm's
+    `define_class!`/`extern_protocol!` factory/event-target registration and
+    `addTarget:action:` attach/detach are the other confined sites.
 - **No unwind across FFI.** Every platform export routes through `frust-shell-common`'s
   `guard` helper (`catch_unwind` + log, returning a benign default) rather than unwinding
   into JVM-/Swift-owned stack frames — a panic crossing the FFI boundary is undefined
@@ -469,15 +465,19 @@ Conventions for `Widget::semantics` (see `docs/ARCHITECTURE.md`'s Semantics pass
   instead, letting the mobile frame gate throttle it to `MotionScheme::cosmetic_loop_rate`,
   and must still honor `reduce_motion` (freeze in place, stop requesting frames).
   **Input-driven frames are never paced.**
-- **Design-system code targets `frust_widgets::authoring`, never a catalog module.** A
-  baseline widget never imports `material`/`cupertino`/`glyph`; the container/callback
-  plumbing, event routing, and callback erasure every widget needs live in the public
-  `authoring` module instead — the same surface the three built-in catalogs themselves consume
-  (`docs/ARCHITECTURE.md`'s `frust-widgets` row); `PRESSED_OPACITY`'s `material::state_layer`
-  re-export is compatibility-only. `PageTransition::Custom` carries two contracts: pair it
-  with an explicit `Timing::Duration`/`Timing::Spring` (`Timing::ThemeDefault` falls back to
-  the M3 default, 300ms + `Curve::Emphasized`), and `reduce_motion` collapses it only
-  programmatically; an interactive edge-swipe pop calls it, like every preset.
+- **Design-system code targets `frust_widgets::authoring`, never a catalog module.** A baseline
+  widget never imports `material`/`cupertino`/`glyph`; the container/callback plumbing, event
+  routing, and callback erasure every widget needs live in the public `authoring` module
+  instead — the same surface the three built-in, feature-gated catalogs themselves consume,
+  pinned `authoring`-only by `authoring_only_conformance.rs`; `PRESSED_OPACITY`'s
+  `material::state_layer` re-export is compatibility-only. `PageTransition::Custom` needs an
+  explicit `Timing::Duration`/`Timing::Spring` (`Timing::ThemeDefault` falls back to the M3
+  default, 300ms + `Curve::Emphasized`); `reduce_motion` collapses it only programmatically,
+  and an interactive edge-swipe pop calls it like every preset.
+- **A design system installs itself via `set_default_theme` + `register_app_fonts` from an
+  `app!` `setup` block — never `Component::init` (no kept ordering contract) or
+  `set_app_theme` (pins brightness, breaking platform dark/light following).**
+  `frust::glyph_theme::install()` is the built-in Glyph caller.
 
 ## Testing Patterns
 

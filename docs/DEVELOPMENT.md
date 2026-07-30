@@ -11,17 +11,16 @@ prerequisites used during ordinary development.
   test). Headless Vulkan needs no display server; see `docs/TESTING.md`. Other hosts can
   build and run the non-GPU suite.
 - **Android** (only needed for `frust run`/`build`/`create`'s Android output): `rustup
-  target add aarch64-linux-android`; `cargo install cargo-ndk` (tested with 4.x); JDK
-  17+ on `JAVA_HOME` (Android Studio's bundled JBR auto-detected on macOS);
-  `ANDROID_HOME`/`ANDROID_SDK_ROOT` and `ANDROID_NDK_HOME` set. `frust doctor` checks
-  all of these.
+  target add aarch64-linux-android`; `cargo install cargo-ndk`; JDK 17+ on `JAVA_HOME`
+  (Android Studio's bundled JBR auto-detected on macOS); `ANDROID_HOME`/`ANDROID_SDK_ROOT`
+  and `ANDROID_NDK_HOME` set — `frust doctor` checks all of these.
 - **iOS** (only needed for `frust run`/`build`/`create`'s iOS output; macOS host only):
   Xcode 26+ resolved by `xcode-select -p`; `rustup target add aarch64-apple-ios-sim
-  aarch64-apple-ios`. A booted Simulator suffices for a debug `frust run`; a signed
-  build needs a codesigning identity (`frust` auto-detects `DEVELOPMENT_TEAM`, or set
-  `FRUST_IOS_TEAM`/`[ios] team`). A physical iPhone run also needs iOS 17+,
-  unlocked/paired/trusted with Developer Mode on. `frust doctor` checks Rust targets on
-  macOS hosts only.
+  aarch64-apple-ios`. A booted Simulator suffices for a debug `frust run`; a signed build
+  needs a codesigning identity (`frust` auto-detects `DEVELOPMENT_TEAM`, or set
+  `FRUST_IOS_TEAM`/`[ios] team`), and a physical iPhone run also needs iOS 17+,
+  unlocked/paired/trusted with Developer Mode on (`frust doctor` checks Rust targets on
+  macOS hosts only).
 - **clean-signals-rs** cloned as a sibling directory (`../clean-signals-rs`, branch
   `master`) — needed only for the `clean-signals` core crate, consumed by
   `examples/huddle` and the `plugins/clean-signals-frust` glue plugin. The root
@@ -36,32 +35,30 @@ cargo build --workspace --locked
 ```
 
 `--locked` must always pass — it is part of the verify gate below and is how
-manifest/lockfile drift is caught (see *Version-Pin Policy*).
-
-**Dev-profile shader-stack overrides.** The root `Cargo.toml`,
-`templates/app/Cargo.toml.tmpl`, and `examples/huddle/Cargo.toml` each carry a
-`[profile.dev.package.*]` override (`opt-level = 2`) for the shader/render crates:
-debug-profile (`opt-level = 0`) shader compilation/translation is slow enough on mobile
-CPUs to trip the iOS launch watchdog. The three manifests are hand-synced
-(`cargo test -p frust-cli --test profile_sync` is the tripwire); a
-`[profile.dev.package."*"]` wildcard (`opt-level = 1`) widens every other dependency's
-debug optimization the same way.
+manifest/lockfile drift is caught (see *Version-Pin Policy*). **Dev-profile shader-stack
+overrides.** The root `Cargo.toml`, `templates/app/Cargo.toml.tmpl`, and
+`examples/huddle/Cargo.toml` each carry a `[profile.dev.package.*]` override (`opt-level
+= 2`) for the shader/render crates: debug-profile (`opt-level = 0`) shader
+compilation/translation is slow enough on mobile CPUs to trip the iOS launch watchdog.
+The three manifests are hand-synced (`cargo test -p frust-cli --test profile_sync` is
+the tripwire); a `[profile.dev.package."*"]` wildcard (`opt-level = 1`) widens every
+other dependency's debug optimization the same way.
 
 **Release-profile hardening.** `[profile.release]` (root, template, huddle) sets `lto =
 "fat"`, `codegen-units = 1`, `strip = "symbols"`, `panic = "abort"`, at the default
 `opt-level = 3` — chosen over `"s"`/`"z"` after a smaller-opt-level win didn't clear a
 5% bar against a render-stack CPU-perf carve-out (measured via `scripts/size-report.sh`
-below).
-
-**Glyph bundled fonts.** `frust-theme`'s default-on `glyph-fonts` feature embeds Space
-Mono + IBM Plex Mono (~1MB) for the Glyph design language's type scale. An app opts out
-via `frust = { ..., default-features = false }`, which removes the fonts from the whole
-graph (confirmed via `cargo tree -e features`).
-
-**Widget-authoring test fixtures.** `frust-widgets`' non-default `test-support` feature
-compiles in the crate's GPU-free container-widget fixtures (`frust_widgets::test_support`),
-so a design system built outside this crate can test its own containers the same way;
-off by default in a normal app build.
+below). **Design-system feature gating.** `frust` default-enables
+`glyph`/`material`/`cupertino` (each `frust-widgets` catalog) plus `glyph-fonts`;
+`default-features = false` drops all four. Cargo silently ignores `default-features =
+false` on an *inherited* dependency (defaults stay on) — set it on the
+`[workspace.dependencies]` entry instead (root `Cargo.toml`'s
+`frust-widgets`/`frust-theme` edges); `frust = { workspace = true, default-features =
+false }` in a member is a hard Cargo error, so `examples/no-catalogs` uses a plain
+`path` dependency instead. **Widget-authoring test fixtures.** `frust-widgets`'
+non-default `test-support` feature compiles in the crate's GPU-free container-widget
+fixtures (`frust_widgets::test_support`), so a design system built outside this crate
+can test its own containers the same way; off by default in a normal app build.
 
 ## Run
 
@@ -82,8 +79,9 @@ clean-signals-rs sibling checkout.
 **Glyph design-language gate.** `examples/huddle`'s appearance settings expose a
 four-way `System`/`Material3`/`Cupertino`/`Glyph` toggle; a Glyph dark+light check
 (desktop, Android, iOS) plus a reduced-motion pass round out the manual gate above — no
-automated check exists for either. Every shell falls back to `Theme::glyph_baseline()`
-when no default was seeded, so this also covers first-launch appearance.
+automated check exists for either. `examples/huddle` seeds its own Glyph first-launch
+default via `frust::glyph_theme::install()` (`app!`'s setup block); a shell with no
+design system installed falls back to `Theme::neutral()`.
 
 `examples/huddle` additionally builds and runs on Android and iOS, from its own
 directory (its own `frust.toml`, package `it.f0x.huddle`):
@@ -112,21 +110,18 @@ preview, or `--watch` below) — first Android/iOS builds take a few minutes.
 
 `frust run --render-tier <gpu|cpu>` forces the desktop preview's render tier
 (`FRUST_RENDER_TIER` for a manual `cargo run`); `gpu` fails fast on an incapable
-adapter, `cpu` can always be forced. Desktop-preview-only today.
-
-**High refresh-rate hints.** A generated app's iOS `CADisplayLink` requests a 30–120Hz
+adapter, `cpu` can always be forced (desktop-preview-only today). **High refresh-rate
+hints.** A generated app's iOS `CADisplayLink` requests a 30–120Hz
 `preferredFrameRateRange`; Android calls `Surface.setFrameRate()` (API 30+) with the
 display's max rate — both hints, unverifiable on the iOS Simulator or most Android
 emulators (60Hz-only).
 
-**TUI workbench.** `frust tui` opens the ratatui workbench: `n` scaffolds a project; the
-devices panel launches concurrent sessions (`r`/`Enter`); `d`/`b`/`c` run
-doctor/build/clean as supervised sessions with their own log tab; `a` opens Add Plugin;
-`Ctrl+O`/`p` the project switcher, `i`/chip the bootstrap wizard, `Ctrl+P`/`:` a fuzzy
-command palette, `?` help. A per-session perf sparkline (`t`) parses `frust-perf` lines
-once `FRUST_TRACE` is set. `cargo test -p frust-tui` covers engine/render logic;
-live-terminal gestures and a fresh-machine bootstrap walk are a **manual gate** for a
-person at a real desk, not CI.
+**TUI workbench.** `frust tui` opens the ratatui workbench (scaffold/build/doctor/clean
+as supervised sessions, a fuzzy command palette, a bootstrap wizard, Add Plugin — `?`
+opens the full keybinding help overlay). A per-session perf sparkline parses
+`frust-perf` lines once `FRUST_TRACE` is set. `cargo test -p frust-tui` covers
+engine/render logic; live-terminal gestures and a fresh-machine bootstrap walk are a
+**manual gate** for a person at a real desk, not CI.
 
 ## Dev Loop
 
@@ -183,10 +178,19 @@ gate confirming both before shipping.
 cargo build --workspace --locked \
   && cargo test --workspace \
   && cargo clippy --workspace --all-targets -- -D warnings \
-  && cargo fmt --check
+  && cargo fmt --check \
+  && cargo build -p no-catalogs
 ```
 
 `frust-drive`/`frust-tui` ride this gate automatically (root workspace members).
+
+**The `no-catalogs` step is load-bearing.** `cargo build`/`test --workspace` alone does
+NOT exercise the catalog-off configuration — Cargo unifies `frust`'s features across
+every root-workspace member (`plugins/native-widgets` has its own legitimate default-on
+`frust` dependency), so only the package-scoped build above actually compiles
+`--no-default-features` (`examples/no-catalogs/src/main.rs`'s doc comment has the full
+evidence). Skip it and a catalog opt-out regression ships behind a green `--workspace`
+run.
 
 If the clean-signals-rs sibling checkout exists at `../clean-signals-rs` (branch
 `master` — see Prerequisites and *Version-Pin Policy*), additionally run:
@@ -221,39 +225,39 @@ requires local hardware or is slow, and is marked `#[ignore]` with a reason):
 # GPU smoke test (frust-render): needs a real Metal/Vulkan device.
 cargo test -p frust-render -- --ignored
 
-# Scaffold end-to-end test (frust-cli): compiles a freshly generated
-# project's full dependency graph (winit/vello/wgpu) — ~30s cold.
+# Scaffold end-to-end test (frust-cli): compiles a freshly generated project's full
+# dependency graph (winit/vello/wgpu) — ~30s cold.
 cargo test -p frust-cli --test create_e2e -- --ignored
 
-# iOS scaffold test (frust-cli): scaffolds a project and runs
-# `xcodebuild -list` + `plutil -lint` against the generated Xcode project
-# (parse-only, no build; needs Xcode on macOS).
+# iOS scaffold test (frust-cli): scaffolds a project and runs `xcodebuild -list` + `plutil
+# -lint` against the generated Xcode project (parse-only; needs Xcode on macOS).
 cargo test -p frust-cli --test create_ios -- --ignored
 
-# Build pipeline end-to-end test (frust-cli): scaffolds a project,
-# generates a throwaway keystore, and runs `build apk --release` through a
-# real Gradle build — needs Android SDK/NDK; ~1 minute.
+# Build pipeline e2e test (frust-cli): scaffolds a project, generates a throwaway keystore,
+# and runs `build apk --release` via a real Gradle build — needs Android SDK/NDK; ~1 minute.
 cargo test -p frust-cli --test build_e2e -- --ignored
 
 # Android compile gate (no device needed): the whole facade graph must compile for Android.
-cargo check --target aarch64-linux-android -p frust
-cargo check --target aarch64-linux-android -p frust-plugin
-cargo check --target aarch64-linux-android -p frust-shared-preferences
-cargo check --target aarch64-linux-android -p frust-secure-storage
-cargo check --target aarch64-linux-android -p frust-camera
-cargo check --target aarch64-linux-android -p frust-native-widgets
+cargo check --target aarch64-linux-android \
+  -p frust -p frust-plugin -p frust-shared-preferences -p frust-secure-storage \
+  -p frust-camera -p frust-native-widgets
 cargo check --target aarch64-linux-android -p frust-native-widgets --features demo-components
+
+# --all-targets additionally compiles cfg(test) — the plain checks above never do, so a
+# mobile shell's own test module otherwise goes uncompiled by anything:
+cargo check --all-targets --target aarch64-linux-android -p frust-shell-android
 
 # iOS compile gate (a type-check, no device/Xcode needed — runs on Linux too; only
 # building/running an iOS app needs macOS, see Prerequisites): the whole facade graph
 # must compile for the Simulator target (frust-secure-storage also gates the device target).
-cargo check --target aarch64-apple-ios-sim -p frust
-cargo check --target aarch64-apple-ios-sim -p frust-shared-preferences
-cargo check --target aarch64-apple-ios-sim -p frust-secure-storage
+cargo check --target aarch64-apple-ios-sim \
+  -p frust -p frust-shared-preferences -p frust-secure-storage -p frust-camera \
+  -p frust-native-widgets
 cargo check --target aarch64-apple-ios -p frust-secure-storage
-cargo check --target aarch64-apple-ios-sim -p frust-camera
-cargo check --target aarch64-apple-ios-sim -p frust-native-widgets
 cargo check --target aarch64-apple-ios-sim -p frust-native-widgets --features demo-components
+
+# Same --all-targets rationale as Android above:
+cargo check --all-targets --target aarch64-apple-ios-sim  -p frust-shell-ios
 ```
 
 The iOS compile gate above is also the only check of the `accesskit_ios` adapter today —
@@ -270,9 +274,9 @@ above); compiling Swift needs an Xcode build (macOS only).
 
 ### Deep-link manual test (Android)
 
-A device/emulator gate for `nativeOnDeepLink` (`docs/ARCHITECTURE.md`'s Deep-link flow)
-against a project scaffolded with `frust create --deeplink-scheme <scheme>
-[--deeplink-host <host>]` and installed (`frust run -d <device>`):
+A device/emulator gate for `nativeOnDeepLink` (`docs/ARCHITECTURE.md`'s Deep-link flow) on
+a project scaffolded with `--deeplink-scheme <scheme> [--deeplink-host <host>]`, installed
+via `frust run -d <device>`:
 
 ```bash
 # Cold start (app not running; queues until the native handle exists):
@@ -283,12 +287,11 @@ adb shell am start -a android.intent.action.VIEW -d "<scheme>://<path>" <package
 adb shell am start -a android.intent.action.VIEW -d "<scheme>://<other-path>" <package>
 ```
 
-Confirm the app navigates to the linked route both times. The iOS equivalent
-(`frust_on_deep_link`) has a Simulator-only CLI trigger (`xcrun simctl openurl booted
-"<scheme>://<path>"`); a physical device has none — tap a registered
-`CFBundleURLSchemes` link instead. `frust.toml`'s `[deeplink]` section is
-informational only — it doesn't re-render the manifest intent filter or `Info.plist`;
-use `--overwrite` or edit the platform files directly to change the scheme.
+Confirm the app navigates to the linked route both times. iOS (`frust_on_deep_link`) has
+a Simulator-only CLI trigger (`xcrun simctl openurl booted "<scheme>://<path>"`); a
+physical device has none — tap a registered `CFBundleURLSchemes` link instead.
+`frust.toml`'s `[deeplink]` section is informational only, so use `--overwrite` or edit
+the platform files directly to change the scheme.
 
 ### Safe-area / keyboard / back manual test (Android + iOS)
 
@@ -357,19 +360,17 @@ the platform-specific edge-to-edge/safe-area/keyboard-inset and back-navigation 
 the generated app needs — see `docs/ARCHITECTURE.md`'s Inset delivery and Back flow.
 
 `--arch clean-signals` scaffolds a clean-architecture variant (controller + use-case +
-`async_view` over `clean-signals-frust`) instead of the default notes-app template —
-dev-machine-only while `clean-signals` is unpublished, since the generated project
-path-depends into this checkout and the sibling checkout (see *Version-Pin Policy*);
-`--help` carries this caveat.
+`async_view` over `clean-signals-frust`) instead of the default notes-app template,
+dev-machine-only while `clean-signals` is unpublished (path-depends into this checkout
+and the sibling checkout — see *Version-Pin Policy*; `--help` carries this caveat).
 
-**The platform embedding modules are no longer templated.**
-`platform/android/frust-embedding` and `platform/ios/FrustEmbedding` ship in-repo,
-consumed by a scaffolded project by path. To iterate on embedding Kotlin/Swift: edit
-the module in place and rebuild the consuming app directly — no re-scaffold, no
-`--template-dir` dance. A scaffolded project's embedding path is machine-specific:
-moving it means editing `gradle.properties`' `frust.embedding.dir` line (Android) or
-the local package reference in `project.pbxproj` (iOS). `frust clean` also removes the
-redirected Gradle build output for the included embedding module.
+**Platform embedding modules ship in-repo, not templated.**
+`platform/android/frust-embedding` and `platform/ios/FrustEmbedding` are consumed by a
+scaffolded project by path — edit the module in place and rebuild the consuming app
+directly, no re-scaffold needed. A scaffolded project's embedding path is
+machine-specific: moving it means editing `gradle.properties`'s `frust.embedding.dir`
+line (Android) or the local package reference in `project.pbxproj` (iOS); `frust clean`
+also removes the redirected Gradle build output.
 
 ## Benchmarks
 
@@ -385,11 +386,10 @@ implement the same eight scenarios (S1–S8), driven by `harness/`'s shared scri
 `benchmarks/PROTOCOL.md` is the published methodology (device matrix, run counts,
 statistics, fairness gates, raw-line formats); `benchmarks/RESULTS.md` is the filled
 record of actual device runs (never placeholder/projected numbers), with every
-methodology deviation labeled per run.
-
-**macOS `mktemp` caveat.** `harness/run.sh`'s `mktemp` only expands correctly under GNU
-mktemp — BSD/macOS returns the template unexpanded, silently colliding runs; alias
-`mktemp` to `gmktemp` (`brew install coreutils`) until fixed.
+methodology deviation labeled per run. **macOS `mktemp` caveat.** `harness/run.sh`'s
+`mktemp` only expands correctly under GNU mktemp — BSD/macOS returns the template
+unexpanded, silently colliding runs; alias `mktemp` to `gmktemp` (`brew install
+coreutils`) until fixed.
 
 ## Instrumentation
 
