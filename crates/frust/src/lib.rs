@@ -173,6 +173,11 @@ pub use frust_widgets::{
 /// Switch, and progress indicators — flat-re-exported from
 /// `frust-widgets` so app code (e.g. `examples/catalog`) never names that
 /// crate directly, mirroring the baseline-widget re-export block above.
+///
+/// Gated by this crate's default-on `material` feature, which forwards to
+/// `frust-widgets/material` — with it off the catalog is not compiled at all,
+/// so this block must be gated in lockstep or it would name absent items.
+#[cfg(feature = "material")]
 pub use frust_widgets::{
     AppBar, AppBarView, AppBarWidget, AssistChip, AssistChipView, AssistChipWidget,
     BottomSheetView, BottomSheetWidget, ButtonGroup, ButtonGroupView, ButtonGroupWidget,
@@ -193,7 +198,9 @@ pub use frust_widgets::{
 
 /// The Cupertino (iOS) widget catalog: the
 /// Flutter-parity counterparts to a subset of the Material catalog above —
-/// flat-re-exported from `frust-widgets` for the same reason.
+/// flat-re-exported from `frust-widgets` for the same reason, and gated by the
+/// default-on `cupertino` feature for the same reason as the Material block.
+#[cfg(feature = "cupertino")]
 pub use frust_widgets::{
     CupertinoActionSheetView, CupertinoActionSheetWidget, CupertinoActionStyle,
     CupertinoActivityIndicator, CupertinoActivityIndicatorView, CupertinoActivityIndicatorWidget,
@@ -233,8 +240,14 @@ pub use frust_widgets::motion;
 /// `frust_widgets::icons`/`frust_widgets::motion`'s wholesale-module
 /// precedent, so every widget a later fill task adds under
 /// `frust_widgets::glyph` rides along under `frust::glyph::*` with no further
-/// facade edit. This scaffold ships the module and its (currently doc-only)
-/// stub submodules; the widgets themselves land in the fill tasks.
+/// facade edit.
+///
+/// Gated by this crate's default-on `glyph` feature (which turns on
+/// `frust-widgets/glyph` **and** `frust-theme/glyph` — widgets and tokens
+/// together); the design-token half re-exports as [`GlyphInk`] below, and
+/// [`glyph_theme::install`] is the seam that makes a Glyph theme the app's
+/// starting point.
+#[cfg(feature = "glyph")]
 pub use frust_widgets::glyph;
 
 mod back_glue;
@@ -333,18 +346,29 @@ pub use router_glue::{RouterDeepLinks, router_with_deep_links};
 ///
 /// Also the composable-theming surface:
 /// [`ThemeBuilder`] (`defineTheme`/`copyWith` analog), the no-lock-in typed
-/// extension slot ([`ThemeExtensions`]) plus its first two consumers
-/// [`StatusPalette`]/[`StatusColors`] (success/warning/info) and [`GlyphInk`]
-/// (Glyph's brightness-invariant terminal/tooltip ink), and the Glyph motion
-/// vocabulary ([`MotionDurations`]/[`EasingSet`]) — all flat-re-exported so an
-/// app authors a custom theme against `frust::*` alone. The Glyph baseline
-/// itself is [`Theme::glyph_baseline`].
+/// extension slot ([`ThemeExtensions`]) plus its first consumer
+/// [`StatusPalette`]/[`StatusColors`] (success/warning/info), and the Glyph
+/// motion vocabulary ([`MotionDurations`]/[`EasingSet`]) — all
+/// flat-re-exported so an app authors a custom theme against `frust::*` alone.
 pub use frust_theme::{
     Brightness, ColorScheme, DesignLanguage, EasingSet, Elevation, ElevationLevel, GlassFill,
-    GlassMaterial, GlassScale, GlyphInk, MotionDurations, MotionScheme, MotionSpring, ShadowSpec,
-    ShapeScale, StatusColors, StatusPalette, SurfaceRole, Theme, ThemeBuilder, ThemeExtensions,
-    TypeScale,
+    GlassMaterial, GlassScale, MotionDurations, MotionScheme, MotionSpring, ShadowSpec, ShapeScale,
+    StatusColors, StatusPalette, SurfaceRole, Theme, ThemeBuilder, ThemeExtensions, TypeScale,
 };
+
+/// Glyph's brightness-invariant terminal/tooltip ink — a
+/// [`ThemeExtensions`] attachment on the Glyph baseline, never
+/// brightness-swapped like the rest of a [`ColorScheme`] (see
+/// `docs/CODE_STANDARDS.md`'s Theming conventions).
+///
+/// Gated by the default-on `glyph` feature alongside the widget catalog
+/// ([`glyph`](crate::glyph)): `frust_theme::GlyphInk` lives inside
+/// `frust-theme`'s own `glyph`-gated module, so this re-export tracks it.
+/// `Theme::glyph_baseline()` — the baseline that carries it — appears and
+/// disappears with the same feature; [`glyph_theme::install`] is how an app
+/// makes it the starting theme.
+#[cfg(feature = "glyph")]
+pub use frust_theme::GlyphInk;
 
 /// The color type every [`ColorScheme`] role is expressed in
 /// ([`peniko::Color`]), re-exported so app code can author its own color
@@ -394,9 +418,11 @@ pub use frust_shell_common::{clear_app_theme, set_app_theme};
 /// ```no_run
 /// use frust::{Theme, set_default_theme};
 ///
-/// // A design-system plugin's install() call, seeding the Glyph baseline as
-/// // the app's starting theme without pinning brightness.
-/// set_default_theme(Theme::glyph_baseline());
+/// // A design-system plugin's install() call, seeding its own base theme as
+/// // the app's starting point without pinning brightness. The built-in Glyph
+/// // installer (`frust::glyph_theme::install`, `glyph` feature) is this call
+/// // with `Theme::glyph_baseline()`, plus its bundled-font registration.
+/// set_default_theme(Theme::m3_baseline());
 /// ```
 pub use frust_shell_common::set_default_theme;
 
@@ -435,6 +461,87 @@ pub use frust_shell_common::{SystemUiMode, SystemUiOverlay, set_system_ui_mode};
 /// frust::register_app_fonts(font_bytes);
 /// ```
 pub use frust_shell_common::font_registry::register_app_fonts;
+
+/// The Glyph design system's one-line installer.
+///
+/// Every shell's built-in fallback theme is the design-language-free
+/// `Theme::neutral()` and no shell registers a font of its own, so a Glyph app
+/// supplies both halves itself. [`install`](glyph_theme::install) is that call:
+/// it seeds `Theme::glyph_baseline()` through [`set_default_theme`] and pushes
+/// the bundled Space Mono / IBM Plex Mono faces through
+/// [`register_app_fonts`].
+///
+/// Gated by the default-on `glyph` feature (the tokens it names live behind
+/// `frust-theme`'s own `glyph` gate). Kept in the facade rather than
+/// `frust-shell-common` deliberately: it needs `frust-theme`'s Glyph tokens,
+/// and shell-common must stay design-language-free
+/// (`docs/ARCHITECTURE.md`'s Theme delivery).
+#[cfg(feature = "glyph")]
+pub mod glyph_theme {
+    /// Make the Glyph design system this app's starting point.
+    ///
+    /// Two process-global pushes, both already public seams:
+    ///
+    /// 1. [`set_default_theme`](crate::set_default_theme)`(Theme::glyph_baseline())`
+    ///    — the *base* a shell seeds itself with instead of its built-in
+    ///    `Theme::neutral()` fallback. Deliberately not
+    ///    [`set_app_theme`](crate::set_app_theme): a seeded default does not
+    ///    pin brightness, so a Glyph app still follows system dark mode.
+    /// 2. [`register_app_fonts`](crate::register_app_fonts) for every bundled
+    ///    Glyph face, so the Glyph type scale's families actually resolve. With
+    ///    `frust`'s `glyph-fonts` feature off the bundled bytes are not
+    ///    compiled in and this half is a no-op (`font_data()` answers an empty
+    ///    slice) — the type scale then falls back to whatever monospace family
+    ///    the platform has.
+    ///
+    /// # Timing: must run before the first frame
+    ///
+    /// A shell reads the default-theme slot and drains the font registry
+    /// **once, at construction**, before its first rebuild. A call after that
+    /// takes effect only on a later `clear_app_theme`-driven reseed, which may
+    /// never happen — so a late call silently does nothing visible.
+    ///
+    /// The supported way to get the timing right on all three platforms is
+    /// [`app!`](crate::app)'s setup block, which runs immediately before the
+    /// root component's `Component::init` and therefore before any shell
+    /// construction:
+    ///
+    /// ```no_run
+    /// use frust::{AnyView, Component, any, text};
+    ///
+    /// #[derive(Default)]
+    /// struct MyApp;
+    ///
+    /// impl Component for MyApp {
+    ///     type State = ();
+    ///     fn init(&self) -> Self::State {}
+    ///     fn build(&self, _state: &mut Self::State) -> AnyView<Self::State> {
+    ///         any(text("glyph"))
+    ///     }
+    /// }
+    ///
+    /// frust::app!(MyApp, setup = { frust::glyph_theme::install(); });
+    /// # fn main() {}
+    /// ```
+    ///
+    /// Calling it from `Component::init` itself also happens to be early
+    /// enough today, but that is not a contract this crate keeps; the setup
+    /// block is.
+    ///
+    /// # Thread contract and repeat calls
+    ///
+    /// Both underlying seams are plain `Mutex`-guarded process-globals
+    /// callable from any thread. Calling `install` twice is harmless but
+    /// wasteful: the second `set_default_theme` replaces an identical value,
+    /// and the font bytes are pushed (and later re-registered, shadowing the
+    /// same family names) a second time. Call it once.
+    pub fn install() {
+        crate::set_default_theme(crate::Theme::glyph_baseline());
+        for bytes in frust_theme::glyph::font_data() {
+            crate::register_app_fonts(bytes.to_vec());
+        }
+    }
+}
 
 // No app-facing translucent-surface opt-in lives here: Mode B is a
 // build-time HOST configuration selected by the
@@ -689,8 +796,34 @@ impl<State: 'static, Logic> App<State, Logic> {
 /// [`android_app!`]/JNI instead, not by this preview loop.
 #[cfg(not(target_os = "android"))]
 pub fn run<C: Component>(root: C) -> anyhow::Result<()> {
+    run_with_setup(root, || {})
+}
+
+/// [`run`] with a **setup** closure run once, immediately before
+/// `root.init()` — the desktop half of [`app!`]'s `setup = { .. }` block.
+///
+/// `setup` runs on this (the UI) thread, after
+/// [`frust_reactive::ReactiveRuntime::init`] and under the runtime's root
+/// [`Owner`], and therefore *before* `frust_shell_desktop::run_desktop`
+/// constructs the shell — which is the one moment the shell reads
+/// [`set_default_theme`]'s slot and drains [`register_app_fonts`]' registry.
+/// That is exactly the placement `app!`'s Android/iOS arms get for free (both
+/// run the block inside the state factory `create_handle`/`ffi_glue::init`
+/// calls before building their `AppHandle`), so the ordering contract is
+/// identical on all three platforms.
+///
+/// A design-system plugin's installer (`frust::glyph_theme::install`, or a
+/// third-party equivalent) is the intended payload; app code normally reaches
+/// this through [`app!`] rather than calling it directly.
+///
+/// Desktop-only, matching [`run`]/[`App::run`].
+#[cfg(not(target_os = "android"))]
+pub fn run_with_setup<C: Component>(root: C, setup: impl FnOnce()) -> anyhow::Result<()> {
     let rt = frust_reactive::ReactiveRuntime::init(std::sync::Arc::new(|| {}));
-    let state = rt.with_owner(|| root.init());
+    let state = rt.with_owner(|| {
+        setup();
+        root.init()
+    });
     App::new(state, move |state: &mut C::State| root.build(state)).run()
 }
 
@@ -741,13 +874,67 @@ pub fn run<C: Component>(root: C) -> anyhow::Result<()> {
 /// once to close over `build`) — a root component is stateless configuration
 /// (any real data lives in its `Component::State`), so two independent,
 /// short-lived instances are inexpensive and behaviorally identical.
+///
+/// # `setup = { .. }`: run code before the shell exists
+///
+/// An optional second argument is a **setup block** the macro emits at the top
+/// of each platform's entry, before the shell is constructed:
+///
+/// ```no_run
+/// # use frust::{AnyView, Component, any, text};
+/// # #[derive(Default)]
+/// # struct MyApp;
+/// # impl Component for MyApp {
+/// #     type State = ();
+/// #     fn init(&self) -> Self::State {}
+/// #     fn build(&self, _state: &mut Self::State) -> AnyView<Self::State> { any(text("hi")) }
+/// # }
+/// frust::app!(MyApp, setup = { my_design_system::install(); });
+/// # mod my_design_system {
+/// #     pub fn install() { frust::set_default_theme(frust::Theme::m3_baseline()); }
+/// # }
+/// # fn main() {}
+/// ```
+///
+/// This exists because a design system's installer must reach
+/// [`set_default_theme`]/[`register_app_fonts`] *before* a shell reads them,
+/// and Android has no `main` at all (its entry is the JNI `nativeInit`
+/// `android_app!` generates). Any plugin can use it; it is not
+/// Glyph-specific — the built-in Glyph installer
+/// (`frust::glyph_theme::install`, `glyph` feature) is just the first caller.
+///
+/// **When it runs**, identically on all three platforms: on the UI thread,
+/// after `ReactiveRuntime::init`, under the root reactive `Owner`, immediately
+/// before the root component's `Component::init` — and therefore before any
+/// shell construction, which is the one point a shell reads
+/// `set_default_theme`'s slot and drains the pending-font registry. The
+/// *expansions* differ per platform (Android/iOS place the block inside the
+/// state factory `android_app!`/`ios_app!` receive, which
+/// `jni_glue::create_handle`/`ffi_glue::init` call before building their
+/// `AppHandle`; the desktop arm routes through [`run_with_setup`]); the
+/// ordering contract above is what is guaranteed.
+///
+/// The one-argument form is unchanged: no setup tokens are emitted, the two
+/// mobile state factories expand to exactly what they always did, and the
+/// desktop arm's `run_with_setup(root, || {})` is literally what [`run`] itself
+/// is.
 #[macro_export]
 macro_rules! app {
-    ($root:ty $(,)?) => {
+    // Internal single implementation, shared by both public forms below.
+    // `$($setup:block)?` is empty for the one-argument form, so the two mobile
+    // state factories expand byte-identically to the pre-setup macro and the
+    // desktop arm's `run_with_setup(root, || {})` is `run`'s own body. Listed
+    // FIRST because macro_rules cannot recover from a `$root:ty` fragment that
+    // fails to parse: were the public arms first, `@emit` would be fed to
+    // `:ty` and error out instead of falling through to this arm.
+    (@emit $root:ty, $($setup:block)?) => {
         #[cfg(target_os = "android")]
         $crate::android_app!(
             <$root as $crate::Component>::State,
-            || $crate::Component::init(&<$root as ::core::default::Default>::default()),
+            || {
+                $($setup)?
+                $crate::Component::init(&<$root as ::core::default::Default>::default())
+            },
             {
                 let __frust_root = <$root as ::core::default::Default>::default();
                 move |state: &mut <$root as $crate::Component>::State| {
@@ -758,7 +945,10 @@ macro_rules! app {
 
         $crate::ios_app!(
             <$root as $crate::Component>::State,
-            || $crate::Component::init(&<$root as ::core::default::Default>::default()),
+            || {
+                $($setup)?
+                $crate::Component::init(&<$root as ::core::default::Default>::default())
+            },
             {
                 let __frust_root = <$root as ::core::default::Default>::default();
                 move |state: &mut <$root as $crate::Component>::State| {
@@ -770,16 +960,26 @@ macro_rules! app {
         #[cfg(not(target_os = "android"))]
         #[doc(hidden)]
         pub fn __frust_main() {
-            if let Err(e) = $crate::run(<$root as ::core::default::Default>::default()) {
+            let __frust_setup = || { $($setup)? };
+            if let Err(e) = $crate::run_with_setup(
+                <$root as ::core::default::Default>::default(),
+                __frust_setup,
+            ) {
                 eprintln!("frust: {e:#}");
                 ::std::process::exit(1);
             }
         }
     };
+    ($root:ty $(,)?) => {
+        $crate::app!(@emit $root,);
+    };
+    ($root:ty, setup = $setup:block $(,)?) => {
+        $crate::app!(@emit $root, $setup);
+    };
 }
 
-/// Compile-only smoke of [`app!`]: a `Component + Default` fixture bound to
-/// all three platforms in one call —
+/// Compile-only smoke of [`app!`]'s `setup = { .. }` form: a
+/// `Component + Default` fixture bound to all three platforms in one call —
 /// `cargo test --workspace` compiles this on host (criterion 1: `__frust_main`
 /// present, no Android JNI symbols), and `cargo check --target
 /// aarch64-linux-android -p frust --tests` / `--target
@@ -789,6 +989,20 @@ macro_rules! app {
 /// linked into a cdylib/staticlib/binary, so the fixed JNI/C-ABI export names
 /// `app!` stamps out (via `android_app!`/`ios_app!`) never collide with a
 /// real generated app's.
+///
+/// **Exactly one `app!` invocation may be compiled per target** — a second one
+/// would stamp the same fixed JNI/C-ABI export names — so this fixture takes
+/// the *setup* form (the newer, ordering-critical arm, whose per-platform
+/// expansions differ) and [`macro_expansion_no_setup`] below carries the
+/// one-argument form on host only. The one-argument form's mobile expansion is
+/// unchanged from the pre-setup macro (`@emit $root,` emits no setup tokens)
+/// and every generated project plus `examples/huddle`/`examples/glyph-catalog`
+/// exercises it.
+///
+/// The setup payload here is deliberately feature-independent
+/// ([`set_default_theme`] with the always-available M3 baseline rather than
+/// `glyph_theme::install`), so this fixture also compiles under
+/// `--no-default-features`.
 #[cfg(test)]
 mod macro_expansion {
     // `#[allow(dead_code)]`: a zero-field unit struct's derived `Default::default()`
@@ -812,7 +1026,38 @@ mod macro_expansion {
         }
     }
 
-    crate::app!(TestApp);
+    crate::app!(
+        TestApp,
+        setup = {
+            crate::set_default_theme(crate::Theme::m3_baseline());
+        }
+    );
+}
+
+/// Compile-only smoke of [`app!`]'s **one-argument** form, host-only for the
+/// one-invocation-per-target reason spelled out on [`macro_expansion`] above:
+/// on a mobile target this module is cfg'd out so the fixture there stays the
+/// single setup-form invocation.
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+mod macro_expansion_no_setup {
+    #[derive(Default)]
+    #[allow(dead_code)]
+    struct TestAppNoSetup;
+
+    impl crate::Component for TestAppNoSetup {
+        type State = u32;
+
+        fn init(&self) -> u32 {
+            0
+        }
+
+        fn build(&self, state: &mut u32) -> crate::AnyView<u32> {
+            *state += 1;
+            crate::any(crate::text(format!("{state}")))
+        }
+    }
+
+    crate::app!(TestAppNoSetup);
 }
 
 /// Facade-level regression test: [`run`] runs a root

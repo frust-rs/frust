@@ -20,12 +20,18 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # Glyph fonts opt-out (gf2): `frust`'s default `glyph-fonts` feature bundles
 # ~1MB of Space Mono + IBM Plex Mono TTF bytes for the Glyph design
 # language's type scale (default ON — zero-config Glyph experience). An app
-# that never uses the Glyph design language can drop that ~1MB:
+# that never uses the Glyph design language can drop that ~1MB by re-listing
+# the other defaults it still wants:
 #
-#   frust = { path = "{{ frust_path }}", default-features = false }
+#   frust = { path = "{{ frust_path }}", default-features = false,
+#             features = ["glyph", "material", "cupertino"] }
 #
-# `frust` has no other default feature today, so this is currently a clean
-# opt-out with nothing else to re-add.
+# `frust`'s full default set is `["glyph", "material", "cupertino",
+# "glyph-fonts"]` — the three built-in widget catalogs plus the bundled Glyph
+# fonts. A bare `default-features = false` drops all four, which is the right
+# starting point for an app authoring its own design system against
+# `frust_widgets::authoring`, and the wrong one if you only meant to save the
+# font bytes.
 frust = { path = "{{ frust_path }}" }
 
 # `frust-shared-preferences` demo: a platform plugin
