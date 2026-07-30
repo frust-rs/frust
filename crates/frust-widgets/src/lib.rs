@@ -29,13 +29,16 @@ mod align;
 pub mod authoring;
 mod button;
 mod checkbox;
+#[cfg(feature = "cupertino")]
 pub mod cupertino;
 mod flex;
 mod gesture;
+#[cfg(feature = "glyph")]
 pub mod glyph;
 mod icon;
 pub mod icons;
 mod image;
+#[cfg(feature = "material")]
 pub mod material;
 pub mod motion;
 pub mod nav;
@@ -90,40 +93,59 @@ pub use textinput::{TextInput, TextInputView, TextInputWidget, text_input};
 // Material 3 Expressive widget catalog — flat re-exports so app code (via
 // the `frust` facade) never has to name `frust_widgets::material::*`
 // directly, mirroring the baseline widgets' flat re-export shape above.
+// Gated by the `material` feature (default-on) alongside `pub mod material`
+// above, so an app that never enables it compiles none of this catalog.
 // ---------------------------------------------------------------------
+#[cfg(feature = "material")]
 pub use material::appbar::{AppBar, AppBarView, AppBarWidget, app_bar};
+#[cfg(feature = "material")]
 pub use material::button_group::{ButtonGroup, ButtonGroupView, ButtonGroupWidget, button_group};
+#[cfg(feature = "material")]
 pub use material::card::{
     CardVariant, CardView, CardWidget, card, elevated_card, filled_card, outlined_card,
 };
+#[cfg(feature = "material")]
 pub use material::chips::{
     AssistChip, AssistChipView, AssistChipWidget, FilterChip, FilterChipView, FilterChipWidget,
     assist_chip, filter_chip,
 };
+#[cfg(feature = "material")]
 pub use material::dialog::{DialogView, DialogWidget, dialog, show_dialog};
+#[cfg(feature = "material")]
 pub use material::fab::{FabSize, FabView, FabWidget, extended_fab, fab};
+#[cfg(feature = "material")]
 pub use material::fab_menu::{
     FabMenu, FabMenuItem, FabMenuView, FabMenuWidget, fab_menu, fab_menu_item,
 };
+#[cfg(feature = "material")]
 pub use material::list_item::{
     ListItem, ListItemLines, ListItemWidget, ONE_LINE_HEIGHT, THREE_LINE_HEIGHT, TWO_LINE_HEIGHT,
     list_item,
 };
+#[cfg(feature = "material")]
 pub use material::list_view::{ListView, ListViewWidget, list_view};
+#[cfg(feature = "material")]
 pub use material::loading_indicator::{
     LoadingIndicator, LoadingIndicatorView, LoadingIndicatorWidget, loading_indicator,
 };
+#[cfg(feature = "material")]
 pub use material::navbar::{
     NavItem, NavigationBar, NavigationBarView, NavigationBarWidget, nav_item, navigation_bar,
 };
+#[cfg(feature = "material")]
 pub use material::progress::{
     CircularProgress, CircularProgressView, CircularProgressWidget, LinearProgress,
     LinearProgressView, LinearProgressWidget, ProgressValue, circular_progress, linear_progress,
 };
+#[cfg(feature = "material")]
 pub use material::shape_morph::{RoundedPolygon, morph_path};
+#[cfg(feature = "material")]
 pub use material::sheet::{BottomSheetView, BottomSheetWidget, bottom_sheet, show_bottom_sheet};
+#[cfg(feature = "material")]
 pub use material::split_button::{SplitButton, SplitButtonView, SplitButtonWidget, split_button};
+#[cfg(feature = "material")]
 pub use material::switch::{Switch, SwitchView, SwitchWidget, switch};
+#[cfg(feature = "material")]
 pub use material::toolbar::{
     DockedToolbar, FloatingToolbar, ToolbarVariant, ToolbarView, ToolbarWidget, docked_toolbar,
     floating_toolbar,
@@ -131,29 +153,37 @@ pub use material::toolbar::{
 
 // ---------------------------------------------------------------------
 // Cupertino (iOS) widget catalog — same flat re-export rationale as the
-// Material block above.
+// Material block above. Gated by the `cupertino` feature (default-on)
+// alongside `pub mod cupertino` above.
 // ---------------------------------------------------------------------
+#[cfg(feature = "cupertino")]
 pub use cupertino::action_sheet::{
     CupertinoActionSheetView, CupertinoActionSheetWidget, show_action_sheet,
 };
+#[cfg(feature = "cupertino")]
 pub use cupertino::activity_indicator::{
     CupertinoActivityIndicator, CupertinoActivityIndicatorView, CupertinoActivityIndicatorWidget,
     cupertino_activity_indicator,
 };
+#[cfg(feature = "cupertino")]
 pub use cupertino::alert_dialog::{
     CupertinoActionStyle, CupertinoAlertDialogView, CupertinoAlertDialogWidget,
     CupertinoDialogAction, action, show_cupertino_alert,
 };
+#[cfg(feature = "cupertino")]
 pub use cupertino::button::{
     CupertinoButton, CupertinoButtonSize, CupertinoButtonStyle, CupertinoButtonView,
     CupertinoButtonWidget, cupertino_button,
 };
+#[cfg(feature = "cupertino")]
 pub use cupertino::navbar::{
     CupertinoNavBar, CupertinoNavBarView, CupertinoNavBarWidget, cupertino_nav_bar,
 };
+#[cfg(feature = "cupertino")]
 pub use cupertino::switch::{
     CupertinoSwitch, CupertinoSwitchView, CupertinoSwitchWidget, cupertino_switch,
 };
+#[cfg(feature = "cupertino")]
 pub use cupertino::tabbar::{
     CupertinoTabBar, CupertinoTabBarView, CupertinoTabBarWidget, TabItem, cupertino_tab_bar,
     tab_item,
