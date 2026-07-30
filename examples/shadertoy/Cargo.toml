@@ -25,6 +25,11 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # create` will emit a version dependency here instead.
 frust = { path = "../../crates/frust" }
 
+# `frust` is the ONLY framework line this example ships. The hand-rolled
+# `ShaderView` `View`/`Widget` pair reaches its whole vocabulary through
+# `frust::authoring` (trait vocabulary + geometry) and
+# `frust::authoring::scene::ShaderProgram` — so nothing production pins a
+# framework internal like `kurbo`/`peniko` any more.
 
 # `log` facade dependency, present only so the release-only `lean` feature
 # below can raise the compiled-in log ceiling (release-lean build mode).
@@ -46,11 +51,20 @@ log = "0.4"
 # runtime/owner types and the text-shaping context the desktop shell would
 # otherwise supply. Same literal specs as huddle's `[dev-dependencies]`.
 [dev-dependencies]
+# Test-harness-only, NOT an escape hatch: `tests/showcase.rs` drives
+# `RenderRoot` directly, and `RenderRoot` is deliberately not in
+# `frust::authoring` (it is shell-owned, not something an app constructs), so
+# the harness still names these crates the long way. Migrating headless test
+# harnesses onto the facade is a separate design question — see this feature's
+# TASKS.md § Deferred. Production code names none of them.
 frust-core = { path = "../../crates/frust-core" }
 frust-scene = { path = "../../crates/frust-scene" }
 kurbo = "0.13.1"
 peniko = "0.6.1"
 frust-reactive = { path = "../../crates/frust-reactive" }
+# `frust-text` stays dev-only for the original reason, unchanged by the facade
+# migration: production HUD text uses facade widgets, not hand-shaped glyph
+# runs — only the headless harness needs a `TextContext`.
 frust-text = { path = "../../crates/frust-text" }
 reactive_graph = "0.2"
 

@@ -28,6 +28,15 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # language, so the fonts would be dead weight.
 frust = { path = "../../crates/frust", default-features = false }
 
+# `frust` is the ONLY framework line this bench ships. The `BenchView`
+# `View`/`Widget` pair reaches everything it needs through `frust::authoring`
+# (trait vocabulary + geometry), `frust::authoring::text` (shaping its own
+# labels), `frust::authoring::scene` (`ShaderProgram`, the `PaintScene`/
+# `Command` vocabulary) and the `frust::peniko` long-tail valve — nothing
+# production pins a framework internal like `kurbo`/`peniko` any more.
+#
+# Note this crate is also the canary proving `frust::authoring` is NOT
+# feature-gated: it resolves under `default-features = false` above.
 
 # `log` facade dependency, present only so the release-only `lean` feature
 # below can raise the compiled-in log ceiling (release-lean build mode).
@@ -44,9 +53,14 @@ frust = { path = "../../crates/frust", default-features = false }
 log = "0.4"
 
 [dev-dependencies]
-# Low-level escape hatch: custom widgets painting directly through
-# `frust-scene`'s `PaintScene`/`Command` vocabulary (see `frust::authoring`
-# facade and `docs/ARCHITECTURE.md`).
+# Test-harness-only, NOT an escape hatch: the headless T0 scene tests
+# (`tests/scene.rs`) drive Frust's `RenderRoot` directly — the desktop shell's
+# own rebuild/layout/paint seam, no GPU, no window, the same harness shape as
+# `examples/shadertoy/tests/showcase.rs`. `RenderRoot` is deliberately not in
+# `frust::authoring` (it is shell-owned, not something an app constructs), so
+# the harness still names these crates the long way; migrating headless test
+# harnesses onto the facade is a separate design question (see this feature's
+# TASKS.md § Deferred). Production code names none of them.
 frust-core = { path = "../../crates/frust-core" }
 frust-scene = { path = "../../crates/frust-scene" }
 frust-text = { path = "../../crates/frust-text" }
