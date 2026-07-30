@@ -89,9 +89,10 @@ use frust_theme::Theme;
 use kurbo::{Point, Rect, Size};
 use peniko::Color;
 
+use crate::authoring::ThemeTextColor;
 use crate::nav::navigator::{NavigatorController, PopResult};
 use crate::nav::transition::{PageTransition, TransitionSpec};
-use crate::text::{ThemeTextColor, text};
+use crate::text::text;
 
 /// Scrim opacity behind a modal dialog (M3 spec: 32%).
 const SCRIM_ALPHA: f32 = 0.32;
@@ -300,7 +301,7 @@ pub struct DialogWidget {
     body: Option<ChildPod>,
     body_text: Option<String>,
     actions: Vec<ChildPod>,
-    on_dismiss: Option<crate::ErasedCallback>,
+    on_dismiss: Option<crate::authoring::ErasedCallback>,
     /// The centered panel rect in the widget's own local coordinate space
     /// (computed at layout, read for scrim/panel hit-testing at event time).
     panel: Rect,
@@ -324,18 +325,20 @@ fn reconcile_optional<State: 'static>(
 ) -> ChangeFlags {
     match (prev, next) {
         (None, Some(s)) => {
-            *pod = Some(crate::build_child(&make(s.as_str()), ctx));
+            *pod = Some(crate::authoring::build_child(&make(s.as_str()), ctx));
             ChangeFlags::LAYOUT | ChangeFlags::PAINT
         }
         (Some(s), None) => {
             if let Some(p) = pod.as_mut() {
-                crate::teardown_child(&make(s.as_str()), p, ctx);
+                crate::authoring::teardown_child(&make(s.as_str()), p, ctx);
             }
             *pod = None;
             ChangeFlags::LAYOUT | ChangeFlags::PAINT
         }
         (Some(a), Some(b)) => match pod.as_mut() {
-            Some(p) => crate::rebuild_child(&make(a.as_str()), &make(b.as_str()), p, ctx),
+            Some(p) => {
+                crate::authoring::rebuild_child(&make(a.as_str()), &make(b.as_str()), p, ctx)
+            }
             None => ChangeFlags::NONE,
         },
         (None, None) => ChangeFlags::NONE,
@@ -350,19 +353,22 @@ impl<State: 'static> View<State> for DialogView<State> {
             title: self
                 .title
                 .as_ref()
-                .map(|s| crate::build_child(&title_view::<State>(s), ctx)),
+                .map(|s| crate::authoring::build_child(&title_view::<State>(s), ctx)),
             title_text: self.title.clone(),
             body: self
                 .body
                 .as_ref()
-                .map(|s| crate::build_child(&body_view::<State>(s), ctx)),
+                .map(|s| crate::authoring::build_child(&body_view::<State>(s), ctx)),
             body_text: self.body.clone(),
             actions: self
                 .actions
                 .iter()
-                .map(|v| crate::build_child(v, ctx))
+                .map(|v| crate::authoring::build_child(v, ctx))
                 .collect(),
-            on_dismiss: self.on_dismiss.as_ref().map(crate::erase_callback),
+            on_dismiss: self
+                .on_dismiss
+                .as_ref()
+                .map(crate::authoring::erase_callback),
             panel: Rect::ZERO,
             scrim_captured: false,
             scrim_down_outside: false,
@@ -395,7 +401,7 @@ impl<State: 'static> View<State> for DialogView<State> {
 
         let prev_views: Vec<&AnyView<State>> = prev.actions.iter().collect();
         let next_views: Vec<&AnyView<State>> = self.actions.iter().collect();
-        flags |= crate::rebuild_children(
+        flags |= crate::authoring::rebuild_children(
             &prev_views,
             &next_views,
             &mut element.actions,
@@ -406,19 +412,22 @@ impl<State: 'static> View<State> for DialogView<State> {
 
         // Closures aren't comparable, so reinstall the dismiss adapter
         // unconditionally (cheap — mirrors every other interactive widget).
-        element.on_dismiss = self.on_dismiss.as_ref().map(crate::erase_callback);
+        element.on_dismiss = self
+            .on_dismiss
+            .as_ref()
+            .map(crate::authoring::erase_callback);
         flags
     }
 
     fn teardown(&self, element: &mut DialogWidget, ctx: &mut BuildCtx<'_>) {
         if let (Some(s), Some(p)) = (&self.title, element.title.as_mut()) {
-            crate::teardown_child(&title_view::<State>(s), p, ctx);
+            crate::authoring::teardown_child(&title_view::<State>(s), p, ctx);
         }
         if let (Some(s), Some(p)) = (&self.body, element.body.as_mut()) {
-            crate::teardown_child(&body_view::<State>(s), p, ctx);
+            crate::authoring::teardown_child(&body_view::<State>(s), p, ctx);
         }
         for (view, pod) in self.actions.iter().zip(element.actions.iter_mut()) {
-            crate::teardown_child(view, pod, ctx);
+            crate::authoring::teardown_child(view, pod, ctx);
         }
     }
 }
@@ -543,7 +552,7 @@ impl Widget for DialogWidget {
             ctx.request_focus();
         }
         // An action already capturing (or freshly hit) consumes the event first.
-        if crate::route_event(&mut self.actions, ctx, event) == EventResult::Handled {
+        if crate::authoring::route_event(&mut self.actions, ctx, event) == EventResult::Handled {
             return EventResult::Handled;
         }
         // Escape (once focused) dismisses through the same path as a scrim tap.
@@ -661,7 +670,7 @@ mod tests {
     }
     struct TapWidget {
         size: Size,
-        on_tap: crate::ErasedCallback,
+        on_tap: crate::authoring::ErasedCallback,
         captured: bool,
     }
     impl<State: 'static> View<State> for TapView<State> {
@@ -669,7 +678,7 @@ mod tests {
         fn build(&self, _ctx: &mut BuildCtx<'_>) -> TapWidget {
             TapWidget {
                 size: self.size,
-                on_tap: crate::erase_callback(&self.on_tap),
+                on_tap: crate::authoring::erase_callback(&self.on_tap),
                 captured: false,
             }
         }
@@ -679,7 +688,7 @@ mod tests {
             element: &mut TapWidget,
             _ctx: &mut BuildCtx<'_>,
         ) -> ChangeFlags {
-            element.on_tap = crate::erase_callback(&self.on_tap);
+            element.on_tap = crate::authoring::erase_callback(&self.on_tap);
             ChangeFlags::NONE
         }
     }

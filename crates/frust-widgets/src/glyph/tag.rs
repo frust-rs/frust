@@ -166,7 +166,7 @@ pub struct TagWidget {
     pressed: bool,
     /// Armed by a `Down` inside the remove hit-region, cleared on `Up`/`Cancel`.
     captured: bool,
-    on_remove: Option<crate::ErasedCallback>,
+    on_remove: Option<crate::authoring::ErasedCallback>,
 }
 
 impl<State: 'static> View<State> for TagView<State> {
@@ -183,7 +183,10 @@ impl<State: 'static> View<State> for TagView<State> {
             remove_origin: Point::ZERO,
             pressed: false,
             captured: false,
-            on_remove: self.on_remove.as_ref().map(crate::erase_callback),
+            on_remove: self
+                .on_remove
+                .as_ref()
+                .map(crate::authoring::erase_callback),
         }
     }
 
@@ -193,7 +196,10 @@ impl<State: 'static> View<State> for TagView<State> {
         element: &mut TagWidget,
         _ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        element.on_remove = self.on_remove.as_ref().map(crate::erase_callback);
+        element.on_remove = self
+            .on_remove
+            .as_ref()
+            .map(crate::authoring::erase_callback);
         let mut flags = ChangeFlags::NONE;
         if prev.label != self.label {
             element.label.set_content(self.label.clone());

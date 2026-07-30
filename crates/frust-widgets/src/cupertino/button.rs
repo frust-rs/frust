@@ -103,8 +103,8 @@ use frust_theme::{Brightness, GlassMaterial, ShadowSpec, ShapeScale, Theme};
 use kurbo::{Point, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
 
+use crate::authoring::ThemeTextColor;
 use crate::text;
-use crate::text::ThemeTextColor;
 
 /// Small size-class content height, logical px. Source: `Buttons/Dark/Small/
 /// Bordered/Text/1 - Idle` (49×28) — see the module docs' size-class table.
@@ -360,7 +360,7 @@ pub struct CupertinoButtonWidget {
     captured: bool,
     /// The spring-driven press dip: `0.0` rest → `1.0` fully pressed.
     press_anim: AnimationController,
-    on_press: crate::ErasedCallback,
+    on_press: crate::authoring::ErasedCallback,
 }
 
 impl CupertinoButtonWidget {
@@ -382,13 +382,13 @@ impl<State: 'static> View<State> for CupertinoButtonView<State> {
     fn build(&self, ctx: &mut BuildCtx<'_>) -> CupertinoButtonWidget {
         let label_view = label_view::<State>(self.label.clone(), self.style);
         CupertinoButtonWidget {
-            label: crate::build_child(&label_view, ctx),
+            label: crate::authoring::build_child(&label_view, ctx),
             label_text: self.label.clone(),
             size: self.size,
             style: self.style,
             captured: false,
             press_anim: AnimationController::new(PRESS_ANIM_PERIOD),
-            on_press: crate::erase_callback(&self.on_press),
+            on_press: crate::authoring::erase_callback(&self.on_press),
         }
     }
 
@@ -399,7 +399,7 @@ impl<State: 'static> View<State> for CupertinoButtonView<State> {
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         // Closures are not comparable — always reinstall the adapter.
-        element.on_press = crate::erase_callback(&self.on_press);
+        element.on_press = crate::authoring::erase_callback(&self.on_press);
         let mut flags = ChangeFlags::NONE;
 
         if prev.label != self.label || prev.style != self.style {
@@ -407,7 +407,8 @@ impl<State: 'static> View<State> for CupertinoButtonView<State> {
             element.style = self.style;
             let prev_view = label_view::<State>(prev.label.clone(), prev.style);
             let next_view = label_view::<State>(self.label.clone(), self.style);
-            flags |= crate::rebuild_child(&prev_view, &next_view, &mut element.label, ctx);
+            flags |=
+                crate::authoring::rebuild_child(&prev_view, &next_view, &mut element.label, ctx);
         }
         if prev.size != self.size {
             element.size = self.size;
@@ -418,7 +419,7 @@ impl<State: 'static> View<State> for CupertinoButtonView<State> {
 
     fn teardown(&self, element: &mut CupertinoButtonWidget, ctx: &mut BuildCtx<'_>) {
         let label_view = label_view::<State>(self.label.clone(), self.style);
-        crate::teardown_child(&label_view, &mut element.label, ctx);
+        crate::authoring::teardown_child(&label_view, &mut element.label, ctx);
     }
 }
 

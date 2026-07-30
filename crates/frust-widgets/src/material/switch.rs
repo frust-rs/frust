@@ -182,7 +182,7 @@ pub struct SwitchWidget {
     pressed: bool,
     /// Armed by a `Down` (alongside `capture_pointer`), cleared on `Up`/`Cancel`.
     captured: bool,
-    on_toggle: crate::ErasedArgCallback<bool>,
+    on_toggle: crate::authoring::ErasedArgCallback<bool>,
 }
 
 fn inside(pos: Point, size: Size) -> bool {
@@ -207,7 +207,7 @@ impl<State: 'static> View<State> for SwitchView<State> {
             state_layer: StateLayer::new(),
             pressed: false,
             captured: false,
-            on_toggle: crate::erase_callback_arg(&self.on_toggle),
+            on_toggle: crate::authoring::erase_callback_arg(&self.on_toggle),
         }
     }
 
@@ -217,7 +217,7 @@ impl<State: 'static> View<State> for SwitchView<State> {
         element: &mut SwitchWidget,
         _ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        element.on_toggle = crate::erase_callback_arg(&self.on_toggle);
+        element.on_toggle = crate::authoring::erase_callback_arg(&self.on_toggle);
         if prev.checked != self.checked {
             // The app is the source of truth: adopt the new value. The
             // animation itself starts lazily in `paint`, once a theme (and

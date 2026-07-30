@@ -233,7 +233,7 @@ fn lerp_geom(from: (f64, f64), to: (f64, f64), t: f64) -> (f64, f64) {
 pub struct TabsWidget {
     tabs: Vec<TabEntry>,
     selected: usize,
-    on_select: crate::ErasedArgCallback<usize>,
+    on_select: crate::authoring::ErasedArgCallback<usize>,
     height: f64,
 
     /// The slide controller (idle between selection changes).
@@ -295,7 +295,7 @@ impl<State: 'static> View<State> for TabsView<State> {
         TabsWidget {
             tabs,
             selected: self.selected,
-            on_select: crate::erase_callback_arg(&self.on_select),
+            on_select: crate::authoring::erase_callback_arg(&self.on_select),
             height: 0.0,
             indicator: AnimationController::new(INDICATOR_DURATION).with_curve(INDICATOR_CURVE),
             anim_from: (0.0, 0.0),
@@ -322,7 +322,7 @@ impl<State: 'static> View<State> for TabsView<State> {
         _ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         // Closures aren't comparable — always reinstall the adapter.
-        element.on_select = crate::erase_callback_arg(&self.on_select);
+        element.on_select = crate::authoring::erase_callback_arg(&self.on_select);
         let mut flags = ChangeFlags::NONE;
 
         // Reconcile labels positionally (a tab strip is a fixed small set).

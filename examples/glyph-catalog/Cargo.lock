@@ -1335,6 +1335,7 @@ dependencies = [
  "frust-native-widgets",
  "frust-reactive",
  "frust-scene",
+ "frust-shell-common",
  "frust-text",
  "kurbo",
  "log",

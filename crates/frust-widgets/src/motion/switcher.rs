@@ -259,7 +259,7 @@ impl<State: 'static, P: TransitionPattern + Clone + 'static> View<State>
     fn build(&self, ctx: &mut BuildCtx<'_>) -> PatternSwitcherWidget<P> {
         PatternSwitcherWidget {
             key: self.key,
-            child: crate::build_child(&self.child, ctx),
+            child: crate::authoring::build_child(&self.child, ctx),
             exiting: None,
             pattern: self.pattern.clone(),
             explicit_timing: self.timing,
@@ -311,13 +311,15 @@ impl<State: 'static, P: TransitionPattern + Clone + 'static> View<State>
 
             // Freeze the current incoming child as the exiting child; build the
             // new incoming child fresh in its place.
-            let mut old =
-                std::mem::replace(&mut element.child, crate::build_child(&self.child, ctx));
+            let mut old = std::mem::replace(
+                &mut element.child,
+                crate::authoring::build_child(&self.child, ctx),
+            );
 
             // Container-suppresses-routing contract (docs/CODE_STANDARDS.md):
             // synthetic Cancel -> focus clear -> cleared-IME publish, in order.
             if old.is_active() {
-                crate::cancel_pod(&mut old);
+                crate::authoring::cancel_pod(&mut old);
                 old.set_active(false);
             }
             if old.is_focused() {
@@ -331,14 +333,15 @@ impl<State: 'static, P: TransitionPattern + Clone + 'static> View<State>
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         } else {
             // --- Same identity: an ordinary in-place reconcile, no transition. ---
-            flags |= crate::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
+            flags |=
+                crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
         }
 
         flags
     }
 
     fn teardown(&self, element: &mut PatternSwitcherWidget<P>, ctx: &mut BuildCtx<'_>) {
-        crate::teardown_child(&self.child, &mut element.child, ctx);
+        crate::authoring::teardown_child(&self.child, &mut element.child, ctx);
         // The frozen exiting child has no retained view to run `View::teardown`
         // against; dropping it disposes any Component owner via the defensive
         // `Drop` (module docs).
@@ -413,7 +416,7 @@ impl<P: TransitionPattern + Clone + 'static> Widget for PatternSwitcherWidget<P>
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         // Route only to the incoming child; the frozen exiting child left the
         // event path at transition start (synthetically cancelled) — module docs.
-        crate::route_event_single(&mut self.child, ctx, event)
+        crate::authoring::route_event_single(&mut self.child, ctx, event)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {

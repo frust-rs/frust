@@ -49,11 +49,11 @@ use frust_scene::{Scene, SceneBuilder};
 use frust_shell_common::font_registry::FontRegistryWatcher;
 use frust_shell_common::perf::UiSpans;
 use frust_shell_common::{
-    SurfaceSize, ThemeOverrideWatcher, effective_brightness_for_platform_change,
+    SurfaceSize, ThemeOverrideWatcher, default_theme, effective_brightness_for_platform_change,
     render_thread_enabled,
 };
 use frust_text::TextContext;
-use frust_theme::{Brightness, DesignLanguage, Theme};
+use frust_theme::{Brightness, Theme};
 use kurbo::{Affine, Point, Size};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
@@ -197,11 +197,13 @@ where
         semantics_seen: 0,
         fatal: None,
         epoch,
-        // Glyph baseline, Dark until `resumed` seeds the window's real
-        // preference (`brightness_from_winit` below overwrites `brightness`
-        // unconditionally, so the baseline's own dark-first default never leaks
-        // into a light-preference platform).
-        theme: Theme::glyph_baseline(),
+        // The seeded base theme (`base_theme`: a design system's
+        // `set_default_theme`, else the built-in `Theme::neutral()` fallback),
+        // carrying that base's own brightness only until `resumed` seeds the
+        // window's real preference (`brightness_from_winit` there overwrites
+        // `brightness` unconditionally, so a seeded base's own starting
+        // brightness never leaks into a light-preference platform).
+        theme: base_theme(default_theme()),
         theme_seeded: false,
         theme_override: ThemeOverrideWatcher::new(),
         theme_override_active: false,
@@ -217,37 +219,92 @@ where
     // per-frame poll in `RedrawRequested` picks up any later registration.
     handler.font_registry.drain_into(&mut handler.text_ctx);
 
-    // Bundled Glyph font auto-registration: the default theme just
-    // constructed above is the Glyph baseline, so register the bundled Space
-    // Mono / IBM Plex Mono faces directly into the shell's `TextContext`
-    // before the first layout — same pre-first-layout timing as the drain
-    // above, so the first frame shapes with Glyph fonts with no relayout
-    // needed.
-    register_glyph_fonts_if_active(&handler.theme, &mut handler.text_ctx);
-
     event_loop.run_app(&mut handler)?;
     finish(handler.fatal)
 }
 
-/// Bundled Glyph font auto-registration: registers
-/// `frust_theme::glyph::font_data()`'s bundled Space Mono / IBM Plex Mono
-/// faces into `cx` when `theme`'s [`DesignLanguage`] is [`DesignLanguage::Glyph`]
-/// — a no-op otherwise (an app whose default theme is Material/Cupertino gets
-/// no bundled Glyph fonts registered), and also a no-op when the
-/// `glyph-fonts` feature is off (`font_data()` returns an empty slice then).
-/// Gated on the theme passed in at the call site (the just-constructed
-/// default) — a later `set_app_theme` swap away from Glyph does not
-/// un-register these faces (harmless; an unused registered family costs
-/// nothing at shape time, see the task's Details).
+/// The base [`Theme`] this shell seeds itself from: the design-system-supplied
+/// default (`frust_shell_common::set_default_theme`, read back through
+/// [`default_theme`]) when a plugin seeded one, else the shell's own built-in
+/// [`Theme::neutral`] fallback.
 ///
-/// Pulled out as a free function so the gating + registration is
-/// unit-testable without a live window.
-fn register_glyph_fonts_if_active(theme: &Theme, cx: &mut TextContext) {
-    if theme.design_language == DesignLanguage::Glyph {
-        for bytes in frust_theme::glyph::font_data() {
-            let _ = cx.register_fonts(bytes.to_vec());
-        }
+/// A seeded default supplies only the *starting point*: unlike an app-forced
+/// override (`set_app_theme`) it does not pin brightness — every call site
+/// below still derives `brightness` from the platform's own preference against
+/// this base, so a design-system default keeps following system dark mode.
+///
+/// The fallback is deliberately the design-language-free
+/// [`Theme::neutral`] — system fonts, no bundled font bytes: a shell names no
+/// design system of its own, so an app that installs none gets the neutral
+/// floor rather than someone's brand. A design system supplies both halves
+/// itself (its base theme through `set_default_theme`, its font bytes through
+/// `frust_shell_common::font_registry::register_app_fonts`).
+///
+/// Takes the slot's value as an argument rather than reading the process-global
+/// itself, so the fallback ladder is unit-testable without touching a
+/// process-wide slot that has no reset; every call site passes
+/// [`default_theme()`](default_theme).
+fn base_theme(seeded: Option<Theme>) -> Theme {
+    seeded.unwrap_or_else(Theme::neutral)
+}
+
+/// The theme a cleared app-theme override reverts to: the seeded base
+/// ([`base_theme`] — a design system's `set_default_theme`, else the built-in
+/// fallback) at the platform's *current* brightness, never the cleared
+/// override's own pinned one.
+///
+/// Extracted so the `clear_app_theme` arm below and its unit tests run one
+/// implementation: a test that recomputed this in its own body would stay green
+/// if the arm regressed to an unconditional `Theme::neutral()` — the exact
+/// regression this ladder exists to prevent.
+fn reverted_theme(seeded: Option<Theme>, platform: Brightness) -> Theme {
+    let mut theme = base_theme(seeded);
+    theme.brightness = platform;
+    theme
+}
+
+/// The active-theme decision for one [`ThemeOverrideWatcher::poll`] result —
+/// the precedence ladder's top two rungs as one pure function, shared by the
+/// per-frame poll arm in `RedrawRequested` and its unit tests.
+///
+/// Returns `None` when the poll reported no change (the shell leaves its theme
+/// alone), else the new active theme paired with whether an app-forced override
+/// is now pinning it (`ShellHandler::theme_override_active`).
+///
+/// `seeded`/`platform` are suppliers rather than values because only the
+/// cleared-override arm needs them: reading the process-global default slot
+/// ([`default_theme`] — a `Mutex` lock plus a whole-`Theme` clone) and querying
+/// the window's reported appearance would otherwise become per-frame cost for a
+/// poll that reports "nothing changed" on all but a handful of frames.
+fn theme_after_override_poll(
+    polled: Option<Option<Theme>>,
+    seeded: impl FnOnce() -> Option<Theme>,
+    platform: impl FnOnce() -> Brightness,
+) -> Option<(Theme, bool)> {
+    match polled {
+        // `set_app_theme`: the forced theme wins wholesale — neither the seeded
+        // default nor the platform's brightness is even consulted (the
+        // override-wins rule).
+        Some(Some(theme)) => Some((theme, true)),
+        // `clear_app_theme`: back to the seeded base at the platform's own
+        // current brightness.
+        Some(None) => Some((reverted_theme(seeded(), platform()), false)),
+        None => None,
     }
+}
+
+/// Re-derive `theme`'s brightness from a platform appearance report, honouring
+/// the override-wins rule ([`effective_brightness_for_platform_change`]): an
+/// app-forced override pins brightness, a design-system-seeded default does not
+/// — `theme` still IS that base, so flipping it in place re-derives light/dark
+/// against the design system's own tokens.
+///
+/// Extracted for the same reason as [`reverted_theme`]: the
+/// `WindowEvent::ThemeChanged` arm and the seed-ladder tests share one
+/// implementation.
+fn follow_platform_brightness(theme: &mut Theme, override_active: bool, platform: Brightness) {
+    theme.brightness =
+        effective_brightness_for_platform_change(override_active, theme.brightness, platform);
 }
 
 /// Turns a post-loop `ShellHandler::fatal` into the `run_desktop` result.
@@ -507,7 +564,9 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     /// the nanosecond delta to [`RenderRoot::paint`]. This stays the
     /// desktop clock; only the mobile shells swap in a platform vsync timestamp.
     epoch: Instant,
-    /// The app's active theme (M3 baseline). The shell owns the appearance
+    /// The app's active theme — the seeded base ([`base_theme`]: a design
+    /// system's `set_default_theme`, else the built-in fallback) until an
+    /// app-forced override replaces it. The shell owns the appearance
     /// state: its `brightness` is seeded from the window's reported preference
     /// in `resumed` and flipped live on `WindowEvent::ThemeChanged`. On every
     /// change the shell re-boxes it into [`RenderRoot::set_theme`] (so widgets
@@ -879,11 +938,15 @@ where
             // Override-wins rule: while an app-forced theme
             // override is active, this platform change must not flip
             // brightness — `effective_brightness_for_platform_change` passes
-            // the current brightness through unchanged in that case.
+            // the current brightness through unchanged in that case. A seeded
+            // *default* is deliberately not pinned that way: `self.theme` still
+            // IS that base (`base_theme` seeded it and nothing replaced it), so
+            // flipping its brightness in place re-derives light/dark from the
+            // design system's own theme.
             WindowEvent::ThemeChanged(winit_theme) => {
-                self.theme.brightness = effective_brightness_for_platform_change(
+                follow_platform_brightness(
+                    &mut self.theme,
                     self.theme_override_active,
-                    self.theme.brightness,
                     brightness_from_winit(Some(winit_theme)),
                 );
                 self.apply_theme(&window);
@@ -991,19 +1054,24 @@ where
                 // frame-callback poll. `Some(Some(theme))` is a new forced
                 // theme; `Some(None)` is a `clear_app_theme` reverting to the
                 // platform-derived default; `None` means nothing changed.
-                match self.theme_override.poll() {
-                    Some(Some(theme)) => {
-                        self.theme = theme;
-                        self.theme_override_active = true;
-                        self.apply_theme(&window);
-                    }
-                    Some(None) => {
-                        self.theme = Theme::glyph_baseline();
-                        self.theme.brightness = brightness_from_winit(window.theme());
-                        self.theme_override_active = false;
-                        self.apply_theme(&window);
-                    }
-                    None => {}
+                //
+                // Reverting an override lands on the base this shell seeded
+                // itself from — the design-system default when one was
+                // supplied, else the built-in fallback — with brightness
+                // re-derived from the window's current preference rather than
+                // inherited from the cleared override; that whole ladder lives
+                // in `theme_after_override_poll` so this arm and its unit tests
+                // share one implementation. Both inputs stay lazy: an
+                // unchanged poll pays neither the default-slot read nor the
+                // window appearance query.
+                if let Some((theme, override_active)) =
+                    theme_after_override_poll(self.theme_override.poll(), default_theme, || {
+                        brightness_from_winit(window.theme())
+                    })
+                {
+                    self.theme = theme;
+                    self.theme_override_active = override_active;
+                    self.apply_theme(&window);
                 }
 
                 // Poll the app-facing pending-font registry once per
@@ -1188,16 +1256,15 @@ where
 mod tests {
     use super::{
         ComposeLatch, ElementState, Ime, Tree, TreeId, WinitKey, WinitNamedKey, WinitTheme,
-        brightness_from_winit, build_tree_update, finish, map_key_event, map_modifiers,
-        map_named_key, physical_to_logical, register_glyph_fonts_if_active,
+        base_theme, brightness_from_winit, build_tree_update, default_theme, finish,
+        follow_platform_brightness, map_key_event, map_modifiers, map_named_key,
+        physical_to_logical, theme_after_override_poll,
     };
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{Node, NodeId, Role};
     use frust_core::event::{ImeEvent, Key, KeyEvent, Modifiers, NamedKey};
-    use frust_text::{FontFamily, TextContext, TextStyle};
-    use frust_theme::{Brightness, DesignLanguage, Theme};
+    use frust_theme::{Brightness, Theme};
     use kurbo::Point;
-    use peniko::Color;
     use winit::keyboard::ModifiersState;
 
     // --- brightness_from_winit ---
@@ -1569,67 +1636,205 @@ mod tests {
         assert_eq!(tree_update.focus, root_id);
     }
 
-    // --- register_glyph_fonts_if_active ---
+    // --- the default-theme precedence ladder (seed / appearance / override) ---
+    //
+    // Every assertion below drives the SAME ladder helpers (`base_theme`,
+    // `reverted_theme` via `theme_after_override_poll`,
+    // `follow_platform_brightness`) the production seed (`run_desktop`'s
+    // `theme:` field), appearance (`WindowEvent::ThemeChanged`) and
+    // override-poll (`RedrawRequested`) arms call. That sharing is the whole
+    // point: a test that recomputed the ladder in its own body would stay green
+    // if one of those arms regressed to an unconditional `Theme::neutral()`.
+    //
+    // What it does NOT cover: how a production arm *composes* those helpers —
+    // `base_theme(default_theme())` at the seed site, versus a
+    // default-discarding `base_theme(None)`. Both type-check and both drive the
+    // same helper, so no assertion here can tell them apart.
+    // `crates/frust/tests/theme_ladder_conformance.rs` pins that other half
+    // instead: that each arm still calls these helpers, that the seed site
+    // still passes `default_theme()` into `base_theme`, and that the two mobile
+    // shells' helper copies stay identical to the ones exercised here.
 
-    /// Extracts the raw font-file bytes a shaped `GlyphRun` resolved against,
-    /// mirroring `frust-text/tests/register_fonts.rs`'s helper of the same
-    /// shape, so a test can assert *which* face actually shaped the text.
-    fn shaped_font_bytes(cx: &mut TextContext, text: &str, sty: &TextStyle) -> Vec<u8> {
-        let layout = cx.layout(text, sty, None);
-        let runs = layout.to_scene_runs(Point::ORIGIN);
-        let run = runs.first().expect("expected at least one glyph run");
-        run.font.font().data.as_ref().to_vec()
+    #[test]
+    fn an_unseeded_shell_starts_on_the_builtin_fallback_at_the_platform_brightness() {
+        // Behavior 1. Nothing seeded: the seed site lands on the shell's own
+        // built-in, design-language-free floor...
+        let mut theme = base_theme(None);
+        assert_eq!(theme, Theme::neutral());
+
+        // ...and the platform's first appearance report drives brightness
+        // (`resumed`'s seed, then every `ThemeChanged`), so the fallback's own
+        // starting brightness never leaks onto a dark-preference platform.
+        follow_platform_brightness(&mut theme, false, brightness_from_winit(None));
+        assert_eq!(theme, Theme::neutral().with_brightness(Brightness::Light));
+        follow_platform_brightness(
+            &mut theme,
+            false,
+            brightness_from_winit(Some(WinitTheme::Dark)),
+        );
+        assert_eq!(theme, Theme::neutral().with_brightness(Brightness::Dark));
     }
 
     #[test]
-    fn glyph_theme_auto_registers_and_shapes_space_mono_with_no_explicit_call() {
-        // Post-init (no `frust::register_app_fonts`
-        // call anywhere in this test), a Glyph-themed shell resolves "Space
-        // Mono" to the bundled face, not a SystemUi fallback.
-        let mut cx = TextContext::new();
-        register_glyph_fonts_if_active(&Theme::glyph_baseline(), &mut cx);
+    fn a_seeded_default_is_the_base_and_still_follows_platform_brightness() {
+        // Behavior 2. A design system's `set_default_theme` supplies the base...
+        let seeded = Theme::m3_baseline();
+        let mut theme = base_theme(Some(seeded.clone()));
+        assert_eq!(theme, seeded);
+        // ...in place of the built-in floor, not layered over it.
+        assert_ne!(theme, Theme::neutral());
 
-        let sty = TextStyle {
-            family: FontFamily::named("Space Mono"),
-            ..TextStyle::new(16.0, Color::BLACK)
-        };
-        let glyph_bytes = shaped_font_bytes(&mut cx, "frust", &sty);
-
-        // A pristine context (no auto-registration) shaping the same request
-        // falls back to whatever the host resolves "Space Mono" to via the
-        // system font database (almost certainly not installed) — compare
-        // against the exact bundled bytes instead of a fallback-inequality
-        // check, since a real system match would make inequality flaky.
-        let bundled = frust_theme::glyph::font_data();
-        assert!(
-            !bundled.is_empty(),
-            "expected the default `glyph-fonts` feature to ship bundled bytes"
+        // ...and unlike an app-forced override it does NOT pin brightness: the
+        // appearance arm keeps flipping the seeded base in place, both ways.
+        follow_platform_brightness(
+            &mut theme,
+            false,
+            brightness_from_winit(Some(WinitTheme::Dark)),
         );
-        assert!(
-            bundled.iter().any(|face| face.to_vec() == glyph_bytes),
-            "expected \"Space Mono\" to resolve to one of the bundled Glyph \
-             font faces with no explicit `register_app_fonts` call"
+        assert_eq!(theme, seeded.clone().with_brightness(Brightness::Dark));
+        follow_platform_brightness(
+            &mut theme,
+            false,
+            brightness_from_winit(Some(WinitTheme::Light)),
+        );
+        assert_eq!(theme, seeded.with_brightness(Brightness::Light));
+    }
+
+    #[test]
+    fn an_app_theme_override_beats_a_seeded_default_and_pins_brightness() {
+        // Behavior 3. The override poll's `Some(Some(theme))` arm takes the
+        // forced theme wholesale. The suppliers panic rather than answer, which
+        // proves more than an inequality could: the arm cannot even observe the
+        // seeded default or the platform brightness, so no seeded value and no
+        // platform preference can influence what an override resolves to.
+        let forced = Theme::cupertino_baseline().with_brightness(Brightness::Light);
+        let decided = theme_after_override_poll(
+            Some(Some(forced.clone())),
+            || panic!("an active override must not consult the seeded default"),
+            || panic!("an active override must not consult the platform brightness"),
+        );
+        assert_eq!(decided, Some((forced, true)));
+
+        // ...and it keeps winning against a *later* live platform flip
+        // (`ThemeChanged`'s override-wins rule), exactly where the seeded
+        // default of the test above followed the platform instead.
+        let mut active = Theme::cupertino_baseline().with_brightness(Brightness::Light);
+        follow_platform_brightness(&mut active, true, Brightness::Dark);
+        assert_eq!(active.brightness, Brightness::Light);
+    }
+
+    #[test]
+    fn clearing_an_override_reverts_to_the_seeded_default_not_the_builtin() {
+        // Behavior 4. The `Some(None)` arm with a design system's default
+        // seeded: the revert lands on THAT base at the window's current
+        // brightness — not on the built-in fallback, and not on the cleared
+        // override's pinned brightness.
+        let seeded = Theme::m3_baseline();
+        let decided = theme_after_override_poll(
+            Some(None),
+            || Some(seeded.clone()),
+            || brightness_from_winit(Some(WinitTheme::Dark)),
+        );
+        assert_eq!(
+            decided,
+            Some((seeded.with_brightness(Brightness::Dark), false))
+        );
+        // Spelled out, since this is the arm the ladder exists for: a seeded
+        // shell must NOT revert to the built-in fallback.
+        assert_ne!(
+            decided.map(|(theme, _)| theme),
+            Some(Theme::neutral().with_brightness(Brightness::Dark))
         );
     }
 
     #[test]
-    fn non_glyph_theme_does_not_auto_register_bundled_fonts() {
-        let mut cx = TextContext::new();
-        let mut m3 = Theme::m3_baseline();
-        m3.design_language = DesignLanguage::Material3;
-        register_glyph_fonts_if_active(&m3, &mut cx);
+    fn clearing_an_override_with_nothing_seeded_reverts_to_the_builtin() {
+        // Behavior 5. The same arm with an empty slot: the built-in fallback at
+        // the platform's brightness.
+        let decided = theme_after_override_poll(
+            Some(None),
+            || None,
+            || brightness_from_winit(Some(WinitTheme::Dark)),
+        );
+        assert_eq!(
+            decided,
+            Some((Theme::neutral().with_brightness(Brightness::Dark), false))
+        );
+    }
 
-        let sty = TextStyle {
-            family: FontFamily::named("Space Mono"),
-            ..TextStyle::new(16.0, Color::BLACK)
-        };
-        let bytes = shaped_font_bytes(&mut cx, "frust", &sty);
+    #[test]
+    fn a_poll_reporting_no_change_leaves_the_active_theme_alone() {
+        // The `None` arm: no `set_app_theme`/`clear_app_theme` since the last
+        // frame, so the shell must not touch its theme — and must pay neither
+        // the process-global slot read nor the window appearance query, both of
+        // which run on every frame if this arm ever stops being lazy.
+        let decided = theme_after_override_poll(
+            None,
+            || panic!("an unchanged poll must not read the process-global default slot"),
+            || panic!("an unchanged poll must not query the window's appearance"),
+        );
+        assert_eq!(decided, None);
+    }
 
-        let bundled = frust_theme::glyph::font_data();
-        assert!(
-            bundled.iter().all(|face| face.to_vec() != bytes),
-            "a non-Glyph default theme must not auto-register the bundled \
-             Glyph fonts"
+    #[test]
+    fn a_seeded_default_reaches_both_ladder_sites_through_the_process_global_slot() {
+        // The wiring the argument-taking helpers above cannot check: what the
+        // production sites actually pass is `frust_shell_common::default_theme`,
+        // so a plugin's `set_default_theme` really does reach both the seed and
+        // the revert.
+        //
+        // `theme_default` deliberately exposes no reset (a shell needs the same
+        // seeded base again when `clear_app_theme` reverts an override, so the
+        // slot is non-destructive), which is why this must remain the ONLY test in this
+        // binary that writes it — `the_default_slot_has_exactly_one_test_writer`
+        // pins that. Asserting the pristine state first turns a future second
+        // writer into a loud failure here instead of a silent order dependency
+        // in whichever test happens to run after it.
+        assert_eq!(
+            default_theme(),
+            None,
+            "another test in this binary seeded the process-global default slot first — \
+             the slot has no reset, so tests that read it cannot be order-independent"
+        );
+
+        let seeded = Theme::cupertino_baseline();
+        frust_shell_common::set_default_theme(seeded.clone());
+
+        // The same composition the seed site (`run_desktop`'s `theme:` field)
+        // performs — re-typed here, not shared with it, so this asserts only
+        // that the composition resolves the seeded default, never that the
+        // production site still spells it this way. That second half is
+        // `theme_ladder_conformance.rs`'s
+        // `every_shell_seeds_base_theme_from_the_default_slot` source scan.
+        assert_eq!(base_theme(default_theme()), seeded);
+        // ...and the revert arm, reading that same slot through the same
+        // supplier the production arm passes.
+        assert_eq!(
+            theme_after_override_poll(Some(None), default_theme, || Brightness::Dark),
+            Some((seeded.with_brightness(Brightness::Dark), false))
+        );
+    }
+
+    #[test]
+    fn the_default_slot_has_exactly_one_test_writer() {
+        // Pins the uniqueness the test above depends on. A plain substring scan
+        // of this very file (the `print_free_cores.rs`/`surface_mode_conformance.rs`
+        // idiom — this repo has no lint-plugin tooling), not a parser: every
+        // real call sits on its own statement line and comment-only lines (every
+        // doc mention of the seam) are stripped. The needle is assembled from
+        // two pieces so this line is not itself a hit.
+        let needle = concat!("set_default_theme", "(");
+        let writers = include_str!("app_handler.rs")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .filter(|line| line.contains(needle))
+            .count();
+        assert_eq!(
+            writers, 1,
+            "the process-global default-theme slot has no reset, so exactly one test in this \
+             binary may write it (found {writers}); serialize them behind a lock the way \
+             `frust-shell-common::theme_override`'s own tests do, or fold the new assertion \
+             into the existing writer"
         );
     }
 }

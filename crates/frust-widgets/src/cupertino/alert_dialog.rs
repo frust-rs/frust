@@ -80,9 +80,9 @@ use frust_theme::{Brightness, GlassFill, GlassMaterial, ShapeScale, Theme};
 use kurbo::{Point, Rect, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
 
+use crate::authoring::ThemeTextColor;
 use crate::nav::navigator::{NavigatorController, PopResult};
 use crate::text;
-use crate::text::ThemeTextColor;
 
 /// Panel width, in logical px.
 ///
@@ -340,15 +340,15 @@ impl<State: 'static> View<State> for CupertinoAlertDialogView<State> {
     type Element = CupertinoAlertDialogWidget<State>;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> CupertinoAlertDialogWidget<State> {
-        let title = crate::build_child(&title_view::<State>(self.title.clone()), ctx);
+        let title = crate::authoring::build_child(&title_view::<State>(self.title.clone()), ctx);
         let message = self
             .message
             .as_ref()
-            .map(|m| crate::build_child(&message_view::<State>(m.clone()), ctx));
+            .map(|m| crate::authoring::build_child(&message_view::<State>(m.clone()), ctx));
         let actions = self
             .actions
             .iter()
-            .map(|a| crate::build_child(&action_label_view::<State>(a), ctx))
+            .map(|a| crate::authoring::build_child(&action_label_view::<State>(a), ctx))
             .collect();
         CupertinoAlertDialogWidget {
             title,
@@ -372,7 +372,7 @@ impl<State: 'static> View<State> for CupertinoAlertDialogView<State> {
         element.controller = self.controller.clone();
         if prev.title != self.title {
             element.title_text = self.title.clone();
-            flags |= crate::rebuild_child(
+            flags |= crate::authoring::rebuild_child(
                 &title_view::<State>(prev.title.clone()),
                 &title_view::<State>(self.title.clone()),
                 &mut element.title,
@@ -386,7 +386,7 @@ impl<State: 'static> View<State> for CupertinoAlertDialogView<State> {
         if let (Some(pm), Some(nm), Some(elem_m)) =
             (&prev.message, &self.message, element.message.as_mut())
         {
-            flags |= crate::rebuild_child(
+            flags |= crate::authoring::rebuild_child(
                 &message_view::<State>(pm.clone()),
                 &message_view::<State>(nm.clone()),
                 elem_m,
@@ -395,7 +395,7 @@ impl<State: 'static> View<State> for CupertinoAlertDialogView<State> {
         }
         let common = prev.actions.len().min(self.actions.len());
         for i in 0..common {
-            flags |= crate::rebuild_child(
+            flags |= crate::authoring::rebuild_child(
                 &action_label_view::<State>(&prev.actions[i]),
                 &action_label_view::<State>(&self.actions[i]),
                 &mut element.actions[i],
@@ -406,16 +406,16 @@ impl<State: 'static> View<State> for CupertinoAlertDialogView<State> {
     }
 
     fn teardown(&self, element: &mut CupertinoAlertDialogWidget<State>, ctx: &mut BuildCtx<'_>) {
-        crate::teardown_child(
+        crate::authoring::teardown_child(
             &title_view::<State>(self.title.clone()),
             &mut element.title,
             ctx,
         );
         if let (Some(m), Some(elem_m)) = (&self.message, element.message.as_mut()) {
-            crate::teardown_child(&message_view::<State>(m.clone()), elem_m, ctx);
+            crate::authoring::teardown_child(&message_view::<State>(m.clone()), elem_m, ctx);
         }
         for (a, pod) in self.actions.iter().zip(element.actions.iter_mut()) {
-            crate::teardown_child(&action_label_view::<State>(a), pod, ctx);
+            crate::authoring::teardown_child(&action_label_view::<State>(a), pod, ctx);
         }
     }
 }

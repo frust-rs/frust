@@ -281,6 +281,48 @@ impl MotionScheme {
             cosmetic_loop_rate: CosmeticLoopRate::new(30.0),
         }
     }
+
+    /// The neutral, design-language-free motion scheme.
+    ///
+    /// Every spring is **critically damped** (`damping_ratio: 1.0`, no
+    /// overshoot) — unlike [`MotionScheme::m3_expressive`]'s under-damped
+    /// `0.9` spatial springs (a deliberate M3 Expressive personality trait,
+    /// see that constructor's docs) or [`MotionScheme::cupertino`]'s
+    /// community-documented ζ≈0.5753 iOS spring, both of which bounce by
+    /// design. A neutral-themed transition settles without overshoot — a
+    /// deliberately unbranded feel, not a missing feature. Stiffness still
+    /// varies by speed tier (fast > default > slow), the same three-tier
+    /// shape every other baseline uses.
+    ///
+    /// Duration/easing tokens are a plain, **Frust-authored round-number
+    /// scale** — not sourced from any published design system's table,
+    /// unlike the M3/Cupertino baselines above — using only the generic
+    /// CSS-keyword [`Curve`] variants (`EaseOut`/`EaseInOut`/`EaseIn`),
+    /// never a design-language-specific bezier.
+    pub const fn neutral() -> Self {
+        Self {
+            fast_spatial: MotionSpring::new(1.0, 700.0),
+            fast_effects: MotionSpring::new(1.0, 1800.0),
+            default_spatial: MotionSpring::new(1.0, 400.0),
+            default_effects: MotionSpring::new(1.0, 900.0),
+            slow_spatial: MotionSpring::new(1.0, 200.0),
+            slow_effects: MotionSpring::new(1.0, 450.0),
+            durations: MotionDurations {
+                instant: 100.0,
+                fast: 150.0,
+                base: 250.0,
+                slow: 400.0,
+                deliberate: 600.0,
+            },
+            easing: EasingSet {
+                spatial: Curve::EaseOut,
+                effects: Curve::EaseInOut,
+                exit: Curve::EaseIn,
+            },
+            reduce_motion: false,
+            cosmetic_loop_rate: CosmeticLoopRate::new(30.0),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -472,5 +514,58 @@ mod tests {
     fn constructors_stay_const_fn() {
         assert_eq!(M3_CONST, MotionScheme::m3_expressive());
         assert_eq!(CUPERTINO_CONST, MotionScheme::cupertino());
+    }
+
+    // ---- Neutral scheme -----------------------------------------------
+
+    #[test]
+    fn neutral_springs_are_all_critically_damped() {
+        // No overshoot anywhere — unlike m3_expressive's 0.9 spatial
+        // springs or cupertino's ~0.5753 uniform spring.
+        let m = MotionScheme::neutral();
+        for s in [
+            m.fast_spatial,
+            m.fast_effects,
+            m.default_spatial,
+            m.default_effects,
+            m.slow_spatial,
+            m.slow_effects,
+        ] {
+            assert_eq!(s.damping_ratio, 1.0);
+        }
+    }
+
+    #[test]
+    fn neutral_stiffness_still_varies_by_speed_tier() {
+        let m = MotionScheme::neutral();
+        assert!(m.fast_spatial.stiffness > m.default_spatial.stiffness);
+        assert!(m.default_spatial.stiffness > m.slow_spatial.stiffness);
+        assert!(m.fast_effects.stiffness > m.default_effects.stiffness);
+        assert!(m.default_effects.stiffness > m.slow_effects.stiffness);
+    }
+
+    #[test]
+    fn neutral_easing_uses_only_generic_curves() {
+        let m = MotionScheme::neutral();
+        assert_eq!(m.easing.spatial, Curve::EaseOut);
+        assert_eq!(m.easing.effects, Curve::EaseInOut);
+        assert_eq!(m.easing.exit, Curve::EaseIn);
+    }
+
+    #[test]
+    fn neutral_cosmetic_loop_rate_defaults_to_30hz() {
+        assert_eq!(MotionScheme::neutral().cosmetic_loop_rate.hz(), 30.0);
+    }
+
+    #[test]
+    fn neutral_reduce_motion_defaults_to_false() {
+        assert!(!MotionScheme::neutral().reduce_motion);
+    }
+
+    const NEUTRAL_CONST: MotionScheme = MotionScheme::neutral();
+
+    #[test]
+    fn neutral_stays_const_fn() {
+        assert_eq!(NEUTRAL_CONST, MotionScheme::neutral());
     }
 }

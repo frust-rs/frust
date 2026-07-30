@@ -22,6 +22,7 @@ pub mod color;
 pub mod elevation;
 pub mod extensions;
 pub mod glass;
+#[cfg(feature = "glyph")]
 pub mod glyph;
 pub mod motion;
 pub mod shape;
@@ -34,6 +35,7 @@ pub use color::{Brightness, ColorScheme};
 pub use elevation::{Elevation, ElevationLevel, ShadowSpec, SurfaceRole};
 pub use extensions::ThemeExtensions;
 pub use glass::{GlassFill, GlassMaterial, GlassScale};
+#[cfg(feature = "glyph")]
 pub use glyph::GlyphInk;
 pub use motion::{CosmeticLoopRate, EasingSet, MotionDurations, MotionScheme, MotionSpring};
 pub use shape::ShapeScale;

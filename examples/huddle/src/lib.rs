@@ -189,5 +189,15 @@ impl Component for HuddleApp {
 }
 
 // The showcase's sole entry point: one line binds `HuddleApp`
-// to all three platforms.
-frust::app!(HuddleApp);
+// to all three platforms. The `setup` block installs Glyph as the seeded
+// default theme (`frust::glyph_theme::install()`) before any shell reads the
+// default-theme slot — a shell's own fallback is `Theme::neutral()` now, and
+// the appearance settings screen's System/Material3/Cupertino/Glyph toggle
+// (`features::settings`, driven by `set_app_theme`) still needs a Glyph
+// first-launch default to demonstrate the design-language switch faithfully.
+frust::app!(
+    HuddleApp,
+    setup = {
+        frust::glyph_theme::install();
+    }
+);

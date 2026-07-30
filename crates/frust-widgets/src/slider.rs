@@ -164,7 +164,7 @@ pub struct SliderWidget {
     /// Gates `Move` so a hover `Move` (no prior press) never fires `on_change`;
     /// a `Down` still jumps to and reports the tapped value regardless.
     captured: bool,
-    on_change: crate::ErasedArgCallback<f64>,
+    on_change: crate::authoring::ErasedArgCallback<f64>,
 }
 
 /// Map a widget-local x (in `0..=width`) to a `0.0..=1.0` value, clamped.
@@ -183,7 +183,7 @@ impl<State: 'static> View<State> for SliderView<State> {
         SliderWidget {
             value: self.value,
             captured: false,
-            on_change: crate::erase_callback_arg(&self.on_change),
+            on_change: crate::authoring::erase_callback_arg(&self.on_change),
         }
     }
 
@@ -193,7 +193,7 @@ impl<State: 'static> View<State> for SliderView<State> {
         element: &mut SliderWidget,
         _ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        element.on_change = crate::erase_callback_arg(&self.on_change);
+        element.on_change = crate::authoring::erase_callback_arg(&self.on_change);
         if prev.value != self.value {
             element.value = self.value;
             ChangeFlags::PAINT

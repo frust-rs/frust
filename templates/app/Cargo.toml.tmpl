@@ -20,13 +20,35 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # Glyph fonts opt-out (gf2): `frust`'s default `glyph-fonts` feature bundles
 # ~1MB of Space Mono + IBM Plex Mono TTF bytes for the Glyph design
 # language's type scale (default ON — zero-config Glyph experience). An app
-# that never uses the Glyph design language can drop that ~1MB:
+# that never uses the Glyph design language can drop that ~1MB by re-listing
+# the other defaults it still wants:
 #
-#   frust = { path = "{{ frust_path }}", default-features = false }
+#   frust = { path = "{{ frust_path }}", default-features = false,
+#             features = ["glyph", "material", "cupertino"] }
 #
-# `frust` has no other default feature today, so this is currently a clean
-# opt-out with nothing else to re-add.
-frust = { path = "{{ frust_path }}" }
+# `frust`'s full default set is `["glyph", "material", "cupertino",
+# "glyph-fonts"]` — the three built-in widget catalogs plus the bundled Glyph
+# fonts. A bare `default-features = false` drops all four, which is the right
+# starting point for an app authoring its own design system against
+# `frust_widgets::authoring`, and the wrong one if you only meant to save the
+# font bytes.
+#
+# Design system (gs1): Glyph is this app's design system, named explicitly
+# below (`"glyph"` + `"glyph-fonts"`) instead of left to `frust`'s own
+# crate-level defaults, so it's visible here and easy to change. A feature
+# only compiles Glyph's tokens/widgets in, though — `src/lib.rs`'s
+# `frust::app!(..., setup = { frust::glyph_theme::install(); })` is the
+# runtime call that actually makes it the *active* theme at startup (every
+# shell otherwise falls back to a design-language-free `Theme::neutral()`;
+# see that file's comment). To opt out: delete `"glyph"`/`"glyph-fonts"`
+# below and the matching `glyph_theme::install()` call in `src/lib.rs` — the
+# app still builds, now neutral-themed. Swap to Material 3 or Cupertino
+# instead by replacing `"glyph"`/`"glyph-fonts"` with `"material"`/
+# `"cupertino"` here and swapping the setup call for
+# `frust::set_default_theme(frust::Theme::m3_baseline())` /
+# `::cupertino_baseline()`; drop every built-in design system entirely with a
+# bare `default-features = false` (no `features` list at all).
+frust = { path = "{{ frust_path }}", default-features = false, features = ["glyph", "material", "cupertino", "glyph-fonts"] }
 
 # `frust-shared-preferences` demo: a platform plugin
 # the notes app below uses to persist its notes list + draft, the same way

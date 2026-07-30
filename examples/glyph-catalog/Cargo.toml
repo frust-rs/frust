@@ -94,6 +94,12 @@ frust-native-widgets = { path = "../../plugins/native-widgets", features = [
 frust-text = { path = "../../crates/frust-text" }
 frust-reactive = { path = "../../crates/frust-reactive" }
 frust-scene = { path = "../../crates/frust-scene" }
+# `frust-shell-common` is already a transitive dependency of `frust`; named
+# directly here only so `tests/glyph_default_theme.rs` can read back
+# `default_theme()` — the process-global slot `frust::glyph_theme::install()`
+# (called from this app's `frust::app!(.., setup = { .. })` block) writes
+# into, proving the install actually seeds Glyph rather than just compiling.
+frust-shell-common = { path = "../../crates/frust-shell-common" }
 reactive_graph = "0.2"
 peniko = "0.6.1"
 

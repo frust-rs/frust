@@ -313,7 +313,7 @@ pub fn show_bottom_sheet<State, B, R>(
 /// The retained widget for a [`BottomSheetView`]. See the [module docs](self).
 pub struct BottomSheetWidget {
     content: ChildPod,
-    on_dismiss: Option<crate::ErasedCallback>,
+    on_dismiss: Option<crate::authoring::ErasedCallback>,
     dismissable: bool,
     /// The shared back-press dismiss-signal cell (the `DismissAnimated`
     /// seam) plus its state-free pop — see
@@ -346,8 +346,11 @@ impl<State: 'static> View<State> for BottomSheetView<State> {
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> BottomSheetWidget {
         BottomSheetWidget {
-            content: crate::build_child(&self.content, ctx),
-            on_dismiss: self.on_dismiss.as_ref().map(crate::erase_callback),
+            content: crate::authoring::build_child(&self.content, ctx),
+            on_dismiss: self
+                .on_dismiss
+                .as_ref()
+                .map(crate::authoring::erase_callback),
             dismissable: self.dismissable,
             dismiss_signal: self.dismiss_signal.clone(),
             last_seen_dismiss: self
@@ -370,9 +373,17 @@ impl<State: 'static> View<State> for BottomSheetView<State> {
         element: &mut BottomSheetWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        let flags = crate::rebuild_child(&prev.content, &self.content, &mut element.content, ctx);
+        let flags = crate::authoring::rebuild_child(
+            &prev.content,
+            &self.content,
+            &mut element.content,
+            ctx,
+        );
         // Closures aren't comparable — reinstall the dismiss adapter cheaply.
-        element.on_dismiss = self.on_dismiss.as_ref().map(crate::erase_callback);
+        element.on_dismiss = self
+            .on_dismiss
+            .as_ref()
+            .map(crate::authoring::erase_callback);
         element.dismissable = self.dismissable;
         // The dismiss-signal cell's identity is fixed at push time (see
         // `show_bottom_sheet`); reinstalling it here never disturbs
@@ -382,7 +393,7 @@ impl<State: 'static> View<State> for BottomSheetView<State> {
     }
 
     fn teardown(&self, element: &mut BottomSheetWidget, ctx: &mut BuildCtx<'_>) {
-        crate::teardown_child(&self.content, &mut element.content, ctx);
+        crate::authoring::teardown_child(&self.content, &mut element.content, ctx);
     }
 }
 
@@ -548,7 +559,7 @@ impl Widget for BottomSheetWidget {
                     return EventResult::Handled;
                 }
                 // Everything else focus-routed goes to the content.
-                return crate::route_event_single(&mut self.content, ctx, event);
+                return crate::authoring::route_event_single(&mut self.content, ctx, event);
             };
             match p.phase {
                 PointerPhase::Down => {
@@ -563,7 +574,7 @@ impl Widget for BottomSheetWidget {
                         return EventResult::Handled;
                     }
                     // Otherwise give the content a chance to consume it.
-                    if crate::route_event_single(&mut self.content, ctx, event)
+                    if crate::authoring::route_event_single(&mut self.content, ctx, event)
                         == EventResult::Handled
                     {
                         return EventResult::Handled;
@@ -577,7 +588,7 @@ impl Widget for BottomSheetWidget {
                 }
                 // A captured content child keeps receiving Move/Up/Cancel via the
                 // route helper's active-path fast lane.
-                _ => crate::route_event_single(&mut self.content, ctx, event),
+                _ => crate::authoring::route_event_single(&mut self.content, ctx, event),
             }
         }
     }

@@ -241,7 +241,7 @@ pub struct CardWidget {
     pressed: bool,
     captured: bool,
     state_layer: StateLayer,
-    on_press: Option<crate::ErasedCallback>,
+    on_press: Option<crate::authoring::ErasedCallback>,
 }
 
 impl<State: 'static> View<State> for CardView<State> {
@@ -250,12 +250,12 @@ impl<State: 'static> View<State> for CardView<State> {
     fn build(&self, ctx: &mut BuildCtx<'_>) -> CardWidget {
         CardWidget {
             variant: self.variant,
-            child: crate::build_child(&self.child, ctx),
+            child: crate::authoring::build_child(&self.child, ctx),
             interactive: self.on_press.is_some(),
             pressed: false,
             captured: false,
             state_layer: StateLayer::new(),
-            on_press: self.on_press.as_ref().map(crate::erase_callback),
+            on_press: self.on_press.as_ref().map(crate::authoring::erase_callback),
         }
     }
 
@@ -282,13 +282,13 @@ impl<State: 'static> View<State> for CardView<State> {
             }
             flags |= ChangeFlags::PAINT;
         }
-        element.on_press = self.on_press.as_ref().map(crate::erase_callback);
-        flags |= crate::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
+        element.on_press = self.on_press.as_ref().map(crate::authoring::erase_callback);
+        flags |= crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
         flags
     }
 
     fn teardown(&self, element: &mut CardWidget, ctx: &mut BuildCtx<'_>) {
-        crate::teardown_child(&self.child, &mut element.child, ctx);
+        crate::authoring::teardown_child(&self.child, &mut element.child, ctx);
     }
 }
 
@@ -366,13 +366,13 @@ impl Widget for CardWidget {
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         if !self.interactive {
-            return crate::route_event_single(&mut self.child, ctx, event);
+            return crate::authoring::route_event_single(&mut self.child, ctx, event);
         }
         // Non-pointer events (Key, Ime, focus-routed) must be forwarded to
         // the child, even when interactive. Only pointer events drive the
         // interactive card's own capture/press behavior.
         let InputEvent::Pointer(p) = event else {
-            return crate::route_event_single(&mut self.child, ctx, event);
+            return crate::authoring::route_event_single(&mut self.child, ctx, event);
         };
         let on_press = self
             .on_press

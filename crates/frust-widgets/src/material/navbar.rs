@@ -14,7 +14,7 @@
 //! — there is only ever one concrete item type, so no type erasure is
 //! needed) wrapped in its own [`frust_core::ChildPod`] purely so the bar
 //! can route pointer/semantics through the same
-//! [`crate::route_event`]/[`frust_core::ChildPod::semantics_child`]
+//! [`crate::authoring::route_event`]/[`frust_core::ChildPod::semantics_child`]
 //! helpers every multi-child container uses. Each item:
 //!
 //! * lays out an optional caller-supplied `icon` (an opaque `AnyView` — tint
@@ -53,8 +53,8 @@ use frust_theme::Theme;
 use kurbo::{Point, Size};
 use peniko::Color;
 
+use crate::authoring::ThemeTextColor;
 use crate::text;
-use crate::text::ThemeTextColor;
 
 /// Container height of the current Expressive baseline, in logical px.
 ///
@@ -211,12 +211,12 @@ pub fn NavigationBar<State: 'static, F: Fn(&mut State, usize) + 'static>(
 }
 
 /// Erase `on_select` into a per-item callback that always reports `idx`
-/// (mirrors [`crate::erase_callback_arg`], but with the index closed over
+/// (mirrors [`crate::authoring::erase_callback_arg`], but with the index closed over
 /// rather than passed at call time — every item needs its *own* fixed index).
 fn item_on_select<State: 'static>(
     on_select: &OnSelect<State>,
     idx: usize,
-) -> crate::ErasedCallback {
+) -> crate::authoring::ErasedCallback {
     let callback = on_select.clone();
     Box::new(move |ctx: &mut EventCtx| {
         let state = ctx.state_mut::<State>();
@@ -238,7 +238,7 @@ struct NavItemWidget {
     /// [`DEFAULT_EFFECTS_SPRING`] on every selection change (see
     /// [`NavigationBarWidget`]'s `rebuild`).
     indicator: AnimationController,
-    on_select: crate::ErasedCallback,
+    on_select: crate::authoring::ErasedCallback,
     /// The pressed *visual* state; follows the cursor in/out while captured.
     pressed: bool,
     /// Armed by a `Down`, cleared on `Up`/`Cancel` — see [`crate::button`]'s
@@ -266,8 +266,11 @@ fn build_item<State: 'static>(
         ThemeTextColor::OnSurfaceVariant
     };
     let label_view = label_view::<State>(item.label.clone(), role);
-    let icon = item.icon.as_ref().map(|icon| crate::build_child(icon, ctx));
-    let label = crate::build_child(&label_view, ctx);
+    let icon = item
+        .icon
+        .as_ref()
+        .map(|icon| crate::authoring::build_child(icon, ctx));
+    let label = crate::authoring::build_child(&label_view, ctx);
 
     let mut indicator = AnimationController::new(Duration::ZERO);
     if selected {
@@ -388,7 +391,7 @@ impl Widget for NavItemWidget {
 /// Synthesize a [`PointerPhase::Cancel`] into a still-armed item pod (mirrors
 /// [`crate`]'s crate-private `cancel_pod`, reimplemented locally since a
 /// removed item's `NavItemWidget` isn't `AnyView`-wrapped and so can't go
-/// through [`crate::teardown_child`]'s `Box<dyn Widget>` downcast).
+/// through [`crate::authoring::teardown_child`]'s `Box<dyn Widget>` downcast).
 fn cancel_item(pod: &mut ChildPod) {
     let mut dummy_state = ();
     let mut ctx = EventCtx::new(&mut dummy_state, pod.origin(), pod.size());
@@ -445,7 +448,7 @@ impl<State: 'static> View<State> for NavigationBarView<State> {
 
             match (&prev_item.icon, &next_item.icon) {
                 (Some(p), Some(n)) => {
-                    flags |= crate::rebuild_child(
+                    flags |= crate::authoring::rebuild_child(
                         p,
                         n,
                         widget.icon.as_mut().expect("icon pod present"),
@@ -453,12 +456,12 @@ impl<State: 'static> View<State> for NavigationBarView<State> {
                     );
                 }
                 (None, Some(n)) => {
-                    widget.icon = Some(crate::build_child(n, ctx));
+                    widget.icon = Some(crate::authoring::build_child(n, ctx));
                     flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
                 }
                 (Some(p), None) => {
                     if let Some(mut old) = widget.icon.take() {
-                        crate::teardown_child(p, &mut old, ctx);
+                        crate::authoring::teardown_child(p, &mut old, ctx);
                     }
                     flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
                 }
@@ -479,7 +482,8 @@ impl<State: 'static> View<State> for NavigationBarView<State> {
                 widget.label_text = next_item.label.clone();
                 let prev_view = label_view::<State>(prev_item.label.clone(), prev_role);
                 let next_view = label_view::<State>(next_item.label.clone(), next_role);
-                flags |= crate::rebuild_child(&prev_view, &next_view, &mut widget.label, ctx);
+                flags |=
+                    crate::authoring::rebuild_child(&prev_view, &next_view, &mut widget.label, ctx);
             }
 
             if was_selected != now_selected {
@@ -524,7 +528,7 @@ impl<State: 'static> View<State> for NavigationBarView<State> {
                     .downcast_mut::<NavItemWidget>()
                     .expect("nav item pod holds a NavItemWidget");
                 if let (Some(icon_view), Some(icon_pod)) = (&item.icon, widget.icon.as_mut()) {
-                    crate::teardown_child(icon_view, icon_pod, ctx);
+                    crate::authoring::teardown_child(icon_view, icon_pod, ctx);
                 }
                 let role = if idx == prev.selected {
                     ThemeTextColor::OnSurface
@@ -532,7 +536,7 @@ impl<State: 'static> View<State> for NavigationBarView<State> {
                     ThemeTextColor::OnSurfaceVariant
                 };
                 let label_view = label_view::<State>(item.label.clone(), role);
-                crate::teardown_child(&label_view, &mut widget.label, ctx);
+                crate::authoring::teardown_child(&label_view, &mut widget.label, ctx);
             }
             element.items.truncate(common);
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
@@ -548,7 +552,7 @@ impl<State: 'static> View<State> for NavigationBarView<State> {
                 .downcast_mut::<NavItemWidget>()
                 .expect("nav item pod holds a NavItemWidget");
             if let (Some(icon_view), Some(icon_pod)) = (&item.icon, widget.icon.as_mut()) {
-                crate::teardown_child(icon_view, icon_pod, ctx);
+                crate::authoring::teardown_child(icon_view, icon_pod, ctx);
             }
             let role = if i == self.selected {
                 ThemeTextColor::OnSurface
@@ -556,7 +560,7 @@ impl<State: 'static> View<State> for NavigationBarView<State> {
                 ThemeTextColor::OnSurfaceVariant
             };
             let label_view = label_view::<State>(item.label.clone(), role);
-            crate::teardown_child(&label_view, &mut widget.label, ctx);
+            crate::authoring::teardown_child(&label_view, &mut widget.label, ctx);
         }
     }
 }
@@ -589,7 +593,7 @@ impl Widget for NavigationBarWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        crate::route_event(&mut self.items, ctx, event)
+        crate::authoring::route_event(&mut self.items, ctx, event)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {

@@ -268,7 +268,7 @@ impl<State: 'static> View<State> for TooltipView<State> {
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> TooltipWidget {
         TooltipWidget {
-            child: crate::build_child(&self.child, ctx),
+            child: crate::authoring::build_child(&self.child, ctx),
             text: self.text.clone(),
             bubble: GlyphLabel::new(self.text.clone()),
             bubble_size: Size::ZERO,
@@ -284,7 +284,8 @@ impl<State: 'static> View<State> for TooltipView<State> {
         element: &mut TooltipWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        let mut flags = crate::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
+        let mut flags =
+            crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
         if prev.text != self.text {
             element.text = self.text.clone();
             element.bubble.set_content(self.text.clone());
@@ -294,7 +295,7 @@ impl<State: 'static> View<State> for TooltipView<State> {
     }
 
     fn teardown(&self, element: &mut TooltipWidget, ctx: &mut BuildCtx<'_>) {
-        crate::teardown_child(&self.child, &mut element.child, ctx);
+        crate::authoring::teardown_child(&self.child, &mut element.child, ctx);
     }
 }
 

@@ -97,14 +97,14 @@ impl Slot {
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         match (prev, next, self.pod.as_mut()) {
-            (Some(p), Some(n), Some(pod)) => crate::rebuild_child(p, n, pod, ctx),
+            (Some(p), Some(n), Some(pod)) => crate::authoring::rebuild_child(p, n, pod, ctx),
             (None, Some(n), _) => {
-                self.pod = Some(crate::build_child(n, ctx));
+                self.pod = Some(crate::authoring::build_child(n, ctx));
                 ChangeFlags::LAYOUT | ChangeFlags::PAINT
             }
             (Some(p), None, Some(_)) => {
                 if let Some(mut pod) = self.pod.take() {
-                    crate::teardown_child(p, &mut pod, ctx);
+                    crate::authoring::teardown_child(p, &mut pod, ctx);
                 }
                 ChangeFlags::LAYOUT | ChangeFlags::PAINT
             }
@@ -139,7 +139,9 @@ impl<State: 'static> View<State> for GlyphCardView<State> {
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> GlyphCardWidget<State> {
         let mk = |v: &Option<AnyView<State>>, ctx: &mut BuildCtx<'_>| Slot {
-            pod: v.as_ref().map(|view| crate::build_child(view, ctx)),
+            pod: v
+                .as_ref()
+                .map(|view| crate::authoring::build_child(view, ctx)),
         };
         GlyphCardWidget {
             title: mk(&self.title, ctx),
@@ -169,7 +171,7 @@ impl<State: 'static> View<State> for GlyphCardView<State> {
             (&self.footer, &mut element.footer),
         ] {
             if let (Some(v), Some(pod)) = (view.as_ref(), slot.pod.as_mut()) {
-                crate::teardown_child(v, pod, ctx);
+                crate::authoring::teardown_child(v, pod, ctx);
             }
         }
     }
@@ -241,9 +243,9 @@ impl<State: 'static> Widget for GlyphCardWidget<State> {
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         // Active-pod-first (a captured gesture must not re-hit-test), then
         // focus-routed, then reverse-paint-order hit test — the same contract
-        // as `crate::route_event`, over this widget's named optional slots.
+        // as `crate::authoring::route_event`, over this widget's named optional slots.
         if let Some(pod) = self.pods_mut().find(|p| p.is_active()) {
-            return crate::route_event_single(pod, ctx, event);
+            return crate::authoring::route_event_single(pod, ctx, event);
         }
         if event.is_focus_routed() {
             if let Some(pod) = self.pods_mut().find(|p| p.is_focused()) {

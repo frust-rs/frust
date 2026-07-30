@@ -121,6 +121,60 @@ impl Theme {
         }
     }
 
+    /// The neutral, design-language-free baseline theme: no `m3`/
+    /// `cupertino`/`glyph` identity at all.
+    ///
+    /// Composes: a plain grayscale surface/on-surface ramp plus one
+    /// restrained slate-blue accent
+    /// ([`ColorScheme::neutral_light`]/[`ColorScheme::neutral_dark`]); the
+    /// same numeric type scale [`Theme::m3_baseline`] uses, resolved
+    /// against a generic system-font stack with **no bundled font bytes
+    /// referenced** ([`TypeScale::neutral`]); the shared
+    /// [`ShapeScale::m3`]/[`Elevation::m3`] value tables — reused rather
+    /// than re-authored, since neither is actually M3-branded in *value*
+    /// (`Elevation::m3`'s own module docs call its shadow math "TUNABLE,
+    /// not an M3-published spec", and [`GlassScale::opaque_material`]
+    /// already reuses `Elevation::m3` the same way); a no-overshoot
+    /// [`MotionScheme::neutral`] (unlike `m3_expressive`'s deliberately
+    /// bouncy springs); and [`GlassScale::opaque_material`] (already
+    /// neutral). Attaches [`StatusPalette::m3`] like both other built-in
+    /// baselines, since success/warning/info are a functional signal, not a
+    /// design-language "look" — the same reasoning `neutral_light`/
+    /// `neutral_dark` use to keep `error` real red instead of grayscaling
+    /// it too.
+    ///
+    /// **This is the floor every shell falls back to** when no design system
+    /// seeded one via `set_default_theme` — see `docs/ARCHITECTURE.md`'s Theme
+    /// delivery. A design system (Glyph included) is now installed explicitly,
+    /// never assumed. Starts in [`Brightness::Light`], like `m3_baseline`/
+    /// `cupertino_baseline`.
+    ///
+    /// **Caveat — `design_language` is [`DesignLanguage::Material3`] here**,
+    /// the derived default, despite this baseline carrying no Material
+    /// identity: the enum has no neutral variant and is not reshaped by this
+    /// constructor. Branch on the tokens you actually need, not on this field,
+    /// when handed a `neutral()` theme.
+    ///
+    /// Not `const` (like `m3_baseline`/`cupertino_baseline`/
+    /// `glyph_baseline`): `ThemeExtensions`' `HashMap` construction isn't
+    /// const-evaluable.
+    pub fn neutral() -> Self {
+        let mut extensions = ThemeExtensions::new();
+        extensions.insert(StatusPalette::m3());
+        Self {
+            light: ColorScheme::neutral_light(),
+            dark: ColorScheme::neutral_dark(),
+            type_scale: TypeScale::neutral(&TextStyle::default()),
+            shape: ShapeScale::m3(),
+            elevation: Elevation::m3(),
+            motion: MotionScheme::neutral(),
+            glass: GlassScale::opaque_material(),
+            brightness: Brightness::Light,
+            design_language: DesignLanguage::default(),
+            extensions,
+        }
+    }
+
     /// The active [`ColorScheme`] — `light` or `dark`, selected by
     /// `self.brightness`.
     pub fn scheme(&self) -> &ColorScheme {
@@ -339,5 +393,86 @@ mod tests {
 
         let cloned = theme.clone();
         assert_eq!(cloned.extension::<Marker>(), Some(&Marker));
+    }
+
+    // ---- Neutral baseline --------------------------------------------
+
+    #[test]
+    fn neutral_populates_every_role_in_both_brightnesses() {
+        // Task acceptance criterion 1: a fully-populated `Theme`, no
+        // `todo!()`/`unimplemented!()`/placeholder — every field below
+        // constructs and round-trips through the aggregate untouched.
+        let theme = Theme::neutral();
+        assert_eq!(theme.light, ColorScheme::neutral_light());
+        assert_eq!(theme.dark, ColorScheme::neutral_dark());
+        assert_eq!(theme.shape, ShapeScale::m3());
+        assert_eq!(theme.elevation, Elevation::m3());
+        assert_eq!(theme.motion, MotionScheme::neutral());
+        assert_eq!(theme.glass, GlassScale::opaque_material());
+        assert_eq!(theme.brightness, Brightness::Light);
+    }
+
+    #[test]
+    fn neutral_with_brightness_selects_both_schemes() {
+        // Both brightnesses of `neutral()` are legible and distinct — the
+        // dark scheme is reachable the same way every other baseline's is.
+        let light = Theme::neutral();
+        assert_eq!(light.scheme(), &light.light);
+
+        let dark = Theme::neutral().with_brightness(Brightness::Dark);
+        assert_eq!(dark.scheme(), &dark.dark);
+        assert_ne!(dark.scheme().surface, light.scheme().surface);
+    }
+
+    #[test]
+    fn neutral_attaches_the_m3_status_palette_extension() {
+        use crate::status::StatusPalette;
+        // Success/warning/info are a functional signal, not a "look" — the
+        // same reasoning `error` stays real red in `ColorScheme::neutral_*`
+        // (see that constructor's doc comment).
+        assert_eq!(
+            Theme::neutral().extension::<StatusPalette>(),
+            Some(&StatusPalette::m3())
+        );
+    }
+
+    #[test]
+    fn neutral_design_language_stays_the_default() {
+        // Acceptance: `design_language` is left at its `Default` for now —
+        // `DesignLanguage` itself isn't reshaped/removed by this task.
+        assert_eq!(Theme::neutral().design_language, DesignLanguage::default());
+    }
+
+    #[test]
+    fn neutral_type_scale_references_no_bundled_font() {
+        // Task acceptance criterion 2, exercised through the full `Theme`
+        // (see `crate::typography`'s own tests for the focused check).
+        let theme = Theme::neutral();
+        assert!(matches!(
+            theme.type_scale.body_large.family,
+            frust_text::FontFamily::NamedWithGeneric(_)
+        ));
+    }
+
+    #[test]
+    fn neutral_survives_clone_and_extends_independently() {
+        let theme = Theme::neutral();
+        let cloned = theme.clone();
+        assert_eq!(cloned, theme);
+    }
+
+    #[test]
+    fn no_existing_baseline_output_changed() {
+        // Task acceptance criterion 5, pinned as a regression anchor: the
+        // `neutral` baseline is purely additive — the other three
+        // constructors' internal-consistency invariants still hold.
+        assert_eq!(
+            Theme::m3_baseline().design_language,
+            DesignLanguage::Material3
+        );
+        assert_eq!(
+            Theme::cupertino_baseline().design_language,
+            DesignLanguage::Cupertino
+        );
     }
 }

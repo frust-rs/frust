@@ -368,9 +368,13 @@ fn home_page(state: &CatalogState) -> AnyView<CatalogState> {
     ]))
 }
 
-/// The root [`Component`]. The shell default theme is already
-/// Glyph (every shell seeds `Theme::glyph_baseline()`), so `init` forces
-/// nothing — it only wires the reactive [`CatalogState`].
+/// The root [`Component`]. This example's `frust::app!` call below installs
+/// Glyph as the seeded default theme via its `setup = { .. }` block
+/// (`frust::glyph_theme::install()`, run before any shell construction) — a
+/// shell's own built-in fallback is [`Theme::neutral()`] now, so `init`
+/// relies on that explicit install rather than a shell-seeded Glyph default;
+/// `init` itself forces nothing — it only wires the reactive
+/// [`CatalogState`].
 #[derive(Default)]
 pub struct CatalogApp;
 
@@ -399,5 +403,14 @@ impl Component for CatalogApp {
 // `CatalogApp` to all three platforms — the Android JNI exports
 // (`target_os = "android"` only), the iOS C-ABI exports (self-gated to
 // `target_os = "ios"`), and (on desktop) the hidden `__frust_main` that
-// `main.rs` calls.
-frust::app!(CatalogApp);
+// `main.rs` calls. The `setup` block installs Glyph as the seeded default
+// theme (`frust::glyph_theme::install()`) before any shell reads the
+// default-theme slot — a shell's own fallback is `Theme::neutral()` now, and
+// this catalog exists specifically to showcase Glyph, so it must not launch
+// neutral.
+frust::app!(
+    CatalogApp,
+    setup = {
+        frust::glyph_theme::install();
+    }
+);

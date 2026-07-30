@@ -44,7 +44,8 @@ use frust_theme::Theme;
 use kurbo::{BezPath, Point, Rect, RoundedRect, RoundedRectRadii, Shape, Size};
 use peniko::{Brush, Color};
 
-use crate::text::{self, ThemeTextColor};
+use crate::authoring::ThemeTextColor;
+use crate::text;
 
 /// Horizontal padding around the leading label, in logical px.
 const PAD_X: f64 = 20.0;
@@ -183,8 +184,8 @@ pub struct SplitButtonWidget {
     pressed_inside: bool,
     /// Chevron rotation spring (0 = closed/▾, 1 = open/▴).
     chevron_anim: frust_core::AnimationController,
-    on_press: crate::ErasedCallback,
-    on_open: crate::ErasedCallback,
+    on_press: crate::authoring::ErasedCallback,
+    on_open: crate::authoring::ErasedCallback,
 }
 
 /// The resolved `(container, content, divider)` colors. Themed:
@@ -265,7 +266,7 @@ impl<State: 'static> View<State> for SplitButtonView<State> {
             chevron_anim.fling(FLING_VELOCITY, CHEVRON_SPRING);
         }
         SplitButtonWidget {
-            label: crate::build_child(&label_view::<State>(self.label.clone()), ctx),
+            label: crate::authoring::build_child(&label_view::<State>(self.label.clone()), ctx),
             label_text: self.label.clone(),
             open: self.open,
             leading_rect: Rect::ZERO,
@@ -273,8 +274,8 @@ impl<State: 'static> View<State> for SplitButtonView<State> {
             armed: None,
             pressed_inside: false,
             chevron_anim,
-            on_press: crate::erase_callback(&self.on_press),
-            on_open: crate::erase_callback(&self.on_open),
+            on_press: crate::authoring::erase_callback(&self.on_press),
+            on_open: crate::authoring::erase_callback(&self.on_open),
         }
     }
 
@@ -284,8 +285,8 @@ impl<State: 'static> View<State> for SplitButtonView<State> {
         element: &mut SplitButtonWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        element.on_press = crate::erase_callback(&self.on_press);
-        element.on_open = crate::erase_callback(&self.on_open);
+        element.on_press = crate::authoring::erase_callback(&self.on_press);
+        element.on_open = crate::authoring::erase_callback(&self.on_open);
         let mut flags = ChangeFlags::NONE;
 
         if prev.open != self.open {
@@ -298,14 +299,15 @@ impl<State: 'static> View<State> for SplitButtonView<State> {
             element.label_text = self.label.clone();
             let prev_view = label_view::<State>(prev.label.clone());
             let next_view = label_view::<State>(self.label.clone());
-            flags |= crate::rebuild_child(&prev_view, &next_view, &mut element.label, ctx);
+            flags |=
+                crate::authoring::rebuild_child(&prev_view, &next_view, &mut element.label, ctx);
         }
 
         flags
     }
 
     fn teardown(&self, element: &mut SplitButtonWidget, ctx: &mut BuildCtx<'_>) {
-        crate::teardown_child(
+        crate::authoring::teardown_child(
             &label_view::<State>(self.label.clone()),
             &mut element.label,
             ctx,

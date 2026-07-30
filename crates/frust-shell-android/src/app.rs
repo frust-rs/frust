@@ -42,11 +42,11 @@ use frust_shell_common::resample::{self, PointerResampler, RawPointerSample};
 use frust_shell_common::{
     AppTree, FrameGate, FrameInputs, FrameMeta, FramePacing, PlatformViewState, RenderCommand,
     RenderSender, SceneFrame, SceneReturnReceiver, SurfaceSize, ThemeOverrideWatcher, ViewCommand,
-    effective_brightness_for_platform_change, logical_insets, logical_size,
+    default_theme, effective_brightness_for_platform_change, logical_insets, logical_size,
     publish_resolved_surface_mode, sanitize_scale,
 };
 use frust_text::TextContext;
-use frust_theme::{Brightness, DesignLanguage, Theme};
+use frust_theme::{Brightness, Theme};
 use kurbo::{Affine, Point, Size};
 use ndk::native_window::NativeWindow;
 
@@ -104,7 +104,9 @@ pub struct AndroidAppHandle {
     /// The acquired window backing the current surface. Dropped after `renderer`
     /// (see the struct doc): its `Drop` calls `ANativeWindow_release`.
     window: Option<NativeWindow>,
-    /// The app's active theme (M3 baseline). Mirrors the desktop shell's
+    /// The app's active theme — the seeded base ([`base_theme`]: a design
+    /// system's `set_default_theme`, else the built-in fallback) until an
+    /// app-forced override replaces it. Mirrors the desktop shell's
     /// appearance ownership: starts [`Brightness::Light`] here and is
     /// flipped by [`Self::set_appearance`] once Kotlin reports the platform's
     /// real dark-mode preference (`nativeSetAppearance`, called right after
@@ -1008,6 +1010,95 @@ impl ActionHandler for ForgeActionHandler {
     }
 }
 
+/// The base [`Theme`] this shell seeds itself from: the design-system-supplied
+/// default (`frust_shell_common::set_default_theme`, read back through
+/// [`default_theme`]) when a plugin seeded one, else the shell's own built-in
+/// fallback.
+///
+/// A seeded default supplies only the *starting point*: unlike an app-forced
+/// override (`set_app_theme`) it does not pin brightness — every call site
+/// still derives `brightness` from the platform's own preference
+/// (`nativeSetAppearance` → [`AndroidAppHandle::platform_brightness`]) against
+/// this base, so a design-system default keeps following system dark mode.
+///
+/// The fallback is deliberately the design-language-free
+/// [`Theme::neutral`] — system fonts, no bundled font bytes: a shell names no
+/// design system of its own, so an app that installs none gets the neutral
+/// floor rather than someone's brand. A design system supplies both halves
+/// itself (its base theme through `set_default_theme`, its font bytes through
+/// `frust_shell_common::font_registry::register_app_fonts`).
+///
+/// Takes the slot's value as an argument rather than reading the process-global
+/// itself, so the fallback ladder is unit-testable without touching a
+/// process-wide slot that has no reset; every call site passes
+/// [`default_theme()`](default_theme).
+fn base_theme(seeded: Option<Theme>) -> Theme {
+    seeded.unwrap_or_else(Theme::neutral)
+}
+
+/// The theme a cleared app-theme override reverts to: the seeded base
+/// ([`base_theme`] — a design system's `set_default_theme`, else the built-in
+/// fallback) at the platform's *current* brightness
+/// ([`AndroidAppHandle::platform_brightness`]), never the cleared override's own
+/// pinned one.
+///
+/// Extracted so the `clear_app_theme` arm in [`AndroidAppHandle::frame`] and its
+/// unit tests run one implementation: a test that recomputed this in its own
+/// body would stay green if the arm regressed to an unconditional
+/// `Theme::neutral()` — the exact regression this ladder exists to
+/// prevent. `crates/frust/tests/theme_ladder_conformance.rs` pins this body
+/// identical to the desktop shell's twin, whose unit tests DO run in a host
+/// `cargo test --workspace` (this module's cannot — see its own docs).
+fn reverted_theme(seeded: Option<Theme>, platform: Brightness) -> Theme {
+    let mut theme = base_theme(seeded);
+    theme.brightness = platform;
+    theme
+}
+
+/// The active-theme decision for one [`ThemeOverrideWatcher::poll`] result —
+/// the precedence ladder's top two rungs as one pure function, shared by the
+/// per-frame poll arm in [`AndroidAppHandle::frame`] and its unit tests.
+///
+/// Returns `None` when the poll reported no change (the shell leaves its theme
+/// alone), else the new active theme paired with whether an app-forced override
+/// is now pinning it ([`AndroidAppHandle::theme_override_active`]).
+///
+/// `seeded`/`platform` are suppliers rather than values because only the
+/// cleared-override arm needs them: reading the process-global default slot
+/// ([`default_theme`] — a `Mutex` lock plus a whole-`Theme` clone) would
+/// otherwise become per-frame cost on every Choreographer tick, for a poll that
+/// reports "nothing changed" on all but a handful of frames.
+fn theme_after_override_poll(
+    polled: Option<Option<Theme>>,
+    seeded: impl FnOnce() -> Option<Theme>,
+    platform: impl FnOnce() -> Brightness,
+) -> Option<(Theme, bool)> {
+    match polled {
+        // `set_app_theme`: the forced theme wins wholesale — neither the seeded
+        // default nor the platform's brightness is even consulted (the
+        // override-wins rule).
+        Some(Some(theme)) => Some((theme, true)),
+        // `clear_app_theme`: back to the seeded base at the platform's own
+        // current brightness.
+        Some(None) => Some((reverted_theme(seeded(), platform()), false)),
+        None => None,
+    }
+}
+
+/// Re-derive `theme`'s brightness from a platform appearance report, honouring
+/// the override-wins rule ([`effective_brightness_for_platform_change`]): an
+/// app-forced override pins brightness, a design-system-seeded default does not
+/// — `theme` still IS that base, so flipping it in place re-derives light/dark
+/// against the design system's own tokens.
+///
+/// Extracted for the same reason as [`reverted_theme`]: the
+/// `nativeSetAppearance` arm ([`AndroidAppHandle::set_appearance`]) and the
+/// seed-ladder tests share one implementation.
+fn follow_platform_brightness(theme: &mut Theme, override_active: bool, platform: Brightness) {
+    theme.brightness =
+        effective_brightness_for_platform_change(override_active, theme.brightness, platform);
+}
+
 /// Assemble an accesskit [`TreeUpdate`] from a [`SemanticsUpdate`].
 ///
 /// v1 always publishes the whole tree (`RenderRoot::semantics` recomputes it in
@@ -1032,11 +1123,13 @@ impl AndroidAppHandle {
     /// frame. No `unsafe` here — the window acquisition and surface creation
     /// happen at the FFI boundary.
     ///
-    /// Seeds the Glyph baseline theme (dark-first per
-    /// `Theme::glyph_baseline`, until Kotlin's follow-up `nativeSetAppearance`
-    /// reports the real preference — `platform_brightness` defaults `Light` and
+    /// Seeds the base theme ([`base_theme`]: a design system's
+    /// `set_default_theme`, else the built-in [`Theme::neutral`] fallback,
+    /// carrying that base's own brightness until Kotlin's follow-up
+    /// `nativeSetAppearance`
+    /// reports the real preference; `platform_brightness` defaults `Light` and
     /// unconditionally overwrites `theme.brightness` on that call, so a
-    /// light-preference device still ends up Glyph light) into both delivery
+    /// light-preference device still ends up light) into both delivery
     /// paths (`AppTree::set_theme` for widgets, `provide_context` for app code)
     /// before the first rebuild, mirroring the desktop shell's `apply_theme`.
     /// Must be called under the root reactive `Owner` (see
@@ -1078,21 +1171,16 @@ impl AndroidAppHandle {
         let mut font_registry = FontRegistryWatcher::new();
         font_registry.drain_into(&mut text_ctx);
 
-        let theme = Theme::glyph_baseline();
-
-        // Bundled Glyph font auto-registration: the default theme
-        // above is the Glyph baseline, so register the bundled Space Mono /
-        // IBM Plex Mono faces (`frust_theme::glyph::font_data()` — an empty
-        // slice, so a no-op, when the `glyph-fonts` feature is off) directly
-        // into `text_ctx` before the first rebuild — same pre-first-rebuild
-        // timing as the drain above, so the first frame shapes with Glyph
-        // fonts with no relayout needed. Gated on the *default* theme's
-        // design language, not re-checked on a later `set_app_theme` swap.
-        if theme.design_language == DesignLanguage::Glyph {
-            for bytes in frust_theme::glyph::font_data() {
-                let _ = text_ctx.register_fonts(bytes.to_vec());
-            }
-        }
+        // The seeded base theme (`base_theme`: a design system's
+        // `set_default_theme`, else the built-in `Theme::neutral()` fallback),
+        // carrying that base's own brightness until Kotlin's follow-up
+        // `nativeSetAppearance` overwrites it with the device's real
+        // preference. A design system that needs its own font bytes shaped from
+        // the first frame registers them through
+        // `frust_shell_common::font_registry::register_app_fonts`, which the
+        // construction-time drain above applies — the shell itself bundles no
+        // fonts.
+        let theme = base_theme(default_theme());
 
         app.set_theme(Box::new(theme.clone()));
         // Thread the surface's RESOLVED translucency into the render root so
@@ -1290,11 +1378,11 @@ impl AndroidAppHandle {
         self.platform_brightness = platform;
         // Override-wins rule: while an app-forced theme override
         // is active, this platform-appearance report must not flip brightness.
-        self.theme.brightness = effective_brightness_for_platform_change(
-            self.theme_override_active,
-            self.theme.brightness,
-            platform,
-        );
+        // A seeded *default* is deliberately not pinned that way: `self.theme`
+        // still IS that base (`base_theme` seeded it and nothing replaced it),
+        // so flipping its brightness in place re-derives light/dark from the
+        // design system's own theme.
+        follow_platform_brightness(&mut self.theme, self.theme_override_active, platform);
         // Frame-gate input: an appearance change must force the next
         // frame to run so the re-themed tree repaints. `push_theme` below also
         // marks LAYOUT|PAINT change flags, so this is belt-and-suspenders with
@@ -1844,22 +1932,26 @@ impl AndroidAppHandle {
         // renderer, so this stays in sync even while the surface is torn down
         // (mirroring the reactive-runtime pump just above). A poll that changes
         // the theme is a frame-gate input (`theme_or_appearance_changed`).
+        //
+        // Reverting an override lands on the base this shell seeded itself
+        // from — the design-system default when one was supplied, else the
+        // built-in fallback — with brightness re-derived from the platform's
+        // last reported preference rather than inherited from the cleared
+        // override; that whole ladder lives in `theme_after_override_poll` so
+        // this arm and its unit tests share one implementation. The seeded
+        // supplier stays lazy: an unchanged poll never reads the
+        // process-global slot.
         let mut theme_or_appearance_changed = false;
-        match self.theme_override.poll() {
-            Some(Some(theme)) => {
-                self.theme = theme;
-                self.theme_override_active = true;
-                self.push_theme();
-                theme_or_appearance_changed = true;
-            }
-            Some(None) => {
-                self.theme = Theme::glyph_baseline();
-                self.theme.brightness = self.platform_brightness;
-                self.theme_override_active = false;
-                self.push_theme();
-                theme_or_appearance_changed = true;
-            }
-            None => {}
+        let platform_brightness = self.platform_brightness;
+        if let Some((theme, override_active)) =
+            theme_after_override_poll(self.theme_override.poll(), default_theme, || {
+                platform_brightness
+            })
+        {
+            self.theme = theme;
+            self.theme_override_active = override_active;
+            self.push_theme();
+            theme_or_appearance_changed = true;
         }
 
         // Poll the app-facing pending-font registry once per frame,
@@ -2222,20 +2314,34 @@ impl AndroidAppHandle {
     }
 }
 
-/// Unit tests for the pure accessibility-tree assembly.
+/// Unit tests for the pure accessibility-tree assembly and the default-theme
+/// seed ladder.
 ///
 /// This module is inside the `#[cfg(target_os = "android")]` `app` module, so it
 /// only compiles/runs for the Android target — the assembly references
-/// `frust_core`/`accesskit` types, both of which are Android-gated
+/// `frust_core`/`accesskit` types (and the seed ladder `frust_theme`'s
+/// [`Theme`]), all of which are Android-gated
 /// dependencies of this crate by deliberate design (see `Cargo.toml`), so it
-/// cannot be a host test the way [`crate::ffi_support`]'s pure helpers are. The
-/// Android compile gate (`cargo check --target aarch64-linux-android`) is the
-/// primary check that this path stays correct.
+/// cannot be a host test the way [`crate::ffi_support`]'s pure helpers are —
+/// worse, the documented Android compile gate (`cargo check --target
+/// aarch64-linux-android -p frust`) never builds test cfg either, so nothing
+/// below is even type-checked without an explicit `--all-targets`.
+///
+/// The theme ladder is therefore guarded off-device by two things that DO run
+/// on every `cargo test --workspace`: the desktop shell's twin of each ladder
+/// test (`frust-shell-desktop`'s `app_handler::tests`), and
+/// `crates/frust/tests/theme_ladder_conformance.rs`, whose source scan pins
+/// this shell's arms to the extracted helpers and pins those helpers' bodies
+/// identical to the desktop copies the twin tests exercise.
 #[cfg(test)]
 mod tests {
-    use super::tree_update_from_semantics;
+    use super::{
+        base_theme, follow_platform_brightness, theme_after_override_poll,
+        tree_update_from_semantics,
+    };
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{Node, NodeId, Role, Tree, TreeId};
+    use frust_theme::{Brightness, Theme};
 
     #[test]
     fn tree_update_carries_nodes_root_and_focused_node() {
@@ -2267,5 +2373,124 @@ mod tests {
         // accesskit requires a non-optional focus target; the root is the
         // conventional fallback (`SemanticsUpdate::focus_id`).
         assert_eq!(tree_update.focus, NodeId(1));
+    }
+
+    // --- the default-theme precedence ladder (seed / appearance / override) ---
+    //
+    // Every assertion below drives the SAME ladder helpers the production seed
+    // ([`AndroidAppHandle::new`]), appearance (`nativeSetAppearance`) and
+    // override-poll ([`AndroidAppHandle::frame`]) arms call — a test that
+    // recomputed the ladder in its own body would stay green if one of those
+    // arms regressed to an unconditional `Theme::neutral()`. What no assertion
+    // here can see is how an arm *composes* those helpers (a seed site passing
+    // `None` instead of `default_theme()` drives the same `base_theme`).
+    //
+    // These do not run in a host `cargo test --workspace` (see this module's
+    // own docs), so they are not this ladder's only guard:
+    // `crates/frust/tests/theme_ladder_conformance.rs` pins each arm's call
+    // site — including the seed site's `base_theme(default_theme())` — AND pins
+    // these helpers' bodies identical to the desktop shell's, whose twin of
+    // every test below does run on the host.
+
+    #[test]
+    fn an_unseeded_shell_starts_on_the_builtin_fallback_at_the_platform_brightness() {
+        // Behavior 1. Nothing seeded: the seed site lands on the shell's own
+        // built-in, design-language-free floor...
+        let mut theme = base_theme(None);
+        assert_eq!(theme, Theme::neutral());
+
+        // ...and Kotlin's follow-up `nativeSetAppearance` drives brightness, so
+        // the fallback's own starting brightness never leaks onto a
+        // dark-preference device.
+        follow_platform_brightness(&mut theme, false, Brightness::Light);
+        assert_eq!(theme, Theme::neutral().with_brightness(Brightness::Light));
+        follow_platform_brightness(&mut theme, false, Brightness::Dark);
+        assert_eq!(theme, Theme::neutral().with_brightness(Brightness::Dark));
+    }
+
+    #[test]
+    fn a_seeded_default_is_the_base_and_still_follows_platform_brightness() {
+        // Behavior 2. A design system's `set_default_theme` supplies the base...
+        let seeded = Theme::m3_baseline();
+        let mut theme = base_theme(Some(seeded.clone()));
+        assert_eq!(theme, seeded);
+        // ...in place of the built-in floor, not layered over it.
+        assert_ne!(theme, Theme::neutral());
+
+        // ...and unlike an app-forced override it does NOT pin brightness: the
+        // `set_appearance` arm keeps flipping the seeded base in place.
+        follow_platform_brightness(&mut theme, false, Brightness::Dark);
+        assert_eq!(theme, seeded.clone().with_brightness(Brightness::Dark));
+        follow_platform_brightness(&mut theme, false, Brightness::Light);
+        assert_eq!(theme, seeded.with_brightness(Brightness::Light));
+    }
+
+    #[test]
+    fn an_app_theme_override_beats_a_seeded_default_and_pins_brightness() {
+        // Behavior 3. The override poll's `Some(Some(theme))` arm takes the
+        // forced theme wholesale. The suppliers panic rather than answer, which
+        // proves more than an inequality could: the arm cannot even observe the
+        // seeded default or the platform brightness, so no seeded value and no
+        // device preference can influence what an override resolves to.
+        let forced = Theme::cupertino_baseline().with_brightness(Brightness::Light);
+        let decided = theme_after_override_poll(
+            Some(Some(forced.clone())),
+            || panic!("an active override must not consult the seeded default"),
+            || panic!("an active override must not consult the platform brightness"),
+        );
+        assert_eq!(decided, Some((forced, true)));
+
+        // ...and it keeps winning against a *later* `nativeSetAppearance` flip
+        // (the override-wins rule), exactly where the seeded default of the
+        // test above followed the platform instead.
+        let mut active = Theme::cupertino_baseline().with_brightness(Brightness::Light);
+        follow_platform_brightness(&mut active, true, Brightness::Dark);
+        assert_eq!(active.brightness, Brightness::Light);
+    }
+
+    #[test]
+    fn clearing_an_override_reverts_to_the_seeded_default_not_the_builtin() {
+        // Behavior 4. The `Some(None)` arm with a design system's default
+        // seeded: the revert lands on THAT base at the device's last reported
+        // brightness (`platform_brightness`) — not on the built-in fallback,
+        // and not on the cleared override's pinned brightness.
+        let seeded = Theme::m3_baseline();
+        let decided =
+            theme_after_override_poll(Some(None), || Some(seeded.clone()), || Brightness::Dark);
+        assert_eq!(
+            decided,
+            Some((seeded.with_brightness(Brightness::Dark), false))
+        );
+        // Spelled out, since this is the arm the ladder exists for: a seeded
+        // shell must NOT revert to the built-in fallback.
+        assert_ne!(
+            decided.map(|(theme, _)| theme),
+            Some(Theme::neutral().with_brightness(Brightness::Dark))
+        );
+    }
+
+    #[test]
+    fn clearing_an_override_with_nothing_seeded_reverts_to_the_builtin() {
+        // Behavior 5. The same arm with an empty slot: the built-in fallback at
+        // the platform's brightness.
+        let decided = theme_after_override_poll(Some(None), || None, || Brightness::Dark);
+        assert_eq!(
+            decided,
+            Some((Theme::neutral().with_brightness(Brightness::Dark), false))
+        );
+    }
+
+    #[test]
+    fn a_poll_reporting_no_change_leaves_the_active_theme_alone() {
+        // The `None` arm: no `set_app_theme`/`clear_app_theme` since the last
+        // tick, so the shell must not touch its theme — and must not pay the
+        // process-global slot read, which would otherwise run on every
+        // Choreographer tick.
+        let decided = theme_after_override_poll(
+            None,
+            || panic!("an unchanged poll must not read the process-global default slot"),
+            || panic!("an unchanged poll must not read the platform brightness"),
+        );
+        assert_eq!(decided, None);
     }
 }

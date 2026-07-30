@@ -55,6 +55,8 @@ use frust_core::{PaintCtx, PaintScene};
 use kurbo::Rect;
 use peniko::Color;
 
+pub use crate::authoring::PRESSED_OPACITY;
+
 /// Hover-state overlay opacity (source: androidx Compose Material3
 /// `StateTokens` v0_210, retrieved 2026-07-17).
 pub const HOVER_OPACITY: f32 = 0.08;
@@ -62,10 +64,6 @@ pub const HOVER_OPACITY: f32 = 0.08;
 /// `StateTokens` v0_210, retrieved 2026-07-17 — supersedes material-web
 /// v0.192's 12%, see R18).
 pub const FOCUS_OPACITY: f32 = 0.10;
-/// Pressed-state overlay opacity (source: androidx Compose Material3
-/// `StateTokens` v0_210, retrieved 2026-07-17 — supersedes material-web
-/// v0.192's 12%, see R18).
-pub const PRESSED_OPACITY: f32 = 0.10;
 /// Dragged-state overlay opacity (source: androidx Compose Material3
 /// `StateTokens` v0_210, retrieved 2026-07-17).
 pub const DRAGGED_OPACITY: f32 = 0.16;

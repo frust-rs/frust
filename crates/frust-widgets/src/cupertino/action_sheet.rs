@@ -277,12 +277,12 @@ impl<State: 'static> View<State> for CupertinoActionSheetView<State> {
         let actions = self
             .actions
             .iter()
-            .map(|a| crate::build_child(&action_label_view::<State>(a), ctx))
+            .map(|a| crate::authoring::build_child(&action_label_view::<State>(a), ctx))
             .collect();
         let cancel = self
             .cancel
             .as_ref()
-            .map(|c| crate::build_child(&cancel_view::<State>(c.clone()), ctx));
+            .map(|c| crate::authoring::build_child(&cancel_view::<State>(c.clone()), ctx));
         CupertinoActionSheetWidget {
             actions,
             cancel,
@@ -304,7 +304,7 @@ impl<State: 'static> View<State> for CupertinoActionSheetView<State> {
         element.controller = self.controller.clone();
         let common = prev.actions.len().min(self.actions.len());
         for i in 0..common {
-            flags |= crate::rebuild_child(
+            flags |= crate::authoring::rebuild_child(
                 &action_label_view::<State>(&prev.actions[i]),
                 &action_label_view::<State>(&self.actions[i]),
                 &mut element.actions[i],
@@ -314,7 +314,7 @@ impl<State: 'static> View<State> for CupertinoActionSheetView<State> {
         if let (Some(pc), Some(nc), Some(elem_c)) =
             (&prev.cancel, &self.cancel, element.cancel.as_mut())
         {
-            flags |= crate::rebuild_child(
+            flags |= crate::authoring::rebuild_child(
                 &cancel_view::<State>(pc.clone()),
                 &cancel_view::<State>(nc.clone()),
                 elem_c,
@@ -326,10 +326,10 @@ impl<State: 'static> View<State> for CupertinoActionSheetView<State> {
 
     fn teardown(&self, element: &mut CupertinoActionSheetWidget<State>, ctx: &mut BuildCtx<'_>) {
         for (a, pod) in self.actions.iter().zip(element.actions.iter_mut()) {
-            crate::teardown_child(&action_label_view::<State>(a), pod, ctx);
+            crate::authoring::teardown_child(&action_label_view::<State>(a), pod, ctx);
         }
         if let (Some(c), Some(elem_c)) = (&self.cancel, element.cancel.as_mut()) {
-            crate::teardown_child(&cancel_view::<State>(c.clone()), elem_c, ctx);
+            crate::authoring::teardown_child(&cancel_view::<State>(c.clone()), elem_c, ctx);
         }
     }
 }

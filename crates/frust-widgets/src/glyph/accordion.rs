@@ -235,7 +235,7 @@ pub struct AccordionWidget {
     title_size: Size,
     body: ChildPod,
     open: bool,
-    on_toggle: Option<crate::ErasedCallback>,
+    on_toggle: Option<crate::authoring::ErasedCallback>,
     reveal: RevealDriver,
     /// The latest reveal fraction, updated in paint and read by layout.
     reveal_value: f64,
@@ -256,9 +256,12 @@ impl<State: 'static> View<State> for AccordionView<State> {
             title: GlyphLabel::new(self.title.clone()),
             title_text: self.title.clone(),
             title_size: Size::ZERO,
-            body: crate::build_child(&self.body, ctx),
+            body: crate::authoring::build_child(&self.body, ctx),
             open: self.open,
-            on_toggle: self.on_toggle.as_ref().map(crate::erase_callback),
+            on_toggle: self
+                .on_toggle
+                .as_ref()
+                .map(crate::authoring::erase_callback),
             reveal: RevealDriver::new(if self.open { 1.0 } else { 0.0 }),
             reveal_value: if self.open { 1.0 } else { 0.0 },
             header_height: 0.0,
@@ -285,13 +288,16 @@ impl<State: 'static> View<State> for AccordionView<State> {
             element.reveal.set_target(if self.open { 1.0 } else { 0.0 });
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
-        element.on_toggle = self.on_toggle.as_ref().map(crate::erase_callback);
-        flags |= crate::rebuild_child(&prev.body, &self.body, &mut element.body, ctx);
+        element.on_toggle = self
+            .on_toggle
+            .as_ref()
+            .map(crate::authoring::erase_callback);
+        flags |= crate::authoring::rebuild_child(&prev.body, &self.body, &mut element.body, ctx);
         flags
     }
 
     fn teardown(&self, element: &mut AccordionWidget, ctx: &mut BuildCtx<'_>) {
-        crate::teardown_child(&self.body, &mut element.body, ctx);
+        crate::authoring::teardown_child(&self.body, &mut element.body, ctx);
     }
 }
 
@@ -432,7 +438,7 @@ impl Widget for AccordionWidget {
         // revealed body) routes to the body child instead.
         let InputEvent::Pointer(p) = event else {
             // Focus-routed events go to the body if it holds focus.
-            return crate::route_event_single(&mut self.body, ctx, event);
+            return crate::authoring::route_event_single(&mut self.body, ctx, event);
         };
         let in_header = p.position.y < self.header_height;
         match p.phase {
@@ -444,11 +450,11 @@ impl Widget for AccordionWidget {
                     ctx.request_redraw();
                     return EventResult::Handled;
                 }
-                crate::route_event_single(&mut self.body, ctx, event)
+                crate::authoring::route_event_single(&mut self.body, ctx, event)
             }
             PointerPhase::Move => {
                 if !self.captured {
-                    return crate::route_event_single(&mut self.body, ctx, event);
+                    return crate::authoring::route_event_single(&mut self.body, ctx, event);
                 }
                 let inside = in_header;
                 if inside != self.pressed {
@@ -459,7 +465,7 @@ impl Widget for AccordionWidget {
             }
             PointerPhase::Up => {
                 if !self.captured {
-                    return crate::route_event_single(&mut self.body, ctx, event);
+                    return crate::authoring::route_event_single(&mut self.body, ctx, event);
                 }
                 self.captured = false;
                 let fired = in_header;
@@ -477,7 +483,7 @@ impl Widget for AccordionWidget {
                     ctx.request_redraw();
                     return EventResult::Handled;
                 }
-                crate::route_event_single(&mut self.body, ctx, event)
+                crate::authoring::route_event_single(&mut self.body, ctx, event)
             }
         }
     }

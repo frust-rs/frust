@@ -28,12 +28,16 @@ use peniko::Color;
 /// an app-supplied `.color()` always wins (precedence: explicit > theme >
 /// fallback). With no theme threaded in, the style's own color (black by default)
 /// is the unthemed fallback.
+///
+/// Part of the widget-authoring toolkit — re-exported as
+/// [`crate::authoring::ThemeTextColor`], which is the path a design system
+/// outside this crate names it by.
 // Every variant names an M3 "on_*" color role (`on_surface`/`on_primary`/
 // `on_surface_variant`/`on_primary_container`) — the shared `On` prefix
 // reflects the token vocabulary, not a naming smell.
 #[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum ThemeTextColor {
+pub enum ThemeTextColor {
     /// `colors.on_surface` — the default for standalone/body text.
     OnSurface,
     /// `colors.on_primary` — a label painted over a `primary`-filled surface
@@ -138,8 +142,13 @@ impl TextView {
     }
 
     /// Set the themed default color role used when no explicit color was set
-    /// (crate-internal: [`crate::Button`] labels their text `OnPrimary`).
-    pub(crate) fn themed_role(mut self, role: ThemeTextColor) -> Self {
+    /// (e.g. [`crate::Button`] labels its text [`ThemeTextColor::OnPrimary`] so it
+    /// reads against the primary-filled button).
+    ///
+    /// Part of the widget-authoring toolkit (see [`crate::authoring`]): it stays
+    /// an inherent method here — an inherent impl cannot be added from another
+    /// crate — while the role enum itself is re-exported from `authoring`.
+    pub fn themed_role(mut self, role: ThemeTextColor) -> Self {
         self.role = role;
         self
     }

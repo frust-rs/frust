@@ -5,6 +5,17 @@ resolver = "2"
 # only, no frust-* framework deps), unlike the excluded facade-tier
 # plugins/clean-signals-frust below, which stays out of the root graph.
 members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets"]
+# examples/no-catalogs is the catalog-free build's compile guard: unlike
+# every example excluded below, it is INCLUDED on purpose — a package-scoped
+# `cargo build -p no-catalogs`/`cargo check -p no-catalogs` compiles `frust
+# --no-default-features` with nothing to remember. CONFIRMED LIMITATION:
+# `cargo build --workspace`/`cargo test --workspace` do NOT actually
+# exercise the catalog-off configuration — Cargo's feature resolver unifies
+# this crate's `frust` dependency with `plugins/native-widgets`'s own
+# (legitimately) default-on `frust`+`glyph-fonts` dependency into one
+# catalogs-ON build once both are roots in the same `--workspace` command.
+# See examples/no-catalogs/src/main.rs's top-of-file doc for the full
+# evidence and the standalone-command fallback this implies.
 # examples/huddle (renamed from its prior directory name) is the
 # sole example (examples-convergence: hello/counter/notes/gallery/navdemo/
 # catalog/inbox were folded into it and deleted) — standalone (its own
@@ -259,9 +270,24 @@ frust-text = { path = "crates/frust-text" }
 # bundled Space Mono/IBM Plex Mono bytes back re-requests them through its
 # own `glyph-fonts` feature (mirroring the perf-trace chain's shape,
 # inverted: default-ON at the facade top instead of default-off) — see
-# `crates/frust/Cargo.toml`'s `default = ["glyph-fonts"]`.
+# `crates/frust/Cargo.toml`'s `default = ["glyph", "material", "cupertino",
+# "glyph-fonts"]`.
 frust-theme = { path = "crates/frust-theme", default-features = false }
-frust-widgets = { path = "crates/frust-widgets" }
+# `default-features = false` for the same reason as the `frust-theme` edge
+# above, one tier up: `frust-widgets`' three built-in catalogs
+# (`glyph`/`material`/`cupertino`) are its own default features, and an app that
+# authors its own design system against `frust_widgets::authoring` must be able
+# to compile none of them. That opt-out is only real if this edge stops
+# requesting them — the facade's `glyph`/`material`/`cupertino` features
+# (`crates/frust/Cargo.toml`) are the re-enabling asks, default-on there, so an
+# unmodified app build is unchanged. Cargo ignores `default-features = false`
+# written on an *inherited* edge (warning: "`default-features` is ignored ...,
+# since `default-features` was not specified for
+# `workspace.dependencies.frust-widgets`"), so the switch has to live here.
+# The two mobile shells' target-gated `frust-widgets` DEV-dependencies inherit
+# it too; their macro-expansion smoke tests only use `frust_widgets::text`
+# (a baseline widget, ungated), so nothing there needs a catalog back.
+frust-widgets = { path = "crates/frust-widgets", default-features = false }
 frust-reactive = { path = "crates/frust-reactive" }
 frust-plugin = { path = "crates/frust-plugin" }
 frust-paths = { path = "crates/frust-paths" }

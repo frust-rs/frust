@@ -60,7 +60,8 @@ use peniko::{Brush, Color};
 
 use super::shape_morph::{RoundedPolygon, morph_path};
 use super::state_layer::PRESSED_OPACITY;
-use crate::text::{self, ThemeTextColor};
+use crate::authoring::ThemeTextColor;
+use crate::text;
 
 /// Horizontal padding around each member's label, in logical px.
 const PAD_X: f64 = 16.0;
@@ -202,7 +203,7 @@ pub struct ButtonGroupWidget {
     pressed_inside: bool,
     /// The spring-driven press-emphasis morph parameter (0 rest → 1 pressed).
     press_anim: frust_core::AnimationController,
-    on_select: crate::ErasedArgCallback<usize>,
+    on_select: crate::authoring::ErasedArgCallback<usize>,
 }
 
 /// The `(selected_fill, unselected_fill, outline, content)` colors. Themed:
@@ -262,7 +263,7 @@ impl<State: 'static> View<State> for ButtonGroupView<State> {
         let members = self
             .labels
             .iter()
-            .map(|label| crate::build_child(&label_view::<State>(label.clone()), ctx))
+            .map(|label| crate::authoring::build_child(&label_view::<State>(label.clone()), ctx))
             .collect();
         ButtonGroupWidget {
             members,
@@ -273,7 +274,7 @@ impl<State: 'static> View<State> for ButtonGroupView<State> {
             active_member: None,
             pressed_inside: false,
             press_anim: frust_core::AnimationController::new(PRESS_ANIM_PERIOD),
-            on_select: crate::erase_callback_arg(&self.on_select),
+            on_select: crate::authoring::erase_callback_arg(&self.on_select),
         }
     }
 
@@ -283,7 +284,7 @@ impl<State: 'static> View<State> for ButtonGroupView<State> {
         element: &mut ButtonGroupWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        element.on_select = crate::erase_callback_arg(&self.on_select);
+        element.on_select = crate::authoring::erase_callback_arg(&self.on_select);
         let mut flags = ChangeFlags::NONE;
 
         if prev.selected != self.selected {
@@ -305,7 +306,7 @@ impl<State: 'static> View<State> for ButtonGroupView<State> {
                 .iter()
                 .map(|l| label_view::<State>(l.clone()))
                 .collect();
-            flags |= crate::rebuild_children(
+            flags |= crate::authoring::rebuild_children(
                 &prev_views,
                 &next_views,
                 &mut element.members,
@@ -325,8 +326,12 @@ impl<State: 'static> View<State> for ButtonGroupView<State> {
                 if prev_label != next_label {
                     let prev_view = label_view::<State>(prev_label.clone());
                     let next_view = label_view::<State>(next_label.clone());
-                    flags |=
-                        crate::rebuild_child(&prev_view, &next_view, &mut element.members[i], ctx);
+                    flags |= crate::authoring::rebuild_child(
+                        &prev_view,
+                        &next_view,
+                        &mut element.members[i],
+                        ctx,
+                    );
                 }
             }
             element.labels = self.labels.clone();
@@ -337,7 +342,7 @@ impl<State: 'static> View<State> for ButtonGroupView<State> {
 
     fn teardown(&self, element: &mut ButtonGroupWidget, ctx: &mut BuildCtx<'_>) {
         for (label, pod) in self.labels.iter().zip(element.members.iter_mut()) {
-            crate::teardown_child(&label_view::<State>(label.clone()), pod, ctx);
+            crate::authoring::teardown_child(&label_view::<State>(label.clone()), pod, ctx);
         }
     }
 }

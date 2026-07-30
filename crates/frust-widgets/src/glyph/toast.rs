@@ -191,7 +191,10 @@ impl<State: 'static> View<State> for ToastView {
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> ToastWidget {
         ToastWidget {
-            message: crate::build_child::<State>(&message_view::<State>(self.message.clone()), ctx),
+            message: crate::authoring::build_child::<State>(
+                &message_view::<State>(self.message.clone()),
+                ctx,
+            ),
             message_text: self.message.clone(),
             variant: self.variant,
         }
@@ -208,7 +211,8 @@ impl<State: 'static> View<State> for ToastView {
             element.message_text = self.message.clone();
             let prev_view = message_view::<State>(prev.message.clone());
             let next_view = message_view::<State>(self.message.clone());
-            flags |= crate::rebuild_child(&prev_view, &next_view, &mut element.message, ctx);
+            flags |=
+                crate::authoring::rebuild_child(&prev_view, &next_view, &mut element.message, ctx);
         }
         if prev.variant != self.variant {
             element.variant = self.variant;
@@ -219,7 +223,7 @@ impl<State: 'static> View<State> for ToastView {
 
     fn teardown(&self, element: &mut ToastWidget, ctx: &mut BuildCtx<'_>) {
         let view = message_view::<State>(self.message.clone());
-        crate::teardown_child(&view, &mut element.message, ctx);
+        crate::authoring::teardown_child(&view, &mut element.message, ctx);
     }
 }
 
@@ -567,7 +571,7 @@ impl<State: 'static> View<State> for ToastHostView {
         if let Some(active) = element.active.take() {
             let view = any::<State, _>(toast(active.message));
             let mut pod = active.child;
-            crate::teardown_child(&view, &mut pod, ctx);
+            crate::authoring::teardown_child(&view, &mut pod, ctx);
         }
     }
 }
@@ -610,14 +614,17 @@ impl ToastHostWidget {
             let active = self.active.take().expect("checked Some above");
             let view = any::<State, _>(toast(active.message));
             let mut pod = active.child;
-            crate::teardown_child(&view, &mut pod, ctx);
+            crate::authoring::teardown_child(&view, &mut pod, ctx);
             self.next_index += 1;
             structural_change = true;
         }
         if self.active.is_none()
             && let Some(message) = self.queue.get(self.next_index).cloned()
         {
-            let child = crate::build_child::<State>(&any::<State, _>(toast(message.clone())), ctx);
+            let child = crate::authoring::build_child::<State>(
+                &any::<State, _>(toast(message.clone())),
+                ctx,
+            );
             self.active = Some(ActiveToast {
                 message,
                 child,

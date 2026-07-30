@@ -104,9 +104,10 @@ use kurbo::{Affine, Point, Rect, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
 
 use crate::Timing;
+use crate::authoring::ThemeTextColor;
 use crate::nav::navigator::{BackPolicy, NavigatorController, PopResult, PushOptions};
 use crate::nav::transition::{TransitionDriver, TransitionSpec, make_driver};
-use crate::text::{ThemeTextColor, text};
+use crate::text::text;
 
 /// Scrim opacity behind the panel at full enter (an original, hand-picked
 /// value — a terminal-dark modal barrier, heavier than M3's 32% so the amber
@@ -485,18 +486,20 @@ fn reconcile_optional<State: 'static>(
 ) -> ChangeFlags {
     match (prev, next) {
         (None, Some(s)) => {
-            *pod = Some(crate::build_child(&make(s.as_str()), ctx));
+            *pod = Some(crate::authoring::build_child(&make(s.as_str()), ctx));
             ChangeFlags::LAYOUT | ChangeFlags::PAINT
         }
         (Some(s), None) => {
             if let Some(p) = pod.as_mut() {
-                crate::teardown_child(&make(s.as_str()), p, ctx);
+                crate::authoring::teardown_child(&make(s.as_str()), p, ctx);
             }
             *pod = None;
             ChangeFlags::LAYOUT | ChangeFlags::PAINT
         }
         (Some(a), Some(b)) => match pod.as_mut() {
-            Some(p) => crate::rebuild_child(&make(a.as_str()), &make(b.as_str()), p, ctx),
+            Some(p) => {
+                crate::authoring::rebuild_child(&make(a.as_str()), &make(b.as_str()), p, ctx)
+            }
             None => ChangeFlags::NONE,
         },
         (None, None) => ChangeFlags::NONE,
@@ -511,17 +514,17 @@ impl<State: 'static> View<State> for GlyphDialogView<State> {
             title: self
                 .title
                 .as_ref()
-                .map(|s| crate::build_child(&title_view::<State>(s), ctx)),
+                .map(|s| crate::authoring::build_child(&title_view::<State>(s), ctx)),
             title_text: self.title.clone(),
             body: self
                 .body
                 .as_ref()
-                .map(|s| crate::build_child(&body_view::<State>(s), ctx)),
+                .map(|s| crate::authoring::build_child(&body_view::<State>(s), ctx)),
             body_text: self.body.clone(),
             actions: self
                 .actions
                 .iter()
-                .map(|v| crate::build_child(v, ctx))
+                .map(|v| crate::authoring::build_child(v, ctx))
                 .collect(),
             scrim_dismissible: self.scrim_dismissible,
             on_close: self.on_close.clone(),
@@ -562,7 +565,7 @@ impl<State: 'static> View<State> for GlyphDialogView<State> {
 
         let prev_views: Vec<&AnyView<State>> = prev.actions.iter().collect();
         let next_views: Vec<&AnyView<State>> = self.actions.iter().collect();
-        flags |= crate::rebuild_children(
+        flags |= crate::authoring::rebuild_children(
             &prev_views,
             &next_views,
             &mut element.actions,
@@ -584,13 +587,13 @@ impl<State: 'static> View<State> for GlyphDialogView<State> {
 
     fn teardown(&self, element: &mut GlyphDialogWidget, ctx: &mut BuildCtx<'_>) {
         if let (Some(s), Some(p)) = (&self.title, element.title.as_mut()) {
-            crate::teardown_child(&title_view::<State>(s), p, ctx);
+            crate::authoring::teardown_child(&title_view::<State>(s), p, ctx);
         }
         if let (Some(s), Some(p)) = (&self.body, element.body.as_mut()) {
-            crate::teardown_child(&body_view::<State>(s), p, ctx);
+            crate::authoring::teardown_child(&body_view::<State>(s), p, ctx);
         }
         for (view, pod) in self.actions.iter().zip(element.actions.iter_mut()) {
-            crate::teardown_child(view, pod, ctx);
+            crate::authoring::teardown_child(view, pod, ctx);
         }
     }
 }
@@ -817,7 +820,7 @@ impl Widget for GlyphDialogWidget {
             ctx.request_focus();
         }
         // An action already capturing (or freshly hit) consumes the event first.
-        if crate::route_event(&mut self.actions, ctx, event) == EventResult::Handled {
+        if crate::authoring::route_event(&mut self.actions, ctx, event) == EventResult::Handled {
             return EventResult::Handled;
         }
         // Escape (once focused) begins the exit/cancel — gated by `dismissable`
@@ -1542,7 +1545,7 @@ mod tests {
     }
     struct TapWidget {
         size: Size,
-        on_tap: crate::ErasedCallback,
+        on_tap: crate::authoring::ErasedCallback,
         captured: bool,
     }
     impl<State: 'static> View<State> for TapView<State> {
@@ -1550,12 +1553,12 @@ mod tests {
         fn build(&self, _ctx: &mut BuildCtx<'_>) -> TapWidget {
             TapWidget {
                 size: self.size,
-                on_tap: crate::erase_callback(&self.on_tap),
+                on_tap: crate::authoring::erase_callback(&self.on_tap),
                 captured: false,
             }
         }
         fn rebuild(&self, _p: &Self, e: &mut TapWidget, _c: &mut BuildCtx<'_>) -> ChangeFlags {
-            e.on_tap = crate::erase_callback(&self.on_tap);
+            e.on_tap = crate::authoring::erase_callback(&self.on_tap);
             ChangeFlags::NONE
         }
     }

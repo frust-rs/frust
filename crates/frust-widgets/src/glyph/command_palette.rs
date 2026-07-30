@@ -510,7 +510,7 @@ pub struct CommandPaletteWidget {
     prompt_size: Size,
     items: Vec<PaletteItem>,
     rows: Vec<Row>,
-    on_select: crate::ErasedArgCallback<usize>,
+    on_select: crate::authoring::ErasedArgCallback<usize>,
     dismissable: bool,
     on_close: Option<OnClose>,
     /// The shared back-press dismiss-signal cell (see the [module docs](self)'s
@@ -550,7 +550,7 @@ impl<State: 'static> View<State> for CommandPaletteView<State> {
     type Element = CommandPaletteWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> CommandPaletteWidget {
-        let input = crate::build_child(
+        let input = crate::authoring::build_child(
             &input_view::<State>(&self.query, &self.placeholder, self.on_query.clone()),
             ctx,
         );
@@ -560,7 +560,7 @@ impl<State: 'static> View<State> for CommandPaletteView<State> {
             prompt_size: Size::ZERO,
             items: self.items.clone(),
             rows: make_rows(&self.items),
-            on_select: crate::erase_callback_arg(&self.on_select),
+            on_select: crate::authoring::erase_callback_arg(&self.on_select),
             dismissable: self.dismissable,
             on_close: self.on_close.clone(),
             last_seen_dismiss: self.dismiss_signal.as_ref().map(|s| s.get()).unwrap_or(0),
@@ -585,7 +585,7 @@ impl<State: 'static> View<State> for CommandPaletteView<State> {
         let mut flags = ChangeFlags::NONE;
         let prev_input = input_view::<State>(&prev.query, &prev.placeholder, prev.on_query.clone());
         let next_input = input_view::<State>(&self.query, &self.placeholder, self.on_query.clone());
-        flags |= crate::rebuild_child(&prev_input, &next_input, &mut element.input, ctx);
+        flags |= crate::authoring::rebuild_child(&prev_input, &next_input, &mut element.input, ctx);
 
         if prev.items != self.items {
             element.items = self.items.clone();
@@ -593,7 +593,7 @@ impl<State: 'static> View<State> for CommandPaletteView<State> {
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         element.dismissable = self.dismissable;
-        element.on_select = crate::erase_callback_arg(&self.on_select);
+        element.on_select = crate::authoring::erase_callback_arg(&self.on_select);
         element.on_close = self.on_close.clone();
         // A new/changed dismiss-signal identity resets the last-seen generation
         // to its current value, so swapping in a fresh cell never misfires an
@@ -609,7 +609,7 @@ impl<State: 'static> View<State> for CommandPaletteView<State> {
 
     fn teardown(&self, element: &mut CommandPaletteWidget, ctx: &mut BuildCtx<'_>) {
         let input = input_view::<State>(&self.query, &self.placeholder, self.on_query.clone());
-        crate::teardown_child(&input, &mut element.input, ctx);
+        crate::authoring::teardown_child(&input, &mut element.input, ctx);
     }
 }
 
@@ -680,7 +680,7 @@ impl CommandPaletteWidget {
 
     /// Route a synthetic tap into the input to claim focus on the first
     /// (non-scrim-dismiss) event — see the [module docs](self)'s focus note.
-    /// Uses a Down+Up through [`crate::route_event_single`] so the input's
+    /// Uses a Down+Up through [`crate::authoring::route_event_single`] so the input's
     /// capture is cleanly released and the focus request propagates up the
     /// modal chain.
     fn autofocus_input(&mut self, ctx: &mut EventCtx) {
@@ -700,8 +700,8 @@ impl CommandPaletteWidget {
             position: target,
             button: PointerButton::Primary,
         });
-        crate::route_event_single(&mut self.input, ctx, &down);
-        crate::route_event_single(&mut self.input, ctx, &up);
+        crate::authoring::route_event_single(&mut self.input, ctx, &down);
+        crate::authoring::route_event_single(&mut self.input, ctx, &up);
     }
 }
 
@@ -899,7 +899,7 @@ impl Widget for CommandPaletteWidget {
                 }
                 return EventResult::Handled;
             }
-            return crate::route_event_single(&mut self.input, ctx, event);
+            return crate::authoring::route_event_single(&mut self.input, ctx, event);
         }
 
         let InputEvent::Pointer(p) = event else {
@@ -908,13 +908,13 @@ impl Widget for CommandPaletteWidget {
 
         // A captured input drag stays with the input.
         if self.input.is_active() {
-            return crate::route_event_single(&mut self.input, ctx, event);
+            return crate::authoring::route_event_single(&mut self.input, ctx, event);
         }
 
         match p.phase {
             PointerPhase::Down => {
                 if self.input_rect.contains(p.position) {
-                    return crate::route_event_single(&mut self.input, ctx, event);
+                    return crate::authoring::route_event_single(&mut self.input, ctx, event);
                 }
                 if let Some(i) = self.row_at(p.position) {
                     self.pressed_row = Some(i);

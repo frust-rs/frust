@@ -124,7 +124,7 @@
 //! mapping outcome (SF Pro has no weight above Semibold to step up to here),
 //! not an oversight.
 
-use frust_text::{FontFamily, FontWeight, LineHeight, TextStyle};
+use frust_text::{FontFamily, FontWeight, GenericSlot, LineHeight, TextStyle};
 
 /// The 15 Material 3 type-scale presets, each a full [`TextStyle`], plus 15
 /// M3-Expressive `_emphasized` siblings (see the module docs' "Emphasized
@@ -299,6 +299,30 @@ impl TypeScale {
             label_medium_emphasized: apply_cupertino_emphasized(base, CUPERTINO_LABEL_MEDIUM),
             label_small_emphasized: apply_cupertino_emphasized(base, CUPERTINO_LABEL_SMALL),
         }
+    }
+
+    /// Builds the neutral, design-language-free type scale from `base` (its
+    /// `style`/`color` are preserved, like [`TypeScale::m3`]).
+    ///
+    /// Reuses [`TypeScale::m3`]'s own numeric progression — a type *scale*
+    /// (a size/weight/tracking/line-height ladder) isn't a branded artifact
+    /// the way a named font face is, so there's no "M3-specific value" here
+    /// to replace (see `crate::theme::Theme::neutral`'s module docs). The
+    /// one thing this constructor *does* override is `family`: every slot
+    /// forces a generic sans-serif stack via
+    /// [`FontFamily::stack_with_generic`] (no named font at all, ending in
+    /// [`GenericSlot::SansSerif`]) rather than inheriting whatever `base`
+    /// supplies — **no bundled font bytes are referenced**, so this
+    /// compiles and behaves identically whether or not the `glyph-fonts`
+    /// feature is enabled (task acceptance criterion 2).
+    pub fn neutral(base: &TextStyle) -> Self {
+        let family =
+            FontFamily::stack_with_generic(std::iter::empty::<&str>(), GenericSlot::SansSerif);
+        let base = TextStyle {
+            family,
+            ..base.clone()
+        };
+        Self::m3(&base)
     }
 }
 
@@ -582,5 +606,69 @@ mod tests {
             scale.body_large.line_height,
             scale.body_large_emphasized.line_height
         );
+    }
+
+    // ---- Neutral scale ----------------------------------------------------
+
+    #[test]
+    fn neutral_uses_no_bundled_fonts() {
+        // Task acceptance criterion 2: every slot names only a generic/
+        // system family, never "Space Mono"/"IBM Plex Mono" or any other
+        // concrete named font.
+        let scale = TypeScale::neutral(&TextStyle::new(16.0, Color::BLACK));
+        let expected =
+            FontFamily::stack_with_generic(std::iter::empty::<&str>(), GenericSlot::SansSerif);
+        for family in [
+            &scale.display_large.family,
+            &scale.headline_medium.family,
+            &scale.title_large.family,
+            &scale.body_large.family,
+            &scale.label_small.family,
+            &scale.body_large_emphasized.family,
+        ] {
+            assert_eq!(family, &expected);
+            match family {
+                FontFamily::NamedWithGeneric(parts) => {
+                    // No `FamilyName::Named` entry — a generic-only stack.
+                    assert!(
+                        !parts
+                            .iter()
+                            .any(|p| matches!(p, frust_text::FamilyName::Named(_)))
+                    );
+                }
+                other => panic!("expected a generic-only stack, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn neutral_reuses_the_m3_numeric_scale() {
+        // The scale (sizes/weights/tracking/line-height) is shared with M3
+        // — only `family` differs (see this constructor's doc comment).
+        let base = TextStyle::new(16.0, Color::BLACK);
+        let neutral = TypeScale::neutral(&base);
+        let m3 = TypeScale::m3(&base);
+        assert_eq!(neutral.display_large.size, m3.display_large.size);
+        assert_eq!(
+            neutral.display_large.line_height,
+            m3.display_large.line_height
+        );
+        assert_eq!(neutral.title_medium.weight, m3.title_medium.weight);
+        assert_eq!(
+            neutral.body_large_emphasized.weight,
+            m3.body_large_emphasized.weight
+        );
+        assert_ne!(neutral.display_large.family, m3.display_large.family);
+    }
+
+    #[test]
+    fn neutral_preserves_base_color_but_overrides_family() {
+        let base = TextStyle {
+            family: FontFamily::named("Roboto"),
+            ..TextStyle::new(16.0, Color::from_rgb8(1, 2, 3))
+        };
+        let scale = TypeScale::neutral(&base);
+        assert_ne!(scale.body_large.family, base.family);
+        assert_eq!(scale.body_large.color, base.color);
     }
 }
