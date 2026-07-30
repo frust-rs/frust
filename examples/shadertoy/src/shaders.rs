@@ -10,11 +10,11 @@
 //! (`@fragment fn fs_main(in: FrustVsOut) -> @location(0) vec4<f32>`) and
 //! reads the uniforms as `frust_u.resolution` / `frust_u.time`. Every shader
 //! here writes **opaque** output (`vec4<f32>(color, 1.0)`) — the v1
-//! [`frust_scene::ShaderProgram`] contract (vello's
+//! [`frust::authoring::scene::ShaderProgram`] contract (vello's
 //! image-override copy only agrees with Frust's premultiplied render target
 //! at alpha = 1.0).
 
-use frust_scene::ShaderProgram;
+use frust::authoring::scene::ShaderProgram;
 
 /// *Neon rings* — a port of
 /// [shadertoy.com/view/mtyGWy](https://www.shadertoy.com/view/mtyGWy),

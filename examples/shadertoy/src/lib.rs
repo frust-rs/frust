@@ -18,7 +18,7 @@ use frust::{
     SizedBox, Stack, SystemUiMode, Theme, any, button, flexible, inflexible, safe_area,
     set_app_theme, set_system_ui_mode, text,
 };
-use frust_scene::ShaderProgram;
+use frust::authoring::scene::ShaderProgram;
 
 use shader_view::shader_view;
 
