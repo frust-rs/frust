@@ -5,6 +5,17 @@ resolver = "2"
 # only, no frust-* framework deps), unlike the excluded facade-tier
 # plugins/clean-signals-frust below, which stays out of the root graph.
 members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets"]
+# examples/no-catalogs is the catalog-free build's compile guard: unlike
+# every example excluded below, it is INCLUDED on purpose — a package-scoped
+# `cargo build -p no-catalogs`/`cargo check -p no-catalogs` compiles `frust
+# --no-default-features` with nothing to remember. CONFIRMED LIMITATION:
+# `cargo build --workspace`/`cargo test --workspace` do NOT actually
+# exercise the catalog-off configuration — Cargo's feature resolver unifies
+# this crate's `frust` dependency with `plugins/native-widgets`'s own
+# (legitimately) default-on `frust`+`glyph-fonts` dependency into one
+# catalogs-ON build once both are roots in the same `--workspace` command.
+# See examples/no-catalogs/src/main.rs's top-of-file doc for the full
+# evidence and the standalone-command fallback this implies.
 # examples/huddle (renamed from its prior directory name) is the
 # sole example (examples-convergence: hello/counter/notes/gallery/navdemo/
 # catalog/inbox were folded into it and deleted) — standalone (its own
