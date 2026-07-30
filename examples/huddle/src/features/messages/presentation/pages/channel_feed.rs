@@ -46,10 +46,12 @@
 //!   [`ScrollView::on_scroll`](frust::ScrollView) instead of
 //!   `on_near_start`.
 //! - **Per-message entrance + typing indicator.** A per-item slide/fade
-//!   `AnimationController` needs a custom painting `Widget`, which a facade-only
-//!   crate cannot author (the same limitation the `ui::toast` module already
-//!   notes). The keyed list gives newly-appended messages stable identity, and
-//!   the "being typed" affordance uses the facade's self-animating
+//!   `AnimationController` would need a custom painting `Widget`, authored via
+//!   `frust::authoring` — the seam `ui::toast`'s own entrance wrapper uses —
+//!   but this screen stays on the facade's built-in widgets alone rather than
+//!   hand-rolling one here. The keyed list gives newly-appended messages
+//!   stable identity, and the "being typed" affordance uses the facade's
+//!   self-animating
 //!   [`loading_indicator`](frust::loading_indicator) /
 //!   [`cupertino_activity_indicator`](frust::cupertino_activity_indicator)
 //!   as a live animation. Message rows are FLAT (no `Card` wrapper) — the
@@ -67,9 +69,8 @@ use frust::{
     FlexView, GestureDetector, Get, GetUntracked, MainAxisAlignment, NavigatorController, Padding,
     RwSignal, ScrollInfo, Set, SizedBox, Stack, Theme, Update, any, app_bar, assist_chip,
     cupertino_activity_indicator, filter_chip, flexible, hero, icon, icons, inflexible, keyed,
-    loading_indicator, safe_area, scroll_view, text, text_input, use_context,
+    kurbo::Size, loading_indicator, safe_area, scroll_view, text, text_input, use_context,
 };
-use kurbo::Size;
 
 use crate::HuddleState;
 use crate::features::messages::{FeedBody, FeedMessage, MessagesController};

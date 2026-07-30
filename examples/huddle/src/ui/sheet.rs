@@ -1,7 +1,7 @@
 //! `sheet` — a reusable bottom-sheet overlay.
 //!
 //! A hand-rolled [`View`]/[`Widget`] pair built directly against
-//! `frust-core` — the same "low-level escape hatch" precedent
+//! `frust::authoring` — the same precedent
 //! [`crate::ui::swipeable`] uses (`SwipeableRow`), rotated from the horizontal
 //! swipe axis to a vertical bottom sheet. No facade widget mounts an in-screen
 //! sheet with a scrim + slide-in + drag-to-dismiss that a *plain* screen
@@ -58,17 +58,16 @@
 
 use std::rc::Rc;
 
+use frust::authoring::{
+    AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
+    InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerButton, PointerEvent, PointerPhase,
+    SemanticsCtx, Size, View, Widget, any,
+};
 use frust::{
-    Axis, CrossAxisAlignment, EdgeInsets, FlexView, GestureDetector, IconSource, Padding, SizedBox,
-    Theme, filled_card, flexible, icon, inflexible, text,
+    AnimationController, Axis, CrossAxisAlignment, Curve, EdgeInsets, FlexView, FrameTime,
+    GestureDetector, IconSource, Padding, SizedBox, Theme, filled_card, flexible, icon, inflexible,
+    input::TOUCH_SLOP, text,
 };
-use frust_core::{
-    AnimationController, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Curve, EventCtx,
-    EventResult, FrameTime, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerButton,
-    PointerEvent, PointerPhase, SemanticsCtx, TOUCH_SLOP, View, Widget, any,
-};
-use kurbo::{Point, Size};
-use peniko::Color;
 use std::time::Duration;
 
 /// Height (logical px) of the drag-handle region reserved at the top of the

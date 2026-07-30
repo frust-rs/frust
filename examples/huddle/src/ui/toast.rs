@@ -21,7 +21,7 @@
 //! # Entrance animation
 //!
 //! Each toast card is wrapped in [`toast_entrance`], a small paint-driven
-//! escape-hatch `View`/`Widget` (built directly on `frust-core`, the same
+//! `View`/`Widget` built directly on `frust::authoring` (the same
 //! precedent [`crate::ui::sheet`]/[`crate::ui::swipeable`] use) that slides the
 //! card up and fades it in via an [`AnimationController`] — the sheet's
 //! paint-driven-controller pattern, not the drawer's off-screen timer, since a
@@ -36,15 +36,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use frust::authoring::{
+    BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent, LayoutCtx,
+    PaintCtx, PaintScene, Point, SemanticsCtx, Size, View, Widget,
+};
 use frust::{
-    Align, Alignment, AnyView, Column, EdgeInsets, Get, GetUntracked, Padding, RwSignal, SizedBox,
-    Update, any, filled_card, text,
+    Align, Alignment, AnimationController, AnyView, Column, Curve, EdgeInsets, Get, GetUntracked,
+    Padding, RwSignal, SizedBox, Update, any, filled_card, text,
 };
-use frust_core::{
-    AnimationController, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Curve, EventCtx,
-    EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget,
-};
-use kurbo::{Point, Size};
 
 /// The default auto-dismiss delay (Material snackbar-ish ~3s).
 pub const DEFAULT_DISMISS_AFTER: Duration = Duration::from_secs(3);

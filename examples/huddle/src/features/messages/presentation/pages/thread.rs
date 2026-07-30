@@ -57,9 +57,8 @@ use std::sync::Arc;
 use frust::{
     Align, Alignment, AnyView, Axis, Color, CrossAxisAlignment, EdgeInsets, FlexView,
     GestureDetector, Get, GetUntracked, Padding, RwSignal, Set, SizedBox, Stack, any, app_bar,
-    hero, icon, icons, inflexible, keyed, scroll_view, text, text_input, use_context,
+    hero, icon, icons, inflexible, keyed, kurbo::Size, scroll_view, text, text_input, use_context,
 };
-use kurbo::Size;
 
 use crate::HuddleState;
 use crate::features::messages::domain::repositories::MessageRepository;

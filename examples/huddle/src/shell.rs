@@ -84,7 +84,7 @@ impl Tab {
     /// `LazyLock`s so the per-frame rebuild sees a stable `Arc` identity
     /// (the navbar's structural diff uses `IconData::same`).
     pub fn glyph_icon(self) -> frust::IconData {
-        use kurbo::{BezPath, Circle, Rect, Shape};
+        use frust::kurbo::{BezPath, Circle, Rect, Shape};
         use std::sync::LazyLock;
         const TOL: f64 = 0.05;
         /// Outer shape minus inner shape as a NonZero-fill ring.
