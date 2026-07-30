@@ -4,7 +4,7 @@
 //! # The gap this closes
 //!
 //! Every shell seeds itself with a built-in fallback theme
-//! (`Theme::glyph_baseline()`) that a design-system plugin has no way to
+//! (`Theme::neutral()`) that a design-system plugin has no way to
 //! replace — the plugin can only reach for [`crate::theme_override::set_app_theme`],
 //! but that seam **forces** the active theme end-to-end, pinning it against a
 //! live platform appearance change until `clear_app_theme` runs (see
@@ -28,8 +28,8 @@
 //!    re-derives light/dark from the platform's own appearance against this
 //!    same base (why [`default_theme`] is a non-destructive read — see
 //!    below).
-//! 3. The shell's own built-in fallback (`Theme::glyph_baseline()` today),
-//!    when neither of the above was ever set.
+//! 3. The shell's own built-in fallback (`Theme::neutral()`), when neither of
+//!    the above was ever set. A design system is installed, never assumed.
 //!
 //! # Layering choice
 //!
@@ -152,7 +152,12 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_slot();
 
-        let theme = Theme::glyph_baseline();
+        // A design-language-free baseline on purpose: `Theme::glyph_baseline()`
+        // lives behind `frust-theme`'s `glyph` feature, which THIS crate does
+        // not request — naming it here breaks `cargo test -p frust-shell-common`
+        // while `--workspace` stays green via feature unification. Nothing below
+        // is Glyph-specific.
+        let theme = Theme::m3_baseline();
         set_default_theme(theme.clone());
 
         // Two (in fact three) consecutive reads all return the same value —
@@ -180,7 +185,9 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_slot();
 
-        let theme = Theme::glyph_baseline();
+        // Feature-independent baseline — see the note in
+        // `default_theme_read_is_non_destructive`.
+        let theme = Theme::m3_baseline();
         let handle = std::thread::spawn({
             let theme = theme.clone();
             move || set_default_theme(theme)

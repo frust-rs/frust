@@ -143,16 +143,17 @@ impl Theme {
     /// `neutral_dark` use to keep `error` real red instead of grayscaling
     /// it too.
     ///
-    /// This is the floor a shell falls back to once `m3_baseline`/
-    /// `cupertino_baseline`/`glyph_baseline` move into their own plugin
-    /// crates (a later phase) — **no shell constructs this yet**
-    /// (dead-but-public until then; `docs/ARCHITECTURE.md`'s Theme
-    /// delivery still names `glyph_baseline` as every shell's seeded
-    /// default). Starts in [`Brightness::Light`], like `m3_baseline`/
-    /// `cupertino_baseline`. `design_language` stays
-    /// [`DesignLanguage::default`] ([`DesignLanguage::Material3`]) for
-    /// now — [`DesignLanguage`] itself isn't reshaped/removed by this
-    /// constructor.
+    /// **This is the floor every shell falls back to** when no design system
+    /// seeded one via `set_default_theme` — see `docs/ARCHITECTURE.md`'s Theme
+    /// delivery. A design system (Glyph included) is now installed explicitly,
+    /// never assumed. Starts in [`Brightness::Light`], like `m3_baseline`/
+    /// `cupertino_baseline`.
+    ///
+    /// **Caveat — `design_language` is [`DesignLanguage::Material3`] here**,
+    /// the derived default, despite this baseline carrying no Material
+    /// identity: the enum has no neutral variant and is not reshaped by this
+    /// constructor. Branch on the tokens you actually need, not on this field,
+    /// when handed a `neutral()` theme.
     ///
     /// Not `const` (like `m3_baseline`/`cupertino_baseline`/
     /// `glyph_baseline`): `ThemeExtensions`' `HashMap` construction isn't

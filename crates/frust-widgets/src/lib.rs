@@ -23,10 +23,13 @@
 //! system can be authored outside this crate at parity with the three built-in
 //! catalogs, which consume exactly the same surface. Every in-crate call site,
 //! including the three built-in catalogs, spells it out as
-//! `crate::authoring::build_child(...)` — there is no crate-root re-export
-//! shortcut, so a catalog reaching past the public `authoring` surface fails to
-//! compile rather than silently resolving through a compatibility shim (see
-//! `crates/frust-widgets/tests/authoring_only_conformance.rs`).
+//! `crate::authoring::build_child(...)`: there is no crate-root re-export
+//! shortcut, so reaching for a *promoted* item by a bare `crate::` path fails
+//! to compile. That covers most of the boundary but not all of it — an item
+//! `authoring` re-exports out of a private module (`ThemeTextColor`, from
+//! `crate::text`) still resolves by its own private path, so the compiler
+//! alone cannot enforce this. `crates/frust-widgets/tests/authoring_only_conformance.rs`
+//! closes the remainder by source-scanning the catalogs for such bypasses.
 
 mod align;
 pub mod authoring;
