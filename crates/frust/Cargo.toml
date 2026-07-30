@@ -38,6 +38,26 @@ any_spawner = { workspace = true }
 # it directly (not just transitively) so the re-export doesn't rely on which
 # platform-shell dependency happens to be active.
 frust-shell-common = { workspace = true }
+# Load-bearing: re-exported through `authoring::scene` (see lib.rs) so a widget
+# painting below `PaintScene` can build its own `Scene`/`Command`s without
+# naming `frust-scene`. Already in the graph transitively via frust-widgets/
+# frust-core; named here (promoted from a former dev-dependency, see task
+# 01/facade-authoring-seam) so the re-export resolves in the library itself,
+# not just a test build.
+frust-scene = { workspace = true }
+# Load-bearing: re-exported through `authoring::text` (see lib.rs) so an app
+# can shape its own glyph runs without naming `frust-text`. Already in the
+# graph transitively via frust-widgets/frust-theme; named here (promoted from
+# a former dev-dependency) so the re-export resolves in the library itself,
+# not just a test build.
+frust-text = { workspace = true }
+# Load-bearing: `kurbo`'s geometry types are re-exported flat (`frust::kurbo`)
+# and by name through `authoring` (see lib.rs) so an app authoring a custom
+# widget can build paths/rects/affines without naming `kurbo` directly.
+# Already in the graph transitively via frust-widgets/frust-scene/frust-core;
+# named here (promoted from a former dev-dependency) so the re-export
+# resolves in the library itself, not just a test build.
+kurbo = { workspace = true }
 # Depended on unconditionally so the re-exported `android_app!` macro is always
 # available; the crate compiles to (almost) nothing off-Android.
 frust-shell-android = { workspace = true }
@@ -59,16 +79,18 @@ frust-shell-desktop = { workspace = true }
 # implement `frust_core::PaintScene`/`Widget` directly, whose signatures
 # name these geometry/brush types. Also used by the ported facade integration
 # tests below (`tests/interaction_basics.rs`/`tests/interaction_text_input.rs`).
-kurbo = { workspace = true }
+# `kurbo` is a real `[dependencies]` entry above (promoted for `authoring`),
+# so it is not repeated here — a crate cannot be named in both sections with
+# the same feature set.
 peniko = { workspace = true }
 # Test-only: the ported counter/notes headless interaction tests
 # (`tests/interaction_basics.rs`/`tests/interaction_text_input.rs`) drive the
 # framework's `RenderRoot` directly with synthetic `InputEvent`s — the same
 # event seam the desktop shell's `dispatch` uses — shaping text through a real
-# `TextContext` (no GPU, no window) and recording paint output.
+# `TextContext` (no GPU, no window) and recording paint output. `frust-scene`
+# and `frust-text` are real `[dependencies]` entries above (promoted for
+# `authoring::scene`/`authoring::text`), so only `frust-core` is added here.
 frust-core = { workspace = true }
-frust-scene = { workspace = true }
-frust-text = { workspace = true }
 # Test-only (`image_async` tests): encodes a tiny in-memory PNG fixture via
 # the `image` crate's own encoder, mirroring `frust-widgets::image`'s own
 # test fixture — no filesystem asset to keep in sync. Already pinned exact at
