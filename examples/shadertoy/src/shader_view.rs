@@ -1,15 +1,15 @@
-//! `ShaderView`: the escape-hatch `View`/`Widget` pair painting a fullscreen,
+//! `ShaderView`: the hand-rolled `View`/`Widget` pair painting a fullscreen,
 //! continuously-animated fragment-shader quad ([`frust::authoring::scene::ShaderProgram`])
 //! — the same hand-rolled pattern as
 //! `benchmarks/frust_bench/src/scenarios/s1_animation/chart.rs`'s
 //! `BubbleChart`.
 
-use frust::{FrameTime, RwSignal, Set};
-use frust::authoring::{
-    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, View, Widget,
-    Rect, Size,
-};
 use frust::authoring::scene::ShaderProgram;
+use frust::authoring::{
+    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Rect, Size, View,
+    Widget,
+};
+use frust::{FrameTime, RwSignal, Set};
 
 /// Wrap the shader's time origin at this many seconds to dodge `f32`
 /// precision drift on a long-running session — periodic enough (an hour) to

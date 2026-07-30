@@ -15,7 +15,7 @@
 //! badges/tags/alerts/toasts/loaders sections). The exact per-section counts
 //! are asserted in `tests/scene.rs` and reported by [`ScenePlan::counts`].
 
-use frust::authoring::{BezPath, Point, Rect, Size, Color, ImageData};
+use frust::authoring::{BezPath, Color, ImageData, Point, Rect, Size};
 use frust::peniko::{Blob, ImageAlphaType, ImageFormat};
 
 /// The three bench modes (cycled by tapping; the initial mode is the

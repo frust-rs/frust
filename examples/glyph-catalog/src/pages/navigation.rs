@@ -35,11 +35,10 @@
 //! ## Why `IconSource`, not a hand-built `kurbo::BezPath`
 //!
 //! Huddle's `Tab::glyph_icon` (the task's cited precedent) builds its vector
-//! icons from a `kurbo::BezPath` directly — but huddle carries a documented,
-//! one-off `frust-core`/`kurbo`/`peniko` escape-hatch dependency
-//! (`docs/CODE_STANDARDS.md`'s State & Reactivity Conventions) that this
-//! catalog's `Cargo.toml` deliberately does **not** repeat (an
-//! `examples/*`/app crate depends on `frust` plus plugin crates only). The
+//! icons from a `BezPath` directly — reached, like every custom widget now,
+//! through `frust::authoring` (`docs/CODE_STANDARDS.md`'s State & Reactivity
+//! Conventions). That is available here too, but this catalog deliberately
+//! does **not** hand-roll a vector icon at all. The
 //! same deterministic-vector-path outcome is reachable with no extra
 //! dependency at all: [`frust::IconSource`] — the exact `{ d: &'static str,
 //! design: f64 }` shape `scripts/gen_icons.py` emits for the vendored

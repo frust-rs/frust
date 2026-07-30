@@ -252,10 +252,23 @@ pub use frust_widgets::glyph;
 
 /// Everything needed to author a custom `View`/`Widget` pair.
 ///
-/// `use frust::authoring::*;` is intended to be **sufficient**: an app that
-/// implements its own layout/paint/event widget should need no framework
-/// dependency but `frust`. If something is missing, that is a bug in this
-/// module — file it rather than reaching for `frust-core` directly.
+/// **`frust` alone is sufficient**: an app that implements its own
+/// layout/paint/event widget should need no framework dependency but this
+/// crate. If something is reachable through neither this module nor the flat
+/// facade, that is a bug — file it rather than reaching for `frust-core`
+/// directly.
+///
+/// `use frust::authoring::*;` covers the widget-authoring vocabulary proper.
+/// Two neighbouring surfaces are deliberately *not* duplicated here because
+/// they are already reachable flat, and a real widget usually wants them too:
+///
+/// - [`frust::input`](crate::input) — gesture constants such as `TOUCH_SLOP`.
+/// - The animation vocabulary — [`AnimationController`](crate::AnimationController),
+///   [`Curve`](crate::Curve), [`FrameTime`](crate::FrameTime) and friends.
+///
+/// For anything the by-name lists below omit, reach for the whole-crate valves:
+/// [`frust::kurbo`](crate::kurbo), [`frust::peniko`](crate::peniko),
+/// [`frust::accesskit`](crate::accesskit).
 ///
 /// Not feature-gated (unlike the design-system re-exports above): an app that
 /// disables every catalog (`--no-default-features`) still needs this seam to
@@ -367,6 +380,20 @@ pub mod authoring {
     /// `frust_text::editor`'s distinct, byte-indexed type.
     pub use frust_core::{EditingState, ImeEvent, ImeState};
 
+    /// The inset vocabulary [`LayoutCtx::window_insets`]/[`PaintCtx::window_insets`]
+    /// return — lifted because a widget that lays itself out around the status
+    /// bar, notch, or on-screen keyboard cannot otherwise name the value those
+    /// accessors hand it.
+    pub use frust_core::{WindowEdgeInsets, WindowInsets};
+
+    /// The accessibility-node vocabulary [`SemanticsCtx::push_node`] and
+    /// [`SemanticsCtx::push_container`] take: both are
+    /// `(role: Role, build: impl FnOnce(&mut Node)) -> NodeId`, so a widget that
+    /// *contributes* a semantics node (rather than only forwarding a child's)
+    /// must be able to name these three. See also the whole-crate
+    /// [`frust::accesskit`](crate::accesskit) valve for the rest of the crate.
+    pub use frust_core::accesskit::{Node, NodeId, Role};
+
     // tier 2 — child/event/callback plumbing, verbatim
     pub use frust_widgets::authoring::*;
 
@@ -389,6 +416,17 @@ pub mod authoring {
             FamilyName, FontFamily, FontStyle, FontWeight, GenericSlot, LineHeight, TextContext,
             TextLayout, TextStyle,
         };
+        /// Types named in [`TextContext`]'s own public signatures —
+        /// `register_fonts() -> Result<Vec<RegisteredFamily>, FontError>` and
+        /// `shape_cache_stats() -> ShapeCacheStats`. Without these an app could
+        /// call the methods but never name what they return.
+        pub use frust_text::{FontError, RegisteredFamily, ShapeCacheStats};
+        /// The index bridge between the two `EditingState`s this seam exposes:
+        /// [`super::EditingState`] (core/IME) counts UTF-16 code units, while
+        /// [`EditingStateBytes`] counts bytes. A widget driving its own
+        /// [`TextEditor`] against the IME surface needs both directions —
+        /// `frust_widgets::textinput` uses exactly these.
+        pub use frust_text::{byte_to_utf16, utf16_to_byte};
     }
 
     /// The renderer-agnostic display list, for widgets painting below `PaintScene`.
@@ -400,6 +438,13 @@ pub mod authoring {
     }
 }
 
+/// The accessibility vocabulary crate, whole — the long-tail valve behind
+/// [`authoring`]'s by-name `Node`/`NodeId`/`Role`, for the rest of what a
+/// semantics-contributing widget may need (`Action`, `Live`, `Toggled`, …).
+/// Re-exported through `frust-core`, which owns the `accesskit` version pin
+/// (see `docs/DEVELOPMENT.md` § Version-Pin Policy) — naming it here keeps an
+/// app on that single pinned version rather than declaring its own.
+pub use frust_core::accesskit;
 /// The geometry crate, whole, for types [`authoring`] does not lift by name
 /// (e.g. `kurbo::Circle`) — the long-tail escape valve alongside the by-name
 /// list above.

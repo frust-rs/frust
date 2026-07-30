@@ -229,11 +229,22 @@ fn is_comment_only(line: &str) -> bool {
     line.trim_start().starts_with("//")
 }
 
-/// The three crates with NO sanctioned bare spelling for an app-tier
-/// consumer: every path through them is fully covered by `frust::authoring`/
+/// The crates with NO sanctioned bare spelling for an app-tier consumer:
+/// every path through them is fully covered by `frust::authoring`/
 /// `frust::authoring::text`/`frust::authoring::scene`, so a bare reference is
 /// always a violation, unlike `kurbo`/`peniko` below.
-const NO_VALVE_CRATES: &[&str] = &["frust_core", "frust_scene", "frust_text"];
+///
+/// `accesskit` earns its place here for a subtler reason than the other three.
+/// It is the one crate a widget could otherwise be *forced* to name directly:
+/// `SemanticsCtx::push_node`/`push_container` take `accesskit::Role` and
+/// `&mut accesskit::Node`, so any widget contributing (not merely forwarding)
+/// an accessibility node must spell those types. `frust::authoring` lifts
+/// `Node`/`NodeId`/`Role` by name and `frust::accesskit` is the whole-crate
+/// valve, so a bare `accesskit::` here means a consumer re-declared a direct
+/// dependency on a crate whose version is pinned in exactly one place
+/// (`docs/DEVELOPMENT.md` § Version-Pin Policy, `accesskit 0.24`) — precisely
+/// the version-forgeability hole this seam exists to close.
+const NO_VALVE_CRATES: &[&str] = &["frust_core", "frust_scene", "frust_text", "accesskit"];
 
 /// The two crates with a sanctioned long-tail escape valve —
 /// `frust::kurbo::X`/`frust::peniko::X` — for types `authoring` does not lift
@@ -333,12 +344,28 @@ fn violations_in(path: &Path, contents: &str) -> Vec<String> {
         }
         if pending_cfg_test {
             pending_cfg_test = false;
-            if trimmed.starts_with("mod ") {
+            // Tolerate a `pub`/`pub(crate)` prefix: `#[cfg(test)] pub mod tests {`
+            // is as legitimate a shape as the bare `mod tests {` every current
+            // consumer happens to use, and silently failing to recognise it
+            // would turn dev-only code into spurious violations.
+            let after_vis = trimmed
+                .strip_prefix("pub(crate) ")
+                .or_else(|| trimmed.strip_prefix("pub "))
+                .unwrap_or(trimmed);
+            if after_vis.starts_with("mod ") {
                 let opens = line.matches('{').count() as i32;
                 let closes = line.matches('}').count() as i32;
-                skip_until_depth = Some(depth);
-                depth += opens - closes;
-                continue;
+                // ONLY enter skip mode when the line actually opens a block.
+                // An out-of-line `#[cfg(test)] mod tests;` (or a one-line
+                // `mod tests { }`) opens nothing, and arming the skip there
+                // would consume exactly one following production line
+                // unscanned — a silent false negative, the failure mode this
+                // scan exists to prevent.
+                if opens > closes {
+                    skip_until_depth = Some(depth);
+                    depth += opens - closes;
+                    continue;
+                }
             }
         }
         depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;

@@ -121,8 +121,9 @@
 //! construction (`ComponentCtx::new_view`/`env` against `jni::objects::JObject`
 //! on Android, `objc2-ui-kit` constructors off `ComponentCtx::mtm` on iOS), and
 //! this crate's `Cargo.toml` carries neither FFI crate —
-//! `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions sanction only a
-//! `frust-core`/`kurbo`/`peniko` escape hatch for an `examples/*` app, and
+//! `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions put an app on
+//! `frust` alone (custom widgets via `frust::authoring`), never a raw FFI
+//! dependency, and
 //! `docs/DEVELOPMENT.md`'s Version-Pin Policy notes `objc2-ui-kit` is already
 //! resolving at two versions in this workspace. So this page does what an app
 //! actually can do with the public surface: enable the feature, register the
