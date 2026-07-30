@@ -15,13 +15,12 @@
 //! and the measurement compares steady-state per-frame cost.
 
 use frust::FrameTime;
-use frust_core::{
+use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, View, Widget,
+    Brush, Color, Point, Rect, Size, Vec2, ImageData,
 };
-use frust_scene::ShaderProgram;
-use frust_text::{TextContext, TextLayout, TextStyle};
-use kurbo::{Point, Rect, Size, Vec2};
-use peniko::{Brush, Color};
+use frust::authoring::text::{TextContext, TextLayout, TextStyle};
+use frust::authoring::scene::ShaderProgram;
 
 use crate::scene::{self, BACKGROUND, Mode};
 
@@ -61,7 +60,7 @@ struct BuiltContent {
     /// Shaped labels paired with their widget-relative baseline origins.
     labels: Vec<(TextLayout, Point)>,
     bands: Vec<Rect>,
-    images: Vec<peniko::ImageData>,
+    images: Vec<ImageData>,
     memory_bytes: u64,
 }
 

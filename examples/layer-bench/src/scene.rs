@@ -15,8 +15,8 @@
 //! badges/tags/alerts/toasts/loaders sections). The exact per-section counts
 //! are asserted in `tests/scene.rs` and reported by [`ScenePlan::counts`].
 
-use kurbo::{BezPath, Point, Rect, Size};
-use peniko::{Blob, Color, ImageAlphaType, ImageData, ImageFormat};
+use frust::authoring::{BezPath, Point, Rect, Size, Color, ImageData};
+use frust::peniko::{Blob, ImageAlphaType, ImageFormat};
 
 /// The three bench modes (cycled by tapping; the initial mode is the
 /// compile-time/runtime `LAYER_BENCH_SCENE` define — see [`crate::initial_mode`]).
