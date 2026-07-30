@@ -34,6 +34,11 @@ test-support = []
 # each independently gate-able and default-on so an unmodified consumer keeps
 # compiling every catalog unchanged. A design system authored outside this
 # crate against the public `authoring` toolkit can disable all three.
-glyph = []
+# `glyph` also turns on frust-theme's own `glyph` gate: the Glyph catalog
+# resolves Glyph-specific tokens (`frust_theme::GlyphInk`, consumed by
+# `glyph::term_block`/`glyph::tooltip`). The workspace's frust-theme edge is
+# `default-features = false`, so nothing else switches those tokens on for a
+# standalone `-p frust-widgets --features glyph` build.
+glyph = ["frust-theme/glyph"]
 material = []
 cupertino = []
