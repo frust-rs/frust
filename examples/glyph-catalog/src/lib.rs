@@ -43,8 +43,9 @@
 
 pub mod pages;
 
-use frust_core::{BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Widget};
-use kurbo::Size;
+use frust::authoring::{
+    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, Widget,
+};
 
 use frust::motion::patterns::{GlyphSlide, SlideDirection};
 use frust::motion::switcher::pattern_switcher;
@@ -61,11 +62,9 @@ use pages::SECTION_LABELS;
 // "Mode B background" section)
 // ---------------------------------------------------------------------------
 
-/// A full-bleed background fill — the low-level `frust-core`/`kurbo` escape
-/// hatch (`docs/CODE_STANDARDS.md`'s State & Reactivity Conventions;
-/// `examples/huddle::ui::fill_box::FillBox` is the identical pattern, and
-/// this crate already carries both crates as sanctioned dependencies for
-/// `pages::appbar`'s `AnchorReporter`). Needed because no facade widget
+/// A full-bleed background fill — a hand-rolled `View`/`Widget` pair reached
+/// entirely through `frust::authoring` (`examples/huddle::ui::fill_box::FillBox`
+/// is the identical pattern, built the same way). Needed because no facade widget
 /// paints an unconditional "fill available space" rect: `Image`/`SizedBox`
 /// only tighten a child when the INCOMING constraint is already tight, and
 /// [`Stack`] hands every child a LOOSE (min-zero) constraint, so a naive

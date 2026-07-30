@@ -12,19 +12,16 @@
 //! # No new framework primitives
 //!
 //! Every moment composes existing facade widgets only. Two deliberate
-//! substitutions from the original design's suggested mapping, both because
-//! the "obvious" primitive isn't reachable without a manifest change
-//! (`cargo build` catalog deps must stay unchanged):
+//! substitutions from the original design's suggested mapping:
 //!
 //! - **Session attach** uses [`SharedAxis::Scaled`] instead of
 //!   `TransitionPattern::ContainerTransform`: `ContainerTransform::new`/
-//!   `from_source` takes a `kurbo::Rect`, and `kurbo` is not reachable from
-//!   this crate's non-test code (only a `[dev-dependencies]` entry, used by
-//!   `tests/smoke.rs`'s headless harness) — promoting it to a real
-//!   `[dependencies]` edge would be exactly the catalog-deps change this
-//!   crate avoids. `SharedAxis::Scaled`
-//!   (incoming 0.80→1.0 scale + fade-through, no `Rect` needed) reads as the
-//!   same "grows to fill" morph without it.
+//!   `from_source` takes a `Rect` (reachable, like every geometry type this
+//!   file needs, through `frust::authoring`) this page has no other use for —
+//!   `SharedAxis::Scaled` (incoming 0.80→1.0 scale + fade-through, no `Rect`
+//!   needed) reads as the same "grows to fill" morph without pulling that type
+//!   in for one call site — a design choice kept as-is by this file's facade
+//!   migration, not a dependency constraint.
 //! - **Per-frame demo state (heartbeat/boot/waveform/clipboard-burst) reads
 //!   a wall clock, not a
 //!   timer signal.** `frust::spawn_local` + `tokio::time::sleep` is the
@@ -37,9 +34,8 @@
 //!   Conventions binds `frust-core`/`frust-widgets`, not application code —
 //!   `examples/huddle` already reads `Instant` at this tier) and mounts a
 //!   tiny [`FrameTicker`] — a hand-rolled
-//!   `View`/`Widget` pair (this crate's `Cargo.toml` already carries
-//!   `frust-core`/`kurbo` as real dependencies for `appbar.rs`'s
-//!   `AnchorReporter`, the same documented escape hatch) whose only job is an
+//!   `View`/`Widget` pair reached entirely through `frust::authoring`
+//!   (mirrors `appbar.rs`'s `AnchorReporter`) whose only job is an
 //!   unconditional `PaintCtx::request_frame` call in its own `paint` — to
 //!   keep this page's `build` re-invoked every frame while an animation needs
 //!   to keep advancing. **This replaces an earlier `pump()`**
@@ -131,16 +127,12 @@
 
 use std::time::{Duration, Instant};
 
-// Low-level escape hatch (see the module docs' [`FrameTicker`] note) —
-// `frust-core`/`kurbo` back only `FrameTicker` below; every other widget in
-// this file comes from the `frust` facade. Mirrors `appbar.rs`'s
-// `AnchorReporter` — this crate's `Cargo.toml` already carries both as real
-// dependencies for that use.
-use frust_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, View, Widget,
+// FrameTicker (see the module docs' [`FrameTicker`] note) is a hand-rolled
+// `View`/`Widget` pair — reached, like every other widget in this file,
+// entirely through the `frust` facade. Mirrors `appbar.rs`'s `AnchorReporter`.
+use frust::authoring::{
+    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, View, Widget,
 };
-use kurbo::Size;
-
 use frust::glyph::{BadgeVariant, TermLine, badge, glyph_card, term_block};
 use frust::motion::patterns::SharedAxis;
 use frust::motion::switcher::pattern_switcher;

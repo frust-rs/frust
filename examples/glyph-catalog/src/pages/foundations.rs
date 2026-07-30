@@ -25,15 +25,14 @@
 //! without hardcoding a literal hex (which would violate the "never hardcode
 //! hexes" rule below), so it labels them N/A rather than painting a swatch.
 
+use frust::authoring::{
+    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, View, Widget,
+};
 use frust::{
     AnyView, Axis, Color, CrossAxisAlignment, EdgeInsets, FlexView, GlyphInk, Image, ImageFit,
     ImageSource, Padding, Row, ShapeScale, SizedBox, StatusPalette, TextView, Theme, any,
     inflexible, text, use_context,
 };
-use frust_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, View, Widget,
-};
-use kurbo::Size;
 
 use crate::CatalogState;
 

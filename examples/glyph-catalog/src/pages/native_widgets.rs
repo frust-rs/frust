@@ -204,20 +204,18 @@ use frust::{
     RwSignal, Set, SizedBox, Theme, any, button, checkbox, glyph, inflexible, slider, switch, text,
     use_context,
 };
-// Low-level escape hatch (see [`GateFrameTicker`]'s doc comment) —
-// `frust-core`/`kurbo` back only that one widget below; every other widget in
-// this file comes from the `frust`/`frust_native_widgets` facades. Mirrors
-// `interactions.rs`'s identical `FrameTicker` escape hatch — this crate's
-// `Cargo.toml` already carries both as real dependencies for that use.
-use frust_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, View, Widget,
+// GateFrameTicker (see its own doc comment) is a hand-rolled `View`/`Widget`
+// pair — reached, like every other widget in this file, entirely through the
+// `frust`/`frust_native_widgets` facades. Mirrors `interactions.rs`'s
+// identical `FrameTicker`.
+use frust::authoring::{
+    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, View, Widget,
 };
 use frust_native_widgets::{
     DEMO_CARD_HEIGHT, DEMO_CARD_KIND, DEMO_CARD_WIDTH, DemoCard, DemoCardProps, NativeImageFit,
     live_slot_count, native_button, native_component, native_image, native_label, native_progress,
     native_slider, native_switch, register_demo_components,
 };
-use kurbo::Size;
 
 use crate::CatalogState;
 
@@ -864,11 +862,10 @@ const CYCLE_STEP_MS: f64 = 150.0;
 /// unconditional [`PaintCtx::request_frame`] call in its own `paint` —
 /// mounted only while [`cycle_state`] reports a run still has cycles left,
 /// so a request traces directly to the harness that issued it. Duplicated
-/// from `interactions.rs`'s identical `FrameTicker` escape hatch (each page
-/// file owns its own copy per that file's established convention, not shared
-/// across files) — see this crate's `Cargo.toml` for why `frust-core`/`kurbo`
-/// are real dependencies already, and this file's own top-of-file comment on
-/// the same import.
+/// from `interactions.rs`'s identical `FrameTicker` (each page file owns its
+/// own copy per that file's established convention, not shared across files)
+/// — reached, like every other widget on this page, entirely through
+/// `frust::authoring` (this file's own top-of-file import comment).
 struct GateFrameTicker;
 
 impl<State: 'static> View<State> for GateFrameTicker {
@@ -1202,9 +1199,7 @@ pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
     // The write-back affordance — placed BEFORE the pairs so a
     // person gating this page picks the mode, then interacts.
     let writeback_block = block(vec![
-        inflexible(label(
-            "Write-back mode (the rejecting round trip)",
-        )),
+        inflexible(label("Write-back mode (the rejecting round trip)")),
         gap(6.0),
         inflexible(caption(
             "OFF (default) = ACCEPT: the app confirms whatever the control reports, the plain \
