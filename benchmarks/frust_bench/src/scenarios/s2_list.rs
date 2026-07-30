@@ -14,7 +14,7 @@
 //!
 //! Per this task's explicit permission ("driven by synthetic input **or an
 //! auto-scroll driver**"), S2 is instead a self-contained `View`/`Widget` pair
-//! (the same low-level `frust-core`/`kurbo`/`peniko` escape hatch S1's
+//! (authored through `frust::authoring`, the same custom-widget seam S1's
 //! `BubbleChart` uses) that:
 //!
 //! - drives its own scroll offset from a fixed, deterministic scripted
@@ -39,7 +39,7 @@
 //!   `ListView` uses, reimplemented locally since we don't have access to its
 //!   crate-private `build_child`/`rebuild_child` helpers from outside
 //!   `frust-widgets`) using `frust`'s public `text`/`icon` leaf widgets, built
-//!   and driven directly via `frust_core`'s public `BuildCtx`/`LayoutCtx`/
+//!   and driven directly via `frust::authoring`'s public `BuildCtx`/`LayoutCtx`/
 //!   `PaintCtx`/`Widget` API (the same pattern `frust-widgets`' own
 //!   containers use internally, available here since it's all public API);
 //! - reports a "nearing the not-yet-loaded edge" condition back to a nested
@@ -76,14 +76,14 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use frust::authoring::{
+    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Point, Size, View,
+    Widget,
+};
 use frust::{
     AnyView, Color, Component, Curve, FrameTime, Get, IconSource, RwSignal, Set, UseTask, any,
     component, icon, icons, spawn_blocking, text, use_task,
 };
-use frust_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, View, Widget,
-};
-use kurbo::{Point, Size};
 
 use super::{BenchState, Scenario};
 

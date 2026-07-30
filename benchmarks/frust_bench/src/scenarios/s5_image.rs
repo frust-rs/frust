@@ -49,8 +49,8 @@
 //! new image ids become visible to decode, and the scene goes empty). This
 //! scenario reuses
 //! the real `frust::Image`/`ImageView` leaf widget per visible cell (built and
-//! driven directly through the public `frust_core` `View`/`Widget`/`BuildCtx`/
-//! `LayoutCtx`/`PaintCtx` API — the same pattern `frust-widgets`' own
+//! driven directly through the public `frust::authoring` `View`/`Widget`/
+//! `BuildCtx`/`LayoutCtx`/`PaintCtx` API — the same pattern `frust-widgets`' own
 //! containers use internally), so the actual GPU image-composite path is
 //! identical to using `Image` anywhere else in the framework; only the
 //! windowing/scroll-driving is reimplemented.
@@ -70,14 +70,14 @@
 
 use std::collections::HashMap;
 
+use frust::authoring::{
+    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Point, Size, View,
+    Widget,
+};
 use frust::{
     AnyView, Color, Component, FrameTime, Get, Image, ImageFit, ImageSource, RwSignal, Set,
     UseTask, any, component, decode_image_async, use_task,
 };
-use frust_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, View, Widget,
-};
-use kurbo::{Point, Size};
 
 use super::{BenchState, Scenario};
 

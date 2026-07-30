@@ -24,13 +24,12 @@
 //!    the window (an input, a resize) — it cannot self-schedule one, by design,
 //!    since scheduling a wake-up would defeat the idle measurement.
 
+use frust::authoring::{
+    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, View, Widget,
+};
 use frust::{
     AnyView, Axis, Color, EdgeInsets, FlexView, FrameTime, Padding, any, inflexible, text,
 };
-use frust_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, View, Widget,
-};
-use kurbo::Size;
 
 use super::{BenchState, Scenario};
 
