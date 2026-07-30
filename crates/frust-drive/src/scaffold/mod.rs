@@ -329,7 +329,15 @@ mod tests {
         assert!(!lib_rs.contains("ios_app!"), "{lib_rs}");
         assert!(!lib_rs.contains("App::new"), "{lib_rs}");
         assert!(lib_rs.contains("impl Component for MyAppApp"), "{lib_rs}");
-        assert!(lib_rs.contains("frust::app!(MyAppApp)"), "{lib_rs}");
+        // The generated app ships Glyph by default: the `app!` invocation's
+        // `setup` block is what actually seeds it as the active theme (a
+        // Cargo feature alone only compiles the code in) — see
+        // `frust::glyph_theme::install`'s doc comment for the ordering
+        // contract.
+        assert!(
+            lib_rs.contains("frust::app!(MyAppApp, setup = { frust::glyph_theme::install(); });"),
+            "{lib_rs}"
+        );
         // The generated demo is a notes app: an embedded logo Image, a
         // controlled TextInput whose submit appends a keyed note row (each with a
         // Delete button), inside a scroll view. The `app_logic` keeps the
@@ -1275,7 +1283,12 @@ mod tests {
         assert!(lib_rs.contains("pub mod failure;"), "{lib_rs}");
         assert!(lib_rs.contains("pub mod features;"), "{lib_rs}");
         assert!(lib_rs.contains("impl Component for MyAppApp"), "{lib_rs}");
-        assert!(lib_rs.contains("frust::app!(MyAppApp)"), "{lib_rs}");
+        // Glyph-by-default applies to this variant too — see the matching
+        // assertion in `generate_produces_manifest_listed_files_with_substitutions`.
+        assert!(
+            lib_rs.contains("frust::app!(MyAppApp, setup = { frust::glyph_theme::install(); });"),
+            "{lib_rs}"
+        );
         // The controller's construction/rendering detail moved into the
         // feature slice; lib.rs only names the type as its `State`.
         assert!(!lib_rs.contains("ControllerCore"), "{lib_rs}");

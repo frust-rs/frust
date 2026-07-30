@@ -70,4 +70,12 @@ impl Component for {{ title_case_name | replace(" ", "") }}App {
 // (unconditional; self-gated to `target_os = "ios"`), and (on desktop) the
 // hidden `__frust_main` that `main.rs` calls. Never edit this line or
 // `main.rs` — add screens/state to the feature slices above instead.
-frust::app!({{ title_case_name | replace(" ", "") }}App);
+// The `setup` block runs once, on the UI thread, before the root
+// component's `Component::init`; `frust::glyph_theme::install()` is what
+// makes Glyph this app's design system — every shell otherwise falls back
+// to a design-language-free `Theme::neutral()`. Delete this call (and
+// `Cargo.toml`'s `"glyph"`/`"glyph-fonts"` features) for a neutral-themed
+// app, or swap it for `frust::set_default_theme(frust::Theme::m3_baseline())`
+// / `::cupertino_baseline()` to use one of the other two built-in design
+// systems instead.
+frust::app!({{ title_case_name | replace(" ", "") }}App, setup = { frust::glyph_theme::install(); });
