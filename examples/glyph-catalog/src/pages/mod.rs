@@ -1,8 +1,8 @@
-//! The twelve catalog sections, one module per section, mirroring the
+//! The thirteen catalog sections, one module per section, mirroring the
 //! reference builds' section list (foundations, buttons+forms, feedback,
 //! navigation, content, overlays, motion) plus `interactions`, `appbar`,
-//! `platform_views`, `camera`, and `native_widgets` — five sections with
-//! no reference-build section-list precedent of their own.
+//! `platform_views`, `camera`, `native_widgets`, and `responsive` — six
+//! sections with no reference-build section-list precedent of their own.
 //!
 //! # Page-fn contract (fixed across every section)
 //!
@@ -46,16 +46,17 @@ pub mod native_widgets;
 pub mod navigation;
 pub mod overlays;
 pub mod platform_views;
+pub mod responsive;
 
 use frust::AnyView;
 
 use crate::CatalogState;
 
-/// The twelve section tab labels, in order. Indexed by `CatalogState::section`
-/// and dispatched by [`current`]. "Native Widgets" is the newest addition,
-/// appended at the end so every existing
+/// The thirteen section tab labels, in order. Indexed by `CatalogState::section`
+/// and dispatched by [`current`]. "Native Widgets" and "Responsive" are the
+/// newest additions, both appended at the end so every existing
 /// section's index stays stable.
-pub const SECTION_LABELS: [&str; 12] = [
+pub const SECTION_LABELS: [&str; 13] = [
     "Foundations",
     "Buttons + Forms",
     "Feedback",
@@ -68,9 +69,10 @@ pub const SECTION_LABELS: [&str; 12] = [
     "Platform Views",
     "Camera",
     "Native Widgets",
+    "Responsive",
 ];
 
-/// Dispatch to the section page for `section` (0..12), falling back to
+/// Dispatch to the section page for `section` (0..13), falling back to
 /// foundations for any out-of-range index (defensive — the tab strip only ever
 /// yields a valid index).
 pub fn current(section: usize, state: &CatalogState) -> AnyView<CatalogState> {
@@ -87,6 +89,7 @@ pub fn current(section: usize, state: &CatalogState) -> AnyView<CatalogState> {
         9 => platform_views::page(state),
         10 => camera::page(state),
         11 => native_widgets::page(state),
+        12 => responsive::page(state),
         _ => foundations::page(state),
     }
 }
