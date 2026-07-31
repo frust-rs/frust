@@ -61,15 +61,25 @@ signal-poll seam race-free without a lock.
 - Platform-view embedding: paint-time view frames feed the `platform_view` differ, which exposes a
   command backlog each shell's FFI layer polls and applies to the native view hierarchy, frame-paired
   to keep geometry in sync.
-- Cross-cutting host signals (theme, insets, IME, deep-link, back, system UI, window metrics) arrive
-  via each shell's native input path, translate into the framework's vocabulary, and force a
-  relayout/repaint. Window metrics (logical size, scale, derived orientation, insets snapshot) are
-  published from the points where the window's shape actually changes — Android (`set_window`,
+- Cross-cutting host signals (theme, insets, IME, deep-link, back, system UI, window metrics, reduced
+  motion) arrive via each shell's native input path, translate into the framework's vocabulary, and
+  force a relayout/repaint. Window metrics (logical size, scale, derived orientation, insets snapshot)
+  are published from the points where the window's shape actually changes — Android (`set_window`,
   `split_recreate_surface`, `resize_surface`, `set_insets`), iOS (`set_surface`, `resize`,
   `set_insets`), and desktop (`resumed` and `WindowEvent::Resized`). Desktop gains app-facing
   window-shape context it never carried before; insets are seeded as `WindowInsets::default()` since
   winit 0.30 offers no cross-platform safe-area accessor. The shared `WindowMetricsPublisher` guards
   re-publication against unconditional per-frame churn (see CORE_ARCHITECTURE.md).
+- Reduced motion is the one host signal whose sensor is not the appearance sensor. Android watches
+  `Settings.Global.ANIMATOR_DURATION_SCALE` (reduced at exactly `0`) via a main-`Looper`
+  `ContentObserver` registered while resumed, plus an `onResume` re-read — `onConfigurationChanged`
+  never fires for it. iOS watches `UIAccessibility.isReduceMotionEnabled` via
+  `reduceMotionStatusDidChangeNotification`, plus an `appDidBecomeActive` re-read —
+  `traitCollectionDidChange` never fires for it. Desktop has no source at all, a checked gap rather
+  than an oversight — winit exposes nothing. Delivery also bypasses `set_app_theme` on purpose:
+  routing through it would latch `theme_override_active` and pin brightness, so each mobile shell
+  instead edits `self.theme.motion.reduce_motion` directly, calls `push_theme()`, and sets
+  `appearance_dirty` so the frame gate cannot skip the carrying tick.
 - Surface-mode resolution: each mobile shell resolves the host's declared translucency mode against
   actual surface capabilities at configure time and republishes the resolved verdict every frame.
 - A set of additive, off-by-default kill-switch env vars (`FRUST_NO_RENDER_THREAD`,

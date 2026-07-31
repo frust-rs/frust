@@ -17,6 +17,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how CLI relates to the other units.
 |--------|-----------------|
 | `frust-cli::commands` | One thin handler per subcommand; the sole construction site for the injected `RealProcessRunner` |
 | `frust-drive::process` | The `ProcessRunner` trait plus `RealProcessRunner`/`FakeProcessRunner` — the sole seam for shelling out |
+| `frust-drive::manifest` | The shared `frust.toml` reader (`[app]`/`[android]`/`[ios]`/`[signing]`), replacing the duplicate deserialisers the Android/iOS run pipelines used to each carry |
 | `frust-drive::scaffold` | Manifest-driven template rendering that produces a new Frust project tree |
 | `frust-drive::doctor` | Pluggable environment validators plus a structured, non-blocking toolchain report |
 | `frust-drive::devices` | Pluggable per-platform device discovery, aggregated non-fatally |
@@ -60,6 +61,18 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
 - `run`/`build`: CLI args become a `BuildInfo`, which drives `frust-drive`'s Android/iOS pipelines
   (compile → install → launch/stream) through the same `ProcessRunner`; desktop falls back to a
   `cargo run` passthrough with an optional `--watch` loop.
+- `build --release` (Android): `android_build::signing` gates the artifact on release-signing
+  material that actually resolves, not on `android/key.properties`'s existence — that old contract
+  was unsound, since the shipped Gradle template silently debug-signs when the properties file is
+  empty, so a stub file bought a green gate and a debug-signed release. The gate now resolves
+  `storeFile`/`storePassword`/`keyAlias`/`keyPassword` from the properties file named by
+  `frust.toml`'s `[signing]` section (default `android/key.properties`, optionally key-prefixed) with
+  `[signing.env]`-named env-var fallbacks (blank counts as absent), then confirms the resolved
+  `storeFile` lands on a real file, tried against three candidate bases. It does not parse
+  `build.gradle.kts` — `[signing]` is only the project's declaration of what its own Gradle reads, so
+  pointing it somewhere Gradle doesn't means the gate believes you. `[signing] external = true` waives
+  the gate for signing Frust cannot inspect (CI, a Gradle signing plugin) and warns on every release
+  build instead of promising a signature it can't verify.
 - `tui`: `Command::Tui` hands off entirely to `frust-tui`'s own async runtime (see
   [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)).
 - `plugin add`: `frust-drive::plugin::add_plugin` looks up a `PluginSpec` and applies its
@@ -76,4 +89,5 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
 | `DeviceDiscovery` / `Device` | Device discovery abstraction and its result shape |
 | `TemplateContext` | Render/path substitution variables for `frust create`'s scaffold |
 | `PluginSpec` / `Contribution` | A plugin registry entry and the idempotent project edits it applies |
+| `Manifest` / `SigningSection` / `SigningEnv` | Parsed `frust.toml` shape (`[app]`/`[android]`/`[ios]`/`[signing]`/`[signing.env]`) shared by every pipeline that reads the manifest |
 | `Cli` / `Command` | The `clap`-derived argument surface for the `frust` binary |

@@ -142,7 +142,8 @@ fast-dev template recipe ships** — re-run `scripts/devloop-measure.sh` if that
 ## Release Builds
 
 ```bash
-# Android: signed release APK (needs android/key.properties — see Prerequisites)
+# Android: signed release APK (needs resolvable signing material, not just a file's
+# existence — see the `[signing]` gate in docs/CLI_ARCHITECTURE.md)
 frust build apk --release
 
 # Other Android artifact shapes
