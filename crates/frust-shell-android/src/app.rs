@@ -42,8 +42,8 @@ use frust_shell_common::resample::{self, PointerResampler, RawPointerSample};
 use frust_shell_common::{
     AppTree, FrameGate, FrameInputs, FrameMeta, FramePacing, PlatformViewState, RenderCommand,
     RenderSender, SceneFrame, SceneReturnReceiver, SurfaceSize, ThemeOverrideWatcher, ViewCommand,
-    default_theme, effective_brightness_for_platform_change, logical_insets, logical_size,
-    publish_resolved_surface_mode, sanitize_scale,
+    WindowMetricsPublisher, default_theme, effective_brightness_for_platform_change,
+    logical_insets, logical_size, publish_resolved_surface_mode, sanitize_scale,
 };
 use frust_text::TextContext;
 use frust_theme::{Brightness, Theme};
@@ -119,6 +119,14 @@ pub struct AndroidAppHandle {
     /// and the app-side `provide_context` re-provide only fire on a real change.
     /// Starts zero (no occlusion) until Kotlin's first `nativeOnInsetsChanged`.
     insets: WindowInsets,
+    /// Change detector for the app-facing [`WindowMetrics`](frust_core::WindowMetrics)
+    /// context: seeded before the first rebuild in [`Self::new`] and re-polled
+    /// from every entry point where one of its inputs actually moves
+    /// ([`Self::set_window`]/[`Self::split_recreate_surface`]/
+    /// [`Self::resize_surface`], and [`Self::set_insets`]) — never from
+    /// [`Self::frame`], which only reads values those entry points stored.
+    /// See [`Self::push_window_metrics`] for why the guard is load-bearing.
+    window_metrics: WindowMetricsPublisher,
     /// Polls the process-wide app-facing theme override slot
     /// (`frust::set_app_theme`/`clear_app_theme`) once per
     /// frame (see [`Self::frame`]) — see
@@ -1199,6 +1207,20 @@ impl AndroidAppHandle {
         // `Unknown`. Re-published every frame by `sync_translucent_resolved`.
         publish_resolved_surface_mode(resolved_translucent);
         provide_context(theme.clone());
+        // Seed the app-facing window-shape context beside the theme, so an
+        // `app_logic`/`Component::build` calling `use_context::<WindowMetrics>()`
+        // during the very first rebuild below resolves a real value rather than
+        // `None`. Insets start at zero here — Kotlin's first
+        // `nativeOnInsetsChanged` arrives after `nativeInit` and re-polls this
+        // publisher (see `set_insets`). No `ReactiveRuntime::get()` wrap: like
+        // the theme seed above, this runs nested inside `create_handle`'s
+        // `with_owner`.
+        let mut window_metrics = WindowMetricsPublisher::new();
+        if let Some(metrics) =
+            window_metrics.poll(physical, sanitize_scale(scale), WindowInsets::default())
+        {
+            provide_context(metrics);
+        }
         app.rebuild();
         let mut executor = executor;
         executor.record_first_rebuild();
@@ -1221,6 +1243,7 @@ impl AndroidAppHandle {
             scope: TrackedScope::new(),
             theme,
             insets: WindowInsets::default(),
+            window_metrics,
             theme_override: ThemeOverrideWatcher::new(),
             theme_override_active: false,
             platform_brightness: Brightness::Light,
@@ -1499,6 +1522,9 @@ impl AndroidAppHandle {
         // dimensions and open the resume-warmup window.
         self.surface_dirty = true;
         self.frame_gate.note_resumed();
+        // The new surface may come up at new dimensions/density — republish the
+        // window-shape context (self-guarded, so a same-size recreate is silent).
+        self.push_window_metrics();
         // The old surface (and everything Kotlin's `FrustSurfaceView` composited
         // behind it) is gone — replay Create+Update for every currently-live
         // platform-view slot so the native side rebuilds its whole
@@ -1541,6 +1567,10 @@ impl AndroidAppHandle {
         // See `split_recreate_surface`'s matching call: a new surface means a
         // fresh native-view hierarchy on the Kotlin side, and the
         // release-gate pairing refers to the old surface's frames.
+        //
+        // A recreate can also land at new dimensions/density — republish the
+        // window-shape context (self-guarded, so a same-size recreate is silent).
+        self.push_window_metrics();
         self.platform_view_state.reset_for_surface_recreate();
         self.platform_view_due.clear();
         // ...and with it the tail's hold: neither stage may outlive the
@@ -1579,6 +1609,10 @@ impl AndroidAppHandle {
         // `set_window`.
         self.surface_dirty = true;
         self.frame_gate.note_resumed();
+        // New logical size and/or density: republish the window-shape context
+        // (self-guarded, so a `surfaceChanged` re-reporting identical
+        // dimensions publishes nothing).
+        self.push_window_metrics();
     }
 
     /// `nativeOnInsetsChanged`: convert the platform's physical-px per-edge insets
@@ -1604,6 +1638,9 @@ impl AndroidAppHandle {
         }
         self.insets = insets;
         self.push_insets(insets);
+        // The composite window-shape context carries a copy of these insets, so
+        // an insets change is also a metrics change (self-guarded).
+        self.push_window_metrics();
     }
 
     /// Push the current [`WindowInsets`] to both delivery paths — into the render
@@ -1616,6 +1653,43 @@ impl AndroidAppHandle {
         match ReactiveRuntime::get() {
             Some(rt) => rt.with_owner(|| provide_context(insets)),
             None => provide_context(insets),
+        }
+    }
+
+    /// Re-`provide_context` the window's [`WindowMetrics`](frust_core::WindowMetrics)
+    /// for app-side `use_context::<WindowMetrics>()` reads — **only when it
+    /// actually changed** ([`WindowMetricsPublisher::poll`] returns `None`
+    /// otherwise).
+    ///
+    /// Mirrors [`Self::push_insets`]/[`Self::push_theme`]'s re-provide shape,
+    /// with two deliberate differences:
+    ///
+    /// - **Guarded, never per-frame.** `WindowMetrics` is delivered *alongside*
+    ///   the standalone `WindowInsets` context (which keeps working untouched),
+    ///   not through it, and it is not pushed into the render root at all — so
+    ///   nothing else rate-limits it. A `provide_context` re-provide replaces the
+    ///   value every `Component::build` reads, and this framework has no
+    ///   per-component rebuild skipping, so an unconditional per-frame
+    ///   re-provide would be a permanent whole-app rebuild. The publisher's
+    ///   change detection is what keeps a static window quiet.
+    /// - **Called from the entry points where the inputs move**, not from
+    ///   [`Self::frame`]: `nativeOnSurfaceChanged` → [`Self::resize_surface`] /
+    ///   [`Self::set_window`] / [`Self::split_recreate_surface`] (size + density)
+    ///   and `nativeOnInsetsChanged` → [`Self::set_insets`] (insets). `frame`
+    ///   only reads what those already stored.
+    ///
+    /// Units: the size is converted from the surface's physical px with the same
+    /// `sanitize_scale`d density every other consumer uses, and `self.insets` is
+    /// already logical (`logical_insets` ran in [`Self::set_insets`]) — so the
+    /// published metrics are logical throughout, matching iOS and desktop.
+    fn push_window_metrics(&mut self) {
+        let scale = sanitize_scale(self.scale);
+        let Some(metrics) = self.window_metrics.poll(self.physical, scale, self.insets) else {
+            return; // unchanged — no re-provide, no app-wide rebuild
+        };
+        match ReactiveRuntime::get() {
+            Some(rt) => rt.with_owner(|| provide_context(metrics)),
+            None => provide_context(metrics),
         }
     }
 

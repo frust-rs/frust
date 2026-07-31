@@ -7,6 +7,10 @@
 //! untrusted density into HiDPI layout math ([`sanitize_scale`]/[`logical_size`]/
 //! [`logical_insets`], the last converting platform per-edge insets into a
 //! logical [`WindowInsets`](frust_core::insets::WindowInsets)),
+//! the shared window-shape publish path ([`window_metrics`] assembling a
+//! logical [`WindowMetrics`](frust_core::WindowMetrics) and
+//! [`WindowMetricsPublisher`] deciding — on all three shells — whether it
+//! actually changed and so may be re-provided to app code),
 //! the app-facing theme override slot ([`set_app_theme`]/[`clear_app_theme`]/
 //! [`ThemeOverrideWatcher`] — see [`theme_override`]'s module docs for the
 //! layering rationale), the [`perf`] module's frame-timing/startup-span
@@ -57,7 +61,10 @@ mod theme_default;
 mod theme_override;
 
 pub use app_tree::{AppTree, new_boxed_app, new_boxed_app_with};
-pub use ffi_support::{guard, logical_insets, logical_size, run_guarded_thread, sanitize_scale};
+pub use ffi_support::{
+    WindowMetricsPublisher, guard, logical_insets, logical_size, run_guarded_thread,
+    sanitize_scale, window_metrics,
+};
 pub use frame_gate::{
     FrameDecision, FrameGate, FrameInputs, FramePacing, anim_pacing_kill_switch_engaged,
 };

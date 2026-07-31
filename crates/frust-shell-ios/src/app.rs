@@ -54,8 +54,8 @@ use frust_shell_common::resample::{self, PointerResampler, RawPointerSample};
 use frust_shell_common::{
     AppTree, FrameGate, FrameInputs, FrameMeta, FramePacing, PlatformViewState, RenderCommand,
     RenderSender, SceneFrame, SceneReturnReceiver, SurfaceSize, ThemeOverrideWatcher,
-    default_theme, effective_brightness_for_platform_change, logical_insets, logical_size,
-    publish_resolved_surface_mode, sanitize_scale,
+    WindowMetricsPublisher, default_theme, effective_brightness_for_platform_change,
+    logical_insets, logical_size, publish_resolved_surface_mode, sanitize_scale,
 };
 use frust_text::TextContext;
 use frust_theme::{Brightness, Theme};
@@ -164,6 +164,14 @@ pub struct IosAppHandle {
     /// `provide_context` re-provide only fire on a real change. Starts zero until
     /// Swift's first `frust_set_insets` (safe-area / keyboard-frame report).
     insets: WindowInsets,
+    /// Change detector for the app-facing [`WindowMetrics`](frust_core::WindowMetrics)
+    /// context: seeded before the first rebuild in [`Self::new`] and re-polled
+    /// from every entry point where one of its inputs actually moves
+    /// ([`Self::resize`]/[`Self::set_surface`], and [`Self::set_insets`]) —
+    /// never from [`Self::frame`], which only reads values those entry points
+    /// stored. See [`Self::push_window_metrics`] for why the guard is
+    /// load-bearing.
+    window_metrics: WindowMetricsPublisher,
     /// The accesskit adapter, attached lazily by `frust_init_accessibility`
     /// once Swift has a `FrustView` (UIView) to hand over.
     /// `None` until then — `frust_init` only receives the `CAMetalLayer`, which
@@ -1221,6 +1229,19 @@ impl IosAppHandle {
         // `Unknown`. Re-published every frame by `sync_translucent_resolved`.
         publish_resolved_surface_mode(resolved_translucent);
         provide_context(theme.clone());
+        // Seed the app-facing window-shape context beside the theme, so an
+        // `app_logic`/`Component::build` calling `use_context::<WindowMetrics>()`
+        // during the very first rebuild below resolves a real value rather than
+        // `None`. Insets start at zero here — Swift's first `frust_set_insets`
+        // arrives after `frust_init` and re-polls this publisher (see
+        // `set_insets`). No `ReactiveRuntime::get()` wrap: like the theme seed
+        // above, this runs nested inside `create_handle`'s `with_owner`.
+        let mut window_metrics = WindowMetricsPublisher::new();
+        if let Some(metrics) =
+            window_metrics.poll(physical, sanitize_scale(scale), WindowInsets::default())
+        {
+            provide_context(metrics);
+        }
         app.rebuild();
         let mut executor = executor;
         executor.record_first_rebuild();
@@ -1255,6 +1276,7 @@ impl IosAppHandle {
             theme_override_active: false,
             platform_brightness: Brightness::Light,
             insets: WindowInsets::default(),
+            window_metrics,
             // Attached later, on the first layout, via `frust_init_accessibility`
             // once Swift can supply the UIView (see the field doc).
             a11y: None,
@@ -1400,6 +1422,9 @@ impl IosAppHandle {
         }
         self.insets = insets;
         self.push_insets(insets);
+        // The composite window-shape context carries a copy of these insets, so
+        // an insets change is also a metrics change (self-guarded).
+        self.push_window_metrics();
     }
 
     /// Push the current [`WindowInsets`] to both delivery paths — into the render
@@ -1412,6 +1437,44 @@ impl IosAppHandle {
         match ReactiveRuntime::get() {
             Some(rt) => rt.with_owner(|| provide_context(insets)),
             None => provide_context(insets),
+        }
+    }
+
+    /// Re-`provide_context` the window's [`WindowMetrics`](frust_core::WindowMetrics)
+    /// for app-side `use_context::<WindowMetrics>()` reads — **only when it
+    /// actually changed** ([`WindowMetricsPublisher::poll`] returns `None`
+    /// otherwise).
+    ///
+    /// Mirrors [`Self::push_insets`]/[`Self::push_theme`]'s re-provide shape,
+    /// with two deliberate differences:
+    ///
+    /// - **Guarded, never per-frame.** `WindowMetrics` is delivered *alongside*
+    ///   the standalone `WindowInsets` context (which keeps working untouched),
+    ///   not through it, and it is not pushed into the render root at all — so
+    ///   nothing else rate-limits it. A `provide_context` re-provide replaces the
+    ///   value every `Component::build` reads, and this framework has no
+    ///   per-component rebuild skipping, so an unconditional per-frame
+    ///   re-provide would be a permanent whole-app rebuild. The publisher's
+    ///   change detection is what keeps a static window quiet.
+    /// - **Called from the entry points where the inputs move**, not from
+    ///   [`Self::frame`]: `frust_resize` → [`Self::resize`] /
+    ///   [`Self::set_surface`] (drawable size + scale) and `frust_set_insets` →
+    ///   [`Self::set_insets`] (safe area / keyboard). `frame` only reads what
+    ///   those already stored.
+    ///
+    /// Units: the size is converted from the drawable's physical px with the
+    /// same `sanitize_scale`d display scale layout uses, and `self.insets` is
+    /// already logical (UIKit hands over points, which
+    /// [`Self::set_insets`] passes through `logical_insets(.., 1.0)`) — so the
+    /// published metrics are logical throughout, matching Android and desktop.
+    fn push_window_metrics(&mut self) {
+        let scale = sanitize_scale(self.scale);
+        let Some(metrics) = self.window_metrics.poll(self.physical, scale, self.insets) else {
+            return; // unchanged — no re-provide, no app-wide rebuild
+        };
+        match ReactiveRuntime::get() {
+            Some(rt) => rt.with_owner(|| provide_context(metrics)),
+            None => provide_context(metrics),
         }
     }
 
@@ -1548,6 +1611,9 @@ impl IosAppHandle {
         // ticks against the fresh surface must run even before their change
         // signals are observable.
         self.frame_gate.note_resumed();
+        // The recreate may land at new dimensions/scale — republish the
+        // window-shape context (self-guarded, so a same-size recreate is silent).
+        self.push_window_metrics();
         // The recreated surface re-resolved its alpha mode from scratch (review
         // M1) — on this (inline) path the renderer on this thread already holds
         // it, so a recreate that fell back to opaque degrades to Mode A right
@@ -1580,6 +1646,11 @@ impl IosAppHandle {
         // resume-warmup so the next frames re-layout/paint at the new size even
         // if no other change signal fires.
         self.frame_gate.note_resumed();
+        // New logical size and/or scale: republish the window-shape context —
+        // this is the path a device rotation takes, so it is what flips the
+        // derived `Orientation` for app code (self-guarded, so a `frust_resize`
+        // re-reporting identical dimensions publishes nothing).
+        self.push_window_metrics();
     }
 
     /// Mark the app paused (`frust_pause`): subsequent `frame()`s are no-ops.
