@@ -150,7 +150,7 @@ const FFI_WALL_MARKERS: &[&str] = &["app crate cannot", "cannot implement `nativ
 /// because the `demo-components` feature only exists for this reason (the demo
 /// composite ships inside the plugin rather than in an example app).
 const FFI_WALL_SITES: &[&str] = &[
-    "docs/ARCHITECTURE.md",
+    "docs/NATIVE_WIDGETS_ARCHITECTURE.md",
     "docs/DEVELOPMENT.md",
     "plugins/native-widgets/README.md",
     "plugins/native-widgets/src/api/mod.rs",
@@ -172,7 +172,7 @@ const DISPLAY_ONLY_MARKERS: &[&str] = &[
 /// absent on purpose — it documents the feature gate, not the event gap — and
 /// `src/api/mod.rs` likewise states only the FFI wall.
 const DISPLAY_ONLY_SITES: &[&str] = &[
-    "docs/ARCHITECTURE.md",
+    "docs/NATIVE_WIDGETS_ARCHITECTURE.md",
     "plugins/native-widgets/README.md",
     "plugins/native-widgets/src/api/mount.rs",
     "plugins/native-widgets/src/component.rs",
