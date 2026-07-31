@@ -67,6 +67,51 @@
 //! path is unchanged). On the mobile IME path a Return arrives as a
 //! `Commit("\n")`: single-line (and submit-on-enter) fields treat it as submit,
 //! a newline-inserting multi-line field inserts the literal newline instead.
+//!
+//! # Disabled mode
+//!
+//! [`TextInputView::enabled(false)`](TextInputView::enabled) makes the field
+//! inert and dims it. Inertness hangs off **one** hook — the focus gate: a
+//! `Down` inside a disabled field neither requests focus nor captures the
+//! pointer, and since `Key`/`Ime` only reach a widget along the recorded focus
+//! path, refusing focus makes keyboard and IME editing impossible without a
+//! single `if disabled { return }` inside [`handle_key`]/[`handle_ime`]. A
+//! field disabled *while* focused releases the focus path on the first event
+//! that reaches it, and stops behaving as focused (no caret, no blink frame, no
+//! active IME surface) from the very next paint — see [`Widget::paint`].
+//!
+//! Dimming multiplies the *resolved* role color's alpha rather than swapping in
+//! a dedicated "disabled" token, at **both** resolution points (the layout-baked
+//! glyph color in [`effective_style`](TextInputWidget::effective_style) and the
+//! paint-time [`Chrome`]), so it behaves identically under Material, Cupertino,
+//! Glyph, and the unthemed fallback constants. That matters: `on_surface_variant`
+//! is opaque under Material/Glyph but translucent under Cupertino
+//! (`frust-theme`'s `ColorScheme` Cupertino arm, `secondaryLabel` at alpha 153),
+//! so it is *not* a portable disabled token.
+//!
+//! # Obscured (password) mode
+//!
+//! [`TextInputView::obscured(true)`](TextInputView::obscured) masks the rendered
+//! glyphs with U+2022 BULLET. The [`TextEditor`]'s model text stays **real** —
+//! every edit, selection, IME sync and `on_change` runs against the true buffer —
+//! and the mask lives in a parallel [`TextEditor`] (`mask_editor`) that holds the
+//! masked mirror. That mirror, not the real editor, is what gets measured,
+//! painted and hit-tested, because masking only at glyph-emission time would
+//! leave the layout (and therefore the caret rect, the field width and the
+//! pointer hit test) measured from the real text. The mirror is a pure function
+//! of the real editing state, recomputed after every edit, so it cannot drift;
+//! the mask is 1:1 per `char`, so offsets map with a simple two-string walk
+//! ([`real_to_masked`]/[`masked_to_real`]) and a multi-byte grapheme masks to
+//! exactly one bullet.
+//!
+//! **Scope boundary (deliberate).** Obscuring is visual masking plus
+//! accessibility (a [`Role::PasswordInput`] semantics node) only. Nothing in
+//! `ImeState`/`ImeEvent` carries a password/content-type hint, so an on-screen
+//! keyboard does not switch to its password layout and platform
+//! autofill/reveal-last-character never engages; the published [`ImeState`] also
+//! still carries the **real** text (the platform IME mirror requires it). A
+//! content-type hint would have to cross `frust-core` and all three shells and is
+//! tracked separately.
 
 use std::rc::Rc;
 
@@ -113,11 +158,38 @@ const CARET: Color = Color::from_rgb8(0x1D, 0x4E, 0xD8);
 /// role).
 const SELECTION_ALPHA: f32 = 0.30;
 
+/// Alpha multiplier applied to every resolved **content** color (glyphs,
+/// placeholder, caret, selection) while the field is disabled.
+///
+/// Material 3's disabled state puts content at 38% of its enabled role color
+/// (`m3.material.io` — *Styles → Color → Roles*, disabled-content opacity;
+/// retrieved 2026-07-31). Applied as a *multiplier on the already-resolved
+/// role*, never as a swap to a different token: `on_surface_variant` is opaque
+/// under Material/Glyph but translucent under Cupertino (alpha 153 — see
+/// `frust-theme`'s `ColorScheme` Cupertino arm), so a token swap would dim by
+/// different amounts per design language while this multiplier does not.
+const DISABLED_CONTENT_ALPHA: f32 = 0.38;
+/// Alpha multiplier applied to the disabled field's **container** chrome (its
+/// outline/accent border). Material 3 puts a disabled container/outline at 12%
+/// (same source and retrieval date as [`DISABLED_CONTENT_ALPHA`]).
+const DISABLED_CONTAINER_ALPHA: f32 = 0.12;
+
+/// The glyph every character is replaced with in obscured (password) mode.
+///
+/// U+2022 BULLET is Android's `inputType=textPassword` default mask; the web
+/// varies by browser and Apple's HIG names no glyph, so this follows the one
+/// platform that publishes a specific character.
+const MASK_CHAR: char = '\u{2022}';
+
 /// The resolved text-field chrome colors. Themed (v1 simplification): background
 /// `surface`, border `outline`, focus accent/caret `primary`, placeholder
 /// `on_surface_variant`, selection `primary` at [`SELECTION_ALPHA`]. Unthemed:
 /// the [`BG`]/[`BORDER`]/[`ACCENT`]/[`PLACEHOLDER`]/[`SELECTION`]/[`CARET`]
 /// constants exactly, so a pre-theme app renders unchanged.
+///
+/// A disabled field dims the *resolved* values (see
+/// [`DISABLED_CONTENT_ALPHA`]), so the themed and unthemed paths dim by the
+/// same rule.
 struct Chrome {
     bg: Color,
     border: Color,
@@ -128,8 +200,8 @@ struct Chrome {
 }
 
 impl Chrome {
-    fn resolve(theme: Option<&Theme>) -> Self {
-        match theme {
+    fn resolve(theme: Option<&Theme>, enabled: bool) -> Self {
+        let mut chrome = match theme {
             Some(theme) => {
                 let s = theme.scheme();
                 Chrome {
@@ -149,8 +221,65 @@ impl Chrome {
                 selection: SELECTION,
                 caret: CARET,
             },
+        };
+        if !enabled {
+            // `bg` is deliberately left opaque: it is this field's own
+            // background painted over an arbitrary parent, so thinning it to
+            // M3's 12% container value would show the parent through the field
+            // rather than reading as "dimmed". The disabled cue is carried by
+            // the outline and the content instead.
+            chrome.border = chrome.border.multiply_alpha(DISABLED_CONTAINER_ALPHA);
+            chrome.accent = chrome.accent.multiply_alpha(DISABLED_CONTAINER_ALPHA);
+            chrome.placeholder = chrome.placeholder.multiply_alpha(DISABLED_CONTENT_ALPHA);
+            chrome.selection = chrome.selection.multiply_alpha(DISABLED_CONTENT_ALPHA);
+            chrome.caret = chrome.caret.multiply_alpha(DISABLED_CONTENT_ALPHA);
         }
+        chrome
     }
+}
+
+/// The masked mirror of `text`: one [`MASK_CHAR`] per `char`, with `'\n'`
+/// preserved so a multi-line field keeps its line structure (and therefore its
+/// height) under masking.
+fn mask_text(text: &str) -> String {
+    text.chars().map(mask_char).collect()
+}
+
+/// The single character `ch` renders as while obscured.
+fn mask_char(ch: char) -> char {
+    if ch == '\n' { '\n' } else { MASK_CHAR }
+}
+
+/// Byte offset in the masked mirror of `text` corresponding to byte offset
+/// `byte` in `text` itself.
+///
+/// An offset landing inside a multi-byte char snaps back to that char's start
+/// (mirroring `frust_text`'s `byte_to_utf16`), so caret arithmetic across a
+/// multi-byte grapheme stays exact.
+fn real_to_masked(text: &str, byte: usize) -> usize {
+    let mut masked = 0usize;
+    for (off, ch) in text.char_indices() {
+        if byte < off + ch.len_utf8() {
+            return masked;
+        }
+        masked += mask_char(ch).len_utf8();
+    }
+    masked
+}
+
+/// The inverse of [`real_to_masked`]: a byte offset in the masked mirror mapped
+/// back onto `text`. An offset inside a mask glyph snaps back to the start of
+/// the char it stands for.
+fn masked_to_real(text: &str, masked_byte: usize) -> usize {
+    let mut masked = 0usize;
+    for (off, ch) in text.char_indices() {
+        let next = masked + mask_char(ch).len_utf8();
+        if masked_byte < next {
+            return off;
+        }
+        masked = next;
+    }
+    text.len()
 }
 
 /// A view-held, typed text callback (erased on build).
@@ -173,6 +302,13 @@ pub struct TextInputView<State: 'static> {
     /// mode-default (true single-line, false multi-line); `Some(_)` = an
     /// explicit [`TextInputView::submit_on_enter`] override.
     submit_on_enter: Option<bool>,
+    /// Whether the field accepts input. `false` refuses focus (making keyboard
+    /// and IME editing unreachable) and dims the chrome — see
+    /// [`TextInputView::enabled`].
+    enabled: bool,
+    /// Whether the rendered glyphs are masked (password mode) — see
+    /// [`TextInputView::obscured`].
+    obscured: bool,
     on_change: OnText<State>,
     on_submit: Option<OnText<State>>,
 }
@@ -196,6 +332,8 @@ pub fn text_input<State: 'static, F: Fn(&mut State, String) + 'static>(
         text_style_explicit: false,
         max_visible_lines: None,
         submit_on_enter: None,
+        enabled: true,
+        obscured: false,
         on_change: Rc::new(on_change),
         on_submit: None,
     }
@@ -256,12 +394,48 @@ impl<State: 'static> TextInputView<State> {
         self.submit_on_enter = Some(submit_on_enter);
         self
     }
+
+    /// Set whether the field accepts input (default `true`).
+    ///
+    /// A disabled field refuses focus, so a tap neither places the caret nor
+    /// raises the keyboard and keyboard/IME editing cannot reach it at all; it
+    /// paints no caret and dims its text, placeholder and outline (see the
+    /// [module docs](self)). A field disabled while focused drops its focus.
+    ///
+    /// This is **disabled**, not *read-only*: Material 3 and Apple's HIG both
+    /// keep a read-only field focusable and copyable, which this option
+    /// deliberately does not do.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Mask the rendered text with U+2022 BULLET (password mode, default
+    /// `false`).
+    ///
+    /// The underlying value is untouched — `on_change` and the published
+    /// `ImeState` still carry the real text, and caret/selection/editing
+    /// arithmetic is unchanged, including across multi-byte graphemes. The
+    /// field reports itself to accessibility as
+    /// [`Role::PasswordInput`]. See the [module docs](self) for what obscuring
+    /// deliberately does *not* do (no platform password keyboard, no autofill).
+    pub fn obscured(mut self, obscured: bool) -> Self {
+        self.obscured = obscured;
+        self
+    }
 }
 
 /// The retained widget for a [`TextInputView`].
 pub struct TextInputWidget {
-    /// The editing engine. Driven through the widget-owned `text_ctx`.
+    /// The editing engine, always holding the **real** (never masked) text.
+    /// Driven through the widget-owned `text_ctx`.
     editor: TextEditor,
+    /// The masked mirror of `editor`, present only while obscured. A pure
+    /// function of `editor`'s editing state (re-derived by
+    /// [`sync_mask`](Self::sync_mask) after every edit, so it cannot drift),
+    /// and the editor every *display* read goes through — see
+    /// [`display`](Self::display) and the [module docs](self).
+    mask_editor: Option<TextEditor>,
     /// The widget's own font/layout context — see the [module docs](self).
     text_ctx: TextContext,
     /// The declared (builder) style — family/weight/style/size/letter-spacing/
@@ -298,6 +472,19 @@ pub struct TextInputWidget {
     /// Defaults to true single-line / false multi-line; Shift+Enter inverts it
     /// (multi-line only — a single-line field always submits).
     submit_on_enter: bool,
+    /// Whether the field accepts input (see [`TextInputView::enabled`]). Gates
+    /// the whole `event()` pass and both theme-resolution points.
+    enabled: bool,
+    /// Whether the rendered glyphs are masked (see [`TextInputView::obscured`]).
+    /// Kept alongside `mask_editor` (which it decides) so `rebuild` can compare
+    /// it and `semantics` can pick its role without inspecting the mirror.
+    obscured: bool,
+    /// Set by a `rebuild` that disabled a field holding focus: the focus path
+    /// lives on the widget's *pod*, which `rebuild` cannot reach (`BuildCtx`
+    /// carries no focus seam), so the release is deferred to the first
+    /// `event()` that arrives — meanwhile `paint` already refuses to behave as
+    /// focused (no caret, no blink frame, an inactive IME surface).
+    release_focus_pending: bool,
     /// The widget's event-pass view of its focus: set on a `Down` inside,
     /// cleared on Escape / a blur `Down` this widget observes. NOT authoritative
     /// for painting — `paint` reads `PaintCtx::has_focus()` (the pod-recorded
@@ -332,18 +519,69 @@ impl TextInputWidget {
     /// LAYOUT time (where `TextInput`, like `Text`, bakes the glyph brush into
     /// the editor's shaped state) keeps the unthemed path pixel-identical to
     /// before this retrofit.
+    ///
+    /// While disabled, whatever color that resolution produced is dimmed by
+    /// [`DISABLED_CONTENT_ALPHA`] — the layout half of the two-point dimming
+    /// (the other is [`Chrome::resolve`]), and the reason a change to `enabled`
+    /// must report `ChangeFlags::LAYOUT`.
     fn effective_style(&self, theme: Option<&Theme>) -> TextStyle {
-        if self.text_style_explicit {
-            return self.style.clone();
-        }
-        match theme {
-            Some(theme) => {
-                let mut style = self.style.clone();
-                style.color = theme.scheme().on_surface;
-                style
+        let mut style = if self.text_style_explicit {
+            self.style.clone()
+        } else {
+            match theme {
+                Some(theme) => {
+                    let mut style = self.style.clone();
+                    style.color = theme.scheme().on_surface;
+                    style
+                }
+                None => self.style.clone(),
             }
-            None => self.style.clone(),
+        };
+        if !self.enabled {
+            style.color = style.color.multiply_alpha(DISABLED_CONTENT_ALPHA);
         }
+        style
+    }
+
+    /// The editor every *display* read goes through: the masked mirror while
+    /// obscured, the real editor otherwise. Layout metrics, glyph runs,
+    /// selection rects, the caret rect and the pointer hit test all key off
+    /// this, so masking changes what is measured and not just what is drawn
+    /// (see the [module docs](self)).
+    fn display(&self) -> &TextEditor {
+        self.mask_editor.as_ref().unwrap_or(&self.editor)
+    }
+
+    /// (Re)create the masked mirror to match `obscured`, then seed it from the
+    /// current editing state. Resets `applied_wrap_width` so the next `layout`
+    /// re-installs the soft-wrap width on both editors (a freshly built
+    /// [`TextEditor`] carries none, and that install is also what refreshes the
+    /// new mirror's layout).
+    fn rebuild_mask_editor(&mut self) {
+        let style = self.applied_style.clone();
+        self.mask_editor = self.obscured.then(|| TextEditor::new(&style));
+        self.applied_wrap_width = None;
+        self.sync_mask();
+    }
+
+    /// Re-derive the masked mirror from the real editing state. A no-op when
+    /// not obscured, and (via [`EditOp::ApplyEditingState`]'s value-equality
+    /// short-circuit) when nothing changed. Because the mirror is *derived*
+    /// rather than edited in parallel, it can never drift from the real buffer.
+    fn sync_mask(&mut self) {
+        let Some(mask) = self.mask_editor.as_mut() else {
+            return;
+        };
+        let real = self.editor.editing_state_bytes();
+        let state = EditingStateBytes {
+            text: mask_text(&real.text),
+            base: real_to_masked(&real.text, real.base),
+            extent: real_to_masked(&real.text, real.extent),
+            composing: real
+                .composing
+                .map(|r| real_to_masked(&real.text, r.start)..real_to_masked(&real.text, r.end)),
+        };
+        mask.apply(EditOp::ApplyEditingState(state), &mut self.text_ctx);
     }
 
     /// Rebuild `editor` with `style`, preserving the current editing state
@@ -367,14 +605,16 @@ impl TextInputWidget {
         self.applied_style = style;
         // The freshly built editor carries no wrap width (`TextEditor::new`
         // resets it to single-line); force `layout` to re-install the desired
-        // width on the next pass.
+        // width on the next pass. (`rebuild_mask_editor` re-asserts this too —
+        // the masked mirror must be rebuilt with the same new style.)
         self.applied_wrap_width = None;
+        self.rebuild_mask_editor();
     }
 
     /// The single-line text height from the editor's refreshed metrics, floored
     /// to a sensible line height for an empty field.
     fn content_height(&self) -> f64 {
-        self.editor
+        self.display()
             .layout_size()
             .height
             .max(self.style.size as f64 * 1.25)
@@ -389,8 +629,8 @@ impl TextInputWidget {
     /// Height of one text line from the editor's own metrics, falling back to a
     /// sensible line height before the first layout / when the field is empty.
     fn line_height(&self) -> f64 {
-        let h = self.editor.layout_size().height;
-        let n = self.editor.line_count();
+        let h = self.display().layout_size().height;
+        let n = self.display().line_count();
         if h > 0.0 && n > 0 {
             h / n as f64
         } else {
@@ -408,12 +648,12 @@ impl TextInputWidget {
             return 0.0;
         }
         let visible = (field_height - 2.0 * PAD_Y).max(0.0);
-        let content = self.editor.layout_size().height;
+        let content = self.display().layout_size().height;
         if content <= visible {
             return 0.0;
         }
         let max_off = content - visible;
-        let (y0, y1) = match self.editor.cursor_rect(CARET_W) {
+        let (y0, y1) = match self.display().cursor_rect(CARET_W) {
             Some(c) => (c.y0, c.y1),
             None => (0.0, 0.0),
         };
@@ -462,6 +702,7 @@ impl TextInputWidget {
             composing: None,
         });
         self.editor.apply(op, &mut self.text_ctx);
+        self.sync_mask();
     }
 
     /// Apply one editing op, then run the after-edit bookkeeping: reset the
@@ -476,6 +717,9 @@ impl TextInputWidget {
     /// Shared after-edit bookkeeping (see [`apply_edit`](Self::apply_edit)),
     /// factored out so a multi-op edit (an IME commit) reports once.
     fn finish_edit(&mut self, ctx: &mut EventCtx, before: String) {
+        // Re-derive the masked mirror first: the IME surface published below
+        // (and any metric read this pass) takes its caret rect from it.
+        self.sync_mask();
         self.reset_blink();
         let after = self.editor.text().to_string();
         if after != before {
@@ -499,7 +743,10 @@ impl TextInputWidget {
             composing_extent: es.composing_extent,
         };
         let offset = origin.to_vec2() + Vec2::new(PAD_X, self.content_origin_y(size.height));
-        let caret = self.editor.cursor_rect(CARET_W).map(|c| {
+        // The caret rect is a *screen* placement hint, so it comes from the
+        // displayed (possibly masked) layout — while `editing` above stays the
+        // real text the platform IME mirror needs.
+        let caret = self.display().cursor_rect(CARET_W).map(|c| {
             Rect::new(
                 c.x0 + offset.x,
                 c.y0 + offset.y,
@@ -527,6 +774,40 @@ impl TextInputWidget {
             (pos.x - PAD_X) as f32,
             (pos.y - self.content_origin_y(height)) as f32,
         )
+    }
+
+    /// Place (or extend the selection to) the caret nearest a widget-local
+    /// pointer position.
+    ///
+    /// Unobscured this is just [`EditOp::MoveToPoint`] on the real editor.
+    /// Obscured, the point must be resolved against the *masked* layout — the
+    /// glyphs the user actually sees, whose advances differ from the real
+    /// text's — and the resulting offsets mapped back onto the real buffer, so
+    /// a tap lands on the same character it visually points at.
+    fn move_to_point(&mut self, ctx: &mut EventCtx, x: f32, y: f32, select: bool) {
+        if self.mask_editor.is_none() {
+            self.apply_edit(ctx, EditOp::MoveToPoint { x, y, select });
+            return;
+        }
+        let (masked_base, masked_extent) = {
+            let mask = self
+                .mask_editor
+                .as_mut()
+                .expect("obscured field has a mask editor");
+            mask.apply(EditOp::MoveToPoint { x, y, select }, &mut self.text_ctx);
+            let m = mask.editing_state_bytes();
+            (m.base, m.extent)
+        };
+        let real = self.editor.editing_state_bytes();
+        let before = real.text.clone();
+        let state = EditingStateBytes {
+            base: masked_to_real(&real.text, masked_base),
+            extent: masked_to_real(&real.text, masked_extent),
+            ..real
+        };
+        self.editor
+            .apply(EditOp::ApplyEditingState(state), &mut self.text_ctx);
+        self.finish_edit(ctx, before);
     }
 
     /// Handle a keyboard key event (already focus-gated by the caller).
@@ -713,8 +994,9 @@ impl<State: 'static> View<State> for TextInputView<State> {
             }),
             &mut text_ctx,
         );
-        TextInputWidget {
+        let mut widget = TextInputWidget {
             editor,
+            mask_editor: None,
             text_ctx,
             style: style.clone(),
             text_style_explicit: self.text_style_explicit,
@@ -723,6 +1005,9 @@ impl<State: 'static> View<State> for TextInputView<State> {
             max_visible_lines: self.max_visible_lines,
             applied_wrap_width: None,
             submit_on_enter: resolve_submit_on_enter(self.max_visible_lines, self.submit_on_enter),
+            enabled: self.enabled,
+            obscured: self.obscured,
+            release_focus_pending: false,
             focused: false,
             captured: false,
             blink_epoch: FrameTime::ZERO,
@@ -732,7 +1017,10 @@ impl<State: 'static> View<State> for TextInputView<State> {
                 .on_submit
                 .as_ref()
                 .map(crate::authoring::erase_callback_arg::<State, String>),
-        }
+        };
+        // Seeds the masked mirror when built obscured (a no-op otherwise).
+        widget.rebuild_mask_editor();
+        widget
     }
 
     fn rebuild(
@@ -762,6 +1050,29 @@ impl<State: 'static> View<State> for TextInputView<State> {
         }
         element.submit_on_enter =
             resolve_submit_on_enter(self.max_visible_lines, self.submit_on_enter);
+        // Enabled reconcile. LAYOUT (not just PAINT) because the disabled dim
+        // is baked into the glyph color at layout time — the same
+        // `set_theme` -> `ChangeFlags::LAYOUT` contract `text_style` rides.
+        // A field disabled *while focused* must not be stranded focused: clear
+        // the widget's own view of it now and flag the pod-level release for
+        // the first event that reaches us (`BuildCtx` has no focus seam).
+        if prev.enabled != self.enabled {
+            element.enabled = self.enabled;
+            if !self.enabled {
+                element.release_focus_pending = element.focused;
+                element.focused = false;
+                element.captured = false;
+            }
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        // Obscured reconcile: the masked mirror is what gets *measured*, and a
+        // mask glyph's advance differs from the character it replaces, so this
+        // resizes the field as well as repainting it.
+        if prev.obscured != self.obscured {
+            element.obscured = self.obscured;
+            element.rebuild_mask_editor();
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
         // Text style reconcile: a changed declared style or explicit-
         // flag invalidates the style actually installed on the editor. The
         // editor itself is only rebuilt in `layout` (`effective_style`/
@@ -796,6 +1107,10 @@ impl Widget for TextInputWidget {
         if effective != self.applied_style {
             self.apply_style(effective);
         }
+        // Catch-all mirror refresh: a rebuild-driven value/obscured change lands
+        // before this pass, and everything measured below reads `display()`.
+        // Cheap when already in sync (value-equality short-circuit).
+        self.sync_mask();
 
         let width = if bc.max().width.is_finite() {
             bc.max().width
@@ -815,6 +1130,11 @@ impl Widget for TextInputWidget {
             .map(|_| (width - 2.0 * PAD_X).max(0.0) as f32);
         if self.applied_wrap_width != Some(desired_wrap) {
             self.editor.set_wrap_width(desired_wrap, &mut self.text_ctx);
+            // The masked mirror wraps at the same width (and this is also the
+            // call that refreshes a freshly rebuilt mirror's layout).
+            if let Some(mask) = self.mask_editor.as_mut() {
+                mask.set_wrap_width(desired_wrap, &mut self.text_ctx);
+            }
             self.applied_wrap_width = Some(desired_wrap);
         }
 
@@ -823,7 +1143,7 @@ impl Widget for TextInputWidget {
                 // Clamp the reported content height to the [1, max_lines] line
                 // band (+ padding); overflow scrolls in paint.
                 let line_h = self.line_height();
-                let content = self.editor.layout_size().height.max(line_h);
+                let content = self.display().layout_size().height.max(line_h);
                 let capped = content.min(line_h * max_lines as f64);
                 capped + 2.0 * PAD_Y
             }
@@ -835,7 +1155,7 @@ impl Widget for TextInputWidget {
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let origin = ctx.origin();
         let size = ctx.size();
-        let chrome = Chrome::resolve(Theme::from_paint_ctx(ctx));
+        let chrome = Chrome::resolve(Theme::from_paint_ctx(ctx), self.enabled);
 
         // Record the blink epoch from the shared frame clock once per pending
         // reset (a focus/edit flagged it during the clockless event pass).
@@ -853,7 +1173,10 @@ impl Widget for TextInputWidget {
         // caret-blink continuation frame, and IME republish below all key off
         // `focused`, so they stop together and the field stops resurrecting the
         // IME surface the blur cleared (review F1).
-        let focused = ctx.has_focus();
+        // A disabled field never *behaves* as focused, even if the pod's focus
+        // path is still recorded (a `rebuild` that disabled a focused field
+        // cannot reach it — see `release_focus_pending`).
+        let focused = ctx.has_focus() && self.enabled;
         if self.focused && !focused {
             self.focused = false;
         }
@@ -906,15 +1229,16 @@ impl Widget for TextInputWidget {
             }
         } else {
             let off = text_origin.to_vec2();
-            // Selection highlights sit behind the glyphs.
-            for r in self.editor.selection_rects() {
+            // Selection highlights sit behind the glyphs. Both come from the
+            // displayed layout — the masked mirror while obscured.
+            for r in self.display().selection_rects() {
                 scene.fill_rect(
                     Point::new(r.x0 + off.x, r.y0 + off.y),
                     Size::new(r.width(), r.height()),
                     chrome.selection,
                 );
             }
-            for run in self.editor.to_scene_runs(text_origin) {
+            for run in self.display().to_scene_runs(text_origin) {
                 scene.draw_glyph_run(run);
             }
         }
@@ -931,7 +1255,7 @@ impl Widget for TextInputWidget {
             // observe the clear (see `PaintCtx::publish_ime_state`).
             ctx.publish_ime_state(self.current_ime_state(origin, size));
             if self.caret_visible_at(now)
-                && let Some(c) = self.editor.cursor_rect(CARET_W)
+                && let Some(c) = self.display().cursor_rect(CARET_W)
             {
                 let off = text_origin.to_vec2();
                 scene.fill_rect(
@@ -940,6 +1264,16 @@ impl Widget for TextInputWidget {
                     chrome.caret,
                 );
             }
+        } else if !self.enabled && ctx.has_focus() {
+            // Disabled while still holding the pod's focus path: publish an
+            // *inactive* IME surface so the shell dismisses the keyboard on the
+            // very next frame rather than waiting for the event-pass release
+            // (`release_focus_pending`). No caret, and no `request_frame` — a
+            // disabled field is at rest.
+            let mut ime = self.current_ime_state(origin, size);
+            ime.active = false;
+            ime.caret = None;
+            ctx.publish_ime_state(ime);
         }
 
         if clip_content {
@@ -948,6 +1282,20 @@ impl Widget for TextInputWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        // The focus gate IS the disabled gate: refusing focus here is what
+        // makes `Key`/`Ime` (focus-routed, never hit-tested) unreachable, so
+        // `handle_key`/`handle_ime` need no disabled guards of their own. A
+        // disabled field also consumes nothing — it is inert, not a shield.
+        if !self.enabled {
+            if ctx.has_focus() || self.release_focus_pending {
+                ctx.release_focus();
+                self.release_focus_pending = false;
+                self.focused = false;
+                self.captured = false;
+                ctx.request_redraw();
+            }
+            return EventResult::Ignored;
+        }
         match event {
             InputEvent::Pointer(p) => match p.phase {
                 PointerPhase::Down => {
@@ -957,14 +1305,7 @@ impl Widget for TextInputWidget {
                         self.focused = true;
                         self.captured = true;
                         let (x, y) = self.editor_point(p.position, ctx.size().height);
-                        self.apply_edit(
-                            ctx,
-                            EditOp::MoveToPoint {
-                                x,
-                                y,
-                                select: false,
-                            },
-                        );
+                        self.move_to_point(ctx, x, y, false);
                         EventResult::Handled
                     } else {
                         // A `Down` outside our bounds that still reaches us (we are
@@ -983,7 +1324,7 @@ impl Widget for TextInputWidget {
                         return EventResult::Ignored;
                     }
                     let (x, y) = self.editor_point(p.position, ctx.size().height);
-                    self.apply_edit(ctx, EditOp::MoveToPoint { x, y, select: true });
+                    self.move_to_point(ctx, x, y, true);
                     EventResult::Handled
                 }
                 PointerPhase::Up => {
@@ -1027,8 +1368,26 @@ impl Widget for TextInputWidget {
         // A single-line TextInput node exposing its current text as `value`.
         // accesskit tracks focus at the tree level, so a focused field records
         // itself as the pass's focus node rather than carrying a per-node flag.
-        let id = ctx.push_node(Role::TextInput, |node| {
-            node.set_value(self.editor.text());
+        //
+        // Obscured, the role becomes `PasswordInput` (the one piece of password
+        // semantics this option delivers) and the reported value is the *masked*
+        // mirror — an assistive-tech client reads the node value verbatim, so
+        // publishing the real secret there would defeat the masking.
+        let role = if self.obscured {
+            Role::PasswordInput
+        } else {
+            Role::TextInput
+        };
+        let value = if self.obscured {
+            mask_text(self.editor.text())
+        } else {
+            self.editor.text().to_string()
+        };
+        let id = ctx.push_node(role, |node| {
+            node.set_value(value);
+            if !self.enabled {
+                node.set_disabled();
+            }
         });
         if self.focused {
             ctx.set_focused(id);
@@ -2341,5 +2700,496 @@ mod tests {
              than the default SystemUi family; if this fails, ph_style likely \
              regressed to not preserving the configured family"
         );
+    }
+
+    // --- enabled(false) ---
+
+    /// The standard fixture field, with `enabled`/`obscured` dialled in.
+    fn options_logic(
+        enabled: bool,
+        obscured: bool,
+    ) -> impl FnMut(&mut AppState) -> TextInputView<AppState> {
+        move |state: &mut AppState| {
+            text_input(state.value.clone(), |s: &mut AppState, v: String| {
+                s.changes += 1;
+                s.value = v;
+            })
+            .placeholder("type here")
+            .enabled(enabled)
+            .obscured(obscured)
+        }
+    }
+
+    /// Build + lay out a root over `logic`.
+    fn options_root(
+        logic: &mut impl FnMut(&mut AppState) -> TextInputView<AppState>,
+        state: &mut AppState,
+    ) -> RenderRoot<AppState, TextInputView<AppState>> {
+        let mut root = RenderRoot::new();
+        root.rebuild(logic, state);
+        root.layout(Size::new(300.0, 200.0));
+        root
+    }
+
+    #[test]
+    fn disabled_field_refuses_focus_and_stays_inert() {
+        let mut state = AppState::default();
+        let mut logic = options_logic(false, false);
+        let mut root = options_root(&mut logic, &mut state);
+
+        let outcome = root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert!(!outcome.handled, "a disabled field consumes nothing");
+        assert!(
+            !root.is_focus_active(),
+            "a tap must not focus a disabled field"
+        );
+        assert!(!widget(&root).focused);
+        assert!(!widget(&root).captured, "no drag capture either");
+        assert!(root.ime_state().is_none(), "no IME surface is published");
+
+        // Keys and IME are unreachable (they route down the focus path, which
+        // the tap never claimed) and edit nothing even when injected directly.
+        root.event(&mut state, &ch("x"));
+        root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::Commit("ni".to_string())),
+        );
+        assert_eq!(widget(&root).editor.text(), "");
+        assert_eq!(state.changes, 0);
+
+        // No caret is painted, and the field is at rest.
+        let mut rec = CaretRecorder {
+            caret_color: Some(CARET.multiply_alpha(DISABLED_CONTENT_ALPHA)),
+            caret_fills: 0,
+        };
+        let outcome = root.paint(&mut rec, FrameTime::ZERO);
+        assert_eq!(rec.caret_fills, 0, "a disabled field paints no caret");
+        assert!(!outcome.needs_frame, "a disabled field never blinks");
+    }
+
+    #[test]
+    fn disabling_a_focused_field_releases_focus_and_deactivates_ime() {
+        let mut state = AppState::default();
+        let mut enabled_logic = options_logic(true, false);
+        let mut root = options_root(&mut enabled_logic, &mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert!(root.is_focus_active());
+        assert!(root.ime_state().expect("focused").active);
+
+        // Flip the flag on a rebuild while the field holds focus.
+        let mut disabled_logic = options_logic(false, false);
+        let flags = root.rebuild(&mut disabled_logic, &mut state);
+        assert!(
+            flags.needs_layout(),
+            "the disabled dim is baked at layout, so the flip must relayout"
+        );
+        root.layout(Size::new(300.0, 200.0));
+        assert!(
+            !widget(&root).focused,
+            "the widget stops considering itself focused immediately"
+        );
+
+        // Leg 1 — the next paint already refuses to act focused and hands the
+        // shell an inactive IME surface (dismissing the keyboard).
+        let mut sink = NullScene;
+        let outcome = root.paint(&mut sink, FrameTime::ZERO);
+        assert!(!outcome.needs_frame, "a disabled field paints at rest");
+        assert!(
+            !root.ime_state().expect("still published").active,
+            "the published IME surface goes inactive"
+        );
+
+        // Leg 2 — the first event that reaches the field releases the pod-level
+        // focus path, and edits nothing on the way.
+        root.event(&mut state, &ch("x"));
+        assert!(
+            !root.is_focus_active(),
+            "the stranded focus path is released"
+        );
+        assert!(root.ime_state().is_none());
+        assert_eq!(widget(&root).editor.text(), "");
+    }
+
+    #[test]
+    fn disabled_dims_content_and_outline_in_every_design_language() {
+        // The dim is an alpha multiplier on the *resolved* role, so it must
+        // behave identically unthemed and under all three design languages —
+        // including Cupertino, whose `on_surface_variant` is itself translucent
+        // (the reason a token swap would not be portable).
+        let mut languages: Vec<(&str, Option<Theme>)> = vec![
+            ("unthemed", None),
+            ("material", Some(Theme::m3_baseline())),
+            ("cupertino", Some(Theme::cupertino_baseline())),
+        ];
+        #[cfg(feature = "glyph")]
+        languages.push(("glyph", Some(Theme::glyph_baseline())));
+        for (name, theme) in languages {
+            let enabled = Chrome::resolve(theme.as_ref(), true);
+            let disabled = Chrome::resolve(theme.as_ref(), false);
+            assert_eq!(
+                disabled.placeholder,
+                enabled.placeholder.multiply_alpha(DISABLED_CONTENT_ALPHA),
+                "{name}: disabled placeholder is the enabled role at 38%"
+            );
+            assert_eq!(
+                disabled.border,
+                enabled.border.multiply_alpha(DISABLED_CONTAINER_ALPHA),
+                "{name}: disabled outline is the enabled role at 12%"
+            );
+            assert!(
+                disabled.placeholder.components[3] < enabled.placeholder.components[3],
+                "{name}: the disabled placeholder must actually be more transparent"
+            );
+            assert_eq!(
+                disabled.bg, enabled.bg,
+                "{name}: the container fill stays opaque (see Chrome::resolve)"
+            );
+        }
+    }
+
+    #[test]
+    fn disabled_dims_the_layout_baked_glyph_color() {
+        // The second resolution point: the glyph color is baked into the shaped
+        // editor state at LAYOUT time, so dimming has to happen there too.
+        let mut state = AppState {
+            value: "hi".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(false, false);
+        let mut root = options_root(&mut logic, &mut state);
+        root.set_theme(Box::new(Theme::m3_baseline()));
+        root.layout(Size::new(300.0, 200.0));
+
+        let expected = Theme::m3_baseline()
+            .scheme()
+            .on_surface
+            .multiply_alpha(DISABLED_CONTENT_ALPHA);
+        assert_eq!(
+            painted_text_color(&mut root),
+            expected,
+            "a disabled field's glyphs are on_surface at 38%"
+        );
+    }
+
+    #[test]
+    fn disabled_dims_the_unthemed_fallback_glyph_color() {
+        let mut state = AppState {
+            value: "hi".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(false, false);
+        let mut root = options_root(&mut logic, &mut state);
+        assert_eq!(
+            painted_text_color(&mut root),
+            Color::BLACK.multiply_alpha(DISABLED_CONTENT_ALPHA),
+            "with no theme threaded the black fallback dims by the same rule"
+        );
+    }
+
+    // --- obscured(true) ---
+
+    #[test]
+    fn mask_offsets_map_1_to_1_per_char_across_a_multi_byte_grapheme() {
+        // "a😀b": 1 + 4 + 1 real bytes; masked "•••" is 3 × 3 bytes.
+        let text = "a\u{1F600}b";
+        assert_eq!(mask_text(text), "\u{2022}\u{2022}\u{2022}");
+        for (real, masked) in [(0, 0), (1, 3), (5, 6), (6, 9)] {
+            assert_eq!(real_to_masked(text, real), masked, "real {real} -> masked");
+            assert_eq!(
+                masked_to_real(text, masked),
+                real,
+                "masked {masked} -> real"
+            );
+        }
+        // Interior offsets snap back to the enclosing character's start, both
+        // ways (the emoji spans real bytes 1..5 and masked bytes 3..6).
+        assert_eq!(real_to_masked(text, 3), 3, "mid-emoji snaps to its start");
+        assert_eq!(masked_to_real(text, 4), 1, "mid-mask snaps to its start");
+        // A newline is preserved so a multi-line field keeps its line count.
+        assert_eq!(mask_text("a\nb"), "\u{2022}\n\u{2022}");
+    }
+
+    #[test]
+    fn obscured_paints_bullets_and_keeps_the_real_value() {
+        /// Records the glyph ids of every painted run, in order.
+        #[derive(Default)]
+        struct GlyphIdRecorder {
+            ids: Vec<u16>,
+        }
+        impl PaintScene for GlyphIdRecorder {
+            fn fill_rect(&mut self, _o: Point, _s: Size, _c: Color) {}
+            fn fill_rounded_rect(&mut self, _o: Point, _s: Size, _r: f64, _c: Color) {}
+            fn draw_text(&mut self, _o: Point, _t: &str) {}
+            fn draw_glyph_run(&mut self, run: frust_scene::GlyphRun) {
+                self.ids.extend(run.glyphs.iter().map(|g| g.id as u16));
+            }
+        }
+
+        fn ids(root: &mut RenderRoot<AppState, TextInputView<AppState>>) -> Vec<u16> {
+            let mut rec = GlyphIdRecorder::default();
+            root.paint(&mut rec, FrameTime::ZERO);
+            rec.ids
+        }
+
+        // An obscured field holding "abc" must paint exactly what a plain field
+        // holding "•••" paints — and nothing of what "abc" paints.
+        let mut secret_state = AppState {
+            value: "abc".to_string(),
+            ..AppState::default()
+        };
+        let mut secret_logic = options_logic(true, true);
+        let mut secret = options_root(&mut secret_logic, &mut secret_state);
+
+        let mut bullets_state = AppState {
+            value: "\u{2022}\u{2022}\u{2022}".to_string(),
+            ..AppState::default()
+        };
+        let mut plain_logic = options_logic(true, false);
+        let mut bullets = options_root(&mut plain_logic, &mut bullets_state);
+
+        let mut clear_state = AppState {
+            value: "abc".to_string(),
+            ..AppState::default()
+        };
+        let mut clear = options_root(&mut plain_logic, &mut clear_state);
+
+        assert_eq!(
+            ids(&mut secret),
+            ids(&mut bullets),
+            "an obscured field paints bullets"
+        );
+        assert_ne!(
+            ids(&mut secret),
+            ids(&mut clear),
+            "…and not the real characters"
+        );
+        assert_eq!(
+            widget(&secret).editor.text(),
+            "abc",
+            "the model text is untouched by masking"
+        );
+    }
+
+    #[test]
+    fn obscured_measures_from_the_masked_text_not_the_real_one() {
+        // Masking at glyph-emission time only would leave the field measured
+        // from the real text: an 'i'-heavy secret would size like 'i's while
+        // painting bullets. The mirror is what gets measured, so an obscured
+        // field's width matches the equivalent bullet string's.
+        let mut secret_state = AppState {
+            value: "iiiiiiiiii".to_string(),
+            ..AppState::default()
+        };
+        let mut secret_logic = options_logic(true, true);
+        let secret = options_root(&mut secret_logic, &mut secret_state);
+
+        let mut bullets_state = AppState {
+            value: "\u{2022}".repeat(10),
+            ..AppState::default()
+        };
+        let mut plain_logic = options_logic(true, false);
+        let bullets = options_root(&mut plain_logic, &mut bullets_state);
+
+        let masked_w = widget(&secret).display().layout_size().width;
+        let bullets_w = widget(&bullets).display().layout_size().width;
+        let real_w = widget(&secret).editor.layout_size().width;
+        assert_eq!(masked_w, bullets_w, "measured from the masked mirror");
+        assert!(
+            masked_w > real_w,
+            "sanity: bullets are wider than 'i's ({masked_w} vs {real_w})"
+        );
+    }
+
+    #[test]
+    fn obscured_editing_matches_unobscured_across_a_multi_byte_grapheme() {
+        // The masking must not disturb the editing arithmetic: run the same
+        // key sequence on an obscured and a clear field and require identical
+        // editing state at every step, including over a 4-byte emoji.
+        let mut secret_state = AppState::default();
+        let mut secret_logic = options_logic(true, true);
+        let mut secret = options_root(&mut secret_logic, &mut secret_state);
+        let mut clear_state = AppState::default();
+        let mut clear_logic = options_logic(true, false);
+        let mut clear = options_root(&mut clear_logic, &mut clear_state);
+
+        let plain = Modifiers::default();
+        let meta = Modifiers {
+            meta: true,
+            ..Modifiers::default()
+        };
+        let events = vec![
+            pointer(PointerPhase::Down, 10.0, 10.0),
+            ch("a"),
+            ch("\u{1F600}"),
+            ch("b"),
+            named(NamedKey::ArrowLeft, plain),
+            named(NamedKey::Backspace, plain),
+            named(NamedKey::End, plain),
+            named(NamedKey::Backspace, plain),
+            InputEvent::Key(KeyEvent {
+                key: Key::Character("a".to_string()),
+                modifiers: meta,
+                repeat: false,
+            }),
+        ];
+        for (i, event) in events.iter().enumerate() {
+            secret.event(&mut secret_state, event);
+            clear.event(&mut clear_state, event);
+            assert_eq!(
+                widget(&secret).editor.editing_state_bytes(),
+                widget(&clear).editor.editing_state_bytes(),
+                "editing state diverged at step {i}"
+            );
+        }
+        // The emoji was deleted as one grapheme in both, and the app saw the
+        // real text throughout.
+        assert_eq!(secret_state.value, "a");
+        assert_eq!(secret_state.value, clear_state.value);
+        assert_eq!(secret_state.changes, clear_state.changes);
+    }
+
+    #[test]
+    fn obscured_caret_rect_follows_the_masked_layout() {
+        // The caret must sit where the *bullets* end, not where the real text
+        // would have ended.
+        let mut secret_state = AppState {
+            value: "iiii".to_string(),
+            ..AppState::default()
+        };
+        let mut secret_logic = options_logic(true, true);
+        let mut secret = options_root(&mut secret_logic, &mut secret_state);
+        secret.event(&mut secret_state, &pointer(PointerPhase::Down, 290.0, 10.0));
+        let masked_caret = secret
+            .ime_state()
+            .expect("focused")
+            .caret
+            .expect("a caret rect");
+
+        let mut bullets_state = AppState {
+            value: "\u{2022}".repeat(4),
+            ..AppState::default()
+        };
+        let mut plain_logic = options_logic(true, false);
+        let mut bullets = options_root(&mut plain_logic, &mut bullets_state);
+        bullets.event(
+            &mut bullets_state,
+            &pointer(PointerPhase::Down, 290.0, 10.0),
+        );
+        let bullets_caret = bullets
+            .ime_state()
+            .expect("focused")
+            .caret
+            .expect("a caret rect");
+
+        assert_eq!(
+            masked_caret, bullets_caret,
+            "the obscured caret tracks the masked glyphs"
+        );
+        assert_eq!(
+            secret.ime_state().expect("focused").editing.text,
+            "iiii",
+            "the IME surface still carries the real text (see the module docs)"
+        );
+    }
+
+    #[test]
+    fn obscured_tap_places_the_caret_from_the_masked_hit_test() {
+        // A tap between the first and second bullet must land on real byte 1,
+        // resolved against the masked advances (bullets are much wider than
+        // 'i's, so hit-testing the real layout would overshoot to the end).
+        let mut state = AppState {
+            value: "iiiiiiii".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(true, true);
+        let mut root = options_root(&mut logic, &mut state);
+        // Mid-way through the first mask glyph -> caret before or after char 0.
+        let half_bullet = widget(&root).display().layout_size().width / 16.0;
+        root.event(
+            &mut state,
+            &pointer(PointerPhase::Down, PAD_X + half_bullet, 10.0),
+        );
+        let extent = widget(&root).editor.editing_state_bytes().extent;
+        assert!(
+            extent <= 1,
+            "a tap inside the first mask glyph lands at byte 0 or 1, got {extent}"
+        );
+    }
+
+    #[test]
+    fn obscured_reports_password_role_with_a_masked_value() {
+        let mut state = AppState {
+            value: "hunter2".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(true, true);
+        let root = options_root(&mut logic, &mut state);
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::PasswordInput)
+            .expect("an obscured field contributes a Role::PasswordInput node");
+        assert_eq!(
+            node.value(),
+            Some("\u{2022}".repeat(7).as_str()),
+            "the a11y value is masked too — a client reads it verbatim"
+        );
+
+        // Enabled + clear stays a plain TextInput node carrying the real value.
+        let mut plain_logic = options_logic(true, false);
+        let plain = options_root(&mut plain_logic, &mut state);
+        let update = plain.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::TextInput)
+            .expect("a clear field stays Role::TextInput");
+        assert_eq!(node.value(), Some("hunter2"));
+        assert!(!node.is_disabled(), "an enabled field is not disabled");
+    }
+
+    #[test]
+    fn disabled_reports_disabled_semantics() {
+        let mut state = AppState::default();
+        let mut logic = options_logic(false, false);
+        let root = options_root(&mut logic, &mut state);
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::TextInput)
+            .expect("a text field node");
+        assert!(node.is_disabled(), "a disabled field says so to a11y");
+    }
+
+    #[test]
+    fn toggling_obscured_relayouts_and_keeps_the_value() {
+        let mut state = AppState {
+            value: "iiiiiiii".to_string(),
+            ..AppState::default()
+        };
+        let mut clear_logic = options_logic(true, false);
+        let mut root = options_root(&mut clear_logic, &mut state);
+        let clear_width = widget(&root).display().layout_size().width;
+
+        let mut secret_logic = options_logic(true, true);
+        let flags = root.rebuild(&mut secret_logic, &mut state);
+        assert!(
+            flags.needs_layout(),
+            "masking changes the measured text, so the flip must relayout"
+        );
+        root.layout(Size::new(300.0, 200.0));
+        assert!(
+            widget(&root).display().layout_size().width > clear_width,
+            "the masked mirror is measured after the flip"
+        );
+        assert_eq!(widget(&root).editor.text(), "iiiiiiii");
+
+        // …and back again.
+        root.rebuild(&mut clear_logic, &mut state);
+        root.layout(Size::new(300.0, 200.0));
+        assert_eq!(widget(&root).display().layout_size().width, clear_width);
+        assert!(widget(&root).mask_editor.is_none());
     }
 }
