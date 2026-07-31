@@ -81,13 +81,18 @@ an orientation enum — the shell furnishes only `(width, height, scale)`. `Orie
 via `Orientation::from_size()` (portrait when `height >= width`, including exact squares as
 portrait) and never tracks a device orientation-lock. This is a stable guarantee pinned by tests.
 
-**Context is not reactive.** A `provide_context` call does not mark anything dirty via a signal;
-instead, the shell must re-provide `WindowMetrics` under the app's tracked scope so the read/write
-pair participates in the normal dependency-tracking path. Since there is no per-component rebuild
-skipping, any metrics change rebuilds the whole app — acceptable only because builds are cheap by
-construction. A shell must re-provide only on actual change (guarded by `WindowMetricsPublisher`'s
-change check), never unconditionally each frame, or the app churns forever. This is load-bearing,
-not an optimization.
+**Context is not reactive.** `provide_context` is a plain insert into the owner's context map — it
+notifies nothing — and `use_context` creates no subscription, so a metrics write neither marks the
+tracked scope dirty nor wakes a frame. A new value therefore becomes visible only on the **next**
+rebuild, which the resize or inset change that produced it already drives. Delivery is
+pull-on-next-frame, not push; do not write code that assumes writing a context triggers a rebuild.
+(Signal writes are the reactive path and do wake — but only `deep_link` and `back` are signals.)
+
+A shell must still re-provide only on actual change, guarded by `WindowMetricsPublisher`'s check.
+The reason is cost at the FFI boundary, not a rebuild storm: an unconditional per-frame re-provide
+would burn a lock write plus an allocation every frame on the mobile path. Separately, when a rebuild
+does run it rebuilds the whole app — there is no per-component skipping — which is affordable only
+because builds are cheap by construction.
 
 ## Key Types
 
