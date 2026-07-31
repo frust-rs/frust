@@ -163,10 +163,32 @@ pub struct MotionScheme {
     pub durations: MotionDurations,
     /// The three-easing vocabulary (Glyph vocabulary; see [`EasingSet`]).
     pub easing: EasingSet,
-    /// Collapses patterned motion to a fast crossfade. Set by a shell from
-    /// the OS's reduced-motion accessibility preference; the plumbing that
-    /// reads the platform setting and threads it here lands in a later task
-    /// — every baseline below defaults this to `false`.
+    /// Collapses patterned motion to a fast crossfade. Every baseline below
+    /// defaults this to `false` — the correct value absent an OS signal — and
+    /// a mobile shell raises it from the platform's own reduced-motion
+    /// accessibility preference:
+    ///
+    /// - **Android**: `Settings.Global.ANIMATOR_DURATION_SCALE`, reduced when
+    ///   the scale is exactly `0` (the same signal `ValueAnimator::
+    ///   areAnimatorsEnabled` consults). It is **not** a `Configuration`
+    ///   field, so `onConfigurationChanged` never reports it — the embedding
+    ///   registers a `ContentObserver` on that setting's URI and re-reads it
+    ///   on every resume.
+    /// - **iOS**: `UIAccessibility.isReduceMotionEnabled`, observed through
+    ///   `UIAccessibility.reduceMotionStatusDidChangeNotification`. It is
+    ///   **not** a `UITraitCollection` trait, so `traitCollectionDidChange`
+    ///   never fires for it.
+    /// - **Desktop**: no source. winit 0.30 exposes no reduced-motion (or any
+    ///   other accessibility-preference) accessor and nothing else in the
+    ///   desktop path reads one, so the desktop shell leaves this at whatever
+    ///   the active theme authored — a deliberate, checked gap (2026-07-31),
+    ///   not an oversight to re-investigate.
+    ///
+    /// Both mobile shells apply the OS report as a **floor**: the platform's
+    /// value is OR'd over the active theme's own authored token (each shell's
+    /// `effective_reduce_motion`), never assigned over it. So a theme built
+    /// with `reduce_motion: true` keeps it while the OS setting is off, and
+    /// the OS setting still wins whenever it is on.
     pub reduce_motion: bool,
     /// The `CosmeticLoop` tick-rate cap — see [`CosmeticLoopRate`]. Every
     /// baseline below defaults this to 30Hz; override via

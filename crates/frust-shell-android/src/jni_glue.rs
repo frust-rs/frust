@@ -1486,6 +1486,26 @@ pub fn native_set_appearance(handle: jlong, dark: jboolean) {
     });
 }
 
+/// `nativeSetReduceMotion`: apply the platform's reduced-motion accessibility
+/// preference to the active theme's `MotionScheme`, re-publishing it through
+/// both delivery paths — the reduced-motion twin of [`native_set_appearance`].
+///
+/// `reduce` is Kotlin's `Settings.Global.ANIMATOR_DURATION_SCALE == 0f` read.
+/// That setting is not part of `Configuration`, so Kotlin sources it from a
+/// `ContentObserver` plus a re-read on resume rather than
+/// `onConfigurationChanged` (see `FrustSurfaceView.reduceMotionEnabled`).
+/// Same `jboolean`-is-a-real-`bool` note as [`native_set_appearance`]; the
+/// continuous Choreographer loop repaints the next tick with no extra wake
+/// needed. A missing handle is a no-op.
+pub fn native_set_reduce_motion(handle: jlong, reduce: jboolean) {
+    guard("nativeSetReduceMotion", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            app.set_reduce_motion(reduce);
+        }
+    });
+}
+
 /// `nativeSystemUiState`: return the process-wide system-UI override slot's
 /// packed `(generation, mode)` state for Kotlin's `doFrame` to poll,
 /// mirroring the proven `nativeImeState`-in-`doFrame` per-frame-poll idiom.

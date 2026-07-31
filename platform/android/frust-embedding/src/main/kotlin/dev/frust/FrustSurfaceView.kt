@@ -3,8 +3,12 @@ package dev.frust
 import android.app.Activity
 import android.content.Context
 import android.content.res.Configuration
+import android.database.ContentObserver
 import android.graphics.PixelFormat
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
 import android.text.Editable
 import android.text.InputType
 import android.text.Selection
@@ -256,6 +260,16 @@ class FrustSurfaceView(
     // instead of recreating the activity).
     private external fun nativeSetAppearance(handle: Long, dark: Boolean)
 
+    // Reduced motion: apply the platform's reduce-motion
+    // accessibility preference to the app's motion tokens. `reduce` mirrors
+    // `Settings.Global.ANIMATOR_DURATION_SCALE == 0f` — see
+    // [reduceMotionEnabled]. Called once right after `nativeInit` returns a
+    // handle, again from [onResume] (the setting is toggled in Settings, i.e.
+    // while this app is backgrounded), and on every [reduceMotionObserver]
+    // fire. NOT driven by `onConfigurationChanged`: animation scale is not a
+    // `Configuration` field and that callback never fires for it.
+    private external fun nativeSetReduceMotion(handle: Long, reduce: Boolean)
+
     // Deep links. `url` is the raw `Intent.data` Uri's `toString()`,
     // forwarded to `frust_reactive::push_deep_link` on the Rust side.
     private external fun nativeOnDeepLink(handle: Long, url: String)
@@ -460,6 +474,76 @@ class FrustSurfaceView(
         get() = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
             Configuration.UI_MODE_NIGHT_YES
 
+    /**
+     * Whether the platform currently reports a reduce-motion preference.
+     *
+     * Android has no single "reduce motion" switch: the user-facing controls
+     * (Settings > Accessibility > *Remove animations*, and Developer options >
+     * *Animator duration scale: off*) both land on
+     * `Settings.Global.ANIMATOR_DURATION_SCALE`, and a scale of exactly `0`
+     * means "no animations" — the same signal the platform's own
+     * `ValueAnimator.areAnimatorsEnabled()` consults. Read with a default of
+     * `1f` (the untouched-setting value), so a device that has never written
+     * the row reports "animate normally" rather than "reduced".
+     *
+     * Deliberately NOT sourced from `Configuration`/`onConfigurationChanged`:
+     * animation scale is not a configuration field, so that callback never
+     * fires for it — hence [reduceMotionObserver].
+     */
+    private val reduceMotionEnabled: Boolean
+        get() = Settings.Global.getFloat(
+            context.contentResolver,
+            Settings.Global.ANIMATOR_DURATION_SCALE,
+            1f,
+        ) == 0f
+
+    /**
+     * Change notification for [reduceMotionEnabled]. Registered on
+     * [onResume] and unregistered on [onPause], so a backgrounded app holds no
+     * resolver registration; the [onResume] re-read below covers the far more
+     * common path — the user leaves the app to flip the setting and comes back
+     * — while this observer covers a toggle made with the app still visible
+     * (split screen, a quick-settings tile).
+     *
+     * Constructed against the main `Looper` so `onChange` is dispatched on the
+     * same thread every other native call here runs on; the native side is not
+     * thread-safe.
+     */
+    private val reduceMotionObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
+        override fun onChange(selfChange: Boolean) {
+            pushReduceMotion()
+        }
+    }
+
+    /** Whether [reduceMotionObserver] is currently registered (idempotence guard). */
+    private var reduceMotionObserverRegistered = false
+
+    /**
+     * Push the current [reduceMotionEnabled] value to the native side. A
+     * missing handle is a no-op — [surfaceCreated] pushes once the handle
+     * exists, mirroring `nativeSetAppearance`'s seeding.
+     */
+    private fun pushReduceMotion() {
+        if (handle == 0L) return
+        nativeSetReduceMotion(handle, reduceMotionEnabled)
+    }
+
+    private fun registerReduceMotionObserver() {
+        if (reduceMotionObserverRegistered) return
+        context.contentResolver.registerContentObserver(
+            Settings.Global.getUriFor(Settings.Global.ANIMATOR_DURATION_SCALE),
+            false,
+            reduceMotionObserver,
+        )
+        reduceMotionObserverRegistered = true
+    }
+
+    private fun unregisterReduceMotionObserver() {
+        if (!reduceMotionObserverRegistered) return
+        context.contentResolver.unregisterContentObserver(reduceMotionObserver)
+        reduceMotionObserverRegistered = false
+    }
+
     init {
         holder.addCallback(this)
         // Required for a custom editor view to receive IME focus + text input.
@@ -595,6 +679,11 @@ class FrustSurfaceView(
             if (handle != 0L) {
                 nativeSetAppearance(handle, isDarkMode)
                 updateSystemBarsAppearance(isDarkMode)
+                // Seed the reduce-motion accessibility preference beside the
+                // appearance: [onResume] already ran (and re-runs on every
+                // foreground), but it fires before this handle exists on a cold
+                // start, so its push was a no-op.
+                pushReduceMotion()
                 // Attach the accesskit accessibility adapter to this view.
                 // Best-effort: the native side isolates any
                 // failure in its own guard, so a missing delegate class or JNI
@@ -645,6 +734,10 @@ class FrustSurfaceView(
      * The `android:configChanges` manifest entry includes `uiMode`, so a
      * system light/dark toggle reaches here instead of recreating the
      * activity — re-seed the theme's brightness from the fresh configuration.
+     *
+     * Only appearance: the reduce-motion preference is a `Settings.Global`
+     * row, not a `Configuration` field, so it never reaches this callback —
+     * see [reduceMotionObserver].
      */
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
@@ -937,6 +1030,12 @@ class FrustSurfaceView(
         if (handle != 0L) {
             nativeOnResume(handle)
         }
+        // Reduce motion: re-read on every foreground and (re)arm the observer.
+        // The setting lives in Settings/Developer options, so the user is
+        // necessarily out of this app while flipping it — this re-read, not the
+        // observer, is the path that normally catches the change.
+        registerReduceMotionObserver()
+        pushReduceMotion()
         Choreographer.getInstance().postFrameCallback(this)
     }
 
@@ -944,6 +1043,9 @@ class FrustSurfaceView(
     fun onPause() {
         running = false
         Choreographer.getInstance().removeFrameCallback(this)
+        // Hold no resolver registration while backgrounded; [onResume] re-arms
+        // it and re-reads the value that may have changed in between.
+        unregisterReduceMotionObserver()
         if (handle != 0L) {
             nativeOnPause(handle)
         }
@@ -951,6 +1053,10 @@ class FrustSurfaceView(
 
     /** Called by `MainActivity.onDestroy` — releases the native handle. */
     fun onDestroy() {
+        // Belt-and-suspenders: [onPause] normally precedes destruction, but a
+        // ContentObserver outliving its view would keep calling into a dead
+        // handle.
+        unregisterReduceMotionObserver()
         if (handle != 0L) {
             nativeOnDestroy(handle)
             handle = 0

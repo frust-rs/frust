@@ -259,6 +259,19 @@ open class FrustViewController: UIViewController {
             name: UIResponder.keyboardWillHideNotification,
             object: nil
         )
+
+        // Reduce motion: `UIAccessibility.isReduceMotionEnabled` is NOT a
+        // `UITraitCollection` trait, so `traitCollectionDidChange` never fires
+        // for it — this notification is the only live-change signal. The
+        // initial value is seeded in `updateSurface`, right after `frust_init`
+        // returns a handle (this observer is registered well before that, but
+        // `pushReduceMotion` needs a handle).
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(reduceMotionDidChange),
+            name: UIAccessibility.reduceMotionStatusDidChangeNotification,
+            object: nil
+        )
     }
 
     public override func viewDidLayoutSubviews() {
@@ -375,6 +388,11 @@ open class FrustViewController: UIViewController {
             // appearance before the first frame; live changes
             // arrive later via `traitCollectionDidChange`.
             frust_set_appearance(handle, traitCollection.userInterfaceStyle == .dark ? 1 : 0)
+            // Seed the reduce-motion accessibility preference beside the
+            // appearance; live changes arrive via
+            // `reduceMotionStatusDidChangeNotification` (see `viewDidLoad`),
+            // never via `traitCollectionDidChange`.
+            pushReduceMotion()
             // Push the initial insets — the first
             // `viewSafeAreaInsetsDidChange` may have already fired before
             // `handle` existed, so `pushInsets()`'s guard silently dropped
@@ -580,14 +598,39 @@ open class FrustViewController: UIViewController {
     @objc private func appDidBecomeActive() {
         if let handle { frust_resume(handle) }
         displayLink?.isPaused = false
+        // Re-read the reduce-motion preference on every foreground: a
+        // suspended app is not guaranteed to have been delivered the
+        // notification for a toggle made while it was away (the user has to
+        // leave for Settings to flip it, so this is a routine path, not an
+        // edge case).
+        pushReduceMotion()
     }
 
     /// The platform's light/dark appearance preference changed —
     /// re-seed the theme's brightness.
+    ///
+    /// Appearance only: reduce motion is an `UIAccessibility` preference, not a
+    /// `UITraitCollection` trait, so it never reports here — see
+    /// `reduceMotionDidChange`.
     public override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
         super.traitCollectionDidChange(previousTraitCollection)
         guard let handle else { return }
         frust_set_appearance(handle, traitCollection.userInterfaceStyle == .dark ? 1 : 0)
+    }
+
+    /// The platform's reduce-motion accessibility preference changed
+    /// (`UIAccessibility.reduceMotionStatusDidChangeNotification`) — re-push it
+    /// so the theme's motion tokens collapse (or un-collapse) live.
+    @objc private func reduceMotionDidChange() {
+        pushReduceMotion()
+    }
+
+    /// Push `UIAccessibility.isReduceMotionEnabled` to Rust as the C ABI's
+    /// `0`/`1`. A missing handle is a no-op — `updateSurface` pushes once
+    /// `frust_init` has returned one, mirroring the appearance seed.
+    private func pushReduceMotion() {
+        guard let handle else { return }
+        frust_set_reduce_motion(handle, UIAccessibility.isReduceMotionEnabled ? 1 : 0)
     }
 
     deinit {

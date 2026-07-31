@@ -1287,6 +1287,27 @@ pub fn set_appearance(handle: *mut c_void, dark: u8) {
     });
 }
 
+/// `frust_set_reduce_motion`: apply the platform's reduced-motion
+/// accessibility preference to the active theme's `MotionScheme`, re-publishing
+/// it through both delivery paths — the reduced-motion twin of
+/// [`set_appearance`].
+///
+/// `reduce` is Swift's `UIAccessibility.isReduceMotionEnabled` read, as `0`/`1`
+/// (the same no-`<stdbool.h>` convention `frust_set_appearance`'s `dark`
+/// follows). Reduced motion is NOT a `UITraitCollection` trait, so Swift
+/// sources it from `UIAccessibility.reduceMotionStatusDidChangeNotification`
+/// rather than `traitCollectionDidChange`. The continuous `CADisplayLink` loop
+/// repaints the next tick with no extra wake needed. A missing handle is a
+/// no-op.
+pub fn set_reduce_motion(handle: *mut c_void, reduce: u8) {
+    guard("frust_set_reduce_motion", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            app.set_reduce_motion(reduce != 0);
+        }
+    });
+}
+
 /// `frust_set_insets`: deliver the platform's window insets. The eight `f32`s
 /// are two per-edge
 /// sets in the order [`logical_insets`](frust_shell_common::logical_insets)
