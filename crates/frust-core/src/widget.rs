@@ -678,6 +678,26 @@ impl<'a> PaintCtx<'a> {
         self
     }
 
+    /// Build a paint context at `origin`/`size` seeded with an arbitrary
+    /// [`FrameTime`], for exercising clock-dependent paint logic (caret blink,
+    /// a hand-advanced [`crate::anim::AnimationController`], …) from outside
+    /// this crate.
+    ///
+    /// [`PaintCtx::set_frame_time`] is deliberately `pub(crate)` — only
+    /// [`crate::app::RenderRoot::paint`] (the shell-owned clock source) may
+    /// advance it in a production build — so an app crate testing a widget
+    /// from its own `src/` has no other way to construct a `PaintCtx` at a
+    /// chosen time. This constructor is that sanctioned seam. Gated behind
+    /// `cfg(test)`/the `test-support` feature so the symbol does not exist in
+    /// a normal app build; see the crate's `test-support` feature docs in
+    /// `Cargo.toml`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(origin: Point, size: Size, frame_time: FrameTime) -> Self {
+        let mut ctx = Self::new(origin, size);
+        ctx.frame_time = frame_time;
+        ctx
+    }
+
     /// Recover the threaded theme as `&T`, or `None` if no theme was threaded
     /// into this pass (a supported state — bare-core tests and pre-theme apps)
     /// or its concrete type differs from `T`.
@@ -2761,6 +2781,54 @@ mod tests {
         let mut bare = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
         pod.paint_child(&mut bare, &mut scene);
         assert_eq!(seen.get(), None);
+    }
+
+    /// A leaf widget whose visible appearance is driven purely by
+    /// [`PaintCtx::frame_time`] — stands in for a caret-blink widget: it fills
+    /// a rect only during the "on" half of a 1-second blink cycle, with no
+    /// internal state of its own.
+    struct BlinkBox;
+
+    impl Widget for BlinkBox {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(4.0, 4.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            let millis = ctx.frame_time().as_nanos() / 1_000_000;
+            if (millis / 500).is_multiple_of(2) {
+                scene.fill_rect(ctx.origin(), ctx.size(), Color::BLACK);
+            }
+        }
+    }
+
+    #[test]
+    fn for_test_seeds_the_requested_frame_time() {
+        let ctx = PaintCtx::for_test(Point::ZERO, Size::new(1.0, 1.0), FrameTime::from_nanos(42));
+        assert_eq!(ctx.frame_time(), FrameTime::from_nanos(42));
+    }
+
+    /// End-to-end proof the seam actually drives a clock-dependent widget:
+    /// the same [`BlinkBox`] paints differently at two [`FrameTime`]s built
+    /// via [`PaintCtx::for_test`] alone — no [`crate::app::RenderRoot`]
+    /// involved, exactly how an app crate outside this workspace would use
+    /// the seam.
+    #[test]
+    fn for_test_drives_a_clock_dependent_widget_to_two_appearances() {
+        let mut widget = BlinkBox;
+        let size = Size::new(4.0, 4.0);
+
+        let mut on_ctx = PaintCtx::for_test(Point::ZERO, size, FrameTime::from_nanos(0));
+        let mut on_scene = RecordingScene::default();
+        widget.paint(&mut on_ctx, &mut on_scene);
+        assert_eq!(on_scene.rects.len(), 1, "expected the caret painted on");
+
+        let mut off_ctx = PaintCtx::for_test(Point::ZERO, size, FrameTime::from_nanos(500_000_000));
+        let mut off_scene = RecordingScene::default();
+        widget.paint(&mut off_ctx, &mut off_scene);
+        assert!(
+            off_scene.rects.is_empty(),
+            "expected the caret painted off half a blink cycle later"
+        );
     }
 
     #[test]
