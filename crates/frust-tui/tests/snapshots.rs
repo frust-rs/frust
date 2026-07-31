@@ -319,8 +319,10 @@ fn run_config_modal_100x30() {
 
 // ── Create-project wizard (D6b) ─────────────────────────────────────────────
 
-/// A wizard with a probe already resolved to `clean_signals` availability, on
-/// `step`, with `name`/`directory` filled and `arch_cursor` set.
+/// A wizard on `step`, with `name`/`directory` filled and `arch_cursor` set.
+/// `clean_signals` is threaded through `set_clean_signals_available` for
+/// completeness, but no arch card is sibling-gated today (`clean-signals` is
+/// git+rev-pinned to its public repo — task 05), so it has no visible effect.
 fn wizard_state(step: WizardStep, name: &str, clean_signals: bool, arch_cursor: usize) -> AppState {
     let mut wizard = CreateWizard::new();
     wizard.set_clean_signals_available(clean_signals);
@@ -346,21 +348,13 @@ fn wizard_name_step_80x24() {
     ));
 }
 
-/// The architecture step with the clean-signals sibling ABSENT — the
-/// clean-signals card renders disabled-with-explanation.
+/// The architecture step: the clean-signals card is selectable (no sibling
+/// checkout gates it — `clean-signals` is git+rev-pinned to its public repo,
+/// task 05). One snapshot covers both `clean_signals` probe outcomes since
+/// neither changes the rendering — the former sibling-absent/-present pair
+/// collapsed into this single case when the gating was retired.
 #[test]
-fn wizard_arch_step_sibling_absent_80x24() {
-    insta::assert_snapshot!(render_to_string(
-        80,
-        24,
-        &wizard_state(WizardStep::Arch, "my_app", false, 1)
-    ));
-}
-
-/// The architecture step with the sibling PRESENT — the clean-signals card is
-/// selectable.
-#[test]
-fn wizard_arch_step_sibling_present_80x24() {
+fn wizard_arch_step_clean_signals_enabled_80x24() {
     insta::assert_snapshot!(render_to_string(
         80,
         24,
@@ -371,7 +365,11 @@ fn wizard_arch_step_sibling_present_80x24() {
 // ── Add plugin dialog (frust-secure-storage Phase 7) ─────────────────────────
 
 /// An Add Plugin dialog over a workbench, on `step`, with the sibling probe
-/// resolved to `sibling_available` and the given `cursor`.
+/// resolved to `sibling_available` and the given `cursor`. `sibling_available`
+/// is threaded through `set_sibling_available` for completeness, but no
+/// registry entry is sibling-gated today (`clean-signals-frust` was the sole
+/// `requires_sibling` user before `clean-signals` moved to a git+rev pin —
+/// task 05), so it has no visible effect.
 fn add_plugin_state(step: AddPluginStep, sibling_available: bool, cursor: usize) -> AppState {
     let mut dialog = AddPluginDialog::new(PathBuf::from("/tmp/huddle"));
     dialog.set_sibling_available(sibling_available);
@@ -382,10 +380,13 @@ fn add_plugin_state(step: AddPluginStep, sibling_available: bool, cursor: usize)
     state
 }
 
-/// The select step with the facade-tier (sibling-gated) plugin card disabled —
-/// it renders disabled-with-explanation.
+/// The select step: every registry card is selectable, including
+/// clean-signals-frust — no card is sibling-gated (see `add_plugin_state`'s
+/// doc). This snapshot replaces the former disabled-card case: that scenario
+/// can no longer occur since clean-signals-frust's registry entry dropped
+/// its sibling requirement.
 #[test]
-fn add_plugin_select_disabled_card_100x30() {
+fn add_plugin_select_step_100x30() {
     insta::assert_snapshot!(render_to_string(
         100,
         30,

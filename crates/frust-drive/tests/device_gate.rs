@@ -5,8 +5,8 @@
 //!
 //! Ignored by default: needs the OnePlus 9 (serial `53f887ac`) attached and a
 //! full Android toolchain (Android SDK/NDK, a JDK, `cargo-ndk`, the
-//! `aarch64-linux-android` target) plus the `../../examples/huddle` project
-//! and its `clean-signals-rs` sibling checkout. Run with:
+//! `aarch64-linux-android` target) plus the `../../examples/huddle` project.
+//! Run with:
 //!
 //! ```bash
 //! JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \

@@ -871,8 +871,8 @@ mod tests {
     }
 
     /// A scaffold context whose `frust_path` deliberately does NOT exist on
-    /// disk — so the derived clean-signals-rs sibling is absent (missing-sibling
-    /// error case) and no accidental real checkout is picked up.
+    /// disk — so a derived `../clean-signals-rs` sibling path is absent too,
+    /// and no accidental real checkout is picked up.
     fn test_context() -> TemplateContext {
         TemplateContext {
             project_name: "my_app".into(),
@@ -1370,30 +1370,29 @@ mod tests {
     }
 
     #[test]
-    fn missing_sibling_for_clean_signals_frust_errors() {
-        // test_context's frust_path is nonexistent, so the derived
-        // clean-signals-rs sibling is absent.
-        let root = scaffold_project("clean-signals-missing-sibling");
-        let err = add_plugin(&root, "clean-signals-frust", &[]).unwrap_err();
-        assert!(matches!(
-            err,
-            PluginAddError::SiblingCheckoutMissing { sibling, .. }
-                if sibling == "../clean-signals-rs"
-        ));
-        // The gate failed before any edit — the dep was not added.
+    fn clean_signals_frust_add_succeeds_without_sibling_checkout() {
+        // test_context's frust_path is nonexistent, so a `../clean-signals-rs`
+        // sibling derived from it is absent too — clean-signals-frust's
+        // registry entry no longer requires one (clean-signals is
+        // git+rev-pinned to its public repo; see `registry.rs`'s
+        // `CLEAN_SIGNALS_FRUST`), so this must still succeed.
+        let root = scaffold_project("clean-signals-no-sibling");
+        let report = add_plugin(&root, "clean-signals-frust", &[]).unwrap();
+        assert_eq!(report.items.len(), 1);
+        assert_eq!(report.items[0].outcome, AddOutcome::Applied);
         let cargo = fs::read_to_string(root.join(CARGO_TOML_REL)).unwrap();
-        assert!(!cargo.contains("clean-signals-frust = {"), "{cargo}");
+        assert!(cargo.contains("clean-signals-frust = {"), "{cargo}");
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn clean_signals_frust_adds_dep_when_sibling_present() {
-        let root = scaffold_project("clean-signals-present-sibling");
-        // Point `frust` at a real in-tree crate dir so `resolve_sibling`'s
-        // `..`-walk resolves on disk: repo root becomes `<root>/vendor`, and
-        // the sibling `../clean-signals-rs` lands at `<root>/clean-signals-rs`.
-        // Every intermediate directory must actually exist for a `..`-bearing
-        // path's `.exists()` to resolve on Unix.
+    fn clean_signals_frust_add_succeeds_with_stale_sibling_present() {
+        // Same as above, but with a leftover `../clean-signals-rs` directory
+        // actually present on disk (a dev machine that still has the
+        // pre-migration sibling checkout) — its presence or absence must
+        // make no difference now that the registry entry declares no
+        // `requires_sibling`.
+        let root = scaffold_project("clean-signals-stale-sibling");
         let cargo_path = root.join(CARGO_TOML_REL);
         let cargo = fs::read_to_string(&cargo_path).unwrap();
         let rewritten = cargo.replace(

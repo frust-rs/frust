@@ -178,7 +178,15 @@ fn apply_effect(
         Some(Effect::RefreshDevices) => spawn_device_discovery(tx.clone()),
         Some(Effect::LaunchSessions(specs)) => launch_sessions(specs, supervisor, tx),
         Some(Effect::RecordRecentProject(path)) => crate::engine::record_recent_project(&path),
-        Some(Effect::ProbeCleanSignals) => probe_clean_signals(tx.clone()),
+        Some(Effect::ProbeCleanSignals) => {
+            // Neither the create wizard's arch cards nor the Add Plugin
+            // dialog's registry cards are sibling-gated any longer —
+            // clean-signals moved to a git+rev pin (`docs/DEVELOPMENT.md`'s
+            // Version-Pin Policy), so there is no `../clean-signals-rs`
+            // checkout left to probe for. Reply immediately rather than
+            // touching disk for a check nothing acts on.
+            let _ = tx.send(Message::CleanSignalsProbed(true));
+        }
         Some(Effect::ScaffoldProject {
             directory,
             project_name,
@@ -543,17 +551,6 @@ fn session_state(id: SessionId, state: SessionState) -> Message {
     })
 }
 
-/// Probe (off the UI thread) whether the `../clean-signals-rs` sibling
-/// checkout — which the clean-signals arch variant path-deps into — is present
-/// next to this Frust checkout, posting the result back as
-/// [`Message::CleanSignalsProbed`] to gate the wizard's clean-signals card.
-fn probe_clean_signals(tx: UnboundedSender<Message>) {
-    tokio::task::spawn_blocking(move || {
-        let available = clean_signals_sibling().is_some_and(|p| p.is_dir());
-        let _ = tx.send(Message::CleanSignalsProbed(available));
-    });
-}
-
 /// Apply a registry plugin's contributions to `project_root` off the UI thread
 /// via [`frust_drive::plugin::add_plugin`] (format-preserving file edits, so
 /// cheap), posting [`Message::AddPluginSucceeded`] with the per-edit report, or
@@ -573,14 +570,6 @@ fn spawn_add_plugin(
         };
         let _ = tx.send(msg);
     });
-}
-
-/// The `../clean-signals-rs` sibling directory (next to this Frust checkout),
-/// derived from `frust-tui`'s compile-time manifest dir
-/// (`<repo>/crates/frust-tui`).
-fn clean_signals_sibling() -> Option<PathBuf> {
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent()?.parent()?;
-    Some(repo.parent()?.join("clean-signals-rs"))
 }
 
 /// Scaffold a new project off the UI thread via

@@ -2,8 +2,9 @@
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
-//! `clean-signals-frust` (dependency, gated on the sibling `clean-signals-rs`
-//! checkout), `camera` (dependency, an app-side plist key, the plugin's
+//! `clean-signals-frust` (dependency; `clean-signals` itself is git+rev-pinned
+//! to its public repo, so no sibling checkout is required), `camera`
+//! (dependency, an app-side plist key, the plugin's
 //! own Android library module, its own iOS Swift package — the first
 //! registry entry to use [`Contribution::SwiftPackageRef`] — and an app-crate
 //! export shim a device gate proved necessary, see this module's `CAMERA_BASE`
@@ -76,14 +77,13 @@ const SECURE_STORAGE: PluginSpec = PluginSpec {
 
 const CLEAN_SIGNALS_FRUST: PluginSpec = PluginSpec {
     id: "clean-signals-frust",
-    summary: "Clean-architecture facade binding the clean-signals core to frust \
-              (needs the clean-signals-rs sibling checkout).",
+    summary: "Clean-architecture facade binding the clean-signals core to frust.",
     crate_dir: "clean-signals-frust",
     base: &[Contribution::CargoDep {
         name: "clean-signals-frust",
     }],
     optional_features: &[],
-    requires_sibling: Some("../clean-signals-rs"),
+    requires_sibling: None,
 };
 
 /// `camera`'s base contributions, unwidened since first landing. No optional
@@ -401,9 +401,11 @@ mod tests {
     }
 
     #[test]
-    fn clean_signals_frust_declares_its_sibling_requirement() {
+    fn clean_signals_frust_declares_no_sibling_requirement() {
+        // clean-signals is git+rev-pinned to its public repo (task 05); the
+        // plugin no longer needs a `../clean-signals-rs` sibling checkout.
         let spec = find_plugin("clean-signals-frust").unwrap();
-        assert_eq!(spec.requires_sibling, Some("../clean-signals-rs"));
+        assert_eq!(spec.requires_sibling, None);
     }
 
     #[test]

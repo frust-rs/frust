@@ -97,8 +97,10 @@ cargo build --workspace --locked \
   && cargo fmt --check
 ```
 
-When `../clean-signals-rs` exists at the required branch, also run the Huddle
-and clean-signals-frust gates from their standalone workspace roots:
+Also run the Huddle and clean-signals-frust gates from their standalone
+workspace roots — unconditional, since `clean-signals` is git+rev-pinned to
+its public repo rather than a `../clean-signals-rs` sibling checkout (see
+`docs/DEVELOPMENT.md`'s Version-Pin Policy):
 
 ```bash
 (cd examples/huddle && cargo test) \
@@ -107,8 +109,8 @@ and clean-signals-frust gates from their standalone workspace roots:
   && (cd plugins/clean-signals-frust && cargo clippy --all-targets -- -D warnings)
 ```
 
-If the sibling checkout is absent, record that these conditional gates were not
-run. Do not silently treat the root workspace as coverage for them.
+Do not silently treat the root workspace as coverage for these — each is a
+standalone workspace excluded from it.
 
 The experimental CPU render tier is outside the default feature set:
 

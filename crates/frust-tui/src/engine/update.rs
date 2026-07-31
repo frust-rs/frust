@@ -39,10 +39,15 @@ pub enum Effect {
     /// format-preserving save to `~/.config/frust/tui.toml`) — the runner
     /// performs the actual file I/O; the pure engine only requests it.
     RecordRecentProject(PathBuf),
-    /// Probe (off-thread) whether the `../clean-signals-rs` sibling checkout
-    /// is present, posting the result back as
-    /// [`Message::CleanSignalsProbed`] — gates the create wizard's
-    /// clean-signals arch card.
+    /// Historically probed (off-thread) whether the `../clean-signals-rs`
+    /// sibling checkout was present, posting the result back as
+    /// [`Message::CleanSignalsProbed`] to gate the create wizard's
+    /// clean-signals arch card / the Add Plugin dialog's facade-tier cards.
+    /// `clean-signals` is now git+rev-pinned to its public repo, so no card
+    /// is sibling-gated any more and the runner replies immediately with
+    /// `true` rather than touching disk — kept as the priming effect fired
+    /// on opening either the wizard or the dialog, and as the generic
+    /// mechanism a future sibling-dependent registry entry would reuse.
     ProbeCleanSignals,
     /// Scaffold a new project off-thread via `frust_drive::scaffold::generate`,
     /// posting [`Message::ScaffoldSucceeded`]/[`Message::ScaffoldFailed`] back.
@@ -1998,19 +2003,26 @@ mod tests {
     }
 
     #[test]
-    fn probe_result_gates_the_clean_signals_card_through_update() {
+    fn probe_result_is_a_harmless_no_op_for_the_clean_signals_card() {
+        // clean-signals is git+rev-pinned to its public repo (task 05), so
+        // the card starts enabled and stays enabled regardless of the probe
+        // result — the probe still fires (`Effect::ProbeCleanSignals`) but
+        // no card depends on its outcome today.
         let mut st = welcome();
         update(&mut st, Message::OpenCreateWizard);
+        let clean = |st: &AppState| {
+            st.create_wizard
+                .as_ref()
+                .unwrap()
+                .arches
+                .iter()
+                .find(|c| c.tag.as_deref() == Some("clean-signals"))
+                .unwrap()
+                .enabled
+        };
+        assert!(clean(&st));
         update(&mut st, Message::CleanSignalsProbed(true));
-        let clean = st
-            .create_wizard
-            .as_ref()
-            .unwrap()
-            .arches
-            .iter()
-            .find(|c| c.tag.as_deref() == Some("clean-signals"))
-            .unwrap();
-        assert!(clean.enabled);
+        assert!(clean(&st));
         // A probe that arrives after the wizard closed is a harmless no-op.
         update(&mut st, Message::CloseCreateWizard);
         assert!(!update(&mut st, Message::CleanSignalsProbed(false)).redraw);
@@ -2144,19 +2156,18 @@ mod tests {
     }
 
     #[test]
-    fn add_plugin_probe_gates_the_sibling_card_through_update() {
+    fn add_plugin_probe_is_a_harmless_no_op_with_no_sibling_gated_entries() {
+        // clean-signals-frust was the sole `requires_sibling` registry user
+        // before clean-signals moved to a git+rev pin (task 05); no entry is
+        // sibling-gated today, so every card starts (and stays) enabled
+        // regardless of the probe result.
         let mut st = workbench_with_project();
         update(&mut st, Message::OpenAddPlugin);
+        let entries = &st.add_plugin.as_ref().unwrap().entries;
+        assert!(entries.iter().all(|e| !e.sibling_gated && e.enabled));
         update(&mut st, Message::CleanSignalsProbed(true));
-        let gated = st
-            .add_plugin
-            .as_ref()
-            .unwrap()
-            .entries
-            .iter()
-            .find(|e| e.sibling_gated)
-            .unwrap();
-        assert!(gated.enabled);
+        let entries = &st.add_plugin.as_ref().unwrap().entries;
+        assert!(entries.iter().all(|e| !e.sibling_gated && e.enabled));
     }
 
     #[test]
