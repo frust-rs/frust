@@ -31,6 +31,113 @@ use crate::tree::{WidgetPod, WidgetTree};
 use crate::view::{BuildCtx, ChangeFlags, View, WidgetId};
 use crate::widget::{LayoutCtx, PaintCtx, PaintOutcome, PaintScene, PlatformViewFrame};
 
+/// The window's shape and platform-occlusion state, delivered to app code as a
+/// plain [`provide_context`](reactive_graph::owner::provide_context)-carried
+/// value — logical size, device-pixel scale, a
+/// [derived](Orientation::from_size) orientation, and the current
+/// [`WindowInsets`].
+///
+/// # Plain value, not a signal
+///
+/// `WindowMetrics` is delivered exactly like `Theme` and [`WindowInsets`]
+/// already are: a shell calls `provide_context` with a freshly-built value on
+/// change, and app code recovers it with `use_context::<WindowMetrics>()`
+/// inside `Component::build`. It is **not** an `RwSignal` — only `deep_link`
+/// and `back` are true signals in `frust-reactive`; every other host-signal
+/// carrier (theme, insets, and now this) is a re-provided plain value.
+///
+/// # Alongside `WindowInsets`, not superseding it
+///
+/// `WindowInsets` already reaches `Component::build` on Android and iOS today
+/// (each shell's `push_insets` calls `provide_context(insets)` independently
+/// of anything here — desktop has no such arm for either value yet).
+/// `WindowMetrics` is additive: a shell that starts providing it keeps
+/// providing the standalone `WindowInsets` context too, so an existing
+/// `use_context::<WindowInsets>()` call site never breaks. `insets` on this
+/// type is a **copy** of that same value for convenience (a widget laying
+/// itself out around window shape wants size/scale/orientation/insets
+/// together), not a replacement for the independent context.
+///
+/// # Orientation is derived, not platform-sourced
+///
+/// No platform callback in either mobile shell carries an orientation enum —
+/// Android's `nativeOnSurfaceChanged` and iOS's `frust_resize` each hand the
+/// shell only a `(width, height, scale)` triple. [`Orientation`] is therefore
+/// always computed from `size` via [`Orientation::from_size`]
+/// (portrait when `height >= width`, so an exact square reads as portrait);
+/// it never tracks a device orientation-lock setting or a platform rotation
+/// event directly.
+///
+/// # Rebuild cost
+///
+/// A tracked read of a `use_context` value inside `Component::build` (or the
+/// root `app_logic`) subscribes the enclosing `TrackedScope`; a later
+/// `provide_context` of a changed `WindowMetrics` does not itself mark
+/// anything dirty by writing through a signal — a shell must instead
+/// re-provide it under the app's tracked scope so the read/write pair
+/// participates in the normal dirty-and-wake path. There is no
+/// per-component rebuild skipping in this framework (a component always
+/// re-runs `build` on any rebuild), so any metrics change rebuilds the
+/// **whole** app, not just the widget that reads it. This is acceptable only
+/// because builds are cheap by construction — a shell wiring this up (see
+/// `docs/SHELLS_ARCHITECTURE.md`) must re-provide `WindowMetrics` only on an
+/// actual change (mirroring `RenderRoot::set_insets`'s `PartialEq`-guarded
+/// no-op), never unconditionally once per frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowMetrics {
+    /// The window's logical (density-independent) size.
+    pub size: Size,
+    /// The device-pixel scale factor (logical → physical px multiplier).
+    pub scale: f64,
+    /// The orientation derived from `size` — see the type's doc for why this
+    /// is computed, never platform-sourced.
+    pub orientation: Orientation,
+    /// A copy of the window's current insets — see the type's doc for why
+    /// this does not replace the standalone `WindowInsets` context.
+    pub insets: WindowInsets,
+}
+
+impl WindowMetrics {
+    /// Construct a [`WindowMetrics`] from its transported fields, deriving
+    /// [`orientation`](Self::orientation) from `size` rather than accepting it
+    /// as an input — see the type's doc for why orientation is never
+    /// platform-sourced.
+    pub fn new(size: Size, scale: f64, insets: WindowInsets) -> Self {
+        Self {
+            size,
+            scale,
+            orientation: Orientation::from_size(size),
+            insets,
+        }
+    }
+}
+
+/// A window's derived portrait/landscape orientation.
+///
+/// Always computed from a [`WindowMetrics::size`] via [`Orientation::from_size`]
+/// — see [`WindowMetrics`]'s doc for why no platform callback carries this as
+/// an enum directly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Orientation {
+    /// `size.height >= size.width`, including the exact-square case.
+    Portrait,
+    /// `size.height < size.width`.
+    Landscape,
+}
+
+impl Orientation {
+    /// Derives orientation from a logical window size: portrait when
+    /// `height >= width` (an exact square reads as portrait), landscape
+    /// otherwise.
+    pub fn from_size(size: Size) -> Self {
+        if size.height >= size.width {
+            Orientation::Portrait
+        } else {
+            Orientation::Landscape
+        }
+    }
+}
+
 /// Owns the retained tree and drives the rebuild/layout/paint passes for a
 /// single-root application.
 ///
@@ -2580,5 +2687,48 @@ mod tests {
         root.set_theme(Box::new(0u32));
         assert!(root.semantics_generation() > generation);
         assert!(root.semantics_if_changed(generation).is_some());
+    }
+
+    #[test]
+    fn orientation_from_size_is_portrait_when_taller_than_wide() {
+        assert_eq!(
+            Orientation::from_size(Size::new(400.0, 800.0)),
+            Orientation::Portrait
+        );
+    }
+
+    #[test]
+    fn orientation_from_size_is_landscape_when_wider_than_tall() {
+        assert_eq!(
+            Orientation::from_size(Size::new(800.0, 400.0)),
+            Orientation::Landscape
+        );
+    }
+
+    #[test]
+    fn orientation_from_size_square_reads_as_portrait() {
+        // Height >= width is the derivation rule (see `Orientation::from_size`'s
+        // doc); an exact square satisfies `>=` and must not panic/ambiguously
+        // resolve, so this is pinned explicitly rather than left implicit.
+        assert_eq!(
+            Orientation::from_size(Size::new(500.0, 500.0)),
+            Orientation::Portrait
+        );
+    }
+
+    #[test]
+    fn window_metrics_new_derives_orientation_from_size() {
+        let insets = WindowInsets::default();
+        let portrait = WindowMetrics::new(Size::new(390.0, 844.0), 3.0, insets);
+        assert_eq!(portrait.orientation, Orientation::Portrait);
+        assert_eq!(portrait.size, Size::new(390.0, 844.0));
+        assert_eq!(portrait.scale, 3.0);
+        assert_eq!(portrait.insets, insets);
+
+        let landscape = WindowMetrics::new(Size::new(844.0, 390.0), 3.0, insets);
+        assert_eq!(landscape.orientation, Orientation::Landscape);
+
+        let square = WindowMetrics::new(Size::new(500.0, 500.0), 2.0, insets);
+        assert_eq!(square.orientation, Orientation::Portrait);
     }
 }
