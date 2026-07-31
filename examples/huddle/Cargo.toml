@@ -35,21 +35,24 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # code names `frust-core`/`kurbo`/`peniko` directly any more.
 frust = { path = "../../crates/frust" }
 
-# clean-signals (the async/use-case/controller/retry substrate) stays a path
-# dependency to the sibling `clean-signals-rs` checkout; its Frust glue now
-# lives in-repo as `plugins/clean-signals-frust` (repointed from the sibling
-# checkout's pre-migration glue crate). Both this crate and the
-# in-repo glue plugin resolve `clean-signals` by the SAME canonical sibling
-# path — a hard requirement, not a convenience. If `clean-signals` came in by
-# `git`+`rev` while the glue plugin resolved `clean-signals` by path, Cargo
-# would build TWO distinct crate identities for `clean-signals`, and the
-# controller's `AsyncState`/`ControllerCore`/`Failure` types would NOT unify
-# with the glue crate's `use_controller`/`async_view`/`use_failure_listener`
-# bounds (type-identity rule — see docs/DEVELOPMENT.md's Version-Pin Policy).
-# Requires the sibling checkout at `../../../clean-signals-rs` (i.e. next to
-# `../frust`) on its `develop` branch. Swap both to a git+rev spec together,
-# never one at a time, once clean-signals gains a remote.
-clean-signals = { path = "../../../clean-signals-rs/crates/clean-signals" }
+# clean-signals (the async/use-case/controller/retry substrate) is
+# git+rev-pinned to the public repo rather than the sibling `clean-signals-rs`
+# checkout, so a scaffolded `--arch clean-signals` project builds on any
+# machine with no local checkout required. Both this crate and the in-repo
+# glue plugin (`plugins/clean-signals-frust`) MUST resolve `clean-signals` by
+# the identical `git`+`rev` spec — a hard requirement, not a convenience: two
+# different resolution routes (e.g. one git, one path) would build TWO
+# distinct crate identities for `clean-signals`, and the controller's
+# `AsyncState`/`ControllerCore`/`Failure` types would NOT unify with the glue
+# crate's `use_controller`/`async_view`/`use_failure_listener` bounds
+# (type-identity rule — see docs/DEVELOPMENT.md's Version-Pin Policy). Package
+# `clean-signals` is a workspace member on `master`, so the git dep resolves
+# it by name with no subdirectory needed. Never enable the `effects` feature
+# (`clean-signals`'s own gate onto `reactive_graph/effects`) — the frame path
+# is a custom subscriber, not `RenderEffect` (same rule as the workspace's own
+# `reactive_graph` pin). Bump the `rev` and this comment's rationale together,
+# never silently.
+clean-signals = { git = "https://github.com/f0x-it-llc/clean-signals-rs", rev = "910f626" }
 clean-signals-frust = { path = "../../plugins/clean-signals-frust" }
 
 # `log` facade dependency, present only so the release-only `lean` feature

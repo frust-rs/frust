@@ -12,8 +12,8 @@
 # migrated into this repo, renamed and adopted from the sibling
 # `clean-signals-rs` checkout's pre-migration Frust glue crate. `frust*` deps
 # below resolve in-repo (this plugin lives inside the `frust` checkout,
-# unlike huddle's example); only `clean-signals` stays a sibling-checkout
-# path dep, matching huddle's own `clean-signals` path so the two resolve
+# unlike huddle's example); `clean-signals` is git+rev-pinned to the public
+# repo, matching huddle's own `clean-signals` spec exactly so the two resolve
 # the identical crate identity (type-identity rule — see
 # docs/DEVELOPMENT.md's Version-Pin Policy).
 [workspace]
@@ -28,11 +28,11 @@ description = "Frust integration for clean-signals: component-scoped controllers
 publish = false
 
 [dependencies]
-# Sibling checkout path — same canonical path huddle's own `clean-signals`
-# dependency resolves (`../../../clean-signals-rs/crates/clean-signals`
-# relative to this plugin, i.e. next to the `frust` checkout), so both
-# consumers build one `clean-signals` crate identity (type-identity rule).
-clean-signals = { path = "../../../clean-signals-rs/crates/clean-signals" }
+# git+rev pin to the public repo — the identical spec huddle's own
+# `clean-signals` dependency uses, so both consumers build one `clean-signals`
+# crate identity (type-identity rule). Never enable the `effects` feature
+# (see docs/DEVELOPMENT.md's Version-Pin Policy).
+clean-signals = { git = "https://github.com/f0x-it-llc/clean-signals-rs", rev = "910f626" }
 # In-repo path: this plugin lives inside the `frust` checkout itself
 # (`plugins/clean-signals-frust`), so `frust` collapses to a relative
 # in-repo path rather than the sibling-checkout path the pre-migration
@@ -46,7 +46,7 @@ frust = { path = "../../crates/frust" }
 # per CODE_STANDARDS). kurbo/peniko are pinned to Frust's rendering-stack
 # versions so the geometry/color types unify.
 [dev-dependencies]
-clean-signals = { path = "../../../clean-signals-rs/crates/clean-signals", features = ["test-fixtures"] }
+clean-signals = { git = "https://github.com/f0x-it-llc/clean-signals-rs", rev = "910f626", features = ["test-fixtures"] }
 frust-core = { path = "../../crates/frust-core" }
 frust-reactive = { path = "../../crates/frust-reactive" }
 frust-scene = { path = "../../crates/frust-scene" }

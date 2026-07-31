@@ -54,8 +54,8 @@ use frust_shell_common::resample::{self, PointerResampler, RawPointerSample};
 use frust_shell_common::{
     AppTree, FrameGate, FrameInputs, FrameMeta, FramePacing, PlatformViewState, RenderCommand,
     RenderSender, SceneFrame, SceneReturnReceiver, SurfaceSize, ThemeOverrideWatcher,
-    default_theme, effective_brightness_for_platform_change, logical_insets, logical_size,
-    publish_resolved_surface_mode, sanitize_scale,
+    WindowMetricsPublisher, default_theme, effective_brightness_for_platform_change,
+    logical_insets, logical_size, publish_resolved_surface_mode, sanitize_scale,
 };
 use frust_text::TextContext;
 use frust_theme::{Brightness, Theme};
@@ -158,12 +158,37 @@ pub struct IosAppHandle {
     /// *while* an override was active (during which `self.theme.brightness`
     /// itself does not move — see `effective_brightness_for_platform_change`).
     platform_brightness: Brightness,
+    /// The platform's last-reported reduced-motion preference
+    /// (`UIAccessibility.isReduceMotionEnabled`, delivered by
+    /// `frust_set_reduce_motion` → [`Self::set_reduce_motion`]), tracked
+    /// independently of `self.theme.motion.reduce_motion` for the same reason
+    /// [`Self::platform_brightness`] is: a theme swap replaces the token and
+    /// this latch is what re-raises the floor over the new theme. Starts
+    /// `false` (no OS report yet — Swift pushes the real value right after
+    /// `frust_init`, alongside `frust_set_appearance`).
+    os_reduce_motion: bool,
+    /// The **active theme's own** `motion.reduce_motion` token, captured every
+    /// time a whole `Theme` is installed ([`Self::new`]'s seed and the
+    /// override-poll arm in [`Self::frame`]). Paired with
+    /// [`Self::os_reduce_motion`] through [`effective_reduce_motion`] so the
+    /// OS report is a floor over the authored value rather than a replacement
+    /// of it — without this, turning the OS setting back off would have to
+    /// guess what the theme originally asked for.
+    authored_reduce_motion: bool,
     /// The last window insets pushed to the render root, in logical px. Retained
     /// so [`Self::set_insets`] skips a no-op push
     /// (`WindowInsets` is `PartialEq`) — both the relayout and the app-side
     /// `provide_context` re-provide only fire on a real change. Starts zero until
     /// Swift's first `frust_set_insets` (safe-area / keyboard-frame report).
     insets: WindowInsets,
+    /// Change detector for the app-facing [`WindowMetrics`](frust_core::WindowMetrics)
+    /// context: seeded before the first rebuild in [`Self::new`] and re-polled
+    /// from every entry point where one of its inputs actually moves
+    /// ([`Self::resize`]/[`Self::set_surface`], and [`Self::set_insets`]) —
+    /// never from [`Self::frame`], which only reads values those entry points
+    /// stored. See [`Self::push_window_metrics`] for why the guard is
+    /// load-bearing.
+    window_metrics: WindowMetricsPublisher,
     /// The accesskit adapter, attached lazily by `frust_init_accessibility`
     /// once Swift has a `FrustView` (UIView) to hand over.
     /// `None` until then — `frust_init` only receives the `CAMetalLayer`, which
@@ -200,7 +225,8 @@ pub struct IosAppHandle {
     /// tick. Latched beside `last_needs_frame`; a skipped frame leaves it.
     last_needs_frame_paced_only: bool,
     /// Handle-side latch feeding [`FrameInputs::theme_or_appearance_changed`]:
-    /// set by [`Self::set_appearance`] on an OS-driven light/dark flip, taken
+    /// set by [`Self::set_appearance`] on an OS-driven light/dark flip and by
+    /// [`Self::set_reduce_motion`] on a reduced-motion toggle, taken
     /// only past the pause/ready gate (like the signals-dirty drain) so a flip
     /// while backgrounded is observed by the first frame after resume.
     /// `push_theme`'s LAYOUT|PAINT change flags carry correctness either way;
@@ -1082,6 +1108,28 @@ fn follow_platform_brightness(theme: &mut Theme, override_active: bool, platform
         effective_brightness_for_platform_change(override_active, theme.brightness, platform);
 }
 
+/// The reduced-motion **floor** rule: the OS's accessibility preference
+/// (`UIAccessibility.isReduceMotionEnabled`, reported through
+/// `frust_set_reduce_motion`) is OR'd over the active theme's own authored
+/// `motion.reduce_motion` token — never assigned over it.
+///
+/// Why a floor rather than the brightness rule's override-wins ladder
+/// ([`follow_platform_brightness`]): reduced motion is an accessibility
+/// *guarantee*, not a style preference, so a live OS toggle must reach a theme
+/// an app forced with `set_app_theme` (a catalog's design-language switcher,
+/// say) instead of being pinned out of it. Symmetrically, an app that
+/// deliberately authored `reduce_motion: true` keeps it while the OS setting is
+/// off — neither side can un-reduce what the other asked for, which is the one
+/// direction it is never safe to get wrong.
+///
+/// Deliberately NOT one of the ladder helpers pinned byte-identical across all
+/// three shells by `crates/frust/tests/theme_ladder_conformance.rs`: desktop
+/// has no reduced-motion source at all (see `MotionScheme::reduce_motion`), so
+/// only the two mobile shells carry this.
+fn effective_reduce_motion(authored: bool, os: bool) -> bool {
+    authored || os
+}
+
 /// Map one differ [`ViewCommand`] onto the host-testable
 /// [`crate::ffi_support::PlatformViewCommand`] shape, converting its logical,
 /// absolute-window rect/clip into physical px (`* scale`) — the one place
@@ -1203,6 +1251,10 @@ impl IosAppHandle {
         // construction-time drain above applies — the shell itself bundles no
         // fonts.
         let theme = base_theme(default_theme());
+        // The base's own reduced-motion token, kept so a later OS report (or a
+        // later theme swap) can re-derive the effective value instead of
+        // guessing what the theme asked for — see `authored_reduce_motion`.
+        let authored_reduce_motion = theme.motion.reduce_motion;
 
         app.set_theme(Box::new(theme.clone()));
         // Thread the surface's RESOLVED translucency into the render root so
@@ -1221,6 +1273,19 @@ impl IosAppHandle {
         // `Unknown`. Re-published every frame by `sync_translucent_resolved`.
         publish_resolved_surface_mode(resolved_translucent);
         provide_context(theme.clone());
+        // Seed the app-facing window-shape context beside the theme, so an
+        // `app_logic`/`Component::build` calling `use_context::<WindowMetrics>()`
+        // during the very first rebuild below resolves a real value rather than
+        // `None`. Insets start at zero here — Swift's first `frust_set_insets`
+        // arrives after `frust_init` and re-polls this publisher (see
+        // `set_insets`). No `ReactiveRuntime::get()` wrap: like the theme seed
+        // above, this runs nested inside `create_handle`'s `with_owner`.
+        let mut window_metrics = WindowMetricsPublisher::new();
+        if let Some(metrics) =
+            window_metrics.poll(physical, sanitize_scale(scale), WindowInsets::default())
+        {
+            provide_context(metrics);
+        }
         app.rebuild();
         let mut executor = executor;
         executor.record_first_rebuild();
@@ -1254,7 +1319,15 @@ impl IosAppHandle {
             theme_override: ThemeOverrideWatcher::new(),
             theme_override_active: false,
             platform_brightness: Brightness::Light,
+            // No OS reduced-motion report yet (Swift pushes one right after
+            // `frust_init`, beside `frust_set_appearance`), so the seeded
+            // base's own token IS the effective value — `effective_reduce_motion`
+            // against a `false` OS latch is the identity, which is why the seed
+            // above needs no fix-up.
+            os_reduce_motion: false,
+            authored_reduce_motion,
             insets: WindowInsets::default(),
+            window_metrics,
             // Attached later, on the first layout, via `frust_init_accessibility`
             // once Swift can supply the UIView (see the field doc).
             a11y: None,
@@ -1357,6 +1430,44 @@ impl IosAppHandle {
         self.appearance_dirty = true;
     }
 
+    /// `frust_set_reduce_motion`: apply the platform's reduced-motion
+    /// accessibility preference to the active theme's `MotionScheme` and
+    /// re-push it to both delivery paths — the reduced-motion twin of
+    /// [`Self::set_appearance`], travelling the identical transport (a C-ABI
+    /// entry → a `Theme` edit → [`Self::push_theme`]) over a different sensor.
+    ///
+    /// `reduce` is Swift's `UIAccessibility.isReduceMotionEnabled` read; it is
+    /// not a `UITraitCollection` trait, so Swift sources it from
+    /// `UIAccessibility.reduceMotionStatusDidChangeNotification` (plus a
+    /// re-read on foreground) rather than `traitCollectionDidChange`.
+    ///
+    /// The OS value is a floor over the theme's own authored token, not a
+    /// replacement ([`effective_reduce_motion`]) — including while an app-forced
+    /// override is active, unlike the brightness path's override-wins rule
+    /// (that helper's doc has the reasoning). No explicit redraw is scheduled:
+    /// the continuous `CADisplayLink` loop already repaints every tick, and
+    /// `appearance_dirty` keeps the frame gate from skipping the tick that
+    /// carries the change (and survives a toggle made while backgrounded — the
+    /// latch is only taken past the pause/ready gate).
+    ///
+    /// Unchanged-value calls return early, unlike [`Self::set_appearance`]:
+    /// Swift re-pushes this on every foreground (and the notification can fire
+    /// more than once per real change), where a config-change-driven appearance
+    /// push is rare — without the guard every resume would pay a `push_theme`'s
+    /// forced relayout for nothing. Sound because `os_reduce_motion` is the
+    /// only writer of the token outside a whole-`Theme` install, and that
+    /// install re-applies the floor itself.
+    pub(crate) fn set_reduce_motion(&mut self, reduce: bool) {
+        if self.os_reduce_motion == reduce {
+            return;
+        }
+        self.os_reduce_motion = reduce;
+        self.theme.motion.reduce_motion =
+            effective_reduce_motion(self.authored_reduce_motion, reduce);
+        self.push_theme();
+        self.appearance_dirty = true;
+    }
+
     /// Push the current [`Self::theme`] to both delivery paths — boxed
     /// type-erased into the render root ([`AppTree::set_theme`]) and
     /// re-`provide_context`ed under the process-wide root
@@ -1400,6 +1511,9 @@ impl IosAppHandle {
         }
         self.insets = insets;
         self.push_insets(insets);
+        // The composite window-shape context carries a copy of these insets, so
+        // an insets change is also a metrics change (self-guarded).
+        self.push_window_metrics();
     }
 
     /// Push the current [`WindowInsets`] to both delivery paths — into the render
@@ -1412,6 +1526,44 @@ impl IosAppHandle {
         match ReactiveRuntime::get() {
             Some(rt) => rt.with_owner(|| provide_context(insets)),
             None => provide_context(insets),
+        }
+    }
+
+    /// Re-`provide_context` the window's [`WindowMetrics`](frust_core::WindowMetrics)
+    /// for app-side `use_context::<WindowMetrics>()` reads — **only when it
+    /// actually changed** ([`WindowMetricsPublisher::poll`] returns `None`
+    /// otherwise).
+    ///
+    /// Mirrors [`Self::push_insets`]/[`Self::push_theme`]'s re-provide shape,
+    /// with two deliberate differences:
+    ///
+    /// - **Guarded, never per-frame.** `WindowMetrics` is delivered *alongside*
+    ///   the standalone `WindowInsets` context (which keeps working untouched),
+    ///   not through it, and it is not pushed into the render root at all — so
+    ///   nothing else rate-limits it. `provide_context` is a plain map insert
+    ///   that notifies nothing, but an unconditional per-frame re-provide would
+    ///   still pay a lock write plus an allocation every frame across the FFI
+    ///   boundary for no observable benefit. The publisher's change detection
+    ///   is what keeps a static window quiet.
+    /// - **Called from the entry points where the inputs move**, not from
+    ///   [`Self::frame`]: `frust_resize` → [`Self::resize`] /
+    ///   [`Self::set_surface`] (drawable size + scale) and `frust_set_insets` →
+    ///   [`Self::set_insets`] (safe area / keyboard). `frame` only reads what
+    ///   those already stored.
+    ///
+    /// Units: the size is converted from the drawable's physical px with the
+    /// same `sanitize_scale`d display scale layout uses, and `self.insets` is
+    /// already logical (UIKit hands over points, which
+    /// [`Self::set_insets`] passes through `logical_insets(.., 1.0)`) — so the
+    /// published metrics are logical throughout, matching Android and desktop.
+    fn push_window_metrics(&mut self) {
+        let scale = sanitize_scale(self.scale);
+        let Some(metrics) = self.window_metrics.poll(self.physical, scale, self.insets) else {
+            return; // unchanged — no re-provide, no app-wide rebuild
+        };
+        match ReactiveRuntime::get() {
+            Some(rt) => rt.with_owner(|| provide_context(metrics)),
+            None => provide_context(metrics),
         }
     }
 
@@ -1548,6 +1700,9 @@ impl IosAppHandle {
         // ticks against the fresh surface must run even before their change
         // signals are observable.
         self.frame_gate.note_resumed();
+        // The recreate may land at new dimensions/scale — republish the
+        // window-shape context (self-guarded, so a same-size recreate is silent).
+        self.push_window_metrics();
         // The recreated surface re-resolved its alpha mode from scratch (review
         // M1) — on this (inline) path the renderer on this thread already holds
         // it, so a recreate that fell back to opaque degrades to Mode A right
@@ -1580,6 +1735,11 @@ impl IosAppHandle {
         // resume-warmup so the next frames re-layout/paint at the new size even
         // if no other change signal fires.
         self.frame_gate.note_resumed();
+        // New logical size and/or scale: republish the window-shape context —
+        // this is the path a device rotation takes, so it is what flips the
+        // derived `Orientation` for app code (self-guarded, so a `frust_resize`
+        // re-reporting identical dimensions publishes nothing).
+        self.push_window_metrics();
     }
 
     /// Mark the app paused (`frust_pause`): subsequent `frame()`s are no-ops.
@@ -1838,11 +1998,19 @@ impl IosAppHandle {
         // process-global slot.
         let mut theme_or_appearance_changed = false;
         let platform_brightness = self.platform_brightness;
-        if let Some((theme, override_active)) =
+        if let Some((mut theme, override_active)) =
             theme_after_override_poll(self.theme_override.poll(), default_theme, || {
                 platform_brightness
             })
         {
+            // A whole-`Theme` swap re-bases the reduced-motion floor: the
+            // incoming theme carries its own authored token, so record that and
+            // re-apply the OS report over it. Without this, a `set_app_theme`/
+            // `clear_app_theme` would silently un-reduce motion while the
+            // platform setting is still on (`effective_reduce_motion`).
+            self.authored_reduce_motion = theme.motion.reduce_motion;
+            theme.motion.reduce_motion =
+                effective_reduce_motion(self.authored_reduce_motion, self.os_reduce_motion);
             self.theme = theme;
             self.theme_override_active = override_active;
             self.push_theme();
@@ -2265,7 +2433,9 @@ impl IosAppHandle {
 /// identical to the desktop copies the twin tests exercise.
 #[cfg(test)]
 mod tests {
-    use super::{base_theme, follow_platform_brightness, theme_after_override_poll};
+    use super::{
+        base_theme, effective_reduce_motion, follow_platform_brightness, theme_after_override_poll,
+    };
     use frust_theme::{Brightness, Theme};
 
     // Every assertion below drives the SAME ladder helpers the production seed
@@ -2383,5 +2553,40 @@ mod tests {
             || panic!("an unchanged poll must not read the platform brightness"),
         );
         assert_eq!(decided, None);
+    }
+
+    // --- the reduced-motion floor (`frust_set_reduce_motion`) ---------------
+
+    #[test]
+    fn the_os_reduced_motion_report_raises_and_lowers_an_unreduced_theme() {
+        // The ordinary case: every shipped baseline authors `false`, so the
+        // effective value tracks the OS setting in both directions.
+        assert!(effective_reduce_motion(false, true));
+        assert!(!effective_reduce_motion(false, false));
+    }
+
+    #[test]
+    fn a_theme_authored_reduced_stays_reduced_while_the_os_setting_is_off() {
+        // The floor's whole point: the OS report may only ever ADD reduction.
+        // A theme built with `reduce_motion: true` (a `ThemeBuilder::map_motion`
+        // app choice) must not be un-reduced by a device that has the setting
+        // off.
+        assert!(effective_reduce_motion(true, false));
+        assert!(effective_reduce_motion(true, true));
+    }
+
+    #[test]
+    fn the_floor_applies_to_an_app_forced_override_too() {
+        // Unlike brightness, an active `set_app_theme` override does NOT pin
+        // this: the frame arm re-bases `authored_reduce_motion` from the
+        // incoming theme and re-applies the OS report over it, so a live
+        // accessibility toggle still reaches a catalog app that forced its own
+        // theme. This asserts the composition that arm performs.
+        let forced = Theme::cupertino_baseline();
+        let authored = forced.motion.reduce_motion;
+        assert!(!authored, "the shipped Cupertino baseline authors `false`");
+        let mut active = forced;
+        active.motion.reduce_motion = effective_reduce_motion(authored, true);
+        assert!(active.motion.reduce_motion);
     }
 }

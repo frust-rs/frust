@@ -42,8 +42,8 @@ use frust_shell_common::resample::{self, PointerResampler, RawPointerSample};
 use frust_shell_common::{
     AppTree, FrameGate, FrameInputs, FrameMeta, FramePacing, PlatformViewState, RenderCommand,
     RenderSender, SceneFrame, SceneReturnReceiver, SurfaceSize, ThemeOverrideWatcher, ViewCommand,
-    default_theme, effective_brightness_for_platform_change, logical_insets, logical_size,
-    publish_resolved_surface_mode, sanitize_scale,
+    WindowMetricsPublisher, default_theme, effective_brightness_for_platform_change,
+    logical_insets, logical_size, publish_resolved_surface_mode, sanitize_scale,
 };
 use frust_text::TextContext;
 use frust_theme::{Brightness, Theme};
@@ -119,6 +119,14 @@ pub struct AndroidAppHandle {
     /// and the app-side `provide_context` re-provide only fire on a real change.
     /// Starts zero (no occlusion) until Kotlin's first `nativeOnInsetsChanged`.
     insets: WindowInsets,
+    /// Change detector for the app-facing [`WindowMetrics`](frust_core::WindowMetrics)
+    /// context: seeded before the first rebuild in [`Self::new`] and re-polled
+    /// from every entry point where one of its inputs actually moves
+    /// ([`Self::set_window`]/[`Self::split_recreate_surface`]/
+    /// [`Self::resize_surface`], and [`Self::set_insets`]) — never from
+    /// [`Self::frame`], which only reads values those entry points stored.
+    /// See [`Self::push_window_metrics`] for why the guard is load-bearing.
+    window_metrics: WindowMetricsPublisher,
     /// Polls the process-wide app-facing theme override slot
     /// (`frust::set_app_theme`/`clear_app_theme`) once per
     /// frame (see [`Self::frame`]) — see
@@ -135,6 +143,23 @@ pub struct AndroidAppHandle {
     /// *while* an override was active (during which `self.theme.brightness`
     /// itself does not move — see `effective_brightness_for_platform_change`).
     platform_brightness: Brightness,
+    /// The platform's last-reported reduced-motion preference
+    /// (`Settings.Global.ANIMATOR_DURATION_SCALE == 0`, delivered by
+    /// `nativeSetReduceMotion` → [`Self::set_reduce_motion`]), tracked
+    /// independently of `self.theme.motion.reduce_motion` for the same reason
+    /// [`Self::platform_brightness`] is: a theme swap replaces the token and
+    /// this latch is what re-raises the floor over the new theme. Starts
+    /// `false` (no OS report yet — Kotlin pushes the real value right after
+    /// `nativeInit`, alongside `nativeSetAppearance`).
+    os_reduce_motion: bool,
+    /// The **active theme's own** `motion.reduce_motion` token, captured every
+    /// time a whole `Theme` is installed ([`Self::new`]'s seed and the
+    /// override-poll arm in [`Self::frame`]). Paired with
+    /// [`Self::os_reduce_motion`] through [`effective_reduce_motion`] so the
+    /// OS report is a floor over the authored value rather than a replacement
+    /// of it — without this, turning the OS setting back off would have to
+    /// guess what the theme originally asked for.
+    authored_reduce_motion: bool,
     /// The accessibility adapter state, attached lazily by
     /// `nativeInitAccessibility` after `nativeInit` (see
     /// [`Self::attach_accessibility`]). `None` until then — a11y is best-effort
@@ -170,8 +195,11 @@ pub struct AndroidAppHandle {
     /// same lifecycle transitions also open the gate's resume-warmup window (see
     /// [`FrameGate::note_resumed`]).
     surface_dirty: bool,
-    /// Latch: the platform light/dark preference changed since the last frame
-    /// (`nativeSetAppearance` → [`Self::set_appearance`]). Read-and-cleared each
+    /// Latch: a platform appearance-ish preference changed since the last
+    /// frame — the light/dark mode (`nativeSetAppearance` →
+    /// [`Self::set_appearance`]) or the reduced-motion setting
+    /// (`nativeSetReduceMotion` → [`Self::set_reduce_motion`]).
+    /// Read-and-cleared each
     /// frame into [`FrameInputs::theme_or_appearance_changed`] (OR'd with the
     /// in-frame theme-override poll result). Belt-and-suspenders with the change
     /// flags [`Self::set_appearance`]'s `push_theme` already marks.
@@ -1099,6 +1127,28 @@ fn follow_platform_brightness(theme: &mut Theme, override_active: bool, platform
         effective_brightness_for_platform_change(override_active, theme.brightness, platform);
 }
 
+/// The reduced-motion **floor** rule: the OS's accessibility preference
+/// (`Settings.Global.ANIMATOR_DURATION_SCALE == 0`, reported through
+/// `nativeSetReduceMotion`) is OR'd over the active theme's own authored
+/// `motion.reduce_motion` token — never assigned over it.
+///
+/// Why a floor rather than the brightness rule's override-wins ladder
+/// ([`follow_platform_brightness`]): reduced motion is an accessibility
+/// *guarantee*, not a style preference, so a live OS toggle must reach a theme
+/// an app forced with `set_app_theme` (a catalog's design-language switcher,
+/// say) instead of being pinned out of it. Symmetrically, an app that
+/// deliberately authored `reduce_motion: true` keeps it while the OS setting is
+/// off — neither side can un-reduce what the other asked for, which is the one
+/// direction it is never safe to get wrong.
+///
+/// Deliberately NOT one of the ladder helpers pinned byte-identical across all
+/// three shells by `crates/frust/tests/theme_ladder_conformance.rs`: desktop
+/// has no reduced-motion source at all (see `MotionScheme::reduce_motion`), so
+/// only the two mobile shells carry this.
+fn effective_reduce_motion(authored: bool, os: bool) -> bool {
+    authored || os
+}
+
 /// Assemble an accesskit [`TreeUpdate`] from a [`SemanticsUpdate`].
 ///
 /// v1 always publishes the whole tree (`RenderRoot::semantics` recomputes it in
@@ -1181,6 +1231,10 @@ impl AndroidAppHandle {
         // construction-time drain above applies — the shell itself bundles no
         // fonts.
         let theme = base_theme(default_theme());
+        // The base's own reduced-motion token, kept so a later OS report (or a
+        // later theme swap) can re-derive the effective value instead of
+        // guessing what the theme asked for — see `authored_reduce_motion`.
+        let authored_reduce_motion = theme.motion.reduce_motion;
 
         app.set_theme(Box::new(theme.clone()));
         // Thread the surface's RESOLVED translucency into the render root so
@@ -1199,6 +1253,20 @@ impl AndroidAppHandle {
         // `Unknown`. Re-published every frame by `sync_translucent_resolved`.
         publish_resolved_surface_mode(resolved_translucent);
         provide_context(theme.clone());
+        // Seed the app-facing window-shape context beside the theme, so an
+        // `app_logic`/`Component::build` calling `use_context::<WindowMetrics>()`
+        // during the very first rebuild below resolves a real value rather than
+        // `None`. Insets start at zero here — Kotlin's first
+        // `nativeOnInsetsChanged` arrives after `nativeInit` and re-polls this
+        // publisher (see `set_insets`). No `ReactiveRuntime::get()` wrap: like
+        // the theme seed above, this runs nested inside `create_handle`'s
+        // `with_owner`.
+        let mut window_metrics = WindowMetricsPublisher::new();
+        if let Some(metrics) =
+            window_metrics.poll(physical, sanitize_scale(scale), WindowInsets::default())
+        {
+            provide_context(metrics);
+        }
         app.rebuild();
         let mut executor = executor;
         executor.record_first_rebuild();
@@ -1221,9 +1289,17 @@ impl AndroidAppHandle {
             scope: TrackedScope::new(),
             theme,
             insets: WindowInsets::default(),
+            window_metrics,
             theme_override: ThemeOverrideWatcher::new(),
             theme_override_active: false,
             platform_brightness: Brightness::Light,
+            // No OS reduced-motion report yet (Kotlin pushes one right after
+            // `nativeInit`, beside `nativeSetAppearance`), so the seeded base's
+            // own token IS the effective value — `effective_reduce_motion`
+            // against a `false` OS latch is the identity, which is why the
+            // seed above needs no fix-up.
+            os_reduce_motion: false,
+            authored_reduce_motion,
             a11y: None,
             frame_gate,
             events_since_last_frame: false,
@@ -1392,6 +1468,44 @@ impl AndroidAppHandle {
         self.push_theme();
     }
 
+    /// `nativeSetReduceMotion`: apply the platform's reduced-motion
+    /// accessibility preference to the active theme's `MotionScheme` and
+    /// re-push it to both delivery paths — the reduced-motion twin of
+    /// [`Self::set_appearance`], travelling the identical transport (a JNI
+    /// entry → a `Theme` edit → [`Self::push_theme`]) over a different sensor.
+    ///
+    /// `reduce` is Kotlin's `Settings.Global.ANIMATOR_DURATION_SCALE == 0f`
+    /// read (see `FrustSurfaceView.reduceMotionEnabled`); the setting is NOT a
+    /// `Configuration` field, so Kotlin observes it with a `ContentObserver`
+    /// plus a re-read on every resume rather than through
+    /// `onConfigurationChanged`.
+    ///
+    /// The OS value is a floor over the theme's own authored token, not a
+    /// replacement ([`effective_reduce_motion`]) — including while an app-forced
+    /// override is active, unlike the brightness path's override-wins rule
+    /// (that helper's doc has the reasoning). No explicit redraw is scheduled:
+    /// the continuous Choreographer loop already repaints every tick, and
+    /// `appearance_dirty` keeps the frame gate from skipping the tick that
+    /// carries the change.
+    ///
+    /// Unchanged-value calls return early, unlike [`Self::set_appearance`]:
+    /// Kotlin re-pushes this on every resume (and a `ContentObserver` can fire
+    /// more than once per real change), where a config-change-driven appearance
+    /// push is rare — without the guard every resume would pay a `push_theme`'s
+    /// forced relayout for nothing. Sound because `os_reduce_motion` is the
+    /// only writer of the token outside a whole-`Theme` install, and that
+    /// install re-applies the floor itself.
+    pub(crate) fn set_reduce_motion(&mut self, reduce: bool) {
+        if self.os_reduce_motion == reduce {
+            return;
+        }
+        self.os_reduce_motion = reduce;
+        self.theme.motion.reduce_motion =
+            effective_reduce_motion(self.authored_reduce_motion, reduce);
+        self.appearance_dirty = true;
+        self.push_theme();
+    }
+
     /// Push the current [`Self::theme`] to both delivery paths — boxed
     /// type-erased into the render root ([`AppTree::set_theme`]) and
     /// re-`provide_context`ed under the process-wide root
@@ -1499,6 +1613,9 @@ impl AndroidAppHandle {
         // dimensions and open the resume-warmup window.
         self.surface_dirty = true;
         self.frame_gate.note_resumed();
+        // The new surface may come up at new dimensions/density — republish the
+        // window-shape context (self-guarded, so a same-size recreate is silent).
+        self.push_window_metrics();
         // The old surface (and everything Kotlin's `FrustSurfaceView` composited
         // behind it) is gone — replay Create+Update for every currently-live
         // platform-view slot so the native side rebuilds its whole
@@ -1541,6 +1658,10 @@ impl AndroidAppHandle {
         // See `split_recreate_surface`'s matching call: a new surface means a
         // fresh native-view hierarchy on the Kotlin side, and the
         // release-gate pairing refers to the old surface's frames.
+        //
+        // A recreate can also land at new dimensions/density — republish the
+        // window-shape context (self-guarded, so a same-size recreate is silent).
+        self.push_window_metrics();
         self.platform_view_state.reset_for_surface_recreate();
         self.platform_view_due.clear();
         // ...and with it the tail's hold: neither stage may outlive the
@@ -1579,6 +1700,10 @@ impl AndroidAppHandle {
         // `set_window`.
         self.surface_dirty = true;
         self.frame_gate.note_resumed();
+        // New logical size and/or density: republish the window-shape context
+        // (self-guarded, so a `surfaceChanged` re-reporting identical
+        // dimensions publishes nothing).
+        self.push_window_metrics();
     }
 
     /// `nativeOnInsetsChanged`: convert the platform's physical-px per-edge insets
@@ -1604,6 +1729,9 @@ impl AndroidAppHandle {
         }
         self.insets = insets;
         self.push_insets(insets);
+        // The composite window-shape context carries a copy of these insets, so
+        // an insets change is also a metrics change (self-guarded).
+        self.push_window_metrics();
     }
 
     /// Push the current [`WindowInsets`] to both delivery paths — into the render
@@ -1616,6 +1744,43 @@ impl AndroidAppHandle {
         match ReactiveRuntime::get() {
             Some(rt) => rt.with_owner(|| provide_context(insets)),
             None => provide_context(insets),
+        }
+    }
+
+    /// Re-`provide_context` the window's [`WindowMetrics`](frust_core::WindowMetrics)
+    /// for app-side `use_context::<WindowMetrics>()` reads — **only when it
+    /// actually changed** ([`WindowMetricsPublisher::poll`] returns `None`
+    /// otherwise).
+    ///
+    /// Mirrors [`Self::push_insets`]/[`Self::push_theme`]'s re-provide shape,
+    /// with two deliberate differences:
+    ///
+    /// - **Guarded, never per-frame.** `WindowMetrics` is delivered *alongside*
+    ///   the standalone `WindowInsets` context (which keeps working untouched),
+    ///   not through it, and it is not pushed into the render root at all — so
+    ///   nothing else rate-limits it. `provide_context` is a plain map insert
+    ///   that notifies nothing, but an unconditional per-frame re-provide would
+    ///   still pay a lock write plus an allocation every frame across the FFI
+    ///   boundary for no observable benefit. The publisher's change detection
+    ///   is what keeps a static window quiet.
+    /// - **Called from the entry points where the inputs move**, not from
+    ///   [`Self::frame`]: `nativeOnSurfaceChanged` → [`Self::resize_surface`] /
+    ///   [`Self::set_window`] / [`Self::split_recreate_surface`] (size + density)
+    ///   and `nativeOnInsetsChanged` → [`Self::set_insets`] (insets). `frame`
+    ///   only reads what those already stored.
+    ///
+    /// Units: the size is converted from the surface's physical px with the same
+    /// `sanitize_scale`d density every other consumer uses, and `self.insets` is
+    /// already logical (`logical_insets` ran in [`Self::set_insets`]) — so the
+    /// published metrics are logical throughout, matching iOS and desktop.
+    fn push_window_metrics(&mut self) {
+        let scale = sanitize_scale(self.scale);
+        let Some(metrics) = self.window_metrics.poll(self.physical, scale, self.insets) else {
+            return; // unchanged — no re-provide, no app-wide rebuild
+        };
+        match ReactiveRuntime::get() {
+            Some(rt) => rt.with_owner(|| provide_context(metrics)),
+            None => provide_context(metrics),
         }
     }
 
@@ -1943,11 +2108,19 @@ impl AndroidAppHandle {
         // process-global slot.
         let mut theme_or_appearance_changed = false;
         let platform_brightness = self.platform_brightness;
-        if let Some((theme, override_active)) =
+        if let Some((mut theme, override_active)) =
             theme_after_override_poll(self.theme_override.poll(), default_theme, || {
                 platform_brightness
             })
         {
+            // A whole-`Theme` swap re-bases the reduced-motion floor: the
+            // incoming theme carries its own authored token, so record that and
+            // re-apply the OS report over it. Without this, a `set_app_theme`/
+            // `clear_app_theme` would silently un-reduce motion while the
+            // platform setting is still on (`effective_reduce_motion`).
+            self.authored_reduce_motion = theme.motion.reduce_motion;
+            theme.motion.reduce_motion =
+                effective_reduce_motion(self.authored_reduce_motion, self.os_reduce_motion);
             self.theme = theme;
             self.theme_override_active = override_active;
             self.push_theme();
@@ -2336,7 +2509,7 @@ impl AndroidAppHandle {
 #[cfg(test)]
 mod tests {
     use super::{
-        base_theme, follow_platform_brightness, theme_after_override_poll,
+        base_theme, effective_reduce_motion, follow_platform_brightness, theme_after_override_poll,
         tree_update_from_semantics,
     };
     use frust_core::SemanticsUpdate;
@@ -2492,5 +2665,40 @@ mod tests {
             || panic!("an unchanged poll must not read the platform brightness"),
         );
         assert_eq!(decided, None);
+    }
+
+    // --- the reduced-motion floor (`nativeSetReduceMotion`) ------------------
+
+    #[test]
+    fn the_os_reduced_motion_report_raises_and_lowers_an_unreduced_theme() {
+        // The ordinary case: every shipped baseline authors `false`, so the
+        // effective value tracks the OS setting in both directions.
+        assert!(effective_reduce_motion(false, true));
+        assert!(!effective_reduce_motion(false, false));
+    }
+
+    #[test]
+    fn a_theme_authored_reduced_stays_reduced_while_the_os_setting_is_off() {
+        // The floor's whole point: the OS report may only ever ADD reduction.
+        // A theme built with `reduce_motion: true` (a `ThemeBuilder::map_motion`
+        // app choice) must not be un-reduced by a device that has the setting
+        // off.
+        assert!(effective_reduce_motion(true, false));
+        assert!(effective_reduce_motion(true, true));
+    }
+
+    #[test]
+    fn the_floor_applies_to_an_app_forced_override_too() {
+        // Unlike brightness, an active `set_app_theme` override does NOT pin
+        // this: the frame arm re-bases `authored_reduce_motion` from the
+        // incoming theme and re-applies the OS report over it, so a live
+        // accessibility toggle still reaches a catalog app that forced its own
+        // theme. This asserts the composition that arm performs.
+        let forced = Theme::cupertino_baseline();
+        let authored = forced.motion.reduce_motion;
+        assert!(!authored, "the shipped Cupertino baseline authors `false`");
+        let mut active = forced;
+        active.motion.reduce_motion = effective_reduce_motion(authored, true);
+        assert!(active.motion.reduce_motion);
     }
 }

@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use frust_drive::scaffold::{self, TemplateContext};
+use frust_drive::scaffold::{self, TemplateContext, context};
 
 /// Parsed + defaulted arguments for `frust create` (mirrors
 /// `cli::Command::Create`; kept separate so `scaffold` stays decoupled
@@ -53,7 +53,7 @@ pub fn run(args: CreateArgs) -> Result<u8> {
         org: args.org,
         description: args.description,
         frust_version: env!("CARGO_PKG_VERSION").to_string(),
-        frust_path: resolve_frust_path(args.frust_path.as_deref()),
+        frust_path: resolve_frust_path(args.frust_path.as_deref())?,
         deeplink_scheme: args.deeplink_scheme,
         deeplink_host: args.deeplink_host,
     };
@@ -84,15 +84,29 @@ pub fn run(args: CreateArgs) -> Result<u8> {
 /// (a temporary mechanism until Frust crates are
 /// published), derived from `frust-cli`'s own compile-time manifest
 /// directory.
-fn resolve_frust_path(overridden: Option<&str>) -> String {
+///
+/// An override accepts either the facade crate itself or its repo root
+/// (see [`context::resolve_frust_crate_path`]); a repo-root value is
+/// canonicalised to the nested facade crate directory with a printed note,
+/// and anything else is a hard error naming both accepted shapes — a
+/// repo-root value can otherwise silently bake `frust = { path =
+/// "<repo-root>" }`, a virtual-workspace manifest with no `[package]` table
+/// and a hard Cargo error at build time instead of scaffold time.
+fn resolve_frust_path(overridden: Option<&str>) -> Result<String> {
     if let Some(path) = overridden {
-        return path.to_string();
+        let resolved = context::resolve_frust_crate_path(Path::new(path))?;
+        let resolved = resolved.to_string_lossy().into_owned();
+        if resolved != path {
+            println!("note: --frust-path `{path}` normalised to `{resolved}`");
+        }
+        return Ok(resolved);
     }
     let raw = Path::new(env!("CARGO_MANIFEST_DIR")).join("../frust");
-    raw.canonicalize()
+    Ok(raw
+        .canonicalize()
         .unwrap_or(raw)
         .to_string_lossy()
-        .into_owned()
+        .into_owned())
 }
 
 /// Infers a project name from `dir`'s basename, resolving `.`/`..`

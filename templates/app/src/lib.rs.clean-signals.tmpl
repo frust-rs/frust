@@ -78,4 +78,10 @@ impl Component for {{ title_case_name | replace(" ", "") }}App {
 // app, or swap it for `frust::set_default_theme(frust::Theme::m3_baseline())`
 // / `::cupertino_baseline()` to use one of the other two built-in design
 // systems instead.
-frust::app!({{ title_case_name | replace(" ", "") }}App, setup = { frust::glyph_theme::install(); });
+frust::app!(
+    {{ title_case_name | replace(" ", "") }}App,
+    setup = {
+        frust::glyph_theme::install();
+    }
+);
+

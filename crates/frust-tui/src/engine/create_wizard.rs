@@ -2,13 +2,18 @@
 //! architecture → off-thread scaffold → open-in-place.
 //!
 //! Everything here is plain data + pure transitions — no filesystem, no
-//! threads. The two pieces of real I/O the wizard needs (the
-//! `../clean-signals-rs` sibling probe that gates the clean-signals arch card,
-//! and the `frust_drive::scaffold::generate` run itself) both happen
-//! off-thread in `crate::runner`, feeding their results back as messages
-//! ([`super::Message::CleanSignalsProbed`] / [`super::Message::ScaffoldSucceeded`]
-//! / [`super::Message::ScaffoldFailed`]). `crate::ui` renders it; the runner
-//! enacts the [`Effect`](super::update::Effect)s the pure transition requests.
+//! threads. The `frust_drive::scaffold::generate` run itself happens
+//! off-thread in `crate::runner`, feeding its result back as a message
+//! ([`super::Message::ScaffoldSucceeded`] / [`super::Message::ScaffoldFailed`]).
+//! `crate::ui` renders it; the runner enacts the
+//! [`Effect`](super::update::Effect)s the pure transition requests.
+//!
+//! No arch card is sibling-gated today — `clean-signals` is git+rev-pinned to
+//! its public repo (`docs/DEVELOPMENT.md`'s Version-Pin Policy), so no
+//! `../clean-signals-rs` sibling checkout is required — but
+//! [`ArchCard::sibling_gated`]/[`CreateWizard::set_clean_signals_available`]
+//! stay in place as the generic mechanism a future sibling-dependent arch
+//! would reuse.
 
 use frust_drive::scaffold::{KNOWN_ARCHES, validate_project_name};
 
@@ -48,14 +53,14 @@ pub struct ArchCard {
     pub description: String,
     /// Whether this card can currently be chosen. A sibling-gated card starts
     /// disabled and is enabled once the off-thread probe confirms the sibling
-    /// checkout (see [`CreateWizard::set_clean_signals_available`]).
+    /// checkout (see [`CreateWizard::set_clean_signals_available`]). No card
+    /// is sibling-gated today (see this module's doc comment).
     pub enabled: bool,
     /// Why the card is disabled (rendered inline), or `None` when enabled.
     pub disabled_reason: Option<String>,
-    /// Whether this card path-depends on the `../clean-signals-rs` sibling
-    /// checkout — the probe toggles [`enabled`](ArchCard::enabled) for these.
-    /// Only clean-signals needs a sibling today; a future arch that does adds
-    /// its own gating here.
+    /// Whether this card depends on a sibling checkout — the probe toggles
+    /// [`enabled`](ArchCard::enabled) for these. No arch needs one today; a
+    /// future arch that does adds its own gating here.
     pub sibling_gated: bool,
 }
 
@@ -244,7 +249,9 @@ impl CreateWizard {
     }
 
     /// Enable/disable the sibling-gated arch card(s) once the off-thread probe
-    /// resolves whether the `../clean-signals-rs` sibling checkout is present.
+    /// resolves whether a required sibling checkout is present. Currently a
+    /// no-op — no arch card is sibling-gated (this module's doc comment) —
+    /// kept for a future sibling-dependent arch to reuse.
     pub fn set_clean_signals_available(&mut self, available: bool) {
         for card in &mut self.arches {
             if card.sibling_gated {
@@ -298,8 +305,8 @@ const CLEAN_SIGNALS_ABSENT: &str =
 const CLEAN_SIGNALS_PENDING: &str = "checking for the ../clean-signals-rs sibling…";
 
 /// Build the arch cards: the default template, then one card per
-/// [`KNOWN_ARCHES`] tag. A sibling-gated card starts disabled pending the
-/// probe.
+/// [`KNOWN_ARCHES`] tag. A sibling-gated card would start disabled pending
+/// the probe — no known tag needs one today (see this module's doc comment).
 fn build_cards() -> Vec<ArchCard> {
     let mut cards = vec![ArchCard {
         tag: None,
@@ -310,7 +317,7 @@ fn build_cards() -> Vec<ArchCard> {
         sibling_gated: false,
     }];
     for &tag in KNOWN_ARCHES {
-        let sibling_gated = tag == "clean-signals";
+        let sibling_gated = false;
         cards.push(ArchCard {
             tag: Some(tag.to_string()),
             label: humanize(tag),
@@ -344,8 +351,7 @@ fn humanize(tag: &str) -> String {
 fn arch_description(tag: &str) -> String {
     match tag {
         "clean-signals" => {
-            "Controller + use-case + async_view via clean-signals-frust. Dev-machine only."
-                .to_string()
+            "Controller + use-case + async_view via clean-signals-frust.".to_string()
         }
         _ => "An architecture variant.".to_string(),
     }
@@ -375,19 +381,29 @@ mod tests {
             .find(|c| c.tag.as_deref() == Some("clean-signals"))
             .expect("clean-signals card enumerated from KNOWN_ARCHES");
         assert_eq!(clean.label, "Clean Signals");
-        // Sibling-gated, so it starts disabled pending the probe.
-        assert!(clean.sibling_gated);
-        assert!(!clean.enabled);
+        // clean-signals is git+rev-pinned to its public repo (task 05), so
+        // this card needs no sibling checkout and starts enabled like every
+        // other card.
+        assert!(!clean.sibling_gated);
+        assert!(clean.enabled);
     }
 
+    /// The generic sibling-gating mechanism ([`ArchCard::sibling_gated`] /
+    /// [`CreateWizard::set_clean_signals_available`]) has no live user today
+    /// — exercise it directly against a synthetic gated card rather than
+    /// through `clean-signals`, which is no longer gated.
     #[test]
-    fn probe_gates_the_clean_signals_card() {
+    fn set_clean_signals_available_toggles_a_gated_cards_enabled_state() {
         let mut w = CreateWizard::new();
-        let idx = w
-            .arches
-            .iter()
-            .position(|c| c.tag.as_deref() == Some("clean-signals"))
-            .unwrap();
+        w.arches.push(ArchCard {
+            tag: Some("future-sibling-arch".to_string()),
+            label: "Future Sibling Arch".to_string(),
+            description: "stand-in for a future sibling-gated arch".to_string(),
+            enabled: false,
+            disabled_reason: Some(CLEAN_SIGNALS_PENDING.to_string()),
+            sibling_gated: true,
+        });
+        let idx = w.arches.len() - 1;
 
         w.set_clean_signals_available(false);
         assert!(!w.arches[idx].enabled);
@@ -449,12 +465,19 @@ mod tests {
     #[test]
     fn a_disabled_card_blocks_scaffold() {
         let mut w = CreateWizard::new();
+        // No arch card is disabled by default today (see
+        // `cards_enumerate_default_plus_known_arches`), so exercise the
+        // disabled-blocks-advance contract against a synthetic gated card.
+        w.arches.push(ArchCard {
+            tag: Some("future-sibling-arch".to_string()),
+            label: "Future Sibling Arch".to_string(),
+            description: "stand-in for a future sibling-gated arch".to_string(),
+            enabled: false,
+            disabled_reason: Some(CLEAN_SIGNALS_PENDING.to_string()),
+            sibling_gated: true,
+        });
+        let idx = w.arches.len() - 1;
         w.step = WizardStep::Arch;
-        let idx = w
-            .arches
-            .iter()
-            .position(|c| c.tag.as_deref() == Some("clean-signals"))
-            .unwrap();
         w.arch_cursor = idx;
         w.set_clean_signals_available(false);
         // Highlighting the disabled card is fine; choosing it is blocked.
@@ -465,7 +488,7 @@ mod tests {
         assert_eq!(
             w.advance(),
             WizardAdvance::Scaffold {
-                arch: Some("clean-signals".to_string())
+                arch: Some("future-sibling-arch".to_string())
             }
         );
     }

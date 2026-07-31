@@ -20,6 +20,7 @@ pub mod doctor;
 pub mod ios_build;
 pub mod ios_id;
 pub mod ios_run;
+pub mod manifest;
 pub mod plugin;
 pub mod process;
 pub mod scaffold;

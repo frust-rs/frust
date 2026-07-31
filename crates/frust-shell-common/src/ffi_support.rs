@@ -6,7 +6,9 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+use frust_core::WindowMetrics;
 use frust_core::insets::{EdgeInsets, WindowInsets};
+use kurbo::Size;
 
 /// Sanitize a raw density (e.g. a JNI `jfloat`) into a scale safe to divide or
 /// multiply by: finite and strictly positive, else the `1.0` fallback.
@@ -87,6 +89,103 @@ pub fn logical_insets(physical: [f64; 8], scale: f64) -> WindowInsets {
             to_logical(physical[7]),
         ),
     )
+}
+
+/// Assemble the app-facing [`WindowMetrics`] from a shell's raw surface
+/// dimensions, its already-[`sanitize_scale`]d scale, and the window's
+/// already-**logical** [`WindowInsets`].
+///
+/// The one place the three shells agree on units. `physical` is the surface's
+/// device-pixel size (Android's `nativeOnSurfaceChanged` pair, iOS's
+/// `frust_resize` pair, winit's `inner_size()`), converted to logical px here
+/// through [`logical_size`] — so [`WindowMetrics::size`] is logical on every
+/// platform, exactly like the coordinates and insets that already cross this
+/// boundary (`docs/CODE_STANDARDS.md`'s physical-at-FFI/logical-inside rule).
+/// `insets` is passed through unchanged because each shell has *already*
+/// resolved it to logical px via [`logical_insets`] (Android divides by its
+/// display density, iOS uses the identity scale because UIKit hands over
+/// points) — this must never re-divide it.
+///
+/// [`WindowMetrics::orientation`](frust_core::WindowMetrics) is derived from the
+/// logical size by [`WindowMetrics::new`]; no platform callback carries an
+/// orientation enum.
+///
+/// `scale` must already have passed through [`sanitize_scale`] (finite,
+/// strictly positive) — the same trust contract [`logical_size`] and
+/// [`logical_insets`] state, so a shell sanitizes the platform density once per
+/// use and feeds the identical value to all three.
+#[inline]
+pub fn window_metrics(physical: (u32, u32), scale: f64, insets: WindowInsets) -> WindowMetrics {
+    let (logical_w, logical_h) = logical_size(physical.0, physical.1, scale);
+    WindowMetrics::new(Size::new(logical_w, logical_h), scale, insets)
+}
+
+/// Per-shell-instance change detector over the window's [`WindowMetrics`]: each
+/// of the three shells owns one and drives it from its own resize/insets entry
+/// points, publishing only what it reports as *changed*.
+///
+/// # Why this is not a per-frame push
+///
+/// Delivering `WindowMetrics` to app code means `provide_context`-ing it under
+/// the reactive root owner, exactly as `Theme` and [`WindowInsets`] already are
+/// — a plain map insert that notifies nothing and creates no subscription, so
+/// re-providing does not itself wake a frame. The guard here exists for cost
+/// at the FFI boundary instead: a shell that re-provided metrics
+/// unconditionally once per frame would pay a lock write plus an allocation
+/// every frame for no observable benefit, since the next rebuild (already
+/// driven by the resize or inset change itself) is what actually picks the
+/// new value up. This type makes the guarded path the only path:
+/// [`poll`](Self::poll) returns `Some` **only** on an actual change, mirroring
+/// [`ThemeOverrideWatcher`](crate::ThemeOverrideWatcher)'s poll-returns-`Option`
+/// shape and `RenderRoot::set_insets`'s `PartialEq`-guarded no-op.
+///
+/// It is deliberately reactive-free (this crate ships no reactive dependency —
+/// see `docs/ARCHITECTURE.md`'s Layer Dependencies): it decides *whether* to
+/// publish and computes *what* to publish, and each shell owns the
+/// `provide_context` call itself. That keeps the unit conversion and the
+/// change-detection host-testable even though both mobile `app` modules are
+/// target-gated and never host-compiled.
+#[derive(Debug, Default)]
+pub struct WindowMetricsPublisher {
+    /// The metrics last reported as changed, or `None` before the first
+    /// [`poll`](Self::poll) — so the seeding poll a shell runs before its very
+    /// first rebuild always publishes.
+    last: Option<WindowMetrics>,
+}
+
+impl WindowMetricsPublisher {
+    /// A fresh publisher that has published nothing yet.
+    pub fn new() -> Self {
+        Self { last: None }
+    }
+
+    /// Assemble the current [`WindowMetrics`] (see [`window_metrics`] for the
+    /// unit contract) and return it **only if it differs** from the last one
+    /// this publisher reported; `None` means the shell must not re-provide.
+    ///
+    /// A shell calls this from every point where one of the inputs actually
+    /// moves — surface create/resize and the insets callback — never from its
+    /// per-frame driver, which only *reads* values these entry points already
+    /// stored.
+    pub fn poll(
+        &mut self,
+        physical: (u32, u32),
+        scale: f64,
+        insets: WindowInsets,
+    ) -> Option<WindowMetrics> {
+        let metrics = window_metrics(physical, scale, insets);
+        if self.last == Some(metrics) {
+            return None;
+        }
+        self.last = Some(metrics);
+        Some(metrics)
+    }
+
+    /// The metrics last published, or `None` before the first change-reporting
+    /// [`poll`](Self::poll).
+    pub fn last(&self) -> Option<WindowMetrics> {
+        self.last
+    }
 }
 
 /// Run `f`, catching any panic so it can never unwind across the FFI boundary
@@ -255,6 +354,152 @@ mod tests {
         let insets = logical_insets(physical, 2.0);
         assert_eq!(insets.view_padding, EdgeInsets::new(4.0, 22.0, 8.0, 17.0));
         assert_eq!(insets.view_insets, EdgeInsets::new(0.0, 0.0, 0.0, 170.0));
+    }
+
+    // --- WindowMetrics: units, derived orientation, change detection ---------
+    //
+    // This is where the three shells' `WindowMetrics` publish path gets its
+    // coverage: both mobile `app` modules are target-gated (never host-compiled)
+    // and the desktop handler needs a live winit window, so the shared,
+    // reactive-free helper below is the only host-testable surface — the same
+    // reason `logical_insets`/`sanitize_scale` live in this module.
+
+    use frust_core::Orientation;
+
+    #[test]
+    fn window_metrics_size_is_logical_on_every_shell() {
+        // Android: `nativeOnSurfaceChanged` reports device pixels + density.
+        // A 1080x2400 @3x phone surface lays out as 360x800 logical.
+        let android = window_metrics((1080, 2400), 3.0, WindowInsets::default());
+        assert_eq!(android.size, Size::new(360.0, 800.0));
+        assert_eq!(android.scale, 3.0);
+
+        // iOS: `frust_resize` reports the drawable's pixel size + UIScreen
+        // scale, so the identical division applies (its *insets* are the only
+        // already-logical input — see the insets test below).
+        let ios = window_metrics((1170, 2532), 3.0, WindowInsets::default());
+        assert_eq!(ios.size, Size::new(390.0, 844.0));
+
+        // Desktop: winit `inner_size()` is physical too; a 2x HiDPI 1600x1200
+        // window is 800x600 logical.
+        let desktop = window_metrics((1600, 1200), 2.0, WindowInsets::default());
+        assert_eq!(desktop.size, Size::new(800.0, 600.0));
+
+        // Unit scale: physical and logical coincide (the non-HiDPI case).
+        let unit = window_metrics((800, 600), 1.0, WindowInsets::default());
+        assert_eq!(unit.size, Size::new(800.0, 600.0));
+    }
+
+    #[test]
+    fn window_metrics_passes_already_logical_insets_through_untouched() {
+        // The insets each shell hands in have ALREADY been through
+        // `logical_insets` (Android divides by its density, iOS uses the
+        // identity scale). Re-dividing them by `scale` here would halve a
+        // status-bar inset on every @2x device — pin the pass-through.
+        let logical = logical_insets([0.0, 48.0, 0.0, 68.0, 0.0, 0.0, 0.0, 0.0], 2.0);
+        assert_eq!(logical.view_padding, EdgeInsets::new(0.0, 24.0, 0.0, 34.0));
+
+        let metrics = window_metrics((800, 1600), 2.0, logical);
+        assert_eq!(metrics.insets, logical);
+        assert_eq!(
+            metrics.insets.view_padding,
+            EdgeInsets::new(0.0, 24.0, 0.0, 34.0)
+        );
+    }
+
+    #[test]
+    fn window_metrics_orientation_flips_when_width_and_height_cross_over() {
+        // Derived from the LOGICAL size (no platform callback carries an
+        // orientation enum), so a rotation reported purely as swapped surface
+        // dimensions still flips it.
+        let portrait = window_metrics((1080, 2400), 3.0, WindowInsets::default());
+        assert_eq!(portrait.orientation, Orientation::Portrait);
+
+        let landscape = window_metrics((2400, 1080), 3.0, WindowInsets::default());
+        assert_eq!(landscape.orientation, Orientation::Landscape);
+
+        // The crossover itself: an exact square reads as portrait (height >= width).
+        let square = window_metrics((1000, 1000), 2.0, WindowInsets::default());
+        assert_eq!(square.orientation, Orientation::Portrait);
+    }
+
+    #[test]
+    fn window_metrics_uses_sanitized_scale_from_caller() {
+        // Same trust contract as `logical_size`/`logical_insets`: the shell
+        // sanitizes once and hands the result in.
+        let scale = sanitize_scale(f32::NAN); // -> 1.0
+        let metrics = window_metrics((400, 800), scale, WindowInsets::default());
+        assert_eq!(metrics.size, Size::new(400.0, 800.0));
+        assert_eq!(metrics.scale, 1.0);
+    }
+
+    #[test]
+    fn window_metrics_publisher_reports_only_actual_changes() {
+        // THE cost-guard anchor: a shell re-`provide_context`s only when this
+        // returns `Some`. An unconditional per-frame re-provide would pay a
+        // lock write plus an allocation every frame at the FFI boundary for
+        // nothing observable, so every repeat below must be `None`.
+        let mut pub_ = WindowMetricsPublisher::new();
+        assert_eq!(pub_.last(), None, "nothing published before the first poll");
+
+        // First poll (the shell's pre-first-rebuild seeding) always publishes.
+        let first = pub_
+            .poll((1080, 2400), 3.0, WindowInsets::default())
+            .expect("the seeding poll must publish");
+        assert_eq!(first.size, Size::new(360.0, 800.0));
+        assert_eq!(pub_.last(), Some(first));
+
+        // Steady state: the same inputs re-reported (a resize callback that
+        // re-delivers unchanged dimensions, or a shell polling more than once)
+        // must NOT re-provide.
+        for _ in 0..100 {
+            assert_eq!(
+                pub_.poll((1080, 2400), 3.0, WindowInsets::default()),
+                None,
+                "unchanged metrics must never be re-provided"
+            );
+        }
+        assert_eq!(
+            pub_.last(),
+            Some(first),
+            "a no-op poll leaves the last value"
+        );
+
+        // A real rotation publishes once, then goes quiet again.
+        let rotated = pub_
+            .poll((2400, 1080), 3.0, WindowInsets::default())
+            .expect("a rotation is a real change");
+        assert_eq!(rotated.orientation, Orientation::Landscape);
+        assert_eq!(pub_.poll((2400, 1080), 3.0, WindowInsets::default()), None);
+    }
+
+    #[test]
+    fn window_metrics_publisher_detects_each_input_independently() {
+        // Size, scale, and insets each move on their own platform callback
+        // (`resize` vs. the insets report), so each must independently trip a
+        // re-provide — and each must then settle.
+        let base_insets = WindowInsets::default();
+        let mut pub_ = WindowMetricsPublisher::new();
+        assert!(pub_.poll((1080, 2400), 3.0, base_insets).is_some());
+
+        // Size only (an in-place resize, e.g. a desktop window drag).
+        assert!(pub_.poll((1080, 2000), 3.0, base_insets).is_some());
+        assert!(pub_.poll((1080, 2000), 3.0, base_insets).is_none());
+
+        // Scale only (a display-density config change at the same pixel size —
+        // it changes the logical size too, but the point is the shell need not
+        // special-case which input moved).
+        assert!(pub_.poll((1080, 2000), 2.0, base_insets).is_some());
+        assert!(pub_.poll((1080, 2000), 2.0, base_insets).is_none());
+
+        // Insets only (the IME coming up: same size, same scale).
+        let ime_up = logical_insets([0.0, 48.0, 0.0, 0.0, 0.0, 0.0, 0.0, 680.0], 2.0);
+        assert!(pub_.poll((1080, 2000), 2.0, ime_up).is_some());
+        assert!(pub_.poll((1080, 2000), 2.0, ime_up).is_none());
+
+        // ...and back down again.
+        assert!(pub_.poll((1080, 2000), 2.0, base_insets).is_some());
+        assert!(pub_.poll((1080, 2000), 2.0, base_insets).is_none());
     }
 
     #[test]

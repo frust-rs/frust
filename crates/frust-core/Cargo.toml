@@ -12,3 +12,13 @@ peniko = { workspace = true }
 frust-scene = { workspace = true }
 accesskit = { workspace = true }
 reactive_graph = { workspace = true }
+
+[features]
+# Compiles `PaintCtx::for_test` (a `FrameTime`-seeded `PaintCtx` constructor)
+# into the library, so an app crate testing a clock-dependent widget from its
+# own `src/` — no direct `frust-core` dependency, only the `frust` facade —
+# can drive `Widget::paint` at a chosen time without reaching
+# `PaintCtx::set_frame_time` (deliberately `pub(crate)`: only the shell-owned
+# `RenderRoot::paint` may advance the clock in a production build). Off by
+# default; always available inside this crate's own `cfg(test)` build.
+test-support = []

@@ -77,3 +77,17 @@ fn inset_vocabulary_resolves() {
     }
     let _ = std::mem::size_of::<WindowEdgeInsets>();
 }
+
+/// A custom image-painting widget can obtain an `&ImageData` from an
+/// `ImageSource` using only `frust::authoring` imports — both types are
+/// reachable through the facade without reaching for `frust_widgets` or
+/// `peniko` directly.
+#[test]
+fn image_data_accessor_resolves_through_facade() {
+    fn _paint_image(source: &ImageSource, scene: &mut dyn PaintScene) {
+        let data: &ImageData = source.image_data();
+        scene.draw_image(data, Rect::new(0.0, 0.0, 100.0, 100.0));
+    }
+    let _ = std::mem::size_of::<ImageSource>();
+    let _ = std::mem::size_of::<ImageData>();
+}

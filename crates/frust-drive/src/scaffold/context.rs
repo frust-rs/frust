@@ -1,9 +1,84 @@
 //! Template context construction and project-name validation.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
 use thiserror::Error;
+
+/// Why a `--frust-path` value was rejected by [`resolve_frust_crate_path`]:
+/// neither accepted shape names the `frust` package.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum FrustPathError {
+    #[error(
+        "--frust-path `{given}` doesn't point at a Frust checkout: expected either the `frust` \
+         facade crate itself (a directory whose Cargo.toml has `[package] name = \"frust\"`) or \
+         its repo root (a directory containing `crates/frust` with that Cargo.toml) — found \
+         neither"
+    )]
+    NotFacadeCrate { given: String },
+}
+
+/// Canonicalises a `--frust-path` argument to the `frust` facade crate
+/// directory, accepting either shape:
+///
+/// 1. `path` itself is the facade crate (`<path>/Cargo.toml` names package
+///    `frust`) -> returned unchanged.
+/// 2. `path` is the repo root containing it (`<path>/crates/frust/Cargo.toml`
+///    names package `frust`) -> returns the nested `<path>/crates/frust`.
+/// 3. Neither -> [`FrustPathError::NotFacadeCrate`], naming both accepted
+///    shapes.
+///
+/// Deliberately file-probed rather than string-matched on a trailing
+/// `crates/frust` path segment, so a vendored or renamed checkout still
+/// resolves. This closes a fourth broken path surface a repo-root value
+/// otherwise produces silently: `frust = { path = "<repo-root>" }` points at
+/// the root `Cargo.toml`, a virtual workspace manifest with no `[package]`
+/// table — a hard Cargo error, not a merely-wrong-but-working path — so a
+/// repo-root value cannot be made to work by adjusting the other
+/// `frust_path`-derived joins ([`frust_path_from_project_subdir`],
+/// [`TemplateContext::frust_embedding_android_dir`],
+/// [`TemplateContext::frust_embedding_ios_dir`]); it must be normalised
+/// before it ever reaches them.
+pub fn resolve_frust_crate_path(path: &Path) -> Result<PathBuf, FrustPathError> {
+    if manifest_names_package(path, "frust") {
+        return Ok(path.to_path_buf());
+    }
+    let nested = path.join("crates").join("frust");
+    if manifest_names_package(&nested, "frust") {
+        return Ok(nested);
+    }
+    Err(FrustPathError::NotFacadeCrate {
+        given: path.display().to_string(),
+    })
+}
+
+/// A minimal `Cargo.toml` parse: only `[package] name`, serde-ignoring
+/// everything else (mirrors `ios_build::team`'s partial-`frust.toml` parse
+/// precedent).
+#[derive(Debug, Deserialize)]
+struct CargoManifestName {
+    package: Option<CargoPackageName>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoPackageName {
+    name: Option<String>,
+}
+
+/// Whether `<dir>/Cargo.toml` exists, parses, and names package `expected`.
+/// Any failure along the way (missing file, a virtual-workspace manifest
+/// with no `[package]` table, malformed toml) is treated as "no match", not
+/// propagated — the caller falls through to the next accepted shape.
+fn manifest_names_package(dir: &Path, expected: &str) -> bool {
+    let Ok(contents) = std::fs::read_to_string(dir.join("Cargo.toml")) else {
+        return false;
+    };
+    let Ok(manifest) = toml::from_str::<CargoManifestName>(&contents) else {
+        return false;
+    };
+    manifest.package.and_then(|p| p.name).as_deref() == Some(expected)
+}
 
 /// Re-base a **project-root-relative** `frust_path` for a consumer that
 /// resolves it from a project *subdirectory* one level down (`android/`,
@@ -610,5 +685,106 @@ mod tests {
             frust_path_from_project_subdir("vendor/frust"),
             "../vendor/frust"
         );
+    }
+
+    mod resolve_frust_crate_path_tests {
+        use super::*;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+            static COUNTER: AtomicU32 = AtomicU32::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "frust-drive-frust-path-test-{tag}-{}-{n}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            dir
+        }
+
+        fn write_manifest(dir: &std::path::Path, package_name: &str) {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(
+                dir.join("Cargo.toml"),
+                format!("[package]\nname = \"{package_name}\"\nversion = \"0.1.0\"\n"),
+            )
+            .unwrap();
+        }
+
+        /// Shape 1: `path` is the facade crate itself -> used as-is.
+        #[test]
+        fn accepts_facade_crate_directly() {
+            let root = unique_temp_dir("facade-direct");
+            write_manifest(&root, "frust");
+
+            assert_eq!(resolve_frust_crate_path(&root).unwrap(), root);
+
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        /// Shape 2: `path` is the repo root containing `crates/frust` ->
+        /// canonicalises to the nested facade crate directory. This is the
+        /// previously-uncovered case: a repo-root value must resolve to a
+        /// real, buildable path rather than silently baking `frust = {
+        /// path = "<repo-root>" }` (a virtual-workspace manifest with no
+        /// `[package]` table).
+        #[test]
+        fn canonicalises_repo_root_to_nested_facade_crate() {
+            let root = unique_temp_dir("repo-root");
+            // A virtual-workspace manifest at the root — no `[package]`
+            // table, so it must NOT satisfy shape 1.
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+            write_manifest(&root.join("crates").join("frust"), "frust");
+
+            assert_eq!(
+                resolve_frust_crate_path(&root).unwrap(),
+                root.join("crates").join("frust")
+            );
+
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        /// Shape 3: neither the path itself nor `<path>/crates/frust` names
+        /// package `frust` -> hard error naming both accepted shapes.
+        #[test]
+        fn rejects_unrelated_directory_naming_both_accepted_shapes() {
+            let dir = unique_temp_dir("unrelated");
+            std::fs::create_dir_all(&dir).unwrap();
+
+            let err = resolve_frust_crate_path(&dir).unwrap_err();
+            let message = err.to_string();
+            assert!(message.contains(&dir.display().to_string()), "{message}");
+            assert!(message.contains("facade crate"), "{message}");
+            assert!(message.contains("crates/frust"), "{message}");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        /// A directory with no `Cargo.toml` at all (not just a wrong
+        /// package name) hits the same rejection path.
+        #[test]
+        fn rejects_directory_with_no_cargo_toml() {
+            let dir = unique_temp_dir("no-manifest");
+            std::fs::create_dir_all(&dir).unwrap();
+
+            assert!(resolve_frust_crate_path(&dir).is_err());
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        /// A vendored/renamed checkout — the facade crate directory itself
+        /// doesn't literally end in `crates/frust` — still resolves via
+        /// shape 1, since resolution is file-probed, not string-matched.
+        #[test]
+        fn accepts_vendored_checkout_with_nonstandard_directory_name() {
+            let root = unique_temp_dir("vendored");
+            let vendored = root.join("third_party").join("frust-vendor");
+            write_manifest(&vendored, "frust");
+
+            assert_eq!(resolve_frust_crate_path(&vendored).unwrap(), vendored);
+
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 }

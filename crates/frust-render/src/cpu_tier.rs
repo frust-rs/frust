@@ -240,6 +240,12 @@ impl SceneSink for CpuSink<'_> {
         self.ctx.push_clip_layer(&rect.to_path(FLATTEN_TOLERANCE));
     }
 
+    fn push_clip_rounded(&mut self, transform: Affine, rect: &Rect, radius: f64) {
+        let path = RoundedRect::from_rect(*rect, radius).to_path(FLATTEN_TOLERANCE);
+        self.ctx.set_transform(transform);
+        self.ctx.push_clip_layer(&path);
+    }
+
     fn pop_clip(&mut self) {
         self.ctx.pop_layer();
     }

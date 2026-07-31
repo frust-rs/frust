@@ -20,11 +20,10 @@ host = "{{ deeplink_host }}"
 # dev = { app-id-suffix = ".dev" }
 # prod = {}
 
-# Android release signing is driven by `android/key.properties`, a Java
-# properties file the Gradle build reads (this file is NOT parsed by Frust).
-# It must be gitignored (the generated .gitignore already excludes
-# `key.properties` and `*.jks`) so the keystore/passwords never enter version
-# control. Keys:
+# Android release signing. By default the signing material lives in
+# `android/key.properties`, a Java properties file that must stay gitignored
+# (the generated .gitignore already excludes `key.properties` and `*.jks`) so
+# the keystore and passwords never enter version control. Keys:
 #   storePassword=<keystore password>
 #   keyPassword=<key password>
 #   keyAlias=<key alias>
@@ -32,10 +31,52 @@ host = "{{ deeplink_host }}"
 # Generate an upload keystore with:
 #   keytool -genkey -v -keystore ~/upload-keystore.jks -keyalg RSA \
 #     -storetype JKS -keysize 2048 -validity 10000 -alias upload
-# Without key.properties, release builds fall back to debug signing (a Gradle
-# warning is logged); `frust build` makes a missing keystore a hard error.
+#
+# Each value also falls back to an environment variable when the properties
+# file doesn't supply it (a blank entry counts as not supplied) — the CI half
+# of the common "properties file locally, environment in CI" rig. The defaults
+# need no configuration at all:
+#   ANDROID_STORE_FILE  ANDROID_STORE_PASSWORD
+#   ANDROID_KEY_ALIAS   ANDROID_KEY_PASSWORD
+#
+# `frust build --release` / `frust run --release` resolve all four values,
+# check the keystore file really exists, and then write what they resolved to
+# `android/.frust-signing.properties` for the Gradle build to read — deleting
+# it again the moment Gradle returns. That file is the single source of truth:
+# Gradle signs with exactly what the gate verified, so a green build and a
+# release-signed artifact are the same fact. A stub `key.properties` can't buy
+# a green, debug-signed release. Running `./gradlew assembleRelease` by hand
+# (Android Studio) skips Frust entirely — Gradle then falls back to
+# `key.properties` + the four `ANDROID_*` variables, and Frust makes no promise
+# about that path; it debug-signs with a warning if nothing resolves.
+#
+# The section below IS parsed by Frust (unlike the deeplink/flavor sections
+# above, which only document what was baked into the platform templates).
+# Set it when your signing material lives somewhere other than the defaults —
+# Frust resolves whatever you describe here and hands Gradle the result, so
+# there is nothing to keep in sync on the Gradle side:
 # [signing]
-# keystore = "android/key.properties"
+# # Properties file path, relative to `android/`. Default: "key.properties".
+# key-properties = "app/keystores/key.properties"
+# # Prefix on the property keys, for a file holding several key sets
+# # (`prod.storeFile`, `develop.storeFile`, ...). Default: none. Frust strips
+# # it before handing the values to Gradle.
+# prefix = "prod"
+# # Waives the gate when signing happens somewhere Frust can't inspect (a CI
+# # signing service, a Gradle signing plugin). Nothing is resolved or generated
+# # and every release build warns that Frust cannot promise the artifact is
+# # release-signed.
+# external = false
+#
+# Renames the environment variable behind any value, overriding the
+# `ANDROID_*` defaults above. Only the variable NAMES belong here, never the
+# values. No matching Gradle edit is needed — Frust resolves the variable and
+# passes the value on.
+# [signing.env]
+# store-file = "CI_STORE_FILE"
+# store-password = "CI_STORE_PASSWORD"
+# key-alias = "CI_KEY_ALIAS"
+# key-password = "CI_KEY_PASSWORD"
 
 # Override the derived iOS bundle identifier (defaults to
 # `org.camelCase(name)`, e.g. `{{ iosIdentifier }}`).

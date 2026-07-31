@@ -1,33 +1,11 @@
-//! Project detection for `frust run`'s Android path: locates `frust.toml`
-//! in the current directory and resolves the Android application id;
-//! `android/` is checked separately since the desktop-fallback path doesn't
-//! need it.
+//! Project detection for `frust run`'s Android path: reads `frust.toml`
+//! (through the shared `crate::manifest` reader) and resolves the Android
+//! application id; `android/` is checked separately since the
+//! desktop-fallback path doesn't need it.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
-use serde::Deserialize;
-
-/// The `[app]`/`[android]` subset of `frust.toml` that `frust run` reads.
-#[derive(Debug, Clone, Deserialize)]
-struct FrustToml {
-    app: AppSection,
-    #[serde(default)]
-    android: Option<AndroidSection>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct AppSection {
-    name: String,
-    org: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct AndroidSection {
-    #[serde(default)]
-    identifier: Option<String>,
-}
+use anyhow::{Context, Result};
 
 /// A detected Frust project, resolved from a directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,16 +21,8 @@ pub struct Project {
 /// `android/` to exist — see [`require_android_dir`] for that check, run
 /// only on the Android path.
 pub fn detect(cwd: &Path) -> Result<Project> {
-    let toml_path = cwd.join("frust.toml");
-    if !toml_path.exists() {
-        bail!(
-            "no `frust.toml` found in `{}` — is this a Frust project? Run `frust create` to scaffold one.",
-            cwd.display()
-        );
-    }
-    let raw = fs::read_to_string(&toml_path)
-        .with_context(|| format!("reading `{}`", toml_path.display()))?;
-    let parsed = parse(&raw).with_context(|| format!("parsing `{}`", toml_path.display()))?;
+    let toml_path = crate::manifest::path(cwd);
+    let parsed = crate::manifest::load(cwd)?;
 
     let app_id = match parsed.android.and_then(|a| a.identifier) {
         Some(explicit) => {
@@ -82,16 +52,12 @@ pub fn detect(cwd: &Path) -> Result<Project> {
     })
 }
 
-fn parse(raw: &str) -> Result<FrustToml> {
-    toml::from_str(raw).context("invalid frust.toml")
-}
-
 /// `android/` (a generated Gradle project, identified by its wrapper
 /// script) must exist for the Android run path.
 pub fn require_android_dir(root: &Path) -> Result<PathBuf> {
     let android_dir = root.join("android");
     if !android_dir.join("gradlew").exists() {
-        bail!(
+        anyhow::bail!(
             "no `android/` project found in `{}` — this Frust project predates Android \
              support, or `android/` wasn't generated. Re-run `frust create` to add it.",
             root.display()
@@ -113,6 +79,7 @@ fn derive_app_id(org: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     fn unique_temp_dir(tag: &str) -> PathBuf {

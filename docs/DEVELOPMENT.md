@@ -21,11 +21,12 @@ prerequisites used during ordinary development.
   `FRUST_IOS_TEAM`/`[ios] team`), and a physical iPhone run also needs iOS 17+,
   unlocked/paired/trusted with Developer Mode on (`frust doctor` checks Rust targets on
   macOS hosts only).
-- **clean-signals-rs** cloned as a sibling directory (`../clean-signals-rs`, branch
-  `master`) — needed only for the `clean-signals` core crate, consumed by
-  `examples/huddle` and the `plugins/clean-signals-frust` glue plugin. The root
-  workspace never needs it (see *Version-Pin Policy*); both dependents' verify gates are
-  conditional steps in *Test*.
+- **clean-signals-rs**: not required to build. `clean-signals` is git+rev-pinned to its
+  public repo (see *Version-Pin Policy*), consumed by `examples/huddle`,
+  `plugins/clean-signals-frust`, and `templates/app`'s clean-signals scaffold variant.
+  Cloning it as a sibling directory (`../clean-signals-rs`) is still useful for local
+  iteration on `clean-signals` itself, via a `[patch]` override in the consuming
+  workspace — not needed for ordinary development.
 - No Docker, CI config, or `.env` setup exists in this repo yet.
 
 ## Build
@@ -73,8 +74,7 @@ rendering/interaction/theme/navigation/text-input changes (no automated pixel-di
 yet, so a person must look at the window) — including the check that a background-thread
 wake (e.g. a timer-driven completion) renders content with zero mouse movement, not only
 on an input-triggered redraw. `examples/huddle`'s own verify gate (`cargo test` plus
-clippy, from its own directory) is the conditional step in *Test* below, gated on the
-clean-signals-rs sibling checkout.
+clippy, from its own directory) is part of *Test* below.
 
 **Glyph design-language gate.** `examples/huddle`'s appearance settings expose a
 four-way `System`/`Material3`/`Cupertino`/`Glyph` toggle; a Glyph dark+light check
@@ -142,7 +142,8 @@ fast-dev template recipe ships** — re-run `scripts/devloop-measure.sh` if that
 ## Release Builds
 
 ```bash
-# Android: signed release APK (needs android/key.properties — see Prerequisites)
+# Android: signed release APK (needs resolvable signing material, not just a file's
+# existence — see the `[signing]` gate in docs/CLI_ARCHITECTURE.md)
 frust build apk --release
 
 # Other Android artifact shapes
@@ -192,8 +193,7 @@ every root-workspace member (`plugins/native-widgets` has its own legitimate def
 evidence). Skip it and a catalog opt-out regression ships behind a green `--workspace`
 run.
 
-If the clean-signals-rs sibling checkout exists at `../clean-signals-rs` (branch
-`master` — see Prerequisites and *Version-Pin Policy*), additionally run:
+Additionally run:
 
 ```bash
 (cd examples/huddle && cargo test) \
@@ -204,10 +204,9 @@ If the clean-signals-rs sibling checkout exists at `../clean-signals-rs` (branch
 
 `examples/huddle` and `plugins/clean-signals-frust` each gate from their own directory
 rather than `-p` from the repo root because both are standalone workspaces excluded from
-the root one (*Version-Pin Policy*). No sibling checkout? Do not run these commands —
-record "huddle/clean-signals-frust gate not run — no clean-signals-rs sibling checkout"
-instead, and do not touch either directory without the sibling in place. This gate is
-separate from `frust build apk`/`run`'s pipeline gate (*Run*).
+the root one (*Version-Pin Policy*); both git+rev-pin `clean-signals` to its public repo,
+so no local sibling checkout is required to run this gate. This gate is separate from
+`frust build apk`/`run`'s pipeline gate (*Run*).
 
 **Non-default features are not compiled by the chain above.** `frust-render`'s
 `cpu-tier` (experimental `vello_cpu` render backend — see *Version-Pin Policy*) is
@@ -360,9 +359,9 @@ the platform-specific edge-to-edge/safe-area/keyboard-inset and back-navigation 
 the generated app needs — see `docs/SHELLS_ARCHITECTURE.md`'s cross-cutting host-signal flow.
 
 `--arch clean-signals` scaffolds a clean-architecture variant (controller + use-case +
-`async_view` over `clean-signals-frust`) instead of the default notes-app template,
-dev-machine-only while `clean-signals` is unpublished (path-depends into this checkout
-and the sibling checkout — see *Version-Pin Policy*; `--help` carries this caveat).
+`async_view` over `clean-signals-frust`) instead of the default notes-app template;
+`clean-signals` is git+rev-pinned to its public GitHub repo (see *Version-Pin Policy*), so
+the scaffold builds on any machine with no sibling checkout required.
 
 **Platform embedding modules ship in-repo, not templated.**
 `platform/android/frust-embedding` and `platform/ios/FrustEmbedding` are consumed by a
@@ -429,6 +428,7 @@ not floating. Each row's tripwire must be re-run after touching that pin:
 | `vello 0.9.0` / `wgpu 29.0.3` (resolves 29.0.4) | `vello` requires `wgpu ^29.0.3`; bumping `wgpu` independently (30.x is ecosystem-latest) breaks the build | `cargo build --workspace --locked` |
 | `image =0.25.10` exact (`Image` widget's PNG/JPEG decoder, `png`/`jpeg` only) | Only 0.25.x release whose MSRV equals the workspace `rust-version` (1.88) | fresh MSRV check before bumping, not just `cargo update` |
 | `reactive_graph 0.2` / `any_spawner 0.3` / `tokio 1` (no default features), minor | `frust-reactive` substrate, pre-1.0 Leptos-ecosystem churn expected; never enable `reactive_graph`'s `effects` feature — the frame path is a custom subscriber, not `RenderEffect` (see ARCHITECTURE's Key Types) | `cargo test -p frust-reactive` |
+| `clean-signals` (git, `rev = "910f626"` on `master`, not published to crates.io) | Consumed by `examples/huddle`, `plugins/clean-signals-frust` (dep + `test-fixtures` dev-dep), and `templates/app`'s clean-signals scaffold variant — all four sites must pin the identical git+rev spec (type-identity rule below). Never enable its `effects` feature (`reactive_graph/effects`, same prohibition as the `reactive_graph` row above) — absent at this rev, confirm it stays that way before bumping | `cargo generate-lockfile` + `cargo build --locked` in each of `examples/huddle`/`plugins/clean-signals-frust` |
 | `accesskit 0.24` minor + adapters (`accesskit_winit 0.33`, `accesskit_android 0.7` minor, `accesskit_ios =0.1.2` exact) | `frust-core`'s semantics-pass vocabulary; `accesskit_ios` is younger/less proven, compile-gate only (*Test*) | `cargo test -p frust-core semantics` |
 | `vello_cpu =0.0.9` exact | Experimental CPU render tier (`frust-render`'s non-default `cpu-tier` feature), pre-1.0 unstable API, isolated behind the `SceneSink` encode seam so a breaking bump never reaches the default GPU path | tripwire in *Test* |
 | `ndk-context 0.1` minor | `frust-plugin`'s Android platform-handle slot (written by `nativeInitPlatform`, read by every plugin) | `cargo check --target aarch64-linux-android -p frust-plugin` |
@@ -443,10 +443,11 @@ not floating. Each row's tripwire must be re-run after touching that pin:
 
 - `examples/huddle` and `plugins/clean-signals-frust` are each a **standalone package**
   (own `[workspace]` root/`Cargo.lock`, excluded from the root `[workspace]`),
-  path-depending on the `clean-signals` core crate at the same **sibling checkout**
-  (`../../../clean-signals-rs`, branch `master` — not git+rev-pinned, so every consumer
-  must resolve it the same way). Neither manifest can use `{ workspace = true }`; gate
-  each from its own directory (`cargo test` + `cargo clippy --all-targets -- -D
+  git+rev-pinning the `clean-signals` core crate to its public repo (see the table row
+  above) rather than a path dep — every consumer, including `templates/app`'s
+  clean-signals scaffold variant, must resolve the identical git+rev spec, or Cargo
+  builds two distinct crate identities. Neither manifest can use `{ workspace = true }`;
+  gate each from its own directory (`cargo test` + `cargo clippy --all-targets -- -D
   warnings`).
 - **Never run a blind `cargo update`.** After any pinned-dependency manifest change, run
   `cargo generate-lockfile` then confirm `cargo build --workspace --locked` still

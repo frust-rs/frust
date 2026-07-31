@@ -386,6 +386,15 @@ pub mod authoring {
     /// accessors hand it.
     pub use frust_core::{WindowEdgeInsets, WindowInsets};
 
+    /// The window-shape value recovered via
+    /// `use_context::<`[`WindowMetrics`]`>()` inside `Component::build` — lifted
+    /// alongside [`WindowInsets`] for the same reason: a widget or component
+    /// laying itself out around window size/scale/orientation cannot otherwise
+    /// name the value. See [`WindowMetrics`]'s own doc for the plain-value
+    /// delivery contract, the alongside-not-superseding relationship with
+    /// [`WindowInsets`], and the derived-orientation/rebuild-cost notes.
+    pub use frust_core::{Orientation, WindowMetrics};
+
     /// The accessibility-node vocabulary a widget that *contributes* a
     /// semantics node needs — as opposed to one that only forwards a child's.
     ///
@@ -814,6 +823,15 @@ pub use frust_shell_common::{ResolvedSurfaceMode, resolved_surface_mode};
 pub use frust_core::anim::{
     AnimationController, AnimationStatus, Curve, FrameTime, Lerp, Spring, SpringDesc, Tween,
 };
+
+/// The window's shape, flat-re-exported from `frust-core::app` so app code
+/// (not just widget authors, see [`authoring::WindowMetrics`]) can recover it
+/// via `use_context::<`[`WindowMetrics`]`>()` inside `Component::build` — a
+/// component laying itself out around window size/scale/orientation reads
+/// this the same way it reads a [`Theme`] via `use_context`. Delivered as a
+/// plain value (not an `RwSignal`); see [`WindowMetrics`]'s own doc for the
+/// derived-[`Orientation`] and rebuild-cost notes.
+pub use frust_core::{Orientation, WindowMetrics};
 
 /// Pure input/gesture helpers (slop constants, [`input::VelocityTracker`], the
 /// fling-decay math) re-exported for app authors and advanced widgets.

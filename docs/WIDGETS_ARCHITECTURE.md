@@ -60,7 +60,10 @@ module; an app can disable all three to build its own design system on the same 
   when supported, degrading to an opaque Material fill otherwise.
 - Motion flow: implicit-animation and transition widgets resolve default timing from `Theme.motion`,
   collapsing to a short crossfade under `reduce_motion`; decorative loops request paced frames so
-  the mobile frame gate can throttle them.
+  the mobile frame gate can throttle them. `reduce_motion` is a floor, not an assignment: every
+  baseline defaults it `false`, and a mobile shell OR's the OS accessibility preference over whatever
+  the active theme authored (`effective = authored || os`, see SHELLS_ARCHITECTURE.md for the
+  sensors) — an authored `true` is never un-reduced by an OS report of `false`.
 - Navigation flow: `Navigator`/`Router` manage a page stack and declarative routes over the same
   container plumbing; `hero()` morphs a tagged child between pages during transitions.
 - Platform-view flow: `platform_view()`/`shield()` publish native-compositing slots and input-shield

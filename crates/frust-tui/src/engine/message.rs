@@ -227,7 +227,8 @@ pub enum Message {
 
     // ── Create-project wizard ───────────────────────────────────────────────
     /// Open the create wizard (the workbench "New project" action / `n`, or
-    /// the palette). Primes an off-thread clean-signals sibling probe.
+    /// the palette). Primes the [`super::update::Effect::ProbeCleanSignals`]
+    /// priming effect (see its doc — no arch card is sibling-gated today).
     OpenCreateWizard,
     /// Close the wizard without scaffolding (the Cancel button).
     CloseCreateWizard,
@@ -245,8 +246,11 @@ pub enum Message {
     CreateWizardArchMove(isize),
     /// Highlight an arch card by index (mouse click parity).
     CreateWizardSelectArchAt(usize),
-    /// The off-thread sibling probe finished: whether the `../clean-signals-rs`
-    /// sibling checkout is present (gates the clean-signals arch card).
+    /// The [`super::update::Effect::ProbeCleanSignals`] priming effect's
+    /// reply — historically whether the `../clean-signals-rs` sibling
+    /// checkout was present. No card is sibling-gated today, so the runner
+    /// always replies `true` and this is effectively a no-op (see that
+    /// effect's doc).
     CleanSignalsProbed(bool),
     /// The off-thread scaffold succeeded; open the new project in place.
     ScaffoldSucceeded {

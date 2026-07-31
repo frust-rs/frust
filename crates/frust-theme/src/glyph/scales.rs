@@ -289,6 +289,11 @@ impl MotionScheme {
                 effects: Curve::Cubic(0.16, 1.0, 0.3, 1.0),
                 exit: Curve::Cubic(0.4, 0.0, 1.0, 1.0),
             },
+            // `false` like every other baseline: the correct value absent an
+            // OS signal. A mobile shell ORs the platform's own reduced-motion
+            // preference over this authored token (see
+            // `MotionScheme::reduce_motion`), so Glyph needs no per-catalog
+            // reduced-motion handling of its own.
             reduce_motion: false,
             cosmetic_loop_rate: CosmeticLoopRate::new(30.0),
         }

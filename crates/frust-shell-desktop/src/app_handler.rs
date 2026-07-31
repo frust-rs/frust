@@ -43,14 +43,15 @@ use frust_core::event::{
     ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton, PointerEvent,
     PointerPhase, ScrollDelta,
 };
+use frust_core::insets::WindowInsets;
 use frust_core::view::View;
 use frust_reactive::{FrameWaker, ReactiveRuntime, TrackedScope, provide_context};
 use frust_scene::{Scene, SceneBuilder};
 use frust_shell_common::font_registry::FontRegistryWatcher;
 use frust_shell_common::perf::UiSpans;
 use frust_shell_common::{
-    SurfaceSize, ThemeOverrideWatcher, default_theme, effective_brightness_for_platform_change,
-    render_thread_enabled,
+    SurfaceSize, ThemeOverrideWatcher, WindowMetricsPublisher, default_theme,
+    effective_brightness_for_platform_change, render_thread_enabled,
 };
 use frust_text::TextContext;
 use frust_theme::{Brightness, Theme};
@@ -210,6 +211,7 @@ where
         font_registry: FontRegistryWatcher::new(),
         paced_wake: None,
         anim_pacing: !frust_shell_common::anim_pacing_kill_switch_engaged(),
+        window_metrics: WindowMetricsPublisher::new(),
     };
 
     // Construction-time font drain: apply any fonts registered via
@@ -608,6 +610,19 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     ///
     /// [`FRUST_NO_ANIM_PACING`]: frust_shell_common::frame_gate::NO_ANIM_PACING_VAR
     anim_pacing: bool,
+    /// Change detector for the app-facing [`WindowMetrics`](frust_core::WindowMetrics)
+    /// context: seeded in `resumed` (before the first frame) and re-polled on
+    /// `WindowEvent::Resized` — never per frame in `RedrawRequested`, which only
+    /// *reads* `inner_size()`/`scale_factor()`. See
+    /// [`ShellHandler::push_window_metrics`] for why the guard is load-bearing.
+    ///
+    /// Desktop is the shell that had **no** insets arm at all: winit 0.30
+    /// exposes no cross-platform safe-area/inset accessor (its only `safe_area`
+    /// support is internal to the iOS backend), so the metrics published here
+    /// carry [`WindowInsets::default`] — zero occlusion, which is the truth for
+    /// a decorated desktop window. Mobile's own standalone `WindowInsets`
+    /// context is unaffected.
+    window_metrics: WindowMetricsPublisher,
 }
 
 impl<State, Logic, V> ShellHandler<State, Logic, V>
@@ -677,6 +692,43 @@ where
         let theme = self.theme.clone();
         self.runtime.with_owner(move || provide_context(theme));
         window.request_redraw();
+    }
+
+    /// `provide_context` the window's [`WindowMetrics`](frust_core::WindowMetrics)
+    /// under the reactive root owner — **only when it actually changed**
+    /// ([`WindowMetricsPublisher::poll`] returns `None` otherwise) — so a
+    /// `Component::build`'s `use_context::<WindowMetrics>()` resolves the current
+    /// window shape on the next rebuild. The app-code delivery path
+    /// [`ShellHandler::apply_theme`] already uses for [`Theme`], with the
+    /// change guard added.
+    ///
+    /// **The guard is load-bearing, not an optimization.** `provide_context` is a
+    /// plain map insert that notifies nothing on its own, but re-providing once
+    /// per frame from `RedrawRequested` would still pay a lock write plus an
+    /// allocation for no observable benefit — the value only ever becomes
+    /// visible on the next rebuild, which a genuine input change already
+    /// drives. So this is called only where an input genuinely moves: `resumed`
+    /// (the seed, before the first frame) and `WindowEvent::Resized`. A
+    /// scale-factor change needs no separate arm — winit guarantees a
+    /// following `Resized`.
+    ///
+    /// `physical` is winit's device-pixel `inner_size`, divided by `scale` into
+    /// the same logical space the layout pass below uses, so the published size
+    /// is logical exactly as on Android/iOS. Insets are
+    /// [`WindowInsets::default`] (see the `window_metrics` field doc).
+    ///
+    /// Unlike `apply_theme` this requests **no** redraw of its own: both call
+    /// sites already do (`resumed`'s theme seed, `Resized`'s own
+    /// `request_redraw`), and a metrics publish that forced a frame on its own
+    /// would defeat the guard's purpose.
+    fn push_window_metrics(&mut self, physical: (u32, u32), scale: f64) {
+        let Some(metrics) = self
+            .window_metrics
+            .poll(physical, scale, WindowInsets::default())
+        else {
+            return; // unchanged — no re-provide, no app-wide rebuild
+        };
+        self.runtime.with_owner(move || provide_context(metrics));
     }
 
     /// Handle one `accesskit_winit` adapter event delivered through the
@@ -859,6 +911,15 @@ where
         } else {
             window.request_redraw();
         }
+
+        // Seed the app-facing window-shape context beside the theme, before the
+        // first frame the redraw above drives, so a `Component::build` calling
+        // `use_context::<WindowMetrics>()` in the very first rebuild resolves a
+        // real value rather than `None`. Self-guarded, so a redundant `resumed`
+        // (or one after a suspend/resume at unchanged dimensions) publishes
+        // nothing. Live changes arrive via `WindowEvent::Resized`.
+        let physical = window.inner_size();
+        self.push_window_metrics((physical.width, physical.height), window.scale_factor());
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
@@ -927,6 +988,14 @@ where
                     height: size.height,
                     scale: window.scale_factor(),
                 });
+                // Republish the app-facing window shape (new logical size, and
+                // the derived portrait/landscape orientation with it). Reads the
+                // event's own `size` rather than `inner_size()` — this IS the
+                // authoritative new size, and it is also what winit delivers
+                // after a `ScaleFactorChanged`, which is why that needs no arm
+                // of its own. Self-guarded, so a resize that reports unchanged
+                // dimensions publishes nothing.
+                self.push_window_metrics((size.width, size.height), window.scale_factor());
                 window.request_redraw();
             }
 

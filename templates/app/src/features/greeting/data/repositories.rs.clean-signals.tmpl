@@ -44,3 +44,4 @@ fn map_source_error(err: SourceError) -> AppFailure {
         SourceError::Unavailable(msg) => AppFailure::Network(msg),
     }
 }
+

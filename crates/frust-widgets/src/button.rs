@@ -35,6 +35,27 @@
 //! addition would slot in above the theme resolution in
 //! [`ButtonStyle::resolve`]).
 //!
+//! # Label alignment
+//!
+//! [`ButtonView::label_alignment`] reuses [`crate::Alignment`] (the same type
+//! `Align`/`AlignView` are built on — no button-local alignment type exists)
+//! to position the label within a button that has grown past its natural
+//! wrapped size, e.g. a full-bleed button stretched to fill a row. With no
+//! explicit call, the label defaults to leading-pinned on both axes — today's
+//! only behaviour — *unless* the button has been stretched **wider** than its
+//! natural content, in which case it defaults to horizontally centered; a
+//! stretched *height* never auto-centers (narrower than the reported full-bleed-
+//! width defect), so centering vertically always needs an explicit
+//! `.label_alignment()` call. A natural-width/height button is unaffected
+//! either way, since there is no free space for any alignment fraction to
+//! distribute. [`ButtonStyle::Icon`] ignores `label_alignment` outright — it is
+//! definitionally centered (square, re-centered every layout, see below) —
+//! silently half-applying an alignment there would be worse than ignoring it.
+//! **Not inherited**: `cupertino::cupertino_button` and
+//! `material::{split_button, button_group}` are fully independent
+//! implementations that never call [`button`], so none of them gain this
+//! option.
+//!
 //! # Press-feedback scale
 //!
 //! A `Down` scales the button to `0.96` over the theme's `durations.instant`
@@ -65,7 +86,7 @@ use peniko::{Brush, Color};
 use crate::nav::transition::{TransitionDriver, make_driver};
 use crate::text;
 use crate::text::ThemeTextColor;
-use crate::{Timing, authoring::PRESSED_OPACITY};
+use crate::{Alignment, Timing, authoring::PRESSED_OPACITY};
 
 /// Corner radius of the button's rounded-rect background, in logical px (the
 /// unthemed fallback; a theme resolves this from `shape.small`).
@@ -405,6 +426,9 @@ pub struct ButtonView<State: 'static> {
     style: ButtonStyle,
     small: bool,
     loading: bool,
+    /// `None` = the default stretch-aware behaviour — see the [module
+    /// docs](self)'s "Label alignment" section.
+    label_alignment: Option<Alignment>,
 }
 
 /// Create a button labelled `label` that runs `on_press` against the app state
@@ -419,6 +443,7 @@ pub fn button<State: 'static, F: Fn(&mut State) + 'static>(
         style: ButtonStyle::default(),
         small: false,
         loading: false,
+        label_alignment: None,
     }
 }
 
@@ -451,6 +476,15 @@ impl<State: 'static> ButtonView<State> {
         self.loading = loading;
         self
     }
+
+    /// Explicitly position the label within a stretched button, overriding
+    /// the stretch-aware default on both axes — see the [module
+    /// docs](self)'s "Label alignment" section. Ignored under
+    /// [`ButtonStyle::Icon`], which is always centered.
+    pub fn label_alignment(mut self, alignment: Alignment) -> Self {
+        self.label_alignment = Some(alignment);
+        self
+    }
 }
 
 /// The retained widget for a [`ButtonView`]. The label is a nested
@@ -474,6 +508,9 @@ pub struct ButtonWidget {
     style: ButtonStyle,
     small: bool,
     loading: bool,
+    /// See [`ButtonView::label_alignment`] / the [module docs](self)'s
+    /// "Label alignment" section.
+    label_alignment: Option<Alignment>,
     /// The press-feedback scale driver — see the [module docs](self).
     press: PressAnim,
     /// The loading-spinner rotation controller — always `repeat()`ing
@@ -500,6 +537,42 @@ impl ButtonWidget {
             }
             None => RADIUS,
         }
+    }
+
+    /// Resolve the label's origin for every non-Icon style — see the [module
+    /// docs](self)'s "Label alignment" section. `final_size` is the button's
+    /// own post-`BoxConstraints` box; `content_size` is the label's natural
+    /// wrapped size (label + padding, pre-constrain), used to detect
+    /// stretch. Reuses [`Alignment`]'s `-1.0..=1.0` fraction convention
+    /// directly (its `fraction` helper is private to `align.rs`, so the
+    /// two-line remap is duplicated here rather than exposed just for this).
+    fn resolve_label_origin(
+        alignment: Option<Alignment>,
+        pad_x: f64,
+        pad_y: f64,
+        final_size: Size,
+        content_size: Size,
+    ) -> Point {
+        // Free space beyond the label's natural content box on each axis —
+        // zero unless a `BoxConstraints` min has stretched the button past
+        // it. Clamped at zero defensively: `final_size` should never shrink
+        // below `content_size` (padding never underflows), but a clamp here
+        // costs nothing and avoids ever pushing the label negative.
+        let free_x = (final_size.width - content_size.width).max(0.0);
+        let free_y = (final_size.height - content_size.height).max(0.0);
+        // No explicit alignment: leading-pinned on both axes (today's only
+        // behaviour) unless the button has been stretched *wider* than its
+        // natural content, which defaults the horizontal axis to centered.
+        // Vertical stretch never auto-centers (narrower than the reported
+        // full-bleed-*width* defect) — an explicit call is the only way to
+        // center vertically.
+        let effective = alignment
+            .unwrap_or_else(|| Alignment::new(if free_x > 0.0 { 0.0 } else { -1.0 }, -1.0));
+        let frac = |component: f64| (component + 1.0) / 2.0;
+        Point::new(
+            pad_x + free_x * frac(effective.x),
+            pad_y + free_y * frac(effective.y),
+        )
     }
 
     /// Paint the loading spinner (a rotating partial ring) centered on the
@@ -543,6 +616,7 @@ impl<State: 'static> View<State> for ButtonView<State> {
             style: self.style,
             small: self.small,
             loading: self.loading,
+            label_alignment: self.label_alignment,
             press: PressAnim::new(),
             spinner,
         }
@@ -570,6 +644,14 @@ impl<State: 'static> View<State> for ButtonView<State> {
         }
         if prev.small != self.small {
             element.small = self.small;
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        if prev.label_alignment != self.label_alignment {
+            element.label_alignment = self.label_alignment;
+            // Alignment only moves the label's origin, never the button's
+            // own painted fill/border, but a new origin still needs a
+            // relayout pass to take effect (`ChildPod::set_origin` isn't
+            // itself a repaint trigger).
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         if prev.loading != self.loading {
@@ -610,19 +692,34 @@ impl Widget for ButtonWidget {
         let label_size = self
             .label
             .layout_child(ctx, &BoxConstraints::loose(inner_max));
-        self.label.set_origin(Point::new(pad_x, pad_y));
         let mut size = Size::new(
             label_size.width + inset.width,
             label_size.height + inset.height,
         );
+        // The label's *natural* wrapped size (label + padding), pre-constrain
+        // — used below to detect stretch (`resolve_label_origin`) and, for
+        // Icon, to compute the pre-square origin exactly as before this
+        // option existed.
+        let content_size = size;
         if self.style == ButtonStyle::Icon {
             // Square, secondary-shaped (module docs): grow the shorter side to
             // match the longer one, then re-center the label inside it.
+            // `label_alignment` is ignored here — Icon is always centered
+            // (see the module docs' "Label alignment" section).
             let side = size.width.max(size.height);
             size = Size::new(side, side);
             self.label.set_origin(Point::new(
                 (side - label_size.width) / 2.0,
                 (side - label_size.height) / 2.0,
+            ));
+        } else {
+            let final_size = bc.constrain(size);
+            self.label.set_origin(Self::resolve_label_origin(
+                self.label_alignment,
+                pad_x,
+                pad_y,
+                final_size,
+                content_size,
             ));
         }
         bc.constrain(size)
@@ -1121,6 +1218,111 @@ mod tests {
         assert!(
             small_size.width < normal_size.width && small_size.height < normal_size.height,
             "small() must produce a smaller laid-out box: small={small_size:?} normal={normal_size:?}"
+        );
+    }
+
+    // --- Label alignment ----------------------------------------------------
+
+    /// Lay a button out under `bc` and return `(size, label_origin)`.
+    fn layout_with(w: &mut ButtonWidget, bc: &BoxConstraints) -> (Size, Point) {
+        let mut text_ctx = frust_text::TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut text_ctx);
+        let size = w.layout(&mut lctx, bc);
+        (size, w.label.origin())
+    }
+
+    #[test]
+    fn natural_width_button_label_origin_is_unchanged_by_default() {
+        // A loose constraint the label never grows into: the button wraps to
+        // its natural content size, so there's no free space for any
+        // alignment fraction to distribute — the label stays pinned at
+        // (PAD_X, PAD_Y), byte-identical to pre-option behaviour.
+        let view = button::<Counter, _>("go", |_: &mut Counter| {});
+        let mut counter = 0u64;
+        let mut w = View::<Counter>::build(&view, &mut BuildCtx::new(&mut counter));
+        let (size, origin) = layout_with(&mut w, &BoxConstraints::loose(Size::new(200.0, 200.0)));
+        assert!(size.width < 200.0, "button must not have been stretched");
+        assert_eq!(origin, Point::new(PAD_X, PAD_Y));
+    }
+
+    #[test]
+    fn stretched_button_defaults_to_centered_label() {
+        // A width-only min constraint forces the button wider than its
+        // natural content — with no explicit `.label_alignment()`, the
+        // label defaults to horizontally centered.
+        let view = button::<Counter, _>("go", |_: &mut Counter| {});
+        let mut counter = 0u64;
+        let mut w = View::<Counter>::build(&view, &mut BuildCtx::new(&mut counter));
+        let bc = BoxConstraints::new(Size::new(200.0, 0.0), Size::new(200.0, 200.0));
+        let (size, origin) = layout_with(&mut w, &bc);
+        assert_eq!(size.width, 200.0, "min forces the full stretched width");
+        let label_width = w.label.size().width;
+        let expected_x = (size.width - label_width) / 2.0;
+        assert!(
+            (origin.x - expected_x).abs() < 1e-6,
+            "stretched button must default to a centered label: got {origin:?}, expected x={expected_x}"
+        );
+        // Height was not stretched — the default never auto-centers that axis.
+        assert_eq!(origin.y, PAD_Y);
+    }
+
+    #[test]
+    fn explicit_leading_alignment_overrides_the_stretched_default() {
+        let view =
+            button::<Counter, _>("go", |_: &mut Counter| {}).label_alignment(Alignment::TOP_LEFT);
+        let mut counter = 0u64;
+        let mut w = View::<Counter>::build(&view, &mut BuildCtx::new(&mut counter));
+        let bc = BoxConstraints::new(Size::new(200.0, 0.0), Size::new(200.0, 200.0));
+        let (size, origin) = layout_with(&mut w, &bc);
+        assert_eq!(size.width, 200.0, "min forces the full stretched width");
+        assert_eq!(
+            origin,
+            Point::new(PAD_X, PAD_Y),
+            "an explicit leading alignment pins at the padding even when stretched"
+        );
+    }
+
+    #[test]
+    fn explicit_center_alignment_also_centers_vertically_when_stretched() {
+        // Height auto-centering never happens by default, but an explicit
+        // `Alignment::CENTER` still applies to both axes.
+        let view =
+            button::<Counter, _>("go", |_: &mut Counter| {}).label_alignment(Alignment::CENTER);
+        let mut counter = 0u64;
+        let mut w = View::<Counter>::build(&view, &mut BuildCtx::new(&mut counter));
+        let bc = BoxConstraints::tight(Size::new(200.0, 100.0));
+        let (size, origin) = layout_with(&mut w, &bc);
+        assert_eq!(size, Size::new(200.0, 100.0));
+        assert!(
+            origin.y > PAD_Y,
+            "an explicit CENTER alignment must also center vertically: got {origin:?}"
+        );
+    }
+
+    #[test]
+    fn icon_style_ignores_explicit_label_alignment() {
+        // Icon is definitionally centered (module docs) — an explicit
+        // `.label_alignment()` must not change its square-centered layout;
+        // the widget's own layout must be identical with or without one.
+        let plain = button::<Counter, _>("i", |_: &mut Counter| {}).style(ButtonStyle::Icon);
+        let with_alignment = button::<Counter, _>("i", |_: &mut Counter| {})
+            .style(ButtonStyle::Icon)
+            .label_alignment(Alignment::TOP_LEFT);
+        let mut counter = 0u64;
+        let mut plain_w = View::<Counter>::build(&plain, &mut BuildCtx::new(&mut counter));
+        let mut aligned_w =
+            View::<Counter>::build(&with_alignment, &mut BuildCtx::new(&mut counter));
+        let bc = BoxConstraints::loose(Size::new(200.0, 200.0));
+        let (plain_size, plain_origin) = layout_with(&mut plain_w, &bc);
+        let (aligned_size, aligned_origin) = layout_with(&mut aligned_w, &bc);
+        assert_eq!(
+            plain_size.width, plain_size.height,
+            "Icon style must be square"
+        );
+        assert_eq!(
+            (plain_size, plain_origin),
+            (aligned_size, aligned_origin),
+            "an explicit label_alignment must be ignored under ButtonStyle::Icon"
         );
     }
 

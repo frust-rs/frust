@@ -146,6 +146,7 @@ use kurbo::Point;
 
 use crate::ChildKey;
 
+pub use crate::image::ImageSource;
 pub use crate::text::ThemeTextColor;
 
 /// Pressed-state overlay opacity (source: androidx Compose Material3

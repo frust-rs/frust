@@ -335,7 +335,9 @@ mod tests {
         // `frust::glyph_theme::install`'s doc comment for the ordering
         // contract.
         assert!(
-            lib_rs.contains("frust::app!(MyAppApp, setup = { frust::glyph_theme::install(); });"),
+            lib_rs.contains(
+                "frust::app!(\n    MyAppApp,\n    setup = {\n        frust::glyph_theme::install();\n    }\n);"
+            ),
             "{lib_rs}"
         );
         // The generated demo is a notes app: an embedded logo Image, a
@@ -1238,7 +1240,7 @@ mod tests {
         );
         assert!(
             cargo_toml.contains(
-                "clean-signals = { path = \"/path/to/frust/../../../clean-signals-rs/crates/clean-signals\" }"
+                "clean-signals = { git = \"https://github.com/f0x-it-llc/clean-signals-rs\", rev = \"910f626\" }"
             ),
             "{cargo_toml}"
         );
@@ -1286,7 +1288,9 @@ mod tests {
         // Glyph-by-default applies to this variant too — see the matching
         // assertion in `generate_produces_manifest_listed_files_with_substitutions`.
         assert!(
-            lib_rs.contains("frust::app!(MyAppApp, setup = { frust::glyph_theme::install(); });"),
+            lib_rs.contains(
+                "frust::app!(\n    MyAppApp,\n    setup = {\n        frust::glyph_theme::install();\n    }\n);"
+            ),
             "{lib_rs}"
         );
         // The controller's construction/rendering detail moved into the

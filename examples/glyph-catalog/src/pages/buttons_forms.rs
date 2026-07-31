@@ -48,11 +48,31 @@
 //! interaction and reports disabled accessibility semantics, so it doubles as
 //! the disabled-look demo below, captioned honestly rather than presented as
 //! a dedicated disabled API.
+//!
+//! # `TextInputView::enabled(false)` / `.obscured(true)` and stretched button
+//! label alignment
+//!
+//! [`disabled_vs_enabled_row`] pairs a `.enabled(false)` field against an
+//! enabled one, both pre-filled so the dimmed-chrome contrast is visible
+//! without typing (`TextInputView` — unlike `ButtonView` above — *does* carry
+//! a dedicated `.enabled(..)` builder). The obscured demo pre-fills
+//! `.obscured(true)` with real text so the bullet masking is visible at a
+//! glance. [`stretched_button_row`] and [`vertical_alignment_row`] exercise
+//! `ButtonView::label_alignment` (`button.rs`): the former shows the
+//! stretch-aware *default* auto-centering a width-stretched button's label
+//! with no explicit call (beside an unaffected natural-width button), the
+//! latter shows that a height-stretched button's default never auto-centers
+//! vertically — only an explicit `.label_alignment(Alignment::CENTER)` does.
+//! No design-system catalog (`material`/`cupertino`/`glyph`) wraps
+//! `TextInput`, so this page — run under the Glyph theme — is the only place
+//! the baseline `TextInput`'s themed token resolution gets a design-language
+//! look; Material/Cupertino disabled appearance is **not** covered here (see
+//! `examples/huddle`'s four-way appearance toggle for that check).
 
 use frust::{
-    AnyView, Axis, ButtonStyle, Column, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get,
-    Padding, RwSignal, Set, SizedBox, any, button, checkbox, component, inflexible, radio, slider,
-    switch, text, text_input,
+    Alignment, AnyView, Axis, ButtonStyle, Column, Component, CrossAxisAlignment, EdgeInsets,
+    FlexView, Get, Padding, RwSignal, Set, SizedBox, any, button, checkbox, component, inflexible,
+    radio, slider, switch, text, text_input,
 };
 
 use crate::CatalogState;
@@ -87,6 +107,16 @@ struct ButtonsFormsState {
     /// The `slider` demo's controlled value (`0.0..=1.0`), live-read out as a
     /// percentage beside it.
     slider_value: RwSignal<f64>,
+    /// The disabled-vs-enabled `TextInput` pair's disabled-side value
+    /// (`.enabled(false)` — see the [module docs](self)). Pre-seeded and
+    /// effectively frozen: a disabled field refuses focus, so nothing ever
+    /// writes back to this signal.
+    disabled_input_value: RwSignal<String>,
+    /// The disabled-vs-enabled pair's enabled-side value, for contrast.
+    enabled_compare_value: RwSignal<String>,
+    /// The `.obscured(true)` demo's value, pre-filled so the bullet masking
+    /// is visible without typing (see the [module docs](self)).
+    obscured_value: RwSignal<String>,
 }
 
 impl Component for ButtonsFormsScreen {
@@ -101,6 +131,9 @@ impl Component for ButtonsFormsScreen {
             radio_selected: RwSignal::new(0),
             switch_on: RwSignal::new(false),
             slider_value: RwSignal::new(0.4),
+            disabled_input_value: RwSignal::new("Locked value".to_string()),
+            enabled_compare_value: RwSignal::new("Editable value".to_string()),
+            obscured_value: RwSignal::new("hunter2".to_string()),
         }
     }
 
@@ -114,6 +147,9 @@ impl Component for ButtonsFormsScreen {
         let radio_selected = state.radio_selected.get();
         let switch_on = state.switch_on.get();
         let slider_value = state.slider_value.get();
+        let disabled_input_value = state.disabled_input_value.get();
+        let enabled_compare_value = state.enabled_compare_value.get();
+        let obscured_value = state.obscured_value.get();
 
         let content = Column(vec![
             heading("Buttons"),
@@ -138,6 +174,18 @@ impl Component for ButtonsFormsScreen {
             ),
             spacer(4.0),
             disabled_demo_row(),
+            spacer(16.0),
+            caption(
+                "Stretched label alignment (.label_alignment — task 08): the wide CTA below has no explicit call and still centers its label, because the stretch-aware default auto-centers on width-only stretch; the natural-width button beside it is unaffected either way.",
+            ),
+            spacer(4.0),
+            stretched_button_row(),
+            spacer(12.0),
+            caption(
+                "Height stretch never auto-centers by default (contrast the top-pinned label on the left) — only an explicit .label_alignment(Alignment::CENTER) centers both axes (right).",
+            ),
+            spacer(4.0),
+            vertical_alignment_row(),
             spacer(24.0),
             heading("Form Controls"),
             caption(
@@ -161,6 +209,23 @@ impl Component for ButtonsFormsScreen {
                 })
                 .placeholder("Write a longer note...")
                 .multiline(4),
+            ),
+            spacer(12.0),
+            caption(
+                "Disabled vs enabled (.enabled(false) — task 07): both pre-filled so the dimmed chrome/content on the left is visible without typing; the disabled field also refuses focus.",
+            ),
+            spacer(4.0),
+            disabled_vs_enabled_row(disabled_input_value, enabled_compare_value),
+            spacer(12.0),
+            caption(
+                "Obscured / password mode (.obscured(true) — task 07): pre-filled with real text, masked with bullets; the underlying value is untouched.",
+            ),
+            spacer(4.0),
+            any(
+                text_input(obscured_value, |s: &mut ButtonsFormsState, v: String| {
+                    s.obscured_value.set(v)
+                })
+                .obscured(true),
             ),
             spacer(12.0),
             any(checkbox(
@@ -272,6 +337,77 @@ fn disabled_demo_row() -> AnyView<ButtonsFormsState> {
     any(button("Unavailable", |_: &mut ButtonsFormsState| {})
         .style(ButtonStyle::Secondary)
         .loading(true))
+}
+
+/// Stretch-aware default from `ButtonView::label_alignment` (task 08): a
+/// button forced wider than its natural content ([`SizedBox`]-wrapped)
+/// auto-centers its label with *no* explicit `.label_alignment(..)` call,
+/// beside a natural-width button that's unaffected — there's no free space
+/// for any alignment fraction to distribute into.
+fn stretched_button_row() -> AnyView<ButtonsFormsState> {
+    any(FlexView::new(
+        Axis::Horizontal,
+        vec![
+            inflexible(
+                SizedBox(Some(220.0), None)
+                    .child(button("Continue", |_: &mut ButtonsFormsState| {})),
+            ),
+            inflexible(hspacer(12.0)),
+            inflexible(button("Continue", |_: &mut ButtonsFormsState| {})),
+        ],
+    )
+    .cross_axis(CrossAxisAlignment::Center))
+}
+
+/// Contrasts the default vs an explicit `Alignment::CENTER` on a button
+/// stretched on *both* axes (`SizedBox(width, height)`, both tightened): the
+/// default's y-component stays top-pinned even when x auto-centers (task
+/// 08's module docs — height stretch never auto-centers), so an explicit
+/// call is the only way to also center vertically.
+fn vertical_alignment_row() -> AnyView<ButtonsFormsState> {
+    any(FlexView::new(
+        Axis::Horizontal,
+        vec![
+            inflexible(
+                SizedBox(Some(160.0), Some(64.0))
+                    .child(button("Default", |_: &mut ButtonsFormsState| {})),
+            ),
+            inflexible(hspacer(12.0)),
+            inflexible(
+                SizedBox(Some(160.0), Some(64.0)).child(
+                    button("Centered", |_: &mut ButtonsFormsState| {})
+                        .label_alignment(Alignment::CENTER),
+                ),
+            ),
+        ],
+    )
+    .cross_axis(CrossAxisAlignment::Center))
+}
+
+/// The disabled-vs-enabled `TextInput` pair (task 07's `.enabled(false)`):
+/// same style, one refuses focus and dims its chrome/content, the other is
+/// untouched — both pre-filled so the contrast is visible at a glance.
+fn disabled_vs_enabled_row(
+    disabled_value: String,
+    enabled_value: String,
+) -> AnyView<ButtonsFormsState> {
+    any(FlexView::new(
+        Axis::Horizontal,
+        vec![
+            inflexible(
+                text_input(disabled_value, |s: &mut ButtonsFormsState, v: String| {
+                    s.disabled_input_value.set(v)
+                })
+                .enabled(false),
+            ),
+            inflexible(hspacer(12.0)),
+            inflexible(text_input(
+                enabled_value,
+                |s: &mut ButtonsFormsState, v: String| s.enabled_compare_value.set(v),
+            )),
+        ],
+    )
+    .cross_axis(CrossAxisAlignment::Center))
 }
 
 /// Two mutually-exclusive radios, `selected` = the currently-chosen index.

@@ -51,7 +51,7 @@ pub use accesskit;
 pub use anim::{
     AnimationController, AnimationStatus, Curve, FrameTime, Lerp, Spring, SpringDesc, Tween,
 };
-pub use app::RenderRoot;
+pub use app::{Orientation, RenderRoot, WindowMetrics};
 pub use component::{Component, ComponentView, ComponentWidget, component};
 pub use event::{
     EditingState, EventCtx, EventOutcome, EventResult, ImeEvent, ImeState, InputEvent, Key,
