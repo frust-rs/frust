@@ -37,7 +37,11 @@ pub(crate) trait SceneSink {
     fn draw_glyph_run(&mut self, run: &GlyphRun);
     /// Push a rectangular clip onto the backend's clip stack, under `transform`.
     fn push_clip(&mut self, transform: Affine, rect: &Rect);
-    /// Pop the most recently pushed clip.
+    /// Push a clip with uniformly rounded corners onto the backend's clip
+    /// stack, under `transform`. Popped by [`SceneSink::pop_clip`], the same
+    /// pop the rectangular clip uses.
+    fn push_clip_rounded(&mut self, transform: Affine, rect: &Rect, radius: f64);
+    /// Pop the most recently pushed clip, rectangular or rounded.
     fn pop_clip(&mut self);
     /// Draw a decoded image (natural pixel size `data.width`x`data.height`),
     /// scaled to fill `dest`, under `transform`.
@@ -131,7 +135,9 @@ pub(crate) fn encode_into_with_shaders(
     // independently (a transient, transition-only artifact where translucent
     // group content overlaps a slot mid-animation — documented tradeoff).
     enum Group {
-        Clip,
+        /// A clip group; `Some(radius)` when the clip has rounded corners, so
+        /// the hoist below re-pushes it with its corners intact.
+        Clip(Option<f64>),
         Layer(f32),
     }
     let mut groups: Vec<(Group, Affine, Rect)> = Vec::new();
@@ -158,8 +164,19 @@ pub(crate) fn encode_into_with_shaders(
             } => sink.stroke_line(*transform, brush, *p0, *p1, *width),
             Command::GlyphRun(run) => sink.draw_glyph_run(run),
             Command::PushClip { rect, transform } => {
-                groups.push((Group::Clip, *transform, *rect));
+                groups.push((Group::Clip(None), *transform, *rect));
                 sink.push_clip(*transform, rect);
+            }
+            Command::PushClipRounded {
+                rect,
+                radius,
+                transform,
+            } => {
+                // Same clip stack as `PushClip` (one `PopClip` pops either);
+                // the radius rides along so the `ClearRect` hoist can re-push
+                // the rounded shape rather than squaring its corners.
+                groups.push((Group::Clip(Some(*radius)), *transform, *rect));
+                sink.push_clip_rounded(*transform, rect, *radius);
             }
             Command::PopClip => {
                 groups.pop();
@@ -207,14 +224,15 @@ pub(crate) fn encode_into_with_shaders(
                 if punch.width() > 0.0 && punch.height() > 0.0 {
                     for (kind, ..) in groups.iter().rev() {
                         match kind {
-                            Group::Clip => sink.pop_clip(),
+                            Group::Clip(_) => sink.pop_clip(),
                             Group::Layer(_) => sink.pop_layer(),
                         }
                     }
                     sink.clear_rect(Affine::IDENTITY, &punch);
                     for (kind, t, r) in &groups {
                         match kind {
-                            Group::Clip => sink.push_clip(*t, r),
+                            Group::Clip(None) => sink.push_clip(*t, r),
+                            Group::Clip(Some(radius)) => sink.push_clip_rounded(*t, r, *radius),
                             Group::Layer(alpha) => sink.push_layer(*t, r, *alpha),
                         }
                     }
@@ -331,6 +349,22 @@ impl SceneSink for vello::Scene {
             1.0,
             transform,
             rect,
+        );
+    }
+
+    fn push_clip_rounded(&mut self, transform: Affine, rect: &Rect, radius: f64) {
+        // Same layer-as-clip mechanism as `push_clip` above, with a rounded
+        // shape: `vello::Scene::push_layer` takes `clip: &impl Shape`, and
+        // `kurbo::RoundedRect` is one. The concrete `RoundedRect` is built
+        // HERE, inside the render crate — `frust-scene` carries only `Rect` +
+        // `f64` (scene-layer purity, `docs/ARCHITECTURE.md`).
+        let rounded = RoundedRect::from_rect(*rect, radius);
+        self.push_layer(
+            Fill::NonZero,
+            peniko::BlendMode::default(),
+            1.0,
+            transform,
+            &rounded,
         );
     }
 
@@ -480,6 +514,11 @@ mod tests {
             rect: Rect,
             transform: Affine,
         },
+        PushClipRounded {
+            rect: Rect,
+            radius: f64,
+            transform: Affine,
+        },
         PopClip,
         Image {
             width: u32,
@@ -572,6 +611,14 @@ mod tests {
         fn push_clip(&mut self, transform: Affine, rect: &Rect) {
             self.events.push(Event::PushClip {
                 rect: *rect,
+                transform,
+            });
+        }
+
+        fn push_clip_rounded(&mut self, transform: Affine, rect: &Rect, radius: f64) {
+            self.events.push(Event::PushClipRounded {
+                rect: *rect,
+                radius,
                 transform,
             });
         }
@@ -751,6 +798,130 @@ mod tests {
                 Event::PopClip,
             ]
         );
+    }
+
+    #[test]
+    fn rounded_clip_maps_to_rounded_push_and_the_shared_pop() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let translate = Affine::translate((6.0, 2.0));
+        builder.push_transform(translate);
+        let clip = Rect::new(0.0, 0.0, 40.0, 40.0);
+        builder.push_clip_rounded(clip, 8.0);
+        builder.fill_rect(Rect::new(1.0, 1.0, 2.0, 2.0), Brush::Solid(RED));
+        builder.pop_clip();
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        assert_eq!(
+            sink.events,
+            vec![
+                Event::PushClipRounded {
+                    rect: clip,
+                    radius: 8.0,
+                    transform: translate,
+                },
+                Event::FillRect {
+                    rect: Rect::new(1.0, 1.0, 2.0, 2.0),
+                    transform: translate,
+                },
+                Event::PopClip,
+            ]
+        );
+    }
+
+    #[test]
+    fn rounded_clip_and_layer_nest_preserving_push_pop_order() {
+        // Mirrors `clip_and_layer_nest_preserving_push_pop_order` for the
+        // rounded variant: an alpha layer inside a rounded clip must nest and
+        // unwind in the same order.
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let clip_rect = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let layer_rect = Rect::new(10.0, 10.0, 50.0, 50.0);
+
+        builder.push_clip_rounded(clip_rect, 12.0);
+        builder.push_layer(layer_rect, 0.6);
+        builder.pop_layer();
+        builder.pop_clip();
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        assert_eq!(
+            sink.events,
+            vec![
+                Event::PushClipRounded {
+                    rect: clip_rect,
+                    radius: 12.0,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PushLayer {
+                    rect: layer_rect,
+                    alpha: 0.6,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PopLayer,
+                Event::PopClip,
+            ]
+        );
+    }
+
+    #[test]
+    fn clear_rect_hoist_re_pushes_a_rounded_clip_with_its_radius() {
+        // The hole-punch hoist pops every open group, clears at root, then
+        // re-pushes them. A rounded clip must come back rounded — re-pushing it
+        // as a plain rect would square the corners of everything painted after
+        // a nested slot's punch.
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let clip = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let hole = Rect::new(20.0, 20.0, 60.0, 60.0);
+        builder.push_clip_rounded(clip, 9.0);
+        builder.clear_rect(hole);
+        builder.pop_clip();
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        assert_eq!(
+            sink.events,
+            vec![
+                Event::PushClipRounded {
+                    rect: clip,
+                    radius: 9.0,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PopClip,
+                Event::ClearRect {
+                    rect: hole,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PushClipRounded {
+                    rect: clip,
+                    radius: 9.0,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PopClip,
+            ]
+        );
+    }
+
+    /// The rounded clip must reach a real `vello::Scene` (via
+    /// `kurbo::RoundedRect`, built inside this crate) without panicking — the
+    /// `RecordingSink` checks above only verify the structural mapping.
+    #[test]
+    fn rounded_clip_encodes_into_a_real_vello_scene_without_panicking() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.push_transform(Affine::translate((1.0, 1.0)));
+        builder.push_clip_rounded(Rect::new(0.0, 0.0, 64.0, 64.0), 16.0);
+        builder.draw_image(&two_by_two_image(), Rect::new(0.0, 0.0, 64.0, 64.0));
+        builder.pop_clip();
+
+        let mut vello_scene = vello::Scene::new();
+        encode_scene(&scene, &mut vello_scene);
     }
 
     #[test]

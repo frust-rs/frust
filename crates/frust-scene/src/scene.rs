@@ -60,6 +60,26 @@ pub enum Command {
     /// transform. Subsequent draws are clipped to it until the matching
     /// [`Command::PopClip`].
     PushClip { rect: Rect, transform: Affine },
+    /// Push a clip with uniformly rounded corners onto the render backend's
+    /// clip stack, under a transform. Subsequent draws are clipped to the
+    /// rounded shape until the matching [`Command::PopClip`].
+    ///
+    /// Popped by the *same* [`Command::PopClip`] a [`Command::PushClip`] uses —
+    /// there is one clip stack, not a separate rounded one. The motivating
+    /// consumer is a radiused mask over a bitmap (an avatar/thumbnail), which a
+    /// rectangular clip cannot express.
+    ///
+    /// Carried as a `Rect` + uniform `f64` radius, mirroring
+    /// [`Command::RoundedRect`] rather than naming a `kurbo::RoundedRect`; the
+    /// render crate reconstitutes the concrete shape at encode time. An
+    /// arbitrary-path clip is deliberately not modelled yet — extend here (and
+    /// in `frust-render::convert`) if one is ever needed.
+    PushClipRounded {
+        rect: Rect,
+        /// Corner radius, in the pre-transform coordinate space.
+        radius: f64,
+        transform: Affine,
+    },
     /// Pop the most recently pushed clip.
     PopClip,
     /// Draw a decoded image (natural pixel size `data.width`x`data.height`),

@@ -106,7 +106,24 @@ impl<'a> SceneBuilder<'a> {
         self.scene.push(Command::PushClip { rect, transform });
     }
 
-    /// Pops the most recently pushed clip.
+    /// Pushes a clip with uniformly rounded corners (`radius`, in the
+    /// pre-transform coordinate space) onto the render backend's clip stack,
+    /// recording the current transform so the clip is applied in the same space
+    /// as the draws it encloses.
+    ///
+    /// Popped by [`SceneBuilder::pop_clip`] — the same method that pops a
+    /// rectangular [`SceneBuilder::push_clip`], since both share one clip stack
+    /// (see [`Command::PushClipRounded`]).
+    pub fn push_clip_rounded(&mut self, rect: Rect, radius: f64) {
+        let transform = self.current_transform();
+        self.scene.push(Command::PushClipRounded {
+            rect,
+            radius,
+            transform,
+        });
+    }
+
+    /// Pops the most recently pushed clip, rectangular or rounded.
     pub fn pop_clip(&mut self) {
         self.scene.push(Command::PopClip);
     }
@@ -418,6 +435,70 @@ mod tests {
             Command::PushClip { transform, .. } => assert_eq!(*transform, scale),
             other => panic!("expected PushClip, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn push_clip_rounded_pops_through_the_shared_pop_clip() {
+        // A rounded push must pop through the SAME `PopClip` a rectangular
+        // push does — one clip stack, not two.
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+
+        builder.push_clip_rounded(Rect::new(0.0, 0.0, 5.0, 5.0), 2.0);
+        builder.pop_clip();
+
+        let commands = scene.commands();
+        assert_eq!(commands.len(), 2);
+        assert!(matches!(commands[0], Command::PushClipRounded { .. }));
+        assert!(matches!(commands[1], Command::PopClip));
+    }
+
+    #[test]
+    fn push_clip_rounded_round_trips_radius_and_captures_current_transform() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let scale = Affine::scale(2.0);
+        builder.push_transform(scale);
+        let rect = Rect::new(0.0, 0.0, 40.0, 40.0);
+        builder.push_clip_rounded(rect, 8.0);
+
+        match &scene.commands()[0] {
+            Command::PushClipRounded {
+                rect: got,
+                radius,
+                transform,
+            } => {
+                assert_eq!(*got, rect);
+                assert_eq!(*radius, 8.0);
+                assert_eq!(*transform, scale);
+            }
+            other => panic!("expected PushClipRounded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_rounded_clip_and_layer_preserve_push_pop_ordering() {
+        // The radiused-mask-over-a-bitmap shape: a rounded clip enclosing an
+        // alpha layer must nest exactly like the rectangular clip does,
+        // preserving command-stream order.
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let clip_rect = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let layer_rect = Rect::new(10.0, 10.0, 50.0, 50.0);
+
+        builder.push_clip_rounded(clip_rect, 12.0);
+        builder.push_layer(layer_rect, 0.75);
+        builder.fill_rect(Rect::new(0.0, 0.0, 1.0, 1.0), red_brush());
+        builder.pop_layer();
+        builder.pop_clip();
+
+        let commands = scene.commands();
+        assert_eq!(commands.len(), 5);
+        assert!(matches!(commands[0], Command::PushClipRounded { .. }));
+        assert!(matches!(commands[1], Command::PushLayer { .. }));
+        assert!(matches!(commands[2], Command::FillRect { .. }));
+        assert!(matches!(commands[3], Command::PopLayer));
+        assert!(matches!(commands[4], Command::PopClip));
     }
 
     fn two_by_two_image() -> ImageData {

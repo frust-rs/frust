@@ -63,8 +63,21 @@ pub trait PaintScene {
     /// implementation honors the clip by recording a push/pop command pair.
     fn push_clip(&mut self, _origin: Point, _size: Size) {}
 
-    /// Pop the most recently pushed clip. Defaulted to a no-op; see
-    /// [`PaintScene::push_clip`].
+    /// Push a clip with uniformly rounded corners (at `origin`/`size`, corner
+    /// `radius`) onto the backend clip stack; subsequent draws are clipped to
+    /// the rounded shape until the matching [`PaintScene::pop_clip`] — the same
+    /// pop [`PaintScene::push_clip`] uses, since there is one clip stack.
+    ///
+    /// Lets paint code express a radiused mask over content a rectangular clip
+    /// cannot shape — a rounded bitmap (avatar/thumbnail) being the motivating
+    /// case. Defaulted to a no-op so recorder scenes stay valid; the
+    /// `SceneBuilder` implementation honors it by recording a real
+    /// [`frust_scene::Command::PushClipRounded`]/[`frust_scene::Command::PopClip`]
+    /// pair.
+    fn push_clip_rounded(&mut self, _origin: Point, _size: Size, _radius: f64) {}
+
+    /// Pop the most recently pushed clip, rectangular or rounded. Defaulted to
+    /// a no-op; see [`PaintScene::push_clip`].
     fn pop_clip(&mut self) {}
 
     /// Emit a run of *unshaped* text anchored at `origin`.
@@ -261,6 +274,10 @@ impl PaintScene for SceneBuilder<'_> {
 
     fn push_clip(&mut self, origin: Point, size: Size) {
         SceneBuilder::push_clip(self, rect_at(origin, size));
+    }
+
+    fn push_clip_rounded(&mut self, origin: Point, size: Size, radius: f64) {
+        SceneBuilder::push_clip_rounded(self, rect_at(origin, size), radius);
     }
 
     fn pop_clip(&mut self) {
