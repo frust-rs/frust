@@ -95,7 +95,13 @@ impl ImageSource {
     }
 
     /// Borrow the decoded `peniko::ImageData` this source wraps, for painting.
-    fn image_data(&self) -> &ImageData {
+    ///
+    /// This returns a borrow of already-decoded pixels and triggers no decode.
+    /// The source caches pixel data once at construction via [`Self::decode`];
+    /// this accessor hands back a reference to that cache. Calling this
+    /// repeatedly with the same [`ImageSource`] is zero-cost and does not
+    /// re-trigger the image decoder.
+    pub fn image_data(&self) -> &ImageData {
         &self.data
     }
 }
