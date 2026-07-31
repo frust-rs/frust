@@ -48,8 +48,11 @@ pub enum Command {
         template_dir: Option<String>,
 
         /// Override the computed path to the `frust` facade crate
-        /// (development only; a temporary `frust_path`
-        /// mechanism).
+        /// (development only; a temporary `frust_path` mechanism).
+        /// Accepts either the facade crate itself (a directory whose
+        /// Cargo.toml names package `frust`, e.g. `<repo>/crates/frust`)
+        /// or that repo's root (e.g. `<repo>`), which is normalised to the
+        /// nested facade crate directory; anything else is rejected.
         #[arg(long = "frust-path", value_name = "PATH", hide = true)]
         frust_path: Option<String>,
 
