@@ -2,22 +2,36 @@
 //! throwaway upload keystore → `frust build apk --release` produces a
 //! release-signed APK.
 //!
-//! Three shapes are covered, because the CLI's release-signing gate has to be
-//! right about all of them: the scaffolded default (`android/key.properties`),
-//! a *relocated* rig whose Gradle reads prefixed keys out of
-//! `android/app/keystores/key.properties` (declared to Frust through
-//! `frust.toml`'s `[signing]` section), and the *env-only CI* rig — no
-//! properties file at all, the four values exported as the default
-//! `ANDROID_*` variables `[signing.env]` documents. The first two also assert
-//! the gate's false-positive case first — a stub `key.properties` with no
-//! keystore behind it must fail before Gradle runs, since with the generated
-//! Gradle template that stub would otherwise yield a silently debug-signed
-//! release.
+//! **Every case asserts on the ARTIFACT** (`apksigner verify --print-certs`),
+//! never on the gate's verdict alone. A green gate riding on a debug-signed
+//! APK is the exact failure mode these tests exist to catch, and two review
+//! rounds passed while shipping it precisely because the assertions stopped at
+//! the verdict.
 //!
-//! Every one of them asserts on the *artifact* (`apksigner verify
-//! --print-certs`), never on the gate's verdict alone: the gate passing while
-//! Gradle debug-signs is precisely the failure mode these tests exist to
-//! catch.
+//! `[signing]` has three independent axes — properties **path**, key
+//! **prefix**, env-var **names** — and each is a way for the CLI's resolution
+//! and Gradle's to diverge. `frust build` now collapses all three by writing
+//! what it resolved to `android/.frust-signing.properties` for Gradle to read
+//! (see `frust-drive`'s `android_build::signing`), so one shape per axis is
+//! covered here plus the default:
+//!
+//! | Test | Axis it pins |
+//! |---|---|
+//! | [`scaffolded_project_produces_a_signed_release_apk`] | the default rig, plus the two negative directions |
+//! | [`prefix_only_signing_produces_a_release_signed_apk`] | **prefix** — default path, `prod.`-prefixed keys, stock Gradle |
+//! | [`relocated_keystore_project_passes_the_gate_without_android_key_properties`] | **path** — and a project that edited the template's fallback lookups |
+//! | [`env_only_ci_rig_produces_a_release_signed_apk_without_key_properties`] | **env names** — stock `frust.toml`, no `[signing.env]` block at all |
+//!
+//! The default-rig test also covers both negative directions in one project
+//! (reusing its warm cargo/Gradle caches): a stub `key.properties` must fail
+//! the gate *before* Gradle runs, and a hand-run `./gradlew assembleRelease`
+//! with no material at all must debug-sign with the template's warning — the
+//! documented, no-Frust-promise fallback that the gate refuses to let a CLI
+//! build reach.
+//!
+//! Each test also asserts `android/.frust-signing.properties` does **not**
+//! exist once a build returns: it carries the keystore passwords in plaintext
+//! and must not outlive the Gradle invocation that needed it.
 //!
 //! Like `create_e2e`, this drives the compiled `frust` binary via
 //! `CARGO_BIN_EXE_frust` (the crate is binary-only, no `lib` target) so it
@@ -72,6 +86,21 @@ fn find_keytool() -> PathBuf {
         return jbr;
     }
     PathBuf::from("keytool")
+}
+
+/// A `JAVA_HOME` for the one test that drives `./gradlew` itself (the CLI
+/// resolves its own through the Android preflight). `$JAVA_HOME` first, else
+/// Android Studio's bundled JBR — the same two candidates the preflight uses.
+fn find_java_home() -> Option<String> {
+    if let Ok(java_home) = std::env::var("JAVA_HOME")
+        && Path::new(&java_home).join("bin/java").exists()
+    {
+        return Some(java_home);
+    }
+    Path::new(STUDIO_JBR_HOME)
+        .join("bin/java")
+        .exists()
+        .then(|| STUDIO_JBR_HOME.to_string())
 }
 
 /// Resolves an `ANDROID_NDK_HOME` for the build subprocess: the env var if
@@ -197,6 +226,38 @@ fn release_build_with_env(
         .expect("failed to spawn `frust build apk --release`")
 }
 
+/// Drives `./gradlew assembleRelease` directly, the way Android Studio (or a
+/// CI job that never invokes Frust) would — the documented fallback path that
+/// carries no Frust promise. The `-P` properties mirror what
+/// `frust build apk --release --target-platform android-arm64` passes, so the
+/// two share a cargo/Gradle cache instead of each compiling the Rust graph.
+fn hand_run_gradle_release(project: &Path, ndk_home: &str) -> std::process::Output {
+    let java_home = find_java_home()
+        .expect("no JDK 17+ found: set JAVA_HOME (e.g. /usr/lib/jvm/java-17-openjdk)");
+    Command::new("./gradlew")
+        .args([
+            "assembleRelease",
+            "-Pfrust.targetPlatforms=arm64-v8a",
+            "-Pfrust.splitPerAbi=false",
+        ])
+        .current_dir(project.join("android"))
+        .env("JAVA_HOME", java_home)
+        .env("ANDROID_NDK_HOME", ndk_home)
+        .output()
+        .expect("failed to spawn `./gradlew assembleRelease`")
+}
+
+/// The generated signing file holds the keystore passwords in plaintext and
+/// must not survive the Gradle invocation that needed it — on any path.
+fn assert_no_generated_signing_file(project: &Path) {
+    let generated = project.join("android/.frust-signing.properties");
+    assert!(
+        !generated.exists(),
+        "`{}` outlived the build; it carries plaintext keystore passwords",
+        generated.display()
+    );
+}
+
 /// The gate's false-positive case: a stub `android/key.properties` written
 /// only to satisfy a file-existence check must fail the release build, and
 /// must fail *before* Gradle runs — with the generated template that stub
@@ -221,33 +282,23 @@ fn assert_stub_key_properties_is_rejected(project: &Path, ndk_home: &str) {
         !project.join("android/app/build/outputs").exists(),
         "Gradle ran despite the signing gate rejecting the stub"
     );
+    assert_no_generated_signing_file(project);
 
     std::fs::remove_file(&stub).expect("failed to remove the stub key.properties");
 }
 
-/// Asserts a release APK landed and, when `apksigner` is available, that its
-/// signer certificate is this test's keystore rather than the Android debug
-/// key.
-fn assert_release_apk(project: &Path) {
+/// Reads the signer certificates `apksigner verify --print-certs` reports for
+/// the release APK, or `None` when no `apksigner` is installed.
+fn release_apk_certs(project: &Path) -> Option<String> {
     let apk = project.join("android/app/build/outputs/apk/release/app-release.apk");
-    assert!(
-        apk.exists(),
-        "expected a signed release APK at {}",
-        apk.display()
-    );
+    assert!(apk.exists(), "expected a release APK at {}", apk.display());
     let size = std::fs::metadata(&apk).expect("APK metadata").len();
     assert!(
         size > 1_000_000,
         "release APK is implausibly small ({size} bytes)"
     );
 
-    let Some(apksigner) = find_apksigner() else {
-        eprintln!(
-            "note: no `apksigner` under $ANDROID_HOME/build-tools — skipping the \
-             signer-certificate assertion"
-        );
-        return;
-    };
+    let apksigner = find_apksigner()?;
     let out = Command::new(&apksigner)
         .args(["verify", "--print-certs", apk.to_str().unwrap()])
         .output()
@@ -261,6 +312,46 @@ fn assert_release_apk(project: &Path) {
         out.status.success(),
         "`apksigner verify` failed:\n{printed}"
     );
+    Some(printed)
+}
+
+/// The template's documented no-Frust-promise fallback, exercised for real: a
+/// hand-run Gradle release build with no signing material anywhere produces an
+/// APK carrying the **Android debug** certificate, and says so in its output.
+/// This is the artifact `frust build --release` must never let through, so
+/// proving the framework still reaches it is what gives the gate's refusal
+/// meaning.
+fn assert_debug_signed_apk(project: &Path) {
+    let Some(printed) = release_apk_certs(project) else {
+        eprintln!(
+            "note: no `apksigner` under $ANDROID_HOME/build-tools — skipping the \
+             debug-certificate assertion"
+        );
+        return;
+    };
+    assert!(
+        printed.contains("CN=Android Debug"),
+        "an unsigned hand-run release build must carry the Android debug \
+         certificate:\n{printed}"
+    );
+    assert!(
+        !printed.contains(E2E_CN),
+        "this APK should not carry the test keystore's certificate:\n{printed}"
+    );
+}
+
+/// Asserts a release APK landed and, when `apksigner` is available, that its
+/// signer certificate is this test's keystore rather than the Android debug
+/// key. **This, not the CLI's exit status, is what every case must assert:**
+/// the whole defect class is a green gate over a debug-signed artifact.
+fn assert_release_apk(project: &Path) {
+    let Some(printed) = release_apk_certs(project) else {
+        eprintln!(
+            "note: no `apksigner` under $ANDROID_HOME/build-tools — skipping the \
+             signer-certificate assertion"
+        );
+        return;
+    };
     assert!(
         printed.contains(E2E_CN),
         "release APK is not signed with this test's keystore (debug-signed?):\n{printed}"
@@ -302,7 +393,28 @@ fn scaffolded_project_produces_a_signed_release_apk() {
     // 2) A stub key.properties must not buy a green (debug-signed) release.
     assert_stub_key_properties_is_rejected(&project, &ndk_home);
 
-    // 3) Real signing material at the scaffolded default location.
+    // 3) The fallback the gate exists to keep a CLI build away from: a
+    //    hand-run `./gradlew assembleRelease` with no signing material at all
+    //    still succeeds, warns, and debug-signs. Run here (rather than in its
+    //    own project) so its cargo/Gradle work warms the caches step 5 reuses.
+    let gradle_out = hand_run_gradle_release(&project, &ndk_home);
+    let gradle_printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&gradle_out.stdout),
+        String::from_utf8_lossy(&gradle_out.stderr)
+    );
+    assert!(
+        gradle_out.status.success(),
+        "an unsigned hand-run `./gradlew assembleRelease` must still succeed:\n{gradle_printed}"
+    );
+    assert!(
+        gradle_printed.contains("release build is debug-signed"),
+        "expected the template's debug-signing warning:\n{gradle_printed}"
+    );
+    assert_debug_signed_apk(&project);
+    assert_no_generated_signing_file(&project);
+
+    // 4) Real signing material at the scaffolded default location.
     let keystore = project.join("upload-e2e.jks");
     generate_keystore(&keystore);
     std::fs::write(
@@ -314,7 +426,9 @@ fn scaffolded_project_produces_a_signed_release_apk() {
     )
     .expect("failed to write android/key.properties");
 
-    // 4) Build, and assert the artifact really carries our certificate.
+    // 5) Build, and assert the artifact really carries our certificate — over
+    //    the top of the debug-signed APK step 3 just produced, so a build that
+    //    failed to re-sign would be caught rather than finding no APK at all.
     let out = release_build(&project, &ndk_home);
     assert!(
         out.status.success(),
@@ -323,15 +437,88 @@ fn scaffolded_project_produces_a_signed_release_apk() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_release_apk(&project);
+    assert_no_generated_signing_file(&project);
 
     let _ = std::fs::remove_dir_all(&project);
 }
 
-/// The relocated-keystore rig: Gradle reads `prod.`-prefixed keys out of
-/// `android/app/keystores/key.properties`, and `android/key.properties` never
-/// exists. Before `[signing]` was parsed, this project could not pass the CLI
-/// gate at all despite Gradle signing it correctly. The Gradle edit is made
-/// here in the test — no external app repository is involved.
+/// **The primary acceptance case.** `[signing] prefix = "prod"` against the
+/// *default* properties path and a completely *unmodified* Gradle template —
+/// the shape review round 1 proved was broken: the gate resolved
+/// `prod.storeFile` & co., passed with no warning, and Gradle (which has no
+/// prefix concept and looks for a bare `storeFile`) found nothing and
+/// debug-signed. Nothing about the template changed to fix it; the CLI now
+/// resolves the prefix away and hands Gradle the result through
+/// `android/.frust-signing.properties`.
+///
+/// The assertion is on the artifact's certificate, because the verdict is
+/// exactly what passed while the bug shipped.
+#[test]
+#[ignore = "compiles a full generated project + Gradle; needs Android SDK/NDK — run with cargo test -p frust-cli --test build_e2e -- --ignored"]
+fn prefix_only_signing_produces_a_release_signed_apk() {
+    let ndk_home = resolve_ndk_home().expect(
+        "Android NDK not found: set ANDROID_NDK_HOME or install one under $ANDROID_HOME/ndk",
+    );
+
+    let project = unique_dir("prefix-only");
+    let _ = std::fs::remove_dir_all(&project);
+
+    scaffold(&project);
+
+    // 1) Declare only a prefix. The properties path stays the scaffolded
+    //    default and `android/app/build.gradle.kts` is left exactly as
+    //    generated — no `signingValue("prod.…")` rewrite anywhere.
+    let toml_path = project.join("frust.toml");
+    let mut frust_toml = std::fs::read_to_string(&toml_path).expect("reading frust.toml");
+    frust_toml.push_str("\n[signing]\nprefix = \"prod\"\n");
+    std::fs::write(&toml_path, frust_toml).expect("writing frust.toml");
+    let gradle = std::fs::read_to_string(project.join("android/app/build.gradle.kts"))
+        .expect("reading generated build.gradle.kts");
+    assert!(
+        !gradle.contains("prod."),
+        "this test must run against the STOCK Gradle template — Gradle has no prefix concept, \
+         and that is the whole point"
+    );
+
+    // 2) A multi-key-set properties file at the default path: `develop.` keys
+    //    pointing nowhere alongside the real `prod.` ones.
+    let keystore = project.join("prod-e2e.jks");
+    generate_keystore(&keystore);
+    std::fs::write(
+        project.join("android/key.properties"),
+        format!(
+            "develop.storeFile=/nonexistent/develop.jks\ndevelop.storePassword=nope\n\
+             prod.storePassword={STORE_PASS}\nprod.keyPassword={STORE_PASS}\n\
+             prod.keyAlias=upload\nprod.storeFile={}\n",
+            keystore.display()
+        ),
+    )
+    .expect("failed to write the prefixed android/key.properties");
+
+    let out = release_build(&project, &ndk_home);
+    assert!(
+        out.status.success(),
+        "`frust build apk --release` failed for the prefix-only project at {}:\n{}",
+        project.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_release_apk(&project);
+    assert_no_generated_signing_file(&project);
+
+    let _ = std::fs::remove_dir_all(&project);
+}
+
+/// The relocated-keystore rig: the project's own Gradle reads `prod.`-prefixed
+/// keys out of `android/app/keystores/key.properties`, and
+/// `android/key.properties` never exists. Before `[signing]` was parsed, this
+/// project could not pass the CLI gate at all despite Gradle signing it
+/// correctly. The Gradle edit is made here in the test — no external app
+/// repository is involved.
+///
+/// It doubles as the guard on constraint the generated-file design rests on:
+/// editing the template's **fallback** lookups (which is what a relocated rig
+/// does) must not disturb the `frustSigning(...)` read that sits ahead of
+/// them. The artifact must still carry this test's certificate.
 #[test]
 #[ignore = "compiles a full generated project + Gradle; needs Android SDK/NDK — run with cargo test -p frust-cli --test build_e2e -- --ignored"]
 fn relocated_keystore_project_passes_the_gate_without_android_key_properties() {
@@ -407,27 +594,35 @@ fn relocated_keystore_project_passes_the_gate_without_android_key_properties() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_release_apk(&project);
-    // The gate cannot see this project's Gradle edit, so passing must come
-    // with the divergence advisory rather than a silent green.
+    assert_no_generated_signing_file(&project);
+    // No advisory. The gate used to warn "this release may be debug-signed"
+    // whenever it resolved material the *stock* template could not follow;
+    // that caveat is now false for every build that could ever read it — only
+    // `frust build`/`frust run` see `on_line`, and those are exactly the
+    // builds whose Gradle is handed the resolved values.
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("app/keystores/key.properties") && stdout.contains("may be debug-signed"),
-        "expected the Gradle-divergence advisory for a relocated key-properties path:\n{stdout}"
+        !stdout.contains("may be debug-signed"),
+        "the Gradle-divergence advisory is dead weight now that Gradle reads what the gate \
+         resolved; it must not fire:\n{stdout}"
     );
 
     let _ = std::fs::remove_dir_all(&project);
 }
 
-/// The CI rig frust.toml's `[signing.env]` comment advertises: **no**
-/// `android/key.properties` anywhere, all four values exported as the default
-/// `ANDROID_*` environment variables. Before the generated Gradle read those
-/// variables this was the framework's worst signing outcome — the CLI gate
-/// resolved all four, passed, and Gradle (seeing an empty `key.properties`)
-/// debug-signed the artifact behind a green build.
+/// The CI rig with a **completely stock `frust.toml`**: no
+/// `android/key.properties` anywhere, no `[signing]` section at all, just the
+/// four `ANDROID_*` variables exported. Round 1 found the gate hard-failing
+/// this shape — it only reached the environment through an explicit
+/// `[signing.env]` block, so a CI job doing the documented thing got
+/// "release build has no usable signing material" for a build Gradle would
+/// have signed. The previous version of this test had to append a
+/// `[signing.env]` block to work, which documented the gap instead of closing
+/// it; the four `ANDROID_*` names are now the gate's defaults, matching the
+/// template's own fallback names.
 ///
 /// The assertion that matters is on the **artifact**, not the gate's verdict:
-/// `apksigner verify --print-certs` must report this test's certificate, so
-/// gate and reality agree.
+/// `apksigner verify --print-certs` must report this test's certificate.
 #[test]
 #[ignore = "compiles a full generated project + Gradle; needs Android SDK/NDK — run with cargo test -p frust-cli --test build_e2e -- --ignored"]
 fn env_only_ci_rig_produces_a_release_signed_apk_without_key_properties() {
@@ -440,21 +635,18 @@ fn env_only_ci_rig_produces_a_release_signed_apk_without_key_properties() {
 
     scaffold(&project);
 
-    // 1) Declare the rig by uncommenting the shipped `[signing.env]` block —
-    //    the names below are verbatim what `frust.toml.tmpl` documents and
-    //    what the generated build.gradle.kts hardcodes.
-    let toml_path = project.join("frust.toml");
-    let mut frust_toml = std::fs::read_to_string(&toml_path).expect("reading frust.toml");
-    frust_toml.push_str(
-        "\n[signing.env]\nstore-file = \"ANDROID_STORE_FILE\"\n\
-         store-password = \"ANDROID_STORE_PASSWORD\"\nkey-alias = \"ANDROID_KEY_ALIAS\"\n\
-         key-password = \"ANDROID_KEY_PASSWORD\"\n",
+    // 1) Nothing declared. The scaffolded frust.toml ships every `[signing]`
+    //    line commented out, and this test must not touch it.
+    let frust_toml =
+        std::fs::read_to_string(project.join("frust.toml")).expect("reading frust.toml");
+    assert!(
+        !frust_toml.contains("\n[signing.env]"),
+        "this test must run against a stock frust.toml with no [signing.env] block"
     );
-    std::fs::write(&toml_path, frust_toml).expect("writing frust.toml");
 
     // 2) A keystore, and nothing on disk pointing at it. `storeFile` is
     //    absolute so the gate's candidate bases and Gradle's
-    //    `rootProject.file(...)` land on the same file.
+    //    `rootProject.file(...)` land on the same file either way.
     let keystore = project.join("ci-upload.jks");
     generate_keystore(&keystore);
     assert!(
@@ -484,6 +676,7 @@ fn env_only_ci_rig_produces_a_release_signed_apk_without_key_properties() {
     // 4) The whole point: the artifact carries this test's certificate, not
     //    the Android debug key.
     assert_release_apk(&project);
+    assert_no_generated_signing_file(&project);
 
     let _ = std::fs::remove_dir_all(&project);
 }

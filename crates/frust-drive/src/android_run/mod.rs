@@ -103,7 +103,8 @@ pub fn stdout_is_tty() -> bool {
 }
 
 /// Drives the full, mode/flavor-aware Android pipeline: preflight →
-/// local.properties version write → (release only) signing gate →
+/// local.properties version write → (release only) signing gate + generated
+/// `.frust-signing.properties` →
 /// variant-aware `./gradlew assemble<Flavor><Mode>` → variant-aware APK
 /// install → badging-derived launch → pid-scoped logcat streaming.
 /// Mirrors `ios_run::run`'s `(runner, root, device)` shape, plus `info` for
@@ -207,7 +208,16 @@ fn prepare_session(
     crate::android_build::local_properties::write(&android_dir, &version_name, &version_code)
         .context("writing android/local.properties")?;
 
-    crate::android_build::signing::check_release_signing(&project.root, info.mode, on_line)?;
+    // One source of truth for signing (see `android_build::signing`): the gate
+    // resolves `[signing]` and the material it verified is handed to Gradle as
+    // `android/.frust-signing.properties`. The guard's `Drop` deletes that
+    // file when this function returns — every early `?`/`bail!` included — and
+    // it is dropped explicitly right after `gradle::assemble` on the happy
+    // path, so the plaintext passwords never outlive the Gradle invocation.
+    let generated =
+        crate::android_build::signing::check_release_signing(&project.root, info.mode, on_line)?
+            .map(|resolved| crate::android_build::signing::write_resolved(&android_dir, &resolved))
+            .transpose()?;
 
     if cancel.load(Ordering::SeqCst) {
         return Ok(None);
@@ -240,6 +250,8 @@ fn prepare_session(
         &props,
         on_line,
     )?;
+    // Gradle has returned; the generated signing file has no further reader.
+    drop(generated);
     if !build_out.success {
         let tail = tail_lines(&build_out.stderr, 50);
         if tail.is_empty() {

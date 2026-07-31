@@ -1,6 +1,8 @@
 //! Android release build pipeline: preflight (reusing `android_run`'s
 //! checks, minus the device-only `adb` one) → merge-write
-//! `android/local.properties` → gate release builds on a keystore → compute
+//! `android/local.properties` → gate release builds on a keystore and hand
+//! the resolved material to Gradle as a short-lived
+//! `android/.frust-signing.properties` → compute
 //! the `assemble<Flavor><Mode>`/`bundle<Flavor><Mode>` Gradle task and its
 //! `-P` properties → run `./gradlew` → glob-verify and report the produced
 //! artifact(s).
@@ -98,7 +100,17 @@ fn build_with_env(
     local_properties::write(&android_dir, &version_name, &version_code)
         .context("writing android/local.properties")?;
 
-    signing::check_release_signing(project_dir, info.mode, on_line)?;
+    // One source of truth for signing: the gate resolves `[signing]`, and the
+    // material it verified is handed to Gradle as
+    // `android/.frust-signing.properties` (unprefixed keys, absolute
+    // storeFile). The guard's `Drop` deletes that file the moment this
+    // function returns — including every `?`/`bail!` path below — so the
+    // plaintext passwords never outlive the Gradle invocation that needed
+    // them. Non-release modes and `[signing] external = true` resolve to
+    // `None` and write nothing.
+    let generated = signing::check_release_signing(project_dir, info.mode, on_line)?
+        .map(|resolved| signing::write_resolved(&android_dir, &resolved))
+        .transpose()?;
 
     // Release-lean preflight: a legacy app that predates the `lean` feature
     // has it dropped here — with a one-time warning routed through this
@@ -130,6 +142,10 @@ fn build_with_env(
             &mut prefixed,
         )
         .with_context(|| format!("running `./gradlew {task}` in `{}`", android_dir.display()))?;
+    // Gradle has returned; the generated signing file has no further reader.
+    // (An early `?` above drops it just the same — this only narrows the
+    // window for the success path.)
+    drop(generated);
 
     if !out.success {
         let combined = format!("{}\n{}", out.stdout, out.stderr);
