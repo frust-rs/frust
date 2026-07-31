@@ -176,16 +176,14 @@ pub fn app_logic(state: &mut AppState) -> impl View<AppState> + use<> {
     // The logo sizes to its natural box and `Contain`-fits into it.
     children.push(any(Image(logo).fit(ImageFit::Contain)));
     children.push(any(text("Notes").size(32.0)));
-    children.push(any(
-        text_input(draft, |s: &mut AppState, v: String| {
-            s.draft = v;
-            s.save_draft();
-        })
-        .placeholder("Write a note, then press Enter")
-        .on_submit(|s: &mut AppState, v: String| {
-            s.submit_draft(v);
-        }),
-    ));
+    children.push(any(text_input(draft, |s: &mut AppState, v: String| {
+        s.draft = v;
+        s.save_draft();
+    })
+    .placeholder("Write a note, then press Enter")
+    .on_submit(|s: &mut AppState, v: String| {
+        s.submit_draft(v);
+    })));
     children.push(any(scroll_view(FlexView::new(Axis::Vertical, rows))));
 
     // SafeArea pads the root view by the window's system-bar/notch/gesture-nav insets,
@@ -228,4 +226,10 @@ impl Component for {{ title_case_name | replace(" ", "") }}App {
 // `frust::set_default_theme(frust::Theme::m3_baseline())` /
 // `::cupertino_baseline()` to use one of the other two built-in design
 // systems instead.
-frust::app!({{ title_case_name | replace(" ", "") }}App, setup = { frust::glyph_theme::install(); });
+frust::app!(
+    {{ title_case_name | replace(" ", "") }}App,
+    setup = {
+        frust::glyph_theme::install();
+    }
+);
+

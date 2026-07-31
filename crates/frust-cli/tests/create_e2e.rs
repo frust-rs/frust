@@ -77,6 +77,22 @@ fn scaffolded_project_builds_against_the_real_facade() {
         dest.display()
     );
 
+    // The generated tree must already be `rustfmt`-clean — the manifest
+    // guarantees no downstream project has to reformat its own untouched
+    // scaffold before its first commit passes CI (docs/DEVELOPMENT.md's
+    // Formatting section pins `cargo fmt --check` into the standard verify
+    // gate; scaffolded projects inherit that expectation from turn one).
+    let fmt_status = Command::new("cargo")
+        .args(["fmt", "--check"])
+        .current_dir(&dest)
+        .status()
+        .expect("failed to spawn `cargo fmt --check` in the generated project");
+    assert!(
+        fmt_status.success(),
+        "generated project at {} is not `cargo fmt --check`-clean",
+        dest.display()
+    );
+
     let _ = std::fs::remove_dir_all(&dest);
 }
 
@@ -143,6 +159,18 @@ fn scaffolded_clean_signals_project_builds_against_the_real_facade_and_plugin() 
     assert!(
         build_status.success(),
         "generated clean-signals project at {} failed to `cargo build`",
+        dest.display()
+    );
+
+    // Same `rustfmt`-clean guarantee as the default-arch test above.
+    let fmt_status = Command::new("cargo")
+        .args(["fmt", "--check"])
+        .current_dir(&dest)
+        .status()
+        .expect("failed to spawn `cargo fmt --check` in the generated clean-signals project");
+    assert!(
+        fmt_status.success(),
+        "generated clean-signals project at {} is not `cargo fmt --check`-clean",
         dest.display()
     );
 
