@@ -702,13 +702,15 @@ where
     /// [`ShellHandler::apply_theme`] already uses for [`Theme`], with the
     /// change guard added.
     ///
-    /// **The guard is load-bearing, not an optimization.** A re-provide replaces
-    /// the value every `Component::build` reads, and this framework has no
-    /// per-component rebuild skipping — re-providing once per frame from
-    /// `RedrawRequested` would mean every frame invalidates the whole app. So
-    /// this is called only where an input genuinely moves: `resumed` (the seed,
-    /// before the first frame) and `WindowEvent::Resized`. A scale-factor change
-    /// needs no separate arm — winit guarantees a following `Resized`.
+    /// **The guard is load-bearing, not an optimization.** `provide_context` is a
+    /// plain map insert that notifies nothing on its own, but re-providing once
+    /// per frame from `RedrawRequested` would still pay a lock write plus an
+    /// allocation for no observable benefit — the value only ever becomes
+    /// visible on the next rebuild, which a genuine input change already
+    /// drives. So this is called only where an input genuinely moves: `resumed`
+    /// (the seed, before the first frame) and `WindowEvent::Resized`. A
+    /// scale-factor change needs no separate arm — winit guarantees a
+    /// following `Resized`.
     ///
     /// `physical` is winit's device-pixel `inner_size`, divided by `scale` into
     /// the same logical space the layout pass below uses, so the published size

@@ -127,11 +127,14 @@ pub fn window_metrics(physical: (u32, u32), scale: f64, insets: WindowInsets) ->
 /// # Why this is not a per-frame push
 ///
 /// Delivering `WindowMetrics` to app code means `provide_context`-ing it under
-/// the reactive root owner, exactly as `Theme` and [`WindowInsets`] already are.
-/// There is no per-component rebuild skipping in this framework — any rebuild
-/// re-runs every `Component::build` — so a shell that re-provided metrics
-/// unconditionally once per frame would keep the whole app rebuilding forever
-/// on every platform, silently. This type makes the guarded path the only path:
+/// the reactive root owner, exactly as `Theme` and [`WindowInsets`] already are
+/// — a plain map insert that notifies nothing and creates no subscription, so
+/// re-providing does not itself wake a frame. The guard here exists for cost
+/// at the FFI boundary instead: a shell that re-provided metrics
+/// unconditionally once per frame would pay a lock write plus an allocation
+/// every frame for no observable benefit, since the next rebuild (already
+/// driven by the resize or inset change itself) is what actually picks the
+/// new value up. This type makes the guarded path the only path:
 /// [`poll`](Self::poll) returns `Some` **only** on an actual change, mirroring
 /// [`ThemeOverrideWatcher`](crate::ThemeOverrideWatcher)'s poll-returns-`Option`
 /// shape and `RenderRoot::set_insets`'s `PartialEq`-guarded no-op.
@@ -432,10 +435,10 @@ mod tests {
 
     #[test]
     fn window_metrics_publisher_reports_only_actual_changes() {
-        // THE rebuild-cost anchor: a shell re-`provide_context`s only when this
-        // returns `Some`. An unconditional per-frame re-provide would pin the
-        // app at a 100% rebuild rate forever (there is no per-component rebuild
-        // skipping), so every repeat below must be `None`.
+        // THE cost-guard anchor: a shell re-`provide_context`s only when this
+        // returns `Some`. An unconditional per-frame re-provide would pay a
+        // lock write plus an allocation every frame at the FFI boundary for
+        // nothing observable, so every repeat below must be `None`.
         let mut pub_ = WindowMetricsPublisher::new();
         assert_eq!(pub_.last(), None, "nothing published before the first poll");
 

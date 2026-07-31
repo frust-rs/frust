@@ -68,21 +68,22 @@ use crate::widget::{LayoutCtx, PaintCtx, PaintOutcome, PaintScene, PlatformViewF
 /// it never tracks a device orientation-lock setting or a platform rotation
 /// event directly.
 ///
-/// # Rebuild cost
+/// # Context is not reactive
 ///
-/// A tracked read of a `use_context` value inside `Component::build` (or the
-/// root `app_logic`) subscribes the enclosing `TrackedScope`; a later
-/// `provide_context` of a changed `WindowMetrics` does not itself mark
-/// anything dirty by writing through a signal — a shell must instead
-/// re-provide it under the app's tracked scope so the read/write pair
-/// participates in the normal dirty-and-wake path. There is no
-/// per-component rebuild skipping in this framework (a component always
-/// re-runs `build` on any rebuild), so any metrics change rebuilds the
-/// **whole** app, not just the widget that reads it. This is acceptable only
-/// because builds are cheap by construction — a shell wiring this up (see
-/// `docs/SHELLS_ARCHITECTURE.md`) must re-provide `WindowMetrics` only on an
-/// actual change (mirroring `RenderRoot::set_insets`'s `PartialEq`-guarded
-/// no-op), never unconditionally once per frame.
+/// `provide_context` is a plain insert into the owner's context map — it
+/// notifies nothing — and `use_context` inside `Component::build` (or the
+/// root `app_logic`) creates no subscription, so re-providing a changed
+/// `WindowMetrics` does not itself mark anything dirty or wake a frame. A new
+/// value becomes visible only on the next rebuild, which the resize or inset
+/// change that produced it already drives; do not write a shell that assumes
+/// a `provide_context` write triggers one. A shell wiring this up (see
+/// `docs/SHELLS_ARCHITECTURE.md`) must still re-provide `WindowMetrics` only
+/// on an actual change (mirroring `RenderRoot::set_insets`'s
+/// `PartialEq`-guarded no-op) — the reason is cost at the FFI boundary (a
+/// lock write plus an allocation every frame), not a rebuild storm.
+/// Separately, there is no per-component rebuild skipping in this framework
+/// (a component always re-runs `build` on any rebuild it does take part in),
+/// which is affordable only because builds are cheap by construction.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WindowMetrics {
     /// The window's logical (density-independent) size.

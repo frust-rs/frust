@@ -1758,11 +1758,11 @@ impl AndroidAppHandle {
     /// - **Guarded, never per-frame.** `WindowMetrics` is delivered *alongside*
     ///   the standalone `WindowInsets` context (which keeps working untouched),
     ///   not through it, and it is not pushed into the render root at all — so
-    ///   nothing else rate-limits it. A `provide_context` re-provide replaces the
-    ///   value every `Component::build` reads, and this framework has no
-    ///   per-component rebuild skipping, so an unconditional per-frame
-    ///   re-provide would be a permanent whole-app rebuild. The publisher's
-    ///   change detection is what keeps a static window quiet.
+    ///   nothing else rate-limits it. `provide_context` is a plain map insert
+    ///   that notifies nothing, but an unconditional per-frame re-provide would
+    ///   still pay a lock write plus an allocation every frame across the FFI
+    ///   boundary for no observable benefit. The publisher's change detection
+    ///   is what keeps a static window quiet.
     /// - **Called from the entry points where the inputs move**, not from
     ///   [`Self::frame`]: `nativeOnSurfaceChanged` → [`Self::resize_surface`] /
     ///   [`Self::set_window`] / [`Self::split_recreate_surface`] (size + density)

@@ -825,9 +825,10 @@ mod tests {
     //   1. `use_context::<WindowMetrics>()` resolves inside `Component::build`
     //      (the delivery contract), and
     //   2. a static window re-provides NOTHING across a long run of frames (the
-    //      cost contract). There is no per-component rebuild skipping in this
-    //      framework, so an unconditional per-frame re-provide would pin the app
-    //      at a 100% rebuild rate forever, on every platform, silently.
+    //      cost contract). `provide_context` notifies nothing on its own — an
+    //      unconditional per-frame re-provide would still cost a lock write
+    //      plus an allocation every frame at the FFI boundary for no
+    //      observable benefit, which is what this guards against.
 
     use frust_core::{Orientation, WindowMetrics};
 
@@ -907,8 +908,9 @@ mod tests {
                 provides.get(),
                 1,
                 "a static window must never re-provide WindowMetrics — an \
-                 unconditional per-frame re-provide would invalidate the whole \
-                 app on every frame, forever"
+                 unconditional per-frame re-provide would pay a lock write \
+                 plus an allocation every frame at the FFI boundary for \
+                 nothing observable"
             );
 
             // (3) A real rotation publishes once and flips the derived
