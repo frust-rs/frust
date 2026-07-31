@@ -32,7 +32,7 @@ cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings 
 ```
 
 This is the standard verify gate. [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) § Test is canonical —
-it also covers conditional steps (e.g. the `huddle`/`clean-signals-frust` sibling-checkout gate).
+it also covers the standalone-workspace gates (e.g. `huddle`/`clean-signals-frust`).
 
 ## Agent Guardrails
 
@@ -43,6 +43,7 @@ it also covers conditional steps (e.g. the `huddle`/`clean-signals-frust` siblin
   gates from their own directories.
 - `workflow/` is a separate nested repo — never commit it.
 - Doc edits must respect the budgets recorded in [docs/DOC_POLICY.md](docs/DOC_POLICY.md).
-- The `clean-signals` sibling-checkout path deps are load-bearing — `examples/huddle` and
-  `plugins/clean-signals-frust` must resolve it by the same canonical `../clean-signals-rs`
-  path (two resolution routes would give Cargo two crate identities) — do not "fix" them.
+- `clean-signals` is git+rev-pinned (`910f626` on `master`) to its public repo —
+  `examples/huddle`, `plugins/clean-signals-frust`, and `templates/app`'s clean-signals
+  scaffold variant must all resolve the identical git+rev spec (two resolution routes
+  would give Cargo two crate identities) — do not change one without the others.
