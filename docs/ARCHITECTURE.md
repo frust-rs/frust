@@ -78,6 +78,11 @@ frust-scene/frust-text ──► frust-core ──► frust-widgets/frust-theme 
   paint/layout context; app code reads a cloned `Theme` reactively. `native-widgets` folds it into
   control props every frame, diff-gated against the platform FFI. See
   [WIDGETS_ARCHITECTURE.md](WIDGETS_ARCHITECTURE.md) and [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md).
+- **Window metrics** — the shell publishes `WindowMetrics` (logical size, scale, derived orientation,
+  and insets snapshot) as a plain `provide_context` value (not a signal) whenever the window shape
+  changes, guarded to avoid unconditional per-frame re-provides. Widgets adapt layout and visuals to
+  the shape without a separate reactive subscription. See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) and
+  [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md).
 - **Android frame pipeline** — a Choreographer callback consults `frame_gate` to run or skip the
   frame, then rebuild → conditional layout → paint → render-thread present. See
   [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md).

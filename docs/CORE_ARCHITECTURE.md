@@ -67,6 +67,28 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
   storage in the shells and plugins that consume it.
 - A compile-time `Send` assertion on `Scene` guards a future render-thread split.
 
+## Window Metrics and Context Delivery
+
+`WindowMetrics` (logical size, device-pixel scale, derived orientation, and window insets) is
+delivered via `provide_context` as a **plain value, not a signal** — exactly like `Theme` and
+`WindowInsets` already are. Only `deep_link` and `back` are true `RwSignal`s in the host-signal
+layer; theme, insets, and now metrics are re-provided plain values each time they change. A widget
+or component reads them inside `Component::build` via `use_context::<WindowMetrics>()` without any
+signal subscription.
+
+**Orientation is derived, not platform-sourced:** no platform callback in either mobile shell carries
+an orientation enum — the shell furnishes only `(width, height, scale)`. `Orientation` is computed
+via `Orientation::from_size()` (portrait when `height >= width`, including exact squares as
+portrait) and never tracks a device orientation-lock. This is a stable guarantee pinned by tests.
+
+**Context is not reactive.** A `provide_context` call does not mark anything dirty via a signal;
+instead, the shell must re-provide `WindowMetrics` under the app's tracked scope so the read/write
+pair participates in the normal dependency-tracking path. Since there is no per-component rebuild
+skipping, any metrics change rebuilds the whole app — acceptable only because builds are cheap by
+construction. A shell must re-provide only on actual change (guarded by `WindowMetricsPublisher`'s
+change check), never unconditionally each frame, or the app churns forever. This is load-bearing,
+not an optimization.
+
 ## Key Types
 
 | Type | Purpose |
@@ -81,4 +103,5 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
 | `ReactiveRuntime` / `TrackedScope` / `FrameWaker` | Process-wide reactive substrate and its rebuild-wake bridge |
 | `AsyncValue<T>` / `use_task` / `spawn_blocking` | Blessed heavy-work idiom over the reactive substrate |
 | `App` / `app!` / `run` / `Component` | The facade's canonical entry surface binding a root `Component` to all platforms |
+| `WindowMetrics` / `Orientation` | Window shape delivered as a plain `provide_context` value (not a signal) — see "Window Metrics and Context Delivery" |
 | `RwSignal` / `Memo` (re-exported) | Facade-flat reactive primitives app state is typed with |
