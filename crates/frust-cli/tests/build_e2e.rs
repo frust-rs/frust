@@ -2,14 +2,22 @@
 //! throwaway upload keystore → `frust build apk --release` produces a
 //! release-signed APK.
 //!
-//! Two shapes are covered, because the CLI's release-signing gate has to be
-//! right about both: the scaffolded default (`android/key.properties`) and a
-//! *relocated* rig whose Gradle reads prefixed keys out of
-//! `android/app/keystores/key.properties`, declared to Frust through
-//! `frust.toml`'s `[signing]` section. Both tests also assert the gate's
-//! false-positive case first — a stub `key.properties` with no keystore
-//! behind it must fail before Gradle runs, since with the generated Gradle
-//! template that stub would otherwise yield a silently debug-signed release.
+//! Three shapes are covered, because the CLI's release-signing gate has to be
+//! right about all of them: the scaffolded default (`android/key.properties`),
+//! a *relocated* rig whose Gradle reads prefixed keys out of
+//! `android/app/keystores/key.properties` (declared to Frust through
+//! `frust.toml`'s `[signing]` section), and the *env-only CI* rig — no
+//! properties file at all, the four values exported as the default
+//! `ANDROID_*` variables `[signing.env]` documents. The first two also assert
+//! the gate's false-positive case first — a stub `key.properties` with no
+//! keystore behind it must fail before Gradle runs, since with the generated
+//! Gradle template that stub would otherwise yield a silently debug-signed
+//! release.
+//!
+//! Every one of them asserts on the *artifact* (`apksigner verify
+//! --print-certs`), never on the gate's verdict alone: the gate passing while
+//! Gradle debug-signs is precisely the failure mode these tests exist to
+//! catch.
 //!
 //! Like `create_e2e`, this drives the compiled `frust` binary via
 //! `CARGO_BIN_EXE_frust` (the crate is binary-only, no `lib` target) so it
@@ -158,7 +166,20 @@ fn generate_keystore(at: &Path) {
 /// Single-ABI (arm64) keeps the wall-clock to one Rust target while still
 /// exercising the full signing pipeline.
 fn release_build(project: &Path, ndk_home: &str) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_frust"))
+    release_build_with_env(project, ndk_home, &[])
+}
+
+/// [`release_build`] plus extra environment variables. They reach both halves
+/// of the signing story in one shot: the CLI gate reads them directly, and
+/// Gradle inherits them through the `./gradlew` child — which is exactly the
+/// CI shape `[signing.env]` describes.
+fn release_build_with_env(
+    project: &Path,
+    ndk_home: &str,
+    extra_env: &[(&str, &str)],
+) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_frust"));
+    command
         .args([
             "build",
             "apk",
@@ -167,7 +188,11 @@ fn release_build(project: &Path, ndk_home: &str) -> std::process::Output {
             "android-arm64",
         ])
         .current_dir(project)
-        .env("ANDROID_NDK_HOME", ndk_home)
+        .env("ANDROID_NDK_HOME", ndk_home);
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    command
         .output()
         .expect("failed to spawn `frust build apk --release`")
 }
@@ -329,12 +354,14 @@ fn relocated_keystore_project_passes_the_gate_without_android_key_properties() {
     );
     for key in ["keyAlias", "keyPassword", "storeFile", "storePassword"] {
         relocated = relocated.replace(
-            &format!("keystoreProperties[\"{key}\"]"),
-            &format!("keystoreProperties[\"prod.{key}\"]"),
+            &format!("signingValue(\"{key}\""),
+            &format!("signingValue(\"prod.{key}\""),
         );
     }
     assert!(
-        relocated != gradle && relocated.contains("app/keystores/key.properties"),
+        relocated.contains("app/keystores/key.properties")
+            && relocated.contains("signingValue(\"prod.storeFile\"")
+            && relocated.contains("signingValue(\"prod.keyAlias\""),
         "the generated build.gradle.kts no longer matches the strings this test rewrites"
     );
     std::fs::write(&gradle_path, relocated).expect("writing the relocated build.gradle.kts");
@@ -379,6 +406,83 @@ fn relocated_keystore_project_passes_the_gate_without_android_key_properties() {
         project.display(),
         String::from_utf8_lossy(&out.stderr)
     );
+    assert_release_apk(&project);
+    // The gate cannot see this project's Gradle edit, so passing must come
+    // with the divergence advisory rather than a silent green.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("app/keystores/key.properties") && stdout.contains("may be debug-signed"),
+        "expected the Gradle-divergence advisory for a relocated key-properties path:\n{stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&project);
+}
+
+/// The CI rig frust.toml's `[signing.env]` comment advertises: **no**
+/// `android/key.properties` anywhere, all four values exported as the default
+/// `ANDROID_*` environment variables. Before the generated Gradle read those
+/// variables this was the framework's worst signing outcome — the CLI gate
+/// resolved all four, passed, and Gradle (seeing an empty `key.properties`)
+/// debug-signed the artifact behind a green build.
+///
+/// The assertion that matters is on the **artifact**, not the gate's verdict:
+/// `apksigner verify --print-certs` must report this test's certificate, so
+/// gate and reality agree.
+#[test]
+#[ignore = "compiles a full generated project + Gradle; needs Android SDK/NDK — run with cargo test -p frust-cli --test build_e2e -- --ignored"]
+fn env_only_ci_rig_produces_a_release_signed_apk_without_key_properties() {
+    let ndk_home = resolve_ndk_home().expect(
+        "Android NDK not found: set ANDROID_NDK_HOME or install one under $ANDROID_HOME/ndk",
+    );
+
+    let project = unique_dir("env-ci");
+    let _ = std::fs::remove_dir_all(&project);
+
+    scaffold(&project);
+
+    // 1) Declare the rig by uncommenting the shipped `[signing.env]` block —
+    //    the names below are verbatim what `frust.toml.tmpl` documents and
+    //    what the generated build.gradle.kts hardcodes.
+    let toml_path = project.join("frust.toml");
+    let mut frust_toml = std::fs::read_to_string(&toml_path).expect("reading frust.toml");
+    frust_toml.push_str(
+        "\n[signing.env]\nstore-file = \"ANDROID_STORE_FILE\"\n\
+         store-password = \"ANDROID_STORE_PASSWORD\"\nkey-alias = \"ANDROID_KEY_ALIAS\"\n\
+         key-password = \"ANDROID_KEY_PASSWORD\"\n",
+    );
+    std::fs::write(&toml_path, frust_toml).expect("writing frust.toml");
+
+    // 2) A keystore, and nothing on disk pointing at it. `storeFile` is
+    //    absolute so the gate's candidate bases and Gradle's
+    //    `rootProject.file(...)` land on the same file.
+    let keystore = project.join("ci-upload.jks");
+    generate_keystore(&keystore);
+    assert!(
+        !project.join("android/key.properties").exists(),
+        "this test must sign with no key.properties at all"
+    );
+
+    // 3) Build with the four variables exported, CI-style.
+    let store_file = keystore.to_str().expect("keystore path is valid UTF-8");
+    let out = release_build_with_env(
+        &project,
+        &ndk_home,
+        &[
+            ("ANDROID_STORE_FILE", store_file),
+            ("ANDROID_STORE_PASSWORD", STORE_PASS),
+            ("ANDROID_KEY_ALIAS", "upload"),
+            ("ANDROID_KEY_PASSWORD", STORE_PASS),
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "`frust build apk --release` failed for the env-only project at {}:\n{}",
+        project.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // 4) The whole point: the artifact carries this test's certificate, not
+    //    the Android debug key.
     assert_release_apk(&project);
 
     let _ = std::fs::remove_dir_all(&project);

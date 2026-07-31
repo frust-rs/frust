@@ -51,8 +51,16 @@ host = "{{ deeplink_host }}"
 # external = false
 #
 # Environment variables each value falls back to when the properties file
-# doesn't supply it — the CI half of a "properties file locally, environment
-# in CI" rig. Only the variable NAMES belong here, never the values.
+# doesn't supply it (a blank entry counts as not supplied) — the CI half of a
+# "properties file locally, environment in CI" rig. Only the variable NAMES
+# belong here, never the values.
+#
+# The generated `android/app/build.gradle.kts` reads exactly the four names
+# below, hardcoded: Gradle cannot read frust.toml, so there is no pass-through.
+# Uncommenting this block as-is is enough for the CI rig to work end to end;
+# renaming a variable here means editing `signingValue(...)` in that Gradle
+# file to match, or the gate will pass on material the build never sees and
+# the artifact will be debug-signed.
 # [signing.env]
 # store-file = "ANDROID_STORE_FILE"
 # store-password = "ANDROID_STORE_PASSWORD"

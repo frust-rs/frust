@@ -11,11 +11,12 @@
 //! key-prefixed) with per-value environment-variable fallbacks, then checks
 //! that the keystore path actually resolves to a file on disk. A stub
 //! `key.properties` written just to appease the gate therefore fails here
-//! instead of producing a green, debug-signed release: with the shipped
-//! template, Gradle wires a release signing config only when
-//! `key.properties` is non-empty, so "all four values present" is the same
-//! condition Gradle tests, and "the keystore exists" is the condition Gradle
-//! would blow up on next.
+//! instead of producing a green, debug-signed release: the shipped template
+//! wires a release signing config only when all four values resolve — from
+//! its `key.properties` or from the four default `ANDROID_*` variables,
+//! [`resolve_field`]'s precedence exactly — so "all four values present" is
+//! the same condition Gradle tests, and "the keystore exists" is the
+//! condition Gradle would blow up on next.
 //!
 //! **Where the material lives is configuration, not a constant.**
 //! `frust.toml`'s `[signing]` section (see [`crate::manifest::SigningSection`])
@@ -25,7 +26,12 @@
 //!
 //! **Honest limits.** Nothing here parses `build.gradle.kts` — `[signing]`
 //! describes what the project's own Gradle does, and the gate believes that
-//! description. It also cannot tell a real JKS from an empty file of the same
+//! description. Where the description may move the material somewhere the
+//! *generated* Gradle cannot follow — a relocated `key-properties` path, or
+//! any `[signing.env]` fallback, whose variable names Gradle cannot learn
+//! from frust.toml — the gate says so on `on_line` (see
+//! [`gradle_divergence_advisory`]) rather than pretending it verified a
+//! signature. It also cannot tell a real JKS from an empty file of the same
 //! name; verifying keystore contents would mean shelling out to `keytool`
 //! with the store password on the command line. Both cases degrade into a
 //! Gradle-side failure, never into a green build with a debug-signed
@@ -95,14 +101,25 @@ impl Field {
     }
 }
 
+/// Which of the two sources supplied a resolved value. The gate does not care
+/// — material is material — but the Gradle-divergence advisory does: the
+/// generated `build.gradle.kts` reads the properties file at one fixed path
+/// plus four fixed environment variables, so resolving from anywhere else is
+/// the one shape where a green gate and a debug-signed artifact can coexist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    Properties,
+    Environment,
+}
+
 /// Gates [`BuildMode::Release`] on release signing material that actually
 /// resolves; profile/debug builds are never gated. Reads `[signing]` from
 /// `<project_root>/frust.toml` (absent manifest or section == the scaffolded
 /// default, `android/key.properties`).
 ///
-/// `on_line` carries the one advisory this gate can emit (the
-/// `external = true` waiver) — this is a print-free core like the pipelines
-/// that call it.
+/// `on_line` carries the two advisories this gate can emit — the
+/// `external = true` waiver and the Gradle-divergence note — since this is a
+/// print-free core like the pipelines that call it.
 pub fn check_release_signing(
     project_root: &Path,
     mode: BuildMode,
@@ -148,12 +165,12 @@ fn verify(
     let key_properties = resolve_path(&android_dir, configured.unwrap_or(DEFAULT_KEY_PROPERTIES));
     let properties = read_properties(&key_properties)?;
 
-    let mut resolved: HashMap<Field, String> = HashMap::new();
+    let mut resolved: HashMap<Field, (String, Origin)> = HashMap::new();
     let mut missing: Vec<Field> = Vec::new();
     for field in Field::ALL {
         match resolve_field(field, signing, properties.as_ref(), env) {
-            Some(value) => {
-                resolved.insert(field, value);
+            Some(found) => {
+                resolved.insert(field, found);
             }
             None => missing.push(field),
         }
@@ -163,25 +180,67 @@ fn verify(
         bail!(unresolved_message(&key_properties, signing, &missing));
     }
 
-    let store_file = &resolved[&Field::StoreFile];
+    let (store_file, _) = &resolved[&Field::StoreFile];
     let candidates = store_file_candidates(project_root, &android_dir, &key_properties, store_file);
     if !candidates.iter().any(|c| c.is_file()) {
         bail!(missing_keystore_message(store_file, &candidates));
     }
 
+    let relocated = configured.is_some_and(|path| path != DEFAULT_KEY_PROPERTIES);
+    let via_env = resolved
+        .values()
+        .any(|(_, origin)| *origin == Origin::Environment);
+    if let Some(advisory) = gradle_divergence_advisory(&key_properties, relocated, via_env) {
+        on_line(&advisory);
+    }
+
     Ok(())
+}
+
+/// The advisory for material the *generated* `build.gradle.kts` may not read.
+/// `Some` only when resolution used a relocated properties file or an
+/// environment fallback — the shipped template reads `android/key.properties`
+/// plus the four default `ANDROID_*` variables and nothing else, so those are
+/// the shapes where this gate can pass while Gradle debug-signs. Nothing here
+/// parses Gradle; this is a prompt to check, not a verdict.
+fn gradle_divergence_advisory(
+    key_properties: &Path,
+    relocated: bool,
+    via_env: bool,
+) -> Option<String> {
+    let mut sources: Vec<String> = Vec::new();
+    if relocated {
+        sources.push(format!("`{}`", key_properties.display()));
+    }
+    if via_env {
+        sources.push("environment variables named by `[signing.env]`".to_string());
+    }
+    if sources.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "note: signing material resolved from {}; the generated build.gradle.kts reads \
+         `android/key.properties` plus the default $ANDROID_STORE_FILE / \
+         $ANDROID_STORE_PASSWORD / $ANDROID_KEY_ALIAS / $ANDROID_KEY_PASSWORD — confirm your \
+         build.gradle.kts reads the same, or this release may be debug-signed.",
+        sources.join(" and ")
+    ))
 }
 
 /// Resolves one value: the properties file first (the same precedence a
 /// Gradle rig uses), then the `[signing.env]`-named environment variable.
-/// Blank values count as absent — an empty `storePassword=` line is not
-/// signing material.
+/// Blank values count as absent at both steps — an empty `storePassword=`
+/// line is not signing material, it falls through to the environment.
+///
+/// The generated `build.gradle.kts`'s `signingValue(...)` mirrors this
+/// precedence exactly; keeping the two in step is what stops a green gate
+/// from riding on material Gradle never sees.
 fn resolve_field(
     field: Field,
     signing: &SigningSection,
     properties: Option<&HashMap<String, String>>,
     env: &dyn EnvLookup,
-) -> Option<String> {
+) -> Option<(String, Origin)> {
     let key = match signing.prefix.as_deref() {
         Some(prefix) if !prefix.is_empty() => format!("{prefix}.{}", field.property()),
         _ => field.property().to_string(),
@@ -191,10 +250,11 @@ fn resolve_field(
         .map(String::as_str)
         .and_then(non_empty)
     {
-        return Some(value);
+        return Some((value, Origin::Properties));
     }
     let name = signing.env.as_ref().and_then(|e| field.env_var(e))?;
-    env.get(name).as_deref().and_then(non_empty)
+    let value = env.get(name).as_deref().and_then(non_empty)?;
+    Some((value, Origin::Environment))
 }
 
 fn non_empty(value: &str) -> Option<String> {
@@ -394,6 +454,17 @@ mod tests {
         check_env(project, mode, FakeEnv::new())
     }
 
+    /// The "resolved from …" clause of a Gradle-divergence advisory — the
+    /// part that names the diverging sources, up to the `;` that introduces
+    /// the boilerplate about what the generated Gradle reads (which always
+    /// mentions `android/key.properties` and the `ANDROID_*` names, so a
+    /// whole-message `contains` would prove nothing).
+    fn advisory_source(line: &str) -> &str {
+        line.split_once(';')
+            .unwrap_or_else(|| panic!("not a divergence advisory: {line}"))
+            .0
+    }
+
     fn check_env(project: &Path, mode: BuildMode, env: FakeEnv) -> Result<Vec<String>> {
         let mut lines = Vec::new();
         check_with_env(project, mode, &env, &mut |line| {
@@ -526,7 +597,15 @@ mod tests {
              prod.keyPassword=pw\n",
         );
         assert!(!dir.join("android/key.properties").exists());
-        assert!(check(&dir, BuildMode::Release).unwrap().is_empty());
+        // Passing is not silent: the generated Gradle reads
+        // `android/key.properties`, so a relocated rig is exactly the case
+        // this gate cannot verify for itself.
+        let lines = check(&dir, BuildMode::Release).unwrap();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("may be debug-signed"), "{lines:?}");
+        let source = advisory_source(&lines[0]);
+        assert!(source.contains("app/keystores/key.properties"), "{source}");
+        assert!(!source.contains("[signing.env]"), "{source}");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -548,7 +627,12 @@ mod tests {
         let env = FakeEnv::new()
             .set("PROD_STORE_PASSWORD", "pw")
             .set("PROD_KEY_PASSWORD", "pw");
-        assert!(check_env(&dir, BuildMode::Release, env).unwrap().is_empty());
+        let lines = check_env(&dir, BuildMode::Release, env).unwrap();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        // Both divergences at once — relocated file *and* env fallbacks.
+        let source = advisory_source(&lines[0]);
+        assert!(source.contains("app/keystores/key.properties"), "{source}");
+        assert!(source.contains("[signing.env]"), "{source}");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -591,7 +675,13 @@ mod tests {
             .set("CI_STORE_PASSWORD", "pw")
             .set("CI_KEY_ALIAS", "upload")
             .set("CI_KEY_PASSWORD", "pw");
-        assert!(check_env(&dir, BuildMode::Release, env).unwrap().is_empty());
+        let lines = check_env(&dir, BuildMode::Release, env).unwrap();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let source = advisory_source(&lines[0]);
+        assert!(source.contains("[signing.env]"), "{source}");
+        // The default properties path was used, so it is not named as a
+        // divergence — only the environment is.
+        assert!(!source.contains("key.properties"), "{source}");
         let _ = fs::remove_dir_all(&dir);
     }
 
