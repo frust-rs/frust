@@ -98,7 +98,7 @@ fn build_with_env(
     local_properties::write(&android_dir, &version_name, &version_code)
         .context("writing android/local.properties")?;
 
-    signing::check_release_signing(&android_dir, info.mode)?;
+    signing::check_release_signing(project_dir, info.mode, on_line)?;
 
     // Release-lean preflight: a legacy app that predates the `lean` feature
     // has it dropped here — with a one-time warning routed through this
@@ -186,6 +186,19 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("android")).unwrap();
         dir
+    }
+
+    /// Complete release signing material for a default-configured project:
+    /// the four values `signing::check_release_signing` resolves, plus a
+    /// placeholder file at the `storeFile` path they name (the gate checks
+    /// that a keystore exists there, not that it is a valid JKS).
+    fn write_release_signing(android_dir: &Path) {
+        fs::write(android_dir.join("upload.jks"), b"not-a-real-jks").unwrap();
+        fs::write(
+            android_dir.join("key.properties"),
+            "storePassword=pw\nkeyPassword=pw\nkeyAlias=upload\nstoreFile=upload.jks\n",
+        )
+        .unwrap();
     }
 
     fn fake_env() -> FakeEnv {
@@ -329,7 +342,7 @@ mod tests {
     fn release_apk_with_flavor_and_defines_asserts_exact_argv() {
         let dir = unique_project_dir("full-release-flavor-defines");
         let android_dir = dir.join("android");
-        fs::write(android_dir.join("key.properties"), "keyAlias=upload\n").unwrap();
+        write_release_signing(&android_dir);
         let out_dir = android_dir.join("app/build/outputs/apk/paid/release");
         fs::create_dir_all(&out_dir).unwrap();
         fs::write(out_dir.join("app-paid-release.apk"), b"fake").unwrap();
@@ -409,7 +422,7 @@ mod tests {
                     .to_string(),
             },
         );
-        fs::write(dir.join("android/key.properties"), "keyAlias=upload\n").unwrap();
+        write_release_signing(&dir.join("android"));
 
         let target = AndroidArtifact::Apk {
             split_per_abi: false,
@@ -476,7 +489,7 @@ mod tests {
     fn release_legacy_app_drops_lean_and_warns() {
         let dir = unique_project_dir("f2-legacy");
         let android_dir = dir.join("android");
-        fs::write(android_dir.join("key.properties"), "keyAlias=upload\n").unwrap();
+        write_release_signing(&android_dir);
         fs::write(dir.join("Cargo.toml"), "[package]\nname = \"app\"\n").unwrap();
         let out_dir = android_dir.join("app/build/outputs/apk/release");
         fs::create_dir_all(&out_dir).unwrap();
@@ -519,7 +532,7 @@ mod tests {
     fn release_declaring_app_keeps_lean_without_warning() {
         let dir = unique_project_dir("f2-declaring");
         let android_dir = dir.join("android");
-        fs::write(android_dir.join("key.properties"), "keyAlias=upload\n").unwrap();
+        write_release_signing(&android_dir);
         fs::write(
             dir.join("Cargo.toml"),
             "[package]\nname = \"app\"\n\n[features]\nlean = [\"log/release_max_level_warn\"]\n",
@@ -576,7 +589,7 @@ mod tests {
         );
 
         let build_info = info(BuildMode::Release, None);
-        fs::write(android_dir.join("key.properties"), "keyAlias=upload\n").unwrap();
+        write_release_signing(&android_dir);
         let result = build_with_env(
             &runner,
             &dir,

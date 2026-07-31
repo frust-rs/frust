@@ -20,11 +20,10 @@ host = "{{ deeplink_host }}"
 # dev = { app-id-suffix = ".dev" }
 # prod = {}
 
-# Android release signing is driven by `android/key.properties`, a Java
-# properties file the Gradle build reads (this file is NOT parsed by Frust).
-# It must be gitignored (the generated .gitignore already excludes
-# `key.properties` and `*.jks`) so the keystore/passwords never enter version
-# control. Keys:
+# Android release signing. By default the Gradle build reads
+# `android/key.properties`, a Java properties file that must stay gitignored
+# (the generated .gitignore already excludes `key.properties` and `*.jks`) so
+# the keystore and passwords never enter version control. Keys:
 #   storePassword=<keystore password>
 #   keyPassword=<key password>
 #   keyAlias=<key alias>
@@ -32,10 +31,33 @@ host = "{{ deeplink_host }}"
 # Generate an upload keystore with:
 #   keytool -genkey -v -keystore ~/upload-keystore.jks -keyalg RSA \
 #     -storetype JKS -keysize 2048 -validity 10000 -alias upload
-# Without key.properties, release builds fall back to debug signing (a Gradle
-# warning is logged); `frust build` makes a missing keystore a hard error.
+# Without usable signing material, Gradle falls back to debug signing (a
+# warning is logged); `frust build --release` makes it a hard error instead —
+# it resolves all four values and checks the keystore file exists, so a stub
+# `key.properties` can't buy a green, debug-signed release.
+#
+# The section below IS parsed by Frust (unlike the deeplink/flavor sections
+# above, which only document what was baked into the platform templates).
+# Set it when your Gradle build reads signing material from somewhere else:
 # [signing]
-# keystore = "android/key.properties"
+# # Properties file path, relative to `android/`. Default: "key.properties".
+# key-properties = "app/keystores/key.properties"
+# # Prefix on the property keys, for a file holding several key sets
+# # (`prod.storeFile`, `develop.storeFile`, ...). Default: none.
+# prefix = "prod"
+# # Waives the gate when signing happens somewhere Frust can't inspect (a CI
+# # signing service, a Gradle signing plugin). Every release build then warns
+# # that Frust cannot promise the artifact is release-signed.
+# external = false
+#
+# Environment variables each value falls back to when the properties file
+# doesn't supply it — the CI half of a "properties file locally, environment
+# in CI" rig. Only the variable NAMES belong here, never the values.
+# [signing.env]
+# store-file = "ANDROID_STORE_FILE"
+# store-password = "ANDROID_STORE_PASSWORD"
+# key-alias = "ANDROID_KEY_ALIAS"
+# key-password = "ANDROID_KEY_PASSWORD"
 
 # Override the derived iOS bundle identifier (defaults to
 # `org.camelCase(name)`, e.g. `{{ iosIdentifier }}`).
