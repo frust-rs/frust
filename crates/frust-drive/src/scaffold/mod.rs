@@ -1238,7 +1238,7 @@ mod tests {
         );
         assert!(
             cargo_toml.contains(
-                "clean-signals = { path = \"/path/to/frust/../../../clean-signals-rs/crates/clean-signals\" }"
+                "clean-signals = { git = \"https://github.com/f0x-it-llc/clean-signals-rs\", rev = \"910f626\" }"
             ),
             "{cargo_toml}"
         );
