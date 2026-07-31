@@ -2,9 +2,11 @@
 //! (preflight → xcodebuild → `simctl install` → `simctl launch --console-pty`,
 //! streamed) and [`run_physical`] drives a signed physical device (iOS 17+
 //! gate → `ios_build`'s signed device build → `devicectl device install app`
-//! → `devicectl device process launch --console --terminate-existing`,
+//! → `devicectl device process launch --console --terminate-existing` against
+//! the built bundle's own `Info.plist`-read identity, see [`bundle_id`],
 //! streamed). Both mirror `android_run`'s structure and testing style.
 
+pub mod bundle_id;
 pub mod devicectl;
 pub mod preflight;
 pub mod project;
@@ -85,9 +87,18 @@ pub fn run(
     Ok(if launch_out.success { 0 } else { 1 })
 }
 
-/// What the iOS-simulator preflight → build → install core resolves before
-/// the `simctl launch` streaming phase: the app's bundle id and the target
-/// simulator udid, for the launch both front-ends attach.
+/// What a preflight → build → install core resolves before the launch
+/// streaming phase: the app's bundle id and the target device udid, for the
+/// launch both front-ends attach.
+///
+/// The two pipelines resolve `bundle_id` differently on purpose. The physical
+/// path reads it back out of the bundle it just installed (see [`bundle_id`]),
+/// because a `--flavor` there builds a different scheme/configuration whose
+/// target may rewrite `PRODUCT_BUNDLE_IDENTIFIER`. The simulator path is
+/// scheme-fixed (`Runner`, stock `Debug|Profile|Release`) and threads no
+/// flavor at all, so its built bundle can only carry the `frust.toml`-derived
+/// id — it keeps using that directly rather than spending a `plutil` call to
+/// be told the same thing.
 struct PreparedIosSession {
     bundle_id: String,
     udid: String,
@@ -230,10 +241,12 @@ const MIN_DEVICECTL_IOS_MAJOR: u32 = 17;
 /// `devicectl device install app` → `devicectl device process launch
 /// --console --terminate-existing` (streamed) on `device`, an
 /// already-discovered `Platform::Ios`/`Kind::PhysicalDevice` device, against
-/// the Frust project rooted at `root`. `info.mode` selects the build
-/// configuration exactly like the simulator path; signing is always
-/// requested (`codesign: true`) regardless of mode — `run` never skips
-/// signing for a physical device.
+/// the Frust project rooted at `root`. `info.mode`/`info.flavor` select the
+/// scheme and build configuration (`ios_build::schemes`), and the launch
+/// targets the installed bundle's own identity rather than the
+/// `frust.toml`-derived one (see [`bundle_id`]); signing is always requested
+/// (`codesign: true`) regardless of mode — `run` never skips signing for a
+/// physical device.
 pub fn run_physical(
     runner: &dyn ProcessRunner,
     root: &Path,
@@ -269,10 +282,10 @@ pub fn run_physical(
     Ok(0)
 }
 
-/// The shared iOS-17+ gate → signed build → install core of the physical-iOS
-/// pipeline (mirrors [`prepare_simulator_session`]), feeding each phase line
-/// to `on_line` and checking `cancel` at each boundary. Returns `Ok(None)`
-/// when `cancel` was observed at a boundary.
+/// The shared iOS-17+ gate → signed build → install → launch-identity core of
+/// the physical-iOS pipeline (mirrors [`prepare_simulator_session`]), feeding
+/// each phase line to `on_line` and checking `cancel` at each boundary.
+/// Returns `Ok(None)` when `cancel` was observed at a boundary.
 fn prepare_physical_session(
     runner: &dyn ProcessRunner,
     root: &Path,
@@ -339,8 +352,19 @@ fn prepare_physical_session(
         );
     }
 
+    // The *installed* identity, read back out of the `.app` just built and
+    // installed rather than derived from `frust.toml`: a `--flavor` selects a
+    // different scheme/configuration, whose target conventionally rewrites
+    // `PRODUCT_BUNDLE_IDENTIFIER`, so the id `devicectl` must launch is not
+    // the one `frust.toml` derives. An unreadable plist is a warning, not an
+    // error — the fallback below is exactly right for an unflavored project.
+    let (resolved, plist_warning) = bundle_id::resolve(runner, &app_path);
+    if let Some(plist_warning) = plist_warning {
+        on_line(&plist_warning);
+    }
+
     Ok(Some(PreparedIosSession {
-        bundle_id: project.bundle_id,
+        bundle_id: resolved.unwrap_or(project.bundle_id),
         udid: device.id.clone(),
     }))
 }
@@ -791,9 +815,25 @@ mod tests {
     }
 
     fn plant_physical_app(dir: &std::path::Path) -> String {
-        let app_dir = dir.join("build/ios/Build/Products/Debug-iphoneos/Runner.app");
+        plant_physical_app_in(dir, "Debug")
+    }
+
+    /// Plants the built `.app` in `configuration`'s device products directory,
+    /// returning its path — a flavored build lands under
+    /// `<Mode>-<Flavor>-iphoneos`, not the stock `Debug-iphoneos`.
+    fn plant_physical_app_in(dir: &std::path::Path, configuration: &str) -> String {
+        let app_dir = dir
+            .join("build/ios/Build/Products")
+            .join(format!("{configuration}-iphoneos"))
+            .join("Runner.app");
         fs::create_dir_all(&app_dir).unwrap();
         app_dir.to_string_lossy().into_owned()
+    }
+
+    /// The `plutil` invocation the launch-identity step makes for the `.app`
+    /// at `app_path`.
+    fn plutil_key(app_path: &str) -> String {
+        format!("plutil -extract CFBundleIdentifier raw {app_path}/Info.plist")
     }
 
     /// Registers the preflight/scheme-listing fixtures every `run_physical`
@@ -943,6 +983,167 @@ mod tests {
         let runner = FakeProcessRunner::new();
         let err = run_physical(&runner, &dir, &physical_device(), &debug_info()).unwrap_err();
         assert!(err.to_string().contains("ios/Runner.xcodeproj"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // --- launch identity read from the built bundle's `Info.plist` ---
+    //
+    // The `run_physical` tests above deliberately register no `plutil`
+    // fixture: they double as the "unreadable plist is never fatal" case,
+    // proving the pipeline still builds → installs → launches the
+    // `frust.toml`-derived id when the identity read fails. The tests below
+    // cover the readable path.
+
+    const FLAVORED_LIST_JSON: &str = r#"{"project":{"name":"Runner","schemes":["Runner","Develop"],"configurations":["Debug","Profile","Release","Debug-Develop"]}}"#;
+
+    fn develop_flavor_info() -> BuildInfo {
+        BuildInfo::from_args(
+            BuildArgs {
+                flavor: Some("develop".to_string()),
+                ..BuildArgs::default()
+            },
+            BuildMode::Debug,
+        )
+        .unwrap()
+    }
+
+    /// [`physical_base_runner`]'s `--flavor develop` counterpart: scheme
+    /// `Develop`, configuration `Debug-Develop` (`ios_build::schemes`), both
+    /// listed by the `-list -json` fixture so the flavored-configuration
+    /// verification passes.
+    fn flavored_base_runner() -> FakeProcessRunner {
+        FakeProcessRunner::new()
+            .with("xcode-select -p", ok("/Applications/Xcode.app\n"))
+            .with(
+                "rustup target list --installed",
+                ok("aarch64-apple-ios\n"),
+            )
+            .with(
+                "xcrun xcodebuild -list -json -project ios/Runner.xcodeproj",
+                ok(FLAVORED_LIST_JSON),
+            )
+            .with(
+                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Develop -configuration Debug-Develop -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios FRUST_FEATURES=ZnJ1c3QvcGVyZi10cmFjZQ== DEVELOPMENT_TEAM=TEAMID1234 CODE_SIGN_STYLE=Automatic CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES -allowProvisioningUpdates -allowProvisioningDeviceRegistration build",
+                ok("Build succeeded"),
+            )
+    }
+
+    /// The bug this identity read exists for: a flavor whose Xcode
+    /// configuration rewrites `PRODUCT_BUNDLE_IDENTIFIER` installs
+    /// `dev.f0x.myapp.develop`, so launching the `frust.toml`-derived
+    /// `dev.f0x.myapp` gets `CoreDeviceError 10002 … is not installed`. Only
+    /// the plist-derived launch is registered on the fake runner, so a
+    /// regression back to the derived id would find no fixture and error
+    /// instead of silently passing.
+    #[test]
+    fn flavored_run_launches_the_bundle_id_read_from_the_installed_app() {
+        let dir = unique_physical_project_dir("plist-flavored");
+        let app_path = plant_physical_app_in(&dir, "Debug-Develop");
+
+        let runner = flavored_base_runner()
+            .with(
+                format!(
+                    "xcrun devicectl device install app --device 00008110-000A2D3A3C68801E {app_path}"
+                ),
+                ok(""),
+            )
+            .with(plutil_key(&app_path), ok("dev.f0x.myapp.develop\n"))
+            .with(
+                "xcrun devicectl device process launch --device 00008110-000A2D3A3C68801E --console --terminate-existing dev.f0x.myapp.develop",
+                ok("hello from device\n"),
+            );
+
+        let code = run_physical(&runner, &dir, &physical_device(), &develop_flavor_info()).unwrap();
+        assert_eq!(code, 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The no-flavor direction: the plist yields exactly the
+    /// `frust.toml`-derived id, so the resolved identity — and therefore the
+    /// launch — is byte-identical to the pre-fix behavior, with nothing
+    /// warned.
+    #[test]
+    fn unflavored_plist_resolves_the_frust_toml_bundle_id_without_warning() {
+        let dir = unique_physical_project_dir("plist-unflavored");
+        let app_path = plant_physical_app(&dir);
+
+        let runner = physical_base_runner()
+            .with(
+                format!(
+                    "xcrun devicectl device install app --device 00008110-000A2D3A3C68801E {app_path}"
+                ),
+                ok(""),
+            )
+            .with(plutil_key(&app_path), ok("dev.f0x.myapp\n"));
+
+        let never = AtomicBool::new(false);
+        let mut lines = Vec::new();
+        let prepared = prepare_physical_session(
+            &runner,
+            &dir,
+            &physical_device(),
+            &debug_info(),
+            &mut |l| lines.push(l.to_string()),
+            &never,
+        )
+        .unwrap()
+        .expect("a prepared session, not a cancellation");
+
+        assert_eq!(prepared.bundle_id, "dev.f0x.myapp");
+        assert!(
+            !lines.iter().any(|l| l.starts_with("warning:")),
+            "a readable plist must not warn: {lines:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An unreadable plist (here: `plutil` reports the key missing) warns
+    /// exactly once through the session's sink and falls back to the
+    /// `frust.toml`-derived bundle id — never a hard error.
+    #[test]
+    fn unreadable_plist_warns_once_and_falls_back_to_the_frust_toml_bundle_id() {
+        let dir = unique_physical_project_dir("plist-unreadable");
+        let app_path = plant_physical_app(&dir);
+
+        let runner = physical_base_runner()
+            .with(
+                format!(
+                    "xcrun devicectl device install app --device 00008110-000A2D3A3C68801E {app_path}"
+                ),
+                ok(""),
+            )
+            .with(
+                plutil_key(&app_path),
+                Output {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: "No value at that key path or invalid key path: CFBundleIdentifier"
+                        .to_string(),
+                },
+            );
+
+        let never = AtomicBool::new(false);
+        let mut lines = Vec::new();
+        let prepared = prepare_physical_session(
+            &runner,
+            &dir,
+            &physical_device(),
+            &debug_info(),
+            &mut |l| lines.push(l.to_string()),
+            &never,
+        )
+        .unwrap()
+        .expect("a prepared session, not a cancellation");
+
+        assert_eq!(prepared.bundle_id, "dev.f0x.myapp");
+        assert_eq!(
+            lines.iter().filter(|l| l.starts_with("warning:")).count(),
+            1,
+            "exactly one fallback warning: {lines:?}"
+        );
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

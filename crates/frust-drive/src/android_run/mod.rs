@@ -1,9 +1,11 @@
 //! Android drive pipeline for `frust run`: preflight → gradle build → adb
-//! install → launch → pid-scoped logcat streaming.
+//! install → launch (against the built APK's own badging-read identity, see
+//! [`badging`]) → pid-scoped logcat streaming.
 //! Device selection (this module's top level) is decoupled from clap/stdin
 //! so it's unit-testable without a terminal.
 
 pub mod adb;
+pub mod badging;
 pub mod gradle;
 pub mod preflight;
 pub mod project;
@@ -103,7 +105,7 @@ pub fn stdout_is_tty() -> bool {
 /// Drives the full, mode/flavor-aware Android pipeline: preflight →
 /// local.properties version write → (release only) signing gate →
 /// variant-aware `./gradlew assemble<Flavor><Mode>` → variant-aware APK
-/// install → launch → pid-scoped logcat streaming.
+/// install → badging-derived launch → pid-scoped logcat streaming.
 /// Mirrors `ios_run::run`'s `(runner, root, device)` shape, plus `info` for
 /// the mode/flavor/defines/version funnel.
 pub fn run(
@@ -272,8 +274,27 @@ fn prepare_session(
         return Ok(None);
     }
 
-    on_line(&format!("Launching {}…", project.app_id));
-    let launch_out = adb::launch(runner, &device.id, &project.app_id)?;
+    // The *installed* identity, read back out of the APK just built and
+    // installed rather than derived from `frust.toml`: a Gradle flavor's
+    // `applicationIdSuffix` moves the package, and AGP roots the launchable
+    // activity's class at the module namespace instead, so both halves of the
+    // `am start -n` component (and the `pidof` package) differ from the
+    // frust.toml-derived id. Unreadable badging is a warning, not an error —
+    // the fallback below is exactly right for a project with no flavor.
+    let (identity, badging_warning) = badging::resolve(runner, env, &apk_path);
+    if let Some(badging_warning) = badging_warning {
+        on_line(&badging_warning);
+    }
+    let (component, package) = match identity {
+        Some(identity) => (identity.component(), identity.package),
+        None => (
+            adb::default_component(&project.app_id),
+            project.app_id.clone(),
+        ),
+    };
+
+    on_line(&format!("Launching {package}…"));
+    let launch_out = adb::launch(runner, &device.id, &component)?;
     if !launch_out.success {
         bail!("`adb shell am start` failed: {}", launch_out.stderr.trim());
     }
@@ -282,7 +303,7 @@ fn prepare_session(
     let pid = adb::resolve_pid(
         runner,
         &device.id,
-        &project.app_id,
+        &package,
         adb::PID_RETRY_ATTEMPTS,
         &mut sleep,
     )?;
@@ -830,6 +851,140 @@ mod tests {
             let build_info = info(BuildMode::Debug, None);
             let err = run_with_env(&runner, &dir, &device(), &build_info, &fake_env()).unwrap_err();
             assert!(err.to_string().contains("adb install"), "{err}");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// Plants a fake SDK (one build-tools version holding an `aapt2`)
+        /// under `dir`, returning the `aapt2` path the badging step will
+        /// invoke and the `ANDROID_HOME` value pointing at its SDK root.
+        fn plant_aapt2(dir: &std::path::Path) -> (String, String) {
+            let build_tools = dir.join("sdk/build-tools/35.0.1");
+            fs::create_dir_all(&build_tools).unwrap();
+            let aapt2 = build_tools.join("aapt2");
+            fs::write(&aapt2, "#!/bin/sh\n").unwrap();
+            (
+                aapt2.to_string_lossy().into_owned(),
+                dir.join("sdk").to_string_lossy().into_owned(),
+            )
+        }
+
+        /// The flavor bug this badging step exists for: a `dev` flavor
+        /// declaring `applicationIdSuffix ".dev"` installs
+        /// `dev.f0x.myapp.dev`, while AGP roots the launchable activity at
+        /// the module namespace (`dev.f0x.myapp.MainActivity`). Only the
+        /// badging-derived component and package are registered on the fake
+        /// runner, so a regression back to the `frust.toml`-derived
+        /// `dev.f0x.myapp/.MainActivity` + `pidof dev.f0x.myapp` would find
+        /// no fixture and error instead of silently passing.
+        #[test]
+        fn badging_identity_drives_both_the_launch_component_and_the_pid_poll() {
+            let dir = unique_project_dir("badging-flavor");
+            let out_dir = dir.join("android/app/build/outputs/apk/dev/debug");
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-dev-debug.apk"), b"fake").unwrap();
+            let apk_path = out_dir
+                .join("app-dev-debug.apk")
+                .to_string_lossy()
+                .into_owned();
+            let (aapt2, android_home) = plant_aapt2(&dir);
+
+            let runner = preflight_ok_runner()
+                .with(
+                    "./gradlew assembleDevDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    ok("BUILD SUCCESSFUL"),
+                )
+                .with(format!("adb -s emulator-5554 install -r {apk_path}"), ok(""))
+                .with(
+                    format!("{aapt2} dump badging {apk_path}"),
+                    ok("package: name='dev.f0x.myapp.dev' versionCode='1' versionName='1.0'\n\
+                        launchable-activity: name='dev.f0x.myapp.MainActivity'  label='' icon=''\n"),
+                )
+                .with(
+                    "adb -s emulator-5554 shell am start -n dev.f0x.myapp.dev/dev.f0x.myapp.MainActivity",
+                    ok(""),
+                )
+                .with(
+                    "adb -s emulator-5554 shell pidof dev.f0x.myapp.dev",
+                    ok("4242\n"),
+                );
+
+            let never = AtomicBool::new(false);
+            let mut lines = Vec::new();
+            let prepared = prepare_session(
+                &runner,
+                &dir,
+                &device(),
+                &info(BuildMode::Debug, Some("dev")),
+                &fake_env().set("ANDROID_HOME", &android_home),
+                &mut |l| lines.push(l.to_string()),
+                &never,
+            )
+            .unwrap()
+            .expect("a prepared session, not a cancellation");
+
+            assert_eq!(prepared.pid, "4242");
+            assert!(
+                lines.iter().any(|l| l == "Launching dev.f0x.myapp.dev…"),
+                "the launch line must name the installed package: {lines:?}"
+            );
+            assert!(
+                !lines.iter().any(|l| l.starts_with("warning:")),
+                "a readable APK must not warn: {lines:?}"
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// Unreadable badging (here: no SDK env, so the PATH `aapt2` lookup
+        /// fails to spawn) warns once and falls back to the pre-badging
+        /// `<app_id>/.MainActivity` + `pidof <app_id>` behavior — never a hard
+        /// error. Only the fallback invocations are registered, so a
+        /// regression that errored out (or launched something else) fails.
+        #[test]
+        fn unreadable_badging_warns_once_and_falls_back_to_the_frust_toml_identity() {
+            let dir = unique_project_dir("badging-fallback");
+            let out_dir = dir.join("android/app/build/outputs/apk/debug");
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
+            let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
+
+            let runner = preflight_ok_runner()
+                .with(
+                    "./gradlew assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    ok("BUILD SUCCESSFUL"),
+                )
+                .with(format!("adb -s emulator-5554 install -r {apk_path}"), ok(""))
+                .with(
+                    "adb -s emulator-5554 shell am start -n dev.f0x.myapp/.MainActivity",
+                    ok(""),
+                )
+                .with("adb -s emulator-5554 shell pidof dev.f0x.myapp", ok("4242\n"));
+
+            let never = AtomicBool::new(false);
+            let mut lines = Vec::new();
+            let prepared = prepare_session(
+                &runner,
+                &dir,
+                &device(),
+                &info(BuildMode::Debug, None),
+                &fake_env(),
+                &mut |l| lines.push(l.to_string()),
+                &never,
+            )
+            .unwrap()
+            .expect("a prepared session, not a cancellation");
+
+            assert_eq!(prepared.pid, "4242");
+            assert_eq!(
+                lines.iter().filter(|l| l.starts_with("warning:")).count(),
+                1,
+                "exactly one fallback warning: {lines:?}"
+            );
+            assert!(
+                lines.iter().any(|l| l == "Launching dev.f0x.myapp…"),
+                "{lines:?}"
+            );
 
             let _ = fs::remove_dir_all(&dir);
         }
