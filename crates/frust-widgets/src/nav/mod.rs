@@ -15,9 +15,13 @@
 //!   two pages during a transition.
 //! * [`router`] — declarative route table (a go_router-subset layer).
 //! * [`path`] — path/URL parsing for the router.
+//! * [`route`] — [`RouteNavigator`](route::RouteNavigator), the `Send + Sync`
+//!   navigation-request queue a screen reaches through `provide_context` (the
+//!   router itself cannot ride context — it holds `Rc`s).
 
 pub mod hero;
 pub mod navigator;
 pub mod path;
+pub mod route;
 pub mod router;
 pub mod transition;

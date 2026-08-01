@@ -77,6 +77,7 @@ pub use nav::navigator::{
     PopResult, PushOptions, ResultCallback, VisibilityCallback, navigator,
 };
 pub use nav::path::{Location, PathPattern, RouteParams};
+pub use nav::route::{NavRequest, NavWaker, RouteNavigator};
 pub use nav::router::{
     DEFAULT_REDIRECT_LIMIT, ErrorBuilder, Redirect, Resolution, ResolvedPage, Route, RouteBuilder,
     Router,

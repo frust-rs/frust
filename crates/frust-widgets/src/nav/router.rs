@@ -23,7 +23,8 @@
 //!
 //! [`go`](Router::go) resets the stack to the matched chain (replace semantics —
 //! the current top's state is dropped); [`push`](Router::push) stacks the matched
-//! leaf (the page below is retained); [`pop`](Router::pop) pops one page.
+//! leaf (the page below is retained); [`replace`](Router::replace) swaps the top
+//! for the matched leaf; [`pop`](Router::pop) pops one page.
 //! [`go_named`](Router::go_named)/[`push_named`](Router::push_named) resolve a
 //! named route's params into a path first. Every one drives the owned
 //! [`NavigatorController`] — no reactive types here; the signal glue that feeds
@@ -32,6 +33,27 @@
 //!
 //! The router is plain data + logic an app keeps in its `Component::State`
 //! alongside the controller — no global registry.
+//!
+//! # Reaching the router from a screen
+//!
+//! Neither a `Router` (`Rc` page builders) nor a [`NavigatorController`]
+//! (`Rc<RefCell<…>>`) can ride `provide_context`, which needs `Send + Sync`. The
+//! seam that can is [`RouteNavigator`] — a plain `Send + Sync` queue of
+//! [`NavRequest`] data any screen (or background task) appends to, which
+//! [`pump`](Router::pump) drains and applies here on the UI thread. Get one from
+//! [`route_navigator`](Router::route_navigator); the facade's
+//! `RouterDeepLinks::track` pumps it every rebuild, so an app that already calls
+//! `track()` gets path navigation with no extra wiring. See the
+//! [`route`](super::route) module for the full rationale.
+//!
+//! # Params handed to a page builder
+//!
+//! A page's [`RouteBuilder`] receives the location's **query merged under the
+//! path captures** — `/terminal?session=abc` reaches its builder with
+//! `session=abc`, and a `:id` capture beats a `?id=` of the same name. This is
+//! also what makes named navigation round-trip: [`path_for_name`](Router::path_for_name)
+//! emits params it could not substitute into a segment as query parameters, and
+//! resolution now reads them back.
 //!
 //! # Deferred (documented seams)
 //!
@@ -53,6 +75,7 @@ use frust_core::{AnyView, any};
 
 use super::navigator::NavigatorController;
 use super::path::{Location, PathPattern, RouteParams, encode_segment};
+use super::route::{NavRequest, RouteNavigator};
 
 /// A page builder for a route: maps the captured [`RouteParams`] to the page's
 /// view. Re-run each time the page rebuilds (via the closure the router hands the
@@ -129,24 +152,41 @@ impl<State: 'static> Route<State> {
     }
 }
 
-/// One resolved page in a [`Resolution::Matched`] chain: the route's builder plus
-/// the params captured for it. [`build`](ResolvedPage::build) produces the page
-/// view; the router wraps it in a `Fn() -> AnyView` for the controller.
+/// One resolved page in a [`Resolution::Matched`] chain: the route's builder,
+/// the params handed to it (query merged under the path captures — see the
+/// [module docs](self)), and the resolved location they came from.
+/// [`build`](ResolvedPage::build) produces the page view; the router wraps it in
+/// a `Fn() -> AnyView` for the controller.
 pub struct ResolvedPage<State: 'static> {
     builder: RouteBuilder<State>,
     params: RouteParams,
+    location: Location,
 }
 
 impl<State: 'static> ResolvedPage<State> {
-    /// Build the page view against its captured params.
+    /// Build the page view against its params.
     pub fn build(&self) -> AnyView<State> {
         (self.builder)(&self.params)
+    }
+
+    /// The params this page's builder receives.
+    pub fn params(&self) -> &RouteParams {
+        &self.params
+    }
+
+    /// The final (post-redirect) location this page resolved from — the raw
+    /// [`Location`] behind [`params`](Self::params), for a caller that needs the
+    /// path/query split rather than the merged map.
+    pub fn location(&self) -> &Location {
+        &self.location
     }
 
     /// Turn this page into the `Fn() -> AnyView` closure a
     /// [`NavigatorController`] op takes (re-run each rebuild).
     fn into_page_builder(self) -> impl Fn() -> AnyView<State> + 'static {
-        let ResolvedPage { builder, params } = self;
+        let ResolvedPage {
+            builder, params, ..
+        } = self;
         move || (builder)(&params)
     }
 }
@@ -155,8 +195,9 @@ impl<State: 'static> ResolvedPage<State> {
 /// final resolved location and merged params) or an error fallback.
 pub enum Resolution<State: 'static> {
     /// The location matched a route chain. `pages` is the chain root→leaf; for a
-    /// flat route it holds a single page. `params` is the merged capture map,
-    /// `location` the final (post-redirect) location.
+    /// flat route it holds a single page. `params` is the merged param map (the
+    /// location's query merged **under** the path captures — a capture wins a
+    /// name collision), `location` the final (post-redirect) location.
     Matched {
         location: Location,
         params: RouteParams,
@@ -173,7 +214,8 @@ impl<State: 'static> Resolution<State> {
         matches!(self, Resolution::Matched { .. })
     }
 
-    /// The merged captured params, or an empty map for an error resolution.
+    /// The merged params (query under path captures), or an empty map for an
+    /// error resolution.
     pub fn params(&self) -> RouteParams {
         match self {
             Resolution::Matched { params, .. } => params.clone(),
@@ -198,6 +240,10 @@ pub struct Router<State: 'static> {
     redirect: Option<Redirect>,
     error_builder: ErrorBuilder<State>,
     redirect_limit: usize,
+    /// The `Send + Sync` request queue screens navigate through (see the
+    /// [module docs](self)' "Reaching the router from a screen"). Owned here,
+    /// handed out by clone; drained by [`pump`](Self::pump).
+    route_nav: RouteNavigator,
 }
 
 impl<State: 'static> Router<State> {
@@ -219,6 +265,7 @@ impl<State: 'static> Router<State> {
             redirect: None,
             error_builder: Rc::new(default_error_page),
             redirect_limit: DEFAULT_REDIRECT_LIMIT,
+            route_nav: RouteNavigator::new(),
         }
     }
 
@@ -291,17 +338,25 @@ impl<State: 'static> Router<State> {
                 continue;
             }
 
-            // 4. Matched, no redirect: build the page chain.
+            // 4. Matched, no redirect: build the page chain. A page builder
+            //    sees the location's query merged UNDER the path captures — a
+            //    `:id` capture beats a `?id=` of the same name — so
+            //    `/terminal?session=abc` can read its own parameter and a
+            //    named-route path built with extra params round-trips back
+            //    through `resolve` (see the module docs).
+            let mut merged = loc.query.clone();
+            merged.extend(params);
             let pages = chain
                 .iter()
                 .map(|route| ResolvedPage {
                     builder: route.builder.clone(),
-                    params: params.clone(),
+                    params: merged.clone(),
+                    location: loc.clone(),
                 })
                 .collect();
             return Resolution::Matched {
                 location: loc,
-                params,
+                params: merged,
                 pages,
             };
         }
@@ -329,11 +384,39 @@ impl<State: 'static> Router<State> {
 
     // --- Navigation API (drives the controller) ---
 
+    /// The [`RouteNavigator`] screens navigate through: a `Send + Sync` handle
+    /// safe to hold under `provide_context`, in a callback, or on a background
+    /// thread. Requests queued on it are applied by this router's next
+    /// [`pump`](Self::pump) — see the [module docs](self)' "Reaching the router
+    /// from a screen".
+    pub fn route_navigator(&self) -> RouteNavigator {
+        self.route_nav.clone()
+    }
+
+    /// Drain the [`route_navigator`](Self::route_navigator)'s queue and apply
+    /// each request, in order. Idempotent when the queue is empty, so it is meant
+    /// to be called unconditionally once per rebuild (the facade's
+    /// `RouterDeepLinks::track` does exactly that). Must run on the UI thread —
+    /// it drives the `Rc`-backed [`NavigatorController`]; queuing is what is
+    /// thread-free.
+    pub fn pump(&self) {
+        for request in self.route_nav.drain() {
+            match request {
+                NavRequest::Go(location) => self.go(&location),
+                NavRequest::Push(location) => self.push(&location),
+                NavRequest::Replace(location) => self.replace(&location),
+                NavRequest::Pop => self.pop(),
+                NavRequest::GoNamed { name, params } => self.go_named(&name, &params),
+                NavRequest::PushNamed { name, params } => self.push_named(&name, &params),
+            }
+        }
+    }
+
     /// Reset the stack to the matched chain (replace semantics — the current top's
     /// state is dropped). See the [module docs](self)'s deferred note on
     /// arbitrary-depth reset.
     pub fn go(&self, location: &str) {
-        match self.resolve(location) {
+        match self.resolved(location) {
             Resolution::Matched { pages, .. } => {
                 let mut pages = pages.into_iter();
                 if let Some(first) = pages.next() {
@@ -351,7 +434,7 @@ impl<State: 'static> Router<State> {
 
     /// Push the matched leaf page onto the stack (the page below is retained).
     pub fn push(&self, location: &str) {
-        match self.resolve(location) {
+        match self.resolved(location) {
             Resolution::Matched { pages, .. } => {
                 if let Some(leaf) = pages.into_iter().next_back() {
                     self.controller.push(leaf.into_page_builder());
@@ -359,6 +442,22 @@ impl<State: 'static> Router<State> {
             }
             Resolution::Error { location } => {
                 self.controller.push(self.error_page_builder(location));
+            }
+        }
+    }
+
+    /// Replace the top page with the matched leaf (the top's state is dropped;
+    /// the stack depth is unchanged). [`go`](Self::go)'s single-page case, minus
+    /// the chain push — the op a [`NavRequest::Replace`] applies.
+    pub fn replace(&self, location: &str) {
+        match self.resolved(location) {
+            Resolution::Matched { pages, .. } => {
+                if let Some(leaf) = pages.into_iter().next_back() {
+                    self.controller.replace(leaf.into_page_builder());
+                }
+            }
+            Resolution::Error { location } => {
+                self.controller.replace(self.error_page_builder(location));
             }
         }
     }
@@ -381,9 +480,11 @@ impl<State: 'static> Router<State> {
     pub fn go_named(&self, name: &str, params: &RouteParams) {
         match self.path_for_name(name, params) {
             Some(path) => self.go(&path),
-            None => self
-                .controller
-                .replace(self.error_page_builder(named_error_location(name))),
+            None => {
+                let location = named_error_location(name);
+                self.route_nav.set_location(location.clone());
+                self.controller.replace(self.error_page_builder(location));
+            }
         }
     }
 
@@ -392,9 +493,11 @@ impl<State: 'static> Router<State> {
     pub fn push_named(&self, name: &str, params: &RouteParams) {
         match self.path_for_name(name, params) {
             Some(path) => self.push(&path),
-            None => self
-                .controller
-                .push(self.error_page_builder(named_error_location(name))),
+            None => {
+                let location = named_error_location(name);
+                self.route_nav.set_location(location.clone());
+                self.controller.push(self.error_page_builder(location));
+            }
         }
     }
 
@@ -405,6 +508,19 @@ impl<State: 'static> Router<State> {
     pub fn path_for_name(&self, name: &str, params: &RouteParams) -> Option<String> {
         let pattern = find_named_pattern(&self.routes, name, "")?;
         Some(substitute_pattern(&pattern, params))
+    }
+
+    /// [`resolve`](Self::resolve) plus the one side effect the navigating
+    /// methods share: publishing the resolved (post-redirect) location on the
+    /// [`RouteNavigator`], so `location()` reports where the router actually
+    /// went — including the location an unmatched link errored on.
+    fn resolved(&self, raw: &str) -> Resolution<State> {
+        let resolution = self.resolve(raw);
+        let location = match &resolution {
+            Resolution::Matched { location, .. } | Resolution::Error { location } => location,
+        };
+        self.route_nav.set_location(location.clone());
+        resolution
     }
 
     /// Wrap the error builder into a `Fn() -> AnyView` closure for the controller.
@@ -540,8 +656,10 @@ mod tests {
         View, Widget,
     };
     use kurbo::{Point, Size};
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::super::navigator::{NavigatorView, navigator};
 
@@ -663,6 +781,87 @@ mod tests {
         let res = router.resolve("/users/42");
         assert!(res.is_matched());
         assert_eq!(res.params().get("id").map(String::as_str), Some("42"));
+    }
+
+    /// Run a page builder and hand back the params it actually received — the
+    /// only thing that proves the query merge reaches a page (rather than just
+    /// the `Resolution`'s own map).
+    fn builder_params(resolution: &Resolution<()>) -> RouteParams {
+        let Resolution::Matched { pages, .. } = resolution else {
+            panic!("expected match");
+        };
+        let leaf = pages.last().expect("a matched chain has a leaf");
+        let _view = leaf.build();
+        leaf.params().clone()
+    }
+
+    #[test]
+    fn query_reaches_the_page_builder() {
+        // R47: `/terminal?session=<id>` must be able to read its own parameter.
+        let seen: Rc<RefCell<RouteParams>> = Rc::new(RefCell::new(RouteParams::new()));
+        let recorder = seen.clone();
+        let router: Router<()> = Router::new(vec![Route::new("/terminal", move |p| {
+            *recorder.borrow_mut() = p.clone();
+            sized(10.0, 10.0)
+        })]);
+
+        let resolution = router.resolve("/terminal?session=abc");
+        assert_eq!(
+            builder_params(&resolution)
+                .get("session")
+                .map(String::as_str),
+            Some("abc")
+        );
+        assert_eq!(
+            seen.borrow().get("session").map(String::as_str),
+            Some("abc"),
+            "the builder itself receives the query parameter"
+        );
+    }
+
+    #[test]
+    fn path_capture_beats_a_colliding_query_key() {
+        // The merge order is query UNDER captures: `/users/42?id=99` is 42.
+        let router: Router<()> = Router::new(vec![Route::new("/users/:id", |_| sized(10.0, 10.0))]);
+        let resolution = router.resolve("/users/42?id=99");
+        assert_eq!(
+            builder_params(&resolution).get("id").map(String::as_str),
+            Some("42")
+        );
+        assert_eq!(
+            resolution.params().get("id").map(String::as_str),
+            Some("42")
+        );
+    }
+
+    #[test]
+    fn named_extra_params_round_trip_through_resolve() {
+        // `path_for_name` emits unconsumed params as query; before R47 resolve
+        // dropped them again, so `push_named(name, {id, tab})` lost `tab`.
+        let router: Router<()> = Router::new(vec![
+            Route::new("/users/:id", |_| sized(10.0, 10.0)).name("user"),
+        ]);
+        let path = router
+            .path_for_name("user", &params(&[("id", "42"), ("tab", "posts")]))
+            .expect("named route");
+        let received = builder_params(&router.resolve(&path));
+        assert_eq!(received.get("id").map(String::as_str), Some("42"));
+        assert_eq!(received.get("tab").map(String::as_str), Some("posts"));
+    }
+
+    #[test]
+    fn resolved_page_exposes_its_location() {
+        let router: Router<()> = Router::new(vec![Route::new("/users/:id", |_| sized(10.0, 10.0))]);
+        let Resolution::Matched { pages, .. } = router.resolve("/users/42?tab=posts") else {
+            panic!("expected match");
+        };
+        let leaf = pages.last().expect("leaf");
+        assert_eq!(leaf.location().path, "/users/42");
+        assert_eq!(
+            leaf.location().query.get("tab").map(String::as_str),
+            Some("posts"),
+            "the raw location keeps path and query separate"
+        );
     }
 
     #[test]
@@ -919,5 +1118,187 @@ mod tests {
             vec![(Point::ZERO, Size::new(99.0, 99.0))],
             "the error page replaced the top"
         );
+    }
+
+    // ================= RouteNavigator seam (pump) =================
+
+    /// The `app_logic` closure [`RenderRoot::rebuild`] drives, boxed so
+    /// [`PumpHarness`] can store it as a field.
+    type AppLogic = Box<dyn FnMut(&mut ()) -> NavigatorView<()>>;
+
+    /// A router + navigator harness for the pump tests: the same shape the
+    /// other stack tests use, bundled so a test can queue → pump → rebuild →
+    /// paint in one line each.
+    struct PumpHarness {
+        router: Router<()>,
+        root: RenderRoot<(), NavigatorView<()>>,
+        app: AppLogic,
+        state: (),
+    }
+
+    impl PumpHarness {
+        fn new(routes: Vec<Route<()>>) -> Self {
+            let controller: NavigatorController<()> = NavigatorController::new();
+            // A GPU/text-free error page: the default one builds a `Text`,
+            // which panics without a threaded `TextContext`.
+            let router =
+                Router::with_controller(&controller, routes).error_builder(|_| sized(99.0, 99.0));
+            let app: AppLogic =
+                Box::new(move |_: &mut ()| navigator(&controller, || sized(10.0, 10.0)));
+            let mut harness = PumpHarness {
+                router,
+                root: RenderRoot::new(),
+                app,
+                state: (),
+            };
+            harness.rebuild();
+            harness
+        }
+
+        fn rebuild(&mut self) {
+            self.root.rebuild(&mut self.app, &mut self.state);
+        }
+
+        /// One frame: pump the queue (as the facade's `track()` does at the top
+        /// of `build`), rebuild, paint.
+        fn frame(&mut self) -> Vec<(Point, Size)> {
+            self.router.pump();
+            self.rebuild();
+            drive_paint(&mut self.root)
+        }
+    }
+
+    fn pump_routes() -> Vec<Route<()>> {
+        vec![
+            Route::new("/home", |_| sized(10.0, 10.0)),
+            Route::new("/detail", |_| sized(20.0, 20.0)),
+            Route::new("/other", |_| sized(30.0, 30.0)),
+        ]
+    }
+
+    #[test]
+    fn pump_applies_a_queued_request_on_the_next_frame() {
+        let mut h = PumpHarness::new(pump_routes());
+        let nav = h.router.route_navigator();
+        assert_eq!(h.frame(), vec![(Point::ZERO, Size::new(10.0, 10.0))]);
+
+        // Recorded the way an event handler would: through the context-safe
+        // handle, with no router in sight.
+        nav.push("/detail");
+        assert_eq!(
+            h.frame(),
+            vec![(Point::ZERO, Size::new(20.0, 20.0))],
+            "a request queued between frames lands on the very next one"
+        );
+
+        nav.pop();
+        assert_eq!(h.frame(), vec![(Point::ZERO, Size::new(10.0, 10.0))]);
+    }
+
+    #[test]
+    fn pump_applies_every_request_variant_in_order() {
+        let mut h = PumpHarness::new(pump_routes());
+        let nav = h.router.route_navigator();
+
+        nav.push("/detail");
+        nav.replace("/other");
+        assert_eq!(
+            h.frame(),
+            vec![(Point::ZERO, Size::new(30.0, 30.0))],
+            "push then replace leaves /other on top, not /detail"
+        );
+        // The replace swapped the top rather than stacking: one pop is back home.
+        nav.pop();
+        assert_eq!(h.frame(), vec![(Point::ZERO, Size::new(10.0, 10.0))]);
+
+        nav.go("/detail");
+        assert_eq!(h.frame(), vec![(Point::ZERO, Size::new(20.0, 20.0))]);
+    }
+
+    #[test]
+    fn pump_applies_named_requests_with_their_params() {
+        let seen: Rc<RefCell<RouteParams>> = Rc::new(RefCell::new(RouteParams::new()));
+        let recorder = seen.clone();
+        let mut h = PumpHarness::new(vec![
+            Route::new("/home", |_| sized(10.0, 10.0)),
+            Route::new("/users/:id", move |p| {
+                *recorder.borrow_mut() = p.clone();
+                sized(20.0, 20.0)
+            })
+            .name("user"),
+        ]);
+        let nav = h.router.route_navigator();
+
+        nav.push_named("user", params(&[("id", "42"), ("tab", "posts")]));
+        assert_eq!(h.frame(), vec![(Point::ZERO, Size::new(20.0, 20.0))]);
+        // Round-trip: the extra param rode the generated query string back
+        // through `resolve` into the page's own params (R47).
+        assert_eq!(seen.borrow().get("id").map(String::as_str), Some("42"));
+        assert_eq!(seen.borrow().get("tab").map(String::as_str), Some("posts"));
+    }
+
+    #[test]
+    fn pump_is_a_no_op_when_the_queue_is_empty() {
+        let mut h = PumpHarness::new(pump_routes());
+        assert_eq!(h.frame(), vec![(Point::ZERO, Size::new(10.0, 10.0))]);
+        // Called unconditionally every rebuild — repeated pumps must not
+        // re-apply the last request.
+        for _ in 0..3 {
+            assert_eq!(h.frame(), vec![(Point::ZERO, Size::new(10.0, 10.0))]);
+        }
+    }
+
+    #[test]
+    fn a_request_from_another_thread_pumps_normally() {
+        // The #29 shape's payoff: the handle crosses a thread boundary (it is
+        // `Send + Sync`), and the resolution still happens on the UI thread.
+        let mut h = PumpHarness::new(pump_routes());
+        let nav = h.router.route_navigator();
+        let woke = Arc::new(AtomicUsize::new(0));
+        let counter = woke.clone();
+        nav.set_waker(Arc::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        std::thread::spawn(move || nav.push("/detail"))
+            .join()
+            .expect("off-thread request must not panic");
+
+        assert_eq!(
+            woke.load(Ordering::SeqCst),
+            1,
+            "the waker asked for a frame"
+        );
+        assert_eq!(h.frame(), vec![(Point::ZERO, Size::new(20.0, 20.0))]);
+    }
+
+    #[test]
+    fn route_navigator_publishes_the_resolved_location() {
+        let mut h = PumpHarness::new(pump_routes());
+        let nav = h.router.route_navigator();
+        assert!(nav.location().is_none(), "nothing resolved yet");
+
+        nav.push("/detail?tab=posts");
+        let _ = h.frame();
+        let loc = nav.location().expect("published after the pump");
+        assert_eq!(loc.path, "/detail");
+        assert_eq!(loc.query.get("tab").map(String::as_str), Some("posts"));
+
+        // An unmatched location still reports where the router ended up.
+        nav.go("/nope");
+        let _ = h.frame();
+        assert_eq!(nav.location().expect("published").path, "/nope");
+    }
+
+    #[test]
+    fn route_navigator_clones_share_one_queue() {
+        // Every `route_navigator()` call hands out the same underlying queue, so
+        // a screen holding an old clone still reaches the same router.
+        let mut h = PumpHarness::new(pump_routes());
+        let first = h.router.route_navigator();
+        let second = h.router.route_navigator();
+        first.push("/detail");
+        second.replace("/other");
+        assert_eq!(h.frame(), vec![(Point::ZERO, Size::new(30.0, 30.0))]);
     }
 }

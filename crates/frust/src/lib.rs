@@ -163,9 +163,19 @@ pub use frust_widgets::icons;
 /// ([`Location`]/[`PathPattern`]/[`RouteParams`]), per-route/top-level
 /// [`Redirect`]s (loop-guarded at [`DEFAULT_REDIRECT_LIMIT`]), and an
 /// [`ErrorBuilder`] fallback for an unmatched location.
+///
+/// A page builder receives the location's query merged **under** its path
+/// captures, so `/terminal?session=abc` reads its own parameter.
+///
+/// [`RouteNavigator`] is the seam a screen navigates through: a `Send + Sync`
+/// queue of [`NavRequest`] data (paths and names, never closures) that rides
+/// `provide_context` — the [`Router`] itself cannot, since it holds `Rc` page
+/// builders. [`RouterDeepLinks::track`] drains it every rebuild, so a request
+/// queued in an event handler (on any thread — the queue never panics
+/// off-thread) applies on the next frame.
 pub use frust_widgets::{
-    DEFAULT_REDIRECT_LIMIT, ErrorBuilder, Location, PathPattern, Redirect, Resolution,
-    ResolvedPage, Route, RouteBuilder, RouteParams, Router,
+    DEFAULT_REDIRECT_LIMIT, ErrorBuilder, Location, NavRequest, NavWaker, PathPattern, Redirect,
+    Resolution, ResolvedPage, Route, RouteBuilder, RouteNavigator, RouteParams, Router,
 };
 
 /// The Material 3 Expressive widget catalog: AppBar,
