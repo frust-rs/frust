@@ -40,8 +40,8 @@ use frust_core::RenderRoot;
 use frust_core::SemanticsUpdate;
 use frust_core::accesskit::{Tree, TreeId, TreeUpdate};
 use frust_core::event::{
-    EventOutcome, ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton,
-    PointerEvent, PointerPhase, ScrollDelta,
+    EventOutcome, ImeContentType, ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey,
+    PointerButton, PointerEvent, PointerPhase, ScrollDelta,
 };
 use frust_core::insets::WindowInsets;
 use frust_core::view::View;
@@ -61,7 +61,7 @@ use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey as WinitNamedKey};
-use winit::window::{Theme as WinitTheme, Window, WindowAttributes, WindowId};
+use winit::window::{ImePurpose, Theme as WinitTheme, Window, WindowAttributes, WindowId};
 
 use crate::paced_wake::{ControlFlowIntent, next_paced_wake, paced_wake_action};
 use crate::render::FrameExecutor;
@@ -485,15 +485,48 @@ impl ComposeLatch {
     }
 }
 
+/// Map a published [`ImeContentType`] onto the nearest winit [`ImePurpose`].
+///
+/// **This is the full extent of what pinned winit 0.30.13 offers for this
+/// hint, and it is a weak one.** [`Window::set_ime_purpose`] docs itself as
+/// unsupported on every backend *except* Wayland — iOS, Android, Web,
+/// Windows, X11, and macOS are all listed explicitly as no-ops. Where it
+/// *is* honoured (Wayland, via the compositor's own input-method/OSK), it is
+/// a cosmetic hint, not a security boundary: winit has no secure-text-entry
+/// concept, so plaintext still crosses the same `Ime`/`KeyboardInput` event
+/// stream either way (see [`frust_core::event::ImeState`]'s own
+/// "residual exposure" note, which already documents this for the mobile
+/// shells — the same limit applies here, just with a much smaller platform
+/// footprint that actually honours it).
+///
+/// `ImePurpose` also only distinguishes `Normal`/`Password`/`Terminal`, so
+/// [`NoSuggestions`](ImeContentType::NoSuggestions) has nothing more precise
+/// to map onto than `Normal` — desktop has no channel to ask a platform IME
+/// to suppress suggestions/learning without also claiming secure entry it
+/// can't actually deliver on this backend.
+///
+/// Recorded in `docs/SHELLS_ARCHITECTURE.md`'s IME section.
+fn ime_purpose_for(content_type: ImeContentType) -> ImePurpose {
+    if content_type.is_secret() {
+        ImePurpose::Password
+    } else {
+        ImePurpose::Normal
+    }
+}
+
 /// Cached view of what we last told winit about the platform IME, so
-/// [`ShellHandler::sync_ime`] only calls `set_ime_allowed`/`set_ime_cursor_area`
-/// on an actual change rather than every dispatched event.
+/// [`ShellHandler::sync_ime`] only calls
+/// `set_ime_allowed`/`set_ime_cursor_area`/`set_ime_purpose` on an actual
+/// change rather than every dispatched event.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 struct ImeSync {
     /// The last `set_ime_allowed` value sent to winit.
     allowed: bool,
     /// The last `set_ime_cursor_area` position/size sent to winit, if any.
     cursor_area: Option<(LogicalPosition<f64>, LogicalSize<f64>)>,
+    /// The last [`ImePurpose`] sent to winit via `set_ime_purpose` — see
+    /// [`ime_purpose_for`] for how far that call actually reaches.
+    purpose: ImePurpose,
 }
 
 /// Owns everything a running desktop app needs across frames.
@@ -654,13 +687,22 @@ where
     }
 
     /// Query [`RenderRoot::ime_state`] and push any *changed* IME-relevant
-    /// state to winit: `set_ime_allowed` on an active-transition, and
+    /// state to winit: `set_ime_allowed` on an active-transition,
     /// `set_ime_cursor_area` (logical caret rect) when active and the caret
-    /// moved. Both calls are gated behind [`ImeSync`]'s cache so a steady-state
-    /// focused field with an unmoving caret doesn't re-issue them every event.
+    /// moved, and `set_ime_purpose` when [`ImeState::content_type`] changes
+    /// (see [`ime_purpose_for`] for exactly how little that last call reaches
+    /// — pinned winit honours it on Wayland only, and even there it is a
+    /// cosmetic hint, not secure entry). All three calls are gated behind
+    /// [`ImeSync`]'s cache so a steady-state focused field with an unmoving
+    /// caret and unchanged content type doesn't re-issue them every event.
+    ///
+    /// [`ImeState::content_type`]: frust_core::event::ImeState::content_type
     fn sync_ime(&mut self, window: &Window) {
         let ime_state = self.root.ime_state();
         let active = ime_state.as_ref().is_some_and(|s| s.active);
+        let purpose = ime_state
+            .as_ref()
+            .map_or(ImePurpose::Normal, |s| ime_purpose_for(s.content_type));
 
         if active != self.ime_sync.allowed {
             window.set_ime_allowed(active);
@@ -668,6 +710,11 @@ where
             if !active {
                 self.ime_sync.cursor_area = None;
             }
+        }
+
+        if purpose != self.ime_sync.purpose {
+            window.set_ime_purpose(purpose);
+            self.ime_sync.purpose = purpose;
         }
 
         if active && let Some(caret) = ime_state.and_then(|s| s.caret) {
@@ -1381,17 +1428,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposeLatch, ElementState, Ime, Tree, TreeId, WinitKey, WinitNamedKey, WinitTheme,
-        base_theme, brightness_from_winit, build_tree_update, default_theme, finish,
-        follow_platform_brightness, map_key_event, map_modifiers, map_named_key,
+        ComposeLatch, ElementState, Ime, ImeSync, Tree, TreeId, WinitKey, WinitNamedKey,
+        WinitTheme, base_theme, brightness_from_winit, build_tree_update, default_theme, finish,
+        follow_platform_brightness, ime_purpose_for, map_key_event, map_modifiers, map_named_key,
         physical_to_logical, theme_after_override_poll,
     };
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{Node, NodeId, Role};
-    use frust_core::event::{ImeEvent, Key, KeyEvent, Modifiers, NamedKey};
+    use frust_core::event::{ImeContentType, ImeEvent, Key, KeyEvent, Modifiers, NamedKey};
     use frust_theme::{Brightness, Theme};
     use kurbo::Point;
     use winit::keyboard::ModifiersState;
+    use winit::window::ImePurpose;
 
     // --- brightness_from_winit ---
 
@@ -1719,6 +1767,44 @@ mod tests {
         let mapped = latch.observe(&Ime::Enabled);
         assert!(!latch.is_composing());
         assert_eq!(mapped, ImeEvent::Enabled);
+    }
+
+    // --- ime_purpose_for ---
+    //
+    // Pins the desktop shell's (deliberately thin) response to the
+    // content-type hint: this is the honest "winit offers almost nothing"
+    // outcome the task anticipated, recorded here so a later reader finds a
+    // considered decision rather than a silently missed field. See
+    // `ime_purpose_for`'s doc comment for why `Password` is the only variant
+    // that maps to anything but `Normal`, and why even that mapping only
+    // reaches Wayland.
+
+    #[test]
+    fn ime_purpose_maps_password_to_the_winit_password_purpose() {
+        assert_eq!(
+            ime_purpose_for(ImeContentType::Password),
+            ImePurpose::Password
+        );
+    }
+
+    #[test]
+    fn ime_purpose_has_no_distinct_mapping_for_normal_or_no_suggestions() {
+        // `ImePurpose` has no "suppress suggestions" variant, so the only
+        // content type that changes the winit call is the secret one.
+        assert_eq!(ime_purpose_for(ImeContentType::Normal), ImePurpose::Normal);
+        assert_eq!(
+            ime_purpose_for(ImeContentType::NoSuggestions),
+            ImePurpose::Normal
+        );
+    }
+
+    /// Pins [`ImeSync`]'s default so a fresh shell starts believing it has
+    /// already told winit `ImePurpose::Normal` — matching winit's own
+    /// documented default, so the first real `Password` field is what
+    /// triggers the first `set_ime_purpose` call, not startup.
+    #[test]
+    fn ime_sync_defaults_to_the_normal_purpose() {
+        assert_eq!(ImeSync::default().purpose, ImePurpose::Normal);
     }
 
     // --- build_tree_update ---
