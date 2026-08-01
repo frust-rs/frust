@@ -115,22 +115,30 @@
 //! ([`real_to_masked`]/[`masked_to_real`]) and a multi-byte grapheme masks to
 //! exactly one bullet.
 //!
-//! **Scope boundary (deliberate).** Obscuring is visual masking plus
-//! accessibility (a [`Role::PasswordInput`] semantics node) only. Nothing in
-//! `ImeState`/`ImeEvent` carries a password/content-type hint, so an on-screen
-//! keyboard does not switch to its password layout and platform
-//! autofill/reveal-last-character never engages; the published [`ImeState`] also
-//! still carries the **real** text (the platform IME mirror requires it). A
-//! content-type hint would have to cross `frust-core` and all three shells and is
-//! tracked separately.
+//! **Scope boundary.** Obscuring is visual masking plus accessibility (a
+//! [`Role::PasswordInput`] semantics node) plus an IME content-type hint:
+//! `obscured(true)` publishes [`ImeContentType::Password`] on
+//! [`ImeState::content_type`], computed live on every publication (event pass,
+//! paint-pass republish, and the disabled-while-focused release), so a newly
+//! focused obscured field never has a window where it publishes `Normal`. The
+//! published [`ImeState`] still carries the **real** text (the platform IME
+//! mirror requires it — see [`ImeState`]'s docs); the hint, not redaction, is
+//! what is supposed to keep the platform's suggestion strip and learned-word
+//! dictionary from seeing it. **That guarantee is only as good as the shells
+//! honouring the hint** — this widget cannot prove the on-screen keyboard
+//! actually switches to secure entry, only that it asks. There is no builder
+//! to request a different content type: `obscured` is the field's sole
+//! content-type signal for now, deliberately narrow (see [`ImeContentType`]'s
+//! own docs on why a shell must not fall back to non-secret behaviour for an
+//! unrecognized variant).
 
 use std::rc::Rc;
 
 use frust_core::accesskit::Role;
 use frust_core::{
     BoxConstraints, BuildCtx, ChangeFlags, EditingState, EventCtx, EventResult, FrameTime,
-    ImeEvent, ImeState, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, PointerPhase,
-    SemanticsCtx, View, Widget,
+    ImeContentType, ImeEvent, ImeState, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx, PaintScene,
+    PointerPhase, SemanticsCtx, View, Widget,
 };
 use frust_text::{EditOp, EditingStateBytes, TextContext, TextEditor, TextStyle, utf16_to_byte};
 use frust_theme::Theme;
@@ -769,9 +777,19 @@ impl TextInputWidget {
             active: true,
             editing,
             caret,
-            // No hint yet: mapping `obscured` onto `ImeContentType::Password`
-            // is the widget half of the content-type work, tracked separately.
-            content_type: Default::default(),
+            // `obscured` is the field's *only* content-type signal for now (no
+            // builder exposes an override — see the module docs' rationale).
+            // Computed live from `self.obscured` on every call, so there is no
+            // window where a masked field publishes `Normal`: the very first
+            // `ImeState` a newly focused obscured field emits already carries
+            // `Password`, which is what actually closes the suggestion-strip
+            // leak (a field that starts `Normal` and flips a frame later has
+            // already leaked to the IME).
+            content_type: if self.obscured {
+                ImeContentType::Password
+            } else {
+                ImeContentType::Normal
+            },
         }
     }
 
@@ -3451,5 +3469,105 @@ mod tests {
         root.layout(Size::new(300.0, 200.0));
         assert_eq!(widget(&root).display().layout_size().width, clear_width);
         assert!(widget(&root).mask_editor.is_none());
+    }
+
+    // --- content_type (FINDINGS #31, widget half) ---
+    //
+    // These lock the widget's IME content-type mapping only — the leak this
+    // closes lives at the platform seam, and no widget-level test can observe
+    // whether a shell actually honours the hint. See the module docs' scope
+    // boundary and `ImeContentType`'s own docs.
+
+    #[test]
+    fn obscured_publishes_password_content_type_across_focus_edit_and_refocus() {
+        let mut state = AppState {
+            value: "hunter2".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(true, true);
+        let mut root = options_root(&mut logic, &mut state);
+
+        // Focus.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert_eq!(
+            root.ime_state().expect("focused").content_type,
+            ImeContentType::Password,
+            "an obscured field's very first published IME surface must already \
+             be Password"
+        );
+
+        // Edit.
+        root.event(&mut state, &ch("x"));
+        assert_eq!(
+            root.ime_state().expect("still focused").content_type,
+            ImeContentType::Password,
+            "content type must not drop on edit"
+        );
+
+        // Blur, then re-focus.
+        root.event(&mut state, &named(NamedKey::Escape, Modifiers::default()));
+        assert!(root.ime_state().is_none(), "blur unpublishes the surface");
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert_eq!(
+            root.ime_state().expect("re-focused").content_type,
+            ImeContentType::Password,
+            "content type must be correct again on re-focus, not just the first time"
+        );
+    }
+
+    #[test]
+    fn unobscured_field_publishes_the_default_no_hint_content_type() {
+        // No behaviour change for the common case: a plain field's published
+        // surface keeps the `Normal` default it always had.
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert_eq!(
+            root.ime_state().expect("focused").content_type,
+            ImeContentType::Normal
+        );
+
+        root.event(&mut state, &ch("h"));
+        assert_eq!(
+            root.ime_state().expect("still focused").content_type,
+            ImeContentType::Normal
+        );
+    }
+
+    #[test]
+    fn obscured_content_type_is_correct_on_the_first_publication_after_focus() {
+        // The ordering guarantee the security fix rests on: a field that starts
+        // `Normal` and flips to `Password` a frame later has already leaked to
+        // the platform IME (see the module docs). Assert there is no such
+        // window by checking the *very first* `ImeState` a freshly built,
+        // never-before-focused obscured field emits — a single `Down` event,
+        // nothing before it.
+        let mut state = AppState {
+            value: "hunter2".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(true, true);
+        let mut root = options_root(&mut logic, &mut state);
+        assert!(
+            root.ime_state().is_none(),
+            "an unfocused field publishes nothing yet"
+        );
+
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+
+        let ime = root
+            .ime_state()
+            .expect("focusing publishes the first IME surface");
+        assert_eq!(
+            ime.content_type,
+            ImeContentType::Password,
+            "the first-ever publication for an obscured field must already \
+             carry Password"
+        );
+        assert_eq!(
+            ime.editing.text, "hunter2",
+            "sanity: this is the real first publication, not a stale one"
+        );
     }
 }
