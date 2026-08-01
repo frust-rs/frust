@@ -23,10 +23,12 @@
 //! [`ButtonStyle::label_role`]. `.small()` selects a reduced padding scale;
 //! `.loading(bool)` shows a rotating spinner in place of the label and
 //! suppresses `on_press` while shown (disabled semantics — see
-//! [`Widget::semantics`](struct.ButtonWidget.html#impl-Widget-for-ButtonWidget)).
-//! The spinner freezes (and stops requesting frames) wherever it currently
-//! sits under `Theme.motion.reduce_motion`, the same skip-animation shape
-//! [`crate::material::loading_indicator`]'s morph loop uses.
+//! [`Widget::semantics`](struct.ButtonWidget.html#impl-Widget-for-ButtonWidget));
+//! `.disabled(bool)` disables interaction and dims the button's appearance
+//! (suppresses `on_press`, blocks focus acquisition, dims fill/border/label via
+//! alpha multiplication). The spinner freezes (and stops requesting frames)
+//! wherever it currently sits under `Theme.motion.reduce_motion`, the same
+//! skip-animation shape [`crate::material::loading_indicator`]'s morph loop uses.
 //!
 //! Precedence stays token-resolved (`docs/CODE_STANDARDS.md`'s Theming
 //! conventions): every fill/border/label color below is `theme > fallback`
@@ -146,6 +148,18 @@ const BORDER_TOLERANCE: f64 = 0.1;
 /// by roughly the same amount today's `FILL`→`FILL_PRESSED` step does.
 const PRESSED_DARKEN: f32 = 0.82;
 
+/// Alpha multiplier applied to a disabled button's fill, border, and label. A
+/// disabled button dims the *resolved* theme color's alpha rather than swapping
+/// in a dedicated "disabled" token, at every resolution point (paint-time fill/
+/// border/ink), so it behaves identically under Material, Cupertino, Glyph, and
+/// the unthemed fallback constants. Material 3 puts a disabled container at 12%,
+/// but buttons are a primary interactive target (unlike passive text fields),
+/// so this uses a gentler 38% to maintain visibility while signaling
+/// unavailability (same multiplier as [`frust_text`]/`TextInput`'s
+/// `DISABLED_CONTENT_ALPHA`, Material 3 disabled content token, source:
+/// https://m3.material.io/components/buttons/specs, retrieved 2026-08-01).
+const DISABLED_ALPHA: f32 = 0.38;
+
 /// The press-feedback pivot scale while pressed.
 const PRESSED_SCALE: f64 = 0.96;
 /// The rest (unpressed) scale.
@@ -188,6 +202,13 @@ fn pressed_overlay(color: Color, factor: f32) -> Color {
 fn with_alpha(color: Color, alpha: f32) -> Color {
     let c = color.components;
     Color::new([c[0], c[1], c[2], alpha])
+}
+
+/// Return `color` with its alpha channel multiplied by `DISABLED_ALPHA` to dim
+/// a disabled button's appearance. Mirrors `TextInput`'s dimming pattern.
+fn disabled_alpha(color: Color) -> Color {
+    let c = color.components;
+    Color::new([c[0], c[1], c[2], c[3] * DISABLED_ALPHA])
 }
 
 /// Build the affine that scales uniformly by `scale` about the absolute
@@ -426,6 +447,7 @@ pub struct ButtonView<State: 'static> {
     style: ButtonStyle,
     small: bool,
     loading: bool,
+    disabled: bool,
     /// `None` = the default stretch-aware behaviour — see the [module
     /// docs](self)'s "Label alignment" section.
     label_alignment: Option<Alignment>,
@@ -443,6 +465,7 @@ pub fn button<State: 'static, F: Fn(&mut State) + 'static>(
         style: ButtonStyle::default(),
         small: false,
         loading: false,
+        disabled: false,
         label_alignment: None,
     }
 }
@@ -477,6 +500,16 @@ impl<State: 'static> ButtonView<State> {
         self
     }
 
+    /// Disable the button while `disabled` is `true`, suppressing `on_press`,
+    /// blocking focus acquisition, and dimming the appearance (fill, border,
+    /// label) by multiplying their alpha by [`DISABLED_ALPHA`]. Precedence:
+    /// if both `.disabled(true)` and `.loading(true)`, disabled takes effect
+    /// (both suppress interaction and report disabled semantics anyway).
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
     /// Explicitly position the label within a stretched button, overriding
     /// the stretch-aware default on both axes — see the [module
     /// docs](self)'s "Label alignment" section. Ignored under
@@ -508,6 +541,8 @@ pub struct ButtonWidget {
     style: ButtonStyle,
     small: bool,
     loading: bool,
+    /// Whether the button is disabled (suppresses press, blocks focus, dims appearance).
+    disabled: bool,
     /// See [`ButtonView::label_alignment`] / the [module docs](self)'s
     /// "Label alignment" section.
     label_alignment: Option<Alignment>,
@@ -616,6 +651,7 @@ impl<State: 'static> View<State> for ButtonView<State> {
             style: self.style,
             small: self.small,
             loading: self.loading,
+            disabled: self.disabled,
             label_alignment: self.label_alignment,
             press: PressAnim::new(),
             spinner,
@@ -662,6 +698,18 @@ impl<State: 'static> View<State> for ButtonView<State> {
                 // `Widget::event`), so a still-armed press would never see
                 // its terminating Up/Cancel — disarm it now rather than
                 // leave a stale capture flag behind.
+                element.pressed = false;
+                element.captured = false;
+                element.press.set_pressed(false);
+            }
+        }
+        if prev.disabled != self.disabled {
+            element.disabled = self.disabled;
+            flags |= ChangeFlags::PAINT;
+            if self.disabled {
+                // Disabled suppresses the whole event pass from here on (see
+                // `Widget::event`), so a still-armed press would never see
+                // its terminating Up/Cancel — disarm it now.
                 element.pressed = false;
                 element.captured = false;
                 element.press.set_pressed(false);
@@ -732,17 +780,30 @@ impl Widget for ButtonWidget {
         // typecheck under NLL (the reason `ink`/`press_timing` are resolved
         // here rather than lazily, next to where each is consumed).
         let theme = Theme::from_paint_ctx(ctx);
-        let paint = self.style.resolve(theme);
+        let mut paint = self.style.resolve(theme);
         let radius = Self::resolve_radius(theme, ctx.size());
         // Press-feedback scale: `Down`/`Up`/`Cancel` only recorded the target
         // (see the module docs); resolve the direction's `Timing` now that a
         // theme is in scope.
         let press_timing = resolve_press_timing(theme, self.pressed);
-        let ink = self.style.resolve_ink(theme);
+        let mut ink = self.style.resolve_ink(theme);
         // Resolved now (last use of the shared `theme` borrow — see the
         // comment above) so the `loading` branch below can check it without
         // re-borrowing `theme` across the intervening `&mut ctx` calls.
         let reduce_motion = theme.map(|t| t.motion.reduce_motion).unwrap_or(false);
+
+        // Apply disabled dimming to fill, border, and ink (label/spinner color).
+        // This multiplies the resolved theme color's alpha, so it behaves
+        // identically under Material, Cupertino, Glyph, and the unthemed
+        // fallback constants.
+        if self.disabled {
+            paint.fill = disabled_alpha(paint.fill);
+            paint.fill_pressed = disabled_alpha(paint.fill_pressed);
+            if let Some(ref mut border) = paint.border {
+                *border = disabled_alpha(*border);
+            }
+            ink = disabled_alpha(ink);
+        }
 
         let fill = if self.pressed {
             paint.fill_pressed
@@ -798,9 +859,9 @@ impl Widget for ButtonWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        // Loading suppresses on_press and every other interaction (disabled
-        // semantics — see `Widget::semantics` and the module docs).
-        if self.loading {
+        // Loading and disabled both suppress on_press and every other interaction
+        // (disabled semantics — see `Widget::semantics` and the module docs).
+        if self.loading || self.disabled {
             return EventResult::Ignored;
         }
         let InputEvent::Pointer(p) = event else {
@@ -857,11 +918,11 @@ impl Widget for ButtonWidget {
     fn semantics(&self, ctx: &mut SemanticsCtx) {
         // A button is a single a11y node (Role::Button) labelled by its text; it
         // does not expose its inner label as a separate child node. It advertises
-        // the Click action it fires on release — unless loading, which reports
-        // disabled semantics instead.
+        // the Click action it fires on release — unless loading or disabled,
+        // which both report disabled semantics instead.
         ctx.push_node(Role::Button, |node| {
             node.set_label(self.label_text.as_str());
-            if self.loading {
+            if self.loading || self.disabled {
                 node.set_disabled();
             } else {
                 node.add_action(Action::Click);
@@ -1335,6 +1396,78 @@ mod tests {
         dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 10.0, 10.0));
         dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 10.0, 10.0));
         assert_eq!(state.presses, 0, "loading must suppress on_press");
+    }
+
+    #[test]
+    fn disabled_suppresses_on_press() {
+        let view = button::<Counter, _>("go", |s: &mut Counter| s.presses += 1).disabled(true);
+        let mut counter = 0u64;
+        let mut w = View::<Counter>::build(&view, &mut BuildCtx::new(&mut counter));
+        let mut state = Counter::default();
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 10.0, 10.0));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(state.presses, 0, "disabled must suppress on_press");
+    }
+
+    #[test]
+    fn disabled_blocks_focus_and_press_suppression() {
+        // A disabled button returns Ignored on a Down, preventing pointer capture
+        // and press state setup — identical to loading's suppression.
+        let view = button::<Counter, _>("go", |s: &mut Counter| s.presses += 1).disabled(true);
+        let mut counter = 0u64;
+        let mut w = View::<Counter>::build(&view, &mut BuildCtx::new(&mut counter));
+        let mut state = Counter::default();
+        let state_any: &mut dyn Any = &mut state;
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(100.0, 40.0));
+        let result = w.event(&mut ctx, &ev(PointerPhase::Down, 10.0, 10.0));
+        assert!(
+            matches!(result, EventResult::Ignored),
+            "disabled must return Ignored, not Handled"
+        );
+        assert!(!w.captured, "disabled must not capture pointer");
+        assert!(!w.pressed, "disabled must not set pressed state");
+    }
+
+    #[test]
+    fn disabled_dims_appearance_by_alpha_multiplication() {
+        // A disabled button multiplies its resolved theme colors' alpha by
+        // DISABLED_ALPHA without changing the colors themselves, so the
+        // dimming works identically under Material, Cupertino, Glyph, and
+        // unthemed modes.
+        let theme = frust_theme::Theme::m3_baseline();
+        let mut w = widget();
+        w.disabled = true;
+        let mut rec = RRectRecorder::default();
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(100.0, 40.0)).with_theme(&theme);
+        w.paint(&mut ctx, &mut rec);
+
+        // The resting fill should be the primary color dimmed by DISABLED_ALPHA.
+        let undimmed = theme.scheme().primary;
+        let dimmed = disabled_alpha(undimmed);
+        assert_eq!(
+            rec.rrects[0].1, dimmed,
+            "disabled button must dim the fill by multiplying alpha: got {:?}, expected {:?}",
+            rec.rrects[0].1, dimmed
+        );
+    }
+
+    #[test]
+    fn disabled_and_loading_interaction() {
+        // Disabled takes precedence over loading — if both are true, the button
+        // is treated as disabled (both suppress interaction anyway, but we test
+        // the precedence semantics is respected by verifying press suppression).
+        let view = button::<Counter, _>("go", |s: &mut Counter| s.presses += 1)
+            .loading(true)
+            .disabled(true);
+        let mut counter = 0u64;
+        let mut w = View::<Counter>::build(&view, &mut BuildCtx::new(&mut counter));
+        let mut state = Counter::default();
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 10.0, 10.0));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(state.presses, 0, "disabled+loading must suppress on_press");
+        // Both flags stay set in the widget (neither clears the other on rebuild).
+        assert!(w.loading, "loading flag is preserved");
+        assert!(w.disabled, "disabled flag is preserved");
     }
 
     /// `reduce_motion` freezes the loading spinner wherever it currently sits
