@@ -1486,6 +1486,35 @@ pub fn native_set_appearance(handle: jlong, dark: jboolean) {
     });
 }
 
+/// `nativeAppIsDark`: the read half of the appearance seam — return whether
+/// the APP's currently active theme is dark right now, for Kotlin to drive
+/// `updateSystemBarsAppearance` from instead of re-reading
+/// `Configuration.uiMode` (see [`AndroidAppHandle::is_dark_theme`]'s doc for
+/// the full FINDINGS #43 rationale). `FrustSurfaceView` calls this right
+/// after every `nativeSetAppearance` (`surfaceCreated`/
+/// `onConfigurationChanged`) AND once per frame (`pollAppBrightness`), so a
+/// runtime `frust::set_app_theme`/`clear_app_theme` call — which has no
+/// device `Configuration` event of its own — still reaches the status bar
+/// within one frame.
+///
+/// A missing/torn-down handle returns `false` (light) — a defensive default
+/// only, never actually observed on the production path: Kotlin already
+/// guards every call site on `handle != 0L` before reaching here (mirrors
+/// [`native_system_ui_state`]'s own note that its default is a narrow
+/// teardown-race fallback, not a meaningful "unknown" state — the app side
+/// itself never has an "unknown" brightness once a handle exists, since
+/// [`AndroidAppHandle::new`] always seeds `theme.brightness` before returning
+/// one).
+pub fn native_app_is_dark(handle: jlong) -> jboolean {
+    guard("nativeAppIsDark", false, || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        match unsafe { handle_mut(handle) } {
+            Some(app) => app.is_dark_theme(),
+            None => false,
+        }
+    })
+}
+
 /// `nativeSetReduceMotion`: apply the platform's reduced-motion accessibility
 /// preference to the active theme's `MotionScheme`, re-publishing it through
 /// both delivery paths — the reduced-motion twin of [`native_set_appearance`].

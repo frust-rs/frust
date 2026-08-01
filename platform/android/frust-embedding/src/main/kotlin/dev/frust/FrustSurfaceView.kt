@@ -260,6 +260,20 @@ class FrustSurfaceView(
     // instead of recreating the activity).
     private external fun nativeSetAppearance(handle: Long, dark: Boolean)
 
+    // The read half of the appearance seam: whether the APP's currently
+    // active theme is dark right now — NOT a re-read of `Configuration.
+    // uiMode`. Kotlin trusted the device's own dark-mode preference for
+    // status-bar icon contrast ([updateSystemBarsAppearance]); that silently
+    // disagrees with the app's actual theme whenever an app-forced
+    // `frust::set_app_theme` override (or a design system's seeded default)
+    // is in play, painting invisible (light-on-light or dark-on-dark) icons.
+    // Called right after every [nativeSetAppearance] ([surfaceCreated],
+    // [onConfigurationChanged]) and once per frame ([pollAppBrightness]) —
+    // the per-frame poll is what picks up a runtime `set_app_theme`/
+    // `clear_app_theme` call, which has no `Configuration` event of its own
+    // to ride in on.
+    private external fun nativeAppIsDark(handle: Long): Boolean
+
     // Reduced motion: apply the platform's reduce-motion
     // accessibility preference to the app's motion tokens. `reduce` mirrors
     // `Settings.Global.ANIMATOR_DURATION_SCALE == 0f` — see
@@ -399,6 +413,16 @@ class FrustSurfaceView(
      * that never calls the API never fires [onSystemUiModeChanged].
      */
     private var lastSystemUiGeneration: Long = 0
+
+    /**
+     * The last brightness [updateSystemBarsAppearance] was actually applied
+     * with, so [pollAppBrightness] only touches
+     * `WindowInsetsControllerCompat` on a real change instead of re-setting
+     * the same two booleans every Choreographer tick. `null` until the first
+     * call ([surfaceCreated]), matching "nothing applied yet" distinctly from
+     * either boolean value.
+     */
+    private var lastAppliedDark: Boolean? = null
 
     /**
      * Set by `MainActivity` (which owns the `Window` a
@@ -622,15 +646,45 @@ class FrustSurfaceView(
      * (not the deprecated `ViewCompat.getWindowInsetsController(View)`)
      * needs the hosting `Activity`'s `Window` — always available here since
      * `MainActivity` is this view's sole constructor caller (see
-     * `dev.frust.FrustSurfaceView`'s class doc). Called alongside
-     * every `nativeSetAppearance` — see [surfaceCreated]/[onConfigurationChanged].
+     * `dev.frust.FrustSurfaceView`'s class doc).
+     *
+     * `dark` must be the APP's resolved brightness ([nativeAppIsDark]), not
+     * the device's raw [isDarkMode] — the two legitimately disagree once an
+     * app-forced `frust::set_app_theme` override is active (FINDINGS #43: the
+     * device-sourced call this used to receive produced invisible
+     * light-on-light or dark-on-dark icons whenever they did). Called from
+     * [surfaceCreated], [onConfigurationChanged], and every frame via
+     * [pollAppBrightness] (change-gated by [lastAppliedDark] there).
      */
     private fun updateSystemBarsAppearance(dark: Boolean) {
+        lastAppliedDark = dark
         val window = (context as? Activity)?.window ?: return
         WindowCompat.getInsetsController(window, this).apply {
             isAppearanceLightStatusBars = !dark
             isAppearanceLightNavigationBars = !dark
         }
+    }
+
+    /**
+     * Per-frame poll of the app's resolved brightness ([nativeAppIsDark]),
+     * applying [updateSystemBarsAppearance] only on an actual change (mirrors
+     * [pollSystemUiState]'s generation-gated shape, minus the generation — a
+     * cheap direct `Boolean` compare is enough here since the value itself,
+     * not a monotonic counter, is what Kotlin polls).
+     *
+     * This is what reaches a runtime `frust::set_app_theme`/`clear_app_theme`
+     * call: unlike the device's `uiMode`, an app theme swap has no
+     * `Configuration` event of its own to ride in on, so without this poll
+     * the status bar would only catch up at the next unrelated
+     * `onConfigurationChanged` (or never, if the device config never
+     * changes). Called only while `handle != 0L` (see [doFrame]) — before
+     * that, the native side has nothing to report, and the system bars are
+     * simply left at the platform default until [surfaceCreated] seeds them.
+     */
+    private fun pollAppBrightness() {
+        val dark = nativeAppIsDark(handle)
+        if (dark == lastAppliedDark) return
+        updateSystemBarsAppearance(dark)
     }
 
     /**
@@ -678,7 +732,13 @@ class FrustSurfaceView(
             handle = nativeInit(holder.surface, scaleFactor, context.cacheDir.absolutePath)
             if (handle != 0L) {
                 nativeSetAppearance(handle, isDarkMode)
-                updateSystemBarsAppearance(isDarkMode)
+                // Seed system-bar icon contrast from the APP's just-resolved
+                // brightness, not the device's `isDarkMode` we just fed in —
+                // with no override active yet they agree, but sourcing this
+                // from the app keeps `surfaceCreated` on the same one true
+                // path [pollAppBrightness]/[onConfigurationChanged] use (see
+                // [updateSystemBarsAppearance]'s doc).
+                updateSystemBarsAppearance(nativeAppIsDark(handle))
                 // Seed the reduce-motion accessibility preference beside the
                 // appearance: [onResume] already ran (and re-runs on every
                 // foreground), but it fires before this handle exists on a cold
@@ -743,7 +803,15 @@ class FrustSurfaceView(
         super.onConfigurationChanged(newConfig)
         if (handle != 0L) {
             nativeSetAppearance(handle, isDarkMode)
-            updateSystemBarsAppearance(isDarkMode)
+            // Re-derive system-bar icon contrast from the APP's just-resolved
+            // brightness, not `isDarkMode` directly: if an app-forced
+            // `frust::set_app_theme` override is active, `nativeSetAppearance`
+            // above is a no-op on `theme.brightness` (the override-wins
+            // rule — see `frust_shell_common::theme_override`), so re-reading
+            // the device here would have flipped the icons to disagree with
+            // what the override is actually painting. `nativeAppIsDark`
+            // reports the resolved value either way.
+            updateSystemBarsAppearance(nativeAppIsDark(handle))
         }
     }
 
@@ -950,6 +1018,12 @@ class FrustSurfaceView(
             // Per-frame system-UI poll: cheap generation-gated
             // JNI read, applied only on an actual `set_system_ui_mode` change.
             pollSystemUiState()
+            // Per-frame app-brightness poll: cheap `Boolean`-gated
+            // JNI read, applied only on an actual change — this is what picks
+            // up a runtime `frust::set_app_theme`/`clear_app_theme` call
+            // (see [pollAppBrightness]'s doc for why that needs a per-frame
+            // poll rather than riding on `onConfigurationChanged`).
+            pollAppBrightness()
             // Per-frame platform-view command poll:
             // the null-return fast path keeps a no-change frame allocation-free
             // (a null string means "nothing to do" — no JSON parse); only a
