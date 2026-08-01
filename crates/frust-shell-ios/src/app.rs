@@ -1130,6 +1130,41 @@ fn effective_reduce_motion(authored: bool, os: bool) -> bool {
     authored || os
 }
 
+/// Run one **event pass** under the reactive runtime's root
+/// [`Owner`](frust_reactive::Owner), so `use_context` resolves from inside a
+/// touch/IME handler exactly as it does from `Component::build`.
+///
+/// Every path that reaches [`AppTree::event`](frust_shell_common::AppTree::event)
+/// — touch dispatch (raw and frame-resampled), `ime_apply`, and a queued
+/// accessibility action — routes through this. Without it `Owner::current()` is
+/// `None` for the whole pass (`Owner::with` restores the previous owner when the
+/// rebuild wrap returns), so a handler's `use_context::<Theme>()` silently
+/// resolves to `None`.
+///
+/// Three deliberate properties, mirrored in the Android shell and pinned by the
+/// desktop shell's `event_pass_*` tests (the mobile `app` modules are
+/// target-gated and never host-compiled, so that is where this shape is
+/// testable):
+///
+/// * **The root owner, not a fresh child scope.** A child owner would have to be
+///   created and disposed per input event — including per resampled `Move` —
+///   and a handler's `provide_context` would evaporate on dispose. Sharing costs
+///   one thread-local swap per pass and no allocation.
+/// * **No [`TrackedScope`].** `TrackedScope::track` clears the scope's recorded
+///   sources and dirty flag on entry, so tracking an event pass would unsubscribe
+///   the frame loop from every signal the last rebuild read *and* swallow a
+///   pending wake. A handler that writes a signal still wakes the shell through
+///   the rebuild scope's own subscription, unchanged.
+/// * **Never panics.** Like the rebuild wrap, it degrades to running the pass
+///   unwrapped if the runtime is somehow absent — this path is reached across the
+///   C-ABI boundary, where an unwind is undefined behavior.
+fn under_root_owner<R>(pass: impl FnOnce() -> R) -> R {
+    match ReactiveRuntime::get() {
+        Some(rt) => rt.with_owner(pass),
+        None => pass(),
+    }
+}
+
 /// Map one differ [`ViewCommand`] onto the host-testable
 /// [`crate::ffi_support::PlatformViewCommand`] shape, converting its logical,
 /// absolute-window rect/clip into physical px (`* scale`) — the one place
@@ -1892,7 +1927,8 @@ impl IosAppHandle {
                 position,
                 button: PointerButton::Primary,
             });
-            let _ = self.app.event(&event);
+            let app = &mut self.app;
+            let _ = under_root_owner(|| app.event(&event));
         }
     }
 
@@ -1904,7 +1940,8 @@ impl IosAppHandle {
     /// `CADisplayLink` loop already ticks the next frame every vsync — so it is
     /// dropped (mirror of [`Self::dispatch_touch`]).
     pub(crate) fn ime_apply(&mut self, state: EditingState) {
-        let _ = self.app.ime_apply(state);
+        let app = &mut self.app;
+        let _ = under_root_owner(|| app.ime_apply(state));
         // Latch for the frame gate: an IME edit between frames must force the
         // next frame to run (mirror of [`Self::dispatch_touch`]).
         self.events_since_last_frame = true;
@@ -2066,15 +2103,20 @@ impl IosAppHandle {
         if let Some(a11y) = self.a11y.as_ref() {
             let actions = a11y.drain_actions();
             a11y_action_performed = !actions.is_empty();
-            for req in actions {
-                // `target_node.0` is the raw accesskit id the adapter reported;
-                // an unknown node or unmodelled action is a benign no-op (see
-                // `RenderRoot::perform_accessibility_action`). `needs_redraw` is
-                // dropped — the CADisplayLink loop already ticks the next frame.
-                let _ = self
-                    .app
-                    .perform_accessibility_action(req.target_node.0, req.action);
-            }
+            // An action is routed through synthesized pointer events, landing in
+            // the very same handlers a real tap would — so the whole batch runs
+            // under the reactive root owner (see [`under_root_owner`]).
+            let app = &mut self.app;
+            under_root_owner(|| {
+                for req in actions {
+                    // `target_node.0` is the raw accesskit id the adapter
+                    // reported; an unknown node or unmodelled action is a benign
+                    // no-op (see `RenderRoot::perform_accessibility_action`).
+                    // `needs_redraw` is dropped — the CADisplayLink loop already
+                    // ticks the next frame.
+                    let _ = app.perform_accessibility_action(req.target_node.0, req.action);
+                }
+            });
         }
 
         // Render-side surface self-heal, taken past the
@@ -2190,18 +2232,23 @@ impl IosAppHandle {
         // tree BEFORE the rebuild, so the rebuild reflects this frame's resampled
         // input (same `resample_clock` domain the raw samples were stamped in). A
         // no-op when disabled (touches went straight through in `dispatch_touch`).
-        // `PointerEvent` is `Copy`, so indexing the scratch avoids holding its
-        // borrow across the `self.app.event` call.
+        // The scratch buffer and the tree are borrowed as disjoint fields so the
+        // batch can be iterated in place while dispatching.
         if self.resampler.is_enabled() {
             let now_nanos = self.resample_clock.elapsed().as_nanos() as u64;
             self.pointer_scratch.clear();
             self.resampler
                 .resample(now_nanos, &mut self.pointer_scratch);
-            let n = self.pointer_scratch.len();
-            for i in 0..n {
-                let event = InputEvent::Pointer(self.pointer_scratch[i]);
-                let _ = self.app.event(&event);
-            }
+            // One owner install for the whole drained batch (see
+            // [`under_root_owner`]), so the per-frame cost stays flat regardless
+            // of how many samples landed.
+            let app = &mut self.app;
+            let scratch = &self.pointer_scratch;
+            under_root_owner(|| {
+                for sample in scratch {
+                    let _ = app.event(&InputEvent::Pointer(*sample));
+                }
+            });
         }
 
         // Rebuild under the root `Owner` AND inside the persistent

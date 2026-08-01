@@ -1149,6 +1149,41 @@ fn effective_reduce_motion(authored: bool, os: bool) -> bool {
     authored || os
 }
 
+/// Run one **event pass** under the reactive runtime's root
+/// [`Owner`](frust_reactive::Owner), so `use_context` resolves from inside a
+/// press/key/IME handler exactly as it does from `Component::build`.
+///
+/// Every path that reaches [`AppTree::event`](frust_shell_common::AppTree::event)
+/// — touch dispatch (raw and frame-resampled), `ime_apply`, `ime_action`, and a
+/// queued accessibility action — routes through this. Without it
+/// `Owner::current()` is `None` for the whole pass (`Owner::with` restores the
+/// previous owner when the rebuild wrap returns), so a handler's
+/// `use_context::<Theme>()` silently resolves to `None`.
+///
+/// Three deliberate properties, mirrored in the iOS shell and pinned by the
+/// desktop shell's `event_pass_*` tests (the mobile `app` modules are
+/// target-gated and never host-compiled, so that is where this shape is
+/// testable):
+///
+/// * **The root owner, not a fresh child scope.** A child owner would have to be
+///   created and disposed per input event — including per resampled `Move` —
+///   and a handler's `provide_context` would evaporate on dispose. Sharing costs
+///   one thread-local swap per pass and no allocation.
+/// * **No [`TrackedScope`].** `TrackedScope::track` clears the scope's recorded
+///   sources and dirty flag on entry, so tracking an event pass would unsubscribe
+///   the frame loop from every signal the last rebuild read *and* swallow a
+///   pending wake. A handler that writes a signal still wakes the shell through
+///   the rebuild scope's own subscription, unchanged.
+/// * **Never panics.** Like the rebuild wrap, it degrades to running the pass
+///   unwrapped if the runtime is somehow absent — this path is reached from JNI,
+///   where an unwind is undefined behavior.
+fn under_root_owner<R>(pass: impl FnOnce() -> R) -> R {
+    match ReactiveRuntime::get() {
+        Some(rt) => rt.with_owner(pass),
+        None => pass(),
+    }
+}
+
 /// Assemble an accesskit [`TreeUpdate`] from a [`SemanticsUpdate`].
 ///
 /// v1 always publishes the whole tree (`RenderRoot::semantics` recomputes it in
@@ -1401,9 +1436,15 @@ impl AndroidAppHandle {
             None => return false,
         };
         let performed = !drained.is_empty();
-        for (node_id, action) in drained {
-            let _ = self.app.perform_accessibility_action(node_id.0, action);
-        }
+        let app = &mut self.app;
+        // An accessibility action is routed through synthesized pointer events,
+        // landing in the very same handlers a real tap would — so it needs the
+        // ambient `Owner` just as much (see [`under_root_owner`]).
+        under_root_owner(|| {
+            for (node_id, action) in drained {
+                let _ = app.perform_accessibility_action(node_id.0, action);
+            }
+        });
         performed
     }
 
@@ -1952,7 +1993,8 @@ impl AndroidAppHandle {
                 position,
                 button: PointerButton::Primary,
             });
-            let _ = self.app.event(&event);
+            let app = &mut self.app;
+            let _ = under_root_owner(|| app.event(&event));
         }
     }
 
@@ -1968,7 +2010,8 @@ impl AndroidAppHandle {
         // Frame-gate latch: an IME edit between frames forces the next
         // frame to run (see `dispatch_touch`).
         self.events_since_last_frame = true;
-        let _ = self.app.ime_apply(state);
+        let app = &mut self.app;
+        let _ = under_root_owner(|| app.ime_apply(state));
     }
 
     /// The IME surface the focused widget published, for the FFI layer to
@@ -1994,7 +2037,8 @@ impl AndroidAppHandle {
         // Frame-gate latch: a soft-keyboard action forces the next
         // frame to run (see `dispatch_touch`).
         self.events_since_last_frame = true;
-        let _ = self.app.event(&event);
+        let app = &mut self.app;
+        let _ = under_root_owner(|| app.event(&event));
     }
 
     /// Run one frame: rebuild → layout → paint → render, mirroring the desktop
@@ -2284,19 +2328,24 @@ impl AndroidAppHandle {
         // tree BEFORE the rebuild, so the rebuild reflects this frame's
         // resampled input. Uses the same `resample_clock` domain the raw samples
         // were stamped in. A no-op when the resampler is disabled (touches were
-        // delivered directly in `dispatch_touch`). `PointerEvent` is `Copy`, so
-        // indexing the scratch buffer avoids holding its borrow across the
-        // `self.app.event` call.
+        // delivered directly in `dispatch_touch`). The scratch buffer and the
+        // tree are borrowed as disjoint fields so the batch can be iterated
+        // in place while dispatching.
         if self.resampler.is_enabled() {
             let now_nanos = self.resample_clock.elapsed().as_nanos() as u64;
             self.pointer_scratch.clear();
             self.resampler
                 .resample(now_nanos, &mut self.pointer_scratch);
-            let n = self.pointer_scratch.len();
-            for i in 0..n {
-                let event = InputEvent::Pointer(self.pointer_scratch[i]);
-                let _ = self.app.event(&event);
-            }
+            // One owner install for the whole drained batch (see
+            // [`under_root_owner`]), so the per-frame cost stays flat regardless
+            // of how many samples landed.
+            let app = &mut self.app;
+            let scratch = &self.pointer_scratch;
+            under_root_owner(|| {
+                for sample in scratch {
+                    let _ = app.event(&InputEvent::Pointer(*sample));
+                }
+            });
         }
 
         // Rebuild under the root `Owner` AND inside the persistent
