@@ -1,8 +1,10 @@
 //! Page-transition machinery for the [`navigator`](super::navigator): the
 //! transition vocabulary ([`PageTransition`] presets + [`Timing`]
 //! modes), the per-transition progress [`driver`](TransitionDriver) the navigator
-//! advances during paint, and the pure geometry ([`resolve_layers`]) that maps a
-//! progress value onto per-page paint offsets + opacities.
+//! advances during paint, the pure geometry ([`resolve_layers`]) that maps a
+//! progress value onto per-page paint offsets + opacities, and the published
+//! [`TransitionState`] snapshot chrome *outside* the navigator observes a
+//! transition through.
 //!
 //! # Split of concerns
 //!
@@ -362,6 +364,98 @@ impl TransitionSpec {
         self.preset != PageTransition::None
     }
 }
+
+// --- Published transition snapshot ------------------------------------------
+
+/// A snapshot of the navigator's single in-flight page transition, published by
+/// [`NavigatorWidget`](super::navigator::NavigatorWidget) and read through
+/// [`NavigatorController::transition`](super::navigator::NavigatorController::transition).
+///
+/// Plain `Copy` data — `Send + Sync` **by construction** (every field is a
+/// primitive), so an app may mirror it into an `RwSignal`, hand it across
+/// `provide_context`, or read it directly. `frust-widgets` stays reactive-free:
+/// the navigator publishes this into a plain `Rc<Cell<TransitionState>>`, exactly
+/// as it publishes [`depth`](super::navigator::NavigatorController::depth); any
+/// signal bridging is the facade's job.
+///
+/// # Timing
+///
+/// The full read-timing contract (which pass sees an exact value and which sees
+/// a one-frame-stale one) is documented on
+/// [`NavigatorController::transition`](super::navigator::NavigatorController::transition)
+/// — read it before choreographing anything against `progress`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TransitionState {
+    /// Whether a page transition is in flight right now.
+    pub active: bool,
+    /// The RAW driver value, `0.0` → `1.0`. A spatial spring genuinely
+    /// overshoots past `1.0` (see the module docs' overshoot note) — use
+    /// [`clamped`](Self::clamped) for anything driving opacity.
+    pub progress: f64,
+    /// `true` when the transition runs *backwards* (a pop or an interactive
+    /// edge-swipe back); `false` for a push/replace.
+    pub is_pop: bool,
+    /// An interactive edge-swipe is holding the progress (the drag pins it
+    /// between frames rather than a driver advancing it). Cleared when the
+    /// swipe is released into its settle spring.
+    pub interactive: bool,
+    /// The page-stack depth the transition is leaving.
+    pub from_depth: usize,
+    /// The page-stack depth the transition is arriving at. Always the navigator's
+    /// *current* `pages.len()` — a push/pop/replace mutates the stack up front and
+    /// animates afterwards, so the stack is the destination from the first frame.
+    pub to_depth: usize,
+    /// Bumped once per transition started. Distinguishes "the same transition,
+    /// later" from "a new transition at the same progress" — the discriminator a
+    /// chrome observer needs to reset its own per-transition state. Wraps.
+    pub generation: u32,
+}
+
+impl TransitionState {
+    /// The at-rest snapshot for a settled stack of `depth` pages: nothing in
+    /// flight, `from_depth == to_depth == depth`.
+    ///
+    /// `progress` is `1.0` — "fully arrived". With `from_depth == to_depth` the
+    /// value is degenerate (both endpoints are the same stack), so a reader that
+    /// ignores [`active`](Self::active) still sees the destination rather than a
+    /// jump back to the origin.
+    pub const fn settled(depth: usize, generation: u32) -> Self {
+        TransitionState {
+            active: false,
+            progress: 1.0,
+            is_pop: false,
+            interactive: false,
+            from_depth: depth,
+            to_depth: depth,
+            generation,
+        }
+    }
+
+    /// [`progress`](Self::progress) clamped to `[0.0, 1.0]` — the value to drive
+    /// opacity (or any other bounded quantity) with, since a spatial spring's raw
+    /// progress overshoots.
+    pub fn clamped(&self) -> f64 {
+        self.progress.clamp(0.0, 1.0)
+    }
+}
+
+impl Default for TransitionState {
+    /// The at-rest snapshot of an empty stack — what a
+    /// [`NavigatorController`](super::navigator::NavigatorController) reads before
+    /// any navigator attaches to it.
+    fn default() -> Self {
+        Self::settled(0, 0)
+    }
+}
+
+// Compile-time proof of the property the whole seam rests on: the published
+// snapshot is `Send + Sync` BY CONSTRUCTION, so it can ride `provide_context`
+// (which requires `T: Send + Sync`) or be mirrored into an `RwSignal` — unlike
+// the `Rc`-backed `NavigatorController` that hands it out.
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync + 'static>() {}
+    assert_send_sync::<TransitionState>();
+};
 
 // --- Progress driver --------------------------------------------------------
 
@@ -879,6 +973,36 @@ mod tests {
     }
 
     const SIZE: Size = Size::new(400.0, 800.0);
+
+    #[test]
+    fn transition_state_settled_is_at_rest_on_one_depth() {
+        let s = TransitionState::settled(3, 7);
+        assert!(!s.active);
+        assert!(!s.is_pop);
+        assert!(!s.interactive);
+        assert_eq!((s.from_depth, s.to_depth), (3, 3));
+        assert_eq!(s.generation, 7);
+        assert_eq!(s.progress, 1.0, "settled means fully arrived");
+        assert_eq!(
+            TransitionState::default(),
+            TransitionState::settled(0, 0),
+            "the default is an at-rest empty stack (no navigator attached)"
+        );
+    }
+
+    #[test]
+    fn transition_state_clamped_bounds_a_spring_overshoot() {
+        // A spatial spring genuinely overshoots; `progress` keeps the raw value
+        // (so a slide visibly springs past rest) and `clamped` is what drives
+        // opacity.
+        let mut s = TransitionState::settled(1, 0);
+        s.progress = 1.08;
+        assert_eq!(s.clamped(), 1.0);
+        s.progress = -0.04;
+        assert_eq!(s.clamped(), 0.0);
+        s.progress = 0.42;
+        assert_eq!(s.clamped(), 0.42);
+    }
 
     #[test]
     fn ramp_is_clamped_linear() {

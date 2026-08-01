@@ -44,6 +44,28 @@
 //! painted while covered. Layout runs unconditionally every frame, so a page
 //! revealed by a pop is re-laid-out and correct on the very next frame — the same
 //! relayout-every-frame invariant the theme path leans on.
+//!
+//! # Observation seams (reactive-free, by construction)
+//!
+//! Nothing outside a page's own subtree can reach into the navigator, so every
+//! observation is *published* or *pushed* — never polled through the widget, and
+//! never through a signal (`frust-widgets` carries no reactive dependency; any
+//! signal mirroring is the facade's job, as `back_glue`/`router_glue` do it):
+//!
+//! * **Transition** — [`NavigatorController::transition`] reads a published
+//!   [`TransitionState`] snapshot (an `Rc<Cell<_>>` of `Copy`, `Send + Sync`
+//!   data, beside `depth`/`back_interest`). Published on the **controller**
+//!   because the chrome that wants to match page motion is a *sibling* of the
+//!   navigator, not a descendant. Its doc carries the read-timing contract.
+//! * **Page visibility** — [`PushOptions::on_visibility`] (and
+//!   [`NavigatorView::on_root_visibility`] for the root page) pushes
+//!   [`PageVisibility`] changes to the page itself. A callback rather than a
+//!   published cell because a covered page has no pass in which to poll one.
+//!   The single derivation is [`NavigatorWidget::visibility_of`], computed from
+//!   the same `base_visible_index` layout and paint cull against.
+//!
+//! Neither seam changes disposal: a covering push still does **not** run a
+//! page's `on_cleanup`, so its widget state survives the cover.
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
@@ -59,8 +81,8 @@ use frust_theme::Theme;
 use kurbo::{Affine, Point, Rect, Size, Vec2};
 
 use super::transition::{
-    Layer, PageTransition, TransitionDriver, TransitionSpec, lerp_rect, make_driver,
-    resolve_layers, resolve_spec, settle_driver,
+    Layer, PageTransition, TransitionDriver, TransitionSpec, TransitionState, lerp_rect,
+    make_driver, resolve_layers, resolve_spec, settle_driver,
 };
 
 // --- Edge-swipe tuning constants (see per-constant approximation notes) ------
@@ -98,6 +120,31 @@ pub type PageBuilder<State> = Rc<dyn Fn() -> AnyView<State>>;
 /// A pusher-registered result callback: invoked with `&mut State` when the page it
 /// was registered against is popped, carrying the [`PopResult`] the pop supplied.
 pub type ResultCallback<State> = Rc<dyn Fn(&mut State, PopResult)>;
+
+/// Where a retained page sits in the stack right now — the vocabulary
+/// [`PushOptions::on_visibility`]/[`NavigatorView::on_root_visibility`] report.
+///
+/// Derived from exactly the state layout and paint already cull against (see
+/// [`NavigatorWidget::visibility_of`]); there is deliberately no second notion of
+/// "visible" anywhere in the navigator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PageVisibility {
+    /// Topmost: laid out, painted, and the ONLY page routed input.
+    #[default]
+    Current,
+    /// Painted (a transparent page — a dialog/sheet/palette — sits above it) but
+    /// routed no input.
+    Visible,
+    /// Fully covered by an opaque page: retained (its widget state survives), but
+    /// neither laid out nor painted.
+    Covered,
+}
+
+/// A page-visibility observer, registered per page via
+/// [`PushOptions::on_visibility`] (or [`NavigatorView::on_root_visibility`] for
+/// the root page). Fired by the navigator from a rebuild whenever the page's
+/// [`PageVisibility`] changes — never twice with the same value.
+pub type VisibilityCallback = Rc<dyn Fn(PageVisibility)>;
 
 /// The value a [`pop`](NavigatorController::pop_with_result) hands back to the
 /// pusher's [`ResultCallback`], type-erased so a page can return any `'static`
@@ -196,6 +243,7 @@ pub struct PushOptions<State: 'static> {
     transition: Option<TransitionSpec>,
     on_result: Option<ResultCallback<State>>,
     dismiss_signal: Option<Rc<Cell<u64>>>,
+    on_visibility: Option<VisibilityCallback>,
 }
 
 impl<State: 'static> PushOptions<State> {
@@ -209,6 +257,7 @@ impl<State: 'static> PushOptions<State> {
             transition: None,
             on_result: None,
             dismiss_signal: None,
+            on_visibility: None,
         }
     }
 
@@ -250,6 +299,47 @@ impl<State: 'static> PushOptions<State> {
         self.dismiss_signal = Some(signal);
         self
     }
+
+    /// Observe this page's [`PageVisibility`]: fired once at push (with
+    /// [`Current`](PageVisibility::Current)) and on every subsequent change,
+    /// **never twice with the same value**. This is the seam a screen
+    /// pauses/resumes polling, a timer, or a camera session from.
+    ///
+    /// # Why it is a callback, not a published cell
+    ///
+    /// A covered page is neither painted nor (under
+    /// [`NavigatorView::cull_covered_builds`]) rebuilt, so it has **no pass in
+    /// which to poll** anything. The seam therefore has to push. It is shaped
+    /// exactly like [`on_result`](Self::on_result)/
+    /// [`dismiss_signal`](Self::dismiss_signal): a plain `Rc<dyn Fn>` slot, no
+    /// signal — `frust-widgets` is reactive-free.
+    ///
+    /// # No `&mut State`
+    ///
+    /// The callback receives **no** `&mut State`, unlike
+    /// [`on_result`](Self::on_result). It fires from a rebuild (a `BuildCtx`),
+    /// which carries no erased app state; and deferring it to the next event pass
+    /// the way `on_result` does would mean a covered page learns it is covered
+    /// only if some unrelated input happens to arrive. Capture what you need
+    /// (a signal, an `Rc<Cell<_>>`, a controller handle) in the closure instead.
+    ///
+    /// # "No cleanup on cover" is the contract, not a bug
+    ///
+    /// A covering push does **not** fire the page's `on_cleanup` and must never
+    /// start to: the page stays mounted so its widget state survives the cover
+    /// (the retained-page-state guarantee the whole navigator rests on — see the
+    /// [module docs](self)' paint-culling section). This seam exists precisely so
+    /// a page can release its *own* resources on
+    /// [`Covered`](PageVisibility::Covered) and re-acquire them on
+    /// [`Current`](PageVisibility::Current), without the navigator disposing
+    /// anything.
+    ///
+    /// Calling back into the [`NavigatorController`] from here is safe: a
+    /// `push`/`pop` only *records* an op, drained at the next rebuild.
+    pub fn on_visibility(mut self, f: impl Fn(PageVisibility) + 'static) -> Self {
+        self.on_visibility = Some(Rc::new(f));
+        self
+    }
 }
 
 /// One queued navigation op, recorded by the [`NavigatorController`] and drained
@@ -267,6 +357,9 @@ enum NavOp<State: 'static> {
         /// The shared generation cell bumped on a
         /// [`DismissAnimated`](BackPolicy::DismissAnimated) back press.
         dismiss_signal: Option<Rc<Cell<u64>>>,
+        /// The page-visibility observer registered by
+        /// [`PushOptions::on_visibility`], if any.
+        on_visibility: Option<VisibilityCallback>,
     },
     /// Pop the top page (never the last/root page), delivering `result` to the
     /// popped page's pusher-registered callback. A pop *reverses* the popped
@@ -316,6 +409,17 @@ pub struct NavigatorController<State: 'static> {
     /// overlay still owns the press. Same plain `Rc<Cell<_>>` (reactive-free)
     /// polled-at-rebuild contract as `depth`.
     back_interest: Rc<Cell<bool>>,
+    /// The published snapshot of the navigator's single in-flight page
+    /// transition, written by the attached [`NavigatorWidget`] at every
+    /// transition edge *and* on every paint frame that advances the driver. The
+    /// read seam is [`transition`](Self::transition), whose doc carries the
+    /// timing contract.
+    ///
+    /// Same reactive-free idiom as [`depth`](Self::depth)/
+    /// [`back_interest`](Self::back_interest) — a plain `Rc<Cell<_>>` of `Copy`
+    /// data, never a signal. Unlike those two it is published from *paint* as
+    /// well as build, which is what makes a frame-exact read possible.
+    transition: Rc<Cell<TransitionState>>,
 }
 
 impl<State: 'static> Clone for NavigatorController<State> {
@@ -324,6 +428,7 @@ impl<State: 'static> Clone for NavigatorController<State> {
             ops: Rc::clone(&self.ops),
             depth: Rc::clone(&self.depth),
             back_interest: Rc::clone(&self.back_interest),
+            transition: Rc::clone(&self.transition),
         }
     }
 }
@@ -341,6 +446,7 @@ impl<State: 'static> NavigatorController<State> {
             ops: Rc::new(RefCell::new(Vec::new())),
             depth: Rc::new(Cell::new(0)),
             back_interest: Rc::new(Cell::new(false)),
+            transition: Rc::new(Cell::new(TransitionState::default())),
         }
     }
 
@@ -384,6 +490,44 @@ impl<State: 'static> NavigatorController<State> {
     /// authoritative regardless (see `frust-reactive::back`'s timing note).
     pub fn back_interest(&self) -> bool {
         self.back_interest.get()
+    }
+
+    /// The navigator's current [`TransitionState`] — the observation seam chrome
+    /// *outside* the navigator subtree (an app bar, a tab bar, a progress
+    /// indicator) drives its own motion from. [`TransitionState::default`] (an
+    /// at-rest depth-0 snapshot) until a navigator attaches.
+    ///
+    /// Published on the **controller**, not the widget, deliberately: chrome that
+    /// wants to match page motion is a *sibling* of the navigator, not a
+    /// descendant, so it can never reach the widget — but it can hold a
+    /// controller clone, exactly as it already does to `push`.
+    ///
+    /// # The timing contract
+    ///
+    /// The progress driver advances in exactly one place — `paint`, off
+    /// `PaintCtx::frame_time` (the No-`Instant::now()` rule in
+    /// `docs/REVIEW_FOCUS.md` forbids any other clock in `frust-widgets`).
+    /// Therefore:
+    ///
+    /// - **A read during your own `Widget::paint`, from a widget painted *after*
+    ///   the navigator, is exact for the current frame.** In a root
+    ///   `Stack(vec![navigator_subtree, chrome])`, `StackWidget::paint` walks its
+    ///   children in order, so `chrome` paints second and reads the value the
+    ///   navigator wrote microseconds earlier **in the same frame**. This is the
+    ///   frame-perfect path; it is the one to use for choreography.
+    /// - **A read during `Component::build` (or any `View::build`/`rebuild`) is
+    ///   always exactly one frame stale** for `progress`, because build precedes
+    ///   paint. Fine for "is a transition running?"; wrong for choreography.
+    /// - **The [`active`](TransitionState::active) edges are the exception.**
+    ///   Both `start_transition` and `finalize_transition` publish from a
+    ///   `BuildCtx` pass, so a build-time reader that builds *after* the navigator
+    ///   sees `active` flip on the very frame it happens. Only intermediate
+    ///   `progress` lags.
+    ///
+    /// The navigator already requests a frame for every frame a transition runs,
+    /// so a paint-time observer needs no wake of its own.
+    pub fn transition(&self) -> TransitionState {
+        self.transition.get()
     }
 
     /// Push an **opaque** page built by `builder` on top of the stack, using the
@@ -473,14 +617,15 @@ impl<State: 'static> NavigatorController<State> {
             transition: options.transition,
             back: options.back,
             dismiss_signal: options.dismiss_signal,
+            on_visibility: options.on_visibility,
         });
     }
 
     /// Shared push-op construction every `push*` method above funnels through —
     /// the five public variants differ only in which of `opaque`/`on_result`/
     /// `transition` they fix vs. expose. All push with [`BackPolicy::Pop`] and
-    /// no dismiss signal; a page wanting a different policy uses
-    /// [`push_with_options`](Self::push_with_options).
+    /// no dismiss signal, and no visibility observer; a page wanting any of those
+    /// uses [`push_with_options`](Self::push_with_options).
     fn push_impl(
         &self,
         builder: impl Fn() -> AnyView<State> + 'static,
@@ -495,6 +640,7 @@ impl<State: 'static> NavigatorController<State> {
             transition,
             back: BackPolicy::Pop,
             dismiss_signal: None,
+            on_visibility: None,
         });
     }
 
@@ -576,6 +722,13 @@ pub struct NavigatorView<State: 'static> {
     /// `None` derives it from the default transition preset — on for
     /// [`PageTransition::IosPush`], off otherwise.
     pop_swipe: Option<bool>,
+    /// The ROOT page's [`PageVisibility`] observer (the root has no
+    /// [`PushOptions`] to carry one). Installed on the root page entry at
+    /// `build`, like the root's [`BackPolicy`] — not live-refreshed.
+    root_visibility: Option<VisibilityCallback>,
+    /// Whether a [`Covered`](PageVisibility::Covered) page stops re-running its
+    /// builder. Default `false` — the shipped behaviour.
+    cull_covered_builds: bool,
 }
 
 impl<State: 'static> NavigatorView<State> {
@@ -594,6 +747,49 @@ impl<State: 'static> NavigatorView<State> {
     /// and release completes or cancels the pop by progress/velocity.
     pub fn pop_swipe(mut self, enabled: bool) -> Self {
         self.pop_swipe = Some(enabled);
+        self
+    }
+
+    /// Observe the **root** page's [`PageVisibility`] — the same seam
+    /// [`PushOptions::on_visibility`] gives a pushed page, for the one page that
+    /// has no `PushOptions`. Fired once with
+    /// [`Current`](PageVisibility::Current) on the navigator's first build, then
+    /// on every change (e.g. [`Covered`](PageVisibility::Covered) when an opaque
+    /// page is pushed over it).
+    ///
+    /// Read [`PushOptions::on_visibility`]'s doc for the full contract: no
+    /// `&mut State`, no duplicate values, and — importantly — **no `on_cleanup`
+    /// on cover**; the root page stays mounted with its widget state intact.
+    ///
+    /// The callback is captured at the navigator's first `build` (like the root
+    /// page's builder itself) and is not refreshed on later rebuilds.
+    pub fn on_root_visibility(mut self, f: impl Fn(PageVisibility) + 'static) -> Self {
+        self.root_visibility = Some(Rc::new(f));
+        self
+    }
+
+    /// Skip re-running the builder (and the child reconcile) for pages that are
+    /// [`Covered`](PageVisibility::Covered).
+    ///
+    /// **Default `false`** — the shipped behaviour, where every retained page
+    /// reconciles every frame whether covered or not. Making covered builds stop
+    /// is a real behaviour change (an app may rely on a covered page's builder
+    /// running against live state), so it is strictly opt-in.
+    ///
+    /// Two ordering rules hold when enabled, and neither needs a wake mechanism:
+    ///
+    /// - **A revealed page rebuilds in the same pass that revealed it.** Ops are
+    ///   applied — and a settled transition finalized — *before* the per-page
+    ///   reconcile loop in [`NavigatorView::rebuild`], so by the time the loop
+    ///   asks [`visibility_of`](NavigatorWidget::visibility_of) the revealed page
+    ///   is no longer `Covered`. There is no cross-frame gap to bridge.
+    /// - **The frame on which a page *becomes* `Covered` still rebuilds it.** The
+    ///   cull decision reads the page's visibility as of the *previous* reconcile,
+    ///   so a page gets exactly one final reconcile after its
+    ///   `on_visibility(Covered)` fires — a page staging teardown UI on cover can
+    ///   still render it.
+    pub fn cull_covered_builds(mut self, enabled: bool) -> Self {
+        self.cull_covered_builds = enabled;
         self
     }
 
@@ -617,6 +813,8 @@ pub fn navigator<State: 'static>(
         initial: Rc::new(initial),
         default_transition: TransitionSpec::NONE,
         pop_swipe: None,
+        root_visibility: None,
+        cull_covered_builds: false,
     }
 }
 
@@ -643,6 +841,23 @@ struct PageEntry<State: 'static> {
     /// the page's own widget subtree observes it (see [`BackPolicy`]'s seam).
     /// `None` for any page that did not supply one.
     dismiss_signal: Option<Rc<Cell<u64>>>,
+    /// This page's [`PageVisibility`] as of the last
+    /// [`publish_visibility`](NavigatorWidget::publish_visibility) pass.
+    /// `None` until the *first* publish, so a freshly pushed page's opening
+    /// [`Current`](PageVisibility::Current) always fires (there is no
+    /// "unknown" enum variant to model that with).
+    visibility: Option<PageVisibility>,
+    /// The page-visibility observer from [`PushOptions::on_visibility`] (or, for
+    /// the root page, [`NavigatorView::on_root_visibility`]). `None` for a page
+    /// that registered none.
+    on_visibility: Option<VisibilityCallback>,
+    /// Whether the *previous* per-page reconcile pass saw this page as
+    /// [`Covered`](PageVisibility::Covered). Only read when
+    /// [`NavigatorView::cull_covered_builds`] is on, and it is what implements
+    /// that switch's "the frame a page becomes covered still rebuilds it" rule:
+    /// a page is skipped only once it has *already* been reconciled while
+    /// covered.
+    reconciled_covered: bool,
 }
 
 /// The single in-flight page transition a [`NavigatorWidget`] owns (Flutter
@@ -770,6 +985,17 @@ pub struct NavigatorWidget<State: 'static> {
     /// from the current depth + top-page [`BackPolicy`] after every stack
     /// mutation so `NavigatorController::back_interest` is authoritative.
     back_interest: Rc<Cell<bool>>,
+    /// The shared [`TransitionState`] slot published to the
+    /// [`NavigatorController`]. A clone of the controller's
+    /// `Rc<Cell<TransitionState>>`, written at every transition edge
+    /// (start/interactive-start/hold/settle/finalize) *and* on every paint frame
+    /// that advances the driver — see
+    /// [`NavigatorController::transition`]'s timing contract.
+    transition_state: Rc<Cell<TransitionState>>,
+    /// Whether a [`Covered`](PageVisibility::Covered) page skips its per-frame
+    /// reconcile. Refreshed from the view each rebuild (live-configurable, like
+    /// `pop_swipe_enabled`); default `false`.
+    cull_covered_builds: bool,
 }
 
 /// Whether the navigator should claim a back press ahead-of-time: the
@@ -782,15 +1008,87 @@ fn compute_back_interest(depth: usize, top_policy: BackPolicy) -> bool {
 
 impl<State: 'static> NavigatorWidget<State> {
     /// Publish the current page-stack depth **and** back-interest to the shared
-    /// controller slots. Called after every stack mutation — at the end of `apply_ops`,
-    /// and at the end of `build`/`rebuild` (so a transition finalize that changed
-    /// the stack is reflected too) — so `NavigatorController::depth`/`can_pop`/
-    /// `back_interest` read authoritative values.
-    fn publish_state(&self) {
+    /// controller slots, refresh the published [`TransitionState`]'s depths, and
+    /// fire any page-visibility changes. Called after every stack mutation — at
+    /// the end of `apply_ops`, after a transition finalize, and at the end of
+    /// `build`/`rebuild` — so `NavigatorController::depth`/`can_pop`/
+    /// `back_interest`/`transition` read authoritative values.
+    fn publish_state(&mut self) {
         self.depth.set(self.pages.len());
         let top_policy = self.pages.last().map(|p| p.back).unwrap_or(BackPolicy::Pop);
         self.back_interest
             .set(compute_back_interest(self.pages.len(), top_policy));
+        // Keep the published transition's depths coherent even for a stack
+        // mutation that started no transition at all (an instant push/pop): the
+        // stack is always the transition's *destination*, and with nothing in
+        // flight it is both endpoints.
+        let mut t = self.transition_state.get();
+        t.to_depth = self.pages.len();
+        if !t.active {
+            t.from_depth = t.to_depth;
+        }
+        self.transition_state.set(t);
+        self.publish_visibility();
+    }
+
+    /// Fire every page's [`PushOptions::on_visibility`] observer whose
+    /// [`PageVisibility`] changed since the last pass (and no others — a value is
+    /// never reported twice in a row).
+    ///
+    /// Called only from [`publish_state`](Self::publish_state), so it runs at
+    /// build, at the end of `apply_ops`, after a transition finalize, and at the
+    /// end of `rebuild` — in every case *before* the per-page reconcile loop
+    /// gets to decide anything, which is what lets a revealed page rebuild in the
+    /// same pass that revealed it.
+    ///
+    /// Re-entrancy is safe by construction: a callback that calls
+    /// `controller.push()`/`pop()` only records a [`NavOp`], drained at the next
+    /// rebuild — it cannot re-enter the widget.
+    fn publish_visibility(&mut self) {
+        for i in 0..self.pages.len() {
+            let next = self.visibility_of(i);
+            if self.pages[i].visibility == Some(next) {
+                continue;
+            }
+            self.pages[i].visibility = Some(next);
+            // Clone the `Rc` out before firing: the callback is app code and may
+            // reach back into the controller.
+            if let Some(observer) = self.pages[i].on_visibility.clone() {
+                observer(next);
+            }
+        }
+    }
+
+    /// Where the page at `index` sits in the stack right now.
+    ///
+    /// **The single derivation of "visible" in the navigator**, computed from the
+    /// same [`base_visible_index`](Self::base_visible_index) that `layout` and
+    /// `paint` already cull against — the visibility seam, the covered-build cull
+    /// and (task 06) the semantics rule all read this one function rather than
+    /// recomputing it.
+    ///
+    /// [`Current`](PageVisibility::Current) iff `index` is the top of the stack;
+    /// [`Covered`](PageVisibility::Covered) iff it is below the topmost opaque
+    /// page; [`Visible`](PageVisibility::Visible) otherwise (a page under a
+    /// transparent overlay).
+    ///
+    /// # During a transition
+    ///
+    /// Layout/paint culling is *suspended* mid-transition, but visibility is
+    /// computed against the settled stack regardless: a pop/replace stashes the
+    /// leaving page out of `self.pages` and a push already has the new page on
+    /// top, so `self.pages` **is** the destination stack from the transition's
+    /// first frame. A page therefore learns it is about to be covered when the
+    /// push is applied, not 340ms later — which is the point, since the
+    /// observation exists to let it release resources.
+    fn visibility_of(&self, index: usize) -> PageVisibility {
+        if index + 1 >= self.pages.len() {
+            PageVisibility::Current
+        } else if index < self.base_visible_index() {
+            PageVisibility::Covered
+        } else {
+            PageVisibility::Visible
+        }
     }
 
     /// The index of the topmost **opaque** page — the bottom of the visible
@@ -803,6 +1101,48 @@ impl<State: 'static> NavigatorWidget<State> {
             }
         }
         0
+    }
+
+    /// Publish a fresh [`TransitionState`] for a transition that is *starting*,
+    /// bumping the generation. The stack has already been mutated to the
+    /// destination when this runs, so `to_depth` is simply the current page
+    /// count; `from_depth` is the pre-op depth the caller knows.
+    ///
+    /// Shared by the programmatic
+    /// [`start_transition`](Self::start_transition) and the interactive
+    /// edge-swipe [`begin_interactive_pop`](Self::begin_interactive_pop) — the
+    /// first two of the publication points listed on
+    /// [`NavigatorController::transition`].
+    fn publish_transition_start(
+        &self,
+        from_depth: usize,
+        progress: f64,
+        is_pop: bool,
+        interactive: bool,
+    ) {
+        let to_depth = self.pages.len();
+        let generation = self.transition_state.get().generation.wrapping_add(1);
+        self.transition_state.set(TransitionState {
+            active: true,
+            progress,
+            is_pop,
+            interactive,
+            from_depth,
+            to_depth,
+            generation,
+        });
+    }
+
+    /// Update the published progress of the in-flight transition, leaving every
+    /// other field alone. `interactive` is set alongside it (a drag holds the
+    /// progress; a release hands it back to a spring).
+    fn publish_transition_progress(&self, progress: f64, interactive: Option<bool>) {
+        let mut t = self.transition_state.get();
+        t.progress = progress;
+        if let Some(interactive) = interactive {
+            t.interactive = interactive;
+        }
+        self.transition_state.set(t);
     }
 
     /// Cancel any in-flight capture and clear the focus flag on the *current* top
@@ -850,6 +1190,18 @@ impl<State: 'static> NavigatorWidget<State> {
         ctx: &mut BuildCtx<'_>,
     ) {
         self.finalize_transition(ctx);
+        // The stack is already at its destination here (the op mutated it before
+        // staging the animation), so the *pre-op* depth is derived from the op
+        // shape: a pop removed a page (now in `stashed`), a replace swapped one
+        // in place, a push added one.
+        let to_depth = self.pages.len();
+        let from_depth = if is_pop {
+            to_depth + 1
+        } else if stashed.is_some() {
+            to_depth
+        } else {
+            to_depth.saturating_sub(1)
+        };
         // Build a fallback driver eagerly (the unthemed M3 default — current
         // behavior), and stash the *unresolved* spec so the first paint can
         // re-resolve `ThemeDefault` timing + `reduce_motion` against the live
@@ -868,6 +1220,10 @@ impl<State: 'static> NavigatorWidget<State> {
             hero_entering: HashMap::new(),
             pending_spec: Some(spec),
         });
+        // Publication point: a programmatic transition starts at progress 0, not
+        // interactive, with a fresh generation. This runs in a `BuildCtx` pass,
+        // so a build-time observer sees `active` flip on this very frame.
+        self.publish_transition_start(from_depth, 0.0, is_pop, false);
     }
 
     /// Dispose the active transition: tear down its retained (leaving) page, if
@@ -906,6 +1262,15 @@ impl<State: 'static> NavigatorWidget<State> {
                     crate::authoring::teardown_child(&stashed.view, &mut stashed.pod, ctx);
                 }
             }
+            // Publication point: the transition is over. Publish an at-rest
+            // snapshot for the (possibly just-restored) stack, keeping the
+            // generation so an observer can still tell which transition ended.
+            // Like `start_transition` this runs in a `BuildCtx` pass, so the
+            // `active` falling edge is visible to a build-time observer on the
+            // frame it happens.
+            let generation = self.transition_state.get().generation;
+            self.transition_state
+                .set(TransitionState::settled(self.pages.len(), generation));
         }
     }
 
@@ -916,10 +1281,13 @@ impl<State: 'static> NavigatorWidget<State> {
     /// The gesture that drives this lives in `event`; the navigator supplies the
     /// held-progress driver state a swipe manipulates.
     pub fn set_transition_progress(&mut self, p: f64) {
-        if let Some(t) = self.transition.as_mut() {
-            t.driver = TransitionDriver::Held { value: p };
-            t.settled = false;
-        }
+        let Some(t) = self.transition.as_mut() else {
+            return;
+        };
+        t.driver = TransitionDriver::Held { value: p };
+        t.settled = false;
+        // Publication point: a drag is holding the progress.
+        self.publish_transition_progress(p, Some(true));
     }
 
     /// Interactive-edge-swipe seam: release the active transition into a spring
@@ -931,12 +1299,16 @@ impl<State: 'static> NavigatorWidget<State> {
     /// finalize path's responsibility — this seam only drives the progress
     /// driver.
     pub fn settle_transition(&mut self, velocity: f64) {
-        if let Some(t) = self.transition.as_mut() {
-            let from = t.driver.value();
-            let target = if velocity >= 0.0 { 1.0 } else { 0.0 };
-            t.driver = settle_driver(t.settle_spring, from, velocity, target);
-            t.settled = false;
-        }
+        let Some(t) = self.transition.as_mut() else {
+            return;
+        };
+        let from = t.driver.value();
+        let target = if velocity >= 0.0 { 1.0 } else { 0.0 };
+        t.driver = settle_driver(t.settle_spring, from, velocity, target);
+        t.settled = false;
+        // Publication point: the drag released — progress is unchanged this
+        // instant, but a spring (not a finger) drives it from here.
+        self.publish_transition_progress(from, Some(false));
     }
 
     /// The event-pass timestamp (ms) for velocity tracking — the last frame time
@@ -968,6 +1340,7 @@ impl<State: 'static> NavigatorWidget<State> {
         );
         self.cancel_top();
         let popped = self.pages.pop().expect("depth > 1 checked before steal");
+        let from_depth = self.pages.len() + 1;
         let spec = popped.transition;
         // The swipe animates the popped page's own preset; a page pushed without an
         // animated transition still swipes with the iOS-push geometry (a swipe is
@@ -979,10 +1352,9 @@ impl<State: 'static> NavigatorWidget<State> {
             PageTransition::IosPush
         };
         let (_driver, settle_spring) = make_driver(spec.timing);
+        let held = initial_progress.clamp(0.0, 1.0);
         self.transition = Some(ActiveTransition {
-            driver: TransitionDriver::Held {
-                value: initial_progress.clamp(0.0, 1.0),
-            },
+            driver: TransitionDriver::Held { value: held },
             preset,
             is_pop: true,
             stashed: Some(popped),
@@ -996,6 +1368,12 @@ impl<State: 'static> NavigatorWidget<State> {
             // there is no deferred timing to resolve at paint.
             pending_spec: None,
         });
+        // Publication point: an interactive pop starts at whatever progress the
+        // drag has already reached, and is flagged `interactive` until release.
+        // Unlike `start_transition` this runs in the EVENT pass, so a build-time
+        // observer sees the edge on the next frame's build (the paint-time reader
+        // still sees it this frame).
+        self.publish_transition_start(from_depth, held, true, true);
         self.needs_ime_clear = true;
     }
 
@@ -1004,13 +1382,17 @@ impl<State: 'static> NavigatorWidget<State> {
     /// (progress units/s). A cancel flags the transition for
     /// [restore](Self::finalize_transition) rather than teardown.
     fn settle_interactive(&mut self, complete: bool, progress_velocity: f64) {
-        if let Some(t) = self.transition.as_mut() {
-            let from = t.driver.value();
-            let target = if complete { 1.0 } else { 0.0 };
-            t.driver = settle_driver(t.settle_spring, from, progress_velocity, target);
-            t.settled = false;
-            t.restore_on_finalize = !complete;
-        }
+        let Some(t) = self.transition.as_mut() else {
+            return;
+        };
+        let from = t.driver.value();
+        let target = if complete { 1.0 } else { 0.0 };
+        t.driver = settle_driver(t.settle_spring, from, progress_velocity, target);
+        t.settled = false;
+        t.restore_on_finalize = !complete;
+        // The edge-swipe's own release path, publishing exactly what the public
+        // `settle_transition` seam does: a spring, not a finger, drives it now.
+        self.publish_transition_progress(from, Some(false));
     }
 
     /// Drive an in-progress interactive edge-swipe from a pointer event:
@@ -1247,6 +1629,7 @@ impl<State: 'static> NavigatorWidget<State> {
                     transition,
                     back,
                     dismiss_signal,
+                    on_visibility,
                 } => {
                     let spec = self.effective_spec(transition);
                     self.cancel_top();
@@ -1265,6 +1648,12 @@ impl<State: 'static> NavigatorWidget<State> {
                         transition: spec,
                         back,
                         dismiss_signal,
+                        // `None`, not `Current`: the end-of-`apply_ops`
+                        // `publish_state` is what fires this page's opening
+                        // `Current` observation.
+                        visibility: None,
+                        on_visibility,
+                        reconciled_covered: false,
                     });
                     self.needs_ime_clear = true;
                     // A push's leaving page (now at `len - 2`) stays in the stack;
@@ -1305,6 +1694,12 @@ impl<State: 'static> NavigatorWidget<State> {
                             // overlay uses `push_with_options`, never replace.
                             back: BackPolicy::Pop,
                             dismiss_signal: None,
+                            visibility: None,
+                            // A replace has no `PushOptions`, so the incoming
+                            // page carries no observer (the outgoing one's dies
+                            // with it — it is being torn down, not covered).
+                            on_visibility: None,
+                            reconciled_covered: false,
                         };
                         if spec.is_animated() {
                             // Stash the old top and animate the new one in over it
@@ -1327,6 +1722,9 @@ impl<State: 'static> NavigatorWidget<State> {
                             transition: spec,
                             back: BackPolicy::Pop,
                             dismiss_signal: None,
+                            visibility: None,
+                            on_visibility: None,
+                            reconciled_covered: false,
                         });
                     }
                     self.needs_ime_clear = true;
@@ -1407,6 +1805,11 @@ impl<State: 'static> NavigatorWidget<State> {
             let adv = t.driver.advance(ctx.frame_time());
             (adv, t.is_pop, t.preset, t.stashed.is_some())
         };
+        // Publication point, immediately after the driver advanced: this is the
+        // ONLY place progress moves for a programmatic transition, and it is what
+        // makes a read from a widget painted AFTER the navigator frame-exact.
+        // See `NavigatorController::transition`'s timing contract.
+        self.publish_transition_progress(adv.value, None);
         let area = ctx.size();
         let nav_origin = ctx.origin();
         let (enter_layer, leave_layer) = resolve_layers(preset, adv.value, is_pop, area);
@@ -1674,6 +2077,9 @@ impl<State: 'static> View<State> for NavigatorView<State> {
                 // The root page always pops on back (never an overlay policy).
                 back: BackPolicy::Pop,
                 dismiss_signal: None,
+                visibility: None,
+                on_visibility: self.root_visibility.clone(),
+                reconciled_covered: false,
             }],
             pending_results: Vec::new(),
             needs_ime_clear: false,
@@ -1684,6 +2090,8 @@ impl<State: 'static> View<State> for NavigatorView<State> {
             last_frame_time: FrameTime::ZERO,
             depth: Rc::clone(&self.controller.depth),
             back_interest: Rc::clone(&self.controller.back_interest),
+            transition_state: Rc::clone(&self.controller.transition),
+            cull_covered_builds: self.cull_covered_builds,
         };
         // Apply any ops the app queued before the first frame.
         let ops = self.controller.drain();
@@ -1709,6 +2117,8 @@ impl<State: 'static> View<State> for NavigatorView<State> {
         element.default_transition = self.default_transition;
         // Refresh the edge-swipe enable flag from the view too (live-configurable).
         element.pop_swipe_enabled = self.resolve_pop_swipe();
+        // Same for the covered-build cull switch (default `false`).
+        element.cull_covered_builds = self.cull_covered_builds;
         // 1. Structural ops (view-driven): push/pop/replace the retained stack.
         let ops = self.controller.drain();
         if !ops.is_empty() {
@@ -1723,12 +2133,33 @@ impl<State: 'static> View<State> for NavigatorView<State> {
             .unwrap_or(false)
         {
             element.finalize_transition(ctx);
+            // Finalizing MUTATES the page stack — a cancelled interactive pop
+            // pushes its stashed page back on — so publish explicitly here
+            // rather than leaning on the end-of-rebuild publish below to cover
+            // it by accident. This is also what fires the restored page's
+            // `on_visibility` before the reconcile loop reads it.
+            element.publish_state();
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
-        // 2. Reconcile every retained page (including culled ones) by re-running
-        //    its builder against live state — the pod, and thus the page's own
-        //    widget state, is preserved; only the view descriptor is rebuilt.
-        for entry in &mut element.pages {
+        // 2. Reconcile every retained page by re-running its builder against live
+        //    state — the pod, and thus the page's own widget state, is preserved;
+        //    only the view descriptor is rebuilt.
+        //
+        //    Covered pages are included by default. Under
+        //    `cull_covered_builds(true)` a page is skipped once it has ALREADY
+        //    been reconciled while covered, so the frame it becomes covered still
+        //    gets one final reconcile (see that builder's doc). Steps 1 and 1b
+        //    above both ran before this loop, so a page revealed this frame is no
+        //    longer `Covered` and rebuilds in the same pass that revealed it.
+        let cull = element.cull_covered_builds;
+        for index in 0..element.pages.len() {
+            let covered = element.pages[index].visibility == Some(PageVisibility::Covered);
+            let skip = cull && covered && element.pages[index].reconciled_covered;
+            element.pages[index].reconciled_covered = covered;
+            if skip {
+                continue;
+            }
+            let entry = &mut element.pages[index];
             let next_view = (entry.builder)();
             flags |= crate::authoring::rebuild_child(&entry.view, &next_view, &mut entry.pod, ctx);
             entry.view = next_view;
@@ -1844,6 +2275,7 @@ fn cleared_ime_state() -> ImeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Stack;
     use crate::test_support::RecordingScene;
     use frust_core::{FrameTime, PointerButton, PointerEvent, PointerPhase, RenderRoot, any};
     use kurbo::Rect;
@@ -4439,5 +4871,501 @@ mod tests {
             t2 += 16;
             assert!(t2 < 10000, "cancel failed to settle");
         }
+    }
+
+    // --- #40: the published TransitionState, observed from OUTSIDE the
+    //     navigator subtree (the case the seam exists for). ---
+
+    /// What a chrome probe stacked above the navigator saw, per pass.
+    #[derive(Default)]
+    struct ProbeLog {
+        /// `TransitionState::active` as read from each `View::build`/`rebuild`
+        /// (a `BuildCtx` pass).
+        build_active: Vec<bool>,
+        /// `TransitionState::progress` as read from each `Widget::paint`.
+        paint_progress: Vec<f64>,
+        /// `TransitionState::generation` as read from each `Widget::paint`.
+        paint_generation: Vec<u32>,
+    }
+
+    /// A zero-content "chrome" widget that only *observes* the navigator through
+    /// a controller clone — the sibling-not-descendant position #40 is about.
+    struct ProbeView {
+        controller: NavigatorController<()>,
+        log: Rc<RefCell<ProbeLog>>,
+    }
+    struct ProbeWidget {
+        controller: NavigatorController<()>,
+        log: Rc<RefCell<ProbeLog>>,
+    }
+    impl ProbeView {
+        fn record_build(&self) {
+            let active = self.controller.transition().active;
+            self.log.borrow_mut().build_active.push(active);
+        }
+    }
+    impl View<()> for ProbeView {
+        type Element = ProbeWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> ProbeWidget {
+            self.record_build();
+            ProbeWidget {
+                controller: self.controller.clone(),
+                log: self.log.clone(),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut ProbeWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            self.record_build();
+            ChangeFlags::NONE
+        }
+    }
+    impl Widget for ProbeWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(1.0, 1.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            let t = self.controller.transition();
+            let mut log = self.log.borrow_mut();
+            log.paint_progress.push(t.progress);
+            log.paint_generation.push(t.generation);
+        }
+    }
+
+    /// One full frame of a `Stack(vec![navigator, probe])` root, returning the
+    /// navigator's recorded page fills plus whether another frame was requested.
+    fn probe_frame(
+        root: &mut RenderRoot<(), AnyView<()>>,
+        app: &mut impl FnMut(&mut ()) -> AnyView<()>,
+        state: &mut (),
+        time: FrameTime,
+    ) -> (Vec<(Point, Size, f32)>, bool) {
+        root.rebuild(app, state);
+        root.layout(Size::new(100.0, 100.0));
+        let mut scene = TransitionScene::default();
+        let out = root.paint(&mut scene, time);
+        (scene.fills, out.needs_frame)
+    }
+
+    #[test]
+    fn transition_state_is_frame_exact_for_chrome_painted_after_the_navigator() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let log = Rc::new(RefCell::new(ProbeLog::default()));
+
+        // Before any navigator attaches: the at-rest default.
+        let idle = controller.transition();
+        assert!(!idle.active, "no navigator attached yet");
+        assert_eq!(idle.generation, 0);
+
+        let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            let log = log.clone();
+            move |_: &mut ()| {
+                any(Stack(vec![
+                    any(navigator(&ctrl, || sized_page(100.0, 100.0))),
+                    any(ProbeView {
+                        controller: ctrl.clone(),
+                        log: log.clone(),
+                    }),
+                ]))
+            }
+        };
+        let mut state = ();
+
+        probe_frame(&mut root, &mut app, &mut state, ft(0));
+        let at_rest = controller.transition();
+        assert!(
+            !at_rest.active,
+            "a settled navigator publishes an idle state"
+        );
+        assert_eq!(
+            (at_rest.from_depth, at_rest.to_depth),
+            (1, 1),
+            "an idle snapshot's endpoints are both the current stack"
+        );
+
+        // Push B on a 100ms linear shared-axis transition: 30dp of entering slide
+        // makes the navigator's own painted progress recoverable from the fills.
+        let spec = TransitionSpec::new(
+            PageTransition::M3SharedAxisX,
+            Timing::Duration(Duration::from_millis(100), Curve::Linear),
+        );
+        let builds_before = log.borrow().build_active.len();
+        controller.push_with(|| sized_page(100.0, 80.0), spec);
+
+        let mut painted = Vec::new();
+        for ms in [0u64, 25, 50, 75] {
+            let (fills, needs) = probe_frame(&mut root, &mut app, &mut state, ft(ms));
+            assert!(needs, "a running transition keeps requesting frames");
+            painted.push(fill_h(&fills, 80.0).0.x);
+        }
+
+        let log = log.borrow();
+        // (a) The BUILD-time edge: the probe builds after the navigator, and
+        //     `start_transition` publishes from that same BuildCtx pass, so
+        //     `active` is visible on the very frame of the push.
+        assert!(
+            log.build_active[builds_before],
+            "a build-time reader sees `active` flip on the push frame: {:?}",
+            log.build_active
+        );
+
+        // (b) The PAINT-time reads: exactly the value the navigator painted with.
+        //     Entering dx is `30 * (1 - progress)` for a shared-axis push, so
+        //     inverting the geometry recovers the navigator's own progress.
+        let reads = &log.paint_progress[log.paint_progress.len() - painted.len()..];
+        for (i, (&p, &x)) in reads.iter().zip(painted.iter()).enumerate() {
+            assert!(
+                (30.0 * (1.0 - p) - x).abs() < 1e-9,
+                "frame {i}: probe read {p} but the navigator painted at x={x}"
+            );
+        }
+        // (c) Strictly increasing across frames.
+        for pair in reads.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "progress advances monotonically: {reads:?}"
+            );
+        }
+        // (d) One transition = one generation, bumped exactly once.
+        let generations = &log.paint_generation[log.paint_generation.len() - painted.len()..];
+        assert!(
+            generations.iter().all(|g| *g == 1),
+            "one started transition = generation 1 throughout: {generations:?}"
+        );
+        drop(log);
+
+        // Settle, then finalize: `active` falls, the depths collapse onto the new
+        // stack, and the generation is retained so an observer can still tell
+        // WHICH transition ended.
+        probe_frame(&mut root, &mut app, &mut state, ft(150));
+        let (_, needs) = probe_frame(&mut root, &mut app, &mut state, ft(200));
+        assert!(!needs, "the transition finalized");
+        let done = controller.transition();
+        assert!(!done.active);
+        assert!(!done.interactive);
+        assert_eq!((done.from_depth, done.to_depth), (2, 2));
+        assert_eq!(done.generation, 1);
+        assert_eq!(done.progress, 1.0, "a settled snapshot is fully arrived");
+    }
+
+    #[test]
+    fn transition_state_marks_a_pop_and_survives_an_instant_stack_mutation() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        // An INSTANT (non-animated) push starts no transition at all, but
+        // `publish_state` still leaves a coherent snapshot on the new depth.
+        controller.push(|| sized_page(100.0, 80.0));
+        root.rebuild(&mut app, &mut state);
+        let t = controller.transition();
+        assert!(!t.active, "an instant push animates nothing");
+        assert_eq!((t.from_depth, t.to_depth), (2, 2));
+        assert_eq!(t.generation, 0, "no transition started, no generation bump");
+
+        // An ANIMATED pop publishes `is_pop` with the shrinking depth pair.
+        let spec = TransitionSpec::new(
+            PageTransition::M3SharedAxisX,
+            Timing::Duration(Duration::from_millis(100), Curve::Linear),
+        );
+        controller.replace_with(|| sized_page(100.0, 80.0), spec);
+        full_frame(&mut root, &mut app, &mut state, ft(0));
+        let t = controller.transition();
+        assert!(t.active);
+        assert!(!t.is_pop, "a replace animates in the push direction");
+        assert_eq!(
+            (t.from_depth, t.to_depth),
+            (2, 2),
+            "a replace swaps in place: the depth is unchanged"
+        );
+        // Let it finish so the pop below starts clean.
+        full_frame(&mut root, &mut app, &mut state, ft(150));
+        full_frame(&mut root, &mut app, &mut state, ft(200));
+
+        controller.pop();
+        full_frame(&mut root, &mut app, &mut state, ft(216));
+        let t = controller.transition();
+        assert!(t.active);
+        assert!(t.is_pop, "a pop of an animated page runs backwards");
+        assert!(!t.interactive, "a programmatic pop is not a drag");
+        assert_eq!((t.from_depth, t.to_depth), (2, 1));
+        assert_eq!(t.generation, 2, "second transition of this navigator");
+    }
+
+    #[test]
+    fn transition_state_tracks_the_interactive_edge_swipe() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0)).pop_swipe(true)
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        controller.push(|| sized_page(100.0, 80.0));
+        full_frame(&mut root, &mut app, &mut state, ft(0));
+
+        // Arm on the left edge, then steal with a decisive rightward drag.
+        root.event(&mut state, &down(5.0, 50.0));
+        root.event(&mut state, &move_to(45.0, 50.0));
+        let held = controller.transition();
+        assert!(held.active, "the steal started a transition");
+        assert!(held.is_pop);
+        assert!(held.interactive, "a drag is holding the progress");
+        assert_eq!((held.from_depth, held.to_depth), (2, 1));
+        assert!(held.progress > 0.0, "the drag carried initial progress");
+
+        // Dragging further advances the published progress in place.
+        root.event(&mut state, &move_to(70.0, 50.0));
+        let further = controller.transition();
+        assert!(further.progress > held.progress);
+        assert!(further.interactive);
+        assert_eq!(
+            further.generation, held.generation,
+            "the same transition, later — not a new one"
+        );
+
+        // Release: a spring drives it from here, so `interactive` clears while the
+        // transition stays active.
+        root.event(&mut state, &up(70.0, 50.0));
+        let released = controller.transition();
+        assert!(released.active, "the settle is still a live transition");
+        assert!(!released.interactive, "the finger let go");
+    }
+
+    // --- #28: page visibility. ---
+
+    type VisLog = Rc<RefCell<Vec<(&'static str, PageVisibility)>>>;
+
+    #[test]
+    fn on_visibility_reports_current_covered_current_and_never_repeats() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let seen: VisLog = Rc::new(RefCell::new(Vec::new()));
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            let seen = seen.clone();
+            move |_: &mut ()| {
+                let seen = seen.clone();
+                navigator(&ctrl, || sized_page(100.0, 100.0))
+                    .on_root_visibility(move |v| seen.borrow_mut().push(("root", v)))
+            }
+        };
+        let mut state = ();
+
+        // The root page's opening observation fires on the navigator's build.
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(*seen.borrow(), vec![("root", PageVisibility::Current)]);
+
+        // Idle frames repeat nothing.
+        root.rebuild(&mut app, &mut state);
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(seen.borrow().len(), 1, "a value is never reported twice");
+
+        // A TRANSPARENT push (a dialog) leaves the root painted → `Visible`.
+        {
+            let seen = seen.clone();
+            controller.push_with_options(
+                || sized_page(50.0, 50.0),
+                PushOptions::transparent()
+                    .on_visibility(move |v| seen.borrow_mut().push(("dialog", v))),
+            );
+        }
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            *seen.borrow(),
+            vec![
+                ("root", PageVisibility::Current),
+                ("root", PageVisibility::Visible),
+                ("dialog", PageVisibility::Current),
+            ],
+        );
+
+        // An OPAQUE push over both covers the root and demotes the dialog.
+        {
+            let seen = seen.clone();
+            controller.push_with_options(
+                || sized_page(100.0, 60.0),
+                PushOptions::opaque().on_visibility(move |v| seen.borrow_mut().push(("b", v))),
+            );
+        }
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            seen.borrow()[3..],
+            [
+                ("root", PageVisibility::Covered),
+                ("dialog", PageVisibility::Covered),
+                ("b", PageVisibility::Current),
+            ],
+        );
+
+        // Popping B reveals both again, in stack order.
+        controller.pop();
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            seen.borrow()[6..],
+            [
+                ("root", PageVisibility::Visible),
+                ("dialog", PageVisibility::Current),
+            ],
+        );
+
+        // Popping the dialog restores the root to `Current`.
+        controller.pop();
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(seen.borrow()[8..], [("root", PageVisibility::Current)]);
+        assert_eq!(seen.borrow().len(), 9, "no extra observations anywhere");
+    }
+
+    /// Count how many times the ROOT page's builder runs, with the covered-build
+    /// cull either on or off. Returns `(counter, root, app)` ready to drive.
+    #[allow(clippy::type_complexity)]
+    fn cull_harness(
+        controller: &NavigatorController<()>,
+        cull: bool,
+    ) -> (
+        Rc<Cell<u32>>,
+        RenderRoot<(), NavigatorView<()>>,
+        impl FnMut(&mut ()) -> NavigatorView<()>,
+    ) {
+        let builds = Rc::new(Cell::new(0u32));
+        let root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let app = {
+            let ctrl = controller.clone();
+            let builds = builds.clone();
+            move |_: &mut ()| {
+                let builds = builds.clone();
+                navigator(&ctrl, move || {
+                    builds.set(builds.get() + 1);
+                    sized_page(100.0, 100.0)
+                })
+                .cull_covered_builds(cull)
+            }
+        };
+        (builds, root, app)
+    }
+
+    #[test]
+    fn cull_covered_builds_freezes_a_covered_page_and_resumes_on_the_reveal_frame() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let (builds, mut root, mut app) = cull_harness(&controller, true);
+        let mut state = ();
+
+        root.rebuild(&mut app, &mut state); // build seeds the root page
+        root.rebuild(&mut app, &mut state);
+        let before_cover = builds.get();
+
+        // The covering push: the root learns it is `Covered` BEFORE the reconcile
+        // loop, but still gets exactly one final rebuild on this frame (so a page
+        // staging teardown UI on cover can render it).
+        controller.push(|| sized_page(100.0, 60.0));
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            builds.get(),
+            before_cover + 1,
+            "the frame a page becomes covered still rebuilds it"
+        );
+
+        // From here the builder is frozen.
+        let frozen = builds.get();
+        root.rebuild(&mut app, &mut state);
+        root.rebuild(&mut app, &mut state);
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(builds.get(), frozen, "a covered page stops rebuilding");
+
+        // The pop is applied before the reconcile loop, so the revealed page
+        // rebuilds on the SAME frame — nothing has to wake it.
+        controller.pop();
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            builds.get(),
+            frozen + 1,
+            "a revealed page rebuilds in the pass that revealed it"
+        );
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(builds.get(), frozen + 2, "and keeps rebuilding after that");
+    }
+
+    #[test]
+    fn cull_covered_builds_defaults_off() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        // Same harness, `false` — which is also what plain `navigator(...)` gives:
+        // the shipped every-page-every-frame behaviour is unchanged.
+        let (builds, mut root, mut app) = cull_harness(&controller, false);
+        let mut state = ();
+
+        root.rebuild(&mut app, &mut state);
+        controller.push(|| sized_page(100.0, 60.0));
+        root.rebuild(&mut app, &mut state);
+        let covered_at = builds.get();
+        root.rebuild(&mut app, &mut state);
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            builds.get(),
+            covered_at + 2,
+            "by default a covered page still reconciles every frame"
+        );
+
+        // And the default really is `false` on a bare navigator.
+        let bare: NavigatorView<()> = navigator(&controller, || sized_page(1.0, 1.0));
+        assert!(!bare.cull_covered_builds);
+    }
+
+    #[test]
+    fn a_covered_page_keeps_its_widget_state_under_the_build_cull() {
+        // The "no cleanup on cover" contract, pinned against the opt-in cull:
+        // freezing a page's builder must not dispose it.
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let observed = Rc::new(Cell::new(0u32));
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            let obs = observed.clone();
+            move |_: &mut ()| {
+                let obs = obs.clone();
+                navigator(&ctrl, move || counter_page(&obs)).cull_covered_builds(true)
+            }
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut RecordingScene::default(), FrameTime::ZERO);
+
+        // Tap the root page → its retained counter is 1.
+        root.event(&mut state, &down(5.0, 5.0));
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut RecordingScene::default(), FrameTime::ZERO);
+        assert_eq!(observed.get(), 1);
+
+        // Cover it for several frames, then reveal: the retained pod (and thus the
+        // count) survived — a covering push never runs `on_cleanup`.
+        controller.push(|| sized_page(100.0, 60.0));
+        for _ in 0..4 {
+            root.rebuild(&mut app, &mut state);
+            root.layout(Size::new(100.0, 100.0));
+            root.paint(&mut RecordingScene::default(), FrameTime::ZERO);
+        }
+        controller.pop();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut RecordingScene::default(), FrameTime::ZERO);
+        assert_eq!(
+            observed.get(),
+            1,
+            "the covered page's widget state survived the build cull"
+        );
     }
 }
