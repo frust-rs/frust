@@ -153,8 +153,22 @@ android {
                 signingConfig = releaseSigning
             } else {
                 signingConfig = signingConfigs.getByName("debug")
+                // THE CLI GREPS THIS WARNING. `frust build`/`frust run
+                // --release` scan every release build's Gradle output for the
+                // FRUST-SIGNING-FALLBACK token below and hard-fail rather than
+                // report success over a debug-signed artifact — the backstop
+                // for the case where this file (an older generated project, or
+                // an edited signing block) never read
+                // `.frust-signing.properties` at all. Reword the prose freely;
+                // do NOT drop the token, and if you move it, move
+                // `frust-drive`'s `android_build::signing` matcher with it.
+                // That matcher also accepts the bare phrase "release build is
+                // debug-signed", which every template Frust has ever shipped
+                // carries, so projects generated before the token existed keep
+                // the same protection.
                 logger.warn(
-                    "Frust: release build is debug-signed. Build with " +
+                    "Frust: release build is debug-signed. " +
+                        "[FRUST-SIGNING-FALLBACK] Build with " +
                         "`frust build apk --release` (its signing gate refuses " +
                         "to ship this), or — for a hand-run ./gradlew — supply " +
                         "all four signing values in android/key.properties or " +

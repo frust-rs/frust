@@ -31,6 +31,20 @@
 //! buys the guarantee above, and the short, owner-only, always-deleted window
 //! is what keeps it acceptable.
 //!
+//! **The backstop.** That guarantee is by *construction*, and the construction
+//! has a precondition nothing can check up front: that this project's
+//! `build.gradle.kts` actually contains the `frustSigning(...)` read. A project
+//! generated before that read existed (there is no `frust upgrade`), an edited
+//! signing block, Gradle's configuration cache, or a concurrent build deleting
+//! the fixed-name file all break it — and the template's fallthrough *succeeds*,
+//! debug-signing with a warning, so `out.success` alone would report a green
+//! release build over a debug-signed APK. So the pipelines also key off what
+//! Gradle **did**: [`reported_debug_signing`] greps the captured output of a
+//! successful release build for the template's fallback marker and
+//! [`debug_signed_error`] turns it into a hard failure. That needs no model of
+//! Gradle at all — every residual divergence route collapses into one refusal,
+//! and no `build.gradle.kts` gets parsed.
+//!
 //! **Honest limits.** Nothing here parses `build.gradle.kts`. A project that
 //! edits the generated template's *fallback* lookups is free to; the
 //! `.frust-signing.properties` read sits ahead of them and is not something a
@@ -225,6 +239,57 @@ fn verify(
         key_alias: resolved[&Field::KeyAlias].clone(),
         key_password: resolved[&Field::KeyPassword].clone(),
     }))
+}
+
+/// The machine-stable token the generated `build.gradle.kts` prints when its
+/// release build falls through to the debug signing config. Prose gets
+/// reworded; a token does not — the template carries a comment saying the CLI
+/// greps for this exact string, and the two must move together.
+const FALLBACK_TOKEN: &str = "FRUST-SIGNING-FALLBACK";
+
+/// The prose fragment that same warning has carried in **every** template Frust
+/// has ever shipped, back through the pre-rename ForgeKit one. It is matched
+/// alongside [`FALLBACK_TOKEN`] because the installed base is precisely what
+/// this check exists for: a project generated before the token existed cannot
+/// print it, and there is no `frust upgrade` to re-render its Gradle. An old
+/// template keeps the old prose, so the matcher accepts both.
+const FALLBACK_PROSE: &str = "release build is debug-signed";
+
+/// Whether Gradle reported that it debug-signed the release build it just
+/// finished — i.e. whether the generated `build.gradle.kts` reached its
+/// no-promises fallback despite the gate having resolved and written real
+/// material.
+///
+/// Call this **only for a build that succeeded**. On a *failed* build Gradle
+/// may echo lines of the build script itself (which quotes both markers in a
+/// comment) while diagnosing an error, and a failed build is already reported
+/// as a failure anyway.
+pub(crate) fn reported_debug_signing(gradle_output: &str) -> bool {
+    gradle_output.contains(FALLBACK_TOKEN) || gradle_output.contains(FALLBACK_PROSE)
+}
+
+/// The refusal [`reported_debug_signing`] earns: Gradle exited 0, but over a
+/// debug-signed artifact, so the build is not the release build it claims to
+/// be. Names the two routes that actually reach it and the two ways out.
+pub(crate) fn debug_signed_error() -> anyhow::Error {
+    anyhow::anyhow!(
+        "Gradle debug-signed this release build — refusing to report it as a release build.\n\n\
+         The signing gate resolved release material from frust.toml's `[signing]` section and \
+         handed it to Gradle in `android/.frust-signing.properties`, but \
+         `android/app/build.gradle.kts` did not use it: Gradle logged its debug-signing \
+         fallback instead. The artifact carries the Android debug certificate, not your \
+         keystore.\n\n\
+         Usual causes:\n\n\
+         \t- the project was generated before that read existed (there is no `frust upgrade` — \
+         the signing block has to be brought forward by hand)\n\
+         \t- the release `signingConfigs` block was edited so the `frustSigning(...)` lookups \
+         no longer run\n\n\
+         Fix `android/app/build.gradle.kts` so the release signing config reads \
+         `.frust-signing.properties` first — `frust create` a throwaway project and copy its \
+         `signingConfigs` block across. If this project signs through machinery Frust cannot \
+         see (CI, a Gradle signing plugin), declare `[signing] external = true` in frust.toml \
+         instead: that waives the gate and this check, and warns on every release build."
+    )
 }
 
 /// A live `android/.frust-signing.properties`. Dropping it deletes the file —

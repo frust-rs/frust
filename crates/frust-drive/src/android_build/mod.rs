@@ -111,6 +111,11 @@ fn build_with_env(
     let generated = signing::check_release_signing(project_dir, info.mode, on_line)?
         .map(|resolved| signing::write_resolved(&android_dir, &resolved))
         .transpose()?;
+    // `Some` iff this is a release build the gate actually vouched for — a
+    // non-release mode and `[signing] external = true` both resolve to `None`.
+    // Recorded before the guard is dropped below, since that is exactly the
+    // condition under which Gradle's own verdict has to be checked.
+    let signing_promised = generated.is_some();
 
     // Release-lean preflight: a legacy app that predates the `lean` feature
     // has it dropped here — with a one-time warning routed through this
@@ -147,8 +152,8 @@ fn build_with_env(
     // window for the success path.)
     drop(generated);
 
+    let combined = format!("{}\n{}", out.stdout, out.stderr);
     if !out.success {
-        let combined = format!("{}\n{}", out.stdout, out.stderr);
         if let Some(flavor) = info.flavor.as_deref()
             && task_not_found(&combined, &task)
         {
@@ -162,6 +167,15 @@ fn build_with_env(
             bail!("`./gradlew {task}` failed");
         }
         bail!("`./gradlew {task}` failed:\n{tail}");
+    }
+
+    // The gate promised a release-signed artifact; Gradle just said it produced
+    // a debug-signed one. Key off what Gradle *did* rather than what the gate
+    // predicted — see `signing`'s module doc ("The backstop"). Checked only on
+    // a successful build: a failed one already fails, and Gradle can echo build
+    // script text (which quotes the marker in a comment) while diagnosing.
+    if signing_promised && signing::reported_debug_signing(&combined) {
+        return Err(signing::debug_signed_error());
     }
 
     let paths = artifacts::discover(&android_dir, target, info.mode, info.flavor.as_deref())?;
@@ -421,6 +435,177 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("keytool"), "{err}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The line the current generated template prints when its release build
+    /// falls through to the debug signing config.
+    const FALLBACK_WARNING: &str = "Frust: release build is debug-signed. \
+[FRUST-SIGNING-FALLBACK] Build with `frust build apk --release` …";
+
+    /// The same line as an installed-base project generated *before* the
+    /// machine-stable token existed prints it — the D2 route, where the
+    /// project's Gradle has no `frustSigning(...)` read at all.
+    const FALLBACK_WARNING_LEGACY: &str =
+        "Frust: release build is debug-signed; create android/key.properties …";
+
+    /// Registers a successful `assembleRelease` whose output carries `warning`,
+    /// against a release-signed project with a real artifact on disk — so
+    /// nothing *but* the marker can fail the build.
+    fn release_runner_emitting(warning: &str) -> FakeProcessRunner {
+        preflight_ok_runner().with(
+            "./gradlew assembleRelease -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+            Output {
+                success: true,
+                stdout: format!("> Task :app:assembleRelease\n{warning}\nBUILD SUCCESSFUL"),
+                stderr: String::new(),
+            },
+        )
+    }
+
+    fn arm64_apk() -> AndroidArtifact {
+        AndroidArtifact::Apk {
+            split_per_abi: false,
+            abis: vec!["arm64-v8a".to_string()],
+        }
+    }
+
+    /// Plants the release APK `artifacts::discover` would find, so a build that
+    /// wrongly *passes* the marker check reports success rather than tripping
+    /// over a missing artifact — the failure has to come from the marker.
+    fn plant_release_apk(android_dir: &Path) -> PathBuf {
+        let out_dir = android_dir.join("app/build/outputs/apk/release");
+        fs::create_dir_all(&out_dir).unwrap();
+        let apk = out_dir.join("app-release.apk");
+        fs::write(&apk, b"fake").unwrap();
+        apk
+    }
+
+    /// **The D1 backstop.** The gate resolved material and wrote
+    /// `.frust-signing.properties`, Gradle exited 0 — and said it debug-signed
+    /// anyway (the project's `build.gradle.kts` never read the file). Success
+    /// plus a debug-signed artifact is the whole defect class; it must be a
+    /// hard failure, not a `BuiltArtifacts`.
+    #[test]
+    fn release_bails_when_gradle_reports_it_debug_signed() {
+        let dir = unique_project_dir("gradle-debug-signed");
+        let android_dir = dir.join("android");
+        write_release_signing(&android_dir);
+        plant_release_apk(&android_dir);
+
+        let runner = release_runner_emitting(FALLBACK_WARNING);
+        let build_info = info(BuildMode::Release, None);
+        let err = build_with_env(
+            &runner,
+            &dir,
+            &build_info,
+            &arm64_apk(),
+            &fake_env(),
+            &mut |_| {},
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("Gradle debug-signed"), "{message}");
+        assert!(message.contains("build.gradle.kts"), "{message}");
+        assert!(message.contains("external = true"), "{message}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// **The D2 route.** An installed-base project prints the *old* prose, with
+    /// no `FRUST-SIGNING-FALLBACK` token in it — the matcher accepts both, so
+    /// the projects that most need this backstop are the ones it covers.
+    #[test]
+    fn release_bails_on_the_pre_token_warning_an_old_template_prints() {
+        let dir = unique_project_dir("gradle-debug-signed-legacy");
+        let android_dir = dir.join("android");
+        write_release_signing(&android_dir);
+        plant_release_apk(&android_dir);
+
+        let runner = release_runner_emitting(FALLBACK_WARNING_LEGACY);
+        let build_info = info(BuildMode::Release, None);
+        let err = build_with_env(
+            &runner,
+            &dir,
+            &build_info,
+            &arm64_apk(),
+            &fake_env(),
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Gradle debug-signed"), "{err}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `[signing] external = true` is a declared, warned-about bypass: Frust
+    /// promises nothing about the signature, so the marker must not start hard
+    /// failing that path. The build succeeds and the waiver warning still
+    /// fires.
+    #[test]
+    fn external_signing_still_passes_when_gradle_reports_debug_signing() {
+        let dir = unique_project_dir("external-debug-signed");
+        let android_dir = dir.join("android");
+        fs::write(
+            dir.join("frust.toml"),
+            "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n[signing]\nexternal = true\n",
+        )
+        .unwrap();
+        let apk = plant_release_apk(&android_dir);
+
+        let runner = release_runner_emitting(FALLBACK_WARNING);
+        let build_info = info(BuildMode::Release, None);
+        let mut lines = Vec::new();
+        let result = build_with_env(
+            &runner,
+            &dir,
+            &build_info,
+            &arm64_apk(),
+            &fake_env(),
+            &mut |l| lines.push(l.to_string()),
+        )
+        .unwrap();
+        assert_eq!(result.paths, vec![apk]);
+        assert!(
+            lines.iter().any(|l| l.contains("external = true")),
+            "the waiver must still announce itself: {lines:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A debug build is debug-signed by design. The template's release-only
+    /// warning cannot reach a debug task, but the check is gated on the gate
+    /// having promised something regardless — so a stray marker in debug output
+    /// never fails a build Frust made no signing promise about.
+    #[test]
+    fn a_debug_build_is_not_failed_by_the_marker() {
+        let dir = unique_project_dir("debug-marker");
+        let android_dir = dir.join("android");
+        let out_dir = android_dir.join("app/build/outputs/apk/debug");
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
+
+        let runner = preflight_ok_runner().with(
+            "./gradlew assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+            Output {
+                success: true,
+                stdout: format!("{FALLBACK_WARNING}\nBUILD SUCCESSFUL"),
+                stderr: String::new(),
+            },
+        );
+        let build_info = info(BuildMode::Debug, None);
+        let result = build_with_env(
+            &runner,
+            &dir,
+            &build_info,
+            &arm64_apk(),
+            &fake_env(),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(result.paths, vec![out_dir.join("app-debug.apk")]);
 
         let _ = fs::remove_dir_all(&dir);
     }
