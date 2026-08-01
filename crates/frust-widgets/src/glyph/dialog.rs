@@ -6,12 +6,14 @@
 //!
 //! Like [`crate::material::dialog`], a `GlyphDialog` is designed to be pushed
 //! as a **transparent navigator page** via
-//! [`NavigatorController::push_transparent_for_result`] — the page below stays
-//! visible under the scrim, and the navigator's existing modal contract
+//! [`NavigatorController::push_with_options`] (with a custom
+//! [`BackPolicy`](crate::nav::navigator::BackPolicy) and dismiss signal — see
+//! the `dismissable(bool)` + back-dismiss section below) — the page below
+//! stays visible under the scrim, and the navigator's existing modal contract
 //! (input routed only to the top page, pointer capture / focus / IME threaded
 //! through the page pod) is what makes it modal. [`show_glyph_dialog`] wraps
 //! the push and wires dismissal to `controller.pop()`. This module edits **no**
-//! nav file: it consumes `push_transparent_for_result`/`pop` read-only.
+//! nav file: it consumes `push_with_options`/`pop` read-only.
 //!
 //! # Enter/exit staging (widget-internal, not a navigator transition)
 //!
@@ -57,6 +59,35 @@
 //! actions have. Only the scrim-tap / Escape *cancel* path plays the exit
 //! staging.
 //!
+//! # Body/content slot
+//!
+//! [`body`](GlyphDialogView::body) (supporting text) and
+//! [`content`](GlyphDialogView::content) (an arbitrary app-provided
+//! [`AnyView`]) share one slot between the title and the action row —
+//! **`content` wins if both are set**, silently, in both debug and release
+//! (no panic, no assert — a `.body()` call is simply shadowed the moment
+//! `.content()` is also chained). Reach for `content` when the dialog needs
+//! more than static text — a text field is the motivating case (a name-input
+//! dialog no longer has to smuggle its field in as an "action").
+//!
+//! **Sizing:** the slot gets the same loose-width/unbounded-height
+//! constraints `body` always has (`BoxConstraints::loose(Size::new(w,
+//! f64::INFINITY))`) — it lays out at its own intrinsic height and the panel
+//! grows to fit. **This is a documented limit, not a bug:** the dialog never
+//! clips or auto-scrolls an oversized slot, so content that can grow
+//! arbitrarily tall (a long list, a growing log) can push the panel off
+//! the top/bottom of the viewport. Wrap genuinely unbounded content in your
+//! own scrolling container before passing it to `.content()`.
+//!
+//! **Focus:** the slot is routed exactly like an action button — a `Down`
+//! that hits it is hit-tested and forwarded via
+//! [`crate::authoring::route_event_single`], and once it holds the recorded
+//! focus path, subsequent `Key`/`Ime` events (focus-routed, never hit-tested)
+//! go straight to it *before* the dialog's own Escape/dismiss handling gets a
+//! look — so a focused [`TextInput`](crate::TextInput) inside `.content()`
+//! receives every keystroke; only a key it declines (Escape, since a text
+//! field doesn't handle it) falls through to the dialog's dismiss check.
+//!
 //! # Only one floating layer
 //!
 //! Enforcing "at most one dialog/overlay at a time" is the app's (or the
@@ -85,8 +116,12 @@
 //! # Semantics
 //!
 //! The whole dialog contributes one [`Role::Dialog`] container node with the
-//! accesskit **modal** flag set, labelled by the title; title/body/actions are
-//! its accesskit children (mirroring [`crate::material::dialog`]).
+//! accesskit **modal** flag set, labelled by the title; title/body-or-content/
+//! actions are its accesskit children (mirroring [`crate::material::dialog`]) —
+//! the body/content slot forwards through [`ChildPod::semantics_child`]
+//! regardless of which of `body`/`content` occupies it, so a `.content()`
+//! subtree's own semantics (e.g. a text field's role/label/value) reach the
+//! accessibility tree like any other child.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -288,6 +323,10 @@ type OnClose = Rc<dyn Fn()>;
 pub struct GlyphDialogView<State: 'static> {
     title: Option<String>,
     body: Option<String>,
+    /// Arbitrary body/content-slot widget — see
+    /// [`content`](GlyphDialogView::content) and the [module docs](self)'s
+    /// "Body/content slot" section. Wins over `body` when both are set.
+    content: Option<AnyView<State>>,
     actions: Vec<AnyView<State>>,
     scrim_dismissible: bool,
     on_close: Option<OnClose>,
@@ -298,6 +337,34 @@ pub struct GlyphDialogView<State: 'static> {
     dismiss_signal: Option<Rc<Cell<u64>>>,
 }
 
+/// The resolved body/content slot for one frame — see
+/// [`GlyphDialogView::body_slot`].
+enum BodySlot<'a, State: 'static> {
+    /// Neither `body` nor `content` is set.
+    None,
+    /// `body` text, rendered through [`body_view`].
+    Text(&'a str),
+    /// An app-provided [`content`](GlyphDialogView::content) view (wins over
+    /// `body` when both are set).
+    Content(&'a AnyView<State>),
+}
+
+impl<State: 'static> GlyphDialogView<State> {
+    /// Resolve the body/content slot for this frame, applying the
+    /// content-wins precedence documented on [`content`](Self::content): a
+    /// `.body()` call is simply shadowed (never a panic, live or in a debug
+    /// build) when `.content()` is also set.
+    fn body_slot(&self) -> BodySlot<'_, State> {
+        if let Some(c) = &self.content {
+            BodySlot::Content(c)
+        } else if let Some(b) = &self.body {
+            BodySlot::Text(b.as_str())
+        } else {
+            BodySlot::None
+        }
+    }
+}
+
 /// Create an empty Glyph dialog. Chain [`title`](GlyphDialogView::title)/
 /// [`body`](GlyphDialogView::body)/[`action`](GlyphDialogView::action) to fill
 /// it, and [`on_close`](GlyphDialogView::on_close) to wire dismissal (usually
@@ -306,6 +373,7 @@ pub fn glyph_dialog<State: 'static>() -> GlyphDialogView<State> {
     GlyphDialogView {
         title: None,
         body: None,
+        content: None,
         actions: Vec::new(),
         scrim_dismissible: true,
         on_close: None,
@@ -328,8 +396,26 @@ impl<State: 'static> GlyphDialogView<State> {
     }
 
     /// Set the dialog supporting text (Glyph body family, `onSurfaceVariant`).
+    ///
+    /// Shares its slot with [`content`](Self::content) — **`content` wins if
+    /// both are set** (see the [module docs](self)'s "Body/content slot"
+    /// section); this call is otherwise unaffected by whether `content` is
+    /// also set later in the chain.
     pub fn body(mut self, body: impl Into<String>) -> Self {
         self.body = Some(body.into());
+        self
+    }
+
+    /// Set arbitrary widget content in the body slot — the first-class
+    /// escape hatch for content `.body()`'s plain-text slot can't express
+    /// (the motivating case: a text field inside the dialog).
+    ///
+    /// Shares its slot with [`body`](Self::body) — **`content` wins if both
+    /// are set**, silently (no panic, no assert, in debug or release). See
+    /// the [module docs](self)'s "Body/content slot" section for the
+    /// sizing/overflow and focus contract.
+    pub fn content(mut self, content: AnyView<State>) -> Self {
+        self.content = Some(content);
         self
     }
 
@@ -450,7 +536,15 @@ enum Phase {
 pub struct GlyphDialogWidget {
     title: Option<ChildPod>,
     title_text: Option<String>,
+    /// The body/content slot — either the built `body` text
+    /// ([`body_view`]) or an app-provided [`GlyphDialogView::content`] view,
+    /// whichever [`BodySlot`] resolved to (see the [module docs](self)'s
+    /// "Body/content slot" section). Routed for events, painted, and
+    /// forwarded for semantics exactly like `title`/an action — the widget
+    /// never needs to know which of the two occupies it.
     body: Option<ChildPod>,
+    /// `body`'s source text, `Some` only when the slot is currently holding
+    /// `body_view` text (not an app [`GlyphDialogView::content`] view).
     body_text: Option<String>,
     actions: Vec<ChildPod>,
     scrim_dismissible: bool,
@@ -506,6 +600,88 @@ fn reconcile_optional<State: 'static>(
     }
 }
 
+/// Reconcile the body/content slot in place, applying the content-wins
+/// precedence documented on [`GlyphDialogView::content`].
+///
+/// Unlike [`reconcile_optional`] (a plain optional string, e.g. `title`),
+/// this slot's `Some` case can be either `body` text or an app-provided
+/// [`AnyView`] — a transition between any two of the three states (none,
+/// text, content) is handled the same way `Some(a) -> Some(b)` handles a
+/// same-string no-op or a text edit: [`crate::authoring::rebuild_child`]
+/// delegates to `AnyView`'s own type-erased rebuild, which tears down and
+/// rebuilds the child on a concrete-type mismatch (text ↔ content, or
+/// content ↔ a *different* content view) and mutates in place otherwise —
+/// this function only has to decide when the pod itself is born or dies.
+fn reconcile_body_slot<State: 'static>(
+    prev: &GlyphDialogView<State>,
+    next: &GlyphDialogView<State>,
+    pod: &mut Option<ChildPod>,
+    ctx: &mut BuildCtx<'_>,
+) -> ChangeFlags {
+    match (prev.body_slot(), next.body_slot()) {
+        (BodySlot::None, BodySlot::None) => ChangeFlags::NONE,
+        (BodySlot::None, BodySlot::Text(s)) => {
+            *pod = Some(crate::authoring::build_child(&body_view::<State>(s), ctx));
+            ChangeFlags::LAYOUT | ChangeFlags::PAINT
+        }
+        (BodySlot::None, BodySlot::Content(v)) => {
+            *pod = Some(crate::authoring::build_child(v, ctx));
+            ChangeFlags::LAYOUT | ChangeFlags::PAINT
+        }
+        (BodySlot::Text(s), BodySlot::None) => {
+            if let Some(p) = pod.as_mut() {
+                crate::authoring::teardown_child(&body_view::<State>(s), p, ctx);
+            }
+            *pod = None;
+            ChangeFlags::LAYOUT | ChangeFlags::PAINT
+        }
+        (BodySlot::Content(_), BodySlot::None) => {
+            if let (Some(v), Some(p)) = (&prev.content, pod.as_mut()) {
+                crate::authoring::teardown_child(v, p, ctx);
+            }
+            *pod = None;
+            ChangeFlags::LAYOUT | ChangeFlags::PAINT
+        }
+        (BodySlot::Text(a), BodySlot::Text(b)) => match pod.as_mut() {
+            Some(p) => crate::authoring::rebuild_child(
+                &body_view::<State>(a),
+                &body_view::<State>(b),
+                p,
+                ctx,
+            ),
+            None => ChangeFlags::NONE,
+        },
+        (BodySlot::Text(a), BodySlot::Content(v)) => match pod.as_mut() {
+            Some(p) => crate::authoring::rebuild_child(&body_view::<State>(a), v, p, ctx),
+            None => ChangeFlags::NONE,
+        },
+        (BodySlot::Content(_), BodySlot::Text(b)) => match pod.as_mut() {
+            Some(p) => {
+                let pv = prev
+                    .content
+                    .as_ref()
+                    .expect("BodySlot::Content implies `content` is set");
+                crate::authoring::rebuild_child(pv, &body_view::<State>(b), p, ctx)
+            }
+            None => ChangeFlags::NONE,
+        },
+        (BodySlot::Content(_), BodySlot::Content(_)) => match pod.as_mut() {
+            Some(p) => {
+                let pv = prev
+                    .content
+                    .as_ref()
+                    .expect("BodySlot::Content implies `content` is set");
+                let nv = next
+                    .content
+                    .as_ref()
+                    .expect("BodySlot::Content implies `content` is set");
+                crate::authoring::rebuild_child(pv, nv, p, ctx)
+            }
+            None => ChangeFlags::NONE,
+        },
+    }
+}
+
 impl<State: 'static> View<State> for GlyphDialogView<State> {
     type Element = GlyphDialogWidget;
 
@@ -516,11 +692,17 @@ impl<State: 'static> View<State> for GlyphDialogView<State> {
                 .as_ref()
                 .map(|s| crate::authoring::build_child(&title_view::<State>(s), ctx)),
             title_text: self.title.clone(),
-            body: self
-                .body
-                .as_ref()
-                .map(|s| crate::authoring::build_child(&body_view::<State>(s), ctx)),
-            body_text: self.body.clone(),
+            body: match self.body_slot() {
+                BodySlot::None => None,
+                BodySlot::Text(s) => {
+                    Some(crate::authoring::build_child(&body_view::<State>(s), ctx))
+                }
+                BodySlot::Content(v) => Some(crate::authoring::build_child(v, ctx)),
+            },
+            body_text: match self.body_slot() {
+                BodySlot::Text(s) => Some(s.to_string()),
+                _ => None,
+            },
             actions: self
                 .actions
                 .iter()
@@ -554,14 +736,11 @@ impl<State: 'static> View<State> for GlyphDialogView<State> {
             ctx,
         );
         element.title_text = self.title.clone();
-        flags |= reconcile_optional(
-            prev.body.as_ref(),
-            self.body.as_ref(),
-            &mut element.body,
-            body_view::<State>,
-            ctx,
-        );
-        element.body_text = self.body.clone();
+        flags |= reconcile_body_slot(prev, self, &mut element.body, ctx);
+        element.body_text = match self.body_slot() {
+            BodySlot::Text(s) => Some(s.to_string()),
+            _ => None,
+        };
 
         let prev_views: Vec<&AnyView<State>> = prev.actions.iter().collect();
         let next_views: Vec<&AnyView<State>> = self.actions.iter().collect();
@@ -589,8 +768,14 @@ impl<State: 'static> View<State> for GlyphDialogView<State> {
         if let (Some(s), Some(p)) = (&self.title, element.title.as_mut()) {
             crate::authoring::teardown_child(&title_view::<State>(s), p, ctx);
         }
-        if let (Some(s), Some(p)) = (&self.body, element.body.as_mut()) {
-            crate::authoring::teardown_child(&body_view::<State>(s), p, ctx);
+        match (self.body_slot(), element.body.as_mut()) {
+            (BodySlot::Text(s), Some(p)) => {
+                crate::authoring::teardown_child(&body_view::<State>(s), p, ctx);
+            }
+            (BodySlot::Content(v), Some(p)) => {
+                crate::authoring::teardown_child(v, p, ctx);
+            }
+            _ => {}
         }
         for (view, pod) in self.actions.iter().zip(element.actions.iter_mut()) {
             crate::authoring::teardown_child(view, pod, ctx);
@@ -823,6 +1008,17 @@ impl Widget for GlyphDialogWidget {
         if crate::authoring::route_event(&mut self.actions, ctx, event) == EventResult::Handled {
             return EventResult::Handled;
         }
+        // The body/content slot is next — this is what lets a focused
+        // `TextInput` inside `.content()` receive every keystroke (focus-routed
+        // `Key`/`Ime`) or a drag (an already-captured pointer), *before* the
+        // Escape/scrim handling below gets a look. A key the slot declines
+        // (Escape, since a text field doesn't handle it) falls through as
+        // documented in the [module docs](self)'s "Body/content slot" section.
+        if let Some(pod) = self.body.as_mut()
+            && crate::authoring::route_event_single(pod, ctx, event) == EventResult::Handled
+        {
+            return EventResult::Handled;
+        }
         // Escape (once focused) begins the exit/cancel — gated by `dismissable`
         // (a non-dismissable dialog ignores it, same as the scrim).
         if let InputEvent::Key(key_event) = event {
@@ -902,6 +1098,7 @@ impl Widget for GlyphDialogWidget {
 mod tests {
     use super::*;
     use crate::nav::navigator::{NavigatorView, navigator};
+    use crate::textinput::text_input;
     use frust_core::{
         BuildCtx, KeyEvent, Modifiers, PointerButton, PointerEvent, RenderRoot, any as core_any,
     };
@@ -1534,6 +1731,158 @@ mod tests {
         assert!(
             !node.children().is_empty(),
             "title/body are semantics children"
+        );
+    }
+
+    // -- `.content()`: an arbitrary body/content-slot view -------------
+
+    #[test]
+    fn body_only_dialog_still_builds_a_text_child_and_records_body_text() {
+        // Regression guard: with no `.content()`, `body_slot()` must still
+        // resolve exactly like the pre-`.content()` `Option<String>` path.
+        let view: GlyphDialogView<()> = glyph_dialog().title("Hi").body("Sure?");
+        let w = build(&view);
+        assert!(w.body.is_some(), "body text still builds a child pod");
+        assert_eq!(w.body_text.as_deref(), Some("Sure?"));
+    }
+
+    #[test]
+    fn content_wins_over_body_when_both_are_set() {
+        let view: GlyphDialogView<()> = glyph_dialog()
+            .title("Both")
+            .body("ignored text")
+            .content(tap_action(50.0, 20.0, |_s: &mut ()| {}));
+        let mut w = build(&view);
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        w.layout(&mut lctx, &BoxConstraints::tight(Size::new(400.0, 600.0)));
+
+        assert_eq!(
+            w.body_text, None,
+            "content wins: the body text is not the active slot"
+        );
+        let slot_size = w.body.as_ref().expect("slot built").size();
+        assert_eq!(
+            slot_size,
+            Size::new(50.0, 20.0),
+            "the slot holds the fixed-size content view, not laid-out body text"
+        );
+    }
+
+    #[test]
+    fn content_taller_than_viewport_is_not_clamped_or_scrolled() {
+        // The documented overflow limit (see the module docs' "Body/content
+        // slot" section): the slot gets loose width / unbounded height, and
+        // an oversized content view is neither clipped nor auto-scrolled.
+        let view: GlyphDialogView<()> =
+            glyph_dialog()
+                .title("Tall")
+                .content(tap_action(300.0, 2000.0, |_s: &mut ()| {}));
+        let mut w = build(&view);
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        let area = Size::new(400.0, 600.0);
+        w.layout(&mut lctx, &BoxConstraints::tight(area));
+
+        let content_size = w.body.as_ref().expect("content pod built").size();
+        assert_eq!(
+            content_size.height, 2000.0,
+            "the content slot gets unbounded (loose) height, matching body's own sizing"
+        );
+        assert!(
+            w.panel.height() > area.height,
+            "an oversized content slot is not clipped or scrolled — the panel simply grows \
+             past the viewport; wrap unbounded content in your own scroll view instead"
+        );
+    }
+
+    #[test]
+    fn content_text_field_takes_focus_and_accepts_typing() {
+        // The motivating case: a text field inside `.content()` must actually
+        // be reachable — a focused child must receive keystrokes before the
+        // dialog's own Escape/dismiss handling gets a look at them.
+        #[derive(Default)]
+        struct FieldState {
+            text: String,
+        }
+
+        let view: GlyphDialogView<FieldState> = glyph_dialog().title("Rename").content(core_any::<
+            FieldState,
+            _,
+        >(
+            text_input(String::new(), |s: &mut FieldState, v| {
+                s.text = v;
+            }),
+        ));
+        let mut w = build(&view);
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        let area = Size::new(400.0, 600.0);
+        w.layout(&mut lctx, &BoxConstraints::tight(area));
+
+        let content_pod = w.body.as_ref().expect("content pod is built");
+        let tap = Point::new(
+            content_pod.origin().x + content_pod.size().width / 2.0,
+            content_pod.origin().y + content_pod.size().height / 2.0,
+        );
+
+        let mut state = FieldState::default();
+        let dispatch = |w: &mut GlyphDialogWidget, state: &mut FieldState, e: &InputEvent| {
+            let s: &mut dyn Any = state;
+            let mut ctx = EventCtx::new(s, Point::ZERO, area);
+            w.event(&mut ctx, e)
+        };
+
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, tap.x, tap.y));
+        assert!(
+            w.body.as_ref().unwrap().is_focused(),
+            "tapping the content field focuses it (not swallowed by the scrim barrier)"
+        );
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, tap.x, tap.y));
+
+        dispatch(
+            &mut w,
+            &mut state,
+            &InputEvent::Key(KeyEvent {
+                key: Key::Character("a".to_string()),
+                modifiers: Modifiers::default(),
+                repeat: false,
+            }),
+        );
+        assert_eq!(
+            state.text, "a",
+            "the focused content field received the keystroke instead of it being \
+             swallowed by the dialog's own Key handling"
+        );
+    }
+
+    #[test]
+    fn semantics_forwards_the_content_subtree() {
+        fn logic(_s: &mut ()) -> GlyphDialogView<()> {
+            glyph_dialog()
+                .title("Confirm")
+                .content(any::<(), _>(text("hello".to_string())))
+        }
+        let mut root: RenderRoot<(), GlyphDialogView<()>> = RenderRoot::new();
+        let mut state = ();
+        root.rebuild(&mut logic, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(Size::new(400.0, 600.0), &mut tcx as &mut dyn Any);
+        let update = root.semantics();
+
+        let (_, dialog_node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Dialog)
+            .expect("a Role::Dialog node is contributed");
+        let (content_id, _) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Label && n.value() == Some("hello"))
+            .expect("the content subtree's own semantics reached the tree — it was forwarded");
+        assert!(
+            dialog_node.children().contains(content_id),
+            "the content node is a direct semantics child of the dialog container"
         );
     }
 
