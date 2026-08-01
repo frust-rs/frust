@@ -31,6 +31,17 @@
 //! fresh editing value immediately, and layout needs no threaded context (it
 //! reads the editor's own refreshed metrics).
 //!
+//! **App fonts still reach it.** A private context does *not* mean a private
+//! font set: `TextContext::new` seeds itself from `frust-text`'s process-wide
+//! app-font record, which every `frust::register_app_fonts` payload lands in
+//! when the shell drains it into the shell-owned context. So a field built
+//! after a design system installed its fonts (`glyph_theme::install`) shapes
+//! with them, exactly like [`Text`](crate::TextView) does. A font registered
+//! *later* (a shell's per-frame late drain) is picked up by the
+//! `TextContext::sync_app_fonts` call at the top of [`Widget::layout`], which
+//! rebuilds the editor so its retained parley layout re-shapes too — the
+//! private context's shape cache alone would not cover it.
+//!
 //! # Focus, IME and blink
 //!
 //! A `Down` inside the field requests focus, places the caret, and publishes an
@@ -1100,11 +1111,19 @@ impl<State: 'static> View<State> for TextInputView<State> {
 
 impl Widget for TextInputWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        // Late-registered app fonts (a shell's per-frame font drain, after this
+        // widget's private context was built) — a lock and a length compare
+        // when nothing is pending. On an actual registration the editor's own
+        // retained parley layout is still shaped against the old faces, so it
+        // has to be rebuilt: `apply_style` with the unchanged style does
+        // exactly that (and takes the masked mirror with it), carrying the same
+        // narrow mid-composition caveat a theme swap does — see `apply_style`.
+        let fonts_changed = self.text_ctx.sync_app_fonts();
         // Resolve the themed style and rebuild the editor if it drifted from
         // what's currently installed (a theme swap, or a rebuild-invalidated
         // `style`/`text_style_explicit` — see `effective_style`/`apply_style`).
         let effective = self.effective_style(Theme::from_layout_ctx(ctx));
-        if effective != self.applied_style {
+        if fonts_changed || effective != self.applied_style {
             self.apply_style(effective);
         }
         // Catch-all mirror refresh: a rebuild-driven value/obscured change lands
@@ -2699,6 +2718,244 @@ mod tests {
             "placeholder with Monospace family should resolve to a different font \
              than the default SystemUi family; if this fails, ph_style likely \
              regressed to not preserving the configured family"
+        );
+    }
+
+    // --- App-font parity (the shell drain must reach the private context) ---
+    //
+    // A `TextInput` owns a private `TextContext` (module docs' Text context
+    // ownership). The defect this section pins: that private context used to be
+    // a bare `TextContext::new()`, so an app font registered through
+    // `frust::register_app_fonts` — drained by the shell into the *shell-owned*
+    // context, the one `LayoutCtx::text_context` threads to `Text` — never
+    // reached the field, which silently fell back to a platform face.
+    //
+    // `frust-widgets` cannot call `frust::register_app_fonts` (its registry
+    // lives in `frust-shell-common`, above this crate), so these tests
+    // reproduce the drain's single observable effect instead:
+    // `FontRegistryWatcher::drain_into` is a `TextContext::register_fonts` call
+    // on the shell-owned context, and nothing else.
+
+    /// The registered test font's bytes — the same public-domain subsetted
+    /// asset `frust-text`'s own registration tests use (and which
+    /// `frust-shell-common` likewise includes cross-crate rather than
+    /// duplicating a font file per crate).
+    const TUFFY: &[u8] = include_bytes!("../../frust-text/tests/fonts/Tuffy-Subset.ttf");
+
+    /// The same face with its `name` table rewritten to "Helvetica". Used for
+    /// the late-registration test so the *pre-registration* leg is meaningful
+    /// on any host: "Helvetica" resolves to whatever the platform has (or a
+    /// fallback) before registration, and to these exact bytes after, per
+    /// fontique's registered-shadows-system-family rule.
+    const TUFFY_AS_HELVETICA: &[u8] =
+        include_bytes!("../../frust-text/tests/fonts/Tuffy-As-Helvetica.ttf");
+
+    /// Tuffy's digit advance at 24px, in logical px — measured from this exact
+    /// asset through this exact parley pin (see `docs/DEVELOPMENT.md`'s
+    /// Version-Pin Policy). Hard-coded so the assertion is on the *shaped
+    /// metric*, not merely on "some font was registered": the device symptom
+    /// behind this bug was a wrong per-glyph advance (1-em fallback boxes)
+    /// while registration itself reported success.
+    const TUFFY_DIGIT_ADVANCE_24PX: f32 = 13.3125;
+
+    /// Slack on [`TUFFY_DIGIT_ADVANCE_24PX`]: parley lays out with
+    /// `quantize = true`, so a run's successive x deltas land on subpixel
+    /// boundaries and one digit pair in ten reads ~0.12px short of the nominal
+    /// advance. Far tighter than any real font swap (a fallback face differs by
+    /// whole pixels at this size).
+    const ADVANCE_TOLERANCE: f32 = 0.25;
+
+    /// The digits string every advance assertion shapes — uniform-width in
+    /// Tuffy, so one expected advance covers every glyph in the run.
+    const DIGITS: &str = "0123456789";
+
+    /// Records each painted glyph run's resolved font bytes and per-glyph
+    /// advances (successive x deltas) — shaped output, not registration state.
+    #[derive(Default)]
+    struct ShapedRunRecorder {
+        runs: Vec<(Vec<u8>, Vec<f32>)>,
+    }
+
+    impl PaintScene for ShapedRunRecorder {
+        fn fill_rect(&mut self, _o: Point, _s: Size, _c: Color) {}
+        fn fill_rounded_rect(&mut self, _o: Point, _s: Size, _r: f64, _c: Color) {}
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+        fn draw_glyph_run(&mut self, run: frust_scene::GlyphRun) {
+            let advances = run.glyphs.windows(2).map(|w| w[1].x - w[0].x).collect();
+            self.runs
+                .push((run.font.font().data.as_ref().to_vec(), advances));
+        }
+    }
+
+    /// Paint `root` and return the first glyph run's `(font bytes, advances)`.
+    fn painted_shaped_run(
+        root: &mut RenderRoot<AppState, TextInputView<AppState>>,
+    ) -> (Vec<u8>, Vec<f32>) {
+        let mut rec = ShapedRunRecorder::default();
+        root.paint(&mut rec, FrameTime::ZERO);
+        rec.runs.first().expect("one glyph run painted").clone()
+    }
+
+    /// A 24px style in `family`.
+    fn family_style(family: frust_text::FontFamily) -> TextStyle {
+        TextStyle {
+            family,
+            ..TextStyle::new(24.0, Color::BLACK)
+        }
+    }
+
+    /// A laid-out field carrying `value` (empty = the placeholder path) in
+    /// `family`, built *now* — i.e. with whatever fonts are registered at call
+    /// time, which is the ordering under test.
+    fn field_in_family(
+        state: &mut AppState,
+        family: frust_text::FontFamily,
+    ) -> RenderRoot<AppState, TextInputView<AppState>> {
+        let style = family_style(family);
+        let mut root = RenderRoot::new();
+        root.rebuild(
+            &mut |s: &mut AppState| {
+                text_input(s.value.clone(), |_s: &mut AppState, _v: String| {})
+                    .placeholder(DIGITS)
+                    .text_style(style.clone())
+            },
+            state,
+        );
+        root.layout(Size::new(600.0, 200.0));
+        root
+    }
+
+    /// Assert the shaped run resolved to `expected`'s exact bytes.
+    ///
+    /// Compared behind a `bool` rather than `assert_eq!` on purpose: an
+    /// `assert_eq!` between two font files prints both in full, which is tens
+    /// of megabytes of failure output per failing test.
+    fn assert_same_font(font: &[u8], expected: &[u8], what: &str) {
+        assert!(
+            font == expected,
+            "{what}: shaped against a different face than the registered app \
+             font ({} bytes shaped vs {} expected)",
+            font.len(),
+            expected.len()
+        );
+    }
+
+    /// Assert the shaped run resolved to something *other* than `other`'s bytes.
+    fn assert_other_font(font: &[u8], other: &[u8], what: &str) {
+        assert!(
+            font != other,
+            "{what}: expected a different face, got the same {} bytes",
+            font.len()
+        );
+    }
+
+    /// Assert every advance in `advances` is `expected` (within quantization
+    /// slack — see [`ADVANCE_TOLERANCE`]).
+    fn assert_uniform_advance(advances: &[f32], expected: f32, what: &str) {
+        assert!(!advances.is_empty(), "{what}: no advances measured");
+        for a in advances {
+            assert!(
+                (a - expected).abs() <= ADVANCE_TOLERANCE,
+                "{what}: shaped advance {a} != the registered font's own {expected} \
+                 (all advances: {advances:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn app_registered_font_shapes_the_field_content() {
+        // The shell's construction-time drain, reproduced exactly.
+        let mut shell_ctx = frust_text::TextContext::new();
+        shell_ctx
+            .register_fonts(TUFFY.to_vec())
+            .expect("valid TTF bytes must register");
+
+        // A field built *after* that drain — the real ordering: a design system
+        // registers its fonts from `app!`'s setup block, before the first
+        // rebuild builds any widget.
+        let mut state = AppState {
+            value: DIGITS.to_string(),
+            ..AppState::default()
+        };
+        let mut root = field_in_family(&mut state, frust_text::FontFamily::named("Tuffy"));
+        let (font, advances) = painted_shaped_run(&mut root);
+
+        assert_same_font(&font, TUFFY, "content");
+        assert_uniform_advance(&advances, TUFFY_DIGIT_ADVANCE_24PX, "content");
+
+        // Negative control: an unregistered family name resolves to a fallback
+        // face, whose bytes cannot be the registered asset's.
+        let mut fallback_state = AppState {
+            value: DIGITS.to_string(),
+            ..AppState::default()
+        };
+        let mut fallback_root = field_in_family(
+            &mut fallback_state,
+            frust_text::FontFamily::named("Frust No Such Family"),
+        );
+        let (fallback_font, fallback_advances) = painted_shaped_run(&mut fallback_root);
+        assert_other_font(&fallback_font, TUFFY, "unregistered-family control");
+        assert_ne!(
+            fallback_advances, advances,
+            "fixture sanity: the fallback face must shape these digits to \
+             different metrics, or this test could pass without the app font"
+        );
+    }
+
+    #[test]
+    fn app_registered_font_shapes_the_placeholder() {
+        // The placeholder shapes on its own path (`text_ctx.layout` in `paint`,
+        // not the editor's retained layout), so it needs its own coverage.
+        let mut shell_ctx = frust_text::TextContext::new();
+        shell_ctx
+            .register_fonts(TUFFY.to_vec())
+            .expect("valid TTF bytes must register");
+
+        // Empty value + never focused = the placeholder is what gets painted.
+        let mut state = AppState::default();
+        let mut root = field_in_family(&mut state, frust_text::FontFamily::named("Tuffy"));
+        let (font, advances) = painted_shaped_run(&mut root);
+
+        assert_same_font(&font, TUFFY, "placeholder");
+        assert_uniform_advance(&advances, TUFFY_DIGIT_ADVANCE_24PX, "placeholder");
+    }
+
+    #[test]
+    fn font_registered_after_build_reshapes_the_field_at_the_next_layout() {
+        // The shells' *per-frame* late drain: a font can register after this
+        // widget's private context was built. `layout`'s `sync_app_fonts` picks
+        // it up and rebuilds the editor, whose retained parley layout would
+        // otherwise stay shaped against the old faces (clearing the private
+        // context's shape cache alone would not cover it).
+        let mut state = AppState {
+            value: DIGITS.to_string(),
+            ..AppState::default()
+        };
+        let mut root = field_in_family(&mut state, frust_text::FontFamily::named("Helvetica"));
+        let (before_font, before_advances) = painted_shaped_run(&mut root);
+        assert_other_font(
+            &before_font,
+            TUFFY_AS_HELVETICA,
+            "pre-registration control (nothing has registered this face yet)",
+        );
+
+        let mut shell_ctx = frust_text::TextContext::new();
+        shell_ctx
+            .register_fonts(TUFFY_AS_HELVETICA.to_vec())
+            .expect("valid TTF bytes must register");
+
+        // The shell forces LAYOUT on a `drain_into` that applied something;
+        // this is that relayout.
+        root.layout(Size::new(600.0, 200.0));
+        let (after_font, after_advances) = painted_shaped_run(&mut root);
+
+        // A registered family shadows any system "Helvetica" (fontique 0.11),
+        // so this holds on every host.
+        assert_same_font(&after_font, TUFFY_AS_HELVETICA, "late-registered");
+        assert_uniform_advance(&after_advances, TUFFY_DIGIT_ADVANCE_24PX, "late-registered");
+        assert_ne!(
+            after_advances, before_advances,
+            "the late registration must actually change the shaped metrics"
         );
     }
 

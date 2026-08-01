@@ -5,6 +5,16 @@
 //! a [`parley::FontContext`] (system font sources, loaded via fontique — Core
 //! Text on macOS with no registration) and a [`parley::LayoutContext`] scratch
 //! buffer reused across layout passes.
+//!
+//! # App fonts across independent contexts
+//!
+//! A shell owns *the* context widgets shape through at layout time, but a
+//! widget that must shape outside the layout pass legitimately owns a private
+//! one (`frust_widgets::textinput`). [`APP_FONTS`] is the process-wide record
+//! that keeps those two in agreement about registered app fonts — see its docs
+//! for the layering rationale.
+
+use std::sync::Mutex;
 
 use parley::fontique::Blob;
 use parley::style::StyleProperty;
@@ -38,6 +48,34 @@ pub enum FontError {
     NoFacesFound,
 }
 
+/// The process-wide record of every font blob a [`TextContext::register_fonts`]
+/// call accepted, in registration order and **never drained**.
+///
+/// # Why this lives here
+///
+/// App fonts enter the framework through `frust::register_app_fonts`, whose
+/// pending-byte slot (`frust_shell_common::font_registry`) each shell drains —
+/// destructively — into the one shell-owned `TextContext`. That context is the
+/// one `LayoutCtx::text_context` threads to widgets during layout, so every
+/// widget shaping through it (`Text`) already sees app fonts. The gap is the
+/// widget that legitimately owns a *private* context: `TextInput` applies edits
+/// synchronously during the event pass, where no context is threaded (see
+/// `frust_widgets::textinput`'s module docs), and a private context built after
+/// the shell drained the pending slot would otherwise carry no app font at all.
+///
+/// `frust-widgets` cannot read the shell's slot — `frust-shell-common` sits
+/// *above* it (`docs/ARCHITECTURE.md`'s layer dependencies) — so the durable
+/// record lives at the one layer the shell drain and every widget both already
+/// depend on. Registering into any context records the blob here; every other
+/// context picks it up through [`TextContext::sync_app_fonts`], which
+/// [`TextContext::new`] calls for free.
+///
+/// Append-only by design: the payloads must survive to seed contexts created
+/// *later*, which is exactly what a drain-once slot cannot do. Blobs are
+/// `Arc`-backed, so seeding a fresh context costs a refcount bump plus
+/// fontique's own parse, never a copy of the font bytes.
+static APP_FONTS: Mutex<Vec<Blob<u8>>> = Mutex::new(Vec::new());
+
 /// Owns parley's font matching and layout scratch state.
 ///
 /// This is deliberately not `Clone`/`Sync`: it is expensive per-instance state
@@ -52,20 +90,32 @@ pub struct TextContext {
     /// line-breaking only and repeated content shapes once. See
     /// [`crate::shape_cache`].
     shape_cache: ShapeCache,
+    /// How many of [`APP_FONTS`]' blobs this context has already registered —
+    /// its watermark into that append-only record. Bumped by
+    /// [`Self::sync_app_fonts`] and [`Self::register_fonts`].
+    app_fonts_applied: usize,
 }
 
 impl TextContext {
-    /// Builds a context with system fonts available.
+    /// Builds a context with system fonts available, seeded with every app font
+    /// registered so far.
     ///
     /// [`parley::FontContext::new`] populates the fontique source collection from
     /// the platform (Core Text on macOS); no manual font registration is
     /// required for the default [`crate::FontFamily::SystemUi`] to resolve.
+    ///
+    /// The seeding step ([`Self::sync_app_fonts`]) is what makes a *private*
+    /// context (a `TextInput`'s) shape with the same app fonts the shell-owned
+    /// context does, however late it is constructed — see [`APP_FONTS`].
     pub fn new() -> Self {
-        Self {
+        let mut cx = Self {
             font_ctx: parley::FontContext::new(),
             layout_ctx: parley::LayoutContext::new(),
             shape_cache: ShapeCache::new(DEFAULT_CAPACITY),
-        }
+            app_fonts_applied: 0,
+        };
+        cx.sync_app_fonts();
+        cx
     }
 
     /// Lays out `text` with `style`, wrapping to `max_width` when supplied.
@@ -149,12 +199,36 @@ impl TextContext {
     /// theme swap does (see `docs/ARCHITECTURE.md`'s Theme delivery), so the
     /// next layout pass re-shapes against the newly registered faces. This
     /// crate only owns the shape-cache half of that contract.
+    ///
+    /// An accepted payload is also recorded process-wide ([`APP_FONTS`]), so
+    /// every `TextContext` constructed later — and every existing one that
+    /// calls [`Self::sync_app_fonts`] — resolves the same family. That is what
+    /// carries an app font from a shell's drain into a widget-owned private
+    /// context.
     pub fn register_fonts(&mut self, data: Vec<u8>) -> Result<Vec<RegisteredFamily>, FontError> {
         let blob = Blob::from(data);
-        let registered = self.font_ctx.collection.register_fonts(blob, None);
+
+        // Held across the registration below so the watermark this sets cannot
+        // skip a blob another context records concurrently.
+        let mut slot = APP_FONTS.lock().unwrap_or_else(|e| e.into_inner());
+        // Catch up first: this context may be behind the record (another
+        // context registered since it was built), and the watermark below
+        // would otherwise declare those blobs applied without applying them.
+        for missed in &slot[self.app_fonts_applied..] {
+            let _ = self
+                .font_ctx
+                .collection
+                .register_fonts(missed.clone(), None);
+        }
+        self.app_fonts_applied = slot.len();
+
+        let registered = self.font_ctx.collection.register_fonts(blob.clone(), None);
         if registered.is_empty() {
             return Err(FontError::NoFacesFound);
         }
+        slot.push(blob);
+        self.app_fonts_applied = slot.len();
+        drop(slot);
 
         let families = registered
             .into_iter()
@@ -171,6 +245,43 @@ impl TextContext {
 
         self.clear_shape_cache();
         Ok(families)
+    }
+
+    /// Registers every app font this context is missing (see [`APP_FONTS`]),
+    /// returning whether at least one face actually registered.
+    ///
+    /// Cheap when there is nothing to do — one lock and a length compare, no
+    /// allocation and no font parsing — so a widget owning a private context
+    /// can call it once per layout pass to pick up a font registered *after*
+    /// the context was built (the shells' per-frame late drain).
+    ///
+    /// A `true` return carries the same caller-visible relayout contract as
+    /// [`Self::register_fonts`]: this context's shape cache is cleared, but a
+    /// layout retained *outside* it (a [`crate::TextEditor`]'s parley layout)
+    /// must be re-shaped by its owner.
+    pub fn sync_app_fonts(&mut self) -> bool {
+        let slot = APP_FONTS.lock().unwrap_or_else(|e| e.into_inner());
+        if self.app_fonts_applied == slot.len() {
+            return false;
+        }
+        let mut applied = false;
+        for blob in &slot[self.app_fonts_applied..] {
+            if !self
+                .font_ctx
+                .collection
+                .register_fonts(blob.clone(), None)
+                .is_empty()
+            {
+                applied = true;
+            }
+        }
+        self.app_fonts_applied = slot.len();
+        drop(slot);
+
+        if applied {
+            self.clear_shape_cache();
+        }
+        applied
     }
 
     /// Drops every cached shaped layout, forcing the next [`Self::layout`]
@@ -213,6 +324,62 @@ mod tests {
     /// A body-text style at `size`.
     fn style(size: f32) -> TextStyle {
         TextStyle::new(size, Color::BLACK)
+    }
+
+    /// The registered-font fixture, shared with `tests/register_fonts.rs`.
+    const TUFFY: &[u8] = include_bytes!("../tests/fonts/Tuffy-Subset.ttf");
+
+    /// The raw bytes of the face a shaped run of `text` actually resolved to.
+    fn shaped_font_bytes(cx: &mut TextContext, text: &str, sty: &TextStyle) -> Vec<u8> {
+        let layout = cx.layout(text, sty, None);
+        let runs = layout.to_scene_runs(kurbo::Point::ORIGIN);
+        runs.first()
+            .expect("expected at least one glyph run")
+            .font
+            .font()
+            .data
+            .as_ref()
+            .to_vec()
+    }
+
+    #[test]
+    fn an_app_font_reaches_contexts_built_later_and_older_ones_on_sync() {
+        // The seam FINDINGS #35 turns on: `register_fonts` is what a shell's
+        // font drain calls, and a widget-owned context (a `TextInput`'s) is
+        // built from `new()` long after that drain. Both legs below are
+        // monotone — the record is append-only and never reset, so nothing
+        // here depends on the order tests run in.
+        let s = TextStyle {
+            family: crate::FontFamily::named("Tuffy"),
+            ..style(24.0)
+        };
+
+        // A context that exists *before* the registration.
+        let mut older = TextContext::new();
+
+        // The shell's drain.
+        let mut shell = TextContext::new();
+        shell
+            .register_fonts(TUFFY.to_vec())
+            .expect("valid TTF bytes must register");
+
+        // A context built after it needs no explicit sync.
+        let mut later = TextContext::new();
+        assert!(
+            !later.sync_app_fonts(),
+            "a freshly built context is already current with the app-font record"
+        );
+        assert!(
+            shaped_font_bytes(&mut later, "0123456789", &s) == TUFFY,
+            "a context built after the registration must shape with the app font"
+        );
+
+        // An older one picks it up on the explicit sync a per-frame caller makes.
+        older.sync_app_fonts();
+        assert!(
+            shaped_font_bytes(&mut older, "0123456789", &s) == TUFFY,
+            "an already-built context must pick the app font up on sync_app_fonts"
+        );
     }
 
     #[test]
