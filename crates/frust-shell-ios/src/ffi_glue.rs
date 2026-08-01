@@ -55,7 +55,7 @@ use std::sync::{Arc, Once};
 
 use anyhow::{Context, Result, bail};
 
-use frust_core::event::{EditingState, ImeState};
+use frust_core::event::{EditingState, ImeContentType, ImeState};
 use frust_reactive::{ReactiveRuntime, push_deep_link};
 use frust_render::{RenderContext, SurfaceAlphaRequest, SurfacePhase, SurfaceRenderer};
 use frust_scene::Scene;
@@ -1216,9 +1216,40 @@ unsafe fn cstr_to_string(ptr: *const c_char) -> String {
         .into_owned()
 }
 
+/// Map [`ImeContentType`] onto the stable wire string
+/// [`crate::ffi_support::ime_state_json`] embeds as `"contentType"`.
+///
+/// `ImeContentType` is `#[non_exhaustive]`, and this crate is not the crate
+/// that defines it, so (unlike `ImeContentType::is_secret`/
+/// `suppresses_suggestions`, defined alongside the enum) a wildcard arm is
+/// mandatory here — `rustc` will not let this bridge compile against a future
+/// variant it hasn't seen. Rather than let that wildcard silently default to
+/// `"normal"` (exactly the downgrade the type's own docs warn about), it
+/// fails closed using the same [`ImeContentType::is_secret`]/
+/// [`ImeContentType::suppresses_suggestions`] predicates the enum's docs
+/// mandate matching on for this reason: an unrecognized variant becomes the
+/// *strictest* wire string its own predicates justify, never the loosest.
+fn content_type_wire(content_type: ImeContentType) -> &'static str {
+    match content_type {
+        ImeContentType::Normal => "normal",
+        ImeContentType::Password => "password",
+        ImeContentType::NoSuggestions => "noSuggestions",
+        other => {
+            if other.is_secret() {
+                "password"
+            } else if other.suppresses_suggestions() {
+                "noSuggestions"
+            } else {
+                "normal"
+            }
+        }
+    }
+}
+
 /// Convert the focused widget's published [`ImeState`] (or its absence) into the
 /// bridge JSON, mapping the logical-pixel caret rect into the flat
-/// caretX/Y/W/H the Swift side expects.
+/// caretX/Y/W/H the Swift side expects and [`ImeContentType`] into the
+/// `"contentType"` wire string (see [`content_type_wire`]).
 fn ime_state_to_json(state: Option<ImeState>) -> String {
     match state {
         Some(s) => {
@@ -1236,10 +1267,20 @@ fn ime_state_to_json(state: Option<ImeState>) -> String {
                 s.editing.composing_base,
                 s.editing.composing_extent,
                 caret,
+                content_type_wire(s.content_type),
             )
         }
         // No focused field / no published surface: the inactive sentinel.
-        None => crate::ffi_support::ime_state_json(false, "", -1, -1, -1, -1, None),
+        None => crate::ffi_support::ime_state_json(
+            false,
+            "",
+            -1,
+            -1,
+            -1,
+            -1,
+            None,
+            content_type_wire(ImeContentType::Normal),
+        ),
     }
 }
 
@@ -1615,4 +1656,77 @@ mod macro_expansion_state_factory {
     }
 
     crate::ios_app!(NonDefaultState, init_state, test_logic);
+}
+
+/// `content_type_wire`/`ime_state_to_json` coverage. Compiled (and would run)
+/// only under `#[cfg(target_os = "ios")]` — this crate's C-ABI/`frust-core`
+/// dependency is iOS-target-gated (see the crate's `Cargo.toml`), so unlike
+/// [`crate::ffi_support`]'s tests this module never executes on the Linux
+/// host `cargo test --workspace` runs on; it is verified only by
+/// `cargo check --all-targets --target aarch64-apple-ios-sim -p
+/// frust-shell-ios` (compiles, does not run) until an iOS test runner exists.
+#[cfg(test)]
+mod ime_content_type_wire {
+    use frust_core::event::{EditingState, ImeContentType, ImeState};
+
+    use super::{content_type_wire, ime_state_to_json};
+
+    #[test]
+    fn every_variant_maps_to_its_stable_wire_string() {
+        assert_eq!(content_type_wire(ImeContentType::Normal), "normal");
+        assert_eq!(content_type_wire(ImeContentType::Password), "password");
+        assert_eq!(
+            content_type_wire(ImeContentType::NoSuggestions),
+            "noSuggestions"
+        );
+    }
+
+    #[test]
+    fn absent_state_encodes_as_normal() {
+        // No focused field: the inactive sentinel must not default to a
+        // secret classification (that would be over-restrictive, not a leak,
+        // but it's still the wrong default — "normal" is what "no field" is).
+        assert!(ime_state_to_json(None).contains(r#""contentType":"normal""#));
+    }
+
+    #[test]
+    fn published_password_state_carries_it_through_to_json() {
+        let state = ImeState {
+            active: true,
+            editing: EditingState {
+                text: "hunter2".to_string(),
+                selection_base: 7,
+                selection_extent: 7,
+                composing_base: -1,
+                composing_extent: -1,
+            },
+            caret: None,
+            content_type: ImeContentType::Password,
+        };
+        let json = ime_state_to_json(Some(state));
+        assert!(json.contains(r#""contentType":"password""#));
+        // The leak this finding closes is the suggestion strip, not the
+        // published text — the core deliberately still carries the real
+        // text for the platform mirror (see `ImeState` docs); confirm this
+        // bridge doesn't (re)introduce redaction that would desync it.
+        assert!(json.contains(r#""text":"hunter2""#));
+    }
+
+    #[test]
+    fn published_no_suggestions_state_carries_it_through_to_json() {
+        let state = ImeState {
+            active: true,
+            editing: EditingState {
+                text: "AB12-CD34".to_string(),
+                selection_base: 9,
+                selection_extent: 9,
+                composing_base: -1,
+                composing_extent: -1,
+            },
+            caret: None,
+            content_type: ImeContentType::NoSuggestions,
+        };
+        let json = ime_state_to_json(Some(state));
+        assert!(json.contains(r#""contentType":"noSuggestions""#));
+    }
 }

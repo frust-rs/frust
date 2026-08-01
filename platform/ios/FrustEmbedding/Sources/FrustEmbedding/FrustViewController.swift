@@ -464,10 +464,68 @@ open class FrustViewController: UIViewController {
         if active {
             if !forgeView.isFirstResponder {
                 forgeView.seedMirror(from: state)
+                // Content-type traits (secure entry, autocorrect,
+                // spell-check) must land BEFORE `becomeFirstResponder()` —
+                // UIKit reads them when it stands up the keyboard for this
+                // responder, not continuously afterward, so setting them
+                // after would leave the wrong keyboard configuration live for
+                // this focus session.
+                applyImeContentType(state["contentType"] as? String)
                 forgeView.becomeFirstResponder()
             }
         } else if forgeView.isFirstResponder {
             forgeView.resignFirstResponder()
+        }
+    }
+
+    /// Map the wire `"contentType"` string (`"normal"` / `"password"` /
+    /// `"noSuggestions"` — encoded on the Rust side by
+    /// `frust_shell_ios::ffi_glue::content_type_wire` from
+    /// `frust_core::event::ImeContentType`) onto the UIKit text-input traits
+    /// that actually suppress the QuickType suggestion bar and keyboard
+    /// learning (FINDINGS #31).
+    ///
+    /// `isSecureTextEntry` is the load-bearing flag for `"password"`: it is
+    /// what stops UIKit from echoing typed characters into the suggestion
+    /// strip and from persisting them into the personalized-learning
+    /// dictionary — the exact leak this finding closes. `textContentType =
+    /// .password` layers the system's password-manager/autofill heuristics
+    /// on top. `"noSuggestions"` is the non-secret sibling: entry stays
+    /// visible (no `isSecureTextEntry`), but autocorrect/spell-check/learning
+    /// are still switched off.
+    ///
+    /// `ImeContentType` has exactly three variants today (no dedicated
+    /// "new password" or "one-time code" hint yet), so this does not reach
+    /// for `.newPassword`/`.oneTimeCode` — `.oneTimeCode` in particular
+    /// actively invites a QuickType suggestion (SMS-code autofill), which
+    /// would fight `"noSuggestions"`'s whole purpose. Revisit this mapping if
+    /// `ImeContentType` grows a variant those fit.
+    ///
+    /// Any wire value this switch doesn't recognize — including `nil` (no
+    /// `"contentType"` key, which should not happen once the core always
+    /// populates the field, but a shell must not trust wire input) — falls
+    /// through to the `"password"` arm: the same fail-closed rule
+    /// `content_type_wire`'s doc comment states on the Rust side, applied
+    /// here at the boundary that actually renders it. A field that state-sync
+    /// forgot to classify becomes stricter than intended, never a secret
+    /// field that got de-classified into a plaintext keyboard.
+    private func applyImeContentType(_ wire: String?) {
+        switch wire {
+        case "normal":
+            forgeView.isSecureTextEntry = false
+            forgeView.textContentType = nil
+            forgeView.autocorrectionType = .yes
+            forgeView.spellCheckingType = .default
+        case "noSuggestions":
+            forgeView.isSecureTextEntry = false
+            forgeView.textContentType = nil
+            forgeView.autocorrectionType = .no
+            forgeView.spellCheckingType = .no
+        default:  // "password", nil, or any unrecognized future value.
+            forgeView.isSecureTextEntry = true
+            forgeView.textContentType = .password
+            forgeView.autocorrectionType = .no
+            forgeView.spellCheckingType = .no
         }
     }
 
