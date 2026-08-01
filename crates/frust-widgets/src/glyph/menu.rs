@@ -111,6 +111,27 @@
 //! back-press handling) and stages the same animated exit a scrim tap or
 //! `Escape` does.
 //!
+//! # Leading icon slot (rider FINDINGS #46)
+//!
+//! Glyph's own overflow-menu design draws a leading icon per row, but
+//! [`MenuItem`] originally carried only `{label, variant}` — no way to
+//! vector one. [`MenuItem::icon`] (equivalently, [`MenuEntry::icon`] chained
+//! straight off [`menu_item`]/[`menu_item_danger`]) attaches an
+//! [`crate::icon::IconData`], painted at [`ITEM_ICON_SIZE`] just inside the
+//! row's leading padding, tinted the item's own normal/danger ink (the same
+//! color the label itself resolves), with [`ITEM_ICON_GAP`] before the
+//! label. A [`MenuEntry::Separator`] has no icon slot — chaining `.icon(..)`
+//! onto one is a no-op, not a panic (mirrors this catalog's general
+//! silent-drop-on-inapplicable-slot precedent rather than making a
+//! chainable builder fallible).
+//!
+//! **No `&str`-vs-icon precedence rule is needed here** (unlike
+//! [`crate::glyph::empty_state::EmptyStateView`], which has one glyph slot
+//! two representations compete for): `label` and `icon` are independent
+//! slots on the same [`MenuItem`] that always render *together* when both
+//! are set — the icon never replaces or hides the label text, so there is
+//! nothing to arbitrate between them.
+//!
 //! # Semantics
 //!
 //! The whole menu contributes one [`Role::Menu`] container node with the
@@ -142,6 +163,7 @@ use kurbo::{Affine, Point, Rect, RoundedRect, Shape, Size, Vec2};
 use peniko::{Brush, Color};
 
 use crate::Timing;
+use crate::icon::IconData;
 use crate::motion::patterns::GlyphStagger;
 use crate::nav::navigator::{BackPolicy, NavigatorController, PopResult, PushOptions};
 use crate::nav::transition::{TransitionDriver, TransitionSpec, make_driver};
@@ -164,6 +186,17 @@ const SEP_TOTAL_H: f64 = 11.0;
 /// A separator's horizontal inset from the panel's padded edges (the design
 /// system: `.dd-sep{margin:5px 4px}`'s `4px`).
 const SEP_INSET_X: f64 = 4.0;
+/// An item's leading icon side length, in logical px (an original,
+/// hand-picked value — the design system's own overflow-menu reference
+/// doesn't specify a pixel size for its leading-icon rows, so this is sized
+/// down from the catalog's default 24px icon box to sit comfortably inside
+/// [`ITEM_ROW_H`] alongside the `11.5px` label — see the module docs'
+/// Leading icon slot section).
+const ITEM_ICON_SIZE: f64 = 16.0;
+/// Gap between an item's leading icon and its label, in logical px (an
+/// original, hand-picked value, matching this catalog's typical icon/label
+/// gap — e.g. `crate::glyph::navbar`'s `NAV_ITEM_GAP`-scale spacing).
+const ITEM_ICON_GAP: f64 = 8.0;
 /// Minimum panel width (the design system: `.dropdown{min-width:170px}`).
 const MIN_WIDTH: f64 = 170.0;
 /// Maximum panel width (an original, hand-picked value — the design system leaves it
@@ -368,6 +401,17 @@ fn item_style(color: Color) -> TextStyle {
     }
 }
 
+/// The horizontal space an item's leading icon slot reserves before its
+/// label — [`ITEM_ICON_SIZE`] plus [`ITEM_ICON_GAP`] when the item carries
+/// an icon, `0.0` otherwise (no icon, no reserved space).
+fn icon_reserve(item: &MenuItem) -> f64 {
+    if item.icon.is_some() {
+        ITEM_ICON_SIZE + ITEM_ICON_GAP
+    } else {
+        0.0
+    }
+}
+
 /// A selectable menu item's visual emphasis — `Danger` for a destructive
 /// action ("Danger uses the error role").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -376,12 +420,35 @@ pub enum MenuItemVariant {
     Danger,
 }
 
-/// One selectable menu item: a label plus its [`MenuItemVariant`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One selectable menu item: a label, its [`MenuItemVariant`], and an
+/// optional leading icon (see the module docs' Leading icon slot section).
+///
+/// `icon` is compared via [`IconData::same`] rather than derived
+/// `PartialEq` (which [`IconData`] doesn't implement — a generated
+/// [`crate::icons`] source has no natural structural equality beyond its
+/// `d`/`design` pair, which `same` already checks), so `MenuItem`/
+/// [`MenuEntry`] implement `PartialEq`/`Eq` by hand below instead of via
+/// `#[derive]`.
+#[derive(Clone, Debug)]
 pub struct MenuItem {
     pub label: String,
     pub variant: MenuItemVariant,
+    pub icon: Option<IconData>,
 }
+
+impl PartialEq for MenuItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.label == other.label
+            && self.variant == other.variant
+            && match (&self.icon, &other.icon) {
+                (Some(a), Some(b)) => a.same(b),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+impl Eq for MenuItem {}
 
 impl MenuItem {
     /// A normal-emphasis item.
@@ -389,6 +456,7 @@ impl MenuItem {
         Self {
             label: label.into(),
             variant: MenuItemVariant::Normal,
+            icon: None,
         }
     }
 
@@ -397,7 +465,15 @@ impl MenuItem {
         Self {
             label: label.into(),
             variant: MenuItemVariant::Danger,
+            icon: None,
         }
+    }
+
+    /// Attach a leading vector icon to this item (see the module docs'
+    /// Leading icon slot section).
+    pub fn icon(mut self, icon: impl Into<IconData>) -> Self {
+        self.icon = Some(icon.into());
+        self
     }
 }
 
@@ -407,6 +483,19 @@ impl MenuItem {
 pub enum MenuEntry {
     Item(MenuItem),
     Separator,
+}
+
+impl MenuEntry {
+    /// Attach a leading vector icon to this entry — a no-op on
+    /// [`MenuEntry::Separator`] (see the module docs' Leading icon slot
+    /// section). Chainable straight off [`menu_item`]/[`menu_item_danger`],
+    /// e.g. `menu_item("Rename").icon(icons::EDIT)`.
+    pub fn icon(mut self, icon: impl Into<IconData>) -> Self {
+        if let MenuEntry::Item(item) = &mut self {
+            item.icon = Some(icon.into());
+        }
+        self
+    }
 }
 
 impl From<MenuItem> for MenuEntry {
@@ -790,7 +879,7 @@ impl Widget for GlyphMenuWidget {
                     MenuItemVariant::Danger => danger_c,
                 };
                 row.label_size = label.layout(ctx, &item_style(color));
-                content_w = content_w.max(row.label_size.width);
+                content_w = content_w.max(icon_reserve(item) + row.label_size.width);
             }
         }
 
@@ -893,6 +982,10 @@ impl Widget for GlyphMenuWidget {
         );
 
         let item_radius = resolve_item_radius(theme);
+        // Per-item ink for the leading icon slot — the same normal/danger
+        // resolution `layout`'s label shaping already applied (see the
+        // module docs' Leading icon slot section).
+        let (label_c, danger_c) = (resolve_label(theme), resolve_danger(theme));
         let mut item_idx = 0usize;
         for (i, row) in self.rows.iter().enumerate() {
             let Some(r) = self.row_rects.get(i) else {
@@ -926,9 +1019,27 @@ impl Widget for GlyphMenuWidget {
                         };
                         scene.fill_rounded_rect(row_origin, r.size(), item_radius, wash);
                     }
+                    if let Some(icon_data) = &item.icon {
+                        let color = match item.variant {
+                            MenuItemVariant::Normal => label_c,
+                            MenuItemVariant::Danger => danger_c,
+                        };
+                        let (path, design) = icon_data.resolve();
+                        let scale = if design > 0.0 {
+                            ITEM_ICON_SIZE / design
+                        } else {
+                            1.0
+                        };
+                        let scaled = Affine::scale(scale) * path;
+                        let icon_origin = Point::new(
+                            row_origin.x + ITEM_PAD_X,
+                            row_origin.y + (r.size().height - ITEM_ICON_SIZE) / 2.0,
+                        );
+                        scene.fill_path(icon_origin, &scaled, &Brush::Solid(color));
+                    }
                     if let Some(label) = &row.label {
                         let label_origin = Point::new(
-                            row_origin.x + ITEM_PAD_X,
+                            row_origin.x + ITEM_PAD_X + icon_reserve(item),
                             row_origin.y + (r.size().height - row.label_size.height) / 2.0,
                         );
                         label.paint(label_origin, scene);
@@ -1084,6 +1195,7 @@ mod tests {
         rrects: Vec<(Point, Size, f64, Color)>,
         shadows: usize,
         strokes: Vec<Color>,
+        path_fills: Vec<(Point, Rect, Color)>,
         transforms: Vec<Affine>,
         transform_pops: u32,
         layers: Vec<(Point, Size, f32)>,
@@ -1103,6 +1215,11 @@ mod tests {
         fn stroke_path(&mut self, _o: Point, _p: &kurbo::BezPath, _w: f64, brush: &Brush) {
             if let Brush::Solid(c) = brush {
                 self.strokes.push(*c);
+            }
+        }
+        fn fill_path(&mut self, origin: Point, path: &kurbo::BezPath, brush: &Brush) {
+            if let Brush::Solid(c) = brush {
+                self.path_fills.push((origin, path.bounding_box(), *c));
             }
         }
         fn push_transform(&mut self, t: Affine) {
@@ -1267,6 +1384,76 @@ mod tests {
         for (_, _, alpha) in &rec.layers {
             assert!((*alpha - 1.0).abs() < 1e-3, "fully settled stagger");
         }
+    }
+
+    // -- Leading icon slot (rider FINDINGS #46) --------------------------
+
+    /// A 10×10-design filled diamond, mirroring
+    /// `crate::glyph::navbar::tests::diamond_icon` — a known bounding box so
+    /// the icon-fill assertions below are deterministic.
+    fn diamond_icon() -> IconData {
+        let mut p = kurbo::BezPath::new();
+        p.move_to((5.0, 0.0));
+        p.line_to((10.0, 5.0));
+        p.line_to((5.0, 10.0));
+        p.line_to((0.0, 5.0));
+        p.close_path();
+        IconData::from_path(p, 10.0)
+    }
+
+    #[test]
+    fn icon_item_paints_a_filled_path_leading_the_label() {
+        let entries = vec![
+            menu_item("Rename session").icon(diamond_icon()),
+            menu_item_danger("Kill session").icon(diamond_icon()),
+        ];
+        let view = glyph_menu(Rect::new(700.0, 40.0, 740.0, 80.0), entries);
+        let mut w = build(&view);
+        let area = Size::new(800.0, 600.0);
+        layout(&mut w, area);
+        w.phase = Phase::Shown;
+        w.stagger = build_stagger(2);
+        w.stagger.advance(ft_ms(0.0));
+        w.stagger.advance(ft_ms(10_000.0));
+
+        let mut rec = Recorder::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, area);
+        w.paint(&mut pctx, &mut rec);
+
+        // The vector path is actually painted — a real fill_path call with a
+        // non-degenerate bounding box scaled into the icon box, not merely
+        // that the builder accepted a value.
+        assert_eq!(rec.path_fills.len(), 2, "one fill_path per icon item");
+        let (_, normal_bbox, normal_color) = rec.path_fills[0];
+        assert!(
+            (normal_bbox.width() - ITEM_ICON_SIZE).abs() < 1e-6,
+            "icon scaled to ITEM_ICON_SIZE"
+        );
+        assert!((normal_bbox.height() - ITEM_ICON_SIZE).abs() < 1e-6);
+        assert_eq!(normal_color, resolve_label(None), "normal item icon tint");
+        let (_, _, danger_color) = rec.path_fills[1];
+        assert_eq!(danger_color, resolve_danger(None), "danger item icon tint");
+    }
+
+    #[test]
+    fn icon_on_separator_is_a_no_op() {
+        let entry = menu_separator().icon(diamond_icon());
+        assert_eq!(
+            entry,
+            MenuEntry::Separator,
+            "icon is dropped on a separator"
+        );
+    }
+
+    #[test]
+    fn structural_diff_treats_a_same_source_icon_as_unchanged() {
+        // Two `MenuItem`s built from the same generated `IconSource` compare
+        // equal (same `d`/`design` pair) even though each `.into()` call
+        // produces a fresh `IconData` handle — mirrors
+        // `IconData::same`'s "generated source" branch.
+        let a = MenuItem::new("Rename").icon(crate::icons::EDIT);
+        let b = MenuItem::new("Rename").icon(crate::icons::EDIT);
+        assert_eq!(a, b);
     }
 
     // -- Navigator integration: selection pops with Some(index) ---------
