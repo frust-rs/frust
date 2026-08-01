@@ -537,7 +537,12 @@ Use the owning test layer:
 - `frust-drive`: fake `ProcessRunner` unit tests plus narrowly scoped real-tool
   end-to-end tests.
 - `frust-cli`: argument/dispatch tests, scaffold content tests, profile-sync
-  tripwires, and ignored real Cargo/Gradle/Xcode build gates.
+  tripwires, and ignored real Cargo/Gradle/Xcode build gates. Behaviour that
+  only exists while the process is *dying* (the release-signing file's
+  signal-time cleanup) is covered by spawning the compiled binary against a
+  faked toolchain — a stub `rustup`/`cargo`/`java` on `PATH` and a `gradlew`
+  that sleeps — then signalling its process group: real signals, no SDK, and
+  fast enough to stay in the default gate rather than behind `--ignored`.
 - `frust-tui`: engine/update tests and terminal snapshots at normal, narrow,
   and minimum sizes; retain manual terminal restoration and live mouse/keyboard
   checks.

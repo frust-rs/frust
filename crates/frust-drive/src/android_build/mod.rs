@@ -104,12 +104,15 @@ fn build_with_env(
     // material it verified is handed to Gradle as
     // `android/.frust-signing.properties` (unprefixed keys, absolute
     // storeFile). The guard's `Drop` deletes that file the moment this
-    // function returns — including every `?`/`bail!` path below — so the
-    // plaintext passwords never outlive the Gradle invocation that needed
-    // them. Non-release modes and `[signing] external = true` resolve to
-    // `None` and write nothing.
+    // function returns — including every `?`/`bail!` path below — and the
+    // `crate::interrupt` registration it carries (armed before the file is
+    // created) covers the routes `Drop` cannot: a Ctrl-C or SIGTERM during the
+    // multi-minute Gradle invocation below, and an abort. So the plaintext
+    // passwords never outlive the Gradle invocation that needed them. Non-
+    // release modes and `[signing] external = true` resolve to `None` and write
+    // nothing.
     let generated = signing::check_release_signing(project_dir, info.mode, on_line)?
-        .map(|resolved| signing::write_resolved(&android_dir, &resolved))
+        .map(|resolved| signing::write_resolved(&android_dir, &resolved, on_line))
         .transpose()?;
     // `Some` iff this is a release build the gate actually vouched for — a
     // non-release mode and `[signing] external = true` both resolve to `None`.

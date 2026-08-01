@@ -146,10 +146,13 @@ fn run_with_env(
     // Default SIGINT disposition would exit 130; a streamed run wants
     // Ctrl-C to stop the (already-SIGINT'd, same-process-group) `adb
     // logcat` child and exit 0.
-    ctrlc::set_handler(|| {
-        std::process::exit(0);
-    })
-    .context("failed to install Ctrl-C handler")?;
+    //
+    // This asks `crate::interrupt` — the process's single SIGINT/SIGTERM/SIGHUP
+    // owner — for that exit status rather than installing a second `ctrlc`
+    // handler, which would either fail to install or replace the one that
+    // deletes `.frust-signing.properties`: a `--release` run has already armed
+    // that scrub in `prepare_session` above.
+    crate::interrupt::exit_code_on_signal(0).context("failed to install Ctrl-C handler")?;
 
     let mut on_log_line = |line: &str| println!("{line}");
     adb::stream_logcat(runner, &device.id, &pid, &mut on_log_line)?;
@@ -214,9 +217,13 @@ fn prepare_session(
     // file when this function returns — every early `?`/`bail!` included — and
     // it is dropped explicitly right after `gradle::assemble` on the happy
     // path, so the plaintext passwords never outlive the Gradle invocation.
+    // The `crate::interrupt` registration it carries covers what `Drop` cannot:
+    // a Ctrl-C or SIGTERM during that invocation, and an abort.
     let generated =
         crate::android_build::signing::check_release_signing(&project.root, info.mode, on_line)?
-            .map(|resolved| crate::android_build::signing::write_resolved(&android_dir, &resolved))
+            .map(|resolved| {
+                crate::android_build::signing::write_resolved(&android_dir, &resolved, on_line)
+            })
             .transpose()?;
     // `Some` iff this is a release run the gate actually vouched for — a
     // non-release mode and `[signing] external = true` both resolve to `None`.

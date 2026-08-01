@@ -17,6 +17,10 @@ pub mod build_info;
 pub mod cargo_manifest;
 pub mod devices;
 pub mod doctor;
+/// Process-wide termination handling (the single SIGINT/SIGTERM/SIGHUP owner
+/// and the secret-file scrub it runs). Internal: it is machinery the pipelines
+/// arm, not a surface a front-end drives.
+pub(crate) mod interrupt;
 pub mod ios_build;
 pub mod ios_id;
 pub mod ios_run;

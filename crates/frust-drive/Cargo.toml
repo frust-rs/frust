@@ -27,5 +27,11 @@ include_dir.workspace = true
 toml_edit.workspace = true
 # `frust run`'s Android/desktop log-streaming path needs a clean Ctrl-C →
 # exit-0 hook (default SIGINT disposition exits 130; a streamed run should
-# exit 0 instead).
-ctrlc.workspace = true
+# exit 0 instead), and `crate::interrupt` needs to delete the release-signing
+# file's plaintext passwords before the process dies. `termination` routes
+# SIGTERM and SIGHUP to that same handler — a CI runner sends SIGTERM and a
+# closed terminal sends SIGHUP, and either one used to leave those passwords
+# on disk. The feature is additive across the workspace, so `frust-cli`'s
+# `--watch` handler group-kills its child on those two signals as well
+# (previously it orphaned the preview binary).
+ctrlc = { workspace = true, features = ["termination"] }
