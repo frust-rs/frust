@@ -1837,6 +1837,7 @@ fn cleared_ime_state() -> ImeState {
             composing_extent: -1,
         },
         caret: None,
+        content_type: Default::default(),
     }
 }
 
@@ -2367,6 +2368,7 @@ mod tests {
                         composing_extent: -1,
                     },
                     caret: Some(Rect::new(0.0, 0.0, 1.0, 12.0)),
+                    content_type: Default::default(),
                 });
                 return EventResult::Handled;
             }

@@ -2128,6 +2128,7 @@ mod tests {
                             composing_extent: -1,
                         },
                         caret: Some(kurbo::Rect::new(0.0, 0.0, 1.0, 12.0)),
+                        content_type: Default::default(),
                     });
                     return EventResult::Handled;
                 }

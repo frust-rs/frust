@@ -17,6 +17,7 @@
 //! on window-leave).
 
 use std::any::Any;
+use std::fmt;
 
 use kurbo::{Point, Rect, Size, Vec2};
 
@@ -177,6 +178,22 @@ pub struct EditingState {
     pub composing_extent: i32,
 }
 
+impl Default for EditingState {
+    /// An empty field with no selection and no composing region.
+    ///
+    /// Note this is **not** the derived default: the anchors are the `−1`
+    /// "none" sentinel, not `0` (which would mean a real caret at offset 0).
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            selection_base: -1,
+            selection_extent: -1,
+            composing_base: -1,
+            composing_extent: -1,
+        }
+    }
+}
+
 /// An input-method (IME) event delivered down the focus path (never hit-tested).
 ///
 /// Desktop drives [`ImeEvent::Compose`]/[`ImeEvent::Commit`] from winit's
@@ -272,6 +289,107 @@ impl InputEvent {
     }
 }
 
+/// What kind of content a focused editable field holds — the hint a widget
+/// publishes so each shell can configure the platform input method.
+///
+/// This is the framework's **input-purpose vocabulary**: renderer- and
+/// platform-neutral names a widget states its intent in, which each shell maps
+/// onto its own host API. It is deliberately tiny — it exists to let a secret
+/// field tell the platform it is secret, not to model every keyboard layout.
+///
+/// # Why this exists (security, not ergonomics)
+///
+/// Visual masking (`TextInput::obscured`) hides the glyphs the *app* draws; it
+/// says nothing to the input method. A stock soft keyboard given no hint will
+/// happily render the field's text in its suggestion strip **above** the masked
+/// field, and may commit it to its persistent learned-word dictionary. Only a
+/// content-type hint suppresses that; an accessibility `Role::PasswordInput`
+/// does not.
+///
+/// # Platform mapping
+///
+/// Each shell owns its own constants (core holds no platform integers). The
+/// intended mapping, which downstream shell work must honour:
+///
+/// | Variant | Android (`InputType` / `EditorInfo.imeOptions`) | iOS (`UITextInputTraits`) | Desktop (winit) |
+/// |---|---|---|---|
+/// | [`Normal`](Self::Normal) | `TYPE_CLASS_TEXT` | platform defaults | `ImePurpose::Normal` |
+/// | [`Password`](Self::Password) | `TYPE_CLASS_TEXT \| TYPE_TEXT_VARIATION_PASSWORD`, plus `TYPE_TEXT_FLAG_NO_SUGGESTIONS` and `IME_FLAG_NO_PERSONALIZED_LEARNING` | `isSecureTextEntry = true`, `textContentType = .password`, `autocorrectionType = .no`, `spellCheckingType = .no` | `ImePurpose::Password` |
+/// | [`NoSuggestions`](Self::NoSuggestions) | `TYPE_CLASS_TEXT \| TYPE_TEXT_FLAG_NO_SUGGESTIONS`, plus `IME_FLAG_NO_PERSONALIZED_LEARNING` | `autocorrectionType = .no`, `spellCheckingType = .no` | no equivalent — `ImePurpose::Normal` |
+///
+/// Sources: Android `android.text.InputType` / `android.view.inputmethod.EditorInfo`
+/// and Apple `UITextInputTraits` reference docs, retrieved 2026-08-01.
+///
+/// **Unsupported is a first-class outcome.** winit 0.30's
+/// `Window::set_ime_purpose` is documented as unsupported on iOS/Android/Web/
+/// Windows/X11/macOS/Orbital (Wayland text-input-v3 is the only implementation),
+/// so the desktop shell may legitimately honour nothing here. A shell that
+/// cannot express a hint drops it — it must never refuse to publish, and core
+/// never asserts that a hint took effect.
+///
+/// # Matching rule for shells
+///
+/// This enum is `#[non_exhaustive]`: adding a variant later (numeric password,
+/// email, one-time code…) must not break a shell. So a shell branches its
+/// **security** behaviour on [`is_secret`](Self::is_secret) /
+/// [`suppresses_suggestions`](Self::suppresses_suggestions), never on a variant
+/// match with a `_ =>` fallback — a catch-all arm would silently downgrade a
+/// future secret variant to a non-secret keyboard, which is exactly the leak
+/// this type exists to close. Variant matching is fine for the *cosmetic*
+/// choice (which keyboard layout to request).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ImeContentType {
+    /// No hint: ordinary text, platform defaults (suggestions, autocorrect and
+    /// personalized learning all as the user configured them).
+    ///
+    /// The default, and what every field publishes unless it opts in.
+    #[default]
+    Normal,
+    /// Secret text (password / passphrase / PIN entered as text).
+    ///
+    /// The shell must request secure entry *and* suppress suggestions and
+    /// personalized learning.
+    Password,
+    /// Non-secret text that must not be autocorrected, suggested, or learned
+    /// (recovery codes, identifiers, usernames).
+    ///
+    /// Distinct from [`Password`](Self::Password): the platform does **not**
+    /// switch to secure entry, so autofill/reveal-last-character behaviour is
+    /// unchanged; only the suggestion/learning channel is closed.
+    NoSuggestions,
+}
+
+impl ImeContentType {
+    /// Whether the field holds a secret the platform must treat as such
+    /// (secure entry on iOS, a password `InputType` variation on Android).
+    ///
+    /// Shells gate secure-entry configuration on this, not on a variant match
+    /// (see the type docs' matching rule).
+    ///
+    /// This predicate and [`suppresses_suggestions`](Self::suppresses_suggestions)
+    /// match exhaustively (no `_` arm) on purpose: adding a variant to this enum
+    /// is a compile error here until it is classified as secret or not.
+    pub fn is_secret(self) -> bool {
+        match self {
+            Self::Password => true,
+            Self::Normal | Self::NoSuggestions => false,
+        }
+    }
+
+    /// Whether the platform must suppress its suggestion strip, autocorrect,
+    /// and persistent word learning for this field.
+    ///
+    /// True for every secret content type and for
+    /// [`NoSuggestions`](Self::NoSuggestions).
+    pub fn suppresses_suggestions(self) -> bool {
+        match self {
+            Self::Password | Self::NoSuggestions => true,
+            Self::Normal => false,
+        }
+    }
+}
+
 /// The IME-relevant surface a focused editable widget publishes for the shell.
 ///
 /// Written by the focused widget through [`EventCtx::publish_ime_state`], it
@@ -279,7 +397,28 @@ impl InputEvent {
 /// the shell reads it via [`crate::app::RenderRoot::ime_state`] to drive the
 /// platform IME (winit `set_ime_cursor_area`, Android `updateSelection`, iOS
 /// `inputDelegate`). See the module docs for the index boundary rule.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// # `editing` carries the real text, even for a secret field
+///
+/// [`content_type`](Self::content_type) marks a field secret; it does **not**
+/// redact [`editing`](Self::editing). That is deliberate: this struct is one
+/// half of a **bidirectional state-sync mirror** (see `docs/CODE_STANDARDS.md`'s
+/// state-sync rule) — the platform keeps a local `Editable`/`UITextInput` mirror
+/// seeded from these exact fields and hands a whole reconciled
+/// [`EditingState`] back through [`ImeEvent::ApplyEditingState`]. Publishing
+/// redacted or masked text would desynchronize that mirror (the platform would
+/// compute deletions/replacements against text the widget does not have, and
+/// would echo the mask back as the field's new value), and it would not close
+/// the leak anyway: the keyboard process is where the characters originate.
+/// What a hint *does* close is the suggestion strip reading the field's text and
+/// the IME persisting it to a learned-word dictionary.
+///
+/// **Residual exposure:** the plaintext still crosses the FFI seam into the
+/// platform IME. A hostile or non-compliant third-party keyboard can read it.
+/// That is unavoidable on both mobile platforms short of not using the platform
+/// IME at all. As partial mitigation, this type's [`fmt::Debug`] redacts the
+/// text whenever the content type is secret, so a trace log never carries it.
+#[derive(Clone, PartialEq)]
 pub struct ImeState {
     /// Whether the focused widget currently wants IME active.
     pub active: bool,
@@ -287,6 +426,56 @@ pub struct ImeState {
     pub editing: EditingState,
     /// The caret rectangle in logical coordinates, for IME candidate placement.
     pub caret: Option<Rect>,
+    /// What kind of content the field holds, so the shell can configure the
+    /// platform IME. Defaults to [`ImeContentType::Normal`] — a field that says
+    /// nothing behaves exactly as it did before this hint existed.
+    pub content_type: ImeContentType,
+}
+
+impl Default for ImeState {
+    /// A cleared, inactive surface with no hint — what a container publishes
+    /// when it stops routing to an editable child.
+    fn default() -> Self {
+        Self {
+            active: false,
+            editing: EditingState::default(),
+            caret: None,
+            content_type: ImeContentType::Normal,
+        }
+    }
+}
+
+impl fmt::Debug for ImeState {
+    /// Hand-written so a secret field's text never reaches a log.
+    ///
+    /// Everything except [`EditingState::text`] prints as derived; for a secret
+    /// [`content_type`](Self::content_type) the text is replaced by
+    /// `<redacted>` (no length, which would itself leak).
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        struct Redacted<'a>(&'a EditingState);
+        impl fmt::Debug for Redacted<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_struct("EditingState")
+                    .field("text", &"<redacted>")
+                    .field("selection_base", &self.0.selection_base)
+                    .field("selection_extent", &self.0.selection_extent)
+                    .field("composing_base", &self.0.composing_base)
+                    .field("composing_extent", &self.0.composing_extent)
+                    .finish()
+            }
+        }
+
+        let mut s = f.debug_struct("ImeState");
+        s.field("active", &self.active);
+        if self.content_type.is_secret() {
+            s.field("editing", &Redacted(&self.editing));
+        } else {
+            s.field("editing", &self.editing);
+        }
+        s.field("caret", &self.caret)
+            .field("content_type", &self.content_type)
+            .finish()
+    }
 }
 
 /// What a widget did with an event.
@@ -427,6 +616,10 @@ impl<'a> EventCtx<'a> {
     /// the shell reads it via [`crate::app::RenderRoot::ime_state`]. Called by the
     /// focused editable widget after any state change so the platform IME stays in
     /// sync.
+    ///
+    /// Core carries the whole [`ImeState`] — including its
+    /// [`ImeContentType`](ImeState::content_type) hint — opaquely: nothing
+    /// between here and the shell inspects or rewrites it.
     pub fn publish_ime_state(&mut self, state: ImeState) {
         self.ime_state = Some(state);
     }
@@ -593,6 +786,7 @@ mod tests {
                 composing_extent: -1,
             },
             caret: Some(Rect::new(0.0, 0.0, 1.0, 10.0)),
+            content_type: ImeContentType::Normal,
         };
         {
             let mut child = ctx.child_ctx(Point::ZERO, Size::ZERO, false);
@@ -608,6 +802,119 @@ mod tests {
         assert!(ctx.is_focus_requested());
         assert!(!ctx.is_focus_released());
         assert_eq!(ctx.take_ime_state(), Some(published));
+    }
+
+    #[test]
+    fn content_type_defaults_to_no_hint() {
+        assert_eq!(ImeContentType::default(), ImeContentType::Normal);
+        assert!(!ImeContentType::default().is_secret());
+        assert!(!ImeContentType::default().suppresses_suggestions());
+    }
+
+    #[test]
+    fn content_type_predicates_classify_every_variant() {
+        // `is_secret` gates secure entry; `suppresses_suggestions` gates the
+        // suggestion strip + personalized learning. A shell branches on these,
+        // never on a `_` arm (the enum is `#[non_exhaustive]`).
+        assert!(ImeContentType::Password.is_secret());
+        assert!(ImeContentType::Password.suppresses_suggestions());
+
+        assert!(!ImeContentType::NoSuggestions.is_secret());
+        assert!(ImeContentType::NoSuggestions.suppresses_suggestions());
+
+        assert!(!ImeContentType::Normal.is_secret());
+        assert!(!ImeContentType::Normal.suppresses_suggestions());
+    }
+
+    #[test]
+    fn default_ime_state_is_cleared_and_unhinted() {
+        let s = ImeState::default();
+        assert!(!s.active);
+        assert!(s.caret.is_none());
+        assert_eq!(s.content_type, ImeContentType::Normal);
+        // `−1` sentinels, not the derived zeros: no selection, no composition.
+        assert_eq!(
+            s.editing,
+            EditingState {
+                text: String::new(),
+                selection_base: -1,
+                selection_extent: -1,
+                composing_base: -1,
+                composing_extent: -1,
+            }
+        );
+    }
+
+    /// The content-type hint must survive core's opaque passthrough untouched —
+    /// core never inspects or rewrites it, it only carries it to the shell.
+    #[test]
+    fn publish_ime_state_round_trips_the_content_type() {
+        let mut count = 0u32;
+        let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+        let published = ImeState {
+            active: true,
+            editing: EditingState {
+                text: "hunter2".to_string(),
+                selection_base: 7,
+                selection_extent: 7,
+                composing_base: -1,
+                composing_extent: -1,
+            },
+            caret: Some(Rect::new(0.0, 0.0, 1.0, 10.0)),
+            content_type: ImeContentType::Password,
+        };
+        ctx.publish_ime_state(published.clone());
+        let taken = ctx.take_ime_state().expect("published state");
+        assert_eq!(taken, published);
+        assert_eq!(taken.content_type, ImeContentType::Password);
+        // The secret's text is published verbatim — the platform IME mirror
+        // needs it (see `ImeState`'s docs); the hint, not redaction, is what
+        // tells the shell to lock the keyboard down.
+        assert_eq!(taken.editing.text, "hunter2");
+    }
+
+    /// …and it survives the focus-chain bubble a real widget publication takes.
+    #[test]
+    fn content_type_bubbles_up_the_focus_chain() {
+        let mut count = 0u32;
+        let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+        let published = ImeState {
+            content_type: ImeContentType::NoSuggestions,
+            ..ImeState::default()
+        };
+        {
+            let mut child = ctx.child_ctx(Point::ZERO, Size::ZERO, true);
+            child.publish_ime_state(published.clone());
+            let ime = child.take_ime_state();
+            ctx.absorb_child(false, false, false, false, ime);
+        }
+        assert_eq!(ctx.take_ime_state(), Some(published));
+    }
+
+    #[test]
+    fn debug_redacts_a_secret_field_but_not_a_normal_one() {
+        let secret = ImeState {
+            active: true,
+            editing: EditingState {
+                text: "hunter2".to_string(),
+                ..EditingState::default()
+            },
+            caret: None,
+            content_type: ImeContentType::Password,
+        };
+        let rendered = format!("{secret:?}");
+        assert!(
+            !rendered.contains("hunter2"),
+            "secret text leaked: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"));
+        assert!(rendered.contains("Password"));
+
+        let plain = ImeState {
+            content_type: ImeContentType::Normal,
+            ..secret
+        };
+        assert!(format!("{plain:?}").contains("hunter2"));
     }
 
     #[test]

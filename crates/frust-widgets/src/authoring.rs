@@ -897,6 +897,7 @@ mod focus_tests {
                                 composing_extent: -1,
                             },
                             caret: Some(Rect::new(0.0, 0.0, 1.0, 10.0)),
+                            content_type: Default::default(),
                         });
                     }
                     EventResult::Handled

@@ -377,8 +377,10 @@ pub mod authoring {
     };
     /// The event-pass/IME-surface `EditingState` — see this module's own docs
     /// for the split against [`text::EditingState`](self::text::EditingState),
-    /// `frust_text::editor`'s distinct, byte-indexed type.
-    pub use frust_core::{EditingState, ImeEvent, ImeState};
+    /// `frust_text::editor`'s distinct, byte-indexed type. `ImeContentType` is
+    /// the input-purpose hint an editable widget publishes on its `ImeState` so
+    /// a shell can lock a secret field's keyboard down.
+    pub use frust_core::{EditingState, ImeContentType, ImeEvent, ImeState};
 
     /// The inset vocabulary [`LayoutCtx::window_insets`]/[`PaintCtx::window_insets`]
     /// return — lifted because a widget that lays itself out around the status

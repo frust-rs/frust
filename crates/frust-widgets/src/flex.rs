@@ -789,6 +789,7 @@ mod tests {
                     composing_extent: -1,
                 },
                 caret: None,
+                content_type: Default::default(),
             });
         }
     }

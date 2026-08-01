@@ -769,6 +769,9 @@ impl TextInputWidget {
             active: true,
             editing,
             caret,
+            // No hint yet: mapping `obscured` onto `ImeContentType::Password`
+            // is the widget half of the content-type work, tracked separately.
+            content_type: Default::default(),
         }
     }
 
