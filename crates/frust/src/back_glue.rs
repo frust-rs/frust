@@ -185,10 +185,30 @@ struct Registrant {
 }
 
 impl Registrant {
-    /// The sort key R44-back orders the arbitration list by: rank first, then
-    /// first-wire order within a rank.
+    /// The sort key R44-back orders the arbitration list by: rank first
+    /// ([`Role`], `Host` sorts ahead of every `Navigator`), then within
+    /// `Role::Navigator` **innermost-first** (highest `birth` — a nested
+    /// navigator always wires after the navigator hosting it, so the highest
+    /// `birth` among `Navigator` peers is the innermost one); `Role::Host`
+    /// peers keep first-wire order (`birth` ascending), unchanged.
+    ///
+    /// G1 (closing finding N1): pre-this-change every rank ordered by
+    /// first-wire (`birth` ascending), which meant an outer navigator at
+    /// depth > 1 — exactly the case where a pushed page hosts a nested
+    /// navigator — permanently outranked the nested navigator inside it, so a
+    /// back press always popped the outer stack (discarding the nested
+    /// navigator's own page) instead of reaching in. `Role::Host` keeps its
+    /// existing order: nothing in this cycle's evidence calls for changing it,
+    /// and the R44/#44 guard only ever required Host to rank above every
+    /// Navigator, never a particular order among multiple hosts.
     fn key(&self) -> (Role, u64) {
-        (self.role, self.birth)
+        match self.role {
+            Role::Host => (self.role, self.birth),
+            // `u64::MAX - birth`: ascending sort on this puts the HIGHEST
+            // birth (innermost, wired last) first among `Navigator` peers —
+            // LIFO, mirroring Android's `OnBackPressedDispatcher`.
+            Role::Navigator => (self.role, u64::MAX - self.birth),
+        }
     }
 }
 
@@ -984,6 +1004,16 @@ mod tests {
     /// forever from a stack nothing renders. These controllers are never mounted
     /// (no widget builds them), so the mounted veto never applies and this is
     /// the pure one-cycle path.
+    ///
+    /// **G1 correction:** all three controllers here register as plain
+    /// `Role::Navigator` peers — despite the `outer`/`inner`/`nested` names,
+    /// nothing wires one *inside* another, so this test proves only the
+    /// birth tiebreak among equal-rank registrants (now innermost/last-wire
+    /// first), not `Role::Host`-first ranking (that's
+    /// `an_init_registered_backhandler_does_not_outrank_a_later_overlay_host`,
+    /// unchanged by this fix). The order below was previously build-order
+    /// (`outer, inner, nested`) and is now the reverse (last-wired sorts
+    /// first) — deliberately inverted, not a leftover mistake.
     #[test]
     fn a_navigator_that_stops_wiring_is_pruned_after_one_full_cycle() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1000,8 +1030,8 @@ mod tests {
         refresh_interest(&nested, Role::Navigator);
         assert_eq!(
             registrant_ids(),
-            vec![outer.id(), inner.id(), nested.id()],
-            "appended in build order"
+            vec![nested.id(), inner.id(), outer.id()],
+            "innermost/last-wired first: the reverse of build order"
         );
 
         // Frame 2: the nested navigator's screen is gone — it never wires again.
@@ -1009,7 +1039,7 @@ mod tests {
         refresh_interest(&inner, Role::Navigator);
         assert_eq!(
             registrant_ids(),
-            vec![outer.id(), inner.id(), nested.id()],
+            vec![nested.id(), inner.id(), outer.id()],
             "not yet: a full cycle has not elapsed without it"
         );
 
@@ -1018,7 +1048,7 @@ mod tests {
         refresh_interest(&outer, Role::Navigator);
         assert_eq!(
             registrant_ids(),
-            vec![outer.id(), inner.id()],
+            vec![inner.id(), outer.id()],
             "the departed navigator is pruned, and its controller clone released"
         );
 
@@ -1026,7 +1056,7 @@ mod tests {
         refresh_interest(&inner, Role::Navigator);
         refresh_interest(&outer, Role::Navigator);
         refresh_interest(&inner, Role::Navigator);
-        assert_eq!(registrant_ids(), vec![outer.id(), inner.id()]);
+        assert_eq!(registrant_ids(), vec![inner.id(), outer.id()]);
     }
 
     // -----------------------------------------------------------------------
@@ -1150,6 +1180,12 @@ mod tests {
     /// navigator whose widget is torn down (its page rebuilt without it) reports
     /// unmounted, so the one-cycle rule drops it and releases the controller
     /// clone the registrant holds.
+    ///
+    /// **G1 correction:** `nested` genuinely lives inside `outer`'s own page
+    /// here, so it wires after `outer` and — under the new innermost-first
+    /// `Role::Navigator` order — now sorts AHEAD of it; the order below
+    /// flipped from `[outer, nested]` to `[nested, outer]` for that reason,
+    /// this test's own point (mount-liveness pruning) is unaffected.
     #[test]
     fn a_torn_down_navigator_stops_vetoing_the_prune_and_is_released() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1195,7 +1231,7 @@ mod tests {
         let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
         root.rebuild(&mut app, &mut ());
         assert!(nested.is_mounted(), "the nested navigator is in the tree");
-        assert_eq!(registrant_ids(), vec![outer.id(), nested.id()]);
+        assert_eq!(registrant_ids(), vec![nested.id(), outer.id()]);
 
         // While mounted it survives the outer navigator's double wire — the
         // exact sequence the one-cycle rule alone misreads as a build cycle.
@@ -1203,12 +1239,12 @@ mod tests {
         root.rebuild(&mut app, &mut ());
         assert_eq!(
             registrant_ids(),
-            vec![outer.id(), nested.id()],
+            vec![nested.id(), outer.id()],
             "a mounted navigator is in the tree by definition: never pruned"
         );
         assert_eq!(
             *mid_pass.borrow(),
-            vec![outer.id(), nested.id()],
+            vec![nested.id(), outer.id()],
             "and it is never MISSING mid-pass either — the window in which a \
              spurious prune would mis-answer handles_back / mis-route a press"
         );
@@ -1226,6 +1262,95 @@ mod tests {
             registrant_ids(),
             vec![outer.id()],
             "the departed navigator is released, not kept alive by the veto"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // G1 (closes review finding N1): a nested navigator must receive the
+    // back press.
+    // -----------------------------------------------------------------------
+
+    /// **G1**: an outer navigator PUSHES a page that hosts a nested navigator
+    /// (the outer navigator is at depth > 1 — exactly what makes
+    /// `compute_back_interest` true for it too), and the nested navigator's
+    /// own stack is also poppable. A back press must reach the INNERMOST
+    /// (nested) navigator, popping its stack, and must leave the outer
+    /// navigator's depth untouched — the reverse of what plain build-order
+    /// (outermost-first) arbitration gave: before this fix the outer
+    /// navigator, wired first, always claimed the press and popped the whole
+    /// page hosting the nested navigator instead of reaching into it.
+    #[test]
+    fn a_nested_navigator_inside_a_pushed_page_gets_the_back_press() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let outer: NavigatorController<()> = NavigatorController::new();
+        let inner: NavigatorController<()> = NavigatorController::new();
+
+        // The outer navigator's ROOT page is plain — no nested navigator
+        // exists at depth 1, so `compute_back_interest` starts false for it
+        // (matching the module docs: the bug only appears once the outer
+        // navigator itself is poppable).
+        let mut app: AppLogic = {
+            let outer_c = outer.clone();
+            Box::new(move |_: &mut ()| {
+                auto_wire(&outer_c);
+                raw_navigator(&outer_c, page)
+            })
+        };
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        root.rebuild(&mut app, &mut ());
+        assert_eq!(outer.depth(), 1, "outer starts at its own root");
+        assert!(
+            !handles_back(),
+            "root-level, no nested navigator yet: back bubbles"
+        );
+
+        // Push a page onto the OUTER navigator that hosts the nested
+        // navigator — outer is now at depth 2, the shape that made #44's
+        // regression reachable.
+        {
+            let inner_for_push = inner.clone();
+            outer.push(move || {
+                auto_wire(&inner_for_push);
+                any(raw_navigator(&inner_for_push, page))
+            });
+        }
+        root.rebuild(&mut app, &mut ());
+        assert_eq!(
+            outer.depth(),
+            2,
+            "outer pushed to depth 2: the page hosting the nested navigator"
+        );
+        assert_eq!(
+            inner.depth(),
+            1,
+            "the nested navigator starts at its own root"
+        );
+
+        // Push inside the nested navigator too, so BOTH stacks are poppable —
+        // the exact ambiguity R44-back must arbitrate between two
+        // `Role::Navigator` peers.
+        inner.push(page);
+        root.rebuild(&mut app, &mut ());
+        assert_eq!((outer.depth(), inner.depth()), (2, 2));
+        assert!(handles_back(), "some registrant claims the press");
+
+        push_back_press();
+        root.rebuild(&mut app, &mut ());
+        assert_eq!(
+            inner.depth(),
+            1,
+            "the back press popped the NESTED navigator's stack"
+        );
+        assert_eq!(
+            outer.depth(),
+            2,
+            "and left the outer navigator's depth UNCHANGED — a bare \
+             build-order (outermost-first) arbitration would instead have \
+             popped the outer stack, discarding the whole page the nested \
+             navigator lives on"
         );
     }
 }
