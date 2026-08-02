@@ -231,6 +231,21 @@ gate — while the iOS Swift side has now gone four batches running without
 compiling at all. Compile-verified is not device-verified, so F5 narrows
 FINDINGS #31's Android gap without closing the finding.
 
+**API-level caveat on the Android flags — the learning half is inert below
+API 26.** `EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING` was added in
+**API 26**, but `frust-embedding`'s `minSdk = 24`
+(`platform/android/frust-embedding/build.gradle.kts:36`). It is an
+`imeOptions` bit rather than a method call, so there is no crash and no
+`NewApi` lint — the constant inlines at compile time and an older IME simply
+ignores the unknown bit. The consequence is that on **API 24 and 25 the
+keyboard-learning suppression is a silent no-op**, on both the `password`
+and `noSuggestions` paths; only `TYPE_TEXT_VARIATION_PASSWORD` and
+`TYPE_TEXT_FLAG_NO_SUGGESTIONS` (both API 3/5) take effect there. So typed
+secrets can still enter the IME's personal dictionary on those two API
+levels. This is **not fixable in shell code** — the platform has no
+equivalent before 26 — which is why it is recorded rather than tasked. Read
+every "matches the core contract table" claim about Android as *"on API 26+"*.
+
 **Why not closed**: FINDINGS #31's only proof gate is on-device
 verification, and that gate is currently blocked on device access. **The
 leak is therefore not confirmed closed on any platform** — the Rust-side
