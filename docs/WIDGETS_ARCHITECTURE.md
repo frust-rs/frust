@@ -66,6 +66,24 @@ module; an app can disable all three to build its own design system on the same 
   sensors) — an authored `true` is never un-reduced by an OS report of `false`.
 - Navigation flow: `Navigator`/`Router` manage a page stack and declarative routes over the same
   container plumbing; `hero()` morphs a tagged child between pages during transitions.
+  - **Navigator observation seams:** `NavigatorController::transition()` publishes a `Copy` `TransitionState`
+    (active, progress, direction, depth pair, generation) on an `Rc<Cell<_>>` so chrome outside the
+    subtree can observe transitions; reads during paint from a widget painted *after* the navigator
+    are frame-exact, reads during `Component::build` are one frame stale. `PushOptions::on_visibility`
+    and `PageVisibility` (Current/Visible/Covered) provide page-level visibility observation; the opt-in
+    `cull_covered_builds` (default false) skips rebuilds for covered pages, but `on_cleanup` does **not**
+    fire under a covering push (retained-state guarantee).
+  - **RouteNavigator:** A thread-safe (`Arc<Mutex<Vec<NavRequest>>>`) navigation handle carrying no closures
+    or reactive types, making it `Send + Sync` and usable via `provide_context` from any thread; off-thread
+    requests wake the shell and apply in the next rebuild before the navigator reconciles.
+  - **Route params:** Query parameters merge **under** path segment captures; path captures take precedence
+    over query params of the same name, and named-route `path_for_name` round-trips unused params as query.
+  - **overlay_host() constructor:** A `NavigatorView` with pop_swipe disabled and no-op transition
+    (not a new widget); back-button interest is arbitrated by outermost registrant first — a host with
+    no overlays defers to the inner navigator.
+  - **NavigatorWidget semantics (R23):** Now implements `Widget::semantics`, forwarding via
+    `ChildPod::semantics_child` to exactly the pages input routing can reach (covered pages and pages
+    under modals omitted outright), honoring the input-parity invariant documented in CODE_STANDARDS.md.
 - Platform-view flow: `platform_view()`/`shield()` publish native-compositing slots and input-shield
   rects each frame for the shell layer to reconcile against native views.
 
@@ -78,3 +96,32 @@ module; an app can disable all three to build its own design system on the same 
 | authoring module (`build_child`/`rebuild_child`/`teardown_child`/`rebuild_children`, `route_event`) | The sanctioned seam for authoring any widget against `frust-core` |
 | `Navigator` / `Router` / `hero()` | Page-stack and declarative routing plus shared-element transitions |
 | `ButtonStyle`, `ScrollInfo`, `IconData`/`IconSource`, `ImageSource`/`ImageFit` | Small per-widget config/state types shared across the baseline widget set |
+| `NavigatorController::transition()` / `TransitionState` / `PageVisibility` | Navigation state observation seams |
+| `RouteNavigator` / `NavRequest` | Off-thread-safe navigation handle (Arc-backed plain data, no reactive types) |
+
+## Architectural Facts & Constraints
+
+### Reactive-Free Design
+`frust-widgets` contains no `reactive_graph` symbols crate-wide — the crate is entirely signal-free.
+Reactive bridging lives in the CORE unit's facade (`router_glue.rs`, `back_glue.rs`), where observer
+callbacks and context providers can reach the reactive runtime. This boundary keeps the widget set
+reusable and decouples it from the reactive layer; state machine state in nav/navigator is held in
+plain `Rc<Cell<_>>`/`Arc<Mutex<_>>` instead.
+
+### Icon Generation
+`crates/frust-widgets/src/icons/mod.rs` is **generated** by `scripts/gen_icons.py` from a hardcoded
+`STARTER_SET`. Hand-edits to this file are destroyed on the next `gen_icons.py` run; expand the icon
+set by modifying the script's source list, not the generated output.
+
+### Text Widget Alignment
+`TextInput`'s live-edited text is always start-aligned, regardless of `TextStyle::align`, because
+parley's `PlainEditor` exposes no text-alignment hook. This is a parley limitation, not a frust
+design decision; users cannot work around it per-field. `TextView` does honor `align`.
+
+### Recent Additions (Batch 2)
+**Navigator observation:** `TransitionState` and `PageVisibility` seams; `overlay_host()` constructor;
+R23 semantics forwarding. **Routing:** route params now merge query under path captures, and
+`RouteNavigator` allows off-thread navigation. **Widgets:** `glyph::sheet` (modal overlay with staged
+dismiss and scrim fade); `button` disabled state; `TextInput` read-only mode and `content_type` IME
+hints; `TextView` alignment control; `EmptyStateView` and `MenuEntry` icon slots; badge `Info` variant
+with warning border. **Glyph dialect:** Expanded platform token set for material and cupertino.
