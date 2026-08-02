@@ -10,7 +10,8 @@
 //! set-if-different, preserving the selection while the text is unchanged. The
 //! content text's style (family/weight/style/size/letter-spacing/line-height,
 //! plus color when set explicitly) can be set with [`TextInputView::text_style`];
-//! it never touches the chrome color constants or padding/caret sizing below.
+//! it never touches the chrome colors or geometry — see the "Chrome" section
+//! below for the seam that does.
 //! Mirroring [`Text`](crate::TextView)'s [`effective_style`](TextInputWidget::effective_style)
 //! pattern: when the app did **not** call `.text_style(...)`, the glyph color
 //! resolves from the active theme's `on_surface` role at LAYOUT time (where
@@ -131,6 +132,55 @@
 //! content-type signal for now, deliberately narrow (see [`ImeContentType`]'s
 //! own docs on why a shell must not fall back to non-secret behaviour for an
 //! unrecognized variant).
+//!
+//! # Chrome
+//!
+//! The field's chrome **colors** (background/border/focus-accent/placeholder/
+//! selection/caret) already resolve from the active [`Theme`]'s `ColorScheme`
+//! (see [`Chrome::resolve`]), so an app restyles them the same way every other
+//! themed widget does — installing a different `Theme`. Its **geometry**
+//! ([`PAD_X`]/[`PAD_Y`] inner padding, [`BORDER_W`] border thickness,
+//! [`RADIUS`] corner radius, [`CARET_W`] caret width) was, until now, private:
+//! neither a `Theme` field nor a builder setter reached it (FINDINGS #37).
+//!
+//! **Why builder setters, not new `Theme` tokens.** None of the three built-in
+//! catalogs (Material/Cupertino/Glyph) wraps `TextInput` in a themed "text
+//! field" component — they embed the bare [`text_input`] view directly (see
+//! `glyph::command_palette`, `glyph::dialog`), so there is no existing
+//! design-language policy for this geometry to preserve, and no token family
+//! for it in `frust-theme::ShapeScale` (which only ever specifies a
+//! *corner-radius* scale, not padding/border-width/caret-width) to plug into.
+//! Inventing a whole geometry token family that nothing else in the crate
+//! would read is exactly the "tokens nothing reads" trap this seam's design
+//! note warns against — a bigger step than a reachability finding calls for.
+//! Separately, [`PAD_X`]/[`CARET_W`] are read from the **event pass**
+//! ([`TextInputWidget::editor_point`]/[`TextInputWidget::current_ime_state`]),
+//! which carries no threaded `Theme` (`docs/CODE_STANDARDS.md`'s Theming
+//! conventions, "Event-pass code never reads a theme" — this file's own
+//! `PAD_X`/`PAD_Y`/`CARET_W` are cited there as the precedent for a metric
+//! staying a plain value for exactly that reason); a `Theme`-token
+//! implementation would have to duplicate that geometry outside `Theme`
+//! anyway to keep the event pass working. A per-instance value carried on the
+//! view/widget — read identically from both passes — has no such gap.
+//!
+//! **The seam.** [`TextInputView::padding`], [`TextInputView::border_width`],
+//! [`TextInputView::corner_radius`], and [`TextInputView::caret_width`] each
+//! override one geometry constant, defaulting to the current
+//! [`PAD_X`]/[`PAD_Y`]/[`BORDER_W`]/[`RADIUS`]/[`CARET_W`] values so a field
+//! that calls none of them renders byte-for-byte as before. Colors stay
+//! theme-only — this seam does not duplicate `Chrome::resolve`'s job, only
+//! closes the sizing gap next to it.
+//!
+//! **Focus treatment.** The focused state itself (an accent-colored border,
+//! no separate halo/glow) is unchanged; [`TextInputView::focus_ring_width`]
+//! is the one narrow escape hatch this seam adds on top — an optional border
+//! width used only while focused (defaulting to the same width as idle, i.e.
+//! no visual change), so an app can make the existing focus border thicker
+//! without this widget growing a second rendering primitive (a halo) it does
+//! not otherwise have. Combined with a theme's `primary`/accent role, this
+//! reaches the "thicker, differently-colored focus outline" family of looks
+//! (e.g. a 3px accent-colored ring) without this widget claiming to paint a
+//! soft glow it does not.
 
 use std::rc::Rc;
 
@@ -145,15 +195,27 @@ use frust_theme::Theme;
 use kurbo::{Point, Rect, Size, Vec2};
 use peniko::Color;
 
-/// Corner radius of the field chrome, in logical px.
+/// Default corner radius of the field chrome, in logical px. Overridable
+/// per-instance with [`TextInputView::corner_radius`] — see the module docs'
+/// "Chrome" section for why this is a builder default rather than a `Theme`
+/// token.
 const RADIUS: f64 = 6.0;
-/// Border thickness, in logical px.
+/// Default border thickness, in logical px. Overridable per-instance with
+/// [`TextInputView::border_width`] (see the module docs' "Chrome" section);
+/// the focused border additionally honors [`TextInputView::focus_ring_width`].
 const BORDER_W: f64 = 1.5;
-/// Horizontal inner padding (chrome edge to text), in logical px.
+/// Default horizontal inner padding (chrome edge to text), in logical px.
+/// Overridable per-instance with [`TextInputView::padding`] (see the module
+/// docs' "Chrome" section). Read from the event pass as well as layout/paint
+/// (`docs/CODE_STANDARDS.md`'s Theming conventions cite this constant as the
+/// precedent for why such a metric stays a plain value, not a `Theme` token).
 const PAD_X: f64 = 8.0;
-/// Vertical inner padding (chrome edge to text), in logical px.
+/// Default vertical inner padding (chrome edge to text), in logical px.
+/// Overridable per-instance with [`TextInputView::padding`] — see [`PAD_X`].
 const PAD_Y: f64 = 6.0;
-/// Caret width, in logical px.
+/// Default caret width, in logical px. Overridable per-instance with
+/// [`TextInputView::caret_width`] — see [`PAD_X`] for why it stays a plain
+/// value rather than a `Theme` token.
 const CARET_W: f32 = 1.5;
 /// Blink half-period: caret visible 500 ms, hidden 500 ms.
 const BLINK_MS: f64 = 500.0;
@@ -328,6 +390,25 @@ pub struct TextInputView<State: 'static> {
     /// Whether the rendered glyphs are masked (password mode) — see
     /// [`TextInputView::obscured`].
     obscured: bool,
+    /// Horizontal inner padding — see [`TextInputView::padding`]. Defaults to
+    /// [`PAD_X`].
+    pad_x: f64,
+    /// Vertical inner padding — see [`TextInputView::padding`]. Defaults to
+    /// [`PAD_Y`].
+    pad_y: f64,
+    /// Border thickness — see [`TextInputView::border_width`]. Defaults to
+    /// [`BORDER_W`].
+    border_width: f64,
+    /// Corner radius — see [`TextInputView::corner_radius`]. Defaults to
+    /// [`RADIUS`].
+    corner_radius: f64,
+    /// Caret width — see [`TextInputView::caret_width`]. Defaults to
+    /// [`CARET_W`].
+    caret_width: f32,
+    /// Focused-only border width override — see
+    /// [`TextInputView::focus_ring_width`]. `None` = use `border_width` while
+    /// focused too (unchanged appearance).
+    focus_ring_width: Option<f64>,
     on_change: OnText<State>,
     on_submit: Option<OnText<State>>,
 }
@@ -353,6 +434,12 @@ pub fn text_input<State: 'static, F: Fn(&mut State, String) + 'static>(
         submit_on_enter: None,
         enabled: true,
         obscured: false,
+        pad_x: PAD_X,
+        pad_y: PAD_Y,
+        border_width: BORDER_W,
+        corner_radius: RADIUS,
+        caret_width: CARET_W,
+        focus_ring_width: None,
         on_change: Rc::new(on_change),
         on_submit: None,
     }
@@ -442,6 +529,55 @@ impl<State: 'static> TextInputView<State> {
         self.obscured = obscured;
         self
     }
+
+    /// Override the chrome's inner padding (chrome edge to text), in logical
+    /// px. Defaults to [`PAD_X`]/[`PAD_Y`] (8×6) — a field that never calls
+    /// this renders identically to before this setter existed. Independent of
+    /// [`text_style`](Self::text_style)'s glyph metrics; see the module docs'
+    /// "Chrome" section for why this is a per-instance value rather than a
+    /// `Theme` token.
+    pub fn padding(mut self, x: f64, y: f64) -> Self {
+        self.pad_x = x;
+        self.pad_y = y;
+        self
+    }
+
+    /// Override the chrome's border thickness, in logical px. Defaults to
+    /// [`BORDER_W`] (1.5). Affects only the idle/unfocused border unless
+    /// [`focus_ring_width`](Self::focus_ring_width) is left unset, in which
+    /// case the focused border uses this width too (unchanged relative
+    /// behavior). See the module docs' "Chrome" section.
+    pub fn border_width(mut self, width: f64) -> Self {
+        self.border_width = width;
+        self
+    }
+
+    /// Override the chrome's corner radius, in logical px. Defaults to
+    /// [`RADIUS`] (6.0). See the module docs' "Chrome" section.
+    pub fn corner_radius(mut self, radius: f64) -> Self {
+        self.corner_radius = radius;
+        self
+    }
+
+    /// Override the caret width, in logical px. Defaults to [`CARET_W`]
+    /// (1.5). See the module docs' "Chrome" section.
+    pub fn caret_width(mut self, width: f32) -> Self {
+        self.caret_width = width;
+        self
+    }
+
+    /// Use `width` as the border thickness only while the field is focused,
+    /// instead of [`border_width`](Self::border_width). Unset by default, so
+    /// a focused field's border is the same width as its idle border,
+    /// matching the current behavior exactly. This is the narrow focus-ring
+    /// escape hatch described in the module docs' "Chrome" section — combined
+    /// with a theme's accent color, it reaches a thicker/differently-colored
+    /// focus outline without this widget growing a second rendering
+    /// primitive (a halo) it does not otherwise have.
+    pub fn focus_ring_width(mut self, width: f64) -> Self {
+        self.focus_ring_width = Some(width);
+        self
+    }
 }
 
 /// The retained widget for a [`TextInputView`].
@@ -521,6 +657,27 @@ pub struct TextInputWidget {
     /// reset; the next paint records `blink_epoch` from `frame_time` and clears
     /// this. `true` initially so the first painted frame seeds the epoch.
     blink_reset_pending: bool,
+    /// Resolved horizontal inner padding — see [`TextInputView::padding`].
+    /// Read from both the event pass (`editor_point`/`current_ime_state`) and
+    /// layout/paint (see [`PAD_X`]).
+    pad_x: f64,
+    /// Resolved vertical inner padding — see [`TextInputView::padding`] and
+    /// [`PAD_Y`].
+    pad_y: f64,
+    /// Resolved border thickness — see [`TextInputView::border_width`] and
+    /// [`BORDER_W`]. The idle border width; `paint` widens it to
+    /// `focus_ring_width` instead while focused, when set.
+    border_width: f64,
+    /// Resolved corner radius — see [`TextInputView::corner_radius`] and
+    /// [`RADIUS`].
+    corner_radius: f64,
+    /// Resolved caret width — see [`TextInputView::caret_width`] and
+    /// [`CARET_W`].
+    caret_width: f32,
+    /// Focused-only border width override — see
+    /// [`TextInputView::focus_ring_width`]. `None` = `paint` uses
+    /// `border_width` while focused too (unchanged appearance).
+    focus_ring_width: Option<f64>,
     on_change: crate::authoring::ErasedArgCallback<String>,
     on_submit: Option<crate::authoring::ErasedArgCallback<String>>,
 }
@@ -642,7 +799,7 @@ impl TextInputWidget {
     /// The top-left of the text content within a `height`-tall field (vertically
     /// centered, never above the top padding). Single-line placement.
     fn text_top(&self, height: f64) -> f64 {
-        ((height - self.content_height()) / 2.0).max(PAD_Y)
+        ((height - self.content_height()) / 2.0).max(self.pad_y)
     }
 
     /// Height of one text line from the editor's own metrics, falling back to a
@@ -666,13 +823,13 @@ impl TextInputWidget {
         if self.max_visible_lines.is_none() {
             return 0.0;
         }
-        let visible = (field_height - 2.0 * PAD_Y).max(0.0);
+        let visible = (field_height - 2.0 * self.pad_y).max(0.0);
         let content = self.display().layout_size().height;
         if content <= visible {
             return 0.0;
         }
         let max_off = content - visible;
-        let (y0, y1) = match self.display().cursor_rect(CARET_W) {
+        let (y0, y1) = match self.display().cursor_rect(self.caret_width) {
             Some(c) => (c.y0, c.y1),
             None => (0.0, 0.0),
         };
@@ -691,7 +848,7 @@ impl TextInputWidget {
     /// shifted up by the keep-caret-in-view scroll offset.
     fn content_origin_y(&self, height: f64) -> f64 {
         if self.max_visible_lines.is_some() {
-            PAD_Y - self.scroll_y(height)
+            self.pad_y - self.scroll_y(height)
         } else {
             self.text_top(height)
         }
@@ -761,11 +918,11 @@ impl TextInputWidget {
             composing_base: es.composing_base,
             composing_extent: es.composing_extent,
         };
-        let offset = origin.to_vec2() + Vec2::new(PAD_X, self.content_origin_y(size.height));
+        let offset = origin.to_vec2() + Vec2::new(self.pad_x, self.content_origin_y(size.height));
         // The caret rect is a *screen* placement hint, so it comes from the
         // displayed (possibly masked) layout — while `editing` above stays the
         // real text the platform IME mirror needs.
-        let caret = self.display().cursor_rect(CARET_W).map(|c| {
+        let caret = self.display().cursor_rect(self.caret_width).map(|c| {
             Rect::new(
                 c.x0 + offset.x,
                 c.y0 + offset.y,
@@ -803,7 +960,7 @@ impl TextInputWidget {
     /// coordinate space (used for caret placement / drag-selection).
     fn editor_point(&self, pos: Point, height: f64) -> (f32, f32) {
         (
-            (pos.x - PAD_X) as f32,
+            (pos.x - self.pad_x) as f32,
             (pos.y - self.content_origin_y(height)) as f32,
         )
     }
@@ -1044,6 +1201,12 @@ impl<State: 'static> View<State> for TextInputView<State> {
             captured: false,
             blink_epoch: FrameTime::ZERO,
             blink_reset_pending: true,
+            pad_x: self.pad_x,
+            pad_y: self.pad_y,
+            border_width: self.border_width,
+            corner_radius: self.corner_radius,
+            caret_width: self.caret_width,
+            focus_ring_width: self.focus_ring_width,
             on_change: crate::authoring::erase_callback_arg(&self.on_change),
             on_submit: self
                 .on_submit
@@ -1126,6 +1289,32 @@ impl<State: 'static> View<State> for TextInputView<State> {
             element.set_controlled_value(&self.value);
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
+        // Chrome geometry reconcile (see the module docs' "Chrome" section).
+        // Padding feeds the resolved field height and the multi-line wrap
+        // width, so it needs a relayout; the rest (border width, corner
+        // radius, caret width, the focus-ring override) are paint-only — none
+        // of them change the `Size` `layout` returns.
+        if prev.pad_x != self.pad_x || prev.pad_y != self.pad_y {
+            element.pad_x = self.pad_x;
+            element.pad_y = self.pad_y;
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        if prev.border_width != self.border_width {
+            element.border_width = self.border_width;
+            flags |= ChangeFlags::PAINT;
+        }
+        if prev.corner_radius != self.corner_radius {
+            element.corner_radius = self.corner_radius;
+            flags |= ChangeFlags::PAINT;
+        }
+        if prev.caret_width != self.caret_width {
+            element.caret_width = self.caret_width;
+            flags |= ChangeFlags::PAINT;
+        }
+        if prev.focus_ring_width != self.focus_ring_width {
+            element.focus_ring_width = self.focus_ring_width;
+            flags |= ChangeFlags::PAINT;
+        }
         flags
     }
 }
@@ -1167,7 +1356,7 @@ impl Widget for TextInputWidget {
         // TextInput mirror of `Text`'s re-shape-every-frame defect.
         let desired_wrap: Option<f32> = self
             .max_visible_lines
-            .map(|_| (width - 2.0 * PAD_X).max(0.0) as f32);
+            .map(|_| (width - 2.0 * self.pad_x).max(0.0) as f32);
         if self.applied_wrap_width != Some(desired_wrap) {
             self.editor.set_wrap_width(desired_wrap, &mut self.text_ctx);
             // The masked mirror wraps at the same width (and this is also the
@@ -1185,9 +1374,9 @@ impl Widget for TextInputWidget {
                 let line_h = self.line_height();
                 let content = self.display().layout_size().height.max(line_h);
                 let capped = content.min(line_h * max_lines as f64);
-                capped + 2.0 * PAD_Y
+                capped + 2.0 * self.pad_y
             }
-            None => self.content_height() + 2.0 * PAD_Y,
+            None => self.content_height() + 2.0 * self.pad_y,
         };
         bc.constrain(Size::new(width, height))
     }
@@ -1223,24 +1412,33 @@ impl Widget for TextInputWidget {
 
         // Chrome: a border-colored rounded rect with an inset background fills in
         // as the frame (there is no stroke-rect primitive on `PaintScene`).
+        // The border width itself widens to `focus_ring_width` while focused,
+        // when set — the seam's narrow focus-ring escape hatch (see the module
+        // docs' "Chrome" section); unset, it stays `border_width` either way,
+        // matching the pre-seam behavior exactly.
         let border_color = if focused {
             chrome.accent
         } else {
             chrome.border
         };
-        scene.fill_rounded_rect(origin, size, RADIUS, border_color);
+        let border_w = if focused {
+            self.focus_ring_width.unwrap_or(self.border_width)
+        } else {
+            self.border_width
+        };
+        scene.fill_rounded_rect(origin, size, self.corner_radius, border_color);
         scene.fill_rounded_rect(
-            Point::new(origin.x + BORDER_W, origin.y + BORDER_W),
+            Point::new(origin.x + border_w, origin.y + border_w),
             Size::new(
-                (size.width - 2.0 * BORDER_W).max(0.0),
-                (size.height - 2.0 * BORDER_W).max(0.0),
+                (size.width - 2.0 * border_w).max(0.0),
+                (size.height - 2.0 * border_w).max(0.0),
             ),
-            (RADIUS - BORDER_W).max(0.0),
+            (self.corner_radius - border_w).max(0.0),
             chrome.bg,
         );
 
         let text_origin = Point::new(
-            origin.x + PAD_X,
+            origin.x + self.pad_x,
             origin.y + self.content_origin_y(size.height),
         );
 
@@ -1249,10 +1447,10 @@ impl Widget for TextInputWidget {
         let clip_content = self.max_visible_lines.is_some();
         if clip_content {
             scene.push_clip(
-                Point::new(origin.x + BORDER_W, origin.y + PAD_Y),
+                Point::new(origin.x + self.border_width, origin.y + self.pad_y),
                 Size::new(
-                    (size.width - 2.0 * BORDER_W).max(0.0),
-                    (size.height - 2.0 * PAD_Y).max(0.0),
+                    (size.width - 2.0 * self.border_width).max(0.0),
+                    (size.height - 2.0 * self.pad_y).max(0.0),
                 ),
             );
         }
@@ -1295,7 +1493,7 @@ impl Widget for TextInputWidget {
             // observe the clear (see `PaintCtx::publish_ime_state`).
             ctx.publish_ime_state(self.current_ime_state(origin, size));
             if self.caret_visible_at(now)
-                && let Some(c) = self.display().cursor_rect(CARET_W)
+                && let Some(c) = self.display().cursor_rect(self.caret_width)
             {
                 let off = text_origin.to_vec2();
                 scene.fill_rect(
@@ -1968,6 +2166,229 @@ mod tests {
             "focused border is primary, background is surface"
         );
         assert_eq!(rec.rects, vec![scheme.primary], "caret is primary");
+    }
+
+    // --- Chrome geometry seam (FINDINGS #37): padding / border_width /
+    // corner_radius / caret_width / focus_ring_width ---
+
+    /// Records rounded-rect (chrome) and rect (selection/caret) fill
+    /// *geometry* — origin/size/radius/color — so the seam's effect on the
+    /// actual painted chrome can be asserted, not just that the builder
+    /// accepted a value.
+    #[derive(Default)]
+    struct ChromeGeometryRecorder {
+        rrects: Vec<(Point, Size, f64, Color)>,
+        rects: Vec<(Point, Size, Color)>,
+    }
+
+    impl PaintScene for ChromeGeometryRecorder {
+        fn fill_rect(&mut self, origin: Point, size: Size, color: Color) {
+            self.rects.push((origin, size, color));
+        }
+        fn fill_rounded_rect(&mut self, origin: Point, size: Size, radius: f64, color: Color) {
+            self.rrects.push((origin, size, radius, color));
+        }
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+        fn draw_glyph_run(&mut self, _run: frust_scene::GlyphRun) {}
+    }
+
+    #[test]
+    fn default_chrome_geometry_matches_the_unthemed_constants() {
+        // Pins the resolved default geometry: a field that never calls the
+        // new seam must render byte-for-byte as before it existed.
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        let field_size = root.layout(Size::new(300.0, 200.0));
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+
+        let mut rec = ChromeGeometryRecorder::default();
+        root.paint(&mut rec, FrameTime::ZERO);
+
+        let (outer_origin, outer_size, outer_radius, _) = rec.rrects[0];
+        let (inner_origin, inner_size, inner_radius, _) = rec.rrects[1];
+        assert_eq!(outer_size, field_size, "outer chrome rect covers the field");
+        assert_eq!(outer_radius, RADIUS, "default corner radius is RADIUS");
+        assert_eq!(
+            inner_origin.x - outer_origin.x,
+            BORDER_W,
+            "default border width is BORDER_W"
+        );
+        assert_eq!(inner_origin.y - outer_origin.y, BORDER_W);
+        assert_eq!(
+            inner_size,
+            Size::new(
+                outer_size.width - 2.0 * BORDER_W,
+                outer_size.height - 2.0 * BORDER_W
+            )
+        );
+        assert_eq!(inner_radius, RADIUS - BORDER_W);
+
+        let (_, caret_size, _) = *rec.rects.last().expect("caret painted while focused");
+        assert!(
+            (caret_size.width - CARET_W as f64).abs() < 1e-6,
+            "default caret width is CARET_W"
+        );
+    }
+
+    #[test]
+    fn custom_padding_changes_the_resolved_height_and_published_caret_offset() {
+        let mut default_state = AppState::default();
+        let mut default_root = harness(&mut default_state);
+        let default_size = default_root.layout(Size::new(300.0, 200.0));
+        default_root.event(&mut default_state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        let default_caret_x = default_root
+            .ime_state()
+            .expect("focused")
+            .caret
+            .expect("caret rect")
+            .x0;
+
+        let mut state = AppState::default();
+        let mut logic = |s: &mut AppState| {
+            text_input(s.value.clone(), |s: &mut AppState, v: String| s.value = v)
+                .padding(30.0, 40.0)
+        };
+        let mut root = RenderRoot::new();
+        root.rebuild(&mut logic, &mut state);
+        let custom_size = root.layout(Size::new(300.0, 200.0));
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        let custom_caret_x = root
+            .ime_state()
+            .expect("focused")
+            .caret
+            .expect("caret rect")
+            .x0;
+
+        assert_eq!(
+            custom_size.height - default_size.height,
+            2.0 * (40.0 - PAD_Y),
+            "vertical padding is reflected in the resolved field height, not just accepted"
+        );
+        assert!(
+            (custom_caret_x - default_caret_x - (30.0 - PAD_X)).abs() < 1e-6,
+            "horizontal padding shifts the published caret rect"
+        );
+    }
+
+    #[test]
+    fn custom_border_width_and_corner_radius_resize_the_painted_chrome() {
+        let mut state = AppState::default();
+        let mut logic = |s: &mut AppState| {
+            text_input(s.value.clone(), |s: &mut AppState, v: String| s.value = v)
+                .border_width(4.0)
+                .corner_radius(2.0)
+        };
+        let mut root = RenderRoot::new();
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(300.0, 200.0));
+
+        let mut rec = ChromeGeometryRecorder::default();
+        root.paint(&mut rec, FrameTime::ZERO);
+
+        let (outer_origin, outer_size, outer_radius, _) = rec.rrects[0];
+        let (inner_origin, inner_size, inner_radius, _) = rec.rrects[1];
+        assert_eq!(
+            outer_radius, 2.0,
+            "corner_radius reaches the painted outer rect"
+        );
+        assert_eq!(
+            inner_radius, 0.0,
+            "inner radius clamps at 0 once border_width exceeds corner_radius"
+        );
+        assert_eq!(
+            inner_origin.x - outer_origin.x,
+            4.0,
+            "border_width insets the fill"
+        );
+        assert_eq!(inner_origin.y - outer_origin.y, 4.0);
+        assert_eq!(
+            inner_size,
+            Size::new(outer_size.width - 8.0, outer_size.height - 8.0)
+        );
+    }
+
+    #[test]
+    fn custom_caret_width_changes_the_painted_caret_rect() {
+        let mut state = AppState::default();
+        let mut logic = |s: &mut AppState| {
+            text_input(s.value.clone(), |s: &mut AppState, v: String| s.value = v).caret_width(6.0)
+        };
+        let mut root = RenderRoot::new();
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(300.0, 200.0));
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+
+        let mut rec = ChromeGeometryRecorder::default();
+        root.paint(&mut rec, FrameTime::ZERO);
+        let (_, caret_size, _) = *rec.rects.last().expect("caret painted");
+        assert!(
+            (caret_size.width - 6.0).abs() < 1e-6,
+            "caret_width is reflected in the painted caret rect, not just accepted by the builder"
+        );
+    }
+
+    #[test]
+    fn custom_focus_ring_width_only_widens_the_border_while_focused() {
+        // The focus treatment specifically: unfocused, the idle border_width
+        // is unaffected; focused, focus_ring_width takes over.
+        let mut state = AppState::default();
+        let mut logic = |s: &mut AppState| {
+            text_input(s.value.clone(), |s: &mut AppState, v: String| s.value = v)
+                .focus_ring_width(5.0)
+        };
+        let mut root = RenderRoot::new();
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(300.0, 200.0));
+
+        let mut idle = ChromeGeometryRecorder::default();
+        root.paint(&mut idle, FrameTime::ZERO);
+        let (idle_outer, _, _, _) = idle.rrects[0];
+        let (idle_inner, _, _, _) = idle.rrects[1];
+        assert_eq!(
+            idle_inner.x - idle_outer.x,
+            BORDER_W,
+            "idle border stays the default width when unfocused"
+        );
+
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        let mut focused = ChromeGeometryRecorder::default();
+        root.paint(&mut focused, FrameTime::ZERO);
+        let (focused_outer, _, _, _) = focused.rrects[0];
+        let (focused_inner, _, _, _) = focused.rrects[1];
+        assert_eq!(
+            focused_inner.x - focused_outer.x,
+            5.0,
+            "the focused appearance responds to focus_ring_width"
+        );
+    }
+
+    #[test]
+    fn geometry_field_changes_request_the_right_change_flags() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+
+        // Padding changes the resolved `Size`, so it must relayout.
+        let mut padded = |s: &mut AppState| {
+            text_input(s.value.clone(), |s: &mut AppState, v: String| s.value = v)
+                .padding(20.0, 20.0)
+        };
+        let flags = root.rebuild(&mut padded, &mut state);
+        assert!(flags.needs_layout(), "a padding change must relayout");
+
+        // Border width alone is paint-only geometry — it never resizes the
+        // field, so it must not force a relayout on top of an unrelated
+        // padding change that already did.
+        let mut bordered = |s: &mut AppState| {
+            text_input(s.value.clone(), |s: &mut AppState, v: String| s.value = v)
+                .padding(20.0, 20.0)
+                .border_width(4.0)
+        };
+        let flags = root.rebuild(&mut bordered, &mut state);
+        assert!(flags.needs_paint());
+        assert!(
+            !flags.needs_layout(),
+            "border_width alone does not resize the field"
+        );
     }
 
     #[test]
