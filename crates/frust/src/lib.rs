@@ -73,15 +73,39 @@
 
 pub use frust_core::component::{Component, ComponentView, component};
 pub use frust_core::view::{AnyView, View, any};
+// [`NavigatorController::push_with_options`] (an existing method on the
+// already-flat-re-exported [`NavigatorController`] below) needed its argument
+// type actually constructible from `frust::` — added here as part of the
+// baseline re-export list, alongside the other bare navigator vocabulary
+// (`NavigatorController`/`NavigatorId`/`PageBuilder`/`PopResult`) it was
+// missing:
+//
+// - [`PushOptions`] carries a pushed page's back-press [`BackPolicy`] (and,
+//   for a [`BackPolicy::DismissAnimated`] overlay, the shared dismiss-signal
+//   cell) alongside opacity/transition/result.
+// - [`PushOptions::on_visibility`]/[`NavigatorController::transition`] hand
+//   back [`PageVisibility`]/[`TransitionState`] respectively — both
+//   otherwise unnameable without [`PageVisibility`]/[`VisibilityCallback`]/
+//   [`TransitionState`] themselves in scope.
+//
+// This is the FINDINGS #41 gap: `frust-widgets`' own `show_glyph_dialog`
+// (`push_with_options(.., PushOptions::transparent())` with a custom
+// [`BackPolicy`]) already depends on exactly this seam, so an app-authored
+// dialog/sheet could reach the *method* through [`NavigatorController`] but
+// never construct a call to it. See this file's
+// `push_with_options_dismiss_animated` test module below for the worked
+// `BackPolicy::DismissAnimated` + dismiss-signal example — an app-authored
+// modal staging its own exit on Android back instead of vanishing.
 pub use frust_widgets::{
-    Align, AlignView, Alignment, Axis, Button, ButtonStyle, ButtonView, Checkbox, CheckboxView,
-    ChildKey, Column, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, GestureDetector,
-    GestureDetectorView, HeroView, Icon, IconData, IconSource, IconView, IconWidget, Image,
-    ImageError, ImageFit, ImageSource, ImageView, MainAxisAlignment, NavigatorController,
-    NavigatorId, NavigatorView, Padding, PaddingView, PageBuilder, PageTransition, PopResult,
-    Radio, RadioView, RadioWidget, ResultCallback, Row, SafeAreaView, ScrollInfo, ScrollView,
-    SizedBox, SizedBoxView, Slider, SliderView, Stack, StackView, TextInput, TextInputView,
-    TextView, Timing, TransitionSpec, button, checkbox, flexible, hero, icon, inflexible, keyed,
+    Align, AlignView, Alignment, Axis, BackPolicy, Button, ButtonStyle, ButtonView, Checkbox,
+    CheckboxView, ChildKey, Column, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView,
+    GestureDetector, GestureDetectorView, HeroView, Icon, IconData, IconSource, IconView,
+    IconWidget, Image, ImageError, ImageFit, ImageSource, ImageView, MainAxisAlignment,
+    NavigatorController, NavigatorId, NavigatorView, Padding, PaddingView, PageBuilder,
+    PageTransition, PageVisibility, PopResult, PushOptions, Radio, RadioView, RadioWidget,
+    ResultCallback, Row, SafeAreaView, ScrollInfo, ScrollView, SizedBox, SizedBoxView, Slider,
+    SliderView, Stack, StackView, TextInput, TextInputView, TextView, Timing, TransitionSpec,
+    TransitionState, VisibilityCallback, button, checkbox, flexible, hero, icon, inflexible, keyed,
     radio, safe_area, scroll_view, slider, text, text_input,
 };
 
@@ -177,6 +201,51 @@ pub use frust_widgets::{
     DEFAULT_REDIRECT_LIMIT, ErrorBuilder, Location, NavRequest, NavWaker, PathPattern, Redirect,
     Resolution, ResolvedPage, Route, RouteBuilder, RouteNavigator, RouteParams, Router,
 };
+
+/// The page-transition **resolve/drive** path: the framework's own reduce-
+/// motion collapse policy, re-exported so an app-authored animation reuses it
+/// rather than re-deriving it.
+///
+/// [`resolve_spec`] applies `Theme.motion.reduce_motion`'s hard accessibility
+/// rule to a [`TransitionSpec`] — collapsing any animated preset to a
+/// `≤120ms` linear cross-fade — and resolves a bare [`Timing::ThemeDefault`]
+/// against the active [`MotionScheme`]. [`make_driver`] then turns the
+/// resolved [`Timing`] into a running [`TransitionDriver`] (advanced each
+/// frame via `TransitionDriver::advance`) plus the [`SpringDesc`] to settle it
+/// with later (an interactive edge-swipe's release fling). This is exactly
+/// the pair `frust-widgets`' own navigator and
+/// [`motion::switcher::PatternSwitcher`](crate::motion::switcher::PatternSwitcher)
+/// drive their transitions through — before this re-export, an app widget
+/// implementing its own page/dialog animation had to hand-roll the
+/// reduce-motion collapse (read `Theme.motion.reduce_motion`, apply the
+/// `120ms` + linear + zero-motion rule) instead of calling the framework's one
+/// implementation, so the two would silently drift the next time the
+/// framework's rule changes (FINDINGS #41).
+///
+/// Not otherwise re-exported at `frust-widgets`' own crate root (reached here
+/// via `frust_widgets::nav::transition`, a `pub mod` two levels down) — this
+/// is the facade's job precisely so app code never has to know that.
+///
+/// ```
+/// use frust::{Curve, PageTransition, Theme, Timing, TransitionDriver, TransitionSpec};
+///
+/// // A theme with reduce_motion on: resolve_spec collapses the spec to the
+/// // framework's own linear cross-fade, with no app-side collapse logic.
+/// let mut theme = Theme::m3_baseline();
+/// theme.motion.reduce_motion = true;
+///
+/// let spec = TransitionSpec::duration(PageTransition::SlideUp);
+/// let resolved = frust::resolve_spec(spec, Some(&theme.motion));
+/// assert_eq!(resolved.preset, PageTransition::ReducedCrossfade);
+/// assert_eq!(
+///     resolved.timing,
+///     Timing::Duration(std::time::Duration::from_millis(120), Curve::Linear)
+/// );
+///
+/// let (driver, _settle_spring) = frust::make_driver(resolved.timing);
+/// assert!(matches!(driver, TransitionDriver::Auto(_)));
+/// ```
+pub use frust_widgets::nav::transition::{TransitionDriver, make_driver, resolve_spec};
 
 /// The Material 3 Expressive widget catalog: AppBar,
 /// Card, Chips, Dialog, FAB, ListView/ListItem, NavigationBar, BottomSheet,
@@ -1445,6 +1514,152 @@ mod glass_reexport {
             Theme::cupertino_baseline().glass,
             GlassScale::ios27(),
             "Cupertino baseline carries the iOS-27 glass scale"
+        );
+    }
+}
+
+/// FINDINGS #41 acceptance test: an app-authored animation composed entirely
+/// from facade names ([`resolve_spec`]/[`make_driver`]/[`TransitionDriver`]),
+/// with **no** hand-rolled reduce-motion branch anywhere in this module — the
+/// bar the task sets is the *absence* of an app-side `if reduce_motion { .. }`
+/// check, not merely that these names resolve.
+#[cfg(test)]
+mod motion_resolve_reuse {
+    use std::time::Duration;
+
+    use crate::{
+        Curve, PageTransition, Theme, Timing, TransitionDriver, make_driver, resolve_spec,
+    };
+
+    /// Under `Theme.motion.reduce_motion`, the framework's own collapse policy
+    /// (`≤120ms` linear cross-fade) applies via a single [`resolve_spec`] call
+    /// — the app never re-derives it.
+    #[test]
+    fn resolve_spec_collapses_under_reduce_motion_without_app_derivation() {
+        let mut theme = Theme::m3_baseline();
+        theme.motion.reduce_motion = true;
+
+        let spec = crate::TransitionSpec::duration(PageTransition::SlideUp);
+        let resolved = resolve_spec(spec, Some(&theme.motion));
+
+        assert_eq!(
+            resolved.preset,
+            PageTransition::ReducedCrossfade,
+            "reduce_motion collapses any animated preset to ReducedCrossfade"
+        );
+        assert_eq!(
+            resolved.timing,
+            Timing::Duration(Duration::from_millis(120), Curve::Linear),
+            "reduce_motion collapses to the framework's own <=120ms linear timing"
+        );
+
+        // Drive the resolved timing through the same `make_driver` the
+        // navigator/PatternSwitcher use — an app widget advances `driver` from
+        // its own paint pass exactly like they do.
+        let (driver, _settle_spring) = make_driver(resolved.timing);
+        assert!(
+            matches!(driver, TransitionDriver::Auto(_)),
+            "a Duration timing always drives TransitionDriver::Auto"
+        );
+    }
+
+    /// With reduce_motion off, a bare [`Timing::ThemeDefault`] still resolves
+    /// to a concrete timing through the same call — the non-collapsed half of
+    /// the same resolve path, still with no app-side branching.
+    #[test]
+    fn resolve_spec_resolves_theme_default_when_reduce_motion_is_off() {
+        let theme = Theme::m3_baseline();
+        assert!(!theme.motion.reduce_motion);
+
+        let spec = crate::TransitionSpec::new(PageTransition::SlideUp, Timing::ThemeDefault);
+        let resolved = resolve_spec(spec, Some(&theme.motion));
+
+        assert_eq!(
+            resolved.preset,
+            PageTransition::SlideUp,
+            "preset is unchanged"
+        );
+        assert_ne!(
+            resolved.timing,
+            Timing::ThemeDefault,
+            "ThemeDefault is resolved to a concrete timing, not passed through raw"
+        );
+
+        let (_driver, _settle_spring) = make_driver(resolved.timing);
+    }
+}
+
+/// FINDINGS #41's sharper half: an app-authored modal using
+/// [`PushOptions`]/[`BackPolicy`]/[`NavigatorController::push_with_options`] —
+/// all facade-reachable only as of this task — with [`BackPolicy::DismissAnimated`]
+/// and a dismiss-signal cell, the same mechanism `frust-widgets`' own
+/// `show_glyph_dialog` depends on. Before this task `PushOptions`/`BackPolicy`
+/// were unnameable through `frust::`, so this call could not be constructed at
+/// all: Android back on an app-authored sheet had no way to stage the exit and
+/// the sheet would vanish instead of sliding down (the `pop`-not-`request_back`
+/// symptom this policy prevents).
+///
+/// Uses `NavigatorController::request_back` directly rather than the full
+/// `frust::navigator`-auto-wired + `push_back_press()` path deliberately: the
+/// auto-wiring reads `frust-reactive`'s process-wide back-press signal, which
+/// needs an active `ReactiveRuntime` and races `back_glue`'s own
+/// `TEST_LOCK`-guarded suite if run concurrently in the same test binary.
+/// `request_back` is the exact call `back_glue::route_back` makes on a real
+/// consumed press (see `back_glue`'s module docs), so this covers the same
+/// mechanism without that shared global.
+#[cfg(test)]
+mod push_with_options_dismiss_animated {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use frust_core::RenderRoot;
+    use frust_widgets::navigator as raw_navigator;
+
+    use crate::{AnyView, BackPolicy, NavigatorController, PushOptions, any, text};
+
+    fn page() -> AnyView<()> {
+        any(text("modal"))
+    }
+
+    #[test]
+    fn dismiss_animated_stages_the_exit_instead_of_vanishing() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), _> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| raw_navigator(&ctrl, page)
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+
+        // An app-authored modal: transparent, DismissAnimated, with its own
+        // shared dismiss-signal cell.
+        let signal = Rc::new(Cell::new(0u64));
+        controller.push_with_options(
+            page,
+            PushOptions::transparent()
+                .back(BackPolicy::DismissAnimated)
+                .dismiss_signal(signal.clone()),
+        );
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(controller.depth(), 2, "modal pushed");
+        assert_eq!(signal.get(), 0, "no back yet");
+
+        // Android back: routed through `request_back`.
+        controller.request_back();
+        root.rebuild(&mut app, &mut state);
+
+        assert_eq!(
+            controller.depth(),
+            2,
+            "DismissAnimated does not pop on back — the stack stages the exit \
+             rather than the page vanishing"
+        );
+        assert_eq!(
+            signal.get(),
+            1,
+            "back fired the dismiss signal exactly once, for the modal's own \
+             widget to stage its exit animation on"
         );
     }
 }
