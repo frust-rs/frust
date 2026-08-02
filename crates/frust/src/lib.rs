@@ -638,11 +638,11 @@ pub fn navigator<State: 'static>(
 /// accessibility nodes for the top page only.
 ///
 /// Like [`navigator`], every rebuild additionally auto-wires back handling for
-/// `controller`. With a host *and* an inner navigator there are two registrants,
-/// and a press goes to the first one claiming it in build order — outermost
-/// first (**R44-back**). A host with no overlays open claims nothing, so back
-/// falls through to the inner navigator exactly as before the host existed. See
-/// [`back_glue`]'s module docs for the arbitration contract.
+/// `controller` — here as a **host**, the rank that claims a press ahead of any
+/// plain navigator (**R44-back**), whenever and however often either wires. A
+/// host with no overlays open claims nothing, so back falls through to the inner
+/// navigator exactly as before the host existed. See [`back_glue`]'s module docs
+/// for the arbitration contract.
 ///
 /// ```no_run
 /// use frust::{
@@ -687,7 +687,7 @@ pub fn overlay_host<State: 'static>(
     controller: &NavigatorController<State>,
     app: impl Fn() -> AnyView<State> + 'static,
 ) -> NavigatorView<State> {
-    back_glue::auto_wire(controller);
+    back_glue::auto_wire_overlay_host(controller);
     frust_widgets::overlay_host(controller, app)
 }
 

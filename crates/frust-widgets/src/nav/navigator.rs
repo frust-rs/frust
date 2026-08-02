@@ -456,6 +456,20 @@ pub struct NavigatorController<State: 'static> {
     /// data, never a signal. Unlike those two it is published from *paint* as
     /// well as build, which is what makes a frame-exact read possible.
     transition: Rc<Cell<TransitionState>>,
+    /// How many live [`NavigatorWidget`]s currently render this controller's
+    /// stack — incremented by [`NavigatorView::build`], decremented by its
+    /// `teardown`. Read through [`is_mounted`](Self::is_mounted).
+    ///
+    /// A **liveness** seam, not a published-state one: the three cells above
+    /// answer "what does the stack look like?", this one answers "is this
+    /// navigator in the retained tree at all?". The facade's back arbitration
+    /// needs the latter to tell a navigator that merely did not wire this pass
+    /// from one whose screen was torn down (see `frust::back_glue`'s R44-back
+    /// prune). A count, not a bool, so a reconcile that builds the replacement
+    /// widget before tearing down the old one never reads as unmounted.
+    ///
+    /// Same reactive-free `Rc<Cell<_>>` idiom as the rest of the controller.
+    mounted: Rc<Cell<usize>>,
 }
 
 impl<State: 'static> Clone for NavigatorController<State> {
@@ -465,6 +479,7 @@ impl<State: 'static> Clone for NavigatorController<State> {
             depth: Rc::clone(&self.depth),
             back_interest: Rc::clone(&self.back_interest),
             transition: Rc::clone(&self.transition),
+            mounted: Rc::clone(&self.mounted),
         }
     }
 }
@@ -483,7 +498,39 @@ impl<State: 'static> NavigatorController<State> {
             depth: Rc::new(Cell::new(0)),
             back_interest: Rc::new(Cell::new(false)),
             transition: Rc::new(Cell::new(TransitionState::default())),
+            mounted: Rc::new(Cell::new(0)),
         }
+    }
+
+    /// Whether a live [`NavigatorWidget`] currently renders this controller's
+    /// stack — i.e. whether this navigator is in the retained tree *right now*.
+    ///
+    /// `false` before the first `build` and again after the widget's `teardown`
+    /// (a screen with its own nested navigator, popped). Unlike
+    /// [`depth`](Self::depth)/[`back_interest`](Self::back_interest) this is not
+    /// an advisory snapshot of the stack: it is exact at every point after the
+    /// widget's `build` began, because `build`/`teardown` write it directly.
+    ///
+    /// The facade's back arbitration is the intended consumer: a registered
+    /// controller that is still mounted is still part of the tree, so it must
+    /// keep its place in the arbitration list even on a pass in which it did not
+    /// re-wire; one that is no longer mounted can be released.
+    pub fn is_mounted(&self) -> bool {
+        self.mounted.get() > 0
+    }
+
+    /// Record that a [`NavigatorWidget`] attached to this controller. Called at
+    /// the very top of [`NavigatorView::build`], *before* the root page builder
+    /// runs: that builder may itself wire a nested navigator, and the facade's
+    /// back arbitration must already see this navigator as mounted by then.
+    fn mount(&self) {
+        self.mounted.set(self.mounted.get() + 1);
+    }
+
+    /// Record that an attached [`NavigatorWidget`] was torn down (saturating, so
+    /// an unpaired teardown can never wrap).
+    fn unmount(&self) {
+        self.mounted.set(self.mounted.get().saturating_sub(1));
     }
 
     /// This controller's [`NavigatorId`] — stable across clones, distinct per
@@ -2198,6 +2245,12 @@ impl<State: 'static> View<State> for NavigatorView<State> {
     type Element = NavigatorWidget<State>;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> NavigatorWidget<State> {
+        // Publish liveness FIRST: the root page builder below can wire a nested
+        // navigator (an app's inner navigator inside a root `overlay_host`'s
+        // page), and the facade's back arbitration must already see this
+        // navigator as mounted when that happens — the widget itself does not
+        // exist until the end of this function.
+        self.controller.mount();
         let view = (self.initial)();
         let pod = crate::authoring::build_child(&view, ctx);
         let mut widget = NavigatorWidget {
@@ -2312,6 +2365,10 @@ impl<State: 'static> View<State> for NavigatorView<State> {
         for entry in &mut element.pages {
             crate::authoring::teardown_child(&entry.view, &mut entry.pod, ctx);
         }
+        // This navigator has left the tree: drop the liveness `build` published,
+        // so a holder of a controller clone (the facade's back arbitration) can
+        // tell "gone" from "did not wire this pass".
+        self.controller.unmount();
     }
 }
 
