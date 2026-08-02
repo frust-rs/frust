@@ -45,6 +45,15 @@
 //! revealed by a pop is re-laid-out and correct on the very next frame — the same
 //! relayout-every-frame invariant the theme path leans on.
 //!
+//! # Root overlay host
+//!
+//! [`overlay_host`] is the same widget wearing a different hat: a navigator
+//! whose root page is the *whole app* and whose pushed pages are app-level
+//! modals, so an overlay dims and blocks chrome an inner navigator's overlay
+//! cannot reach. It is a constructor, not a second widget — everything below
+//! (input routing, R23, `BackPolicy`, dismiss signals, `on_result`) applies to
+//! it unchanged.
+//!
 //! # Accessibility reach (R23)
 //!
 //! The accessibility tree follows **input routing**, not painting:
@@ -388,6 +397,23 @@ enum NavOp<State: 'static> {
     },
 }
 
+/// An opaque identity for the navigator a [`NavigatorController`] drives: every
+/// clone of one controller reports the same value, and two independently
+/// constructed controllers never do.
+///
+/// The seam a *multi-navigator* registry keys on — the facade's back-press
+/// arbitration (rule **R44-back**) holds one entry per registered controller and
+/// needs to tell "this controller again" from "a second controller", which it
+/// cannot do through the op queue or the published cells.
+///
+/// **Uniqueness holds among *live* controllers only.** The value is derived from
+/// the address of the shared op queue, so a holder that wants the identity to
+/// stay meaningful must keep a controller clone alive alongside it (as the
+/// facade's registry does) — otherwise a freed allocation could be reused and
+/// two ids collide.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct NavigatorId(usize);
+
 /// The app-state handle to a [`navigator`]: a cloneable op queue an app keeps in
 /// its `Component::State` and drives with [`push`](Self::push)/[`pop`](Self::pop)/
 /// [`replace`](Self::replace). Every clone shares one queue (`Rc`), so the handle
@@ -458,6 +484,13 @@ impl<State: 'static> NavigatorController<State> {
             back_interest: Rc::new(Cell::new(false)),
             transition: Rc::new(Cell::new(TransitionState::default())),
         }
+    }
+
+    /// This controller's [`NavigatorId`] — stable across clones, distinct per
+    /// independently constructed controller. See [`NavigatorId`] for the
+    /// liveness caveat.
+    pub fn id(&self) -> NavigatorId {
+        NavigatorId(Rc::as_ptr(&self.ops) as *const u8 as usize)
     }
 
     /// The current page-stack depth of the navigator this controller drives, as
@@ -826,6 +859,72 @@ pub fn navigator<State: 'static>(
         root_visibility: None,
         cull_covered_builds: false,
     }
+}
+
+/// The **root overlay host**: a navigator whose root page is the whole app —
+/// chrome, tab shell, inner navigator and all — and whose pushed pages are the
+/// app's modals. Because the host sits *above* every piece of chrome, an overlay
+/// pushed here dims and blocks chrome that an overlay on an inner navigator
+/// cannot reach.
+///
+/// It is a [`navigator`] with two defaults changed and nothing else:
+///
+/// * **[`pop_swipe(false)`](NavigatorView::pop_swipe)** — an edge swipe must
+///   never dismiss an overlay.
+/// * **[`TransitionSpec::NONE`]** — each overlay widget stages its *own*
+///   enter/exit (the contract the dialog/sheet catalogs already rely on), so the
+///   host must not animate the page swap underneath them.
+///
+/// Everything else is the ordinary navigator, deliberately: dismiss-signal
+/// routing, [`PushOptions`]/[`BackPolicy`], per-overlay
+/// [`on_result`](PushOptions::on_result), the keyboard drop on a page switch,
+/// and the capture-cancel + focus-clear are inherited rather than re-invented.
+///
+/// ```no_run
+/// # use frust_widgets::{NavigatorController, overlay_host, text};
+/// # use frust_core::any;
+/// # let controller: NavigatorController<()> = NavigatorController::new();
+/// # let app_root = || any(text("the whole app: chrome, tabs, inner navigator"));
+/// // Wrap the app's existing root view; nothing inside it changes.
+/// let root = overlay_host(&controller, move || app_root());
+/// # let _ = root;
+/// ```
+///
+/// # The host owns no scrim
+///
+/// The per-page-paints-its-own-scrim convention is preserved verbatim: the host
+/// is purely structural and paints nothing of its own. An overlay page already
+/// fills `ctx.origin()..ctx.size()` with its scrim, and at the root that rect
+/// *is* the window — so the catalogs' dialogs and sheets need no change to dim
+/// the whole app.
+///
+/// # Chrome inertness is not new code
+///
+/// [`NavigatorWidget::event`](Widget::event) routes to
+/// [`input_routed_pages`](NavigatorWidget::input_routed_pages) — the top page
+/// only — so with an overlay up the entire app root, chrome included, receives
+/// nothing. The accessibility tree says the same thing through the same
+/// function under rule R23 (see [`semantics`](Widget::semantics)), so there is
+/// no second reachability path to keep in sync.
+///
+/// # Back arbitration
+///
+/// With a root host *and* an inner navigator there are two back registrants. The
+/// facade's back glue (`frust::back_glue`) routes a press to the first
+/// registrant claiming [`back_interest`](NavigatorController::back_interest) in
+/// build order — outermost first — so a press with a root overlay open reaches
+/// the host, and a press with none open falls through to the inner navigator
+/// (a host at depth 1 with the default [`BackPolicy::Pop`] claims nothing).
+pub fn overlay_host<State: 'static>(
+    controller: &NavigatorController<State>,
+    app: impl Fn() -> AnyView<State> + 'static,
+) -> NavigatorView<State> {
+    navigator(controller, app)
+        // Both are stated explicitly rather than left to the `navigator`
+        // defaults: they are the host's *contract*, not a coincidence of what
+        // `navigator` happens to default to.
+        .pop_swipe(false)
+        .transition(TransitionSpec::NONE)
 }
 
 /// One retained page in the [`NavigatorWidget`]'s stack: its builder (re-run each
@@ -5460,6 +5559,292 @@ mod tests {
             observed.get(),
             1,
             "the covered page's widget state survived the build cull"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // #44 — the root overlay host (`overlay_host`).
+    // ---------------------------------------------------------------------
+
+    /// A full-screen stand-in for one piece of the app root (its content, its
+    /// chrome) or for an overlay pushed over it. It fills its whole box, counts
+    /// the pointer `Down`s that actually reach it, and contributes exactly one
+    /// labelled accessibility node — so a test reads the input reach and the
+    /// accessibility reach of the same thing as two sets of labels (the shape
+    /// `tests/semantics_tree.rs`'s R23 parity helper uses).
+    struct HostProbe {
+        label: &'static str,
+        hits: Rc<Cell<u32>>,
+    }
+    struct HostProbeWidget {
+        label: &'static str,
+        hits: Rc<Cell<u32>>,
+    }
+    impl View<()> for HostProbe {
+        type Element = HostProbeWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> HostProbeWidget {
+            HostProbeWidget {
+                label: self.label,
+                hits: self.hits.clone(),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            element: &mut HostProbeWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            element.label = self.label;
+            element.hits = self.hits.clone();
+            ChangeFlags::NONE
+        }
+    }
+    impl Widget for HostProbeWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            scene.fill_rect(ctx.origin(), ctx.size(), peniko::Color::BLACK);
+        }
+        fn event(&mut self, _ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if let InputEvent::Pointer(p) = event
+                && p.phase == PointerPhase::Down
+            {
+                self.hits.set(self.hits.get() + 1);
+                return EventResult::Handled;
+            }
+            EventResult::Ignored
+        }
+        fn semantics(&self, ctx: &mut SemanticsCtx) {
+            ctx.push_node(frust_core::accesskit::Role::Button, |node| {
+                node.set_label(self.label)
+            });
+        }
+    }
+
+    fn host_probe(label: &'static str, hits: &Rc<Cell<u32>>) -> AnyView<()> {
+        any(HostProbe {
+            label,
+            hits: hits.clone(),
+        })
+    }
+
+    /// Every label present anywhere in the collected accessibility tree.
+    fn semantic_labels(root: &RenderRoot<(), NavigatorView<()>>) -> Vec<String> {
+        root.semantics()
+            .nodes
+            .iter()
+            .filter_map(|(_, node)| node.label().map(str::to_string))
+            .collect()
+    }
+
+    /// The app-root shape a host wraps: `Stack[content, chrome]`, both
+    /// full-screen, so the chrome paints over the content and — by
+    /// `StackWidget`'s reverse-order hit-testing — takes any pointer that
+    /// reaches the app root at all.
+    type HostAppLogic = Box<dyn FnMut(&mut ()) -> NavigatorView<()>>;
+    type HostFixture = (
+        NavigatorController<()>,
+        RenderRoot<(), NavigatorView<()>>,
+        HostAppLogic,
+        Rc<Cell<u32>>,
+        Rc<Cell<u32>>,
+    );
+
+    fn overlay_host_fixture() -> HostFixture {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let content_hits = Rc::new(Cell::new(0u32));
+        let chrome_hits = Rc::new(Cell::new(0u32));
+        let app: HostAppLogic = {
+            let ctrl = controller.clone();
+            let content = content_hits.clone();
+            let chrome = chrome_hits.clone();
+            Box::new(move |_: &mut ()| {
+                let content = content.clone();
+                let chrome = chrome.clone();
+                overlay_host(&ctrl, move || {
+                    any(Stack(vec![
+                        host_probe("app-content", &content),
+                        host_probe("app-chrome", &chrome),
+                    ]))
+                })
+            })
+        };
+        (
+            controller,
+            RenderRoot::new(),
+            app,
+            content_hits,
+            chrome_hits,
+        )
+    }
+
+    /// The host is the ordinary navigator with exactly two defaults changed —
+    /// asserted on the view, and then behaviourally: a left-edge drag over an
+    /// open overlay must not dismiss it (an edge swipe is a navigation gesture,
+    /// never a modal dismissal), and the overlay must appear with no host
+    /// transition of its own (each overlay stages its own enter/exit).
+    #[test]
+    fn overlay_host_is_a_navigator_with_two_defaults_changed() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let view = overlay_host(&controller, || sized_page(10.0, 10.0));
+        assert_eq!(
+            view.pop_swipe,
+            Some(false),
+            "the host pins pop_swipe off explicitly, not by default-derivation"
+        );
+        assert!(!view.resolve_pop_swipe());
+        assert_eq!(view.default_transition, TransitionSpec::NONE);
+
+        let (controller, mut root, mut app, ..) = overlay_host_fixture();
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        controller.push_with_options(|| sized_page(1e4, 1e4), PushOptions::transparent());
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        // No host transition: the overlay is settled on the very frame it is
+        // pushed, so it takes input immediately rather than after ≤340ms of
+        // mid-transition input suppression.
+        assert!(
+            !controller.transition().active,
+            "TransitionSpec::NONE: the overlay push settles instantly"
+        );
+        assert_eq!(controller.depth(), 2);
+
+        // A full left-edge drag: arm at x <= EDGE_SWIPE_ZONE_DP, cross the slop,
+        // release well past the commit threshold.
+        root.event(&mut state, &down(2.0, 50.0));
+        root.event(&mut state, &move_to(80.0, 50.0));
+        root.event(&mut state, &up(90.0, 50.0));
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            controller.depth(),
+            2,
+            "pop_swipe(false): an edge swipe never dismisses an overlay"
+        );
+    }
+
+    /// The chrome-inertness half of #44, and the reason the host must sit
+    /// *above* the chrome rather than beside it: with an overlay up, a pointer
+    /// at the chrome's own coordinates reaches the overlay. No new suppression
+    /// code — `route_top` already routes to `input_routed_pages()` only.
+    #[test]
+    fn an_overlay_takes_the_pointer_from_the_chrome_beneath_it() {
+        let (controller, mut root, mut app, content_hits, chrome_hits) = overlay_host_fixture();
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        // Baseline: with no overlay, a press at (50, 50) lands on the chrome.
+        root.event(&mut state, &down(50.0, 50.0));
+        assert_eq!(chrome_hits.get(), 1, "no overlay: the chrome takes presses");
+        assert_eq!(content_hits.get(), 0, "the chrome is above the content");
+
+        let overlay_hits = Rc::new(Cell::new(0u32));
+        controller.push_with_options(
+            {
+                let overlay_hits = overlay_hits.clone();
+                move || host_probe("overlay", &overlay_hits)
+            },
+            PushOptions::transparent(),
+        );
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        chrome_hits.set(0);
+        content_hits.set(0);
+        root.event(&mut state, &down(50.0, 50.0));
+        assert_eq!(overlay_hits.get(), 1, "the overlay takes the press");
+        assert_eq!(
+            chrome_hits.get(),
+            0,
+            "the chrome under a root overlay is inert — the whole point of #44"
+        );
+        assert_eq!(content_hits.get(), 0, "so is the app content");
+    }
+
+    /// The host owns no scrim, and does not need to: an overlay page already
+    /// fills `ctx.origin()..ctx.size()`, and at the ROOT that rect is the
+    /// window. This is what lets `glyph::dialog`/`material::sheet` dim the whole
+    /// app with no change at all.
+    #[test]
+    fn an_overlays_scrim_rect_equals_the_window_rect() {
+        let (controller, mut root, mut app, ..) = overlay_host_fixture();
+        let mut state = ();
+        let window = Size::new(320.0, 640.0);
+        root.rebuild(&mut app, &mut state);
+        root.layout(window);
+
+        // A page that fills whatever box it is given — the scrim shape every
+        // overlay catalog widget paints first.
+        controller.push_with_options(|| sized_page(1e4, 1e4), PushOptions::transparent());
+        root.rebuild(&mut app, &mut state);
+        root.layout(window);
+        let mut scene = RecordingScene::default();
+        root.paint(&mut scene, FrameTime::ZERO);
+
+        assert!(
+            scene.rects.contains(&(Point::ZERO, window)),
+            "the overlay's scrim covers the whole window, not a sub-rect \
+             (recorded rects: {:?})",
+            scene.rects
+        );
+    }
+
+    /// **R23 parity at the root.** With an overlay up, the app root and its
+    /// chrome contribute NO accessibility nodes — asserted, not assumed, and
+    /// asserted *together with* the input reach so the two can only ever agree.
+    /// A root overlay that dimmed the chrome visually while a screen reader
+    /// still read it out would be #44 re-created inside the accessibility tree.
+    #[test]
+    fn an_overlay_host_omits_the_app_root_and_its_chrome_from_semantics() {
+        let (controller, mut root, mut app, content_hits, chrome_hits) = overlay_host_fixture();
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        // With no overlay, the app root IS the routed page: both reaches carry
+        // the content and the chrome (the #23 regression guard, at the root).
+        let labels = semantic_labels(&root);
+        assert!(
+            labels.iter().any(|l| l == "app-content") && labels.iter().any(|l| l == "app-chrome"),
+            "no overlay: the whole app root is in the accessibility tree ({labels:?})"
+        );
+
+        let overlay_hits = Rc::new(Cell::new(0u32));
+        controller.push_with_options(
+            {
+                let overlay_hits = overlay_hits.clone();
+                move || host_probe("overlay", &overlay_hits)
+            },
+            PushOptions::transparent(),
+        );
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        // The accessibility reach…
+        let labels = semantic_labels(&root);
+        assert!(
+            labels.iter().any(|l| l == "overlay"),
+            "the overlay itself is present ({labels:?})"
+        );
+        assert!(
+            !labels.iter().any(|l| l == "app-content") && !labels.iter().any(|l| l == "app-chrome"),
+            "R23: the app root and its chrome contribute nothing under an \
+             overlay ({labels:?})"
+        );
+
+        // …equals the input reach, measured the same way.
+        content_hits.set(0);
+        chrome_hits.set(0);
+        root.event(&mut state, &down(50.0, 50.0));
+        assert_eq!(overlay_hits.get(), 1);
+        assert_eq!(
+            (content_hits.get(), chrome_hits.get()),
+            (0, 0),
+            "R23 parity: what contributes no node is exactly what receives no input"
         );
     }
 }

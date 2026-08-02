@@ -78,11 +78,11 @@ pub use frust_widgets::{
     ChildKey, Column, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, GestureDetector,
     GestureDetectorView, HeroView, Icon, IconData, IconSource, IconView, IconWidget, Image,
     ImageError, ImageFit, ImageSource, ImageView, MainAxisAlignment, NavigatorController,
-    NavigatorView, Padding, PaddingView, PageBuilder, PageTransition, PopResult, Radio, RadioView,
-    RadioWidget, ResultCallback, Row, SafeAreaView, ScrollInfo, ScrollView, SizedBox, SizedBoxView,
-    Slider, SliderView, Stack, StackView, TextInput, TextInputView, TextView, Timing,
-    TransitionSpec, button, checkbox, flexible, hero, icon, inflexible, keyed, radio, safe_area,
-    scroll_view, slider, text, text_input,
+    NavigatorId, NavigatorView, Padding, PaddingView, PageBuilder, PageTransition, PopResult,
+    Radio, RadioView, RadioWidget, ResultCallback, Row, SafeAreaView, ScrollInfo, ScrollView,
+    SizedBox, SizedBoxView, Slider, SliderView, Stack, StackView, TextInput, TextInputView,
+    TextView, Timing, TransitionSpec, button, checkbox, flexible, hero, icon, inflexible, keyed,
+    radio, safe_area, scroll_view, slider, text, text_input,
 };
 
 /// Platform-view embedding (platform-views feature, tasks 02/07): reserve
@@ -553,6 +553,73 @@ pub fn navigator<State: 'static>(
 ) -> NavigatorView<State> {
     back_glue::auto_wire(controller);
     frust_widgets::navigator(controller, initial)
+}
+
+/// Build a **root overlay host** driven by `controller`, wrapping the app's
+/// whole root view — the facade's back-aware wrapper over
+/// [`frust_widgets::overlay_host`].
+///
+/// The host is a [`navigator`] whose root page is the entire app (chrome, tab
+/// shell, inner navigator and all) and whose pushed pages are app-level modals,
+/// with two defaults changed: no edge-swipe pop, and no host transition (each
+/// overlay stages its own). Because it sits *above* every piece of chrome, an
+/// overlay pushed here dims and blocks chrome that an overlay on an inner
+/// navigator cannot reach — and the chrome goes inert to pointers *and* to
+/// assistive technology for free, since the navigator routes input and forwards
+/// accessibility nodes for the top page only.
+///
+/// Like [`navigator`], every rebuild additionally auto-wires back handling for
+/// `controller`. With a host *and* an inner navigator there are two registrants,
+/// and a press goes to the first one claiming it in build order — outermost
+/// first (**R44-back**). A host with no overlays open claims nothing, so back
+/// falls through to the inner navigator exactly as before the host existed. See
+/// [`back_glue`]'s module docs for the arbitration contract.
+///
+/// ```no_run
+/// use frust::{
+///     AnyView, Component, NavigatorController, Stack, any, navigator, overlay_host, text,
+/// };
+///
+/// #[derive(Default)]
+/// struct App;
+///
+/// struct AppState {
+///     nav: NavigatorController<AppState>,
+///     overlays: NavigatorController<AppState>,
+/// }
+///
+/// impl Component for App {
+///     type State = AppState;
+///
+///     fn init(&self) -> AppState {
+///         AppState {
+///             nav: NavigatorController::new(),
+///             overlays: NavigatorController::new(),
+///         }
+///     }
+///
+///     fn build(&self, state: &mut AppState) -> AnyView<AppState> {
+///         let nav = state.nav.clone();
+///         // The former root view moves INSIDE the host's page builder — which
+///         // is also what puts the inner navigator's wiring after the host's.
+///         any(overlay_host(&state.overlays, move || {
+///             any(Stack(vec![
+///                 any(navigator(&nav, || any(text("home")))),
+///                 any(text("persistent chrome")),
+///             ]))
+///         }))
+///     }
+/// }
+///
+/// frust::app!(App);
+/// # fn main() {}
+/// ```
+pub fn overlay_host<State: 'static>(
+    controller: &NavigatorController<State>,
+    app: impl Fn() -> AnyView<State> + 'static,
+) -> NavigatorView<State> {
+    back_glue::auto_wire(controller);
+    frust_widgets::overlay_host(controller, app)
 }
 
 /// Router ⇄ deep-link auto-wiring: [`router_with_deep_links`]/

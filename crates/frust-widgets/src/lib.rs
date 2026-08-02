@@ -73,8 +73,9 @@ pub use icon::{Icon, IconData, IconSource, IconView, IconWidget, icon};
 pub use image::{Image, ImageError, ImageFit, ImageSource, ImageView, ImageWidget};
 pub use nav::hero::{HeroView, HeroWidget, hero};
 pub use nav::navigator::{
-    BackPolicy, NavigatorController, NavigatorView, NavigatorWidget, PageBuilder, PageVisibility,
-    PopResult, PushOptions, ResultCallback, VisibilityCallback, navigator,
+    BackPolicy, NavigatorController, NavigatorId, NavigatorView, NavigatorWidget, PageBuilder,
+    PageVisibility, PopResult, PushOptions, ResultCallback, VisibilityCallback, navigator,
+    overlay_host,
 };
 pub use nav::path::{Location, PathPattern, RouteParams};
 pub use nav::route::{NavRequest, NavWaker, RouteNavigator};
