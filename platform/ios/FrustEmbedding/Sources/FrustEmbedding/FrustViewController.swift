@@ -99,6 +99,21 @@ open class FrustViewController: UIViewController {
     /// `FrustSurfaceView.pendingDeepLink`).
     private var pendingDeepLink: String?
 
+    /// The wire `"contentType"` value last pushed into `forgeView`'s
+    /// `UITextInputTraits` by `applyImeContentType`, or `nil` when nothing has
+    /// been applied since the field last went inactive. Tracked so
+    /// `syncImeFocus` can detect a **steady-active** field whose
+    /// classification changed (e.g. `"normal"` → `"password"` without an
+    /// intervening blur, or focus moving directly from one field to a
+    /// differently-classified one while `forgeView` — the single shared
+    /// responder for the whole tree — never actually leaves first-responder
+    /// status) and re-apply the traits, mirroring Android's
+    /// `FrustSurfaceView.pollImeAfterDispatch`/`lastKnownState.contentType`
+    /// comparison. Without this, the *previous* field's traits — in
+    /// particular `isSecureTextEntry` — stay live for the rest of the
+    /// session (FINDINGS #31, reintroduced on this exact edge).
+    private var lastAppliedContentType: String?
+
     /// The keyboard's current occlusion of this view's bottom edge, in
     /// logical points (`FlutterViewController.mm:1593-1622` model). Computed as
     /// the intersection of the keyboard's end frame with `view.bounds`, so
@@ -457,10 +472,26 @@ open class FrustViewController: UIViewController {
     }
 
     /// Reconcile keyboard/first-responder state with the tree: a newly-focused
-    /// field seeds the mirror and shows the keyboard; a blurred field resigns.
+    /// field seeds the mirror and shows the keyboard; a blurred field resigns;
+    /// a **steady-active** field (still first responder, no focus edge) whose
+    /// `"contentType"` classification changed re-applies the traits and cycles
+    /// the responder so the keyboard actually picks them up (see
+    /// `applyImeContentType`'s doc for why a cycle, not just a trait
+    /// assignment, is required).
+    ///
+    /// The steady-active branch is the fix for the case a per-focus-edge-only
+    /// application misses entirely: `forgeView` is the *one* shared responder
+    /// for the whole tree, so focus moving from field A to field B — even
+    /// with differently-classified content types — never trips
+    /// `!forgeView.isFirstResponder`, because the responder never actually
+    /// stops being first responder in between. Without this branch a
+    /// `"normal"` field's traits (autocorrect on, no secure entry) stay live
+    /// while the user types into what Rust reports as a `"password"` field —
+    /// FINDINGS #31 reintroduced on this exact edge.
     private func syncImeFocus() {
         guard let state = fetchImeState() else { return }
         let active = (state["active"] as? Bool) ?? false
+        let contentType = state["contentType"] as? String
         if active {
             if !forgeView.isFirstResponder {
                 forgeView.seedMirror(from: state)
@@ -470,11 +501,24 @@ open class FrustViewController: UIViewController {
                 // responder, not continuously afterward, so setting them
                 // after would leave the wrong keyboard configuration live for
                 // this focus session.
-                applyImeContentType(state["contentType"] as? String)
+                applyImeContentType(contentType)
+                lastAppliedContentType = contentType
+                forgeView.becomeFirstResponder()
+            } else if contentType != lastAppliedContentType {
+                // Same responder, no focus edge, but the classification
+                // changed underneath it (obscure-toggle on one field, or
+                // focus moved straight to a differently-classified field —
+                // see this function's doc). `applyImeContentType` alone is
+                // not enough here; see its doc for the resign/become cycle
+                // this requires.
+                applyImeContentType(contentType)
+                lastAppliedContentType = contentType
+                forgeView.resignFirstResponder()
                 forgeView.becomeFirstResponder()
             }
         } else if forgeView.isFirstResponder {
             forgeView.resignFirstResponder()
+            lastAppliedContentType = nil
         }
     }
 
@@ -509,6 +553,36 @@ open class FrustViewController: UIViewController {
     /// here at the boundary that actually renders it. A field that state-sync
     /// forgot to classify becomes stricter than intended, never a secret
     /// field that got de-classified into a plaintext keyboard.
+    ///
+    /// **Assigning these properties alone is not sufficient on a `UITextInput`
+    /// that is already first responder.** `syncImeFocus` calls this function
+    /// from two sites: once before the *first* `becomeFirstResponder()` of a
+    /// focus session (traits land before the keyboard stands up — the normal
+    /// case, and the only one where a bare assignment works), and once more
+    /// on a steady-active field whose classification changed mid-session. For
+    /// that second call, `syncImeFocus` wraps it in a
+    /// `resignFirstResponder()` / `becomeFirstResponder()` cycle — required
+    /// because `isSecureTextEntry` is documented by Apple
+    /// (`UITextInputTraits.isSecureTextEntry`) to take effect only when set
+    /// *before* the object becomes first responder; there is no supported
+    /// "reload traits on a live responder" call (`reloadInputViews()` only
+    /// re-queries `inputView`/`inputAccessoryView`, not
+    /// `UITextInputTraits`). The cycle is the conservative, Apple-sanctioned
+    /// choice over a trait assignment that silently fails to take effect on
+    /// exactly the security-relevant path this whole mechanism exists for.
+    ///
+    /// This does mean a mid-session classification change visibly cycles the
+    /// keyboard: `forgeView`'s own state (`mirror`, `selectedRange`,
+    /// `markedRange`) lives on the view instance and is untouched by the
+    /// resign/become cycle, so no text or caret position is lost, but a
+    /// resign/become pair is a real (if typically very brief, same-run-loop)
+    /// first-responder transition and cannot be guaranteed flicker-free on
+    /// every iOS version — this file is compile- and device-unverified (see
+    /// this task's completion notes), so the actual on-device visual is
+    /// unconfirmed either way. That cost was judged acceptable against the
+    /// alternative: a stale `isSecureTextEntry`/`textContentType` silently
+    /// leaking a secret field's keystrokes into QuickType and keyboard
+    /// learning is a worse failure mode than a visible keyboard blink.
     private func applyImeContentType(_ wire: String?) {
         switch wire {
         case "normal":
