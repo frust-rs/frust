@@ -457,8 +457,10 @@ pub struct NavigatorController<State: 'static> {
     /// well as build, which is what makes a frame-exact read possible.
     transition: Rc<Cell<TransitionState>>,
     /// How many live [`NavigatorWidget`]s currently render this controller's
-    /// stack — incremented by [`NavigatorView::build`], decremented by its
-    /// `teardown`. Read through [`is_mounted`](Self::is_mounted).
+    /// stack — incremented by [`NavigatorView::build`] and (if a live widget's
+    /// controller is swapped) by [`NavigatorView::rebuild`]; decremented by
+    /// `teardown` and by that same swap handling for the controller being
+    /// swapped *away from*. Read through [`is_mounted`](Self::is_mounted).
     ///
     /// A **liveness** seam, not a published-state one: the three cells above
     /// answer "what does the stack look like?", this one answers "is this
@@ -467,6 +469,16 @@ pub struct NavigatorController<State: 'static> {
     /// from one whose screen was torn down (see `frust::back_glue`'s R44-back
     /// prune). A count, not a bool, so a reconcile that builds the replacement
     /// widget before tearing down the old one never reads as unmounted.
+    ///
+    /// **The widget never decrements this cell by looking `self.controller` up
+    /// again** — [`NavigatorWidget`] holds its own clone (`mounted`, alongside
+    /// `depth`/`back_interest`/`transition`), rebound only at `build` and at a
+    /// controller-swap `rebuild`, and every decrement goes through that field.
+    /// A `NavigatorView`'s `self.controller` is whatever the app currently
+    /// hands it — after a swap that is already the *new* controller — so
+    /// `teardown` reading it instead would double-unmount the new one and never
+    /// correct the old one, exactly the structural gap this field closes (see
+    /// [`NavigatorView::rebuild`]'s controller-swap comment).
     ///
     /// Same reactive-free `Rc<Cell<_>>` idiom as the rest of the controller.
     mounted: Rc<Cell<usize>>,
@@ -527,11 +539,11 @@ impl<State: 'static> NavigatorController<State> {
         self.mounted.set(self.mounted.get() + 1);
     }
 
-    /// Record that an attached [`NavigatorWidget`] was torn down (saturating, so
-    /// an unpaired teardown can never wrap).
-    fn unmount(&self) {
-        self.mounted.set(self.mounted.get().saturating_sub(1));
-    }
+    // No `unmount` method here deliberately: unmounting always goes through
+    // the widget-owned `mounted` cell (`unmount_cell`, below), never back
+    // through a `NavigatorController` reference — see the `mounted` field
+    // doc's structural-pairing note and `NavigatorView::rebuild`'s
+    // controller-swap handling.
 
     /// This controller's [`NavigatorId`] — stable across clones, distinct per
     /// independently constructed controller. See [`NavigatorId`] for the
@@ -1148,6 +1160,17 @@ pub struct NavigatorWidget<State: 'static> {
     /// that advances the driver — see
     /// [`NavigatorController::transition`]'s timing contract.
     transition_state: Rc<Cell<TransitionState>>,
+    /// The shared liveness slot [`mount`](NavigatorController::mount)
+    /// increments and [`unmount_cell`] decrements, cloned from whichever
+    /// controller's cells this widget is currently bound to (`build`, or the
+    /// last controller-swap `rebuild`). Stored on the *widget* — not read back
+    /// off `self.controller` — so `teardown`'s decrement always pairs with
+    /// whichever cell the widget last incremented, even if a later rebuild
+    /// swapped `NavigatorView::controller` again in between: pairing is
+    /// structural (same field written and read), never a lookup by identity
+    /// that could drift. See [`NavigatorView::rebuild`]'s controller-swap
+    /// handling for how this field gets re-bound.
+    mounted: Rc<Cell<usize>>,
     /// Whether a [`Covered`](PageVisibility::Covered) page skips its per-frame
     /// reconcile. Refreshed from the view each rebuild (live-configurable, like
     /// `pop_swipe_enabled`); default `false`.
@@ -1160,6 +1183,17 @@ pub struct NavigatorWidget<State: 'static> {
 /// depth-1-with-overlay case a raw `can_pop` cannot express.
 fn compute_back_interest(depth: usize, top_policy: BackPolicy) -> bool {
     depth > 1 || top_policy != BackPolicy::Pop
+}
+
+/// Decrement a [`NavigatorController`]'s `mounted` cell, saturating so an
+/// already-zero cell can never wrap. The one place a mounted count is ever
+/// decremented — [`NavigatorView::teardown`] and [`NavigatorView::rebuild`]'s
+/// controller-swap handling both call this against the cell
+/// [`NavigatorWidget`] itself owns (never by looking `NavigatorController`
+/// back up), which is what makes the mount/unmount pairing structural rather
+/// than an identity lookup that could drift after a swap.
+fn unmount_cell(mounted: &Cell<usize>) {
+    mounted.set(mounted.get().saturating_sub(1));
 }
 
 impl<State: 'static> NavigatorWidget<State> {
@@ -2278,6 +2312,7 @@ impl<State: 'static> View<State> for NavigatorView<State> {
             depth: Rc::clone(&self.controller.depth),
             back_interest: Rc::clone(&self.controller.back_interest),
             transition_state: Rc::clone(&self.controller.transition),
+            mounted: Rc::clone(&self.controller.mounted),
             cull_covered_builds: self.cull_covered_builds,
         };
         // Apply any ops the app queued before the first frame.
@@ -2299,6 +2334,56 @@ impl<State: 'static> View<State> for NavigatorView<State> {
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         let mut flags = ChangeFlags::NONE;
+        // 0. Controller identity. `AnyView::rebuild` (crates/frust-core/src/view.rs)
+        //    matches only the concrete view type (`NavigatorView<State>`), never
+        //    controller identity — so a slot that gets rebuilt against a
+        //    *different* `NavigatorController` reaches this `rebuild`, not
+        //    `build`, unlike every other structural change. Left unhandled, the
+        //    widget would keep draining ops from `self.controller` (the new one,
+        //    correct) while publishing depth/back_interest/transition/mounted
+        //    into the cells captured at `build` (the old one) — an ops/state
+        //    split, and the old controller's mounted count would never return to
+        //    0 (permanently "mounted", defeating F1's mounted-veto prune in
+        //    `frust::back_glue`).
+        //
+        //    Re-bind rather than rebuild the element: swapping which controller
+        //    drives a navigator is app-level misuse (idiomatic usage keeps one
+        //    controller per `Component::State` for the view's whole life), but
+        //    tearing down and rebuilding the retained page stack on top of that
+        //    misuse would additionally blow away every page's widget state
+        //    (`push_pop_preserves_page_widget_state`'s guarantee) for a
+        //    consequence out of proportion to the mistake. Re-binding keeps the
+        //    stack — and the app's data — intact; only the four published cells
+        //    move to point at the new controller.
+        //
+        //    Ordering: unmount the OLD controller through `element.mounted`
+        //    (the cell still bound from the last build/rebind) BEFORE rebinding
+        //    that field to the new controller's cell — otherwise the decrement
+        //    would land on the wrong cell and the leak would just move rather
+        //    than close. Mount the NEW controller only after every cell points
+        //    at it, so a re-entrant read mid-rebind never sees a half-swapped
+        //    widget.
+        //
+        //    An in-flight transition (`element.transition`, the widget's own
+        //    retained animation state — never controller-owned) is left
+        //    running untouched; only where its progress gets *published*
+        //    moves. The new controller's `transition` cell starts at
+        //    `TransitionState::default()` (inactive), so a chrome observer
+        //    reading it through the very next frame after a mid-transition swap
+        //    sees a one-frame-stale "at rest" snapshot — self-healing at the
+        //    next paint (which republishes progress every frame a transition is
+        //    active) or at `finalize_transition`, whichever comes first. Bounded
+        //    and self-correcting, not a permanent split — the cost of swapping
+        //    controllers mid-transition, which is already deep into misuse
+        //    territory.
+        if self.controller.id() != _prev.controller.id() {
+            unmount_cell(&element.mounted);
+            element.depth = Rc::clone(&self.controller.depth);
+            element.back_interest = Rc::clone(&self.controller.back_interest);
+            element.transition_state = Rc::clone(&self.controller.transition);
+            element.mounted = Rc::clone(&self.controller.mounted);
+            self.controller.mount();
+        }
         // Keep the widget's default transition in sync with the view so an app can
         // change it live (per-op overrides always win over it).
         element.default_transition = self.default_transition;
@@ -2365,10 +2450,20 @@ impl<State: 'static> View<State> for NavigatorView<State> {
         for entry in &mut element.pages {
             crate::authoring::teardown_child(&entry.view, &mut entry.pod, ctx);
         }
-        // This navigator has left the tree: drop the liveness `build` published,
-        // so a holder of a controller clone (the facade's back arbitration) can
-        // tell "gone" from "did not wire this pass".
-        self.controller.unmount();
+        // This navigator has left the tree: drop the liveness `mount()` count
+        // this widget holds. Decrement through `element.mounted` — the cell
+        // `build`/the last controller-swap `rebuild` bound — rather than calling
+        // `self.controller.unmount()`. `self.controller` is merely whichever
+        // controller *this* view instance happens to carry; after a swap it is
+        // already the NEW controller, which `rebuild`'s swap handling already
+        // mounted for a widget still alive. Unmounting through `self.controller`
+        // here would double-unmount the new one (permanently `mounted() ==
+        // false` even while the app still holds it elsewhere) and leave the OLD
+        // one's earlier `rebuild`-time unmount as the only correction it ever
+        // got — the mount/unmount pair is only provably balanced when both ends
+        // read the same cell, which `element.mounted` guarantees regardless of
+        // how many times the controller was swapped underneath this widget.
+        unmount_cell(&element.mounted);
     }
 }
 
@@ -2700,6 +2795,104 @@ mod tests {
         root.layout(Size::new(100.0, 100.0));
         root.paint(&mut RecordingScene::default(), FrameTime::ZERO);
         assert_eq!(observed.get(), 1, "page A's widget state survived push→pop");
+    }
+
+    // --- G2 (closes review finding N3): rebuilding a `NavigatorView` slot
+    //     against a *different* `NavigatorController` must not split published
+    //     state from the ops actually applied, and must not leave the old
+    //     controller's mounted count stuck above zero forever. `AnyView::rebuild`
+    //     only matches on concrete view type, never controller identity, so this
+    //     reaches `NavigatorView::rebuild` — not `build` — exactly like an
+    //     ordinary same-controller rebuild. ---
+
+    #[test]
+    fn controller_swap_on_rebuild_rebinds_liveness_and_state() {
+        let controller_a: NavigatorController<()> = NavigatorController::new();
+        let controller_b: NavigatorController<()> = NavigatorController::new();
+
+        let view_a = navigator(&controller_a, || sized_page(10.0, 10.0));
+        let mut next_id = 0u64;
+        let mut ctx = BuildCtx::new(&mut next_id);
+        let mut widget = view_a.build(&mut ctx);
+
+        assert!(
+            controller_a.is_mounted(),
+            "build mounts the controller it was given"
+        );
+        assert!(
+            !controller_b.is_mounted(),
+            "B was never attached to anything yet"
+        );
+        assert_eq!(controller_a.depth(), 1);
+
+        // Queue an op on B *before* the swap, proving it lands on B once B is
+        // the controller actually driving this widget (not dropped, not
+        // misapplied to A).
+        controller_b.push(|| sized_page(20.0, 20.0));
+
+        // Rebuild the same widget against a view driven by a *different*
+        // controller — the misuse this fix makes safe.
+        let view_b = navigator(&controller_b, || sized_page(10.0, 10.0));
+        view_b.rebuild(&view_a, &mut widget, &mut ctx);
+
+        assert!(
+            !controller_a.is_mounted(),
+            "the OLD controller must be unmounted in the same rebuild that swaps away from it"
+        );
+        assert!(
+            controller_b.is_mounted(),
+            "the NEW controller must be mounted once it drives a live widget"
+        );
+        assert_eq!(
+            controller_b.depth(),
+            2,
+            "the op queued on B (the controller actually in use) applied"
+        );
+        assert_eq!(
+            controller_a.depth(),
+            1,
+            "A's published state is frozen where the swap left it, not further updated"
+        );
+
+        // Tear down through the view currently bound (B) — the decrement must
+        // hit B's cell (via the widget's own captured `mounted`), not re-derive
+        // it from `self.controller` by coincidence.
+        view_b.teardown(&mut widget, &mut ctx);
+        assert!(
+            !controller_b.is_mounted(),
+            "teardown unmounts whichever controller the widget is currently bound to"
+        );
+        assert!(!controller_a.is_mounted(), "A stays unmounted");
+    }
+
+    #[test]
+    fn ops_apply_only_against_the_controller_currently_in_use() {
+        let controller_a: NavigatorController<()> = NavigatorController::new();
+        let controller_b: NavigatorController<()> = NavigatorController::new();
+
+        let view_a = navigator(&controller_a, || sized_page(10.0, 10.0));
+        let mut next_id = 0u64;
+        let mut ctx = BuildCtx::new(&mut next_id);
+        let mut widget = view_a.build(&mut ctx);
+
+        // Swap to B with no queued ops — a plain rebind.
+        let view_b = navigator(&controller_b, || sized_page(10.0, 10.0));
+        view_b.rebuild(&view_a, &mut widget, &mut ctx);
+        assert_eq!(controller_b.depth(), 1);
+
+        // An op queued on the now-orphaned A must never reach this widget —
+        // there is nothing left driving it through A.
+        controller_a.push(|| sized_page(30.0, 30.0));
+        // An op queued on B, the controller actually in use, must apply.
+        controller_b.push(|| sized_page(20.0, 20.0));
+
+        view_b.rebuild(&view_b, &mut widget, &mut ctx);
+
+        assert_eq!(
+            controller_b.depth(),
+            2,
+            "only the op queued on the controller in use (B) applied"
+        );
     }
 
     // --- The controller's depth slot tracks the stack through rebuilds, and
