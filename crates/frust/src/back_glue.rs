@@ -55,7 +55,8 @@
 //! > [`back_interest()`](NavigatorController::back_interest)` == true`.**
 //!
 //! [`SharedBack::registrants`] is that ordered list, kept sorted by
-//! ([`Role`], first-wire sequence). **Rank comes from the call site, not from
+//! ([`Role`], wire sequence) — build order among hosts, but *reversed* among
+//! navigators so the innermost wins. **Rank comes from the call site, not from
 //! wire timing**: [`auto_wire_overlay_host`] (the facade's
 //! [`overlay_host`](crate::overlay_host)) registers [`Role::Host`], every other
 //! entry point registers [`Role::Navigator`]. That is what makes the order
