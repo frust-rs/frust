@@ -148,6 +148,17 @@ class FrustSurfaceView(
         private const val IME_RESYNC_FRAMES = 3
 
         /**
+         * Wire values `nativeImeState`'s `"contentType"` field carries
+         * (encoded on the Rust side by
+         * `frust_shell_android::jni_glue::content_type_wire` from
+         * `frust_core::event::ImeContentType`). `"password"` has no named
+         * constant here — every unrecognized/unhandled value, including it,
+         * falls through to [applyImeContentType]'s fail-closed `else` arm.
+         */
+        private const val CONTENT_TYPE_NORMAL = "normal"
+        private const val CONTENT_TYPE_NO_SUGGESTIONS = "noSuggestions"
+
+        /**
          * Decode the low byte of `nativeSystemUiState`'s packed `u64` (task
          * 03's `system_ui::encoded_state()` doc comment:
          * `(generation << 8) | mode_bits`, low byte: `0..=4` is the mode
@@ -897,9 +908,8 @@ class FrustSurfaceView(
     override fun onCheckIsTextEditor(): Boolean = true
 
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
-        outAttrs.inputType = InputType.TYPE_CLASS_TEXT
-        outAttrs.imeOptions = EditorInfo.IME_ACTION_DONE
         val state = lastKnownState
+        applyImeContentType(outAttrs, state?.contentType ?: CONTENT_TYPE_NORMAL)
         outAttrs.initialSelStart = state?.selBase ?: -1
         outAttrs.initialSelEnd = state?.selExt ?: -1
         return FrustInputConnection().also {
@@ -909,15 +919,77 @@ class FrustSurfaceView(
     }
 
     /**
+     * Map the wire `"contentType"` string (`"normal"` / `"password"` /
+     * `"noSuggestions"` — encoded on the Rust side by
+     * `frust_shell_android::jni_glue::content_type_wire` from
+     * `frust_core::event::ImeContentType`) onto the `EditorInfo`/`InputType`
+     * flags that actually close FINDINGS #31: typing into a `Password` field
+     * must not surface the composed text in Gboard's suggestion strip, nor
+     * let Gboard commit it to its learned-word dictionary.
+     *
+     * `TYPE_TEXT_VARIATION_PASSWORD` is what suppresses the suggestion
+     * strip and switches to secure entry; `IME_FLAG_NO_PERSONALIZED_LEARNING`
+     * is the flag that stops the IME persisting the secret into its learned
+     * word list — the *persistent* half of the leak — so it is set
+     * unconditionally alongside the password variation, never omitted.
+     * `"noSuggestions"` is the non-secret sibling: entry stays visible, but
+     * `TYPE_TEXT_FLAG_NO_SUGGESTIONS` still switches off the suggestion strip
+     * and autocorrect (no secure-entry masking, no personalized-learning
+     * flag — this is not a secret field).
+     *
+     * Any wire value this `when` doesn't recognize — including an absent
+     * `lastKnownState` (nothing focused/published yet) — falls through to
+     * the `"password"` arm: the same fail-closed rule
+     * `content_type_wire`'s Rust-side doc comment states, applied here at the
+     * boundary that actually renders it. A field state-sync forgot to
+     * classify becomes stricter than intended, never a secret field that got
+     * de-classified into a plaintext keyboard. `onCreateInputConnection`
+     * passes [CONTENT_TYPE_NORMAL] explicitly for the "nothing published
+     * yet" case instead, since no field is even focused there.
+     */
+    private fun applyImeContentType(outAttrs: EditorInfo, contentType: String) {
+        when (contentType) {
+            CONTENT_TYPE_NORMAL -> {
+                outAttrs.inputType = InputType.TYPE_CLASS_TEXT
+                outAttrs.imeOptions = EditorInfo.IME_ACTION_DONE
+            }
+            CONTENT_TYPE_NO_SUGGESTIONS -> {
+                outAttrs.inputType =
+                    InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                outAttrs.imeOptions = EditorInfo.IME_ACTION_DONE
+            }
+            else -> { // "password", or any unrecognized/future value — fail closed.
+                outAttrs.inputType =
+                    InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                outAttrs.imeOptions =
+                    EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+            }
+        }
+    }
+
+    /**
      * After every native dispatch, reconcile the soft keyboard with the focused
      * widget's IME surface: newly-active ⇒ take focus + show the keyboard (and
      * restart input so a fresh [FrustInputConnection] is seeded from the new
      * state); newly-inactive ⇒ hide it.
+     *
+     * A **steady-active** field whose [ImeWireState.contentType] changed since
+     * the last poll (e.g. a field that starts `"normal"` and flips to
+     * `"password"` while still focused, without ever losing/regaining focus)
+     * also forces [InputMethodManager.restartInput]: `EditorInfo`/`InputType`
+     * are fixed at [onCreateInputConnection] time and Android never re-queries
+     * them on an already-bound `InputConnection`, so without this restart a
+     * field that becomes secret *after* the IME already connected would keep
+     * leaking into the suggestion strip under the stale, non-secure
+     * `EditorInfo` (the exact gap this task closes — see `onCreateInputConnection`'s
+     * doc for how the fresh `EditorInfo` is derived).
      */
     private fun pollImeAfterDispatch() {
         if (handle == 0L) return
         val state = parseImeState(nativeImeState(handle)) ?: return
+        val previous = lastKnownState
         lastKnownState = state
+        val contentTypeChanged = previous != null && previous.contentType != state.contentType
         if (state.active && !imeActive) {
             imeActive = true
             requestFocus()
@@ -927,12 +999,21 @@ class FrustSurfaceView(
         } else if (!state.active && imeActive) {
             imeActive = false
             imm.hideSoftInputFromWindow(windowToken, 0)
+        } else if (state.active && contentTypeChanged) {
+            // Same field, no show/hide edge, but the content-type hint
+            // changed under it — force a fresh EditorInfo/InputType (see this
+            // function's doc). `restartInput` re-invokes
+            // `onCreateInputConnection`, which reseeds the mirror from the
+            // already-updated `lastKnownState`, so no separate `reconcileTo`
+            // call is needed on this path.
+            imm.restartInput(this)
         } else if (state.active) {
-            // Steady active (no show/hide edge): reconcile the live mirror to the
-            // focused field's published state — a caret moved by a tap, or a
-            // whole-field text change from a field switch or a submit-clear.
-            // `reconcileTo` compares against the LIVE editable (not the racing
-            // `lastKnownState`), so a pre-advanced snapshot can't hide a change.
+            // Steady active (no show/hide edge, same content type): reconcile
+            // the live mirror to the focused field's published state — a
+            // caret moved by a tap, or a whole-field text change from a field
+            // switch or a submit-clear. `reconcileTo` compares against the
+            // LIVE editable (not the racing `lastKnownState`), so a
+            // pre-advanced snapshot can't hide a change.
             activeConnection?.reconcileTo(state)
         }
     }
@@ -967,6 +1048,7 @@ class FrustSurfaceView(
                 selExt = obj.optInt("selExt", -1),
                 compBase = obj.optInt("compBase", -1),
                 compExt = obj.optInt("compExt", -1),
+                contentType = obj.optString("contentType", CONTENT_TYPE_NORMAL),
             )
         } catch (e: JSONException) {
             null
@@ -981,6 +1063,14 @@ class FrustSurfaceView(
         val selExt: Int,
         val compBase: Int,
         val compExt: Int,
+        /**
+         * The wire `"contentType"` string (`"normal"` / `"password"` /
+         * `"noSuggestions"`) `nativeImeState` encodes from
+         * `frust_core::event::ImeContentType`. Drives
+         * [applyImeContentType]'s `EditorInfo`/`InputType` mapping and
+         * [pollImeAfterDispatch]'s content-type-change restart.
+         */
+        val contentType: String,
     )
 
     override fun doFrame(frameTimeNanos: Long) {
@@ -1325,7 +1415,11 @@ class FrustSurfaceView(
             val selEnd = Selection.getSelectionEnd(editable)
             val compStart = getComposingSpanStart(editable)
             val compEnd = getComposingSpanEnd(editable)
-            val snapshot = ImeWireState(true, text, selStart, selEnd, compStart, compEnd)
+            // `contentType` is irrelevant to this dedup snapshot — it never
+            // compares against `lastKnownState`, only against a prior call's
+            // own `snapshot` — so a fixed placeholder is correct here.
+            val snapshot =
+                ImeWireState(true, text, selStart, selEnd, compStart, compEnd, CONTENT_TYPE_NORMAL)
             if (snapshot == lastPushed) return
             lastPushed = snapshot
 
