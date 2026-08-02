@@ -103,6 +103,26 @@
 //! the next). Before rule 1 existed, that inference pruned the root overlay
 //! host mid-pass and re-created finding #44.
 //!
+//! ## Reachability is upstream of arbitration, by design (H1/R23)
+//!
+//! Ranking decides *who wins among the claimants*; it deliberately does **not**
+//! decide who may claim. A navigator on a page input cannot reach — a nested
+//! navigator inside a page the outer navigator has covered — reports
+//! `back_interest() == false` at the source: `frust-widgets` gates it on the
+//! hosting page being in the host navigator's `input_routed_pages()` (rule
+//! **R23**: navigator reach follows input routing, exactly; see
+//! `frust_widgets::NavigatorController::back_interest`). So this module needs no
+//! visibility filter of its own, and there is **no second notion of
+//! reachability** to keep in sync with the widget's — the same reason
+//! `input_routed_pages` is the one derivation behind both input routing and R23
+//! semantics.
+//!
+//! That is load-bearing for `Role::Navigator`'s innermost-first order: without
+//! it, an innermost navigator that had gone off-screen would outrank the
+//! navigator the user is actually looking at and swallow every press (finding
+//! F1). The two rules are complements — reach says *whether* a navigator is in
+//! the running, rank says *which* of the ones in the running gets the press.
+//!
 //! # Timing: the live provider closes the stale-window
 //!
 //! The wiring runs during a rebuild's *build* pass, **before** the navigator's
@@ -178,6 +198,9 @@ struct Registrant {
     /// release rules).
     mounted: Box<dyn Fn() -> bool>,
     /// `controller.back_interest()` — does this navigator claim the next press?
+    /// Already `false` for a navigator whose hosting page input cannot reach
+    /// (the R23 gate in `frust-widgets`; see the module docs), which is why
+    /// nothing here filters on visibility.
     interest: Box<dyn Fn() -> bool>,
     /// `controller.request_back()` — deliver the press to this navigator,
     /// honoring its top page's `BackPolicy`. An `Rc` rather than a `Box` so
@@ -349,8 +372,13 @@ fn refresh_interest<State: 'static>(controller: &NavigatorController<State>, rol
 }
 
 /// Deliver a consumed back press under **R44-back**: to the first registrant in
-/// arbitration order (hosts first, then build order) that claims it via
-/// `back_interest()`.
+/// arbitration order (hosts first, then plain navigators innermost-first) that
+/// claims it via `back_interest()`.
+///
+/// No visibility/reachability filter here on purpose: `back_interest()` is
+/// already gated on the claimant's hosting page being input-routed (see the
+/// module docs' R23 note), so a navigator the user cannot reach is never in this
+/// list's answer to begin with.
 ///
 /// `fallback` is the controller whose wire consumed the press, used only when
 /// *no* registrant claims one — which preserves the pre-arbitration behaviour
@@ -1355,6 +1383,163 @@ mod tests {
              build-order (outermost-first) arbitration would instead have \
              popped the outer stack, discarding the whole page the nested \
              navigator lives on"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // H1 (closes review finding F1): the converse of G1 — a nested navigator
+    // whose hosting page input can no longer reach must NOT take the press.
+    // -----------------------------------------------------------------------
+
+    /// An outer navigator whose ROOT page hosts a nested navigator, each
+    /// auto-wired where its view is constructed (the outer from the app's build
+    /// pass, the nested from the page builder the outer runs during its own
+    /// reconcile) — the canonical tab/section-stack shape. `cull` sets the outer
+    /// navigator's [`cull_covered_builds`], the switch that decides whether the
+    /// covered page keeps re-running its builder at all.
+    struct NestedHarness {
+        outer: NavigatorController<()>,
+        nested: NavigatorController<()>,
+        root: RenderRoot<(), NavigatorView<()>>,
+        app: AppLogic,
+    }
+
+    impl NestedHarness {
+        fn new(cull: bool) -> Self {
+            let outer: NavigatorController<()> = NavigatorController::new();
+            let nested: NavigatorController<()> = NavigatorController::new();
+            let app: AppLogic = {
+                let outer = outer.clone();
+                let nested = nested.clone();
+                Box::new(move |_: &mut ()| {
+                    // Exactly what `frust::navigator` does, outermost first.
+                    auto_wire(&outer);
+                    let nested = nested.clone();
+                    raw_navigator(&outer, move || {
+                        auto_wire(&nested);
+                        any(raw_navigator(&nested, page))
+                    })
+                    .cull_covered_builds(cull)
+                })
+            };
+            let mut harness = Self {
+                outer,
+                nested,
+                root: RenderRoot::new(),
+                app,
+            };
+            harness.rebuild();
+            harness
+        }
+
+        fn rebuild(&mut self) {
+            self.root.rebuild(&mut self.app, &mut ());
+        }
+    }
+
+    /// **H1 — the F1 case.** The outer navigator pushes a page OVER the one
+    /// hosting the nested navigator. Input can reach only the outer navigator's
+    /// top page (`input_routed_pages`), so back must follow: the press pops the
+    /// OUTER stack, and the nested (invisible) stack is untouched.
+    ///
+    /// Before this fix `route_back` was a bare `find(|r| interest())` over a
+    /// list sorted innermost-first, and the covered page keeps reconciling (the
+    /// default) or stays `is_mounted()` (under the cull) either way — so the
+    /// nested navigator claimed the press, popped a stack nobody could see, and
+    /// the back button appeared to do nothing.
+    ///
+    /// Run under BOTH `cull_covered_builds` settings: they are exactly the two
+    /// ways the covered page's builder does or does not keep running, and the
+    /// answer must not depend on that.
+    #[test]
+    fn a_nested_navigator_on_a_covered_page_does_not_take_the_back_press() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+
+        for cull in [false, true] {
+            reset();
+            let mut h = NestedHarness::new(cull);
+
+            // The nested stack is poppable while its page is still current —
+            // the G1 case, which must keep working (asserted below too).
+            h.nested.push(page);
+            h.rebuild();
+            assert_eq!((h.outer.depth(), h.nested.depth()), (1, 2));
+            assert!(
+                handles_back(),
+                "the nested navigator claims the press while its page is current (cull={cull})"
+            );
+
+            // Now push a page over it on the OUTER navigator: the nested
+            // navigator's page is covered and routed no input.
+            h.outer.push(page);
+            h.rebuild();
+            assert_eq!((h.outer.depth(), h.nested.depth()), (2, 2));
+            // A few idle frames: under `cull_covered_builds(true)` the covered
+            // page stops rebuilding entirely here, so this is where a
+            // wire-refreshed (rather than live) reachability flag would go stale.
+            for _ in 0..3 {
+                h.rebuild();
+            }
+            assert!(
+                handles_back(),
+                "the outer navigator claims it (cull={cull})"
+            );
+
+            push_back_press();
+            h.rebuild();
+            assert_eq!(
+                h.outer.depth(),
+                1,
+                "the press popped the OUTER stack — the page the user is \
+                 actually looking at came off (cull={cull})"
+            );
+            assert_eq!(
+                h.nested.depth(),
+                2,
+                "and the covered navigator's invisible stack is UNCHANGED \
+                 (cull={cull})"
+            );
+
+            // Revealed again, the nested navigator takes the next press — the
+            // G1 behaviour, unregressed, in the same harness.
+            push_back_press();
+            h.rebuild();
+            assert_eq!(
+                (h.outer.depth(), h.nested.depth()),
+                (1, 1),
+                "back reaches the nested navigator again once its page is \
+                 current (cull={cull})"
+            );
+        }
+    }
+
+    /// The reach gate is **input routing**, not painting: a *transparent*
+    /// overlay pushed on the outer navigator leaves the page below it painted
+    /// (`PageVisibility::Visible`) but routes it no input, so the nested
+    /// navigator on that page must not take the press either. This is the same
+    /// divergence R23 pins for semantics.
+    #[test]
+    fn a_nested_navigator_under_a_transparent_overlay_does_not_take_the_back_press() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let mut h = NestedHarness::new(false);
+        h.nested.push(page);
+        h.rebuild();
+        h.outer
+            .push_with_options(page, PushOptions::transparent().back(BackPolicy::Pop));
+        h.rebuild();
+        assert_eq!((h.outer.depth(), h.nested.depth()), (2, 2));
+
+        push_back_press();
+        h.rebuild();
+        assert_eq!(h.outer.depth(), 1, "the overlay came off");
+        assert_eq!(
+            h.nested.depth(),
+            2,
+            "the painted-but-inert page's navigator kept its stack"
         );
     }
 }

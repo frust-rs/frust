@@ -85,6 +85,28 @@
 //!
 //! Neither seam changes disposal: a covering push still does **not** run a
 //! page's `on_cleanup`, so its widget state survives the cover.
+//!
+//! # Back reach follows input routing too (R23)
+//!
+//! Back arbitration obeys the same reach as input and semantics: a navigator
+//! whose **hosting page** is not one of its host navigator's
+//! [`input_routed_pages`](NavigatorWidget::input_routed_pages) reports **no**
+//! [`back_interest`](NavigatorController::back_interest), whatever its own stack
+//! looks like. Otherwise a nested navigator sitting on a covered page — a
+//! section stack with a detail page pushed over it — would claim the press and
+//! pop a stack nobody can see, leaving the visible page put.
+//!
+//! The mechanism is a third published seam, and the only one that flows
+//! *downward*: each [`PageEntry::reach`] is an `Rc<Cell<bool>>` its navigator
+//! sets to `own_reachability && page is input-routed`, installed as an ambient
+//! scope ([`with_page_reach`]) around that page's builder and subtree reconcile.
+//! A navigator built anywhere under it captures the cell
+//! ([`ambient_page_reach`]) as its own [`NavigatorWidget::host_reach`] and ANDs
+//! it into what it publishes — so the invariant composes to any depth with no
+//! tree walk, and holds even for a page frozen by
+//! [`cull_covered_builds`](NavigatorView::cull_covered_builds) (the cell is
+//! shared and live, not a per-wire snapshot). Reactive-free like the rest: a
+//! plain `Rc<Cell<_>>`, never a signal.
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
@@ -164,6 +186,65 @@ pub enum PageVisibility {
 /// the root page). Fired by the navigator from a rebuild whenever the page's
 /// [`PageVisibility`] changes — never twice with the same value.
 pub type VisibilityCallback = Rc<dyn Fn(PageVisibility)>;
+
+// --- Back reach: the ambient "is the hosting page input-routed?" seam --------
+
+thread_local! {
+    /// The stack of per-page **back-reach** cells for the page builders currently
+    /// on the call stack — the ambient seam a *nested* navigator learns its
+    /// hosting page's input reachability through (rule **R23**: navigator reach
+    /// follows input routing, exactly).
+    ///
+    /// A navigator pushes the reach cell of the page whose builder / reconcile it
+    /// is about to run ([`with_page_reach`]) and pops it again afterwards, so any
+    /// navigator built anywhere inside that page's subtree — at any depth, through
+    /// any container — reads it with [`ambient_page_reach`]. A stack rather than a
+    /// single slot because navigators nest: each level restores its parent's cell.
+    ///
+    /// Reactive-free by construction (`frust-widgets` carries no `reactive_graph`
+    /// dependency): a plain `Rc<Cell<bool>>`, the same idiom as `depth`/
+    /// `back_interest`/`transition`, never a signal. UI-thread-affine for the same
+    /// reason those are — the cells are `Rc`-backed and only ever touched from a
+    /// build pass.
+    static PAGE_REACH: RefCell<Vec<Rc<Cell<bool>>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Pops [`PAGE_REACH`] on drop so an unwinding page builder cannot leave a stale
+/// scope behind for the rest of the thread's life.
+struct PageReachGuard;
+
+impl Drop for PageReachGuard {
+    fn drop(&mut self) {
+        PAGE_REACH.with(|stack| {
+            stack.borrow_mut().pop();
+        });
+    }
+}
+
+/// Run `f` with `reach` installed as the ambient page-reach cell — i.e. declare
+/// "everything built in here lives on the page this cell describes".
+///
+/// The [`PAGE_REACH`] borrow is released *before* `f` runs, so `f` may nest
+/// another `with_page_reach` (a navigator inside a page inside a navigator) or
+/// call [`ambient_page_reach`] freely.
+fn with_page_reach<R>(reach: &Rc<Cell<bool>>, f: impl FnOnce() -> R) -> R {
+    PAGE_REACH.with(|stack| stack.borrow_mut().push(Rc::clone(reach)));
+    let _guard = PageReachGuard;
+    f()
+}
+
+/// The reach cell of the page currently being built/reconciled, or `None` at the
+/// top level (a root navigator, whose reach is unconditional).
+fn ambient_page_reach() -> Option<Rc<Cell<bool>>> {
+    PAGE_REACH.with(|stack| stack.borrow().last().cloned())
+}
+
+/// Whether a navigator hosted under `host_reach` is itself reachable: `true` at
+/// the top level (no hosting page), otherwise whatever the hosting page's cell
+/// currently says.
+fn host_reachable(host_reach: Option<&Rc<Cell<bool>>>) -> bool {
+    host_reach.is_none_or(|cell| cell.get())
+}
 
 /// The value a [`pop`](NavigatorController::pop_with_result) hands back to the
 /// pusher's [`ResultCallback`], type-erased so a page can return any `'static`
@@ -439,7 +520,10 @@ pub struct NavigatorController<State: 'static> {
     /// [`NavigatorWidget`] alongside [`depth`](Self::depth). `true` iff the stack
     /// is poppable (`depth > 1`) **or** the top page's [`BackPolicy`] is not
     /// [`Pop`](BackPolicy::Pop) (a dismissable/veto overlay claims back even at
-    /// the root). This is the signal the facade's back handler computes
+    /// the root) — **and** the page hosting this navigator is itself
+    /// input-reachable (the R23 gate; see
+    /// [`NavigatorWidget::reachable`], always satisfied for a top-level
+    /// navigator). This is the signal the facade's back handler computes
     /// `handles_back` from — it differs from [`can_pop`](Self::can_pop) exactly
     /// in the depth-1-with-overlay case, where a raw pop would do nothing but the
     /// overlay still owns the press. Same plain `Rc<Cell<_>>` (reactive-free)
@@ -482,6 +566,22 @@ pub struct NavigatorController<State: 'static> {
     ///
     /// Same reactive-free `Rc<Cell<_>>` idiom as the rest of the controller.
     mounted: Rc<Cell<usize>>,
+    /// The [`PageEntry::reach`] cell of the page **hosting** this navigator,
+    /// bound by the attached [`NavigatorWidget`] at `build`/`rebuild`; `None`
+    /// for a top-level navigator (and until a widget attaches).
+    ///
+    /// The R23 back-reach gate [`back_interest`](Self::back_interest) reads
+    /// *live*, rather than a value baked into the published cell: the page
+    /// hosting a nested navigator can stop being input-routed on a pass in which
+    /// that navigator does not rebuild at all (a page frozen by
+    /// [`cull_covered_builds`](NavigatorView::cull_covered_builds), or one
+    /// stashed out of the stack by a pop transition), and a baked-in value would
+    /// go stale exactly there — the case finding F1 called out as the worse one.
+    ///
+    /// A `RefCell` slot around a plain `Rc<Cell<bool>>`, like `ops` — a
+    /// *binding* that moves when the widget re-captures its host, wrapping the
+    /// same reactive-free cell idiom as the published state.
+    host_reach: Rc<RefCell<Option<Rc<Cell<bool>>>>>,
 }
 
 impl<State: 'static> Clone for NavigatorController<State> {
@@ -492,6 +592,7 @@ impl<State: 'static> Clone for NavigatorController<State> {
             back_interest: Rc::clone(&self.back_interest),
             transition: Rc::clone(&self.transition),
             mounted: Rc::clone(&self.mounted),
+            host_reach: Rc::clone(&self.host_reach),
         }
     }
 }
@@ -511,7 +612,27 @@ impl<State: 'static> NavigatorController<State> {
             back_interest: Rc::new(Cell::new(false)),
             transition: Rc::new(Cell::new(TransitionState::default())),
             mounted: Rc::new(Cell::new(0)),
+            host_reach: Rc::new(RefCell::new(None)),
         }
+    }
+
+    /// Bind (or re-bind) the hosting page's reach cell — called by the attached
+    /// [`NavigatorWidget`] from `build` and every `rebuild` with whatever
+    /// [`ambient_page_reach`] says at that point, so the binding follows the
+    /// navigator if its subtree ever moves between pages.
+    ///
+    /// Deliberately not public: reach is derived by the navigator hosting this
+    /// one, never declared by an app.
+    fn bind_host_reach(&self, reach: Option<Rc<Cell<bool>>>) {
+        *self.host_reach.borrow_mut() = reach;
+    }
+
+    /// Whether the page hosting this navigator is input-routed right now — the
+    /// **R23 back-reach gate**, read live (see
+    /// [`host_reach`](Self::host_reach)). `true` for a top-level navigator and
+    /// before a widget attaches.
+    fn host_reachable(&self) -> bool {
+        host_reachable(self.host_reach.borrow().as_ref())
     }
 
     /// Whether a live [`NavigatorWidget`] currently renders this controller's
@@ -586,12 +707,25 @@ impl<State: 'static> NavigatorController<State> {
     /// `handles_back`, so a dismissable overlay at the root still consumes back
     /// rather than exiting the app.
     ///
+    /// # Nested navigators: reach follows input routing (R23)
+    ///
+    /// A navigator hosted on a page its own host navigator routes **no input**
+    /// to (a covered page, or the page under a transparent overlay) reports
+    /// `false` here regardless of its own stack: back arbitration reaches
+    /// exactly as far as input does, so a press can never pop an off-screen
+    /// stack while the visible page stays put. Unconditional `true` for the
+    /// reach term at the top level, so a single-navigator app is unaffected.
+    ///
     /// **Advisory**, published at the last rebuild like [`depth`](Self::depth) —
     /// a query racing a same-frame stack change sees the previous value; the
     /// navigator's own [`request_back`](Self::request_back) routing stays
     /// authoritative regardless (see `frust-reactive::back`'s timing note).
     pub fn back_interest(&self) -> bool {
-        self.back_interest.get()
+        // The published cell answers for this navigator's own stack; the reach
+        // gate is ANDed HERE (live) rather than baked into the cell, because the
+        // hosting page can stop being input-routed on a pass in which this
+        // navigator never rebuilds — see `host_reach`.
+        self.back_interest.get() && self.host_reachable()
     }
 
     /// The navigator's current [`TransitionState`] — the observation seam chrome
@@ -970,10 +1104,14 @@ pub fn navigator<State: 'static>(
 ///
 /// With a root host *and* an inner navigator there are two back registrants. The
 /// facade's back glue (`frust::back_glue`) routes a press to the first
-/// registrant claiming [`back_interest`](NavigatorController::back_interest) in
-/// build order — outermost first — so a press with a root overlay open reaches
-/// the host, and a press with none open falls through to the inner navigator
-/// (a host at depth 1 with the default [`BackPolicy::Pop`] claims nothing).
+/// registrant claiming [`back_interest`](NavigatorController::back_interest),
+/// ranked host-first and then innermost-first among plain navigators — so a
+/// press with a root overlay open reaches the host, and a press with none open
+/// falls through to the inner navigator (a host at depth 1 with the default
+/// [`BackPolicy::Pop`] claims nothing). An open overlay additionally silences
+/// the inner navigator outright: the host's root page — the whole app — is no
+/// longer input-routed, so under the R23 back-reach gate (see the module docs)
+/// nothing inside it claims the press either.
 pub fn overlay_host<State: 'static>(
     controller: &NavigatorController<State>,
     app: impl Fn() -> AnyView<State> + 'static,
@@ -1026,6 +1164,21 @@ struct PageEntry<State: 'static> {
     /// a page is skipped only once it has *already* been reconciled while
     /// covered.
     reconciled_covered: bool,
+    /// Whether an input event can reach **this page**, all the way up: this
+    /// navigator is itself reachable AND this page is in
+    /// [`input_routed_pages`](NavigatorWidget::input_routed_pages). Republished
+    /// by [`publish_reach`](NavigatorWidget::publish_reach) on every stack
+    /// mutation and rebuild.
+    ///
+    /// Installed as the ambient [`PAGE_REACH`] scope while this page's builder
+    /// and subtree reconcile run, so a *nested* navigator on this page can read
+    /// it — the seam that makes back arbitration follow input routing (R23) even
+    /// though a nested navigator has no idea what the navigator hosting it is
+    /// doing. Shared with every such descendant, so it stays a live read rather
+    /// than a snapshot: a page frozen by
+    /// [`cull_covered_builds`](NavigatorView::cull_covered_builds) still reports
+    /// truthfully.
+    reach: Rc<Cell<bool>>,
 }
 
 /// The single in-flight page transition a [`NavigatorWidget`] owns (Flutter
@@ -1175,12 +1328,27 @@ pub struct NavigatorWidget<State: 'static> {
     /// reconcile. Refreshed from the view each rebuild (live-configurable, like
     /// `pop_swipe_enabled`); default `false`.
     cull_covered_builds: bool,
+    /// The [`PageEntry::reach`] cell of the page **hosting this navigator**, or
+    /// `None` for a navigator at the top level (a root navigator / a root
+    /// [`overlay_host`], whose reach is unconditional).
+    ///
+    /// Captured from the ambient [`PAGE_REACH`] scope at `build` and re-captured
+    /// at every `rebuild`, so it always names whichever page this navigator is
+    /// currently reconciled under. Read through
+    /// [`reachable`](Self::reachable) — the one input this navigator has into
+    /// "can a back press legitimately reach me?".
+    host_reach: Option<Rc<Cell<bool>>>,
 }
 
-/// Whether the navigator should claim a back press ahead-of-time: the
-/// stack is poppable (`depth > 1`) **or** the top page's [`BackPolicy`] is not
+/// Whether the navigator's **own stack** wants a back press ahead-of-time: it is
+/// poppable (`depth > 1`) **or** the top page's [`BackPolicy`] is not
 /// [`Pop`](BackPolicy::Pop). Pure so it is unit-testable directly, including the
 /// depth-1-with-overlay case a raw `can_pop` cannot express.
+///
+/// This is only half the answer [`NavigatorController::back_interest`] gives:
+/// the R23 reach gate (is the page hosting this navigator input-routed at all?)
+/// is ANDed on at *read* time, deliberately not baked in here — see
+/// [`NavigatorController::host_reach`].
 fn compute_back_interest(depth: usize, top_policy: BackPolicy) -> bool {
     depth > 1 || top_policy != BackPolicy::Pop
 }
@@ -1206,6 +1374,9 @@ impl<State: 'static> NavigatorWidget<State> {
     fn publish_state(&mut self) {
         self.depth.set(self.pages.len());
         let top_policy = self.pages.last().map(|p| p.back).unwrap_or(BackPolicy::Pop);
+        // Reach first: every page's cell must be current before a nested
+        // navigator on one of them reconciles below (R23).
+        self.publish_reach();
         self.back_interest
             .set(compute_back_interest(self.pages.len(), top_policy));
         // Keep the published transition's depths coherent even for a stack
@@ -1219,6 +1390,44 @@ impl<State: 'static> NavigatorWidget<State> {
         }
         self.transition_state.set(t);
         self.publish_visibility();
+    }
+
+    /// Whether **this navigator** is reachable by input at all — `true` unless
+    /// the page hosting it is not the page its own host navigator routes input
+    /// to (see [`host_reach`](Self::host_reach)).
+    ///
+    /// Always `true` for a top-level navigator, which is why every
+    /// single-navigator app is unaffected by the R23 back gate.
+    fn reachable(&self) -> bool {
+        host_reachable(self.host_reach.as_ref())
+    }
+
+    /// Republish every page's [`PageEntry::reach`] cell: a page is reachable iff
+    /// this navigator is reachable AND the page is in
+    /// [`input_routed_pages`](Self::input_routed_pages).
+    ///
+    /// **This is the whole propagation mechanism.** The AND folds this
+    /// navigator's own reachability into what it publishes to its pages, so the
+    /// invariant composes to any nesting depth without anyone walking the tree:
+    /// a navigator three levels down reads one cell and gets the answer for the
+    /// entire chain above it. Called from
+    /// [`publish_state`](Self::publish_state), i.e. after every stack mutation
+    /// and at the end of every `build`/`rebuild`, and always *before* the
+    /// per-page reconcile loop that re-runs page builders — so a nested
+    /// navigator reconciling this pass reads the value for the stack it is
+    /// actually being reconciled into.
+    ///
+    /// Reach is derived from `input_routed_pages`, not from
+    /// [`PageVisibility`](crate::PageVisibility): a page under a *transparent*
+    /// overlay is still `Visible` but is routed no input, and R23 tracks input
+    /// routing exactly (the same divergence [`semantics`](Widget::semantics)
+    /// documents).
+    fn publish_reach(&mut self) {
+        let own = self.reachable();
+        let routed = self.input_routed_pages();
+        for index in 0..self.pages.len() {
+            self.pages[index].reach.set(own && routed.contains(&index));
+        }
     }
 
     /// Fire every page's [`PushOptions::on_visibility`] observer whose
@@ -1380,6 +1589,16 @@ impl<State: 'static> NavigatorWidget<State> {
         ctx: &mut BuildCtx<'_>,
     ) {
         self.finalize_transition(ctx);
+        // A stashed (leaving) page is out of `self.pages`, so `publish_reach`
+        // will never see it again — mark it unreachable HERE or a nested
+        // navigator riding it out would keep claiming back presses for the whole
+        // flight (input is fully suppressed mid-transition anyway). A cancelled
+        // interactive pop pushes the page back onto the stack, and the finalize
+        // that does so is followed by an explicit `publish_state` that restores
+        // this.
+        if let Some(leaving) = stashed.as_ref() {
+            leaving.reach.set(false);
+        }
         // The stack is already at its destination here (the op mutated it before
         // staging the animation), so the *pre-op* depth is derived from the op
         // shape: a pop removed a page (now in `stashed`), a replace swapped one
@@ -1530,6 +1749,10 @@ impl<State: 'static> NavigatorWidget<State> {
         );
         self.cancel_top();
         let popped = self.pages.pop().expect("depth > 1 checked before steal");
+        // Out of `self.pages`, so out of `publish_reach`'s sight — same
+        // stashed-page rule `start_transition` applies (a cancelled swipe's
+        // finalize restores it, followed by an explicit `publish_state`).
+        popped.reach.set(false);
         let from_depth = self.pages.len() + 1;
         let spec = popped.transition;
         // The swipe animates the popped page's own preset; a page pushed without an
@@ -1852,8 +2075,16 @@ impl<State: 'static> NavigatorWidget<State> {
                     // invalidates an arm captured against the pre-mutation stack
                     // (mirrors the capture/focus-clearing `cancel_top` contract).
                     self.edge.armed = false;
-                    let view = builder();
-                    let pod = crate::authoring::build_child(&view, ctx);
+                    // The incoming page becomes the top, so it is reachable iff
+                    // this navigator is; its cell is live from before its own
+                    // builder runs, so a nested navigator built in there reads a
+                    // correct value on its very first `build`.
+                    let reach = Rc::new(Cell::new(self.reachable()));
+                    let (view, pod) = with_page_reach(&reach, || {
+                        let view = builder();
+                        let pod = crate::authoring::build_child(&view, ctx);
+                        (view, pod)
+                    });
                     self.pages.push(PageEntry {
                         builder,
                         view,
@@ -1869,6 +2100,7 @@ impl<State: 'static> NavigatorWidget<State> {
                         visibility: None,
                         on_visibility,
                         reconciled_covered: false,
+                        reach,
                     });
                     self.needs_ime_clear = true;
                     // A push's leaving page (now at `len - 2`) stays in the stack;
@@ -1895,8 +2127,13 @@ impl<State: 'static> NavigatorWidget<State> {
                     // invalidates an arm captured against the outgoing page
                     // (mirrors the `cancel_top` capture/focus-clearing contract).
                     self.edge.armed = false;
-                    let view = builder();
-                    let pod = crate::authoring::build_child(&view, ctx);
+                    // As the push arm: the replacement page is the new top.
+                    let reach = Rc::new(Cell::new(self.reachable()));
+                    let (view, pod) = with_page_reach(&reach, || {
+                        let view = builder();
+                        let pod = crate::authoring::build_child(&view, ctx);
+                        (view, pod)
+                    });
                     if let Some(top) = self.pages.last_mut() {
                         let entry = PageEntry {
                             builder,
@@ -1915,6 +2152,7 @@ impl<State: 'static> NavigatorWidget<State> {
                             // with it — it is being torn down, not covered).
                             on_visibility: None,
                             reconciled_covered: false,
+                            reach: Rc::clone(&reach),
                         };
                         if spec.is_animated() {
                             // Stash the old top and animate the new one in over it
@@ -1940,6 +2178,7 @@ impl<State: 'static> NavigatorWidget<State> {
                             visibility: None,
                             on_visibility: None,
                             reconciled_covered: false,
+                            reach,
                         });
                     }
                     self.needs_ime_clear = true;
@@ -2285,8 +2524,22 @@ impl<State: 'static> View<State> for NavigatorView<State> {
         // navigator as mounted when that happens — the widget itself does not
         // exist until the end of this function.
         self.controller.mount();
-        let view = (self.initial)();
-        let pod = crate::authoring::build_child(&view, ctx);
+        // Capture the hosting page's reach cell BEFORE installing our own root
+        // page's — `ambient_page_reach` here names the page *this navigator*
+        // lives on (`None` at the top level), which is what gates whether this
+        // navigator may claim a back press at all (R23).
+        let host_reach = ambient_page_reach();
+        // Bind it on the controller too: that is where the R23 gate is applied,
+        // live, by `NavigatorController::back_interest`.
+        self.controller.bind_host_reach(host_reach.clone());
+        // The root page is the only page, hence the routed one: its reach is
+        // this navigator's own.
+        let root_reach = Rc::new(Cell::new(host_reachable(host_reach.as_ref())));
+        let (view, pod) = with_page_reach(&root_reach, || {
+            let view = (self.initial)();
+            let pod = crate::authoring::build_child(&view, ctx);
+            (view, pod)
+        });
         let mut widget = NavigatorWidget {
             pages: vec![PageEntry {
                 builder: self.initial.clone(),
@@ -2301,6 +2554,7 @@ impl<State: 'static> View<State> for NavigatorView<State> {
                 visibility: None,
                 on_visibility: self.root_visibility.clone(),
                 reconciled_covered: false,
+                reach: root_reach,
             }],
             pending_results: Vec::new(),
             needs_ime_clear: false,
@@ -2314,6 +2568,7 @@ impl<State: 'static> View<State> for NavigatorView<State> {
             transition_state: Rc::clone(&self.controller.transition),
             mounted: Rc::clone(&self.controller.mounted),
             cull_covered_builds: self.cull_covered_builds,
+            host_reach,
         };
         // Apply any ops the app queued before the first frame.
         let ops = self.controller.drain();
@@ -2391,6 +2646,26 @@ impl<State: 'static> View<State> for NavigatorView<State> {
         element.pop_swipe_enabled = self.resolve_pop_swipe();
         // Same for the covered-build cull switch (default `false`).
         element.cull_covered_builds = self.cull_covered_builds;
+        // Re-capture the hosting page's reach cell: this rebuild runs inside
+        // whichever page's `with_page_reach` scope currently owns this
+        // navigator, which is authoritative even if the subtree moved between
+        // pages (or between a page and the top level) since `build`. Before the
+        // ops drain, because `apply_ops` stamps `self.reachable()` onto any page
+        // it builds.
+        element.host_reach = ambient_page_reach();
+        // Re-bind on the controller as well (`self.controller` is the CURRENT
+        // one, so this is correct across a controller swap too) — the live R23
+        // gate reads it there.
+        self.controller.bind_host_reach(element.host_reach.clone());
+        // Republish page reach IMMEDIATELY, not just from the end-of-rebuild
+        // `publish_state`: this navigator's own reachability may have changed
+        // this frame (an ancestor covered the page hosting it), and the pages'
+        // cells must already say so before the reconcile loop below rebuilds a
+        // navigator nested inside one of them — that nested navigator reads the
+        // cell during its own rebuild, which happens strictly before this
+        // rebuild's closing publish. Without this, reach propagated only one
+        // nesting level per frame.
+        element.publish_reach();
         // 1. Structural ops (view-driven): push/pop/replace the retained stack.
         let ops = self.controller.drain();
         if !ops.is_empty() {
@@ -2431,10 +2706,20 @@ impl<State: 'static> View<State> for NavigatorView<State> {
             if skip {
                 continue;
             }
-            let entry = &mut element.pages[index];
-            let next_view = (entry.builder)();
-            flags |= crate::authoring::rebuild_child(&entry.view, &next_view, &mut entry.pod, ctx);
-            entry.view = next_view;
+            // Install this page's reach cell for the whole builder + subtree
+            // reconcile: a nested navigator anywhere under it (the app's page
+            // builder is where `frust::navigator` auto-wires, and the nested
+            // `NavigatorView::rebuild` runs inside `rebuild_child`) reads it and
+            // gates its own back interest on it — R23, structurally.
+            let reach = Rc::clone(&element.pages[index].reach);
+            flags |= with_page_reach(&reach, || {
+                let entry = &mut element.pages[index];
+                let next_view = (entry.builder)();
+                let child_flags =
+                    crate::authoring::rebuild_child(&entry.view, &next_view, &mut entry.pod, ctx);
+                entry.view = next_view;
+                child_flags
+            });
         }
         // Republish depth + back-interest at rebuild time — the rebuild-time
         // refresh contract the back handler relies on. A settled-transition
@@ -3340,10 +3625,12 @@ mod tests {
     // Back-request routing + per-page dismiss policy.
     // ---------------------------------------------------------------------
 
-    // --- Pure: back_interest is depth>1 OR a non-Pop top policy.
-    //     Tested directly so the depth-1-with-overlay case (which `can_pop`
-    //     cannot express) is covered without needing a depth-1 overlay through
-    //     the push API. ---
+    // --- Pure: a navigator's OWN stack wants a press iff depth>1 OR the top
+    //     policy is not `Pop`. Tested directly so the depth-1-with-overlay case
+    //     (which `can_pop` cannot express) is covered without needing a depth-1
+    //     overlay through the push API. The R23 reach gate is deliberately NOT a
+    //     parameter here — it is ANDed on at read time by
+    //     `NavigatorController::back_interest`, which the next test pins. ---
     #[test]
     fn compute_back_interest_covers_depth_and_policy() {
         // Root only: not poppable, plain Pop policy -> no interest (a root back
@@ -3355,6 +3642,69 @@ mod tests {
         assert!(compute_back_interest(1, BackPolicy::Veto));
         // Root + a dismissable overlay: same — it wants the press to animate out.
         assert!(compute_back_interest(1, BackPolicy::DismissAnimated));
+    }
+
+    // --- R23: an unreachable host page vetoes that answer, at READ time. A
+    //     navigator whose hosting page input cannot reach must not claim the
+    //     press, whatever its own stack looks like — and it must stop claiming
+    //     it the instant the page goes unreachable, without waiting for a
+    //     rebuild that (under `cull_covered_builds`) may never come. This is the
+    //     controller-seam proof; the widget-level ones live further down. ---
+    #[test]
+    fn back_interest_is_vetoed_at_read_time_by_an_unreachable_host_page() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(10.0, 10.0))
+        };
+        let mut state = ();
+
+        // A real, poppable stack at the top level: nothing gates it.
+        root.rebuild(&mut app, &mut state);
+        controller.push(|| sized_page(20.0, 20.0));
+        root.rebuild(&mut app, &mut state);
+        assert!(controller.back_interest(), "top level -> back interest");
+
+        // Bind a hosting page input cannot reach. No rebuild in between: the
+        // gate is read live, so the veto lands immediately.
+        let reach = Rc::new(Cell::new(false));
+        controller.bind_host_reach(Some(Rc::clone(&reach)));
+        assert!(
+            !controller.back_interest(),
+            "an unreachable host page vetoes the press"
+        );
+        assert!(
+            controller.back_interest.get(),
+            "...while the PUBLISHED cell still reports the stack's own answer — \
+             the reach gate is ANDed on at read time, never baked into the cell"
+        );
+
+        // Un-vetoes just as live, again with no rebuild — the frozen-page case.
+        reach.set(true);
+        assert!(controller.back_interest(), "revealed -> interest returns");
+
+        // The gate is an AND over whatever the stack published, so it covers the
+        // policy half too, including the depth-1 overlay shape the push API
+        // cannot build (hence driving the published cell straight from the pure
+        // helper above).
+        controller
+            .back_interest
+            .set(compute_back_interest(1, BackPolicy::Veto));
+        assert!(
+            controller.back_interest(),
+            "a reachable Veto overlay claims"
+        );
+        reach.set(false);
+        assert!(
+            !controller.back_interest(),
+            "a Veto overlay on an unreachable page claims nothing either"
+        );
+
+        // And an unbound host (a top-level navigator) is unconditionally
+        // reachable — a single-navigator app is untouched by the gate.
+        controller.bind_host_reach(None);
+        assert!(controller.back_interest(), "no hosting page -> no gate");
     }
 
     // --- The controller publishes back_interest
@@ -3391,6 +3741,216 @@ mod tests {
             controller.back_interest(),
             "a Veto overlay claims back interest"
         );
+    }
+
+    // --- R23 back reach (closes review finding F1): a nested navigator's
+    //     back interest is gated on its HOSTING page being input-routed. These
+    //     are the widget-level proofs; `frust::back_glue`'s tests prove the
+    //     arbitration consequence (which navigator a real press reaches). ---
+
+    /// The boxed app closure [`RenderRoot::rebuild`] drives, so a harness can
+    /// store one (mirroring `frust::back_glue`'s `AppLogic`).
+    type AppLogic = Box<dyn FnMut(&mut ()) -> NavigatorView<()>>;
+
+    /// An outer navigator whose ROOT page hosts a nested navigator, with the
+    /// outer navigator's covered-build cull set to `cull` — the shape finding
+    /// F1 describes (a section stack with a detail page pushed over it).
+    struct NestedHarness {
+        outer: NavigatorController<()>,
+        nested: NavigatorController<()>,
+        root: RenderRoot<(), NavigatorView<()>>,
+        app: AppLogic,
+    }
+
+    impl NestedHarness {
+        fn new(cull: bool) -> Self {
+            let outer: NavigatorController<()> = NavigatorController::new();
+            let nested: NavigatorController<()> = NavigatorController::new();
+            let app: AppLogic = {
+                let outer = outer.clone();
+                let nested = nested.clone();
+                Box::new(move |_: &mut ()| {
+                    let nested = nested.clone();
+                    navigator(&outer, move || {
+                        any(navigator(&nested, || sized_page(10.0, 10.0)))
+                    })
+                    .cull_covered_builds(cull)
+                })
+            };
+            Self {
+                outer,
+                nested,
+                root: RenderRoot::new(),
+                app,
+            }
+        }
+
+        fn rebuild(&mut self) {
+            self.root.rebuild(&mut self.app, &mut ());
+        }
+    }
+
+    #[test]
+    fn a_nested_navigator_loses_back_interest_when_its_page_is_covered() {
+        for cull in [false, true] {
+            let mut h = NestedHarness::new(cull);
+            let (outer, nested) = (h.outer.clone(), h.nested.clone());
+            h.rebuild();
+
+            // Both at their own roots: nobody claims a press.
+            assert!(!outer.back_interest(), "outer at its root (cull={cull})");
+            assert!(!nested.back_interest(), "nested at its root (cull={cull})");
+
+            // The nested stack becomes poppable while its page is still the
+            // outer navigator's top: it claims the press.
+            nested.push(|| sized_page(20.0, 20.0));
+            h.rebuild();
+            assert!(
+                nested.back_interest(),
+                "a nested navigator on the CURRENT page claims back (cull={cull})"
+            );
+
+            // The outer navigator pushes a page OVER the one hosting it. Input
+            // can no longer reach the nested navigator, so neither can back.
+            outer.push(|| sized_page(30.0, 30.0));
+            h.rebuild();
+            assert_eq!((outer.depth(), nested.depth()), (2, 2));
+            assert!(
+                !nested.back_interest(),
+                "a nested navigator on a COVERED page claims nothing (cull={cull})"
+            );
+            assert!(
+                outer.back_interest(),
+                "the outer navigator claims it instead (cull={cull})"
+            );
+
+            // A frozen page must not go stale: with `cull_covered_builds(true)`
+            // the nested navigator stops rebuilding entirely here.
+            for _ in 0..3 {
+                h.rebuild();
+            }
+            assert!(
+                !nested.back_interest(),
+                "and keeps claiming nothing while covered (cull={cull})"
+            );
+
+            // Revealed again: interest comes straight back, same pass.
+            outer.pop();
+            h.rebuild();
+            assert!(
+                nested.back_interest(),
+                "revealed: the nested navigator claims back again (cull={cull})"
+            );
+        }
+    }
+
+    /// The same gate under a *transparent* overlay: the hosting page is still
+    /// `PageVisibility::Visible` (painted!) but routed no input, so the nested
+    /// navigator must not claim back either — reach follows input routing
+    /// exactly, not painting (R23).
+    #[test]
+    fn a_nested_navigator_under_a_transparent_overlay_reports_no_back_interest() {
+        let mut h = NestedHarness::new(false);
+        let (outer, nested) = (h.outer.clone(), h.nested.clone());
+        h.rebuild();
+        nested.push(|| sized_page(20.0, 20.0));
+        h.rebuild();
+        assert!(nested.back_interest());
+
+        outer.push_transparent(|| sized_page(30.0, 30.0));
+        h.rebuild();
+        assert!(
+            !nested.back_interest(),
+            "painted but not routed input: no back interest either"
+        );
+    }
+
+    /// A page *stashed* by an animated pop is out of `pages` entirely, so
+    /// `publish_reach` can never see it again — it is marked unreachable at the
+    /// stash instead. Otherwise a nested navigator on the leaving page would
+    /// keep claiming presses for the whole flight, during which the navigator
+    /// suppresses input outright.
+    #[test]
+    fn a_nested_navigator_on_a_page_leaving_in_a_pop_transition_claims_nothing() {
+        let outer: NavigatorController<()> = NavigatorController::new();
+        let nested: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let outer = outer.clone();
+            // An animated default: the pop below stashes the leaving page
+            // instead of tearing it down immediately.
+            move |_: &mut ()| {
+                navigator(&outer, || sized_page(10.0, 10.0))
+                    .transition(TransitionSpec::duration(PageTransition::IosPush))
+            }
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+
+        // Push the page hosting the nested navigator, then make its stack
+        // poppable so it would otherwise claim the press.
+        {
+            let nested = nested.clone();
+            outer.push(move || {
+                let nested = nested.clone();
+                any(navigator(&nested, || sized_page(20.0, 20.0)))
+            });
+        }
+        root.rebuild(&mut app, &mut state);
+        nested.push(|| sized_page(30.0, 30.0));
+        root.rebuild(&mut app, &mut state);
+        assert!(nested.back_interest(), "current page: it claims back");
+
+        // An ANIMATED pop stashes the hosting page out of the stack.
+        outer.pop();
+        root.rebuild(&mut app, &mut state);
+        assert!(
+            !nested.back_interest(),
+            "a navigator on the leaving page claims nothing mid-flight"
+        );
+    }
+
+    /// Reach composes down an arbitrarily deep chain: with THREE navigators
+    /// nested one page inside another, covering the outermost page silences
+    /// both descendants — each level folds its own reachability into what it
+    /// publishes to its pages, so nobody walks the tree.
+    #[test]
+    fn back_reach_composes_through_three_nesting_levels() {
+        let outer: NavigatorController<()> = NavigatorController::new();
+        let middle: NavigatorController<()> = NavigatorController::new();
+        let inner: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let outer = outer.clone();
+            let middle = middle.clone();
+            let inner = inner.clone();
+            move |_: &mut ()| {
+                let middle = middle.clone();
+                let inner = inner.clone();
+                navigator(&outer, move || {
+                    let inner = inner.clone();
+                    any(navigator(&middle, move || {
+                        any(navigator(&inner, || sized_page(10.0, 10.0)))
+                    }))
+                })
+            }
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+
+        inner.push(|| sized_page(20.0, 20.0));
+        root.rebuild(&mut app, &mut state);
+        assert!(inner.back_interest(), "the innermost navigator claims back");
+
+        // Cover the OUTERMOST navigator's page: two levels below it go quiet.
+        outer.push(|| sized_page(30.0, 30.0));
+        root.rebuild(&mut app, &mut state);
+        assert!(
+            !inner.back_interest(),
+            "an ancestor two levels up covering its page silences the innermost"
+        );
+        assert!(!middle.back_interest());
+        assert!(outer.back_interest(), "the outermost claims it");
     }
 
     // --- request_back on a plain (Pop-policy) stack pops one page,
