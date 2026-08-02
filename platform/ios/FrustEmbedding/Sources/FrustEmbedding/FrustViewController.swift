@@ -107,7 +107,7 @@ open class FrustViewController: UIViewController {
     /// intervening blur, or focus moving directly from one field to a
     /// differently-classified one while `forgeView` — the single shared
     /// responder for the whole tree — never actually leaves first-responder
-    /// status) and re-apply the traits, mirroring Android's
+    /// status) and re-apply the traits **plus re-seed the mirror**, mirroring Android's
     /// `FrustSurfaceView.pollImeAfterDispatch`/`lastKnownState.contentType`
     /// comparison. Without this, the *previous* field's traits — in
     /// particular `isSecureTextEntry` — stay live for the rest of the
@@ -471,23 +471,65 @@ open class FrustViewController: UIViewController {
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
-    /// Reconcile keyboard/first-responder state with the tree: a newly-focused
-    /// field seeds the mirror and shows the keyboard; a blurred field resigns;
-    /// a **steady-active** field (still first responder, no focus edge) whose
-    /// `"contentType"` classification changed re-applies the traits and cycles
-    /// the responder so the keyboard actually picks them up (see
+    /// Reconcile keyboard/first-responder state **and the platform text
+    /// mirror** with the tree: a newly-focused field seeds the mirror and shows
+    /// the keyboard; a blurred field resigns; a **steady-active** field (still
+    /// first responder, no focus edge) whose `"contentType"` classification
+    /// changed re-seeds the mirror, re-applies the traits and cycles the
+    /// responder so the keyboard actually picks them up (see
     /// `applyImeContentType`'s doc for why a cycle, not just a trait
-    /// assignment, is required).
+    /// assignment, is required); and any other steady-active tick reconciles
+    /// the mirror against the published state.
     ///
-    /// The steady-active branch is the fix for the case a per-focus-edge-only
-    /// application misses entirely: `forgeView` is the *one* shared responder
-    /// for the whole tree, so focus moving from field A to field B — even
-    /// with differently-classified content types — never trips
+    /// The two steady-active branches are the fix for the case a
+    /// per-focus-edge-only application misses entirely: `forgeView` is the
+    /// *one* shared responder for the whole tree, so focus moving from field A
+    /// to field B — with the same *or* a different content type — never trips
     /// `!forgeView.isFirstResponder`, because the responder never actually
-    /// stops being first responder in between. Without this branch a
-    /// `"normal"` field's traits (autocorrect on, no secure entry) stay live
-    /// while the user types into what Rust reports as a `"password"` field —
-    /// FINDINGS #31 reintroduced on this exact edge.
+    /// stops being first responder in between. Two distinct defects follow
+    /// from that, and both are handled here:
+    ///
+    /// 1. **Traits.** A `"normal"` field's traits (autocorrect on, no secure
+    ///    entry) would stay live while the user types into what Rust reports as
+    ///    a `"password"` field — FINDINGS #31 reintroduced on this exact edge.
+    /// 2. **Text.** `forgeView.mirror` would still hold **field A's text**, so
+    ///    the first keystroke in B round-trips `A_text + char` through
+    ///    `frust_ime_apply`, which applies to whatever widget is focused now
+    ///    with no widget-identity validation — silently replacing B's content
+    ///    with A's. Re-seeding/reconciling the mirror on *both* steady-active
+    ///    branches is what closes that; a trait-only fix does not.
+    ///
+    /// The re-seed on the content-type branch deliberately happens **before**
+    /// `resignFirstResponder()`: a resign can commit an open composition via
+    /// `unmarkText()`, which itself calls `syncToRust()` — pushing whatever the
+    /// mirror holds into the newly-focused widget. Seeding first means that
+    /// push (if it happens at all) carries B's own text, and in practice the
+    /// seed also clears `markedRange` to `NSNotFound` whenever Rust reports no
+    /// composing region, so `unmarkText()`'s own guard returns early. Belt and
+    /// braces, because the ordering is the difference between a no-op echo and
+    /// overwriting a field with another field's contents.
+    ///
+    /// Mirrors Android's `FrustSurfaceView.pollImeAfterDispatch` branch for
+    /// branch: show/hide edge → `requestFocus`/`restartInput`/`showSoftInput`;
+    /// content-type change → `restartInput` (which re-invokes
+    /// `onCreateInputConnection`, recomputing `EditorInfo` *and* re-seeding the
+    /// connection's mirror from `lastKnownState` — the pairing this function's
+    /// `seedMirror` + `applyImeContentType` reproduces); otherwise steady
+    /// active → `reconcileTo`, the divergence-guarded mirror reconcile.
+    ///
+    /// **Call sites** (also mirroring Android's): the `onTouch` bridge, and
+    /// every `renderFrame` tick — see the call in `renderFrame` for the
+    /// per-frame cost and why the frame tick, not `imeRoundTrip`, is the
+    /// second site.
+    ///
+    /// Being per-frame makes the first branch a self-healing retry: if
+    /// `becomeFirstResponder()` is refused (the view is not yet in a window,
+    /// say), the next tick tries again. That is safe because both steps it
+    /// repeats — `seedMirror` and `applyImeContentType` — are idempotent
+    /// writes of the same published state, and the retry stops the moment the
+    /// responder is accepted. It also means a purely programmatic focus (no
+    /// touch anywhere) now raises the keyboard, which the touch-only call site
+    /// never did.
     private func syncImeFocus() {
         guard let state = fetchImeState() else { return }
         let active = (state["active"] as? Bool) ?? false
@@ -508,13 +550,29 @@ open class FrustViewController: UIViewController {
                 // Same responder, no focus edge, but the classification
                 // changed underneath it (obscure-toggle on one field, or
                 // focus moved straight to a differently-classified field —
-                // see this function's doc). `applyImeContentType` alone is
-                // not enough here; see its doc for the resign/become cycle
-                // this requires.
+                // see this function's doc). Re-seed the mirror first (the
+                // ordering rule above), then re-apply the traits;
+                // `applyImeContentType` alone is not enough here — see its doc
+                // for the resign/become cycle this requires. Seed rather than
+                // reconcile: this is the analogue of Android's `restartInput`
+                // → `onCreateInputConnection` → `seed(state)`, an
+                // unconditional re-seed paired with a fresh keyboard
+                // configuration.
+                forgeView.seedMirror(from: state)
                 applyImeContentType(contentType)
                 lastAppliedContentType = contentType
                 forgeView.resignFirstResponder()
                 forgeView.becomeFirstResponder()
+            } else {
+                // Steady active, same classification: reconcile the mirror to
+                // the focused field's published state — a field switch between
+                // two identically-classified fields, a caret moved by a tap, or
+                // a whole-field text change from a submit-clear, none of which
+                // any `UITextInput` callback originated. Divergence-guarded and
+                // composition-safe (see `reconcileMirror(to:)`), so the common
+                // case — mirror already agrees with Rust — costs one string and
+                // two range compares and notifies nothing.
+                forgeView.reconcileMirror(to: state)
             }
         } else if forgeView.isFirstResponder {
             forgeView.resignFirstResponder()
@@ -692,6 +750,39 @@ open class FrustViewController: UIViewController {
             NSLog("Frust: render thread reported a fatal error — rendering disabled for this session")
             return
         }
+        // Per-frame IME reconcile — the direct analogue of Android's
+        // `pollImeAfterDispatch()` call from `doFrame`
+        // (`FrustSurfaceView.kt`), placed in the same position: after the
+        // native frame call, before the platform-view work.
+        //
+        // **Why a per-frame site is required.** Focus changes that no touch
+        // originated are the common case, not the edge case: pressing Return
+        // moves focus to the next field entirely through the `imeRoundTrip`
+        // closure, and `frust::request_focus`-style programmatic moves have no
+        // UIKit event at all. With `onTouch` as the only call site,
+        // `syncImeFocus` never re-runs on those paths — the previous field's
+        // `isSecureTextEntry` stays live for the new field, and the mirror
+        // keeps the previous field's text.
+        //
+        // **Why here and not inside `imeRoundTrip`.** `imeRoundTrip` runs
+        // *inside* a `UITextInput` callback (`insertText`, `setMarkedText`, …)
+        // via `FrustView.syncToRust()`; calling `syncImeFocus` there would
+        // resign/become the first responder re-entrantly while UIKit is
+        // mid-edit, and would mutate the mirror the caller is about to
+        // reconcile. The frame tick reaches the same state at most one display
+        // refresh later (≤8.3ms at 120Hz) with no re-entrancy.
+        //
+        // **Cost.** One `frust_ime_state_json` FFI call (a `pump_reactive` plus
+        // a small JSON build) and one `JSONSerialization` parse per tick —
+        // the same shape and the same per-frame budget Android's
+        // `pollImeAfterDispatch` already spends on `nativeImeState`. There is
+        // no cheaper generation-gated probe for IME state (unlike
+        // `pollSystemUiState`'s packed `u64`), so this is a real, if small,
+        // per-frame allocation. It does **not** rewrite anything on a steady
+        // field: every mutating path below is guarded — traits only on a
+        // classification change, the mirror only on genuine divergence, and
+        // never through a live composition.
+        syncImeFocus()
         // Platform views: apply this frame's compositor command
         // batch (create/reposition/dispose native sibling views) right after
         // the Frust surface has painted, so native views and Frust content

@@ -78,6 +78,41 @@ extension FrustView {
         lastCaretRect = caret(from: state)
     }
 
+    /// Reconcile the mirror against a Rust-published editing state that the
+    /// platform did **not** originate — the iOS counterpart of Android's
+    /// `FrustSurfaceView.FrustInputConnection.reconcileTo`, and the seam
+    /// `FrustViewController.syncImeFocus` drives on a steady-active field.
+    ///
+    /// Why this exists at all: `forgeView` is the *one* shared `UITextInput`
+    /// responder for the whole tree, so focus moving from field A to field B
+    /// never trips `!isFirstResponder` and never reaches `seedMirror`. Without
+    /// a divergence-guarded reconcile the mirror keeps **field A's text**, and
+    /// the first edit in B round-trips `A_text + char` through
+    /// `frust_ime_apply` — which applies to whatever widget is focused *now*,
+    /// with no widget-identity check, replacing B's content with A's.
+    ///
+    /// Cheap and non-destructive by construction: it delegates to
+    /// `applyReconciled`, which compares text/selection/marked against the LIVE
+    /// mirror and returns without touching anything (and without notifying the
+    /// input delegate) when they already agree — the mismatch guard that makes
+    /// a per-frame call site affordable, exactly as `reconcileTo` does on
+    /// Android. Normal typing is a no-op here: `syncToRust` already pushed the
+    /// mirror and applied Rust's echo.
+    ///
+    /// **A live composition is skipped entirely.** While `markedRange` is set,
+    /// the user is mid-composition (CJK/dictation) and UIKit owns that region;
+    /// rewriting the mirror underneath it would abandon the composition and
+    /// move the caret. The composition path round-trips through `syncToRust` on
+    /// every `setMarkedText`, so the mirror is already authoritative there, and
+    /// the reconcile resumes the moment `unmarkText`/`insertText` commits.
+    /// (Android's `reconcileTo` reaches the same outcome differently: it
+    /// reconciles selection without a `restartInput` precisely so an active
+    /// composition is not dropped.)
+    func reconcileMirror(to state: [String: Any]) {
+        guard markedRange.location == NSNotFound else { return }
+        applyReconciled(state)
+    }
+
     /// Reconcile the mirror against a Rust editing state, notifying the input
     /// delegate only around the parts that actually changed (the common typing
     /// echo — Rust returning exactly what we pushed — is a no-op).
