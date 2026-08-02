@@ -76,6 +76,16 @@ layer; theme, insets, and now metrics are re-provided plain values each time the
 or component reads them inside `Component::build` via `use_context::<WindowMetrics>()` without any
 signal subscription.
 
+**Contexts are visible inside both build and event passes.** A root-level `provide_context` (the
+shell's root `Owner`) makes its context available to every `Component::build` **and** every
+`Widget::event` handler, since the shell runs both passes under the same owner. This includes
+`Theme`, `WindowMetrics`, and a root component's own `init`-installed contexts. A **nested**
+component's own `provide_context` is invisible from its subtree's event handlers: `ComponentWidget::event`
+routes the event through an inner `EventCtx` over the component's local state but does not install
+the component's owner, so `use_context` inside a handler cannot resolve a sibling's ancestor-provided
+value. This is an accepted residual: event handlers can read root-level context but not nested
+component context.
+
 **Orientation is derived, not platform-sourced:** no platform callback in either mobile shell carries
 an orientation enum — the shell furnishes only `(width, height, scale)`. `Orientation` is computed
 via `Orientation::from_size()` (portrait when `height >= width`, including exact squares as
@@ -110,3 +120,4 @@ because builds are cheap by construction.
 | `App` / `app!` / `run` / `Component` | The facade's canonical entry surface binding a root `Component` to all platforms |
 | `WindowMetrics` / `Orientation` | Window shape delivered as a plain `provide_context` value (not a signal) — see "Window Metrics and Context Delivery" |
 | `RwSignal` / `Memo` (re-exported) | Facade-flat reactive primitives app state is typed with |
+| `ImeState` / `ImeContentType` / `EditingState` | IME surface state: focus, caret, editing text, and a content-type hint (Normal/Password/NoSuggestions) the shell uses to configure the platform IME. **Residual exposure:** the core publishes the real text even for secret fields; leak-closure depends on shells honouring the hint and has not yet been device-verified. `Debug` impl redacts text to prevent accidental logging. |
