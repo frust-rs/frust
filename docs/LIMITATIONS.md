@@ -176,44 +176,60 @@ documented as a known constraint, not a regression.
 
 ### `ime-ios-content-type-unverified` — iOS secure-entry IME path is compile- and device-unverified
 
-**Observed**: `FrustViewController.swift`'s IME content-type path (FINDINGS
-#31 — suppressing the QuickType suggestion bar and keyboard learning on a
-`"password"`-classified field) — including the fix that re-applies
-`isSecureTextEntry`/`textContentType`/`autocorrectionType`/`spellCheckingType`
-on a **steady-active** field whose classification changes without a focus
-edge (`syncImeFocus`'s `contentType != lastAppliedContentType` branch,
-resign/become cycle) — has never been compiled (no macOS host in this
-project's CI/agent loop) or run on an iOS device or simulator. `cargo`
-cannot compile Swift; only `xcodebuild -scheme FrustEmbedding -destination
-'generic/platform=iOS' build` validates it, and that has not been run since
-this path was introduced or since this fix landed.
+**Observed**: `FrustViewController.swift`'s IME reconcile path — the
+content-type application (FINDINGS #31: suppressing the QuickType
+suggestion bar and keyboard learning on a `"password"`-classified field),
+the **mirror re-seed/reconcile** that keeps `FrustView.mirror` from carrying
+a previous field's text across a focus move (`syncImeFocus`'s `seedMirror`
+on the content-type branch and `FrustView.reconcileMirror(to:)` on the
+steady-active branch), and the **per-frame `syncImeFocus()` call from
+`renderFrame`** that makes non-touch focus moves (Return-to-next-field,
+programmatic focus) reach any of it — has never been compiled (no macOS
+host in this project's CI/agent loop) or run on an iOS device or simulator.
+`cargo` cannot compile Swift; only `xcodebuild -scheme FrustEmbedding
+-destination 'generic/platform=iOS' build` validates it, and that has not
+been run since this path was introduced or since any of these fixes landed.
 
 **Applies to**: iOS only — the entire `FrustEmbedding` IME surface
 (`FrustViewController.swift`, `FrustView.swift`, `FrustTextInput.swift`).
-Android's mirror path (`FrustSurfaceView.pollImeAfterDispatch`, the model
-this fix follows) is likewise device-unverified per its own review record,
-but is a materially different code path (`EditorInfo`/`restartInput` vs.
-UIKit `UITextInputTraits`/resign-become) and this entry makes no claim about
-it.
+Android's mirror path (`FrustSurfaceView.pollImeAfterDispatch` +
+`FrustInputConnection.reconcileTo`, the model these fixes follow
+property-for-property) is likewise device-unverified per its own review
+record, but is a materially different code path (`EditorInfo`/
+`restartInput`/`Editable` vs. UIKit `UITextInputTraits`/resign-become/
+`NSMutableString`) and this entry makes no claim about it.
 
 **Why not closed**: FINDINGS #31's only proof gate is on-device
 verification, and that gate is currently blocked on device access. **The
 leak is therefore not confirmed closed on any platform** — the Rust-side
 wire encoding (`content_type_wire`) has unit coverage, but nothing has
-exercised the UIKit trait application, the steady-active re-apply branch, or
-the resign/become keyboard cycle against a real (or simulated) keyboard.
-Treat the current implementation as the best-reasoned fix available, not as
-a verified fix.
+exercised the UIKit trait application, the resign/become keyboard cycle,
+the mirror re-seed, or the per-frame reconcile against a real (or
+simulated) keyboard. The per-frame reconcile in particular has an
+unmeasured cost (one `frust_ime_state_json` FFI call plus one
+`JSONSerialization` parse per `CADisplayLink` tick, matching Android's
+per-frame `nativeImeState` budget) and an unobserved interaction with UIKit
+autocorrect/composition, both reasoned about but not instrumented. Treat
+the current implementation as the best-reasoned fix available, not as a
+verified fix.
 
-**Device-gate observable, for whoever runs it**: focus a `"normal"` field,
-type a few characters, then move focus directly to an `"obscured"`
-(`"password"`) field **without dismissing the keyboard in between** (e.g.
-tab/next-field navigation, or two adjacent fields in the same form).
-Confirm (a) no QuickType suggestion bar appears while typing into the second
-field, and (b) nothing typed into the second field is echoed anywhere
-(suggestion strip, autofill preview, or otherwise) — the same observable
-finding #31 originally closed, now specifically on the focus-move-without-blur
-edge this fix targets.
+**Device-gate observables, for whoever runs it** — three separate runs:
+1. *Traits across a focus move (#31).* Focus a `"normal"` field, type a few
+   characters, then move focus directly to an obscured (`"password"`)
+   field **without dismissing the keyboard in between**. Confirm (a) no
+   QuickType suggestion bar appears while typing into the second field, and
+   (b) nothing typed there is echoed anywhere (suggestion strip, autofill
+   preview).
+2. *Mirror staleness (N2).* Same two-field form, both fields **normal** so
+   no content-type change fires. Type `hello` into A, move focus to empty
+   field B without dismissing the keyboard, type one character. B must
+   contain exactly that one character — **not** `hello` + the character.
+   Repeat with the second field obscured to cover the content-type branch's
+   re-seed ordering.
+3. *Non-touch trigger (N4).* Same as (1) and (2), but move focus with the
+   keyboard's **Return/Next key** rather than a tap, so no touch reaches the
+   surface. Both observables must still hold; before this fix
+   `syncImeFocus` never re-ran on that path.
 
-**Evidence**: none yet — flagged during this fix's implementation and
+**Evidence**: none yet — flagged during these fixes' implementation and
 review; no device or simulator run has occurred.

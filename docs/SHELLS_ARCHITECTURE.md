@@ -105,10 +105,16 @@ signal-poll seam race-free without a lock.
     active/focused but changes from Normal→Password mid-interaction) via `restartInput`, because
     Android never re-queries `EditorInfo` for a bound `InputConnection` — the hint must be
     reestablished by forcing a new connection.
-  - **iOS:** JSON-serializes the content type alongside editing state for Swift to apply. **Swift
-    side is compile-unverified on the build host** (Linux; `swift build` cannot validate iOS
-    code without a macOS environment) — the integration is wired but has not been device-verified
-    in practice.
+  - **iOS:** JSON-serializes the content type alongside editing state for Swift to apply.
+    `syncImeFocus` matches two of Android's three properties: the **per-frame poll** (driven from
+    the `CADisplayLink` tick via `renderFrame`, the `doFrame` analogue) and the **divergence-guarded
+    reconcile**, plus re-seeds the `UITextInput` mirror on content-type change and the resign/become
+    cycle — a shared responder means a field switch has no focus edge, so both traits and mirror text
+    must reconcile, not just apply once on focus. It has **no analogue of Android's `onKeyDown` call
+    site**: iOS has no key event for the soft keyboard's Return, which arrives as `insertText("\n")`
+    through `UITextInput` instead. **Swift side remains compile- and device-unverified on the build
+    host** (Linux; `swift build` cannot validate iOS code without a macOS environment) — see
+    `docs/LIMITATIONS.md` `ime-ios-content-type-unverified`.
   - **Desktop:** forwards to winit's `Window::set_ime_purpose(ImePurpose)`, which is **documented
     unsupported on all platforms except Wayland, and a cosmetic hint even there** (no secure-text
     entry). Password is the only distinction (Password vs Normal); NoSuggestions has no

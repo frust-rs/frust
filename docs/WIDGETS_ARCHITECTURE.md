@@ -80,10 +80,18 @@ module; an app can disable all three to build its own design system on the same 
     over query params of the same name, and named-route `path_for_name` round-trips unused params as query.
   - **overlay_host() constructor:** A `NavigatorView` with pop_swipe disabled and no-op transition
     (not a new widget). Back-button interest is arbitrated by **rank taken from the wiring entry
-    point** — an overlay host outranks a plain navigator regardless of when or how often either
-    wires; equal ranks order by first wire. A host with no overlays reports no interest and defers to
-    the inner navigator. Registrants are released by mount liveness
-    (`NavigatorController::is_mounted()`), not by a wire-count heuristic.
+    point**, never from when or how often a controller wires: an overlay host always outranks a plain
+    navigator, and among navigator peers the order is **innermost-first** (most-recently-wired wins,
+    LIFO) — mirroring Android's `OnBackPressedDispatcher` dispatch order and UIKit/SwiftUI's
+    pop-from-top behavior. Host-first is the same topmost-layer rule, not an exception to it —
+    go_router's outermost-first order on Android is the counter-example this deliberately avoids. A
+    host with no overlays reports no interest and defers to the inner navigator. Registrants are
+    released by mount liveness (`NavigatorController::is_mounted()`), not by a wire-count heuristic.
+  - **Controller binding is structural:** a `NavigatorView`'s published cells (depth, back interest,
+    transition, mount count) bind to the `NavigatorController` it was last built or rebuilt against;
+    a controller swap is detected by identity (not just view type) and re-bound in the same rebuild
+    pass, so ops and published state can never target different controllers and a swapped-away-from
+    controller reliably reports unmounted.
   - **NavigatorWidget semantics (R23):** Now implements `Widget::semantics`, forwarding via
     `ChildPod::semantics_child` to exactly the pages input routing can reach (covered pages and pages
     under modals omitted outright), honoring the input-parity invariant documented in CODE_STANDARDS.md.

@@ -48,10 +48,11 @@
 //! single-registrant (see `frust_reactive::back`); this module owns that one
 //! registration and multiplexes behind it:
 //!
-//! > **R44-back — a root overlay host outranks a plain navigator, and equal
-//! > ranks order by first wire; a back press goes to the first registrant
-//! > reporting [`back_interest()`](NavigatorController::back_interest)` ==
-//! > true`.**
+//! > **R44-back — a root overlay host outranks every plain navigator; among
+//! > [`Role::Navigator`] peers the innermost (last-wired) ranks first, LIFO —
+//! > mirroring Android's `OnBackPressedDispatcher`; a back press goes to the
+//! > first registrant reporting
+//! > [`back_interest()`](NavigatorController::back_interest)` == true`.**
 //!
 //! [`SharedBack::registrants`] is that ordered list, kept sorted by
 //! ([`Role`], first-wire sequence). **Rank comes from the call site, not from
@@ -220,13 +221,15 @@ struct SharedBack {
     /// observing the same count does not re-fire (the `RouterDeepLinks`
     /// consumed-marker pattern, shared across both back entry points).
     consumed: Option<u64>,
-    /// Every wired navigator, sorted by ([`Registrant::role`],
-    /// [`Registrant::birth`]) — hosts first, then build order — which is the
-    /// R44-back arbitration list. Kept sorted on every wire, so a registrant's
-    /// position never depends on how often its controller wires per pass; an
-    /// unmounted registrant that misses a build cycle is pruned (see
-    /// [`refresh_interest`]). The live provider (below) reads through this list,
-    /// so a press is decided against the CURRENT navigators' interest.
+    /// Every wired navigator, sorted by [`Registrant::key`] — [`Role::Host`]
+    /// first (build order among hosts, unchanged), then [`Role::Navigator`]
+    /// peers innermost-first (LIFO: last-wired sorts first, the reverse of
+    /// build order) — the R44-back arbitration list. Kept sorted on every
+    /// wire, so a registrant's position never depends on how often its
+    /// controller wires per pass; an unmounted registrant that misses a
+    /// build cycle is pruned (see [`refresh_interest`]). The live provider
+    /// (below) reads through this list, so a press is decided against the
+    /// CURRENT navigators' interest.
     registrants: Vec<Registrant>,
     /// Monotonic wire counter stamped into [`Registrant::birth`]/
     /// [`Registrant::seq`]; ordering and the one-cycle prune are both expressed
