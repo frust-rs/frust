@@ -617,17 +617,31 @@ open class FrustViewController: UIViewController {
         let active = (state["active"] as? Bool) ?? false
         let contentType = state["contentType"] as? String
 
-        if userInitiated {
+        if userInitiated && !forgeView.isFirstResponder {
             // An explicit user touch on the Frust surface is a legitimate
-            // request for the keyboard: re-arm unconditionally so a field
-            // that was already "satisfied" — including one whose keyboard
-            // the user dismissed with no way for Rust to learn of it — gets
-            // a fresh `becomeFirstResponder()` attempt below instead of
-            // hitting the early-return guard in the `!isFirstResponder`
-            // branch. Harmless when `forgeView` is already first responder
-            // (neither the content-type-change nor the steady-active branch
-            // below reads these two fields) and safe ahead of the `active`
-            // check (that branch clears them itself regardless).
+            // request for the keyboard: re-arm so a field that was already
+            // "satisfied" — including one whose keyboard the user dismissed
+            // with no way for Rust to learn of it — gets a fresh
+            // `becomeFirstResponder()` attempt below instead of hitting the
+            // early-return guard in the `!isFirstResponder` branch.
+            //
+            // 🛑 The `!isFirstResponder` half is load-bearing; do not drop it
+            // back to a bare `if userInitiated`. `imeFocusSatisfied` is set
+            // back to `true` ONLY inside the `!isFirstResponder` branch
+            // below — neither the content-type-change branch nor the
+            // steady-active branch restores it. So re-arming while the field
+            // is ALREADY first responder (a tap or drag inside the focused
+            // field — caret positioning, selection, or scrolling elsewhere
+            // on the surface) would fall through to one of those branches
+            // and leave the flag dangling at `false` with the responder
+            // never actually resigned. A later UIKit-originated dismissal
+            // with no further touch would then find `!isFirstResponder &&
+            // !imeFocusSatisfied` on the very next tick and reassert the
+            // keyboard — reopening exactly the F3 pop-back this bound
+            // exists to close. Gating here keeps the invariant
+            // "isFirstResponder implies satisfied" intact: there is nothing
+            // to re-arm while we still hold the responder, and a genuine
+            // dismissal resigns it first, so the re-tap path still works.
             imeFocusSatisfied = false
             imeFocusRetryCount = 0
         }

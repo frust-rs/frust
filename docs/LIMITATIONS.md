@@ -245,7 +245,7 @@ and an unobserved interaction with UIKit autocorrect/composition, both
 reasoned about but not instrumented. Treat the current implementation as
 the best-reasoned fix available, not as a verified fix.
 
-**Device-gate observables, for whoever runs it** — four separate runs:
+**Device-gate observables, for whoever runs it** — five separate runs:
 1. *Traits across a focus move (#31).* Focus a `"normal"` field, type a few
    characters, then move focus directly to an obscured (`"password"`)
    field **without dismissing the keyboard in between**. Confirm (a) no
@@ -268,8 +268,20 @@ the best-reasoned fix available, not as a verified fix.
    With a Mode B sibling native control focused, confirm the per-frame tick
    does not steal focus back from it. Dismiss field A by swipe, tap a
    *different non-editable* part of the surface, then tap field A again — it
-   must still recover (exercises the unconditional-clear-on-any-touch design
-   point, and its residual limitation above).
+   must still recover (exercises the clear-on-touch design point, and its
+   residual limitation above).
+5. *Touch inside an already-focused field, then dismiss (F3c).* Focus field
+   A, then **tap or drag inside A while it still holds the keyboard** —
+   caret repositioning or a selection drag. Now swipe-dismiss the keyboard
+   with **no further touch on the Frust surface**. It must **stay down**.
+   This is a distinct run from (4): the touch there happens *after* the
+   dismissal, this one *before* it. An earlier revision re-armed the bound
+   on any touch, including one that never resigned the responder, which left
+   `imeFocusSatisfied` dangling and reasserted the keyboard on the next tick
+   — reopening (4)'s own guarantee for the most ordinary interaction there
+   is. The re-arm is now gated on `!isFirstResponder`, but **that gating is
+   reasoned, not compiled or measured** — this run is what would catch a
+   regression.
 
 **Evidence**: none yet — flagged during these fixes' implementation and
 review; no device or simulator run has occurred.
