@@ -350,6 +350,15 @@ Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantic
   subtree from the accessibility tree with no compile-time or test signal, so every new
   container widget needs a `semantics` impl even a transparent one that just forwards
   (`self.child.semantics_child(ctx)`).
+- **The one carve-out: a container that gates input may forward only the children input
+  can reach.** The navigator (rule R23) contributes no node of its own and forwards
+  *exactly* the pages `NavigatorWidget::event` would route to — one shared
+  `input_routed_pages()`, so the two reaches cannot drift — omitting covered pages and the
+  page under a modal entirely rather than flagging them `hidden` (which needs a synthetic
+  wrapper node and publishes the stale bounds of a page `layout` skipped). The
+  justification is **input parity**, not "it isn't painted": offering a screen reader a
+  control the user cannot activate is worse than omitting it. A container that does *not*
+  gate input has no such exception — forward every child.
 - **Keep it minimal: role, label, state, and bounds only.** This gives the per-shell adapter
   just enough to build on — no live-region announcements, custom actions, or adapter wiring
   belong here; that integration lives in a shell, not `frust-core`.

@@ -45,6 +45,16 @@
 //! revealed by a pop is re-laid-out and correct on the very next frame — the same
 //! relayout-every-frame invariant the theme path leans on.
 //!
+//! # Accessibility reach (R23)
+//!
+//! The accessibility tree follows **input routing**, not painting:
+//! [`NavigatorWidget::semantics`](Widget::semantics) forwards exactly the pages
+//! [`NavigatorWidget::input_routed_pages`] says an event could reach — today
+//! the top page alone — and omits every other page outright. That is a
+//! deliberate, documented exception to the forward-to-every-child container
+//! rule in `docs/CODE_STANDARDS.md`; the `semantics` doc comment carries the
+//! derivation.
+//!
 //! # Observation seams (reactive-free, by construction)
 //!
 //! Nothing outside a page's own subtree can reach into the navigator, so every
@@ -75,7 +85,7 @@ use std::rc::Rc;
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EditingState, EventCtx, EventResult,
     FrameTime, HeroDirective, HeroFrames, ImeState, InputEvent, LayoutCtx, PaintCtx, PaintScene,
-    PointerPhase, SpringDesc, TOUCH_SLOP, VelocityTracker, View, Widget,
+    PointerPhase, SemanticsCtx, SpringDesc, TOUCH_SLOP, VelocityTracker, View, Widget,
 };
 use frust_theme::Theme;
 use kurbo::{Affine, Point, Rect, Size, Vec2};
@@ -1456,13 +1466,38 @@ impl<State: 'static> NavigatorWidget<State> {
         }
     }
 
+    /// The set of pages an input event can reach, as an index range into
+    /// `self.pages` (ascending = bottom-to-top).
+    ///
+    /// **The single derivation of "reachable"**, read by both
+    /// [`route_top`](Self::route_top) and
+    /// [`semantics`](Widget::semantics) so input reach and the accessibility
+    /// tree can never drift apart (rule R23 — *navigator semantics forwarding
+    /// follows input routing, exactly*). Today the set is exactly
+    /// `{ pages.last() }`; if non-modal overlays ever start passing input
+    /// through, both sides widen together by construction.
+    ///
+    /// This is deliberately **narrower** than the painted range
+    /// [`base_visible_index`](Self::base_visible_index) yields: a page under a
+    /// transparent overlay is [`PageVisibility::Visible`] — painted, but routed
+    /// no input — and is therefore *not* in this set.
+    fn input_routed_pages(&self) -> std::ops::Range<usize> {
+        self.pages.len().saturating_sub(1)..self.pages.len()
+    }
+
     /// Route an event to the top page via the shared single-child router.
+    ///
+    /// Walks [`input_routed_pages`](Self::input_routed_pages) top-first,
+    /// stopping at the first page that consumes the event — one page today.
     fn route_top(&mut self, ctx: &mut EventCtx<'_>, event: &InputEvent) -> EventResult {
-        if let Some(top) = self.pages.last_mut() {
-            crate::authoring::route_event_single(&mut top.pod, ctx, event)
-        } else {
-            EventResult::Ignored
+        for i in self.input_routed_pages().rev() {
+            if crate::authoring::route_event_single(&mut self.pages[i].pod, ctx, event)
+                == EventResult::Handled
+            {
+                return EventResult::Handled;
+            }
         }
+        EventResult::Ignored
     }
 
     /// The event body with an explicit timestamp so velocity math is deterministic
@@ -2252,6 +2287,65 @@ impl<State: 'static> Widget for NavigatorWidget<State> {
         // transition and keeps receiving its own pointer stream.
         let t_ms = self.event_time_ms();
         self.event_at(ctx, event, t_ms)
+    }
+
+    /// **R23 — semantics forwarding follows input routing, exactly.**
+    ///
+    /// A transparent container (like [`Stack`](crate::Stack)): the navigator
+    /// contributes **no node of its own** and forwards
+    /// [`ChildPod::semantics_child`] for exactly the pages
+    /// [`input_routed_pages`](Self::input_routed_pages) says an input event
+    /// could reach — today `{ pages.last() }`. Every other page is **omitted**:
+    /// no node, no recursion. Offering a screen-reader user a control they
+    /// physically cannot activate is worse than not offering it, so the two
+    /// reaches are derived from one function rather than kept in sync by hand.
+    ///
+    /// # This omits more than paint culling does
+    ///
+    /// A page under a *transparent* overlay is [`PageVisibility::Visible`] —
+    /// still painted — yet it is omitted here, because R23 tracks **input
+    /// routing**, not painting, and [`route_top`](Self::route_top) routes only
+    /// to the top page. The divergence is deliberate: it is what makes a modal
+    /// modal to assistive technology for free (the page beneath a dialog is
+    /// already inert to a finger). The topmost transparent page — the dialog
+    /// itself — *is* forwarded, since it is `pages.last()`.
+    ///
+    /// # Why omission and not an accesskit flag
+    ///
+    /// Not `hidden`: it would need a synthesized per-page wrapper node to carry
+    /// the flag (churning node ids on every navigation for nodes that exist
+    /// only to say "ignore me"), it would publish the **stale bounds** of a
+    /// covered page that `layout` skipped, and whether every platform adapter
+    /// honours the flag is unverified — omission needs no such trust. Not
+    /// `clips_children`, which asserts `overflow: hidden` and would be simply
+    /// false here. Not `modal`, which is the right flag but belongs on the
+    /// dialog widget: the navigator does not know a page is a dialog and cannot
+    /// infer it from [`BackPolicy`] (most shipped modals push through
+    /// `push_transparent_for_result` and so take the default
+    /// [`BackPolicy::Pop`]).
+    ///
+    /// # During a transition
+    ///
+    /// No special case: `pages.last()` is the *destination* page for a push,
+    /// pop and replace alike, and its mid-flight bounds are the animated pod
+    /// origins `paint` is using — consistent with the screen and
+    /// self-correcting within one transition. Input is *fully* suppressed
+    /// mid-transition ([`event_at`](Self::event_at)), so a screen reader
+    /// activating a node during those ≤340ms hits exactly the same suppression
+    /// a finger would.
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        // The routed set is always the top of the settled stack — i.e. exactly
+        // the pages `visibility_of` calls `Current`. Pinned here so a future
+        // change to either derivation trips in debug rather than silently
+        // widening the accessibility tree past the input reach.
+        debug_assert!(
+            self.input_routed_pages()
+                .all(|i| self.visibility_of(i) == PageVisibility::Current),
+            "R23: the input-routed page set must be exactly the Current page(s)"
+        );
+        for i in self.input_routed_pages() {
+            self.pages[i].pod.semantics_child(ctx);
+        }
     }
 }
 
