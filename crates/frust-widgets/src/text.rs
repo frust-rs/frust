@@ -12,7 +12,7 @@ use frust_core::{
     Widget,
 };
 use frust_text::{
-    FontFamily, FontStyle, FontWeight, LineHeight, TextContext, TextLayout, TextStyle,
+    FontFamily, FontStyle, FontWeight, LineHeight, TextAlign, TextContext, TextLayout, TextStyle,
 };
 use frust_theme::Theme;
 use kurbo::Size;
@@ -62,8 +62,14 @@ pub enum ThemeTextColor {
 /// string and hands the finished text in. Styling is applied with the
 /// [`TextView::size`]/[`TextView::color`]/[`TextView::weight`]/
 /// [`TextView::family`]/[`TextView::italic`]/[`TextView::letter_spacing`]/
-/// [`TextView::line_height`] builder methods, or in bulk with
-/// [`TextView::style`].
+/// [`TextView::line_height`]/[`TextView::align`] builder methods, or in bulk
+/// with [`TextView::style`].
+///
+/// [`TextView::align`] positions each wrapped line within the layout's
+/// width (centre/right-aligned paragraphs, not just the block's own
+/// position within its parent). It applies to this static leaf only; a
+/// live-edited `TextInput`'s text is always start-aligned — see
+/// `frust_text::TextEditor`'s docs.
 pub struct TextView {
     content: String,
     style: TextStyle,
@@ -129,6 +135,17 @@ impl TextView {
     /// Set the line height.
     pub fn line_height(mut self, line_height: LineHeight) -> Self {
         self.style.line_height = line_height;
+        self
+    }
+
+    /// Set the paragraph alignment (start/center/end/left/right/justify).
+    ///
+    /// Only visible once the text wraps to more than one line under a
+    /// bounded width — a single-line layout's width already equals the
+    /// line's own content width, so every alignment renders identically to
+    /// the default ([`TextAlign::Start`]).
+    pub fn align(mut self, align: TextAlign) -> Self {
+        self.style.align = align;
         self
     }
 
@@ -322,6 +339,7 @@ mod tests {
             .family(FontFamily::named("Inter"))
             .letter_spacing(2.0)
             .line_height(LineHeight::Absolute(30.0))
+            .align(TextAlign::Center)
             .color(Color::from_rgb8(1, 2, 3));
 
         assert_eq!(view.style.size, 20.0);
@@ -330,6 +348,7 @@ mod tests {
         assert_eq!(view.style.family, FontFamily::named("Inter"));
         assert_eq!(view.style.letter_spacing, 2.0);
         assert_eq!(view.style.line_height, LineHeight::Absolute(30.0));
+        assert_eq!(view.style.align, TextAlign::Center);
         assert_eq!(view.style.color, Color::from_rgb8(1, 2, 3));
     }
 
@@ -488,6 +507,85 @@ mod tests {
         let stats = tcx.shape_cache_stats();
         assert_eq!(stats.shapes, 1, "the width change must not re-shape");
         assert_eq!(stats.line_breaks, 1, "the width change re-breaks once");
+    }
+
+    // --- Paragraph alignment (FINDINGS #39), end-to-end through the widget ---
+
+    /// Builds, lays out, and paints `view` at `bc`, returning the painted
+    /// glyph runs (unlike [`painted_color`], which discards everything but
+    /// the brush).
+    fn painted_runs(view: TextView, bc: BoxConstraints) -> Vec<GlyphRun> {
+        let mut widget = View::<()>::build(&view, &mut frust_core::BuildCtx::new(&mut 0u64));
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+        widget.layout(&mut lctx, &bc);
+        let mut rec = GlyphRunRecorder::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, bc.max());
+        widget.paint(&mut pctx, &mut rec);
+        rec.runs
+    }
+
+    /// A recording scene that captures every painted glyph run in full
+    /// (unlike [`GlyphRecorder`], which keeps only the brush color).
+    #[derive(Default)]
+    struct GlyphRunRecorder {
+        runs: Vec<GlyphRun>,
+    }
+
+    impl PaintScene for GlyphRunRecorder {
+        fn fill_rect(&mut self, _o: Point, _s: Size, _c: Color) {}
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+        fn draw_glyph_run(&mut self, run: GlyphRun) {
+            self.runs.push(run);
+        }
+    }
+
+    /// Groups `runs`' glyphs by line (glyphs on the same line share a `y` —
+    /// `frust_text`'s coordinate contract) and returns each line's minimum
+    /// `x` (its rendered left edge), in line order.
+    fn line_min_x(runs: &[GlyphRun]) -> Vec<f32> {
+        let mut by_y: Vec<(f32, f32)> = Vec::new();
+        for run in runs {
+            for g in &run.glyphs {
+                match by_y.iter_mut().find(|(y, _)| (*y - g.y).abs() < 0.01) {
+                    Some((_, min_x)) => *min_x = min_x.min(g.x),
+                    None => by_y.push((g.y, g.x)),
+                }
+            }
+        }
+        by_y.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        by_y.into_iter().map(|(_, x)| x).collect()
+    }
+
+    #[test]
+    fn text_view_align_centers_and_right_aligns_wrapped_lines() {
+        // The end-to-end path the finding names: `Align(CENTER, text(..))`
+        // must actually centre every line, not just the block. Asserts on
+        // per-line origins (via the painted glyph runs), not on the style
+        // merely being set.
+        let content = "A\nBBBBBBBBBB";
+        let bc = BoxConstraints::loose(Size::new(400.0, 200.0));
+
+        let start_x = line_min_x(&painted_runs(text(content), bc));
+        let center_x = line_min_x(&painted_runs(text(content).align(TextAlign::Center), bc));
+        let right_x = line_min_x(&painted_runs(text(content).align(TextAlign::Right), bc));
+
+        assert_eq!(start_x.len(), 2, "expected two hard-broken lines");
+        assert_eq!(center_x.len(), 2);
+        assert_eq!(right_x.len(), 2);
+
+        assert!(
+            start_x[0].abs() < 0.5 && start_x[1].abs() < 0.5,
+            "default (start) alignment must hug the left edge: {start_x:?}"
+        );
+        assert!(
+            center_x[0] > center_x[1] + 1.0,
+            "the shorter line must center further right than the longer one: {center_x:?}"
+        );
+        assert!(
+            right_x[0] > right_x[1] + 1.0,
+            "the shorter line's right-aligned left edge must sit further right: {right_x:?}"
+        );
     }
 
     // --- Theme-swap regression (review F1) ---

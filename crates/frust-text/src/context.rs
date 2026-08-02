@@ -23,7 +23,8 @@ use peniko::Brush;
 use crate::layout::TextLayout;
 use crate::shape_cache::{DEFAULT_CAPACITY, ShapeCache, ShapeCacheStats, ShapeKey};
 use crate::style::{
-    TextStyle, to_parley_family, to_parley_line_height, to_parley_style, to_parley_weight,
+    TextStyle, to_parley_align, to_parley_family, to_parley_line_height, to_parley_style,
+    to_parley_weight,
 };
 
 /// A font family registered via [`TextContext::register_fonts`], reported back
@@ -125,6 +126,12 @@ impl TextContext {
     /// downstream via the scene transform). Passing `None` produces a single
     /// unwrapped line per hard break in `text`. An empty `text` yields a layout
     /// with no glyph runs and a near-zero size.
+    ///
+    /// `style.align` positions every line within the layout's width (a
+    /// no-op distinction from [`crate::TextAlign::Start`] until `max_width`
+    /// is bounded, since an unbounded line's width already equals its
+    /// content). Applies here **and** on the width-change re-break path in
+    /// [`crate::shape_cache::ShapeCache::get`] — see that fn's docs.
     pub fn layout(&mut self, text: &str, style: &TextStyle, max_width: Option<f32>) -> TextLayout {
         let key = ShapeKey::new(text, style);
 
@@ -157,8 +164,11 @@ impl TextContext {
 
         let mut layout = builder.build(text);
         layout.break_all_lines(max_width);
+        // Both hardcoded-alignment sites (this one and the width-change
+        // re-break path in `ShapeCache::get`) must apply `style.align` — see
+        // `to_parley_align`'s docs.
         layout.align(
-            parley::layout::Alignment::Start,
+            to_parley_align(style.align),
             parley::layout::AlignmentOptions::default(),
         );
 
@@ -493,5 +503,193 @@ mod tests {
             shapes_before + 1,
             "an evicted entry is re-shaped, not served stale"
         );
+    }
+
+    // --- Paragraph alignment (FINDINGS #39) ---
+
+    use crate::style::TextAlign;
+
+    /// A style at `align`, otherwise default.
+    fn aligned_style(align: TextAlign) -> TextStyle {
+        TextStyle {
+            align,
+            ..style(16.0)
+        }
+    }
+
+    /// Lays out `text` at `max_width` and returns each line's minimum glyph
+    /// `x` (its rendered left edge), in line order.
+    ///
+    /// Glyphs on the same line share a `y` (`crate::convert`'s coordinate
+    /// contract), so grouping by `y` recovers per-line positions from the
+    /// flat glyph-run output — the only origin-independent signal that
+    /// alignment (baked into `positioned_glyphs()` by parley) actually moved
+    /// a line, as opposed to just the style being set.
+    fn line_min_x(cx: &mut TextContext, text: &str, style: &TextStyle, max_width: f32) -> Vec<f32> {
+        let layout = cx.layout(text, style, Some(max_width));
+        let runs = layout.to_scene_runs(kurbo::Point::ORIGIN);
+        let mut by_y: Vec<(f32, f32)> = Vec::new();
+        for run in &runs {
+            for g in &run.glyphs {
+                match by_y.iter_mut().find(|(y, _)| (*y - g.y).abs() < 0.01) {
+                    Some((_, min_x)) => *min_x = min_x.min(g.x),
+                    None => by_y.push((g.y, g.x)),
+                }
+            }
+        }
+        by_y.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        by_y.into_iter().map(|(_, x)| x).collect()
+    }
+
+    /// Two hard-broken lines of very different length, so alignment moves
+    /// them by clearly different, non-accidental amounts. The long line is
+    /// short enough to stay well under `max_width` (400px) even under a
+    /// pessimistically wide glyph metric, so it never itself soft-wraps —
+    /// keeping the line count at exactly two regardless of the host's
+    /// resolved system font.
+    const TWO_LINES: &str = "A\nBBBBBBBBBB";
+
+    #[test]
+    fn center_and_right_align_position_wrapped_lines_correctly() {
+        // Asserts on per-line origins, not on the style merely being set —
+        // this is what catches the v1 defect where `Align(CENTER, text(..))`
+        // centred only the block, leaving every line hugging the leading
+        // edge.
+        let mut cx = TextContext::new();
+        let max_width = 400.0;
+
+        let start_x = line_min_x(
+            &mut cx,
+            TWO_LINES,
+            &aligned_style(TextAlign::Start),
+            max_width,
+        );
+        let center_x = line_min_x(
+            &mut cx,
+            TWO_LINES,
+            &aligned_style(TextAlign::Center),
+            max_width,
+        );
+        let right_x = line_min_x(
+            &mut cx,
+            TWO_LINES,
+            &aligned_style(TextAlign::Right),
+            max_width,
+        );
+
+        assert_eq!(start_x.len(), 2, "expected two hard-broken lines");
+        assert_eq!(center_x.len(), 2);
+        assert_eq!(right_x.len(), 2);
+
+        // Start (default, v1-compatible): every line hugs the left edge.
+        assert!(
+            start_x[0].abs() < 0.5 && start_x[1].abs() < 0.5,
+            "start-aligned lines must hug the left edge: {start_x:?}"
+        );
+
+        // Center: both lines move off the left edge, and the short line ("A")
+        // centers further right than the long line, since each line is
+        // centered independently within the 400px container.
+        assert!(
+            center_x[0] > 1.0 && center_x[1] > 1.0,
+            "center-aligned lines must move off the left edge: {center_x:?}"
+        );
+        assert!(
+            center_x[0] > center_x[1] + 1.0,
+            "the shorter line must center further right than the longer one: {center_x:?}"
+        );
+
+        // Right: same relationship — the short line's left edge sits further
+        // right than the long line's, since both trailing edges align.
+        assert!(
+            right_x[0] > right_x[1] + 1.0,
+            "the shorter line's right-aligned left edge must sit further right: {right_x:?}"
+        );
+    }
+
+    #[test]
+    fn alignment_survives_a_width_change_through_the_shape_cache_rebreak() {
+        // The resize regression the adversarial pass flagged: `ShapeCache::get`
+        // had its own hardcoded `Alignment::Start` on the re-break path, so a
+        // resized layout would silently revert to `Start` even though the
+        // initial (from-scratch) layout in this fn correctly centered.
+        let mut cx = TextContext::new();
+        let centered = aligned_style(TextAlign::Center);
+
+        // First pass: shapes and breaks from scratch at 400px.
+        let _ = cx.layout(TWO_LINES, &centered, Some(400.0));
+
+        // Second pass at a different width: a shape-cache hit that re-breaks
+        // (not a fresh shape) — exactly the path `ShapeCache::get` owns.
+        let x = line_min_x(&mut cx, TWO_LINES, &centered, 500.0);
+        assert_eq!(x.len(), 2);
+        assert!(
+            x[0] > x[1] + 1.0,
+            "center alignment must survive the width-change re-break: {x:?}"
+        );
+
+        let stats = cx.shape_cache_stats();
+        assert_eq!(stats.shapes, 1, "the width change must not re-shape");
+        assert_eq!(
+            stats.line_breaks, 1,
+            "sanity: this really went through the re-break path"
+        );
+    }
+
+    #[test]
+    fn same_text_different_alignment_does_not_collide_in_the_shape_cache() {
+        // The `ShapeKey` extension regression: two texts identical but for
+        // alignment must shape (and render) independently, not share one
+        // cache entry.
+        let mut cx = TextContext::new();
+        let max_width = 400.0;
+
+        let start_x = line_min_x(
+            &mut cx,
+            TWO_LINES,
+            &aligned_style(TextAlign::Start),
+            max_width,
+        );
+        let center_x = line_min_x(
+            &mut cx,
+            TWO_LINES,
+            &aligned_style(TextAlign::Center),
+            max_width,
+        );
+
+        assert_ne!(
+            start_x, center_x,
+            "a cache collision would make the second (center) request come back \
+             identical to the first (start)"
+        );
+        assert!(
+            start_x[0].abs() < 0.5,
+            "the start-aligned request must render correctly despite sharing text \
+             with a differently-aligned request: {start_x:?}"
+        );
+        assert!(
+            center_x[0] > center_x[1] + 1.0,
+            "the center-aligned request must render correctly despite sharing text \
+             with a differently-aligned request: {center_x:?}"
+        );
+
+        let stats = cx.shape_cache_stats();
+        assert_eq!(
+            stats.shapes, 2,
+            "distinct alignment must be a distinct shape, not a collision"
+        );
+    }
+
+    #[test]
+    fn default_alignment_matches_pre_findings_39_start_behavior() {
+        // Byte-for-byte parity: the default style's layout is unchanged from
+        // before this retrofit (both hardcoded call sites now apply
+        // `TextAlign::Start`, exactly what they hardcoded before).
+        let mut cx = TextContext::new();
+        let default_x = line_min_x(&mut cx, TWO_LINES, &style(16.0), 400.0);
+        let explicit_start_x =
+            line_min_x(&mut cx, TWO_LINES, &aligned_style(TextAlign::Start), 400.0);
+        assert_eq!(default_x, explicit_start_x);
+        assert!(default_x.iter().all(|x| x.abs() < 0.5));
     }
 }

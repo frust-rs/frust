@@ -171,6 +171,16 @@ impl TextEditor {
     /// letter-spacing, line-height) is applied as an edit-style default,
     /// mirroring [`crate::TextContext::layout`]. No wrapping width is set —
     /// v1 is single-line.
+    ///
+    /// **`style.align` is deliberately not applied here** (FINDINGS #39's
+    /// scope boundary): [`parley::PlainEditor`] manages its own layout
+    /// internally and exposes no alignment override through
+    /// [`parley::PlainEditor::edit_styles`] or any other hook this fn (or
+    /// [`Self::apply`]'s driver) reaches — unlike the other style knobs
+    /// above, there is no `StyleProperty` for it to `insert`. A live-edited
+    /// [`TextEditor`] (the engine behind `TextInput`) therefore always
+    /// renders start-aligned, regardless of `style.align`. Only
+    /// [`crate::TextContext::layout`] (static, non-editable text) honors it.
     pub fn new(style: &TextStyle) -> Self {
         let mut editor = PlainEditor::<Brush>::new(style.size);
         // Single-line by default: no wrapping width. A widget opts into wrapped
