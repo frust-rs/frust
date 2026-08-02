@@ -927,15 +927,16 @@ class FrustSurfaceView(
      * must not surface the composed text in Gboard's suggestion strip, nor
      * let Gboard commit it to its learned-word dictionary.
      *
-     * `TYPE_TEXT_VARIATION_PASSWORD` is what suppresses the suggestion
-     * strip and switches to secure entry; `IME_FLAG_NO_PERSONALIZED_LEARNING`
-     * is the flag that stops the IME persisting the secret into its learned
-     * word list — the *persistent* half of the leak — so it is set
-     * unconditionally alongside the password variation, never omitted.
+     * `TYPE_TEXT_VARIATION_PASSWORD` is what switches to secure entry;
+     * `TYPE_TEXT_FLAG_NO_SUGGESTIONS` and `IME_FLAG_NO_PERSONALIZED_LEARNING`
+     * are set alongside it, never omitted — the former suppresses the
+     * suggestion strip, the latter stops the IME persisting the secret into
+     * its learned word list, the *persistent* half of the leak.
      * `"noSuggestions"` is the non-secret sibling: entry stays visible, but
      * `TYPE_TEXT_FLAG_NO_SUGGESTIONS` still switches off the suggestion strip
-     * and autocorrect (no secure-entry masking, no personalized-learning
-     * flag — this is not a secret field).
+     * and autocorrect, and `IME_FLAG_NO_PERSONALIZED_LEARNING` still stops
+     * the typed text feeding the IME's learned-word dictionary (no secure-
+     * entry masking — this is not a secret field).
      *
      * Any wire value this `when` doesn't recognize — including an absent
      * `lastKnownState` (nothing focused/published yet) — falls through to
@@ -956,11 +957,13 @@ class FrustSurfaceView(
             CONTENT_TYPE_NO_SUGGESTIONS -> {
                 outAttrs.inputType =
                     InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-                outAttrs.imeOptions = EditorInfo.IME_ACTION_DONE
+                outAttrs.imeOptions =
+                    EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
             }
             else -> { // "password", or any unrecognized/future value — fail closed.
                 outAttrs.inputType =
-                    InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                    InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD or
+                        InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                 outAttrs.imeOptions =
                     EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
             }
