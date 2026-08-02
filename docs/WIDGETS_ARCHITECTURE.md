@@ -79,8 +79,11 @@ module; an app can disable all three to build its own design system on the same 
   - **Route params:** Query parameters merge **under** path segment captures; path captures take precedence
     over query params of the same name, and named-route `path_for_name` round-trips unused params as query.
   - **overlay_host() constructor:** A `NavigatorView` with pop_swipe disabled and no-op transition
-    (not a new widget); back-button interest is arbitrated by outermost registrant first — a host with
-    no overlays defers to the inner navigator.
+    (not a new widget). Back-button interest is arbitrated by **rank taken from the wiring entry
+    point** — an overlay host outranks a plain navigator regardless of when or how often either
+    wires; equal ranks order by first wire. A host with no overlays reports no interest and defers to
+    the inner navigator. Registrants are released by mount liveness
+    (`NavigatorController::is_mounted()`), not by a wire-count heuristic.
   - **NavigatorWidget semantics (R23):** Now implements `Widget::semantics`, forwarding via
     `ChildPod::semantics_child` to exactly the pages input routing can reach (covered pages and pages
     under modals omitted outright), honoring the input-parity invariant documented in CODE_STANDARDS.md.
