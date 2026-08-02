@@ -98,13 +98,16 @@ signal-poll seam race-free without a lock.
 - **IME content-type:** each focused widget publishes `ImeState::content_type` (Normal/Password/
   NoSuggestions), and the shells destructure the state field-by-field into platform payloads per
   their capabilities and security posture:
-  - **Android:** maps to `EditorInfo.inputType` (`TYPE_CLASS_TEXT`, with
-    `TYPE_TEXT_FLAG_NO_SUGGESTIONS` or `TYPE_TEXT_VARIATION_PASSWORD`) and `EditorInfo.imeOptions`
-    (adds `IME_FLAG_NO_PERSONALIZED_LEARNING` for Password, blocking the suggestion strip and
-    personalized learning). Handles content-type changes on a **steady-focused** field (field is
-    active/focused but changes from Normal→Password mid-interaction) via `restartInput`, because
-    Android never re-queries `EditorInfo` for a bound `InputConnection` — the hint must be
-    reestablished by forcing a new connection.
+  - **Android:** maps to `EditorInfo.inputType` (`TYPE_CLASS_TEXT`; Password and NoSuggestions both
+    add `TYPE_TEXT_FLAG_NO_SUGGESTIONS`, Password additionally adds `TYPE_TEXT_VARIATION_PASSWORD`)
+    and `EditorInfo.imeOptions` (`IME_FLAG_NO_PERSONALIZED_LEARNING` for both Password and
+    NoSuggestions), blocking the suggestion strip and personalized learning on both — each branch
+    was previously missing one of its two required flags (fix F5), and `applyImeContentType` is now
+    the first Kotlin change in three batches to have cleared `compileDebugKotlin`. Handles
+    content-type changes on a **steady-focused** field (field is active/focused but changes from
+    Normal→Password mid-interaction) via `restartInput`, because Android never re-queries
+    `EditorInfo` for a bound `InputConnection` — the hint must be reestablished by forcing a new
+    connection.
   - **iOS:** JSON-serializes the content type alongside editing state for Swift to apply.
     `syncImeFocus` matches two of Android's three properties: the **per-frame poll** (driven from
     the `CADisplayLink` tick via `renderFrame`, the `doFrame` analogue) and the **divergence-guarded
@@ -112,9 +115,16 @@ signal-poll seam race-free without a lock.
     cycle — a shared responder means a field switch has no focus edge, so both traits and mirror text
     must reconcile, not just apply once on focus. It has **no analogue of Android's `onKeyDown` call
     site**: iOS has no key event for the soft keyboard's Return, which arrives as `insertText("\n")`
-    through `UITextInput` instead. **Swift side remains compile- and device-unverified on the build
-    host** (Linux; `swift build` cannot validate iOS code without a macOS environment) — see
-    `docs/LIMITATIONS.md` `ime-ios-content-type-unverified`.
+    through `UITextInput` instead. The per-frame `becomeFirstResponder()` retry is now **bounded**
+    (`imeFocusSatisfied`, fix F3) rather than fighting an intentional UIKit-originated resign every
+    frame forever, since nothing on the Swift side can observe *why* first responder was resigned. A
+    user touch on the Frust surface unconditionally re-arms the bound (fix F3b) — a self-dismissed
+    field can be recovered by re-tapping it — but a touch landing inside a Mode B hosted slot never
+    reaches this path (`FrustView.hitTest` returns `nil` there), so a sibling native control holding
+    first responder is unaffected by the per-frame tick. **Swift side remains compile- and
+    device-unverified on the build host** (Linux; even a Mac needs `xcodebuild`, and
+    `aarch64-apple-ios` is not installed here) — see `docs/LIMITATIONS.md`
+    `ime-ios-content-type-unverified`, which also records a residual gap in the touch-re-arm design.
   - **Desktop:** forwards to winit's `Window::set_ime_purpose(ImePurpose)`, which is **documented
     unsupported on all platforms except Wayland, and a cosmetic hint even there** (no secure-text
     entry). Password is the only distinction (Password vs Normal); NoSuggestions has no

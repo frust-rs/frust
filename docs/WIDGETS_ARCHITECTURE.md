@@ -87,6 +87,13 @@ module; an app can disable all three to build its own design system on the same 
     go_router's outermost-first order on Android is the counter-example this deliberately avoids. A
     host with no overlays reports no interest and defers to the inner navigator. Registrants are
     released by mount liveness (`NavigatorController::is_mounted()`), not by a wire-count heuristic.
+  - **Back reach follows input routing (R23):** ranking (above) decides who wins *among* claimants;
+    a separate reach check decides who may claim at all. A navigator whose hosting page is not in
+    its host navigator's `input_routed_pages()` reports `back_interest() == false` outright,
+    whatever its own stack looks like — so a press can never pop an off-screen nested stack while
+    the visible page stays put. Reach is input routing, not painting: a page under a *transparent*
+    overlay is still `PageVisibility::Visible` but claims no back. A top-level navigator has no
+    hosting page and is unconditionally reachable, so single-navigator apps are unaffected.
   - **Controller binding is structural:** a `NavigatorView`'s published cells (depth, back interest,
     transition, mount count) bind to the `NavigatorController` it was last built or rebuilt against;
     a controller swap is detected by identity (not just view type) and re-bound in the same rebuild
@@ -94,7 +101,10 @@ module; an app can disable all three to build its own design system on the same 
     controller reliably reports unmounted.
   - **NavigatorWidget semantics (R23):** Now implements `Widget::semantics`, forwarding via
     `ChildPod::semantics_child` to exactly the pages input routing can reach (covered pages and pages
-    under modals omitted outright), honoring the input-parity invariant documented in CODE_STANDARDS.md.
+    under modals omitted outright), honoring the input-parity invariant documented in
+    CODE_STANDARDS.md. Back arbitration's reach check (above) derives from this same
+    `input_routed_pages()` set, so it is the single reach definition shared by input, semantics, and
+    back.
 - Platform-view flow: `platform_view()`/`shield()` publish native-compositing slots and input-shield
   rects each frame for the shell layer to reconcile against native views.
 
