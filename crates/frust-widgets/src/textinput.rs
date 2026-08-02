@@ -99,7 +99,55 @@
 //! Glyph, and the unthemed fallback constants. That matters: `on_surface_variant`
 //! is opaque under Material/Glyph but translucent under Cupertino
 //! (`frust-theme`'s `ColorScheme` Cupertino arm, `secondaryLabel` at alpha 153),
-//! so it is *not* a portable disabled token.
+//! so it is *not* a portable disabled token. Dimming is keyed **strictly** off
+//! [`TextInputView::enabled`] at both points — see the next section for the
+//! sibling flag that intentionally does not dim.
+//!
+//! # Read-only mode
+//!
+//! [`TextInputView::read_only(true)`](TextInputView::read_only) makes the field
+//! non-interactive **without** dimming it (FINDINGS #52) — the option
+//! `enabled(false)` deliberately does not offer, since disabled conflates two
+//! orthogonal things (interactive? / dimmed?) that a static-but-live-styled
+//! mock (a splash screen's frozen preview of a field that un-freezes at the
+//! live handoff) needs to keep apart: popping from dimmed to full alpha at that
+//! handoff is exactly the bug this option closes.
+//!
+//! **Non-interactivity reuses [`enabled(false)`](TextInputView::enabled)'s one
+//! suppression hook** — the focus gate — rather than adding a parallel path:
+//! [`TextInputWidget::interactive`] is `enabled && !read_only`, and every place
+//! that used to gate on `enabled` alone (the top of [`Widget::event`], the
+//! focused-while-painting check, the disabled-while-focused IME-dismiss branch)
+//! now gates on `interactive` instead, so a field turned read-only while
+//! focused releases focus and dismisses the platform IME exactly like a field
+//! turned disabled while focused does — same code path, same guarantees.
+//!
+//! **Dimming stays keyed to `enabled` alone**, never `interactive`: both
+//! resolution points ([`Chrome::resolve`] and
+//! [`effective_style`](TextInputWidget::effective_style)) still branch on
+//! `enabled`, so `read_only(true)` with `enabled(true)` (the default) paints at
+//! full alpha at both points, while `enabled(false)` dims exactly as before —
+//! `read_only` never widens or narrows what `enabled(false)` already does.
+//!
+//! **Semantics.** A read-only field is a real accessibility distinction from a
+//! disabled one — accesskit exposes both `Disabled` and `ReadOnly` node states,
+//! and a screen reader announces them differently (disabled: nothing to
+//! interact with at all; read-only: present and its value is readable, just not
+//! editable). [`Widget::semantics`] reports `set_disabled()` only when
+//! `!enabled`, and `set_read_only()` when `enabled && read_only` — never both,
+//! and never by omitting the node (`docs/CODE_STANDARDS.md`'s Semantics
+//! Conventions: a widget with something to say about itself keeps its node).
+//!
+//! **Interaction with [`obscured`](TextInputView::obscured).** Orthogonal:
+//! `read_only` never touches masking, the mirror, or the published
+//! `ImeContentType` hint — a read-only obscured field still reports
+//! `Role::PasswordInput` with a masked a11y value, it just never focuses (so it
+//! never actually publishes an *active* IME surface to race the hint against).
+//!
+//! **Interaction with the Chrome geometry setters** (`padding`/`border_width`/
+//! `corner_radius`/`caret_width`/`focus_ring_width`, see the "Chrome" section
+//! below). Also orthogonal: those override plain geometry constants read
+//! identically regardless of `enabled`/`read_only`/`obscured`.
 //!
 //! # Obscured (password) mode
 //!
@@ -387,6 +435,11 @@ pub struct TextInputView<State: 'static> {
     /// and IME editing unreachable) and dims the chrome — see
     /// [`TextInputView::enabled`].
     enabled: bool,
+    /// Whether the field refuses focus/editing without dimming — see
+    /// [`TextInputView::read_only`]. Independent of `enabled`: dimming stays
+    /// keyed to `enabled` alone (see the [module docs](self)' "Read-only mode"
+    /// section).
+    read_only: bool,
     /// Whether the rendered glyphs are masked (password mode) — see
     /// [`TextInputView::obscured`].
     obscured: bool,
@@ -433,6 +486,7 @@ pub fn text_input<State: 'static, F: Fn(&mut State, String) + 'static>(
         max_visible_lines: None,
         submit_on_enter: None,
         enabled: true,
+        read_only: false,
         obscured: false,
         pad_x: PAD_X,
         pad_y: PAD_Y,
@@ -513,6 +567,24 @@ impl<State: 'static> TextInputView<State> {
     /// deliberately does not do.
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
+        self
+    }
+
+    /// Set whether the field is read-only (default `false`): non-interactive
+    /// like a disabled field (no focus, no caret, no editing — see
+    /// [`enabled`](Self::enabled)) but painted at **full alpha**, not dimmed.
+    ///
+    /// This is the presentation `enabled(false)` cannot express: an
+    /// undimmed-but-inert field (FINDINGS #52), e.g. a static mock that should
+    /// look identical before and after a live handoff. Reuses
+    /// `enabled(false)`'s one suppression hook (the focus gate) rather than a
+    /// parallel path — a field made read-only while focused releases focus and
+    /// dismisses the platform IME exactly like disabling it would. See the
+    /// [module docs](self)' "Read-only mode" section for the semantics
+    /// distinction from disabled and the interaction with `obscured`/the
+    /// chrome geometry setters.
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
         self
     }
 
@@ -627,18 +699,25 @@ pub struct TextInputWidget {
     /// Defaults to true single-line / false multi-line; Shift+Enter inverts it
     /// (multi-line only — a single-line field always submits).
     submit_on_enter: bool,
-    /// Whether the field accepts input (see [`TextInputView::enabled`]). Gates
-    /// the whole `event()` pass and both theme-resolution points.
+    /// Whether the field accepts input (see [`TextInputView::enabled`]). Feeds
+    /// [`interactive`](Self::interactive) (the gate for the whole `event()`
+    /// pass) and, alone, both theme-resolution points' dimming — see
+    /// [`Chrome::resolve`]/[`effective_style`](Self::effective_style).
     enabled: bool,
+    /// Whether the field is read-only (see [`TextInputView::read_only`]).
+    /// Feeds [`interactive`](Self::interactive) alongside `enabled`, but never
+    /// dimming — the whole point of the flag (see the [module docs](self)'
+    /// "Read-only mode" section).
+    read_only: bool,
     /// Whether the rendered glyphs are masked (see [`TextInputView::obscured`]).
     /// Kept alongside `mask_editor` (which it decides) so `rebuild` can compare
     /// it and `semantics` can pick its role without inspecting the mirror.
     obscured: bool,
-    /// Set by a `rebuild` that disabled a field holding focus: the focus path
-    /// lives on the widget's *pod*, which `rebuild` cannot reach (`BuildCtx`
-    /// carries no focus seam), so the release is deferred to the first
-    /// `event()` that arrives — meanwhile `paint` already refuses to behave as
-    /// focused (no caret, no blink frame, an inactive IME surface).
+    /// Set by a `rebuild` that disabled or read-onlied a field holding focus:
+    /// the focus path lives on the widget's *pod*, which `rebuild` cannot reach
+    /// (`BuildCtx` carries no focus seam), so the release is deferred to the
+    /// first `event()` that arrives — meanwhile `paint` already refuses to
+    /// behave as focused (no caret, no blink frame, an inactive IME surface).
     release_focus_pending: bool,
     /// The widget's event-pass view of its focus: set on a `Down` inside,
     /// cleared on Escape / a blur `Down` this widget observes. NOT authoritative
@@ -688,6 +767,19 @@ fn inside(pos: Point, size: Size) -> bool {
 }
 
 impl TextInputWidget {
+    /// Whether the field can take focus and be edited — `false` if disabled
+    /// *or* read-only. The single hook both flags suppress interactivity
+    /// through: [`Widget::event`]'s top gate, `paint`'s `focused` computation,
+    /// and the disabled/read-only-while-focused IME-dismiss branch all key off
+    /// this rather than `enabled` alone, so `read_only` gets the exact same
+    /// suppression `enabled(false)` already had with no parallel path. Dimming
+    /// deliberately does **not** use this — see [`Chrome::resolve`] and
+    /// [`effective_style`](Self::effective_style), which key off `enabled`
+    /// alone (the [module docs](self)' "Read-only mode" section).
+    fn interactive(&self) -> bool {
+        self.enabled && !self.read_only
+    }
+
     /// The style to shape the editor with: `style` unchanged when the color was
     /// set explicitly (or no theme is active), otherwise `style` with its color
     /// replaced by the theme's `on_surface` role. Mirrors
@@ -1195,6 +1287,7 @@ impl<State: 'static> View<State> for TextInputView<State> {
             applied_wrap_width: None,
             submit_on_enter: resolve_submit_on_enter(self.max_visible_lines, self.submit_on_enter),
             enabled: self.enabled,
+            read_only: self.read_only,
             obscured: self.obscured,
             release_focus_pending: false,
             focused: false,
@@ -1259,6 +1352,20 @@ impl<State: 'static> View<State> for TextInputView<State> {
                 element.captured = false;
             }
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        // Read-only reconcile: unlike `enabled`, PAINT only — `read_only`
+        // never dims (see the module docs' "Read-only mode" section), so no
+        // glyph color is baked differently at layout time. A field made
+        // read-only *while focused* releases focus the same way a field
+        // disabled while focused does (see `interactive`).
+        if prev.read_only != self.read_only {
+            element.read_only = self.read_only;
+            if self.read_only {
+                element.release_focus_pending = element.focused;
+                element.focused = false;
+                element.captured = false;
+            }
+            flags |= ChangeFlags::PAINT;
         }
         // Obscured reconcile: the masked mirror is what gets *measured*, and a
         // mask glyph's advance differs from the character it replaces, so this
@@ -1402,10 +1509,11 @@ impl Widget for TextInputWidget {
         // caret-blink continuation frame, and IME republish below all key off
         // `focused`, so they stop together and the field stops resurrecting the
         // IME surface the blur cleared (review F1).
-        // A disabled field never *behaves* as focused, even if the pod's focus
-        // path is still recorded (a `rebuild` that disabled a focused field
-        // cannot reach it — see `release_focus_pending`).
-        let focused = ctx.has_focus() && self.enabled;
+        // A disabled or read-only field never *behaves* as focused, even if
+        // the pod's focus path is still recorded (a `rebuild` that flipped
+        // either flag on a focused field cannot reach it — see
+        // `release_focus_pending`).
+        let focused = ctx.has_focus() && self.interactive();
         if self.focused && !focused {
             self.focused = false;
         }
@@ -1502,12 +1610,12 @@ impl Widget for TextInputWidget {
                     chrome.caret,
                 );
             }
-        } else if !self.enabled && ctx.has_focus() {
-            // Disabled while still holding the pod's focus path: publish an
-            // *inactive* IME surface so the shell dismisses the keyboard on the
-            // very next frame rather than waiting for the event-pass release
-            // (`release_focus_pending`). No caret, and no `request_frame` — a
-            // disabled field is at rest.
+        } else if !self.interactive() && ctx.has_focus() {
+            // Disabled or read-only while still holding the pod's focus path:
+            // publish an *inactive* IME surface so the shell dismisses the
+            // keyboard on the very next frame rather than waiting for the
+            // event-pass release (`release_focus_pending`). No caret, and no
+            // `request_frame` — a non-interactive field is at rest.
             let mut ime = self.current_ime_state(origin, size);
             ime.active = false;
             ime.caret = None;
@@ -1520,11 +1628,12 @@ impl Widget for TextInputWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        // The focus gate IS the disabled gate: refusing focus here is what
-        // makes `Key`/`Ime` (focus-routed, never hit-tested) unreachable, so
-        // `handle_key`/`handle_ime` need no disabled guards of their own. A
-        // disabled field also consumes nothing — it is inert, not a shield.
-        if !self.enabled {
+        // The focus gate IS the disabled/read-only gate: refusing focus here
+        // is what makes `Key`/`Ime` (focus-routed, never hit-tested)
+        // unreachable, so `handle_key`/`handle_ime` need no disabled/read-only
+        // guards of their own. A non-interactive field also consumes nothing
+        // — it is inert, not a shield.
+        if !self.interactive() {
             if ctx.has_focus() || self.release_focus_pending {
                 ctx.release_focus();
                 self.release_focus_pending = false;
@@ -1621,10 +1730,18 @@ impl Widget for TextInputWidget {
         } else {
             self.editor.text().to_string()
         };
+        // Disabled and read-only are reported as distinct accesskit node
+        // states, never conflated (a screen reader announces them
+        // differently — see the module docs' "Read-only mode" section): a
+        // disabled field says `set_disabled()`, a read-only *enabled* field
+        // says `set_read_only()`. `!enabled` wins if somehow both flags are
+        // set — a disabled field is the stronger claim.
         let id = ctx.push_node(role, |node| {
             node.set_value(value);
             if !self.enabled {
                 node.set_disabled();
+            } else if self.read_only {
+                node.set_read_only();
             }
         });
         if self.focused {
@@ -3403,10 +3520,12 @@ mod tests {
 
     // --- enabled(false) ---
 
-    /// The standard fixture field, with `enabled`/`obscured` dialled in.
+    /// The standard fixture field, with `enabled`/`obscured`/`read_only`
+    /// dialled in.
     fn options_logic(
         enabled: bool,
         obscured: bool,
+        read_only: bool,
     ) -> impl FnMut(&mut AppState) -> TextInputView<AppState> {
         move |state: &mut AppState| {
             text_input(state.value.clone(), |s: &mut AppState, v: String| {
@@ -3416,6 +3535,7 @@ mod tests {
             .placeholder("type here")
             .enabled(enabled)
             .obscured(obscured)
+            .read_only(read_only)
         }
     }
 
@@ -3433,7 +3553,7 @@ mod tests {
     #[test]
     fn disabled_field_refuses_focus_and_stays_inert() {
         let mut state = AppState::default();
-        let mut logic = options_logic(false, false);
+        let mut logic = options_logic(false, false, false);
         let mut root = options_root(&mut logic, &mut state);
 
         let outcome = root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
@@ -3469,14 +3589,14 @@ mod tests {
     #[test]
     fn disabling_a_focused_field_releases_focus_and_deactivates_ime() {
         let mut state = AppState::default();
-        let mut enabled_logic = options_logic(true, false);
+        let mut enabled_logic = options_logic(true, false, false);
         let mut root = options_root(&mut enabled_logic, &mut state);
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
         assert!(root.is_focus_active());
         assert!(root.ime_state().expect("focused").active);
 
         // Flip the flag on a rebuild while the field holds focus.
-        let mut disabled_logic = options_logic(false, false);
+        let mut disabled_logic = options_logic(false, false, false);
         let flags = root.rebuild(&mut disabled_logic, &mut state);
         assert!(
             flags.needs_layout(),
@@ -3554,7 +3674,7 @@ mod tests {
             value: "hi".to_string(),
             ..AppState::default()
         };
-        let mut logic = options_logic(false, false);
+        let mut logic = options_logic(false, false, false);
         let mut root = options_root(&mut logic, &mut state);
         root.set_theme(Box::new(Theme::m3_baseline()));
         root.layout(Size::new(300.0, 200.0));
@@ -3576,13 +3696,259 @@ mod tests {
             value: "hi".to_string(),
             ..AppState::default()
         };
-        let mut logic = options_logic(false, false);
+        let mut logic = options_logic(false, false, false);
         let mut root = options_root(&mut logic, &mut state);
         assert_eq!(
             painted_text_color(&mut root),
             Color::BLACK.multiply_alpha(DISABLED_CONTENT_ALPHA),
             "with no theme threaded the black fallback dims by the same rule"
         );
+    }
+
+    // --- read_only(true) (FINDINGS #52) ---
+
+    #[test]
+    fn read_only_refuses_focus_and_stays_inert() {
+        // Same inertness contract as disabled (reused suppression hook, not a
+        // parallel one): no focus, no caret, no edits reach the field.
+        let mut state = AppState::default();
+        let mut logic = options_logic(true, false, true);
+        let mut root = options_root(&mut logic, &mut state);
+
+        let outcome = root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert!(!outcome.handled, "a read-only field consumes nothing");
+        assert!(
+            !root.is_focus_active(),
+            "a tap must not focus a read-only field"
+        );
+        assert!(!widget(&root).focused);
+        assert!(!widget(&root).captured, "no drag capture either");
+        assert!(root.ime_state().is_none(), "no IME surface is published");
+
+        root.event(&mut state, &ch("x"));
+        root.event(
+            &mut state,
+            &InputEvent::Ime(ImeEvent::Commit("ni".to_string())),
+        );
+        assert_eq!(widget(&root).editor.text(), "");
+        assert_eq!(state.changes, 0);
+
+        let mut rec = CaretRecorder {
+            caret_color: Some(CARET),
+            caret_fills: 0,
+        };
+        let outcome = root.paint(&mut rec, FrameTime::ZERO);
+        assert_eq!(rec.caret_fills, 0, "a read-only field paints no caret");
+        assert!(!outcome.needs_frame, "a read-only field never blinks");
+    }
+
+    #[test]
+    fn making_a_focused_field_read_only_releases_focus_and_deactivates_ime() {
+        let mut state = AppState::default();
+        let mut live_logic = options_logic(true, false, false);
+        let mut root = options_root(&mut live_logic, &mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert!(root.is_focus_active());
+        assert!(root.ime_state().expect("focused").active);
+
+        // Flip the flag on a rebuild while the field holds focus.
+        let mut read_only_logic = options_logic(true, false, true);
+        let flags = root.rebuild(&mut read_only_logic, &mut state);
+        assert!(
+            !flags.needs_layout(),
+            "read-only never dims, so the flip is PAINT-only, unlike disabled"
+        );
+        root.layout(Size::new(300.0, 200.0));
+        assert!(
+            !widget(&root).focused,
+            "the widget stops considering itself focused immediately"
+        );
+
+        // Leg 1 — the next paint already refuses to act focused and hands the
+        // shell an inactive IME surface (dismissing the keyboard).
+        let mut sink = NullScene;
+        let outcome = root.paint(&mut sink, FrameTime::ZERO);
+        assert!(!outcome.needs_frame, "a read-only field paints at rest");
+        assert!(
+            !root.ime_state().expect("still published").active,
+            "the published IME surface goes inactive"
+        );
+
+        // Leg 2 — the first event that reaches the field releases the pod-level
+        // focus path, and edits nothing on the way.
+        root.event(&mut state, &ch("x"));
+        assert!(
+            !root.is_focus_active(),
+            "the stranded focus path is released"
+        );
+        assert!(root.ime_state().is_none());
+        assert_eq!(widget(&root).editor.text(), "");
+    }
+
+    #[test]
+    fn read_only_paints_full_alpha_chrome_in_every_design_language() {
+        // The first of the two dimming resolution points: `Chrome::resolve`,
+        // observed here through the actual `paint` pass (not called directly),
+        // so the assertion also proves `paint` feeds it `enabled` alone.
+        let mut languages: Vec<(&str, Option<Theme>)> = vec![
+            ("unthemed", None),
+            ("material", Some(Theme::m3_baseline())),
+            ("cupertino", Some(Theme::cupertino_baseline())),
+        ];
+        #[cfg(feature = "glyph")]
+        languages.push(("glyph", Some(Theme::glyph_baseline())));
+        for (name, theme) in languages {
+            let mut state = AppState::default();
+            let mut logic = options_logic(true, false, true);
+            let mut root = options_root(&mut logic, &mut state);
+            if let Some(theme) = theme.clone() {
+                root.set_theme(Box::new(theme));
+            }
+            let live_border = Chrome::resolve(theme.as_ref(), true).border;
+            let rec = paint_chrome(&mut root);
+            assert_eq!(
+                rec.rrects[0], live_border,
+                "{name}: a read-only field's idle border matches the fully-\
+                 enabled resolved border — not `DISABLED_CONTAINER_ALPHA`-dimmed"
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_paints_full_alpha_layout_baked_glyph_color() {
+        // The second of the two dimming resolution points:
+        // `effective_style`'s LAYOUT-time bake.
+        let mut state = AppState {
+            value: "hi".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(true, false, true);
+        let mut root = options_root(&mut logic, &mut state);
+        root.set_theme(Box::new(Theme::m3_baseline()));
+        root.layout(Size::new(300.0, 200.0));
+
+        assert_eq!(
+            painted_text_color(&mut root),
+            Theme::m3_baseline().scheme().on_surface,
+            "a read-only field's glyphs stay full-alpha on_surface, not dimmed"
+        );
+    }
+
+    #[test]
+    fn read_only_paints_full_alpha_unthemed_fallback_glyph_color() {
+        let mut state = AppState {
+            value: "hi".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(true, false, true);
+        let mut root = options_root(&mut logic, &mut state);
+        assert_eq!(
+            painted_text_color(&mut root),
+            Color::BLACK,
+            "with no theme threaded, read-only stays the undimmed black fallback"
+        );
+    }
+
+    #[test]
+    fn switching_a_read_only_field_to_live_shows_no_alpha_change() {
+        // The FINDINGS #52 motivating case: a static mock rendered read-only
+        // then switched interactive at a live handoff must show **no** alpha
+        // change at either resolution point — the pop `enabled(false)` would
+        // have produced.
+        let mut state = AppState {
+            value: "hi".to_string(),
+            ..AppState::default()
+        };
+        let mut read_only_logic = options_logic(true, false, true);
+        let mut root = options_root(&mut read_only_logic, &mut state);
+        let before_glyph = painted_text_color(&mut root);
+        let before_border = paint_chrome(&mut root).rrects[0];
+
+        let mut live_logic = options_logic(true, false, false);
+        root.rebuild(&mut live_logic, &mut state);
+        root.layout(Size::new(300.0, 200.0));
+        let after_glyph = painted_text_color(&mut root);
+        let after_border = paint_chrome(&mut root).rrects[0];
+
+        assert_eq!(
+            before_glyph, after_glyph,
+            "glyph color must not change across the read-only -> live handoff"
+        );
+        assert_eq!(
+            before_border, after_border,
+            "border color must not change across the read-only -> live handoff"
+        );
+        assert_eq!(
+            before_glyph,
+            Color::BLACK,
+            "sanity: read-only starts undimmed"
+        );
+    }
+
+    #[test]
+    fn read_only_reports_read_only_not_disabled_semantics() {
+        let mut state = AppState::default();
+        let mut logic = options_logic(true, false, true);
+        let root = options_root(&mut logic, &mut state);
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::TextInput)
+            .expect("a text field node");
+        assert!(
+            node.is_read_only(),
+            "a read-only field says so to a11y, distinct from disabled"
+        );
+        assert!(
+            !node.is_disabled(),
+            "read-only is not the same claim as disabled"
+        );
+    }
+
+    #[test]
+    fn disabled_wins_semantics_over_read_only_when_both_are_set() {
+        let mut state = AppState::default();
+        let mut logic = options_logic(false, false, true);
+        let root = options_root(&mut logic, &mut state);
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::TextInput)
+            .expect("a text field node");
+        assert!(node.is_disabled(), "disabled is the stronger claim");
+        assert!(
+            !node.is_read_only(),
+            "disabled and read-only are never both reported"
+        );
+    }
+
+    #[test]
+    fn read_only_obscured_field_stays_password_role_and_never_focuses() {
+        // Orthogonality: `read_only` never touches masking or the IME
+        // content-type hint, it just keeps the field from ever actually
+        // focusing (so there is no active surface to publish a hint on).
+        let mut state = AppState {
+            value: "hunter2".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = options_logic(true, true, true);
+        let mut root = options_root(&mut logic, &mut state);
+
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::PasswordInput)
+            .expect("read-only + obscured still contributes Role::PasswordInput");
+        assert_eq!(node.value(), Some("\u{2022}".repeat(7).as_str()));
+        assert!(node.is_read_only());
+
+        let outcome = root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert!(!outcome.handled);
+        assert!(!root.is_focus_active());
+        assert!(root.ime_state().is_none());
     }
 
     // --- obscured(true) ---
@@ -3636,14 +4002,14 @@ mod tests {
             value: "abc".to_string(),
             ..AppState::default()
         };
-        let mut secret_logic = options_logic(true, true);
+        let mut secret_logic = options_logic(true, true, false);
         let mut secret = options_root(&mut secret_logic, &mut secret_state);
 
         let mut bullets_state = AppState {
             value: "\u{2022}\u{2022}\u{2022}".to_string(),
             ..AppState::default()
         };
-        let mut plain_logic = options_logic(true, false);
+        let mut plain_logic = options_logic(true, false, false);
         let mut bullets = options_root(&mut plain_logic, &mut bullets_state);
 
         let mut clear_state = AppState {
@@ -3679,14 +4045,14 @@ mod tests {
             value: "iiiiiiiiii".to_string(),
             ..AppState::default()
         };
-        let mut secret_logic = options_logic(true, true);
+        let mut secret_logic = options_logic(true, true, false);
         let secret = options_root(&mut secret_logic, &mut secret_state);
 
         let mut bullets_state = AppState {
             value: "\u{2022}".repeat(10),
             ..AppState::default()
         };
-        let mut plain_logic = options_logic(true, false);
+        let mut plain_logic = options_logic(true, false, false);
         let bullets = options_root(&mut plain_logic, &mut bullets_state);
 
         let masked_w = widget(&secret).display().layout_size().width;
@@ -3705,10 +4071,10 @@ mod tests {
         // key sequence on an obscured and a clear field and require identical
         // editing state at every step, including over a 4-byte emoji.
         let mut secret_state = AppState::default();
-        let mut secret_logic = options_logic(true, true);
+        let mut secret_logic = options_logic(true, true, false);
         let mut secret = options_root(&mut secret_logic, &mut secret_state);
         let mut clear_state = AppState::default();
-        let mut clear_logic = options_logic(true, false);
+        let mut clear_logic = options_logic(true, false, false);
         let mut clear = options_root(&mut clear_logic, &mut clear_state);
 
         let plain = Modifiers::default();
@@ -3755,7 +4121,7 @@ mod tests {
             value: "iiii".to_string(),
             ..AppState::default()
         };
-        let mut secret_logic = options_logic(true, true);
+        let mut secret_logic = options_logic(true, true, false);
         let mut secret = options_root(&mut secret_logic, &mut secret_state);
         secret.event(&mut secret_state, &pointer(PointerPhase::Down, 290.0, 10.0));
         let masked_caret = secret
@@ -3768,7 +4134,7 @@ mod tests {
             value: "\u{2022}".repeat(4),
             ..AppState::default()
         };
-        let mut plain_logic = options_logic(true, false);
+        let mut plain_logic = options_logic(true, false, false);
         let mut bullets = options_root(&mut plain_logic, &mut bullets_state);
         bullets.event(
             &mut bullets_state,
@@ -3800,7 +4166,7 @@ mod tests {
             value: "iiiiiiii".to_string(),
             ..AppState::default()
         };
-        let mut logic = options_logic(true, true);
+        let mut logic = options_logic(true, true, false);
         let mut root = options_root(&mut logic, &mut state);
         // Mid-way through the first mask glyph -> caret before or after char 0.
         let half_bullet = widget(&root).display().layout_size().width / 16.0;
@@ -3821,7 +4187,7 @@ mod tests {
             value: "hunter2".to_string(),
             ..AppState::default()
         };
-        let mut logic = options_logic(true, true);
+        let mut logic = options_logic(true, true, false);
         let root = options_root(&mut logic, &mut state);
         let update = root.semantics();
         let (_, node) = update
@@ -3836,7 +4202,7 @@ mod tests {
         );
 
         // Enabled + clear stays a plain TextInput node carrying the real value.
-        let mut plain_logic = options_logic(true, false);
+        let mut plain_logic = options_logic(true, false, false);
         let plain = options_root(&mut plain_logic, &mut state);
         let update = plain.semantics();
         let (_, node) = update
@@ -3851,7 +4217,7 @@ mod tests {
     #[test]
     fn disabled_reports_disabled_semantics() {
         let mut state = AppState::default();
-        let mut logic = options_logic(false, false);
+        let mut logic = options_logic(false, false, false);
         let root = options_root(&mut logic, &mut state);
         let update = root.semantics();
         let (_, node) = update
@@ -3868,11 +4234,11 @@ mod tests {
             value: "iiiiiiii".to_string(),
             ..AppState::default()
         };
-        let mut clear_logic = options_logic(true, false);
+        let mut clear_logic = options_logic(true, false, false);
         let mut root = options_root(&mut clear_logic, &mut state);
         let clear_width = widget(&root).display().layout_size().width;
 
-        let mut secret_logic = options_logic(true, true);
+        let mut secret_logic = options_logic(true, true, false);
         let flags = root.rebuild(&mut secret_logic, &mut state);
         assert!(
             flags.needs_layout(),
@@ -3905,7 +4271,7 @@ mod tests {
             value: "hunter2".to_string(),
             ..AppState::default()
         };
-        let mut logic = options_logic(true, true);
+        let mut logic = options_logic(true, true, false);
         let mut root = options_root(&mut logic, &mut state);
 
         // Focus.
@@ -3968,7 +4334,7 @@ mod tests {
             value: "hunter2".to_string(),
             ..AppState::default()
         };
-        let mut logic = options_logic(true, true);
+        let mut logic = options_logic(true, true, false);
         let mut root = options_root(&mut logic, &mut state);
         assert!(
             root.ime_state().is_none(),
