@@ -114,6 +114,50 @@ open class FrustViewController: UIViewController {
     /// session (FINDINGS #31, reintroduced on this exact edge).
     private var lastAppliedContentType: String?
 
+    /// Whether `syncImeFocus`'s `becomeFirstResponder()` retry has already
+    /// been satisfied for the CURRENT Rust-reported activation — either it
+    /// landed once (`forgeView.isFirstResponder` went true), or it exhausted
+    /// `imeFocusRetryLimit` consecutive attempts without landing. Either way,
+    /// once `true`, the per-frame retry (see `syncImeFocus`) stops reasserting
+    /// first-responder status: nothing on the Swift side can observe an
+    /// intentional resign (a user keyboard dismissal, or a sibling native
+    /// control taking first responder — see the FFI-blur-seam note on
+    /// `syncImeFocus`), so re-attempting every tick regardless of this flag
+    /// would fight either of those forever (fix F3). Reset to `false` on a
+    /// genuine Rust-side focus edge — `active` returning to `true` from
+    /// `false` (bottom of `syncImeFocus`) or, while already satisfied, the
+    /// published `contentType` changing (the one proxy this wire format
+    /// offers for "a different field is now the target"; there is no
+    /// dedicated focus-identity field to key off instead) — **or** on a
+    /// user touch of the Frust surface (`syncImeFocus(userInitiated: true)`,
+    /// called from `onTouch`). The touch re-arm is what lets a user bring
+    /// the keyboard back for a field Rust still reports as active but whose
+    /// keyboard the user dismissed: without it, re-tapping the very field
+    /// that was already "satisfied" changes neither `active` nor
+    /// `contentType`, so the per-frame-only re-arms above never fire and the
+    /// field is permanently unreachable (fix F3 traded "can't dismiss" for
+    /// "can't restore" without this). A sibling native control taking first
+    /// responder does NOT re-arm this: it never touches `FrustView` at all —
+    /// `FrustView.hitTest` returns `nil` for a point inside an interactive
+    /// hosted slot, so the gesture routes straight to the sibling and
+    /// `onTouch` (hence `syncImeFocus(userInitiated: true)`) never fires for
+    /// it — so the bounded per-frame retry still cannot fight a sibling that
+    /// holds the responder.
+    private var imeFocusSatisfied = false
+
+    /// Consecutive failed `becomeFirstResponder()` attempts within the
+    /// current unsatisfied retry window (reset to `0` on success or on a
+    /// re-arm). Bounded by `imeFocusRetryLimit` — see `imeFocusSatisfied`.
+    private var imeFocusRetryCount = 0
+
+    /// How many consecutive per-frame `becomeFirstResponder()` failures
+    /// `syncImeFocus` tolerates (while `forgeView.window != nil`, so the
+    /// count only accrues once the view could plausibly accept first
+    /// responder at all) before giving up for the current activation. Small
+    /// on purpose: this only needs to outlast an ordinary same-tick UIKit
+    /// transient, not paper over a real, indefinitely-refusing condition.
+    private let imeFocusRetryLimit = 3
+
     /// The keyboard's current occlusion of this view's bottom edge, in
     /// logical points (`FlutterViewController.mm:1593-1622` model). Computed as
     /// the intersection of the keyboard's end frame with `view.bounds`, so
@@ -232,7 +276,12 @@ open class FrustViewController: UIViewController {
             frust_dispatch_touch(handle, phase, Float(location.x), Float(location.y))
             // A touch may have focused/blurred an editable widget; reconcile the
             // keyboard/first-responder state with what the tree now reports.
-            self.syncImeFocus()
+            // `userInitiated: true` — this is a touch on the Frust surface
+            // itself (see `FrustView.hitTest`: a touch inside an interactive
+            // hosted slot never reaches here), so it re-arms
+            // `imeFocusSatisfied`/`imeFocusRetryCount` — see that flag's doc
+            // for why a touch, and only a touch, is allowed to do that.
+            self.syncImeFocus(userInitiated: true)
         }
 
         // Bridge the view's UITextInput mirror into the native IME: push
@@ -517,66 +566,152 @@ open class FrustViewController: UIViewController {
     /// `seedMirror` + `applyImeContentType` reproduces); otherwise steady
     /// active → `reconcileTo`, the divergence-guarded mirror reconcile.
     ///
-    /// **Call sites** (also mirroring Android's): the `onTouch` bridge, and
-    /// every `renderFrame` tick — see the call in `renderFrame` for the
+    /// **Call sites** (also mirroring Android's): the `onTouch` bridge
+    /// (`userInitiated: true`), and every `renderFrame` tick
+    /// (`userInitiated: false`) — see the call in `renderFrame` for the
     /// per-frame cost and why the frame tick, not `imeRoundTrip`, is the
     /// second site.
     ///
-    /// Being per-frame makes the first branch a self-healing retry: if
-    /// `becomeFirstResponder()` is refused (the view is not yet in a window,
-    /// say), the next tick tries again. That is safe because both steps it
-    /// repeats — `seedMirror` and `applyImeContentType` — are idempotent
-    /// writes of the same published state, and the retry stops the moment the
-    /// responder is accepted. It also means a purely programmatic focus (no
-    /// touch anywhere) now raises the keyboard, which the touch-only call site
-    /// never did.
-    private func syncImeFocus() {
+    /// **Being per-frame requires the first branch's retry to have a
+    /// terminating condition (fix F3).** Nothing on the Swift side reports a
+    /// resign back to Rust — there is no `resignFirstResponder()` override on
+    /// `FrustView` and no FFI call that would report a blur, so
+    /// `frust_ime_state_json`'s `"active"` only goes `false` when the
+    /// *Rust-side widget* loses focus. A resign UIKit originated instead — a
+    /// user's interactive keyboard-dismiss gesture, `.keyboardDismissMode`,
+    /// hardware-keyboard Done, or a sibling native control (platform-views)
+    /// taking first responder — leaves `"active"` `true` on the Rust side
+    /// with no way for this file to learn the resign was intentional. Retried
+    /// unconditionally every tick, `becomeFirstResponder()` does not merely
+    /// fail harmlessly here (unlike the one legitimate transient case, the
+    /// view not yet being in a window) — it actually **succeeds** and pops
+    /// the keyboard back up, or fights a sibling for the responder, every
+    /// single frame. So the retry is bounded by `imeFocusSatisfied`
+    /// (see its doc): attempted at most once (or up to `imeFocusRetryLimit`
+    /// consecutive times if the view has a window but genuinely refuses) per
+    /// Rust-reported activation, then left alone — including the intentional-
+    /// dismiss case — until a genuine Rust-side focus edge, OR a user touch
+    /// of the Frust surface, re-arms it (`userInitiated`, below — fix F3b:
+    /// a bare per-frame bound with no touch re-arm leaves a dismissed field
+    /// permanently unreachable, since re-tapping the very same still-active
+    /// field changes neither `active` nor `contentType`, the only two
+    /// per-frame re-arm signals). `becomeFirstResponder()` is never even
+    /// attempted while `forgeView.window == nil` (an early-boot/pre-layout
+    /// race, not a UIKit refusal) and that case does not count against the
+    /// retry budget, so a purely programmatic focus that arrives before the
+    /// view is attached still self-heals exactly as before this fix — it
+    /// just no longer keeps re-asserting once the responder is later
+    /// resigned on purpose. `seedMirror`/`applyImeContentType` stay
+    /// idempotent writes of the same published state either way.
+    ///
+    /// - Parameter userInitiated: `true` only from the `onTouch` bridge — a
+    ///   touch that reached `FrustView` (a touch inside an interactive hosted
+    ///   slot never does; see `FrustView.hitTest`), so it is an explicit,
+    ///   user-driven request for the keyboard and is allowed to re-arm
+    ///   `imeFocusSatisfied`/`imeFocusRetryCount` unconditionally before the
+    ///   rest of this function runs — see `imeFocusSatisfied`'s doc for why
+    ///   this, and only this, call site may do that. `false` from the
+    ///   per-frame `renderFrame` tick, which must stay bounded.
+    private func syncImeFocus(userInitiated: Bool) {
         guard let state = fetchImeState() else { return }
         let active = (state["active"] as? Bool) ?? false
         let contentType = state["contentType"] as? String
-        if active {
-            if !forgeView.isFirstResponder {
-                forgeView.seedMirror(from: state)
-                // Content-type traits (secure entry, autocorrect,
-                // spell-check) must land BEFORE `becomeFirstResponder()` —
-                // UIKit reads them when it stands up the keyboard for this
-                // responder, not continuously afterward, so setting them
-                // after would leave the wrong keyboard configuration live for
-                // this focus session.
-                applyImeContentType(contentType)
-                lastAppliedContentType = contentType
-                forgeView.becomeFirstResponder()
-            } else if contentType != lastAppliedContentType {
-                // Same responder, no focus edge, but the classification
-                // changed underneath it (obscure-toggle on one field, or
-                // focus moved straight to a differently-classified field —
-                // see this function's doc). Re-seed the mirror first (the
-                // ordering rule above), then re-apply the traits;
-                // `applyImeContentType` alone is not enough here — see its doc
-                // for the resign/become cycle this requires. Seed rather than
-                // reconcile: this is the analogue of Android's `restartInput`
-                // → `onCreateInputConnection` → `seed(state)`, an
-                // unconditional re-seed paired with a fresh keyboard
-                // configuration.
-                forgeView.seedMirror(from: state)
-                applyImeContentType(contentType)
-                lastAppliedContentType = contentType
+
+        if userInitiated {
+            // An explicit user touch on the Frust surface is a legitimate
+            // request for the keyboard: re-arm unconditionally so a field
+            // that was already "satisfied" — including one whose keyboard
+            // the user dismissed with no way for Rust to learn of it — gets
+            // a fresh `becomeFirstResponder()` attempt below instead of
+            // hitting the early-return guard in the `!isFirstResponder`
+            // branch. Harmless when `forgeView` is already first responder
+            // (neither the content-type-change nor the steady-active branch
+            // below reads these two fields) and safe ahead of the `active`
+            // check (that branch clears them itself regardless).
+            imeFocusSatisfied = false
+            imeFocusRetryCount = 0
+        }
+
+        guard active else {
+            // Not active: the one unconditional re-arm point (an
+            // `active` false→true edge always clears the retry budget), and
+            // nothing to retry meanwhile.
+            imeFocusSatisfied = false
+            imeFocusRetryCount = 0
+            if forgeView.isFirstResponder {
                 forgeView.resignFirstResponder()
-                forgeView.becomeFirstResponder()
-            } else {
-                // Steady active, same classification: reconcile the mirror to
-                // the focused field's published state — a field switch between
-                // two identically-classified fields, a caret moved by a tap, or
-                // a whole-field text change from a submit-clear, none of which
-                // any `UITextInput` callback originated. Divergence-guarded and
-                // composition-safe (see `reconcileMirror(to:)`), so the common
-                // case — mirror already agrees with Rust — costs one string and
-                // two range compares and notifies nothing.
-                forgeView.reconcileMirror(to: state)
+                lastAppliedContentType = nil
             }
-        } else if forgeView.isFirstResponder {
+            return
+        }
+
+        if !forgeView.isFirstResponder {
+            if imeFocusSatisfied {
+                // Already attempted (and either landed once, then was
+                // resigned by UIKit/a sibling, or exhausted its retry
+                // budget) for this activation. Don't reassert — that is
+                // exactly the fight this bound exists to avoid — unless the
+                // published `contentType` changed, the only proxy available
+                // for "Rust's focus target changed under us" (no dedicated
+                // focus-identity field on the wire).
+                guard contentType != lastAppliedContentType else { return }
+                imeFocusSatisfied = false
+                imeFocusRetryCount = 0
+            }
+            // Not yet attached to a window: a legitimate transient (e.g. a
+            // programmatic focus request that arrived before the first
+            // layout), not a UIKit refusal — retry indefinitely without
+            // spending the bounded budget below.
+            guard forgeView.window != nil else { return }
+            forgeView.seedMirror(from: state)
+            // Content-type traits (secure entry, autocorrect,
+            // spell-check) must land BEFORE `becomeFirstResponder()` —
+            // UIKit reads them when it stands up the keyboard for this
+            // responder, not continuously afterward, so setting them
+            // after would leave the wrong keyboard configuration live for
+            // this focus session.
+            applyImeContentType(contentType)
+            lastAppliedContentType = contentType
+            forgeView.becomeFirstResponder()
+            if forgeView.isFirstResponder {
+                imeFocusSatisfied = true
+                imeFocusRetryCount = 0
+            } else {
+                imeFocusRetryCount += 1
+                if imeFocusRetryCount >= imeFocusRetryLimit {
+                    // Give up for this activation — a genuine, non-transient
+                    // refusal despite having a window. Stop hammering it;
+                    // wait for the re-arm conditions above.
+                    imeFocusSatisfied = true
+                }
+            }
+        } else if contentType != lastAppliedContentType {
+            // Same responder, no focus edge, but the classification
+            // changed underneath it (obscure-toggle on one field, or
+            // focus moved straight to a differently-classified field —
+            // see this function's doc). Re-seed the mirror first (the
+            // ordering rule above), then re-apply the traits;
+            // `applyImeContentType` alone is not enough here — see its doc
+            // for the resign/become cycle this requires. Seed rather than
+            // reconcile: this is the analogue of Android's `restartInput`
+            // → `onCreateInputConnection` → `seed(state)`, an
+            // unconditional re-seed paired with a fresh keyboard
+            // configuration.
+            forgeView.seedMirror(from: state)
+            applyImeContentType(contentType)
+            lastAppliedContentType = contentType
             forgeView.resignFirstResponder()
-            lastAppliedContentType = nil
+            forgeView.becomeFirstResponder()
+        } else {
+            // Steady active, same classification: reconcile the mirror to
+            // the focused field's published state — a field switch between
+            // two identically-classified fields, a caret moved by a tap, or
+            // a whole-field text change from a submit-clear, none of which
+            // any `UITextInput` callback originated. Divergence-guarded and
+            // composition-safe (see `reconcileMirror(to:)`), so the common
+            // case — mirror already agrees with Rust — costs one string and
+            // two range compares and notifies nothing.
+            forgeView.reconcileMirror(to: state)
         }
     }
 
@@ -781,8 +916,11 @@ open class FrustViewController: UIViewController {
         // per-frame allocation. It does **not** rewrite anything on a steady
         // field: every mutating path below is guarded — traits only on a
         // classification change, the mirror only on genuine divergence, and
-        // never through a live composition.
-        syncImeFocus()
+        // never through a live composition. `userInitiated: false` — this
+        // tick did not originate from a touch, so it must stay bounded by
+        // `imeFocusSatisfied` (see that flag's doc and `syncImeFocus`'s
+        // `userInitiated` parameter doc) rather than re-arming the retry.
+        syncImeFocus(userInitiated: false)
         // Platform views: apply this frame's compositor command
         // batch (create/reposition/dispose native sibling views) right after
         // the Frust surface has painted, so native views and Frust content
