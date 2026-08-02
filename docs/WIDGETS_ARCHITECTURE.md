@@ -124,4 +124,5 @@ R23 semantics forwarding. **Routing:** route params now merge query under path c
 `RouteNavigator` allows off-thread navigation. **Widgets:** `glyph::sheet` (modal overlay with staged
 dismiss and scrim fade); `button` disabled state; `TextInput` read-only mode and `content_type` IME
 hints; `TextView` alignment control; `EmptyStateView` and `MenuEntry` icon slots; badge `Info` variant
-with warning border. **Glyph dialect:** Expanded platform token set for material and cupertino.
+with warning border. **Glyph tokens:** `GlyphInk::terminal_border` and an xl step on the Glyph shape
+scale (material and cupertino token sets are unchanged).
