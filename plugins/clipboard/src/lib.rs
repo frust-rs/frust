@@ -273,7 +273,7 @@ impl Clipboard {
     ///   *No sensitivity marking*): `arboard` exposes no custom-format
     ///   write surface, so reaching either would need `clipboard-win`'s raw
     ///   format API directly — deliberately deferred
-    ///   (`docs/LIMITATIONS.md`'s `clipboard-desktop-sensitivity-unset`).
+    ///   (`docs/LIMITATIONS.md`'s `clip-desktop-sensitivity-noop`).
     ///
     /// # Errors
     /// As [`Self::set_text`].

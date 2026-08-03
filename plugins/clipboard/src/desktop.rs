@@ -56,7 +56,7 @@
 //! exposes no custom-format write surface, so reaching either would
 //! require `clipboard-win`'s raw format API directly. Deliberately
 //! deferred, not implemented (`docs/LIMITATIONS.md`'s
-//! `clipboard-desktop-sensitivity-unset`).
+//! `clip-desktop-sensitivity-noop`).
 
 use arboard::Clipboard as ArboardClipboard;
 

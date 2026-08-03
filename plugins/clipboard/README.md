@@ -86,7 +86,7 @@ output, tokens, passwords, one-time codes:
   formats). Neither is set here: `arboard` exposes no custom-format write
   surface, so reaching either would require `clipboard-win`'s raw format
   API directly — deliberately deferred, not implemented in this crate
-  (`docs/LIMITATIONS.md`'s `clipboard-desktop-sensitivity-unset`).
+  (`docs/LIMITATIONS.md`'s `clip-desktop-sensitivity-noop`).
 
 Use plain `set_text` for anything else (e.g. copying a share link, a
 user-composed note) — there is no reason to pay `set_text_sensitive`'s
