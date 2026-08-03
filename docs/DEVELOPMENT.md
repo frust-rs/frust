@@ -463,8 +463,16 @@ not floating. Each row's tripwire must be re-run after touching that pin:
 ## Platform-Support Policy
 
 The minimum supported platform is a **project-wide constant, not a per-module choice**. Every module
-must declare the same floor — a mismatch is a *silent behaviour change*, not a build error, which is
-why the numbers are repeated in an in-file comment at each site.
+must declare the same floor; the numbers are repeated in an in-file comment at each site.
+
+**A mismatch fails in one of two ways, depending on direction** (both verified empirically):
+
+- **App below library → hard build error.** AGP's manifest merger refuses it:
+  `uses-sdk:minSdkVersion 24 cannot be smaller than version 26 declared in library
+  [:frust-embedding] … as the library might be using APIs not available in 24`.
+  `:app:processDebugMainManifest` fails; nothing is produced.
+- **Library below app → silent behaviour change.** No error; the library just misses APIs it could
+  have used, exactly as `IME_FLAG_NO_PERSONALIZED_LEARNING` did (below).
 
 | Platform | Floor | Declared in |
 |----------|-------|-------------|
@@ -479,29 +487,51 @@ target?** `Package.swift`'s `platforms:` must stay **at or below** every consume
 
 Raised from 24 in `db6827b`. API 24/25 (Android 7.x) were dropped as too old to carry, and the floor
 was actively costing correctness: **`EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING` is API 26+**, so
-the keyboard-learning half of FINDINGS #31's mitigation was a *silent* no-op below it. It is an
-`imeOptions` bit, so the constant inlines at compile time and an older IME simply ignores it —
-neither a crash nor a `NewApi` lint would ever have surfaced the gap. At 26 the flag is
-unconditionally honoured and `frust-core/src/event.rs`'s IME contract table holds at the floor.
+the keyboard-learning half of FINDINGS #31's mitigation was a no-op below it. It is an `imeOptions`
+bit, so the constant inlines at compile time and an older IME simply ignores it — no compile error,
+no runtime crash. At 26 the flag is unconditionally honoured and `frust-core/src/event.rs`'s IME
+contract table holds at the floor.
+
+> **Lint *did* catch this, and we were not running lint.** Re-tested by setting the module back to
+> `minSdk = 24`: `lintDebug` reports it twice as **`InlinedApi`** (the rule specifically for inlined
+> constants) — *"Field requires API level 26 (current min is 24):
+> `android.view.inputmethod.EditorInfo#IME_FLAG_NO_PERSONALIZED_LEARNING`"*. Its default severity is
+> **warning**, so the build still exits 0. The defect was not invisible to tooling; it was invisible
+> because **no gate ran Android Lint at all**. Wiring `lintDebug` into the Android gate — and
+> deciding whether `InlinedApi` should be an error here — is open work, not something this bump
+> settled.
 
 **Lowering the floor below 26 re-opens that hole silently.** If it is ever lowered, restore the
 API-caveat entry in `docs/LIMITATIONS.md` in the same change.
 
-Two API-26 alternatives are now *available* but deliberately **not** adopted — see each module doc
-for the reasoning: `SeekBar.setMin` (`plugins/native-widgets/src/controls/slider.rs` keeps its
-Rust-side range mapping) and, still out of reach, `Font.Builder(ByteBuffer)` (API 29, so
-`typeface.rs` still writes a cache file). `secure-storage`'s biometric gate is still required —
-`BiometricPrompt` is API 28+, so `NotAvailable(UnsupportedApiLevel)` remains reachable on 26 and 27.
+**One** API becomes available at the new floor and is deliberately **not** adopted:
+`SeekBar.setMin` (API 26) — `plugins/native-widgets/src/controls/slider.rs` keeps its Rust-side
+range mapping; see that module doc for why.
+
+Two things the bump does **not** unlock, and which still need their existing workarounds:
+`Font.Builder(ByteBuffer)` is **API 29**, so `typeface.rs` still writes a cache file; and
+`BiometricPrompt` is **API 28+**, so `secure-storage`'s gate stays and
+`NotAvailable(UnsupportedApiLevel)` remains reachable on 26 and 27.
 
 ### Migrating an already-scaffolded app
 
-Apps generated before `db6827b` carry `minSdk = 24`. Nothing breaks if they stay there — the
-framework does not require 26 to *compile* — but they keep the silent IME gap above. To move, set
-`minSdk = 26` in the app's `app/build.gradle.kts`; there is no other migration step.
+Apps generated before `db6827b` carry `minSdk = 24`. **The bump is mandatory, not optional** — a
+scaffolded app consumes the embedding as a Gradle *project* dependency
+(`implementation(project(":frust-embedding"))`), so an app at 24 against the 26 library fails the
+manifest merger outright (verified: `:app:processDebugMainManifest` exits 1 with the
+`cannot be smaller than version 26` error quoted above). Set `minSdk = 26` in the app's
+`app/build.gradle.kts`; there is no other migration step.
 
-**Verifying a floor change:** `cargo` cannot see it. Run
-`cd examples/glyph-catalog/android && ./gradlew compileDebugKotlin lintDebug` — `lint` is the only
-gate that surfaces an API-level mismatch, since inlined constants produce no compile error.
+**Verifying a floor change:** `cargo` cannot see any of this. Run, from an app dir:
+
+```
+./gradlew :app:processDebugMainManifest   # catches an app-below-library mismatch (hard error)
+./gradlew compileDebugKotlin lintDebug    # catches API usage above the floor, as InlinedApi/NewApi
+```
+
+`lintDebug` reports API-above-floor usage at **warning** severity, so a green exit code does **not**
+mean clean — read the SARIF/HTML report under `build/reports/`, or raise the severity, before
+concluding anything.
 
 ## Known Issues
 
