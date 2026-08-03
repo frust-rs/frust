@@ -55,14 +55,14 @@ android {
 
     // Both SDK levels mirror the app template's `app/build.gradle.kts`, the
     // `frust-embedding` module and the camera/secure-storage modules exactly
-    // (`compileSdk = 36`, `minSdk = 24`). A mismatch is a silent behavior
+    // (`compileSdk = 36`, `minSdk = 26`). A mismatch is a silent behavior
     // change, not a build error — keep them in lockstep. Every control this
     // plugin builds is a plain `android.widget` view available since well
     // before API 24, so nothing here imposes a floor of its own.
     compileSdk = 36
 
     defaultConfig {
-        minSdk = 24
+        minSdk = 26
 
         // The R8 keep rules for the two JNI-bound, reflectively-instantiated
         // classes travel WITH this module: a consuming app inherits them

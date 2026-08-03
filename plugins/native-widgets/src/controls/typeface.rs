@@ -27,7 +27,8 @@
 //! text). `crate::android::fonts` writes those upstream bytes, unmodified, to
 //! a private app-cache file purely because `Typeface.createFromFile` needs a
 //! filesystem path (there is no create-from-bytes overload at this crate's
-//! `minSdk` 24 floor) — it never redistributes the fonts anywhere a user or
+//! `minSdk` 26 floor — `Font.Builder(ByteBuffer)` is API 29) — it never
+//! redistributes the fonts anywhere a user or
 //! another app can reach.
 
 use crate::runtime::Params;

@@ -28,12 +28,12 @@ android {
     namespace = "dev.frust"
 
     // Both SDK levels mirror the app template's `app/build.gradle.kts` exactly
-    // (`compileSdk = 36`, `minSdk = 24`). A mismatch here is a silent behavior
+    // (`compileSdk = 36`, `minSdk = 26`). A mismatch here is a silent behavior
     // change, not a build error — keep them in lockstep.
     compileSdk = 36
 
     defaultConfig {
-        minSdk = 24
+        minSdk = 26
 
         // Merged into every consuming app's R8 configuration by AGP — the
         // module-owned keep rules for `dev.frust.FrustSurfaceView` (JNI-referenced)
