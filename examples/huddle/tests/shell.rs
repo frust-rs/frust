@@ -200,25 +200,31 @@ fn modal_round_trip_delivers_its_result() {
     root.rebuild(&mut logic, &mut state); // the pushed page's first build
     controller.pop_with_result(PopResult::of("confirmed".to_string()));
 
-    // A REAL frame (layout at W×H + paint) so the flushing event pass below
-    // routes by hit test against laid-out bounds.
+    // One REAL frame (rebuild + layout at W×H + paint), and NO input event of
+    // any kind. FINDINGS #56: the rebuild that applies the pop also dispatches
+    // the `InputEvent::Housekeeping` broadcast that flushes the queued
+    // `on_result`, so the result is in app state before this frame ends. The
+    // whole point is that it no longer waits on a tap — which, in this shell,
+    // chrome outside the navigator could swallow entirely.
     let mut tcx = TextContext::new();
     frame(&mut root, &mut logic, &mut state, &mut tcx);
-    assert!(
-        delivered.lock().unwrap().is_none(),
-        "on_result is queued, not yet flushed (no event pass)"
+    assert_eq!(
+        delivered.lock().unwrap().clone(),
+        Some("confirmed".to_string()),
+        "a modal push/pop round trip delivers its PopResult back into app state \
+         on the pop's own frame, with no input event"
     );
 
-    // The next event pass flushes the queued on_result callback. Aim at the page
-    // content area (window center) — chrome must not swallow it first.
+    // A later, unrelated event must not re-deliver: the queue was drained, not
+    // copied.
+    *delivered.lock().unwrap() = None;
     root.event(
         &mut state,
         &support::pointer(frust_core::PointerPhase::Move, Point::new(W / 2.0, 300.0)),
     );
-    assert_eq!(
-        delivered.lock().unwrap().clone(),
-        Some("confirmed".to_string()),
-        "a modal push/pop round trip delivers its PopResult back into app state"
+    assert!(
+        delivered.lock().unwrap().is_none(),
+        "the flushed callback fires exactly once"
     );
 }
 

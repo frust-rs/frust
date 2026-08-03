@@ -412,6 +412,14 @@ impl ScrollWidget {
             self.deliver_pending_scroll(ctx);
         }
         match event {
+            // A broadcast is not user input: it bypasses the whole gesture
+            // machinery, reaches the child whether or not it is focused or
+            // captured, and is never consumed (`crate::authoring::route_event`'s
+            // contract, applied to this widget's hand-rolled routing).
+            InputEvent::Housekeeping => {
+                self.child.event_child(ctx, event);
+                EventResult::Ignored
+            }
             // Focus-routed events (Key/Ime) bypass the scroll gesture machinery
             // and go straight to the child if it holds the recorded focus path.
             InputEvent::Key(_) | InputEvent::Ime(_) => {

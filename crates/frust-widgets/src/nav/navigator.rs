@@ -34,7 +34,16 @@
 //! pusher-registered `on_result` callback needs `&mut State` — which a rebuild
 //! (`BuildCtx`) does not carry — so the callback is queued at rebuild and flushed
 //! at the start of the next [`NavigatorWidget::event`] pass, where the erased
-//! app state is in scope. See [`NavigatorController::push_for_result`].
+//! app state is in scope. Queuing it also raises
+//! [`frust_core::mark_pending_result_flush`], which makes the *same* rebuild
+//! dispatch a non-input [`InputEvent::Housekeeping`] broadcast and flush it
+//! before the frame ends — so a result lands on the frame that produced it
+//! rather than waiting on the next touch (FINDINGS #56; a menu row opening a
+//! sheet measured 3.2s late on device, and was dropped entirely when the next
+//! touch went to chrome outside the navigator). An eager `NavOp::Pop` delivers
+//! on the pop's own frame; an interactive edge-swipe pop delivers on its settle
+//! frame, since that is where it queues. See
+//! [`NavigatorController::push_for_result`].
 //!
 //! # Paint culling (Flutter opaque-route parity)
 //!
@@ -418,10 +427,15 @@ impl<State: 'static> PushOptions<State> {
     ///
     /// The callback receives **no** `&mut State`, unlike
     /// [`on_result`](Self::on_result). It fires from a rebuild (a `BuildCtx`),
-    /// which carries no erased app state; and deferring it to the next event pass
-    /// the way `on_result` does would mean a covered page learns it is covered
-    /// only if some unrelated input happens to arrive. Capture what you need
-    /// (a signal, an `Rc<Cell<_>>`, a controller handle) in the closure instead.
+    /// which carries no erased app state, and it fires *synchronously* there:
+    /// nothing is queued, so a covered page learns it is covered on the frame it
+    /// happens. Capture what you need (a signal, an `Rc<Cell<_>>`, a controller
+    /// handle) in the closure instead.
+    ///
+    /// (`on_result` does defer — it needs `&mut State` — but it is no longer
+    /// waiting on user input to be delivered: the rebuild that queues it also
+    /// dispatches the `InputEvent::Housekeeping` broadcast that flushes it, so
+    /// both seams now land on the same frame. See the [module docs](self).)
     ///
     /// # "No cleanup on cover" is the contract, not a bug
     ///
@@ -1272,7 +1286,9 @@ impl EdgeSwipe {
 pub struct NavigatorWidget<State: 'static> {
     pages: Vec<PageEntry<State>>,
     /// Pop-result callbacks awaiting `&mut State` — flushed at the start of the
-    /// next [`event`](NavigatorWidget::event) pass.
+    /// next [`event`](NavigatorWidget::event) pass, which the queuing rebuild
+    /// guarantees itself by raising
+    /// [`frust_core::mark_pending_result_flush`] (see the [module docs](self)).
     pending_results: Vec<(ResultCallback<State>, PopResult)>,
     /// Set on every stack mutation; the next paint publishes a cleared IME surface
     /// and clears this, so the platform keyboard hides deterministically.
@@ -1667,6 +1683,10 @@ impl<State: 'static> NavigatorWidget<State> {
                         && let Some(callback) = stashed.on_result.take()
                     {
                         self.pending_results.push((callback, PopResult::empty()));
+                        // Ask this frame's rebuild for a housekeeping pass so the
+                        // callback runs on the settle frame instead of waiting for
+                        // whatever input happens to arrive next (FINDINGS #56).
+                        frust_core::mark_pending_result_flush();
                     }
                     crate::authoring::teardown_child(&stashed.view, &mut stashed.pod, ctx);
                 }
@@ -2009,6 +2029,10 @@ impl<State: 'static> NavigatorWidget<State> {
             let spec = popped.transition;
             if let Some(callback) = popped.on_result.take() {
                 self.pending_results.push((callback, result));
+                // Ask this frame's rebuild for a housekeeping pass so the callback
+                // runs on the very frame the pop applied, with no input needed
+                // (FINDINGS #56).
+                frust_core::mark_pending_result_flush();
             }
             self.needs_ime_clear = true;
             if spec.is_animated() {
@@ -2801,14 +2825,34 @@ impl<State: 'static> Widget for NavigatorWidget<State> {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        // Flush pop-result callbacks queued at the previous rebuild — this is the
-        // first point after a pop where the erased app state is in scope.
+        // Flush pop-result callbacks queued during the rebuild — this is the
+        // first point after a pop where the erased app state is in scope. Runs
+        // for every event kind, including the `Housekeeping` broadcast the
+        // rebuild dispatches for exactly this purpose (FINDINGS #56), so a result
+        // no longer waits on user input that may never arrive.
         if !self.pending_results.is_empty() {
             let pending = std::mem::take(&mut self.pending_results);
             let state = ctx.state_mut::<State>();
             for (callback, result) in pending {
                 callback(state, result);
             }
+        }
+        if event.is_broadcast() {
+            // A broadcast is not user input, so none of `event_at`'s machinery
+            // applies: it must not drive an in-flight edge swipe, must not be
+            // swallowed by the mid-transition input block, and must not be
+            // narrowed to `input_routed_pages` — a nested navigator on a *covered*
+            // page can have queued a result too, and it is entitled to the same
+            // same-frame flush. Forward to every page, consume nothing.
+            //
+            // This is deliberately wider than R23's input/semantics reach and does
+            // not weaken it: R23 governs what a *user* can activate, and a
+            // housekeeping pass activates nothing — every widget below either has
+            // deferred work of its own to run or ignores it outright.
+            for entry in &mut self.pages {
+                crate::authoring::route_event_single(&mut entry.pod, ctx, event);
+            }
+            return EventResult::Ignored;
         }
         // The rest of the event body (edge-swipe arm/steal/drive + the
         // mid-transition input block + top-page routing) runs against the
@@ -3279,18 +3323,17 @@ mod tests {
         );
         root.rebuild(&mut app, &mut state);
 
-        // Pop B with a payload; the structural pop applies at rebuild and queues
-        // the callback.
+        // Pop B with a payload. The structural pop applies at rebuild, queues the
+        // callback, and — FINDINGS #56 — the same rebuild flushes it through its
+        // own `InputEvent::Housekeeping` broadcast. No event pass, no input.
         controller.pop_with_result(PopResult::of(42i32));
         root.rebuild(&mut app, &mut state);
         assert_eq!(
-            state.received, None,
-            "callback not yet flushed (no event pass)"
+            state.received,
+            Some(42),
+            "an eager pop delivers its result within the rebuild that applied it — \
+             no input event required"
         );
-
-        // The next event pass flushes the queued callback with `&mut State`.
-        root.event(&mut state, &move_to(5.0, 5.0));
-        assert_eq!(state.received, Some(42));
     }
 
     // --- push_transparent_for_result: the modal+result combination carries its
@@ -3331,14 +3374,276 @@ mod tests {
             "the page below the transparent dialog stays visible"
         );
 
-        // Pop the dialog with a payload; the callback is queued at rebuild and
-        // flushed at the next event pass, exactly like the opaque
-        // push_for_result path.
+        // Pop the dialog with a payload; the callback is queued and flushed
+        // inside the same rebuild, exactly like the opaque push_for_result path.
         controller.pop_with_result(PopResult::of(7i32));
         root.rebuild(&mut app, &mut state);
-        assert_eq!(state.received, None, "not yet flushed (no event pass)");
-        root.event(&mut state, &move_to(5.0, 5.0));
-        assert_eq!(state.received, Some(7));
+        assert_eq!(
+            state.received,
+            Some(7),
+            "the transparent modal delivers its result on the pop's own rebuild"
+        );
+    }
+
+    // --- FINDINGS #56: a queued pop result is delivered by the rebuild that
+    //     queued it, driven by the `InputEvent::Housekeeping` broadcast
+    //     `RenderRoot::rebuild` dispatches — never by waiting for user input. ---
+
+    /// A leaf that counts the hit-tested pointer presses it fires on, so a test
+    /// can prove the housekeeping broadcast fires **no** ordinary handler. Shaped
+    /// like every interactive widget in the crate: it fires on `Up`-inside, and
+    /// its `Down` claims the pointer.
+    struct TapProbe {
+        taps: Rc<Cell<u32>>,
+    }
+    struct TapProbeWidget {
+        taps: Rc<Cell<u32>>,
+    }
+    impl<S: 'static> View<S> for TapProbe {
+        type Element = TapProbeWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> TapProbeWidget {
+            TapProbeWidget {
+                taps: self.taps.clone(),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            element: &mut TapProbeWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            element.taps = self.taps.clone();
+            ChangeFlags::NONE
+        }
+    }
+    impl Widget for TapProbeWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if let InputEvent::Pointer(p) = event {
+                match p.phase {
+                    PointerPhase::Down => {
+                        ctx.capture_pointer();
+                        return EventResult::Handled;
+                    }
+                    PointerPhase::Up => {
+                        self.taps.set(self.taps.get() + 1);
+                        return EventResult::Handled;
+                    }
+                    _ => {}
+                }
+            }
+            EventResult::Ignored
+        }
+    }
+
+    #[test]
+    fn eager_pop_result_is_delivered_without_any_input_event() {
+        let controller: NavigatorController<ResultState> = NavigatorController::new();
+        let mut root: RenderRoot<ResultState, NavigatorView<ResultState>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ResultState| navigator(&ctrl, || sized_page(100.0, 100.0))
+        };
+        let mut state = ResultState::default();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        controller.push_for_result(
+            || sized_page(50.0, 50.0),
+            |state: &mut ResultState, result: PopResult| {
+                state.received = result.take::<i32>();
+            },
+        );
+        root.rebuild(&mut app, &mut state);
+
+        // The whole point: ONE rebuild, zero `root.event` calls, result present.
+        controller.pop_with_result(PopResult::of(5i32));
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            state.received,
+            Some(5),
+            "the rebuild that applied the pop also flushed its result callback"
+        );
+        assert!(
+            !frust_core::take_pending_result_flush(),
+            "the rebuild drained its own flush mark — nothing is left owed to a \
+             later frame"
+        );
+    }
+
+    #[test]
+    fn swipe_settle_delivers_its_result_on_the_settle_frames_rebuild() {
+        let controller: NavigatorController<SwipeResultState> = NavigatorController::new();
+        let mut root: RenderRoot<SwipeResultState, NavigatorView<SwipeResultState>> =
+            RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut SwipeResultState| {
+                navigator(&ctrl, || sized_page(100.0, 100.0)).pop_swipe(true)
+            }
+        };
+        let mut state = SwipeResultState::default();
+
+        controller.push_for_result(
+            || sized_page(100.0, 60.0),
+            |state: &mut SwipeResultState, _result: PopResult| {
+                state.popped = true;
+            },
+        );
+        let mut sink = RecordingScene::default();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut sink, FrameTime::ZERO);
+
+        // Swipe across and release past the commit point → the pop completes.
+        // Unlike the eager path, the interactive path queues its callback at
+        // `finalize_transition`, so the delivery frame is the *settle* frame.
+        root.event(&mut state, &down(5.0, 50.0));
+        root.paint(&mut sink, ft(100));
+        root.event(&mut state, &move_to(80.0, 50.0));
+        root.paint(&mut sink, ft(200));
+        root.event(&mut state, &up(80.0, 50.0));
+        assert!(
+            !state.popped,
+            "not delivered while the spring is still running"
+        );
+
+        // From here on: rebuild/layout/paint only. No input of any kind.
+        let mut delivered_on_finalize = false;
+        for t in [300u64, 316, 332, 348, 400, 500, 800, 1200, 2000] {
+            let was_running = nav_widget(&root).transition.is_some();
+            root.rebuild(&mut app, &mut state);
+            let now_settled = nav_widget(&root).transition.is_none();
+            if state.popped && !delivered_on_finalize {
+                delivered_on_finalize = true;
+                assert!(
+                    was_running && now_settled,
+                    "delivery must land on the rebuild that finalized the \
+                     transition, not a later one"
+                );
+            }
+            root.layout(Size::new(100.0, 100.0));
+            root.paint(&mut sink, ft(t));
+        }
+        assert!(
+            delivered_on_finalize,
+            "the settled swipe delivered its result with no input event"
+        );
+    }
+
+    /// App state for the chained-result convergence test.
+    #[derive(Default)]
+    struct ChainState {
+        hops: Vec<u32>,
+    }
+
+    #[test]
+    fn a_result_callback_that_navigates_converges_within_one_rebuild() {
+        // Two chained hops, both under `MAX_PENDING_RESULT_FLUSH_PASSES`: popping
+        // B fires B's callback, which pushes C *and* pops it again; that pop fires
+        // C's callback. Both land inside the single `rebuild` below, and the stack
+        // it leaves behind is the post-chain one — proving the flush/re-diff cycle
+        // really re-runs `app_logic` rather than shipping a stale view.
+        let controller: NavigatorController<ChainState> = NavigatorController::new();
+        let mut root: RenderRoot<ChainState, NavigatorView<ChainState>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ChainState| navigator(&ctrl, || sized_page(100.0, 100.0))
+        };
+        let mut state = ChainState::default();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        controller.push_for_result(|| sized_page(80.0, 80.0), {
+            let ctrl = controller.clone();
+            move |state: &mut ChainState, _result: PopResult| {
+                state.hops.push(1);
+                // Calling back into the controller from a result callback is
+                // supported (ops are recorded, applied at the next rebuild — here,
+                // the re-diff this very flush triggers).
+                ctrl.push_for_result(
+                    || sized_page(60.0, 60.0),
+                    |state: &mut ChainState, _| {
+                        state.hops.push(2);
+                    },
+                );
+                ctrl.pop();
+            }
+        });
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(controller.depth(), 2, "B pushed");
+
+        controller.pop();
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            state.hops,
+            vec![1, 2],
+            "both chained result callbacks ran inside the one rebuild"
+        );
+        assert_eq!(
+            controller.depth(),
+            1,
+            "the ops those callbacks queued were applied by the same rebuild's \
+             re-diff, so the stack is already back at the root"
+        );
+        assert!(
+            !frust_core::take_pending_result_flush(),
+            "the chain converged under the cap — nothing deferred to a later frame"
+        );
+    }
+
+    #[test]
+    fn the_housekeeping_broadcast_never_fires_a_hit_tested_handler() {
+        // `InputEvent::Housekeeping` reports `Point::ZERO` for its position, so a
+        // container that hit-tested it instead of branching on `is_broadcast()`
+        // would deliver a phantom press to whatever sits at the origin. The page
+        // content here is exactly such a widget, filling the whole page.
+        let taps = Rc::new(Cell::new(0u32));
+        let controller: NavigatorController<ResultState> = NavigatorController::new();
+        let mut root: RenderRoot<ResultState, NavigatorView<ResultState>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            let taps = taps.clone();
+            move |_: &mut ResultState| {
+                navigator(&ctrl, {
+                    let taps = taps.clone();
+                    move || any(TapProbe { taps: taps.clone() })
+                })
+            }
+        };
+        let mut state = ResultState::default();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        controller.push_for_result(
+            || sized_page(50.0, 50.0),
+            |state: &mut ResultState, result: PopResult| {
+                state.received = result.take::<i32>();
+            },
+        );
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        // The pop's rebuild broadcasts through the whole tree, including the
+        // revealed root page's probe.
+        controller.pop_with_result(PopResult::of(1i32));
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(state.received, Some(1), "the result still arrived");
+        assert_eq!(
+            taps.get(),
+            0,
+            "the housekeeping broadcast must fire no press handler — it is not \
+             user input"
+        );
+
+        // Sanity: the probe *does* fire on a real press, so the assertion above
+        // is not passing because the fixture is inert.
+        root.event(&mut state, &down(10.0, 10.0));
+        root.event(&mut state, &up(10.0, 10.0));
+        assert_eq!(taps.get(), 1, "a real tap still activates the same widget");
     }
 
     // --- Opaque-page paint culling. ---
@@ -4761,19 +5066,22 @@ mod tests {
         let (settled, _) = full_frame(&mut root, &mut app, &mut state, ft(316));
         assert_eq!(settled.len(), 2, "both A and the settled sheet paint");
 
-        // Pop the sheet with a result payload; drive the reverse transition to
-        // settle, then flush the queued callback at the next event pass.
+        // Pop the sheet with a result payload. `NavOp::Pop` queues (and, through
+        // the housekeeping broadcast, flushes) the callback eagerly on the rebuild
+        // that applies the pop — the out-animation that follows is purely visual.
         controller.pop_with_result(PopResult::of(99i32));
-        for t in [1000u64, 1050, 1150, 1300] {
-            full_frame(&mut root, &mut app, &mut state, ft(t));
-        }
-        assert_eq!(state.received, None, "not yet flushed (no event pass)");
-        root.event(&mut state, &move_to(5.0, 5.0));
+        full_frame(&mut root, &mut app, &mut state, ft(1000));
         assert_eq!(
             state.received,
             Some(99),
-            "the transparent+SlideUp dialog still delivers its pop result"
+            "the transparent+SlideUp dialog delivers its pop result on the pop \
+             frame, with no input"
         );
+        // Drive the reverse transition to settle; nothing re-delivers.
+        for t in [1050u64, 1150, 1300] {
+            full_frame(&mut root, &mut app, &mut state, ft(t));
+        }
+        assert_eq!(state.received, Some(99));
     }
 
     // ---------------------------------------------------------------------
@@ -4782,10 +5090,10 @@ mod tests {
 
     /// Downcast the root widget to a `&NavigatorWidget` so a gesture test can
     /// inspect the private edge/transition state.
-    fn nav_widget(root: &RenderRoot<(), NavigatorView<()>>) -> &NavigatorWidget<()> {
+    fn nav_widget<S: 'static>(root: &RenderRoot<S, NavigatorView<S>>) -> &NavigatorWidget<S> {
         let id = root.root_id().expect("root built");
         (root.tree().pod(id).expect("root pod").widget() as &dyn Any)
-            .downcast_ref::<NavigatorWidget<()>>()
+            .downcast_ref::<NavigatorWidget<S>>()
             .expect("root is a NavigatorWidget")
     }
 
@@ -5150,20 +5458,21 @@ mod tests {
         root.paint(&mut sink, ft(200));
         root.event(&mut state, &up(80.0, 50.0));
 
-        // Drive to settle/finalize (the callback is queued at finalize).
+        // Drive to settle/finalize. The callback is queued at finalize (a
+        // `BuildCtx` pass) and — FINDINGS #56 — flushed by that same rebuild's
+        // housekeeping broadcast, so it lands on the settle frame with no further
+        // input.
+        assert!(!state.popped, "not delivered before the swipe settles");
         for t in [300u64, 316, 332, 348, 400, 500, 800, 1200, 2000] {
             root.rebuild(&mut app, &mut state);
             root.layout(Size::new(100.0, 100.0));
             root.paint(&mut sink, ft(t));
         }
         assert!(
-            !state.popped,
-            "callback not fired until the next event pass"
+            state.popped,
+            "the completed swipe delivered its pop result on the settle frame's \
+             rebuild, with no input event"
         );
-
-        // The next event pass flushes the queued result callback.
-        root.event(&mut state, &move_to(5.0, 5.0));
-        assert!(state.popped, "the completed swipe delivered its pop result");
     }
 
     // --- Release below threshold cancels; page restored exactly. ---
