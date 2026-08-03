@@ -41,19 +41,35 @@ jni = { workspace = true }
 # so both repeat the workspace pin literally with their own minimal feature
 # list rather than inheriting the (large) default set.
 [target.'cfg(target_os = "ios")'.dependencies]
-# `NSString`: `UIPasteboard.string`/`setString:`'s payload type.
+# `AnyObject`: the type-erased value objects go in `set_text_sensitive`'s
+# `NSDictionary<NSString, AnyObject>` items/options dictionaries (see
+# `plugins/camera/Cargo.toml`'s comment for the same reason it depends on
+# `objc2` directly rather than relying on it only transitively).
+objc2 = { workspace = true }
+# `NSString`: `UIPasteboard.string`/`setString:`'s payload type. `NSArray` +
+# `NSDictionary` + `NSObject`: `set_text_sensitive`'s `setItems(_:options:)`
+# call builds an `NSArray<NSDictionary<NSString, AnyObject>>` items array and
+# an `NSDictionary<NSString, AnyObject>` options dictionary (`NSObject` is
+# what `NSDictionary::from_slices` itself needs — see
+# `plugins/camera/Cargo.toml`'s comment on its own `video_settings` helper
+# for the same dependency). `NSValue`: where `NSNumber` lives (the options
+# dictionary's `UIPasteboardOptionLocalOnly` value).
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSString",
+    "NSObject",
+    "NSArray",
+    "NSDictionary",
+    "NSValue",
 ] }
 # `UIPasteboard`: the one class this backend touches (`generalPasteboard`,
-# `string`/`setString:`). Enabling it turns on the `NSString`/`NSArray`/
-# `NSData`/etc. `objc2-foundation` sub-features `UIPasteboard`'s own API
-# surface needs (see `objc2-ui-kit-0.3.2/Cargo.toml`'s `UIPasteboard` feature
-# list) — this crate still names `NSString` explicitly above rather than
-# relying on that as a side effect, matching `plugins/native-widgets`'s own
-# "every FFI surface this crate touches is a named, minimal, direct
-# dependency" discipline.
+# `string`/`setString:`/`setItems_options`). Enabling it turns on the
+# `NSString`/`NSArray`/`NSData`/etc. `objc2-foundation` sub-features
+# `UIPasteboard`'s own API surface needs (see `objc2-ui-kit-0.3.2/Cargo.toml`'s
+# `UIPasteboard` feature list) — this crate still names those explicitly
+# above rather than relying on that as a side effect, matching
+# `plugins/native-widgets`'s own "every FFI surface this crate touches is a
+# named, minimal, direct dependency" discipline.
 objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "std",
     "UIPasteboard",
@@ -64,8 +80,12 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
 # default `image-data` feature (image get/set, pulling in `image`/
 # `objc2-core-graphics`/`windows-sys` Gdi bindings this crate never uses) —
 # see `docs/DEVELOPMENT.md`'s Version-Pin Policy for the pin rationale and
-# tripwire. Pinned exact per policy (a young-ish, pre-1.0-in-spirit surface
-# this crate depends on for its entire desktop text path).
+# `cargo check -p frust-clipboard` tripwire. Pinned exact per policy (a
+# young-ish, pre-1.0-in-spirit surface this crate depends on for its entire
+# desktop text path). A type-check alone doesn't exercise arboard's actual
+# clipboard behavior — after bumping this pin, also run the real (opt-in,
+# destructive — see `README.md`'s Testing section) conformance test:
+# `FRUST_CLIPBOARD_TESTS=1 cargo test -p frust-clipboard`.
 #
 # macOS shares this arm rather than `apple.rs`: `UIPasteboard` (UIKit) does
 # not exist on macOS, and arboard's own macOS backend (`NSPasteboard` via

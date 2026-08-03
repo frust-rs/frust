@@ -16,31 +16,54 @@
 //!
 //! Unlike `SecureStorage`'s named-store-handle model, there is exactly one
 //! OS clipboard — so [`Clipboard`] carries no handle to open: [`Clipboard::set_text`]/
-//! [`Clipboard::get_text`] are plain associated functions. Every platform
-//! this crate targets documents its clipboard API as thread-safe with no
-//! main-thread requirement (Android's `ClipboardManager`, iOS's
-//! `UIPasteboard` — see [`apple`]'s module doc — and `arboard`'s desktop
-//! backends), so v1 exposes a synchronous API with nothing to block on. A
-//! future byte/image payload is left to a later version; v1 is `String`
-//! only, matching `frust-shared-preferences`'/`frust-secure-storage`'s own
-//! v1 scope.
+//! [`Clipboard::get_text`] are plain associated functions. None of the three
+//! platforms this crate targets documents a main-thread requirement for its
+//! clipboard API (Android's `ClipboardManager`, `arboard`'s desktop
+//! backends, and iOS's `UIPasteboard` — see [`apple`]'s module doc for why
+//! that last one is an absence-of-hazard finding, not a documented
+//! any-thread guarantee), so v1 exposes a synchronous API with nothing to
+//! block on. A future byte/image payload is left to a later version; v1 is
+//! `String` only, matching `frust-shared-preferences`'/`frust-secure-storage`'s
+//! own v1 scope.
 //!
 //! [`Clipboard::get_text`] returns `Ok(None)` for an empty or non-text
-//! clipboard — never an error — matching Android's `getPrimaryClip`
-//! returning `null` and iOS/arboard's "content not available" case.
+//! clipboard — **and also for a clipboard whose text content is the empty
+//! string** — never an error — matching Android's `getPrimaryClip` returning
+//! `null` and iOS/arboard's "content not available" case. This is a
+//! deliberate single story every backend and the conformance suite hold to:
+//! there is no way for a caller to distinguish "never set" from "set to
+//! `\"\"`" through this API, and v1 does not need one.
+//!
+//! # Security: sensitive content
+//!
+//! [`Clipboard::set_text`] moves `text` into a **world-readable OS
+//! channel** — any other app with clipboard access (there is no
+//! permission gate on any of the three platforms) can read it back, and on
+//! Android 13+ the OS may briefly *preview* the copied text on-screen in a
+//! system toast. For content a user would not want another app or a
+//! screen-recording to see — copied terminal output, tokens, passwords,
+//! one-time codes — use [`Clipboard::set_text_sensitive`] instead, which
+//! applies each platform's best-effort sensitivity marking (see that
+//! method's doc for exactly what each platform does and does not protect
+//! against). Neither call encrypts the clipboard or prevents a
+//! determined reader; both are best-effort hints to the OS/other apps.
+//! See the plugin `README.md`'s `## Security` section for the full
+//! platform-by-platform writeup.
 //!
 //! # Backends
 //!
-//! [`Clipboard::set_text`]/[`Clipboard::get_text`] route by
-//! `#[cfg(target_os = ...)]` to one of three real backends: [`android`]
-//! (`ClipboardManager`/`ClipData`, plain JNI — no Kotlin/Gradle module, see
-//! that module's doc for why one isn't needed), [`apple`] (iOS only —
-//! `UIPasteboard`), and [`desktop`] (macOS, Linux, Windows — `arboard`). All
-//! three are real implementations exercised by the shared
-//! [`conformance::run_conformance_suite`] (`#[cfg(test)]`): host-runnable on
-//! desktop (this crate's own `cargo test`), compile-gated only on mobile
-//! (`cargo check --target aarch64-linux-android`/`aarch64-apple-ios -p
-//! frust-clipboard` — see `docs/DEVELOPMENT.md`'s Test section).
+//! [`Clipboard::set_text`]/[`Clipboard::get_text`]/[`Clipboard::set_text_sensitive`]
+//! route by `#[cfg(target_os = ...)]` to one of three real backends:
+//! [`android`] (`ClipboardManager`/`ClipData`, plain JNI — no Kotlin/Gradle
+//! module, see that module's doc for why one isn't needed), [`apple`] (iOS
+//! only — `UIPasteboard`), and [`desktop`] (macOS, Linux, Windows —
+//! `arboard`), plus a total-cover fallback arm on any other target (see
+//! [`Unavailability::UnsupportedPlatform`]). All three real backends are
+//! exercised by the shared [`conformance::run_conformance_suite`]
+//! (`#[cfg(test)]`): host-runnable on desktop (this crate's own `cargo
+//! test`), compile-gated only on mobile (`cargo check --target
+//! aarch64-linux-android`/`aarch64-apple-ios -p frust-clipboard` — see
+//! `docs/DEVELOPMENT.md`'s Test section).
 //!
 //! # Platform caveats (see the plugin `README.md` for the full writeup)
 //!
@@ -104,7 +127,10 @@ pub enum Unavailability {
     /// No clipboard mechanism is reachable in the current environment —
     /// e.g. a desktop Linux session with neither X11 nor a Wayland
     /// clipboard protocol available (`arboard`'s
-    /// `Error::ClipboardNotSupported`; see [`desktop`]'s module doc).
+    /// `Error::ClipboardNotSupported`; see [`desktop`]'s module doc), or a
+    /// build target this crate has no backend module for at all (not
+    /// Android/iOS/macOS/Linux/Windows — e.g. tvOS, wasm), where `Clipboard`'s
+    /// associated functions report this rather than failing to compile.
     UnsupportedPlatform,
 }
 
@@ -122,9 +148,18 @@ pub(crate) trait Backend: Send + Sync {
     /// whatever it held before (of any type/format).
     fn set_text(&self, text: &str) -> Result<(), ClipboardError>;
     /// The clipboard's current plain-text content, or `None` if it is empty
-    /// or holds a non-text payload. Never an error for "empty" — see the
-    /// crate doc's *v1 is a single global slot* section.
+    /// (including a clipboard explicitly set to `""`) or holds a non-text
+    /// payload. Never an error for "empty" — see the crate doc's *v1 is a
+    /// single global slot* section.
     fn get_text(&self) -> Result<Option<String>, ClipboardError>;
+    /// As [`Self::set_text`], plus a best-effort platform sensitivity
+    /// marking — see [`Clipboard::set_text_sensitive`]'s doc for what each
+    /// backend does. Default: identical to [`Self::set_text`] (the desktop
+    /// backend has no platform sensitivity primitive to apply, so it never
+    /// overrides this).
+    fn set_text_sensitive(&self, text: &str) -> Result<(), ClipboardError> {
+        self.set_text(text)
+    }
 }
 
 /// The platform clipboard.
@@ -157,10 +192,28 @@ impl Clipboard {
         {
             desktop::DesktopClipboard.set_text(text)
         }
+        // Total-cover fallback: any target not one of the four arms above
+        // (tvOS, wasm, …) has no backend module compiled in at all — report
+        // it as a typed unavailability rather than failing to compile with a
+        // confusing "no arm produced a value" error.
+        #[cfg(not(any(
+            target_os = "android",
+            target_os = "ios",
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "windows"
+        )))]
+        {
+            let _ = text;
+            Err(ClipboardError::NotAvailable(
+                Unavailability::UnsupportedPlatform,
+            ))
+        }
     }
 
     /// The clipboard's current plain-text content, or `None` if it is empty
-    /// or holds a non-text payload.
+    /// (including a clipboard explicitly set to `""`) or holds a non-text
+    /// payload.
     ///
     /// # Errors
     /// As [`Self::set_text`]. On Android 10+, an unfocused caller sees
@@ -178,6 +231,72 @@ impl Clipboard {
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         {
             desktop::DesktopClipboard.get_text()
+        }
+        // Total-cover fallback — see `set_text`'s.
+        #[cfg(not(any(
+            target_os = "android",
+            target_os = "ios",
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "windows"
+        )))]
+        {
+            Err(ClipboardError::NotAvailable(
+                Unavailability::UnsupportedPlatform,
+            ))
+        }
+    }
+
+    /// As [`Self::set_text`], plus a best-effort platform sensitivity
+    /// marking for content the user would not want visible to another app,
+    /// a clipboard-history UI, or another of the user's devices (copied
+    /// terminal output, tokens, passwords, one-time codes) — see the crate
+    /// doc's *Security: sensitive content* section.
+    ///
+    /// This is a **hint, not a guarantee**: it does not encrypt the
+    /// clipboard, and any app the OS grants clipboard access to can still
+    /// read the text back with [`Self::get_text`]/its own platform API.
+    ///
+    /// - **Android (API 33+):** sets `ClipDescription.EXTRA_IS_SENSITIVE` on
+    ///   the clip description's extras, which suppresses the Android 13+
+    ///   copied-text preview toast and flags clipboard-history UIs. Ignored
+    ///   (a plain [`Self::set_text`]) below API 33.
+    /// - **iOS:** writes via `UIPasteboard.setItems(_:options:)` with
+    ///   `.localOnly: true`, which blocks Universal Clipboard/Handoff
+    ///   replication to the user's other signed-in devices. No expiration
+    ///   date is set (a possible future opt-in — see [`apple`]'s module
+    ///   doc).
+    /// - **Desktop (arboard):** no platform sensitivity primitive exists;
+    ///   behaves exactly like [`Self::set_text`].
+    ///
+    /// # Errors
+    /// As [`Self::set_text`].
+    pub fn set_text_sensitive(text: &str) -> Result<(), ClipboardError> {
+        #[cfg(target_os = "android")]
+        {
+            android::AndroidClipboard.set_text_sensitive(text)
+        }
+        #[cfg(target_os = "ios")]
+        {
+            apple::AppleClipboard.set_text_sensitive(text)
+        }
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+        {
+            desktop::DesktopClipboard.set_text_sensitive(text)
+        }
+        // Total-cover fallback — see `set_text`'s.
+        #[cfg(not(any(
+            target_os = "android",
+            target_os = "ios",
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "windows"
+        )))]
+        {
+            let _ = text;
+            Err(ClipboardError::NotAvailable(
+                Unavailability::UnsupportedPlatform,
+            ))
         }
     }
 }

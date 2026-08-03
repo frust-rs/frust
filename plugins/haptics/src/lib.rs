@@ -134,7 +134,10 @@ pub enum HapticsError {
 pub enum Unavailability {
     /// This platform has no haptic-feedback mechanism this crate drives —
     /// every desktop target (macOS, Linux, Windows) unconditionally, in v1
-    /// (see [`desktop`]'s module doc).
+    /// (see [`desktop`]'s module doc) — or a build target this crate has no
+    /// backend module for at all (not Android/iOS/macOS/Linux/Windows —
+    /// e.g. tvOS, wasm), where [`Haptics::perform`] reports this rather
+    /// than failing to compile.
     UnsupportedPlatform,
 }
 
@@ -190,6 +193,24 @@ impl Haptics {
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         {
             desktop::DesktopHaptics.perform(effect)
+        }
+        // Total-cover fallback: any target not one of the four arms above
+        // (tvOS, wasm, …) has no backend module compiled in at all — report
+        // it as a typed unavailability rather than failing to compile with a
+        // confusing "no arm produced a value" error (matches
+        // `frust-clipboard`'s own dispatch functions).
+        #[cfg(not(any(
+            target_os = "android",
+            target_os = "ios",
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "windows"
+        )))]
+        {
+            let _ = effect;
+            Err(HapticsError::NotAvailable(
+                Unavailability::UnsupportedPlatform,
+            ))
         }
     }
 }

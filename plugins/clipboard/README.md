@@ -28,6 +28,11 @@ use frust_clipboard::Clipboard;
 
 Clipboard::set_text("copied from frust")?;
 let text = Clipboard::get_text()?;   // Some("copied from frust")
+
+// For content the user wouldn't want another app, a clipboard-history UI,
+// or another of their devices to see (tokens, passwords, terminal output) —
+// see `## 2. Security` below.
+Clipboard::set_text_sensitive("ghp_super_secret_token")?;
 ```
 
 **No manifest, plist, permission, Gradle module, or Swift package is
@@ -37,12 +42,49 @@ with no Kotlin/Swift glue to wire in. The frust TUI's **Add Plugin** dialog
 still lists this plugin (for a consistent workflow across every plugin), but
 all it applies is the Cargo dependency line above.
 
-`Clipboard::get_text()` returns `Ok(None)` for an empty clipboard or one
-holding a non-text payload — never an error.
+`Clipboard::get_text()` returns `Ok(None)` for an empty clipboard, one
+holding a non-text payload, **or one explicitly set to the empty string
+`""`** — never an error. There is no way to distinguish "never set" from
+"set to `\"\"`" through this API, and every backend/the conformance suite
+hold to this one story.
 
 ---
 
-## 2. Platform caveats
+## 2. Security
+
+`Clipboard::set_text` moves `text` into a **world-readable OS channel**:
+there is no permission gate on any of the three platforms, so any other app
+the user has granted clipboard access to (which, on desktop and pre-13
+Android, is implicitly every app) can read it back with its own clipboard
+API. Neither `set_text` nor `set_text_sensitive` encrypts the clipboard or
+stops a determined reader — both are plain-text writes; the difference is
+what each platform does to reduce *incidental* exposure.
+
+Use **`Clipboard::set_text_sensitive`** instead of `set_text` for content
+the user would not want visible to another app, a clipboard-history UI, a
+screen recording, or another of their signed-in devices — copied terminal
+output, tokens, passwords, one-time codes:
+
+- **Android (API 33+):** sets `ClipDescription.EXTRA_IS_SENSITIVE` on the
+  clip's description extras, which suppresses the Android 13+ copied-text
+  preview toast and signals clipboard-history UIs to redact/omit the entry.
+  A no-op fallback to plain `set_text` below API 33 (the extras key is simply
+  ignored by the platform, not an error).
+- **iOS:** writes via `UIPasteboard.setItems(_:options:)` with
+  `.localOnly: true`, which blocks Universal Clipboard/Handoff from
+  replicating the pasteboard item to the user's other signed-in Apple
+  devices. No expiration date is set by default (a possible future opt-in).
+- **Desktop (macOS/Linux/Windows via `arboard`):** no platform sensitivity
+  primitive exists on any of the three; `set_text_sensitive` is a plain
+  alias for `set_text` here.
+
+Use plain `set_text` for anything else (e.g. copying a share link, a
+user-composed note) — there is no reason to pay `set_text_sensitive`'s
+slightly heavier iOS write path for content that isn't sensitive.
+
+---
+
+## 3. Platform caveats
 
 - **Android 10+ focus gate (read-only).** `getPrimaryClip` returns `null`
   — read back here as `Ok(None)`, the same as a genuinely empty clipboard —
@@ -74,18 +116,18 @@ holding a non-text payload — never an error.
 
 ---
 
-## 3. No blocking calls
+## 4. No blocking calls
 
 Every backend this crate ships is synchronous and non-blocking — unlike
 `frust-secure-storage`'s biometric gate or `frust-camera`'s permission/
 capture calls, nothing here needs `frust-reactive`'s `spawn_blocking`.
-`Clipboard::set_text`/`Clipboard::get_text` are safe to call from the UI
-thread on every platform (see each backend module's own rustdoc for the
-platform documentation this relies on).
+`Clipboard::set_text`/`Clipboard::get_text`/`Clipboard::set_text_sensitive`
+are safe to call from the UI thread on every platform (see each backend
+module's own rustdoc for the platform documentation this relies on).
 
 ---
 
-## 4. Caveats
+## 5. Caveats
 
 - **v1 is plain text only.** A byte/image clipboard payload is a future
   enhancement, matching `frust-shared-preferences`'/`frust-secure-storage`'s
@@ -93,3 +135,20 @@ platform documentation this relies on).
 - **`frust create --overwrite` is a non-issue here** — this plugin adds
   nothing to the generated project besides the Cargo dependency line, so
   there is nothing for `--overwrite` to drop.
+
+---
+
+## 6. Testing this crate itself
+
+`desktop::tests::conformance` exercises the **real host clipboard** (the
+full conformance suite, plus a `set_text_sensitive`-aliases-`set_text`
+check) and is skipped by default (a plain `cargo test --workspace`/`-p
+frust-clipboard` must never clobber whatever a developer had copied). Opt in
+deliberately when touching this crate's desktop backend:
+
+```bash
+FRUST_CLIPBOARD_TESTS=1 cargo test -p frust-clipboard
+```
+
+This overwrites your clipboard and leaves a test string in it when it
+finishes.

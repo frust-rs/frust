@@ -38,6 +38,15 @@
 //! `ClipData` simply reads back as [`Backend::get_text`]'s `Ok(None)`, the
 //! same outcome as a genuinely empty clipboard. Writing
 //! (`setPrimaryClip`) carries no such restriction.
+//!
+//! # Sensitivity marking (`set_text_sensitive`)
+//!
+//! [`Backend::set_text_sensitive`] sets `ClipDescription.EXTRA_IS_SENSITIVE`
+//! (API 33+) on the written clip's description extras — see
+//! [`EXTRA_IS_SENSITIVE`]'s doc for why no `SDK_INT` branch is needed. This
+//! suppresses the Android 13+ "copied text preview" toast for the clip and
+//! signals clipboard-history UIs to redact/omit it; it does not encrypt the
+//! clip or prevent another app with clipboard access from reading it back.
 
 use jni::objects::{JObject, JString, JValue};
 use jni::{Env, jni_sig, jni_str};
@@ -50,6 +59,15 @@ const CLIPBOARD_SERVICE: &str = "clipboard";
 /// `ClipData.newPlainText`'s user-visible label. Cosmetic only (surfaced by
 /// some OEM clipboard-history UIs); never read back by this crate.
 const CLIP_LABEL: &str = "frust";
+
+/// `ClipDescription.EXTRA_IS_SENSITIVE` — the `PersistableBundle` extras key
+/// (API 33+) that suppresses the Android 13+ copied-text preview toast and
+/// flags clipboard-history UIs. The string literal is used directly (rather
+/// than the SDK constant, which doesn't exist before API 33) so this backend
+/// needs no `Build.VERSION.SDK_INT` branch: an unrecognized extras key on a
+/// pre-33 device is simply ignored by the platform, never an error. See this
+/// module's [`Backend::set_text_sensitive`] impl below.
+const EXTRA_IS_SENSITIVE: &str = "android.content.extra.IS_SENSITIVE";
 
 /// The Android backend. Stateless — every operation re-fetches the
 /// `ClipboardManager` inside a fresh scoped JNI attachment.
@@ -217,7 +235,74 @@ impl Backend for AndroidClipboard {
                     )?
                     .l()?;
                 let text_jstr = env.cast_local::<JString>(text_jstr)?;
-                Ok(Some(text_jstr.to_string()))
+                let text = text_jstr.to_string();
+                // Crate-wide contract (see `crate::Clipboard::get_text`'s
+                // doc): an empty string reads back as `Ok(None)`, the same
+                // as a genuinely absent clip — there is no way for a caller
+                // to distinguish "never set" from "set to `\"\"`" through
+                // this API.
+                if text.is_empty() {
+                    return Ok(None);
+                }
+                Ok(Some(text))
+            })
+        })
+    }
+
+    fn set_text_sensitive(&self, text: &str) -> Result<(), ClipboardError> {
+        with_context(|env, context| {
+            run_jni(env, |env| {
+                let clipboard = get_clipboard_manager(env, context)?;
+                let label = env.new_string(CLIP_LABEL)?;
+                let text_jstr = env.new_string(text)?;
+                // ClipData.newPlainText(label, text) — a static factory.
+                let clip_data = env
+                    .call_static_method(
+                        jni_str!("android/content/ClipData"),
+                        jni_str!("newPlainText"),
+                        jni_sig!(
+                            "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Landroid/content/ClipData;"
+                        ),
+                        &[JValue::Object(&label), JValue::Object(&text_jstr)],
+                    )?
+                    .l()?;
+                // Mark the clip sensitive: ClipData.getDescription() ->
+                // ClipDescription, then set a PersistableBundle extra on it
+                // (see EXTRA_IS_SENSITIVE's doc for the API-33+/no-branch
+                // rationale).
+                let description = env
+                    .call_method(
+                        &clip_data,
+                        jni_str!("getDescription"),
+                        jni_sig!("()Landroid/content/ClipDescription;"),
+                        &[],
+                    )?
+                    .l()?;
+                let extras = env.new_object(
+                    jni_str!("android/os/PersistableBundle"),
+                    jni_sig!("()V"),
+                    &[],
+                )?;
+                let sensitive_key = env.new_string(EXTRA_IS_SENSITIVE)?;
+                env.call_method(
+                    &extras,
+                    jni_str!("putBoolean"),
+                    jni_sig!("(Ljava/lang/String;Z)V"),
+                    &[JValue::Object(&sensitive_key), JValue::Bool(true)],
+                )?;
+                env.call_method(
+                    &description,
+                    jni_str!("setExtras"),
+                    jni_sig!("(Landroid/os/PersistableBundle;)V"),
+                    &[JValue::Object(&extras)],
+                )?;
+                env.call_method(
+                    &clipboard,
+                    jni_str!("setPrimaryClip"),
+                    jni_sig!("(Landroid/content/ClipData;)V"),
+                    &[JValue::Object(&clip_data)],
+                )?;
+                Ok(())
             })
         })
     }

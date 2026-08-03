@@ -37,9 +37,14 @@ fn overwrite(backend: Box<dyn Backend>) {
     assert_eq!(backend.get_text().unwrap(), Some("second".to_string()));
 }
 
+/// Crate-wide contract (see `crate::Clipboard::get_text`'s doc): a clipboard
+/// explicitly set to the empty string reads back as `Ok(None)`, identical to
+/// a clipboard that was never set — there is no way for a caller to
+/// distinguish the two through this API, and every backend holds to this one
+/// story rather than three different ones.
 fn empty_string(backend: Box<dyn Backend>) {
     backend.set_text("").unwrap();
-    assert_eq!(backend.get_text().unwrap(), Some(String::new()));
+    assert_eq!(backend.get_text().unwrap(), None);
 }
 
 fn unicode(backend: Box<dyn Backend>) {

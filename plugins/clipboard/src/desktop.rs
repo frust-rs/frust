@@ -38,6 +38,14 @@
 //! reach the clipboard at all — a documented, deliberately-deferred gap, not
 //! enabled here to keep the dependency graph minimal (see this crate's
 //! `Cargo.toml`).
+//!
+//! # No sensitivity marking
+//!
+//! `arboard` has no platform sensitivity primitive on any of the three
+//! desktop targets (no macOS `NSPasteboard` transient-type analog exposed,
+//! no equivalent on X11/Wayland/Windows), so this backend does not override
+//! [`Backend::set_text_sensitive`]'s default — it behaves exactly like
+//! [`Backend::set_text`] here.
 
 use arboard::Clipboard as ArboardClipboard;
 
@@ -74,6 +82,11 @@ impl Backend for DesktopClipboard {
     fn get_text(&self) -> Result<Option<String>, ClipboardError> {
         let mut clipboard = ArboardClipboard::new().map_err(map_err)?;
         match clipboard.get_text() {
+            // Crate-wide contract (see `crate::Clipboard::get_text`'s doc):
+            // an empty string reads back as `Ok(None)`, the same as
+            // `ContentNotAvailable` below — there is no way for a caller to
+            // distinguish "never set" from "set to `\"\"`" through this API.
+            Ok(text) if text.is_empty() => Ok(None),
             Ok(text) => Ok(Some(text)),
             Err(arboard::Error::ContentNotAvailable) => Ok(None),
             Err(other) => Err(map_err(other)),
@@ -85,15 +98,48 @@ impl Backend for DesktopClipboard {
 mod tests {
     use super::*;
 
-    /// The full cross-backend conformance suite ([`crate::conformance`])
-    /// against the real host clipboard. A headless CI runner or container
-    /// with no reachable clipboard mechanism (no X11 display, no Wayland
-    /// compositor, no `NSPasteboard`/Windows equivalent) can't run this —
-    /// probe availability first and skip with a clear message rather than
-    /// fail (`docs/DEVELOPMENT.md`'s Test section asks for exactly this
-    /// shape for a host-dependent gate).
+    /// Opt-in env var gating the test below: it exercises the **real host
+    /// clipboard** and overwrites whatever the developer had copied,
+    /// leaving a test string behind when it finishes. A plain `cargo test
+    /// --workspace`/`-p frust-clipboard` must never clobber a developer's
+    /// clipboard as a side effect, so the test no-ops (printing this
+    /// variable's name) unless it is explicitly set. Tripwire command (also
+    /// in this crate's `README.md` and `Cargo.toml`): `FRUST_CLIPBOARD_TESTS=1
+    /// cargo test -p frust-clipboard`.
+    const CLIPBOARD_TESTS_ENV: &str = "FRUST_CLIPBOARD_TESTS";
+
+    fn clipboard_tests_opted_in() -> bool {
+        std::env::var(CLIPBOARD_TESTS_ENV).as_deref() == Ok("1")
+    }
+
+    /// The full cross-backend conformance suite ([`crate::conformance`]),
+    /// plus a `set_text_sensitive`-aliases-`set_text` check (desktop has no
+    /// sensitivity primitive to apply — see the module doc's *No
+    /// sensitivity marking* — so it should read back identically), against
+    /// the real host clipboard. Both live in **one** test function rather
+    /// than two: two tests each opening/writing the real OS clipboard would
+    /// run concurrently under `cargo test`'s default parallelism, and doing
+    /// so was observed to crash (`arboard`'s macOS `NSPasteboard` backend is
+    /// not documented safe for concurrent access from independent
+    /// `Clipboard` instances) — one test, one thread, no race.
+    ///
+    /// **Destructive** (see this module's opt-in gate above) — skipped by
+    /// default. When opted in, a headless CI runner or container with no
+    /// reachable clipboard mechanism (no X11 display, no Wayland
+    /// compositor, no `NSPasteboard`/Windows equivalent) still can't run
+    /// this — probe availability next and skip with a clear message rather
+    /// than fail (`docs/DEVELOPMENT.md`'s Test section asks for exactly
+    /// this shape for a host-dependent gate).
     #[test]
     fn conformance() {
+        if !clipboard_tests_opted_in() {
+            eprintln!(
+                "skipping frust-clipboard desktop conformance: destructive \
+                 (overwrites the real host clipboard) — opt in with \
+                 `{CLIPBOARD_TESTS_ENV}=1 cargo test -p frust-clipboard`"
+            );
+            return;
+        }
         if let Err(e) = ArboardClipboard::new() {
             eprintln!(
                 "skipping frust-clipboard desktop conformance: no clipboard \
@@ -102,5 +148,14 @@ mod tests {
             return;
         }
         crate::conformance::run_conformance_suite(&|| Box::new(DesktopClipboard));
+
+        let backend = DesktopClipboard;
+        backend
+            .set_text_sensitive("frust-clipboard sensitive alias check")
+            .unwrap();
+        assert_eq!(
+            backend.get_text().unwrap(),
+            Some("frust-clipboard sensitive alias check".to_string())
+        );
     }
 }
