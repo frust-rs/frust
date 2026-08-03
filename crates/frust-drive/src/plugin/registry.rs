@@ -1,4 +1,4 @@
-//! The static plugin registry (v1) — six entries mirroring `plugins/`:
+//! The static plugin registry (v1) — seven entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
@@ -11,9 +11,14 @@
 //! constant's doc comment for the full rationale), `native-widgets`
 //! (dependency plus the plugin's own Android library
 //! module — and **nothing** on iOS, which is not an omission: that arm ships
-//! zero Swift by design), and `clipboard` (dependency only — plain text
+//! zero Swift by design), `clipboard` (dependency only — plain text
 //! clipboard access needs no manifest permission, plist key, Gradle module,
-//! or Swift package on either mobile platform).
+//! or Swift package on either mobile platform), and `haptics` (dependency
+//! plus the `android.permission.VIBRATE` manifest permission — the first
+//! registry entry to use [`Contribution::ManifestPermission`] rather than a
+//! Gradle module for its Android addition, since the plugin's Android
+//! backend is plain JNI with no Kotlin helper class to carry the permission
+//! inside a module manifest; see `HAPTICS_BASE`'s doc comment).
 
 use super::{Contribution, FeatureSpec, PluginSpec};
 
@@ -210,6 +215,42 @@ const CLIPBOARD: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+/// `haptics`' base contributions — a Cargo dependency plus one
+/// [`Contribution::ManifestPermission`], the app's own `android.permission.VIBRATE`
+/// `<uses-permission>` line.
+///
+/// This is the registry's **first** use of [`Contribution::ManifestPermission`]
+/// rather than [`Contribution::GradleModule`] for an Android addition — every
+/// prior permission-carrying entry (`secure-storage`'s `USE_BIOMETRIC`,
+/// `camera`'s implicit `CAMERA` permission) rides inside the plugin's own
+/// Gradle module manifest, folded in by the manifest merger so the app's
+/// manifest is never touched. `haptics` has no such module: like `clipboard`,
+/// its Android backend is plain JNI against framework classes
+/// (`android.os.Vibrator`/`VibrationEffect`) with no app-defined Kotlin helper
+/// class to carry a permission inside — see
+/// `plugins/haptics/src/android.rs`'s module doc. `VIBRATE` is a **normal**
+/// permission (granted automatically at install, no runtime prompt), so an
+/// app-manifest edit here carries none of the runtime-permission-flow
+/// complexity a dangerous permission would.
+const HAPTICS_BASE: &[Contribution] = &[
+    Contribution::CargoDep {
+        name: "frust-haptics",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.VIBRATE",
+    },
+];
+
+const HAPTICS: PluginSpec = PluginSpec {
+    id: "haptics",
+    summary: "Minimal haptic feedback (selection tick, impact, success/warning/error) \
+              over Vibrator/VibrationEffect and UIKit's feedback generators.",
+    crate_dir: "haptics",
+    base: HAPTICS_BASE,
+    optional_features: &[],
+    requires_sibling: None,
+};
+
 /// The v1 static plugin registry (Vec-factory convention). A caller (the CLI
 /// or the TUI Add Plugin dialog) enumerates this to drive selection without
 /// hardcoding plugin ids.
@@ -221,6 +262,7 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         CAMERA,
         NATIVE_WIDGETS,
         CLIPBOARD,
+        HAPTICS,
     ]
 }
 
@@ -240,7 +282,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_six_v1_plugins() {
+    fn registry_lists_the_seven_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -251,8 +293,36 @@ mod tests {
                 "camera",
                 "native-widgets",
                 "clipboard",
+                "haptics",
             ]
         );
+    }
+
+    /// The `haptics` entry is exactly a `CargoDep` plus one
+    /// `ManifestPermission` — no optional features, no sibling, and (unlike
+    /// every other permission-carrying entry) no `GradleModule`, since this
+    /// plugin's Android backend is plain JNI with no Kotlin helper class to
+    /// carry the permission inside (see `HAPTICS_BASE`'s own doc comment).
+    #[test]
+    fn haptics_is_a_cargo_dep_plus_one_manifest_permission_and_nothing_else() {
+        let spec = find_plugin("haptics").unwrap();
+        assert_eq!(spec.crate_dir, "haptics");
+        assert!(spec.optional_features.is_empty());
+        assert_eq!(spec.requires_sibling, None);
+
+        assert_eq!(spec.base.len(), 2, "{:?}", spec.base);
+        assert!(matches!(
+            spec.base[0],
+            Contribution::CargoDep {
+                name: "frust-haptics"
+            }
+        ));
+        assert!(matches!(
+            spec.base[1],
+            Contribution::ManifestPermission {
+                permission: "android.permission.VIBRATE"
+            }
+        ));
     }
 
     /// The `clipboard` entry is exactly one `CargoDep` — no manifest
@@ -660,6 +730,68 @@ mod tests {
 
         let after_first = snapshot_tree(&root);
         let second = add_plugin(&root, "native-widgets", &[]).unwrap();
+        assert_eq!(second.items.len(), 2);
+        assert!(
+            second
+                .items
+                .iter()
+                .all(|i| i.outcome == AddOutcome::AlreadyPresent),
+            "{second:?}"
+        );
+        assert_eq!(
+            after_first,
+            snapshot_tree(&root),
+            "a second apply must leave a byte-identical tree"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The `haptics` counterpart of the camera/native-widgets end-to-end
+    /// cases above, and the registry's first exercise of
+    /// `Contribution::ManifestPermission` end to end (`HAPTICS_BASE`'s doc
+    /// comment): a fresh scaffold, `add_plugin(.., "haptics", ..)` applied
+    /// twice. The second apply must report `AlreadyPresent` for both
+    /// contributions and leave a byte-identical tree.
+    #[test]
+    fn haptics_add_plugin_applies_both_contributions_and_reapply_is_idempotent() {
+        let root = scaffold_project("haptics-idempotence");
+
+        let first = add_plugin(&root, "haptics", &[]).unwrap();
+        assert_eq!(first.plugin_id, "haptics");
+        assert_eq!(first.items.len(), 2, "{first:?}");
+        assert!(
+            first.items.iter().all(|i| i.outcome == AddOutcome::Applied),
+            "{first:?}"
+        );
+
+        let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert!(cargo.contains("frust-haptics"), "{cargo}");
+        let manifest =
+            fs::read_to_string(root.join("android/app/src/main/AndroidManifest.xml")).unwrap();
+        assert!(
+            manifest.contains("android.permission.VIBRATE"),
+            "{manifest}"
+        );
+
+        // No Gradle module, no Swift package, no plist key — this entry's
+        // own doc says the Android addition rides a manifest permission
+        // alone (`HAPTICS_BASE`'s comment).
+        let settings = fs::read_to_string(root.join("android/settings.gradle.kts")).unwrap();
+        assert!(
+            !settings.contains("frust-haptics"),
+            "haptics must add no Gradle module include"
+        );
+        let pbxproj =
+            fs::read_to_string(root.join("ios/Runner.xcodeproj/project.pbxproj")).unwrap();
+        assert!(
+            !pbxproj.contains("FrustHaptics"),
+            "haptics must add no Swift package reference"
+        );
+        assert_pbxproj_well_formed(&pbxproj);
+
+        let after_first = snapshot_tree(&root);
+        let second = add_plugin(&root, "haptics", &[]).unwrap();
         assert_eq!(second.items.len(), 2);
         assert!(
             second

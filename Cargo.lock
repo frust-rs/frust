@@ -1538,6 +1538,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-haptics"
+version = "0.1.0"
+dependencies = [
+ "dispatch2",
+ "frust-plugin",
+ "jni 0.22.4",
+ "objc2 0.6.4",
+ "objc2-ui-kit 0.3.2",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "frust-native-widgets"
 version = "0.1.0"
 dependencies = [
