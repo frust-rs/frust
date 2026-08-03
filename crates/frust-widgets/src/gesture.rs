@@ -29,10 +29,21 @@
 //! on every frame it drives, so the very next frame's rebuild drains that
 //! mark, dispatches an `InputEvent::Housekeeping` broadcast carrying a real
 //! `EventCtx`, and this widget fires `on_long_press` from there — **at the
-//! threshold, in wall time**, whether or not the finger ever moves again. Only
-//! the *delivery vehicle* changed (Housekeeping instead of waiting for the
-//! next pointer event); the timer, the slop/cancel rules, and the
-//! fire-exactly-once guarantee below are unchanged.
+//! threshold, in wall time**, whether or not the finger ever moves again. The
+//! timer, the slop/cancel rules, and the fire-exactly-once guarantee below are
+//! unchanged; what the new vehicle *does* change is where the fire's
+//! `EventCtx::request_redraw` goes. A pointer-delivered fire's redraw request
+//! rides the shell's own `RenderRoot::event` call back out; a
+//! Housekeeping-delivered one is dispatched by `RenderRoot::rebuild` itself, so
+//! the repaint reaches the shell only because that method **propagates the
+//! broadcast's `EventOutcome`** — folding `needs_redraw` into the rebuild's
+//! `ChangeFlags::PAINT` (the mobile frame gate's `has_pending_change_flags`
+//! input) and into the deferred frame request the next `paint` surfaces as
+//! `needs_frame` (the desktop `ControlFlow::Wait` loop's wake). That fold is
+//! part of the flush contract, pinned core-side (`frust-core`'s
+//! `RenderRoot::rebuild`, its deferred-callback flush loop and that method's
+//! own tests) — a fire whose consumer mutates nothing the view diff can see
+//! still repaints on both loop styles because of it.
 //!
 //! Two delivery paths race for the same fire, and whichever reaches the widget
 //! first wins — the `Recognizer::Fired` transition makes the other one a
@@ -719,13 +730,30 @@ mod tests {
         // The follow-up frame: every shell runs `rebuild` before `paint`,
         // and `rebuild` is what drains the flush and dispatches the
         // `Housekeeping` broadcast this widget fires from.
-        root.rebuild(&mut long_press_logic, &mut state);
+        let flags = root.rebuild(&mut long_press_logic, &mut state);
         assert_eq!(
             state.long_presses, 1,
             "a stationary hold fires on_long_press at the threshold, in \
              wall time, with no pointer event"
         );
         assert_eq!(state.taps, 0);
+
+        // End-to-end wake: this consumer mutates only a counter the view never
+        // reads, so the re-diff inside `rebuild` sees nothing — the repaint the
+        // fire asked for exists only because `RenderRoot::rebuild` propagates
+        // the Housekeeping dispatch's `EventOutcome` (see the module docs'
+        // "Long-press firing semantics" and `frust-core`'s flush loop).
+        assert!(
+            flags.needs_paint(),
+            "the fire's `request_redraw` folds into the rebuild's flags, which \
+             is what the mobile frame gate reads"
+        );
+        let after = root.paint(&mut sink, ft(620.0));
+        assert!(
+            after.needs_frame,
+            "and surfaces as `needs_frame` for the desktop `Wait` loop — the \
+             widget itself stops requesting frames once it has fired"
+        );
     }
 
     #[test]
