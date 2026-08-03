@@ -1127,6 +1127,23 @@ fn follow_platform_brightness(theme: &mut Theme, override_active: bool, platform
         effective_brightness_for_platform_change(override_active, theme.brightness, platform);
 }
 
+/// Whether `theme` — the APP's currently active theme, already resolved
+/// through the override-wins ladder above — is dark, the pure decision
+/// [`AndroidAppHandle::is_dark_theme`] (`nativeAppIsDark`) exposes to Kotlin.
+///
+/// Extracted as a free function for the same reason as
+/// [`follow_platform_brightness`]/[`theme_after_override_poll`]: constructing
+/// a real [`AndroidAppHandle`] in a unit test needs a live renderer/surface,
+/// which this crate's `#[cfg(target_os = "android")]` gate keeps off the host
+/// entirely — a plain `&Theme -> bool` needs neither and is where this
+/// module's other ladder tests below assert the actual bug this seam fixes:
+/// the result tracks `theme.brightness` (what [`follow_platform_brightness`]/
+/// [`theme_after_override_poll`] resolved the APP to), never a raw device
+/// `Configuration.uiMode` read.
+fn app_is_dark(theme: &Theme) -> bool {
+    theme.brightness == Brightness::Dark
+}
+
 /// The reduced-motion **floor** rule: the OS's accessibility preference
 /// (`Settings.Global.ANIMATOR_DURATION_SCALE == 0`, reported through
 /// `nativeSetReduceMotion`) is OR'd over the active theme's own authored
@@ -1147,6 +1164,41 @@ fn follow_platform_brightness(theme: &mut Theme, override_active: bool, platform
 /// only the two mobile shells carry this.
 fn effective_reduce_motion(authored: bool, os: bool) -> bool {
     authored || os
+}
+
+/// Run one **event pass** under the reactive runtime's root
+/// [`Owner`](frust_reactive::Owner), so `use_context` resolves from inside a
+/// press/key/IME handler exactly as it does from `Component::build`.
+///
+/// Every path that reaches [`AppTree::event`](frust_shell_common::AppTree::event)
+/// — touch dispatch (raw and frame-resampled), `ime_apply`, `ime_action`, and a
+/// queued accessibility action — routes through this. Without it
+/// `Owner::current()` is `None` for the whole pass (`Owner::with` restores the
+/// previous owner when the rebuild wrap returns), so a handler's
+/// `use_context::<Theme>()` silently resolves to `None`.
+///
+/// Three deliberate properties, mirrored in the iOS shell and pinned by the
+/// desktop shell's `event_pass_*` tests (the mobile `app` modules are
+/// target-gated and never host-compiled, so that is where this shape is
+/// testable):
+///
+/// * **The root owner, not a fresh child scope.** A child owner would have to be
+///   created and disposed per input event — including per resampled `Move` —
+///   and a handler's `provide_context` would evaporate on dispose. Sharing costs
+///   one thread-local swap per pass and no allocation.
+/// * **No [`TrackedScope`].** `TrackedScope::track` clears the scope's recorded
+///   sources and dirty flag on entry, so tracking an event pass would unsubscribe
+///   the frame loop from every signal the last rebuild read *and* swallow a
+///   pending wake. A handler that writes a signal still wakes the shell through
+///   the rebuild scope's own subscription, unchanged.
+/// * **Never panics.** Like the rebuild wrap, it degrades to running the pass
+///   unwrapped if the runtime is somehow absent — this path is reached from JNI,
+///   where an unwind is undefined behavior.
+fn under_root_owner<R>(pass: impl FnOnce() -> R) -> R {
+    match ReactiveRuntime::get() {
+        Some(rt) => rt.with_owner(pass),
+        None => pass(),
+    }
 }
 
 /// Assemble an accesskit [`TreeUpdate`] from a [`SemanticsUpdate`].
@@ -1401,9 +1453,15 @@ impl AndroidAppHandle {
             None => return false,
         };
         let performed = !drained.is_empty();
-        for (node_id, action) in drained {
-            let _ = self.app.perform_accessibility_action(node_id.0, action);
-        }
+        let app = &mut self.app;
+        // An accessibility action is routed through synthesized pointer events,
+        // landing in the very same handlers a real tap would — so it needs the
+        // ambient `Owner` just as much (see [`under_root_owner`]).
+        under_root_owner(|| {
+            for (node_id, action) in drained {
+                let _ = app.perform_accessibility_action(node_id.0, action);
+            }
+        });
         performed
     }
 
@@ -1466,6 +1524,39 @@ impl AndroidAppHandle {
         // `theme_or_appearance_changed` input directly.
         self.appearance_dirty = true;
         self.push_theme();
+    }
+
+    /// `nativeAppIsDark`: whether the APP's currently active theme resolves to
+    /// [`Brightness::Dark`] right now — the read half of the appearance seam,
+    /// closing the gap [`Self::set_appearance`] alone left open: that call is
+    /// Kotlin→Rust only (the device's `uiMode` in, nothing back out), so the
+    /// Kotlin system-bar icon contrast (`FrustSurfaceView.
+    /// updateSystemBarsAppearance`) had no way to ask what the app actually
+    /// ended up rendering — it just re-read the same device signal, which
+    /// silently disagrees with `self.theme.brightness` whenever an app-forced
+    /// override (`frust::set_app_theme`) is active (the override-wins rule —
+    /// see [`follow_platform_brightness`]) or a design system's seeded default
+    /// diverges from the platform preference.
+    ///
+    /// Deliberately returns the narrowest possible payload — one `bool`, not a
+    /// serialized `Theme` or a `ColorScheme` snapshot: system-bar icon
+    /// contrast only ever needs light-vs-dark, and every other theme field
+    /// already has its own delivery path (`RenderRoot::set_theme` /
+    /// `provide_context`) that has nothing to do with the JNI boundary.
+    ///
+    /// Reads `self.theme.brightness` directly rather than
+    /// `self.platform_brightness`: the former is the value **actually in
+    /// effect** after the override-wins rule resolves (what the app is really
+    /// showing), the latter is only the device's last report, which is
+    /// exactly the value this seam exists to stop Kotlin from trusting on its
+    /// own. Kotlin polls this once per frame ([`FrustSurfaceView.
+    /// pollAppBrightness`]) in addition to calling it right after
+    /// `nativeSetAppearance` (`surfaceCreated`/`onConfigurationChanged`), so a
+    /// runtime `set_app_theme`/`clear_app_theme` call — which has no device
+    /// `Configuration` event of its own — still reaches the status bar within
+    /// one frame instead of only at the next config change.
+    pub(crate) fn is_dark_theme(&self) -> bool {
+        app_is_dark(&self.theme)
     }
 
     /// `nativeSetReduceMotion`: apply the platform's reduced-motion
@@ -1952,7 +2043,8 @@ impl AndroidAppHandle {
                 position,
                 button: PointerButton::Primary,
             });
-            let _ = self.app.event(&event);
+            let app = &mut self.app;
+            let _ = under_root_owner(|| app.event(&event));
         }
     }
 
@@ -1968,7 +2060,8 @@ impl AndroidAppHandle {
         // Frame-gate latch: an IME edit between frames forces the next
         // frame to run (see `dispatch_touch`).
         self.events_since_last_frame = true;
-        let _ = self.app.ime_apply(state);
+        let app = &mut self.app;
+        let _ = under_root_owner(|| app.ime_apply(state));
     }
 
     /// The IME surface the focused widget published, for the FFI layer to
@@ -1994,7 +2087,8 @@ impl AndroidAppHandle {
         // Frame-gate latch: a soft-keyboard action forces the next
         // frame to run (see `dispatch_touch`).
         self.events_since_last_frame = true;
-        let _ = self.app.event(&event);
+        let app = &mut self.app;
+        let _ = under_root_owner(|| app.event(&event));
     }
 
     /// Run one frame: rebuild → layout → paint → render, mirroring the desktop
@@ -2284,19 +2378,24 @@ impl AndroidAppHandle {
         // tree BEFORE the rebuild, so the rebuild reflects this frame's
         // resampled input. Uses the same `resample_clock` domain the raw samples
         // were stamped in. A no-op when the resampler is disabled (touches were
-        // delivered directly in `dispatch_touch`). `PointerEvent` is `Copy`, so
-        // indexing the scratch buffer avoids holding its borrow across the
-        // `self.app.event` call.
+        // delivered directly in `dispatch_touch`). The scratch buffer and the
+        // tree are borrowed as disjoint fields so the batch can be iterated
+        // in place while dispatching.
         if self.resampler.is_enabled() {
             let now_nanos = self.resample_clock.elapsed().as_nanos() as u64;
             self.pointer_scratch.clear();
             self.resampler
                 .resample(now_nanos, &mut self.pointer_scratch);
-            let n = self.pointer_scratch.len();
-            for i in 0..n {
-                let event = InputEvent::Pointer(self.pointer_scratch[i]);
-                let _ = self.app.event(&event);
-            }
+            // One owner install for the whole drained batch (see
+            // [`under_root_owner`]), so the per-frame cost stays flat regardless
+            // of how many samples landed.
+            let app = &mut self.app;
+            let scratch = &self.pointer_scratch;
+            under_root_owner(|| {
+                for sample in scratch {
+                    let _ = app.event(&InputEvent::Pointer(*sample));
+                }
+            });
         }
 
         // Rebuild under the root `Owner` AND inside the persistent
@@ -2509,8 +2608,8 @@ impl AndroidAppHandle {
 #[cfg(test)]
 mod tests {
     use super::{
-        base_theme, effective_reduce_motion, follow_platform_brightness, theme_after_override_poll,
-        tree_update_from_semantics,
+        app_is_dark, base_theme, effective_reduce_motion, follow_platform_brightness,
+        theme_after_override_poll, tree_update_from_semantics,
     };
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{Node, NodeId, Role, Tree, TreeId};
@@ -2665,6 +2764,59 @@ mod tests {
             || panic!("an unchanged poll must not read the platform brightness"),
         );
         assert_eq!(decided, None);
+    }
+
+    // --- the app-facing brightness getter (`nativeAppIsDark`) ----------------
+    //
+    // FINDINGS #43's bug half: the Kotlin status-bar icon contrast must follow
+    // the APP's theme, not the device's `Configuration.uiMode`. These pin
+    // `app_is_dark` — the pure decision `AndroidAppHandle::is_dark_theme`
+    // (`nativeAppIsDark`) wraps — against the exact scenario that regresses
+    // without this seam: an app-forced override disagreeing with the device.
+
+    #[test]
+    fn app_is_dark_tracks_an_active_override_against_a_disagreeing_device() {
+        // The device reports light (`isDarkMode == false` in Kotlin terms) but
+        // the app forced a dark theme via `frust::set_app_theme` — the exact
+        // "permanently-dark app on a light-mode device" case FINDINGS #43
+        // observed on-device. `app_is_dark` must report the APP's theme (dark),
+        // not the device's (light) — the whole point of this seam existing.
+        let device_reports_light = Brightness::Light;
+        let mut theme = Theme::cupertino_baseline().with_brightness(Brightness::Dark);
+        // Mirrors `AndroidAppHandle::set_appearance`'s call shape: an
+        // in-effect override (`override_active = true`) must not let a
+        // disagreeing platform report flip the resolved brightness.
+        follow_platform_brightness(&mut theme, true, device_reports_light);
+        assert!(
+            app_is_dark(&theme),
+            "an app-forced dark override must stay dark even though the device reports light"
+        );
+    }
+
+    #[test]
+    fn app_is_dark_tracks_an_active_override_the_other_way_too() {
+        // The symmetric case: device reports dark, app forced light — icons
+        // must stay dark-appropriate (light-on-light is invisible), not follow
+        // the device into a light-on-light mismatch.
+        let device_reports_dark = Brightness::Dark;
+        let mut theme = Theme::m3_baseline().with_brightness(Brightness::Light);
+        follow_platform_brightness(&mut theme, true, device_reports_dark);
+        assert!(
+            !app_is_dark(&theme),
+            "an app-forced light override must stay light even though the device reports dark"
+        );
+    }
+
+    #[test]
+    fn app_is_dark_follows_the_device_when_no_override_is_active() {
+        // No `set_app_theme` in effect: the pre-existing (correct) behavior —
+        // the app's own brightness tracks the platform report, so
+        // `app_is_dark` and the device agree, same as before this seam existed.
+        let mut theme = Theme::neutral().with_brightness(Brightness::Light);
+        follow_platform_brightness(&mut theme, false, Brightness::Dark);
+        assert!(app_is_dark(&theme));
+        follow_platform_brightness(&mut theme, false, Brightness::Light);
+        assert!(!app_is_dark(&theme));
     }
 
     // --- the reduced-motion floor (`nativeSetReduceMotion`) ------------------

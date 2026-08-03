@@ -86,7 +86,7 @@ pub mod __jni {
 /// Bind a generated app's `State`/`app_logic` to the fixed Android JNI exports
 /// (a Makepad `app_main!` precedent).
 ///
-/// Stamps out the twenty-one `Java_dev_frust_FrustSurfaceView_native*` symbols
+/// Stamps out the twenty-two `Java_dev_frust_FrustSurfaceView_native*` symbols
 /// the Kotlin `FrustSurfaceView` declares `external`, each delegating to the
 /// non-generic runtime in [`jni_glue`]. `nativeInit` constructs the app's erased
 /// view tree from a state factory and `$app_logic`; the rest operate on the
@@ -99,7 +99,12 @@ pub mod __jni {
 /// preference, and `nativeSetReduceMotion` does the same for the platform's
 /// reduced-motion accessibility preference (a different sensor over the same
 /// transport — `Settings.Global.ANIMATOR_DURATION_SCALE`, not
-/// `Configuration`). `nativeOnDeepLink` delivers a cold-start/running
+/// `Configuration`). `nativeAppIsDark` is the read half of the appearance
+/// seam: it returns whether the app's currently active theme is dark, so
+/// Kotlin's status-bar icon contrast can follow the APP's resolved theme
+/// (which an app-forced `frust::set_app_theme` override may have pinned away
+/// from the platform's own preference) instead of re-reading
+/// `Configuration.uiMode` directly. `nativeOnDeepLink` delivers a cold-start/running
 /// platform deep link into the process-wide deep-link source.
 /// `nativeInitAccessibility` attaches the accesskit Android
 /// adapter to the host view. Two more exports:
@@ -328,6 +333,23 @@ macro_rules! android_app {
             dark: $crate::__jni::jboolean,
         ) {
             $crate::jni_glue::native_set_appearance(handle, dark)
+        }
+
+        /// JNI `nativeAppIsDark`: the read half of the appearance seam —
+        /// return whether the APP's currently active theme is dark right now,
+        /// for Kotlin to drive `updateSystemBarsAppearance` from instead of
+        /// re-reading `Configuration.uiMode` directly (FINDINGS #43: the
+        /// device and the app can legitimately disagree once an app-forced
+        /// `frust::set_app_theme` override or a design system's seeded
+        /// default is in play). Additive: older generated Kotlin that never
+        /// calls this is unaffected.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeAppIsDark<'local>(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+        ) -> $crate::__jni::jboolean {
+            $crate::jni_glue::native_app_is_dark(handle)
         }
 
         /// JNI `nativeSetReduceMotion`: apply the platform's reduced-motion

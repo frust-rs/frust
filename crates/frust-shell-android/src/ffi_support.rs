@@ -157,6 +157,18 @@ pub(crate) fn normalize_ime_indices(
 /// Indices are UTF-16 code units (see [`normalize_ime_indices`]); `caret` is the
 /// logical-pixel caret rectangle `(x, y, width, height)` for future IME candidate
 /// placement, absent when no caret was published.
+///
+/// `content_type` is a **stable, explicitly-encoded wire string** — one of
+/// `"normal"` / `"password"` / `"noSuggestions"` — never a `Debug` rendering of
+/// `frust_core::event::ImeContentType` (that type's `Debug` impl exists on
+/// `ImeState`, not here, but the discipline is the same one that motivated it:
+/// a secret field's classification must never ride on a format that could
+/// silently change shape). [`crate::jni_glue`]'s `content_type_wire` maps the
+/// enum to this string at the one Android-only call site — the same split
+/// [`ImeJsonState`] itself exists for (`frust_core` is Android-gated in this
+/// crate's `Cargo.toml`, so this host-testable type cannot name the enum
+/// directly). This is the same wire shape the iOS bridge's `ime_state_json`
+/// emits under `"contentType"`.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ImeJsonState {
     pub active: bool,
@@ -166,10 +178,12 @@ pub(crate) struct ImeJsonState {
     pub comp_base: i32,
     pub comp_ext: i32,
     pub caret: Option<(f32, f32, f32, f32)>,
+    pub content_type: &'static str,
 }
 
 impl Default for ImeJsonState {
-    /// The "no focused editable" surface: inactive, empty, no selection/composing.
+    /// The "no focused editable" surface: inactive, empty, no selection/composing,
+    /// `"normal"` content type (no hint).
     fn default() -> Self {
         Self {
             active: false,
@@ -179,6 +193,7 @@ impl Default for ImeJsonState {
             comp_base: -1,
             comp_ext: -1,
             caret: None,
+            content_type: "normal",
         }
     }
 }
@@ -224,7 +239,7 @@ fn json_number(v: f32) -> String {
 ///
 /// Shape (indices UTF-16, caret logical px; absent caret ⇒ `null` components):
 /// `{"active":bool,"text":"...","selBase":n,"selExt":n,"compBase":n,`
-/// `"compExt":n,"caretX":f,"caretY":f,"caretW":f,"caretH":f}`.
+/// `"compExt":n,"caretX":f,"caretY":f,"caretW":f,"caretH":f,"contentType":"..."}`.
 pub(crate) fn build_ime_state_json(state: &ImeJsonState) -> String {
     let (caret_x, caret_y, caret_w, caret_h) = match state.caret {
         Some((x, y, w, h)) => (
@@ -241,7 +256,7 @@ pub(crate) fn build_ime_state_json(state: &ImeJsonState) -> String {
         ),
     };
     format!(
-        "{{\"active\":{},\"text\":\"{}\",\"selBase\":{},\"selExt\":{},\"compBase\":{},\"compExt\":{},\"caretX\":{},\"caretY\":{},\"caretW\":{},\"caretH\":{}}}",
+        "{{\"active\":{},\"text\":\"{}\",\"selBase\":{},\"selExt\":{},\"compBase\":{},\"compExt\":{},\"caretX\":{},\"caretY\":{},\"caretW\":{},\"caretH\":{},\"contentType\":\"{}\"}}",
         state.active,
         json_escape(&state.text),
         state.sel_base,
@@ -252,6 +267,7 @@ pub(crate) fn build_ime_state_json(state: &ImeJsonState) -> String {
         caret_y,
         caret_w,
         caret_h,
+        json_escape(state.content_type),
     )
 }
 
@@ -726,10 +742,11 @@ mod tests {
             comp_base: -1,
             comp_ext: -1,
             caret: Some((1.5, 2.0, 0.0, 10.0)),
+            content_type: "normal",
         };
         assert_eq!(
             build_ime_state_json(&state),
-            "{\"active\":true,\"text\":\"hi\",\"selBase\":2,\"selExt\":2,\"compBase\":-1,\"compExt\":-1,\"caretX\":1.5,\"caretY\":2,\"caretW\":0,\"caretH\":10}"
+            "{\"active\":true,\"text\":\"hi\",\"selBase\":2,\"selExt\":2,\"compBase\":-1,\"compExt\":-1,\"caretX\":1.5,\"caretY\":2,\"caretW\":0,\"caretH\":10,\"contentType\":\"normal\"}"
         );
     }
 
@@ -743,10 +760,11 @@ mod tests {
             comp_base: -1,
             comp_ext: -1,
             caret: None,
+            content_type: "normal",
         };
         assert_eq!(
             build_ime_state_json(&state),
-            "{\"active\":false,\"text\":\"a\\\"b\",\"selBase\":-1,\"selExt\":-1,\"compBase\":-1,\"compExt\":-1,\"caretX\":null,\"caretY\":null,\"caretW\":null,\"caretH\":null}"
+            "{\"active\":false,\"text\":\"a\\\"b\",\"selBase\":-1,\"selExt\":-1,\"compBase\":-1,\"compExt\":-1,\"caretX\":null,\"caretY\":null,\"caretW\":null,\"caretH\":null,\"contentType\":\"normal\"}"
         );
     }
 
@@ -754,7 +772,7 @@ mod tests {
     fn build_ime_state_json_default_is_inactive_empty() {
         assert_eq!(
             build_ime_state_json(&ImeJsonState::default()),
-            "{\"active\":false,\"text\":\"\",\"selBase\":-1,\"selExt\":-1,\"compBase\":-1,\"compExt\":-1,\"caretX\":null,\"caretY\":null,\"caretW\":null,\"caretH\":null}"
+            "{\"active\":false,\"text\":\"\",\"selBase\":-1,\"selExt\":-1,\"compBase\":-1,\"compExt\":-1,\"caretX\":null,\"caretY\":null,\"caretW\":null,\"caretH\":null,\"contentType\":\"normal\"}"
         );
     }
 
@@ -771,6 +789,36 @@ mod tests {
             "{json}"
         );
         assert!(!json.contains("NaN") && !json.contains("inf"), "{json}");
+    }
+
+    #[test]
+    fn build_ime_state_json_encodes_content_type_password() {
+        let state = ImeJsonState {
+            content_type: "password",
+            ..ImeJsonState::default()
+        };
+        assert!(
+            build_ime_state_json(&state).contains("\"contentType\":\"password\""),
+            "password content type must ride the JSON DTO explicitly, not via Debug"
+        );
+    }
+
+    #[test]
+    fn build_ime_state_json_encodes_content_type_no_suggestions() {
+        let state = ImeJsonState {
+            content_type: "noSuggestions",
+            ..ImeJsonState::default()
+        };
+        assert!(build_ime_state_json(&state).contains("\"contentType\":\"noSuggestions\""));
+    }
+
+    #[test]
+    fn build_ime_state_json_encodes_content_type_normal() {
+        let state = ImeJsonState {
+            content_type: "normal",
+            ..ImeJsonState::default()
+        };
+        assert!(build_ime_state_json(&state).contains("\"contentType\":\"normal\""));
     }
 
     // -----------------------------------------------------------------

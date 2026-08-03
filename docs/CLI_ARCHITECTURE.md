@@ -24,6 +24,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how CLI relates to the other units.
 | `frust-drive::build_info` | The debug/profile/release + flavor funnel shared by run and build |
 | `frust-drive` Android/iOS pipelines | The four platform pipelines: compile → install → launch/stream |
 | `frust-drive::plugin` | Static plugin registry plus the idempotent project-mutation engine that applies it |
+| `frust-drive::interrupt` | The process-wide SIGINT/SIGTERM/SIGHUP + panic-hook owner; scrubs registered secret files before the process dies |
 
 ## Layer Dependencies
 
@@ -37,9 +38,11 @@ subcommand hands off entirely to `frust-tui`, whose own dependency is on `frust-
 Within `frust-drive`, `anyhow` sits at the CLI/pipeline-core boundary while library-contract errors
 use `thiserror` enums; `serde`/`serde_json`/`toml`/`toml_edit` handle manifest and build-report
 serialization plus format-preserving `Cargo.toml` edits; `minijinja` and `include_dir` embed and
-render the `templates/app/` tree at compile time. `notify` and `ctrlc` are `frust-cli`-only —
-`run --watch`'s filesystem watcher and the Ctrl-C group-kill handler have no reason to live in the
-shared library.
+render the `templates/app/` tree at compile time. `notify` is `frust-cli`-only — `run --watch`'s
+filesystem watcher has no reason to live in the shared library. `ctrlc` is a `frust-drive`
+dependency (`frust-cli` also links it directly for its own `--watch` group-kill handler);
+`frust-drive::interrupt` is the process's single SIGINT/SIGTERM/SIGHUP owner (see Data Flow below),
+and a second `ctrlc::set_handler` anywhere in the same process is a hard error by design.
 
 CLI carries several boundary facts as hard contracts rather than style: `frust-drive`'s
 build/run/scaffold/plugin logic is print-free, threading an `on_line` sink or returning values, so
@@ -61,18 +64,33 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
 - `run`/`build`: CLI args become a `BuildInfo`, which drives `frust-drive`'s Android/iOS pipelines
   (compile → install → launch/stream) through the same `ProcessRunner`; desktop falls back to a
   `cargo run` passthrough with an optional `--watch` loop.
-- `build --release` (Android): `android_build::signing` gates the artifact on release-signing
-  material that actually resolves, not on `android/key.properties`'s existence — that old contract
-  was unsound, since the shipped Gradle template silently debug-signs when the properties file is
-  empty, so a stub file bought a green gate and a debug-signed release. The gate now resolves
-  `storeFile`/`storePassword`/`keyAlias`/`keyPassword` from the properties file named by
+- `build --release` (Android): `android_build::signing` resolves the four release-signing values
+  (`storeFile`/`storePassword`/`keyAlias`/`keyPassword`) **once**, from the properties file named by
   `frust.toml`'s `[signing]` section (default `android/key.properties`, optionally key-prefixed) with
-  `[signing.env]`-named env-var fallbacks (blank counts as absent), then confirms the resolved
-  `storeFile` lands on a real file, tried against three candidate bases. It does not parse
-  `build.gradle.kts` — `[signing]` is only the project's declaration of what its own Gradle reads, so
-  pointing it somewhere Gradle doesn't means the gate believes you. `[signing] external = true` waives
-  the gate for signing Frust cannot inspect (CI, a Gradle signing plugin) and warns on every release
-  build instead of promising a signature it can't verify.
+  `[signing.env]`-named env-var fallbacks (blank counts as absent; the four `ANDROID_*` names apply
+  when `[signing.env]` is absent), confirming the resolved `storeFile` lands on a real file. It does
+  not parse `build.gradle.kts` — instead the pipeline hands Gradle exactly what it resolved:
+  `write_resolved` serialises the same material to `android/.frust-signing.properties` (unprefixed
+  keys, absolute `storeFile`, owner-only), and the generated Gradle template reads that file *first*.
+  Gate and artifact see the identical values by construction, not by a predicate that can drift.
+  The file exists only for the Gradle invocation — a `Drop` guard removes it on return, and
+  `frust-drive::interrupt` (the process's single SIGINT/SIGTERM/SIGHUP + panic-hook owner) scrubs it
+  on a signal or an abort-panic release build too, so the plaintext passwords never outlive the build
+  that needed them.
+  **Backstop:** the by-construction guarantee has one precondition nothing can check up front — that
+  the project's `build.gradle.kts` actually contains the generated-file read. A project whose
+  template predates it (there is no `frust upgrade`) falls through to Gradle's debug signing config
+  and exits 0. Both release pipelines (`android_build::build_with_env` and
+  `android_run::prepare_session`, so `frust run --release` refuses before install) grep the captured
+  Gradle output of a *successful* build for the template's fallback marker
+  (`FRUST-SIGNING-FALLBACK`, or the legacy prose `release build is debug-signed` that every
+  template Frust has shipped carries, so the installed base is covered too) and hard-fail — no
+  `build.gradle.kts` parsing, keyed only on what Gradle actually reported it did. Renaming the
+  template's warning without moving the matcher breaks this contract.
+  `[signing] external = true` waives both the gate and the backstop for signing Frust cannot inspect
+  (CI, a Gradle signing plugin) and warns on every release build instead of promising a signature it
+  can't verify. `key.properties` + the four `ANDROID_*` variables remain as a fallback for a hand-run
+  `./gradlew` (e.g. from Android Studio) — that path carries no Frust promise.
 - `tui`: `Command::Tui` hands off entirely to `frust-tui`'s own async runtime (see
   [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)).
 - `plugin add`: `frust-drive::plugin::add_plugin` looks up a `PluginSpec` and applies its
@@ -90,4 +108,5 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
 | `TemplateContext` | Render/path substitution variables for `frust create`'s scaffold |
 | `PluginSpec` / `Contribution` | A plugin registry entry and the idempotent project edits it applies |
 | `Manifest` / `SigningSection` / `SigningEnv` | Parsed `frust.toml` shape (`[app]`/`[android]`/`[ios]`/`[signing]`/`[signing.env]`) shared by every pipeline that reads the manifest |
+| `ResolvedSigning` / `GeneratedProperties` | The signing gate's one resolved-material value, and the owner-only generated-properties guard that writes/deletes it around a Gradle invocation |
 | `Cli` / `Command` | The `clap`-derived argument surface for the `frust` binary |

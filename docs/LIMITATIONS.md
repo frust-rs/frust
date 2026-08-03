@@ -171,3 +171,134 @@ was chosen over silently guessing at a wider scheme.
 
 **Evidence**: flagged during the camera plugin's implementation and review;
 documented as a known constraint, not a regression.
+
+---
+
+### `ime-ios-content-type-unverified` — iOS secure-entry IME path is compile- and device-unverified
+
+**Observed**: `FrustViewController.swift`'s IME reconcile path — the
+content-type application (FINDINGS #31: suppressing the QuickType
+suggestion bar and keyboard learning on a `"password"`-classified field),
+the **mirror re-seed/reconcile** that keeps `FrustView.mirror` from carrying
+a previous field's text across a focus move (`syncImeFocus`'s `seedMirror`
+on the content-type branch and `FrustView.reconcileMirror(to:)` on the
+steady-active branch), and the **per-frame `syncImeFocus()` call from
+`renderFrame`** that makes non-touch focus moves (Return-to-next-field,
+programmatic focus) reach any of it — has never been compiled (no macOS
+host in this project's CI/agent loop) or run on an iOS device or simulator.
+`cargo` cannot compile Swift; only `xcodebuild -scheme FrustEmbedding
+-destination 'generic/platform=iOS' build` validates it, and that has not
+been run since this path was introduced or since any of these fixes landed.
+
+**Also covers (fixes F3/F3b, review-fix-3)**: `syncImeFocus`'s per-frame
+`becomeFirstResponder()` retry is now **bounded** (`imeFocusSatisfied`)
+instead of fighting an intentional UIKit-originated resign (user swipe-
+dismiss, a sibling native control taking first responder) forever, because
+nothing on the Swift side can observe *why* first responder was resigned.
+A user touch on the Frust surface (`onTouch`, user-initiated) re-arms the
+bound — **but only while the surface is not already first responder**
+(fix F3c). That is what lets a user bring back a keyboard they dismissed
+themselves by re-tapping the field, since re-tapping an already-active field
+changes neither Rust's `active` nor `contentType` signal. The
+not-already-first-responder half is load-bearing: `imeFocusSatisfied` is set
+back to `true` only in the `!isFirstResponder` branch, so re-arming during a
+touch inside a *still-focused* field would leave it dangling at `false` and
+reassert the keyboard on the next UIKit-originated dismissal — reopening the
+very pop-back the bound exists to prevent. A touch inside a Mode B hosted slot never reaches `onTouch`
+(`FrustView.hitTest` returns `nil` there), so a sibling native control
+retaining first responder is unaffected by the per-frame tick. This
+mechanism is Swift-only and is exactly as compile- and device-unverified as
+the rest of this entry.
+
+**Residual limitation, accepted (not a bug to fix here)** — and note F3c's
+gating does **not** remove it: when a Mode B sibling holds first responder,
+`forgeView.isFirstResponder` is already `false`, so the
+not-already-first-responder condition is satisfied and a touch **elsewhere**
+on the Frust surface (e.g. scrolling non-editable content, outside the
+sibling's interactive slot) still re-arms the bound. Rust has no way to learn the sibling took first
+responder, so it still reports its own field as active, and the reconciler
+will attempt to take focus back. This is inherent to the "any surface touch
+re-arms" design, not an oversight; it is strictly better than the unbounded
+per-frame fight it replaces, and it only manifests when the Mode B
+native-widgets path is in play.
+
+**Applies to**: iOS only — the entire `FrustEmbedding` IME surface
+(`FrustViewController.swift`, `FrustView.swift`, `FrustTextInput.swift`).
+Android's mirror path (`FrustSurfaceView.pollImeAfterDispatch` +
+`FrustInputConnection.reconcileTo`, the model these fixes follow
+property-for-property) is likewise device-unverified per its own review
+record, but is a materially different code path (`EditorInfo`/
+`restartInput`/`Editable` vs. UIKit `UITextInputTraits`/resign-become/
+`NSMutableString`) and this entry makes no claim about it. One asymmetry is
+worth stating: Android's `applyImeContentType` inputType/imeOptions flags
+(fix F5) were Kotlin-compiled clean this batch (`compileDebugKotlin`,
+32/32 tasks) — the first Kotlin change in three batches to clear that
+gate — while the iOS Swift side has now gone four batches running without
+compiling at all. Compile-verified is not device-verified, so F5 narrows
+FINDINGS #31's Android gap without closing the finding.
+
+**API-level note — resolved by raising the floor to 26.**
+`EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING` was added in **API 26**. While
+frust's floor was `minSdk = 24` the keyboard-learning suppression was a
+*silent* no-op on API 24 and 25 — it is an `imeOptions` bit rather than a
+method call, so the constant inlines at compile time, an older IME simply
+ignores the unknown bit, and neither a crash nor a `NewApi` lint would have
+surfaced it. **Every frust Gradle module now pins `minSdk = 26`**, so the flag
+is unconditionally honoured and the Android contract table holds at the floor
+with no API caveat. Do not lower the floor below 26 without re-introducing
+this caveat.
+
+**Why not closed**: FINDINGS #31's only proof gate is on-device
+verification, and that gate is currently blocked on device access. **The
+leak is therefore not confirmed closed on any platform** — the Rust-side
+wire encoding (`content_type_wire`) has unit coverage, but nothing has
+exercised the UIKit trait application, the resign/become keyboard cycle,
+the mirror re-seed, the per-frame reconcile, or the bounded-retry/touch-
+re-arm mechanism above against a real (or simulated) keyboard. The
+per-frame reconcile in particular has an unmeasured cost (one
+`frust_ime_state_json` FFI call plus one `JSONSerialization` parse per
+`CADisplayLink` tick, matching Android's per-frame `nativeImeState` budget)
+and an unobserved interaction with UIKit autocorrect/composition, both
+reasoned about but not instrumented. Treat the current implementation as
+the best-reasoned fix available, not as a verified fix.
+
+**Device-gate observables, for whoever runs it** — five separate runs:
+1. *Traits across a focus move (#31).* Focus a `"normal"` field, type a few
+   characters, then move focus directly to an obscured (`"password"`)
+   field **without dismissing the keyboard in between**. Confirm (a) no
+   QuickType suggestion bar appears while typing into the second field, and
+   (b) nothing typed there is echoed anywhere (suggestion strip, autofill
+   preview).
+2. *Mirror staleness (N2).* Same two-field form, both fields **normal** so
+   no content-type change fires. Type `hello` into A, move focus to empty
+   field B without dismissing the keyboard, type one character. B must
+   contain exactly that one character — **not** `hello` + the character.
+   Repeat with the second field obscured to cover the content-type branch's
+   re-seed ordering.
+3. *Non-touch trigger (N4).* Same as (1) and (2), but move focus with the
+   keyboard's **Return/Next key** rather than a tap, so no touch reaches the
+   surface. Both observables must still hold; before this fix
+   `syncImeFocus` never re-ran on that path.
+4. *Bounded retry + touch re-arm (F3/F3b).* Focus field A, let the keyboard
+   appear, then swipe-dismiss it — the keyboard must **stay down** (no
+   per-frame pop-back). Tap field A again — the keyboard must **reappear**.
+   With a Mode B sibling native control focused, confirm the per-frame tick
+   does not steal focus back from it. Dismiss field A by swipe, tap a
+   *different non-editable* part of the surface, then tap field A again — it
+   must still recover (exercises the clear-on-touch design point, and its
+   residual limitation above).
+5. *Touch inside an already-focused field, then dismiss (F3c).* Focus field
+   A, then **tap or drag inside A while it still holds the keyboard** —
+   caret repositioning or a selection drag. Now swipe-dismiss the keyboard
+   with **no further touch on the Frust surface**. It must **stay down**.
+   This is a distinct run from (4): the touch there happens *after* the
+   dismissal, this one *before* it. An earlier revision re-armed the bound
+   on any touch, including one that never resigned the responder, which left
+   `imeFocusSatisfied` dangling and reasserted the keyboard on the next tick
+   — reopening (4)'s own guarantee for the most ordinary interaction there
+   is. The re-arm is now gated on `!isFirstResponder`, but **that gating is
+   reasoned, not compiled or measured** — this run is what would catch a
+   regression.
+
+**Evidence**: none yet — flagged during these fixes' implementation and
+review; no device or simulator run has occurred.

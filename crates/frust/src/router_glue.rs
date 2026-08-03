@@ -12,6 +12,18 @@
 //! we choose deep-link-wins because a cold-start link represents where the OS
 //! actually opened the app, which should never lose to a hardcoded default).
 //!
+//! # Path navigation (the `RouteNavigator` pump)
+//!
+//! [`RouterDeepLinks::track`] also **pumps the router's
+//! [`RouteNavigator`]** — the `Send + Sync` queue a screen reaches through
+//! `provide_context` (see `frust_widgets::nav::route`'s module docs for why the
+//! router itself cannot ride context). This crate is where the two halves meet
+//! for the same reason as the deep-link half: [`RouterDeepLinks::new`] installs
+//! `ReactiveRuntime::wake` as the queue's waker, so an off-thread request
+//! schedules a frame, and `track()`'s `pump()` applies it before the app's
+//! `build` returns — an app already calling `track()` every build gets path
+//! navigation with **no new app code**.
+//!
 //! # Dedupe
 //!
 //! [`RouterDeepLinks::track`] is meant to be called from every
@@ -26,9 +38,10 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
-use frust_reactive::{DeepLink, deep_links};
-use frust_widgets::Router;
+use frust_reactive::{DeepLink, ReactiveRuntime, deep_links};
+use frust_widgets::{RouteNavigator, Router};
 use reactive_graph::traits::Get;
 
 /// Normalize a raw deep-link source string into a router-ready path.
@@ -111,6 +124,17 @@ impl<State: 'static> RouterDeepLinks<State> {
     /// `Component::init`) — calling it again re-navigates to the start
     /// location, discarding whatever the app already navigated to since.
     pub fn new(router: Router<State>, initial_location: &str) -> Self {
+        // The router's request queue is reactive-free by construction
+        // (`frust-widgets` names no `reactive_graph` symbol), so the facade
+        // installs the wake callback: a request queued from a background
+        // thread, or from an event handler after this frame's rebuild, must
+        // still schedule a frame for `track()`'s pump to run in.
+        router.route_navigator().set_waker(Arc::new(|| {
+            if let Some(runtime) = ReactiveRuntime::get() {
+                runtime.wake();
+            }
+        }));
+
         let links = deep_links();
         let start = links
             .initial
@@ -128,13 +152,22 @@ impl<State: 'static> RouterDeepLinks<State> {
         Self { router, consumed }
     }
 
-    /// Track the live deep-link signal and navigate the router to any link
-    /// that hasn't been consumed yet. Call from every `Component::build` —
-    /// dedup'd by a consumed marker (see the module docs), so a rebuild
-    /// re-run that observes the same already-handled link is a no-op: no
-    /// re-navigation, no panic even on a malformed/unmatched link (routed to
-    /// the router's error page like any other unmatched location).
+    /// Apply everything queued on the router's
+    /// [`RouteNavigator`](Self::route_navigator), then track the live
+    /// deep-link signal and navigate the router to any link that hasn't been
+    /// consumed yet. Call from every `Component::build` — the pump is
+    /// idempotent on an empty queue, and the link half is dedup'd by a consumed
+    /// marker (see the module docs), so a rebuild re-run that observes the same
+    /// already-handled link is a no-op: no re-navigation, no panic even on a
+    /// malformed/unmatched link (routed to the router's error page like any
+    /// other unmatched location).
+    ///
+    /// Pumping first is what makes a queued request **zero-frame**: `build`
+    /// runs before the navigator's own `rebuild`, so the controller ops this
+    /// enqueues are drained in that very same reconcile pass.
     pub fn track(&self) {
+        self.router.pump();
+
         let Some(link) = deep_links().latest.get() else {
             return;
         };
@@ -151,6 +184,21 @@ impl<State: 'static> RouterDeepLinks<State> {
     /// methods directly.
     pub fn router(&self) -> &Router<State> {
         &self.router
+    }
+
+    /// The router's [`RouteNavigator`], waker already installed. `Send + Sync`
+    /// and cheap to clone, so a `Component::init` can publish it once
+    /// (`provide_context(state.nav.route_navigator())`) and any screen — or
+    /// background task — navigates by path without holding the router:
+    ///
+    /// ```ignore
+    /// let nav = use_context::<RouteNavigator>().expect("provided at the root");
+    /// button("Open", move |_| nav.push("/terminal?session=abc"));
+    /// ```
+    ///
+    /// Requests land on the next [`track`](Self::track).
+    pub fn route_navigator(&self) -> RouteNavigator {
+        self.router.route_navigator()
     }
 }
 
@@ -390,6 +438,54 @@ mod tests {
         // page — no panic.
         push_deep_link("/does/not/exist");
         assert_eq!(warm.track_and_paint(), ERROR);
+
+        // Criterion 4 (the `RouteNavigator` pump): a request queued the way a
+        // screen's event handler would — through the context-safe handle, with
+        // no router in sight — is applied by the very next `track()`, with no
+        // new deep link involved. Asserted inside this same function for the
+        // same process-wide-slot reason as the criteria above: `track()` reads
+        // `latest`, whose value is only known here.
+        warm.links.route_navigator().go("/settings");
+        assert_eq!(
+            warm.track_and_paint(),
+            SETTINGS,
+            "track() must pump the RouteNavigator queue"
+        );
+
+        // ...and pumping an empty queue on every subsequent build is inert.
+        warm.links.router().go("/");
+        warm.rebuild();
+        assert_eq!(warm.track_and_paint(), HOME);
+    }
+
+    /// The #29 acceptance criterion: a [`RouteNavigator`] round-trips through
+    /// `provide_context`/`use_context` (which require `Send + Sync + 'static`)
+    /// and the recovered clone drives the *same* queue. Deliberately does not
+    /// build a [`RouterDeepLinks`], so it never touches the process-wide
+    /// deep-link slot the test above owns.
+    #[test]
+    fn route_navigator_round_trips_through_context() {
+        use frust_reactive::{provide_context, use_context};
+
+        let rt = ReactiveRuntime::init(Arc::new(|| {}));
+        let router = router_with_error_leaf();
+        let nav = router.route_navigator();
+
+        let recovered = rt.with_owner(|| {
+            provide_context(nav.clone());
+            use_context::<RouteNavigator>()
+        });
+        let recovered = recovered.expect("a RouteNavigator must survive provide_context");
+
+        // Same queue, not a detached copy: what the recovered handle asks for is
+        // what the router pumps.
+        recovered.push("/settings");
+        router.pump();
+        assert_eq!(
+            nav.location().map(|loc| loc.path),
+            Some("/settings".to_string()),
+            "the context-recovered handle drove the original router"
+        );
     }
 
     // --- `normalize_deep_link`: one rule

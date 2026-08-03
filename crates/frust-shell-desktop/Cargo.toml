@@ -42,6 +42,17 @@ anyhow = { workspace = true }
 # is already pulled in via `frust-shell-common`).
 log = { workspace = true }
 
+# DEV-ONLY: the shipped crate reaches the reactive substrate exclusively through
+# `frust-reactive` (see docs/ARCHITECTURE.md's Layer Dependencies) — this entry
+# is a dev-dependency ONLY and never enters a consumer's dependency graph. It
+# exists for the event-dispatch owner-wrap regression test, which needs
+# `reactive_graph`'s `Get`/`Set` signal traits (`frust-reactive` re-exports
+# `RwSignal` but not the traits) to prove the wrap installs an `Owner` and NOT a
+# `TrackedScope`. Same shape and rationale as `frust-shell-common`'s dev-only
+# reactive entries.
+[dev-dependencies]
+reactive_graph = { workspace = true }
+
 [features]
 # Opt-in perf-trace instrumentation: re-exports frust-shell-common/perf-trace
 # and frust-render/perf-trace. Empty by default (opt-in survives cargo's additive

@@ -155,6 +155,7 @@ fn cleared_ime_state() -> ImeState {
             composing_extent: -1,
         },
         caret: None,
+        content_type: Default::default(),
     }
 }
 

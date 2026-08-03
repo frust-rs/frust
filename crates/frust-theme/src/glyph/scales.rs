@@ -133,12 +133,11 @@ impl TypeScale {
 
 impl ShapeScale {
     /// The Glyph shape scale (retrieved 2026-07-21): the
-    /// documented **4 / 6 / 10 / 16 / full** radius scale (`--radius-xs`
-    /// canonical at 4, not the 3px authoring artifact; `--radius-full` = 999px
-    /// → [`f64::INFINITY`]). Glyph's four finite radii fill the low/mid slots;
-    /// every slot above `large` clamps to 16 (Glyph tops its finite scale at
-    /// 16 and reaches for `full`/pill shapes rather than a larger fixed
-    /// radius — documented mapping, not an extrapolation).
+    /// documented **4 / 6 / 10 / 16 / 22 / full** radius scale (`--radius-xs`
+    /// canonical at 4, not the 3px authoring artifact; `--radius-xl` = 22px;
+    /// `--radius-full` = 999px → [`f64::INFINITY`]). Glyph's five finite radii
+    /// fill the low/mid slots; every slot above `extra_large_increased` clamps
+    /// to 22 (documented mapping, not an extrapolation).
     pub const fn glyph() -> Self {
         Self {
             none: 0.0,
@@ -146,10 +145,10 @@ impl ShapeScale {
             small: 6.0,       // --radius-sm
             medium: 10.0,     // --radius-md
             large: 16.0,      // --radius-lg
-            large_increased: 16.0, // Glyph has no value between 16 and full
-            extra_large: 16.0,
-            extra_large_increased: 16.0,
-            extra_extra_large: 16.0,
+            large_increased: 22.0, // --radius-xl (terminal card)
+            extra_large: 22.0,
+            extra_large_increased: 22.0,
+            extra_extra_large: 22.0,
             full: f64::INFINITY, // --radius-full 999px
         }
     }
@@ -421,9 +420,11 @@ mod tests {
         assert_eq!(s.small, 6.0);
         assert_eq!(s.medium, 10.0);
         assert_eq!(s.large, 16.0);
-        // Everything above `large` clamps to 16 (documented mapping).
-        assert_eq!(s.large_increased, 16.0);
-        assert_eq!(s.extra_extra_large, 16.0);
+        // --radius-xl (terminal card).
+        assert_eq!(s.large_increased, 22.0);
+        // Everything above `large_increased` clamps to 22 (documented mapping).
+        assert_eq!(s.extra_large, 22.0);
+        assert_eq!(s.extra_extra_large, 22.0);
         assert!(s.full.is_infinite());
     }
 

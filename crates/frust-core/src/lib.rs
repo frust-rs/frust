@@ -54,8 +54,9 @@ pub use anim::{
 pub use app::{Orientation, RenderRoot, WindowMetrics};
 pub use component::{Component, ComponentView, ComponentWidget, component};
 pub use event::{
-    EditingState, EventCtx, EventOutcome, EventResult, ImeEvent, ImeState, InputEvent, Key,
-    KeyEvent, Modifiers, NamedKey, PointerButton, PointerEvent, PointerPhase, ScrollDelta,
+    EditingState, EventCtx, EventOutcome, EventResult, ImeContentType, ImeEvent, ImeState,
+    InputEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton, PointerEvent, PointerPhase,
+    ScrollDelta,
 };
 pub use input::{
     FLING_DECAY, FLING_STOP, MOUSE_SLOP, TOUCH_SLOP, VELOCITY_WINDOW_MS, VelocityTracker,

@@ -58,6 +58,15 @@ signal-poll seam race-free without a lock.
   frames.
 - iOS: a CADisplayLink tick consults the same `frame_gate`, then unconditionally rebuilds/lays
   out/paints/presents, with optional present-sync gating against platform-view geometry.
+- **Event pass under root owner:** all three shells route every input event through `AppTree::event`
+  inside a reactive `Owner.with` wrap, so the event handler has access to root-level contexts
+  (`Theme`, `WindowMetrics`, root-component `init`-installed values). Desktop names this wrapper
+  `event_under_owner`, Android and iOS name it `under_root_owner` (with a panic-safe degrade for
+  missing runtime). **Architectural reason:** `frust-reactive` is a leaf crate and cannot call
+  `with_owner` itself, so shells must do it. **Residual limit:** the event pass is deliberately
+  **not tracked** — entering `TrackedScope::track` resets dependencies and clears the dirty flag,
+  so tracking dispatch would unsubscribe the frame loop from pending wakes and silently drop
+  subsequent signals.
 - Platform-view embedding: paint-time view frames feed the `platform_view` differ, which exposes a
   command backlog each shell's FFI layer polls and applies to the native view hierarchy, frame-paired
   to keep geometry in sync.
@@ -80,6 +89,47 @@ signal-poll seam race-free without a lock.
   routing through it would latch `theme_override_active` and pin brightness, so each mobile shell
   instead edits `self.theme.motion.reduce_motion` directly, calls `push_theme()`, and sets
   `appearance_dirty` so the frame gate cannot skip the carrying tick.
+- **Android appearance bidirectionality:** Kotlin can now read the app's current resolved theme
+  brightness via `nativeAppIsDark` JNI, replacing re-derivation from `Configuration.uiMode`. Called
+  after every `nativeSetAppearance` (when `Configuration` changes) **and** polled once per frame to
+  catch runtime `frust::set_app_theme`/`clear_app_theme` calls that have no platform event of their
+  own. This closes the race where theme changes pushed from Rust reached the status bar only after
+  the next platform event.
+- **IME content-type:** each focused widget publishes `ImeState::content_type` (Normal/Password/
+  NoSuggestions), and the shells destructure the state field-by-field into platform payloads per
+  their capabilities and security posture:
+  - **Android:** maps to `EditorInfo.inputType` (`TYPE_CLASS_TEXT`; Password and NoSuggestions both
+    add `TYPE_TEXT_FLAG_NO_SUGGESTIONS`, Password additionally adds `TYPE_TEXT_VARIATION_PASSWORD`)
+    and `EditorInfo.imeOptions` (`IME_FLAG_NO_PERSONALIZED_LEARNING` for both Password and
+    NoSuggestions), blocking the suggestion strip and personalized learning on both — each branch
+    was previously missing one of its two required flags (fix F5), and `applyImeContentType` is now
+    the first Kotlin change in three batches to have cleared `compileDebugKotlin`. Handles
+    content-type changes on a **steady-focused** field (field is active/focused but changes from
+    Normal→Password mid-interaction) via `restartInput`, because Android never re-queries
+    `EditorInfo` for a bound `InputConnection` — the hint must be reestablished by forcing a new
+    connection.
+  - **iOS:** JSON-serializes the content type alongside editing state for Swift to apply.
+    `syncImeFocus` matches two of Android's three properties: the **per-frame poll** (driven from
+    the `CADisplayLink` tick via `renderFrame`, the `doFrame` analogue) and the **divergence-guarded
+    reconcile**, plus re-seeds the `UITextInput` mirror on content-type change and the resign/become
+    cycle — a shared responder means a field switch has no focus edge, so both traits and mirror text
+    must reconcile, not just apply once on focus. It has **no analogue of Android's `onKeyDown` call
+    site**: iOS has no key event for the soft keyboard's Return, which arrives as `insertText("\n")`
+    through `UITextInput` instead. The per-frame `becomeFirstResponder()` retry is now **bounded**
+    (`imeFocusSatisfied`, fix F3) rather than fighting an intentional UIKit-originated resign every
+    frame forever, since nothing on the Swift side can observe *why* first responder was resigned. A
+    user touch on the Frust surface re-arms the bound *while the surface is not already first
+    responder* (fixes F3b/F3c) — a self-dismissed field can be recovered by re-tapping it, while a
+    touch inside a still-focused field cannot leave the bound dangling — but a touch landing inside a Mode B hosted slot never
+    reaches this path (`FrustView.hitTest` returns `nil` there), so a sibling native control holding
+    first responder is unaffected by the per-frame tick. **Swift side remains compile- and
+    device-unverified on the build host** (Linux; even a Mac needs `xcodebuild`, and
+    `aarch64-apple-ios` is not installed here) — see `docs/LIMITATIONS.md`
+    `ime-ios-content-type-unverified`, which also records a residual gap in the touch-re-arm design.
+  - **Desktop:** forwards to winit's `Window::set_ime_purpose(ImePurpose)`, which is **documented
+    unsupported on all platforms except Wayland, and a cosmetic hint even there** (no secure-text
+    entry). Password is the only distinction (Password vs Normal); NoSuggestions has no
+    corresponding winit category and maps to Normal.
 - Surface-mode resolution: each mobile shell resolves the host's declared translucency mode against
   actual surface capabilities at configure time and republishes the resolved verdict every frame.
 - A set of additive, off-by-default kill-switch env vars (`FRUST_NO_RENDER_THREAD`,

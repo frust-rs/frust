@@ -5,10 +5,18 @@
 //!
 //! # No `setMin`: the range is mapped in Rust
 //!
-//! `SeekBar.setMin` needs API 26 and this plugin's floor is 24 (every frust
-//! Gradle module pins `minSdk = 24`), so calling it would be a
-//! `NoSuchMethodError` on two supported API levels. The control therefore maps
-//! the app's `[min, max]` onto the platform's `[0, max - min]`: the plan emits
+//! `SeekBar.setMin` needs API 26. This mapping was written when frust's floor
+//! was `minSdk = 24`, where calling it would have been a `NoSuchMethodError`
+//! on two supported API levels. **The floor is now 26, so `setMin` would be
+//! available** — the mapping is retained deliberately rather than because the
+//! platform still forces it: it is correct, it is covered by tests, and
+//! switching to `setMin` would change the wire plan (`Setter::Max` stops being
+//! a span, `Setter::Progress` stops being an offset, and `decode_event` stops
+//! adding `min` back), which is a behavioural refactor with no user-visible
+//! gain. Revisit only with a reason beyond tidiness.
+//!
+//! The control maps the app's `[min, max]` onto the platform's
+//! `[0, max - min]`: the plan emits
 //! [`Setter::Max`] as the *span* and [`Setter::Progress`] as the *offset*
 //! value, and [`decode_event`]'s event decoding adds `min` back on the way
 //! out.

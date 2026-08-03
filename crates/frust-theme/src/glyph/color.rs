@@ -299,6 +299,9 @@ pub struct GlyphInk {
     /// Terminal prompt marker and blinking caret — the amber accent
     /// (`.term-prompt`/`.term-caret` `#ffb627`).
     pub terminal_prompt: Color,
+    /// Terminal card/panel outline and status-row button border
+    /// (`--term-border` rgba(255,238,210,0.07) flattened over `#1c1912`).
+    pub terminal_border: Color,
     /// Tooltip bubble background (`.tooltip-bubble` `#2a2519`).
     pub tooltip_bg: Color,
     /// Tooltip text (`.tooltip-bubble` color `#f2ead9` — the dark-mode fg).
@@ -316,6 +319,7 @@ impl GlyphInk {
             terminal_out: Color::from_rgb8(0xa8, 0x9e, 0x85),
             terminal_comment: Color::from_rgb8(0x6b, 0x62, 0x52),
             terminal_prompt: D_AMBER, // #ffb627
+            terminal_border: Color::from_rgb8(0x2c, 0x28, 0x1f),
             tooltip_bg: Color::from_rgb8(0x2a, 0x25, 0x19),
             tooltip_fg: D_FG, // #f2ead9
         }
@@ -621,8 +625,18 @@ mod tests {
         assert_eq!(ink.terminal_out, Color::from_rgb8(0xa8, 0x9e, 0x85));
         assert_eq!(ink.terminal_comment, Color::from_rgb8(0x6b, 0x62, 0x52));
         assert_eq!(ink.terminal_prompt, Color::from_rgb8(0xff, 0xb6, 0x27));
+        assert_eq!(ink.terminal_border, Color::from_rgb8(0x2c, 0x28, 0x1f));
         assert_eq!(ink.tooltip_bg, Color::from_rgb8(0x2a, 0x25, 0x19));
         assert_eq!(ink.tooltip_fg, Color::from_rgb8(0xf2, 0xea, 0xd9));
+    }
+
+    #[test]
+    fn glyph_ink_terminal_border_flattens_from_source_alpha() {
+        let ink = GlyphInk::default_ink();
+        let bg = Color::from_rgb8(0x1c, 0x19, 0x12);
+        // --term-border rgba(255, 238, 210, 0.07) flattened over terminal_bg.
+        let border_color = Color::from_rgb8(0xff, 0xee, 0xd2);
+        assert_close(ink.terminal_border, flatten(border_color, bg, 0.07));
     }
 
     #[test]

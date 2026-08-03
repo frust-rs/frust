@@ -1,6 +1,6 @@
 //! [`badge`]/[`BadgeView`]: a small, lowercase, pill-shaped status indicator —
 //! "connected"/"degraded"/"offline"/"read-only"/"v0.44.1" in the Glyph
-//! design system's `.badge*` rules (retrieved 2026-07-21) — with five
+//! design system's `.badge*` rules (retrieved 2026-07-21) — with six
 //! semantic variants and an optional leading dot.
 //!
 //! # Color resolution (documented three-tier precedence)
@@ -80,10 +80,12 @@ const BADGE_FONT_SIZE: f32 = 10.5;
 /// Label letter-spacing, in logical px (`.badge{letter-spacing:0.03em}` ==
 /// `0.03 * 10.5`).
 const BADGE_LETTER_SPACING: f32 = BADGE_FONT_SIZE * 0.03;
-/// Neutral-variant border width, in logical px (`.badge{border:1px solid
-/// transparent}` — only the neutral variant supplies a non-transparent
-/// `border-color`).
+/// Border width, in logical px (`.badge{border:1px solid transparent}` —
+/// neutral and warning variants supply non-transparent `border-color`).
 const BADGE_BORDER_WIDTH: f64 = 1.0;
+/// Border alpha for warning and info variants (following alert.rs's
+/// `ALERT_BORDER_ALPHA` precedent).
+const BADGE_BORDER_ALPHA: f32 = 0.3;
 /// The Accent variant's wash alpha (`--amber-faint` == `rgba(255,182,39,0.12)`,
 /// both Glyph brightnesses — see the module docs).
 const BADGE_ACCENT_WASH_ALPHA: f32 = 0.12;
@@ -94,8 +96,11 @@ const BADGE_SUCCESS_FG: Color = Color::from_rgb8(0x5f, 0xd8, 0x8f);
 const BADGE_SUCCESS_BG: Color = Color::from_rgb8(0x1f, 0x31, 0x30);
 const BADGE_WARNING_FG: Color = Color::from_rgb8(0xf5, 0xc8, 0x60);
 const BADGE_WARNING_BG: Color = Color::from_rgb8(0x31, 0x2f, 0x2a);
+const BADGE_WARNING_BORDER: Color = Color::from_rgb8(0xf5, 0xc8, 0x60);
 const BADGE_ERROR_FG: Color = Color::from_rgb8(0xff, 0x6b, 0x6b);
 const BADGE_ERROR_BG: Color = Color::from_rgb8(0x32, 0x24, 0x2c);
+const BADGE_INFO_FG: Color = Color::from_rgb8(0x5e, 0xc8, 0xd8);
+const BADGE_INFO_BG: Color = Color::from_rgb8(0x20, 0x32, 0x3c);
 const BADGE_NEUTRAL_FG: Color = Color::from_rgb8(0xa3, 0x9c, 0x88);
 const BADGE_NEUTRAL_BG: Color = Color::from_rgb8(0x1e, 0x23, 0x30);
 const BADGE_NEUTRAL_BORDER: Color = Color::from_rgb8(0x3e, 0x3f, 0x44);
@@ -118,6 +123,8 @@ pub enum BadgeVariant {
     Warning,
     /// A faint error-hued wash (e.g. "offline"/"stopped").
     Error,
+    /// A faint info-hued wash (cyan, e.g. "active"/"processing").
+    Info,
     /// A neutral raised-surface wash with a hairline border (e.g.
     /// "read-only"/"idle").
     Neutral,
@@ -290,11 +297,30 @@ fn resolve_badge_colors(
         BadgeVariant::Warning => match theme.extension::<StatusPalette>() {
             Some(status) => {
                 let c = status.colors(theme.brightness);
-                (c.warning_container, c.warning, None)
+                (
+                    c.warning_container,
+                    c.warning,
+                    Some(with_alpha(c.warning, BADGE_BORDER_ALPHA)),
+                )
             }
-            None => (BADGE_WARNING_BG, BADGE_WARNING_FG, None),
+            None => (
+                BADGE_WARNING_BG,
+                BADGE_WARNING_FG,
+                Some(BADGE_WARNING_BORDER),
+            ),
         },
         BadgeVariant::Error => (scheme.error_container, scheme.error, None),
+        BadgeVariant::Info => match theme.extension::<StatusPalette>() {
+            Some(status) => {
+                let c = status.colors(theme.brightness);
+                (
+                    c.info_container,
+                    c.info,
+                    Some(with_alpha(c.info, BADGE_BORDER_ALPHA)),
+                )
+            }
+            None => (BADGE_INFO_BG, BADGE_INFO_FG, Some(BADGE_INFO_FG)),
+        },
         BadgeVariant::Neutral => (
             scheme.surface_container_high,
             scheme.on_surface_variant,
@@ -311,8 +337,13 @@ fn resolve_badge_colors(
 fn unthemed_badge_colors(variant: BadgeVariant) -> (Color, Color, Option<Color>) {
     match variant {
         BadgeVariant::Success => (BADGE_SUCCESS_BG, BADGE_SUCCESS_FG, None),
-        BadgeVariant::Warning => (BADGE_WARNING_BG, BADGE_WARNING_FG, None),
+        BadgeVariant::Warning => (
+            BADGE_WARNING_BG,
+            BADGE_WARNING_FG,
+            Some(BADGE_WARNING_BORDER),
+        ),
         BadgeVariant::Error => (BADGE_ERROR_BG, BADGE_ERROR_FG, None),
+        BadgeVariant::Info => (BADGE_INFO_BG, BADGE_INFO_FG, Some(BADGE_INFO_FG)),
         BadgeVariant::Neutral => (
             BADGE_NEUTRAL_BG,
             BADGE_NEUTRAL_FG,
@@ -475,6 +506,24 @@ mod tests {
     }
 
     #[test]
+    fn unthemed_warning_has_a_border() {
+        let mut w = build_widget(BadgeVariant::Warning, false);
+        let rec = layout_and_paint(&mut w, None);
+        assert_eq!(rec.rrects[0].3, BADGE_WARNING_BG);
+        assert_eq!(rec.glyph_colors[0], BADGE_WARNING_FG);
+        assert_eq!(rec.strokes[0], BADGE_WARNING_BORDER);
+    }
+
+    #[test]
+    fn unthemed_info_uses_fallback_constants() {
+        let mut w = build_widget(BadgeVariant::Info, false);
+        let rec = layout_and_paint(&mut w, None);
+        assert_eq!(rec.rrects[0].3, BADGE_INFO_BG);
+        assert_eq!(rec.glyph_colors[0], BADGE_INFO_FG);
+        assert_eq!(rec.strokes[0], BADGE_INFO_FG);
+    }
+
+    #[test]
     fn unthemed_neutral_has_a_border() {
         let mut w = build_widget(BadgeVariant::Neutral, false);
         let rec = layout_and_paint(&mut w, None);
@@ -513,6 +562,34 @@ mod tests {
         let colors = status.colors(Brightness::Light);
         assert_eq!(rec.rrects[0].3, colors.warning_container);
         assert_eq!(rec.glyph_colors[0], colors.warning);
+        assert_eq!(
+            rec.strokes[0],
+            with_alpha(colors.warning, BADGE_BORDER_ALPHA)
+        );
+    }
+
+    #[test]
+    fn glyph_dark_theme_resolves_info_from_status_palette() {
+        let theme = Theme::glyph_baseline();
+        let mut w = build_widget(BadgeVariant::Info, false);
+        let rec = layout_and_paint(&mut w, Some(&theme));
+        let status = theme.extension::<StatusPalette>().unwrap();
+        let colors = status.colors(Brightness::Dark);
+        assert_eq!(rec.rrects[0].3, colors.info_container);
+        assert_eq!(rec.glyph_colors[0], colors.info);
+        assert_eq!(rec.strokes[0], with_alpha(colors.info, BADGE_BORDER_ALPHA));
+    }
+
+    #[test]
+    fn glyph_light_theme_resolves_info_from_status_palette() {
+        let theme = Theme::glyph_baseline().with_brightness(Brightness::Light);
+        let mut w = build_widget(BadgeVariant::Info, false);
+        let rec = layout_and_paint(&mut w, Some(&theme));
+        let status = theme.extension::<StatusPalette>().unwrap();
+        let colors = status.colors(Brightness::Light);
+        assert_eq!(rec.rrects[0].3, colors.info_container);
+        assert_eq!(rec.glyph_colors[0], colors.info);
+        assert_eq!(rec.strokes[0], with_alpha(colors.info, BADGE_BORDER_ALPHA));
     }
 
     #[test]
@@ -531,6 +608,62 @@ mod tests {
         let rec = layout_and_paint(&mut w, Some(&theme));
         let (_, size, radius, _) = rec.rrects[0];
         assert_eq!(radius, size.height / 2.0);
+    }
+
+    #[test]
+    fn all_variants_resolved_colors_are_pinned() {
+        // This test prevents silent restyling of shipped badge variants.
+        // If you need to change a variant's appearance, update these assertions
+        // and document the change in the commit message.
+        let theme = Theme::glyph_baseline();
+
+        // Success: no border
+        let mut w = build_widget(BadgeVariant::Success, false);
+        let rec = layout_and_paint(&mut w, Some(&theme));
+        let status = theme.extension::<StatusPalette>().unwrap();
+        let sc = status.colors(Brightness::Dark);
+        assert_eq!(rec.rrects[0].3, sc.success_container);
+        assert_eq!(rec.glyph_colors[0], sc.success);
+        assert_eq!(rec.strokes.len(), 0, "Success should have no border");
+
+        // Warning: has border
+        let mut w = build_widget(BadgeVariant::Warning, false);
+        let rec = layout_and_paint(&mut w, Some(&theme));
+        assert_eq!(rec.rrects[0].3, sc.warning_container);
+        assert_eq!(rec.glyph_colors[0], sc.warning);
+        assert_eq!(
+            rec.strokes[0],
+            with_alpha(sc.warning, BADGE_BORDER_ALPHA),
+            "Warning should have alpha-blended border"
+        );
+
+        // Error: no border
+        let mut w = build_widget(BadgeVariant::Error, false);
+        let rec = layout_and_paint(&mut w, Some(&theme));
+        assert_eq!(rec.rrects[0].3, theme.scheme().error_container);
+        assert_eq!(rec.glyph_colors[0], theme.scheme().error);
+        assert_eq!(rec.strokes.len(), 0, "Error should have no border");
+
+        // Neutral: has border
+        let mut w = build_widget(BadgeVariant::Neutral, false);
+        let rec = layout_and_paint(&mut w, Some(&theme));
+        assert_eq!(rec.rrects[0].3, theme.scheme().surface_container_high);
+        assert_eq!(rec.glyph_colors[0], theme.scheme().on_surface_variant);
+        assert_eq!(
+            rec.strokes[0],
+            theme.scheme().outline,
+            "Neutral should have outline border"
+        );
+
+        // Accent: no border, alpha-washed background
+        let mut w = build_widget(BadgeVariant::Accent, false);
+        let rec = layout_and_paint(&mut w, Some(&theme));
+        assert_eq!(
+            rec.rrects[0].3,
+            with_alpha(theme.scheme().primary, BADGE_ACCENT_WASH_ALPHA)
+        );
+        assert_eq!(rec.glyph_colors[0], theme.scheme().primary);
+        assert_eq!(rec.strokes.len(), 0, "Accent should have no border");
     }
 
     #[test]

@@ -22,7 +22,7 @@
 //! constructs anything: `Context.createConfigurationContext(Configuration)`
 //! is **API 17+**
 //! (<https://developer.android.com/reference/android/content/Context#createConfigurationContext(android.content.res.Configuration)>,
-//! verified 2026-07-26) — this plugin's floor is `minSdk` 24, so it is
+//! verified 2026-07-26) — this plugin's floor is `minSdk` 26, so it is
 //! unconditionally available, no version gate needed.
 //!
 //! # Baked at construction, not live

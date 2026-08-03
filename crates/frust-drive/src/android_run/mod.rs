@@ -146,10 +146,13 @@ fn run_with_env(
     // Default SIGINT disposition would exit 130; a streamed run wants
     // Ctrl-C to stop the (already-SIGINT'd, same-process-group) `adb
     // logcat` child and exit 0.
-    ctrlc::set_handler(|| {
-        std::process::exit(0);
-    })
-    .context("failed to install Ctrl-C handler")?;
+    //
+    // This asks `crate::interrupt` — the process's single SIGINT/SIGTERM/SIGHUP
+    // owner — for that exit status rather than installing a second `ctrlc`
+    // handler, which would either fail to install or replace the one that
+    // deletes `.frust-signing.properties`: a `--release` run has already armed
+    // that scrub in `prepare_session` above.
+    crate::interrupt::exit_code_on_signal(0).context("failed to install Ctrl-C handler")?;
 
     let mut on_log_line = |line: &str| println!("{line}");
     adb::stream_logcat(runner, &device.id, &pid, &mut on_log_line)?;
@@ -214,10 +217,19 @@ fn prepare_session(
     // file when this function returns — every early `?`/`bail!` included — and
     // it is dropped explicitly right after `gradle::assemble` on the happy
     // path, so the plaintext passwords never outlive the Gradle invocation.
+    // The `crate::interrupt` registration it carries covers what `Drop` cannot:
+    // a Ctrl-C or SIGTERM during that invocation, and an abort.
     let generated =
         crate::android_build::signing::check_release_signing(&project.root, info.mode, on_line)?
-            .map(|resolved| crate::android_build::signing::write_resolved(&android_dir, &resolved))
+            .map(|resolved| {
+                crate::android_build::signing::write_resolved(&android_dir, &resolved, on_line)
+            })
             .transpose()?;
+    // `Some` iff this is a release run the gate actually vouched for — a
+    // non-release mode and `[signing] external = true` both resolve to `None`.
+    // Recorded before the guard is dropped below, since that is exactly the
+    // condition under which Gradle's own verdict has to be checked.
+    let signing_promised = generated.is_some();
 
     if cancel.load(Ordering::SeqCst) {
         return Ok(None);
@@ -258,6 +270,18 @@ fn prepare_session(
             bail!("`./gradlew {task}` failed");
         }
         bail!("`./gradlew {task}` failed:\n{tail}");
+    }
+    // The gate promised a release-signed APK; Gradle just said it produced a
+    // debug-signed one. Refuse before it reaches a device — the same backstop
+    // `android_build::build_with_env` applies, keyed off what Gradle *did*
+    // (see `android_build::signing`'s module doc).
+    if signing_promised
+        && crate::android_build::signing::reported_debug_signing(&format!(
+            "{}\n{}",
+            build_out.stdout, build_out.stderr
+        ))
+    {
+        return Err(crate::android_build::signing::debug_signed_error());
     }
     on_line(&format!(
         "Build finished in {:.1}s.",
@@ -778,6 +802,89 @@ mod tests {
             assert!(
                 !lines.iter().any(|l| l.contains("lean")),
                 "a declaring app must not warn: {lines:?}"
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// **The D1 backstop on the `frust run --release` side.** The gate
+        /// resolved material and wrote `.frust-signing.properties`, Gradle
+        /// exited 0 — and said it debug-signed anyway. `prepare_session` must
+        /// refuse before the APK reaches a device. No `adb install` fixture is
+        /// registered, so a regression that carried on would fail with an
+        /// unregistered-invocation error instead of this message.
+        #[test]
+        fn release_bails_when_gradle_reports_it_debug_signed() {
+            let dir = unique_project_dir("gradle-debug-signed");
+            let android_dir = dir.join("android");
+            write_release_signing(&android_dir);
+            let out_dir = android_dir.join("app/build/outputs/apk/release");
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-release.apk"), b"fake").unwrap();
+
+            let runner = preflight_ok_runner().with(
+                "./gradlew assembleRelease -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                ok("> Task :app:assembleRelease\nFrust: release build is debug-signed. \
+[FRUST-SIGNING-FALLBACK] Build with `frust build apk --release` …\nBUILD SUCCESSFUL"),
+            );
+
+            let build_info = info(BuildMode::Release, None);
+            let err = run_with_env(&runner, &dir, &device(), &build_info, &fake_env()).unwrap_err();
+            let message = err.to_string();
+            assert!(message.contains("Gradle debug-signed"), "{message}");
+            assert!(message.contains("external = true"), "{message}");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// The `external = true` waiver is a declared bypass and must not start
+        /// hard failing on the same marker: the run proceeds to `adb install`
+        /// (where the shared stop fixture ends it) and the waiver warning still
+        /// fires.
+        #[test]
+        fn external_signing_still_proceeds_when_gradle_reports_debug_signing() {
+            let dir = unique_project_dir("external-debug-signed");
+            let android_dir = dir.join("android");
+            fs::write(
+                dir.join("frust.toml"),
+                "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n[signing]\nexternal = true\n",
+            )
+            .unwrap();
+            let out_dir = android_dir.join("app/build/outputs/apk/release");
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-release.apk"), b"fake").unwrap();
+            let apk_path = out_dir
+                .join("app-release.apk")
+                .to_string_lossy()
+                .into_owned();
+
+            let runner = stop_after_install(
+                preflight_ok_runner().with(
+                    "./gradlew assembleRelease -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    ok("Frust: release build is debug-signed. [FRUST-SIGNING-FALLBACK]\n\
+                        BUILD SUCCESSFUL"),
+                ),
+                &apk_path,
+            );
+
+            let build_info = info(BuildMode::Release, None);
+            let never = AtomicBool::new(false);
+            let mut lines = Vec::new();
+            let err = prepare_session(
+                &runner,
+                &dir,
+                &device(),
+                &build_info,
+                &fake_env(),
+                &mut |l| lines.push(l.to_string()),
+                &never,
+            )
+            .err()
+            .expect("expected the adb install stop fixture, not a signing refusal");
+            assert!(err.to_string().contains("adb install"), "{err}");
+            assert!(
+                lines.iter().any(|l| l.contains("external = true")),
+                "the waiver must still announce itself: {lines:?}"
             );
 
             let _ = fs::remove_dir_all(&dir);

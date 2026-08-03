@@ -148,6 +148,17 @@ class FrustSurfaceView(
         private const val IME_RESYNC_FRAMES = 3
 
         /**
+         * Wire values `nativeImeState`'s `"contentType"` field carries
+         * (encoded on the Rust side by
+         * `frust_shell_android::jni_glue::content_type_wire` from
+         * `frust_core::event::ImeContentType`). `"password"` has no named
+         * constant here — every unrecognized/unhandled value, including it,
+         * falls through to [applyImeContentType]'s fail-closed `else` arm.
+         */
+        private const val CONTENT_TYPE_NORMAL = "normal"
+        private const val CONTENT_TYPE_NO_SUGGESTIONS = "noSuggestions"
+
+        /**
          * Decode the low byte of `nativeSystemUiState`'s packed `u64` (task
          * 03's `system_ui::encoded_state()` doc comment:
          * `(generation << 8) | mode_bits`, low byte: `0..=4` is the mode
@@ -259,6 +270,20 @@ class FrustSurfaceView(
     // in `android:configChanges` so a system dark-mode toggle reaches here
     // instead of recreating the activity).
     private external fun nativeSetAppearance(handle: Long, dark: Boolean)
+
+    // The read half of the appearance seam: whether the APP's currently
+    // active theme is dark right now — NOT a re-read of `Configuration.
+    // uiMode`. Kotlin trusted the device's own dark-mode preference for
+    // status-bar icon contrast ([updateSystemBarsAppearance]); that silently
+    // disagrees with the app's actual theme whenever an app-forced
+    // `frust::set_app_theme` override (or a design system's seeded default)
+    // is in play, painting invisible (light-on-light or dark-on-dark) icons.
+    // Called right after every [nativeSetAppearance] ([surfaceCreated],
+    // [onConfigurationChanged]) and once per frame ([pollAppBrightness]) —
+    // the per-frame poll is what picks up a runtime `set_app_theme`/
+    // `clear_app_theme` call, which has no `Configuration` event of its own
+    // to ride in on.
+    private external fun nativeAppIsDark(handle: Long): Boolean
 
     // Reduced motion: apply the platform's reduce-motion
     // accessibility preference to the app's motion tokens. `reduce` mirrors
@@ -399,6 +424,16 @@ class FrustSurfaceView(
      * that never calls the API never fires [onSystemUiModeChanged].
      */
     private var lastSystemUiGeneration: Long = 0
+
+    /**
+     * The last brightness [updateSystemBarsAppearance] was actually applied
+     * with, so [pollAppBrightness] only touches
+     * `WindowInsetsControllerCompat` on a real change instead of re-setting
+     * the same two booleans every Choreographer tick. `null` until the first
+     * call ([surfaceCreated]), matching "nothing applied yet" distinctly from
+     * either boolean value.
+     */
+    private var lastAppliedDark: Boolean? = null
 
     /**
      * Set by `MainActivity` (which owns the `Window` a
@@ -622,15 +657,45 @@ class FrustSurfaceView(
      * (not the deprecated `ViewCompat.getWindowInsetsController(View)`)
      * needs the hosting `Activity`'s `Window` — always available here since
      * `MainActivity` is this view's sole constructor caller (see
-     * `dev.frust.FrustSurfaceView`'s class doc). Called alongside
-     * every `nativeSetAppearance` — see [surfaceCreated]/[onConfigurationChanged].
+     * `dev.frust.FrustSurfaceView`'s class doc).
+     *
+     * `dark` must be the APP's resolved brightness ([nativeAppIsDark]), not
+     * the device's raw [isDarkMode] — the two legitimately disagree once an
+     * app-forced `frust::set_app_theme` override is active (FINDINGS #43: the
+     * device-sourced call this used to receive produced invisible
+     * light-on-light or dark-on-dark icons whenever they did). Called from
+     * [surfaceCreated], [onConfigurationChanged], and every frame via
+     * [pollAppBrightness] (change-gated by [lastAppliedDark] there).
      */
     private fun updateSystemBarsAppearance(dark: Boolean) {
+        lastAppliedDark = dark
         val window = (context as? Activity)?.window ?: return
         WindowCompat.getInsetsController(window, this).apply {
             isAppearanceLightStatusBars = !dark
             isAppearanceLightNavigationBars = !dark
         }
+    }
+
+    /**
+     * Per-frame poll of the app's resolved brightness ([nativeAppIsDark]),
+     * applying [updateSystemBarsAppearance] only on an actual change (mirrors
+     * [pollSystemUiState]'s generation-gated shape, minus the generation — a
+     * cheap direct `Boolean` compare is enough here since the value itself,
+     * not a monotonic counter, is what Kotlin polls).
+     *
+     * This is what reaches a runtime `frust::set_app_theme`/`clear_app_theme`
+     * call: unlike the device's `uiMode`, an app theme swap has no
+     * `Configuration` event of its own to ride in on, so without this poll
+     * the status bar would only catch up at the next unrelated
+     * `onConfigurationChanged` (or never, if the device config never
+     * changes). Called only while `handle != 0L` (see [doFrame]) — before
+     * that, the native side has nothing to report, and the system bars are
+     * simply left at the platform default until [surfaceCreated] seeds them.
+     */
+    private fun pollAppBrightness() {
+        val dark = nativeAppIsDark(handle)
+        if (dark == lastAppliedDark) return
+        updateSystemBarsAppearance(dark)
     }
 
     /**
@@ -678,7 +743,13 @@ class FrustSurfaceView(
             handle = nativeInit(holder.surface, scaleFactor, context.cacheDir.absolutePath)
             if (handle != 0L) {
                 nativeSetAppearance(handle, isDarkMode)
-                updateSystemBarsAppearance(isDarkMode)
+                // Seed system-bar icon contrast from the APP's just-resolved
+                // brightness, not the device's `isDarkMode` we just fed in —
+                // with no override active yet they agree, but sourcing this
+                // from the app keeps `surfaceCreated` on the same one true
+                // path [pollAppBrightness]/[onConfigurationChanged] use (see
+                // [updateSystemBarsAppearance]'s doc).
+                updateSystemBarsAppearance(nativeAppIsDark(handle))
                 // Seed the reduce-motion accessibility preference beside the
                 // appearance: [onResume] already ran (and re-runs on every
                 // foreground), but it fires before this handle exists on a cold
@@ -743,7 +814,15 @@ class FrustSurfaceView(
         super.onConfigurationChanged(newConfig)
         if (handle != 0L) {
             nativeSetAppearance(handle, isDarkMode)
-            updateSystemBarsAppearance(isDarkMode)
+            // Re-derive system-bar icon contrast from the APP's just-resolved
+            // brightness, not `isDarkMode` directly: if an app-forced
+            // `frust::set_app_theme` override is active, `nativeSetAppearance`
+            // above is a no-op on `theme.brightness` (the override-wins
+            // rule — see `frust_shell_common::theme_override`), so re-reading
+            // the device here would have flipped the icons to disagree with
+            // what the override is actually painting. `nativeAppIsDark`
+            // reports the resolved value either way.
+            updateSystemBarsAppearance(nativeAppIsDark(handle))
         }
     }
 
@@ -829,9 +908,8 @@ class FrustSurfaceView(
     override fun onCheckIsTextEditor(): Boolean = true
 
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
-        outAttrs.inputType = InputType.TYPE_CLASS_TEXT
-        outAttrs.imeOptions = EditorInfo.IME_ACTION_DONE
         val state = lastKnownState
+        applyImeContentType(outAttrs, state?.contentType ?: CONTENT_TYPE_NORMAL)
         outAttrs.initialSelStart = state?.selBase ?: -1
         outAttrs.initialSelEnd = state?.selExt ?: -1
         return FrustInputConnection().also {
@@ -841,15 +919,80 @@ class FrustSurfaceView(
     }
 
     /**
+     * Map the wire `"contentType"` string (`"normal"` / `"password"` /
+     * `"noSuggestions"` — encoded on the Rust side by
+     * `frust_shell_android::jni_glue::content_type_wire` from
+     * `frust_core::event::ImeContentType`) onto the `EditorInfo`/`InputType`
+     * flags that actually close FINDINGS #31: typing into a `Password` field
+     * must not surface the composed text in Gboard's suggestion strip, nor
+     * let Gboard commit it to its learned-word dictionary.
+     *
+     * `TYPE_TEXT_VARIATION_PASSWORD` is what switches to secure entry;
+     * `TYPE_TEXT_FLAG_NO_SUGGESTIONS` and `IME_FLAG_NO_PERSONALIZED_LEARNING`
+     * are set alongside it, never omitted — the former suppresses the
+     * suggestion strip, the latter stops the IME persisting the secret into
+     * its learned word list, the *persistent* half of the leak.
+     * `"noSuggestions"` is the non-secret sibling: entry stays visible, but
+     * `TYPE_TEXT_FLAG_NO_SUGGESTIONS` still switches off the suggestion strip
+     * and autocorrect, and `IME_FLAG_NO_PERSONALIZED_LEARNING` still stops
+     * the typed text feeding the IME's learned-word dictionary (no secure-
+     * entry masking — this is not a secret field).
+     *
+     * Any wire value this `when` doesn't recognize — including an absent
+     * `lastKnownState` (nothing focused/published yet) — falls through to
+     * the `"password"` arm: the same fail-closed rule
+     * `content_type_wire`'s Rust-side doc comment states, applied here at the
+     * boundary that actually renders it. A field state-sync forgot to
+     * classify becomes stricter than intended, never a secret field that got
+     * de-classified into a plaintext keyboard. `onCreateInputConnection`
+     * passes [CONTENT_TYPE_NORMAL] explicitly for the "nothing published
+     * yet" case instead, since no field is even focused there.
+     */
+    private fun applyImeContentType(outAttrs: EditorInfo, contentType: String) {
+        when (contentType) {
+            CONTENT_TYPE_NORMAL -> {
+                outAttrs.inputType = InputType.TYPE_CLASS_TEXT
+                outAttrs.imeOptions = EditorInfo.IME_ACTION_DONE
+            }
+            CONTENT_TYPE_NO_SUGGESTIONS -> {
+                outAttrs.inputType =
+                    InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                outAttrs.imeOptions =
+                    EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+            }
+            else -> { // "password", or any unrecognized/future value — fail closed.
+                outAttrs.inputType =
+                    InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD or
+                        InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                outAttrs.imeOptions =
+                    EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+            }
+        }
+    }
+
+    /**
      * After every native dispatch, reconcile the soft keyboard with the focused
      * widget's IME surface: newly-active ⇒ take focus + show the keyboard (and
      * restart input so a fresh [FrustInputConnection] is seeded from the new
      * state); newly-inactive ⇒ hide it.
+     *
+     * A **steady-active** field whose [ImeWireState.contentType] changed since
+     * the last poll (e.g. a field that starts `"normal"` and flips to
+     * `"password"` while still focused, without ever losing/regaining focus)
+     * also forces [InputMethodManager.restartInput]: `EditorInfo`/`InputType`
+     * are fixed at [onCreateInputConnection] time and Android never re-queries
+     * them on an already-bound `InputConnection`, so without this restart a
+     * field that becomes secret *after* the IME already connected would keep
+     * leaking into the suggestion strip under the stale, non-secure
+     * `EditorInfo` (the exact gap this task closes — see `onCreateInputConnection`'s
+     * doc for how the fresh `EditorInfo` is derived).
      */
     private fun pollImeAfterDispatch() {
         if (handle == 0L) return
         val state = parseImeState(nativeImeState(handle)) ?: return
+        val previous = lastKnownState
         lastKnownState = state
+        val contentTypeChanged = previous != null && previous.contentType != state.contentType
         if (state.active && !imeActive) {
             imeActive = true
             requestFocus()
@@ -859,12 +1002,21 @@ class FrustSurfaceView(
         } else if (!state.active && imeActive) {
             imeActive = false
             imm.hideSoftInputFromWindow(windowToken, 0)
+        } else if (state.active && contentTypeChanged) {
+            // Same field, no show/hide edge, but the content-type hint
+            // changed under it — force a fresh EditorInfo/InputType (see this
+            // function's doc). `restartInput` re-invokes
+            // `onCreateInputConnection`, which reseeds the mirror from the
+            // already-updated `lastKnownState`, so no separate `reconcileTo`
+            // call is needed on this path.
+            imm.restartInput(this)
         } else if (state.active) {
-            // Steady active (no show/hide edge): reconcile the live mirror to the
-            // focused field's published state — a caret moved by a tap, or a
-            // whole-field text change from a field switch or a submit-clear.
-            // `reconcileTo` compares against the LIVE editable (not the racing
-            // `lastKnownState`), so a pre-advanced snapshot can't hide a change.
+            // Steady active (no show/hide edge, same content type): reconcile
+            // the live mirror to the focused field's published state — a
+            // caret moved by a tap, or a whole-field text change from a field
+            // switch or a submit-clear. `reconcileTo` compares against the
+            // LIVE editable (not the racing `lastKnownState`), so a
+            // pre-advanced snapshot can't hide a change.
             activeConnection?.reconcileTo(state)
         }
     }
@@ -899,6 +1051,7 @@ class FrustSurfaceView(
                 selExt = obj.optInt("selExt", -1),
                 compBase = obj.optInt("compBase", -1),
                 compExt = obj.optInt("compExt", -1),
+                contentType = obj.optString("contentType", CONTENT_TYPE_NORMAL),
             )
         } catch (e: JSONException) {
             null
@@ -913,6 +1066,14 @@ class FrustSurfaceView(
         val selExt: Int,
         val compBase: Int,
         val compExt: Int,
+        /**
+         * The wire `"contentType"` string (`"normal"` / `"password"` /
+         * `"noSuggestions"`) `nativeImeState` encodes from
+         * `frust_core::event::ImeContentType`. Drives
+         * [applyImeContentType]'s `EditorInfo`/`InputType` mapping and
+         * [pollImeAfterDispatch]'s content-type-change restart.
+         */
+        val contentType: String,
     )
 
     override fun doFrame(frameTimeNanos: Long) {
@@ -950,6 +1111,12 @@ class FrustSurfaceView(
             // Per-frame system-UI poll: cheap generation-gated
             // JNI read, applied only on an actual `set_system_ui_mode` change.
             pollSystemUiState()
+            // Per-frame app-brightness poll: cheap `Boolean`-gated
+            // JNI read, applied only on an actual change — this is what picks
+            // up a runtime `frust::set_app_theme`/`clear_app_theme` call
+            // (see [pollAppBrightness]'s doc for why that needs a per-frame
+            // poll rather than riding on `onConfigurationChanged`).
+            pollAppBrightness()
             // Per-frame platform-view command poll:
             // the null-return fast path keeps a no-change frame allocation-free
             // (a null string means "nothing to do" — no JSON parse); only a
@@ -1251,7 +1418,11 @@ class FrustSurfaceView(
             val selEnd = Selection.getSelectionEnd(editable)
             val compStart = getComposingSpanStart(editable)
             val compEnd = getComposingSpanEnd(editable)
-            val snapshot = ImeWireState(true, text, selStart, selEnd, compStart, compEnd)
+            // `contentType` is irrelevant to this dedup snapshot — it never
+            // compares against `lastKnownState`, only against a prior call's
+            // own `snapshot` — so a fixed placeholder is correct here.
+            val snapshot =
+                ImeWireState(true, text, selStart, selEnd, compStart, compEnd, CONTENT_TYPE_NORMAL)
             if (snapshot == lastPushed) return
             lastPushed = snapshot
 

@@ -1,7 +1,8 @@
 //! [`empty_state`]/[`EmptyStateView`]: the "nothing here yet" placeholder — a
-//! dashed-border panel with a large, faint centered glyph char (Space Mono
-//! display face), a title, a description, and an optional action child-view
-//! slot (the Glyph design system's `.empty-state`).
+//! dashed-border panel with a large, faint centered glyph slot (a font char by
+//! default, the Space Mono display face — or a vector icon, see below), a
+//! title, a description, and an optional action child-view slot (the Glyph
+//! design system's `.empty-state`).
 //!
 //! The title, description, and centered glyph are the widget's own text runs
 //! (shaped/painted directly, like [`super::badge`]); the action slot is an
@@ -9,11 +10,26 @@
 //! route through and its semantics is forwarded (`semantics_child`) — the
 //! silent-drop rule.
 //!
+//! # Glyph slot: char vs. vector icon
+//!
+//! [`EmptyStateView::glyph`] sets a font char (the default is `∅`, U+2205
+//! EMPTY SET), but a char outside the bundled Glyph fonts' coverage falls
+//! back through the *platform's* system font — inconsistent, and on iOS
+//! frequently invisible (e.g. `▣`/`⚙` are absent or render differently across
+//! iOS/Android; see `crates/frust-widgets/src/icon.rs`'s module docs and
+//! FINDINGS #42). [`EmptyStateView::icon`] sets a deterministic vector path
+//! instead — the same pixels on every platform, no font-fallback dependency.
+//!
+//! **Precedence: when both `.icon(..)` and `.glyph(..)` are set, the icon
+//! wins.** The icon is the more specific, explicit vector value; this
+//! mirrors [`crate::icon`]'s own "explicit builder value wins" convention
+//! rather than introducing a new precedence rule.
+//!
 //! # Token resolution
 //!
-//! - **glyph char** = `on_surface_variant` at [`GLYPH_FAINT_ALPHA`] (Glyph's
-//!   "faintest" ghost ink — no opaque `ColorScheme` role exists for it, so a
-//!   true alpha wash stands in).
+//! - **glyph slot** (char or icon) = `on_surface_variant` at
+//!   [`GLYPH_FAINT_ALPHA`] (Glyph's "faintest" ghost ink — no opaque
+//!   `ColorScheme` role exists for it, so a true alpha wash stands in).
 //! - **title** = `on_surface`; **desc** = `on_surface_variant`.
 //! - **dashed border** = `outline`.
 //!
@@ -27,6 +43,7 @@
 //! half the stroke width — the documented approximation of the source's
 //! `border:1px dashed`.
 
+use crate::icon::IconData;
 use frust_core::accesskit::Role;
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
@@ -36,8 +53,8 @@ use frust_text::{
     FontFamily, FontWeight, GenericSlot, LineHeight, TextContext, TextLayout, TextStyle,
 };
 use frust_theme::Theme;
-use kurbo::{Point, Size, Vec2};
-use peniko::Color;
+use kurbo::{Affine, Point, Size, Vec2};
+use peniko::{Brush, Color};
 
 /// Content padding on all four edges, in logical px.
 const EMPTY_PADDING: f64 = 24.0;
@@ -84,20 +101,24 @@ fn with_alpha(color: Color, alpha: f32) -> Color {
 /// A declarative empty-state panel. See the [module docs](self).
 pub struct EmptyStateView<State: 'static> {
     glyph: String,
+    icon: Option<IconData>,
     title: String,
     desc: String,
     action: Option<AnyView<State>>,
 }
 
 /// Create an empty-state panel with a `title` and `desc`. Chain
-/// [`EmptyStateView::glyph`] to change the centered char and
-/// [`EmptyStateView::action`] to add an action slot.
+/// [`EmptyStateView::glyph`] to change the centered char (or
+/// [`EmptyStateView::icon`] for a vector icon instead — see the
+/// [module docs](self)'s precedence note) and [`EmptyStateView::action`] to
+/// add an action slot.
 pub fn empty_state<State: 'static>(
     title: impl Into<String>,
     desc: impl Into<String>,
 ) -> EmptyStateView<State> {
     EmptyStateView {
         glyph: DEFAULT_GLYPH.to_string(),
+        icon: None,
         title: title.into(),
         desc: desc.into(),
         action: None,
@@ -105,9 +126,18 @@ pub fn empty_state<State: 'static>(
 }
 
 impl<State: 'static> EmptyStateView<State> {
-    /// Override the centered glyph char.
+    /// Override the centered glyph char. Ignored if [`EmptyStateView::icon`]
+    /// is also set — see the [module docs](self)'s precedence note.
     pub fn glyph(mut self, glyph: impl Into<String>) -> Self {
         self.glyph = glyph.into();
+        self
+    }
+
+    /// Set a vector icon for the centered glyph slot, taking precedence over
+    /// [`EmptyStateView::glyph`]'s char — see the [module docs](self)'s
+    /// "Glyph slot: char vs. vector icon" section.
+    pub fn icon(mut self, icon: impl Into<IconData>) -> Self {
+        self.icon = Some(icon.into());
         self
     }
 
@@ -169,9 +199,68 @@ impl GlyphLabel {
     }
 }
 
+/// The retained centered glyph slot: a shaped char run (the `.glyph()`
+/// builder path) or a resolved vector icon (`.icon()`, wins when both are
+/// set — see the [module docs](self)). Mirrors
+/// [`crate::glyph::navbar`]'s identical `NavSlot` shape.
+enum EmptyGlyphSlot {
+    // Boxed: `GlyphLabel` carries a `TextLayout`/`TextStyle` pair that makes
+    // it far larger than `IconData`'s handful of bytes — an unboxed variant
+    // would size the whole enum (and every `EmptyStateWidget`) off the
+    // bigger arm (`clippy::large_enum_variant`).
+    Char(Box<GlyphLabel>),
+    Icon(IconData),
+}
+
+impl EmptyGlyphSlot {
+    fn new(icon: &Option<IconData>, glyph: &str) -> Self {
+        match icon {
+            Some(data) => EmptyGlyphSlot::Icon(data.clone()),
+            None => EmptyGlyphSlot::Char(Box::new(GlyphLabel::new(glyph))),
+        }
+    }
+
+    /// Whether `self` (the retained slot) still matches the declarative
+    /// `(icon, glyph)` pair a rebuild is diffing against — a cheap
+    /// short-circuit so an unchanged char/icon skips rebuilding the slot
+    /// (and, for the char path, keeps its cached shaped layout).
+    fn matches(&self, icon: &Option<IconData>, glyph: &str) -> bool {
+        match (self, icon) {
+            (EmptyGlyphSlot::Icon(current), Some(next)) => current.same(next),
+            (EmptyGlyphSlot::Char(label), None) => label.content == glyph,
+            _ => false,
+        }
+    }
+
+    fn layout(&mut self, ctx: &mut LayoutCtx, color: Color) -> Size {
+        match self {
+            EmptyGlyphSlot::Char(label) => label.layout(ctx, &glyph_style(color), None),
+            // A vector icon occupies the same square box the glyph char's
+            // face size defines — no text shaping involved.
+            EmptyGlyphSlot::Icon(_) => Size::new(EMPTY_GLYPH_SIZE as f64, EMPTY_GLYPH_SIZE as f64),
+        }
+    }
+
+    fn paint(&self, origin: Point, color: Color, scene: &mut dyn PaintScene) {
+        match self {
+            EmptyGlyphSlot::Char(label) => label.paint(origin, scene),
+            EmptyGlyphSlot::Icon(data) => {
+                let (path, design) = data.resolve();
+                let scale = if design > 0.0 {
+                    EMPTY_GLYPH_SIZE as f64 / design
+                } else {
+                    1.0
+                };
+                let scaled = Affine::scale(scale) * path;
+                scene.fill_path(origin, &scaled, &Brush::Solid(color));
+            }
+        }
+    }
+}
+
 /// The retained widget for an [`EmptyStateView`].
 pub struct EmptyStateWidget<State: 'static> {
-    glyph: GlyphLabel,
+    glyph: EmptyGlyphSlot,
     glyph_size: Size,
     title: GlyphLabel,
     title_text: String,
@@ -189,7 +278,7 @@ impl<State: 'static> View<State> for EmptyStateView<State> {
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> EmptyStateWidget<State> {
         EmptyStateWidget {
-            glyph: GlyphLabel::new(self.glyph.clone()),
+            glyph: EmptyGlyphSlot::new(&self.icon, &self.glyph),
             glyph_size: Size::ZERO,
             title: GlyphLabel::new(self.title.clone()),
             title_text: self.title.clone(),
@@ -213,8 +302,8 @@ impl<State: 'static> View<State> for EmptyStateView<State> {
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         let mut flags = ChangeFlags::NONE;
-        if prev.glyph != self.glyph {
-            element.glyph.set_content(self.glyph.clone());
+        if !element.glyph.matches(&self.icon, &self.glyph) {
+            element.glyph = EmptyGlyphSlot::new(&self.icon, &self.glyph);
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         if prev.title != self.title {
@@ -358,7 +447,7 @@ impl<State: 'static> Widget for EmptyStateWidget<State> {
             None
         };
 
-        self.glyph_size = self.glyph.layout(ctx, &glyph_style(glyph_c), None);
+        self.glyph_size = self.glyph.layout(ctx, glyph_c);
         self.title_size = self.title.layout(ctx, &title_style(title_c), inner_max_w);
         self.desc_size = self.desc.layout(ctx, &desc_style(desc_c), inner_max_w);
 
@@ -407,7 +496,7 @@ impl<State: 'static> Widget for EmptyStateWidget<State> {
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let theme = Theme::from_paint_ctx(ctx);
-        let (border, _, _, _) = resolve_colors(theme);
+        let (border, glyph_c, _, _) = resolve_colors(theme);
         let o = ctx.origin();
         let size = ctx.size();
 
@@ -417,6 +506,7 @@ impl<State: 'static> Widget for EmptyStateWidget<State> {
         let mut y = EMPTY_PADDING;
         self.glyph.paint(
             o + Vec2::new(center_x - self.glyph_size.width / 2.0, y),
+            glyph_c,
             scene,
         );
         y += self.glyph_size.height + EMPTY_GLYPH_GAP;
@@ -468,6 +558,7 @@ mod tests {
     struct Recorder {
         lines: Vec<(Point, Point, Color)>,
         glyph_colors: Vec<Color>,
+        path_fills: Vec<(Point, kurbo::Rect, Color)>,
     }
 
     impl PaintScene for Recorder {
@@ -479,6 +570,12 @@ mod tests {
         fn draw_glyph_run(&mut self, run: frust_scene::GlyphRun) {
             if let peniko::Brush::Solid(c) = run.brush {
                 self.glyph_colors.push(c);
+            }
+        }
+        fn fill_path(&mut self, origin: Point, path: &kurbo::BezPath, brush: &Brush) {
+            use kurbo::Shape;
+            if let Brush::Solid(c) = brush {
+                self.path_fills.push((origin, path.bounding_box(), *c));
             }
         }
     }
@@ -542,7 +639,64 @@ mod tests {
     fn default_glyph_is_the_empty_set_sign() {
         let view: EmptyStateView<()> = empty_state("t", "d");
         let w = build(&view);
-        assert_eq!(w.glyph.content, DEFAULT_GLYPH);
+        match &w.glyph {
+            EmptyGlyphSlot::Char(label) => assert_eq!(label.content, DEFAULT_GLYPH),
+            EmptyGlyphSlot::Icon(_) => panic!("default slot should be the char face, not an icon"),
+        }
+    }
+
+    /// A 10×10-design filled diamond, mirroring
+    /// `crate::glyph::navbar::tests::diamond_icon` — a known bounding box so
+    /// the icon-vs-char slot painted-fill assertions are deterministic.
+    fn diamond_icon() -> IconData {
+        let mut p = kurbo::BezPath::new();
+        p.move_to((5.0, 0.0));
+        p.line_to((10.0, 5.0));
+        p.line_to((5.0, 10.0));
+        p.line_to((0.0, 5.0));
+        p.close_path();
+        IconData::from_path(p, 10.0)
+    }
+
+    #[test]
+    fn icon_slot_paints_a_filled_path_not_a_glyph_run() {
+        let view: EmptyStateView<()> =
+            empty_state("Nothing here", "Add something to begin").icon(diamond_icon());
+        let mut w = build(&view);
+        let rec = layout_and_paint(&mut w, None);
+        // The vector path is actually painted — a real fill_path call with a
+        // non-degenerate bounding box scaled into the glyph box, not merely
+        // that the builder accepted a value.
+        assert_eq!(rec.path_fills.len(), 1, "one fill_path for the icon slot");
+        let (_, bbox, color) = rec.path_fills[0];
+        assert!(
+            (bbox.width() - EMPTY_GLYPH_SIZE as f64).abs() < 1e-6,
+            "icon scaled to the glyph box width"
+        );
+        assert!((bbox.height() - EMPTY_GLYPH_SIZE as f64).abs() < 1e-6);
+        assert_eq!(
+            color,
+            with_alpha(EMPTY_GLYPH_FG, GLYPH_FAINT_ALPHA),
+            "icon fill uses the same faint-wash glyph ink as the char face"
+        );
+        // No text-shaped glyph run is emitted for the icon face — the char
+        // path is not exercised at all when an icon is set. The only
+        // remaining glyph runs are the title and description text.
+        assert_eq!(
+            rec.glyph_colors.len(),
+            2,
+            "title + desc runs only, no centered-glyph char run"
+        );
+    }
+
+    #[test]
+    fn icon_wins_over_glyph_char_when_both_are_set() {
+        let view: EmptyStateView<()> = empty_state("t", "d").glyph("X").icon(diamond_icon());
+        let w = build(&view);
+        match &w.glyph {
+            EmptyGlyphSlot::Icon(_) => {}
+            EmptyGlyphSlot::Char(_) => panic!("icon must win over glyph when both are set"),
+        }
     }
 
     #[test]

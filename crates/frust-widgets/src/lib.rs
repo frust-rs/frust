@@ -73,15 +73,17 @@ pub use icon::{Icon, IconData, IconSource, IconView, IconWidget, icon};
 pub use image::{Image, ImageError, ImageFit, ImageSource, ImageView, ImageWidget};
 pub use nav::hero::{HeroView, HeroWidget, hero};
 pub use nav::navigator::{
-    BackPolicy, NavigatorController, NavigatorView, NavigatorWidget, PageBuilder, PopResult,
-    PushOptions, ResultCallback, navigator,
+    BackPolicy, NavigatorController, NavigatorId, NavigatorView, NavigatorWidget, PageBuilder,
+    PageVisibility, PopResult, PushOptions, ResultCallback, VisibilityCallback, navigator,
+    overlay_host,
 };
 pub use nav::path::{Location, PathPattern, RouteParams};
+pub use nav::route::{NavRequest, NavWaker, RouteNavigator};
 pub use nav::router::{
     DEFAULT_REDIRECT_LIMIT, ErrorBuilder, Redirect, Resolution, ResolvedPage, Route, RouteBuilder,
     Router,
 };
-pub use nav::transition::{PageTransition, Timing, TransitionSpec};
+pub use nav::transition::{PageTransition, Timing, TransitionSpec, TransitionState};
 pub use padding::{EdgeInsets, Padding, PaddingView, PaddingWidget};
 pub use platform_view::{
     PlatformViewView, PlatformViewWidget, ShieldView, ShieldWidget, platform_view, shield,

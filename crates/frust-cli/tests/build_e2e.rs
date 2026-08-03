@@ -21,6 +21,7 @@
 //! | [`prefix_only_signing_produces_a_release_signed_apk`] | **prefix** — default path, `prod.`-prefixed keys, stock Gradle |
 //! | [`relocated_keystore_project_passes_the_gate_without_android_key_properties`] | **path** — and a project that edited the template's fallback lookups |
 //! | [`env_only_ci_rig_produces_a_release_signed_apk_without_key_properties`] | **env names** — stock `frust.toml`, no `[signing.env]` block at all |
+//! | [`an_old_template_that_ignores_the_generated_file_fails_the_release_build`] | the **precondition** that mechanism rests on, and the `external` waiver that must survive it |
 //!
 //! The default-rig test also covers both negative directions in one project
 //! (reusing its warm cargo/Gradle caches): a stub `key.properties` must fail
@@ -333,6 +334,27 @@ fn assert_debug_signed_apk(project: &Path) {
         printed.contains("CN=Android Debug"),
         "an unsigned hand-run release build must carry the Android debug \
          certificate:\n{printed}"
+    );
+    assert!(
+        !printed.contains(E2E_CN),
+        "this APK should not carry the test keystore's certificate:\n{printed}"
+    );
+}
+
+/// [`assert_debug_signed_apk`] with no escape hatch: a case whose *entire*
+/// evidence is the certificate on the artifact has no meaningful
+/// "`apksigner` was missing so we skipped it" outcome — a skipped assertion is
+/// not evidence. Used by the cases that exist to prove what Gradle actually
+/// signed, where a silent skip would turn the test into a no-op.
+fn assert_debug_signed_apk_strict(project: &Path) {
+    let printed = release_apk_certs(project).expect(
+        "no `apksigner` under $ANDROID_HOME/build-tools — this case's whole point is which \
+         certificate the artifact carries, so it cannot be skipped: install build-tools or \
+         export ANDROID_HOME",
+    );
+    assert!(
+        printed.contains("CN=Android Debug"),
+        "expected the Android debug certificate on this artifact:\n{printed}"
     );
     assert!(
         !printed.contains(E2E_CN),
@@ -676,6 +698,144 @@ fn env_only_ci_rig_produces_a_release_signed_apk_without_key_properties() {
     // 4) The whole point: the artifact carries this test's certificate, not
     //    the Android debug key.
     assert_release_apk(&project);
+    assert_no_generated_signing_file(&project);
+
+    let _ = std::fs::remove_dir_all(&project);
+}
+
+/// **The installed-base route — the precondition the one-source-of-truth
+/// mechanism cannot check.** `frust build` hands Gradle
+/// `android/.frust-signing.properties`, but only a project whose
+/// `build.gradle.kts` contains the `frustSigning(...)` read ever looks at it.
+/// There is no `frust upgrade`/regenerate command, so every project scaffolded
+/// by an earlier CLI has no such read — it follows the newly-shipped
+/// `frust.toml` guidance, adds `[signing] prefix = "prod"`, and Gradle's
+/// template falls through to `signingConfigs.getByName("debug")`, warns, and
+/// **exits 0**. Keying off `out.success` alone reported that as a successful
+/// release build over a debug-signed APK.
+///
+/// This test ages a freshly scaffolded project back to that shape by stripping
+/// the four `frustSigning(...)` reads, then asserts three things in order:
+/// the CLI **fails**, its message names the cause, and — the assertion that
+/// actually matters — the APK Gradle left behind really does carry
+/// `CN=Android Debug`. That last one is what makes the failure meaningful
+/// rather than incidental: it proves the route reaches the bad artifact and
+/// that the refusal is the only thing standing between a user and shipping it.
+///
+/// It then reuses the same (warm-cache) project for the `external = true`
+/// waiver, which is the sharpest possible test of that path: `external` is a
+/// declared bypass over exactly this situation — Gradle emits the very marker
+/// that just failed the build — and it must still succeed, with its warning.
+#[test]
+#[ignore = "compiles a full generated project + Gradle; needs Android SDK/NDK — run with cargo test -p frust-cli --test build_e2e -- --ignored"]
+fn an_old_template_that_ignores_the_generated_file_fails_the_release_build() {
+    let ndk_home = resolve_ndk_home().expect(
+        "Android NDK not found: set ANDROID_NDK_HOME or install one under $ANDROID_HOME/ndk",
+    );
+
+    let project = unique_dir("old-template");
+    let _ = std::fs::remove_dir_all(&project);
+
+    scaffold(&project);
+
+    // 1) Age the generated Gradle back to a pre-`.frust-signing.properties`
+    //    project: strip the four `frustSigning(...) ?:` reads so only the
+    //    `key.properties` + `ANDROID_*` fallback is left — which is precisely
+    //    what an installed-base project's signing block looks like. (The now
+    //    unused `frustSigning` helper stays; what matters is that no resolved
+    //    value comes from it.)
+    let gradle_path = project.join("android/app/build.gradle.kts");
+    let gradle = std::fs::read_to_string(&gradle_path).expect("reading generated build.gradle.kts");
+    assert_eq!(
+        gradle.matches("frustSigning(\"").count(),
+        4,
+        "the generated build.gradle.kts no longer has the four reads this test strips"
+    );
+    let mut aged = gradle;
+    for key in ["storeFile", "storePassword", "keyAlias", "keyPassword"] {
+        aged = aged.replace(&format!("frustSigning(\"{key}\") ?: "), "");
+    }
+    assert_eq!(
+        aged.matches("frustSigning(\"").count(),
+        0,
+        "the four reads must be gone — that is the whole simulation"
+    );
+    std::fs::write(&gradle_path, aged).expect("writing the aged build.gradle.kts");
+
+    // 2) The configuration `frust.toml.tmpl` documents, verbatim: a prefix, and
+    //    real material behind it. The gate resolves all four and passes.
+    let stock_toml =
+        std::fs::read_to_string(project.join("frust.toml")).expect("reading frust.toml");
+    std::fs::write(
+        project.join("frust.toml"),
+        format!("{stock_toml}\n[signing]\nprefix = \"prod\"\n"),
+    )
+    .expect("writing frust.toml");
+    let keystore = project.join("prod-e2e.jks");
+    generate_keystore(&keystore);
+    std::fs::write(
+        project.join("android/key.properties"),
+        format!(
+            "prod.storePassword={STORE_PASS}\nprod.keyPassword={STORE_PASS}\n\
+             prod.keyAlias=upload\nprod.storeFile={}\n",
+            keystore.display()
+        ),
+    )
+    .expect("failed to write the prefixed android/key.properties");
+
+    // 3) The build must fail. Before this backstop it exited 0 over an APK
+    //    carrying `CN=Android Debug` — so if it succeeds here, report which
+    //    certificate the CLI just blessed rather than a bare "expected failure"
+    //    (this is also the message the negative control reads).
+    let out = release_build(&project, &ndk_home);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if out.status.success() {
+        let certs = release_apk_certs(&project)
+            .unwrap_or_else(|| "<no apksigner available to name it>".to_string());
+        panic!(
+            "`frust build apk --release` reported success for a project whose Gradle debug-signs. \
+             The artifact it blessed:\n{certs}"
+        );
+    }
+    assert!(
+        stderr.contains("Gradle debug-signed"),
+        "expected the debug-signed refusal, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("build.gradle.kts"),
+        "the refusal must name the file to fix:\n{stderr}"
+    );
+    // The artifact assertion, not the verdict: Gradle really did produce a
+    // debug-signed release APK, and the CLI is the only thing that caught it.
+    assert_debug_signed_apk_strict(&project);
+    assert_no_generated_signing_file(&project);
+
+    // 4) The `external = true` waiver over the identical situation: Gradle
+    //    still emits the marker, and the build must still succeed — with the
+    //    warning that says Frust promises nothing about the signature.
+    std::fs::write(
+        project.join("frust.toml"),
+        format!("{stock_toml}\n[signing]\nexternal = true\n"),
+    )
+    .expect("writing frust.toml");
+    let out = release_build(&project, &ndk_home);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.status.success(),
+        "`[signing] external = true` is a declared bypass and must not hard-fail:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("external = true") && stdout.contains("cannot promise"),
+        "the waiver must warn on every release build:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("release build is debug-signed"),
+        "this case is only meaningful if Gradle emitted the marker the waiver survives:\n{stdout}"
+    );
+    // And the waiver really does let a debug-signed artifact through — that is
+    // what "Frust cannot promise this artifact is release-signed" means.
+    assert_debug_signed_apk_strict(&project);
     assert_no_generated_signing_file(&project);
 
     let _ = std::fs::remove_dir_all(&project);

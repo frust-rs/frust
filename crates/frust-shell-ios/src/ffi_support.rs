@@ -217,7 +217,7 @@ pub(crate) struct CaretRect {
 ///
 /// ```text
 /// {"active":bool,"text":"...","selBase":n,"selExt":n,"compBase":n,"compExt":n,
-///  "caretX":f,"caretY":f,"caretW":f,"caretH":f}
+///  "caretX":f,"caretY":f,"caretW":f,"caretH":f,"contentType":"normal"}
 /// ```
 ///
 /// Selection/composing indices are UTF-16 code units (the platform-native unit,
@@ -226,6 +226,17 @@ pub(crate) struct CaretRect {
 /// logical-pixel; an absent (or non-finite) caret serializes the four caret
 /// fields as `null`. JSON is hand-rolled (no `serde` in the shell) with a tiny
 /// escaper — see [`json_escape_into`].
+///
+/// `content_type` is a **stable, explicitly-encoded wire string** — one of
+/// `"normal"` / `"password"` / `"noSuggestions"` — never a `Debug` rendering
+/// of `frust_core::event::ImeContentType` (that type's `Debug` impl exists on
+/// `ImeState`, not here, but the discipline is the same one that motivated
+/// it: a secret field's classification must never ride on a format that could
+/// silently change shape). The caller ([`crate::ffi_glue::ime_state_to_json`])
+/// maps the enum to this string; unrecognized/future strings on the Swift side
+/// must fail closed to the most restrictive (`"password"`-equivalent)
+/// handling, never fall through to `"normal"`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn ime_state_json(
     active: bool,
     text: &str,
@@ -234,6 +245,7 @@ pub(crate) fn ime_state_json(
     comp_base: i32,
     comp_ext: i32,
     caret: Option<CaretRect>,
+    content_type: &str,
 ) -> String {
     let mut out = String::with_capacity(text.len() + 128);
     out.push_str("{\"active\":");
@@ -260,7 +272,9 @@ pub(crate) fn ime_state_json(
     push_num_or_null(&mut out, cw);
     out.push_str(",\"caretH\":");
     push_num_or_null(&mut out, ch);
-    out.push('}');
+    out.push_str(",\"contentType\":\"");
+    json_escape_into(content_type, &mut out);
+    out.push_str("\"}");
     out
 }
 
@@ -694,26 +708,27 @@ mod tests {
                 w: 2.0,
                 h: 16.0,
             }),
+            "normal",
         );
         assert_eq!(
             json,
-            r#"{"active":true,"text":"hi","selBase":0,"selExt":2,"compBase":-1,"compExt":-1,"caretX":4,"caretY":8,"caretW":2,"caretH":16}"#
+            r#"{"active":true,"text":"hi","selBase":0,"selExt":2,"compBase":-1,"compExt":-1,"caretX":4,"caretY":8,"caretW":2,"caretH":16,"contentType":"normal"}"#
         );
     }
 
     #[test]
     fn ime_json_without_caret_emits_nulls() {
-        let json = ime_state_json(false, "", -1, -1, -1, -1, None);
+        let json = ime_state_json(false, "", -1, -1, -1, -1, None, "normal");
         assert_eq!(
             json,
-            r#"{"active":false,"text":"","selBase":-1,"selExt":-1,"compBase":-1,"compExt":-1,"caretX":null,"caretY":null,"caretW":null,"caretH":null}"#
+            r#"{"active":false,"text":"","selBase":-1,"selExt":-1,"compBase":-1,"compExt":-1,"caretX":null,"caretY":null,"caretW":null,"caretH":null,"contentType":"normal"}"#
         );
     }
 
     #[test]
     fn ime_json_escapes_text_and_keeps_utf16_indices() {
         // Text with a quote is escaped; composing indices survive verbatim.
-        let json = ime_state_json(true, "a\"b", 1, 1, 0, 3, None);
+        let json = ime_state_json(true, "a\"b", 1, 1, 0, 3, None, "normal");
         assert!(json.contains(r#""text":"a\"b""#));
         assert!(json.contains(r#""compBase":0,"compExt":3"#));
     }
@@ -777,10 +792,23 @@ mod tests {
                 w: 2.0,
                 h: 10.0,
             }),
+            "normal",
         );
         // Non-finite components degrade to null rather than emitting `NaN`/`inf`
         // (which are not valid JSON); finite ones still serialize.
         assert!(json.contains(r#""caretX":null,"caretY":null,"caretW":2,"caretH":10"#));
+    }
+
+    #[test]
+    fn ime_json_encodes_content_type_password() {
+        let json = ime_state_json(true, "hunter2", 7, 7, -1, -1, None, "password");
+        assert!(json.contains(r#""contentType":"password""#));
+    }
+
+    #[test]
+    fn ime_json_encodes_content_type_no_suggestions() {
+        let json = ime_state_json(true, "ABC-123", 7, 7, -1, -1, None, "noSuggestions");
+        assert!(json.contains(r#""contentType":"noSuggestions""#));
     }
 
     // --- Platform-view commands JSON --------------

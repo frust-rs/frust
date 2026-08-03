@@ -21,11 +21,15 @@
 //! ```text
 //! python3 scripts/gen_icons.py --src <material-symbols-svg-dir> \
 //!     --out crates/frust-widgets/src/icons/mod.rs
+//! cargo fmt -p frust-widgets
 //! ```
 //!
 //! The script reads each `<name>.svg`, extracts and renormalizes its
-//! `<path d="...">` data, validates it parses, and re-emits this file. See
-//! `scripts/gen_icons.py`.
+//! `<path d="...">` data, validates it parses, and re-emits this file; the
+//! trailing `cargo fmt` is required to collapse this generator's raw
+//! double blank line before the first entry down to the single blank line
+//! this file actually carries (see `scripts/gen_icons.py`'s own docstring).
+//! See `scripts/gen_icons.py`.
 
 use crate::IconSource;
 
@@ -278,6 +282,54 @@ pub const DONE_ALL: IconSource = IconSource {
     design: D,
 };
 
+/// `fullscreen_expand`
+pub const FULLSCREEN_EXPAND: IconSource = IconSource {
+    d: "M 3 21 v -5 h 2 v 3 h 3 v 2 H 3 Z m 13 0 v -2 h 3 v -3 h 2 v 5 H 16 Z M 3 8 v -5 h 5 v 2 H 5 v 3 h -2 Z m 16 0 v -3 H 16 v -2 h 5 v 5 h -2 Z",
+    design: D,
+};
+
+/// `fullscreen_exit`
+pub const FULLSCREEN_EXIT: IconSource = IconSource {
+    d: "M 6 21 v -3 H 3 v -2 h 5 v 5 h -2 Z m 10 0 v -5 h 5 v 2 H 18 v 3 h -2 Z M 3 8 v -2 h 3 v -3 h 2 v 5 H 3 Z m 13 0 v -5 h 2 v 3 h 3 v 2 H 16 Z",
+    design: D,
+};
+
+/// `power`
+pub const POWER: IconSource = IconSource {
+    d: "M 11 13 v -10 h 2 v 10 h -2 Z m 1 8 q -1.85 0 -3.4875 -0.7125 T 5.65 18.35 q -1.225 -1.225 -1.9375 -2.8625 T 3 12 q 0 -2 0.825 -3.775 t 2.325 -3.075 l 1.4 1.4 q -1.2 1 -1.875 2.425 t -0.675 3.025 q 0 2.9 2.05 4.95 t 4.95 2.05 q 2.925 0 4.9625 -2.05 T 19 12 q 0 -1.6 -0.6625 -3.025 T 16.45 6.55 l 1.4 -1.4 q 1.5 1.3 2.325 3.075 t 0.825 3.775 q 0 1.85 -0.7125 3.4875 t -1.925 2.8625 q -1.2125 1.225 -2.85 1.9375 T 12 21 Z",
+    design: D,
+};
+
+/// `pane_mark`
+pub const PANE_MARK: IconSource = IconSource {
+    d: "M 5 11 q -0.825 0 -1.4125 -0.5875 T 3 9 v -4 q 0 -0.825 0.5875 -1.4125 T 5 3 h 14 q 0.825 0 1.4125 0.5875 T 21 5 v 4 q 0 0.825 -0.5875 1.4125 T 19 11 H 5 Z m 0 -2 h 14 v -4 H 5 v 4 Z m 0 12 q -0.825 0 -1.4125 -0.5875 T 3 19 v -4 q 0 -0.825 0.5875 -1.4125 T 5 13 h 14 q 0.825 0 1.4125 0.5875 T 21 15 v 4 q 0 0.825 -0.5875 1.4125 T 19 21 H 5 Z m 0 -2 h 14 v -4 H 5 v 4 Z m 0 -10 v -4 4 Z m 0 10 v -4 4 Z",
+    design: D,
+};
+
+/// `chevron_left`
+pub const CHEVRON_LEFT: IconSource = IconSource {
+    d: "M 14 18 8 12 l 6 -6 1.4 1.4 -4.6 4.6 4.6 4.6 -1.4 1.4 Z",
+    design: D,
+};
+
+/// `scan_mark`
+pub const SCAN_MARK: IconSource = IconSource {
+    d: "M 2 7 v -5 h 5 v 2 H 4 v 3 H 2 Z m 0 15 v -5 h 2 v 3 h 3 v 2 H 2 Z m 15 0 v -2 h 3 v -3 h 2 v 5 H 17 Z m 3 -15 v -3 H 17 v -2 h 5 v 5 h -2 Z M 17.5 17.5 h 1.5 v 1.5 h -1.5 v -1.5 Z m 0 -3 h 1.5 v 1.5 h -1.5 v -1.5 Z m -1.5 1.5 h 1.5 v 1.5 h -1.5 v -1.5 Z m -1.5 1.5 h 1.5 v 1.5 h -1.5 v -1.5 Z m -1.5 -1.5 h 1.5 v 1.5 h -1.5 v -1.5 Z m 3 -3 h 1.5 v 1.5 h -1.5 v -1.5 Z m -1.5 1.5 h 1.5 v 1.5 h -1.5 v -1.5 Z m -1.5 -1.5 h 1.5 v 1.5 h -1.5 v -1.5 Z m 6 -8 v 6 H 13 v -6 h 6 Z M 11 13 v 6 H 5 v -6 h 6 Z m 0 -8 v 6 H 5 v -6 h 6 Z m -1.5 12.5 v -3 H 6.5 v 3 h 3 Z m 0 -8 v -3 H 6.5 v 3 h 3 Z m 8 0 v -3 H 14.5 v 3 h 3 Z",
+    design: D,
+};
+
+/// `globe`
+pub const GLOBE: IconSource = IconSource {
+    d: "M 12 22 q -2.075 0 -3.9 -0.7875 T 4.925 19.075 q -1.35 -1.35 -2.1375 -3.175 T 2 12 q 0 -2.075 0.7875 -3.9 T 4.925 4.925 q 1.35 -1.35 3.175 -2.1375 T 12 2 q 2.075 0 3.9 0.7875 T 19.075 4.925 q 1.35 1.35 2.1375 3.175 T 22 12 q 0 2.075 -0.7875 3.9 T 19.075 19.075 q -1.35 1.35 -3.175 2.1375 T 12 22 Z m -1 -2.05 v -1.95 q -0.825 0 -1.4125 -0.5875 T 9 16 v -1 L 4.2 10.2 q -0.075 0.45 -0.1375 0.9 t -0.0625 0.9 q 0 3.025 1.9875 5.3 T 11 19.95 Z m 6.9 -2.55 q 0.5 -0.55 0.9 -1.1875 t 0.6625 -1.325 q 0.2625 -0.6875 0.4 -1.4125 t 0.1375 -1.475 q 0 -2.45 -1.3625 -4.475 T 15 4.6 v 0.4 q 0 0.825 -0.5875 1.4125 T 13 7 h -2 v 2 q 0 0.425 -0.2875 0.7125 T 10 10 h -2 v 2 h 6 q 0.425 0 0.7125 0.2875 T 15 13 v 3 h 1 q 0.65 0 1.175 0.3875 t 0.725 1.0125 Z",
+    design: D,
+};
+
+/// `plug`
+pub const PLUG: IconSource = IconSource {
+    d: "M 5 21 q -0.425 0 -0.7125 -0.2875 T 4 20 v -1 h -1 v -4 q 0 -0.425 0.2875 -0.7125 T 4 14 h 1 v -7 q 0 -1.65 1.175 -2.825 t 2.825 -1.175 q 1.65 0 2.825 1.175 t 1.175 2.825 v 10 q 0 0.825 0.5875 1.4125 T 15 19 q 0.825 0 1.4125 -0.5875 T 17 17 v -7 h -1 q -0.425 0 -0.7125 -0.2875 T 15 9 v -4 h 1 v -1 q 0 -0.425 0.2875 -0.7125 T 17 3 h 2 q 0.425 0 0.7125 0.2875 T 20 4 v 1 h 1 v 4 q 0 0.425 -0.2875 0.7125 T 20 10 h -1 v 7 q 0 1.65 -1.175 2.825 t -2.825 1.175 q -1.65 0 -2.825 -1.175 t -1.175 -2.825 v -10 q 0 -0.825 -0.5875 -1.4125 T 9 5 q -0.825 0 -1.4125 0.5875 T 7 7 v 7 h 1 q 0.425 0 0.7125 0.2875 T 9 15 v 4 h -1 v 1 q 0 0.425 -0.2875 0.7125 T 7 21 h -2 Z",
+    design: D,
+};
+
 /// Every generated [`IconSource`] in this module, for exhaustive
 /// iteration (e.g. a parse-validation test, or a picker gallery).
 pub const ALL: &[IconSource] = &[
@@ -322,4 +374,12 @@ pub const ALL: &[IconSource] = &[
     CALL,
     SCHEDULE,
     DONE_ALL,
+    FULLSCREEN_EXPAND,
+    FULLSCREEN_EXIT,
+    POWER,
+    PANE_MARK,
+    CHEVRON_LEFT,
+    SCAN_MARK,
+    GLOBE,
+    PLUG,
 ];

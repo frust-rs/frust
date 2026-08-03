@@ -34,13 +34,94 @@
 //!   supported (Huddle uses it); it now shares the same consumption marker and
 //!   `request_back`/`back_interest` routing as the automatic path.
 //!
-//! Because the whole back system is single-navigator today (frust-reactive's
-//! live-provider slot is single-registrant — see `frust_reactive::back`), a
-//! single process-wide (UI-thread-affine) [`SHARED`] marker is the "single
+//! A single process-wide (UI-thread-affine) [`SHARED`] marker is the "single
 //! consumption source": when Huddle constructs a [`BackHandler`] *and* calls
 //! `frust::navigator` on the same controller, whichever runs first in a given
 //! rebuild consumes the press; the other observes the same already-consumed
 //! count and no-ops, so one press = one `request_back` (no double-pop).
+//!
+//! # R44-back: arbitration across more than one navigator
+//!
+//! An app with a root [`overlay_host`](crate::overlay_host) has **two**
+//! navigators wired at once — the host, and the inner navigator inside it — and
+//! both want the back press. `frust-reactive`'s live-provider slot stays
+//! single-registrant (see `frust_reactive::back`); this module owns that one
+//! registration and multiplexes behind it:
+//!
+//! > **R44-back — a root overlay host outranks every plain navigator; among
+//! > [`Role::Navigator`] peers the innermost (last-wired) ranks first, LIFO —
+//! > mirroring Android's `OnBackPressedDispatcher`; a back press goes to the
+//! > first registrant reporting
+//! > [`back_interest()`](NavigatorController::back_interest)` == true`.**
+//!
+//! [`SharedBack::registrants`] is that ordered list, kept sorted by
+//! ([`Role`], wire sequence) — build order among hosts, but *reversed* among
+//! navigators so the innermost wins. **Rank comes from the call site, not from
+//! wire timing**: [`auto_wire_overlay_host`] (the facade's
+//! [`overlay_host`](crate::overlay_host)) registers [`Role::Host`], every other
+//! entry point registers [`Role::Navigator`]. That is what makes the order
+//! independent of *when* and *how many times* a controller wires — the two
+//! things an app genuinely varies:
+//!
+//! - An explicit [`BackHandler`] constructed in `Component::init` wires its
+//!   controller **before any view exists**, so first-wire order alone would put
+//!   an inner navigator ahead of a host that cannot possibly have wired yet.
+//! - The documented Huddle pattern wires one controller **twice in a single
+//!   build pass** (`state.back.track()` and `frust::navigator(&controller, …)`),
+//!   so "one wire per pass" is not a premise anything here may rest on.
+//!
+//! `handles_back`/the live provider answer `any(interest)`; a consumed press
+//! routes to the *first* registrant with interest. **The single-navigator case
+//! is unchanged bit for bit**: one registrant makes `any` and "the first with
+//! interest" both degenerate to that controller, whatever its rank. So does a
+//! host with no overlays — at depth 1 with the default `BackPolicy::Pop`,
+//! `compute_back_interest` is `false`, and the host transparently defers to the
+//! inner navigator.
+//!
+//! ## Releasing a navigator that went away
+//!
+//! A navigator that goes away (a screen with its own nested navigator, popped)
+//! must not keep claiming presses, and must not keep its controller clone alive
+//! forever. Two rules drop it, in priority order:
+//!
+//! 1. **Mounted is live.** [`NavigatorController::is_mounted`] is exact — the
+//!    navigator's `View::build`/`teardown` write it — so a *mounted* registrant
+//!    is in the retained tree by definition and is never pruned, no matter how
+//!    the wire sequence looks. This is the load-bearing half: a root overlay
+//!    host is mounted from its own `build` (which runs before its page builder,
+//!    hence before the inner navigator wires at all), so nothing an inner
+//!    navigator does to the wire sequence can evict it.
+//! 2. **The one-cycle rule, for registrants that were never mounted.** A wire
+//!    from an already-registered controller ends a window; an unmounted
+//!    registrant that did not wire within it is dropped. This covers the only
+//!    case rule 1 cannot see — a controller wired through a `BackHandler` whose
+//!    navigator view never made it into the tree.
+//!
+//! Rule 2 is deliberately *not* trusted for mounted navigators: it infers a
+//! build cycle from a repeat wire, and the Huddle pattern above breaks that
+//! inference (the second wire of one pass looks exactly like the first wire of
+//! the next). Before rule 1 existed, that inference pruned the root overlay
+//! host mid-pass and re-created finding #44.
+//!
+//! ## Reachability is upstream of arbitration, by design (H1/R23)
+//!
+//! Ranking decides *who wins among the claimants*; it deliberately does **not**
+//! decide who may claim. A navigator on a page input cannot reach — a nested
+//! navigator inside a page the outer navigator has covered — reports
+//! `back_interest() == false` at the source: `frust-widgets` gates it on the
+//! hosting page being in the host navigator's `input_routed_pages()` (rule
+//! **R23**: navigator reach follows input routing, exactly; see
+//! `frust_widgets::NavigatorController::back_interest`). So this module needs no
+//! visibility filter of its own, and there is **no second notion of
+//! reachability** to keep in sync with the widget's — the same reason
+//! `input_routed_pages` is the one derivation behind both input routing and R23
+//! semantics.
+//!
+//! That is load-bearing for `Role::Navigator`'s innermost-first order: without
+//! it, an innermost navigator that had gone off-screen would outrank the
+//! navigator the user is actually looking at and swallow every press (finding
+//! F1). The two rules are complements — reach says *whether* a navigator is in
+//! the running, rank says *which* of the ones in the running gets the press.
 //!
 //! # Timing: the live provider closes the stale-window
 //!
@@ -58,44 +139,131 @@
 //! the source-side contract.
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use frust_reactive::{CanPopRegistration, back_presses, set_can_pop_provider, set_handles_back};
-use frust_widgets::NavigatorController;
+use frust_widgets::{NavigatorController, NavigatorId};
 use reactive_graph::traits::{Get, GetUntracked};
 
 thread_local! {
     /// The process-wide (UI-thread-affine) back-press wiring shared by BOTH the
     /// automatic [`navigator`](crate::navigator) path and the explicit
-    /// [`BackHandler`]. The whole back system is single-navigator today
-    /// (frust-reactive's provider slot is single-registrant), so a single shared
-    /// marker is the "single consumption source" that makes an auto-wired
-    /// `navigator()` and a manual `BackHandler` on the same controller consume a
-    /// press EXACTLY once — no double-pop (see the module docs).
+    /// [`BackHandler`]. A single shared marker is the "single consumption
+    /// source" that makes an auto-wired `navigator()` and a manual
+    /// `BackHandler` on the same controller consume a press EXACTLY once — no
+    /// double-pop — and a single ordered registrant list is what arbitrates a
+    /// press across a root overlay host and the navigator inside it (R44-back;
+    /// see the module docs).
     ///
-    /// UI-thread-affine because [`SharedBack::interest`] captures an `Rc`-backed
+    /// UI-thread-affine because every [`Registrant`] holds an `Rc`-backed
     /// `NavigatorController` (`!Send`), exactly like frust-reactive's live
     /// provider slot it feeds.
     static SHARED: RefCell<SharedBack> = const { RefCell::new(SharedBack::new()) };
 }
 
+/// What a registrant *is*, which is what R44-back ranks it by — taken from the
+/// facade entry point that wired it, never inferred from wire timing.
+///
+/// `Ord` is the arbitration order: [`Host`](Self::Host) sorts first.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Role {
+    /// A root [`overlay_host`](crate::overlay_host). Its overlays are drawn over
+    /// every piece of chrome, including any inner navigator, so an open one owns
+    /// the back press outright — the #44 contract.
+    Host,
+    /// Any other wired navigator: [`navigator`](crate::navigator)'s auto-wiring
+    /// or an explicit [`BackHandler`].
+    Navigator,
+}
+
+/// One wired navigator in [`SharedBack::registrants`] — the unit R44-back
+/// arbitrates over. The closures hold a controller clone, so a registrant keeps
+/// its navigator's op queue alive until it is pruned.
+struct Registrant {
+    /// Which controller this entry stands for, so a re-wire refreshes it in
+    /// place instead of appending a duplicate.
+    id: NavigatorId,
+    /// This entry's arbitration rank (see [`Role`]). Sticky-upgrades to
+    /// [`Role::Host`]: a controller wired *once* as an overlay host is one, even
+    /// on a re-wire that names it through a different entry point.
+    role: Role,
+    /// The wire sequence number of this entry's FIRST wire — the tiebreak within
+    /// a role, so two navigators of equal rank keep build order.
+    birth: u64,
+    /// The wire sequence number of this entry's most recent refresh; the
+    /// one-cycle prune compares against it (see [`refresh_interest`]).
+    seq: u64,
+    /// `controller.is_mounted()` — is this navigator in the retained tree right
+    /// now? A `true` here vetoes the one-cycle prune (see the module docs'
+    /// release rules).
+    mounted: Box<dyn Fn() -> bool>,
+    /// `controller.back_interest()` — does this navigator claim the next press?
+    /// Already `false` for a navigator whose hosting page input cannot reach
+    /// (the R23 gate in `frust-widgets`; see the module docs), which is why
+    /// nothing here filters on visibility.
+    interest: Box<dyn Fn() -> bool>,
+    /// `controller.request_back()` — deliver the press to this navigator,
+    /// honoring its top page's `BackPolicy`. An `Rc` rather than a `Box` so
+    /// [`route_back`] can clone it out and call it with **no** [`SHARED`] borrow
+    /// outstanding.
+    request_back: Rc<dyn Fn()>,
+}
+
+impl Registrant {
+    /// The sort key R44-back orders the arbitration list by: rank first
+    /// ([`Role`], `Host` sorts ahead of every `Navigator`), then within
+    /// `Role::Navigator` **innermost-first** (highest `birth` — a nested
+    /// navigator always wires after the navigator hosting it, so the highest
+    /// `birth` among `Navigator` peers is the innermost one); `Role::Host`
+    /// peers keep first-wire order (`birth` ascending), unchanged.
+    ///
+    /// G1 (closing finding N1): pre-this-change every rank ordered by
+    /// first-wire (`birth` ascending), which meant an outer navigator at
+    /// depth > 1 — exactly the case where a pushed page hosts a nested
+    /// navigator — permanently outranked the nested navigator inside it, so a
+    /// back press always popped the outer stack (discarding the nested
+    /// navigator's own page) instead of reaching in. `Role::Host` keeps its
+    /// existing order: nothing in this cycle's evidence calls for changing it,
+    /// and the R44/#44 guard only ever required Host to rank above every
+    /// Navigator, never a particular order among multiple hosts.
+    fn key(&self) -> (Role, u64) {
+        match self.role {
+            Role::Host => (self.role, self.birth),
+            // `u64::MAX - birth`: ascending sort on this puts the HIGHEST
+            // birth (innermost, wired last) first among `Navigator` peers —
+            // LIFO, mirroring Android's `OnBackPressedDispatcher`.
+            Role::Navigator => (self.role, u64::MAX - self.birth),
+        }
+    }
+}
+
 /// The shared back state behind [`SHARED`] (see its docs).
 struct SharedBack {
-    /// The last back-press count consumed by *either* entry point; `None` until
+    /// The last back-press count consumed by *any* entry point; `None` until
     /// the first observation. A press up to this count has already been routed
     /// through `request_back`, so a second entry point (or a re-run rebuild)
     /// observing the same count does not re-fire (the `RouterDeepLinks`
     /// consumed-marker pattern, shared across both back entry points).
     consumed: Option<u64>,
-    /// The active controller's `back_interest` probe, refreshed on every wire.
-    /// Overwritten (not appended) so at most one controller is retained — the
-    /// single-navigator model. The live provider (below) reads through this
-    /// slot, so a press is decided against the CURRENT navigator's interest.
-    interest: Option<Box<dyn Fn() -> bool>>,
+    /// Every wired navigator, sorted by [`Registrant::key`] — [`Role::Host`]
+    /// first (build order among hosts, unchanged), then [`Role::Navigator`]
+    /// peers innermost-first (LIFO: last-wired sorts first, the reverse of
+    /// build order) — the R44-back arbitration list. Kept sorted on every
+    /// wire, so a registrant's position never depends on how often its
+    /// controller wires per pass; an unmounted registrant that misses a
+    /// build cycle is pruned (see [`refresh_interest`]). The live provider
+    /// (below) reads through this list, so a press is decided against the
+    /// CURRENT navigators' interest.
+    registrants: Vec<Registrant>,
+    /// Monotonic wire counter stamped into [`Registrant::birth`]/
+    /// [`Registrant::seq`]; ordering and the one-cycle prune are both expressed
+    /// against it.
+    seq: u64,
     /// The live can-pop provider registration, made once on the first wire and
-    /// kept for the process lifetime (single-navigator model). Its closure reads
-    /// [`interest`](Self::interest) live, so `handles_back()` answers against the
-    /// current navigator with no one-frame lag (see the module docs' timing
-    /// note). `None` until the first wire registers it.
+    /// kept for the process lifetime. Its closure reads
+    /// [`registrants`](Self::registrants) live, so `handles_back()` answers
+    /// against the current navigators with no one-frame lag (see the module
+    /// docs' timing note). `None` until the first wire registers it.
     provider: Option<CanPopRegistration>,
 }
 
@@ -103,56 +271,156 @@ impl SharedBack {
     const fn new() -> Self {
         Self {
             consumed: None,
-            interest: None,
+            registrants: Vec::new(),
+            seq: 0,
             provider: None,
         }
     }
 }
 
-/// Refresh the active `back_interest` probe and the polled `handles_back`
-/// fallback flag, registering the live provider once. Called on every wire from
-/// both entry points ([`auto_wire`] and [`BackHandler::new`]/[`track`](BackHandler::track)).
+/// Whether **any** wired navigator claims the next back press — the value both
+/// the live provider and the polled `handles_back` flag publish.
+///
+/// Only ever called with no outstanding [`SHARED`] borrow: an `interest` probe
+/// reads an `Rc<Cell<bool>>` on its controller and never re-enters this module.
+fn any_interest() -> bool {
+    SHARED.with(|shared| shared.borrow().registrants.iter().any(|r| (r.interest)()))
+}
+
+/// Register (or refresh) `controller` in the R44-back arbitration list at
+/// `role`'s rank and republish the polled `handles_back` fallback flag,
+/// registering the live provider once. Called on every wire from both entry
+/// points ([`auto_wire`]/[`auto_wire_overlay_host`] and
+/// [`BackHandler::new`]/[`track`](BackHandler::track)).
+///
+/// Ordering and pruning are the whole mechanism — see the module docs' R44-back
+/// section. In short: the entry is (re-)inserted at its ([`Role`], first-wire)
+/// sort position, so neither *when* nor *how often* a controller wires can move
+/// it; and a repeat wire drops every **unmounted** registrant that did not wire
+/// since this controller's previous wire, a mounted one being in the tree by
+/// definition.
 ///
 /// # Panics
 ///
 /// The first call registers the live provider via [`set_can_pop_provider`],
 /// which panics off the UI thread — always the case here (a rebuild / a
 /// `Component::init` runs on the UI thread).
-fn refresh_interest<State: 'static>(controller: &NavigatorController<State>) {
-    let probe = controller.clone();
+fn refresh_interest<State: 'static>(controller: &NavigatorController<State>, role: Role) {
+    let id = controller.id();
+    let mounted_probe = controller.clone();
+    let interest_probe = controller.clone();
+    let request_probe = controller.clone();
     SHARED.with(|shared| {
         let mut shared = shared.borrow_mut();
-        shared.interest = Some(Box::new(move || probe.back_interest()));
+        shared.seq += 1;
+        let seq = shared.seq;
+        // Carry the existing entry's identity forward (rank sticky-upgrades to
+        // `Host`, first-wire order is preserved), and prune against its previous
+        // wire while it is still in the list.
+        let (role, birth) = match shared.registrants.iter().position(|r| r.id == id) {
+            Some(index) => {
+                let previous = shared.registrants[index].seq;
+                let carried = (
+                    // `Host` sorts first, so `min` IS the sticky upgrade: a
+                    // controller ever wired as an overlay host stays one.
+                    shared.registrants[index].role.min(role),
+                    shared.registrants[index].birth,
+                );
+                // A repeat wire closes a window. Any registrant that neither
+                // wired within it nor is currently mounted is no longer in the
+                // tree — drop it rather than let it keep claiming presses. The
+                // mounted probe is a `Cell` read on the registrant's controller
+                // and never re-enters this module, so calling it under the
+                // `SHARED` borrow is safe (same contract as `any_interest`).
+                shared
+                    .registrants
+                    .retain(|r| r.id == id || r.seq >= previous || (r.mounted)());
+                carried
+            }
+            // First wire: this seq is the entry's permanent tiebreak.
+            None => (role, seq),
+        };
+        let entry = Registrant {
+            id,
+            role,
+            birth,
+            seq,
+            mounted: Box::new(move || mounted_probe.is_mounted()),
+            interest: Box::new(move || interest_probe.back_interest()),
+            request_back: Rc::new(move || request_probe.request_back()),
+        };
+        // Re-insert at the sort position, never "wherever it already was": that
+        // is what keeps arbitration order a function of what a registrant IS
+        // (its role and first wire) rather than of the wire sequence.
+        shared.registrants.retain(|r| r.id != id);
+        let at = shared
+            .registrants
+            .iter()
+            .position(|r| r.key() > entry.key())
+            .unwrap_or(shared.registrants.len());
+        shared.registrants.insert(at, entry);
         if shared.provider.is_none() {
-            // Register the stable live provider ONCE. It reads whatever interest
-            // probe is currently active from `SHARED`, so re-wiring a new
-            // controller (overwriting `interest`) needs no re-registration.
-            shared.provider = Some(set_can_pop_provider(Box::new(|| {
-                SHARED.with(|shared| {
-                    shared
-                        .borrow()
-                        .interest
-                        .as_ref()
-                        .map(|probe| probe())
-                        .unwrap_or(false)
-                })
-            })));
+            // Register the stable live provider ONCE. It reads whatever
+            // registrants are currently wired from `SHARED`, so a new
+            // controller joining the list needs no re-registration.
+            shared.provider = Some(set_can_pop_provider(Box::new(any_interest)));
         }
     });
     // Refresh the polled fallback flag (the live provider is authoritative; this
     // only keeps the no-provider fallback roughly in sync — see the module docs).
-    set_handles_back(controller.back_interest());
+    set_handles_back(any_interest());
+}
+
+/// Deliver a consumed back press under **R44-back**: to the first registrant in
+/// arbitration order (hosts first, then plain navigators innermost-first) that
+/// claims it via `back_interest()`.
+///
+/// No visibility/reachability filter here on purpose: `back_interest()` is
+/// already gated on the claimant's hosting page being input-routed (see the
+/// module docs' R23 note), so a navigator the user cannot reach is never in this
+/// list's answer to begin with.
+///
+/// `fallback` is the controller whose wire consumed the press, used only when
+/// *no* registrant claims one — which preserves the pre-arbitration behaviour
+/// exactly (a press was always delivered to the wiring controller). Delivery
+/// there is a no-op by construction: `back_interest()` is false only at depth 1
+/// with a `BackPolicy::Pop` top page, and `request_back` on that stack pops
+/// nothing.
+fn route_back<State: 'static>(fallback: &NavigatorController<State>) {
+    // The claimant's `request_back` is CLONED OUT of the list (that is what the
+    // `Rc<dyn Fn()>` is for) and called with NO `SHARED` borrow outstanding.
+    // `request_back` only enqueues an op or bumps a dismiss signal today, but it
+    // is the one call here that reaches app-reachable machinery, and a re-entry
+    // into this module would panic on the already-borrowed `RefCell` — so the
+    // borrow ends before the call rather than that staying load-bearing. (The
+    // `interest` probe above is a plain `Cell` read, as `any_interest` notes.)
+    let claimant = SHARED.with(|shared| {
+        let shared = shared.borrow();
+        shared
+            .registrants
+            .iter()
+            .find(|r| (r.interest)())
+            .map(|r| Rc::clone(&r.request_back))
+    });
+    match claimant {
+        Some(request_back) => request_back(),
+        None => fallback.request_back(),
+    }
 }
 
 /// Consume any new back press against the shared marker, routing it through
-/// [`NavigatorController::request_back`] (applies the top page's
-/// `BackPolicy`). The tracked read of the back-press counter subscribes THIS
-/// rebuild, so a later `push_back_press` wakes it (State & Reactivity: the
-/// track-per-rebuild contract).
+/// [`NavigatorController::request_back`] (applies the top page's `BackPolicy`)
+/// on the navigator [`route_back`] arbitrates to. The tracked read of the
+/// back-press counter subscribes THIS rebuild, so a later `push_back_press`
+/// wakes it (State & Reactivity: the track-per-rebuild contract).
 ///
 /// The shared marker is the single consumption source (see the module docs): if
 /// both entry points run in the same rebuild on the same controller, the first
 /// fires `request_back` and the second no-ops on the already-consumed count.
+///
+/// `controller` is the *wiring* controller, not necessarily the recipient —
+/// under R44-back the press goes to the first registrant claiming it, and
+/// `controller` is only the fallback when none does.
 fn consume_back<State: 'static>(controller: &NavigatorController<State>) {
     // Tracked read — subscribes the rebuild to the back-press counter.
     let count = back_presses().count.get();
@@ -177,7 +445,7 @@ fn consume_back<State: 'static>(controller: &NavigatorController<State>) {
         }
     });
     if fire {
-        controller.request_back();
+        route_back(controller);
     }
 }
 
@@ -210,7 +478,20 @@ fn seed_consumed() {
 /// provider, which panics off the UI thread (always the UI thread here).
 pub(crate) fn auto_wire<State: 'static>(controller: &NavigatorController<State>) {
     consume_back(controller);
-    refresh_interest(controller);
+    refresh_interest(controller, Role::Navigator);
+}
+
+/// [`auto_wire`] for a root [`overlay_host`](crate::overlay_host): identical,
+/// except the registrant takes [`Role::Host`] — the rank that puts an open
+/// root overlay ahead of the inner navigator whatever the wire sequence looks
+/// like (R44-back; see the module docs).
+///
+/// # Panics
+///
+/// As [`auto_wire`].
+pub(crate) fn auto_wire_overlay_host<State: 'static>(controller: &NavigatorController<State>) {
+    consume_back(controller);
+    refresh_interest(controller, Role::Host);
 }
 
 /// A [`NavigatorController`] wired to the process-wide back-press source (see
@@ -242,9 +523,16 @@ impl<State: 'static> BackHandler<State> {
     /// Call this once per controller (e.g. from `Component::init`) — from the UI
     /// thread, since the provider slot is UI-thread-affine (it reads the
     /// `Rc`-backed controller). A `Component::init` always runs on the UI thread.
+    ///
+    /// **Registration position does not depend on when you construct this**
+    /// (see the module docs' R44-back section): a handler built in
+    /// `Component::init` wires before any view exists, and a root
+    /// [`overlay_host`](crate::overlay_host) still outranks the navigator it
+    /// wraps — the host's rank comes from its own entry point, not from wire
+    /// order. Where you call [`track`](Self::track) from is likewise free.
     pub fn new(controller: NavigatorController<State>) -> Self {
         seed_consumed();
-        refresh_interest(&controller);
+        refresh_interest(&controller, Role::Navigator);
         Self { controller }
     }
 
@@ -260,7 +548,7 @@ impl<State: 'static> BackHandler<State> {
     /// same rebuild cannot double-pop.
     pub fn track(&self) {
         consume_back(&self.controller);
-        refresh_interest(&self.controller);
+        refresh_interest(&self.controller, Role::Navigator);
     }
 
     /// The wired controller — hand it to
@@ -330,6 +618,7 @@ mod tests {
     };
     use frust_widgets::{
         BackPolicy, NavigatorController, NavigatorView, PushOptions, navigator as raw_navigator,
+        overlay_host as raw_overlay_host,
     };
     use std::sync::{Arc, Mutex};
 
@@ -580,5 +869,677 @@ mod tests {
         // A rebuild with no new press does not re-pop (dedupe).
         h.rebuild();
         assert_eq!(h.depth(), 2, "no new press -> no extra pop");
+    }
+
+    // -----------------------------------------------------------------------
+    // R44-back — arbitration across a root overlay host and an inner navigator.
+    // -----------------------------------------------------------------------
+
+    /// A root `overlay_host` wrapping an inner `navigator`, each auto-wired
+    /// where its view is constructed: the host from the app's build pass, the
+    /// inner navigator from the host's root-page builder — which runs inside
+    /// the host's own reconcile, i.e. strictly later. That *is* the build order
+    /// R44-back arbitrates on, so the harness reproduces the real ordering
+    /// rather than hand-declaring it.
+    struct HostHarness {
+        host: NavigatorController<()>,
+        inner: NavigatorController<()>,
+        root: RenderRoot<(), NavigatorView<()>>,
+        app: AppLogic,
+    }
+
+    impl HostHarness {
+        fn new() -> Self {
+            let host: NavigatorController<()> = NavigatorController::new();
+            let inner: NavigatorController<()> = NavigatorController::new();
+            let app: AppLogic = {
+                let host = host.clone();
+                let inner = inner.clone();
+                Box::new(move |_: &mut ()| {
+                    // Outermost: exactly what `frust::overlay_host` does.
+                    auto_wire_overlay_host(&host);
+                    let inner = inner.clone();
+                    raw_overlay_host(&host, move || {
+                        // Innermost: exactly what `frust::navigator` does.
+                        auto_wire(&inner);
+                        any(raw_navigator(&inner, page))
+                    })
+                })
+            };
+            let mut harness = Self {
+                host,
+                inner,
+                root: RenderRoot::new(),
+                app,
+            };
+            harness.rebuild();
+            harness
+        }
+
+        fn rebuild(&mut self) {
+            self.root.rebuild(&mut self.app, &mut ());
+        }
+    }
+
+    /// The R44-back arbitration list, in order — the whitebox view the ordering
+    /// and pruning rules are pinned against.
+    fn registrant_ids() -> Vec<frust_widgets::NavigatorId> {
+        SHARED.with(|shared| shared.borrow().registrants.iter().map(|r| r.id).collect())
+    }
+
+    /// **R44-back**: with a root overlay open, the press goes to the HOST even
+    /// though the inner navigator is poppable and wired *later*. Before
+    /// arbitration the last wire won outright, so this press popped the inner
+    /// navigator — a page vanishing under an open modal.
+    #[test]
+    fn a_root_overlay_takes_the_back_press_from_the_inner_navigator() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let mut h = HostHarness::new();
+        // Registration order is build order: the host first, then the navigator
+        // its root page builds.
+        assert_eq!(
+            registrant_ids(),
+            vec![h.host.id(), h.inner.id()],
+            "outermost first"
+        );
+
+        // Both stacks are poppable: the inner navigator has a page pushed, and
+        // an overlay sits on the host.
+        h.inner.push(page);
+        h.rebuild();
+        h.host
+            .push_with_options(page, PushOptions::transparent().back(BackPolicy::Pop));
+        h.rebuild();
+        assert_eq!((h.host.depth(), h.inner.depth()), (2, 2));
+        assert!(handles_back(), "some registrant claims the press");
+
+        push_back_press();
+        h.rebuild();
+        assert_eq!(h.host.depth(), 1, "the press went to the root overlay host");
+        assert_eq!(
+            h.inner.depth(),
+            2,
+            "and NOT to the inner navigator (the #44 back bug)"
+        );
+    }
+
+    /// **The degenerate case, bit for bit.** A host with no overlays sits at
+    /// depth 1 with the default `BackPolicy::Pop`, so `compute_back_interest`
+    /// is false and it claims nothing — the press falls straight through to the
+    /// inner navigator, exactly as before the host existed. This is the
+    /// single-navigator (huddle) regression guard.
+    #[test]
+    fn a_host_with_no_overlay_defers_the_back_press_to_the_inner_navigator() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let mut h = HostHarness::new();
+        assert!(
+            !handles_back(),
+            "two navigators, both at the root: back bubbles to the platform"
+        );
+
+        h.inner.push(page);
+        h.rebuild();
+        assert_eq!(h.host.depth(), 1, "the host stays empty");
+        assert!(
+            handles_back(),
+            "the inner navigator's interest answers for the whole app"
+        );
+
+        push_back_press();
+        h.rebuild();
+        assert_eq!(h.inner.depth(), 1, "the press popped the inner navigator");
+        assert_eq!(h.host.depth(), 1, "the empty host was untouched");
+        assert!(!handles_back(), "back at the root of both: bubbles again");
+
+        // A press with nothing to do stays a safe no-op (nobody claims it, so it
+        // routes to the wiring controller, whose stack cannot pop).
+        push_back_press();
+        h.rebuild();
+        assert_eq!((h.host.depth(), h.inner.depth()), (1, 1));
+    }
+
+    /// The predictive-back half of R44-back: an overlay on the host claims the
+    /// press even when the inner navigator has nothing to pop. `handles_back`
+    /// answers `any(interest)`, not "the last navigator wired" — under the
+    /// latter the shell would be told nobody handles back and would *exit the
+    /// app* with a root modal open.
+    #[test]
+    fn a_root_overlay_claims_back_even_with_the_inner_navigator_at_its_root() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let mut h = HostHarness::new();
+        h.host
+            .push_with_options(page, PushOptions::transparent().back(BackPolicy::Pop));
+        h.rebuild();
+        assert_eq!((h.host.depth(), h.inner.depth()), (2, 1));
+        assert!(
+            handles_back(),
+            "the root overlay claims the press though the inner navigator cannot pop"
+        );
+
+        push_back_press();
+        h.rebuild();
+        assert_eq!(h.host.depth(), 1, "the press dismissed the root overlay");
+        assert!(!handles_back(), "nothing left to claim it");
+    }
+
+    /// The one-cycle prune: a navigator that stops wiring (its screen torn down)
+    /// is dropped from the arbitration list rather than claiming presses
+    /// forever from a stack nothing renders. These controllers are never mounted
+    /// (no widget builds them), so the mounted veto never applies and this is
+    /// the pure one-cycle path.
+    ///
+    /// **G1 correction:** all three controllers here register as plain
+    /// `Role::Navigator` peers — despite the `outer`/`inner`/`nested` names,
+    /// nothing wires one *inside* another, so this test proves only the
+    /// birth tiebreak among equal-rank registrants (now innermost/last-wire
+    /// first), not `Role::Host`-first ranking (that's
+    /// `an_init_registered_backhandler_does_not_outrank_a_later_overlay_host`,
+    /// unchanged by this fix). The order below was previously build-order
+    /// (`outer, inner, nested`) and is now the reverse (last-wired sorts
+    /// first) — deliberately inverted, not a leftover mistake.
+    #[test]
+    fn a_navigator_that_stops_wiring_is_pruned_after_one_full_cycle() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let outer: NavigatorController<()> = NavigatorController::new();
+        let inner: NavigatorController<()> = NavigatorController::new();
+        let nested: NavigatorController<()> = NavigatorController::new();
+
+        // Frame 1: three navigators wire, in build order.
+        refresh_interest(&outer, Role::Navigator);
+        refresh_interest(&inner, Role::Navigator);
+        refresh_interest(&nested, Role::Navigator);
+        assert_eq!(
+            registrant_ids(),
+            vec![nested.id(), inner.id(), outer.id()],
+            "innermost/last-wired first: the reverse of build order"
+        );
+
+        // Frame 2: the nested navigator's screen is gone — it never wires again.
+        refresh_interest(&outer, Role::Navigator);
+        refresh_interest(&inner, Role::Navigator);
+        assert_eq!(
+            registrant_ids(),
+            vec![nested.id(), inner.id(), outer.id()],
+            "not yet: a full cycle has not elapsed without it"
+        );
+
+        // Frame 3: the outer wire now spans a whole cycle in which `nested`
+        // never appeared.
+        refresh_interest(&outer, Role::Navigator);
+        assert_eq!(
+            registrant_ids(),
+            vec![inner.id(), outer.id()],
+            "the departed navigator is pruned, and its controller clone released"
+        );
+
+        // Re-wiring an existing registrant never re-orders it.
+        refresh_interest(&inner, Role::Navigator);
+        refresh_interest(&outer, Role::Navigator);
+        refresh_interest(&inner, Role::Navigator);
+        assert_eq!(registrant_ids(), vec![inner.id(), outer.id()]);
+    }
+
+    // -----------------------------------------------------------------------
+    // F1: the two ways the pre-fix "a repeat wire proves a build cycle" premise
+    // broke — a controller wiring TWICE per pass, and a `BackHandler` wiring
+    // from `Component::init` before any view exists.
+    // -----------------------------------------------------------------------
+
+    /// The REAL Huddle shape under a root overlay host: the inner navigator is
+    /// wired **twice in one build pass** — an explicit `BackHandler` built in
+    /// `Component::init` and `track()`ed from the host's page builder, plus the
+    /// automatic `navigator()` wiring right beside it
+    /// (`examples/huddle/src/lib.rs` does exactly this pair).
+    ///
+    /// Before the fix, the second wire's one-cycle prune read the FIRST wire of
+    /// the same pass as a cycle boundary and dropped the host, which then
+    /// re-appended *after* the inner navigator — permanently inverting
+    /// arbitration and re-creating finding #44 (a back press with a root modal
+    /// open popping the page underneath it).
+    #[test]
+    fn an_overlay_host_survives_an_inner_navigator_wiring_twice_per_pass() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let host: NavigatorController<()> = NavigatorController::new();
+        let inner: NavigatorController<()> = NavigatorController::new();
+        // `Component::init`: the explicit handler exists before any view does.
+        let back = Rc::new(BackHandler::new(inner.clone()));
+
+        let mut app: AppLogic = {
+            let host = host.clone();
+            let inner = inner.clone();
+            Box::new(move |_: &mut ()| {
+                // The app's build pass: `frust::overlay_host`.
+                auto_wire_overlay_host(&host);
+                let inner = inner.clone();
+                let back = Rc::clone(&back);
+                raw_overlay_host(&host, move || {
+                    // The host's page builder — Huddle's own build body, moved
+                    // inside the host: `state.back.track()` then
+                    // `frust::navigator(&controller, …)`, one pass, one
+                    // controller, TWO wires.
+                    back.track();
+                    auto_wire(&inner);
+                    any(raw_navigator(&inner, page))
+                })
+            })
+        };
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        root.rebuild(&mut app, &mut ());
+
+        assert_eq!(
+            registrant_ids(),
+            vec![host.id(), inner.id()],
+            "the host outranks the inner navigator despite wiring once to its twice"
+        );
+
+        // An overlay over the whole app, and a poppable inner stack under it.
+        inner.push(page);
+        host.push_with_options(page, PushOptions::transparent().back(BackPolicy::Pop));
+        // Two more passes: the ordering must survive repeated double-wiring.
+        for _ in 0..2 {
+            root.rebuild(&mut app, &mut ());
+        }
+        assert_eq!((host.depth(), inner.depth()), (2, 2));
+        assert_eq!(
+            registrant_ids(),
+            vec![host.id(), inner.id()],
+            "still outermost-first after repeated passes"
+        );
+        assert!(
+            handles_back(),
+            "the shell is told the app handles back (a root modal is open)"
+        );
+
+        push_back_press();
+        root.rebuild(&mut app, &mut ());
+        assert_eq!(host.depth(), 1, "the press dismissed the root overlay");
+        assert_eq!(
+            inner.depth(),
+            2,
+            "and NOT the page under it (finding #44's back bug)"
+        );
+    }
+
+    /// The second ordering break: `BackHandler::new` wires from
+    /// `Component::init`, which runs before ANY view is constructed — so a
+    /// first-wire-order rule alone gave the inner navigator position 0 from
+    /// frame 1, and no amount of "track from inside the host's page builder"
+    /// advice could fix a registration that already happened. Rank comes from
+    /// the entry point instead, so the host still sorts first.
+    #[test]
+    fn an_init_registered_backhandler_does_not_outrank_a_later_overlay_host() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let host: NavigatorController<()> = NavigatorController::new();
+        let inner: NavigatorController<()> = NavigatorController::new();
+
+        // `Component::init` — the inner navigator's handler registers FIRST.
+        let back = BackHandler::new(inner.clone());
+        assert_eq!(registrant_ids(), vec![inner.id()], "init wired it alone");
+
+        // The first `Component::build`: the host wires only now.
+        auto_wire_overlay_host(&host);
+        assert_eq!(
+            registrant_ids(),
+            vec![host.id(), inner.id()],
+            "the host claims the outermost slot even though it wired second"
+        );
+
+        // And a repeat pass keeps it there.
+        auto_wire_overlay_host(&host);
+        back.track();
+        assert_eq!(registrant_ids(), vec![host.id(), inner.id()]);
+    }
+
+    /// The mounted veto's other half: it only ever *delays* release. A
+    /// navigator whose widget is torn down (its page rebuilt without it) reports
+    /// unmounted, so the one-cycle rule drops it and releases the controller
+    /// clone the registrant holds.
+    ///
+    /// **G1 correction:** `nested` genuinely lives inside `outer`'s own page
+    /// here, so it wires after `outer` and — under the new innermost-first
+    /// `Role::Navigator` order — now sorts AHEAD of it; the order below
+    /// flipped from `[outer, nested]` to `[nested, outer]` for that reason,
+    /// this test's own point (mount-liveness pruning) is unaffected.
+    #[test]
+    fn a_torn_down_navigator_stops_vetoing_the_prune_and_is_released() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let outer: NavigatorController<()> = NavigatorController::new();
+        let nested: NavigatorController<()> = NavigatorController::new();
+        // The nested navigator lives inside the outer navigator's root page,
+        // until this flag turns it off.
+        let show_nested = Rc::new(std::cell::Cell::new(true));
+        // The arbitration list as seen MID-PASS, at the moment the outer
+        // navigator's page rebuilds — i.e. inside the window a spurious prune
+        // opens, when the shell may read `handles_back` or a press may route.
+        let mid_pass: Rc<RefCell<Vec<NavigatorId>>> = Rc::new(RefCell::new(Vec::new()));
+
+        let mut app: AppLogic = {
+            let outer = outer.clone();
+            let nested = nested.clone();
+            let show_nested = Rc::clone(&show_nested);
+            let mid_pass = Rc::clone(&mid_pass);
+            Box::new(move |_: &mut ()| {
+                // The outer navigator wires TWICE per pass (Huddle's
+                // `track()` + `navigator()` pair), so the one-cycle rule alone
+                // would prune the nested navigator on every second wire — the
+                // mounted veto is the only reason it survives below.
+                auto_wire(&outer);
+                auto_wire(&outer);
+                let nested = nested.clone();
+                let show_nested = Rc::clone(&show_nested);
+                let mid_pass = Rc::clone(&mid_pass);
+                raw_navigator(&outer, move || {
+                    *mid_pass.borrow_mut() = registrant_ids();
+                    if show_nested.get() {
+                        auto_wire(&nested);
+                        any(raw_navigator(&nested, page))
+                    } else {
+                        page()
+                    }
+                })
+            })
+        };
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        root.rebuild(&mut app, &mut ());
+        assert!(nested.is_mounted(), "the nested navigator is in the tree");
+        assert_eq!(registrant_ids(), vec![nested.id(), outer.id()]);
+
+        // While mounted it survives the outer navigator's double wire — the
+        // exact sequence the one-cycle rule alone misreads as a build cycle.
+        root.rebuild(&mut app, &mut ());
+        root.rebuild(&mut app, &mut ());
+        assert_eq!(
+            registrant_ids(),
+            vec![nested.id(), outer.id()],
+            "a mounted navigator is in the tree by definition: never pruned"
+        );
+        assert_eq!(
+            *mid_pass.borrow(),
+            vec![nested.id(), outer.id()],
+            "and it is never MISSING mid-pass either — the window in which a \
+             spurious prune would mis-answer handles_back / mis-route a press"
+        );
+
+        // Its page rebuilds without it: the widget tears down.
+        show_nested.set(false);
+        root.rebuild(&mut app, &mut ());
+        assert!(!nested.is_mounted(), "teardown dropped the liveness");
+
+        // Now the one-cycle rule reaches it (the outer wire that spans a whole
+        // cycle in which the nested navigator never appeared).
+        root.rebuild(&mut app, &mut ());
+        root.rebuild(&mut app, &mut ());
+        assert_eq!(
+            registrant_ids(),
+            vec![outer.id()],
+            "the departed navigator is released, not kept alive by the veto"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // G1 (closes review finding N1): a nested navigator must receive the
+    // back press.
+    // -----------------------------------------------------------------------
+
+    /// **G1**: an outer navigator PUSHES a page that hosts a nested navigator
+    /// (the outer navigator is at depth > 1 — exactly what makes
+    /// `compute_back_interest` true for it too), and the nested navigator's
+    /// own stack is also poppable. A back press must reach the INNERMOST
+    /// (nested) navigator, popping its stack, and must leave the outer
+    /// navigator's depth untouched — the reverse of what plain build-order
+    /// (outermost-first) arbitration gave: before this fix the outer
+    /// navigator, wired first, always claimed the press and popped the whole
+    /// page hosting the nested navigator instead of reaching into it.
+    #[test]
+    fn a_nested_navigator_inside_a_pushed_page_gets_the_back_press() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let outer: NavigatorController<()> = NavigatorController::new();
+        let inner: NavigatorController<()> = NavigatorController::new();
+
+        // The outer navigator's ROOT page is plain — no nested navigator
+        // exists at depth 1, so `compute_back_interest` starts false for it
+        // (matching the module docs: the bug only appears once the outer
+        // navigator itself is poppable).
+        let mut app: AppLogic = {
+            let outer_c = outer.clone();
+            Box::new(move |_: &mut ()| {
+                auto_wire(&outer_c);
+                raw_navigator(&outer_c, page)
+            })
+        };
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        root.rebuild(&mut app, &mut ());
+        assert_eq!(outer.depth(), 1, "outer starts at its own root");
+        assert!(
+            !handles_back(),
+            "root-level, no nested navigator yet: back bubbles"
+        );
+
+        // Push a page onto the OUTER navigator that hosts the nested
+        // navigator — outer is now at depth 2, the shape that made #44's
+        // regression reachable.
+        {
+            let inner_for_push = inner.clone();
+            outer.push(move || {
+                auto_wire(&inner_for_push);
+                any(raw_navigator(&inner_for_push, page))
+            });
+        }
+        root.rebuild(&mut app, &mut ());
+        assert_eq!(
+            outer.depth(),
+            2,
+            "outer pushed to depth 2: the page hosting the nested navigator"
+        );
+        assert_eq!(
+            inner.depth(),
+            1,
+            "the nested navigator starts at its own root"
+        );
+
+        // Push inside the nested navigator too, so BOTH stacks are poppable —
+        // the exact ambiguity R44-back must arbitrate between two
+        // `Role::Navigator` peers.
+        inner.push(page);
+        root.rebuild(&mut app, &mut ());
+        assert_eq!((outer.depth(), inner.depth()), (2, 2));
+        assert!(handles_back(), "some registrant claims the press");
+
+        push_back_press();
+        root.rebuild(&mut app, &mut ());
+        assert_eq!(
+            inner.depth(),
+            1,
+            "the back press popped the NESTED navigator's stack"
+        );
+        assert_eq!(
+            outer.depth(),
+            2,
+            "and left the outer navigator's depth UNCHANGED — a bare \
+             build-order (outermost-first) arbitration would instead have \
+             popped the outer stack, discarding the whole page the nested \
+             navigator lives on"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // H1 (closes review finding F1): the converse of G1 — a nested navigator
+    // whose hosting page input can no longer reach must NOT take the press.
+    // -----------------------------------------------------------------------
+
+    /// An outer navigator whose ROOT page hosts a nested navigator, each
+    /// auto-wired where its view is constructed (the outer from the app's build
+    /// pass, the nested from the page builder the outer runs during its own
+    /// reconcile) — the canonical tab/section-stack shape. `cull` sets the outer
+    /// navigator's [`cull_covered_builds`], the switch that decides whether the
+    /// covered page keeps re-running its builder at all.
+    struct NestedHarness {
+        outer: NavigatorController<()>,
+        nested: NavigatorController<()>,
+        root: RenderRoot<(), NavigatorView<()>>,
+        app: AppLogic,
+    }
+
+    impl NestedHarness {
+        fn new(cull: bool) -> Self {
+            let outer: NavigatorController<()> = NavigatorController::new();
+            let nested: NavigatorController<()> = NavigatorController::new();
+            let app: AppLogic = {
+                let outer = outer.clone();
+                let nested = nested.clone();
+                Box::new(move |_: &mut ()| {
+                    // Exactly what `frust::navigator` does, outermost first.
+                    auto_wire(&outer);
+                    let nested = nested.clone();
+                    raw_navigator(&outer, move || {
+                        auto_wire(&nested);
+                        any(raw_navigator(&nested, page))
+                    })
+                    .cull_covered_builds(cull)
+                })
+            };
+            let mut harness = Self {
+                outer,
+                nested,
+                root: RenderRoot::new(),
+                app,
+            };
+            harness.rebuild();
+            harness
+        }
+
+        fn rebuild(&mut self) {
+            self.root.rebuild(&mut self.app, &mut ());
+        }
+    }
+
+    /// **H1 — the F1 case.** The outer navigator pushes a page OVER the one
+    /// hosting the nested navigator. Input can reach only the outer navigator's
+    /// top page (`input_routed_pages`), so back must follow: the press pops the
+    /// OUTER stack, and the nested (invisible) stack is untouched.
+    ///
+    /// Before this fix `route_back` was a bare `find(|r| interest())` over a
+    /// list sorted innermost-first, and the covered page keeps reconciling (the
+    /// default) or stays `is_mounted()` (under the cull) either way — so the
+    /// nested navigator claimed the press, popped a stack nobody could see, and
+    /// the back button appeared to do nothing.
+    ///
+    /// Run under BOTH `cull_covered_builds` settings: they are exactly the two
+    /// ways the covered page's builder does or does not keep running, and the
+    /// answer must not depend on that.
+    #[test]
+    fn a_nested_navigator_on_a_covered_page_does_not_take_the_back_press() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+
+        for cull in [false, true] {
+            reset();
+            let mut h = NestedHarness::new(cull);
+
+            // The nested stack is poppable while its page is still current —
+            // the G1 case, which must keep working (asserted below too).
+            h.nested.push(page);
+            h.rebuild();
+            assert_eq!((h.outer.depth(), h.nested.depth()), (1, 2));
+            assert!(
+                handles_back(),
+                "the nested navigator claims the press while its page is current (cull={cull})"
+            );
+
+            // Now push a page over it on the OUTER navigator: the nested
+            // navigator's page is covered and routed no input.
+            h.outer.push(page);
+            h.rebuild();
+            assert_eq!((h.outer.depth(), h.nested.depth()), (2, 2));
+            // A few idle frames: under `cull_covered_builds(true)` the covered
+            // page stops rebuilding entirely here, so this is where a
+            // wire-refreshed (rather than live) reachability flag would go stale.
+            for _ in 0..3 {
+                h.rebuild();
+            }
+            assert!(
+                handles_back(),
+                "the outer navigator claims it (cull={cull})"
+            );
+
+            push_back_press();
+            h.rebuild();
+            assert_eq!(
+                h.outer.depth(),
+                1,
+                "the press popped the OUTER stack — the page the user is \
+                 actually looking at came off (cull={cull})"
+            );
+            assert_eq!(
+                h.nested.depth(),
+                2,
+                "and the covered navigator's invisible stack is UNCHANGED \
+                 (cull={cull})"
+            );
+
+            // Revealed again, the nested navigator takes the next press — the
+            // G1 behaviour, unregressed, in the same harness.
+            push_back_press();
+            h.rebuild();
+            assert_eq!(
+                (h.outer.depth(), h.nested.depth()),
+                (1, 1),
+                "back reaches the nested navigator again once its page is \
+                 current (cull={cull})"
+            );
+        }
+    }
+
+    /// The reach gate is **input routing**, not painting: a *transparent*
+    /// overlay pushed on the outer navigator leaves the page below it painted
+    /// (`PageVisibility::Visible`) but routes it no input, so the nested
+    /// navigator on that page must not take the press either. This is the same
+    /// divergence R23 pins for semantics.
+    #[test]
+    fn a_nested_navigator_under_a_transparent_overlay_does_not_take_the_back_press() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let mut h = NestedHarness::new(false);
+        h.nested.push(page);
+        h.rebuild();
+        h.outer
+            .push_with_options(page, PushOptions::transparent().back(BackPolicy::Pop));
+        h.rebuild();
+        assert_eq!((h.outer.depth(), h.nested.depth()), (2, 2));
+
+        push_back_press();
+        h.rebuild();
+        assert_eq!(h.outer.depth(), 1, "the overlay came off");
+        assert_eq!(
+            h.nested.depth(),
+            2,
+            "the painted-but-inert page's navigator kept its stack"
+        );
     }
 }

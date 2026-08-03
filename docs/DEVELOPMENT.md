@@ -437,7 +437,7 @@ not floating. Each row's tripwire must be re-run after touching that pin:
 | `objc2-security 0.3` / `objc2-local-authentication 0.3` minor | `frust-secure-storage`'s Apple Keychain backend + biometric gate (`SecAccessControl`/`LAContext`) | the secure-storage mobile compile gates above |
 | `objc2-ui-kit` / `objc2-quartz-core` / `objc2-core-text` / `objc2-core-foundation` 0.3 minor | `frust-native-widgets`'s (`plugins/native-widgets`) UIKit binding, plus its theme-ladder L2 (`objc2-quartz-core`'s `CALayer.cornerRadius`) and L3 (`objc2-core-text`/`objc2-core-foundation` resolving the embedded Glyph font bytes to a `CTFont`) direct pins — each already resolved transitively before this crate named it directly, so no lockfile version change. `cargo tree -i objc2-ui-kit` legitimately shows two versions — `0.2.2` pulled transitively by `accesskit_ios`/`winit`, `0.3.2` consumed solely by `frust-native-widgets` — an expected split, not `cargo tree -d` drift; do not force-align them | `cargo check --target aarch64-apple-ios-sim -p frust-native-widgets` |
 | `keyring-core 1.0` / `zbus-secret-service-keyring-store 1.0` (`rt-async-io-crypto-rust` feature, keeps the plugin tokio-free) / `windows-native-keyring-store 1.1` minor | `frust-secure-storage`'s desktop Linux/Windows backend | `cargo test -p frust-secure-storage` |
-| `notify 8` minor (`frust-cli`-only) | `frust run --watch`'s filesystem watcher (`ctrlc` floats, shared by `frust-drive`/`frust-cli`, unpinned) | `cargo test -p frust-cli` |
+| `notify 8` minor (`frust-cli`-only) | `frust run --watch`'s filesystem watcher (`ctrlc` floats, shared by `frust-drive`/`frust-cli`, unpinned; `frust-drive`'s copy now enables the `termination` feature so `frust-drive::interrupt` also catches SIGTERM/SIGHUP — needed to scrub the plaintext release-signing file on a CI runner's kill, not just Ctrl-C. Visible consequence: interrupting a `--release` `frust run` before logcat streaming begins now exits 130 for SIGTERM/SIGHUP, where an unhandled signal previously exited 143/129; the logcat phase's own Ctrl-C-means-stop override still exits 0 for all three signals) | `cargo test -p frust-cli` |
 | `ratatui 0.30` / `crossterm 0.29` / `ansi-to-tui 8.0.1` minor | `frust-tui`'s render/terminal/log stack, pre-1.0 churn expected | `cargo test -p frust-tui` |
 | `toml_edit 0.25` minor | `frust-tui`'s config persistence and `frust-drive::plugin`'s format-preserving Cargo.toml/manifest edits | `cargo test -p frust-tui` && `cargo test -p frust-drive` |
 
@@ -459,6 +459,79 @@ not floating. Each row's tripwire must be re-run after touching that pin:
   every platform — expected, not drift. `libc` (unpinned `0.2`) is the same shape but
   two-platform: android's/ios's render-thread priority self-boosts
   (`docs/CODE_STANDARDS.md`'s sanctioned-unsafe zones).
+
+## Platform-Support Policy
+
+The minimum supported platform is a **project-wide constant, not a per-module choice**. Every module
+must declare the same floor; the numbers are repeated in an in-file comment at each site.
+
+**A mismatch fails in one of two ways, depending on direction** (both verified empirically):
+
+- **App below library → hard build error.** AGP's manifest merger refuses it:
+  `uses-sdk:minSdkVersion 24 cannot be smaller than version 26 declared in library
+  [:frust-embedding] … as the library might be using APIs not available in 24`.
+  `:app:processDebugMainManifest` fails; nothing is produced.
+- **Library below app → silent behaviour change.** No error; the library just misses APIs it could
+  have used, exactly as `IME_FLAG_NO_PERSONALIZED_LEARNING` did (below).
+
+| Platform | Floor | Declared in |
+|----------|-------|-------------|
+| Android | **`minSdk = 26`** (Android 8.0) · `compileSdk = 36` | 10 Gradle files: `platform/android/frust-embedding`, `plugins/{camera,native-widgets,secure-storage}/platform/android`, `templates/app/android.tmpl/app`, and the 5 example/benchmark apps |
+| iOS | **15.0** | `platform/ios/FrustEmbedding/Package.swift` (`.iOS(.v15)`) and each app's `IPHONEOS_DEPLOYMENT_TARGET` |
+
+**Adding a new Android module?** Copy the floor and the lockstep comment. **Adding a new iOS
+target?** `Package.swift`'s `platforms:` must stay **at or below** every consumer's
+`IPHONEOS_DEPLOYMENT_TARGET` — a package minimum above the app's is a compile error.
+
+### Why Android is 26 and must not go lower
+
+Raised from 24 in `db6827b`. API 24/25 (Android 7.x) were dropped as too old to carry, and the floor
+was actively costing correctness: **`EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING` is API 26+**, so
+the keyboard-learning half of FINDINGS #31's mitigation was a no-op below it. It is an `imeOptions`
+bit, so the constant inlines at compile time and an older IME simply ignores it — no compile error,
+no runtime crash. At 26 the flag is unconditionally honoured and `frust-core/src/event.rs`'s IME
+contract table holds at the floor.
+
+> **Lint *did* catch this, and we were not running lint.** Re-tested by setting the module back to
+> `minSdk = 24`: `lintDebug` reports it twice as **`InlinedApi`** (the rule specifically for inlined
+> constants) — *"Field requires API level 26 (current min is 24):
+> `android.view.inputmethod.EditorInfo#IME_FLAG_NO_PERSONALIZED_LEARNING`"*. Its default severity is
+> **warning**, so the build still exits 0. The defect was not invisible to tooling; it was invisible
+> because **no gate ran Android Lint at all**. Wiring `lintDebug` into the Android gate — and
+> deciding whether `InlinedApi` should be an error here — is open work, not something this bump
+> settled.
+
+**Lowering the floor below 26 re-opens that hole silently.** If it is ever lowered, restore the
+API-caveat entry in `docs/LIMITATIONS.md` in the same change.
+
+**One** API becomes available at the new floor and is deliberately **not** adopted:
+`SeekBar.setMin` (API 26) — `plugins/native-widgets/src/controls/slider.rs` keeps its Rust-side
+range mapping; see that module doc for why.
+
+Two things the bump does **not** unlock, and which still need their existing workarounds:
+`Font.Builder(ByteBuffer)` is **API 29**, so `typeface.rs` still writes a cache file; and
+`BiometricPrompt` is **API 28+**, so `secure-storage`'s gate stays and
+`NotAvailable(UnsupportedApiLevel)` remains reachable on 26 and 27.
+
+### Migrating an already-scaffolded app
+
+Apps generated before `db6827b` carry `minSdk = 24`. **The bump is mandatory, not optional** — a
+scaffolded app consumes the embedding as a Gradle *project* dependency
+(`implementation(project(":frust-embedding"))`), so an app at 24 against the 26 library fails the
+manifest merger outright (verified: `:app:processDebugMainManifest` exits 1 with the
+`cannot be smaller than version 26` error quoted above). Set `minSdk = 26` in the app's
+`app/build.gradle.kts`; there is no other migration step.
+
+**Verifying a floor change:** `cargo` cannot see any of this. Run, from an app dir:
+
+```
+./gradlew :app:processDebugMainManifest   # catches an app-below-library mismatch (hard error)
+./gradlew compileDebugKotlin lintDebug    # catches API usage above the floor, as InlinedApi/NewApi
+```
+
+`lintDebug` reports API-above-floor usage at **warning** severity, so a green exit code does **not**
+mean clean — read the SARIF/HTML report under `build/reports/`, or raise the severity, before
+concluding anything.
 
 ## Known Issues
 

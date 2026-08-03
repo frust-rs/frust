@@ -126,6 +126,8 @@ fn badges_row<State: 'static>() -> AnyView<State> {
         h_gap(8.0),
         any(glyph::badge("offline", glyph::BadgeVariant::Error).dot(true)),
         h_gap(8.0),
+        any(glyph::badge("active", glyph::BadgeVariant::Info)),
+        h_gap(8.0),
         any(glyph::badge("read-only", glyph::BadgeVariant::Neutral)),
         h_gap(8.0),
         any(glyph::badge("v0.44.1", glyph::BadgeVariant::Accent)),

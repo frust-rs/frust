@@ -49,6 +49,19 @@ final class FrustView: UIView {
     var keyboardType: UIKeyboardType = .default
     var returnKeyType: UIReturnKeyType = .done
 
+    // UITextInputTraits: the security/suggestion knobs the published
+    // `ImeState.content_type` hint drives (see
+    // `FrustViewController.applyImeContentType`, called from `syncImeFocus`
+    // right before `becomeFirstResponder`, so the keyboard is configured
+    // correctly from the first character rather than being reconfigured
+    // mid-session). `isSecureTextEntry` is the load-bearing one — it is what
+    // suppresses the QuickType suggestion bar and keyboard learning
+    // (FINDINGS #31); a field that publishes no hint keeps UIKit's own
+    // defaults (visible entry, spell-check on).
+    var isSecureTextEntry: Bool = false
+    var spellCheckingType: UITextSpellCheckingType = .default
+    var textContentType: UITextContentType?
+
     /// A custom editor view must opt in to becoming first responder for the
     /// keyboard to appear.
     override var canBecomeFirstResponder: Bool { true }

@@ -40,8 +40,8 @@ use frust_core::RenderRoot;
 use frust_core::SemanticsUpdate;
 use frust_core::accesskit::{Tree, TreeId, TreeUpdate};
 use frust_core::event::{
-    ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton, PointerEvent,
-    PointerPhase, ScrollDelta,
+    EventOutcome, ImeContentType, ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey,
+    PointerButton, PointerEvent, PointerPhase, ScrollDelta,
 };
 use frust_core::insets::WindowInsets;
 use frust_core::view::View;
@@ -61,7 +61,7 @@ use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey as WinitNamedKey};
-use winit::window::{Theme as WinitTheme, Window, WindowAttributes, WindowId};
+use winit::window::{ImePurpose, Theme as WinitTheme, Window, WindowAttributes, WindowId};
 
 use crate::paced_wake::{ControlFlowIntent, next_paced_wake, paced_wake_action};
 use crate::render::FrameExecutor;
@@ -485,15 +485,48 @@ impl ComposeLatch {
     }
 }
 
+/// Map a published [`ImeContentType`] onto the nearest winit [`ImePurpose`].
+///
+/// **This is the full extent of what pinned winit 0.30.13 offers for this
+/// hint, and it is a weak one.** [`Window::set_ime_purpose`] docs itself as
+/// unsupported on every backend *except* Wayland — iOS, Android, Web,
+/// Windows, X11, and macOS are all listed explicitly as no-ops. Where it
+/// *is* honoured (Wayland, via the compositor's own input-method/OSK), it is
+/// a cosmetic hint, not a security boundary: winit has no secure-text-entry
+/// concept, so plaintext still crosses the same `Ime`/`KeyboardInput` event
+/// stream either way (see [`frust_core::event::ImeState`]'s own
+/// "residual exposure" note, which already documents this for the mobile
+/// shells — the same limit applies here, just with a much smaller platform
+/// footprint that actually honours it).
+///
+/// `ImePurpose` also only distinguishes `Normal`/`Password`/`Terminal`, so
+/// [`NoSuggestions`](ImeContentType::NoSuggestions) has nothing more precise
+/// to map onto than `Normal` — desktop has no channel to ask a platform IME
+/// to suppress suggestions/learning without also claiming secure entry it
+/// can't actually deliver on this backend.
+///
+/// Recorded in `docs/SHELLS_ARCHITECTURE.md`'s IME section.
+fn ime_purpose_for(content_type: ImeContentType) -> ImePurpose {
+    if content_type.is_secret() {
+        ImePurpose::Password
+    } else {
+        ImePurpose::Normal
+    }
+}
+
 /// Cached view of what we last told winit about the platform IME, so
-/// [`ShellHandler::sync_ime`] only calls `set_ime_allowed`/`set_ime_cursor_area`
-/// on an actual change rather than every dispatched event.
+/// [`ShellHandler::sync_ime`] only calls
+/// `set_ime_allowed`/`set_ime_cursor_area`/`set_ime_purpose` on an actual
+/// change rather than every dispatched event.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 struct ImeSync {
     /// The last `set_ime_allowed` value sent to winit.
     allowed: bool,
     /// The last `set_ime_cursor_area` position/size sent to winit, if any.
     cursor_area: Option<(LogicalPosition<f64>, LogicalSize<f64>)>,
+    /// The last [`ImePurpose`] sent to winit via `set_ime_purpose` — see
+    /// [`ime_purpose_for`] for how far that call actually reaches.
+    purpose: ImePurpose,
 }
 
 /// Owns everything a running desktop app needs across frames.
@@ -639,8 +672,14 @@ where
     /// Also re-syncs the platform IME ([`ShellHandler::sync_ime`]) after every
     /// dispatch: a focus change, blur, or caret move can all happen as
     /// a side effect of any event, not just keyboard/IME ones.
+    ///
+    /// The event pass itself runs under the reactive root [`Owner`] — see
+    /// [`event_under_owner`], which is what makes `use_context` work from a
+    /// press handler.
+    ///
+    /// [`Owner`]: frust_reactive::Owner
     fn dispatch(&mut self, window: &Window, event: InputEvent) {
-        let outcome = self.root.event(&mut self.state, &event);
+        let outcome = event_under_owner(self.runtime, &mut self.root, &mut self.state, &event);
         self.sync_ime(window);
         if outcome.needs_redraw {
             window.request_redraw();
@@ -648,13 +687,22 @@ where
     }
 
     /// Query [`RenderRoot::ime_state`] and push any *changed* IME-relevant
-    /// state to winit: `set_ime_allowed` on an active-transition, and
+    /// state to winit: `set_ime_allowed` on an active-transition,
     /// `set_ime_cursor_area` (logical caret rect) when active and the caret
-    /// moved. Both calls are gated behind [`ImeSync`]'s cache so a steady-state
-    /// focused field with an unmoving caret doesn't re-issue them every event.
+    /// moved, and `set_ime_purpose` when [`ImeState::content_type`] changes
+    /// (see [`ime_purpose_for`] for exactly how little that last call reaches
+    /// — pinned winit honours it on Wayland only, and even there it is a
+    /// cosmetic hint, not secure entry). All three calls are gated behind
+    /// [`ImeSync`]'s cache so a steady-state focused field with an unmoving
+    /// caret and unchanged content type doesn't re-issue them every event.
+    ///
+    /// [`ImeState::content_type`]: frust_core::event::ImeState::content_type
     fn sync_ime(&mut self, window: &Window) {
         let ime_state = self.root.ime_state();
         let active = ime_state.as_ref().is_some_and(|s| s.active);
+        let purpose = ime_state
+            .as_ref()
+            .map_or(ImePurpose::Normal, |s| ime_purpose_for(s.content_type));
 
         if active != self.ime_sync.allowed {
             window.set_ime_allowed(active);
@@ -662,6 +710,11 @@ where
             if !active {
                 self.ime_sync.cursor_area = None;
             }
+        }
+
+        if purpose != self.ime_sync.purpose {
+            window.set_ime_purpose(purpose);
+            self.ime_sync.purpose = purpose;
         }
 
         if active && let Some(caret) = ime_state.and_then(|s| s.caret) {
@@ -757,11 +810,18 @@ where
                 adapter.update_if_active(|| build_tree_update(&update));
             }
             AccessibilityWindowEvent::ActionRequested(request) => {
-                let outcome = self.root.perform_accessibility_action(
-                    &mut self.state,
-                    request.target_node,
-                    request.action,
-                );
+                // Same reactive-owner wrap as `dispatch`: the action is routed
+                // through synthesized pointer events, so it lands in the very
+                // same `Widget::event` handlers a real click would and needs the
+                // ambient `Owner` just as much (see [`event_under_owner`]).
+                let runtime = self.runtime;
+                let outcome = runtime.with_owner(|| {
+                    self.root.perform_accessibility_action(
+                        &mut self.state,
+                        request.target_node,
+                        request.action,
+                    )
+                });
                 if outcome.needs_redraw
                     && let Some(window) = self.window.as_ref()
                 {
@@ -771,6 +831,50 @@ where
             AccessibilityWindowEvent::AccessibilityDeactivated => {}
         }
     }
+}
+
+/// Deliver one input event to the widget tree **under the reactive runtime's
+/// root [`Owner`]**, so context lookups work from inside an event handler.
+///
+/// # Why the wrap is needed
+///
+/// `reactive_graph`'s `use_context` resolves by walking up from
+/// `Owner::current()`, and `Owner::with` *restores* the previous owner when it
+/// returns — so outside the per-frame rebuild wrap there is no current owner at
+/// all. An unwrapped event pass therefore gives every handler
+/// `use_context::<T>() == None`, even for a context the shell itself provided
+/// (`Theme`, `WindowMetrics`) — the whole app looks unthemed from a press
+/// handler. See the `event_pass_*` tests below.
+///
+/// # Owner identity: the root owner, not a fresh child
+///
+/// The pass shares the rebuild's owner rather than opening a child scope. A
+/// child scope would have to be created (and disposed) per input event —
+/// including per pointer `Move` — which the "no per-event allocation" budget
+/// rules out, and a handler's `provide_context` would silently evaporate on
+/// dispose instead of being visible to the next rebuild. The cost of sharing is
+/// that a handler calling `provide_context` writes into the app-wide root owner;
+/// that matches what a root `Component::build` already does.
+///
+/// # No `TrackedScope`: deliberately untracked
+///
+/// The rebuild wrap pairs `with_owner` with `TrackedScope::track`; this one must
+/// **not**. `track` clears the scope's recorded sources and its dirty flag on
+/// entry, so tracking an event pass would (a) throw away the dependency set the
+/// last rebuild recorded, silently unsubscribing the frame loop from every
+/// signal the view reads, and (b) swallow a wake that arrived since that
+/// rebuild. A handler that *writes* a signal still wakes the shell exactly as
+/// before — the write notifies the rebuild scope, which is subscribed from its
+/// own `track` pass.
+///
+/// [`Owner`]: frust_reactive::Owner
+fn event_under_owner<State: 'static, V: View<State>>(
+    runtime: &ReactiveRuntime,
+    root: &mut RenderRoot<State, V>,
+    state: &mut State,
+    event: &InputEvent,
+) -> EventOutcome {
+    runtime.with_owner(|| root.event(state, event))
 }
 
 /// Build an accesskit [`TreeUpdate`] from one [`RenderRoot::semantics`] pull:
@@ -1324,17 +1428,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposeLatch, ElementState, Ime, Tree, TreeId, WinitKey, WinitNamedKey, WinitTheme,
-        base_theme, brightness_from_winit, build_tree_update, default_theme, finish,
-        follow_platform_brightness, map_key_event, map_modifiers, map_named_key,
+        ComposeLatch, ElementState, Ime, ImeSync, Tree, TreeId, WinitKey, WinitNamedKey,
+        WinitTheme, base_theme, brightness_from_winit, build_tree_update, default_theme, finish,
+        follow_platform_brightness, ime_purpose_for, map_key_event, map_modifiers, map_named_key,
         physical_to_logical, theme_after_override_poll,
     };
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{Node, NodeId, Role};
-    use frust_core::event::{ImeEvent, Key, KeyEvent, Modifiers, NamedKey};
+    use frust_core::event::{ImeContentType, ImeEvent, Key, KeyEvent, Modifiers, NamedKey};
     use frust_theme::{Brightness, Theme};
     use kurbo::Point;
     use winit::keyboard::ModifiersState;
+    use winit::window::ImePurpose;
 
     // --- brightness_from_winit ---
 
@@ -1664,6 +1769,44 @@ mod tests {
         assert_eq!(mapped, ImeEvent::Enabled);
     }
 
+    // --- ime_purpose_for ---
+    //
+    // Pins the desktop shell's (deliberately thin) response to the
+    // content-type hint: this is the honest "winit offers almost nothing"
+    // outcome the task anticipated, recorded here so a later reader finds a
+    // considered decision rather than a silently missed field. See
+    // `ime_purpose_for`'s doc comment for why `Password` is the only variant
+    // that maps to anything but `Normal`, and why even that mapping only
+    // reaches Wayland.
+
+    #[test]
+    fn ime_purpose_maps_password_to_the_winit_password_purpose() {
+        assert_eq!(
+            ime_purpose_for(ImeContentType::Password),
+            ImePurpose::Password
+        );
+    }
+
+    #[test]
+    fn ime_purpose_has_no_distinct_mapping_for_normal_or_no_suggestions() {
+        // `ImePurpose` has no "suppress suggestions" variant, so the only
+        // content type that changes the winit call is the secret one.
+        assert_eq!(ime_purpose_for(ImeContentType::Normal), ImePurpose::Normal);
+        assert_eq!(
+            ime_purpose_for(ImeContentType::NoSuggestions),
+            ImePurpose::Normal
+        );
+    }
+
+    /// Pins [`ImeSync`]'s default so a fresh shell starts believing it has
+    /// already told winit `ImePurpose::Normal` — matching winit's own
+    /// documented default, so the first real `Password` field is what
+    /// triggers the first `set_ime_purpose` call, not startup.
+    #[test]
+    fn ime_sync_defaults_to_the_normal_purpose() {
+        assert_eq!(ImeSync::default().purpose, ImePurpose::Normal);
+    }
+
     // --- build_tree_update ---
     //
     // Pure-function coverage of the `SemanticsUpdate` -> `accesskit::TreeUpdate`
@@ -1904,6 +2047,264 @@ mod tests {
              binary may write it (found {writers}); serialize them behind a lock the way \
              `frust-shell-common::theme_override`'s own tests do, or fold the new assertion \
              into the existing writer"
+        );
+    }
+
+    // --- Event dispatch runs under the reactive root Owner -------------------
+    //
+    // Every shell wrapped its per-frame *rebuild* in
+    // `ReactiveRuntime::with_owner` but left *event dispatch* unwrapped, so a
+    // press/key/IME handler ran with `Owner::current() == None` and every
+    // `use_context::<T>()` inside it resolved to `None` — including for the
+    // `Theme`/`WindowMetrics` the shell itself provides. `Owner::with` restores
+    // the previous owner on return, so nothing carried over from the rebuild.
+    //
+    // These drive `event_under_owner` (the production helper `dispatch` calls)
+    // against a real `RenderRoot`, and pin the pre-fix shape as the negative
+    // control — the `app_tree.rs` root-owner pair's idiom.
+
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use std::sync::Arc;
+
+    use frust_core::event::{EventCtx, EventResult, PointerButton, PointerEvent, PointerPhase};
+    use frust_core::layout::BoxConstraints;
+    use frust_core::view::BuildCtx;
+    use frust_core::widget::{LayoutCtx, PaintCtx, Widget};
+    use frust_core::{ChangeFlags, PaintScene, RenderRoot, View};
+    use frust_reactive::{FrameWaker, ReactiveRuntime, RwSignal, TrackedScope, use_context};
+    use kurbo::Size;
+    use reactive_graph::owner::expect_context;
+    use reactive_graph::traits::{Get, Set};
+
+    use super::{InputEvent, event_under_owner, provide_context};
+
+    /// The context value the shell provides under the root owner (a stand-in
+    /// for the real `Theme`/`WindowMetrics` deliveries) and a handler reads back.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct ProbeCtx(u32);
+
+    /// What one event pass observed, recorded by [`ProbeWidget::event`].
+    #[derive(Debug, Default)]
+    struct Observed {
+        /// `use_context::<ProbeCtx>()` — the non-panicking form, and the only
+        /// one app code can reach (the `frust` facade re-exports `use_context`
+        /// but no `expect_context`).
+        used: Option<u32>,
+        /// The panic message `reactive_graph::expect_context` produced, or
+        /// `None` if it returned normally.
+        expect_panic: Option<String>,
+    }
+
+    /// Recording sink shared with the widget's handler.
+    type Seen = Rc<RefCell<Observed>>;
+
+    /// A leaf widget whose `event` handler does what an app's `.on_press`
+    /// closure would: read a context, and read a signal.
+    struct ProbeWidget {
+        seen: Seen,
+        /// Read with `.get()` from inside the handler — the read that must NOT
+        /// register a dependency for the frame's rebuild scope.
+        handler_signal: RwSignal<u32>,
+    }
+
+    impl Widget for ProbeWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(40.0, 20.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, _ctx: &mut EventCtx, _event: &InputEvent) -> EventResult {
+            let used = use_context::<ProbeCtx>().map(|c| c.0);
+            let expect_panic =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(expect_context::<ProbeCtx>))
+                    .err()
+                    .map(|payload| match payload.downcast::<String>() {
+                        Ok(msg) => *msg,
+                        Err(_) => "<non-string panic payload>".to_string(),
+                    });
+            let _ = self.handler_signal.get();
+            *self.seen.borrow_mut() = Observed { used, expect_panic };
+            EventResult::Handled
+        }
+    }
+
+    struct ProbeView {
+        seen: Seen,
+        handler_signal: RwSignal<u32>,
+    }
+
+    impl View<()> for ProbeView {
+        type Element = ProbeWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> ProbeWidget {
+            ProbeWidget {
+                seen: self.seen.clone(),
+                handler_signal: self.handler_signal,
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            element: &mut ProbeWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            element.seen = self.seen.clone();
+            ChangeFlags::NONE
+        }
+    }
+
+    /// One primary-button press at the widget's centre.
+    fn press() -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Down,
+            position: kurbo::Point::new(20.0, 10.0),
+            button: PointerButton::Primary,
+        })
+    }
+
+    /// Build the shell-shaped fixture: the runtime, a root-provided context, a
+    /// laid-out `RenderRoot` over `ProbeView`, and the frame `TrackedScope`
+    /// (already tracking `view_signal` through one rebuild, exactly as
+    /// `RedrawRequested` leaves it).
+    #[expect(
+        clippy::type_complexity,
+        reason = "test fixture tuple, read once below"
+    )]
+    fn fixture() -> (
+        &'static ReactiveRuntime,
+        RenderRoot<(), ProbeView>,
+        Seen,
+        TrackedScope,
+        RwSignal<u32>,
+        RwSignal<u32>,
+    ) {
+        let waker: FrameWaker = Arc::new(|| {});
+        let runtime = ReactiveRuntime::init(waker);
+        runtime.with_owner(|| provide_context(ProbeCtx(7)));
+
+        let (view_signal, handler_signal) =
+            runtime.with_owner(|| (RwSignal::new(0u32), RwSignal::new(0u32)));
+        let seen: Seen = Rc::new(RefCell::new(Observed::default()));
+
+        let mut root: RenderRoot<(), ProbeView> = RenderRoot::new();
+        let scope = TrackedScope::new();
+        let seen_for_logic = seen.clone();
+        let mut app_logic = move |_state: &mut ()| {
+            // A view read, the way a real `app_logic`/`Component::build` reads
+            // state — this is the subscription the frame loop depends on.
+            let _ = view_signal.get();
+            ProbeView {
+                seen: seen_for_logic.clone(),
+                handler_signal,
+            }
+        };
+        // The production rebuild wrap, verbatim.
+        runtime.with_owner(|| scope.track(|| root.rebuild(&mut app_logic, &mut ())));
+        root.layout(Size::new(100.0, 100.0));
+
+        (runtime, root, seen, scope, view_signal, handler_signal)
+    }
+
+    /// The negative control, and the bug as it shipped: dispatching the event
+    /// pass with no ambient owner (the pre-fix `self.root.event(...)` shape)
+    /// resolves every context to `None`, and the panicking form panics.
+    #[test]
+    fn event_pass_without_the_owner_wrap_sees_no_context() {
+        let (_runtime, mut root, seen, _scope, _view_signal, _handler_signal) = fixture();
+
+        // `expect_context`'s panic is caught inside the handler; mute the
+        // default hook so its backtrace line doesn't pollute the test output.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome = root.event(&mut (), &press());
+        std::panic::set_hook(hook);
+
+        assert!(outcome.handled, "the probe widget consumed the press");
+        let seen = seen.borrow();
+        assert_eq!(
+            seen.used, None,
+            "pre-fix: an unwrapped event pass has no current Owner, so \
+             use_context resolves None even for a context the shell provided"
+        );
+        // The panicking form's message, as actually observed on this path:
+        //
+        //   Location { file: ".../core/src/ops/function.rs", line: 250, column: 5 }
+        //   expected context of type
+        //   "frust_shell_desktop::app_handler::tests::ProbeCtx" to be present
+        //
+        // (the `Location` names core's `FnOnce::call_once` shim because
+        // `expect_context` is handed to `catch_unwind` as a function item, so
+        // its `#[track_caller]` resolves there) — only the message tail is
+        // pinned below, since the prefix is a std implementation detail.
+        let panic_msg = seen
+            .expect_panic
+            .as_deref()
+            .expect("pre-fix: expect_context must panic with no ambient Owner");
+        assert!(
+            panic_msg.ends_with("to be present") && panic_msg.contains("expected context of type"),
+            "unexpected panic message: {panic_msg}"
+        );
+    }
+
+    /// The fix: the same press delivered through `event_under_owner` resolves
+    /// the shell-provided context.
+    #[test]
+    fn event_pass_under_the_owner_wrap_resolves_root_context() {
+        let (runtime, mut root, seen, _scope, _view_signal, _handler_signal) = fixture();
+
+        let outcome = event_under_owner(runtime, &mut root, &mut (), &press());
+
+        assert!(outcome.handled, "the probe widget consumed the press");
+        let seen = seen.borrow();
+        assert_eq!(
+            seen.used,
+            Some(7),
+            "a handler must resolve a context the shell provided under the root \
+             owner"
+        );
+        assert_eq!(
+            seen.expect_panic, None,
+            "the panicking form must no longer panic from an event handler"
+        );
+    }
+
+    /// The cost side of the wrap: it installs an `Owner`, never a
+    /// `TrackedScope`. A signal read inside a handler must not become a
+    /// dependency of the frame's rebuild scope (a rebuild storm), and the
+    /// dependencies the rebuild recorded must survive the event pass intact.
+    #[test]
+    fn event_pass_neither_adds_nor_drops_rebuild_dependencies() {
+        let (runtime, mut root, _seen, scope, view_signal, handler_signal) = fixture();
+
+        assert!(
+            !scope.is_dirty(),
+            "fixture precondition: the rebuild scope is clean"
+        );
+
+        event_under_owner(runtime, &mut root, &mut (), &press());
+        assert!(
+            !scope.is_dirty(),
+            "the event pass itself must not dirty the frame scope"
+        );
+
+        // (1) No new dependency: the handler read `handler_signal`, but it did
+        // so with no observer installed, so a later write schedules nothing.
+        handler_signal.set(1);
+        assert!(
+            !scope.is_dirty(),
+            "a signal read only inside an event handler must not subscribe the \
+             frame scope — that would schedule a rebuild the pre-fix shell never \
+             scheduled (a rebuild storm)"
+        );
+
+        // (2) No dropped dependency: the rebuild's own subscription still
+        // stands. `TrackedScope::track` clears recorded sources on entry, so
+        // this is what would break if the event pass were wrapped in `track`.
+        view_signal.set(1);
+        assert!(
+            scope.is_dirty(),
+            "the rebuild's tracked read must still wake the frame loop after an \
+             event pass"
         );
     }
 }
