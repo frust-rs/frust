@@ -1435,6 +1435,8 @@ class FrustSurfaceView(
             if (wholesale) {
                 // Rust replaced the text: rebuild the mirror to match.
                 editable.replace(0, editable.length, state.text)
+                // A later identical `sync()` must not short-circuit on a stale snapshot.
+                lastPushed = null
             }
             val len = editable.length
             if (state.selBase in 0..len && state.selExt in 0..len) {
