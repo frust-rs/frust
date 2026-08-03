@@ -299,6 +299,13 @@ widget in `frust-widgets`:
   set-if-different, so an app that rejects/transforms input in `on_change` sees its own
   value win next frame.
 
+- **A container checks `InputEvent::is_broadcast()` before anything else.** A broadcast
+  (`InputEvent::Housekeeping`) is not user input: every routing helper forwards it to *every*
+  child unconditionally, ahead of the capture/focus/hit-test branches below, and always reports
+  `Ignored` regardless of what children returned — a broadcast is never consumed and never
+  short-circuited by a captured or focused child (`docs/CORE_ARCHITECTURE.md`'s event-routing data
+  flow).
+
 - **Focus routes by recorded path, like capture; `Key`/`Ime` events never hit-test.** A
   container simply forwards `Key`/`Ime` events to its focused child; a `Down` that doesn't
   (re)claim focus on the child it hits blurs the chain. **A structural container rebuild

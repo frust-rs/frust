@@ -56,7 +56,17 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
 - `RenderRoot::paint` walks widgets into a renderer-agnostic `Scene`, later encoded for the GPU by
   `frust-render` (RENDER unit).
 - `RenderRoot::event` routes input through the retained tree, tracking capture/focus without a
-  separate registry.
+  separate registry. Events fall into three routing classes: hit-tested (pointer/scroll),
+  focus-routed (`Key`/`Ime`, delivered down the recorded focus path), and **broadcast**
+  (`InputEvent::Housekeeping`) — a non-input event every container forwards to every child
+  unconditionally, ahead of its capture/focus/hit-test logic, and never consumes.
+- `RenderRoot::rebuild` dispatches a `Housekeeping` broadcast when a thread-local flag
+  (`mark_pending_result_flush`/`take_pending_result_flush`) is set — the seam a widget uses to run
+  a deferred callback that needs `&mut State` but was queued during the state-free view diff (a
+  navigator's pop-result is the shipped case; see WIDGETS_ARCHITECTURE.md). It then re-runs
+  `app_logic` + the view diff so the same frame reflects the mutated state, bounded at
+  `MAX_PENDING_RESULT_FLUSH_PASSES` (3) passes; a remainder past the cap folds into `paint`'s
+  `needs_frame` so a dirty-driven desktop loop still wakes for it next frame.
 - A tracked signal write wakes the shell via the process-wide `FrameWaker`, triggering the next
   rebuild.
 - `Component::init`/`teardown` creates/disposes a per-instance reactive `Owner` nested under its
@@ -111,7 +121,7 @@ because builds are cheap by construction.
 | `View<State>` / `Widget` | The declarative/retained pair every UI element implements |
 | `RenderRoot<State, V>` | Owns the widget tree and theme; drives rebuild/layout/paint/event |
 | `Component` / `ComponentView` / `ComponentWidget` | Stateful widget analog with a per-instance reactive `Owner` |
-| `EventCtx` / `EventOutcome` / `InputEvent` | Event-pass context, result, and input vocabulary |
+| `EventCtx` / `EventOutcome` / `InputEvent` | Event-pass context, result, and input vocabulary — including the `Housekeeping` broadcast variant (see Data Flow) |
 | `PaintCtx` / `PaintScene` / `PaintOutcome` | Paint-pass context and the renderer-agnostic paint target |
 | `Scene` / `SceneBuilder` / `Command` | The renderer-agnostic vector display list |
 | `GlyphRun` / `ShaderProgram` | Shaped-text carrier and opaque shader handle riding through `Scene` |

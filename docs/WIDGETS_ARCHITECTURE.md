@@ -73,6 +73,12 @@ module; an app can disable all three to build its own design system on the same 
     and `PageVisibility` (Current/Visible/Covered) provide page-level visibility observation; the opt-in
     `cull_covered_builds` (default false) skips rebuilds for covered pages, but `on_cleanup` does **not**
     fire under a covering push (retained-state guarantee).
+  - **Pop-result delivery:** `push_for_result`'s `on_result` callback needs `&mut State`, which the
+    state-free view diff doesn't carry, so a pop still queues it — but the queuing rebuild also
+    raises CORE's pending-result-flush flag, which the same rebuild drains via a `Housekeeping`
+    broadcast (see CORE_ARCHITECTURE.md). An eager pop delivers its result within the rebuild that
+    applied it; an interactive edge-swipe pop delivers on its settle frame. No further input event
+    is required either way.
   - **RouteNavigator:** A thread-safe (`Arc<Mutex<Vec<NavRequest>>>`) navigation handle carrying no closures
     or reactive types, making it `Send + Sync` and usable via `provide_context` from any thread; off-thread
     requests wake the shell and apply in the next rebuild before the navigator reconciles.
