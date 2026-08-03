@@ -1,4 +1,4 @@
-//! The static plugin registry (v1) — five entries mirroring `plugins/`:
+//! The static plugin registry (v1) — six entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
@@ -8,10 +8,12 @@
 //! own Android library module, its own iOS Swift package — the first
 //! registry entry to use [`Contribution::SwiftPackageRef`] — and an app-crate
 //! export shim a device gate proved necessary, see this module's `CAMERA_BASE`
-//! constant's doc comment for the full rationale), and `native-widgets`
+//! constant's doc comment for the full rationale), `native-widgets`
 //! (dependency plus the plugin's own Android library
 //! module — and **nothing** on iOS, which is not an omission: that arm ships
-//! zero Swift by design).
+//! zero Swift by design), and `clipboard` (dependency only — plain text
+//! clipboard access needs no manifest permission, plist key, Gradle module,
+//! or Swift package on either mobile platform).
 
 use super::{Contribution, FeatureSpec, PluginSpec};
 
@@ -190,6 +192,24 @@ const NATIVE_WIDGETS: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+/// `clipboard`'s base contribution — a single Cargo dependency, and nothing
+/// else. Plain-text clipboard read/write needs no Android manifest
+/// permission, no iOS plist key, no Gradle module (the Android backend is
+/// plain JNI against framework classes, no app-defined helper class), and no
+/// Swift package (the iOS backend is plain `objc2-ui-kit` against
+/// `UIPasteboard`) — see `plugins/clipboard/README.md`.
+const CLIPBOARD: PluginSpec = PluginSpec {
+    id: "clipboard",
+    summary: "Synchronous plain-text clipboard access (ClipboardManager / \
+              UIPasteboard / arboard).",
+    crate_dir: "clipboard",
+    base: &[Contribution::CargoDep {
+        name: "frust-clipboard",
+    }],
+    optional_features: &[],
+    requires_sibling: None,
+};
+
 /// The v1 static plugin registry (Vec-factory convention). A caller (the CLI
 /// or the TUI Add Plugin dialog) enumerates this to drive selection without
 /// hardcoding plugin ids.
@@ -200,6 +220,7 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         CLEAN_SIGNALS_FRUST,
         CAMERA,
         NATIVE_WIDGETS,
+        CLIPBOARD,
     ]
 }
 
@@ -219,7 +240,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_five_v1_plugins() {
+    fn registry_lists_the_six_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -229,8 +250,28 @@ mod tests {
                 "clean-signals-frust",
                 "camera",
                 "native-widgets",
+                "clipboard",
             ]
         );
+    }
+
+    /// The `clipboard` entry is exactly one `CargoDep` — no manifest
+    /// permission, plist key, Gradle module, or Swift package (see
+    /// `CLIPBOARD`'s own doc comment for why none apply).
+    #[test]
+    fn clipboard_is_a_cargo_dep_and_nothing_else() {
+        let spec = find_plugin("clipboard").unwrap();
+        assert_eq!(spec.crate_dir, "clipboard");
+        assert!(spec.optional_features.is_empty());
+        assert_eq!(spec.requires_sibling, None);
+
+        assert_eq!(spec.base.len(), 1, "{:?}", spec.base);
+        assert!(matches!(
+            spec.base[0],
+            Contribution::CargoDep {
+                name: "frust-clipboard"
+            }
+        ));
     }
 
     /// The `native-widgets` entry is exactly a Cargo dependency plus the
