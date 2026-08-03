@@ -266,8 +266,14 @@ impl Clipboard {
     ///   replication to the user's other signed-in devices. No expiration
     ///   date is set (a possible future opt-in — see [`apple`]'s module
     ///   doc).
-    /// - **Desktop (arboard):** no platform sensitivity primitive exists;
-    ///   behaves exactly like [`Self::set_text`].
+    /// - **Desktop (arboard):** behaves exactly like [`Self::set_text`] on
+    ///   all three targets — but only X11/Wayland genuinely has no
+    ///   sensitivity mechanism. Windows and macOS each document/convention
+    ///   one this backend does not yet set (see [`desktop`]'s module doc's
+    ///   *No sensitivity marking*): `arboard` exposes no custom-format
+    ///   write surface, so reaching either would need `clipboard-win`'s raw
+    ///   format API directly — deliberately deferred
+    ///   (`docs/LIMITATIONS.md`'s `clipboard-desktop-sensitivity-unset`).
     ///
     /// # Errors
     /// As [`Self::set_text`].

@@ -74,9 +74,19 @@ output, tokens, passwords, one-time codes:
   `.localOnly: true`, which blocks Universal Clipboard/Handoff from
   replicating the pasteboard item to the user's other signed-in Apple
   devices. No expiration date is set by default (a possible future opt-in).
-- **Desktop (macOS/Linux/Windows via `arboard`):** no platform sensitivity
-  primitive exists on any of the three; `set_text_sensitive` is a plain
-  alias for `set_text` here.
+- **Desktop (macOS/Linux/Windows via `arboard`):** `set_text_sensitive` is a
+  plain alias for `set_text` on all three — but only X11/Wayland genuinely
+  has no sensitivity mechanism to alias away. Windows documents the
+  `CanIncludeInClipboardHistory`, `CanUploadToCloudClipboard`, and
+  `ExcludeClipboardContentFromMonitorProcessing` clipboard formats
+  precisely to keep a clip out of Win+V clipboard history and Cloud
+  Clipboard sync — the same cross-device replication channel `.localOnly`
+  closes on iOS above. macOS has the community convention
+  `org.nspasteboard.ConcealedType` (not OS-documented, unlike Windows'
+  formats). Neither is set here: `arboard` exposes no custom-format write
+  surface, so reaching either would require `clipboard-win`'s raw format
+  API directly — deliberately deferred, not implemented in this crate
+  (`docs/LIMITATIONS.md`'s `clipboard-desktop-sensitivity-unset`).
 
 Use plain `set_text` for anything else (e.g. copying a share link, a
 user-composed note) — there is no reason to pay `set_text_sensitive`'s

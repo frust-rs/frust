@@ -41,11 +41,22 @@
 //!
 //! # No sensitivity marking
 //!
-//! `arboard` has no platform sensitivity primitive on any of the three
-//! desktop targets (no macOS `NSPasteboard` transient-type analog exposed,
-//! no equivalent on X11/Wayland/Windows), so this backend does not override
-//! [`Backend::set_text_sensitive`]'s default — it behaves exactly like
-//! [`Backend::set_text`] here.
+//! This backend does not override [`Backend::set_text_sensitive`]'s
+//! default — it behaves exactly like [`Backend::set_text`] on all three
+//! desktop targets, but for different reasons per platform. X11/Wayland
+//! genuinely has no sensitivity mechanism to hook. Windows and macOS do:
+//! Windows documents the `CanIncludeInClipboardHistory`,
+//! `CanUploadToCloudClipboard`, and
+//! `ExcludeClipboardContentFromMonitorProcessing` clipboard formats
+//! precisely to keep a clip out of Win+V clipboard history and Cloud
+//! Clipboard sync (the same cross-device replication channel `.localOnly`
+//! closes on iOS — see [`crate::apple`]'s module doc); macOS has the
+//! community convention `org.nspasteboard.ConcealedType` (not
+//! OS-documented, unlike Windows' formats). Neither is set here — `arboard`
+//! exposes no custom-format write surface, so reaching either would
+//! require `clipboard-win`'s raw format API directly. Deliberately
+//! deferred, not implemented (`docs/LIMITATIONS.md`'s
+//! `clipboard-desktop-sensitivity-unset`).
 
 use arboard::Clipboard as ArboardClipboard;
 
