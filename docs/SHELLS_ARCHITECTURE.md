@@ -113,10 +113,13 @@ signal-poll seam race-free without a lock.
     a new connection.
   - **iOS:** JSON-serializes the content type alongside editing state for Swift to apply. Password
     and NoSuggestions also suppress the `UITextInputTraits` smart-quotes/dashes/insert-delete traits
-    (closing the same silent-rewrite defect class the suggestion-strip leak closes, just for
-    punctuation rather than disclosure); Terminal gets the full non-secret suppression matrix —
-    `isSecureTextEntry = false` (not masked), autocorrect/spell-check/smart-punctuation all off, and
-    `autocapitalizationType = .none`.
+    and autocapitalization (`autocapitalizationType = .none`) — closing the same silent-rewrite/
+    auto-capitalize defect class the suggestion-strip leak closes, just for punctuation/case rather
+    than disclosure; Terminal gets the full non-secret suppression matrix — `isSecureTextEntry =
+    false` (not masked), autocorrect/spell-check/smart-punctuation all off, and
+    `autocapitalizationType = .none`. Every one of the eight traits `applyImeContentType` manages is
+    assigned explicitly in every arm, so no value from a prior classification survives a switch on
+    the shared `forgeView` responder.
     `syncImeFocus` matches two of Android's three properties: the **per-frame poll** (driven from
     the `CADisplayLink` tick via `renderFrame`, the `doFrame` analogue) and the **divergence-guarded
     reconcile**, plus re-seeds the `UITextInput` mirror on content-type change and the resign/become

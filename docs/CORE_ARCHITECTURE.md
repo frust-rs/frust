@@ -63,10 +63,14 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
 - `RenderRoot::rebuild` dispatches a `Housekeeping` broadcast when a thread-local flag
   (`mark_pending_result_flush`/`take_pending_result_flush`) is set — the seam a widget uses to run
   a deferred callback that needs `&mut State` but was queued during the state-free view diff (a
-  navigator's pop-result is the shipped case; see WIDGETS_ARCHITECTURE.md). It then re-runs
-  `app_logic` + the view diff so the same frame reflects the mutated state, bounded at
-  `MAX_PENDING_RESULT_FLUSH_PASSES` (3) passes; a remainder past the cap folds into `paint`'s
-  `needs_frame` so a dirty-driven desktop loop still wakes for it next frame.
+  navigator's pop-result and `frust-widgets`' gesture long-press latch are the shipped producers;
+  see WIDGETS_ARCHITECTURE.md). It then re-runs `app_logic` + the view diff so the same frame
+  reflects the mutated state, bounded at `MAX_PENDING_RESULT_FLUSH_PASSES` (3) passes; a remainder
+  past the cap folds into `paint`'s `needs_frame` so a dirty-driven desktop loop still wakes for it
+  next frame. The dispatch's `EventOutcome` is propagated as part of the same contract: a
+  `needs_redraw` it reports folds into `ChangeFlags::PAINT` and the deferred-frame flag, so a
+  flushed callback whose only effect is `EventCtx::request_redraw` (no state the view diff can see)
+  still wakes both the mobile frame gate and the desktop `Wait` loop.
 - A tracked signal write wakes the shell via the process-wide `FrameWaker`, triggering the next
   rebuild.
 - `Component::init`/`teardown` creates/disposes a per-instance reactive `Owner` nested under its

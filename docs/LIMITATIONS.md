@@ -174,7 +174,7 @@ documented as a known constraint, not a regression.
 
 ---
 
-### `ime-ios-content-type-unverified` — iOS secure-entry IME path is compile- and device-unverified
+### `ime-ios-content-type-unverified` — iOS secure-entry IME path is device-unverified
 
 **Observed**: `FrustViewController.swift`'s IME reconcile path — the
 content-type application (FINDINGS #31: suppressing the QuickType
@@ -184,11 +184,16 @@ a previous field's text across a focus move (`syncImeFocus`'s `seedMirror`
 on the content-type branch and `FrustView.reconcileMirror(to:)` on the
 steady-active branch), and the **per-frame `syncImeFocus()` call from
 `renderFrame`** that makes non-touch focus moves (Return-to-next-field,
-programmatic focus) reach any of it — has never been compiled (no macOS
-host in this project's CI/agent loop) or run on an iOS device or simulator.
-`cargo` cannot compile Swift; only `xcodebuild -scheme FrustEmbedding
--destination 'generic/platform=iOS' build` validates it, and that has not
-been run since this path was introduced or since any of these fixes landed.
+programmatic focus) reach any of it — has never run on an iOS device or
+simulator. `cargo` cannot compile Swift, so no ordinary workspace gate
+touches this path; it has been `swiftc -typecheck`-verified on a macOS host
+twice, most recently alongside this round's iOS trait-matrix fix (F2, see
+its commit message), which confirms the sources parse and type-check but
+does not link, run, or exercise any of the behavior below. Only
+`xcodebuild -scheme FrustEmbedding -destination 'generic/platform=iOS'
+build` (a full build) or an on-device/simulator run validates that, and
+neither has occurred since this path was introduced or since any of these
+fixes landed.
 
 **Also covers (fixes F3/F3b, review-fix-3)**: `syncImeFocus`'s per-frame
 `becomeFirstResponder()` retry is now **bounded** (`imeFocusSatisfied`)
@@ -207,8 +212,8 @@ reassert the keyboard on the next UIKit-originated dismissal — reopening the
 very pop-back the bound exists to prevent. A touch inside a Mode B hosted slot never reaches `onTouch`
 (`FrustView.hitTest` returns `nil` there), so a sibling native control
 retaining first responder is unaffected by the per-frame tick. This
-mechanism is Swift-only and is exactly as compile- and device-unverified as
-the rest of this entry.
+mechanism is Swift-only and is exactly as device-unverified as the rest of
+this entry.
 
 **Residual limitation, accepted (not a bug to fix here)** — and note F3c's
 gating does **not** remove it: when a Mode B sibling holds first responder,
@@ -233,9 +238,10 @@ record, but is a materially different code path (`EditorInfo`/
 worth stating: Android's `applyImeContentType` inputType/imeOptions flags
 (fix F5) were Kotlin-compiled clean this batch (`compileDebugKotlin`,
 32/32 tasks) — the first Kotlin change in three batches to clear that
-gate — while the iOS Swift side has now gone four batches running without
-compiling at all. Compile-verified is not device-verified, so F5 narrows
-FINDINGS #31's Android gap without closing the finding.
+gate — while the iOS Swift side has only been `swiftc -typecheck`-verified,
+never built via `xcodebuild` (Kotlin's `compileDebugKotlin` equivalent).
+Compile/typecheck-verified is not device-verified, so F5 narrows FINDINGS
+#31's Android gap without closing the finding.
 
 **API-level note — resolved by raising the floor to 26.**
 `EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING` was added in **API 26**. While
@@ -297,8 +303,8 @@ the best-reasoned fix available, not as a verified fix.
    `imeFocusSatisfied` dangling and reasserted the keyboard on the next tick
    — reopening (4)'s own guarantee for the most ordinary interaction there
    is. The re-arm is now gated on `!isFirstResponder`, but **that gating is
-   reasoned, not compiled or measured** — this run is what would catch a
+   reasoned, not device-measured** — this run is what would catch a
    regression.
 
-**Evidence**: none yet — flagged during these fixes' implementation and
-review; no device or simulator run has occurred.
+**Evidence**: `swiftc -typecheck` exit 0 (most recently this round's F2
+fix, see its commit message); no device or simulator run has occurred.
