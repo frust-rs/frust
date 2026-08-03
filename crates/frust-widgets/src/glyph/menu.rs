@@ -936,10 +936,13 @@ impl Widget for GlyphMenuWidget {
         let (enter, exit) = resolve_timings(theme);
         let (scale, progress, panel_animating) = self.advance(ctx.frame_time(), enter, exit);
 
-        // Item stagger only advances while entering — once shown/exiting,
-        // every item rides the panel's own geometry (see the module docs).
-        let stagger_animating =
-            self.phase == Phase::Enter && self.stagger.advance(ctx.frame_time());
+        // The stagger is a decoupled timeline (see the module docs): a
+        // 3+-item cascade (90ms/item) outlives the panel's enter phase, so it
+        // keeps advancing through `Shown` until it self-completes — items
+        // whose reveal windows open after the panel settles still have to
+        // reveal. An early exit just leaves unrevealed items hidden.
+        let stagger_animating = matches!(self.phase, Phase::Enter | Phase::Shown)
+            && self.stagger.advance(ctx.frame_time());
         let stagger_overall = self.stagger.value_clamped();
         let item_count = self
             .rows
@@ -1383,6 +1386,42 @@ mod tests {
         assert_eq!(rec.layer_pops, 3);
         for (_, _, alpha) in &rec.layers {
             assert!((*alpha - 1.0).abs() < 1e-3, "fully settled stagger");
+        }
+    }
+
+    /// FINDINGS #59 regression: the 3-item cascade (330ms) outlives the
+    /// panel's enter phase (200ms theme-less), so the tail item's reveal
+    /// window opens only once the panel is already `Shown` — the stagger
+    /// must keep advancing there or the item stays invisible forever.
+    #[test]
+    fn stagger_completes_after_panel_enter_ends() {
+        let view = glyph_menu(Rect::new(700.0, 40.0, 740.0, 80.0), three_items());
+        let mut w = build(&view);
+        let area = Size::new(800.0, 600.0);
+        layout(&mut w, area);
+
+        // Seed both clocks, then step past the panel's enter but short of
+        // the stagger's 330ms total.
+        let mut rec = Recorder::default();
+        w.paint(
+            &mut PaintCtx::for_test(Point::ZERO, area, ft_ms(0.0)),
+            &mut rec,
+        );
+        w.paint(
+            &mut PaintCtx::for_test(Point::ZERO, area, ft_ms(250.0)),
+            &mut rec,
+        );
+        assert_eq!(w.phase, Phase::Shown, "panel enter is over at 250ms");
+
+        // Far past the stagger total: every item must be fully revealed.
+        let mut rec = Recorder::default();
+        w.paint(
+            &mut PaintCtx::for_test(Point::ZERO, area, ft_ms(1_000.0)),
+            &mut rec,
+        );
+        assert_eq!(rec.layers.len(), 3, "all three items paint");
+        for (_, _, alpha) in &rec.layers {
+            assert!((*alpha - 1.0).abs() < 1e-3, "stagger fully settled");
         }
     }
 

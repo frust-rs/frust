@@ -17,6 +17,11 @@ kurbo = { workspace = true }
 peniko = { workspace = true }
 image = { workspace = true }
 
+[dev-dependencies]
+# Turns on frust-core's clock seam (`PaintCtx::for_test`) for this crate's own
+# widget tests — the only sanctioned way to paint at a chosen FrameTime.
+frust-core = { workspace = true, features = ["test-support"] }
+
 [features]
 default = ["glyph", "material", "cupertino"]
 # Forwards into frust-theme's own `glyph-fonts` (gf2 opt-out chain, mirroring
