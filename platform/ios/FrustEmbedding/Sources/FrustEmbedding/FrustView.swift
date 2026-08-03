@@ -68,11 +68,19 @@ final class FrustView: UIView {
     // stock `UITextField`/`UITextView` this custom `UITextInput` gets no
     // automatic suppression from `isSecureTextEntry` alone — each trait needs
     // its own stored property here or `applyImeContentType`'s assignment to
-    // it does not compile. Defaults match Apple's documented
-    // `UITextInputTraits` defaults (system-following `.default` for the three
-    // smart-editing traits, `.sentences` for autocapitalization) — the same
-    // "say nothing, get platform defaults" contract `autocorrectionType`/
-    // `spellCheckingType` above already follow.
+    // it does not compile.
+    //
+    // The initial values below are pre-first-classification placeholders
+    // only, not a contract: nothing reads them before `syncImeFocus`'s first
+    // call classifies the field (before `becomeFirstResponder()`), and
+    // `applyImeContentType` (task F2) assigns all eight of the traits it
+    // manages — this pair plus `isSecureTextEntry`/`textContentType`/
+    // `autocorrectionType`/`spellCheckingType` above — explicitly in every
+    // one of its switch arms, so whatever is stored here is overwritten
+    // unconditionally the moment a content type is known. (`autocorrectionType`
+    // above is itself stored as `.yes`, not `UITextAutocorrectionType.default`
+    // — proof these starting values were never meant to read as "Apple's
+    // documented defaults, left standing".)
     var smartQuotesType: UITextSmartQuotesType = .default
     var smartDashesType: UITextSmartDashesType = .default
     var smartInsertDeleteType: UITextSmartInsertDeleteType = .default

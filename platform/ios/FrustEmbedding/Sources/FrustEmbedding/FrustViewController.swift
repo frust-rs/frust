@@ -757,16 +757,31 @@ open class FrustViewController: UIViewController {
     /// happens here for free. Every trait below must be set explicitly per
     /// case, redundant-looking as that is against `isSecureTextEntry`.
     ///
+    /// This exhaustiveness is what makes the function safe to call on a
+    /// long-lived, reused `forgeView` across an arbitrary sequence of
+    /// classification changes: every one of the eight traits below —
+    /// `isSecureTextEntry`, `textContentType`, `autocorrectionType`,
+    /// `spellCheckingType`, `smartQuotesType`, `smartDashesType`,
+    /// `smartInsertDeleteType`, `autocapitalizationType` — is assigned in
+    /// every arm, so no value from a previous call (a stricter `"password"`
+    /// suppression, `"terminal"`'s `.none` autocapitalization, or anything
+    /// else) can survive into the next classification by omission. A
+    /// transition from any content type to any other leaves `forgeView`'s
+    /// trait set identical to what a fresh call with only the new type would
+    /// produce; there is no ordering dependency between successive calls.
+    ///
     /// `"password"`/`"noSuggestions"` additionally suppress
     /// `smartQuotesType`/`smartDashesType`/`smartInsertDeleteType`: a smart
     /// keyboard silently substituting a curly quote or an em dash rewrites
     /// the literal character the user typed, corrupting a password exactly as
     /// it would corrupt a shell command (see `"terminal"` below) — this is
     /// the same defect class as the suggestion-strip leak, just a rewrite
-    /// instead of a disclosure. Neither gains an `autocapitalizationType`
-    /// override here (scoped to smart-punctuation only; unlike `"terminal"`,
-    /// nothing published today types multi-word lower-case-sensitive content
-    /// into a `"password"`/`"noSuggestions"` field).
+    /// instead of a disclosure. Both also set `autocapitalizationType =
+    /// .none`: on the shared `forgeView` responder a prior `"normal"`
+    /// classification's `.sentences` would otherwise survive the switch and
+    /// auto-capitalize the first character typed into the new field — for
+    /// `"password"` that is the same corruption/leak class `"terminal"`
+    /// already closes for shell input, just applied to a secret field.
     ///
     /// `"terminal"` is a raw byte-entry surface (a terminal/shell keystroke
     /// source): the full non-secret suppression matrix —
@@ -833,9 +848,12 @@ open class FrustViewController: UIViewController {
             // across every content type (see this function's doc), so a
             // prior "terminal"/"password"/"noSuggestions" classification's
             // suppression must be undone here, not left to leak forward.
-            forgeView.smartQuotesType = .yes
-            forgeView.smartDashesType = .yes
-            forgeView.smartInsertDeleteType = .yes
+            // `.default` defers to system settings rather than forcing smart
+            // punctuation ON — the same "say nothing, get platform defaults"
+            // contract `spellCheckingType` above already follows.
+            forgeView.smartQuotesType = .default
+            forgeView.smartDashesType = .default
+            forgeView.smartInsertDeleteType = .default
             forgeView.autocapitalizationType = .sentences
         case "noSuggestions":
             forgeView.isSecureTextEntry = false
@@ -845,6 +863,7 @@ open class FrustViewController: UIViewController {
             forgeView.smartQuotesType = .no
             forgeView.smartDashesType = .no
             forgeView.smartInsertDeleteType = .no
+            forgeView.autocapitalizationType = .none
         case "terminal":
             // Raw byte-entry surface: no suggestions, no autocorrect, no
             // smart punctuation, no autocapitalization, and NOT masked (this
@@ -865,6 +884,7 @@ open class FrustViewController: UIViewController {
             forgeView.smartQuotesType = .no
             forgeView.smartDashesType = .no
             forgeView.smartInsertDeleteType = .no
+            forgeView.autocapitalizationType = .none
         }
     }
 
