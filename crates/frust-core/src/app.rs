@@ -139,6 +139,21 @@ impl Orientation {
     }
 }
 
+/// How many [`InputEvent::Housekeeping`] flush passes one
+/// [`RenderRoot::rebuild`] will run before deferring the rest to the next frame.
+///
+/// A flushed pop-result callback may itself push or pop, queueing another
+/// callback — so the flush/re-diff cycle has to be allowed to iterate, but it
+/// must never be allowed to spin: a pair of callbacks that push each other would
+/// otherwise hang the frame. Three passes covers every shape observed in
+/// practice (a result that navigates once, and that page's own result), while
+/// keeping the worst case at four `app_logic` runs per frame — `app_logic` is
+/// cheap by construction (see [`RenderRoot::rebuild`]).
+///
+/// Past the cap the mark stays raised and one more frame is requested, so the
+/// remaining work lands next frame instead of being lost.
+const MAX_PENDING_RESULT_FLUSH_PASSES: usize = 3;
+
 /// Owns the retained tree and drives the rebuild/layout/paint passes for a
 /// single-root application.
 ///
@@ -241,6 +256,18 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// dirty gate — see [`RenderRoot::semantics_if_changed`]). v1 recompute is
     /// acceptable; this is the seam a shell gates on.
     semantics_gen: u64,
+    /// Set when [`RenderRoot::rebuild`] hit
+    /// [`MAX_PENDING_RESULT_FLUSH_PASSES`] with work still owed, and folded into
+    /// the next [`RenderRoot::paint`]'s [`PaintOutcome::needs_frame`] (then
+    /// cleared).
+    ///
+    /// The frame-request half of the deferral: `pending |= PAINT` already tells
+    /// the mobile frame gate to run its next tick, but the desktop loop is
+    /// dirty-driven (`ControlFlow::Wait`) and schedules off `needs_frame`, so the
+    /// deferral has to surface there too — otherwise the remaining flush would
+    /// wait for whatever input happens to arrive next, which is the exact
+    /// FINDINGS #56 failure this whole mechanism exists to remove.
+    deferred_frame: bool,
     _state: core::marker::PhantomData<fn(&mut State)>,
 }
 
@@ -267,6 +294,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             semantics_alloc: Cell::new(2),
             root_semantics_id: Cell::new(None),
             semantics_gen: 0,
+            deferred_frame: false,
             _state: core::marker::PhantomData,
         }
     }
@@ -495,14 +523,59 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     ///
     /// `app_logic` is expected to be cheap and re-entrant: it is
     /// re-run in full every rebuild.
+    ///
+    /// # Deferred-callback flush
+    ///
+    /// The view diff itself is state-free (`rebuild_view` below takes no
+    /// `State`), so a widget applying a structural op there — the navigator
+    /// draining its queued `push`/`pop` is the shipped case — cannot run an app
+    /// callback that needs `&mut State`. It instead queues the callback and calls
+    /// [`mark_pending_result_flush`](crate::event::mark_pending_result_flush);
+    /// this method drains that flag and dispatches an
+    /// [`InputEvent::Housekeeping`] broadcast through the ordinary
+    /// [`event`](RenderRoot::event) plumbing, where `state` *is* in scope. This
+    /// is the only unconditional per-frame pass that holds `&mut State`, which is
+    /// why the dispatch lives here and not in a shell (FINDINGS #56: flushing on
+    /// the next real input meant waiting seconds for a touch, or forever when the
+    /// next touch went to chrome outside the navigator).
+    ///
+    /// A flushed callback mutates `State`, so the view built before it ran is
+    /// stale — the `app_logic` + `rebuild_view` cycle therefore re-runs after
+    /// each flush, and the same frame shows the result. Results can queue further
+    /// nav ops, so the loop is **bounded**; past the cap the flag is left standing
+    /// and one more frame is requested rather than spinning (see
+    /// `MAX_PENDING_RESULT_FLUSH_PASSES`, this module's private cap constant).
     pub fn rebuild(
         &mut self,
         app_logic: &mut impl FnMut(&mut State) -> V,
         state: &mut State,
     ) -> ChangeFlags {
         let view = app_logic(state);
+        let mut flags = self.rebuild_view(view);
 
-        let flags = self.rebuild_view(view);
+        // Deferred-callback convergence loop (see the method doc). Each pass:
+        // drain the flag, run the queued callbacks against real state, then
+        // re-diff so this frame reflects them.
+        let mut passes = 0usize;
+        while crate::event::take_pending_result_flush() {
+            if passes >= MAX_PENDING_RESULT_FLUSH_PASSES {
+                // Cap reached. Put the flag back — the work is still owed — and
+                // ask for one more frame instead of spinning inside this one.
+                // `pending |= PAINT` is what the mobile frame gate reads
+                // (`has_pending_change_flags`); `deferred_frame` is what surfaces
+                // on the next `paint` as `needs_frame`, which is how the desktop
+                // `ControlFlow::Wait` loop learns to wake.
+                crate::event::mark_pending_result_flush();
+                flags |= ChangeFlags::PAINT;
+                self.deferred_frame = true;
+                break;
+            }
+            self.event(state, &InputEvent::Housekeeping);
+            let view = app_logic(state);
+            flags |= self.rebuild_view(view);
+            passes += 1;
+        }
+
         self.pending |= flags;
         // A rebuild that changed layout/paint could have changed the semantics
         // tree (added/removed/relabelled nodes); bump the dirty gate a shell polls
@@ -693,8 +766,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             if needs_layout {
                 self.pending |= ChangeFlags::LAYOUT;
             }
+            // A rebuild that ran out of flush passes owes one more frame; surface
+            // it here (and clear it) so a dirty-driven shell schedules the frame
+            // that finishes the flush — see the `deferred_frame` field doc.
+            let deferred_frame = std::mem::take(&mut self.deferred_frame);
             PaintOutcome {
-                needs_frame: ctx.needs_frame(),
+                needs_frame: ctx.needs_frame() || deferred_frame,
                 needs_layout,
                 // Aggregate tick class: paced-only iff a frame was requested and
                 // every request was CosmeticLoop-class. The mobile frame gate
@@ -810,6 +887,11 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// driven by the outcome. Rebuilding re-entrantly here would invalidate the
     /// widget references the dispatch still holds and turn the event→state→view
     /// feedback into recursion.
+    ///
+    /// [`RenderRoot::rebuild`] calls this itself with
+    /// [`InputEvent::Housekeeping`] to flush deferred state-bearing callbacks.
+    /// That is *sequential*, not re-entrant — the dispatch fully returns before
+    /// the next diff starts — so the rule above is intact.
     pub fn event(&mut self, state: &mut State, event: &InputEvent) -> EventOutcome {
         let Some(root_id) = self.root_id else {
             return EventOutcome::default();
@@ -876,6 +958,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                     self.ime_state = None;
                 }
             }
+            // A broadcast is not user input: it opens no gesture, claims no
+            // focus, and blurs nothing. Deliberately inert here — a housekeeping
+            // pass that moved the root's capture/focus bookkeeping would change
+            // what the *next* real event does, which is exactly what this
+            // mechanism must not do (see `InputEvent::Housekeeping`).
+            InputEvent::Housekeeping => {}
         }
 
         EventOutcome {
@@ -2732,5 +2820,181 @@ mod tests {
 
         let square = WindowMetrics::new(Size::new(500.0, 500.0), 2.0, insets);
         assert_eq!(square.orientation, Orientation::Portrait);
+    }
+
+    // --- Deferred state-bearing callbacks: the `InputEvent::Housekeeping` flush
+    //     `RenderRoot::rebuild` dispatches (FINDINGS #56). ---
+
+    /// App state for the flush tests.
+    #[derive(Default)]
+    struct FlushState {
+        /// How many deferred callbacks have run.
+        flushes: u32,
+        /// How many more times a running callback re-queues itself — the knob the
+        /// chained/capped tests turn.
+        chain_left: u32,
+        /// The `flushes` value each `app_logic` run observed, in order. This is
+        /// what proves the rebuild re-runs `app_logic` *after* a flush rather than
+        /// shipping the now-stale pre-flush view.
+        observed: Vec<u32>,
+    }
+
+    /// The navigator's deferred-callback shape reduced to one leaf: a shared
+    /// `Rc<Cell<u32>>` op queue (the `NavigatorController` analog) is drained
+    /// during the state-free [`View::rebuild`], which can therefore only *queue*
+    /// the callback and raise the flush mark; [`crate::widget::Widget::event`]
+    /// runs it when the broadcast arrives, where `&mut State` finally exists.
+    struct FlushView {
+        ops: std::rc::Rc<Cell<u32>>,
+    }
+
+    struct FlushWidget {
+        ops: std::rc::Rc<Cell<u32>>,
+        queued: u32,
+    }
+
+    impl FlushWidget {
+        fn drain_ops(&mut self) {
+            let ops = self.ops.replace(0);
+            if ops > 0 {
+                self.queued += ops;
+                crate::event::mark_pending_result_flush();
+            }
+        }
+    }
+
+    impl View<FlushState> for FlushView {
+        type Element = FlushWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> FlushWidget {
+            let mut widget = FlushWidget {
+                ops: self.ops.clone(),
+                queued: 0,
+            };
+            widget.drain_ops();
+            widget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            element: &mut FlushWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            element.ops = self.ops.clone();
+            element.drain_ops();
+            ChangeFlags::NONE
+        }
+    }
+
+    impl crate::widget::Widget for FlushWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(10.0, 10.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if !event.is_broadcast() || self.queued == 0 {
+                return EventResult::Ignored;
+            }
+            let queued = std::mem::take(&mut self.queued);
+            let state = ctx.state_mut::<FlushState>();
+            for _ in 0..queued {
+                state.flushes += 1;
+                if state.chain_left > 0 {
+                    state.chain_left -= 1;
+                    self.ops.set(self.ops.get() + 1);
+                }
+            }
+            EventResult::Ignored
+        }
+    }
+
+    fn flush_logic(ops: std::rc::Rc<Cell<u32>>) -> impl FnMut(&mut FlushState) -> FlushView {
+        move |state: &mut FlushState| {
+            state.observed.push(state.flushes);
+            FlushView { ops: ops.clone() }
+        }
+    }
+
+    #[test]
+    fn a_queued_callback_flushes_and_re_diffs_inside_one_rebuild() {
+        let ops = std::rc::Rc::new(Cell::new(0u32));
+        let mut root: RenderRoot<FlushState, FlushView> = RenderRoot::new();
+        let mut app = flush_logic(ops.clone());
+        let mut state = FlushState::default();
+
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(state.flushes, 0);
+        assert_eq!(
+            state.observed,
+            vec![0],
+            "nothing queued ⇒ exactly one app_logic run, no broadcast"
+        );
+
+        // Queue one op — the `NavigatorController::pop_with_result` analog.
+        state.observed.clear();
+        ops.set(1);
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            state.flushes, 1,
+            "the queued callback ran inside this rebuild — no event was dispatched \
+             by anyone but the rebuild itself"
+        );
+        assert_eq!(
+            state.observed,
+            vec![0, 1],
+            "app_logic re-ran after the flush and saw the post-callback state, so \
+             the view this frame ships is not the stale pre-flush one"
+        );
+        assert!(
+            !crate::event::take_pending_result_flush(),
+            "the mark was consumed; nothing is owed to a later frame"
+        );
+    }
+
+    #[test]
+    fn a_runaway_callback_chain_is_capped_and_deferred_to_the_next_frame() {
+        let ops = std::rc::Rc::new(Cell::new(0u32));
+        let mut root: RenderRoot<FlushState, FlushView> = RenderRoot::new();
+        let mut app = flush_logic(ops.clone());
+        // Far more chaining than the cap allows: unbounded, this rebuild would
+        // never return. Reaching the assertions below at all is the no-spin proof.
+        let mut state = FlushState {
+            chain_left: 100,
+            ..Default::default()
+        };
+        root.rebuild(&mut app, &mut state);
+
+        ops.set(1);
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            state.flushes, MAX_PENDING_RESULT_FLUSH_PASSES as u32,
+            "exactly the cap's worth of flush passes, then stop"
+        );
+
+        // The remainder is owed, not lost: the mark still stands and the next
+        // paint asks for the follow-up frame that will finish it.
+        root.layout(Size::new(50.0, 50.0));
+        let mut scene = RecordingScene::default();
+        let outcome = root.paint(&mut scene, FrameTime::ZERO);
+        assert!(
+            outcome.needs_frame,
+            "hitting the cap requests one more frame, so a dirty-driven shell \
+             wakes instead of waiting for input"
+        );
+        assert!(
+            !outcome.needs_frame_paced_only,
+            "a deferred flush is not a cosmetic loop — the mobile frame gate must \
+             not throttle it"
+        );
+
+        // That next frame picks up exactly where the capped one left off.
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            state.flushes,
+            2 * MAX_PENDING_RESULT_FLUSH_PASSES as u32,
+            "the deferred remainder resumed on the following frame"
+        );
+
+        // Leave this thread's flag clean for anything else in the binary.
+        let _ = crate::event::take_pending_result_flush();
     }
 }

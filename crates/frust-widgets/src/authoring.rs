@@ -606,7 +606,17 @@ fn is_pointer_down(event: &InputEvent) -> bool {
     )
 }
 
-/// Route a pointer/scroll/keyboard/IME event to a container's children.
+/// Route a pointer/scroll/keyboard/IME event — or a broadcast — to a
+/// container's children.
+///
+/// **Broadcasts** ([`InputEvent::is_broadcast`], today
+/// [`InputEvent::Housekeeping`]) are checked **first**, ahead of the capture,
+/// focus, and hit-test branches: every child receives one unconditionally, in
+/// order, and the container always reports [`EventResult::Ignored`] so no
+/// first-handler-wins short-circuit can hide a subtree. This is what carries a
+/// deferred, state-bearing callback flush (a navigator's queued `on_result`) to
+/// wherever it was queued, on the frame that queued it, with no user input — see
+/// [`InputEvent::Housekeeping`].
 ///
 /// **Focus-routed events** ([`InputEvent::Key`]/[`InputEvent::Ime`]) bypass hit
 /// testing entirely: they go straight to the child holding the recorded focus
@@ -631,6 +641,14 @@ pub fn route_event(
     ctx: &mut EventCtx<'_>,
     event: &InputEvent,
 ) -> EventResult {
+    if event.is_broadcast() {
+        for pod in children.iter_mut() {
+            // Results are discarded on purpose: a broadcast is never consumed,
+            // so every child gets it regardless of what an earlier one returned.
+            pod.event_child(ctx, event);
+        }
+        return EventResult::Ignored;
+    }
     if event.is_focus_routed() {
         if let Some(pod) = children.iter_mut().find(|p| p.is_focused()) {
             return pod.event_child(ctx, event);
@@ -667,10 +685,13 @@ pub fn route_event(
     handled
 }
 
-/// Route a pointer/scroll event to a container's single child.
+/// Route a pointer/scroll event — or a broadcast — to a container's single
+/// child.
 ///
 /// Mirrors [`route_event`] for the one-child wrappers (`Padding`/`Align`/
-/// `SizedBox`): a captured gesture is forwarded to `pod` unconditionally —
+/// `SizedBox`): a broadcast ([`InputEvent::is_broadcast`]) reaches the child
+/// unconditionally and is never consumed (checked first, ahead of everything
+/// else); a captured gesture is forwarded to `pod` unconditionally —
 /// regardless of whether the event's position still falls within the child's
 /// bounds — with the active path cleared on `Up`/`Cancel`; otherwise the child
 /// only receives the event if it contains the point. Re-hit-testing
@@ -681,6 +702,11 @@ pub fn route_event_single(
     ctx: &mut EventCtx<'_>,
     event: &InputEvent,
 ) -> EventResult {
+    if event.is_broadcast() {
+        // Never consumed: forward, discard the result.
+        pod.event_child(ctx, event);
+        return EventResult::Ignored;
+    }
     if event.is_focus_routed() {
         // Focus-routed events go to the child only if it holds the focus path.
         if pod.is_focused() {

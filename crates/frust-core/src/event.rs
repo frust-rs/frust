@@ -17,6 +17,7 @@
 //! on window-leave).
 
 use std::any::Any;
+use std::cell::Cell;
 use std::fmt;
 
 use kurbo::{Point, Rect, Size, Vec2};
@@ -228,7 +229,8 @@ pub enum ImeEvent {
 /// and IME events are **focus-routed** — delivered straight down the recorded
 /// focus chain with no hit test and no meaningful position (see
 /// [`crate::widget::ChildPod`]'s focus bookkeeping and `frust-widgets`'
-/// `route_event`).
+/// `route_event`). [`InputEvent::Housekeeping`] is neither: it is a **broadcast**
+/// that reaches every child unconditionally.
 #[derive(Clone, Debug, PartialEq)]
 pub enum InputEvent {
     /// A pointer (mouse/touch/pen) gesture event.
@@ -244,20 +246,56 @@ pub enum InputEvent {
     Key(KeyEvent),
     /// An IME event, routed down the focus path (no hit test).
     Ime(ImeEvent),
+    /// **Not user input**: a state-bearing housekeeping pass, broadcast to the
+    /// whole tree so a widget that queued a callback needing `&mut State` during
+    /// a state-free `BuildCtx` pass can run it.
+    ///
+    /// # Why it exists
+    ///
+    /// [`crate::app::RenderRoot::rebuild`] is the only unconditional per-frame
+    /// pass holding `&mut State`, and it hands that state to `app_logic` alone —
+    /// the view diff itself (and therefore every `View::rebuild`, where a
+    /// navigator applies its queued push/pop ops) is state-free. A widget that
+    /// needs to call back into app state from there had, before this variant, no
+    /// pass to run in except the *next event*, which on a touch device may be
+    /// seconds away or may never reach that widget at all (FINDINGS #56: a
+    /// pop-result callback measured 3.2s late on device, and was lost entirely
+    /// when the next tap was consumed by chrome outside the navigator).
+    /// `rebuild` now dispatches this variant instead, so the deferred callback
+    /// runs on the very frame that queued it.
+    ///
+    /// # Routing contract
+    ///
+    /// **Broadcast, never consumed.** It carries no position, is not hit-tested,
+    /// and is not focus-routed: a container forwards it to *every* child
+    /// unconditionally (before any capture/focus/hit-test branch) and reports
+    /// [`EventResult::Ignored`] regardless of what the children returned, so no
+    /// "first handler wins" short-circuit can hide a subtree from it. A leaf
+    /// widget with nothing deferred simply ignores it — the fall-through is
+    /// harmless by construction. It never opens or releases a capture, never
+    /// moves focus, and never blurs.
+    ///
+    /// # Naming
+    ///
+    /// Deliberately *not* `Tick`: `Tick` already means frame pacing in this
+    /// codebase ([`crate::widget::TickClass`]), and this variant has nothing to
+    /// do with the frame gate.
+    Housekeeping,
 }
 
 impl InputEvent {
     /// The event's location, in the receiving widget's local coordinate space.
     ///
-    /// Focus-routed events ([`InputEvent::Key`]/[`InputEvent::Ime`]) have no
-    /// spatial position — they are delivered down the focus chain, not hit-tested
-    /// — so this reports [`Point::ZERO`] for them; callers must never hit-test on
-    /// it (routing helpers early-return the focus-routed variants).
+    /// Focus-routed events ([`InputEvent::Key`]/[`InputEvent::Ime`]) and the
+    /// [`Housekeeping`](InputEvent::Housekeeping) broadcast have no spatial
+    /// position — they are delivered down the focus chain, or to every child, not
+    /// hit-tested — so this reports [`Point::ZERO`] for them; callers must never
+    /// hit-test on it (routing helpers early-return both classes).
     pub fn position(&self) -> Point {
         match self {
             InputEvent::Pointer(p) => p.position,
             InputEvent::Scroll { position, .. } => *position,
-            InputEvent::Key(_) | InputEvent::Ime(_) => Point::ZERO,
+            InputEvent::Key(_) | InputEvent::Ime(_) | InputEvent::Housekeeping => Point::ZERO,
         }
     }
 
@@ -266,8 +304,9 @@ impl InputEvent {
     /// Containers use this (with `offset = -child_origin`) to translate an event
     /// from their own coordinate space into a child's local space before
     /// forwarding it — see [`crate::widget::ChildPod::event_child`]. Focus-routed
-    /// events ([`InputEvent::Key`]/[`InputEvent::Ime`]) carry no position, so they
-    /// are returned unchanged (cloned).
+    /// events ([`InputEvent::Key`]/[`InputEvent::Ime`]) and the
+    /// [`Housekeeping`](InputEvent::Housekeeping) broadcast carry no position, so
+    /// they are returned unchanged (cloned).
     pub fn translated(&self, offset: Vec2) -> InputEvent {
         match self {
             InputEvent::Pointer(p) => InputEvent::Pointer(PointerEvent {
@@ -278,15 +317,81 @@ impl InputEvent {
                 position: *position + offset,
                 delta: *delta,
             },
-            InputEvent::Key(_) | InputEvent::Ime(_) => self.clone(),
+            InputEvent::Key(_) | InputEvent::Ime(_) | InputEvent::Housekeeping => self.clone(),
         }
     }
 
     /// Whether this event is focus-routed (delivered down the focus chain with no
     /// hit test) rather than hit-tested by position.
+    ///
+    /// [`Housekeeping`](InputEvent::Housekeeping) is **not** focus-routed — it
+    /// reaches every child, focused or not; see
+    /// [`is_broadcast`](InputEvent::is_broadcast).
     pub fn is_focus_routed(&self) -> bool {
         matches!(self, InputEvent::Key(_) | InputEvent::Ime(_))
     }
+
+    /// Whether this event is a broadcast: forwarded to **every** child
+    /// unconditionally, with no hit test, no capture fast-path, and no focus
+    /// routing — today exactly [`InputEvent::Housekeeping`].
+    ///
+    /// Every routing helper branches on this **first**, before its capture,
+    /// focus, and hit-test branches (`frust-widgets`'
+    /// `route_event`/`route_event_single`, and this crate's own
+    /// [`crate::component`] mirror), so a broadcast can never be swallowed by a
+    /// captured child or a `contains()` miss.
+    pub fn is_broadcast(&self) -> bool {
+        matches!(self, InputEvent::Housekeeping)
+    }
+}
+
+thread_local! {
+    /// The "a deferred state-bearing callback is queued somewhere in this
+    /// thread's tree" flag, raised by [`mark_pending_result_flush`] and drained
+    /// by [`take_pending_result_flush`].
+    ///
+    /// A side channel for the same reason [`crate::widget::report_retired_slot`]'s
+    /// `RETIRED_SLOTS` list is one: the widget that queues the callback is deep
+    /// inside a `View::rebuild` (a `BuildCtx` pass) with no
+    /// [`crate::app::RenderRoot`] handle to reach, and — unlike a paint pass — no
+    /// threaded per-frame sink.
+    ///
+    /// **Data-free on purpose.** Only the *fact* that a flush is owed rides here;
+    /// the callbacks themselves stay in the widget that queued them. Those
+    /// callbacks are `Rc<dyn Fn>` (`!Send`), so they can only ever be run on the
+    /// thread that queued them — which is exactly why this is `thread_local`
+    /// rather than a process-global `AtomicBool`. A global would let a
+    /// [`RenderRoot`](crate::app::RenderRoot) on one thread *drain a mark raised
+    /// on another*, broadcasting into a tree with nothing pending while the tree
+    /// that actually owes the flush is left waiting — silently reintroducing the
+    /// FINDINGS #56 failure. UI-thread affinity is the same argument
+    /// `frust-reactive`'s `CAN_POP_PROVIDER` and `frust-widgets`' `PAGE_REACH`
+    /// make for their own `Rc`-backed state.
+    static PENDING_RESULT_FLUSH: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Record that a widget queued a callback needing `&mut State` during a
+/// state-free pass, so [`crate::app::RenderRoot::rebuild`] dispatches an
+/// [`InputEvent::Housekeeping`] broadcast before the frame ends.
+///
+/// Idempotent: marking twice in one pass owes exactly one broadcast, and the
+/// broadcast reaches every widget that queued anything (see the variant's
+/// routing contract).
+///
+/// Thread-affine: the mark is visible only to the thread that raised it, which
+/// is also the only thread that can run the `!Send` callback it stands for.
+pub fn mark_pending_result_flush() {
+    PENDING_RESULT_FLUSH.with(|flag| flag.set(true));
+}
+
+/// Take (and clear) the [`mark_pending_result_flush`] flag.
+///
+/// Drained by [`crate::app::RenderRoot::rebuild`], which dispatches one
+/// [`InputEvent::Housekeeping`] broadcast per `true` it takes. Destructive,
+/// mirroring [`crate::app::RenderRoot::take_change_flags`]: a caller that drains
+/// and drops the result loses that flush until something marks again.
+pub fn take_pending_result_flush() -> bool {
+    PENDING_RESULT_FLUSH.with(|flag| flag.replace(false))
 }
 
 /// What kind of content a focused editable field holds — the hint a widget

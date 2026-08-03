@@ -877,6 +877,14 @@ impl Widget for CommandPaletteWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        // A broadcast is not user input, so it must not count as the "first
+        // event pass" the autofocus latch below arms on — it only carries
+        // deferred state-bearing callbacks down to whoever queued them. Forward
+        // it to the input and consume nothing.
+        if event.is_broadcast() {
+            crate::authoring::route_event_single(&mut self.input, ctx, event);
+            return EventResult::Ignored;
+        }
         // Auto-focus the input on the first event pass — unless that very
         // first event is the `Down` half of a scrim-dismiss gesture (see the
         // module docs' focus note and `is_scrim_down`): claiming focus there

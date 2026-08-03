@@ -309,12 +309,22 @@ impl<C: Component> Widget for ComponentWidget<C> {
 /// semantics single-child containers use (the in-crate mirror of
 /// `frust-widgets`' `route_event_single`).
 ///
-/// A focus-routed event goes to the child only if it holds the recorded focus
-/// path; a captured (active) child receives pointer events unconditionally
+/// A broadcast ([`InputEvent::is_broadcast`]) reaches the child unconditionally,
+/// checked **first** so no capture/focus/hit-test branch below can swallow it —
+/// a component sitting between the root and a navigator is the ordinary shape,
+/// so this arm is what lets a deferred pop-result flush reach that navigator at
+/// all. A focus-routed event goes to the child only if it holds the recorded
+/// focus path; a captured (active) child receives pointer events unconditionally
 /// (capture auto-releasing on `Up`/`Cancel`), otherwise the child receives the
 /// event only if it contains the point, and a `Down` that misses a focused
 /// child blurs it.
 fn route_child(pod: &mut ChildPod, ctx: &mut EventCtx<'_>, event: &InputEvent) -> EventResult {
+    if event.is_broadcast() {
+        // Never consumed: forward, discard the result (see the variant's
+        // routing contract).
+        pod.event_child(ctx, event);
+        return EventResult::Ignored;
+    }
     if event.is_focus_routed() {
         if pod.is_focused() {
             return pod.event_child(ctx, event);

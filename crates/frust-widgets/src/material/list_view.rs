@@ -532,6 +532,12 @@ impl ListViewWidget {
             self.deliver_pending_near_end(ctx);
         }
         match event {
+            // A broadcast reaches every realized child unconditionally and is
+            // never consumed — `route_event` owns that contract, so this arm just
+            // hands it over ahead of the gesture machinery.
+            InputEvent::Housekeeping => {
+                crate::authoring::route_event(&mut self.children, ctx, event)
+            }
             InputEvent::Key(_) | InputEvent::Ime(_) => {
                 crate::authoring::route_event(&mut self.children, ctx, event)
             }

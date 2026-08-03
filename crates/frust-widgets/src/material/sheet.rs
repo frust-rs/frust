@@ -484,6 +484,14 @@ impl Widget for BottomSheetWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        // 0. A broadcast is not user input, so it belongs to neither the drag nor
+        //    the scrim arm below: forward it to the content unconditionally and
+        //    consume nothing, so a deferred callback queued inside the sheet still
+        //    flushes while a finger is down.
+        if event.is_broadcast() {
+            crate::authoring::route_event_single(&mut self.content, ctx, event);
+            return EventResult::Ignored;
+        }
         // 1. An in-flight handle drag owns the pointer stream.
         if self.drag_active {
             let InputEvent::Pointer(p) = event else {

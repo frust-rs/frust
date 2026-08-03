@@ -56,7 +56,7 @@ pub use component::{Component, ComponentView, ComponentWidget, component};
 pub use event::{
     EditingState, EventCtx, EventOutcome, EventResult, ImeContentType, ImeEvent, ImeState,
     InputEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton, PointerEvent, PointerPhase,
-    ScrollDelta,
+    ScrollDelta, mark_pending_result_flush, take_pending_result_flush,
 };
 pub use input::{
     FLING_DECAY, FLING_STOP, MOUSE_SLOP, TOUCH_SLOP, VELOCITY_WINDOW_MS, VelocityTracker,

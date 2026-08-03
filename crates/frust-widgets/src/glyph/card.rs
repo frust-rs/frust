@@ -241,9 +241,17 @@ impl<State: 'static> Widget for GlyphCardWidget<State> {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        // Active-pod-first (a captured gesture must not re-hit-test), then
-        // focus-routed, then reverse-paint-order hit test — the same contract
-        // as `crate::authoring::route_event`, over this widget's named optional slots.
+        // Broadcast-first, then active-pod (a captured gesture must not
+        // re-hit-test), then focus-routed, then reverse-paint-order hit test —
+        // the same contract as `crate::authoring::route_event`, over this
+        // widget's named optional slots.
+        if event.is_broadcast() {
+            for pod in self.pods_mut() {
+                // Never consumed: every slot gets it, results discarded.
+                pod.event_child(ctx, event);
+            }
+            return EventResult::Ignored;
+        }
         if let Some(pod) = self.pods_mut().find(|p| p.is_active()) {
             return crate::authoring::route_event_single(pod, ctx, event);
         }

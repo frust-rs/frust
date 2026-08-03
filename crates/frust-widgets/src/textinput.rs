@@ -1708,6 +1708,9 @@ impl Widget for TextInputWidget {
                 self.handle_ime(ctx, e)
             }
             InputEvent::Scroll { .. } => EventResult::Ignored,
+            // A leaf with nothing deferred: the broadcast is a harmless
+            // fall-through (it must not touch the editor, the caret, or focus).
+            InputEvent::Housekeeping => EventResult::Ignored,
         }
     }
 
