@@ -4,7 +4,7 @@ resolver = "2"
 # doesn't cover `plugins/`) — a platform plugin (frust-plugin + FFI crates
 # only, no frust-* framework deps), unlike the excluded facade-tier
 # plugins/clean-signals-frust below, which stays out of the root graph.
-members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets"]
+members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics"]
 # examples/no-catalogs is the catalog-free build's compile guard: unlike
 # every example excluded below, it is INCLUDED on purpose — a package-scoped
 # `cargo build -p no-catalogs`/`cargo check -p no-catalogs` compiles `frust
@@ -170,6 +170,11 @@ ndk-context = "0.1"
 # `{ workspace = true }`. Pinned to minor per the Version-Pin Policy; see
 # `docs/DEVELOPMENT.md`'s Version-Pin Policy table for the full list of
 # dependent mobile compile gates.
+# Also consumed by `frust-haptics`'s iOS-only backend for `MainThreadMarker`/
+# `MainThreadOnly` (constructing the three `UI*FeedbackGenerator` classes,
+# `target_os = "ios"` — not `target_vendor = "apple"`, matching
+# `frust-clipboard`'s own split); the tripwire for that arm is `cargo check
+# --target aarch64-apple-ios -p frust-haptics`. No version change.
 objc2 = "0.6"
 objc2-foundation = "0.3"
 # android emulator detection (frust-render) — target-gated; already a
@@ -239,7 +244,12 @@ windows-native-keyring-store = "1.1"
 # `dispatch2` backs the serial dispatch queue the video-data-output sample
 # delegate runs on. Pinned to minor per the Version-Pin
 # Policy; the tripwire is
-# `cargo check --target aarch64-apple-ios-sim -p frust-camera`.
+# `cargo check --target aarch64-apple-ios-sim -p frust-camera`. Also
+# consumed by `frust-haptics`'s iOS-only backend (the async main-queue bounce
+# every `UI*FeedbackGenerator` call goes through — see
+# `plugins/haptics/src/apple.rs`'s module doc); the tripwire for that arm is
+# `cargo check --target aarch64-apple-ios -p frust-haptics`. No version
+# change from either consumer.
 objc2-av-foundation = "0.3"
 objc2-core-media = "0.3"
 objc2-core-video = "0.3"
@@ -252,8 +262,31 @@ dispatch2 = "0.3"
 # own minimal feature list without Cargo's workspace-inheritance
 # restriction tripping. Pinned to minor per the Version-Pin Policy; the
 # tripwire is `cargo check --target aarch64-apple-ios-sim -p
-# frust-native-widgets`.
+# frust-native-widgets`. Also consumed by `frust-clipboard`'s iOS-only
+# backend (`UIPasteboard`, `target_os = "ios"` — not `target_vendor =
+# "apple"`, since UIKit doesn't exist on macOS); the tripwire for that arm is
+# `cargo check --target aarch64-apple-ios -p frust-clipboard`. No version
+# change from either consumer. Also consumed by `frust-haptics`'s iOS-only
+# backend (the three `UI*FeedbackGenerator` classes, same `target_os = "ios"`
+# split); the tripwire for that arm is `cargo check --target
+# aarch64-apple-ios -p frust-haptics`. No version change from any consumer.
 objc2-ui-kit = "0.3"
+# frust-clipboard's desktop (macOS/Linux/Windows) text-clipboard backend —
+# a sync, 1Password-maintained clipboard crate. `default-features = false`
+# (set here, not just on the member) so `plugins/clipboard/Cargo.toml` can
+# inherit it via `{ workspace = true }` without repeating the version
+# literal — Cargo's workspace-dependency inheritance only forbids a member
+# from *overriding* `default-features` when the workspace entry doesn't
+# already set it explicitly (see `objc2-foundation`'s comment above for the
+# case where it does), and here the default is already what this crate
+# wants (arboard's default `image-data` feature pulls in `image`/
+# `objc2-core-graphics`/`windows-sys` Gdi bindings this crate never uses).
+# Pinned exact per the Version-Pin Policy (a young surface, no minor-version
+# API-stability track record yet); MSRV 1.71, well under this workspace's
+# 1.88 floor. `wl-clipboard-rs`'s native-Wayland `wayland-data-control`
+# feature is deliberately NOT enabled (see `plugins/clipboard/src/desktop.rs`'s
+# module doc) — the tripwire is `cargo check -p frust-clipboard`.
+arboard = { version = "=3.6.1", default-features = false }
 # reactive stack (frust-reactive) — do not add reactive_graph's `effects`
 # feature anywhere (see docs/DEVELOPMENT.md's Version-Pin Policy)
 reactive_graph = "0.2"

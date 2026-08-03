@@ -239,7 +239,7 @@ cargo test -p frust-cli --test build_e2e -- --ignored
 # Android compile gate (no device needed): the whole facade graph must compile for Android.
 cargo check --target aarch64-linux-android \
   -p frust -p frust-plugin -p frust-shared-preferences -p frust-secure-storage \
-  -p frust-camera -p frust-native-widgets
+  -p frust-camera -p frust-native-widgets -p frust-clipboard -p frust-haptics
 cargo check --target aarch64-linux-android -p frust-native-widgets --features demo-components
 
 # --all-targets additionally compiles cfg(test) — the plain checks above never do, so a
@@ -251,7 +251,7 @@ cargo check --all-targets --target aarch64-linux-android -p frust-shell-android
 # must compile for the Simulator target (frust-secure-storage also gates the device target).
 cargo check --target aarch64-apple-ios-sim \
   -p frust -p frust-shared-preferences -p frust-secure-storage -p frust-camera \
-  -p frust-native-widgets
+  -p frust-native-widgets -p frust-clipboard -p frust-haptics
 cargo check --target aarch64-apple-ios -p frust-secure-storage
 cargo check --target aarch64-apple-ios-sim -p frust-native-widgets --features demo-components
 
@@ -376,7 +376,10 @@ also removes the redirected Gradle build output.
 `benchmarks/` is a paired Frust-vs-Flutter measurement suite, out-of-tree from the crate
 workspace: `frust_bench/` (standalone Cargo package, gate from its own directory like
 `examples/huddle`) and `flutter_bench/` (Flutter SDK, tested against 3.44.2 stable)
-implement the same eight scenarios (S1–S8), driven by `harness/`'s shared scripts:
+implement the same eight timed scenarios (S1–S8), driven by `harness/`'s shared scripts.
+`frust_bench` additionally carries S9 (terminal-grid) and S10 (an IME capability probe, never
+timed and never recorded in RESULTS.md); S9 is paired with a Flutter counterpart only at the
+protocol level today — the Flutter side remains on the spike branch, not in this tree.
 
 ```bash
 ./benchmarks/harness/run.sh <scenario> --app frust|flutter --device <serial>
@@ -435,8 +438,9 @@ not floating. Each row's tripwire must be re-run after touching that pin:
 | `objc2 0.6` / `objc2-foundation 0.3` minor | Apple ObjC bridge (`frust-shared-preferences`'s `NSUserDefaults` backend; `frust-secure-storage`'s apple arm also pulls `objc2-foundation` for `NSString`/`NSError`; `frust-camera`'s apple arm pulls the full `objc2-av-foundation`/`objc2-core-media`/`objc2-core-video`/`objc2-quartz-core`/`dispatch2`/`block2` stack, each pinned `0.3`/`0.6` minor — `objc2-av-foundation 0.3.2` itself permits `objc2 >=0.6.2, <0.8.0`, wider than this workspace's own `0.6` caret) | `cargo check --target aarch64-apple-ios-sim -p frust-shared-preferences && cargo check --target aarch64-apple-ios-sim -p frust-camera` |
 | `androidx.camera:camera-{core,camera2,lifecycle} 1.6.1` (Gradle, not a Cargo pin) minor | `frust-camera`'s Android CameraX session/preview stack (`plugins/camera/platform/android/build.gradle.kts`); deliberately not `camera-view` (no `PreviewView`) | `(cd examples/glyph-catalog/android && ./gradlew :frust-camera:compileReleaseKotlin)` |
 | `objc2-security 0.3` / `objc2-local-authentication 0.3` minor | `frust-secure-storage`'s Apple Keychain backend + biometric gate (`SecAccessControl`/`LAContext`) | the secure-storage mobile compile gates above |
-| `objc2-ui-kit` / `objc2-quartz-core` / `objc2-core-text` / `objc2-core-foundation` 0.3 minor | `frust-native-widgets`'s (`plugins/native-widgets`) UIKit binding, plus its theme-ladder L2 (`objc2-quartz-core`'s `CALayer.cornerRadius`) and L3 (`objc2-core-text`/`objc2-core-foundation` resolving the embedded Glyph font bytes to a `CTFont`) direct pins — each already resolved transitively before this crate named it directly, so no lockfile version change. `cargo tree -i objc2-ui-kit` legitimately shows two versions — `0.2.2` pulled transitively by `accesskit_ios`/`winit`, `0.3.2` consumed solely by `frust-native-widgets` — an expected split, not `cargo tree -d` drift; do not force-align them | `cargo check --target aarch64-apple-ios-sim -p frust-native-widgets` |
+| `objc2-ui-kit` / `objc2-quartz-core` / `objc2-core-text` / `objc2-core-foundation` 0.3 minor | `frust-native-widgets`'s (`plugins/native-widgets`) UIKit binding, plus its theme-ladder L2 (`objc2-quartz-core`'s `CALayer.cornerRadius`) and L3 (`objc2-core-text`/`objc2-core-foundation` resolving the embedded Glyph font bytes to a `CTFont`) direct pins — each already resolved transitively before this crate named it directly, so no lockfile version change. Also consumed by `frust-clipboard` (iOS `UIPasteboard`) and `frust-haptics` (the three `UI*FeedbackGenerator` classes). `cargo tree -i objc2-ui-kit` legitimately shows two versions — `0.2.2` pulled transitively by `accesskit_ios`/`winit`, `0.3.2` consumed by `frust-native-widgets`/`frust-clipboard`/`frust-haptics` — an expected split, not `cargo tree -d` drift; do not force-align them | `cargo check --target aarch64-apple-ios-sim -p frust-native-widgets -p frust-clipboard -p frust-haptics` |
 | `keyring-core 1.0` / `zbus-secret-service-keyring-store 1.0` (`rt-async-io-crypto-rust` feature, keeps the plugin tokio-free) / `windows-native-keyring-store 1.1` minor | `frust-secure-storage`'s desktop Linux/Windows backend | `cargo test -p frust-secure-storage` |
+| `arboard =3.6.1` exact | `frust-clipboard`'s desktop (macOS/Linux/Windows) text-clipboard backend; `default-features = false` drops the default `image-data` feature; `wl-clipboard-rs`'s native-Wayland `wayland-data-control` feature is deliberately not enabled | `cargo check -p frust-clipboard` |
 | `notify 8` minor (`frust-cli`-only) | `frust run --watch`'s filesystem watcher (`ctrlc` floats, shared by `frust-drive`/`frust-cli`, unpinned; `frust-drive`'s copy now enables the `termination` feature so `frust-drive::interrupt` also catches SIGTERM/SIGHUP — needed to scrub the plaintext release-signing file on a CI runner's kill, not just Ctrl-C. Visible consequence: interrupting a `--release` `frust run` before logcat streaming begins now exits 130 for SIGTERM/SIGHUP, where an unhandled signal previously exited 143/129; the logcat phase's own Ctrl-C-means-stop override still exits 0 for all three signals) | `cargo test -p frust-cli` |
 | `ratatui 0.30` / `crossterm 0.29` / `ansi-to-tui 8.0.1` minor | `frust-tui`'s render/terminal/log stack, pre-1.0 churn expected | `cargo test -p frust-tui` |
 | `toml_edit 0.25` minor | `frust-tui`'s config persistence and `frust-drive::plugin`'s format-preserving Cargo.toml/manifest edits | `cargo test -p frust-tui` && `cargo test -p frust-drive` |

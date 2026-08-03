@@ -157,6 +157,7 @@ class FrustSurfaceView(
          */
         private const val CONTENT_TYPE_NORMAL = "normal"
         private const val CONTENT_TYPE_NO_SUGGESTIONS = "noSuggestions"
+        private const val CONTENT_TYPE_TERMINAL = "terminal"
 
         /**
          * Decode the low byte of `nativeSystemUiState`'s packed `u64` (task
@@ -920,7 +921,7 @@ class FrustSurfaceView(
 
     /**
      * Map the wire `"contentType"` string (`"normal"` / `"password"` /
-     * `"noSuggestions"` — encoded on the Rust side by
+     * `"noSuggestions"` / `"terminal"` — encoded on the Rust side by
      * `frust_shell_android::jni_glue::content_type_wire` from
      * `frust_core::event::ImeContentType`) onto the `EditorInfo`/`InputType`
      * flags that actually close FINDINGS #31: typing into a `Password` field
@@ -937,6 +938,18 @@ class FrustSurfaceView(
      * and autocorrect, and `IME_FLAG_NO_PERSONALIZED_LEARNING` still stops
      * the typed text feeding the IME's learned-word dictionary (no secure-
      * entry masking — this is not a secret field).
+     *
+     * `"terminal"` (task F1) is a raw byte-entry surface: same non-secret
+     * flags as `"noSuggestions"` (`TYPE_TEXT_FLAG_NO_SUGGESTIONS` +
+     * `IME_FLAG_NO_PERSONALIZED_LEARNING`) — Android's `InputType`/`EditorInfo`
+     * vocabulary has no separate "no smart punctuation" bit the way iOS's
+     * `UITextInputTraits` does (`smartQuotesType`/`smartDashesType`), so
+     * `TYPE_TEXT_FLAG_NO_SUGGESTIONS` is already the whole available lever.
+     * Deliberately does **not** add `TYPE_TEXT_VARIATION_VISIBLE_PASSWORD`: an
+     * S2-spike device check found it can disable swipe typing on some IMEs,
+     * and zero-composing was already verified without it — reach for that
+     * variation as a per-IME fallback only if a specific keyboard is still
+     * seen suggesting into a `"terminal"` field on a device gate.
      *
      * Any wire value this `when` doesn't recognize — including an absent
      * `lastKnownState` (nothing focused/published yet) — falls through to
@@ -959,6 +972,13 @@ class FrustSurfaceView(
                     InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                 outAttrs.imeOptions =
                     EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+            }
+            CONTENT_TYPE_TERMINAL -> {
+                outAttrs.inputType =
+                    InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                outAttrs.imeOptions =
+                    EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING or
+                        EditorInfo.IME_FLAG_NO_EXTRACT_UI
             }
             else -> { // "password", or any unrecognized/future value — fail closed.
                 outAttrs.inputType =
@@ -1435,6 +1455,8 @@ class FrustSurfaceView(
             if (wholesale) {
                 // Rust replaced the text: rebuild the mirror to match.
                 editable.replace(0, editable.length, state.text)
+                // A later identical `sync()` must not short-circuit on a stale snapshot.
+                lastPushed = null
             }
             val len = editable.length
             if (state.selBase in 0..len && state.selExt in 0..len) {

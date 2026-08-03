@@ -1,0 +1,9 @@
+{
+  "chunk_count": 3600,
+  "cols": 80,
+  "duration_ms": 30000,
+  "hz": 120,
+  "profile": "firehose",
+  "rows": 45,
+  "sha256": "d06a7505d5366a982f29efead7148e60740e616e4b116719289ea45bf84ca519"
+}

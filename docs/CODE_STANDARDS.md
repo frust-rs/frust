@@ -27,6 +27,13 @@
     marks the untyped Foundation setter unsafe), each `# Safety`-noted.
   - `frust-secure-storage`'s `apple` backend — a confined `as_cf` objc→`CFType` bridge for
     the Keychain/`SecAccessControl` calls, `# Safety`-noted.
+  - `frust-clipboard`'s `apple` backend — `UIPasteboard`'s `string`/`setString:`/
+    `setItems_options:` calls plus one `extern` static read (`UIPasteboardOptionLocalOnly`), each
+    `# Safety`-noted; its `android`/`desktop` backends hold no `unsafe`.
+  - `frust-haptics`'s `apple` backend — one `MainThreadMarker::new_unchecked()` proving a
+    `dispatch_get_main_queue()` callback runs on the actual main thread; every
+    `UI*FeedbackGenerator` call itself is a plain safe binding. Its `android`/`desktop` backends
+    hold no `unsafe`.
   - `frust-render`'s `RenderContext::create_pipeline_cache` — one call building a
     `wgpu::PipelineCache` from a shell-persisted, adapter-fingerprint-validated blob (see
     `docs/RENDER_ARCHITECTURE.md`'s `RenderContext` module row).

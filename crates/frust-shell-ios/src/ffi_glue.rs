@@ -1229,11 +1229,14 @@ unsafe fn cstr_to_string(ptr: *const c_char) -> String {
 /// [`ImeContentType::suppresses_suggestions`] predicates the enum's docs
 /// mandate matching on for this reason: an unrecognized variant becomes the
 /// *strictest* wire string its own predicates justify, never the loosest.
+/// Mirrors `frust_shell_android::jni_glue::content_type_wire` byte-for-byte
+/// (same four wire strings, same fail-closed rule).
 fn content_type_wire(content_type: ImeContentType) -> &'static str {
     match content_type {
         ImeContentType::Normal => "normal",
         ImeContentType::Password => "password",
         ImeContentType::NoSuggestions => "noSuggestions",
+        ImeContentType::Terminal => "terminal",
         other => {
             if other.is_secret() {
                 "password"
@@ -1679,6 +1682,7 @@ mod ime_content_type_wire {
             content_type_wire(ImeContentType::NoSuggestions),
             "noSuggestions"
         );
+        assert_eq!(content_type_wire(ImeContentType::Terminal), "terminal");
     }
 
     #[test]
@@ -1728,5 +1732,23 @@ mod ime_content_type_wire {
         };
         let json = ime_state_to_json(Some(state));
         assert!(json.contains(r#""contentType":"noSuggestions""#));
+    }
+
+    #[test]
+    fn published_terminal_state_carries_it_through_to_json() {
+        let state = ImeState {
+            active: true,
+            editing: EditingState {
+                text: "ls -la".to_string(),
+                selection_base: 6,
+                selection_extent: 6,
+                composing_base: -1,
+                composing_extent: -1,
+            },
+            caret: None,
+            content_type: ImeContentType::Terminal,
+        };
+        let json = ime_state_to_json(Some(state));
+        assert!(json.contains(r#""contentType":"terminal""#));
     }
 }

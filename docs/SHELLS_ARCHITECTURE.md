@@ -96,19 +96,30 @@ signal-poll seam race-free without a lock.
   own. This closes the race where theme changes pushed from Rust reached the status bar only after
   the next platform event.
 - **IME content-type:** each focused widget publishes `ImeState::content_type` (Normal/Password/
-  NoSuggestions), and the shells destructure the state field-by-field into platform payloads per
-  their capabilities and security posture:
-  - **Android:** maps to `EditorInfo.inputType` (`TYPE_CLASS_TEXT`; Password and NoSuggestions both
-    add `TYPE_TEXT_FLAG_NO_SUGGESTIONS`, Password additionally adds `TYPE_TEXT_VARIATION_PASSWORD`)
-    and `EditorInfo.imeOptions` (`IME_FLAG_NO_PERSONALIZED_LEARNING` for both Password and
-    NoSuggestions), blocking the suggestion strip and personalized learning on both — each branch
+  NoSuggestions/Terminal), and the shells destructure the state field-by-field into platform
+  payloads per their capabilities and security posture:
+  - **Android:** maps to `EditorInfo.inputType` (`TYPE_CLASS_TEXT`; Password, NoSuggestions, and
+    Terminal all add `TYPE_TEXT_FLAG_NO_SUGGESTIONS`, Password additionally adds
+    `TYPE_TEXT_VARIATION_PASSWORD`) and `EditorInfo.imeOptions` (`IME_FLAG_NO_PERSONALIZED_LEARNING`
+    for all three), blocking the suggestion strip and personalized learning on each — each branch
     was previously missing one of its two required flags (fix F5), and `applyImeContentType` is now
-    the first Kotlin change in three batches to have cleared `compileDebugKotlin`. Handles
-    content-type changes on a **steady-focused** field (field is active/focused but changes from
-    Normal→Password mid-interaction) via `restartInput`, because Android never re-queries
-    `EditorInfo` for a bound `InputConnection` — the hint must be reestablished by forcing a new
-    connection.
-  - **iOS:** JSON-serializes the content type alongside editing state for Swift to apply.
+    the first Kotlin change in three batches to have cleared `compileDebugKotlin`. Terminal
+    additionally adds `IME_FLAG_NO_EXTRACT_UI` (no fullscreen extract-UI takeover for a raw
+    byte-entry field); Android's `InputType`/`EditorInfo` vocabulary has no separate
+    smart-punctuation bit, so `TYPE_TEXT_FLAG_NO_SUGGESTIONS` is already Terminal's whole available
+    lever there. Handles content-type changes on a **steady-focused** field (field is active/focused
+    but changes from Normal→Password mid-interaction) via `restartInput`, because Android never
+    re-queries `EditorInfo` for a bound `InputConnection` — the hint must be reestablished by forcing
+    a new connection.
+  - **iOS:** JSON-serializes the content type alongside editing state for Swift to apply. Password
+    and NoSuggestions also suppress the `UITextInputTraits` smart-quotes/dashes/insert-delete traits
+    and autocapitalization (`autocapitalizationType = .none`) — closing the same silent-rewrite/
+    auto-capitalize defect class the suggestion-strip leak closes, just for punctuation/case rather
+    than disclosure; Terminal gets the full non-secret suppression matrix — `isSecureTextEntry =
+    false` (not masked), autocorrect/spell-check/smart-punctuation all off, and
+    `autocapitalizationType = .none`. Every one of the eight traits `applyImeContentType` manages is
+    assigned explicitly in every arm, so no value from a prior classification survives a switch on
+    the shared `forgeView` responder.
     `syncImeFocus` matches two of Android's three properties: the **per-frame poll** (driven from
     the `CADisplayLink` tick via `renderFrame`, the `doFrame` analogue) and the **divergence-guarded
     reconcile**, plus re-seeds the `UITextInput` mirror on content-type change and the resign/become
@@ -128,8 +139,9 @@ signal-poll seam race-free without a lock.
     `ime-ios-content-type-unverified`, which also records a residual gap in the touch-re-arm design.
   - **Desktop:** forwards to winit's `Window::set_ime_purpose(ImePurpose)`, which is **documented
     unsupported on all platforms except Wayland, and a cosmetic hint even there** (no secure-text
-    entry). Password is the only distinction (Password vs Normal); NoSuggestions has no
-    corresponding winit category and maps to Normal.
+    entry). `ImePurpose` distinguishes only `Normal`/`Password`/`Terminal`; NoSuggestions has no
+    corresponding category and maps to Normal, while Terminal maps exactly to `ImePurpose::Terminal`
+    — winit's own purpose for raw byte entry, the first mapping this precise besides Password.
 - Surface-mode resolution: each mobile shell resolves the host's declared translucency mode against
   actual surface capabilities at configure time and republishes the resolved verdict every frame.
 - A set of additive, off-by-default kill-switch env vars (`FRUST_NO_RENDER_THREAD`,

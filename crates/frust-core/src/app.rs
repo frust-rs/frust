@@ -256,10 +256,12 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// dirty gate — see [`RenderRoot::semantics_if_changed`]). v1 recompute is
     /// acceptable; this is the seam a shell gates on.
     semantics_gen: u64,
-    /// Set when [`RenderRoot::rebuild`] hit
-    /// [`MAX_PENDING_RESULT_FLUSH_PASSES`] with work still owed, and folded into
-    /// the next [`RenderRoot::paint`]'s [`PaintOutcome::needs_frame`] (then
-    /// cleared).
+    /// Set by [`RenderRoot::rebuild`] when the deferred-callback flush owes the
+    /// shell a frame, and folded into the next [`RenderRoot::paint`]'s
+    /// [`PaintOutcome::needs_frame`] (then cleared). Two raisers, both in the
+    /// flush loop: hitting [`MAX_PENDING_RESULT_FLUSH_PASSES`] with work still
+    /// owed, and a dispatched [`InputEvent::Housekeeping`] whose
+    /// [`EventOutcome::needs_redraw`] came back set.
     ///
     /// The frame-request half of the deferral: `pending |= PAINT` already tells
     /// the mobile frame gate to run its next tick, but the desktop loop is
@@ -545,6 +547,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// nav ops, so the loop is **bounded**; past the cap the flag is left standing
     /// and one more frame is requested rather than spinning (see
     /// `MAX_PENDING_RESULT_FLUSH_PASSES`, this module's private cap constant).
+    ///
+    /// The broadcast's [`EventOutcome`] is propagated, not discarded: a
+    /// `needs_redraw` coming back from the dispatch folds into this rebuild's
+    /// [`ChangeFlags::PAINT`] and the deferred frame request, so a callback
+    /// whose only effect is [`EventCtx::request_redraw`]
+    /// — invisible to the re-diff, since no view-visible state changed — still
+    /// wakes both the mobile frame gate and the desktop `Wait` loop.
     pub fn rebuild(
         &mut self,
         app_logic: &mut impl FnMut(&mut State) -> V,
@@ -570,7 +579,33 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 self.deferred_frame = true;
                 break;
             }
-            self.event(state, &InputEvent::Housekeeping);
+            // The dispatch's own outcome is load-bearing, not noise: a flushed
+            // callback whose *only* effect is `EventCtx::request_redraw` (no
+            // signal write, no state the next `app_logic` run reads) leaves the
+            // re-diff below reporting `ChangeFlags::NONE`, so nothing else in
+            // this method would ever mark the frame dirty and the requested
+            // redraw would be dropped on the floor. Fold it into exactly the
+            // wake the cap branch above raises: `PAINT` reaches `self.pending`,
+            // which is what the mobile frame gate reads
+            // (`has_pending_change_flags`), and `deferred_frame` surfaces on the
+            // next `paint` as `needs_frame`, which is how the desktop
+            // `ControlFlow::Wait` loop learns to schedule a frame. Both
+            // Housekeeping producers need it (a navigator pop-result callback
+            // and `frust-widgets`' gesture long-press latch), and without it a
+            // redraw-only effect waits for whatever input happens to arrive
+            // next — the FINDINGS #56 shape this mechanism exists to remove.
+            //
+            // Non-empty flags also bump the semantics generation below, which
+            // is correct: the callback just mutated real `State` through a live
+            // `EventCtx`, so the accessibility tree may genuinely have changed,
+            // and every other paint-class path here bumps it the same way (a
+            // spurious bump costs one recompute of an unchanged tree, a missed
+            // one strands a stale tree).
+            let outcome = self.event(state, &InputEvent::Housekeeping);
+            if outcome.needs_redraw {
+                flags |= ChangeFlags::PAINT;
+                self.deferred_frame = true;
+            }
             let view = app_logic(state);
             flags |= self.rebuild_view(view);
             passes += 1;
@@ -2996,5 +3031,125 @@ mod tests {
 
         // Leave this thread's flag clean for anything else in the binary.
         let _ = crate::event::take_pending_result_flush();
+    }
+
+    /// The redraw-only flush shape: a widget that queues a callback exactly like
+    /// [`FlushView`] above, but whose broadcast handler touches **no** state at
+    /// all — it only calls [`EventCtx::request_redraw`]. `frust-widgets`' gesture
+    /// long-press latch is the shipped instance (its `on_long_press` consumer may
+    /// mutate nothing the view diff can see), and the widget's own
+    /// `ctx.request_redraw()` after firing is then the whole wake signal.
+    struct RedrawOnlyView {
+        ops: std::rc::Rc<Cell<u32>>,
+    }
+
+    struct RedrawOnlyWidget {
+        ops: std::rc::Rc<Cell<u32>>,
+        queued: bool,
+    }
+
+    impl RedrawOnlyWidget {
+        fn drain_ops(&mut self) {
+            if self.ops.replace(0) > 0 {
+                self.queued = true;
+                crate::event::mark_pending_result_flush();
+            }
+        }
+    }
+
+    impl View<()> for RedrawOnlyView {
+        type Element = RedrawOnlyWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> RedrawOnlyWidget {
+            let mut widget = RedrawOnlyWidget {
+                ops: self.ops.clone(),
+                queued: false,
+            };
+            widget.drain_ops();
+            widget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            element: &mut RedrawOnlyWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            element.ops = self.ops.clone();
+            element.drain_ops();
+            // The whole point: the re-diff after the flush reports nothing, so
+            // the dispatch's own outcome is the only wake signal there is.
+            ChangeFlags::NONE
+        }
+    }
+
+    impl crate::widget::Widget for RedrawOnlyWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(10.0, 10.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if event.is_broadcast() && std::mem::take(&mut self.queued) {
+                // No `state_mut`, no signal, no view-visible change — a repaint
+                // request and nothing else.
+                ctx.request_redraw();
+            }
+            EventResult::Ignored
+        }
+    }
+
+    #[test]
+    fn a_redraw_only_flushed_callback_wakes_both_loop_styles() {
+        let ops = std::rc::Rc::new(Cell::new(0u32));
+        let mut root: RenderRoot<(), RedrawOnlyView> = RenderRoot::new();
+        let mut app = |_state: &mut ()| RedrawOnlyView { ops: ops.clone() };
+        let mut state = ();
+
+        // Settle the first build so the assertions below observe only the flush.
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(50.0, 50.0));
+        let mut scene = RecordingScene::default();
+        let settled = root.paint(&mut scene, FrameTime::ZERO);
+        assert!(!settled.needs_frame, "nothing queued ⇒ the tree is at rest");
+        let _ = root.take_change_flags();
+
+        // Queue the redraw-only callback (the gesture long-press latch analog: a
+        // prior pass marks, this rebuild flushes).
+        ops.set(1);
+        let flags = root.rebuild(&mut app, &mut state);
+        assert!(
+            flags.needs_paint(),
+            "the broadcast's `needs_redraw` folds into the rebuild's flags even \
+             though the re-diff saw no view change"
+        );
+        assert!(
+            root.has_pending_change_flags(),
+            "PAINT reached `pending`, which is the input the mobile frame gate \
+             reads to decide the next tick runs at all"
+        );
+
+        let outcome = root.paint(&mut scene, FrameTime::ZERO);
+        assert!(
+            outcome.needs_frame,
+            "the same wake surfaces as `needs_frame`, which is how the desktop \
+             `ControlFlow::Wait` loop schedules a frame with no input pending"
+        );
+        assert!(
+            !outcome.needs_frame_paced_only,
+            "a flushed callback's repaint is not a cosmetic loop — the mobile \
+             frame gate must not throttle it"
+        );
+        assert!(
+            !crate::event::take_pending_result_flush(),
+            "the mark was consumed; nothing is owed to a later frame"
+        );
+
+        // And it settles: the next frame asks for nothing, so neither loop spins.
+        let _ = root.take_change_flags();
+        root.rebuild(&mut app, &mut state);
+        let settled = root.paint(&mut scene, FrameTime::ZERO);
+        assert!(
+            !settled.needs_frame,
+            "one wake, not a perpetual one — the flush is over"
+        );
+        assert!(!root.has_pending_change_flags());
     }
 }

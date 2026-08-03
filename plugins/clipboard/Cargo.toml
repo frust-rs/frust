@@ -1,0 +1,95 @@
+[package]
+name = "frust-clipboard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# ClipboardError variants callers match on — thiserror per CODE_STANDARDS.
+thiserror = { workspace = true }
+# The Android platform-handle substrate this crate's Android backend calls
+# through (`frust_plugin::android::with_jni_env`); the only `frust-*`
+# dependency this crate is allowed (platform-plugin charter — see
+# `docs/ARCHITECTURE.md`'s Module Structure / `docs/CODE_STANDARDS.md`'s
+# Plugin Conventions). Unconditional like `frust-shared-preferences`'/
+# `frust-secure-storage`'s own copy: the crate is inert off Android, so
+# declaring it target-gated would buy nothing.
+frust-plugin = { path = "../../crates/frust-plugin" }
+
+# Android: `ClipboardManager`/`ClipData` via plain JNI (no Kotlin/Gradle
+# module — see `src/android.rs`'s module doc for why one isn't needed).
+# Matches `frust-shared-preferences`'/`frust-secure-storage`'s Android arm:
+# their own JNI signature calls don't go through `frust-plugin`'s re-export
+# alone, so this crate depends on `jni` directly too.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { workspace = true }
+
+# iOS only — **not** `target_vendor = "apple"`. `UIPasteboard` is UIKit,
+# which doesn't exist on macOS (no AppKit backend); gating on
+# `target_vendor = "apple"` would try to link the `UIKit` framework into a
+# macOS desktop-preview host build and fail (`ld: framework 'UIKit' not
+# found`) — the same rationale `plugins/native-widgets/Cargo.toml` already
+# documents for its own iOS-only UIKit arm. macOS instead shares the
+# `desktop` (arboard) backend below.
+#
+# Not `{ workspace = true }`: Cargo's workspace-dependency inheritance
+# forbids a member from overriding `default-features` unless the
+# workspace-level entry already sets it explicitly, and neither
+# `objc2-foundation` nor `objc2-ui-kit` does (see
+# `plugins/secure-storage/Cargo.toml`'s comment for the same restriction) —
+# so both repeat the workspace pin literally with their own minimal feature
+# list rather than inheriting the (large) default set.
+[target.'cfg(target_os = "ios")'.dependencies]
+# `AnyObject`: the type-erased value objects go in `set_text_sensitive`'s
+# `NSDictionary<NSString, AnyObject>` items/options dictionaries (see
+# `plugins/camera/Cargo.toml`'s comment for the same reason it depends on
+# `objc2` directly rather than relying on it only transitively).
+objc2 = { workspace = true }
+# `NSString`: `UIPasteboard.string`/`setString:`'s payload type. `NSArray` +
+# `NSDictionary` + `NSObject`: `set_text_sensitive`'s `setItems(_:options:)`
+# call builds an `NSArray<NSDictionary<NSString, AnyObject>>` items array and
+# an `NSDictionary<NSString, AnyObject>` options dictionary (`NSObject` is
+# what `NSDictionary::from_slices` itself needs — see
+# `plugins/camera/Cargo.toml`'s comment on its own `video_settings` helper
+# for the same dependency). `NSValue`: where `NSNumber` lives (the options
+# dictionary's `UIPasteboardOptionLocalOnly` value).
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSString",
+    "NSObject",
+    "NSArray",
+    "NSDictionary",
+    "NSValue",
+] }
+# `UIPasteboard`: the one class this backend touches (`generalPasteboard`,
+# `string`/`setString:`/`setItems_options`). Enabling it turns on the
+# `NSString`/`NSArray`/`NSData`/etc. `objc2-foundation` sub-features
+# `UIPasteboard`'s own API surface needs (see `objc2-ui-kit-0.3.2/Cargo.toml`'s
+# `UIPasteboard` feature list) — this crate still names those explicitly
+# above rather than relying on that as a side effect, matching
+# `plugins/native-widgets`'s own "every FFI surface this crate touches is a
+# named, minimal, direct dependency" discipline.
+objc2-ui-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "UIPasteboard",
+] }
+
+# Desktop text clipboard (macOS, Linux, Windows) — `arboard`, a sync,
+# 1Password-maintained clipboard crate. `default-features = false` drops its
+# default `image-data` feature (image get/set, pulling in `image`/
+# `objc2-core-graphics`/`windows-sys` Gdi bindings this crate never uses) —
+# see `docs/DEVELOPMENT.md`'s Version-Pin Policy for the pin rationale and
+# `cargo check -p frust-clipboard` tripwire. Pinned exact per policy (a
+# young-ish, pre-1.0-in-spirit surface this crate depends on for its entire
+# desktop text path). A type-check alone doesn't exercise arboard's actual
+# clipboard behavior — after bumping this pin, also run the real (opt-in,
+# destructive — see `README.md`'s Testing section) conformance test:
+# `FRUST_CLIPBOARD_TESTS=1 cargo test -p frust-clipboard`.
+#
+# macOS shares this arm rather than `apple.rs`: `UIPasteboard` (UIKit) does
+# not exist on macOS, and arboard's own macOS backend (`NSPasteboard` via
+# `objc2-app-kit`) already covers it, so there is nothing macOS-specific for
+# this crate to write.
+[target.'cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))'.dependencies]
+arboard = { workspace = true }

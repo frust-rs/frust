@@ -419,8 +419,9 @@ pub fn take_pending_result_flush() -> bool {
 /// | Variant | Android (`InputType` / `EditorInfo.imeOptions`) | iOS (`UITextInputTraits`) | Desktop (winit) |
 /// |---|---|---|---|
 /// | [`Normal`](Self::Normal) | `TYPE_CLASS_TEXT` | platform defaults | `ImePurpose::Normal` |
-/// | [`Password`](Self::Password) | `TYPE_CLASS_TEXT \| TYPE_TEXT_VARIATION_PASSWORD`, plus `TYPE_TEXT_FLAG_NO_SUGGESTIONS` and `IME_FLAG_NO_PERSONALIZED_LEARNING` | `isSecureTextEntry = true`, `textContentType = .password`, `autocorrectionType = .no`, `spellCheckingType = .no` | `ImePurpose::Password` |
-/// | [`NoSuggestions`](Self::NoSuggestions) | `TYPE_CLASS_TEXT \| TYPE_TEXT_FLAG_NO_SUGGESTIONS`, plus `IME_FLAG_NO_PERSONALIZED_LEARNING` | `autocorrectionType = .no`, `spellCheckingType = .no` | no equivalent — `ImePurpose::Normal` |
+/// | [`Password`](Self::Password) | `TYPE_CLASS_TEXT \| TYPE_TEXT_VARIATION_PASSWORD`, plus `TYPE_TEXT_FLAG_NO_SUGGESTIONS` and `IME_FLAG_NO_PERSONALIZED_LEARNING` | `isSecureTextEntry = true`, `textContentType = .password`, `autocorrectionType = .no`, `spellCheckingType = .no`, plus smart-punctuation suppression (see [`Terminal`](Self::Terminal)) | `ImePurpose::Password` |
+/// | [`NoSuggestions`](Self::NoSuggestions) | `TYPE_CLASS_TEXT \| TYPE_TEXT_FLAG_NO_SUGGESTIONS`, plus `IME_FLAG_NO_PERSONALIZED_LEARNING` | `autocorrectionType = .no`, `spellCheckingType = .no`, plus smart-punctuation suppression | no equivalent — `ImePurpose::Normal` |
+/// | [`Terminal`](Self::Terminal) | `TYPE_CLASS_TEXT \| TYPE_TEXT_FLAG_NO_SUGGESTIONS`, plus `IME_FLAG_NO_PERSONALIZED_LEARNING` (same as `NoSuggestions`) | `isSecureTextEntry = false`, `autocorrectionType = .no`, `spellCheckingType = .no`, `smartQuotesType = .no`, `smartDashesType = .no`, `smartInsertDeleteType = .no`, `autocapitalizationType = .none`, `textContentType = nil` | `ImePurpose::Terminal` |
 ///
 /// Sources: Android `android.text.InputType` / `android.view.inputmethod.EditorInfo`
 /// and Apple `UITextInputTraits` reference docs, retrieved 2026-08-01.
@@ -463,6 +464,21 @@ pub enum ImeContentType {
     /// switch to secure entry, so autofill/reveal-last-character behaviour is
     /// unchanged; only the suggestion/learning channel is closed.
     NoSuggestions,
+    /// A raw byte-entry surface (a terminal/shell keystroke source): no
+    /// suggestion strip, no autocorrect, no smart quotes/dashes/insert-delete,
+    /// no autocapitalization. Text is **not** masked — this is not a secret
+    /// field, it is a field where every character the user typed must reach
+    /// the app byte-for-byte with zero platform "correction" applied to it.
+    ///
+    /// The defect this closes is the same class [`Password`](Self::Password)
+    /// closes for secrets: a smart keyboard silently substituting `"` for a
+    /// curly quote or `--` for an em dash corrupts a shell command exactly as
+    /// it corrupts a password, just without the confidentiality angle. Distinct
+    /// from [`NoSuggestions`](Self::NoSuggestions): that variant suppresses the
+    /// suggestion/learning channel only, while `Terminal` additionally
+    /// suppresses smart punctuation and autocapitalization, both of which
+    /// silently rewrite the text a suggestion-only hint leaves untouched.
+    Terminal,
 }
 
 impl ImeContentType {
@@ -478,7 +494,7 @@ impl ImeContentType {
     pub fn is_secret(self) -> bool {
         match self {
             Self::Password => true,
-            Self::Normal | Self::NoSuggestions => false,
+            Self::Normal | Self::NoSuggestions | Self::Terminal => false,
         }
     }
 
@@ -486,10 +502,10 @@ impl ImeContentType {
     /// and persistent word learning for this field.
     ///
     /// True for every secret content type and for
-    /// [`NoSuggestions`](Self::NoSuggestions).
+    /// [`NoSuggestions`](Self::NoSuggestions) and [`Terminal`](Self::Terminal).
     pub fn suppresses_suggestions(self) -> bool {
         match self {
-            Self::Password | Self::NoSuggestions => true,
+            Self::Password | Self::NoSuggestions | Self::Terminal => true,
             Self::Normal => false,
         }
     }
@@ -926,6 +942,9 @@ mod tests {
 
         assert!(!ImeContentType::NoSuggestions.is_secret());
         assert!(ImeContentType::NoSuggestions.suppresses_suggestions());
+
+        assert!(!ImeContentType::Terminal.is_secret());
+        assert!(ImeContentType::Terminal.suppresses_suggestions());
 
         assert!(!ImeContentType::Normal.is_secret());
         assert!(!ImeContentType::Normal.suppresses_suggestions());

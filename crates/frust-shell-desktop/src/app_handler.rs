@@ -499,18 +499,22 @@ impl ComposeLatch {
 /// shells — the same limit applies here, just with a much smaller platform
 /// footprint that actually honours it).
 ///
-/// `ImePurpose` also only distinguishes `Normal`/`Password`/`Terminal`, so
+/// `ImePurpose` distinguishes exactly `Normal`/`Password`/`Terminal`, so
 /// [`NoSuggestions`](ImeContentType::NoSuggestions) has nothing more precise
 /// to map onto than `Normal` — desktop has no channel to ask a platform IME
 /// to suppress suggestions/learning without also claiming secure entry it
-/// can't actually deliver on this backend.
+/// can't actually deliver on this backend. [`Terminal`](ImeContentType::Terminal)
+/// is the one variant this backend can map exactly: winit's own `Terminal`
+/// purpose exists for precisely this raw byte-entry case ("input into a
+/// terminal" per its doc comment), so unlike `NoSuggestions` it does not fall
+/// back to `Normal`.
 ///
 /// Recorded in `docs/SHELLS_ARCHITECTURE.md`'s IME section.
 fn ime_purpose_for(content_type: ImeContentType) -> ImePurpose {
-    if content_type.is_secret() {
-        ImePurpose::Password
-    } else {
-        ImePurpose::Normal
+    match content_type {
+        ImeContentType::Terminal => ImePurpose::Terminal,
+        other if other.is_secret() => ImePurpose::Password,
+        _ => ImePurpose::Normal,
     }
 }
 
@@ -1775,9 +1779,9 @@ mod tests {
     // content-type hint: this is the honest "winit offers almost nothing"
     // outcome the task anticipated, recorded here so a later reader finds a
     // considered decision rather than a silently missed field. See
-    // `ime_purpose_for`'s doc comment for why `Password` is the only variant
-    // that maps to anything but `Normal`, and why even that mapping only
-    // reaches Wayland.
+    // `ime_purpose_for`'s doc comment for why `Password` and `Terminal` are
+    // the only variants that map to anything but `Normal`, and why even the
+    // `Password` mapping only reaches Wayland.
 
     #[test]
     fn ime_purpose_maps_password_to_the_winit_password_purpose() {
@@ -1788,9 +1792,18 @@ mod tests {
     }
 
     #[test]
+    fn ime_purpose_maps_terminal_to_the_winit_terminal_purpose() {
+        assert_eq!(
+            ime_purpose_for(ImeContentType::Terminal),
+            ImePurpose::Terminal
+        );
+    }
+
+    #[test]
     fn ime_purpose_has_no_distinct_mapping_for_normal_or_no_suggestions() {
-        // `ImePurpose` has no "suppress suggestions" variant, so the only
-        // content type that changes the winit call is the secret one.
+        // `ImePurpose` has no "suppress suggestions" variant, so `NoSuggestions`
+        // falls back to `Normal` just like `Normal` itself — only the secret
+        // and terminal content types change the winit call.
         assert_eq!(ime_purpose_for(ImeContentType::Normal), ImePurpose::Normal);
         assert_eq!(
             ime_purpose_for(ImeContentType::NoSuggestions),
