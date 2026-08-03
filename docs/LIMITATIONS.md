@@ -152,6 +152,38 @@ caveats.
 
 ---
 
+### `clip-desktop-sensitivity-noop` — `set_text_sensitive` applies no sensitivity marking on desktop
+
+**Observed**: `Clipboard::set_text_sensitive` on macOS, Linux, and Windows (the
+`arboard`-backed desktop backend) is a plain alias for `set_text` — no OS-level
+sensitivity marking is applied on any of the three desktop targets, unlike
+Android (`ClipDescription.EXTRA_IS_SENSITIVE`, API 33+) and iOS
+(`UIPasteboard.setItems(_:options:)` with `localOnly`).
+
+**Applies to**: Desktop only (macOS, Linux, Windows); mobile already applies
+its own marking (see `plugins/clipboard/src/android.rs`/`apple.rs`).
+
+**Why not fixed**: unlike Linux (X11/Wayland have no equivalent mechanism at
+all), Windows and macOS each document a real primitive `arboard` doesn't
+expose. Windows: the clipboard-format trio `CanIncludeInClipboardHistory`,
+`CanUploadToCloudClipboard`, `ExcludeClipboardContentFromMonitorProcessing`
+(suppresses Win+V clipboard history and Cloud Clipboard sync for a format
+marked with them). macOS: the community-convention format
+`org.nspasteboard.ConcealedType` (no first-party API; an opt-in convention a
+number of pasteboard-aware apps honor). Both require writing a custom
+clipboard format rather than plain text, which `arboard`'s API doesn't expose
+— reaching Windows' trio in particular would need `clipboard-win`'s raw
+format surface instead of (or alongside) `arboard`. Deliberately deferred,
+not attempted, to keep the desktop backend on one dependency.
+
+**Evidence**: Windows Clipboard History/Cloud Clipboard format documentation;
+`org.nspasteboard.org`'s `ConcealedType` convention; `arboard`'s public API
+surveyed for a custom-format write (none); flagged during review-r1's
+`set_text_sensitive` fix. See `plugins/clipboard/README.md`'s `## 2.
+Security` section for the crate-level writeup.
+
+---
+
 ### `pbxproj-id-budget` — Xcode object-id minting is capped at 255 ids per prefix
 
 **Observed**: the scheme frust mints new Xcode project object ids under
