@@ -58,7 +58,7 @@ android {
     // (`compileSdk = 36`, `minSdk = 26`). A mismatch is a silent behavior
     // change, not a build error — keep them in lockstep. Every control this
     // plugin builds is a plain `android.widget` view available since well
-    // before API 24, so nothing here imposes a floor of its own.
+    // before API 26, so nothing here imposes a floor of its own.
     compileSdk = 36
 
     defaultConfig {

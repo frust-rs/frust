@@ -460,6 +460,49 @@ not floating. Each row's tripwire must be re-run after touching that pin:
   two-platform: android's/ios's render-thread priority self-boosts
   (`docs/CODE_STANDARDS.md`'s sanctioned-unsafe zones).
 
+## Platform-Support Policy
+
+The minimum supported platform is a **project-wide constant, not a per-module choice**. Every module
+must declare the same floor — a mismatch is a *silent behaviour change*, not a build error, which is
+why the numbers are repeated in an in-file comment at each site.
+
+| Platform | Floor | Declared in |
+|----------|-------|-------------|
+| Android | **`minSdk = 26`** (Android 8.0) · `compileSdk = 36` | 10 Gradle files: `platform/android/frust-embedding`, `plugins/{camera,native-widgets,secure-storage}/platform/android`, `templates/app/android.tmpl/app`, and the 5 example/benchmark apps |
+| iOS | **15.0** | `platform/ios/FrustEmbedding/Package.swift` (`.iOS(.v15)`) and each app's `IPHONEOS_DEPLOYMENT_TARGET` |
+
+**Adding a new Android module?** Copy the floor and the lockstep comment. **Adding a new iOS
+target?** `Package.swift`'s `platforms:` must stay **at or below** every consumer's
+`IPHONEOS_DEPLOYMENT_TARGET` — a package minimum above the app's is a compile error.
+
+### Why Android is 26 and must not go lower
+
+Raised from 24 in `db6827b`. API 24/25 (Android 7.x) were dropped as too old to carry, and the floor
+was actively costing correctness: **`EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING` is API 26+**, so
+the keyboard-learning half of FINDINGS #31's mitigation was a *silent* no-op below it. It is an
+`imeOptions` bit, so the constant inlines at compile time and an older IME simply ignores it —
+neither a crash nor a `NewApi` lint would ever have surfaced the gap. At 26 the flag is
+unconditionally honoured and `frust-core/src/event.rs`'s IME contract table holds at the floor.
+
+**Lowering the floor below 26 re-opens that hole silently.** If it is ever lowered, restore the
+API-caveat entry in `docs/LIMITATIONS.md` in the same change.
+
+Two API-26 alternatives are now *available* but deliberately **not** adopted — see each module doc
+for the reasoning: `SeekBar.setMin` (`plugins/native-widgets/src/controls/slider.rs` keeps its
+Rust-side range mapping) and, still out of reach, `Font.Builder(ByteBuffer)` (API 29, so
+`typeface.rs` still writes a cache file). `secure-storage`'s biometric gate is still required —
+`BiometricPrompt` is API 28+, so `NotAvailable(UnsupportedApiLevel)` remains reachable on 26 and 27.
+
+### Migrating an already-scaffolded app
+
+Apps generated before `db6827b` carry `minSdk = 24`. Nothing breaks if they stay there — the
+framework does not require 26 to *compile* — but they keep the silent IME gap above. To move, set
+`minSdk = 26` in the app's `app/build.gradle.kts`; there is no other migration step.
+
+**Verifying a floor change:** `cargo` cannot see it. Run
+`cd examples/glyph-catalog/android && ./gradlew compileDebugKotlin lintDebug` — `lint` is the only
+gate that surfaces an API-level mismatch, since inlined constants produce no compile error.
+
 ## Known Issues
 
 ### Formatting

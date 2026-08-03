@@ -195,21 +195,27 @@ been run since this path was introduced or since any of these fixes landed.
 instead of fighting an intentional UIKit-originated resign (user swipe-
 dismiss, a sibling native control taking first responder) forever, because
 nothing on the Swift side can observe *why* first responder was resigned.
-A user touch on the Frust surface (`onTouch`, user-initiated) unconditionally
-re-arms the bound — this is what lets a user bring back a keyboard they
-dismissed themselves by re-tapping the field, since re-tapping an
-already-active field changes neither Rust's `active` nor `contentType`
-signal. A touch inside a Mode B hosted slot never reaches `onTouch`
+A user touch on the Frust surface (`onTouch`, user-initiated) re-arms the
+bound — **but only while the surface is not already first responder**
+(fix F3c). That is what lets a user bring back a keyboard they dismissed
+themselves by re-tapping the field, since re-tapping an already-active field
+changes neither Rust's `active` nor `contentType` signal. The
+not-already-first-responder half is load-bearing: `imeFocusSatisfied` is set
+back to `true` only in the `!isFirstResponder` branch, so re-arming during a
+touch inside a *still-focused* field would leave it dangling at `false` and
+reassert the keyboard on the next UIKit-originated dismissal — reopening the
+very pop-back the bound exists to prevent. A touch inside a Mode B hosted slot never reaches `onTouch`
 (`FrustView.hitTest` returns `nil` there), so a sibling native control
 retaining first responder is unaffected by the per-frame tick. This
 mechanism is Swift-only and is exactly as compile- and device-unverified as
 the rest of this entry.
 
-**Residual limitation, accepted (not a bug to fix here)**: the same
-unconditional re-arm-on-any-touch means a touch **elsewhere** on the Frust
-surface (e.g. scrolling non-editable content, outside a Mode B sibling's
-interactive slot) while that sibling native control holds first responder
-also re-arms the bound. Rust has no way to learn the sibling took first
+**Residual limitation, accepted (not a bug to fix here)** — and note F3c's
+gating does **not** remove it: when a Mode B sibling holds first responder,
+`forgeView.isFirstResponder` is already `false`, so the
+not-already-first-responder condition is satisfied and a touch **elsewhere**
+on the Frust surface (e.g. scrolling non-editable content, outside the
+sibling's interactive slot) still re-arms the bound. Rust has no way to learn the sibling took first
 responder, so it still reports its own field as active, and the reconciler
 will attempt to take focus back. This is inherent to the "any surface touch
 re-arms" design, not an oversight; it is strictly better than the unbounded

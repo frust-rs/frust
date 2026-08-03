@@ -608,10 +608,14 @@ open class FrustViewController: UIViewController {
     ///   touch that reached `FrustView` (a touch inside an interactive hosted
     ///   slot never does; see `FrustView.hitTest`), so it is an explicit,
     ///   user-driven request for the keyboard and is allowed to re-arm
-    ///   `imeFocusSatisfied`/`imeFocusRetryCount` unconditionally before the
-    ///   rest of this function runs — see `imeFocusSatisfied`'s doc for why
-    ///   this, and only this, call site may do that. `false` from the
-    ///   per-frame `renderFrame` tick, which must stay bounded.
+    ///   `imeFocusSatisfied`/`imeFocusRetryCount` before the rest of this
+    ///   function runs — **but only while `forgeView` is not already first
+    ///   responder** (fix F3c). Re-arming while we still hold the responder
+    ///   would leave the flag dangling at `false`, because only the
+    ///   `!isFirstResponder` branch ever sets it back to `true`. See
+    ///   `imeFocusSatisfied`'s doc for why this, and only this, call site may
+    ///   re-arm at all. `false` from the per-frame `renderFrame` tick, which
+    ///   must stay bounded.
     private func syncImeFocus(userInitiated: Bool) {
         guard let state = fetchImeState() else { return }
         let active = (state["active"] as? Bool) ?? false

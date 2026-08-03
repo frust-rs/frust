@@ -118,8 +118,9 @@ signal-poll seam race-free without a lock.
     through `UITextInput` instead. The per-frame `becomeFirstResponder()` retry is now **bounded**
     (`imeFocusSatisfied`, fix F3) rather than fighting an intentional UIKit-originated resign every
     frame forever, since nothing on the Swift side can observe *why* first responder was resigned. A
-    user touch on the Frust surface unconditionally re-arms the bound (fix F3b) — a self-dismissed
-    field can be recovered by re-tapping it — but a touch landing inside a Mode B hosted slot never
+    user touch on the Frust surface re-arms the bound *while the surface is not already first
+    responder* (fixes F3b/F3c) — a self-dismissed field can be recovered by re-tapping it, while a
+    touch inside a still-focused field cannot leave the bound dangling — but a touch landing inside a Mode B hosted slot never
     reaches this path (`FrustView.hitTest` returns `nil` there), so a sibling native control holding
     first responder is unaffected by the per-frame tick. **Swift side remains compile- and
     device-unverified on the build host** (Linux; even a Mac needs `xcodebuild`, and
