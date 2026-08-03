@@ -1,4 +1,4 @@
-//! The scenario driver contract shared by all eight benchmark scenarios.
+//! The scenario driver contract shared by all ten benchmark scenarios.
 //!
 //! Every scenario is a zero-sized unit struct implementing [`Scenario`],
 //! registered once in [`SCENARIOS`]. A scenario is selected at launch via a
@@ -56,7 +56,7 @@ pub const SCENARIO_ENV: &str = "FRUST_BENCH_SCENARIO";
 /// [`SCENARIOS`] registry as a `&'static dyn Scenario`.
 pub trait Scenario: Sync {
     /// Stable id: the deep-link host (`frustbench://<id>`) and the default
-    /// scenario-marker name. One of `s1`..=`s8`.
+    /// scenario-marker name. One of `s1`..=`s10`.
     fn id(&self) -> &'static str;
 
     /// Human-readable title, shown in the HUD and each stub's placeholder.
@@ -78,7 +78,7 @@ pub trait Scenario: Sync {
     }
 }
 
-/// All eight scenarios, in id order. Index into this from [`BenchState::active`]
+/// All ten scenarios, in id order. Index into this from [`BenchState::active`]
 /// / [`BenchState::selected`].
 pub static SCENARIOS: [&dyn Scenario; 10] = [
     &s1_animation::S1,
@@ -184,7 +184,7 @@ pub fn index_from_url(url: &str) -> Option<usize> {
     index_from_id(id)
 }
 
-/// Map a bare scenario id (`s1`..=`s8`) to its [`SCENARIOS`] index.
+/// Map a bare scenario id (`s1`..=`s10`) to its [`SCENARIOS`] index.
 pub fn index_from_id(id: &str) -> Option<usize> {
     SCENARIOS.iter().position(|s| s.id() == id)
 }
