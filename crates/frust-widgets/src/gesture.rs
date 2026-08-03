@@ -16,15 +16,43 @@
 //! Timing is measured across **paints**, not events: only the paint pass
 //! carries a clock ([`PaintCtx::frame_time`]), while events carry none. A press
 //! records `press_start` on its first paint and marks itself *elapsed* on a
-//! later paint once `frame_time - press_start >= LONG_PRESS_MS`. **The callback
-//! never fires during paint** (there is no `&mut State`/`EventCtx` there); paint
-//! only *marks* the threshold. `on_long_press` then fires on the next pointer
-//! event delivered for this capture:
+//! later paint once `frame_time - press_start >= LONG_PRESS_MS`.
 //!
-//! - on **`Up`** — a hold that exceeded the threshold releases as a long-press
-//!   instead of a tap ("long-press-on-release"); and
-//! - on a **`Move`** (within slop) arriving after the threshold, so a context
-//!   menu can open the instant the finger jitters even before release.
+//! **The callback still never fires during paint itself** (there is no `&mut
+//! State`/`EventCtx` there) — but paint no longer waits for the next *pointer*
+//! event to deliver it either. The instant a paint observes the threshold
+//! crossed, it calls [`frust_core::mark_pending_result_flush`] — the same
+//! mechanism [`crate::nav::navigator`] uses to run a queued pop-result
+//! callback from a state-free `View::rebuild` pass — and
+//! [`PaintCtx::request_frame`]s a follow-up frame. Every shipping shell
+//! (desktop/Android/iOS) runs `RenderRoot::rebuild` before `RenderRoot::paint`
+//! on every frame it drives, so the very next frame's rebuild drains that
+//! mark, dispatches an `InputEvent::Housekeeping` broadcast carrying a real
+//! `EventCtx`, and this widget fires `on_long_press` from there — **at the
+//! threshold, in wall time**, whether or not the finger ever moves again. Only
+//! the *delivery vehicle* changed (Housekeeping instead of waiting for the
+//! next pointer event); the timer, the slop/cancel rules, and the
+//! fire-exactly-once guarantee below are unchanged.
+//!
+//! Two delivery paths race for the same fire, and whichever reaches the widget
+//! first wins — the `Recognizer::Fired` transition makes the other one a
+//! no-op:
+//!
+//! - the **Housekeeping broadcast** above, ordinarily one frame after the
+//!   threshold, needing no pointer event at all; or
+//! - a **live pointer event** that arrives first — `Up` (a hold that exceeded
+//!   the threshold releases as a long-press instead of a tap) or an in-slop
+//!   `Move` (so a context menu can still open the instant a held finger
+//!   jitters, without waiting out the extra frame).
+//!
+//! The Housekeeping path runs only when `on_long_press` is wired (mirroring
+//! the paint timer's own gate below): an `on_hold_progress`-only detector
+//! keeps its final observation deferred to the next pointer event exactly as
+//! before — nothing here moves a hold-progress-only consumer onto the new
+//! path. When both are wired and `on_long_press` fires via Housekeeping,
+//! `on_hold_progress`'s paired final `1.0` observation (see below) rides along
+//! in the same pass, exactly as the `Move`-arrival path has always delivered
+//! them together.
 //!
 //! The paint timer only runs when an [`on_long_press`](GestureDetectorView::on_long_press)
 //! handler is wired: a **tap-only** detector never marks `elapsed`, so a press
@@ -37,13 +65,12 @@
 //! `on_long_press` is absent (e.g. unwired mid-gesture), so a held press never
 //! silently swallows its release.
 //!
-//! Honest limitation: a *true* timer-fires-while-held-perfectly-still gesture
-//! would need an event-pass clock the framework doesn't have. What this lands is
-//! hold-exceeds-threshold semantics, which feels native for context menus. Frame
-//! liveness while the finger is held still is guaranteed on mobile by the pointer
-//! capture keeping the `FrameGate` running; desktop is dirty-driven, so paint
-//! calls [`PaintCtx::request_frame`] while the timer is pending so it keeps
-//! painting with no input until the threshold is reached.
+//! Frame liveness while the finger is held still is guaranteed on mobile by
+//! the pointer capture keeping the `FrameGate` running; desktop is
+//! dirty-driven, so paint calls [`PaintCtx::request_frame`] both while the
+//! timer is pending, and once more on the frame that crosses the threshold —
+//! that second request is what actually reaches the Housekeeping-flushing
+//! rebuild above on a desktop shell with no further input.
 //!
 //! # Hold-progress observation
 //!
@@ -54,11 +81,16 @@
 //! while a press is pending, but (the same callback-from-paint caveat as
 //! `on_long_press` above) can only *record* it; the observation is delivered on
 //! the next pointer event that already carries a mutable `EventCtx` (an in-slop
-//! `Move`, matching `on_long_press`'s fire-on-move-arrival). A drag past
+//! `Move`, matching `on_long_press`'s fire-on-move-arrival) — **or, when
+//! `on_long_press` is also wired, on the Housekeeping-triggered fire above,
+//! whichever reaches the widget first.** A drag past
 //! [`TOUCH_SLOP`] or an early release *before* the threshold — i.e. the
 //! `Move`/`Up` arm handling that transition, never `PointerPhase::Cancel`
 //! (see the Cancel staleness gap below) — delivers a final `0.0`; reaching the
-//! threshold delivers a final `1.0`. [`hold_threshold_ms`](GestureDetectorView::hold_threshold_ms)
+//! threshold delivers a final `1.0`. An `on_hold_progress`-only detector (no
+//! `on_long_press` wired) keeps the original deferred-to-next-pointer-event
+//! delivery for its final `1.0` too — the Housekeeping path never runs for it.
+//! [`hold_threshold_ms`](GestureDetectorView::hold_threshold_ms)
 //! overrides [`LONG_PRESS_MS`] for both `on_long_press` and this timer.
 //!
 //! ## Cancel staleness gap
@@ -188,9 +220,12 @@ enum Recognizer {
     Idle,
     /// A press is down and still within the slop (tap + long-press both viable).
     /// `press_start` is recorded on the first paint after `Down`; `elapsed`
-    /// flips once a paint observes the hold exceeding the threshold. `progress`
+    /// flips once a paint observes the hold exceeding the threshold — the same
+    /// paint also latches a Housekeeping flush when `on_long_press` is wired
+    /// (see the [module docs](self#long-press-firing-semantics)). `progress`
     /// is paint's latest `0.0..=1.0` hold-progress observation, delivered to
-    /// `on_hold_progress` on the next pointer event (see the [module
+    /// `on_hold_progress` on the next pointer event or the Housekeeping-triggered
+    /// fire, whichever arrives first (see the [module
     /// docs](self#hold-progress-observation)).
     Pressed {
         down_pos: Point,
@@ -200,8 +235,11 @@ enum Recognizer {
     },
     /// The press moved past the slop — became a drag; neither recogniser fires.
     Dragged,
-    /// A long-press already fired for this press (on a post-threshold `Move`);
-    /// we hold capture until `Up`/`Cancel` but fire nothing further.
+    /// A long-press already fired for this press — via the threshold-time
+    /// Housekeeping broadcast (the common case; see the [module
+    /// docs](self#long-press-firing-semantics)) or a post-threshold `Move`/`Up`
+    /// arrival that won the race instead; we hold capture until `Up`/`Cancel`
+    /// but fire nothing further.
     Fired,
 }
 
@@ -308,7 +346,25 @@ impl Widget for GestureDetectorWidget {
             *progress = (elapsed_ms / self.threshold_ms).clamp(0.0, 1.0);
             if !*elapsed {
                 if elapsed_ms >= self.threshold_ms {
-                    *elapsed = true; // paint only marks; the callback fires on the next event
+                    *elapsed = true;
+                    // Threshold-time firing (see the module docs' "Long-press
+                    // firing semantics"): paint still can't call `on_long_press`
+                    // itself (no `EventCtx` here), but it no longer waits for
+                    // the next pointer event either. Latch the same
+                    // deferred-callback flush `nav::navigator` uses for a
+                    // queued pop-result, and request one more frame so a
+                    // dirty-driven desktop shell actually reaches the
+                    // `RenderRoot::rebuild` that drains it — every shell runs
+                    // rebuild (with a real `EventCtx`-bearing `Housekeeping`
+                    // dispatch) before its own paint, so the very next frame
+                    // fires this at the threshold, in wall time, with no
+                    // pointer event required. Gated on `on_long_press` being
+                    // wired: an `on_hold_progress`-only detector keeps its
+                    // original deferred-to-next-pointer-event delivery.
+                    if self.on_long_press.is_some() {
+                        frust_core::mark_pending_result_flush();
+                        ctx.request_frame();
+                    }
                 } else {
                     ctx.request_frame();
                 }
@@ -432,7 +488,48 @@ impl Widget for GestureDetectorWidget {
                 }
             }
         }
-        // Non-pointer (scroll) events pass straight through to the child.
+        if event.is_broadcast() {
+            // `InputEvent::Housekeeping` today: the delivery vehicle for a
+            // threshold-time long-press latched during an earlier paint (see
+            // the module docs' "Long-press firing semantics") — the soonest
+            // pass carrying a real `EventCtx` when no pointer event arrived
+            // first. Gated on `on_long_press` being wired, mirroring paint's
+            // own gate: an `on_hold_progress`-only press never reaches this
+            // arm, so it keeps its original fire-on-move/up-arrival delivery
+            // untouched.
+            if self.on_long_press.is_some()
+                && let Recognizer::Pressed {
+                    elapsed: true,
+                    progress,
+                    ..
+                } = self.state
+            {
+                // Whichever of this broadcast or a live pointer event reaches
+                // the widget first wins the fire; the other finds `state` no
+                // longer `Pressed` and is a no-op (fire-exactly-once).
+                self.state = Recognizer::Fired;
+                if let Some(cb) = self.on_long_press.as_mut() {
+                    cb(ctx);
+                    ctx.request_redraw();
+                }
+                // `on_hold_progress`'s paired final observation (already
+                // pinned at 1.0 by `elapsed`) rides along in the same pass,
+                // exactly as the Move-arrival path always delivered them
+                // together.
+                if let Some(cb) = self.on_hold_progress.as_mut() {
+                    cb(ctx, progress);
+                    ctx.request_redraw();
+                }
+            }
+            // A broadcast is never consumed and always forwarded to the
+            // child unconditionally, reporting Ignored regardless of what it
+            // returns (`docs/CODE_STANDARDS.md`'s interaction-semantics
+            // convention).
+            self.child.event_child(ctx, event);
+            return EventResult::Ignored;
+        }
+        // Non-broadcast, non-pointer events (scroll/key/IME) pass straight
+        // through to the child, reporting whatever it returns.
         self.child.event_child(ctx, event)
     }
 
@@ -587,6 +684,103 @@ mod tests {
         assert_eq!(state.taps, 0, "a long-press must not also fire on_tap");
     }
 
+    /// The same view `root()` builds, standalone — for a test that needs to
+    /// call `RenderRoot::rebuild` a second time against the same retained
+    /// widget (simulating a real shell's next per-frame rebuild).
+    fn long_press_logic(_: &mut TapState) -> GestureDetectorView<TapState> {
+        GestureDetector::<TapState, _>(Blank)
+            .on_tap(|s: &mut TapState| s.taps += 1)
+            .on_long_press(|s: &mut TapState| s.long_presses += 1)
+    }
+
+    #[test]
+    fn stationary_hold_fires_on_long_press_at_the_threshold_with_no_pointer_event() {
+        // The regression this task fixes: before it, a perfectly stationary
+        // finger got nothing until `Up` — paint only *marked* `elapsed`, and
+        // the callback fired on the next pointer event (`Move`/`Up`). Now
+        // paint latches a Housekeeping flush the instant it crosses the
+        // threshold, and the very next `RenderRoot::rebuild` (which every
+        // shell runs before its own paint) drains it and fires — with zero
+        // pointer events anywhere in this test.
+        let mut root = root();
+        let mut state = TapState::default();
+        let mut sink = NullScene;
+        root.event(&mut state, &ev(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut sink, ft(0.0)); // records press_start = 0
+        let crossing = root.paint(&mut sink, ft(600.0)); // 600ms >= 500ms → elapsed marked, flush latched
+        assert!(
+            crossing.needs_frame,
+            "the threshold-crossing paint requests a follow-up frame so a \
+             dirty-driven desktop shell actually reaches the rebuild that fires"
+        );
+        // Paint alone never fires — there is no `EventCtx` in that pass.
+        assert_eq!(state.long_presses, 0, "paint only latches; it never fires");
+
+        // The follow-up frame: every shell runs `rebuild` before `paint`,
+        // and `rebuild` is what drains the flush and dispatches the
+        // `Housekeeping` broadcast this widget fires from.
+        root.rebuild(&mut long_press_logic, &mut state);
+        assert_eq!(
+            state.long_presses, 1,
+            "a stationary hold fires on_long_press at the threshold, in \
+             wall time, with no pointer event"
+        );
+        assert_eq!(state.taps, 0);
+    }
+
+    #[test]
+    fn housekeeping_fire_wins_the_race_and_a_later_move_or_up_is_inert() {
+        // If the Housekeeping broadcast reaches the widget before any
+        // further pointer event does, it fires there — and a `Move`/`Up`
+        // arriving afterwards finds `state` already `Fired`, so neither may
+        // double-fire (fire-exactly-once, regardless of which delivery path
+        // won the race).
+        let mut root = root();
+        let mut state = TapState::default();
+        let mut sink = NullScene;
+        root.event(&mut state, &ev(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut sink, ft(0.0));
+        root.paint(&mut sink, ft(600.0)); // elapsed marked, flush latched
+        root.rebuild(&mut long_press_logic, &mut state); // Housekeeping fires here
+        assert_eq!(state.long_presses, 1);
+
+        root.event(&mut state, &ev(PointerPhase::Move, 11.0, 11.0));
+        assert_eq!(
+            state.long_presses, 1,
+            "a post-fire Move must not double-fire"
+        );
+        assert_eq!(state.taps, 0);
+
+        root.event(&mut state, &ev(PointerPhase::Up, 11.0, 11.0));
+        assert_eq!(state.long_presses, 1, "a post-fire Up must not double-fire");
+        assert_eq!(
+            state.taps, 0,
+            "a post-fire Up must not fall through to on_tap"
+        );
+    }
+
+    #[test]
+    fn drag_before_threshold_then_rebuild_never_fires_via_housekeeping() {
+        // A slop-cancel before the threshold must stay disarmed even across
+        // a later rebuild — the flush is only latched at the
+        // threshold-crossing paint, which a pre-threshold drag never
+        // reaches.
+        let mut root = root();
+        let mut state = TapState::default();
+        let mut sink = NullScene;
+        root.event(&mut state, &ev(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut sink, ft(0.0));
+        root.paint(&mut sink, ft(100.0)); // short of the 500ms threshold
+        root.event(&mut state, &ev(PointerPhase::Move, 10.0, 40.0)); // past slop -> Dragged
+        root.event(&mut state, &ev(PointerPhase::Up, 10.0, 40.0));
+        root.rebuild(&mut long_press_logic, &mut state);
+        assert_eq!(
+            state.long_presses, 0,
+            "a pre-threshold drag never fires via Housekeeping"
+        );
+        assert_eq!(state.taps, 0, "a dragged press is not a tap either");
+    }
+
     #[test]
     fn quick_tap_before_threshold_fires_tap_only() {
         let mut root = root();
@@ -598,6 +792,26 @@ mod tests {
         root.event(&mut state, &ev(PointerPhase::Up, 12.0, 12.0));
         assert_eq!(state.taps, 1, "a quick release is a tap");
         assert_eq!(state.long_presses, 0, "under threshold must not long-press");
+    }
+
+    #[test]
+    fn quick_tap_then_rebuild_never_retroactively_long_presses() {
+        // A quick release before the threshold resolves as a tap; a later
+        // rebuild (which would dispatch Housekeeping if anything were
+        // pending) must not retroactively promote it to a long-press.
+        let mut root = root();
+        let mut state = TapState::default();
+        let mut sink = NullScene;
+        root.event(&mut state, &ev(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut sink, ft(0.0));
+        root.paint(&mut sink, ft(100.0)); // short of the threshold
+        root.event(&mut state, &ev(PointerPhase::Up, 12.0, 12.0));
+        root.rebuild(&mut long_press_logic, &mut state);
+        assert_eq!(state.taps, 1, "the tap already resolved on Up");
+        assert_eq!(
+            state.long_presses, 0,
+            "a subsequent rebuild must not retroactively long-press a released tap"
+        );
     }
 
     #[test]
@@ -855,6 +1069,50 @@ mod tests {
             state.progress.len(),
             4,
             "Up after a fired long-press adds no observation"
+        );
+    }
+
+    /// The same view [`progress_root`] builds, standalone — for a test that
+    /// needs to call `RenderRoot::rebuild` a second time against the same
+    /// retained widget (simulating a real shell's next per-frame rebuild).
+    fn progress_logic(_: &mut HoldState) -> GestureDetectorView<HoldState> {
+        GestureDetector::<HoldState, _>(Blank)
+            .on_tap(|s: &mut HoldState| s.taps += 1)
+            .on_long_press(|s: &mut HoldState| s.long_presses += 1)
+            .on_hold_progress(|s: &mut HoldState, p| s.progress.push(p))
+    }
+
+    #[test]
+    fn housekeeping_fire_delivers_the_paired_final_progress_and_a_later_drag_is_inert() {
+        // A perfectly stationary hold with both `on_long_press` and
+        // `on_hold_progress` wired: the Housekeeping-triggered fire delivers
+        // both in the same pass (matching the paired delivery the
+        // Move-arrival path has always given), and — since `state` is
+        // `Fired`, not `Pressed`, afterwards — a subsequent Move past the
+        // slop must not be mistaken for the Pressed→Dragged transition
+        // (which would otherwise re-deliver a spurious final `0.0`); it just
+        // forwards to the child, e.g. so an underlying scrollable can keep
+        // tracking the drag.
+        let mut root = progress_root();
+        let mut state = HoldState::default();
+        let mut sink = NullScene;
+        root.event(&mut state, &hold_ev(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut sink, ft(0.0));
+        root.paint(&mut sink, ft(500.0)); // elapsed marked, flush latched
+        root.rebuild(&mut progress_logic, &mut state); // Housekeeping fires here
+        assert_eq!(state.long_presses, 1);
+        assert_eq!(
+            state.progress,
+            vec![1.0],
+            "the paired final progress observation rides the same fire"
+        );
+
+        root.event(&mut state, &hold_ev(PointerPhase::Move, 10.0, 40.0)); // past TOUCH_SLOP
+        assert_eq!(state.long_presses, 1, "no double-fire on a post-fire drag");
+        assert_eq!(
+            state.progress,
+            vec![1.0],
+            "a post-fire Move delivers no further progress observation"
         );
     }
 
