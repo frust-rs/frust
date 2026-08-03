@@ -62,6 +62,22 @@ final class FrustView: UIView {
     var spellCheckingType: UITextSpellCheckingType = .default
     var textContentType: UITextContentType?
 
+    // UITextInputTraits: smart-punctuation + autocapitalization knobs (task
+    // F1), driven by `applyImeContentType` the same way as the properties
+    // above. `UITextInputTraits` members are `@objc optional`, so unlike a
+    // stock `UITextField`/`UITextView` this custom `UITextInput` gets no
+    // automatic suppression from `isSecureTextEntry` alone — each trait needs
+    // its own stored property here or `applyImeContentType`'s assignment to
+    // it does not compile. Defaults match Apple's documented
+    // `UITextInputTraits` defaults (system-following `.default` for the three
+    // smart-editing traits, `.sentences` for autocapitalization) — the same
+    // "say nothing, get platform defaults" contract `autocorrectionType`/
+    // `spellCheckingType` above already follow.
+    var smartQuotesType: UITextSmartQuotesType = .default
+    var smartDashesType: UITextSmartDashesType = .default
+    var smartInsertDeleteType: UITextSmartInsertDeleteType = .default
+    var autocapitalizationType: UITextAutocapitalizationType = .sentences
+
     /// A custom editor view must opt in to becoming first responder for the
     /// keyboard to appear.
     override var canBecomeFirstResponder: Bool { true }

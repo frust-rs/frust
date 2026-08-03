@@ -734,11 +734,12 @@ open class FrustViewController: UIViewController {
     }
 
     /// Map the wire `"contentType"` string (`"normal"` / `"password"` /
-    /// `"noSuggestions"` — encoded on the Rust side by
+    /// `"noSuggestions"` / `"terminal"` — encoded on the Rust side by
     /// `frust_shell_ios::ffi_glue::content_type_wire` from
     /// `frust_core::event::ImeContentType`) onto the UIKit text-input traits
     /// that actually suppress the QuickType suggestion bar and keyboard
-    /// learning (FINDINGS #31).
+    /// learning (FINDINGS #31), plus (task F1) the smart-punctuation traits
+    /// that silently rewrite characters rather than just suggesting them.
     ///
     /// `isSecureTextEntry` is the load-bearing flag for `"password"`: it is
     /// what stops UIKit from echoing typed characters into the suggestion
@@ -749,7 +750,34 @@ open class FrustViewController: UIViewController {
     /// visible (no `isSecureTextEntry`), but autocorrect/spell-check/learning
     /// are still switched off.
     ///
-    /// `ImeContentType` has exactly three variants today (no dedicated
+    /// **`forgeView` is a custom `UITextInput`, not a `UITextField`/
+    /// `UITextView`** — none of the automatic trait suppression UIKit applies
+    /// to a native secure text field (which forces smart quotes/dashes/
+    /// autocapitalization off on its own once `isSecureTextEntry = true`)
+    /// happens here for free. Every trait below must be set explicitly per
+    /// case, redundant-looking as that is against `isSecureTextEntry`.
+    ///
+    /// `"password"`/`"noSuggestions"` additionally suppress
+    /// `smartQuotesType`/`smartDashesType`/`smartInsertDeleteType`: a smart
+    /// keyboard silently substituting a curly quote or an em dash rewrites
+    /// the literal character the user typed, corrupting a password exactly as
+    /// it would corrupt a shell command (see `"terminal"` below) — this is
+    /// the same defect class as the suggestion-strip leak, just a rewrite
+    /// instead of a disclosure. Neither gains an `autocapitalizationType`
+    /// override here (scoped to smart-punctuation only; unlike `"terminal"`,
+    /// nothing published today types multi-word lower-case-sensitive content
+    /// into a `"password"`/`"noSuggestions"` field).
+    ///
+    /// `"terminal"` is a raw byte-entry surface (a terminal/shell keystroke
+    /// source): the full non-secret suppression matrix —
+    /// `isSecureTextEntry = false` (not a secret; text is not masked),
+    /// `autocorrectionType`/`spellCheckingType = .no`,
+    /// `smartQuotesType`/`smartDashesType`/`smartInsertDeleteType = .no`, and
+    /// `autocapitalizationType = .none` (a shell auto-capitalizing the first
+    /// character of a command is the same corruption class as a smart quote —
+    /// `"ls"` silently becoming `"Ls"`), `textContentType = nil`.
+    ///
+    /// `ImeContentType` has exactly four variants today (no dedicated
     /// "new password" or "one-time code" hint yet), so this does not reach
     /// for `.newPassword`/`.oneTimeCode` — `.oneTimeCode` in particular
     /// actively invites a QuickType suggestion (SMS-code autofill), which
@@ -801,16 +829,42 @@ open class FrustViewController: UIViewController {
             forgeView.textContentType = nil
             forgeView.autocorrectionType = .yes
             forgeView.spellCheckingType = .default
+            // Explicit resets: `forgeView` is one shared instance reused
+            // across every content type (see this function's doc), so a
+            // prior "terminal"/"password"/"noSuggestions" classification's
+            // suppression must be undone here, not left to leak forward.
+            forgeView.smartQuotesType = .yes
+            forgeView.smartDashesType = .yes
+            forgeView.smartInsertDeleteType = .yes
+            forgeView.autocapitalizationType = .sentences
         case "noSuggestions":
             forgeView.isSecureTextEntry = false
             forgeView.textContentType = nil
             forgeView.autocorrectionType = .no
             forgeView.spellCheckingType = .no
+            forgeView.smartQuotesType = .no
+            forgeView.smartDashesType = .no
+            forgeView.smartInsertDeleteType = .no
+        case "terminal":
+            // Raw byte-entry surface: no suggestions, no autocorrect, no
+            // smart punctuation, no autocapitalization, and NOT masked (this
+            // is not a secret field — see this function's doc).
+            forgeView.isSecureTextEntry = false
+            forgeView.textContentType = nil
+            forgeView.autocorrectionType = .no
+            forgeView.spellCheckingType = .no
+            forgeView.smartQuotesType = .no
+            forgeView.smartDashesType = .no
+            forgeView.smartInsertDeleteType = .no
+            forgeView.autocapitalizationType = .none
         default:  // "password", nil, or any unrecognized future value.
             forgeView.isSecureTextEntry = true
             forgeView.textContentType = .password
             forgeView.autocorrectionType = .no
             forgeView.spellCheckingType = .no
+            forgeView.smartQuotesType = .no
+            forgeView.smartDashesType = .no
+            forgeView.smartInsertDeleteType = .no
         }
     }
 
