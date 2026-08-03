@@ -29,6 +29,7 @@
 
 use frust::{AnyView, Get, RwSignal, Set, any, deep_links, text};
 
+pub mod s10_keys;
 pub mod s1_animation;
 pub mod s2_list;
 pub mod s3_table;
@@ -37,6 +38,7 @@ pub mod s5_image;
 pub mod s6_text;
 pub mod s7_startup;
 pub mod s8_prefs;
+pub mod s9_terminal;
 
 /// The deep-link scheme registered in the generated Android manifest / iOS
 /// Info.plist (`frust create --deeplink-scheme frustbench`); a link's host is
@@ -78,7 +80,7 @@ pub trait Scenario: Sync {
 
 /// All eight scenarios, in id order. Index into this from [`BenchState::active`]
 /// / [`BenchState::selected`].
-pub static SCENARIOS: [&dyn Scenario; 8] = [
+pub static SCENARIOS: [&dyn Scenario; 10] = [
     &s1_animation::S1,
     &s2_list::S2,
     &s3_table::S3,
@@ -87,6 +89,8 @@ pub static SCENARIOS: [&dyn Scenario; 8] = [
     &s6_text::S6,
     &s7_startup::S7,
     &s8_prefs::S8,
+    &s9_terminal::S9,
+    &s10_keys::S10,
 ];
 
 /// The single application state every scenario builds over.
