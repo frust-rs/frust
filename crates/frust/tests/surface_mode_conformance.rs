@@ -114,10 +114,15 @@ const ALLOWLIST: &[&str] = &[
 /// render-side in the default split, while app code polls the slot during a
 /// UI-thread rebuild — publishing from the install would race the very
 /// consumer this slot exists for.
+///
+/// Includes both the pre-split `app.rs` (kept for wave-1 transition) and the
+/// post-split `app/surface.rs` paths. Wave-1 merge removes the `app.rs` entries.
 const RESOLVED_PUBLISH_ALLOWLIST: &[&str] = &[
     "crates/frust-shell-common/src/surface_mode.rs",
     "crates/frust-shell-android/src/app.rs",
     "crates/frust-shell-ios/src/app.rs",
+    "crates/frust-shell-android/src/app/surface.rs",
+    "crates/frust-shell-ios/src/app/surface.rs",
 ];
 
 /// True if `line`, trimmed, is a comment-only line (mirrors
