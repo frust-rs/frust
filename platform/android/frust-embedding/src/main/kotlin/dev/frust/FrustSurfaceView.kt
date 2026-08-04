@@ -140,10 +140,12 @@ class FrustSurfaceView(
         }
 
         /**
-         * How many frames to keep re-polling the IME surface after an editor
-         * action, so [doFrame] catches the submit's next-frame rebuild (which
-         * clears/replaces the field) and reseeds the IME mirror. A small budget
-         * (a couple of frames) covers the one-frame rebuild latency with slack.
+         * The budget [imeResyncFrames] is set to after an editor action.
+         * Historically bounded a re-poll [doFrame] consumed via
+         * [resyncImeMirror]; that consumer is gone (see [imeResyncFrames]'s
+         * doc) — [doFrame]'s own unconditional per-frame
+         * [pollImeAfterDispatch] call is what actually catches the submit's
+         * next-frame rebuild today, with no dependency on this value.
          */
         private const val IME_RESYNC_FRAMES = 3
 
@@ -391,13 +393,20 @@ class FrustSurfaceView(
     private var imeActive = false
 
     /**
-     * Frames remaining to re-poll the IME surface after an editor action
-     * ([performEditorAction] / a hardware Enter). A submit clears/replaces the
-     * field's text through the framework's *next-frame* rebuild — not
-     * synchronously — so the [InputConnection]'s mirror [Editable] would keep the
-     * pre-submit text and the next keystroke would append to it. Counting a few
-     * frames lets [doFrame] observe the post-rebuild state and reseed the mirror
-     * (see [resyncImeMirror]).
+     * Set (not read back down) after an editor action ([performEditorAction]
+     * / a hardware Enter): a submit can clear/replace the field's text
+     * through the framework's *next-frame* rebuild rather than synchronously
+     * (see [performEditorAction]'s doc for the full two-mechanism picture),
+     * so the [InputConnection]'s mirror [Editable] can still be stale
+     * immediately after the synchronous [pollImeAfterDispatch] both dispatch
+     * sites also do. This field originally gated a bounded re-poll consumed
+     * in [doFrame] via [resyncImeMirror]; that gated consumer was removed
+     * when [doFrame] switched to an **unconditional** per-frame
+     * [pollImeAfterDispatch] call instead (which already reconciles any
+     * stale text every frame, no counter needed) — nothing reads this field
+     * back down today. Left in place, still written at both call sites, as
+     * a belt-and-braces marker matching established precedent; not itself
+     * load-bearing for correctness.
      */
     private var imeResyncFrames = 0
 
@@ -1195,6 +1204,13 @@ class FrustSurfaceView(
      * the connection — reseeding the mirror from the fresh state
      * ([onCreateInputConnection] seeds from [lastKnownState]). A pure
      * selection/caret move (same text) needs no restart.
+     *
+     * **Currently unreachable** — its [imeResyncFrames]-gated call site in
+     * [doFrame] was removed when that loop switched to an unconditional
+     * per-frame [pollImeAfterDispatch] call, which subsumes this function's
+     * job via [FrustInputConnection.reconcileTo] instead. Kept, not deleted,
+     * per this file's IME-resync history; a candidate for a follow-up
+     * cleanup pass, not this one.
      */
     private fun resyncImeMirror() {
         if (handle == 0L) return
@@ -1411,11 +1427,39 @@ class FrustSurfaceView(
             return handled
         }
 
+        /**
+         * Forward an editor action (Gboard's Done key /
+         * `EditorInfo.imeOptions = IME_ACTION_DONE`) to Rust as a submit, then
+         * reconcile the mirror synchronously — the same two-step shape
+         * [onKeyDown]'s hardware-Enter path already uses.
+         *
+         * Two mechanisms resync the mirror after a submit, covering two
+         * different timings for the Rust-side state change:
+         *  - [pollImeAfterDispatch], called synchronously right here, catches
+         *    a focused widget that republishes its IME surface *during this
+         *    very event pass* (`EventCtx::publish_ime_state`, "refreshed on
+         *    every event" per `RenderRoot::ime_state`'s doc) — the common
+         *    case, and the fix for the gap this method used to leave open.
+         *    Without it, the mirror [Editable] kept the pre-submit text until
+         *    some *other* IME callback happened to fire and push it back to
+         *    Rust (`sync()`) against an already-cleared app-side baseline — a
+         *    stale full-line resend of whatever was just submitted,
+         *    including a password.
+         *  - A *controlled* field's clear-on-submit is instead a signal
+         *    write whose new value only reaches the widget's own editable
+         *    buffer (and therefore its next `publish_ime_state`) on the
+         *    *next rebuild* — the synchronous poll above can still observe
+         *    stale text in that case. [imeResyncFrames] is set below as the
+         *    belt-and-braces fallback for that window, matching
+         *    [onKeyDown]'s precedent; in practice [doFrame]'s own
+         *    **unconditional** per-frame [pollImeAfterDispatch] call (not
+         *    gated on this counter — see [imeResyncFrames]'s own doc) is
+         *    what actually closes it, on whichever frame the rebuild lands.
+         */
         override fun performEditorAction(actionCode: Int): Boolean {
             if (handle != 0L) {
                 nativeImeAction(handle, actionCode)
-                // A submit clears the field on the next-frame rebuild; re-poll for
-                // a few frames so the mirror is reseeded (see [resyncImeMirror]).
+                pollImeAfterDispatch()
                 imeResyncFrames = IME_RESYNC_FRAMES
             }
             return true
