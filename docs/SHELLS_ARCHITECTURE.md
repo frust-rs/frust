@@ -23,8 +23,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how SHELLS relates to the other units
 | `frust-shell-common::platform_view` | Differ turning per-paint platform-view frames into an idempotent create/update/dispose backlog for embedding native views |
 | `frust-shell-common` (signal-poll seams) | Small process-global slot-plus-poll seams (surface mode, theme, fonts, system UI) each mobile shell drains once per frame |
 | `frust-shell-desktop` | winit event loop with a UI-thread/render-thread surface split and pipeline-cache persistence |
-| `frust-shell-android` | Sanctioned-unsafe JNI FFI boundary, app-binding macro, and Choreographer-synced frame pipeline |
-| `frust-shell-ios` | Sanctioned-unsafe C-ABI FFI boundary, app-binding macro, and CADisplayLink-driven frame pipeline |
+| `frust-shell-android` | Sanctioned-unsafe JNI FFI boundary, app-binding macro, and Choreographer-synced frame pipeline; `app.rs` is the handle-struct root (theme precedence ladder), with `app/frame.rs` (per-tick gate-input gathering + rebuild/layout/paint/present) and `app/surface.rs` (the conformance-pinned resolved-surface-mode publish site) among its submodules |
+| `frust-shell-ios` | Sanctioned-unsafe C-ABI FFI boundary, app-binding macro, and CADisplayLink-driven frame pipeline; unlike Android the handle struct lives in `app/mod.rs` (no root file), alongside the same `app/frame.rs`/`app/surface.rs` submodule split |
 
 ## Layer Dependencies
 
@@ -53,11 +53,21 @@ signal-poll seam race-free without a lock.
 
 - Desktop: winit events drive `AppTree`'s rebuild → layout → paint, then hand the scene across the
   render-split channel for the render thread to encode and present.
-- Android: a Choreographer callback consults `frame_gate` for a run/skip decision, then drives
-  rebuild → conditional layout → paint → render-thread present; touch input feeds the app between
-  frames.
-- iOS: a CADisplayLink tick consults the same `frame_gate`, then unconditionally rebuilds/lays
-  out/paints/presents, with optional present-sync gating against platform-view geometry.
+- Both mobile shells gather an identical `FrameInputs` OR-list each tick — input-for-input
+  comparable across platforms — and consult the shared `frame_gate` for a run/skip decision before
+  rebuild → layout → paint → present. `focus_or_ime_changed` is an *edge* (derived from
+  `RenderRoot::focus_ime_generation()`, cached per handle), not a level: a steady focus session no
+  longer forces a frame every tick and no longer blocks pacing, so a paced (`CosmeticLoop`) frame
+  like a blinking caret throttles to the theme's `cosmetic_loop_rate` even while focused, while a
+  focus/IME transition still forces exactly one frame (an edge landing on a tick whose only other
+  dirtiness is a paced loop is absorbed into that loop's next paced frame). `deferred_callbacks_pending`
+  is the other run-forcing input, a peek at CORE's pending-result-flush flag so a Housekeeping flush
+  owed with nothing else dirty still runs its frame.
+- Android: a Choreographer callback consults the gate in `app/frame.rs`, then drives rebuild →
+  conditional layout → paint → render-thread present; touch input feeds the app between frames.
+- iOS: a CADisplayLink tick consults the same gate (also in `app/frame.rs`), then unconditionally
+  rebuilds/lays out/paints/presents, with optional present-sync gating against platform-view
+  geometry.
 - **Event pass under root owner:** all three shells route every input event through `AppTree::event`
   inside a reactive `Owner.with` wrap, so the event handler has access to root-level contexts
   (`Theme`, `WindowMetrics`, root-component `init`-installed values). Desktop names this wrapper

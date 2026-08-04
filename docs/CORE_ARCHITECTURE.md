@@ -70,7 +70,9 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
   next frame. The dispatch's `EventOutcome` is propagated as part of the same contract: a
   `needs_redraw` it reports folds into `ChangeFlags::PAINT` and the deferred-frame flag, so a
   flushed callback whose only effect is `EventCtx::request_redraw` (no state the view diff can see)
-  still wakes both the mobile frame gate and the desktop `Wait` loop.
+  still wakes both the mobile frame gate and the desktop `Wait` loop. A non-draining peek,
+  `has_pending_result_flush`, lets the mobile frame gate's `deferred_callbacks_pending` input force
+  a run before a skipped frame ever reaches the `rebuild` that would otherwise drain the mark.
 - A tracked signal write wakes the shell via the process-wide `FrameWaker`, triggering the next
   rebuild.
 - `Component::init`/`teardown` creates/disposes a per-instance reactive `Owner` nested under its
@@ -117,6 +119,29 @@ The reason is cost at the FFI boundary, not a rebuild storm: an unconditional pe
 would burn a lock write plus an allocation every frame on the mobile path. Separately, when a rebuild
 does run it rebuilds the whole app — there is no per-component skipping — which is affordable only
 because builds are cheap by construction.
+
+## Focus/IME Lifecycle
+
+`RenderRoot` caches only two focus-adjacent values — `focus_active` (root-level mirror of "some
+widget holds focus") and `ime_state` (the last-published IME surface) — and they are always either
+both cleared or paired into one **active** session; there is no at-rest inactive surface. A widget
+publishing an *inactive* IME surface therefore reads as a full session release, not a value update:
+one primitive clears `focus_active` and `ime_state` together, exactly like an outside-tap blur or an
+explicit `EventCtx::release_focus`.
+
+A monotonic `focus_ime_generation` counter bumps exactly once per release (a paired clear counts as
+one edge, not two) and once per focus/IME change otherwise. `RenderRoot::focus_ime_generation()`
+(exposed to shells via `AppTree::focus_ime_generation`) is what the mobile frame gate caches and
+diffs each tick to derive `FrameInputs::focus_or_ime_changed` (see SHELLS_ARCHITECTURE.md) — a
+same-value republish, such as the paint pass re-publishing an unchanged surface every frame a field
+stays focused, never moves it.
+
+A structural rebuild that tears down, type-swaps, or clears the `focused` flag of a pod holding the
+recorded focus path runs inside a state-free view diff with no `RenderRoot` handle to release the
+session itself. It instead raises a thread-local `mark_focus_orphaned` flag — mirroring
+`mark_pending_result_flush` above, including the same idempotent, thread-affine, data-free shape —
+and `RenderRoot::rebuild` drains it (`take_focus_orphaned`) after its deferred-callback loop and
+releases the session, so the root's cached focus/IME state can never outlive the widget it described.
 
 ## Key Types
 
