@@ -13,11 +13,30 @@
 use std::io::Read;
 use std::process::{Command, Stdio};
 
-/// Bare `frust`, no args, all three streams piped (guaranteed non-TTY):
-/// must exit 2, print full help to stdout, and stay silent on stderr.
+/// A `frust` invocation with colour forced off, for every spawn in this
+/// file. clap's `anstream` auto-detects colour support from the
+/// environment as well as from `is_terminal()`, so a `CLICOLOR_FORCE=1`
+/// (or similarly colour-forcing) ambient environment — a real, reproduced
+/// failure, not a hypothetical — makes clap render ANSI-escaped help,
+/// breaking the plain-text `"Usage: frust"` assertion below even though
+/// stdout is piped (non-TTY). Pinning `NO_COLOR` and clearing the
+/// `CLICOLOR*` overrides makes every assertion in this file independent of
+/// the caller's terminal/env-var state.
+fn frust_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_frust"));
+    command
+        .env("NO_COLOR", "1")
+        .env_remove("CLICOLOR_FORCE")
+        .env_remove("CLICOLOR");
+    command
+}
+
+/// Bare `frust`, no args, all three streams piped/redirected (guaranteed
+/// non-TTY): must exit 2, print full help to stdout, and stay silent on
+/// stderr.
 #[test]
 fn bare_frust_with_no_tty_exits_2_with_help_on_stdout_and_silent_stderr() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_frust"))
+    let mut child = frust_command()
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -56,15 +75,28 @@ fn bare_frust_with_no_tty_exits_2_with_help_on_stdout_and_silent_stderr() {
     );
 }
 
-/// `frust tui` with piped (non-TTY) stdio: the TUI guard's clean-refusal
-/// path — a typed error on stderr and a nonzero exit, never a panic from
-/// `ratatui::init()` or raw ANSI leaking into the pipe.
+/// `frust tui` with piped/redirected (non-TTY) stdio: the TUI guard's
+/// clean-refusal path — `ensure_interactive_terminal` (`frust-tui`'s
+/// `runner.rs`) must reject before `ratatui::init()` ever runs, exiting 1
+/// with its own message on stderr.
+///
+/// Stdout is discarded (`Stdio::null()`, nothing reads it) rather than
+/// piped-and-unread: if the guard ever regressed and `ratatui::init()` ran
+/// anyway, a piped stdout no one reads would fill its OS pipe buffer and
+/// hang this test forever the moment the TUI tried to draw a frame.
+///
+/// The assertions are pinned to the guard's own contract — exit code 1 and
+/// its exact `"interactive terminal"` message on stderr — rather than the
+/// looser "nonzero exit, nonempty stderr" this test used to assert: a
+/// `ratatui::init()` panic (the very failure this guard exists to prevent)
+/// also exits nonzero with nonempty stderr, so the looser assertions
+/// couldn't actually distinguish the clean guard from a crash.
 #[test]
-fn explicit_tui_subcommand_with_no_tty_exits_nonzero_with_error_on_stderr() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_frust"))
+fn explicit_tui_subcommand_with_no_tty_exits_1_with_guard_message_on_stderr() {
+    let mut child = frust_command()
         .arg("tui")
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
+        .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .expect("failed to spawn `frust tui`");
@@ -79,12 +111,63 @@ fn explicit_tui_subcommand_with_no_tty_exits_nonzero_with_error_on_stderr() {
 
     let status = child.wait().expect("waiting for `frust tui`");
 
-    assert!(
-        !status.success(),
-        "`frust tui` with non-TTY stdio must fail, not silently succeed"
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "the TUI guard's clean-refusal path must exit 1; status={status:?} stderr={stderr:?}"
     );
     assert!(
-        !stderr.is_empty(),
-        "the TUI guard's clean-refusal path must report an error on stderr"
+        stderr.contains("interactive terminal"),
+        "expected the TUI guard's own error message on stderr, got: {stderr:?}"
     );
+}
+
+/// `frust`'s exit-2 branch writes to stdout with `let _ =` rather than a
+/// bare `println!`/`writeln!`, specifically so a closed stdout can't turn
+/// into a SIGPIPE panic that pre-empts the exit-2 contract (see `main.rs`'s
+/// doc comment on that branch). This test constructs exactly that failure
+/// deterministically: a pipe whose read end is dropped *before* the child
+/// ever spawns has no reader at all, so the child's first write to it fails
+/// EPIPE immediately (Rust ignores `SIGPIPE`, so this surfaces as a plain
+/// `Err`, not a signal-terminated process) — no timing race with a real
+/// reader required.
+///
+/// By construction this would fail against the pre-hardening code shape (a
+/// bare `println!`/`writeln!`): the write panics, and a panic during
+/// `cargo test`'s debug build exits 101, not 2.
+#[cfg(unix)]
+#[test]
+fn bare_frust_with_no_tty_and_closed_stdout_still_exits_2() -> std::io::Result<()> {
+    let (reader, writer) = std::io::pipe()?;
+    drop(reader);
+
+    let mut child = frust_command()
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(writer))
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn `frust`");
+
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .expect("piped stderr")
+        .read_to_string(&mut stderr)
+        .expect("reading stderr");
+
+    let status = child.wait().expect("waiting for `frust`");
+
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "a closed stdout must not pre-empt the exit-2 contract via a SIGPIPE panic; \
+         status={status:?} stderr={stderr:?}"
+    );
+    assert!(
+        stderr.is_empty(),
+        "the exit-2 branch's contract is silent stderr even with a closed stdout, got: {stderr:?}"
+    );
+
+    Ok(())
 }

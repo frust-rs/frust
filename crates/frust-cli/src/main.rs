@@ -30,7 +30,7 @@ fn main() -> ExitCode {
             std::io::stdout().is_terminal(),
         );
     }
-    if cli.command.is_none() {
+    let Some(command) = cli.command.take() else {
         // Non-TTY stdio and no subcommand given: today's script-facing
         // contract is exit code 2, preserved from clap's own
         // missing-subcommand behavior. What deliberately changed: full help
@@ -41,14 +41,15 @@ fn main() -> ExitCode {
         // Every write below must tolerate failure (`let _ =`, never a bare
         // `println!`/`print!`): a closed or non-blocking stdout (e.g. `frust
         // | head -0`) surfaces as EPIPE, and Rust's default SIGPIPE handling
-        // turns that into a panic (exit 101) rather than the write silently
-        // failing — which would pre-empt the exit-2 contract this branch
-        // exists to guarantee.
+        // turns that into a panic (exit 101 in a debug build, an abort under
+        // the shipped `panic = "abort"` release profile) rather than the
+        // write silently failing — which would pre-empt the exit-2 contract
+        // this branch exists to guarantee.
         let _ = Cli::command().print_help();
         let _ = writeln!(std::io::stdout());
         return ExitCode::from(2);
-    }
-    match commands::dispatch(cli) {
+    };
+    match commands::dispatch(command, &cli) {
         Ok(code) => ExitCode::from(code),
         Err(err) => {
             eprintln!("Error: {err:#}");

@@ -17,8 +17,9 @@ pub struct Cli {
 
     /// Subcommand to run. With none given, `frust` opens the TUI workbench
     /// when both stdin and stdout are terminals; otherwise it prints this
-    /// help and exits 2 (see `commands::dispatch`/`main`'s default-action
-    /// resolution).
+    /// help and exits 2 (see `main.rs`'s `default_command` and the `None`
+    /// branch in `main` that resolves this field before ever calling
+    /// `commands::dispatch`).
     #[command(subcommand)]
     pub command: Option<Command>,
 }
