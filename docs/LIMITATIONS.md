@@ -377,12 +377,11 @@ crossterm — it never raises SIGINT. When `frust tui` launches an Android
 `interrupt::install()`), the signal handler installs without error, but is
 inert for keyboard Ctrl-C. The plaintext `android/.frust-signing.properties`
 scrub cannot fire via the signal path; the `Drop` guard still covers normal
-returns, so the gap is signal-path-only: a wedged or manually killed TUI
-session can leave the plaintext file behind where a CLI run would have scrubbed
-it. Exposure increased 2026-08-04: bare `frust` now defaults into the TUI
-(single-binary convergence), making TUI sessions the common entry point for
-new-project scaffolding that triggers `frust tui create` (containing the
-plaintext signing credentials setup flow).
+returns, so the gap is signal-path-only. Exposure increased 2026-08-04: bare
+`frust` now defaults into the TUI (single-binary convergence), making Android
+**release** builds more likely to be launched from a raw-mode session — the
+TUI's build launcher drives `frust-drive::android_build::build` in-process
+(`spawn_blocking`).
 
 This change also introduced a deliberate narrowing: `frust tui </dev/null` (stdin
 redirected, stdout a real terminal) previously worked via crossterm's `/dev/tty`
@@ -393,10 +392,12 @@ edge-case stream-mixing errors.
 **Applies to**: Android release builds launched from a TUI session (an
 interactive terminal with both stdin and stdout connected) when the user presses
 Ctrl-C before the build completes and the process is not terminated gracefully.
-Desktop and iOS are unaffected — neither frust-drive's signing surface nor the
-interrupt handler's signal coverage differs for them, but neither has plaintext
-secrets on disk. Builds from the CLI (`frust build --release`, `frust run
---release`) continue to scrub via the normal signal path regardless.
+Desktop and iOS are unaffected — only the Android release path materialises
+plaintext signing material (`android_build::signing::write_resolved`, reached
+from the android_build and android_run release pipelines alone); desktop and
+iOS builds write no secret file, so a missed signal has nothing to leave behind.
+Builds from the CLI (`frust build --release`, `frust run --release`) continue to
+scrub via the normal signal path regardless.
 
 **Why accepted**: the gap is pre-existing (the raw-mode/ISIG interaction has
 always existed when a TUI terminal is in raw mode), and deferred per Ed's
@@ -404,15 +405,20 @@ review r0 (2026-08-04) on the single-binary branch. The narrowing of
 `frust tui </dev/null` (breaking the crossterm fallback path) was a deliberate
 trade-off in the same change, chosen as the conservative both-streams gate
 rather than attempting to support mixed-stream scenarios. The exposure increase
-is real: many new users will now encounter the TUI first before learning to
-run `frust create` from the CLI. Mitigation exists (signal-based scrub is one
-of two layers; the `Drop` guard still covers normal completion; a wedged session
-is rare and requires manual kill or loss of terminal connection) but closing
-the signal-path gap requires either breaking raw-mode semantics or introducing
-OS-specific platform code to detect the shell's raw-mode state and install an
-alternative cleanup mechanism — both deferred.
+is real: many new users will now encounter the TUI first. Mitigation exists
+(signal-based scrub is one of two layers; the `Drop` guard still covers normal
+completion; actual leakage still requires SIGKILL or a machine crash, unchanged
+from the CLI), but closing the signal-path gap requires either breaking
+raw-mode semantics or introducing OS-specific platform code to detect the
+shell's raw-mode state and install an alternative cleanup mechanism — both
+deferred. The TUI-specific delta: keyboard Ctrl-C (a) raises no SIGINT, and (b)
+for build sessions cancels nothing — Ctrl-C maps to a stop-session effect that
+is a no-op for builds because the build launcher never registers with
+`Supervisor::sessions`, so the user believes the build was cancelled while it
+(and the plaintext file's open window) runs to completion.
 
-**Evidence**: frust-single-binary review r0 (2026-08-04, committed feature
-branch 03-docs-entrypoint); verified research sweep (2026-08-03, confirmed
-crossterm's raw-mode ISIG clearing and raw-mode SIGINT immunity on Darwin and
-Linux manual testing; confirmed CLI path scrubs via signal, TUI path does not).
+**Evidence**: frust-single-binary review r1 (2026-08-04); plan-verify sweep
+(wf_d589d3ec-080, confirmed crossterm's raw-mode ISIG clearing and raw-mode
+SIGINT immunity on Darwin and Linux manual testing; confirmed CLI path scrubs
+via signal, TUI path does not; confirmed build-launcher no-op on Ctrl-C
+cancel).

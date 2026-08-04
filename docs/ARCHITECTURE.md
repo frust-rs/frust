@@ -89,9 +89,9 @@ frust-scene/frust-text ──► frust-core ──► frust-widgets/frust-theme 
 - **iOS frame pipeline** — a CADisplayLink tick consults the same `frame_gate`, then
   rebuild/layout/paint/present, with an optional present-sync against platform-view geometry. See
   [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md).
-- **CLI flow** — `Cli` (clap) parses a `Command`; `commands::dispatch` builds the one
-  `RealProcessRunner` and injects it into every handler. Cores stay print-free — only the CLI and
-  TUI front-ends print. See [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md).
+- **CLI flow** — `Cli` (clap) parses an **optional** `Command`; `main` resolves the TTY-gated default
+  (bare `frust` in a terminal → the TUI) before `commands::dispatch` builds the one `RealProcessRunner`.
+  Cores stay print-free — only the CLI and TUI front-ends print. See [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md).
 - **Platform-view** — paint-time view frames feed the `platform_view` differ; each shell's FFI
   layer polls the resulting per-frame command backlog and applies it frame-paired with present.
   See [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md).
