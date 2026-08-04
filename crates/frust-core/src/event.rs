@@ -394,6 +394,26 @@ pub fn take_pending_result_flush() -> bool {
     PENDING_RESULT_FLUSH.with(|flag| flag.replace(false))
 }
 
+/// Non-draining peek at the [`mark_pending_result_flush`] flag — whether a
+/// deferred state-bearing callback is owed a [`InputEvent::Housekeeping`]
+/// broadcast, without consuming the mark.
+///
+/// The [`take_change_flags`](crate::app::RenderRoot::take_change_flags) /
+/// [`has_pending_change_flags`](crate::app::RenderRoot::has_pending_change_flags)
+/// pairing, one layer down: the mobile shells read this while gathering their
+/// frame-gate inputs (`FrameInputs::deferred_callbacks_pending`) *before*
+/// deciding whether the frame runs at all, so a frame the gate would otherwise
+/// skip still runs and reaches the [`crate::app::RenderRoot::rebuild`] that
+/// drains the mark. Peeking must not consume it — draining stays that rebuild's
+/// job.
+///
+/// Thread-affine like both of its neighbours: it reports only marks raised on
+/// the calling thread (see the `PENDING_RESULT_FLUSH` doc for why the flag is
+/// thread-local rather than a process-global `AtomicBool`).
+pub fn has_pending_result_flush() -> bool {
+    PENDING_RESULT_FLUSH.with(|flag| flag.get())
+}
+
 /// What kind of content a focused editable field holds — the hint a widget
 /// publishes so each shell can configure the platform input method.
 ///
@@ -1056,5 +1076,33 @@ mod tests {
         let ime = InputEvent::Ime(ImeEvent::Commit("x".to_string()));
         assert!(ime.is_focus_routed());
         assert!(!down(1.0, 1.0).is_focus_routed());
+    }
+
+    #[test]
+    fn pending_result_flush_peek_observes_the_mark_without_draining_it() {
+        // The peek is what a mobile shell reads while gathering its frame-gate
+        // inputs, BEFORE deciding whether the frame runs — so it must be
+        // non-destructive: draining stays `RenderRoot::rebuild`'s job on a frame
+        // that actually runs. A peek that consumed the mark would leave the
+        // rebuild with nothing to flush, which is worse than never peeking.
+        //
+        // Thread-affine like mark/take, and libtest gives each test its own
+        // thread, so this needs no cross-test lock — but drain first anyway so
+        // it never inherits a mark from earlier work on this thread.
+        let _ = take_pending_result_flush();
+        assert!(!has_pending_result_flush(), "starts clear");
+
+        mark_pending_result_flush();
+        assert!(has_pending_result_flush(), "the peek observes the mark");
+        // Repeated peeks are idempotent — the mark survives every one of them.
+        assert!(has_pending_result_flush());
+        assert!(has_pending_result_flush());
+
+        // Only the drain clears it, and the drain still reports the mark it took.
+        assert!(take_pending_result_flush(), "the drain still sees the mark");
+        assert!(
+            !has_pending_result_flush(),
+            "the drain is what clears it, not the peek"
+        );
     }
 }

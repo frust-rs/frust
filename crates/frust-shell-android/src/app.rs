@@ -196,6 +196,19 @@ pub struct AndroidAppHandle {
     /// it also stands in for pointer-capture, which has no `AppTree` accessor —
     /// see [`Self::frame`]'s input-gathering).
     events_since_last_frame: bool,
+    /// Cache: the `AppTree::focus_ime_generation` this handle saw on its last
+    /// gathered tick. Compared against the live generation each frame to derive
+    /// the `FrameInputs::focus_or_ime_changed` **edge** (focus gained/lost, IME
+    /// surface published/cleared), then overwritten with it — the same
+    /// compare-a-generation shape as the a11y push's `semantics_generation`
+    /// gate. Seeded from the tree right after the constructor's first rebuild so
+    /// frame 1 reports no spurious edge (that frame runs on the resume warmup
+    /// and the initial change flags regardless).
+    ///
+    /// Reading the *level* (`is_focus_active`) here instead is what made a
+    /// focused screen render every Choreographer tick forever and put caret
+    /// pacing out of reach — see `FrameInputs::focus_or_ime_changed`.
+    last_focus_ime_gen: u64,
     /// Latch: the GPU surface was (re)created or resized since the last frame.
     /// Set by [`Self::set_window`]/[`Self::resize`], read-and-cleared each frame
     /// into `FrameInputs::surface_changed_or_resized` (and, in the same frame,
@@ -567,6 +580,10 @@ impl AndroidAppHandle {
         // independently forces the first frame to run and to lay out.
         let mut frame_gate = FrameGate::new();
         frame_gate.note_resumed();
+        // Seed the focus/IME edge cache from the just-rebuilt tree, so the
+        // first gathered tick reports an edge only if the session actually
+        // moved after construction.
+        let last_focus_ime_gen = app.focus_ime_generation();
         Self {
             executor,
             text_ctx,
@@ -593,6 +610,7 @@ impl AndroidAppHandle {
             a11y: None,
             frame_gate,
             events_since_last_frame: false,
+            last_focus_ime_gen,
             surface_dirty: false,
             appearance_dirty: false,
             last_needs_frame: false,

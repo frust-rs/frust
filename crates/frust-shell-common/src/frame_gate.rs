@@ -47,7 +47,10 @@
 //! [`FrameInputs::last_needs_frame_paced_only`] and the per-frame clock +
 //! interval through [`FramePacing`] to [`FrameGate::decide_paced`]; any
 //! input/signal/change-flag/transition dirtiness is **never** paced (it runs
-//! immediately, per the default-to-run rule). The `FRUST_NO_FRAME_GATE` kill
+//! immediately, per the default-to-run rule) — with one deliberate exception,
+//! the one-shot [`FrameInputs::focus_or_ime_changed`] edge (that field's doc has
+//! the reasoning: a blinking caret in a focused field is exactly the loop this
+//! gate must be able to throttle). The `FRUST_NO_FRAME_GATE` kill
 //! switch disables pacing too (a disabled gate always runs), and
 //! [`NO_ANIM_PACING_VAR`] (`FRUST_NO_ANIM_PACING`) disables *only* the pacing
 //! while leaving the skip gate active.
@@ -133,8 +136,13 @@ impl FrameDecision {
 /// The per-frame OR-list a shell gathers and hands to [`FrameGate::decide`].
 ///
 /// Every field is a "something that needs this frame to run" signal; the gate
-/// runs the frame if **any** is `true`, with two deliberate deltas noted
+/// runs the frame if **any** is `true`, with three deliberate deltas noted
 /// in the field docs:
+///
+/// - **[`focus_or_ime_changed`](Self::focus_or_ime_changed)** is an *edge*, not
+///   a level: it reports that the focus/IME session moved since the shell last
+///   looked, so a steady focus session no longer forces a frame every vsync
+///   (and, alone among the wake inputs, it does not disqualify pacing).
 ///
 /// - **Semantics adapter needs** is *not* a field here:
 ///   semantics-publish gating stays shell-side (both Android and iOS are
@@ -163,10 +171,38 @@ pub struct FrameInputs {
     /// widget may animate/track the pointer. Source:
     /// `AppTree`/`RenderRoot::is_pointer_captured`.
     pub pointer_capture_active: bool,
-    /// *focus/IME active surface*. Something holds keyboard/IME focus, so
-    /// caret/selection chrome may need repainting. Source:
-    /// `RenderRoot::is_focus_active` (and/or a published `ime_state`).
-    pub focus_or_ime_active: bool,
+    /// *focus/IME session moved*. The root's focus flag or its published IME
+    /// surface changed since the shell last looked — an **edge**, not a level.
+    /// Source: [`AppTree::focus_ime_generation`](crate::AppTree::focus_ime_generation)
+    /// compared against the shell's cached copy (which the shell then updates).
+    ///
+    /// **Why an edge.** This was a *level* input
+    /// (`RenderRoot::is_focus_active || ime_state().is_some()`) — the phase-7
+    /// conservative default. Because it forces a `Run` through
+    /// [`any_set`](Self::any_set) *and* disqualified
+    /// [`is_paced_only_frame`](Self::is_paced_only_frame), any screen holding
+    /// root focus rendered every single vsync for as long as the focus lasted,
+    /// and caret pacing was unreachable while a caret blinked: measured at
+    /// 62–120 fps on a static screen whose only live input was focus (Xiaomi
+    /// 12). As an edge it still forces one frame per transition (focus gained /
+    /// lost, IME surface published / cleared) while a *steady* focus session
+    /// leaves the gate free to idle or pace.
+    ///
+    /// **Why one frame is enough.** Every IME event the platform delivers also
+    /// trips [`events_since_last_frame`](Self::events_since_last_frame) (both
+    /// shells latch it in their `ime_apply` entry points), and the per-frame
+    /// platform IME reconcile (Kotlin `doFrame` / Swift `renderFrame`) polls the
+    /// *published Rust state* on its own cadence, independent of whether Rust
+    /// produced a frame — all it needs is that state to be current, which the
+    /// edge guarantees by forcing the frame after every change.
+    ///
+    /// Unlike the other wake inputs this one is **not** an
+    /// [`is_paced_only_frame`](Self::is_paced_only_frame) disqualifier, so an
+    /// edge landing on a tick whose only other dirtiness is a paced loop is
+    /// consumed by that tick's pacing decision: the repaint then lands with the
+    /// loop's next paced frame (bounded by one `cosmetic_loop_rate` interval),
+    /// and the platform's IME poll is unaffected either way.
+    pub focus_or_ime_changed: bool,
     /// *last paint's `needs_frame`*. The previous paint advanced an
     /// animation/transition and asked for another frame. Source:
     /// `PaintOutcome::needs_frame`, latched by the shell from the prior
@@ -186,6 +222,24 @@ pub struct FrameInputs {
     /// [`AppTree::has_pending_change_flags`](crate::AppTree::has_pending_change_flags)
     /// (a non-draining peek, so a skipped frame preserves the flags).
     pub change_flags_pending: bool,
+    /// *deferred callbacks owed a flush*. A widget queued a state-bearing
+    /// callback during a state-free pass and raised
+    /// [`frust_core::mark_pending_result_flush`], which only
+    /// `RenderRoot::rebuild` can drain (it holds the `&mut State` the callback
+    /// needs). Source: [`frust_core::has_pending_result_flush`], the
+    /// non-draining peek — draining stays the rebuild's job on a frame that
+    /// actually runs.
+    ///
+    /// Hardening under the default-to-run rule rather than a reproduced stall:
+    /// every mark raised today is *also* covered by another input (a mark from
+    /// inside a rebuild is drained by that same rebuild, whose leftover
+    /// `pending |= PAINT` reaches [`change_flags_pending`](Self::change_flags_pending)
+    /// and whose `deferred_frame` reaches [`last_needs_frame`](Self::last_needs_frame);
+    /// `frust-widgets`' paint-time long-press latch pairs its mark with a
+    /// `request_frame`). This input closes the general case those two happen to
+    /// cover — a mark raised with nothing else dirty must never wait for the
+    /// next stray touch (the FINDINGS #56 shape).
+    pub deferred_callbacks_pending: bool,
     /// *theme-override/appearance change*. The app-facing theme override
     /// or the platform light/dark preference changed this tick. Source: the
     /// shell's per-frame `ThemeOverrideWatcher`/appearance poll (see
@@ -215,10 +269,11 @@ impl FrameInputs {
         self.signals_dirty
             || self.events_since_last_frame
             || self.pointer_capture_active
-            || self.focus_or_ime_active
+            || self.focus_or_ime_changed
             || self.last_needs_frame
             || self.last_needs_frame_paced_only
             || self.change_flags_pending
+            || self.deferred_callbacks_pending
             || self.theme_or_appearance_changed
             || self.surface_changed_or_resized
             || self.a11y_action_performed
@@ -236,6 +291,15 @@ impl FrameInputs {
     /// default-to-run rule — see `docs/CODE_STANDARDS.md`'s Frame-Gate
     /// conventions).
     ///
+    /// One deliberate exception:
+    /// [`focus_or_ime_changed`](Self::focus_or_ime_changed) is **not** a
+    /// disqualifier. Its level-input predecessor was one, and — being true for
+    /// a whole focus session — that is what made caret pacing unreachable: a
+    /// blinking caret in a focused field is precisely the paced loop this gate
+    /// must be able to throttle (that field's doc has the device measurement).
+    /// The edge that replaced it is one-shot, so an edge arriving mid-loop is
+    /// simply carried by the loop's next paced frame instead of pre-empting it.
+    ///
     /// [`CosmeticLoop`]: frust_core::TickClass::CosmeticLoop
     pub fn is_paced_only_frame(&self) -> bool {
         self.last_needs_frame
@@ -243,8 +307,8 @@ impl FrameInputs {
             && !self.signals_dirty
             && !self.events_since_last_frame
             && !self.pointer_capture_active
-            && !self.focus_or_ime_active
             && !self.change_flags_pending
+            && !self.deferred_callbacks_pending
             && !self.theme_or_appearance_changed
             && !self.surface_changed_or_resized
             && !self.a11y_action_performed
@@ -514,10 +578,11 @@ mod tests {
             "signals_dirty" => i.signals_dirty = true,
             "events_since_last_frame" => i.events_since_last_frame = true,
             "pointer_capture_active" => i.pointer_capture_active = true,
-            "focus_or_ime_active" => i.focus_or_ime_active = true,
+            "focus_or_ime_changed" => i.focus_or_ime_changed = true,
             "last_needs_frame" => i.last_needs_frame = true,
             "last_needs_frame_paced_only" => i.last_needs_frame_paced_only = true,
             "change_flags_pending" => i.change_flags_pending = true,
+            "deferred_callbacks_pending" => i.deferred_callbacks_pending = true,
             "theme_or_appearance_changed" => i.theme_or_appearance_changed = true,
             "surface_changed_or_resized" => i.surface_changed_or_resized = true,
             "a11y_action_performed" => i.a11y_action_performed = true,
@@ -534,10 +599,11 @@ mod tests {
         "signals_dirty",
         "events_since_last_frame",
         "pointer_capture_active",
-        "focus_or_ime_active",
+        "focus_or_ime_changed",
         "last_needs_frame",
         "last_needs_frame_paced_only",
         "change_flags_pending",
+        "deferred_callbacks_pending",
         "theme_or_appearance_changed",
         "surface_changed_or_resized",
         "a11y_action_performed",
@@ -582,11 +648,14 @@ mod tests {
     #[test]
     fn each_single_input_forces_run() {
         // Exhaustive: every field, set alone on a fresh (non-warming) gate,
-        // must force a Run.
+        // must force a Run — including the two that changed shape here: the
+        // focus/IME EDGE (`focus_or_ime_changed`, which still forces one frame
+        // per transition even though it no longer blocks pacing) and the
+        // deferred-callback peek (`deferred_callbacks_pending`).
         assert_eq!(
             ALL_INPUTS.len(),
-            11,
-            "the OR-list must have all ten wake inputs plus the \
+            12,
+            "the OR-list must have all eleven wake inputs plus the \
              paced-only signal"
         );
         for field in ALL_INPUTS {
@@ -729,6 +798,184 @@ mod tests {
         let mut with_event = paced_only();
         with_event.events_since_last_frame = true;
         assert!(!with_event.is_paced_only_frame());
+        // ...including the deferred-callback peek, which owes a rebuild.
+        let mut with_flush = paced_only();
+        with_flush.deferred_callbacks_pending = true;
+        assert!(!with_flush.is_paced_only_frame());
+
+        // THE POINT OF THE EDGE: a STEADY focus session (a caret blinking in a
+        // focused field — the edge is false because nothing moved since the
+        // last tick) alongside a paced-only request now PACES. As the old level
+        // input (`focus_or_ime_active`, true for the whole session) this was
+        // disqualified, so a focused screen re-rendered every vsync forever and
+        // the pacing arm was unreachable — 62–120 fps measured on a Xiaomi 12.
+        let steady_focus = FrameInputs {
+            focus_or_ime_changed: false,
+            ..paced_only()
+        };
+        assert!(
+            steady_focus.is_paced_only_frame(),
+            "a steady focus session must not block paced-loop throttling"
+        );
+        let mut gate = FrameGate::with_flags(true, true);
+        let interval = interval_30hz();
+        // First paced frame runs (nothing to pace against yet) and anchors...
+        assert!(
+            gate.decide_paced(
+                steady_focus,
+                FramePacing {
+                    now: FrameTime::from_nanos(0),
+                    interval,
+                },
+            )
+            .is_run()
+        );
+        // ...and the very next 120Hz tick, still inside the 30Hz interval, is
+        // throttled — the behavior a focused screen could never reach before.
+        assert_eq!(
+            gate.decide_paced(
+                steady_focus,
+                FramePacing {
+                    now: FrameTime::from_nanos(step_nanos(120.0)),
+                    interval,
+                },
+            ),
+            FrameDecision::Skip,
+            "a paced loop under a steady focus session must throttle to the cap"
+        );
+
+        // The transition edge itself is deliberately NOT a disqualifier (see
+        // `is_paced_only_frame`'s docs): it is one-shot, so the repaint it asks
+        // for lands with the loop's next paced frame rather than immediately.
+        let edge_mid_loop = FrameInputs {
+            focus_or_ime_changed: true,
+            ..paced_only()
+        };
+        assert!(edge_mid_loop.is_paced_only_frame());
+        // With no paced loop in flight it forces a Run like every other input
+        // (`each_single_input_forces_run` above covers the isolated case).
+        assert!(
+            FrameInputs {
+                focus_or_ime_changed: true,
+                ..FrameInputs::default()
+            }
+            .any_set()
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // The focus/IME EDGE, driven the way a shell drives it
+    // -----------------------------------------------------------------
+
+    /// The shells' cache mechanics, verbatim: hold the last-seen
+    /// `AppTree::focus_ime_generation`, report `now != last`, then update the
+    /// cache. Both mobile shells are target-gated (`#[cfg(target_os = ...)]`)
+    /// so their own copies never compile on the host — this stands in for them,
+    /// with `frust-core`'s generation tests
+    /// (`focus_ime_generation_*`) pinning the other half: that the generation
+    /// moves exactly once per real focus/IME transition and never on a
+    /// same-value write.
+    struct FocusEdgeCache {
+        last_seen: u64,
+    }
+    impl FocusEdgeCache {
+        fn new(seed: u64) -> Self {
+            Self { last_seen: seed }
+        }
+        fn gather(&mut self, generation: u64) -> bool {
+            let changed = generation != self.last_seen;
+            self.last_seen = generation;
+            changed
+        }
+    }
+
+    #[test]
+    fn focus_edge_fires_once_per_transition_and_goes_quiet() {
+        // A scripted focus/IME session as `RenderRoot::focus_ime_generation`
+        // reports it: idle, focus gained, steady blinking, IME published,
+        // steady typing pause, IME cleared, blur, idle again. Each transition
+        // bumps the generation exactly once; the steady stretches repeat it.
+        let script: &[(u64, bool, &str)] = &[
+            (0, false, "idle before anything is focused"),
+            (0, false, "still idle"),
+            (1, true, "focus gained"),
+            (1, false, "steady focus (caret blinking)"),
+            (1, false, "still steady"),
+            (2, true, "IME surface published"),
+            (2, false, "steady IME session"),
+            (3, true, "IME surface cleared"),
+            (4, true, "focus lost (blur)"),
+            (4, false, "idle again"),
+        ];
+        let mut cache = FocusEdgeCache::new(0);
+        let mut gate = FrameGate::with_enabled(true);
+        for (generation, expected_edge, what) in script {
+            let inputs = FrameInputs {
+                focus_or_ime_changed: cache.gather(*generation),
+                ..FrameInputs::default()
+            };
+            assert_eq!(
+                inputs.focus_or_ime_changed, *expected_edge,
+                "edge for {what:?}"
+            );
+            // With every other input clear, the decision follows the edge
+            // exactly: one Run per transition, Skip through each steady stretch
+            // — where the old level input ran every single tick.
+            let expect = if *expected_edge {
+                FrameDecision::Run
+            } else {
+                FrameDecision::Skip
+            };
+            assert_eq!(gate.decide(inputs), expect, "decision for {what:?}");
+        }
+    }
+
+    #[test]
+    fn a_long_steady_focus_session_produces_no_frames() {
+        // The regression this task closes, in the shape the device showed it: a
+        // static screen holding focus, nothing else dirty, over a long tick
+        // stream. The generation never moves, so the gate must produce ZERO
+        // frames (it produced one per vsync — 62–120 fps — as a level input).
+        let mut cache = FocusEdgeCache::new(7);
+        let mut gate = FrameGate::with_enabled(true);
+        let mut runs = 0usize;
+        for _ in 0..600 {
+            let inputs = FrameInputs {
+                focus_or_ime_changed: cache.gather(7),
+                ..FrameInputs::default()
+            };
+            if gate.decide(inputs).is_run() {
+                runs += 1;
+            }
+        }
+        assert_eq!(runs, 0, "a steady focus session must produce no frames");
+    }
+
+    // -----------------------------------------------------------------
+    // The deferred-callback flush peek
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_marked_flush_alone_forces_a_run() {
+        // The stall this input closes: a deferred state-bearing callback is
+        // owed a `Housekeeping` broadcast that only `RenderRoot::rebuild` can
+        // dispatch, and NOTHING else is dirty. Without this input the gate
+        // skips, the rebuild never runs, and the callback waits for whatever
+        // touch happens to arrive next (FINDINGS #56's shape).
+        let mut gate = FrameGate::with_enabled(true);
+        let owed = FrameInputs {
+            deferred_callbacks_pending: true,
+            ..FrameInputs::default()
+        };
+        assert_eq!(gate.decide(owed), FrameDecision::Run);
+        // And it keeps forcing frames until the drain clears the mark — the
+        // shell re-peeks every tick, so the input simply goes false.
+        assert_eq!(gate.decide(owed), FrameDecision::Run);
+        assert_eq!(
+            gate.decide(FrameInputs::default()),
+            FrameDecision::Skip,
+            "once the rebuild drained the mark the gate idles again"
+        );
     }
 
     #[test]

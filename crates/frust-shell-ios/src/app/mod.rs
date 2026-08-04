@@ -230,6 +230,18 @@ pub struct IosAppHandle {
     /// reaches the tree between frames, read and cleared once per [`Self::frame`].
     /// Ensures a tap/keystroke on an otherwise-idle screen is never skipped.
     events_since_last_frame: bool,
+    /// Cache feeding `FrameInputs::focus_or_ime_changed`: the
+    /// [`AppTree::focus_ime_generation`] this handle saw on its last gathered
+    /// tick. The **edge** (focus gained/lost, IME surface published/cleared) is
+    /// `live != cached`; like `events_since_last_frame` above, the reset is
+    /// deferred to just after the gate inputs are assembled. Seeded from the
+    /// tree after the constructor's first rebuild so the first tick reports no
+    /// spurious edge (it runs on the resume warmup regardless).
+    ///
+    /// Reading the *level* (`is_focus_active`) here instead is what kept a
+    /// focused screen rendering every `CADisplayLink` tick and put caret pacing
+    /// out of reach — see `FrameInputs::focus_or_ime_changed`.
+    last_focus_ime_gen: u64,
     /// Handle-side latch feeding `FrameInputs::last_needs_frame`: the previous
     /// paint's [`frust_core::PaintOutcome::needs_frame`] (an in-flight
     /// animation/transition asking for another frame). Latched at the end of each
@@ -455,6 +467,10 @@ impl IosAppHandle {
             FrameExecutor::Split(split) => split.present.is_armed(),
             FrameExecutor::Inline(_) => false,
         };
+        // Seed the focus/IME edge cache from the just-rebuilt tree, so the first
+        // gathered tick reports an edge only if the session actually moved after
+        // construction.
+        let last_focus_ime_gen = app.focus_ime_generation();
         Self {
             executor,
             text_ctx,
@@ -485,6 +501,7 @@ impl IosAppHandle {
             a11y: None,
             frame_gate,
             events_since_last_frame: false,
+            last_focus_ime_gen,
             last_needs_frame: false,
             last_needs_frame_paced_only: false,
             appearance_dirty: false,

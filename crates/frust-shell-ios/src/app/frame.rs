@@ -155,6 +155,17 @@ impl IosAppHandle {
         // the `FRUST_NO_FRAME_GATE` kill switch internally (always `Run` when
         // disabled). Correctness over savings: every input defaults toward "run".
         let signals_dirty = ReactiveRuntime::get().is_some_and(|rt| rt.take_signals_dirty());
+        // The focus/IME session's EDGE input: the live generation is read here
+        // and the cache updated below (beside the events-latch reset — this
+        // shell defers its resets past the input assembly), so
+        // `focus_or_ime_changed` reports "the session moved since the last
+        // gathered tick", never "something is focused". As a level read this
+        // forced a frame on every `CADisplayLink` tick for the whole life of a
+        // focus session and made caret pacing unreachable (62–120 fps measured
+        // on a static focused screen). Swift's per-frame `renderFrame` IME
+        // reconcile is unaffected: it polls the published Rust state directly,
+        // whether or not this tick produces a frame.
+        let focus_ime_gen = self.app.focus_ime_generation();
         let inputs = FrameInputs {
             signals_dirty,
             // Pending buffered pointer samples (too new for this tick's instant)
@@ -162,20 +173,23 @@ impl IosAppHandle {
             // ORs into the events input (the "never starves the
             // gate" contract; default-to-run rule).
             events_since_last_frame: self.events_since_last_frame || self.resampler.has_pending(),
-            // Both read straight from the retained tree's `RenderRoot` state: a
-            // mid-drag gesture or a focused/IME-active field must keep painting.
-            // `ime_state().is_some()` is OR'd in as belt-and-braces, exactly as
-            // on Android (the two frame() bodies stay input-for-input
-            // comparable): a published IME surface must keep frames running
-            // even if the focus path and the published surface ever disagree
-            // for a frame (they converge one event pass later by contract).
+            // A mid-drag gesture reads straight from the retained tree's
+            // `RenderRoot` state; the focus/IME input is the generation edge
+            // gathered just above. Both mirror the Android shell's gate
+            // input-for-input (the two frame() bodies stay comparable).
             pointer_capture_active: self.app.is_pointer_captured(),
-            focus_or_ime_active: self.app.is_focus_active() || self.app.ime_state().is_some(),
+            focus_or_ime_changed: focus_ime_gen != self.last_focus_ime_gen,
             last_needs_frame: self.last_needs_frame,
             last_needs_frame_paced_only: self.last_needs_frame_paced_only,
             // Non-draining peek: a skipped frame leaves the flags for the next
             // frame that runs to drain.
             change_flags_pending: self.app.has_pending_change_flags(),
+            // A deferred state-bearing callback marked during a state-free pass
+            // is owed a `Housekeeping` broadcast only `RenderRoot::rebuild` can
+            // dispatch, so the frame that reaches that rebuild must run. Also a
+            // NON-draining peek (the drain is the rebuild's job, on a frame that
+            // actually runs), mirroring `change_flags_pending` above.
+            deferred_callbacks_pending: frust_core::has_pending_result_flush(),
             // The `appearance_dirty` latch (set by `set_appearance`) is taken
             // only past the pause/ready gate — like the signals-dirty drain —
             // mirroring the Android shell input-for-input.
@@ -192,8 +206,11 @@ impl IosAppHandle {
             resumed_recently: false,
         };
         // The events latch has now been read into this frame's decision; reset it
-        // so the next frame only sees events that arrive from here on.
+        // so the next frame only sees events that arrive from here on. Same for
+        // the focus/IME edge cache: this tick has consumed the transition, so
+        // the next one compares against what the tree reports now.
         self.events_since_last_frame = false;
+        self.last_focus_ime_gen = focus_ime_gen;
 
         // Deadline-aware pacing: estimate this frame's target
         // budget from the tick-to-tick delta, updating the stored tick every

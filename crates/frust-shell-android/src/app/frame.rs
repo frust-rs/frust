@@ -187,13 +187,11 @@ impl AndroidAppHandle {
         // latch as it is read, so a skipped frame does not leave a stale signal
         // for the next tick.
         //
-        // `pointer_capture_active`/`focus_or_ime_active` read the dedicated
-        // `AppTree` accessors (`is_pointer_captured`/`is_focus_active`), the
-        // same sources the iOS shell's gate uses — the two frame() bodies must
-        // stay input-for-input comparable. `ime_state().is_some()` is OR'd in
-        // as belt-and-braces: a published IME surface must keep frames running
-        // even if the focus path and the published surface ever disagree for a
-        // frame (they converge one event pass later by contract).
+        // `pointer_capture_active` reads the dedicated `AppTree` accessor
+        // (`is_pointer_captured`); `focus_or_ime_changed` compares
+        // `AppTree::focus_ime_generation` against this handle's cache. Both are
+        // the sources the iOS shell's gate uses — the two frame() bodies must
+        // stay input-for-input comparable.
         let inputs = FrameInputs {
             signals_dirty,
             // Pending buffered pointer samples (a sample too new for this tick's
@@ -203,10 +201,29 @@ impl AndroidAppHandle {
             events_since_last_frame: std::mem::take(&mut self.events_since_last_frame)
                 || self.resampler.has_pending(),
             pointer_capture_active: self.app.is_pointer_captured(),
-            focus_or_ime_active: self.app.is_focus_active() || self.app.ime_state().is_some(),
+            // Focus/IME EDGE, drained inline like every other latch here: the
+            // live generation replaces the cached one and the comparison IS the
+            // input. One Run per focus/IME transition; a steady focus session
+            // (a caret blinking in an idle field) reports `false` and leaves the
+            // gate free to idle or pace — as a level read this input rendered
+            // every Choreographer tick for the whole session (62–120 fps
+            // measured on a Xiaomi 12) and made caret pacing unreachable. The
+            // platform-side IME reconcile is unaffected: Kotlin's per-frame
+            // `doFrame` poll reads the published Rust state directly, whether or
+            // not this tick produces a frame.
+            focus_or_ime_changed: {
+                let generation = self.app.focus_ime_generation();
+                std::mem::replace(&mut self.last_focus_ime_gen, generation) != generation
+            },
             last_needs_frame: self.last_needs_frame,
             last_needs_frame_paced_only: self.last_needs_frame_paced_only,
             change_flags_pending: self.app.has_pending_change_flags(),
+            // A deferred state-bearing callback marked during a state-free pass
+            // is owed a `Housekeeping` broadcast only `RenderRoot::rebuild` can
+            // dispatch, so the frame that reaches that rebuild must run. A
+            // NON-draining peek (the drain is the rebuild's, on a frame that
+            // actually runs), mirroring `change_flags_pending` above.
+            deferred_callbacks_pending: frust_core::has_pending_result_flush(),
             // The `appearance_dirty` latch (set by `set_appearance`) is taken
             // only past the surface-ready gate — like `signals_dirty` above —
             // so an appearance flip during a not-ready window is observed by
