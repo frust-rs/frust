@@ -7,7 +7,7 @@
 //! skip (only `terminal.draw` when the state changed or something is
 //! animating).
 
-use std::io::{self, Stdout, Write};
+use std::io::{self, IsTerminal, Stdout, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,9 +48,30 @@ const TICK: Duration = Duration::from_millis(50);
 /// translator has no viewport height); a comfortable page on typical panes.
 const PAGE_LINES: u64 = 10;
 
+/// Pure check: the TUI requires interactive stdin AND stdout. Testable without
+/// a TTY.
+///
+/// Today a no-controlling-terminal launch (e.g. CI, a background job) panics
+/// via `ratatui::init()`'s `.expect`; a piped-stdout launch with stdin still a
+/// TTY *succeeds* into raw mode and garbles the pipe with raw ANSI —
+/// `crossterm` only gates raw mode on stdin, hence checking both streams here
+/// rather than stdin alone.
+fn ensure_interactive_terminal(stdin_tty: bool, stdout_tty: bool) -> Result<()> {
+    if stdin_tty && stdout_tty {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "the frust TUI needs an interactive terminal (stdin and stdout must be TTYs); \
+             run `frust <command>` for non-interactive use, or `frust --help`"
+        )
+    }
+}
+
 /// Run the TUI: set up the terminal, run the loop, and restore on the way out
 /// (including on panic, via the installed hook).
 pub async fn run() -> Result<()> {
+    ensure_interactive_terminal(io::stdin().is_terminal(), io::stdout().is_terminal())?;
+
     let mut terminal = ratatui::init();
     install_panic_hook();
     if let Err(e) = enable_mouse_capture() {
@@ -1262,6 +1283,22 @@ mod tests {
 
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn ensure_interactive_terminal_requires_both_streams() {
+        assert!(ensure_interactive_terminal(true, true).is_ok());
+        assert!(ensure_interactive_terminal(true, false).is_err());
+        assert!(ensure_interactive_terminal(false, true).is_err());
+        assert!(ensure_interactive_terminal(false, false).is_err());
+    }
+
+    #[test]
+    fn ensure_interactive_terminal_error_names_requirement_and_escape_hatch() {
+        let err = ensure_interactive_terminal(false, false).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("interactive terminal"));
+        assert!(message.contains("frust <command>"));
     }
 
     #[test]
