@@ -461,9 +461,13 @@ thread_local! {
 /// it must never fire on speculation.
 ///
 /// Raised by `frust-widgets`' reconcilers (`teardown_child`,
-/// `cancel_active_children`, and the keyed path's type-swap arm), all three
-/// through one shared gate (`mark_orphan_if_live`); a hand-rolled container that
-/// clears a focused pod itself should raise it under the same condition.
+/// `cancel_active_children`, and the type-swap arms of both the keyed reconciler
+/// and the single-child `rebuild_child`), all four through one shared gate
+/// (`mark_orphan_if_live`), and by
+/// [`ComponentView::rebuild`](crate::component::ComponentView)'s own swap arm,
+/// which spells the identical gate by hand because this crate sits below
+/// `frust-widgets`. A hand-rolled container that clears a focused pod itself
+/// should raise it under the same condition.
 ///
 /// Idempotent and thread-affine, exactly like [`mark_pending_result_flush`].
 pub fn mark_focus_orphaned() {

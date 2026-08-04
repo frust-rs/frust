@@ -3034,6 +3034,149 @@ mod tests {
         );
     }
 
+    // --- Wrapper type swap: the severing path `rebuild_child` owns -----------
+    //
+    // `Padding(if editing { text_input } else { text })` is the single-child
+    // wrapper shape: the view swaps the padded child's concrete type, so the
+    // focused widget is torn down inside `AnyView::rebuild` and a fresh,
+    // non-focusable one takes its pod. Nothing about that reaches the root by
+    // itself — no event, no publish — so without the orphan mark the keyboard
+    // stays up over an idle screen, `is_focus_active()` keeps reporting a
+    // session, and `Key`/`Ime` events keep routing into a widget that ignores
+    // them. Both directions are pinned below over one fixture, exactly like the
+    // cross-branch unmount pair above.
+
+    #[derive(Default)]
+    struct WrapState {
+        row: String,
+        composer: String,
+        row_editing: bool,
+    }
+
+    /// Outer Column: [ Padding-wrapped slot, composer field ]. The slot holds a
+    /// `text_input` while `row_editing` and a plain `text` label otherwise, so
+    /// flipping the flag is an `AnyView` type swap inside the wrapper — the
+    /// `rebuild_child` path, not the multi-child reconciler's.
+    fn wrapped_slot_logic(state: &mut WrapState) -> crate::FlexView<WrapState> {
+        use frust_core::{AnyView, any};
+        // The branch is taken *inside* the wrapper, so the wrapper's own view
+        // type is stable across the flip and only its child's concrete type
+        // changes — the `rebuild_child` swap. (Branching outside and handing
+        // `Padding` a pre-erased `AnyView` would double-erase the child and
+        // hide the swap from the wrapper entirely; see the note in the
+        // completion summary.)
+        let slot: AnyView<WrapState> = if state.row_editing {
+            any(crate::Padding(
+                crate::EdgeInsets::all(0.0),
+                text_input(state.row.clone(), |s: &mut WrapState, v: String| s.row = v),
+            ))
+        } else {
+            any(crate::Padding(
+                crate::EdgeInsets::all(0.0),
+                crate::text(state.row.clone()),
+            ))
+        };
+        crate::Column(vec![
+            slot,
+            any(text_input(
+                state.composer.clone(),
+                |s: &mut WrapState, v: String| s.composer = v,
+            )),
+        ])
+    }
+
+    /// Build the fixture and focus the **wrapped** field, leaving it (and the
+    /// wrapper pod above it) on the live focus chain.
+    fn focus_the_wrapped_field() -> (
+        RenderRoot<WrapState, crate::FlexView<WrapState>>,
+        frust_text::TextContext,
+        WrapState,
+    ) {
+        let mut state = WrapState {
+            row: "row".to_string(),
+            composer: "composer".to_string(),
+            row_editing: true,
+        };
+        let mut root: RenderRoot<WrapState, crate::FlexView<WrapState>> = RenderRoot::new();
+        root.rebuild(&mut wrapped_slot_logic, &mut state);
+        let mut tcx = frust_text::TextContext::new();
+        root.layout_with_text(Size::new(300.0, 200.0), &mut tcx as &mut dyn Any);
+
+        // Full Down+Up so the Up releases the capture and a later Down
+        // hit-tests afresh (see the cross-branch fixture above).
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(
+            root.ime_state().map(|s| s.editing.text),
+            Some("row".to_string()),
+            "the wrapped field owns the session"
+        );
+        (root, tcx, state)
+    }
+
+    #[test]
+    fn swapping_a_live_focused_wrapper_child_releases_the_session() {
+        let (mut root, _tcx, mut state) = focus_the_wrapped_field();
+        let gen_before = root.focus_ime_generation();
+
+        // The wrapper's child type-swaps out from under the focused field.
+        state.row_editing = false;
+        root.rebuild(&mut wrapped_slot_logic, &mut state);
+
+        assert!(
+            !root.is_focus_active(),
+            "the root's focus mirror must not outlive the type-swapped field"
+        );
+        assert_eq!(
+            root.ime_state(),
+            None,
+            "the shell-facing surface dies with the widget that published it"
+        );
+        assert_eq!(
+            root.focus_ime_generation(),
+            gen_before.wrapping_add(1),
+            "one severed live focus path is exactly one edge"
+        );
+    }
+
+    #[test]
+    fn swapping_a_stale_focused_wrapper_child_leaves_the_live_session_alone() {
+        let (mut root, _tcx, mut state) = focus_the_wrapped_field();
+
+        // Focus moves to the composer: the blur clears the link at the outer
+        // Column (the wrapper's own pod), leaving the wrapped field's flag one
+        // level deeper legitimately stale.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 50.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 50.0));
+        assert_eq!(
+            root.ime_state().map(|s| s.editing.text),
+            Some("composer".to_string()),
+            "the composer now owns the session"
+        );
+        let ime_before = root.ime_state();
+        let gen_before = root.focus_ime_generation();
+
+        // The same swap as the twin above, now on a dead branch.
+        state.row_editing = false;
+        root.rebuild(&mut wrapped_slot_logic, &mut state);
+
+        assert!(
+            root.is_focus_active(),
+            "swapping a stale-flagged wrapper child must not blur the composer \
+             the user is typing in"
+        );
+        assert_eq!(
+            root.ime_state(),
+            ime_before,
+            "the live IME surface is untouched by an unrelated branch's swap"
+        );
+        assert_eq!(
+            root.focus_ime_generation(),
+            gen_before,
+            "zero spurious edges: the shell's frame gate must see no focus/IME change"
+        );
+    }
+
     /// A no-op paint sink for `needs_frame` assertions (glyph/rect output is not
     /// under test here).
     struct NullScene;

@@ -227,15 +227,42 @@ pub fn build_child<State: 'static>(view: &AnyView<State>, ctx: &mut BuildCtx<'_>
 /// single-child wrappers (`Padding`/`Align`/`SizedBox`, and the interactive
 /// widgets' own label/track children) that call this instead of
 /// `rebuild_children`.
+///
+/// **A type swap severs the recorded focus path exactly like it severs the
+/// capture path**, and is handled the same way the keyed reconciler handles its
+/// own swap arm: the pod's `focused` flag is dropped (the fresh widget never
+/// claimed focus — leaving the link set would route `Key`/`Ime` events into a
+/// widget that ignores them) and
+/// [`mark_focus_orphaned`](frust_core::mark_focus_orphaned) is raised *when the
+/// severed link was on the live focus chain* ([`mark_orphan_if_live`]), so
+/// `RenderRoot::rebuild` releases `focus_active`/`ime_state` before the frame
+/// ends. This is the `Padding(if editing { text_input } else { text })` shape:
+/// without the release the keyboard stays up over an idle screen and
+/// `is_focus_active()` keeps reporting a session whose owner no longer exists. A
+/// swap of a merely *stale* flag under an already-blurred ancestor marks
+/// nothing — it owned no session.
 pub fn rebuild_child<State: 'static>(
     prev: &AnyView<State>,
     next: &AnyView<State>,
     pod: &mut ChildPod,
     ctx: &mut BuildCtx<'_>,
 ) -> ChangeFlags {
+    // Read before the nested rebuild, exactly as `rebuild_child_tracked` reads
+    // its own `link_focused`: the gate describes the link this pod held *going
+    // into* the swap.
+    let link_focused = pod.is_focused();
     let (flags, swapped) = rebuild_child_tracked(prev, next, pod, ctx);
-    if swapped && pod.is_active() {
-        pod.set_active(false);
+    if swapped {
+        if pod.is_active() {
+            pod.set_active(false);
+        }
+        if link_focused {
+            pod.set_focused(false);
+        }
+        // `ctx` carries the chain down to *this wrapper*; the pod's own flag is
+        // ANDed onto it inside, the same composition every other marking site
+        // uses.
+        mark_orphan_if_live(ctx, link_focused);
     }
     flags
 }
@@ -324,7 +351,9 @@ pub fn teardown_child<State: 'static>(
 }
 
 /// Raise the orphan mark for a severed focus link, but **only when the link was
-/// live** — the one gate all three marking sites share.
+/// live** — the one gate every marking site in this module shares
+/// ([`teardown_child`], [`cancel_active_children`], the keyed reconciler's
+/// type-swap arm, and [`rebuild_child`]'s).
 ///
 /// `link_focused` is the dying pod's own [`ChildPod::is_focused`] flag and
 /// `ctx.has_focus()` is the chain above it, so the mark means exactly one thing:
@@ -931,7 +960,8 @@ mod authoring_surface_tests {
     }
 }
 
-/// Mechanism-level tests for [`rebuild_child`]'s type-swap capture handling:
+/// Mechanism-level tests for [`rebuild_child`]'s type-swap capture *and focus*
+/// handling, plus the orphan-marking sites of the multi-child reconcilers:
 /// every single-child container (`Padding`/`Align`/
 /// `SizedBox`, interactive widgets' labels) reconciles its child through this
 /// helper, so the clear-on-swap behavior is proven once here at the shared
@@ -1057,6 +1087,69 @@ mod tests {
         assert!(
             pod.is_active(),
             "a content-only rebuild must not clear an in-flight capture"
+        );
+    }
+
+    /// [`rebuild_child`]'s type-swap marking site — the single-child wrappers
+    /// (`Padding`/`Align`/`SizedBox`/`GestureDetector`/`Scroll`, the card/dialog
+    /// slot helpers, `ListView`'s surviving rows) — pinned in both directions.
+    /// `Padding(if editing { text_input } else { text })` is the shipped shape:
+    /// the focused widget dies inside the swap, so a live session dies with it,
+    /// while the same swap over a stale flag under a blurred ancestor owns no
+    /// session to lose.
+    #[test]
+    fn a_wrapper_type_swap_marks_only_on_a_live_chain() {
+        fn swap_wrapped_child(build: &mut dyn FnMut(&mut u64) -> BuildCtx<'_>) -> bool {
+            let _ = frust_core::take_focus_orphaned();
+            let mut counter = 0u64;
+            let prev: AnyView<()> = leaf_any(10.0, 10.0);
+            let mut pod = build_child(&prev, &mut ctx(&mut counter));
+            // The wrapper's single child holds the recorded focus path.
+            pod.set_focused(true);
+
+            // Leaf -> SwapLeaf: a concrete-type change, so the old widget dies
+            // inside `AnyView::rebuild` and a fresh one takes its pod.
+            let next: AnyView<()> = swap_leaf().into_any();
+            rebuild_child::<()>(&prev, &next, &mut pod, &mut build(&mut counter));
+            assert!(
+                !pod.is_focused(),
+                "a swapped-in widget must not inherit the old focus link"
+            );
+            frust_core::take_focus_orphaned()
+        }
+
+        assert!(
+            swap_wrapped_child(&mut ctx),
+            "a live focus path dying inside a wrapper's type swap releases the session"
+        );
+        assert!(
+            !swap_wrapped_child(&mut blurred_ctx),
+            "the same swap over a stale flag below a cleared link marks nothing"
+        );
+    }
+
+    /// The negative guard for the site above: a same-type, content-only rebuild
+    /// through a wrapper keeps the focus path (Flutter's retention invariant),
+    /// so it must neither clear the flag nor mark — a mark here would drop the
+    /// keyboard on every frame a padded field re-renders.
+    #[test]
+    fn a_wrapper_content_only_rebuild_keeps_focus_and_marks_nothing() {
+        let _ = frust_core::take_focus_orphaned();
+        let mut counter = 0u64;
+        let prev: AnyView<()> = leaf_any(10.0, 10.0);
+        let mut pod = build_child(&prev, &mut ctx(&mut counter));
+        pod.set_focused(true);
+
+        let next: AnyView<()> = leaf_any(20.0, 20.0);
+        rebuild_child::<()>(&prev, &next, &mut pod, &mut ctx(&mut counter));
+
+        assert!(
+            pod.is_focused(),
+            "a content-only rebuild must not clear the recorded focus path"
+        );
+        assert!(
+            !frust_core::take_focus_orphaned(),
+            "an unchanged wrapper child must not orphan the focus session"
         );
     }
 

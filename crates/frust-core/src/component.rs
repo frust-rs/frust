@@ -234,6 +234,17 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
                 // it recorded is stale — drop it (mirrors `rebuild_child`).
                 element.child.set_active(false);
                 element.child.set_focused(false);
+                // Dropping the flag is not the load-bearing part: the focused
+                // widget just stopped existing, so a LIVE session died with it
+                // and the root must release it before the frame ends. Gated on
+                // the whole chain — `outer_has_focus && child_focused` is the
+                // same composition `teardown` spells below and the same one
+                // `frust-widgets`' `mark_orphan_if_live` applies at its own
+                // marking sites (this crate sits below that one, so the gate is
+                // spelled by hand rather than shared).
+                if outer_has_focus && child_focused {
+                    crate::event::mark_focus_orphaned();
+                }
             }
             element.prev = new_view;
             flags
@@ -402,6 +413,8 @@ mod tests {
     use crate::view::any;
     use kurbo::Rect;
     use reactive_graph::owner::{on_cleanup, provide_context, use_context};
+    use std::cell::Cell;
+    use std::rc::Rc;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -698,6 +711,101 @@ mod tests {
         // Dropping the replaced widget (already disposed) must not fire again.
         drop(element);
         assert_eq!(probe.load(Ordering::SeqCst), 1);
+    }
+
+    // --- The swap arm's orphan mark, across the state boundary --------------
+
+    /// A component whose child view *type* flips on a shared flag: `Empty`
+    /// first, `OtherLeaf` after — the `ComponentView::rebuild` swap arm's
+    /// fixture (`if editing { field } else { label }` inside a component's
+    /// `build`).
+    struct SwapComp {
+        swapped: Rc<Cell<bool>>,
+    }
+    impl Component for SwapComp {
+        type State = ();
+        fn init(&self) {}
+        fn build(&self, _state: &mut ()) -> AnyView<()> {
+            if self.swapped.get() {
+                any(OtherLeaf)
+            } else {
+                any(Empty)
+            }
+        }
+    }
+
+    #[test]
+    fn component_swap_arm_marks_the_orphan_only_on_a_live_chain() {
+        /// Swap the component's child type with the *outer* chain either live
+        /// or already broken, reporting `(pod still focused, orphan marked)`.
+        fn swap_child(outer_live: bool) -> (bool, bool) {
+            let _ = crate::event::take_focus_orphaned();
+            let _owner = ambient();
+            let swapped = Rc::new(Cell::new(false));
+            let v1 = component(SwapComp {
+                swapped: swapped.clone(),
+            });
+            let mut widget = build_widget::<(), _>(&v1);
+            // The component's own child pod holds the recorded focus path.
+            widget.child.set_focused(true);
+
+            swapped.set(true);
+            let v2 = component(SwapComp {
+                swapped: swapped.clone(),
+            });
+            let mut next_id = 0u64;
+            let mut ctx = BuildCtx::new(&mut next_id);
+            // The chain the surrounding tree hands this component.
+            ctx.set_has_focus(outer_live);
+            View::<()>::rebuild(&v2, &v1, &mut widget, &mut ctx);
+            (
+                widget.child.is_focused(),
+                crate::event::take_focus_orphaned(),
+            )
+        }
+
+        let (still_focused, marked) = swap_child(true);
+        assert!(
+            !still_focused,
+            "a swapped-in widget must not inherit the old focus link"
+        );
+        assert!(
+            marked,
+            "a live focus path dying inside the component's swap releases the session"
+        );
+
+        let (still_focused, marked) = swap_child(false);
+        assert!(!still_focused, "the flag is dropped either way");
+        assert!(
+            !marked,
+            "the same swap under an already-blurred ancestor owns no session to release"
+        );
+    }
+
+    #[test]
+    fn component_content_only_rebuild_keeps_focus_and_marks_nothing() {
+        // The negative guard: the component always re-runs `build`, so a
+        // same-type child rebuild happens every frame a component is on screen
+        // — marking there would drop the keyboard continuously.
+        let _ = crate::event::take_focus_orphaned();
+        let _owner = ambient();
+        let v1 = component(Labeled { text: "a" });
+        let mut widget = build_widget::<(), _>(&v1);
+        widget.child.set_focused(true);
+
+        let v2 = component(Labeled { text: "b" });
+        let mut next_id = 0u64;
+        let mut ctx = BuildCtx::new(&mut next_id);
+        View::<()>::rebuild(&v2, &v1, &mut widget, &mut ctx);
+
+        assert!(
+            widget.child.is_focused(),
+            "a content-only rebuild keeps the recorded focus path"
+        );
+        assert!(
+            !crate::event::take_focus_orphaned(),
+            "an in-place child rebuild must not orphan the focus session"
+        );
     }
 
     #[test]
