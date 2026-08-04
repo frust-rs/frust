@@ -116,12 +116,14 @@ hints.** A generated app's iOS `CADisplayLink` requests a 30–120Hz
 display's max rate — both hints, unverifiable on the iOS Simulator or most Android
 emulators (60Hz-only).
 
-**TUI workbench.** `frust tui` opens the ratatui workbench (scaffold/build/doctor/clean
-as supervised sessions, a fuzzy command palette, a bootstrap wizard, Add Plugin — `?`
-opens the full keybinding help overlay). A per-session perf sparkline parses
-`frust-perf` lines once `FRUST_TRACE` is set. `cargo test -p frust-tui` covers
-engine/render logic; live-terminal gestures and a fresh-machine bootstrap walk are a
-**manual gate** for a person at a real desk, not CI.
+**TUI workbench.** Bare `frust` in an interactive terminal, or the explicit `frust tui`, opens the
+ratatui workbench (scaffold/build/doctor/clean as supervised sessions, a fuzzy command palette, a
+bootstrap wizard, Add Plugin — `?` opens the full keybinding help overlay). Both stdin and stdout
+must be TTYs: a non-interactive bare `frust` prints help and exits 2, while a non-interactive
+`frust tui` returns a clean error instead of touching terminal state. A per-session perf sparkline
+parses `frust-perf` lines once `FRUST_TRACE` is set. `cargo test -p frust-tui` covers engine/render
+logic; live-terminal gestures and a fresh-machine bootstrap walk are a **manual gate** for a person
+at a real desk, not CI.
 
 ## Dev Loop
 
