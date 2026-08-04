@@ -110,7 +110,11 @@ signal-poll seam race-free without a lock.
     lever there. Handles content-type changes on a **steady-focused** field (field is active/focused
     but changes from Normal→Password mid-interaction) via `restartInput`, because Android never
     re-queries `EditorInfo` for a bound `InputConnection` — the hint must be reestablished by forcing
-    a new connection.
+    a new connection. A submit (Gboard's Done key or hardware Enter) re-polls the IME mirror
+    synchronously in the same dispatch that forwards it to Rust, matching the touch and
+    hardware-Enter dispatch sites' existing shape; `doFrame`'s own unconditional per-frame poll
+    independently reconciles the rarer case of a controlled field's clear-on-submit landing on a
+    later rebuild instead of the same event pass.
   - **iOS:** JSON-serializes the content type alongside editing state for Swift to apply. Password
     and NoSuggestions also suppress the `UITextInputTraits` smart-quotes/dashes/insert-delete traits
     and autocapitalization (`autocapitalizationType = .none`) — closing the same silent-rewrite/
