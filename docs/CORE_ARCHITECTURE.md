@@ -137,8 +137,12 @@ same-value republish, such as the paint pass re-publishing an unchanged surface 
 stays focused, never moves it.
 
 A structural rebuild that tears down, type-swaps, or clears the `focused` flag of a pod holding the
-recorded focus path runs inside a state-free view diff with no `RenderRoot` handle to release the
-session itself. It instead raises a thread-local `mark_focus_orphaned` flag — mirroring
+recorded focus path — *on the live focus chain* — runs inside a state-free view diff with no
+`RenderRoot` handle to release the session itself. Liveness is tracked through the rebuild pass by
+a `BuildCtx` effective-focus AND-chain (`has_focus`/`with_focus_link`), seeded at the root from the
+session mirror (`focus_active || ime_state.is_some()`) and threaded through pod descent and the
+component boundary, so a stale `focused` flag under an already-blurred ancestor marks nothing. A
+live loss instead raises a thread-local `mark_focus_orphaned` flag — mirroring
 `mark_pending_result_flush` above, including the same idempotent, thread-affine, data-free shape —
 and `RenderRoot::rebuild` drains it (`take_focus_orphaned`) after its deferred-callback loop and
 releases the session, so the root's cached focus/IME state can never outlive the widget it described.

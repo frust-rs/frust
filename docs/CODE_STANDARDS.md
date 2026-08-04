@@ -319,9 +319,12 @@ widget in `frust-widgets`:
   clears capture and focus only where identity is actually lost** —
   stable-prefix/key-matched, not a blanket clear. A reconciler that tears down (or type-swaps) a
   focused pod cannot reach `RenderRoot` itself (no handle inside a `BuildCtx` pass), so it marks the
-  pod orphaned instead; `RenderRoot`'s cached `focus_active`/`ime_state` release on the same rebuild
-  that raised the mark, not merely "eventually" on a later event pass (`docs/CORE_ARCHITECTURE.md`'s
-  Focus/IME Lifecycle).
+  pod orphaned instead, but only *on the live focus chain* — gate the mark on
+  `ctx.has_focus() && pod.is_focused()`, never on the recorded `focused` flag alone, since a
+  hand-rolled container's own teardown/type-swap path can hit a stale flag under an
+  already-blurred ancestor; `RenderRoot`'s cached `focus_active`/`ime_state` release on the same
+  rebuild that raised the mark, not merely "eventually" on a later event pass
+  (`docs/CORE_ARCHITECTURE.md`'s Focus/IME Lifecycle).
 
 - **Keyed lists are all-or-nothing, and keys must be unique.** `keyed(key, view)` marks a
   `Flex` child list for identity-based reconciliation; a mixed or duplicate key set
