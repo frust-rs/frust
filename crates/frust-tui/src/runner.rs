@@ -53,9 +53,14 @@ const PAGE_LINES: u64 = 10;
 ///
 /// Today a no-controlling-terminal launch (e.g. CI, a background job) panics
 /// via `ratatui::init()`'s `.expect`; a piped-stdout launch with stdin still a
-/// TTY *succeeds* into raw mode and garbles the pipe with raw ANSI —
-/// `crossterm` only gates raw mode on stdin, hence checking both streams here
-/// rather than stdin alone.
+/// TTY *succeeds* into raw mode and garbles the pipe with raw ANSI. Stdout
+/// must be a TTY because that is where the TUI's frames are written;
+/// requiring stdin as well is a deliberate conservative narrowing on top of
+/// that, not a technical necessity — `crossterm` 0.29's `tty_fd()` falls back
+/// to opening `/dev/tty` when stdin isn't a TTY, so `frust tui </dev/null`
+/// used to work. This matches the CLI-side default gate (`frust-cli`'s
+/// `default_command`), and means that previously-working
+/// stdin-redirected/stdout-TTY configuration is now refused by design.
 fn ensure_interactive_terminal(stdin_tty: bool, stdout_tty: bool) -> Result<()> {
     if stdin_tty && stdout_tty {
         Ok(())
