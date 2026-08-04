@@ -3629,13 +3629,21 @@ mod tests {
         );
 
         // Leg 1 — the next paint already refuses to act focused and hands the
-        // shell an inactive IME surface (dismissing the keyboard).
+        // shell an inactive IME surface (dismissing the keyboard). The root reads
+        // that inactive publish as a session release, so it drops the surface
+        // outright (both mobile bridges serialise `None` to the same inactive
+        // wire form — see `RenderRoot::ime_state`) and clears its focus mirror
+        // rather than leaving it standing over a field that stopped editing.
         let mut sink = NullScene;
         let outcome = root.paint(&mut sink, FrameTime::ZERO);
         assert!(!outcome.needs_frame, "a disabled field paints at rest");
         assert!(
-            !root.ime_state().expect("still published").active,
-            "the published IME surface goes inactive"
+            root.ime_state().is_none(),
+            "the published inactive surface releases the session"
+        );
+        assert!(
+            !root.is_focus_active(),
+            "the root's focus mirror goes with it"
         );
 
         // Leg 2 — the first event that reaches the field releases the pod-level
@@ -3785,13 +3793,19 @@ mod tests {
         );
 
         // Leg 1 — the next paint already refuses to act focused and hands the
-        // shell an inactive IME surface (dismissing the keyboard).
+        // shell an inactive IME surface (dismissing the keyboard), which the root
+        // reads as a session release: surface dropped, focus mirror cleared (see
+        // the disabled twin above).
         let mut sink = NullScene;
         let outcome = root.paint(&mut sink, FrameTime::ZERO);
         assert!(!outcome.needs_frame, "a read-only field paints at rest");
         assert!(
-            !root.ime_state().expect("still published").active,
-            "the published IME surface goes inactive"
+            root.ime_state().is_none(),
+            "the published inactive surface releases the session"
+        );
+        assert!(
+            !root.is_focus_active(),
+            "the root's focus mirror goes with it"
         );
 
         // Leg 2 — the first event that reaches the field releases the pod-level

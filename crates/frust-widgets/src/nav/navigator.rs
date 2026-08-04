@@ -2931,6 +2931,15 @@ impl<State: 'static> Widget for NavigatorWidget<State> {
 
 /// The cleared/inactive IME surface the navigator publishes after a page switch so
 /// the platform keyboard hides deterministically (see [`NavigatorWidget::paint`]).
+///
+/// `active: false` is what makes this a **session release**, not a surface
+/// refresh: `RenderRoot::paint`'s take path reads the inactive flag as "the
+/// focus session is over" and clears `focus_active` *and* the stored surface
+/// (storing `None`, never this value), so a popped page's focus cannot outlive
+/// the widget that held it. The rest of the fields are the empty/no-selection
+/// form and are never read by any shell for an inactive surface — both mobile
+/// bridges serialise `None` to the byte-identical inactive JSON — but they stay
+/// spelled out so the value is a valid, self-describing `ImeState` on its own.
 fn cleared_ime_state() -> ImeState {
     ImeState {
         active: false,
@@ -3873,14 +3882,82 @@ mod tests {
         root.layout(Size::new(100.0, 100.0));
         root.paint(&mut RecordingScene::default(), FrameTime::ZERO);
 
-        let ime = root
-            .ime_state()
-            .expect("a cleared IME surface is still published");
+        // The stale ACTIVE surface is gone — and the inactive surface the
+        // navigator published is read as a session release, so the whole session
+        // is torn down rather than parked at `Some(inactive)` with `focus_active`
+        // left standing. `None` is what the shells serialise to the same inactive
+        // JSON the old `Some(inactive)` produced (see `RenderRoot::ime_state`), so
+        // the keyboard still drops; what changes is that the root no longer lies.
         assert!(
-            !ime.active,
-            "the stale active IME surface was cleared, not left stale"
+            root.ime_state().is_none(),
+            "the stale active IME surface was released, not parked as Some(inactive)"
         );
-        assert!(ime.editing.text.is_empty());
+        assert!(
+            !root.is_focus_active(),
+            "the focus session dies with the page that held it"
+        );
+    }
+
+    #[test]
+    fn pop_releases_the_focused_field_session() {
+        // The pop twin of `push_clears_focused_field_ime_surface`, and the shape
+        // the device report was filed against: a focused field on the page being
+        // POPPED. `apply_pop` raises `needs_ime_clear`, paint publishes the
+        // inactive surface, and the root releases the session — so an idle screen
+        // (no further touch to self-correct on) is left with nothing forcing
+        // frames and nothing lying about focus.
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| {
+                navigator(&ctrl, || {
+                    any(SizedLeaf {
+                        size: Size::new(10.0, 10.0),
+                    })
+                })
+            }
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        // Push the editable page and focus its field.
+        controller.push(|| any(EditableLeaf));
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut RecordingScene::default(), FrameTime::ZERO);
+        root.event(&mut state, &down(5.0, 5.0));
+        assert!(root.is_focus_active(), "the pushed page's field is focused");
+        assert!(root.ime_state().is_some_and(|s| s.active));
+        let focused_gen = root.focus_ime_generation();
+
+        // Pop back. Exactly one edge for the release, and the session is gone.
+        controller.pop();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut RecordingScene::default(), FrameTime::ZERO);
+        assert!(
+            !root.is_focus_active(),
+            "the popped page's focus is released"
+        );
+        assert!(root.ime_state().is_none());
+        assert_eq!(
+            root.focus_ime_generation(),
+            focused_gen.wrapping_add(1),
+            "one pop is one focus/IME edge"
+        );
+
+        // And it stays released: further idle frames publish nothing, so the
+        // shell's `focus_or_ime_changed` edge never fires again.
+        for _ in 0..30 {
+            root.paint(&mut RecordingScene::default(), FrameTime::ZERO);
+        }
+        assert_eq!(
+            root.focus_ime_generation(),
+            focused_gen.wrapping_add(1),
+            "an idle popped screen fires no further focus/IME edges"
+        );
     }
 
     // --- An example-style stack driven through the facade

@@ -414,6 +414,62 @@ pub fn has_pending_result_flush() -> bool {
     PENDING_RESULT_FLUSH.with(|flag| flag.get())
 }
 
+thread_local! {
+    /// The "a focused child pod lost its identity during this thread's view
+    /// diff" flag, raised by [`mark_focus_orphaned`] and drained by
+    /// [`take_focus_orphaned`].
+    ///
+    /// A side channel for exactly the reason [`PENDING_RESULT_FLUSH`] above is
+    /// one: the reconciler that tears a focused pod down runs deep inside a
+    /// `View::rebuild` (a [`crate::view::BuildCtx`] pass) with no
+    /// [`RenderRoot`](crate::app::RenderRoot) handle to reach, so it cannot
+    /// clear the root's `focus_active`/`ime_state` mirror itself — the
+    /// long-standing desync `frust-widgets`' `cancel_active_children` documents.
+    ///
+    /// **Data-free on purpose, and idempotent.** Only the *fact* that some
+    /// focused pod died rides here; there is nothing useful to carry (the root
+    /// keeps no id of the focused widget, only the boolean mirror). Several pods
+    /// cleared in one diff owe exactly one release.
+    ///
+    /// Thread-local rather than a process-global `AtomicBool` for the same
+    /// UI-thread-affinity reason: the tree that lost the focus, and the
+    /// `RenderRoot` that must release the session, live on one thread. A global
+    /// would let a root on one thread release a session another thread's tree
+    /// still holds.
+    static FOCUS_ORPHANED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Record that a structural rebuild severed the recorded focus path — a focused
+/// [`ChildPod`](crate::widget::ChildPod) was torn down, type-swapped, or had its
+/// `focused` flag cleared by a reconciler — so
+/// [`RenderRoot::rebuild`](crate::app::RenderRoot::rebuild) releases the whole
+/// focus/IME session before the frame ends.
+///
+/// Raised by `frust-widgets`' reconcilers (`teardown_child`,
+/// `cancel_active_children`, and the keyed path's type-swap arm); a hand-rolled
+/// container that clears a focused pod itself should raise it too.
+///
+/// Idempotent and thread-affine, exactly like [`mark_pending_result_flush`].
+pub fn mark_focus_orphaned() {
+    FOCUS_ORPHANED.with(|flag| flag.set(true));
+}
+
+/// Take (and clear) the [`mark_focus_orphaned`] flag.
+///
+/// Drained by [`RenderRoot::rebuild`](crate::app::RenderRoot::rebuild), which
+/// performs one full focus/IME session release per `true` it takes. Destructive,
+/// mirroring [`take_pending_result_flush`]: a caller that drains and drops the
+/// result loses that release until something marks again.
+///
+/// A mark can only be raised *during* a view diff, and the diff's own
+/// `RenderRoot::rebuild` drains it before returning, so the flag never survives
+/// a frame — there is no peeking counterpart (unlike
+/// [`has_pending_result_flush`], which a frame gate must consult before deciding
+/// whether to run the rebuild that drains it at all).
+pub fn take_focus_orphaned() -> bool {
+    FOCUS_ORPHANED.with(|flag| flag.replace(false))
+}
+
 /// What kind of content a focused editable field holds — the hint a widget
 /// publishes so each shell can configure the platform input method.
 ///

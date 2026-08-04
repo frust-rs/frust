@@ -274,6 +274,13 @@ fn rebuild_child_tracked<State: 'static>(
 /// armed widget dropped mid-gesture (e.g. the active row truncated out of a
 /// shrinking list) unwinds its state machine instead of vanishing with no
 /// terminating `Up`/`Cancel`.
+///
+/// A pod still holding the recorded **focus** path ([`ChildPod::is_focused`])
+/// raises [`mark_focus_orphaned`](frust_core::mark_focus_orphaned) instead: the
+/// focused widget is about to stop existing, so the whole focus/IME session dies
+/// with it and `RenderRoot::rebuild` releases it before the frame ends (see
+/// [`cancel_active_children`]'s note for the full mechanism, and why the pod
+/// cannot do it itself).
 pub fn teardown_child<State: 'static>(
     view: &AnyView<State>,
     pod: &mut ChildPod,
@@ -282,6 +289,12 @@ pub fn teardown_child<State: 'static>(
     if pod.is_active() {
         cancel_pod(pod);
         pod.set_active(false);
+    }
+    if pod.is_focused() {
+        // The pod is dropped by the caller right after this returns, so clearing
+        // the flag is bookkeeping hygiene, not the load-bearing part — the mark is.
+        pod.set_focused(false);
+        frust_core::mark_focus_orphaned();
     }
     if let Some(element) = pod.widget_mut().downcast_mut::<Box<dyn Widget>>() {
         view.teardown(element, ctx);
@@ -341,15 +354,44 @@ pub(crate) fn cancel_pod(pod: &mut ChildPod) {
 /// flag is enough — there is no widget-internal blur to drive, and (per the g5
 /// contract) a `Cancel` handler must not touch app state anyway.
 ///
-/// **RenderRoot desync note.** Clearing `focused` here does *not* notify
-/// [`RenderRoot`](frust_core::RenderRoot): the rebuild pass runs over a
-/// [`BuildCtx`], with no `RenderRoot` in scope, exactly as the g5 capture-cancel
-/// cannot reset `RenderRoot::pointer_captured`. So the root's
-/// `focus_active`/`ime_state` stay momentarily stale after a structural blur and
-/// self-correct on the next event pass (a `Down` re-evaluates focus/blur; a
-/// focus-routed event finds no focused pod and is ignored). This is the
-/// conservative, correct-by-convergence behavior — the same transient g5 already
-/// accepts for capture — not a new desync class.
+/// # RenderRoot notification: the orphan mark
+///
+/// Clearing `focused` here cannot notify [`RenderRoot`](frust_core::RenderRoot)
+/// directly — the rebuild pass runs over a [`BuildCtx`], with no `RenderRoot` in
+/// scope, exactly as the g5 capture-cancel cannot reset
+/// `RenderRoot::pointer_captured`. It instead raises the thread-local
+/// [`mark_focus_orphaned`](frust_core::mark_focus_orphaned) flag, which
+/// `RenderRoot::rebuild` drains at the end of the same rebuild and turns into a
+/// full focus/IME session release (`focus_active` cleared, the shell-facing
+/// surface dropped, one edge on the focus/IME generation).
+///
+/// **Why the mark and not convergence.** The previous behavior was to leave the
+/// root's `focus_active`/`ime_state` stale and let the next event pass
+/// self-correct. That is fine while the user keeps touching the screen and wrong
+/// the moment they stop: on an idle screen no next event arrives, so the root
+/// keeps reporting a live focus session for a widget that no longer exists —
+/// which strands `ime_state()` at the shell and (measured on a Xiaomi 12) held
+/// the mobile frame gate's focus input up permanently after a navigator pop.
+/// A session must die with its owner, not with the next tap.
+///
+/// **Why a thread-local and not a tree walk.** Validating the root's mirror
+/// against reality after the diff would need to ask "does any pod in the tree
+/// still hold focus?", and there is no such iterator: `Widget` exposes no
+/// children, so nothing can walk the retained tree generically. The mark is the
+/// only channel available from inside a `BuildCtx` pass, and it mirrors
+/// `mark_pending_result_flush`'s shape exactly (data-free, idempotent,
+/// UI-thread-affine).
+///
+/// **Residual: a stale flag can over-release.** A container-routed blur clears
+/// the focus link at the nearest common ancestor only, so `focused` flags
+/// *below* that link stay set until focus next enters the subtree (see
+/// [`route_event`]). If such a stale pod is later cleared or torn down while a
+/// *different* widget legitimately holds focus, this marks an orphan and the root
+/// releases a live session — the keyboard drops and the next tap re-establishes
+/// it. That is the same convergence the old behavior relied on, now in the
+/// conservative direction (a released session that should be live, rather than a
+/// live session that should be released, which never converged at all on an idle
+/// screen). Narrowing it would need the tree walk that does not exist.
 fn cancel_active_children(pods: &mut [ChildPod]) {
     for pod in pods.iter_mut() {
         if pod.is_active() {
@@ -358,6 +400,7 @@ fn cancel_active_children(pods: &mut [ChildPod]) {
         }
         if pod.is_focused() {
             pod.set_focused(false);
+            frust_core::mark_focus_orphaned();
         }
     }
 }
@@ -384,6 +427,15 @@ fn cancel_active_children(pods: &mut [ChildPod]) {
 /// structural-change-free rebuild leaves every recorded path untouched, so an
 /// ordinary every-frame rebuild never breaks a captured drag or dismisses the
 /// keyboard for an unchanged child.
+///
+/// **A child that does lose its focus path takes the root's session with it.**
+/// Every route that severs a recorded focus path here — a torn-down child
+/// ([`teardown_child`]), a cleared tail ([`cancel_active_children`]), a
+/// key-reused type swap — raises
+/// [`mark_focus_orphaned`](frust_core::mark_focus_orphaned), and
+/// `RenderRoot::rebuild` releases `focus_active`/`ime_state` before the frame
+/// ends rather than leaving them standing over a widget that no longer exists.
+/// See [`cancel_active_children`] for the mechanism and its residual.
 pub fn rebuild_children<State: 'static, C>(
     prev: &[C],
     next: &[C],
@@ -564,7 +616,13 @@ fn rebuild_children_keyed<State: 'static, C>(
                 // key-matched non-swap relocates its pod (and thus its recorded
                 // focus/capture flags) intact, so no clearing happens there.
                 pod.set_active(false);
-                pod.set_focused(false);
+                if pod.is_focused() {
+                    // The focused widget died inside the swap: the recorded focus
+                    // path is severed, so the root's session goes with it (see
+                    // `cancel_active_children`'s orphan-mark note).
+                    pod.set_focused(false);
+                    frust_core::mark_focus_orphaned();
+                }
             }
             new_pods.push(pod);
         } else {
@@ -861,6 +919,74 @@ mod tests {
         assert!(
             pod.is_active(),
             "a content-only rebuild must not clear an in-flight capture"
+        );
+    }
+
+    /// The producer half of the generic-unmount focus release: a reconciler that
+    /// severs a recorded focus path raises the orphan mark, which
+    /// `RenderRoot::rebuild` drains into a full session release (the consumer
+    /// half is pinned in `frust-core`'s
+    /// `generic_unmount_orphan_releases_the_whole_session`).
+    #[test]
+    fn a_truncated_focused_child_marks_the_focus_orphan() {
+        let _ = frust_core::take_focus_orphaned();
+        let mut counter = 0u64;
+        let prev: Vec<AnyView<()>> = vec![leaf_any(10.0, 10.0), leaf_any(10.0, 10.0)];
+        let mut pods: Vec<ChildPod> = prev
+            .iter()
+            .map(|v| build_child(v, &mut ctx(&mut counter)))
+            .collect();
+        // The second child holds the recorded focus path.
+        pods[1].set_focused(true);
+        assert!(
+            !frust_core::take_focus_orphaned(),
+            "building a list orphans nothing"
+        );
+
+        // Shrink the list: the focused child is torn down and dropped.
+        let next: Vec<AnyView<()>> = vec![leaf_any(10.0, 10.0)];
+        rebuild_children(
+            &prev,
+            &next,
+            &mut pods,
+            &mut ctx(&mut counter),
+            |v: &AnyView<()>| v,
+            |_: &AnyView<()>| None::<ChildKey>,
+        );
+        assert_eq!(pods.len(), 1);
+        assert!(
+            frust_core::take_focus_orphaned(),
+            "the focused child's unmount must be reported to the render root"
+        );
+    }
+
+    /// The negative guard: an ordinary content-only rebuild keeps the focus path
+    /// (Flutter's retention invariant) and must therefore orphan nothing — a mark
+    /// raised here would drop the keyboard on every frame.
+    #[test]
+    fn a_content_only_rebuild_marks_no_focus_orphan() {
+        let _ = frust_core::take_focus_orphaned();
+        let mut counter = 0u64;
+        let prev: Vec<AnyView<()>> = vec![leaf_any(10.0, 10.0), leaf_any(10.0, 10.0)];
+        let mut pods: Vec<ChildPod> = prev
+            .iter()
+            .map(|v| build_child(v, &mut ctx(&mut counter)))
+            .collect();
+        pods[1].set_focused(true);
+
+        let next: Vec<AnyView<()>> = vec![leaf_any(20.0, 20.0), leaf_any(20.0, 20.0)];
+        rebuild_children(
+            &prev,
+            &next,
+            &mut pods,
+            &mut ctx(&mut counter),
+            |v: &AnyView<()>| v,
+            |_: &AnyView<()>| None::<ChildKey>,
+        );
+        assert!(pods[1].is_focused(), "the focus path survives intact");
+        assert!(
+            !frust_core::take_focus_orphaned(),
+            "an unchanged child must not orphan the focus session"
         );
     }
 }

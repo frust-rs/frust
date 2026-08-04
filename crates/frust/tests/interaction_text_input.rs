@@ -694,8 +694,14 @@ fn disabling_a_focused_field_drops_the_keyboard_and_releases_focus() {
     let outcome = root.paint(&mut scene, FrameTime::ZERO);
 
     assert!(
-        !root.ime_state().expect("still published").active,
-        "the next paint hands the shell an inactive IME surface, dismissing the keyboard"
+        root.ime_state().is_none(),
+        "the next paint publishes an inactive IME surface, which releases the session \
+         (the shells serialise `None` to that same inactive wire form, so the keyboard \
+         still drops — see `RenderRoot::ime_state`)"
+    );
+    assert!(
+        !root.is_focus_active(),
+        "the released session takes the root's focus mirror with it"
     );
     assert!(
         !outcome.needs_frame,
