@@ -425,6 +425,8 @@ thread_local! {
     /// [`RenderRoot`](crate::app::RenderRoot) handle to reach, so it cannot
     /// clear the root's `focus_active`/`ime_state` mirror itself — the
     /// long-standing desync `frust-widgets`' `cancel_active_children` documents.
+    /// *Which* pods may raise it is narrowed by the pass's own focus chain
+    /// ([`crate::view::BuildCtx::has_focus`]) — see [`mark_focus_orphaned`].
     ///
     /// **Data-free on purpose, and idempotent.** Only the *fact* that some
     /// focused pod died rides here; there is nothing useful to carry (the root
@@ -445,9 +447,23 @@ thread_local! {
 /// [`RenderRoot::rebuild`](crate::app::RenderRoot::rebuild) releases the whole
 /// focus/IME session before the frame ends.
 ///
+/// # The invariant: a mark means a LIVE session lost its owner
+///
+/// Raise this only when the severed link was on the **live focus chain** — the
+/// pod's own `focused` flag AND
+/// [`BuildCtx::has_focus`](crate::view::BuildCtx::has_focus), the composed chain
+/// from the root down to it. A `focused` flag on its own is not evidence of a
+/// session: a container-routed blur clears the focus link at the nearest common
+/// ancestor only, so flags deeper in the blurred branch legitimately stay set,
+/// and marking on one of those releases whatever field is *actually* focused
+/// elsewhere in the tree — the keyboard dropping mid-typing because an unrelated
+/// list recycled a row. Every drain here performs a real, user-visible release;
+/// it must never fire on speculation.
+///
 /// Raised by `frust-widgets`' reconcilers (`teardown_child`,
-/// `cancel_active_children`, and the keyed path's type-swap arm); a hand-rolled
-/// container that clears a focused pod itself should raise it too.
+/// `cancel_active_children`, and the keyed path's type-swap arm), all three
+/// through one shared gate (`mark_orphan_if_live`); a hand-rolled container that
+/// clears a focused pod itself should raise it under the same condition.
 ///
 /// Idempotent and thread-affine, exactly like [`mark_pending_result_flush`].
 pub fn mark_focus_orphaned() {

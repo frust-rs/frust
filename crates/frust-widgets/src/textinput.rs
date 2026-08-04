@@ -2893,6 +2893,147 @@ mod tests {
         );
     }
 
+    // --- Cross-branch unmount: a stale flag must not kill a live session ------
+    //
+    // The shipped shape is a scrollable list above a persistent composer. The
+    // user taps a row's field, then taps the composer: `route_event`'s
+    // blur-on-outside-tap breaks the focus link at the NEAREST COMMON ANCESTOR
+    // (the outer Column's pod for the list branch), so the row field's own pod
+    // flag, one level deeper, legitimately stays set. The list then recycles /
+    // filters / shrinks and the generic reconciler tears that row down.
+    //
+    // The row owns no session — the composer does. A release here is a
+    // user-visible input regression: the keyboard drops mid-typing in a field
+    // nothing touched. The effective-focus chain threaded through `BuildCtx`
+    // (`has_focus`/`with_focus_link`) is what tells the two apart, and both
+    // directions are pinned below over the same fixture.
+
+    #[derive(Default)]
+    struct BranchState {
+        row: String,
+        composer: String,
+        show_row: bool,
+        show_composer: bool,
+    }
+
+    /// Outer Column: [ inner Column (the "list", 0-or-1 row field), composer
+    /// field ]. Each field's initial text names its branch, so `ime_state`
+    /// identifies which one owns the session.
+    fn branches_logic(state: &mut BranchState) -> crate::FlexView<BranchState> {
+        use frust_core::{AnyView, any};
+        let mut rows: Vec<AnyView<BranchState>> = Vec::new();
+        if state.show_row {
+            rows.push(any(text_input(
+                state.row.clone(),
+                |s: &mut BranchState, v: String| s.row = v,
+            )));
+        }
+        let mut outer: Vec<AnyView<BranchState>> = vec![any(crate::Column(rows))];
+        if state.show_composer {
+            outer.push(any(text_input(
+                state.composer.clone(),
+                |s: &mut BranchState, v: String| s.composer = v,
+            )));
+        }
+        crate::Column(outer)
+    }
+
+    /// Build the two-branch tree with both fields present, focus the ROW field,
+    /// then focus the COMPOSER — leaving the row's own pod flag stale below the
+    /// cleared outer link. Returns the root, its text context and the state.
+    fn focus_row_then_composer() -> (
+        RenderRoot<BranchState, crate::FlexView<BranchState>>,
+        frust_text::TextContext,
+        BranchState,
+    ) {
+        let mut state = BranchState {
+            row: "row".to_string(),
+            composer: "composer".to_string(),
+            show_row: true,
+            show_composer: true,
+        };
+        let mut root: RenderRoot<BranchState, crate::FlexView<BranchState>> = RenderRoot::new();
+        root.rebuild(&mut branches_logic, &mut state);
+        let mut tcx = frust_text::TextContext::new();
+        root.layout_with_text(Size::new(300.0, 200.0), &mut tcx as &mut dyn Any);
+
+        // Tap the row field (full Down+Up so the Up releases its capture and the
+        // next Down hit-tests afresh — see nested_blur_clears_ime_and_idles_paint).
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(
+            root.ime_state().map(|s| s.editing.text),
+            Some("row".to_string()),
+            "the row field owns the session first"
+        );
+
+        // Tap the composer: focus moves branches. The blur clears the link at the
+        // outer Column only; the row field's flag inside the inner Column stays.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 50.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 50.0));
+        assert!(root.is_focus_active());
+        assert_eq!(
+            root.ime_state().map(|s| s.editing.text),
+            Some("composer".to_string()),
+            "the composer now owns the session"
+        );
+        (root, tcx, state)
+    }
+
+    #[test]
+    fn tearing_down_a_stale_focused_branch_leaves_the_live_session_alone() {
+        let (mut root, _tcx, mut state) = focus_row_then_composer();
+        let ime_before = root.ime_state();
+        let gen_before = root.focus_ime_generation();
+
+        // The list shrinks: the row field — whose stale flag is still set — is
+        // torn down by the generic reconciler.
+        state.show_row = false;
+        root.rebuild(&mut branches_logic, &mut state);
+
+        assert!(
+            root.is_focus_active(),
+            "unmounting a stale-flagged row must not blur the composer the user is typing in"
+        );
+        assert_eq!(
+            root.ime_state(),
+            ime_before,
+            "the live IME surface is untouched by an unrelated branch's unmount"
+        );
+        assert_eq!(
+            root.focus_ime_generation(),
+            gen_before,
+            "zero spurious edges: the shell's frame gate must see no focus/IME change at all"
+        );
+    }
+
+    #[test]
+    fn tearing_down_the_live_focused_branch_still_releases_the_session() {
+        // The twin of the test above over the same fixture: when the pod that
+        // actually holds the session dies, the release must still happen — the
+        // narrowed gate must not have turned into "never mark".
+        let (mut root, _tcx, mut state) = focus_row_then_composer();
+        let gen_before = root.focus_ime_generation();
+
+        state.show_composer = false;
+        root.rebuild(&mut branches_logic, &mut state);
+
+        assert!(
+            !root.is_focus_active(),
+            "the focused composer's unmount releases the session"
+        );
+        assert_eq!(
+            root.ime_state(),
+            None,
+            "the shell-facing surface dies with the widget that published it"
+        );
+        assert_eq!(
+            root.focus_ime_generation(),
+            gen_before.wrapping_add(1),
+            "one orphaned live focus path is exactly one edge"
+        );
+    }
+
     /// A no-op paint sink for `needs_frame` assertions (glyph/rect output is not
     /// under test here).
     struct NullScene;

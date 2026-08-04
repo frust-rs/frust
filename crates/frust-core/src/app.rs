@@ -782,10 +782,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
 
         // Generic-unmount focus release. A reconciler that tears down (or
         // type-swaps, or clears the `focused` flag of) a child pod holding the
-        // recorded focus path has severed that path, but runs over a `BuildCtx`
-        // with no `RenderRoot` in scope — so it raises
+        // recorded focus path *on the live focus chain* has severed that path,
+        // but runs over a `BuildCtx` with no `RenderRoot` in scope — so it raises
         // `mark_focus_orphaned` and this drain performs the release the
-        // reconciler could not. Without it the root's mirror stays standing over
+        // reconciler could not. "On the live chain" is what `rebuild_view`'s seed
+        // buys: a mark means a live session lost its owner, never that some stale
+        // flag deep in an already-blurred branch went away (see
+        // `mark_focus_orphaned`). Without it the root's mirror stays standing over
         // a widget that no longer exists: `is_focus_active()` keeps reporting
         // true and `ime_state()` keeps handing the shell a surface for a dead
         // field, self-correcting only on the next event pass — which never
@@ -817,11 +820,26 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
 
     /// The rebuild body, split out so [`RenderRoot::rebuild`] can accumulate the
     /// result into [`RenderRoot::pending`] in one place.
+    ///
+    /// # Seeding the diff's focus chain
+    ///
+    /// The root is where the effective focus chain ([`BuildCtx::has_focus`])
+    /// starts: the root widget sits in no `ChildPod`, so its "link above" is the
+    /// root's own session mirror. A reconciler deep in the diff ANDs its pod's
+    /// `focused` flag onto this seed and marks an orphan only if the whole chain
+    /// holds — which is why the seed is "is there a session to lose" rather than
+    /// `focus_active` alone: an active surface parked without the flag is still a
+    /// live session `release_focus_session` would move. With neither set there is
+    /// nothing to release, so the seed is `false` and the diff marks nothing.
     fn rebuild_view(&mut self, view: V) -> ChangeFlags {
+        // Read before the `&mut self.next_id` borrow below (disjoint fields, but
+        // spelled out for the reader).
+        let session_live = self.focus_active || self.ime_state.is_some();
         match (self.root_id, self.prev_view.take()) {
             // Reconcile against the previous view of the same type.
             (Some(root_id), Some(prev)) => {
                 let mut ctx = BuildCtx::new(&mut self.next_id);
+                ctx.set_has_focus(session_live);
                 let flags = {
                     let pod = self
                         .tree
@@ -842,6 +860,10 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // First build: materialise the widget and insert it as the root.
             _ => {
                 let mut ctx = BuildCtx::new(&mut self.next_id);
+                // A first build tears nothing down, so the seed is moot — set it
+                // anyway so the rule is "the root always seeds the chain", with no
+                // arm exempt.
+                ctx.set_has_focus(session_live);
                 let id = ctx.alloc_id();
                 let element = view.build(&mut ctx);
                 let pod = WidgetPod::new(id, Box::new(element));

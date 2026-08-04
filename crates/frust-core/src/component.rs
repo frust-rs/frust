@@ -164,6 +164,11 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
             // A component-local build counter; the child never enters the arena.
             let mut next_id = 0u64;
             let mut inner = BuildCtx::new(&mut next_id);
+            // A freshly built child pod holds no focus link (`ChildPod::new`
+            // starts unfocused), so the chain across this boundary is closed —
+            // and a build tears nothing down, so nothing under it can orphan a
+            // session (see `BuildCtx::has_focus`).
+            inner.set_has_focus(false);
             let element: Box<dyn Widget> = view.build(&mut inner);
             // Double-box so a later rebuild can recover `&mut Box<dyn Widget>`.
             (state, view, ChildPod::new(Box::new(element)), next_id)
@@ -182,15 +187,24 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
         &self,
         _prev: &Self,
         element: &mut Self::Element,
-        _ctx: &mut BuildCtx<'_>,
+        ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         // The outer `_prev` ComponentView is intentionally unused: the component
         // always re-runs `build` because its retained local state may have
         // changed even when the component value is equal (tracked-scope skipping
         // is not implemented).
+        //
+        // The outer `ctx`, by contrast, is read for exactly one thing: the
+        // effective focus chain, which must cross this state boundary or every
+        // reconciler under a component would start a fresh (assumed-live) chain.
+        // Read here because the inner context is built inside the `owner.with`
+        // closure below, which cannot also borrow `ctx`.
+        let outer_has_focus = ctx.has_focus();
         let owner = element.owner.clone();
         owner.with(|| {
             let new_view = self.component.build(&mut element.state);
+            // Read before the `widget_mut` borrow below.
+            let child_focused = element.child.is_focused();
             let (flags, swapped) = {
                 let boxed = element
                     .child
@@ -202,6 +216,11 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
                     any.type_id()
                 };
                 let mut inner = BuildCtx::new(&mut element.next_id);
+                // Extend the chain by this component's own child link — the
+                // `ChildPod::paint_child` composition, spelled by hand because
+                // the component descends into its pod through a fresh inner
+                // context rather than through the pod plumbing.
+                inner.set_has_focus(outer_has_focus && child_focused);
                 let flags = new_view.rebuild(&element.prev, boxed, &mut inner);
                 let after = {
                     let any: &dyn Any = &**boxed;
@@ -221,12 +240,19 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
         })
     }
 
-    fn teardown(&self, element: &mut Self::Element, _ctx: &mut BuildCtx<'_>) {
+    fn teardown(&self, element: &mut Self::Element, ctx: &mut BuildCtx<'_>) {
         // Forward teardown to the child view/element under the component owner,
         // then dispose the owner (runs `on_cleanup`s) and let the state drop.
+        //
+        // The outer focus chain crosses the boundary here exactly as it does in
+        // `rebuild`: a component torn down *inside a live focus chain* must let
+        // the reconcilers below it mark the orphan, and one torn down under a
+        // cleared link must not (see `BuildCtx::has_focus`).
+        let inner_has_focus = ctx.has_focus() && element.child.is_focused();
         element.owner.clone().with(|| {
             let mut next_id = element.next_id;
             let mut inner = BuildCtx::new(&mut next_id);
+            inner.set_has_focus(inner_has_focus);
             if let Some(boxed) = element.child.widget_mut().downcast_mut::<Box<dyn Widget>>() {
                 element.prev.teardown(boxed, &mut inner);
             }
