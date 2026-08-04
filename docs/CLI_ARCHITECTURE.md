@@ -58,9 +58,9 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
 
 - `Cli` (`clap`) parses `argv` into an optional `Command`; with none given, `main` resolves a
   TTY-gated default (stdin and stdout must both be terminals) to `Command::Tui`, otherwise it
-  prints help and exits 2 (the script-facing no-subcommand contract is unchanged). `dispatch` then
-  builds the one `RealProcessRunner` and injects it into every handler — no handler ever shells out
-  directly.
+  prints help and exits 2 (exit code 2 is preserved; output moved from stderr usage-snippet to
+  stdout full help). `dispatch` then builds the one `RealProcessRunner` and injects it into every
+  handler — no handler ever shells out directly.
 - `create`: CLI args convert into `frust-drive::scaffold::generate`, which renders the embedded
   `templates/app/` tree against a `TemplateContext` — a pure file-write, no `ProcessRunner`
   involved.

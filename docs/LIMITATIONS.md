@@ -365,3 +365,54 @@ delete both) is deferred, not ruled on.
 `resyncImeMirror()`; no read of `imeResyncFrames` outside its own assignment);
 `74fa25f` (removed the gated `doFrame` consumer) and `bff5122` (found and
 documented while fixing `performEditorAction`'s mirror-resync gap).
+
+---
+
+### `tui-raw-mode-signing-scrub` — plaintext signing scrub unavailable from TUI session keyboard signal
+
+**Observed**: a TUI session keeps the terminal in raw mode (via `cfmakeraw`,
+clearing termios `ISIG`), so keyboard Ctrl-C is delivered as an input byte via
+crossterm — it never raises SIGINT. When `frust tui` launches an Android
+**release** build (via `frust-drive::android_build::signing::write_resolved` →
+`interrupt::install()`), the signal handler installs without error, but is
+inert for keyboard Ctrl-C. The plaintext `android/.frust-signing.properties`
+scrub cannot fire via the signal path; the `Drop` guard still covers normal
+returns, so the gap is signal-path-only: a wedged or manually killed TUI
+session can leave the plaintext file behind where a CLI run would have scrubbed
+it. Exposure increased 2026-08-04: bare `frust` now defaults into the TUI
+(single-binary convergence), making TUI sessions the common entry point for
+new-project scaffolding that triggers `frust tui create` (containing the
+plaintext signing credentials setup flow).
+
+This change also introduced a deliberate narrowing: `frust tui </dev/null` (stdin
+redirected, stdout a real terminal) previously worked via crossterm's `/dev/tty`
+fallback and is now refused by the TTY guard (both stdin and stdout must be
+real terminals). This gating is conservative by design — chosen to prevent
+edge-case stream-mixing errors.
+
+**Applies to**: Android release builds launched from a TUI session (an
+interactive terminal with both stdin and stdout connected) when the user presses
+Ctrl-C before the build completes and the process is not terminated gracefully.
+Desktop and iOS are unaffected — neither frust-drive's signing surface nor the
+interrupt handler's signal coverage differs for them, but neither has plaintext
+secrets on disk. Builds from the CLI (`frust build --release`, `frust run
+--release`) continue to scrub via the normal signal path regardless.
+
+**Why accepted**: the gap is pre-existing (the raw-mode/ISIG interaction has
+always existed when a TUI terminal is in raw mode), and deferred per Ed's
+review r0 (2026-08-04) on the single-binary branch. The narrowing of
+`frust tui </dev/null` (breaking the crossterm fallback path) was a deliberate
+trade-off in the same change, chosen as the conservative both-streams gate
+rather than attempting to support mixed-stream scenarios. The exposure increase
+is real: many new users will now encounter the TUI first before learning to
+run `frust create` from the CLI. Mitigation exists (signal-based scrub is one
+of two layers; the `Drop` guard still covers normal completion; a wedged session
+is rare and requires manual kill or loss of terminal connection) but closing
+the signal-path gap requires either breaking raw-mode semantics or introducing
+OS-specific platform code to detect the shell's raw-mode state and install an
+alternative cleanup mechanism — both deferred.
+
+**Evidence**: frust-single-binary review r0 (2026-08-04, committed feature
+branch 03-docs-entrypoint); verified research sweep (2026-08-03, confirmed
+crossterm's raw-mode ISIG clearing and raw-mode SIGINT immunity on Darwin and
+Linux manual testing; confirmed CLI path scrubs via signal, TUI path does not).
