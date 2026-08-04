@@ -5,17 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-# A library + a standalone binary. `frust-cli` gains a `frust tui` subcommand
-# that calls into the library; users also get the `frust-tui` binary
-# directly. Neither depends on the framework crates (same isolation charter as
-# `frust-cli`/`frust-drive` — see docs/ARCHITECTURE.md).
+# A library only, no standalone binary — consumed by `frust-cli`: both the
+# bare `frust` invocation and the `tui` subcommand call into it. Depends on no
+# framework crate (same isolation charter as `frust-cli`/`frust-drive` — see
+# docs/ARCHITECTURE.md).
 [lib]
 name = "frust_tui"
 path = "src/lib.rs"
-
-[[bin]]
-name = "frust-tui"
-path = "src/main.rs"
 
 [dependencies]
 # Shared drive pipelines (devices/doctor/run/build/scaffold) — project

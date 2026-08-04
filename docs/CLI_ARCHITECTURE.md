@@ -2,7 +2,9 @@
 
 ## Overview
 
-CLI is the standalone `frust` command-line tool and the drive library behind it. `frust-cli` is a
+CLI is the standalone `frust` command-line tool and the drive library behind it. `frust-cli` ships
+the single `frust` binary, which is also the TUI's front door: bare `frust` in an interactive
+terminal opens the TUI workbench, and the explicit `tui` subcommand does the same. `frust-cli` is a
 thin `clap` front-end with exactly one subcommand handler per command; `frust-drive` is the
 framework-free library doing the actual work — scaffolding new Frust projects, validating the local
 toolchain, discovering devices, and driving the Android/iOS run/build/clean pipelines. `frust-drive`
@@ -54,8 +56,13 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
 
 ## Data Flow
 
-- `Cli` (`clap`) parses `argv` into a `Command`; `commands::dispatch` builds the one
-  `RealProcessRunner` and injects it into every handler — no handler ever shells out directly.
+- `Cli` (`clap`) parses `argv` into an optional `Command`; with none given, `main` resolves a
+  TTY-gated default (stdin and stdout must both be terminals) to `Command::Tui`, otherwise it
+  prints help and exits 2 (exit code 2 is preserved; help content is unchanged — only the stream
+  moved, from stderr to stdout). The two non-interactive refusals deliberately differ in **exit code**, not just
+  wording — bare `frust` → help on stdout + exit 2; explicit `frust tui` → error on stderr + exit 1.
+  `dispatch` then builds the one `RealProcessRunner` and injects it into every handler — no handler
+  ever shells out directly.
 - `create`: CLI args convert into `frust-drive::scaffold::generate`, which renders the embedded
   `templates/app/` tree against a `TemplateContext` — a pure file-write, no `ProcessRunner`
   involved.
@@ -91,8 +98,8 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   (CI, a Gradle signing plugin) and warns on every release build instead of promising a signature it
   can't verify. `key.properties` + the four `ANDROID_*` variables remain as a fallback for a hand-run
   `./gradlew` (e.g. from Android Studio) — that path carries no Frust promise.
-- `tui`: `Command::Tui` hands off entirely to `frust-tui`'s own async runtime (see
-  [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)).
+- `tui` (explicit subcommand, or the bare-`frust` default above): `Command::Tui` hands off entirely
+  to `frust-tui`'s own async runtime (see [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)).
 - `plugin add`: `frust-drive::plugin::add_plugin` looks up a `PluginSpec` and applies its
   `Contribution`s as idempotent, format-preserving edits to a generated project (see
   [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md) for the plugins this distributes).
@@ -109,4 +116,4 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
 | `PluginSpec` / `Contribution` | A plugin registry entry and the idempotent project edits it applies |
 | `Manifest` / `SigningSection` / `SigningEnv` | Parsed `frust.toml` shape (`[app]`/`[android]`/`[ios]`/`[signing]`/`[signing.env]`) shared by every pipeline that reads the manifest |
 | `ResolvedSigning` / `GeneratedProperties` | The signing gate's one resolved-material value, and the owner-only generated-properties guard that writes/deletes it around a Gradle invocation |
-| `Cli` / `Command` | The `clap`-derived argument surface for the `frust` binary |
+| `Cli` / `Command` | The `clap`-derived argument surface for the `frust` binary; `Cli::command` is an `Option<Command>` so bare `frust` (no subcommand) resolves via the TTY-gated default rather than a clap parse error |

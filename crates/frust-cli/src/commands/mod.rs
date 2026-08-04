@@ -12,16 +12,26 @@ use crate::cli::{Cli, Command};
 use anyhow::{Context, Result};
 use frust_drive::process::RealProcessRunner;
 
-/// Runs the selected subcommand, returning the process exit code.
+/// Runs the given subcommand, returning the process exit code.
 ///
 /// The real [`RealProcessRunner`] is constructed here, in one place, and
 /// injected into every drive-touching handler's `run_in` core (the CLI's
 /// sole `Real` construction site); `create` takes no runner (it only writes
 /// files).
-pub fn dispatch(cli: Cli) -> Result<u8> {
+///
+/// Takes the already-resolved `Command` rather than `Cli` (whose `command`
+/// field is `Option<Command>`): `main` resolves bare `frust`'s `None` (TUI
+/// on a TTY, help + exit 2 otherwise) before ever calling `dispatch`, so the
+/// resolved command arrives here as a plain `Command`, not an `Option` —
+/// this is the single dispatch site for every `Command`, including the
+/// bare-`frust` default. The rest of `cli` (`verbose`, `device_id`) is still
+/// read from `&Cli`. Note `cli.command` has itself been `.take()`n by `main`
+/// before this call and is always `None` inside `dispatch`; handlers must
+/// read the `command` parameter, never `cli.command`.
+pub fn dispatch(command: Command, cli: &Cli) -> Result<u8> {
     let verbose = cli.verbose > 0;
     let runner = RealProcessRunner;
-    match cli.command {
+    match command {
         Command::Doctor => doctor::run_in(&runner, verbose),
         Command::Devices => devices::run_in(&runner, verbose),
         Command::Create {
@@ -56,7 +66,14 @@ pub fn dispatch(cli: Cli) -> Result<u8> {
             build,
             render_tier,
             watch,
-        } => run::run_in(&runner, build, cli.device_id, render_tier, watch, verbose),
+        } => run::run_in(
+            &runner,
+            build,
+            cli.device_id.clone(),
+            render_tier,
+            watch,
+            verbose,
+        ),
         Command::Build { target } => {
             let cwd = std::env::current_dir().context("reading current directory")?;
             build::run_in(&runner, &cwd, target)

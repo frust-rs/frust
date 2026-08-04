@@ -2,10 +2,12 @@
 
 ## Overview
 
-TUI is `frust-tui`, a standalone, mouse-first `ratatui` TEA (The Elm Architecture) terminal
-workbench for driving Frust app projects — scaffold/build/run/doctor/clean as supervised sessions
-across desktop/Android/iOS. It is built only on `frust-drive`, with zero dependency on any framework
-rendering crate, mirroring `frust-cli`'s tooling-isolation charter.
+TUI is `frust-tui`, a mouse-first `ratatui` TEA (The Elm Architecture) terminal workbench for
+driving Frust app projects — scaffold/build/run/doctor/clean as supervised sessions across
+desktop/Android/iOS. It is a library with no binary of its own, consumed by `frust-cli` (bare
+`frust` in an interactive terminal, or the explicit `tui` subcommand); it is built only on
+`frust-drive`, with zero dependency on any framework rendering crate, mirroring `frust-cli`'s
+tooling-isolation charter.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how TUI relates to the other units.
 
@@ -16,8 +18,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how TUI relates to the other units.
 | `engine` | Pure TEA core: `AppState` model, `Message` enum, `update()` pure transition returning `Outcome`/`Effect`; terminal-free and unit-testable without a TTY |
 | `supervise` | Session-supervision layer over `frust-drive`: drives per-session build/run lifecycles and bridges process output into engine messages |
 | `ui` | Render-only layer: paints `AppState` into `ratatui` frames and registers this frame's clickable/hoverable regions; never mutates engine state |
-| `runner` | Terminal lifecycle owner: raw-mode/panic-hook setup and the async event loop translating raw input into `Message`s and enacting `Effect`s |
-| `lib.rs` / `main.rs` | Public entry point (`run()`) shared by the standalone `frust-tui` binary and `frust-cli`'s `tui` subcommand |
+| `runner` | Terminal lifecycle owner: `run()` first refuses a non-interactive terminal (stdin and stdout must both be TTYs) with a clean error, then owns raw-mode/panic-hook setup and the async event loop translating raw input into `Message`s and enacting `Effect`s |
+| `lib.rs` | Public entry point (`run()`), reached only through `frust-cli` — no standalone binary |
 
 ## Layer Dependencies
 
