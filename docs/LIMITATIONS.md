@@ -340,3 +340,28 @@ the best-reasoned fix available, not as a verified fix.
 
 **Evidence**: `swiftc -typecheck` exit 0 (most recently this round's F2
 fix, see its commit message); no device or simulator run has occurred.
+
+---
+
+### `ime-android-resync-frames-dead` — `imeResyncFrames`/`resyncImeMirror()` are write-only, unreachable (Android)
+
+**Observed**: `FrustSurfaceView.imeResyncFrames` (a field) is set at both editor-
+action call sites (`performEditorAction`, `onKeyDown`) but never read back down,
+and `resyncImeMirror()` (a function) is declared but never called. Their gated
+consumer in `doFrame` was removed in `74fa25f` when that loop switched to an
+**unconditional** per-frame `pollImeAfterDispatch()` call, which reconciles the
+same staleness every frame without needing a counter.
+
+**Applies to**: Android only — `FrustSurfaceView.kt`'s IME mirror-resync path.
+
+**Why not fixed**: kept in place, not deleted, with corrected doc comments
+(`bff5122`) so a future reader isn't sent chasing a call site that no longer
+exists — misleading-but-harmless vestigial code, not a functional gap, since
+`doFrame`'s unconditional poll already covers what these existed to do. The
+cleanup decision (wire `imeResyncFrames` back to a real bounded purpose, or
+delete both) is deferred, not ruled on.
+
+**Evidence**: source inspection of `FrustSurfaceView.kt` (no call site for
+`resyncImeMirror()`; no read of `imeResyncFrames` outside its own assignment);
+`74fa25f` (removed the gated `doFrame` consumer) and `bff5122` (found and
+documented while fixing `performEditorAction`'s mirror-resync gap).
