@@ -15,8 +15,12 @@ pub struct Cli {
     #[arg(short = 'v', long = "verbose", global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
+    /// Subcommand to run. With none given, `frust` opens the TUI workbench
+    /// when both stdin and stdout are terminals; otherwise it prints this
+    /// help and exits 2 (see `commands::dispatch`/`main`'s default-action
+    /// resolution).
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -240,10 +244,18 @@ mod tests {
         Cli::command().debug_assert();
     }
 
+    /// Bare `frust` (no subcommand) parses fine — `command` resolves to
+    /// `None`, letting `main` decide the default action (TUI vs. help).
+    #[test]
+    fn parses_no_subcommand_as_none() {
+        let cli = Cli::try_parse_from(["frust"]).expect("bare `frust` should parse");
+        assert!(cli.command.is_none());
+    }
+
     #[test]
     fn parses_doctor() {
         let cli = Cli::parse_from(["frust", "doctor"]);
-        assert!(matches!(cli.command, Command::Doctor));
+        assert!(matches!(cli.command, Some(Command::Doctor)));
     }
 
     #[test]
@@ -251,13 +263,13 @@ mod tests {
         let cli = Cli::parse_from(["frust", "-v", "-v", "devices", "-d", "pixel"]);
         assert_eq!(cli.verbose, 2);
         assert_eq!(cli.device_id.as_deref(), Some("pixel"));
-        assert!(matches!(cli.command, Command::Devices));
+        assert!(matches!(cli.command, Some(Command::Devices)));
     }
 
     #[test]
     fn parses_create_dir_with_defaults() {
         let cli = Cli::parse_from(["frust", "create", "myapp"]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Create {
                 dir,
                 org,
@@ -286,7 +298,7 @@ mod tests {
             "dev.f0x",
             "--overwrite",
         ]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Create {
                 dir,
                 org,
@@ -314,7 +326,7 @@ mod tests {
             "--deeplink-host",
             "open",
         ]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Create {
                 deeplink_scheme,
                 deeplink_host,
@@ -330,7 +342,7 @@ mod tests {
     #[test]
     fn parses_create_without_deeplink_flags_defaults_to_none() {
         let cli = Cli::parse_from(["frust", "create", "myapp"]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Create {
                 deeplink_scheme,
                 deeplink_host,
@@ -347,7 +359,7 @@ mod tests {
     #[test]
     fn parses_create_with_arch_clean_signals() {
         let cli = Cli::parse_from(["frust", "create", "myapp", "--arch", "clean-signals"]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Create { arch, .. } => {
                 assert_eq!(arch, Some(ArchArg::CleanSignals));
             }
@@ -359,7 +371,7 @@ mod tests {
     #[test]
     fn parses_create_without_arch_defaults_to_none() {
         let cli = Cli::parse_from(["frust", "create", "myapp"]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Create { arch, .. } => assert_eq!(arch, None),
             other => panic!("expected Create, got {other:?}"),
         }
@@ -381,7 +393,7 @@ mod tests {
     #[test]
     fn parses_run_with_defaults() {
         let cli = Cli::parse_from(["frust", "run"]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Run {
                 build,
                 render_tier,
@@ -400,7 +412,7 @@ mod tests {
     #[test]
     fn parses_run_with_watch_flag() {
         let cli = Cli::parse_from(["frust", "run", "--watch"]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Run { watch, .. } => assert!(watch),
             other => panic!("expected Run, got {other:?}"),
         }
@@ -410,7 +422,7 @@ mod tests {
     fn parses_run_with_device_and_mode_flags() {
         let cli = Cli::parse_from(["frust", "-d", "emulator-5554", "run", "--release"]);
         assert_eq!(cli.device_id.as_deref(), Some("emulator-5554"));
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Run { build, .. } => assert!(build.release),
             other => panic!("expected Run, got {other:?}"),
         }
@@ -419,7 +431,7 @@ mod tests {
     #[test]
     fn parses_run_with_render_tier_gpu() {
         let cli = Cli::parse_from(["frust", "run", "--render-tier", "gpu"]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Run { render_tier, .. } => {
                 assert_eq!(render_tier, Some(RenderTierArg::Gpu));
             }
@@ -430,7 +442,7 @@ mod tests {
     #[test]
     fn parses_run_with_render_tier_cpu() {
         let cli = Cli::parse_from(["frust", "run", "--render-tier", "cpu"]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Run { render_tier, .. } => {
                 assert_eq!(render_tier, Some(RenderTierArg::Cpu));
             }
@@ -441,7 +453,7 @@ mod tests {
     #[test]
     fn parses_run_without_render_tier_is_none() {
         let cli = Cli::parse_from(["frust", "run"]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Run { render_tier, .. } => assert_eq!(render_tier, None),
             other => panic!("expected Run, got {other:?}"),
         }
@@ -474,7 +486,7 @@ mod tests {
             "--define",
             "A=B",
         ]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Build {
                 target: BuildTarget::Apk { build, .. },
             } => {
@@ -497,7 +509,7 @@ mod tests {
             "--target-platform",
             "android-arm64,android-x64",
         ]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Build {
                 target:
                     BuildTarget::Apk {
@@ -521,16 +533,16 @@ mod tests {
         let cli = Cli::parse_from(["frust", "build", "aab"]);
         assert!(matches!(
             cli.command,
-            Command::Build {
+            Some(Command::Build {
                 target: BuildTarget::Appbundle { .. }
-            }
+            })
         ));
     }
 
     #[test]
     fn parses_build_ios_flags() {
         let cli = Cli::parse_from(["frust", "build", "ios", "--simulator", "--no-codesign"]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Build {
                 target:
                     BuildTarget::Ios {
@@ -555,7 +567,7 @@ mod tests {
             "--export-method",
             "app-store-connect",
         ]);
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Build {
                 target: BuildTarget::Ipa { export_method, .. },
             } => {
@@ -574,12 +586,12 @@ mod tests {
     #[test]
     fn parses_clean() {
         let cli = Cli::parse_from(["frust", "clean"]);
-        assert!(matches!(cli.command, Command::Clean));
+        assert!(matches!(cli.command, Some(Command::Clean)));
     }
 
     #[test]
     fn parses_tui() {
         let cli = Cli::parse_from(["frust", "tui"]);
-        assert!(matches!(cli.command, Command::Tui));
+        assert!(matches!(cli.command, Some(Command::Tui)));
     }
 }
