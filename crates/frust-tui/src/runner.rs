@@ -58,9 +58,10 @@ const PAGE_LINES: u64 = 10;
 /// requiring stdin as well is a deliberate conservative narrowing on top of
 /// that, not a technical necessity — `crossterm` 0.29's `tty_fd()` falls back
 /// to opening `/dev/tty` when stdin isn't a TTY, so `frust tui </dev/null`
-/// used to work. This matches the CLI-side default gate (`frust-cli`'s
-/// `default_command`), and means that previously-working
-/// stdin-redirected/stdout-TTY configuration is now refused by design.
+/// used to work. This predicate has a twin, `frust-cli`'s `default_command`
+/// (`crates/frust-cli/src/main.rs`) — the two must move in lockstep — and
+/// means that previously-working stdin-redirected/stdout-TTY configuration
+/// is now refused by design.
 fn ensure_interactive_terminal(stdin_tty: bool, stdout_tty: bool) -> Result<()> {
     if stdin_tty && stdout_tty {
         Ok(())

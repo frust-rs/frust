@@ -21,10 +21,13 @@ use frust_drive::process::RealProcessRunner;
 ///
 /// Takes the already-resolved `Command` rather than `Cli` (whose `command`
 /// field is `Option<Command>`): `main` resolves bare `frust`'s `None` (TUI
-/// on a TTY, help + exit 2 otherwise) before ever calling `dispatch`, so no
-/// `Option` crosses this boundary — this is the single dispatch site for
-/// every `Command`, including the bare-`frust` default. The rest of `cli`
-/// (`verbose`, `device_id`) is still read from `&Cli`.
+/// on a TTY, help + exit 2 otherwise) before ever calling `dispatch`, so the
+/// resolved command arrives here as a plain `Command`, not an `Option` —
+/// this is the single dispatch site for every `Command`, including the
+/// bare-`frust` default. The rest of `cli` (`verbose`, `device_id`) is still
+/// read from `&Cli`. Note `cli.command` has itself been `.take()`n by `main`
+/// before this call and is always `None` inside `dispatch`; handlers must
+/// read the `command` parameter, never `cli.command`.
 pub fn dispatch(command: Command, cli: &Cli) -> Result<u8> {
     let verbose = cli.verbose > 0;
     let runner = RealProcessRunner;

@@ -383,42 +383,77 @@ returns, so the gap is signal-path-only. Exposure increased 2026-08-04: bare
 TUI's build launcher drives `frust-drive::android_build::build` in-process
 (`spawn_blocking`).
 
-This change also introduced a deliberate narrowing: `frust tui </dev/null` (stdin
-redirected, stdout a real terminal) previously worked via crossterm's `/dev/tty`
-fallback and is now refused by the TTY guard (both stdin and stdout must be
-real terminals). This gating is conservative by design — chosen to prevent
-edge-case stream-mixing errors.
+`kill <pid>` (SIGTERM) and terminal-close (SIGHUP) still scrub correctly in a
+TUI process — the same `ctrlc` `termination` feature + `frust-drive::interrupt`
+three-signal handler that covers the CLI; only the raw-mode-delivered keyboard
+Ctrl-C byte is inert. That signal path exits via `std::process::exit`, which
+bypasses the TUI's `ratatui::restore()`/mouse-capture teardown, so a
+SIGTERM'd TUI scrubs the plaintext file correctly but leaves the terminal in
+raw mode/alternate screen afterward (pre-existing, not a regression of this
+change; a shell `reset` recovers it).
 
-**Applies to**: Android release builds launched from a TUI session (an
-interactive terminal with both stdin and stdout connected) when the user presses
-Ctrl-C before the build completes and the process is not terminated gracefully.
-Desktop and iOS are unaffected — only the Android release path materialises
-plaintext signing material (`android_build::signing::write_resolved`, reached
-from the android_build and android_run release pipelines alone); desktop and
-iOS builds write no secret file, so a missed signal has nothing to leave behind.
-Builds from the CLI (`frust build --release`, `frust run --release`) continue to
-scrub via the normal signal path regardless.
+See also `tui-both-streams-tty-gate` below for a related, deliberate TTY-gate
+narrowing introduced in the same change.
+
+**Applies to**: every Android release build launched from a TUI session.
+Keyboard Ctrl-C neither scrubs nor cancels the build, so the plaintext window
+lasts until the build returns on its own; actual leakage still requires
+SIGKILL or a machine crash — unchanged from the CLI. Desktop and iOS are
+unaffected — only the Android release path materialises plaintext signing
+material (`android_build::signing::write_resolved`, reached from the
+android_build and android_run release pipelines alone); desktop and iOS
+builds write no secret file, so a missed signal has nothing to leave behind.
+Builds from the CLI (`frust build --release`, `frust run --release`) continue
+to scrub via the normal signal path regardless.
 
 **Why accepted**: the gap is pre-existing (the raw-mode/ISIG interaction has
 always existed when a TUI terminal is in raw mode), and deferred per Ed's
-review r0 (2026-08-04) on the single-binary branch. The narrowing of
-`frust tui </dev/null` (breaking the crossterm fallback path) was a deliberate
-trade-off in the same change, chosen as the conservative both-streams gate
-rather than attempting to support mixed-stream scenarios. The exposure increase
-is real: many new users will now encounter the TUI first. Mitigation exists
+review r0 (2026-08-04) on the single-binary branch. The exposure increase is
+real: many new users will now encounter the TUI first. Mitigation exists
 (signal-based scrub is one of two layers; the `Drop` guard still covers normal
-completion; actual leakage still requires SIGKILL or a machine crash, unchanged
-from the CLI), but closing the signal-path gap requires either breaking
-raw-mode semantics or introducing OS-specific platform code to detect the
-shell's raw-mode state and install an alternative cleanup mechanism — both
-deferred. The TUI-specific delta: keyboard Ctrl-C (a) raises no SIGINT, and (b)
-for build sessions cancels nothing — Ctrl-C maps to a stop-session effect that
-is a no-op for builds because the build launcher never registers with
-`Supervisor::sessions`, so the user believes the build was cancelled while it
-(and the plaintext file's open window) runs to completion.
+completion; SIGTERM/SIGHUP still scrub as above; actual leakage still
+requires SIGKILL or a machine crash, unchanged from the CLI), but closing the
+signal-path gap requires either breaking raw-mode semantics or introducing
+OS-specific platform code to detect the shell's raw-mode state and install an
+alternative cleanup mechanism — both deferred. The TUI-specific delta:
+keyboard Ctrl-C (a) raises no SIGINT, and (b) for build sessions cancels
+nothing — Ctrl-C maps to a stop-session effect that is a no-op for builds
+because the build launcher never registers with `Supervisor::sessions`, so the
+user believes the build was cancelled while it (and the plaintext file's open
+window) runs to completion. This false-cancellation UX plausibly steers a
+user toward a forceful kill (closing the terminal, `kill -9`) as the next
+step — the one documented leak vector; this is plausible, not measured.
 
 **Evidence**: frust-single-binary review r1 (2026-08-04); plan-verify sweep
 (wf_d589d3ec-080, confirmed crossterm's raw-mode ISIG clearing and raw-mode
 SIGINT immunity on Darwin and Linux manual testing; confirmed CLI path scrubs
 via signal, TUI path does not; confirmed build-launcher no-op on Ctrl-C
 cancel).
+
+---
+
+### `tui-both-streams-tty-gate` — the TUI's default-entry TTY gate requires both stdin and stdout
+
+**Observed**: bare `frust`'s TTY-gated default (see `docs/CLI_ARCHITECTURE.md`'s
+Data Flow) requires **both** stdin and stdout to be real terminals before it
+resolves to `Command::Tui`. stdout is the hard requirement — frames and help
+text render there; stdin is a deliberate conservative narrowing.
+`frust tui </dev/null` (stdin redirected, stdout a real terminal) previously
+worked via crossterm's `/dev/tty` fallback and is now refused by design. A
+pty-allocating automation harness (`ssh -t`, `docker run -it`, an `expect`
+script) still passes the gate by design — its stdin *is* a terminal — so a
+scripted bare `frust` invocation under one of those opens the interactive TUI
+rather than exiting 2.
+
+**Applies to**: any non-interactive or scripted invocation of bare `frust`
+that allocates a pty for stdin (the automation cases above), and any script
+relying on the old `frust tui </dev/null` behavior.
+
+**Why accepted**: chosen as the conservative both-streams gate over attempting
+to support mixed-stream scenarios (see `tui-raw-mode-signing-scrub` above for
+the related signal-handling gap introduced in the same change). There is
+deliberately no environment escape valve: `FRUST_NO_TUI` was considered and
+rejected by Ed (2026-08-04) — "frust --args for CLI and frust for TUI should
+cover everything."
+
+**Evidence**: frust-single-binary reviews r0-r2 (2026-08-04); plan-verify sweep.

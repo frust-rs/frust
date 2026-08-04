@@ -58,8 +58,8 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
 
 - `Cli` (`clap`) parses `argv` into an optional `Command`; with none given, `main` resolves a
   TTY-gated default (stdin and stdout must both be terminals) to `Command::Tui`, otherwise it
-  prints help and exits 2 (exit code 2 is preserved; output moved from stderr usage-snippet to
-  stdout full help). The two non-interactive refusals deliberately differ in **exit code**, not just
+  prints help and exits 2 (exit code 2 is preserved; help content is unchanged — only the stream
+  moved, from stderr to stdout). The two non-interactive refusals deliberately differ in **exit code**, not just
   wording — bare `frust` → help on stdout + exit 2; explicit `frust tui` → error on stderr + exit 1.
   `dispatch` then builds the one `RealProcessRunner` and injects it into every handler — no handler
   ever shells out directly.

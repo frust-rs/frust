@@ -83,7 +83,12 @@ fn bare_frust_with_no_tty_exits_2_with_help_on_stdout_and_silent_stderr() {
 /// Stdout is discarded (`Stdio::null()`, nothing reads it) rather than
 /// piped-and-unread: if the guard ever regressed and `ratatui::init()` ran
 /// anyway, a piped stdout no one reads would fill its OS pipe buffer and
-/// hang this test forever the moment the TUI tried to draw a frame.
+/// hang this test the moment the TUI tried to draw a frame, which
+/// `Stdio::null()` avoids. That removes the pipe-buffer hang specifically,
+/// not every possible hang: a regressed guard's child still shares this
+/// process's controlling terminal, so it could hang via crossterm's
+/// `/dev/tty` fallback instead. The clean, fast failure this test expects is
+/// guaranteed only where no controlling terminal exists at all (e.g. CI).
 ///
 /// The assertions are pinned to the guard's own contract — exit code 1 and
 /// its exact `"interactive terminal"` message on stderr — rather than the

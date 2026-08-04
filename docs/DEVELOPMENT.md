@@ -120,8 +120,10 @@ emulators (60Hz-only).
 ratatui workbench (scaffold/build/doctor/clean as supervised sessions, a fuzzy command palette, a
 bootstrap wizard, Add Plugin — `?` opens the full keybinding help overlay). Opening the workbench
 immediately runs device discovery, the doctor preflight, and the bootstrap report in the invoking
-directory, and records it in the recent-projects store (`~/.config/frust/tui.toml`) — the implicit
-side effects of the new default entry point. Both stdin and stdout must be TTYs: a non-interactive
+directory, and records the active project — the cwd-detected one, or (when the invoking directory
+isn't a Frust project) a re-stamp of the persisted most-recently-opened project, with no entry
+recorded if neither exists — in the recent-projects store (`~/.config/frust/tui.toml`), the
+implicit side effects of the new default entry point. Both stdin and stdout must be TTYs: a non-interactive
 bare `frust` prints help and exits 2, while a non-interactive `frust tui` returns a clean error
 instead of touching terminal state. A per-session perf sparkline parses `frust-perf` lines once
 `FRUST_TRACE` is set. `cargo test -p frust-tui` covers engine/render logic; live-terminal gestures
