@@ -51,9 +51,16 @@
 //! route down the focus path; after any edit the widget fires `on_change`, resets
 //! the caret to visible, and republishes the IME surface. The caret blinks while
 //! focused, its phase measured from the shared shell frame clock
-//! ([`PaintCtx::frame_time`] — no wall-clock reads in widget code) in
-//! `paint` via [`PaintCtx::request_frame`] — the same animation contract the
-//! scroll fling uses. An edit/focus during the (clockless) event pass flags the
+//! ([`PaintCtx::frame_time`] — no wall-clock reads in widget code) in `paint`.
+//! The continuation frame this requests is a paced (`CosmeticLoop`) request via
+//! [`PaintCtx::request_frame_paced`], the same classification the design-system
+//! decorative loops (skeleton/progress/dots/toast/spinner) use: the blink is an
+//! indefinite toggle with no user-visible endpoint, so the mobile frame gate may
+//! throttle its cadence without a perceptible glitch. This is safe at any
+//! repaint cadence because the phase is computed as `frame_time - blink_epoch`
+//! ([`caret_visible_at`](TextInputWidget::caret_visible_at)) — a pure function of
+//! the current frame's own timestamp, never of a delta between consecutive
+//! painted frames. An edit/focus during the (clockless) event pass flags the
 //! blink for reset; the next paint records the blink epoch from `frame_time`.
 //!
 //! # Multi-line mode
@@ -1589,11 +1596,15 @@ impl Widget for TextInputWidget {
             }
         }
 
-        // Caret: blink while focused. Requesting a frame keeps the desktop shell's
-        // wait-loop scheduling paints so the blink animates (the mobile shells'
-        // continuous loops already do). At rest (unfocused) we stop signalling.
+        // Caret: blink while focused. A paced (CosmeticLoop) continuation
+        // request keeps the desktop shell's wait-loop scheduling paints so the
+        // blink animates (the mobile shells' continuous loops already do), while
+        // letting the mobile frame gate throttle the cadence — the blink is an
+        // indefinite decorative toggle with no endpoint, the same classification
+        // as the design-system skeleton/progress/dots/toast/spinner loops. At
+        // rest (unfocused) we stop signalling.
         if focused {
-            ctx.request_frame();
+            ctx.request_frame_paced();
             // Republish the IME surface every painted frame while focused, so a
             // controlled change applied by a rebuild (a submit clearing the
             // field) refreshes the shell-facing state the event pass would
@@ -1615,7 +1626,7 @@ impl Widget for TextInputWidget {
             // publish an *inactive* IME surface so the shell dismisses the
             // keyboard on the very next frame rather than waiting for the
             // event-pass release (`release_focus_pending`). No caret, and no
-            // `request_frame` — a non-interactive field is at rest.
+            // frame request — a non-interactive field is at rest.
             let mut ime = self.current_ime_state(origin, size);
             ime.active = false;
             ime.caret = None;
@@ -2141,11 +2152,17 @@ mod tests {
             "an unfocused field is at rest"
         );
 
-        // Once focused, paint pumps the blink and asks for the next frame.
+        // Once focused, paint pumps the blink and asks for the next frame — a
+        // paced (CosmeticLoop) request, the same classification the
+        // design-system decorative loops (skeleton/progress/dots/toast) use,
+        // since the blink is an indefinite toggle with no endpoint the mobile
+        // frame gate may throttle.
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        let outcome = root.paint(&mut sink, FrameTime::ZERO);
+        assert!(outcome.needs_frame, "a focused field blinks its caret");
         assert!(
-            root.paint(&mut sink, FrameTime::ZERO).needs_frame,
-            "a focused field blinks its caret"
+            outcome.needs_frame_paced_only,
+            "the caret blink is a CosmeticLoop request — the frame gate must be able to pace it"
         );
     }
 
