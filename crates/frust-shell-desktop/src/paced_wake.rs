@@ -101,6 +101,15 @@ pub struct PacedDecision {
 /// below the theme's own ceiling. Both the cap and the fold are computed
 /// **only** on the branch that actually schedules, so a settling or
 /// immediate-redraw frame never runs that arithmetic.
+///
+/// **Overflow ceiling.** `requested_interval` always traces back to a
+/// widget's `frust_core::PaintCtx::request_frame_paced_at`, which clamps to
+/// `frust_core::PaintCtx::MAX_PACED_INTERVAL` (10s) before it is ever folded
+/// into `PaintOutcome::paced_interval` — so the `now + interval` addition
+/// below stays far below any panic-on-overflow `Instant` bound even at the
+/// widest legal input. This function performs no clamp of its own; it relies
+/// entirely on that upstream bound, the single entry point every paced
+/// interval flows through.
 pub fn next_paced_wake(
     needs_frame: bool,
     needs_frame_paced_only: bool,

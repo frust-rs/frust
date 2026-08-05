@@ -651,6 +651,15 @@ impl FrameGate {
     ///   several new intervals in the past). Adopting `now` at the fire is both
     ///   the burst-free and the stall-free answer: the flip costs at most one
     ///   fresh interval of wait, never a missed cadence.
+    ///
+    /// **Overflow ceiling.** `interval` here always traces back to a widget's
+    /// [`frust_core::PaintCtx::request_frame_paced_at`], which clamps to
+    /// [`frust_core::PaintCtx::MAX_PACED_INTERVAL`] (10s) before it is ever
+    /// folded into `PaintOutcome::paced_interval` — so `interval * 2` and
+    /// `interval.as_nanos() as u64` below stay far below `Duration`/`u64`
+    /// overflow or truncation even at the widest legal input. This function
+    /// performs no clamp of its own; it relies entirely on that upstream
+    /// bound, the single entry point every paced interval flows through.
     fn anchor_paced(&mut self, now: FrameTime, interval: std::time::Duration) {
         let next = match (self.last_paced_run, self.last_paced_interval) {
             (Some(last), Some(previous))
