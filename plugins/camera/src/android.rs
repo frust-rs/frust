@@ -1066,6 +1066,21 @@ impl SessionBackend for AndroidSession {
     /// Never blocks: the bind itself happens on the host's main thread and
     /// frames start arriving once it lands.
     ///
+    /// # Detach before refuse
+    ///
+    /// Any existing [`STREAMS`] entry / bound analyzer is detached
+    /// ([`Self::stop_image_stream`]) *before* [`stream_format_code`] gets a
+    /// chance to refuse [`ImageFormat::Bgra`] — that check has zero side
+    /// effects of its own, so running it first would leave a re-bind's
+    /// *previous* stream still bound with nothing left to route its frames
+    /// to. This mirrors Apple's `attach_stream`, which detaches
+    /// unconditionally ahead of its own (infallible) format map. It does not
+    /// make every refusal here detach-first, though: [`Self::ensure_open`]
+    /// above still runs first and can itself refuse
+    /// ([`CameraError::SessionClosed`]) before this detach — see
+    /// [`crate::CameraSession::start_image_stream`]'s doc for how a caller's
+    /// stream claim survives that.
+    ///
     /// # Errors
     /// [`CameraError::SessionClosed`] after [`Self::close`];
     /// [`CameraError::Platform`] for [`ImageFormat::Bgra`] (see
@@ -1076,6 +1091,11 @@ impl SessionBackend for AndroidSession {
         on_frame: Box<ImageFrameCallback>,
     ) -> Result<(), CameraError> {
         self.ensure_open()?;
+
+        // Detach first (see this method's doc's *Detach before refuse*) —
+        // a no-op if nothing is running.
+        self.stop_image_stream();
+
         let format_code = stream_format_code(format)?;
 
         // Register *before* the JNI call: the analyzer can deliver its first
