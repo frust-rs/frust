@@ -21,14 +21,25 @@
 //! doc): [`decode_luma`]'s zero-copy path (`Yuv420`) never outlives the
 //! callback, and the `Bgra` path's one scratch conversion buffer is
 //! allocated and dropped entirely within the call.
+//!
+//! # Streaming composition
+//!
+//! [`crate::CameraSession::start_barcode_stream`] is the one entry point
+//! that *does* touch the camera: it composes [`decode_frame`] with a live
+//! image stream and a [`DetectionPolicy`] (empty/duplicate-detection
+//! policy) — see [`stream`] for the composition itself, and
+//! [`crate::CameraError::StreamBusy`] for how it shares the session's
+//! single image stream with [`crate::CameraSession::start_image_stream`].
 
 mod engine;
 mod luma;
+pub mod stream;
 
 #[cfg(test)]
 mod conformance;
 
 pub use luma::{LumaView, LumaViewError};
+pub use stream::DetectionPolicy;
 
 use crate::{ImageFormat, ImageFrame};
 use engine::{BarcodeEngine, RqrrEngine};
@@ -73,6 +84,22 @@ pub struct Barcode {
     /// Detection quad, clockwise from top-left, in frame coordinates
     /// (pre-rotation). `None` when the engine can't report bounds.
     pub corners: Option<[BarcodePoint; 4]>,
+}
+
+/// Options for [`crate::CameraSession::start_barcode_stream`].
+///
+/// `Default`: `formats` empty ("all supported" — matching [`decode_luma`]'s
+/// own format-filter convention) and `detection` at [`DetectionPolicy`]'s
+/// own default (`Throttled` at its default interval).
+#[derive(Debug, Clone, Default)]
+pub struct BarcodeStreamOptions {
+    /// Which [`BarcodeFormat`]s to decode — an empty `Vec` means "all
+    /// supported" (mobile_scanner semantics, the same convention
+    /// [`decode_luma`]/[`decode_frame`] use).
+    pub formats: Vec<BarcodeFormat>,
+    /// When `on_detect` fires, relative to the underlying decode rate — see
+    /// [`DetectionPolicy`].
+    pub detection: DetectionPolicy,
 }
 
 /// Scan `luma` for every barcode matching `formats` (an empty slice means

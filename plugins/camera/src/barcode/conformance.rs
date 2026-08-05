@@ -63,7 +63,16 @@ fn dark_at_rotated(
 /// `module_px` pixels per module, with a [`QUIET_MODULES`]-module white
 /// quiet zone, optionally rotated by `quarter_turns` quarter turns.
 /// Returns `(buffer, side_px)` — the buffer is always square.
-fn render_qr_luma(payload: &str, module_px: usize, quarter_turns: u8) -> (Vec<u8>, usize) {
+///
+/// `pub(super)`: `barcode::stream`'s own replay tests reuse this builder
+/// rather than duplicating QR-fixture synthesis (`docs/DEVELOPMENT.md`'s
+/// task notes) — visible to `barcode` and its descendant modules, which
+/// covers the sibling `stream` module.
+pub(super) fn render_qr_luma(
+    payload: &str,
+    module_px: usize,
+    quarter_turns: u8,
+) -> (Vec<u8>, usize) {
     let code = qrcode::QrCode::new(payload.as_bytes()).expect("payload encodes to a valid QR code");
     let modules = code.width();
     let colors = code.to_colors();

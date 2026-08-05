@@ -195,7 +195,95 @@ full contract.
 
 ---
 
-## 4. Caveats
+## 4. Barcode stream
+
+`frust_camera::barcode` decodes QR codes from any luma buffer or
+[`ImageFrame`] standalone (no camera involved — see its own module doc).
+`CameraSession::start_barcode_stream` composes that decoder directly with
+the live camera feed:
+
+```rust
+use frust_camera::barcode::Barcode;
+use frust_camera::{BarcodeStreamOptions, DetectionPolicy};
+
+session.start_barcode_stream(
+    BarcodeStreamOptions {
+        formats: Vec::new(), // empty = all supported (v1: QR only)
+        detection: DetectionPolicy::NoDuplicates,
+    },
+    move |found: &[Barcode]| {
+        // never called with an empty slice
+        for barcode in found {
+            println!("{:?}", barcode.raw_value);
+        }
+    },
+)?;
+
+// later
+session.stop_barcode_stream();
+```
+
+### Same thread + close-deadline LAW as raw frames
+
+`on_detect` fires on the same plugin-owned thread `start_image_stream`'s
+callback runs on (never the UI thread) — the decode happens *inside* that
+callback, so the same rule applies: **never write a signal from inside
+it.** Hand detections off the same way `start_image_stream` consumers
+already have to — write into a plain `Arc<Mutex<..>>`/atomic cell from
+`on_detect`, and read it from the UI thread on the next rebuild (a timer or
+another signal write wakes one), or route the value through
+`frust_reactive::use_task`/`spawn_blocking` if it needs async follow-up work:
+
+```rust
+let last_detection: Arc<Mutex<Option<Barcode>>> = Arc::new(Mutex::new(None));
+let cell = Arc::clone(&last_detection);
+session.start_barcode_stream(BarcodeStreamOptions::default(), move |found| {
+    *cell.lock().unwrap() = found.first().cloned();
+})?;
+// `Component::build` reads `last_detection.lock().unwrap()` on its own next
+// rebuild — never inside `on_detect` itself.
+```
+
+### Occupancy: one session, one image stream
+
+`start_image_stream` and `start_barcode_stream` share the session's single
+underlying image stream — at most one can be active at a time:
+
+| Already running | New call | Result |
+|---|---|---|
+| (none) | `start_image_stream` | starts |
+| (none) | `start_barcode_stream` | starts |
+| `start_image_stream` | `start_image_stream` (again) | **allowed** — restarts at the newly requested format (existing behavior, unchanged) |
+| `start_image_stream` | `start_barcode_stream` | `CameraError::StreamBusy` — call `stop_image_stream()` first |
+| `start_barcode_stream` | `start_image_stream` | `CameraError::StreamBusy` — call `stop_barcode_stream()` first |
+| `start_barcode_stream` | `start_barcode_stream` (again) | `CameraError::StreamBusy` — **no** silent re-bind (keeps the running `DetectionPolicy`'s state unambiguous); call `stop_barcode_stream()` first, then start again |
+
+`stop_image_stream`/`stop_barcode_stream` each release only their own claim
+— stopping the wrong kind is a documented no-op, and `close()` releases
+whichever is held.
+
+### Detection policies
+
+`BarcodeStreamOptions::detection` decides when `on_detect` actually fires,
+relative to the underlying decode rate (default: `Throttled` at 250ms,
+matching the `mobile_scanner` package's own default):
+
+- **`NoDuplicates`** — emit each distinct value once; a value re-arms (may
+  emit again) only after it has been absent for 30 consecutive processed
+  frames (`mobile_scanner` parity is "until it leaves view" — this crate
+  approximates that with a frame count).
+- **`Throttled { interval }`** — decode, and therefore ever emit, at most
+  once per `interval`; frames inside the window skip the decoder entirely
+  (the cheap path). Emits are **not** deduplicated.
+- **`Unrestricted`** — every non-empty decode emits, no throttling or
+  deduplication.
+
+`formats: &[]` means "all supported" (empty = all, the same convention
+`decode_luma`/`decode_frame` use) — the v1 engine decodes QR only.
+
+---
+
+## 5. Caveats
 
 - **`frust create --overwrite` destroys these additions.** `--overwrite`
   re-renders the generated project wholesale, silently dropping the Gradle
@@ -224,7 +312,7 @@ full contract.
 
 ---
 
-## 5. The TUI Add Plugin dialog automates all of this
+## 6. The TUI Add Plugin dialog automates all of this
 
 Everything in §1 and §2 — the Cargo.toml dependency, the `:frust-camera`
 Gradle include plus its app-module dependency, the `FrustCamera` Swift

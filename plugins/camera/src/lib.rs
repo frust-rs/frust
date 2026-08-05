@@ -47,6 +47,10 @@
 //! [`ImageFrame`]s or a caller-supplied luma buffer — no camera involved,
 //! and no `cfg` of its own, so it builds and runs identically on every
 //! target this crate targets, including a plain desktop `cargo test`.
+//! [`CameraSession::start_barcode_stream`] composes it directly with the
+//! live image stream, sharing the session's single stream with
+//! [`CameraSession::start_image_stream`] under explicit single-occupancy
+//! rules — see [`CameraError::StreamBusy`].
 //!
 //! # Blocking API — pair with `spawn_blocking`, never the UI thread
 //!
@@ -94,8 +98,12 @@ mod unsupported;
 // — no `cfg` of its own (see the module doc), unlike the backends above.
 pub mod barcode;
 
+pub use barcode::{BarcodeStreamOptions, DetectionPolicy};
+
 use std::path::Path;
 use std::sync::Arc;
+
+use barcode::Barcode;
 
 /// Which physical camera to open.
 ///
@@ -270,6 +278,26 @@ pub enum CameraError {
     #[error("the camera is already in use")]
     InUse,
 
+    /// This session's single image stream is already claimed by the
+    /// *other* stream kind. [`CameraSession::start_image_stream`] refuses
+    /// while a [`CameraSession::start_barcode_stream`] composition is
+    /// active, and vice versa; a second
+    /// [`CameraSession::start_barcode_stream`] call while one is already
+    /// running is refused too (no silent re-bind, unlike
+    /// [`CameraSession::start_image_stream`]'s own restart-in-place
+    /// behavior — see that method's doc), so a running detection policy's
+    /// state never goes ambiguous. Distinct from [`Self::InUse`], which is
+    /// device-level (another session, or another app, holding the camera
+    /// itself) rather than a claim this crate arbitrates in-process.
+    ///
+    /// Call the matching `stop_image_stream`/`stop_barcode_stream` first,
+    /// then retry.
+    #[error(
+        "the camera session's image stream is already claimed by the other stream kind — call \
+         the matching stop_image_stream/stop_barcode_stream first"
+    )]
+    StreamBusy,
+
     /// An operation was attempted on a [`CameraSession`] after
     /// [`CameraSession::close`].
     #[error("the camera session is closed")]
@@ -392,7 +420,10 @@ impl Camera {
         let backend: Arc<dyn SessionBackend> =
             Arc::new(apple::AppleSession::open(lens, resolution)?);
 
-        Ok(CameraSession { backend })
+        Ok(CameraSession {
+            backend,
+            stream_claim: occupancy::StreamOccupancy::default(),
+        })
     }
 
     /// No camera backend exists on this target at all (module doc's
@@ -410,6 +441,9 @@ impl Camera {
 /// [`Camera::open`] selected.
 pub struct CameraSession {
     backend: Arc<dyn SessionBackend>,
+    /// Single-occupancy claim over this session's one image stream — see
+    /// [`CameraError::StreamBusy`]'s doc for the semantics this enforces.
+    stream_claim: occupancy::StreamOccupancy,
 }
 
 impl CameraSession {
@@ -475,10 +509,14 @@ impl CameraSession {
     /// contract and [`ImageFrameCallback`]'s threading contract.
     ///
     /// Never blocks on a frame; calling it again restarts the stream at the
-    /// newly requested format.
+    /// newly requested format — this raw-stream re-bind stays legal even
+    /// after this method started sharing the session's stream claim with
+    /// [`Self::start_barcode_stream`] (unchanged behavior).
     ///
     /// # Errors
-    /// [`CameraError::SessionClosed`] after [`Self::close`];
+    /// [`CameraError::StreamBusy`] while [`Self::start_barcode_stream`]
+    /// holds the session's stream claim — call [`Self::stop_barcode_stream`]
+    /// first. [`CameraError::SessionClosed`] after [`Self::close`];
     /// [`CameraError::Platform`] for [`ImageFormat::Bgra`] on Android (see
     /// that variant's doc), or if the platform refuses the stream.
     pub fn start_image_stream(
@@ -486,21 +524,253 @@ impl CameraSession {
         format: ImageFormat,
         on_frame: impl Fn(&ImageFrame<'_>) + Send + 'static,
     ) -> Result<(), CameraError> {
-        self.backend.start_image_stream(format, Box::new(on_frame))
+        self.stream_claim.claim_raw()?;
+        let result = self.backend.start_image_stream(format, Box::new(on_frame));
+        if result.is_err() {
+            // The attempt never actually started (or clobbered a prior
+            // raw stream while trying to rebind — both backends detach any
+            // existing stream before attempting the new one, so nothing is
+            // running now either way): release the claim rather than
+            // leaving a phantom "raw stream active" state behind.
+            self.stream_claim.release_raw();
+        }
+        result
     }
 
     /// Stop a stream started with [`Self::start_image_stream`], without
-    /// touching the preview. A no-op if no stream is running.
+    /// touching the preview. A no-op if no raw stream is running —
+    /// including while [`Self::start_barcode_stream`] holds the claim
+    /// instead, which this never touches (see [`CameraError::StreamBusy`]'s
+    /// doc).
     pub fn stop_image_stream(&self) {
-        self.backend.stop_image_stream();
+        if self.stream_claim.release_raw() {
+            self.backend.stop_image_stream();
+        }
+    }
+
+    /// Decodes barcodes on the live camera feed. Claims the session's
+    /// single image stream (see [`CameraError::StreamBusy`]); runs the
+    /// decoder inside the stream callback on the plugin-owned thread
+    /// (lossy-latest backpressure self-regulates decode cost — the same
+    /// contract [`Self::start_image_stream`] documents). `on_detect` fires
+    /// only when `opts.detection` emits — **never** with an empty slice —
+    /// on that same thread: the [`ImageFrame`] callback rules apply, no
+    /// signal writes; hand off via `frust_reactive::use_task` or a
+    /// rescheduled write.
+    ///
+    /// Always requests [`ImageFormat::Yuv420`] internally — the format
+    /// [`barcode::decode_frame`] takes its zero-copy path for;
+    /// [`ImageFormat::Bgra`] has no barcode-decode path of its own.
+    ///
+    /// # Errors
+    /// [`CameraError::StreamBusy`] while [`Self::start_image_stream`]'s raw
+    /// stream, or another [`Self::start_barcode_stream`] call, already
+    /// holds the claim — no silent re-bind (unlike
+    /// [`Self::start_image_stream`]), so a running [`DetectionPolicy`]'s
+    /// state never goes ambiguous; call [`Self::stop_barcode_stream`] first.
+    /// Otherwise the same errors [`Self::start_image_stream`] can report.
+    pub fn start_barcode_stream(
+        &self,
+        opts: BarcodeStreamOptions,
+        on_detect: impl Fn(&[Barcode]) + Send + 'static,
+    ) -> Result<(), CameraError> {
+        self.stream_claim.claim_barcode()?;
+        let callback = barcode::stream::build_callback(opts, on_detect);
+        let result = self
+            .backend
+            .start_image_stream(ImageFormat::Yuv420, Box::new(callback));
+        if result.is_err() {
+            self.stream_claim.release_barcode();
+        }
+        result
+    }
+
+    /// Stops a running barcode stream (no-op if none — including while
+    /// [`Self::start_image_stream`] holds the claim instead, which this
+    /// never touches). Releases the stream claim.
+    pub fn stop_barcode_stream(&self) {
+        if self.stream_claim.release_barcode() {
+            self.backend.stop_image_stream();
+        }
     }
 
     /// Close the session and release the camera, stopping any running image
-    /// stream with it. A no-op if already closed; every subsequent fallible
-    /// [`CameraSession`] method call reports
+    /// or barcode stream with it. A no-op if already closed; every
+    /// subsequent fallible [`CameraSession`] method call reports
     /// [`CameraError::SessionClosed`].
     pub fn close(&self) {
+        self.stream_claim.clear();
         self.backend.close();
+    }
+}
+
+// --- Stream occupancy --------------------------------------------------------
+
+/// Single-occupancy claim over a [`CameraSession`]'s one image stream — see
+/// [`CameraError::StreamBusy`]'s doc for the full semantics table this
+/// enforces.
+///
+/// Pure state machine, deliberately backend-independent — like
+/// [`capture`] below, it lives in the platform-independent crate root
+/// rather than beside a `#[cfg]`-gated backend, but for a stronger reason
+/// than that module's "only compiles for one target": [`CameraSession`]
+/// cannot even be *constructed* on this desktop `cargo test` host at all
+/// ([`unsupported::open`] fails before ever building one, per that module's
+/// doc), so the tests below check the claim directly instead of going
+/// through a real session.
+mod occupancy {
+    use std::sync::Mutex;
+
+    use crate::CameraError;
+
+    /// Which kind of stream, if any, currently holds the claim.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    enum Claim {
+        #[default]
+        None,
+        Raw,
+        Barcode,
+    }
+
+    /// [`crate::CameraSession`]'s second field, alongside `backend`.
+    #[derive(Debug, Default)]
+    pub(crate) struct StreamOccupancy(Mutex<Claim>);
+
+    impl StreamOccupancy {
+        fn lock(&self) -> std::sync::MutexGuard<'_, Claim> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+
+        /// [`crate::CameraSession::start_image_stream`]'s occupancy check:
+        /// refused only while a barcode stream holds the claim; re-binds
+        /// freely otherwise — the existing raw-stream restart behavior,
+        /// unchanged by this claim.
+        pub(crate) fn claim_raw(&self) -> Result<(), CameraError> {
+            let mut claim = self.lock();
+            if *claim == Claim::Barcode {
+                return Err(CameraError::StreamBusy);
+            }
+            *claim = Claim::Raw;
+            Ok(())
+        }
+
+        /// [`crate::CameraSession::start_barcode_stream`]'s occupancy
+        /// check: refused while *either* a raw stream or another barcode
+        /// stream already holds the claim — no silent re-bind, unlike
+        /// [`Self::claim_raw`] (keeps a running `DetectionFilter`'s state
+        /// unambiguous).
+        pub(crate) fn claim_barcode(&self) -> Result<(), CameraError> {
+            let mut claim = self.lock();
+            if *claim != Claim::None {
+                return Err(CameraError::StreamBusy);
+            }
+            *claim = Claim::Barcode;
+            Ok(())
+        }
+
+        /// [`crate::CameraSession::stop_image_stream`]: clears the claim
+        /// only if a raw stream currently holds it, and reports whether it
+        /// did — the caller uses this to decide whether to actually reach
+        /// the backend, since stopping the wrong kind must be a pure no-op
+        /// (never touching a running barcode stream).
+        pub(crate) fn release_raw(&self) -> bool {
+            let mut claim = self.lock();
+            if *claim == Claim::Raw {
+                *claim = Claim::None;
+                true
+            } else {
+                false
+            }
+        }
+
+        /// Mirrors [`Self::release_raw`] for
+        /// [`crate::CameraSession::stop_barcode_stream`].
+        pub(crate) fn release_barcode(&self) -> bool {
+            let mut claim = self.lock();
+            if *claim == Claim::Barcode {
+                *claim = Claim::None;
+                true
+            } else {
+                false
+            }
+        }
+
+        /// [`crate::CameraSession::close`]: clears the claim
+        /// unconditionally, regardless of which kind (if any) held it.
+        pub(crate) fn clear(&self) {
+            *self.lock() = Claim::None;
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn raw_then_raw_is_a_legal_rebind() {
+            let occ = StreamOccupancy::default();
+            assert!(occ.claim_raw().is_ok());
+            assert!(occ.claim_raw().is_ok(), "raw re-bind stays legal");
+        }
+
+        #[test]
+        fn raw_while_barcode_active_is_busy() {
+            let occ = StreamOccupancy::default();
+            occ.claim_barcode().unwrap();
+            assert!(matches!(occ.claim_raw(), Err(CameraError::StreamBusy)));
+        }
+
+        #[test]
+        fn barcode_while_raw_active_is_busy() {
+            let occ = StreamOccupancy::default();
+            occ.claim_raw().unwrap();
+            assert!(matches!(occ.claim_barcode(), Err(CameraError::StreamBusy)));
+        }
+
+        #[test]
+        fn barcode_while_barcode_active_is_busy_no_silent_rebind() {
+            let occ = StreamOccupancy::default();
+            occ.claim_barcode().unwrap();
+            assert!(matches!(occ.claim_barcode(), Err(CameraError::StreamBusy)));
+        }
+
+        #[test]
+        fn stop_clears_only_its_own_kind() {
+            let occ = StreamOccupancy::default();
+
+            occ.claim_raw().unwrap();
+            assert!(
+                !occ.release_barcode(),
+                "stopping barcode while raw is active is a no-op"
+            );
+            assert!(occ.release_raw(), "stopping raw actually releases it");
+            assert!(!occ.release_raw(), "a second stop is a no-op");
+
+            occ.claim_barcode().unwrap();
+            assert!(
+                !occ.release_raw(),
+                "stopping raw while barcode is active is a no-op"
+            );
+            assert!(occ.release_barcode());
+        }
+
+        #[test]
+        fn close_clears_any_claim() {
+            let occ = StreamOccupancy::default();
+            occ.claim_barcode().unwrap();
+            occ.clear();
+            assert!(occ.claim_raw().is_ok(), "claim released after clear");
+        }
+
+        #[test]
+        fn a_released_claim_can_be_reclaimed_by_either_kind() {
+            let occ = StreamOccupancy::default();
+            occ.claim_raw().unwrap();
+            occ.release_raw();
+            assert!(occ.claim_barcode().is_ok());
+        }
     }
 }
 
