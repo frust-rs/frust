@@ -99,8 +99,9 @@ use objc2_av_foundation::{
     AVCaptureOutput, AVCapturePhoto, AVCapturePhotoCaptureDelegate, AVCapturePhotoOutput,
     AVCapturePhotoSettings, AVCaptureSession, AVCaptureSessionPreset,
     AVCaptureSessionPreset640x480, AVCaptureSessionPreset1280x720, AVCaptureSessionPreset1920x1080,
-    AVCaptureSessionPreset3840x2160, AVCaptureSessionPresetPhoto, AVCaptureVideoDataOutput,
-    AVCaptureVideoDataOutputSampleBufferDelegate, AVError, AVMediaType, AVMediaTypeVideo,
+    AVCaptureSessionPreset3840x2160, AVCaptureSessionPresetPhoto, AVCaptureTorchMode,
+    AVCaptureVideoDataOutput, AVCaptureVideoDataOutputSampleBufferDelegate, AVError, AVMediaType,
+    AVMediaTypeVideo,
 };
 use objc2_core_media::{
     CMSampleBuffer, CMTime, CMTimeFlags, CMVideoFormatDescriptionGetDimensions,
@@ -484,6 +485,65 @@ impl SessionInner {
         self.on_queue(detach_stream);
     }
 
+    /// See [`crate::CameraSession::set_torch`].
+    ///
+    /// **Still within the non-blocking contract.** [`Self::on_queue`] is an
+    /// `exec_sync` hop onto this session's serial queue, exactly like
+    /// [`Self::close`]: the body is a handful of message sends on an
+    /// already-open device with no platform answer to wait for, so the only
+    /// thing that could delay it is another body already on that queue —
+    /// never a capture round trip or a user dialog, which is what the crate
+    /// doc's *Blocking API* table is about. The torch is device state, not
+    /// stream state, so it survives
+    /// [`Self::start_image_stream`]/[`Self::stop_image_stream`] and goes out
+    /// with the device [`Self::close`] releases.
+    ///
+    /// # Errors
+    /// [`CameraError::SessionClosed`] after [`Self::close`];
+    /// [`CameraError::Platform`] when the lens has no torch (or cannot take
+    /// the requested mode) and when `lockForConfiguration:` fails — the
+    /// device is being reconfigured by someone else, and the request is
+    /// dropped rather than retried.
+    fn set_torch(&self, on: bool) -> Result<(), CameraError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(CameraError::SessionClosed);
+        }
+
+        let outcome: Mutex<Result<(), String>> = Mutex::new(Ok(()));
+        {
+            let outcome = &outcome;
+            self.on_queue(move |objects| {
+                *outcome.lock().unwrap_or_else(|e| e.into_inner()) = set_device_torch(objects, on);
+            });
+        }
+        outcome
+            .into_inner()
+            .unwrap_or_else(|e| e.into_inner())
+            .map_err(CameraError::Platform)
+    }
+
+    /// See [`crate::CameraSession::torch_available`] — `hasTorch &&
+    /// isTorchAvailable` on this session's own device, read on the session
+    /// queue like every other device property in this backend.
+    ///
+    /// Both halves matter: `hasTorch` is the lens's permanent capability
+    /// (false on every front camera), while `isTorchAvailable` is transient —
+    /// AVFoundation withdraws the torch while the device is cooling off, and
+    /// a control offered then would simply do nothing.
+    fn torch_available(&self) -> bool {
+        if self.closed.load(Ordering::Acquire) {
+            return false;
+        }
+        let available = AtomicBool::new(false);
+        {
+            let available = &available;
+            self.on_queue(move |objects| {
+                available.store(device_torch_available(objects), Ordering::Relaxed);
+            });
+        }
+        available.load(Ordering::Relaxed)
+    }
+
     /// See [`crate::CameraSession::close`] — idempotent.
     fn close(&self) {
         if self.closed.swap(true, Ordering::AcqRel) {
@@ -705,6 +765,14 @@ impl SessionBackend for AppleSession {
 
     fn stop_image_stream(&self) {
         self.inner.stop_image_stream();
+    }
+
+    fn set_torch(&self, on: bool) -> Result<(), CameraError> {
+        self.inner.set_torch(on)
+    }
+
+    fn torch_available(&self) -> bool {
+        self.inner.torch_available()
     }
 
     fn close(&self) {
@@ -1392,6 +1460,66 @@ fn set_legacy_video_orientation(connection: &AVCaptureConnection) {
         if connection.isVideoOrientationSupported() {
             connection.setVideoOrientation(AVCaptureVideoOrientation::Portrait);
         }
+    }
+}
+
+// --- Torch ------------------------------------------------------------------
+
+/// [`SessionInner::set_torch`]'s body, run on the session's serial queue.
+///
+/// The device is reached through the input this session already holds
+/// ([`AvObjects::input`]) — the same read [`configure`] makes for geometry —
+/// rather than re-discovering it, so the torch is always the lens this
+/// session is actually streaming.
+fn set_device_torch(objects: &AvObjects, on: bool) -> Result<(), String> {
+    // SAFETY: `device` is a read-only property of the input this session owns
+    // (the precedent read in `configure`), taken on the session's own serial
+    // queue like every other device access in this module.
+    let device = unsafe { objects.input.device() };
+    let mode = if on {
+        AVCaptureTorchMode::On
+    } else {
+        AVCaptureTorchMode::Off
+    };
+
+    // SAFETY: `hasTorch`/`isTorchModeSupported:` are read-only queries, and
+    // they are precisely the predicates `setTorchMode:` documents as its
+    // preconditions — an unsupported mode raises `NSInvalidArgumentException`
+    // and a write without the configuration lock raises `NSGenericException`,
+    // neither of which Rust could catch. The lock/unlock pair below is the
+    // documented bracket for that write.
+    unsafe {
+        if !device.hasTorch() || !device.isTorchModeSupported(mode) {
+            return Err(
+                "apple camera backend: this capture device has no controllable torch (most front \
+                 lenses, and any device without a flash unit)"
+                    .to_string(),
+            );
+        }
+        device.lockForConfiguration().map_err(|error| {
+            format!(
+                "apple camera backend: could not lock the device to set the torch ({})",
+                describe(&error)
+            )
+        })?;
+        device.setTorchMode(mode);
+        // Released immediately: holding the configuration lock keeps every
+        // other client (and AVFoundation's own automatic adjustments) from
+        // touching the device, and this write needs it for one message only.
+        device.unlockForConfiguration();
+    }
+    Ok(())
+}
+
+/// [`SessionInner::torch_available`]'s body, run on the session's serial
+/// queue: the lens's permanent capability **and** its current availability
+/// (the torch is withdrawn while the device cools off).
+fn device_torch_available(objects: &AvObjects) -> bool {
+    // SAFETY: as in `set_device_torch` — a read-only property read on the
+    // session's own device, from that session's serial queue.
+    unsafe {
+        let device = objects.input.device();
+        device.hasTorch() && device.isTorchAvailable()
     }
 }
 

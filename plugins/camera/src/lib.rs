@@ -82,6 +82,13 @@
 //! [`Camera::request_permission`] when the authorization status is already
 //! decided (granted/denied/restricted) returns straight away and is never
 //! refused — only the prompt-and-wait path is guarded.
+//!
+//! [`CameraSession::set_torch`] and [`CameraSession::torch_available`] are
+//! deliberately **not** rows in the table above: neither waits on a platform
+//! answer (Android hands CameraX a fire-and-forget `enableTorch`; Apple takes
+//! one short synchronous hop onto the session's own serial queue, the same
+//! shape [`CameraSession::close`] uses), so both stay callable from any
+//! thread — including the UI thread — and neither needs `spawn_blocking`.
 
 // Platform backends (the crate + frozen contract landed first; the real
 // implementations filled in behind the same
@@ -353,6 +360,26 @@ pub(crate) trait SessionBackend: Send + Sync {
     ) -> Result<(), CameraError>;
     /// See [`CameraSession::stop_image_stream`].
     fn stop_image_stream(&self);
+    /// See [`CameraSession::set_torch`].
+    ///
+    /// The allowance mirrors [`capture`]'s: on a target with no camera
+    /// backend [`CameraSession`]'s torch methods answer from [`unsupported`]
+    /// instead of dispatching here (they are cfg-split like [`Camera::open`]),
+    /// so this declaration is legitimately uncalled there — and nothing
+    /// implements this trait on that target anyway. The trait keeps one shape
+    /// on every target rather than growing a `cfg` of its own.
+    #[cfg_attr(
+        not(any(target_os = "android", target_vendor = "apple")),
+        allow(dead_code)
+    )]
+    fn set_torch(&self, on: bool) -> Result<(), CameraError>;
+    /// See [`CameraSession::torch_available`] (and [`Self::set_torch`] for
+    /// the allowance).
+    #[cfg_attr(
+        not(any(target_os = "android", target_vendor = "apple")),
+        allow(dead_code)
+    )]
+    fn torch_available(&self) -> bool;
     /// See [`CameraSession::close`].
     fn close(&self);
 }
@@ -592,6 +619,63 @@ impl CameraSession {
         if self.stream_claim.release_barcode() {
             self.backend.stop_image_stream();
         }
+    }
+
+    /// Turns the torch (the flash unit held on, in continuous mode) on or
+    /// off.
+    ///
+    /// **Non-blocking, callable from any thread — including the UI thread**
+    /// (module doc's *Blocking API*): Android hands CameraX a fire-and-forget
+    /// `enableTorch` without waiting on its `ListenableFuture`, and Apple
+    /// takes one short synchronous hop onto the session's serial queue.
+    ///
+    /// Torch is **session-level** state: it survives
+    /// [`Self::start_image_stream`]/[`Self::start_barcode_stream`] and their
+    /// stops (a stream never touches it) and dies with [`Self::close`], which
+    /// releases the camera device and with it the torch.
+    ///
+    /// # Errors
+    /// [`CameraError::SessionClosed`] after [`Self::close`];
+    /// [`CameraError::Platform`] where the active lens has no controllable
+    /// torch (see [`Self::torch_available`]), where the platform has not
+    /// finished binding the camera yet (Android: before CameraX's first
+    /// `bindToLifecycle` completes — retry, this is not a permanent
+    /// refusal), or where the platform refuses the request;
+    /// [`CameraError::PlatformNotInitialized`] on a target with no camera
+    /// backend at all.
+    #[cfg(any(target_os = "android", target_vendor = "apple"))]
+    pub fn set_torch(&self, on: bool) -> Result<(), CameraError> {
+        self.backend.set_torch(on)
+    }
+
+    /// No camera backend exists on this target at all (module doc's
+    /// *Backends*), so the torch fails soft exactly like every other call —
+    /// see [`Camera::open`]'s own unsupported arm, which is why no
+    /// [`CameraSession`] can even exist here to call this.
+    #[cfg(not(any(target_os = "android", target_vendor = "apple")))]
+    pub fn set_torch(&self, on: bool) -> Result<(), CameraError> {
+        let _ = on;
+        unsupported::set_torch()
+    }
+
+    /// Whether the active lens has a controllable torch.
+    ///
+    /// `false` on a device with no flash unit, on most front lenses, on every
+    /// target with no camera backend, and after [`Self::close`]. Infallible by
+    /// API shape: a platform query that fails is reported as `false` (and
+    /// logged) rather than as an error, since a caller can only use this to
+    /// decide whether to offer a torch control.
+    ///
+    /// Non-blocking and callable from any thread, like [`Self::set_torch`].
+    #[cfg(any(target_os = "android", target_vendor = "apple"))]
+    pub fn torch_available(&self) -> bool {
+        self.backend.torch_available()
+    }
+
+    /// See [`Self::set_torch`]'s unsupported arm — always `false`.
+    #[cfg(not(any(target_os = "android", target_vendor = "apple")))]
+    pub fn torch_available(&self) -> bool {
+        unsupported::torch_available()
     }
 
     /// Close the session and release the camera, stopping any running image

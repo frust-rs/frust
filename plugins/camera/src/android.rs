@@ -36,6 +36,18 @@
 //! | `startImageStream` | `(int session, int format) -> int` | `0` started (frames arrive via [`Java_dev_frust_camera_FrustCameraHost_nativeOnImageFrame`]); <0 refused. `format`: [`FORMAT_CODE_YUV420`] / [`FORMAT_CODE_BGRA`] (Android refuses the latter — see [`stream_format_code`]) |
 //! | `stopImageStream` | `(int session) -> void` | Unbinds the `ImageAnalysis` use case only; the preview keeps running |
 //!
+//! ### Additive entries (post-freeze)
+//!
+//! The table above is frozen verbatim; a capability added later arrives as an
+//! **additional static**, never as a changed row — the same additive rule
+//! `nativeOnImageFrame` followed on the Kotlin → Rust side below.
+//! `FrustCameraHost.kt`'s copy of this section is its mirror.
+//!
+//! | Method | Signature (Java) | Notes |
+//! |---|---|---|
+//! | `setTorch` | `(int session, boolean on) -> int` | [`TORCH_SET`] accepted (the host does **not** wait on `enableTorch`'s `ListenableFuture` — see [`AndroidSession::set_torch`]) / [`TORCH_ERROR_UNKNOWN_SESSION`] unknown or closed session → [`CameraError::SessionClosed`] / [`TORCH_ERROR_NO_CAMERA`] no `Camera` bound yet → [`CameraError::Platform`] / [`TORCH_ERROR_FAILED`] the camera control refused |
+//! | `torchAvailable` | `(int session) -> int` | Tri-state: [`TORCH_AVAILABLE`] `hasFlashUnit()` / [`TORCH_UNAVAILABLE`] no flash unit / a negative code (unknown session, nothing bound yet), all of which report `false` |
+//!
 //! ## Kotlin → Rust (this crate's own `#[unsafe(no_mangle)]` JNI exports —
 //! package baked into the symbol names, so `dev.frust.camera.FrustCameraHost`
 //! may never move once shipped)
@@ -217,6 +229,39 @@ const FORMAT_CODE_YUV420: i32 = 0;
 /// **refused** by this one — see [`stream_format_code`] for why CameraX
 /// cannot deliver it.
 const FORMAT_CODE_BGRA: i32 = 1;
+
+/// `FrustCameraHost.setTorch`'s "request accepted" return code (module doc's
+/// additive-entries table).
+///
+/// Accepted, **not** applied: the host fires CameraX's `enableTorch` and
+/// drops the returned `ListenableFuture` on purpose, so this code says the
+/// camera control took the request — see [`AndroidSession::set_torch`]'s doc
+/// for why that is the non-blocking contract rather than a weaker promise.
+const TORCH_SET: i32 = 0;
+
+/// `setTorch`/`torchAvailable`: the session id is unknown or already closed
+/// (the host's `ERROR_UNKNOWN_SESSION`) → [`CameraError::SessionClosed`].
+const TORCH_ERROR_UNKNOWN_SESSION: i32 = -1;
+
+/// `setTorch`/`torchAvailable`: the session is live but CameraX has not
+/// finished its first `bindToLifecycle`, so no `Camera` handle exists yet.
+///
+/// A **transient** refusal, mapped to [`CameraError::Platform`] with a
+/// retry-worded message: the backend deliberately does not wait for the bind
+/// (the whole contract is non-blocking), and a caller that drives the torch
+/// off a UI toggle simply tries again on the next tap.
+const TORCH_ERROR_NO_CAMERA: i32 = -3;
+
+/// `setTorch`: the camera control itself refused the request (an exception out
+/// of `enableTorch`) → [`CameraError::Platform`].
+const TORCH_ERROR_FAILED: i32 = -5;
+
+/// `torchAvailable`: the active lens reports `CameraInfo.hasFlashUnit()`.
+const TORCH_AVAILABLE: i32 = 1;
+
+/// `torchAvailable`: the active lens has no flash unit (most front lenses,
+/// and any device without one at all).
+const TORCH_UNAVAILABLE: i32 = 0;
 
 /// The number of plane slots the `nativeOnImageFrame` contract carries — 3,
 /// which covers `ImageFormat.YUV_420_888`'s Y/U/V and leaves room for a
@@ -1101,6 +1146,103 @@ impl SessionBackend for AndroidSession {
                 "frust-camera: stop_image_stream(session_id={}) failed: {err}",
                 self.session_id
             );
+        }
+    }
+
+    /// `FrustCameraHost.setTorch` — `CameraControl.enableTorch(on)` on the
+    /// `Camera` handle CameraX returned from `bindToLifecycle`.
+    ///
+    /// **Never blocks** ([`crate::CameraSession::set_torch`]'s contract):
+    /// `enableTorch` answers with a `ListenableFuture` the host deliberately
+    /// drops, so nothing here waits on the camera control applying the change
+    /// — the JNI call returns as soon as the request is queued, and this is
+    /// the one contract entry that is callable from the UI thread. The
+    /// alternative (waiting on the future) would need a completion callback
+    /// and a blocking wait, i.e. exactly the shape the crate doc's *Blocking
+    /// API* table exists to keep rare.
+    ///
+    /// Torch state lives on the CameraX session, not on a use case, so it
+    /// survives [`Self::start_image_stream`]/[`Self::stop_image_stream`] —
+    /// including the analyzer re-bind, which reassigns the same session's
+    /// `Camera` handle host-side rather than replacing the device.
+    ///
+    /// # Errors
+    /// [`CameraError::SessionClosed`] after [`Self::close`] (or once the host
+    /// no longer knows the id); [`CameraError::Platform`] when no `Camera` is
+    /// bound yet ([`TORCH_ERROR_NO_CAMERA`] — retryable), when the lens has no
+    /// torch, or on a JNI failure.
+    fn set_torch(&self, on: bool) -> Result<(), CameraError> {
+        self.ensure_open()?;
+
+        let code = with_host(|env, class| {
+            run_jni(env, "FrustCameraHost.setTorch", |env| {
+                env.call_static_method(
+                    class,
+                    jni_str!("setTorch"),
+                    jni_sig!("(IZ)I"),
+                    &[JValue::Int(self.session_id), JValue::Bool(on)],
+                )?
+                .i()
+            })
+        })?;
+
+        match code {
+            TORCH_SET => Ok(()),
+            TORCH_ERROR_UNKNOWN_SESSION => Err(CameraError::SessionClosed),
+            TORCH_ERROR_NO_CAMERA => Err(CameraError::Platform(
+                "android camera backend: the torch is not controllable yet — CameraX has not \
+                 finished binding this session's camera (retry once the preview is live)"
+                    .to_string(),
+            )),
+            TORCH_ERROR_FAILED => Err(CameraError::Platform(
+                "android camera backend: the camera control refused the torch request (does this \
+                 lens have a flash unit? see torch_available)"
+                    .to_string(),
+            )),
+            other => Err(CameraError::Platform(format!(
+                "android camera backend: FrustCameraHost.setTorch returned an unknown code {other}"
+            ))),
+        }
+    }
+
+    /// `FrustCameraHost.torchAvailable` — `CameraInfo.hasFlashUnit()` on the
+    /// bound `Camera`.
+    ///
+    /// Infallible by API shape ([`crate::CameraSession::torch_available`]):
+    /// a closed session, a session whose camera is still binding, and any JNI
+    /// failure all report `false` rather than an error — the caller only uses
+    /// this to decide whether to offer a torch control, and "not yet" and "not
+    /// ever" are the same answer to that question at this instant.
+    fn torch_available(&self) -> bool {
+        if self.ensure_open().is_err() {
+            return false;
+        }
+        let code = with_host(|env, class| {
+            run_jni(env, "FrustCameraHost.torchAvailable", |env| {
+                env.call_static_method(
+                    class,
+                    jni_str!("torchAvailable"),
+                    jni_sig!("(I)I"),
+                    &[JValue::Int(self.session_id)],
+                )?
+                .i()
+            })
+        });
+        match code {
+            Ok(TORCH_AVAILABLE) => true,
+            Ok(TORCH_UNAVAILABLE) => false,
+            Ok(other) => {
+                log::debug!(
+                    "frust-camera: torch_available(session_id={}) reported {other} — no torch to \
+                     offer (yet)",
+                    self.session_id
+                );
+                false
+            }
+            Err(err) => {
+                log::warn!("frust-camera: torch_available failed: {err}");
+                false
+            }
         }
     }
 

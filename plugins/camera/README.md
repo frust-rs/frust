@@ -173,6 +173,12 @@ The guard covers every path that can block. Paths that answer without waiting
 are exempt: on Apple, `request_permission` with an already-decided
 authorization status returns immediately and is callable from any thread.
 
+**The torch is not in the table above.** `set_torch`/`torch_available` (§5)
+never wait on a platform answer — Android hands CameraX a fire-and-forget
+`enableTorch`, Apple takes one short synchronous hop onto the session's own
+serial queue — so both are callable from **any** thread, including the UI
+thread, and neither needs `spawn_blocking`.
+
 `take_picture` correlates each attempt with its own completion, so `Ok(())`
 means *that* call's photo was written to the path you passed.
 
@@ -283,7 +289,49 @@ matching the `mobile_scanner` package's own default):
 
 ---
 
-## 5. Caveats
+## 5. Torch
+
+`CameraSession::set_torch` drives the flash unit in continuous ("torch")
+mode; `torch_available` reports whether the active lens has one to drive:
+
+```rust
+if session.torch_available() {
+    session.set_torch(true)?;   // on
+    // …
+    session.set_torch(false)?;  // off
+}
+```
+
+Both are **non-blocking and callable from any thread**, including the UI
+thread (§3) — no `spawn_blocking` wrapper, unlike `request_permission`/
+`take_picture`.
+
+Torch is **session-level** state, not stream state: it survives
+`start_image_stream`/`start_barcode_stream` and their stops (a stream never
+touches it), and it goes out with `close()`, which releases the camera device
+itself.
+
+**Availability is a real answer, not a formality** — check it before offering
+a torch control:
+
+| Situation | `torch_available()` | `set_torch(..)` |
+|---|---|---|
+| Back lens with a flash unit | `true` | `Ok(())` |
+| Front lens (most devices), or any device with no flash unit | `false` | `CameraError::Platform` |
+| iOS, device cooling off (torch temporarily withdrawn) | `false` | `CameraError::Platform` |
+| Android, before CameraX finishes binding the camera | `false` | `CameraError::Platform` — **retryable**, try again once the preview is live |
+| After `close()` | `false` | `CameraError::SessionClosed` |
+| Desktop/wasm (no camera backend) | `false` | `CameraError::PlatformNotInitialized` |
+
+`set_torch` never panics and never silently no-ops: a lens with no torch is
+reported as an error, so a control wired to it can surface *why* nothing
+happened. On-device behavior (real illumination, front-lens refusal, the
+overheating path) is verified by the camera device gate, not by any host-side
+test — `docs/DEVELOPMENT.md`'s *Camera manual test*.
+
+---
+
+## 6. Caveats
 
 - **`frust create --overwrite` destroys these additions.** `--overwrite`
   re-renders the generated project wholesale, silently dropping the Gradle
@@ -309,10 +357,24 @@ matching the `mobile_scanner` package's own default):
   outright (`STRATEGY_KEEP_ONLY_LATEST` holds one image in flight) and drops
   frames on iOS. Never write a signal from inside it — hand work off with
   `frust_reactive::use_task` (`docs/CODE_STANDARDS.md`'s heavy-work routing).
+- **No torch on most front lenses, and none at all on a device without a
+  flash unit.** `torch_available()` (§5) is the check — treat it as a UI
+  gate, not a formality, and expect `false` from `Lens::Front` on nearly
+  every device. On Android it also reads `false` until CameraX has finished
+  binding the camera, so a torch control shown before the preview goes live
+  should re-check rather than latch its first answer.
+- **`set_torch` is accepted, not confirmed.** Android hands CameraX the
+  request without waiting on its `ListenableFuture` (that is what keeps the
+  call non-blocking), so `Ok(())` means "the camera control took it", not
+  "the LED is lit" — the same shape a torch toggle in any CameraX app has.
+  iOS applies it synchronously under the device configuration lock.
+- **v1 is on/off only.** No torch *level* (`setTorchModeOnWithLevel:` on iOS
+  has no CameraX equivalent), no `Auto` mode, and no zoom/focus control —
+  those stay Future Enhancements rather than a half-symmetric API.
 
 ---
 
-## 6. The TUI Add Plugin dialog automates all of this
+## 7. The TUI Add Plugin dialog automates all of this
 
 Everything in §1 and §2 — the Cargo.toml dependency, the `:frust-camera`
 Gradle include plus its app-module dependency, the `FrustCamera` Swift
