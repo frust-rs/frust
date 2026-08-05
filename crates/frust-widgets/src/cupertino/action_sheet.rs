@@ -167,6 +167,13 @@ pub struct CupertinoActionSheetWidget<State: 'static> {
     cancel_rect: Option<Rect>,
     /// Armed by a `Down`, cleared on `Up`/`Cancel` (fire-on-up-inside).
     captured: bool,
+    /// Whether a `Down` has already claimed focus this open — the claim-once
+    /// guard (see `event`'s Down arm). Seeding `false` in [`View::build`] is
+    /// correct with no reset needed elsewhere: [`show_action_sheet`] pushes a
+    /// fresh page per open, so a new widget instance (and a fresh `false`) is
+    /// built every time the sheet opens; there is no retained instance to
+    /// reset on close.
+    focus_claimed: bool,
 }
 
 /// Return `color` with its alpha channel replaced by `alpha` (mirrors
@@ -291,6 +298,7 @@ impl<State: 'static> View<State> for CupertinoActionSheetView<State> {
             action_rects: Vec::new(),
             cancel_rect: None,
             captured: false,
+            focus_claimed: false,
         }
     }
 
@@ -498,9 +506,14 @@ impl<State: 'static> Widget for CupertinoActionSheetWidget<State> {
         };
         match p.phase {
             PointerPhase::Down => {
-                // A press anywhere in the action sheet claims focus, so a
-                // subsequent Escape has a focus chain to travel.
-                ctx.request_focus();
+                // The first press anywhere in the action sheet claims focus,
+                // so a subsequent Escape has a focus chain to travel; the
+                // claim is held until this page pops, so a later press
+                // re-claiming would be redundant.
+                if !self.focus_claimed {
+                    ctx.request_focus();
+                    self.focus_claimed = true;
+                }
                 self.captured = true;
                 ctx.capture_pointer();
                 EventResult::Handled
@@ -933,6 +946,45 @@ mod tests {
         h.root.event(&mut h.state, &escape_event());
         h.drain();
         assert_eq!(h.state.calls, 0, "Escape without prior focus is a no-op");
+    }
+
+    #[test]
+    fn second_press_does_not_reclaim_focus_after_one_open() {
+        use frust_core::ChildPod;
+
+        let view = sheet_view();
+        let w = build(&view);
+        let mut pod = ChildPod::new(Box::new(w));
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+        pod.layout_child(&mut lctx, &BoxConstraints::tight(WINDOW));
+
+        let mut dummy = ();
+        {
+            let s: &mut dyn Any = &mut dummy;
+            let mut ctx = EventCtx::new(s, Point::ZERO, WINDOW);
+            pod.event_child(&mut ctx, &Harness::ev(PointerPhase::Down, 5.0, 5.0));
+        }
+        assert!(pod.is_focused(), "the first Down claims focus");
+        {
+            let s: &mut dyn Any = &mut dummy;
+            let mut ctx = EventCtx::new(s, Point::ZERO, WINDOW);
+            pod.event_child(&mut ctx, &Harness::ev(PointerPhase::Up, 5.0, 5.0));
+        }
+
+        // Simulate an external clear so the second Down's own effect on the
+        // recorded flag is isolated: if the guard holds, the widget itself
+        // never re-calls `request_focus`, so the flag stays as we set it.
+        pod.set_focused(false);
+        {
+            let s: &mut dyn Any = &mut dummy;
+            let mut ctx = EventCtx::new(s, Point::ZERO, WINDOW);
+            pod.event_child(&mut ctx, &Harness::ev(PointerPhase::Down, 5.0, 5.0));
+        }
+        assert!(
+            !pod.is_focused(),
+            "a second Down within the same open must not re-request focus"
+        );
     }
 
     #[test]

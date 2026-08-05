@@ -724,6 +724,13 @@ pub struct GlyphMenuWidget {
     pressed_row: Option<usize>,
     /// A scrim (outside-panel) press is in flight.
     scrim_captured: bool,
+    /// Whether a `Down` has already claimed focus this open — the claim-once
+    /// guard (see `event`'s Down arm). Seeding `false` in [`View::build`] is
+    /// correct with no reset needed elsewhere: [`show_glyph_menu`] pushes a
+    /// fresh page per open, so a new widget instance (and a fresh `false`)
+    /// is built every time the menu opens; there is no retained instance to
+    /// reset on close.
+    focus_claimed: bool,
 }
 
 impl GlyphMenuWidget {
@@ -823,6 +830,7 @@ impl<State: 'static> View<State> for GlyphMenuView {
             pending_result: None,
             pressed_row: None,
             scrim_captured: false,
+            focus_claimed: false,
         }
     }
 
@@ -1060,10 +1068,14 @@ impl Widget for GlyphMenuWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        // A press anywhere claims focus so a subsequent Escape has a chain to
-        // travel (the dialog/palette precedent).
-        if matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Down) {
+        // The first press claims focus so a subsequent Escape has a chain to
+        // travel (the dialog/palette precedent); the claim is held until this
+        // page pops, so a later press re-claiming would be redundant.
+        if !self.focus_claimed
+            && matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Down)
+        {
             ctx.request_focus();
+            self.focus_claimed = true;
         }
         if let InputEvent::Key(key_event) = event {
             if key_event.key == Key::Named(NamedKey::Escape) {
@@ -1702,6 +1714,49 @@ mod tests {
         dispatch(&mut w, &escape_event(), area);
         assert_eq!(w.phase, Phase::Exit);
         assert_eq!(w.pending_result, None);
+    }
+
+    // -- Claim-once: a second press does not re-request focus (FINDINGS #65) --
+
+    #[test]
+    fn second_press_does_not_reclaim_focus_after_one_open() {
+        use frust_core::ChildPod;
+
+        let view = glyph_menu(Rect::new(360.0, 10.0, 392.0, 42.0), three_items());
+        let area = Size::new(400.0, 600.0);
+        let w = build(&view);
+        let mut pod = ChildPod::new(Box::new(w));
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        pod.layout_child(&mut lctx, &BoxConstraints::tight(area));
+
+        let mut dummy = ();
+        {
+            let s: &mut dyn Any = &mut dummy;
+            let mut ctx = EventCtx::new(s, Point::ZERO, area);
+            pod.event_child(&mut ctx, &ev(PointerPhase::Down, 5.0, 5.0));
+        }
+        assert!(pod.is_focused(), "the first Down claims focus");
+        {
+            let s: &mut dyn Any = &mut dummy;
+            let mut ctx = EventCtx::new(s, Point::ZERO, area);
+            pod.event_child(&mut ctx, &ev(PointerPhase::Up, 5.0, 5.0));
+        }
+
+        // Simulate an external clear so the second Down's own effect on the
+        // recorded flag is isolated: if the guard holds, the widget itself
+        // never re-calls `request_focus`, so the flag stays exactly as we
+        // set it here.
+        pod.set_focused(false);
+        {
+            let s: &mut dyn Any = &mut dummy;
+            let mut ctx = EventCtx::new(s, Point::ZERO, area);
+            pod.event_child(&mut ctx, &ev(PointerPhase::Down, 5.0, 5.0));
+        }
+        assert!(
+            !pod.is_focused(),
+            "a second Down within the same open must not re-request focus"
+        );
     }
 
     // -- Semantics: modal Menu container + Button items ------------------
