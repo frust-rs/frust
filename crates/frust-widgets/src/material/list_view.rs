@@ -210,12 +210,80 @@
 //! conservatively and re-measured on its next visit. Both cost accuracy in an
 //! already-estimated total, never a misattached measurement.
 //!
-//! **What this task does not do.** A measurement that lands *above* the anchor
-//! shifts the content under the viewport; correcting the offset for that is the
-//! next step's job, so a first visit to a region whose true extents differ from
-//! the estimate may still shift the visible rows slightly. The anchoring
-//! correction above likewise steps by the estimate in variable mode (the
-//! prepended rows are by definition unmeasured).
+//! # Measured anchor correction (variable extents only)
+//!
+//! A row that measures taller or shorter than it was *assumed* to be moves
+//! every row below it — including the row the viewport's top edge sits inside,
+//! the **anchor**. So layout accumulates, over the rows lying wholly above that
+//! top edge *in the geometry this frame's window was planned against*, the
+//! signed `measured − assumed` delta into one [`ListViewWidget::pending_correction`]:
+//! the amount the offset owes to leave the anchor row exactly where it is. Rows
+//! at or below the anchor contribute nothing — a row growing pushes the content
+//! *below* it down, which is the truth, not a jump. This generalizes the keyed
+//! anchoring correction above: there the shift is `count × extent` in closed
+//! form, here it is whatever the prefix bookkeeping actually measured.
+//!
+//! **Recorded at layout, committed at the next rebuild.** Measurement happens
+//! after this frame's rebuild has already windowed, and a *scroll* correction is
+//! not layout's or paint's to make: layout's only offset write stays the
+//! pre-existing range clamp (the viewport is known nowhere else) and paint's
+//! stays the fling pump. So paint asks for one continuation frame while a
+//! correction is pending — the
+//! same convergence path an uncovered window uses — and the next
+//! [`View::rebuild`] commits it *before* planning the window, folding
+//! `ChangeFlags::LAYOUT` into its report.
+//!
+//! **The pending amount is honored visually the instant it is measured**,
+//! though, so nothing waits a frame to look right: everything that *places*
+//! content — the prefix walk, the window, each row's origin, the edge triggers
+//! and the semantics scroll position — reads
+//! [`ListViewWidget::placement_offset`] (`offset + pending`, clamped) rather
+//! than the raw offset. The anchor row therefore never moves at all, not even
+//! for the one frame between recording and committing, and committing is a pure
+//! bookkeeping step: `offset` absorbs the pending amount and placement lands on
+//! the number it was already painting at. The raw `offset` — the value the fling
+//! pump, the drag, the wheel and the clamp arithmetic own — moves only from
+//! input, from the fling pump, or from a rebuild-time correction.
+//!
+//! **Fling interplay: accumulate, then apply at settle.** While a fling is live
+//! the pump is advancing `offset` at paint, and committing corrections into it
+//! per-frame would fight that two ways: a correction *opposing* the fling (rows
+//! above measuring taller during an upward fling) exceeds a decayed fling step
+//! near the end of the animation and walks the offset backwards, and one
+//! *along* it can push the offset onto a bound, where [`ListViewWidget::tick`]'s
+//! at-bound check kills the fling early. So a correction taken during a fling
+//! only accumulates; the first rebuild after the fling stops — velocity below
+//! [`FLING_STOP`], a bound reached, or a pointer `Down` taking the gesture over,
+//! all three of which clear `fling` — commits the whole sum. Placement honors it
+//! every frame regardless, so the rows stay anchored throughout and the commit
+//! is invisible. The reversal is measured, not assumed: deleting the withhold
+//! makes this module's upward-fling test walk the offset backwards mid-flight
+//! (`7980 → 7993`, ~13px against the gesture), which is why the accumulator is
+//! not simplified into a per-frame commit. **Accepted artifact:** across a long fling over never-measured
+//! rows the *committed* offset drifts from the placement actually painted (by
+//! exactly the accumulated sum) until the fling settles — a reader of
+//! [`ListViewWidget::offset`] alone sees a stale scroll position meanwhile.
+//!
+//! **Clamping.** A correction goes through the same `[0, max_offset]` clamp as
+//! every other offset write, against a `max_offset` that is itself moving as
+//! measurements revise the content extent. A correction clamped at an edge is
+//! truncated, not kept owing: the top/bottom of the list wins over anchor
+//! fidelity.
+//!
+//! **Edge triggers.** `near_start`/`near_end` evaluate on events and on the
+//! fling pump, never in rebuild, so a commit can never itself fire one; and
+//! because they read the *placement*, which a commit leaves unchanged, a
+//! correction cannot rearm or re-fire an edge that has not genuinely moved. At
+//! the very top there is nothing above the viewport to correct by in the first
+//! place, so the load-older edge never sees this motion at all.
+//!
+//! **What stays estimated.** Only materialized rows are ever measured, so a
+//! prepend landing entirely *above* the window (the "load older while scrolled
+//! deep" case) is anchored by the estimate alone — the closed-form shift above —
+//! and refines only if the user scrolls back up over those rows. A prepend that
+//! lands inside the window takes both steps in consecutive frames: the estimate
+//! shift on the reconciling frame, the measured refinement on the next. That is
+//! the same accuracy tradeoff the content-extent total already accepts.
 //!
 //! # Viewport staleness
 //!
@@ -903,6 +971,16 @@ pub struct ListViewWidget {
     anchor_index: usize,
     /// The content-space `y` of [`ListViewWidget::anchor_index`]'s top.
     anchor_y: f64,
+    /// Variable-extent mode: the scroll correction `layout` has measured but no
+    /// rebuild has committed into [`ListViewWidget::offset`] yet — Σ
+    /// `measured − assumed` over the rows that lay wholly above the viewport top
+    /// in the geometry the frame's window was planned against. Always `0.0` on
+    /// the uniform path (which measures nothing). Read back through
+    /// [`ListViewWidget::placement_offset`] by everything that places content, so
+    /// it is honored the frame it is recorded; committed by
+    /// [`ListViewWidget::apply_pending_correction`]. See the [module docs](self)'
+    /// *Measured anchor correction* section.
+    pending_correction: f64,
     item_count: usize,
     item_extent: f64,
     /// Current scroll offset in `[0, max_offset]` (px scrolled down).
@@ -963,6 +1041,7 @@ impl ListViewWidget {
             slot_y: Vec::new(),
             anchor_index: 0,
             anchor_y: 0.0,
+            pending_correction: 0.0,
             item_count,
             item_extent,
             offset: 0.0,
@@ -990,15 +1069,22 @@ impl ListViewWidget {
     /// state: rearm once scrolled away past `2 × threshold`, and return `true`
     /// exactly once when armed and the offset comes within `threshold` of content
     /// start. Callers fire the callback on a `true` return.
+    ///
+    /// Measured against [`ListViewWidget::placement_offset`] — where the content
+    /// actually sits — rather than the raw offset, so an uncommitted
+    /// variable-extent correction can neither rearm nor fire this edge (the
+    /// placement is exactly what a commit leaves unchanged). Identical to the
+    /// offset on the uniform path, which never has a pending correction.
     fn evaluate_near_start(&mut self) -> bool {
         if self.on_near_start.is_none() || self.item_count == 0 {
             return false;
         }
         let threshold = self.near_start_threshold;
-        if self.offset > 2.0 * threshold {
+        let position = self.placement_offset();
+        if position > 2.0 * threshold {
             self.near_start_armed = true;
         }
-        if self.near_start_armed && self.offset <= threshold {
+        if self.near_start_armed && position <= threshold {
             self.near_start_armed = false;
             return true;
         }
@@ -1029,13 +1115,14 @@ impl ListViewWidget {
     /// Edge-detect the near-end "load newer" condition, mirroring
     /// [`Self::evaluate_near_start`] but measured from content **end**: the
     /// remaining scrollable distance below the viewport (`max_offset − offset`)
-    /// rather than the offset itself.
+    /// rather than the offset itself. Reads the placement for the same reason
+    /// [`Self::evaluate_near_start`] does.
     fn evaluate_near_end(&mut self) -> bool {
         if self.on_near_end.is_none() || self.item_count == 0 {
             return false;
         }
         let threshold = self.near_end_threshold;
-        let distance = self.max_offset() - self.offset;
+        let distance = self.max_offset() - self.placement_offset();
         if distance > 2.0 * threshold {
             self.near_end_armed = true;
         }
@@ -1080,6 +1167,48 @@ impl ListViewWidget {
     /// The maximum scroll offset (`extent − viewport`, never negative).
     pub fn max_offset(&self) -> f64 {
         (self.content_extent() - self.viewport.height).max(0.0)
+    }
+
+    /// The content-space `y` the viewport's top edge is actually placed at this
+    /// frame: the committed [`ListViewWidget::offset`] plus the correction
+    /// `layout` has measured and no rebuild has committed yet, through the same
+    /// `[0, max_offset]` clamp every offset write takes.
+    ///
+    /// Everything that *places* content reads this — the prefix walk, the
+    /// window, each row's origin, the edge triggers, the semantics scroll
+    /// position — so a measured correction is honored the instant it is
+    /// recorded and committing it is visually a no-op. Everything that *moves*
+    /// the scroll (drag, wheel, fling, clamp) works on the raw offset instead.
+    /// Identical to the offset on the uniform path, which never measures and so
+    /// never has a pending correction. See the [module docs](self)' *Measured
+    /// anchor correction* section.
+    fn placement_offset(&self) -> f64 {
+        if self.pending_correction == 0.0 {
+            return self.offset;
+        }
+        (self.offset + self.pending_correction).clamp(0.0, self.max_offset())
+    }
+
+    /// Commit the pending measured correction into [`ListViewWidget::offset`] —
+    /// the one place it is ever committed, from [`View::rebuild`] before the
+    /// window is planned. Returns whether the offset actually moved (a
+    /// correction the clamp swallowed whole reports `false`: nothing changed, so
+    /// nothing is owed a layout pass).
+    ///
+    /// **Withheld while a fling is live**: the pump is advancing the offset at
+    /// paint, and a correction landing on top of that can walk it backwards or
+    /// onto a bound that ends the fling early, so the sum keeps accumulating and
+    /// the first rebuild after the fling stops commits all of it (see the
+    /// [module docs](self)' *Measured anchor correction* section).
+    fn apply_pending_correction(&mut self) -> bool {
+        if self.pending_correction == 0.0 || self.is_flinging() {
+            return false;
+        }
+        let target = self.offset + self.pending_correction;
+        self.pending_correction = 0.0;
+        let before = self.offset;
+        self.set_offset(target);
+        self.offset != before
     }
 
     /// The whole content's extent: `item_count * item_extent` exactly on the
@@ -1163,7 +1292,7 @@ impl ListViewWidget {
     /// closed form.
     fn sync_child_origins(&mut self) {
         if self.is_variable() {
-            let offset = self.offset;
+            let offset = self.placement_offset();
             for (y, pod) in self.slot_y.iter().zip(self.children.iter_mut()) {
                 pod.set_origin(Point::new(0.0, *y - offset));
             }
@@ -1228,7 +1357,7 @@ impl ListViewWidget {
     fn walk_to_offset(&self, estimate: f64) -> (usize, f64) {
         let count = self.item_count;
         debug_assert!(count > 0, "walk_to_offset needs a non-empty list");
-        let target = self.offset;
+        let target = self.placement_offset();
         let mut index = self.anchor_index.min(count - 1);
         let mut y = self.anchor_y;
 
@@ -1288,7 +1417,7 @@ impl ListViewWidget {
         }
 
         // Forward to the viewport's bottom edge, then the trailing buffer.
-        let bottom = self.offset + self.viewport.height;
+        let bottom = self.placement_offset() + self.viewport.height;
         let mut end = first_visible + 1;
         let mut y_end = y_visible + self.extent_at(first_visible, estimate);
         while end < count && y_end < bottom {
@@ -1338,9 +1467,12 @@ impl ListViewWidget {
     }
 
     /// Drop every measurement — a full replace, where no previous key survives.
+    /// Any uncommitted correction goes with them: it describes rows this list no
+    /// longer holds, so committing it into new data would be a guess.
     fn clear_measured(&mut self) {
         self.measured.clear();
         self.measured_sum = 0.0;
+        self.pending_correction = 0.0;
     }
 
     /// Drop measurements the current keying provably cannot produce any more:
@@ -1406,24 +1538,53 @@ impl ListViewWidget {
     /// height under its key and re-deriving the window's content positions from
     /// those heights. Measures only pods that already exist — no builder call,
     /// no materialization (the wake hazard the module docs call out).
-    fn layout_variable(&mut self, ctx: &mut LayoutCtx, vw: f64) {
+    ///
+    /// It also records — never applies — the frame's anchor correction: two
+    /// running positions are carried, one over the heights the rows actually
+    /// chose and one over the extents this frame's window was *planned*
+    /// against, and every row whose planned span lies wholly above the viewport
+    /// top contributes its `measured − assumed` delta to
+    /// [`ListViewWidget::pending_correction`]. Those are exactly the rows whose
+    /// mis-estimate moves the anchor row, and the offset owes their sum back.
+    /// The offset itself is never written here beyond the pre-existing range
+    /// clamp (the viewport is only known at layout) — the correction is
+    /// committed by the next [`View::rebuild`]. See the [module docs](self)'
+    /// *Measured anchor correction* section.
+    fn layout_variable(&mut self, ctx: &mut LayoutCtx, vw: f64, estimate: f64) {
         let child_bc = BoxConstraints::new(Size::new(vw, 0.0), Size::new(vw, f64::INFINITY));
+        // The viewport's top edge in content space, in the geometry this frame's
+        // window was planned against — the line that decides which rows sit
+        // above the anchor.
+        let top = self.placement_offset();
         let mut children = std::mem::take(&mut self.children);
         let mut ys = std::mem::take(&mut self.slot_y);
         ys.clear();
         let mut y = self.anchor_y;
+        let mut y_assumed = self.anchor_y;
+        let mut correction = 0.0;
         for (slot, pod) in children.iter_mut().enumerate() {
-            let size = pod.layout_child(ctx, &child_bc);
-            ys.push(y);
-            y += size.height;
             let key = self.slot_keys.get(slot).copied();
             let index = self.keys.get(slot).copied();
+            // Read the assumed extent *before* this row's own measurement is
+            // recorded below, or the delta would always be zero.
+            let assumed = index.map_or(estimate, |index| self.extent_at(index, estimate));
+            let size = pod.layout_child(ctx, &child_bc);
+            ys.push(y);
+            if y_assumed + assumed <= top {
+                correction += size.height - assumed;
+            }
+            y += size.height;
+            y_assumed += assumed;
             if let (Some(key), Some(index)) = (key, index) {
                 self.record_measurement(key, index, size.height);
             }
         }
         self.slot_y = ys;
         self.children = children;
+        // Accumulate, never assign: a correction withheld across a live fling is
+        // still owed. Re-measuring an unchanged row contributes a zero delta, so
+        // this can never double-count one.
+        self.pending_correction += correction;
         // The measurements just revised the content extent (the estimate still
         // governs everything outside the window), so re-clamp before the caller
         // syncs origins.
@@ -1743,6 +1904,21 @@ impl<State: 'static> View<State> for ListView<State> {
             element.evict_measured_stale_indices();
         }
 
+        // Measured anchor correction (variable extents only; the uniform path
+        // measures nothing and never carries one): the previous layout recorded
+        // how much taller or shorter the content above the viewport top actually
+        // measured than the offset was planned against. Commit it here — the one
+        // place the offset absorbs it, before this frame's window is planned —
+        // unless a fling is live, in which case it keeps accumulating and lands
+        // on the first rebuild after the fling stops. Placement has honored it
+        // since the frame it was measured, so this moves nothing on screen; it
+        // is still a `LAYOUT` report because the offset every row's origin is
+        // derived from just changed. See the module docs' *Measured anchor
+        // correction* section.
+        if element.apply_pending_correction() {
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+
         let offset_before_clamp = element.offset;
         element.clamp_offset();
         if element.is_variable() && element.offset != offset_before_clamp {
@@ -1792,9 +1968,9 @@ impl Widget for ListViewWidget {
         };
         self.viewport = Size::new(vw, vh);
         self.clamp_offset();
-        if self.is_variable() {
+        if let Some(estimate) = self.variable_estimate() {
             // Variable extents: rows size themselves and are measured here.
-            self.layout_variable(ctx, vw);
+            self.layout_variable(ctx, vw, estimate);
         } else {
             // Uniform extent: every materialized row is exactly `item_extent` tall.
             let child_bc = BoxConstraints::tight(Size::new(vw, self.item_extent));
@@ -1822,8 +1998,15 @@ impl Widget for ListViewWidget {
         // the shell for one more frame so the next rebuild re-windows. Converges
         // without idling under-materialized, and is the only path by which a
         // measurement changes what is materialized: layout and paint never build.
+        // A correction this frame's layout recorded is committed by the *next*
+        // rebuild, so a frame carrying one owes a continuation frame exactly
+        // like an uncovered window does — the same one-frame convergence, and
+        // the reason a measured correction never idles uncommitted. (While a
+        // fling withholds it the pump above is already asking; the request here
+        // is what covers the frame the fling stops on.)
         let WindowPlan { start, end, .. } = self.desired_window();
-        if self.item_count > 0 && !self.window_covers(start, end) {
+        let uncovered = self.item_count > 0 && !self.window_covers(start, end);
+        if uncovered || self.pending_correction != 0.0 {
             ctx.request_frame();
         }
     }
@@ -1843,7 +2026,11 @@ impl Widget for ListViewWidget {
         // produce `ListItem`s, so the container's `size_of_set` carries the count.
         let max_offset = self.max_offset();
         let count = self.item_count;
-        let offset = self.offset;
+        // The placement, not the raw offset: it is where the content actually
+        // sits, and it is the value that stays put across a correction commit
+        // (see the module docs' *Measured anchor correction* section). The two
+        // are the same number on the uniform path.
+        let offset = self.placement_offset();
         ctx.push_container(
             Role::List,
             move |node| {
@@ -3696,6 +3883,491 @@ mod tests {
 
     // Duplicate keys are ambiguous: the debug tripwire is the contract (release
     // carries on with first-claim-wins, documented on `builder_keyed`).
+
+    // --- (12) Measured anchor correction + the fling's accumulate-then-apply. ---
+
+    /// A row whose id is `≡ 3 (mod 5)` measures [`TALL`] — well above
+    /// [`ESTIMATE`] — and one `≡ 0 (mod 5)` measures [`SHORT`], well below it
+    /// ([`var_height`] cycles 40/60/80/100/120 by `id % 5`). Stepping ids by 5
+    /// therefore builds a list of one known height, in either direction away
+    /// from the estimate.
+    const TALL: f64 = 100.0;
+    const SHORT: f64 = 40.0;
+
+    fn tall_ids(n: usize) -> Vec<u64> {
+        (0..n).map(|i| i as u64 * 5 + 3).collect()
+    }
+
+    fn short_ids(n: usize) -> Vec<u64> {
+        (0..n).map(|i| i as u64 * 5).collect()
+    }
+
+    /// The topmost row the viewport actually shows — the anchor a correction
+    /// holds still — as `(row id, painted y)`, read straight off the live pods.
+    fn anchor_row(w: &ListViewWidget, fx: &VarRows) -> (u64, f64) {
+        let rows = fx.rows.borrow();
+        for (slot, pod) in w.children.iter().enumerate() {
+            if pod.origin().y + pod.size().height > 0.0 {
+                return (rows[w.keys[slot]], pod.origin().y);
+            }
+        }
+        panic!("no materialized row reaches the viewport top");
+    }
+
+    #[test]
+    fn measured_correction_holds_the_anchor_when_rows_measure_taller() {
+        // Criterion 1, upward: a jump lands in a region whose rows all measure
+        // 100 against a 60px estimate, so the two rows the window buffers above
+        // the viewport top measure taller than the offset was planned against.
+        let fx = VarRows::new(tall_ids(300));
+        let mut logic = fx.logic();
+        let mut root = converged_var(&mut logic, &fx);
+
+        root.event(&mut (), &wheel(1_500.0));
+        var_frame(&mut root, &mut logic, &fx, 100.0);
+
+        let w = list_widget(&root);
+        let pending = w.pending_correction;
+        let offset_before = w.offset();
+        let (anchor_id, anchor_y) = anchor_row(w, &fx);
+        assert!(
+            pending > 0.0,
+            "the rows above the viewport top measured taller than assumed"
+        );
+
+        // The convergence frame commits it, and the anchor row is painted at the
+        // pixel position it already occupied — before *and* after.
+        let (flags, outcome) = var_frame(&mut root, &mut logic, &fx, 116.0);
+        let w = list_widget(&root);
+        assert_eq!(w.pending_correction, 0.0, "the correction was committed");
+        assert!(
+            (w.offset() - (offset_before + pending)).abs() < 1e-9,
+            "the offset absorbed exactly the measured delta"
+        );
+        let (id_after, y_after) = anchor_row(w, &fx);
+        assert_eq!(id_after, anchor_id, "the same row is still at the top");
+        assert!(
+            (y_after - anchor_y).abs() < 1e-9,
+            "the anchor row's painted y is unchanged across the correction \
+             ({anchor_y} -> {y_after})"
+        );
+        assert!(flags.contains(ChangeFlags::LAYOUT));
+        assert!(!outcome.needs_frame, "one convergence frame, then settled");
+    }
+
+    #[test]
+    fn measured_correction_holds_the_anchor_when_rows_measure_shorter() {
+        // Criterion 1, the other direction: rows measure 40 against the same
+        // 60px estimate, so the correction is negative and the offset moves
+        // *back* to hold the anchor still.
+        let fx = VarRows::new(short_ids(300));
+        let mut logic = fx.logic();
+        let mut root = converged_var(&mut logic, &fx);
+
+        root.event(&mut (), &wheel(1_500.0));
+        var_frame(&mut root, &mut logic, &fx, 100.0);
+
+        let w = list_widget(&root);
+        let pending = w.pending_correction;
+        let offset_before = w.offset();
+        let (anchor_id, anchor_y) = anchor_row(w, &fx);
+        assert_eq!(
+            w.children[0].size().height,
+            SHORT,
+            "the fixture's rows really do measure shorter than the estimate"
+        );
+        assert!(
+            pending < 0.0,
+            "the rows above the viewport top measured shorter than assumed"
+        );
+
+        let (flags, _) = var_frame(&mut root, &mut logic, &fx, 116.0);
+        let w = list_widget(&root);
+        assert_eq!(w.pending_correction, 0.0);
+        assert!((w.offset() - (offset_before + pending)).abs() < 1e-9);
+        let (id_after, y_after) = anchor_row(w, &fx);
+        assert_eq!(id_after, anchor_id);
+        assert!(
+            (y_after - anchor_y).abs() < 1e-9,
+            "the anchor row's painted y is unchanged across the correction \
+             ({anchor_y} -> {y_after})"
+        );
+        assert!(flags.contains(ChangeFlags::LAYOUT));
+    }
+
+    #[test]
+    fn variable_prepend_refines_from_the_estimate_to_the_measurement() {
+        // Criterion 2's two steps, in consecutive frames: reconciliation shifts
+        // by the estimate (a prepended row is unmeasured by definition), then
+        // the frame that measures those rows refines the shift to the truth —
+        // with the anchor row painting at the same y at every step.
+        let fx = VarRows::new(tall_ids(60));
+        let mut logic = fx.logic();
+        let mut root = converged_var(&mut logic, &fx);
+
+        // Half a row down: the viewport top sits inside row 0, so a prepend
+        // lands *inside* the materialized window and is measurable at all (a
+        // prepend far above the window can only ever be estimated — see the
+        // module docs' *What stays estimated*).
+        root.event(&mut (), &wheel(TALL / 2.0));
+        settle(&mut root, &mut logic, &fx, 100.0, 4);
+        let w = list_widget(&root);
+        let (anchor_id, anchor_y) = anchor_row(w, &fx);
+        let offset_before = w.offset();
+
+        // Step one: the estimate-based shift.
+        fx.rows.borrow_mut().splice(0..0, [5_003u64, 5_008u64]);
+        var_frame(&mut root, &mut logic, &fx, 200.0);
+        let w = list_widget(&root);
+        assert!(
+            (w.offset() - (offset_before + 2.0 * ESTIMATE)).abs() < 1e-9,
+            "reconciliation shifts by the estimate first"
+        );
+        assert!(
+            (w.pending_correction - 2.0 * (TALL - ESTIMATE)).abs() < 1e-9,
+            "and layout records what the two prepended rows actually measured"
+        );
+        let (id_mid, y_mid) = anchor_row(w, &fx);
+        assert_eq!(id_mid, anchor_id);
+        assert!(
+            (y_mid - anchor_y).abs() < 1e-9,
+            "the anchor row did not move on the reconciling frame"
+        );
+
+        // Step two: the measured refinement.
+        let (flags, _) = var_frame(&mut root, &mut logic, &fx, 216.0);
+        let w = list_widget(&root);
+        assert_eq!(w.pending_correction, 0.0);
+        assert!(
+            (w.offset() - (offset_before + 2.0 * TALL)).abs() < 1e-9,
+            "the offset ends up shifted by the prepended rows' *true* extent"
+        );
+        let (id_after, y_after) = anchor_row(w, &fx);
+        assert_eq!(id_after, anchor_id, "still the same row at the top");
+        assert!(
+            (y_after - anchor_y).abs() < 1e-9,
+            "and it never moved across either step"
+        );
+        assert!(flags.contains(ChangeFlags::LAYOUT));
+    }
+
+    /// Fling **upward** (finger dragging down) over rows nothing has measured,
+    /// pumping frames until the fling comes to rest. Returns one `(offset, still
+    /// flinging, pending correction)` sample per frame, starting at the release.
+    ///
+    /// Upward is the interesting direction: rows enter the window *above* the
+    /// viewport top, so every frame measures rows that correct the offset —
+    /// against the fling when they measure taller than the estimate.
+    fn fling_up_and_pump(
+        root: &mut RenderRoot<(), ListView<()>>,
+        logic: &mut impl FnMut(&mut ()) -> ListView<()>,
+        fx: &VarRows,
+        first_ms: f64,
+    ) -> Vec<(f64, bool, f64)> {
+        root.event(&mut (), &ev(PointerPhase::Down, 20.0));
+        var_frame(root, logic, fx, first_ms);
+        root.event(&mut (), &ev(PointerPhase::Move, 90.0)); // takeover
+        var_frame(root, logic, fx, first_ms + 16.0);
+        root.event(&mut (), &ev(PointerPhase::Move, 190.0)); // build velocity
+        root.event(&mut (), &ev(PointerPhase::Up, 190.0)); // release
+        assert!(
+            list_widget(root).is_flinging(),
+            "the release started a fling"
+        );
+
+        let w = list_widget(root);
+        let mut trace = vec![(w.offset(), true, w.pending_correction)];
+        for k in 0..300 {
+            var_frame(root, logic, fx, first_ms + 32.0 + 16.0 * k as f64);
+            let w = list_widget(root);
+            trace.push((w.offset(), w.is_flinging(), w.pending_correction));
+            if !w.is_flinging() {
+                return trace;
+            }
+        }
+        panic!("the fling never came to rest");
+    }
+
+    /// Assert a fling trajectory only ever moved in the fling's own direction —
+    /// the monotonicity criterion 3 asks for, which is exactly what a
+    /// per-frame correction against a paint-advancing offset would break.
+    fn assert_monotonic_upward(trace: &[(f64, bool, f64)]) {
+        for pair in trace.windows(2) {
+            let (before, _, _) = pair[0];
+            let (after, _, _) = pair[1];
+            assert!(
+                after <= before,
+                "the offset stepped backwards during an upward fling \
+                 ({before} -> {after})"
+            );
+        }
+    }
+
+    #[test]
+    fn an_upward_fling_accumulates_the_correction_and_applies_it_at_settle() {
+        // Criterion 3. Every frame of this fling pulls unmeasured rows in above
+        // the viewport top and measures them *taller*, i.e. a correction
+        // pointing against the fling: withheld, the trajectory is the fling's
+        // alone; applied per frame it would step backwards once the decaying
+        // fling advance drops under the per-frame correction.
+        let fx = VarRows::new(tall_ids(300));
+        let mut logic = fx.logic();
+        let mut root = converged_var(&mut logic, &fx);
+
+        // Jump deep into never-measured territory to fling back up through.
+        root.event(&mut (), &wheel(8_000.0));
+        settle(&mut root, &mut logic, &fx, 100.0, 4);
+
+        let trace = fling_up_and_pump(&mut root, &mut logic, &fx, 200.0);
+        assert_monotonic_upward(&trace);
+        assert!(
+            trace.iter().any(|&(_, _, pending)| pending > 0.0),
+            "the fling crossed rows measuring taller than the estimate"
+        );
+        let (offset_at_rest, _, owed) = *trace.last().expect("the fling stopped");
+        assert!(
+            owed > 0.0,
+            "the whole accumulated sum is still owed when the fling stops"
+        );
+
+        // The first rebuild after it stops commits the sum — invisibly.
+        let w = list_widget(&root);
+        let (anchor_id, anchor_y) = anchor_row(w, &fx);
+        let (flags, _) = var_frame(&mut root, &mut logic, &fx, 6_000.0);
+        let w = list_widget(&root);
+        assert!(
+            (w.offset() - (offset_at_rest + owed)).abs() < 1e-9,
+            "settling committed the accumulated correction in full"
+        );
+        let (id_after, y_after) = anchor_row(w, &fx);
+        assert_eq!(id_after, anchor_id, "the same row is still at the top");
+        assert!(
+            (y_after - anchor_y).abs() < 1e-9,
+            "committing an accumulated correction is invisible ({anchor_y} -> {y_after})"
+        );
+        assert!(flags.contains(ChangeFlags::LAYOUT));
+
+        // ...and the list comes to rest instead of oscillating.
+        let mut settled = None;
+        for k in 0..6 {
+            let before = list_widget(&root).offset();
+            var_frame(&mut root, &mut logic, &fx, 6_016.0 + 16.0 * k as f64);
+            let w = list_widget(&root);
+            if w.pending_correction == 0.0 && w.offset() == before {
+                settled = Some(before);
+                break;
+            }
+        }
+        let settled = settled.expect("the list settles after the fling");
+        for k in 0..3 {
+            var_frame(&mut root, &mut logic, &fx, 6_112.0 + 16.0 * k as f64);
+            assert_eq!(
+                list_widget(&root).offset(),
+                settled,
+                "the offset is at rest, not oscillating"
+            );
+        }
+    }
+
+    #[test]
+    fn an_upward_fling_over_shorter_rows_accumulates_the_other_way() {
+        // The mirror: rows measure 40 against the same 60px estimate, so the
+        // withheld sum is negative — the direction that, applied per frame,
+        // over-travels the fling rather than reversing it. Same contract.
+        let fx = VarRows::new(short_ids(400));
+        let mut logic = fx.logic();
+        let mut root = converged_var(&mut logic, &fx);
+
+        root.event(&mut (), &wheel(8_000.0));
+        settle(&mut root, &mut logic, &fx, 100.0, 4);
+
+        let trace = fling_up_and_pump(&mut root, &mut logic, &fx, 200.0);
+        assert_monotonic_upward(&trace);
+        let (offset_at_rest, _, owed) = *trace.last().expect("the fling stopped");
+        assert!(owed < 0.0, "shorter-than-estimated rows owe a negative sum");
+
+        let w = list_widget(&root);
+        let (anchor_id, anchor_y) = anchor_row(w, &fx);
+        var_frame(&mut root, &mut logic, &fx, 6_000.0);
+        let w = list_widget(&root);
+        assert!((w.offset() - (offset_at_rest + owed)).abs() < 1e-9);
+        let (id_after, y_after) = anchor_row(w, &fx);
+        assert_eq!(id_after, anchor_id);
+        assert!(
+            (y_after - anchor_y).abs() < 1e-9,
+            "committing an accumulated correction is invisible ({anchor_y} -> {y_after})"
+        );
+    }
+
+    #[test]
+    fn layout_and_paint_never_move_the_offset_while_a_correction_is_pending() {
+        // Criterion 4, pass by pass: layout may measure a correction but never
+        // apply one, paint touches the offset only through the fling pump (inert
+        // here), and rebuild is the one pass that commits.
+        let fx = VarRows::new(tall_ids(200));
+        let mut logic = fx.logic();
+        let mut root = converged_var(&mut logic, &fx);
+
+        root.event(&mut (), &wheel(1_500.0));
+        fx.probe.pass.set(Pass::Rebuild);
+        root.rebuild(&mut logic, &mut ());
+        let after_rebuild = list_widget(&root).offset();
+
+        fx.probe.pass.set(Pass::Layout);
+        root.layout(KEYED_WINDOW);
+        let w = list_widget(&root);
+        assert!(
+            w.pending_correction != 0.0,
+            "layout measured a correction to record"
+        );
+        assert_eq!(
+            w.offset(),
+            after_rebuild,
+            "...and did not apply it to the offset"
+        );
+
+        fx.probe.pass.set(Pass::Paint);
+        let mut sink = NullScene;
+        let outcome = root.paint(&mut sink, FrameTime::from_nanos(100_000_000));
+        fx.probe.pass.set(Pass::Idle);
+        let w = list_widget(&root);
+        assert!(
+            !w.is_flinging(),
+            "no fling is in flight, so the pump is inert"
+        );
+        assert_eq!(
+            w.offset(),
+            after_rebuild,
+            "paint moves the offset only via the fling pump"
+        );
+        assert!(w.pending_correction != 0.0, "the correction is still owed");
+        assert!(
+            outcome.needs_frame,
+            "and paint asked for the frame that commits it"
+        );
+
+        let (flags, _) = var_frame(&mut root, &mut logic, &fx, 116.0);
+        let w = list_widget(&root);
+        assert_eq!(w.pending_correction, 0.0);
+        assert!(
+            w.offset() > after_rebuild,
+            "rebuild is the pass that commits it"
+        );
+        assert!(flags.contains(ChangeFlags::LAYOUT));
+    }
+
+    #[test]
+    fn uniform_and_positional_modes_never_carry_a_correction() {
+        // Criterion 5: this is variable-extent-only machinery. A uniform keyed
+        // list and a positional list measure nothing, so neither can ever owe a
+        // correction — and their placement is literally their offset.
+        let fx = KeyedRows::new((0..1000).map(|i| i as u64 * 10).collect());
+        let mut keyed = fx.keyed_logic();
+        let mut root = converged(&mut keyed, &fx.log);
+        root.event(&mut (), &wheel(500.0));
+        keyed_frame(&mut root, &mut keyed, &fx.log, 32.0);
+        fx.rows.borrow_mut().splice(0..0, [9990, 9980]);
+        keyed_frame(&mut root, &mut keyed, &fx.log, 48.0);
+        let w = list_widget(&root);
+        assert_eq!(
+            w.pending_correction, 0.0,
+            "a uniform keyed list measures nothing to correct from"
+        );
+        assert_eq!(w.placement_offset(), w.offset());
+
+        let fx = KeyedRows::new((0..1000).map(|i| i as u64 * 10).collect());
+        let mut positional = fx.positional_logic();
+        let mut root = converged(&mut positional, &fx.log);
+        root.event(&mut (), &wheel(500.0));
+        keyed_frame(&mut root, &mut positional, &fx.log, 32.0);
+        fx.rows.borrow_mut().insert(0, 12_345);
+        keyed_frame(&mut root, &mut positional, &fx.log, 48.0);
+        let w = list_widget(&root);
+        assert_eq!(
+            w.pending_correction, 0.0,
+            "a positional list measures nothing to correct from"
+        );
+        assert_eq!(w.placement_offset(), w.offset());
+    }
+
+    /// A hand-built variable-extent widget carrying an uncommitted correction and
+    /// a near-start callback — the deterministic shape of "an uncommitted
+    /// correction decides no edge" (the [`near_start_widget`] idiom).
+    fn pending_correction_widget(pending: f64) -> ListViewWidget {
+        let mut w = ListViewWidget::new(1000, ESTIMATE);
+        w.key_of = Some(Rc::new(|i: usize| ChildKey::new(i as u64)));
+        w.estimated_extent = Some(ESTIMATE);
+        w.viewport = Size::new(200.0, 200.0);
+        w.near_start_threshold = 100.0;
+        let cb: Rc<dyn Fn(&mut Loads)> = Rc::new(|s: &mut Loads| s.count += 1);
+        w.on_near_start = Some(crate::authoring::erase_callback(&cb));
+        w.near_start_armed = true;
+        // The raw offset sits inside the near-start threshold; the content it
+        // describes does not.
+        w.offset = 50.0;
+        w.pending_correction = pending;
+        w
+    }
+
+    #[test]
+    fn an_uncommitted_correction_decides_no_edge() {
+        // The edge-latch half of criterion 5: edges read the placement, so an
+        // uncommitted correction neither fires one on the raw offset's say-so
+        // nor re-fires one when it commits (the placement is exactly what a
+        // commit leaves unchanged).
+        let mut w = pending_correction_widget(500.0);
+        let mut state = Loads::default();
+        run_loads(&mut w, &mut state, &wheel(0.0));
+        assert_eq!(
+            state.count, 0,
+            "at a placement of 550 the list is nowhere near the start"
+        );
+
+        assert!(w.apply_pending_correction(), "the commit applies");
+        assert_eq!(w.offset(), 550.0);
+        assert_eq!(w.pending_correction, 0.0);
+        run_loads(&mut w, &mut state, &wheel(0.0));
+        assert_eq!(
+            state.count, 0,
+            "committing a correction is bookkeeping, not scroll motion"
+        );
+
+        // A genuine approach still fires it, exactly once.
+        run_loads(&mut w, &mut state, &wheel(-500.0));
+        assert_eq!(w.offset(), 50.0);
+        assert_eq!(state.count, 1, "a real approach fires the load-older edge");
+        run_loads(&mut w, &mut state, &wheel(-20.0));
+        assert_eq!(state.count, 1, "and it stays edge-triggered");
+    }
+
+    #[test]
+    fn a_live_fling_withholds_the_correction_until_it_stops() {
+        // The accumulate-then-apply rule at its own granularity, over both ways
+        // a fling ends: decaying under FLING_STOP, and a pointer taking over.
+        let mut w = pending_correction_widget(500.0);
+        w.fling = Some(-40.0);
+        assert!(
+            !w.apply_pending_correction(),
+            "a live fling withholds the commit"
+        );
+        assert_eq!(w.pending_correction, 500.0, "the sum keeps accumulating");
+        for _ in 0..12 {
+            w.tick(16.0);
+        }
+        assert!(!w.is_flinging(), "the fling decayed under FLING_STOP");
+        assert!(w.apply_pending_correction(), "and the next rebuild commits");
+        assert_eq!(w.pending_correction, 0.0);
+
+        // Pointer-down takeover: same commit, one event earlier.
+        let mut w = pending_correction_widget(500.0);
+        let mut state = Loads::default();
+        w.fling = Some(-4_000.0);
+        assert!(!w.apply_pending_correction());
+        run_loads(&mut w, &mut state, &ev(PointerPhase::Down, 50.0));
+        assert!(!w.is_flinging(), "a pointer down takes the gesture over");
+        assert!(w.apply_pending_correction());
+        assert_eq!(w.pending_correction, 0.0);
+    }
 
     #[cfg(debug_assertions)]
     #[test]
