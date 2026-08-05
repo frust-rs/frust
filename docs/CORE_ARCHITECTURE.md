@@ -55,6 +55,14 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
   renderer- and text-crate-agnostic via a type-erased text context.
 - `RenderRoot::paint` walks widgets into a renderer-agnostic `Scene`, later encoded for the GPU by
   `frust-render` (RENDER unit).
+- A paint pass also carries a frame-request contract: `PaintCtx::request_frame` (`TickClass::Transition`,
+  unpaced) marks the pass every-vsync (a max-lattice — any `Transition` request wins over a concurrent
+  `CosmeticLoop` one); `request_frame_paced`/`request_frame_paced_at(interval)` (`TickClass::CosmeticLoop`)
+  marks it merely throttleable and folds `interval` onto a separate MIN-lattice (tightest interval wins,
+  so a fast shimmer beside a slow caret paces the frame at the shimmer's rate; a bare
+  `request_frame_paced` folds in `Duration::ZERO`, meaning "at the theme's own rate"). Both aggregates
+  surface on `PaintOutcome` (`needs_frame_paced_only`, `paced_interval`) for the shell's frame gate to
+  resolve against the active theme's `cosmetic_loop_rate` (see SHELLS_ARCHITECTURE.md).
 - `RenderRoot::event` routes input through the retained tree, tracking capture/focus without a
   separate registry. Events fall into three routing classes: hit-tested (pointer/scroll),
   focus-routed (`Key`/`Ime`, delivered down the recorded focus path), and **broadcast**

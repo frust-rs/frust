@@ -514,7 +514,13 @@ Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantic
   user-visible endpoint. A shimmer/spinner/pulse with no endpoint requests the paced class
   instead, letting the mobile frame gate throttle it to `MotionScheme::cosmetic_loop_rate`,
   and must still honor `reduce_motion` (freeze in place, stop requesting frames).
-  **Input-driven frames are never paced.**
+  **Input-driven frames are never paced.** A loop far slower than the cap (a ~500ms caret
+  blink against a 30Hz shimmer) names its own cadence with `request_frame_paced_at(interval)`
+  instead of the bare call — still `CosmeticLoop`-classified and still `reduce_motion`-honoring,
+  just at an explicit interval rather than the theme's default rate. `TextInput`'s caret is the
+  shipped example, with one deliberate exception to the freeze-in-place rule above: it freezes
+  **visible** rather than hidden (a position cue must stay legible) while still dropping all
+  frame requests when frozen.
 - **Design-system code targets `frust_widgets::authoring`, never a catalog module.** A baseline
   widget never imports `material`/`cupertino`/`glyph`; the container/callback plumbing, event
   routing, and callback erasure every widget needs live in the public `authoring` module

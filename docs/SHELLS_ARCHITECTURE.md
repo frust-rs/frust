@@ -63,6 +63,22 @@ signal-poll seam race-free without a lock.
   dirtiness is a paced loop is absorbed into that loop's next paced frame). `deferred_callbacks_pending`
   is the other run-forcing input, a peek at CORE's pending-result-flush flag so a Housekeeping flush
   owed with nothing else dirty still runs its frame.
+- **Per-request paced interval:** a paced request may name its own cadence
+  (`PaintCtx::request_frame_paced_at`), which reaches the shell as `PaintOutcome::paced_interval` —
+  core's own MIN-fold across every paced request in the pass. Each mobile shell latches it into a
+  `last_paced_interval` field, feeding `FramePacing::requested_interval` on the *next* tick's
+  `decide_paced` (a pre-paint decision); desktop instead reads that same paint's `paced_interval`
+  straight into `next_paced_wake`, synchronously right after the paint that produced it — deliberately
+  no latch field, since its decision always runs post-paint and so never needs a stale value carried
+  forward. Either path resolves the interval via the identical `max(cap, requested)` contract
+  (`FramePacing::effective_interval`): the theme's `cosmetic_loop_rate` is a **ceiling, not a target**,
+  so a request tighter than the cap clamps up to it and only a slower request actually widens the
+  cadence. The mobile pacing anchor tracks whatever interval was in force at the last produced frame and
+  re-anchors to `now` when that interval changes (rather than its usual drift-free `last + interval`
+  arithmetic), so a cadence flip can't double-fire off an anchor laid down under the old interval. A
+  tick carrying the `focus_or_ime_changed` edge tightens pacing back to the bare theme cap regardless of
+  any longer per-request interval — a slow caret can never turn a focus transition into a
+  multi-hundred-ms lag (see `docs/LIMITATIONS.md`).
 - Android: a Choreographer callback consults the gate in `app/frame.rs`, then drives rebuild →
   conditional layout → paint → render-thread present; touch input feeds the app between frames.
 - iOS: a CADisplayLink tick consults the same gate (also in `app/frame.rs`), then unconditionally
