@@ -402,15 +402,6 @@ pub struct FabMenuWidget {
     /// (always `true` for [`Target::Scrim`] — see [`Widget::event`]).
     pressed_inside: bool,
     on_toggle: crate::authoring::ErasedCallback,
-    /// Whether a `Down` has already claimed focus this open — the claim-once
-    /// guard shared by both `event` Down sites (trigger, and while-open
-    /// item/scrim). Unlike the five pushed-page modal widgets (a fresh
-    /// instance per open needs no reset), this widget *persists* across
-    /// open/close cycles — the FAB lives on the screen and reopens/recloses
-    /// repeatedly — so [`View::rebuild`]'s close transition (`self.open`
-    /// going `true` -> `false`) resets this back to `false`, seeding the
-    /// next open's first press to claim again.
-    focus_claimed: bool,
 }
 
 impl FabMenuWidget {
@@ -456,7 +447,6 @@ impl<State: 'static> View<State> for FabMenuView<State> {
             armed: None,
             pressed_inside: false,
             on_toggle: crate::authoring::erase_callback(&self.on_toggle),
-            focus_claimed: false,
         }
     }
 
@@ -475,15 +465,10 @@ impl<State: 'static> View<State> for FabMenuView<State> {
             element.open = self.open;
             element.drive_reveal();
             // A closed-triggered rebuild invalidates any in-flight item/scrim
-            // press — nothing left to release onto. This is also the
-            // widget's own close→open reset point for the claim-once guard
-            // (see `focus_claimed`'s doc): unlike a pushed-page modal, this
-            // widget persists across the close, so the guard must be primed
-            // back to `false` here for the next open to claim again.
+            // press — nothing left to release onto.
             if !self.open {
                 element.armed = None;
                 element.pressed_inside = false;
-                element.focus_claimed = false;
             }
             flags |= ChangeFlags::PAINT;
         }
@@ -693,15 +678,16 @@ impl Widget for FabMenuWidget {
         match p.phase {
             PointerPhase::Down => {
                 if self.fab_rect.contains(p.position) {
-                    // The first press on the trigger claims focus, so a
-                    // subsequent Escape has a focus chain to travel (see the
-                    // module docs' Keyboard operability note); the claim is
-                    // held until this menu closes (see `focus_claimed`'s
-                    // doc), so a later press re-claiming would be redundant.
-                    if !self.focus_claimed {
-                        ctx.request_focus();
-                        self.focus_claimed = true;
-                    }
+                    // Claim focus on every trigger press (see the module
+                    // docs' Keyboard operability note). Load-bearing: the
+                    // root treats a Down that bubbles no claim as a blur
+                    // (`release_focus_session` drops focus + IME state), so
+                    // the re-claim is what keeps the session alive while this
+                    // menu is up. Re-claiming while already focused is a
+                    // change-guarded no-op (no generation bump) — do not add
+                    // a claim-once guard, it kills the session on the second
+                    // tap (claim-once-hygiene review, 2026-08-06).
+                    ctx.request_focus();
                     self.armed = Some(Target::Fab);
                     self.pressed_inside = true;
                     ctx.capture_pointer();
@@ -712,11 +698,9 @@ impl Widget for FabMenuWidget {
                     return EventResult::Ignored;
                 }
                 // Same opt-in while open: a press on an item or the scrim
-                // also claims focus — the first one only, per the same guard.
-                if !self.focus_claimed {
-                    ctx.request_focus();
-                    self.focus_claimed = true;
-                }
+                // also claims focus on every Down — see the trigger arm's
+                // comment above for why.
+                ctx.request_focus();
                 if let Some(i) = self.item_rects.iter().position(|r| r.contains(p.position)) {
                     self.armed = Some(Target::Item(i));
                 } else {
@@ -1082,7 +1066,7 @@ mod tests {
     }
 
     #[test]
-    fn second_trigger_press_does_not_reclaim_focus_after_one_open() {
+    fn a_down_reclaims_trigger_focus_after_an_external_blur() {
         use frust_core::ChildPod;
 
         let mut w = build_menu(false, 2);
@@ -1112,9 +1096,9 @@ mod tests {
             pod.event_child(&mut ctx, &ev(PointerPhase::Up, fab_center.x, fab_center.y));
         }
 
-        // Simulate an external clear so the second Down's own effect on the
-        // recorded flag is isolated: if the guard holds, the widget itself
-        // never re-calls `request_focus`, so the flag stays as we set it.
+        // Simulate an external blur (mirrors the root's own `Down`-with-no-
+        // claim release path) so the second Down's own re-claim is what's
+        // under test, not a leftover flag.
         pod.set_focused(false);
         {
             let s: &mut dyn Any = &mut state;
@@ -1125,13 +1109,14 @@ mod tests {
             );
         }
         assert!(
-            !pod.is_focused(),
-            "a second trigger Down within the same open must not re-request focus"
+            pod.is_focused(),
+            "a second trigger Down must re-claim focus after an external blur — this \
+             is what keeps the root's focus/IME session alive while the menu is up"
         );
     }
 
     #[test]
-    fn second_item_press_while_open_does_not_reclaim_focus() {
+    fn a_down_reclaims_scrim_focus_after_an_external_blur() {
         use frust_core::ChildPod;
 
         let w = build_menu(true, 2);
@@ -1156,6 +1141,9 @@ mod tests {
             pod.event_child(&mut ctx, &ev(PointerPhase::Cancel, 5.0, 5.0));
         }
 
+        // Simulate an external blur (mirrors the root's own `Down`-with-no-
+        // claim release path) so the second Down's own re-claim is what's
+        // under test, not a leftover flag.
         pod.set_focused(false);
         {
             let s: &mut dyn Any = &mut state;
@@ -1163,31 +1151,43 @@ mod tests {
             pod.event_child(&mut ctx, &ev(PointerPhase::Down, 5.0, 5.0));
         }
         assert!(
-            !pod.is_focused(),
-            "a second scrim/item Down within the same open must not re-request focus"
+            pod.is_focused(),
+            "a second scrim/item Down must re-claim focus after an external blur — \
+             this is what keeps the root's focus/IME session alive while the menu is up"
         );
     }
 
     #[test]
     fn reopening_after_a_close_reclaims_focus() {
         // The persisting-widget counterpart of the pushed-page widgets' fresh
-        // `build`: the FAB lives on across open/close cycles, so the guard
-        // must reset on close (`focus_claimed`'s doc) rather than only ever
-        // seeding `false` once.
+        // `build`: the FAB lives on across open/close cycles. Driven through a
+        // `ChildPod` (rather than a removed internal guard field), so what's
+        // actually asserted is the pod's own recorded focus path surviving a
+        // close/reopen rebuild, then self-healing a later external blur.
+        use frust_core::ChildPod;
+
         let mut w = build_menu(false, 1);
         laid_out(&mut w);
-        let mut state = Log::default();
         let fab_center = w.fab_rect.center();
+        let mut pod = ChildPod::new(Box::new(w));
+        let mut tcx = frust_text::TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        let area = Size::new(400.0, 600.0);
+        pod.layout_child(&mut lctx, &BoxConstraints::tight(area));
 
-        dispatch(
-            &mut w,
-            &mut state,
-            &ev(PointerPhase::Down, fab_center.x, fab_center.y),
-        );
-        assert!(w.focus_claimed, "the trigger press claims focus");
+        let mut state = Log::default();
+        {
+            let s: &mut dyn Any = &mut state;
+            let mut ctx = EventCtx::new(s, Point::ZERO, area);
+            pod.event_child(
+                &mut ctx,
+                &ev(PointerPhase::Down, fab_center.x, fab_center.y),
+            );
+        }
+        assert!(pod.is_focused(), "the trigger press claims focus");
 
-        // Open, then close again via rebuild (the controlled `open` prop) —
-        // the close transition must reset the guard.
+        // Open, then close again via rebuild (the controlled `open` prop),
+        // driven directly on the pod's boxed widget.
         let mut counter = 0u64;
         let closed = fab_menu::<Log, _>(icon_stub::<Log>(), false, vec![item(0)], |s: &mut Log| {
             s.toggles += 1
@@ -1195,23 +1195,36 @@ mod tests {
         let opened = fab_menu::<Log, _>(icon_stub::<Log>(), true, vec![item(0)], |s: &mut Log| {
             s.toggles += 1
         });
-        View::<Log>::rebuild(&opened, &closed, &mut w, &mut BuildCtx::new(&mut counter));
-        assert!(w.focus_claimed, "opening alone does not touch the guard");
-        View::<Log>::rebuild(&closed, &opened, &mut w, &mut BuildCtx::new(&mut counter));
+        {
+            let widget = pod
+                .widget_mut()
+                .downcast_mut::<FabMenuWidget>()
+                .expect("the pod wraps a FabMenuWidget");
+            View::<Log>::rebuild(&opened, &closed, widget, &mut BuildCtx::new(&mut counter));
+            View::<Log>::rebuild(&closed, &opened, widget, &mut BuildCtx::new(&mut counter));
+        }
         assert!(
-            !w.focus_claimed,
-            "closing resets the guard so the next open can re-claim"
+            pod.is_focused(),
+            "a same-identity rebuild (open then close) never touches the pod's \
+             recorded focus path on its own"
         );
 
-        laid_out(&mut w);
-        dispatch(
-            &mut w,
-            &mut state,
-            &ev(PointerPhase::Down, fab_center.x, fab_center.y),
-        );
+        // Simulate an external blur (mirrors the root's own `Down`-with-no-
+        // claim release path) so the reopened trigger's own re-claim is
+        // what's under test.
+        pod.set_focused(false);
+        pod.layout_child(&mut lctx, &BoxConstraints::tight(area));
+        {
+            let s: &mut dyn Any = &mut state;
+            let mut ctx = EventCtx::new(s, Point::ZERO, area);
+            pod.event_child(
+                &mut ctx,
+                &ev(PointerPhase::Down, fab_center.x, fab_center.y),
+            );
+        }
         assert!(
-            w.focus_claimed,
-            "reopening re-claims focus (guard was reset on close)"
+            pod.is_focused(),
+            "reopening after a close still lets a fresh trigger press re-claim focus"
         );
     }
 

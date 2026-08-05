@@ -568,13 +568,6 @@ pub struct GlyphDialogWidget {
     /// Whether that press started outside the panel (only an outside press
     /// released outside cancels).
     scrim_down_outside: bool,
-    /// Whether a `Down` has already claimed focus this open — the claim-once
-    /// guard (see `event`'s Down arm). Seeding `false` in [`View::build`] is
-    /// correct with no reset needed elsewhere: [`show_glyph_dialog`] pushes
-    /// a fresh page per open, so a new widget instance (and a fresh `false`)
-    /// is built every time the dialog opens; there is no retained instance
-    /// to reset on close.
-    focus_claimed: bool,
 }
 
 /// Reconcile one optional text child (title/body) in place.
@@ -725,7 +718,6 @@ impl<State: 'static> View<State> for GlyphDialogView<State> {
             driver: None,
             scrim_captured: false,
             scrim_down_outside: false,
-            focus_claimed: false,
         }
     }
 
@@ -1007,14 +999,15 @@ impl Widget for GlyphDialogWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        // The first press claims focus so a subsequent Escape has a chain to
-        // travel (the material dialog's opt-in); the claim is held until this
-        // page pops, so a later press re-claiming would be redundant.
-        if !self.focus_claimed
-            && matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Down)
-        {
+        // Claim focus on every Down. Load-bearing: the root treats a Down
+        // that bubbles no claim as a blur (`release_focus_session` drops
+        // focus + IME state), so the re-claim is what keeps the session alive
+        // while this dialog is up. Re-claiming while already focused is a
+        // change-guarded no-op (no generation bump) — do not add a
+        // claim-once guard, it kills the session on the second tap
+        // (claim-once-hygiene review, 2026-08-06).
+        if matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Down) {
             ctx.request_focus();
-            self.focus_claimed = true;
         }
         // An action already capturing (or freshly hit) consumes the event first.
         if crate::authoring::route_event(&mut self.actions, ctx, event) == EventResult::Handled {
@@ -1629,7 +1622,7 @@ mod tests {
     }
 
     #[test]
-    fn second_press_does_not_reclaim_focus_after_one_open() {
+    fn a_down_reclaims_focus_after_an_external_blur() {
         use frust_core::ChildPod;
 
         let view: GlyphDialogView<()> = glyph_dialog().title("Hi");
@@ -1653,9 +1646,9 @@ mod tests {
             pod.event_child(&mut ctx, &ev(PointerPhase::Up, 5.0, 5.0));
         }
 
-        // Simulate an external clear so the second Down's own effect on the
-        // recorded flag is isolated: if the guard holds, the widget itself
-        // never re-calls `request_focus`, so the flag stays as we set it.
+        // Simulate an external blur (mirrors the root's own `Down`-with-no-
+        // claim release path) so the second Down's own re-claim is what's
+        // under test, not a leftover flag.
         pod.set_focused(false);
         {
             let s: &mut dyn Any = &mut dummy;
@@ -1663,8 +1656,9 @@ mod tests {
             pod.event_child(&mut ctx, &ev(PointerPhase::Down, 5.0, 5.0));
         }
         assert!(
-            !pod.is_focused(),
-            "a second Down within the same open must not re-request focus"
+            pod.is_focused(),
+            "a second Down must re-claim focus after an external blur — this is what \
+             keeps the root's focus/IME session alive while the dialog is up"
         );
     }
 
