@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use frust_scene::{GlyphRun, SceneBuilder, ShaderProgram};
 use kurbo::{Affine, BezPath, Point, Rect, Size};
@@ -502,6 +503,11 @@ impl Default for LayoutCtx<'static> {
 /// all leaves the frame as it is today — the class is only meaningful once a
 /// frame was actually requested (see [`PaintCtx::frame_class`]).
 ///
+/// A `CosmeticLoop` request may additionally name *how often* it wants to be
+/// re-run ([`PaintCtx::request_frame_paced_at`]); those intervals aggregate on
+/// their own **MIN**-lattice, orthogonal to this max-lattice over classes (see
+/// [`PaintCtx::paced_interval`]).
+///
 /// The *gate-side* pacing behavior is implemented separately (the mobile frame
 /// gate); this type is only the vocabulary a widget uses to declare intent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -557,6 +563,20 @@ pub struct PaintCtx<'a> {
     /// Transition (a layout animation is user-visible motion), and the
     /// unchanged `request_frame` sets it too (today's every-vsync behavior).
     frame_unpaced: bool,
+    /// The **MIN** over every paced ([`TickClass::CosmeticLoop`]) request's
+    /// named interval this (sub)paint — the tightest cadence anything asked
+    /// for. `None` until the first paced request; a bare
+    /// [`PaintCtx::request_frame_paced`] contributes [`Duration::ZERO`] ("as
+    /// often as the theme cap allows"), which is the MIN-lattice's absorbing
+    /// element and therefore dominates any slower explicit request.
+    ///
+    /// Orthogonal to `frame_unpaced` (the class max-lattice): it is only
+    /// *meaningful* while the aggregate class is `CosmeticLoop`, but a later
+    /// Transition request never clears it. Bubbles up through
+    /// [`ChildPod::paint_child`]/[`PaintCtx::with_hero_registry`] exactly like
+    /// `frame_unpaced`, and surfaces on [`PaintOutcome::paced_interval`] for the
+    /// mobile frame gate to resolve against the theme's cap.
+    paced_interval: Option<Duration>,
     ime_state: Option<ImeState>,
     /// Whether the widget being painted currently holds the focus path — seeded
     /// from its pod's recorded focus flag ([`ChildPod::is_focused`]) by
@@ -663,6 +683,7 @@ impl<'a> PaintCtx<'a> {
             needs_frame: false,
             needs_layout: false,
             frame_unpaced: false,
+            paced_interval: None,
             ime_state: None,
             has_focus: false,
             frame_time: FrameTime::ZERO,
@@ -872,22 +893,73 @@ impl<'a> PaintCtx<'a> {
     /// [`Self::request_frame`]/[`Self::request_layout`] elsewhere in the tree
     /// re-forces every-vsync cadence, so a paced request is never a downgrade of
     /// user-visible motion.
+    ///
+    /// This names no interval, which means "at the theme's own
+    /// `MotionScheme::cosmetic_loop_rate`" — exactly
+    /// `request_frame_paced_at(Duration::ZERO)`, since that rate is the cap every
+    /// paced request resolves against (see [`Self::request_frame_paced_at`]).
     pub fn request_frame_paced(&mut self) {
-        self.request_frame_class(TickClass::CosmeticLoop);
+        self.request_frame_paced_at(Duration::ZERO);
+    }
+
+    /// Request a pacable decorative repaint **no more often than** once per
+    /// `interval` — [`Self::request_frame_paced`] with an explicit cadence, for a
+    /// loop far slower than the theme's cosmetic rate (a ~500ms caret blink
+    /// against a 30Hz shimmer cap).
+    ///
+    /// Same class as [`Self::request_frame_paced`] ([`TickClass::CosmeticLoop`]);
+    /// only the requested cadence differs. Two contracts govern the value:
+    ///
+    /// - **MIN-lattice aggregation.** Multiple paced requests in one paint pass
+    ///   fold to the *tightest* interval, so every requester is repainted at
+    ///   least as often as it asked. A 30Hz shimmer (a bare
+    ///   [`Self::request_frame_paced`], i.e. [`Duration::ZERO`]) beside a 500ms
+    ///   caret paces the frame at 30Hz — the caret is then simply repainted more
+    ///   often than it needs, which is visually indistinguishable from its own
+    ///   cadence and costs nothing beyond frames the shimmer already forced. That
+    ///   asymmetry is by design: a *slow* request can never starve a fast one.
+    /// - **The theme rate is a ceiling, not a target.** The frame gate resolves
+    ///   the aggregate against `1 / MotionScheme::cosmetic_loop_rate` and takes
+    ///   the *longer* of the two, so an interval tighter than the cap is clamped
+    ///   to it. Motion that genuinely must run every vsync is not cosmetic —
+    ///   use [`Self::request_frame`] ([`TickClass::Transition`]) for that.
+    ///
+    /// `frust-core` never reads a clock or a theme, so neither the fold nor the
+    /// clamp happens here: the aggregate rides out on
+    /// [`PaintOutcome::paced_interval`] and the shell's frame gate resolves it.
+    pub fn request_frame_paced_at(&mut self, interval: Duration) {
+        self.needs_frame = true;
+        self.merge_paced_interval(interval);
     }
 
     /// Request a continuation frame of an explicit [`TickClass`] — the general
     /// form behind [`Self::request_frame`] (Transition) and
-    /// [`Self::request_frame_paced`] (CosmeticLoop).
+    /// [`Self::request_frame_paced`] (CosmeticLoop, at the theme's own rate).
     ///
     /// Always sets `needs_frame`; a [`TickClass::Transition`] request additionally
     /// marks the aggregate unpaced (the max-lattice OR — see [`TickClass`]). A
-    /// `CosmeticLoop` request never clears an already-unpaced aggregate.
+    /// `CosmeticLoop` request never clears an already-unpaced aggregate, and —
+    /// naming no interval — folds [`Duration::ZERO`] into the MIN-lattice like
+    /// [`Self::request_frame_paced`] does.
     pub fn request_frame_class(&mut self, class: TickClass) {
-        self.needs_frame = true;
-        if class == TickClass::Transition {
-            self.frame_unpaced = true;
+        match class {
+            TickClass::Transition => {
+                self.needs_frame = true;
+                self.frame_unpaced = true;
+            }
+            TickClass::CosmeticLoop => self.request_frame_paced(),
         }
+    }
+
+    /// Fold one paced request's interval into this context's MIN-lattice
+    /// aggregate — the single mutation point for `paced_interval`, shared by
+    /// [`Self::request_frame_paced_at`] and the two bubble sites
+    /// ([`ChildPod::paint_child`], [`Self::with_hero_registry`]).
+    fn merge_paced_interval(&mut self, interval: Duration) {
+        self.paced_interval = Some(match self.paced_interval {
+            Some(current) => current.min(interval),
+            None => interval,
+        });
     }
 
     /// Whether a continuation frame was requested during this (sub)paint.
@@ -918,6 +990,20 @@ impl<'a> PaintCtx<'a> {
     /// `frame_class() == Some(TickClass::CosmeticLoop)`.
     pub fn needs_frame_paced_only(&self) -> bool {
         self.needs_frame && !self.frame_unpaced
+    }
+
+    /// The tightest (MIN) interval any paced request named during this
+    /// (sub)paint, or `None` if no paced request was made at all.
+    ///
+    /// [`Duration::ZERO`] — what a bare [`Self::request_frame_paced`] folds in —
+    /// means "at the theme's own `cosmetic_loop_rate`", so `Some(Duration::ZERO)`
+    /// and `None` resolve identically at the frame gate; the distinction is only
+    /// whether *any* paced request was made. Meaningful only while
+    /// [`Self::frame_class`] is [`TickClass::CosmeticLoop`] — a concurrent
+    /// Transition request makes the whole frame unpaced, at which point no
+    /// interval applies (see [`PaintOutcome::paced_interval`]).
+    pub fn paced_interval(&self) -> Option<Duration> {
+        self.paced_interval
     }
 
     /// Signal that this paint advanced animation state that changes the widget's
@@ -1084,6 +1170,7 @@ impl<'a> PaintCtx<'a> {
             needs_frame: false,
             needs_layout: false,
             frame_unpaced: false,
+            paced_interval: None,
             ime_state: None,
             has_focus: self.has_focus,
             frame_time: self.frame_time,
@@ -1107,6 +1194,12 @@ impl<'a> PaintCtx<'a> {
         // aggregate unpaced (mirrors `ChildPod::paint_child`'s absorb).
         if child.frame_unpaced {
             self.frame_unpaced = true;
+        }
+        // MIN-lattice fold of the paced interval, the orthogonal half of the
+        // same absorb: a slower interval inside never loosens the outer
+        // aggregate, and a tighter one tightens it.
+        if let Some(interval) = child.paced_interval {
+            self.merge_paced_interval(interval);
         }
         if let Some(ime) = child.ime_state.take() {
             self.ime_state = Some(ime);
@@ -1404,6 +1497,10 @@ pub struct PlatformViewFrame {
 /// in. The mobile frame gate may throttle such a purely-cosmetic frame
 /// to a lower cadence; a `false` here means the frame runs every vsync as today.
 /// Only meaningful when `needs_frame` is `true`.
+///
+/// `paced_interval` is *how fast* that paced frame asked to be re-run: the MIN
+/// over every paced request this pass (see [`PaintCtx::request_frame_paced_at`]).
+/// Only meaningful alongside `needs_frame_paced_only`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PaintOutcome {
     /// Whether the shell should schedule another frame to continue an animation.
@@ -1416,6 +1513,14 @@ pub struct PaintOutcome {
     /// may throttle (see [`PaintCtx::needs_frame_paced_only`]). Meaningful only
     /// when `needs_frame` is set.
     pub needs_frame_paced_only: bool,
+    /// The tightest (MIN) interval any paced request this frame named — see
+    /// [`PaintCtx::paced_interval`]. `None` (no paced request) and
+    /// `Some(Duration::ZERO)` (a bare [`PaintCtx::request_frame_paced`]) both
+    /// mean "the theme's own `cosmetic_loop_rate`"; a longer value asks the gate
+    /// to pace this loop slower than that cap. Meaningful only alongside
+    /// `needs_frame_paced_only`; a shell latches it beside that flag and hands it
+    /// to the frame gate, which resolves it against the live theme's cap.
+    pub paced_interval: Option<Duration>,
 }
 
 /// A retained UI element living in the widget tree.
@@ -1671,8 +1776,17 @@ impl ChildPod {
         // subtree stay paceable through nested containers. `frame_class()` is
         // `None` when the child asked for nothing, so a still child bubbles
         // nothing (the max-lattice identity).
-        if let Some(class) = child_ctx.frame_class() {
-            ctx.request_frame_class(class);
+        match child_ctx.frame_class() {
+            Some(TickClass::Transition) => ctx.request_frame_class(TickClass::Transition),
+            // Deliberately NOT `request_frame_class(CosmeticLoop)`: that folds
+            // `Duration::ZERO` (the theme cap) into the parent's MIN-lattice and
+            // would silently re-tighten a child that asked for a *slower*
+            // cadence. Forward the child's own aggregate interval instead — the
+            // MIN-lattice's bubbling identity.
+            Some(TickClass::CosmeticLoop) => {
+                ctx.request_frame_paced_at(child_ctx.paced_interval().unwrap_or_default());
+            }
+            None => {}
         }
         // Bubble the child's layout-continuation request the same way as
         // `needs_frame`, so a nested widget animating its layout keeps layout
@@ -1849,6 +1963,24 @@ mod tests {
 
         fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
             ctx.request_frame_paced();
+        }
+    }
+
+    /// The interval a [`SlowPacedAnimator`] asks for — a ~2Hz caret blink,
+    /// deliberately far slower than any theme's cosmetic-loop cap.
+    const SLOW_PACE: Duration = Duration::from_millis(500);
+
+    /// A leaf widget whose decorative loop names its own (slow) cadence via
+    /// [`PaintCtx::request_frame_paced_at`] — stands in for a blinking caret.
+    struct SlowPacedAnimator;
+
+    impl Widget for SlowPacedAnimator {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            ctx.request_frame_paced_at(SLOW_PACE);
         }
     }
 
@@ -2411,6 +2543,66 @@ mod tests {
         assert!(ctx.needs_frame());
         assert_eq!(ctx.frame_class(), Some(TickClass::CosmeticLoop));
         assert!(ctx.needs_frame_paced_only());
+        // The bare form names no interval: `Duration::ZERO` is "at the theme's
+        // own cosmetic rate" — unchanged behavior for all six shimmer widgets.
+        assert_eq!(ctx.paced_interval(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn request_frame_paced_at_carries_its_interval() {
+        // The explicit form is the same class, only slower: a ~500ms caret.
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx.request_frame_paced_at(Duration::from_millis(500));
+        assert!(ctx.needs_frame());
+        assert_eq!(ctx.frame_class(), Some(TickClass::CosmeticLoop));
+        assert!(ctx.needs_frame_paced_only());
+        assert_eq!(ctx.paced_interval(), Some(Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn paced_intervals_aggregate_on_the_min_lattice() {
+        // Two paced requests at different rates in one pass: the TIGHTEST wins,
+        // so both are honored (the slower one is merely repainted more often
+        // than it asked — see `request_frame_paced_at`'s contract).
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx.request_frame_paced_at(Duration::from_millis(500));
+        ctx.request_frame_paced_at(Duration::from_millis(33));
+        assert_eq!(ctx.paced_interval(), Some(Duration::from_millis(33)));
+        assert!(ctx.needs_frame_paced_only());
+
+        // Order-independent (a lattice fold, not a last-writer-wins slot).
+        let mut reversed = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        reversed.request_frame_paced_at(Duration::from_millis(33));
+        reversed.request_frame_paced_at(Duration::from_millis(500));
+        assert_eq!(reversed.paced_interval(), Some(Duration::from_millis(33)));
+
+        // A bare `request_frame_paced` (the theme cap, `Duration::ZERO`) is the
+        // absorbing element: a 30Hz shimmer beside a 2Hz caret paces at 30Hz.
+        let mut shimmer_and_caret = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        shimmer_and_caret.request_frame_paced_at(Duration::from_millis(500));
+        shimmer_and_caret.request_frame_paced();
+        assert_eq!(shimmer_and_caret.paced_interval(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn request_frame_class_cosmetic_matches_the_bare_paced_request() {
+        // The general form must stay interchangeable with `request_frame_paced`
+        // (the widgets' `cull_pacing`/`pacing_integration` suites drive it).
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx.request_frame_class(TickClass::CosmeticLoop);
+        assert_eq!(ctx.frame_class(), Some(TickClass::CosmeticLoop));
+        assert_eq!(ctx.paced_interval(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn no_paced_request_names_no_interval() {
+        // Nothing requested, and a Transition-only request, both leave the
+        // interval unset — there is no paced loop to pace.
+        let ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        assert_eq!(ctx.paced_interval(), None);
+        let mut transition = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        transition.request_frame();
+        assert_eq!(transition.paced_interval(), None);
     }
 
     #[test]
@@ -2483,6 +2675,64 @@ mod tests {
     }
 
     #[test]
+    fn child_pod_bubbles_a_named_interval_unchanged() {
+        // A slow caret nested under a container must reach the root with its own
+        // interval intact — bubbling must never re-tighten it to the theme cap
+        // (which a blanket `request_frame_class(CosmeticLoop)` forward would).
+        let mut outer = ChildPod::new(Box::new(SingleChildContainer {
+            child: ChildPod::new(Box::new(SlowPacedAnimator)),
+        }));
+        let mut lctx = LayoutCtx::new();
+        outer.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        outer.paint_child(&mut pctx, &mut scene);
+        assert!(pctx.needs_frame_paced_only());
+        assert_eq!(
+            pctx.paced_interval(),
+            Some(SLOW_PACE),
+            "a nested slow paced loop keeps its own cadence up the tree"
+        );
+    }
+
+    #[test]
+    fn sibling_paced_intervals_fold_to_the_tightest() {
+        // A shimmer (theme cap) beside a slow caret under one container: the
+        // container's aggregate paces at the shimmer's rate. The caret is then
+        // repainted more often than it asked — no visual harm, by design.
+        struct TwoChildContainer {
+            a: ChildPod,
+            b: ChildPod,
+        }
+        impl Widget for TwoChildContainer {
+            fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                self.a.layout_child(ctx, bc);
+                self.b.layout_child(ctx, bc)
+            }
+            fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+                self.a.paint_child(ctx, scene);
+                self.b.paint_child(ctx, scene);
+            }
+        }
+
+        let mut outer = ChildPod::new(Box::new(TwoChildContainer {
+            a: ChildPod::new(Box::new(SlowPacedAnimator)),
+            b: ChildPod::new(Box::new(PacedAnimator)),
+        }));
+        let mut lctx = LayoutCtx::new();
+        outer.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        outer.paint_child(&mut pctx, &mut scene);
+        assert!(pctx.needs_frame_paced_only());
+        assert_eq!(
+            pctx.paced_interval(),
+            Some(Duration::ZERO),
+            "the tightest sibling request (the theme cap) wins the fold"
+        );
+    }
+
+    #[test]
     fn mixed_sibling_requests_aggregate_to_unpaced() {
         // Two sibling children under one container: one paced, one Transition.
         // The container's aggregate must be unpaced (any Transition dominates).
@@ -2541,6 +2791,20 @@ mod tests {
         });
         assert_eq!(ctx2.frame_class(), Some(TickClass::Transition));
         assert!(!ctx2.needs_frame_paced_only());
+
+        // The interval half of the absorb: a named interval inside surfaces
+        // outside, and folds on the MIN-lattice with an outer request.
+        let mut ctx3 = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx3.with_hero_registry(&registry, |child| {
+            child.request_frame_paced_at(SLOW_PACE);
+        });
+        assert_eq!(ctx3.paced_interval(), Some(SLOW_PACE));
+        ctx3.request_frame_paced();
+        assert_eq!(
+            ctx3.paced_interval(),
+            Some(Duration::ZERO),
+            "the outer theme-cap request tightens the folded aggregate"
+        );
     }
 
     #[test]

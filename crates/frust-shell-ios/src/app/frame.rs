@@ -226,11 +226,16 @@ impl IosAppHandle {
         // `cosmetic_loop_rate` rather than reproduced every `CADisplayLink`
         // tick. `now` is this tick's display-link clock (the same domain `paint`
         // consumes below); the interval is `1 / rate` resolved from the live
-        // theme so a retuned token re-paces live. Every other FrameInputs signal
-        // still forces an immediate Run — pacing never delays real work.
+        // theme so a retuned token re-paces live, and `requested_interval` is the
+        // previous paint's own MIN-folded request
+        // (`PaintCtx::request_frame_paced_at` — a caret blink far slower than the
+        // cap), which `FramePacing::effective_interval` resolves against it.
+        // Every other FrameInputs signal still forces an immediate Run — pacing
+        // never delays real work. Mirrors the Android shell seam-for-seam.
         let pacing = FramePacing {
             now: FrameTime::from_nanos(timestamp_ns),
             interval: Duration::from_secs_f32(1.0 / self.theme.motion.cosmetic_loop_rate.hz()),
+            requested_interval: self.last_paced_interval,
         };
 
         if self.frame_gate.decide_paced(inputs, pacing).is_skip() {
@@ -423,8 +428,11 @@ impl IosAppHandle {
         self.last_needs_frame = paint_outcome.needs_frame;
         // Latch the aggregated tick-class for the NEXT frame's gate so a
         // paced-only decorative loop can be throttled (see
-        // `FrameInputs::last_needs_frame_paced_only`).
+        // `FrameInputs::last_needs_frame_paced_only`), and beside it the
+        // MIN-folded interval that loop asked to be paced at
+        // (`FramePacing::requested_interval`; `None` = the theme's cap).
         self.last_needs_frame_paced_only = paint_outcome.needs_frame_paced_only;
+        self.last_paced_interval = paint_outcome.paced_interval;
 
         // Hand the finished frame to the render-path executor.
         // The inline fallback runs the encode→acquire→submit tail synchronously

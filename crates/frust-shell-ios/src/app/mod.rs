@@ -64,7 +64,7 @@ pub(crate) use present_sync::PresentHandoff;
 use std::ffi::c_void;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use frust_core::event::PointerEvent;
 use frust_core::insets::WindowInsets;
@@ -255,6 +255,13 @@ pub struct IosAppHandle {
     /// loop to the theme's `cosmetic_loop_rate` instead of every `CADisplayLink`
     /// tick. Latched beside `last_needs_frame`; a skipped frame leaves it.
     last_needs_frame_paced_only: bool,
+    /// Handle-side latch feeding `FramePacing::requested_interval`: the previous
+    /// paint's [`frust_core::PaintOutcome::paced_interval`] — the MIN-lattice
+    /// fold of every `PaintCtx::request_frame_paced_at` that pass, `None` when
+    /// none named an interval. Lets a loop slower than the theme's cap (a ~500ms
+    /// caret blink) pace at its own cadence. Latched beside
+    /// `last_needs_frame_paced_only`; a skipped frame leaves it.
+    last_paced_interval: Option<Duration>,
     /// Handle-side latch feeding `FrameInputs::theme_or_appearance_changed`:
     /// set by [`Self::set_appearance`] on an OS-driven light/dark flip and by
     /// [`Self::set_reduce_motion`] on a reduced-motion toggle, taken
@@ -504,6 +511,7 @@ impl IosAppHandle {
             last_focus_ime_gen,
             last_needs_frame: false,
             last_needs_frame_paced_only: false,
+            last_paced_interval: None,
             appearance_dirty: false,
             resampler: PointerResampler::new(),
             resample_clock: Instant::now(),

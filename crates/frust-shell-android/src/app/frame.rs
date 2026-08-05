@@ -266,12 +266,16 @@ impl AndroidAppHandle {
         // `cosmetic_loop_rate` rather than reproduced every Choreographer tick.
         // `now` is this tick's Choreographer clock (the same domain `paint`
         // consumes below); the interval is `1 / rate` resolved from the live
-        // theme so an app that retunes the token re-paces without a restart.
+        // theme so an app that retunes the token re-paces without a restart, and
+        // `requested_interval` is the previous paint's own MIN-folded request
+        // (`PaintCtx::request_frame_paced_at` — a caret blink far slower than
+        // the cap), which `FramePacing::effective_interval` resolves against it.
         // Every other FrameInputs signal still forces an immediate Run — pacing
         // never delays real work (see `frame_gate`'s pacing docs).
         let pacing = FramePacing {
             now: FrameTime::from_nanos(frame_time_nanos),
             interval: Duration::from_secs_f32(1.0 / self.theme.motion.cosmetic_loop_rate.hz()),
+            requested_interval: self.last_paced_interval,
         };
 
         if self.frame_gate.decide_paced(inputs, pacing).is_skip() {
@@ -413,8 +417,11 @@ impl AndroidAppHandle {
             let outcome = self.app.paint(&mut builder, frame_time);
             self.last_needs_frame = outcome.needs_frame;
             // Latch the aggregated tick-class so the NEXT frame's gate can pace a
-            // paced-only decorative loop (see `FrameInputs::last_needs_frame_paced_only`).
+            // paced-only decorative loop (see `FrameInputs::last_needs_frame_paced_only`),
+            // and beside it the MIN-folded interval that loop asked to be paced
+            // at (`FramePacing::requested_interval`; `None` = the theme's cap).
             self.last_needs_frame_paced_only = outcome.needs_frame_paced_only;
+            self.last_paced_interval = outcome.paced_interval;
             builder.pop_transform();
         }
         let paint_time = paint_start.map_or(Duration::ZERO, |t| t.elapsed());

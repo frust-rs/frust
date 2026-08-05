@@ -40,7 +40,7 @@ pub(crate) use render::{RenderSignals, render_scene};
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use frust_core::event::PointerEvent;
 use frust_core::insets::WindowInsets;
@@ -240,6 +240,13 @@ pub struct AndroidAppHandle {
     /// `FrameGate::decide_paced` throttles a paced-only frame to the theme's
     /// `cosmetic_loop_rate` instead of running it every Choreographer tick.
     last_needs_frame_paced_only: bool,
+    /// Latch: the tightest interval the previous paint's paced requests named
+    /// ([`frust_core::PaintOutcome::paced_interval`] — the MIN-lattice fold of
+    /// every `PaintCtx::request_frame_paced_at` that pass), or `None` when none
+    /// named one. Read into `FramePacing::requested_interval` beside
+    /// `last_needs_frame_paced_only`, so a loop slower than the theme's cap (a
+    /// ~500ms caret blink) paces at its own cadence rather than the cap's.
+    last_paced_interval: Option<Duration>,
     /// Whether the layout pass has run at least once. Until it has, the
     /// layout-skip seam in [`Self::frame`] force-runs layout (a paint before the
     /// first layout would have no valid geometry); after the first layout it is
@@ -615,6 +622,7 @@ impl AndroidAppHandle {
             appearance_dirty: false,
             last_needs_frame: false,
             last_needs_frame_paced_only: false,
+            last_paced_interval: None,
             first_layout_done: false,
             resampler: PointerResampler::new(),
             resample_clock: Instant::now(),
