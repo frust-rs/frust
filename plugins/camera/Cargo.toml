@@ -22,6 +22,16 @@ log = { workspace = true }
 # Plugin Conventions).
 frust-plugin = { path = "../../crates/frust-plugin" }
 
+# QR decode engine for the platform-independent `barcode` module
+# (`src/barcode/engine.rs`) — unconditional, unlike the Android/Apple FFI
+# deps below: `barcode` decodes from a `LumaView`/`ImageFrame` and never
+# touches a camera backend directly, so it builds and runs identically on
+# every target, including this desktop host's `cargo test`. Reached only
+# through the module's own private `BarcodeEngine` seam, never named
+# outside `src/barcode/engine.rs` (see root `Cargo.toml`'s comment for the
+# feature-trim rationale/license).
+rqrr = { workspace = true }
+
 # Android: the plugin's own JNI exports (`Java_dev_frust_camera_FrustCameraHost_native*`
 # — the frozen Kotlin↔Rust contract) and the Rust→Kotlin
 # `FrustCameraHost` calls both need `jni` directly — matching
@@ -178,3 +188,9 @@ dispatch2 = { version = "0.3", default-features = false, features = [
     "block2",
     "objc2",
 ] }
+
+[dev-dependencies]
+# QR fixture synthesis for `barcode::conformance`'s desktop tests (encodes a
+# payload to its module matrix, which the tests scale/rotate/stride into a
+# synthetic luma buffer) — no binary image assets, no `image` crate.
+qrcode = { workspace = true }

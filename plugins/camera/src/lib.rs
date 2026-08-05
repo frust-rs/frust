@@ -41,6 +41,13 @@
 //! One capability is deliberately **not** symmetric:
 //! [`ImageFormat::Bgra`] is an Apple-only stream format (see its own doc).
 //!
+//! # Barcode decoding
+//!
+//! [`barcode`] is a platform-independent QR/barcode decoder over
+//! [`ImageFrame`]s or a caller-supplied luma buffer — no camera involved,
+//! and no `cfg` of its own, so it builds and runs identically on every
+//! target this crate targets, including a plain desktop `cargo test`.
+//!
 //! # Blocking API — pair with `spawn_blocking`, never the UI thread
 //!
 //! **Two** calls block until the platform answers. Like
@@ -82,6 +89,10 @@ mod android;
 mod apple;
 #[cfg(not(any(target_os = "android", target_vendor = "apple")))]
 mod unsupported;
+
+// Platform-independent QR/barcode decoding over an `ImageFrame`/luma buffer
+// — no `cfg` of its own (see the module doc), unlike the backends above.
+pub mod barcode;
 
 use std::path::Path;
 use std::sync::Arc;
