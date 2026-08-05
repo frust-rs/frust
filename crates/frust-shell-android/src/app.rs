@@ -196,14 +196,28 @@ pub struct AndroidAppHandle {
     /// it also stands in for pointer-capture, which has no `AppTree` accessor —
     /// see [`Self::frame`]'s input-gathering).
     events_since_last_frame: bool,
-    /// Cache: the `AppTree::focus_ime_generation` this handle saw on its last
-    /// gathered tick. Compared against the live generation each frame to derive
-    /// the `FrameInputs::focus_or_ime_changed` **edge** (focus gained/lost, IME
-    /// surface published/cleared), then overwritten with it — the same
-    /// compare-a-generation shape as the a11y push's `semantics_generation`
-    /// gate. Seeded from the tree right after the constructor's first rebuild so
-    /// frame 1 reports no spurious edge (that frame runs on the resume warmup
-    /// and the initial change flags regardless).
+    /// Cache: the `AppTree::focus_ime_generation` this handle saw as of the
+    /// last frame it actually PRODUCED (not the last gathered tick). Compared
+    /// against the live generation each frame to derive the
+    /// `FrameInputs::focus_or_ime_changed` **edge** (focus gained/lost, IME
+    /// surface published/cleared) — the same compare-a-generation shape as the
+    /// a11y push's `semantics_generation` gate. The gather-time compare in
+    /// `app/frame.rs`'s [`Self::frame`] is a non-mutating peek; the commit
+    /// (overwriting this field with the live generation) happens only past
+    /// that function's `decide_paced(..).is_skip()` early return, on a frame
+    /// that actually runs.
+    ///
+    /// This is NOT reset eagerly like `events_since_last_frame` above: that
+    /// latch is an `is_paced_only_frame` disqualifier, so a tick carrying it
+    /// can never be skipped — clearing it before the gate decides is provably
+    /// harmless. `focus_or_ime_changed` is the one input that both rides
+    /// inside a paced decision AND is consumed on read; draining it on a tick
+    /// the gate then resolves to Skip would lose the edge outright — the exact
+    /// bug a commit-at-gather-time shape had, fixed by deferring the commit
+    /// past the skip return. Seeded from the tree right after the
+    /// constructor's first rebuild so frame 1 reports no spurious edge (that
+    /// frame runs on the resume warmup and the initial change flags
+    /// regardless).
     ///
     /// Reading the *level* (`is_focus_active`) here instead is what made a
     /// focused screen render every Choreographer tick forever and put caret

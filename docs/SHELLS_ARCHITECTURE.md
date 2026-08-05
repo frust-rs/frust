@@ -56,7 +56,8 @@ signal-poll seam race-free without a lock.
 - Both mobile shells gather an identical `FrameInputs` OR-list each tick — input-for-input
   comparable across platforms — and consult the shared `frame_gate` for a run/skip decision before
   rebuild → layout → paint → present. `focus_or_ime_changed` is an *edge* (derived from
-  `RenderRoot::focus_ime_generation()`, cached per handle), not a level: a steady focus session no
+  `RenderRoot::focus_ime_generation()`, cached per handle, committed only on a frame that
+  actually runs), not a level: a steady focus session no
   longer forces a frame every tick and no longer blocks pacing, so a paced (`CosmeticLoop`) frame
   like a blinking caret throttles to the theme's `cosmetic_loop_rate` even while focused, while a
   focus/IME transition still forces exactly one frame (an edge landing on a tick whose only other
