@@ -1065,6 +1065,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 // (including the LAYOUT-implying `request_layout` above) leaves
                 // this false so the frame runs every vsync.
                 needs_frame_paced_only: ctx.needs_frame_paced_only(),
+                // ...and, when it IS paceable, how fast it asked to be re-run:
+                // the MIN over every paced request this pass (`Duration::ZERO`
+                // / `None` meaning the theme's own cosmetic rate). The gate
+                // resolves it against the live theme's cap — see
+                // `PaintCtx::request_frame_paced_at`.
+                paced_interval: ctx.paced_interval(),
             }
         } else {
             PaintOutcome::default()
@@ -1955,6 +1961,11 @@ mod tests {
             outcome.needs_frame_paced_only,
             "a purely-cosmetic frame surfaces as paced-only"
         );
+        assert_eq!(
+            outcome.paced_interval,
+            Some(std::time::Duration::ZERO),
+            "a bare `request_frame_paced` names no interval (the theme's own rate)"
+        );
 
         // A Transition-class (`request_frame`) root is never paced-only, keeping
         // today's every-vsync behavior for existing callers.
@@ -1967,6 +1978,57 @@ mod tests {
         assert!(
             !outcome2.needs_frame_paced_only,
             "request_frame stays unpaced (Transition)"
+        );
+        assert_eq!(
+            outcome2.paced_interval, None,
+            "an unpaced frame names no paced interval"
+        );
+    }
+
+    /// A root widget whose decorative loop names its own slow cadence — the
+    /// `request_frame_paced_at` counterpart of [`PacedFrameWidget`].
+    struct SlowPacedFrameWidget;
+    impl crate::widget::Widget for SlowPacedFrameWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(10.0, 10.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            ctx.request_frame_paced_at(std::time::Duration::from_millis(500));
+        }
+    }
+    struct SlowPacedFrameView;
+    impl View<AppState> for SlowPacedFrameView {
+        type Element = SlowPacedFrameWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> SlowPacedFrameWidget {
+            SlowPacedFrameWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut SlowPacedFrameWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    #[test]
+    fn paint_surfaces_the_requested_paced_interval_on_outcome() {
+        // The end-to-end core half of the per-request pacing seam: a widget's
+        // `request_frame_paced_at` reaches the shell on `PaintOutcome`, which is
+        // what the mobile gate latches into `FramePacing`.
+        let mut state = AppState {
+            label: "x".to_string(),
+        };
+        let mut root: RenderRoot<AppState, SlowPacedFrameView> = RenderRoot::new();
+        root.rebuild(&mut |_s: &mut AppState| SlowPacedFrameView, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        let mut scene = RecordingScene::default();
+        let outcome = root.paint(&mut scene, FrameTime::ZERO);
+        assert!(outcome.needs_frame_paced_only);
+        assert_eq!(
+            outcome.paced_interval,
+            Some(std::time::Duration::from_millis(500))
         );
     }
 

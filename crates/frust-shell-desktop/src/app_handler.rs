@@ -1363,19 +1363,40 @@ where
                 // (not just the `needs_frame` ones) precisely so its settle
                 // path covers that case: it clears the field AND returns the
                 // loop to `Wait`, never leaving a stale `WaitUntil` behind (the
-                // round-1 busy-spin Critical). The paced interval's division is
+                // round-1 busy-spin Critical). The cap/fold arithmetic is
                 // computed only inside the branch that schedules (in
                 // `next_paced_wake`), so a settling frame never runs it; the
                 // rate is kept finite by `CosmeticLoopRate`'s NaN-safe clamp so
                 // that division can't panic. The decision bundles the field,
                 // the redraw, and the control flow into one value, so the field
                 // can never be updated without also deciding the control flow.
+                //
+                // Per-request pacing interval (A2): `paint_outcome.paced_interval`
+                // is this same paint's MIN-aggregated per-request interval (a
+                // ~500ms caret blink against a 30Hz shimmer cap) — fed straight
+                // into `next_paced_wake` exactly as `needs_frame_paced_only` is
+                // above, never stored in a struct field. Unlike the mobile
+                // shells (whose gate decides *before* paint runs, so they must
+                // latch the previous paint's interval into a field for the next
+                // tick's decision — see `frust-shell-android`'s
+                // `last_paced_interval`), desktop's decision runs synchronously
+                // right after `RenderRoot::paint` returns, so this frame's own
+                // outcome is always the freshest possible input: no persisted
+                // value can ever go stale, and an interval change between
+                // paints (a loop's cadence request changing) is re-derived from
+                // scratch on every call rather than carried forward.
+                // `next_paced_wake` folds it against the theme's cap with the
+                // same `max(cap, requested)` semantics as
+                // `FramePacing::effective_interval` — the cap is a ceiling, a
+                // slower per-request interval widens the cadence, never
+                // tightens it.
                 let decision = next_paced_wake(
                     paint_outcome.needs_frame,
                     paint_outcome.needs_frame_paced_only,
                     self.anim_pacing,
                     Instant::now(),
                     self.theme.motion.cosmetic_loop_rate.hz(),
+                    paint_outcome.paced_interval,
                 );
                 self.paced_wake = decision.paced_wake;
                 if decision.request_redraw {

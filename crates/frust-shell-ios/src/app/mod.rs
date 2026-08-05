@@ -64,7 +64,7 @@ pub(crate) use present_sync::PresentHandoff;
 use std::ffi::c_void;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use frust_core::event::PointerEvent;
 use frust_core::insets::WindowInsets;
@@ -231,11 +231,22 @@ pub struct IosAppHandle {
     /// Ensures a tap/keystroke on an otherwise-idle screen is never skipped.
     events_since_last_frame: bool,
     /// Cache feeding `FrameInputs::focus_or_ime_changed`: the
-    /// [`AppTree::focus_ime_generation`] this handle saw on its last gathered
-    /// tick. The **edge** (focus gained/lost, IME surface published/cleared) is
-    /// `live != cached`; like `events_since_last_frame` above, the reset is
-    /// deferred to just after the gate inputs are assembled. Seeded from the
-    /// tree after the constructor's first rebuild so the first tick reports no
+    /// [`AppTree::focus_ime_generation`] this handle saw as of the last frame
+    /// it actually PRODUCED (not the last gathered tick). The **edge** (focus
+    /// gained/lost, IME surface published/cleared) is `live != cached`. The
+    /// gather-time read in [`Self::frame`] is a non-mutating peek; the commit
+    /// happens only past that function's `decide_paced(..).is_skip()` early
+    /// return, on a frame that actually runs.
+    ///
+    /// Unlike `events_since_last_frame` above, this is NOT reset eagerly at
+    /// gather time. That latch is an `is_paced_only_frame` disqualifier, so a
+    /// tick carrying it can never be skipped — clearing it before the gate
+    /// decides is provably harmless. `focus_or_ime_changed` is the one input
+    /// that both rides inside a paced decision AND is consumed on read;
+    /// draining it on a tick the gate then resolves to Skip would lose the
+    /// edge outright — the exact bug a commit-at-gather-time shape had, fixed
+    /// by deferring the commit past the skip return. Seeded from the tree
+    /// after the constructor's first rebuild so the first tick reports no
     /// spurious edge (it runs on the resume warmup regardless).
     ///
     /// Reading the *level* (`is_focus_active`) here instead is what kept a
@@ -255,6 +266,13 @@ pub struct IosAppHandle {
     /// loop to the theme's `cosmetic_loop_rate` instead of every `CADisplayLink`
     /// tick. Latched beside `last_needs_frame`; a skipped frame leaves it.
     last_needs_frame_paced_only: bool,
+    /// Handle-side latch feeding `FramePacing::requested_interval`: the previous
+    /// paint's [`frust_core::PaintOutcome::paced_interval`] — the MIN-lattice
+    /// fold of every `PaintCtx::request_frame_paced_at` that pass, `None` when
+    /// none named an interval. Lets a loop slower than the theme's cap (a ~500ms
+    /// caret blink) pace at its own cadence. Latched beside
+    /// `last_needs_frame_paced_only`; a skipped frame leaves it.
+    last_paced_interval: Option<Duration>,
     /// Handle-side latch feeding `FrameInputs::theme_or_appearance_changed`:
     /// set by [`Self::set_appearance`] on an OS-driven light/dark flip and by
     /// [`Self::set_reduce_motion`] on a reduced-motion toggle, taken
@@ -504,6 +522,7 @@ impl IosAppHandle {
             last_focus_ime_gen,
             last_needs_frame: false,
             last_needs_frame_paced_only: false,
+            last_paced_interval: None,
             appearance_dirty: false,
             resampler: PointerResampler::new(),
             resample_clock: Instant::now(),

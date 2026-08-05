@@ -155,16 +155,19 @@ impl IosAppHandle {
         // the `FRUST_NO_FRAME_GATE` kill switch internally (always `Run` when
         // disabled). Correctness over savings: every input defaults toward "run".
         let signals_dirty = ReactiveRuntime::get().is_some_and(|rt| rt.take_signals_dirty());
-        // The focus/IME session's EDGE input: the live generation is read here
-        // and the cache updated below (beside the events-latch reset — this
-        // shell defers its resets past the input assembly), so
-        // `focus_or_ime_changed` reports "the session moved since the last
-        // gathered tick", never "something is focused". As a level read this
-        // forced a frame on every `CADisplayLink` tick for the whole life of a
-        // focus session and made caret pacing unreachable (62–120 fps measured
-        // on a static focused screen). Swift's per-frame `renderFrame` IME
-        // reconcile is unaffected: it polls the published Rust state directly,
-        // whether or not this tick produces a frame.
+        // The focus/IME session's EDGE input, PEEKED here and committed only
+        // past the skip return below (on a frame that actually runs), so
+        // `focus_or_ime_changed` reports "the session moved since the last tick
+        // that produced a frame", never "something is focused". Committing at
+        // gather time instead would erase an edge landing on a tick the pacing
+        // tightening itself resolves to Skip, and the edge's bound — one
+        // theme-cap interval, `docs/LIMITATIONS.md`'s
+        // `focus-ime-edge-paced-deferral` — depends on it surviving those skips.
+        // As a level read this forced a frame on every `CADisplayLink` tick for
+        // the whole life of a focus session and made caret pacing unreachable
+        // (62–120 fps measured on a static focused screen). Swift's per-frame
+        // `renderFrame` IME reconcile is unaffected: it polls the published Rust
+        // state directly, whether or not this tick produces a frame.
         let focus_ime_gen = self.app.focus_ime_generation();
         let inputs = FrameInputs {
             signals_dirty,
@@ -206,11 +209,13 @@ impl IosAppHandle {
             resumed_recently: false,
         };
         // The events latch has now been read into this frame's decision; reset it
-        // so the next frame only sees events that arrive from here on. Same for
-        // the focus/IME edge cache: this tick has consumed the transition, so
-        // the next one compares against what the tree reports now.
+        // so the next frame only sees events that arrive from here on. Clearing
+        // it eagerly (before the gate decides) is provably harmless: the events
+        // latch is an `is_paced_only_frame` disqualifier, so a tick carrying it
+        // can never be skipped. The focus/IME edge cache is NOT reset here — it
+        // is the one input that both rides inside a paced decision and is
+        // consumed on read, so its commit waits for a decided Run (see below).
         self.events_since_last_frame = false;
-        self.last_focus_ime_gen = focus_ime_gen;
 
         // Deadline-aware pacing: estimate this frame's target
         // budget from the tick-to-tick delta, updating the stored tick every
@@ -226,11 +231,16 @@ impl IosAppHandle {
         // `cosmetic_loop_rate` rather than reproduced every `CADisplayLink`
         // tick. `now` is this tick's display-link clock (the same domain `paint`
         // consumes below); the interval is `1 / rate` resolved from the live
-        // theme so a retuned token re-paces live. Every other FrameInputs signal
-        // still forces an immediate Run — pacing never delays real work.
+        // theme so a retuned token re-paces live, and `requested_interval` is the
+        // previous paint's own MIN-folded request
+        // (`PaintCtx::request_frame_paced_at` — a caret blink far slower than the
+        // cap), which `FramePacing::effective_interval` resolves against it.
+        // Every other FrameInputs signal still forces an immediate Run — pacing
+        // never delays real work. Mirrors the Android shell seam-for-seam.
         let pacing = FramePacing {
             now: FrameTime::from_nanos(timestamp_ns),
             interval: Duration::from_secs_f32(1.0 / self.theme.motion.cosmetic_loop_rate.hz()),
+            requested_interval: self.last_paced_interval,
         };
 
         if self.frame_gate.decide_paced(inputs, pacing).is_skip() {
@@ -246,6 +256,17 @@ impl IosAppHandle {
             self.executor.record_skip();
             return;
         }
+
+        // The frame is known to RUN from here on, so the focus/IME edge peeked
+        // above is genuinely consumed: commit the generation. A tick the gate
+        // skipped deliberately leaves the cache alone, so the next tick still
+        // reports the same pending edge and the repaint lands with the loop's
+        // next produced frame — the one-cap-interval bound in
+        // `docs/LIMITATIONS.md`'s `focus-ime-edge-paced-deferral`. `last_paced_run`
+        // re-anchors only on a Run too, so a persisting edge accumulates wait
+        // against the same anchor and can never double-fire. Mirrors the Android
+        // shell's commit site seam-for-seam.
+        self.last_focus_ime_gen = focus_ime_gen;
 
         // Perf instrumentation: read the cached
         // switch exactly once per frame and gate every `Instant::now()` read
@@ -423,8 +444,11 @@ impl IosAppHandle {
         self.last_needs_frame = paint_outcome.needs_frame;
         // Latch the aggregated tick-class for the NEXT frame's gate so a
         // paced-only decorative loop can be throttled (see
-        // `FrameInputs::last_needs_frame_paced_only`).
+        // `FrameInputs::last_needs_frame_paced_only`), and beside it the
+        // MIN-folded interval that loop asked to be paced at
+        // (`FramePacing::requested_interval`; `None` = the theme's cap).
         self.last_needs_frame_paced_only = paint_outcome.needs_frame_paced_only;
+        self.last_paced_interval = paint_outcome.paced_interval;
 
         // Hand the finished frame to the render-path executor.
         // The inline fallback runs the encode→acquire→submit tail synchronously

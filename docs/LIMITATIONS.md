@@ -462,7 +462,12 @@ caused rides along with the loop's next paced frame. The deferral is bounded by
 one `MotionScheme::cosmetic_loop_rate` interval — 33 ms at the 30 Hz framework
 default, and at most **100 ms** at `CosmeticLoopRate::FLOOR_HZ` (10 Hz), the
 lowest rate a theme can express (the constructor clamps up to the floor, so no
-slower value is representable).
+slower value is representable). Per-request paced intervals — slower cadences
+named by `PaintCtx::request_frame_paced_at(Duration)` (e.g. a 500 ms caret
+blink) — never widen this bound: `FrameGate::decide_paced` deliberately tightens
+any tick carrying `focus_or_ime_changed` back to the theme's own cap, ignoring
+longer per-request intervals, so a focus/IME transition never waits for a slow
+loop's cadence.
 
 **Applies to**: Android and iOS — the two shells that feed `FrameInputs` into
 `FrameGate::decide_paced`. Desktop is unaffected: it runs no skip gate and its

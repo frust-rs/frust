@@ -1294,6 +1294,25 @@ impl Widget for TerminalGridWidget {
         if self.shaped != Some(self.generation) {
             self.reshape(ctx, geometry.font_size);
             self.shaped = Some(self.generation);
+            // Shape-cache audit line, one per reshape (the shape-cache A/B's
+            // second instrument beside `layout_us`). The `frust-perf` prefix
+            // rides run.sh's capture whitelist; the `cache` tag keeps it
+            // invisible to stats.py's `frust-perf raw` parser and run.sh's
+            // raw-frame counter. Counters are cumulative — post-processing
+            // diffs consecutive lines for per-window rates.
+            if frust_shell_common::perf::enabled() {
+                let stats = ctx.text_context::<TextContext>().shape_cache_stats();
+                log::info!(
+                    "frust-perf cache profile={} gen={} shapes={} line_breaks={} hits={} \
+                     evictions={}",
+                    self.profile.name(),
+                    self.generation,
+                    stats.shapes,
+                    stats.line_breaks,
+                    stats.hits,
+                    stats.evictions
+                );
+            }
         }
 
         // Exactly COLS x ROWS cells: the constraint that keeps the grid from

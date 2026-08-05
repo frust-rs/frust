@@ -50,6 +50,11 @@ struct Frame {
     /// A `TickClass::CosmeticLoop` widget is onscreen (unculled) this tick —
     /// if the frame actually paints, it requests a paced continuation.
     loop_visible: bool,
+    /// A widget naming its OWN (slow) paced cadence via
+    /// `PaintCtx::request_frame_paced_at` is onscreen this tick — the caret-blink
+    /// shape. Independent of `loop_visible`, so a tick can hold both and exercise
+    /// the MIN-lattice fold.
+    slow_loop_visible: bool,
     /// A `TickClass::Transition` widget (a page transition/fling/caret
     /// blink) is active this tick — if the frame actually paints, it
     /// requests an unpaced continuation, dominating a concurrent
@@ -63,12 +68,28 @@ struct Frame {
 impl Frame {
     const IDLE: Frame = Frame {
         loop_visible: false,
+        slow_loop_visible: false,
         transition_active: false,
         trigger: Trigger::None,
     };
 
     const PACED_LOOP_ONSCREEN: Frame = Frame {
         loop_visible: true,
+        ..Frame::IDLE
+    };
+
+    /// Only the slow (interval-naming) loop is onscreen — a caret blinking on an
+    /// otherwise still screen.
+    const SLOW_PACED_LOOP_ONSCREEN: Frame = Frame {
+        slow_loop_visible: true,
+        ..Frame::IDLE
+    };
+
+    /// Both paced loops at once: the MIN-lattice fold must hand the gate the
+    /// shimmer's (tighter) cadence.
+    const BOTH_PACED_LOOPS_ONSCREEN: Frame = Frame {
+        loop_visible: true,
+        slow_loop_visible: true,
         ..Frame::IDLE
     };
 
@@ -109,6 +130,9 @@ fn paint_for(frame: Frame) -> PaintOutcome {
     if frame.loop_visible {
         ctx.request_frame_class(TickClass::CosmeticLoop);
     }
+    if frame.slow_loop_visible {
+        ctx.request_frame_paced_at(SLOW_LOOP_INTERVAL);
+    }
     if frame.transition_active {
         ctx.request_frame_class(TickClass::Transition);
     }
@@ -116,6 +140,9 @@ fn paint_for(frame: Frame) -> PaintOutcome {
         needs_frame: ctx.needs_frame(),
         needs_layout: ctx.needs_layout(),
         needs_frame_paced_only: ctx.needs_frame_paced_only(),
+        // The MIN-lattice fold of this pass's paced requests — what the shells
+        // latch into `FramePacing::requested_interval` for the next tick.
+        paced_interval: ctx.paced_interval(),
     }
 }
 
@@ -155,6 +182,9 @@ fn tick(
         FramePacing {
             now,
             interval: pace_interval,
+            // The other half of the shells' latch: the previous paint's own
+            // requested cadence, resolved against the theme cap by the gate.
+            requested_interval: prev_outcome.paced_interval,
         },
     );
     let next_outcome = if decision.is_run() {
@@ -211,6 +241,10 @@ fn step(hz: f64) -> Duration {
 fn cap_interval() -> Duration {
     step(30.0)
 }
+
+/// The cadence [`Frame::slow_loop_visible`]'s widget names — a ~2Hz caret
+/// blink, far slower than the 30Hz cap above.
+const SLOW_LOOP_INTERVAL: Duration = Duration::from_millis(500);
 
 /// The simulated tick-stream rate every test in this file drives the gate at.
 fn tick_hz() -> Duration {
@@ -344,6 +378,124 @@ fn frame_gate_kill_switch_runs_every_source_every_tick() {
             "{name}: a disabled gate (FRUST_NO_FRAME_GATE) must run every tick"
         );
     }
+}
+
+// ---------------------------------------------------------------------
+// Per-request intervals: PaintOutcome → FramePacing → decision, end to end
+// ---------------------------------------------------------------------
+
+#[test]
+fn a_slow_paced_loop_runs_at_its_own_requested_cadence() {
+    // The whole seam in one stream: a caret asks for 500ms during paint, the
+    // outcome carries it, the shell latches it into `FramePacing`, and the gate
+    // paces at 2Hz instead of the theme's 30Hz cap.
+    let mut gate = FrameGate::with_flags(true, true);
+    let seed = seeded(Frame::SLOW_PACED_LOOP_ONSCREEN);
+    assert_eq!(
+        seed.paced_interval,
+        Some(SLOW_LOOP_INTERVAL),
+        "the paint pass must carry the requested interval out on PaintOutcome"
+    );
+    let (runs, _) = run_stream(
+        &mut gate,
+        Frame::SLOW_PACED_LOOP_ONSCREEN,
+        0,
+        120,
+        tick_hz(),
+        cap_interval(),
+        seed,
+    );
+    assert!(
+        (1..=3).contains(&runs),
+        "a 500ms paced request should run ~2x/s against a 30Hz cap, got {runs}"
+    );
+}
+
+#[test]
+fn a_shimmer_beside_a_caret_paces_at_the_shimmer_rate() {
+    // The MIN-lattice, end to end: both loops paint in the same pass, the fold
+    // hands the gate the tighter cadence, and the frame runs at the cap. The
+    // caret is repainted more often than it asked — by design, and the shimmer
+    // is never dragged down to 2Hz.
+    let mut gate = FrameGate::with_flags(true, true);
+    let seed = seeded(Frame::BOTH_PACED_LOOPS_ONSCREEN);
+    assert_eq!(
+        seed.paced_interval,
+        Some(Duration::ZERO),
+        "the bare (theme-cap) request must win the MIN fold"
+    );
+    let (runs, _) = run_stream(
+        &mut gate,
+        Frame::BOTH_PACED_LOOPS_ONSCREEN,
+        0,
+        120,
+        tick_hz(),
+        cap_interval(),
+        seed,
+    );
+    assert!(
+        (28..=32).contains(&runs),
+        "a shimmer+caret frame should run at the 30Hz cap, got {runs}"
+    );
+}
+
+#[test]
+fn a_shimmer_leaving_hands_the_stream_back_to_the_carets_cadence() {
+    // The interval CHANGES between paced frames — the anchor caveat, driven
+    // through real paint passes: 1s of shimmer+caret at the cap, then the
+    // shimmer unmounts and only the 500ms caret is left. The stream must settle
+    // onto the slow cadence with no burst at the transition and no stall.
+    let tick_dur = tick_hz();
+    let mut gate = FrameGate::with_flags(true, true);
+    let (fast_runs, outcome) = run_stream(
+        &mut gate,
+        Frame::BOTH_PACED_LOOPS_ONSCREEN,
+        0,
+        120,
+        tick_dur,
+        cap_interval(),
+        seeded(Frame::BOTH_PACED_LOOPS_ONSCREEN),
+    );
+    assert!((28..=32).contains(&fast_runs));
+
+    // 2 simulated seconds with only the caret left.
+    let mut runs = 0usize;
+    let mut last_run_tick: Option<u64> = None;
+    let mut min_gap = u64::MAX;
+    let mut max_gap = 0u64;
+    let mut prev = outcome;
+    for i in 120..360u64 {
+        let now = FrameTime::from_nanos(i * tick_dur.as_nanos() as u64);
+        let (decision, next) = tick(
+            &mut gate,
+            Frame::SLOW_PACED_LOOP_ONSCREEN,
+            now,
+            cap_interval(),
+            prev,
+        );
+        prev = next;
+        if decision.is_run() {
+            runs += 1;
+            if let Some(last) = last_run_tick {
+                min_gap = min_gap.min(i - last);
+                max_gap = max_gap.max(i - last);
+            }
+            last_run_tick = Some(i);
+        }
+    }
+    assert!(
+        (3..=6).contains(&runs),
+        "~2 runs/s once only the caret remains, got {runs} over 2s"
+    );
+    // 500ms == 60 ticks of a 120Hz stream: no burst below it, no stall past it.
+    assert!(
+        min_gap >= 59,
+        "no burst at the interval change: tightest gap was {min_gap} ticks"
+    );
+    assert!(
+        max_gap <= 61,
+        "no stall at the interval change: widest gap was {max_gap} ticks"
+    );
 }
 
 // ---------------------------------------------------------------------

@@ -40,7 +40,7 @@ pub(crate) use render::{RenderSignals, render_scene};
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use frust_core::event::PointerEvent;
 use frust_core::insets::WindowInsets;
@@ -196,14 +196,28 @@ pub struct AndroidAppHandle {
     /// it also stands in for pointer-capture, which has no `AppTree` accessor —
     /// see [`Self::frame`]'s input-gathering).
     events_since_last_frame: bool,
-    /// Cache: the `AppTree::focus_ime_generation` this handle saw on its last
-    /// gathered tick. Compared against the live generation each frame to derive
-    /// the `FrameInputs::focus_or_ime_changed` **edge** (focus gained/lost, IME
-    /// surface published/cleared), then overwritten with it — the same
-    /// compare-a-generation shape as the a11y push's `semantics_generation`
-    /// gate. Seeded from the tree right after the constructor's first rebuild so
-    /// frame 1 reports no spurious edge (that frame runs on the resume warmup
-    /// and the initial change flags regardless).
+    /// Cache: the `AppTree::focus_ime_generation` this handle saw as of the
+    /// last frame it actually PRODUCED (not the last gathered tick). Compared
+    /// against the live generation each frame to derive the
+    /// `FrameInputs::focus_or_ime_changed` **edge** (focus gained/lost, IME
+    /// surface published/cleared) — the same compare-a-generation shape as the
+    /// a11y push's `semantics_generation` gate. The gather-time compare in
+    /// `app/frame.rs`'s [`Self::frame`] is a non-mutating peek; the commit
+    /// (overwriting this field with the live generation) happens only past
+    /// that function's `decide_paced(..).is_skip()` early return, on a frame
+    /// that actually runs.
+    ///
+    /// This is NOT reset eagerly like `events_since_last_frame` above: that
+    /// latch is an `is_paced_only_frame` disqualifier, so a tick carrying it
+    /// can never be skipped — clearing it before the gate decides is provably
+    /// harmless. `focus_or_ime_changed` is the one input that both rides
+    /// inside a paced decision AND is consumed on read; draining it on a tick
+    /// the gate then resolves to Skip would lose the edge outright — the exact
+    /// bug a commit-at-gather-time shape had, fixed by deferring the commit
+    /// past the skip return. Seeded from the tree right after the
+    /// constructor's first rebuild so frame 1 reports no spurious edge (that
+    /// frame runs on the resume warmup and the initial change flags
+    /// regardless).
     ///
     /// Reading the *level* (`is_focus_active`) here instead is what made a
     /// focused screen render every Choreographer tick forever and put caret
@@ -240,6 +254,13 @@ pub struct AndroidAppHandle {
     /// `FrameGate::decide_paced` throttles a paced-only frame to the theme's
     /// `cosmetic_loop_rate` instead of running it every Choreographer tick.
     last_needs_frame_paced_only: bool,
+    /// Latch: the tightest interval the previous paint's paced requests named
+    /// ([`frust_core::PaintOutcome::paced_interval`] — the MIN-lattice fold of
+    /// every `PaintCtx::request_frame_paced_at` that pass), or `None` when none
+    /// named one. Read into `FramePacing::requested_interval` beside
+    /// `last_needs_frame_paced_only`, so a loop slower than the theme's cap (a
+    /// ~500ms caret blink) paces at its own cadence rather than the cap's.
+    last_paced_interval: Option<Duration>,
     /// Whether the layout pass has run at least once. Until it has, the
     /// layout-skip seam in [`Self::frame`] force-runs layout (a paint before the
     /// first layout would have no valid geometry); after the first layout it is
@@ -615,6 +636,7 @@ impl AndroidAppHandle {
             appearance_dirty: false,
             last_needs_frame: false,
             last_needs_frame_paced_only: false,
+            last_paced_interval: None,
             first_layout_done: false,
             resampler: PointerResampler::new(),
             resample_clock: Instant::now(),
