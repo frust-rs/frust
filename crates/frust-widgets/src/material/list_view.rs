@@ -78,6 +78,54 @@
 //! relocated pod has never been laid out where it now sits, so a frame that
 //! skipped layout would paint it unsized or at a stale origin.
 //!
+//! # Prepend/removal scroll anchoring (keyed lists only)
+//!
+//! A keyed list additionally corrects the scroll offset so a mutation
+//! **above** the viewport — a "load older" prepend, or removing rows above
+//! what's currently on screen — doesn't visually jump the content the user is
+//! looking at. The correction runs inside [`View::rebuild`], **before** the
+//! window is recomputed for this frame, so layout and paint agree on one
+//! corrected offset; it never runs during paint.
+//!
+//! **Anchor selection.** The anchor is the topmost surviving keyed row of the
+//! previous window: walking [`ListViewWidget::keys`] (ascending, so topmost
+//! first), the first key that still identifies a row in the new data is the
+//! anchor. "Still identifies a row" is checked two ways, at most two extra
+//! `key_of` calls per candidate: unchanged position
+//! (`self.key_of(i_prev) == anchor_key`, the below-viewport/no-op case) or
+//! shifted by this frame's net `item_count` delta
+//! (`self.key_of(i_prev + delta) == anchor_key`, the prepend/removal-above
+//! case — correct precisely because nothing between the mutation and the
+//! anchor changed, so every surviving row at or above the old window shifts
+//! by the same net count). If neither check matches for any key in the
+//! previous window, no correction runs at all — a full replace is reset
+//! semantics, not an anchoring case. The search costs at most one extra
+//! `key_of` call pair per previous-window row it must walk past, bounded by
+//! the window size, never `item_count`.
+//!
+//! **Correction.** A confirmed shift of `d` items applies
+//! `offset += d as f64 * item_extent` (uniform extent — closed form once `d`
+//! is known, no search for *where* the anchor landed, since `d` is the
+//! item-count delta itself, merely confirmed against the anchor key),
+//! clamped to `[0, max_offset]`. Reported as `ChangeFlags::LAYOUT` on any
+//! frame that applied one.
+//!
+//! **Decision: anchor always, even from `offset == 0`.** Prepending while the
+//! user is scrolled to the exact top could instead leave `offset` pinned at
+//! zero — treating that as "the user is reading the top row, don't move
+//! it" — but this module always shifts it instead, revealing the
+//! newly-prepended rows above rather than snapping the same old top row back
+//! under the user. A prepend that just answered a fired [`ListView::on_near_start`]
+//! also leaves that edge's armed flag exactly as the fire left it (disarmed)
+//! rather than letting the unconditional item-count-change rearm (below)
+//! force it back armed — otherwise the very next scroll event would
+//! re-trigger "load older" again at the freshly-corrected offset, before the
+//! user has done anything.
+//!
+//! **Positional lists are never anchored** — position-only identity cannot
+//! tell a prepend from a full mutation (see *Row identity* above), so
+//! applying this correction there would be a guess, not a fact.
+//!
 //! # Viewport staleness
 //!
 //! [`frust_core::BuildCtx`] carries no viewport size, so the widget caches
@@ -480,6 +528,51 @@ impl<State: 'static> ListView<State> {
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         flags
+    }
+
+    /// Determine the keyed prepend/removal scroll-anchor correction for this
+    /// rebuild, in **items** (the caller multiplies by `item_extent`), or
+    /// `None` if no correction should apply. See the [module docs](self)'
+    /// anchoring section for the algorithm and the `offset == 0` decision.
+    ///
+    /// `element.item_count` must already hold this frame's (new) count —
+    /// callers apply the item-count bookkeeping before calling this — while
+    /// `old_item_count` is the count as of the *previous* frame.
+    fn anchor_shift_items(
+        prev: &Self,
+        element: &ListViewWidget,
+        old_item_count: usize,
+        key_of: &KeyOf,
+    ) -> Option<isize> {
+        // A prior frame built with the positional path (or no key_of at all)
+        // leaves no previous-frame key function to reconstruct an anchor
+        // key from — nothing to anchor against.
+        let prev_key_of = prev.key_of.as_ref()?;
+        let new_item_count = element.item_count;
+        let delta = new_item_count as isize - old_item_count as isize;
+        for &i_prev in &element.keys {
+            let anchor_key = prev_key_of(i_prev);
+            // Unchanged position: the below-viewport/no-op case (the common
+            // case — checked first, resolves in one extra `key_of` call).
+            if i_prev < new_item_count && key_of(i_prev) == anchor_key {
+                return Some(0);
+            }
+            // Shifted by the frame's net item-count delta: the
+            // prepend/removal-above case, confirmed rather than assumed.
+            if delta != 0 {
+                let candidate = i_prev as isize + delta;
+                if candidate >= 0
+                    && (candidate as usize) < new_item_count
+                    && key_of(candidate as usize) == anchor_key
+                {
+                    return Some(delta);
+                }
+            }
+        }
+        // No key in the previous window survived either hypothesis: a full
+        // replace (or an edit this closed-form check can't characterize) —
+        // reset semantics, not an anchoring case.
+        None
     }
 }
 
@@ -963,19 +1056,51 @@ impl<State: 'static> View<State> for ListView<State> {
         element.near_end_threshold = self.near_end_threshold;
 
         let mut flags = ChangeFlags::NONE;
+        let old_item_count = element.item_count;
+        let mut item_count_changed = false;
         if element.item_count != self.item_count {
             element.item_count = self.item_count;
-            // Content length changed — rearm the near-start "load older" and
-            // near-end "load newer" edges so a list that grew (older rows
-            // loaded, or newer rows appended) can trigger again.
-            element.near_start_armed = true;
-            element.near_end_armed = true;
+            item_count_changed = true;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         if element.item_extent != self.item_extent {
             element.item_extent = self.item_extent;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
+
+        // Prepend/removal scroll anchoring — keyed lists only (positional
+        // identity cannot distinguish a prepend from a full mutation, see the
+        // module docs' *Row identity* section): correct the offset for the
+        // topmost surviving keyed row of the previous window *before* this
+        // frame's window is recomputed below, so layout and paint agree on
+        // one corrected offset — never during paint. See the module docs'
+        // anchoring section for the algorithm and the `offset == 0` decision.
+        let mut prepend_correction = false;
+        if let Some(key_of) = self.key_of.as_ref()
+            && let Some(shift_items) =
+                Self::anchor_shift_items(prev, element, old_item_count, key_of)
+            && shift_items != 0
+        {
+            element.set_offset(element.offset + shift_items as f64 * element.item_extent);
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+            prepend_correction = shift_items > 0;
+        }
+
+        if item_count_changed {
+            // Content length changed — rearm the near-start "load older" and
+            // near-end "load newer" edges so a list that grew (older rows
+            // loaded, or newer rows appended) can trigger again — EXCEPT: a
+            // keyed prepend correction just proved this exact growth was the
+            // near-start edge's own fire being answered, so forcing it back
+            // armed here would let the very next scroll event refire it
+            // immediately, at the exact anchored offset the correction just
+            // placed the user at (see the module docs' anchoring section).
+            if !prepend_correction {
+                element.near_start_armed = true;
+            }
+            element.near_end_armed = true;
+        }
+
         element.clamp_offset();
 
         let (start, end) = element.desired_window();
@@ -2003,8 +2128,14 @@ mod tests {
     #[test]
     fn keyed_insert_under_a_scrolled_window_keeps_state_with_the_rows() {
         // The hard case: a mid-list insert *while* the list is virtualized, so
-        // every row's index shifts under a window that does not move. Positional
-        // identity has no answer here; keys do.
+        // every row's index shifts under a window that would otherwise stay
+        // put — except this insert is a prepend relative to the scrolled
+        // viewport (index 0 sits above it), so scroll anchoring (see the
+        // module docs' anchoring section) shifts the *offset* to compensate,
+        // keeping the SAME rows on screen rather than sliding new content in.
+        // Positional identity has no answer here (see the contrast test
+        // above); keys carry each row's state with its index, and anchoring
+        // carries the viewport with it too.
         let fx = KeyedRows::new((0..1000).map(|i| i as u64 * 10).collect());
         let mut logic = fx.keyed_logic();
         let mut root = converged(&mut logic, &fx.log);
@@ -2015,29 +2146,304 @@ mod tests {
         assert_eq!(list_widget(&root).window(), &[8, 9, 10, 11, 12, 13, 14, 15]);
         // Rows 80..=150 (ids), one per materialized slot.
         assert_eq!(before.len(), 8);
+        let offset_before = list_widget(&root).offset();
 
-        // Insert at the FRONT: every row slides one index down, the window (an
-        // offset, not an identity) stays at 8..16 — so it now shows ids 70..=140.
+        // Insert at the FRONT: every row slides one index down; the anchor
+        // (row 80, topmost of the previous window) shifts the offset by
+        // exactly one row's extent to hold it in place.
         fx.rows.borrow_mut().insert(0, 5);
         let flags = keyed_frame(&mut root, &mut logic, &fx.log, 48.0);
 
         let after = fx.log.painted();
-        for id in [80, 90, 100, 110, 120, 130, 140] {
+        assert_eq!(
+            list_widget(&root).offset(),
+            offset_before + ROW_EXTENT,
+            "anchored: the offset absorbs the shift instead of the window sliding"
+        );
+        for id in [80, 90, 100, 110, 120, 130, 140, 150] {
             assert_eq!(
                 after[&id], before[&id],
-                "row {id} slid one index down and took its widget with it"
+                "row {id} kept its widget — anchoring shows the SAME rows, not new ones"
             );
         }
         assert!(
-            after[&70] > before.values().copied().max().expect("rows painted"),
-            "the row that slid INTO the window from above is built fresh"
-        );
-        assert_eq!(
-            fx.log.torn(),
-            vec![150],
-            "the row pushed out of the bottom of the window is torn down"
+            fx.log.torn().is_empty(),
+            "anchoring keeps the same window of rows visible: nothing leaves it"
         );
         assert!(flags.contains(ChangeFlags::LAYOUT));
+    }
+
+    // --- (10) Prepend/removal scroll anchoring (keyed lists only). ---
+
+    /// The pixel `y` a materialized row paints at (its `ChildPod` origin),
+    /// looked up by the item index it currently occupies — the literal "paint
+    /// position" acceptance criteria assert against.
+    fn painted_y(w: &ListViewWidget, item_index: usize) -> f64 {
+        let slot = w
+            .keys
+            .iter()
+            .position(|&k| k == item_index)
+            .expect("index is materialized");
+        w.children[slot].origin().y
+    }
+
+    #[test]
+    fn keyed_prepend_while_scrolled_anchors_the_visible_rows() {
+        let fx = KeyedRows::new((0..1000).map(|i| i as u64 * 10).collect());
+        let mut logic = fx.keyed_logic();
+        let mut root = converged(&mut logic, &fx.log);
+
+        root.event(&mut (), &wheel(500.0));
+        keyed_frame(&mut root, &mut logic, &fx.log, 32.0);
+        let before = fx.log.painted();
+        assert_eq!(list_widget(&root).window(), &[8, 9, 10, 11, 12, 13, 14, 15]);
+        let offset_before = list_widget(&root).offset();
+        let y_before = painted_y(list_widget(&root), 8); // row id 80's pixel position
+
+        // Prepend 5 rows above the viewport.
+        fx.rows
+            .borrow_mut()
+            .splice(0..0, [9990, 9980, 9970, 9960, 9950]);
+        let flags = keyed_frame(&mut root, &mut logic, &fx.log, 48.0);
+
+        let after = fx.log.painted();
+        let w = list_widget(&root);
+        assert_eq!(
+            w.offset(),
+            offset_before + 5.0 * ROW_EXTENT,
+            "the offset shifts by exactly K * item_extent"
+        );
+        assert_eq!(
+            painted_y(w, 13), // row id 80 slid from index 8 to index 13
+            y_before,
+            "the anchor row paints at the exact same pixel position"
+        );
+        for id in [80, 90, 100, 110, 120, 130, 140, 150] {
+            assert_eq!(
+                after[&id], before[&id],
+                "row {id} kept its widget across the prepend — anchoring, not a rebuild"
+            );
+        }
+        assert!(
+            fx.log.torn().is_empty(),
+            "anchoring keeps the same rows visible — nothing leaves the window"
+        );
+        assert!(flags.contains(ChangeFlags::LAYOUT));
+    }
+
+    #[test]
+    fn keyed_removal_above_the_viewport_anchors_in_reverse() {
+        let fx = KeyedRows::new((0..1000).map(|i| i as u64 * 10).collect());
+        let mut logic = fx.keyed_logic();
+        let mut root = converged(&mut logic, &fx.log);
+
+        root.event(&mut (), &wheel(500.0));
+        keyed_frame(&mut root, &mut logic, &fx.log, 32.0);
+        let before = fx.log.painted();
+        assert_eq!(list_widget(&root).window(), &[8, 9, 10, 11, 12, 13, 14, 15]);
+        let offset_before = list_widget(&root).offset();
+        let y_before = painted_y(list_widget(&root), 8);
+
+        // Remove the first 3 rows — all strictly above the viewport.
+        fx.rows.borrow_mut().drain(0..3);
+        let flags = keyed_frame(&mut root, &mut logic, &fx.log, 48.0);
+
+        let after = fx.log.painted();
+        let w = list_widget(&root);
+        assert_eq!(
+            w.offset(),
+            offset_before - 3.0 * ROW_EXTENT,
+            "removal above shifts the offset back by exactly the removed extent"
+        );
+        assert_eq!(
+            painted_y(w, 5), // row id 80 slid from index 8 to index 5
+            y_before,
+            "the anchor row paints at the exact same pixel position"
+        );
+        for id in [80, 90, 100, 110, 120, 130, 140, 150] {
+            assert_eq!(
+                after[&id], before[&id],
+                "row {id} kept its widget across the removal"
+            );
+        }
+        assert!(fx.log.torn().is_empty());
+        assert!(flags.contains(ChangeFlags::LAYOUT));
+    }
+
+    #[test]
+    fn keyed_removal_above_anchors_correctly_at_max_offset() {
+        // Scripted at a third scroll position (0, mid, max_offset) per the
+        // task's testing note: the closed-form correction must still clamp
+        // correctly when scrolled all the way to the bottom.
+        let fx = KeyedRows::new((0..1000).map(|i| i as u64 * 10).collect());
+        let mut logic = fx.keyed_logic();
+        let mut root = converged(&mut logic, &fx.log);
+
+        root.event(&mut (), &wheel(1_000_000.0)); // scroll to the very bottom
+        keyed_frame(&mut root, &mut logic, &fx.log, 32.0);
+        let before = fx.log.painted();
+        let offset_before = list_widget(&root).offset();
+        assert_eq!(offset_before, list_widget(&root).max_offset());
+
+        // Remove the first 3 rows, strictly above the (bottom-scrolled) viewport.
+        fx.rows.borrow_mut().drain(0..3);
+        let flags = keyed_frame(&mut root, &mut logic, &fx.log, 48.0);
+
+        let after = fx.log.painted();
+        let w = list_widget(&root);
+        assert_eq!(
+            w.offset(),
+            offset_before - 3.0 * ROW_EXTENT,
+            "anchors correctly even scrolled to the very bottom"
+        );
+        assert_eq!(
+            w.offset(),
+            w.max_offset(),
+            "still pinned exactly at the new (smaller) bottom"
+        );
+        for (&id, &generation) in before.iter() {
+            assert_eq!(
+                after.get(&id),
+                Some(&generation),
+                "row {id} kept its widget"
+            );
+        }
+        assert!(flags.contains(ChangeFlags::LAYOUT));
+    }
+
+    #[test]
+    fn keyed_mutation_below_the_viewport_leaves_the_offset_alone() {
+        // The third documented case: a below-viewport mutation is a no-op for
+        // anchoring (the index the anchor occupies doesn't move at all).
+        let fx = KeyedRows::new((0..1000).map(|i| i as u64 * 10).collect());
+        let mut logic = fx.keyed_logic();
+        let mut root = converged(&mut logic, &fx.log);
+
+        root.event(&mut (), &wheel(500.0));
+        keyed_frame(&mut root, &mut logic, &fx.log, 32.0);
+        let offset_before = list_widget(&root).offset();
+
+        fx.rows.borrow_mut().truncate(900); // drop the last 100 rows
+
+        keyed_frame(&mut root, &mut logic, &fx.log, 48.0);
+
+        assert_eq!(
+            list_widget(&root).offset(),
+            offset_before,
+            "a below-viewport mutation leaves an already-scrolled offset untouched"
+        );
+    }
+
+    #[test]
+    fn keyed_prepend_at_the_very_top_still_anchors_off_zero() {
+        // Acceptance criterion 3's decision, recorded in the module docs:
+        // ANCHOR ALWAYS, even starting at offset == 0 — the offset shifts,
+        // revealing the new content above rather than staying pinned at the
+        // literal top.
+        let fx = KeyedRows::new((0..1000).map(|i| i as u64 * 10).collect());
+        let mut logic = fx.keyed_logic();
+        let mut root = converged(&mut logic, &fx.log);
+        assert_eq!(list_widget(&root).offset(), 0.0);
+
+        fx.rows.borrow_mut().splice(0..0, [9990, 9980, 9970]);
+        let flags = keyed_frame(&mut root, &mut logic, &fx.log, 32.0);
+
+        assert_eq!(
+            list_widget(&root).offset(),
+            3.0 * ROW_EXTENT,
+            "the offset shifts away from zero rather than staying pinned"
+        );
+        assert!(flags.contains(ChangeFlags::LAYOUT));
+    }
+
+    #[test]
+    fn keyed_prepend_near_top_does_not_immediately_refire_near_start() {
+        // The edge-latch interaction the task calls out: a correction must
+        // not make the very next event refire an edge that just fired (and
+        // whose callback is presumably what triggered the prepend).
+        let fx = KeyedRows::new((0..1000).map(|i| i as u64 * 10).collect());
+        let loads = Rc::new(Cell::new(0u32));
+        let loads_l = loads.clone();
+        let rows = fx.rows.clone();
+        let gens = fx.gens.clone();
+        let log = fx.log.clone();
+        let mut logic = move |_: &mut ()| -> ListView<()> {
+            let snapshot: Rc<Vec<u64>> = Rc::new(rows.borrow().clone());
+            let (keys, items) = (snapshot.clone(), snapshot.clone());
+            let (gens, log) = (gens.clone(), log.clone());
+            let loads = loads_l.clone();
+            ListView::builder_keyed(
+                snapshot.len(),
+                ROW_EXTENT,
+                move |i| ChildKey::new(keys[i]),
+                move |i| {
+                    any::<(), _>(RowView {
+                        id: items[i],
+                        gens: gens.clone(),
+                        log: log.clone(),
+                    })
+                },
+            )
+            .on_near_start(move |_: &mut ()| loads.set(loads.get() + 1), 100.0)
+        };
+
+        let mut root = converged(&mut logic, &fx.log);
+        // A real near-start approach at the top fires once — the trigger a
+        // real "load older" flow answers by prepending.
+        root.event(&mut (), &wheel(0.0));
+        assert_eq!(loads.get(), 1, "near-start fires once at the top");
+
+        // Prepend a single row — the anchor shifts the offset to 1 * extent,
+        // well within the 100px threshold: exactly the case that would
+        // spuriously refire without the correction's rearm suppression.
+        fx.rows.borrow_mut().splice(0..0, [9999]);
+        keyed_frame(&mut root, &mut logic, &fx.log, 32.0);
+        assert_eq!(
+            list_widget(&root).offset(),
+            ROW_EXTENT,
+            "anchored one row's worth off zero"
+        );
+
+        // The very next event, still near the (corrected) start, must NOT
+        // refire.
+        root.event(&mut (), &wheel(0.0));
+        assert_eq!(
+            loads.get(),
+            1,
+            "the corrected offset does not immediately re-fire the same edge"
+        );
+
+        // Scrolling away past 2x the threshold and back still rearms normally.
+        root.event(&mut (), &wheel(500.0));
+        root.event(&mut (), &wheel(-450.0));
+        assert_eq!(
+            loads.get(),
+            2,
+            "the edge still rearms after genuinely scrolling away and back"
+        );
+    }
+
+    #[test]
+    fn positional_prepend_does_not_anchor_the_offset() {
+        // Criterion 4: positional identity cannot distinguish a prepend from
+        // a full mutation, so the positional path must never apply the
+        // anchoring correction — the offset moves only from user scrolling.
+        let fx = KeyedRows::new((0..1000).map(|i| i as u64 * 10).collect());
+        let mut logic = fx.positional_logic();
+        let mut root = converged(&mut logic, &fx.log);
+
+        root.event(&mut (), &wheel(500.0));
+        keyed_frame(&mut root, &mut logic, &fx.log, 32.0);
+        let offset_before = list_widget(&root).offset();
+
+        fx.rows.borrow_mut().insert(0, 12345);
+        keyed_frame(&mut root, &mut logic, &fx.log, 48.0);
+
+        assert_eq!(
+            list_widget(&root).offset(),
+            offset_before,
+            "the positional path never corrects the offset"
+        );
     }
 
     // Duplicate keys are ambiguous: the debug tripwire is the contract (release
