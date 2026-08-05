@@ -23,14 +23,15 @@
 //! `prev.builder(i)` and the current one with `self.builder(i)`, so no separate
 //! per-window view cache is retained.
 //!
-//! # Index-identity contract (NO stable keys — read before mutating the data)
+//! # Row identity: positional by default, keyed on request
 //!
-//! **Rows are reconciled by their raw item index, not by any stable identity.**
-//! A retained [`ChildPod`] is kept for an index that stays in the window
-//! (preserving that row's *entire* retained state — hosted `Component` state,
-//! `StateLayer` interaction flags, a `ListItem`'s toggle/press state) and
-//! rebuilt in place against `builder(index)`. That is exactly correct when the
-//! backing data changes only in ways that don't shift what lives at an index:
+//! [`ListView::builder`] reconciles rows **by their raw item index, not by any
+//! stable identity.** A retained [`ChildPod`] is kept for an index that stays in
+//! the window (preserving that row's *entire* retained state — hosted
+//! `Component` state, `StateLayer` interaction flags, a `ListItem`'s
+//! toggle/press state) and rebuilt in place against `builder(index)`. That is
+//! exactly correct when the backing data changes only in ways that don't shift
+//! what lives at an index:
 //!
 //! * **append-only** (add rows at the end — `item_count` grows),
 //! * **truncate-only** (drop rows from the end — `item_count` shrinks),
@@ -45,14 +46,37 @@
 //! item. There is no signal that this happened; the list simply renders stale
 //! per-row state against new content at the same slot.
 //!
-//! A stable-key `builder_keyed` variant (identity-keyed rows that survive a
-//! mid-list mutation, like [`keyed`](crate::keyed) does for `Flex`) is a
-//! **named, deliberately deferred follow-up** — non-trivial here because it
-//! must split window *position/slot* from row *identity*, preserve the
-//! `window_covers` contiguity the uniform-extent fast path relies on, and
-//! reconstruct a surviving row's previous view without a positional
-//! `prev.builder(i)`. Until it lands, treat a mid-list mutation as a
-//! full-replace (or accept the misattachment).
+//! [`ListView::builder_keyed`] is the fix for exactly that case: the app also
+//! supplies `key_of(index) -> ChildKey` (the same [`ChildKey`] that
+//! [`keyed`](crate::keyed) uses for `Flex`), and rows reconcile by that stable
+//! identity, so a mid-list mutation carries each row's live widget — and its
+//! retained state — with the row instead of leaving it on the slot. The three
+//! hard parts, and how each is met:
+//!
+//! * **Slot vs. identity.** Window slots stay the contiguous ascending index run
+//!   the uniform-extent fast path (`window_covers`, the
+//!   `item_count * item_extent` scroll extent) relies on; identity lives *beside*
+//!   them in a retained `key -> the item index that row occupied last frame` map
+//!   on the widget, which rebuild reads off the element exactly like `offset`
+//!   and `viewport` (above) — the view is rebuilt from scratch every frame and
+//!   can remember nothing itself.
+//! * **A survivor's previous view.** A key found in that map names the index the
+//!   row rendered last frame, so its previous view is `prev.builder(prev_index)`
+//!   and its next one `self.builder(index)` — the positional `prev.builder(i)`
+//!   reconstruction, redirected through the map. Keys leaving the window (or the
+//!   data) are torn down; keys entering are built fresh.
+//! * **Duplicate keys.** Two slots claiming one identity is ambiguous, so it
+//!   trips a `debug_assert!` (mirroring [`crate::authoring::rebuild_children`]'s
+//!   keyed reconciler). Release builds never panic: the first slot claiming a key
+//!   keeps the live row, later duplicates build fresh, and the retained map keeps
+//!   the last index — deterministic, but which row keeps its state is arbitrary.
+//!
+//! Keyed reconciliation costs one `key_of` call per *materialized* slot per frame
+//! (window-sized, never `item_count`-sized) plus that map; the positional path is
+//! untouched by it. Either path reports `ChangeFlags::LAYOUT` on any frame that
+//! built, tore down, relocated, or re-ranged pods — a freshly built or newly
+//! relocated pod has never been laid out where it now sits, so a frame that
+//! skipped layout would paint it unsized or at a stale origin.
 //!
 //! # Viewport staleness
 //!
@@ -93,12 +117,22 @@ use frust_core::{
 };
 use kurbo::{Point, Size};
 
+use crate::ChildKey;
 use crate::authoring::ErasedCallback;
 
 /// Extra items materialized above and below the visible window, so a small
 /// scroll (or a fling's per-frame advance) reveals already-built rows instead of
 /// a blank edge before the next rebuild re-windows.
 const BUFFER: isize = 2;
+
+/// The debug-only tripwire message for two materialized slots claiming one
+/// identity, shared by the keyed build and rebuild paths. Mirrors
+/// [`crate::authoring::rebuild_children`]'s duplicate-key `debug_assert!`; unlike
+/// that one there is no positional fallback to take, so release builds carry on
+/// with first-claim-wins (see [`ListView::builder_keyed`]).
+const DUPLICATE_KEY_MSG: &str = "ListView::builder_keyed produced a duplicate key inside one \
+     window: row identity is ambiguous (release: the first slot claiming a key keeps the live \
+     row, later duplicates build fresh)";
 
 /// A view-held near-start "load older" callback (erased to [`ErasedCallback`] on
 /// build).
@@ -107,6 +141,12 @@ type OnNearStart<State> = Rc<dyn Fn(&mut State)>;
 /// A view-held near-end "load newer" callback (erased to [`ErasedCallback`] on
 /// build). Mirrors [`OnNearStart`].
 type OnNearEnd<State> = Rc<dyn Fn(&mut State)>;
+
+/// A view-held stable-key function (`item index -> row identity`), installed by
+/// [`ListView::builder_keyed`] and absent for the positional
+/// [`ListView::builder`]. Retained (an [`Rc`]) beside the builder, and — like the
+/// builder — a pure function of the index.
+type KeyOf = Rc<dyn Fn(usize) -> ChildKey>;
 
 /// A declarative, virtualized vertical list. See the [module docs](self).
 ///
@@ -117,6 +157,10 @@ pub struct ListView<State: 'static> {
     item_count: usize,
     item_extent: f64,
     builder: Rc<dyn Fn(usize) -> AnyView<State>>,
+    /// The stable-key function when this is a [`ListView::builder_keyed`] list;
+    /// `None` selects the positional (index-identity) reconciliation path. See
+    /// the [module docs](self)' *Row identity* section.
+    key_of: Option<KeyOf>,
     /// Fired (edge-triggered) when the scrolled window comes within
     /// `near_start_threshold` of content start — the "load older" edge. See
     /// [`ListView::on_near_start`].
@@ -146,8 +190,9 @@ impl<State: 'static> ListView<State> {
     /// safe for append-only, truncate-only, and full-replace data, but a
     /// mid-list insert/remove/reorder silently reattaches a retained row's state
     /// to different content at the same index. See the [module docs]'
-    /// *Index-identity contract* section for the full rule and the deferred
-    /// `builder_keyed` follow-up.
+    /// *Row identity* section for the full rule, and
+    /// [`ListView::builder_keyed`] for the stable-key alternative that survives
+    /// a mid-list mutation.
     ///
     /// [module docs]: self
     pub fn builder(
@@ -163,6 +208,61 @@ impl<State: 'static> ListView<State> {
             item_count,
             item_extent,
             builder: Rc::new(builder),
+            key_of: None,
+            on_near_start: None,
+            near_start_threshold: 0.0,
+            on_near_end: None,
+            near_end_threshold: 0.0,
+        }
+    }
+
+    /// Create a virtualized list whose rows are reconciled by the **stable key**
+    /// `key_of(index)` instead of by raw item index — the mid-list-mutation-safe
+    /// counterpart of [`ListView::builder`], everything else identical.
+    ///
+    /// `key_of` returns the identity of the row at an item index (a
+    /// [`ChildKey`], built from any [`Hash`](std::hash::Hash) value — an item id,
+    /// a name — via `ChildKey::new`/`.into()`); it is called once per
+    /// *materialized* slot per frame, never `item_count` times, and must be a
+    /// pure function of the index over one frame's data, exactly like `builder`.
+    /// Panics if `item_extent` is not positive, like [`ListView::builder`].
+    ///
+    /// ```ignore
+    /// ListView::builder_keyed(
+    ///     rows.len(),
+    ///     56.0,
+    ///     move |i| ChildKey::new(rows[i].id),
+    ///     move |i| any::<AppState, _>(row_view(&rows[i])),
+    /// )
+    /// ```
+    ///
+    /// # Contract
+    ///
+    /// A row whose key stays in the window keeps its live widget — and so its
+    /// entire retained state — even when an insert/remove/reorder moves it to a
+    /// different index; a key that leaves the window (or the data) is torn down,
+    /// and a key entering is built fresh. **Keys must be unique within a
+    /// window:** a duplicate trips a `debug_assert!` and, in release, hands the
+    /// live row to the first slot claiming the key while later duplicates build
+    /// fresh (no panic, but which row keeps its state is arbitrary). See the
+    /// [module docs]' *Row identity* section.
+    ///
+    /// [module docs]: self
+    pub fn builder_keyed(
+        item_count: usize,
+        item_extent: f64,
+        key_of: impl Fn(usize) -> ChildKey + 'static,
+        builder: impl Fn(usize) -> AnyView<State> + 'static,
+    ) -> Self {
+        assert!(
+            item_extent > 0.0,
+            "ListView item_extent must be positive (uniform extent)"
+        );
+        Self {
+            item_count,
+            item_extent,
+            builder: Rc::new(builder),
+            key_of: Some(Rc::new(key_of)),
             on_near_start: None,
             near_start_threshold: 0.0,
             on_near_end: None,
@@ -212,6 +312,177 @@ impl<State: 'static> ListView<State> {
     }
 }
 
+/// The reconciliation half of [`View::rebuild`], split per identity mode. See the
+/// [module docs](self)' *Row identity* section for which one runs when.
+impl<State: 'static> ListView<State> {
+    /// Reconcile the materialized window to `[start, end)` **by item index** —
+    /// the [`ListView::builder`] path, unchanged since the keyed one landed
+    /// beside it: an index that stays in the window keeps its live pod and is
+    /// rebuilt in place against its own previous view, indices leaving are torn
+    /// down, indices entering are built fresh.
+    ///
+    /// Because the window is a contiguous range, any change to it necessarily
+    /// builds or tears down at least one pod, so `structural` covers the
+    /// "window shifted" case as well as the materialization one.
+    fn reconcile_positional(
+        &self,
+        prev: &Self,
+        element: &mut ListViewWidget,
+        ctx: &mut BuildCtx<'_>,
+        start: usize,
+        end: usize,
+    ) -> ChangeFlags {
+        let mut flags = ChangeFlags::NONE;
+        // Move the live window out so surviving indices can be relocated by key.
+        let old_keys = std::mem::take(&mut element.keys);
+        let old_children = std::mem::take(&mut element.children);
+        let mut old: HashMap<usize, ChildPod> = old_keys.into_iter().zip(old_children).collect();
+
+        let mut new_children = Vec::with_capacity(end.saturating_sub(start));
+        let mut new_keys = Vec::with_capacity(end.saturating_sub(start));
+        let mut structural = false;
+
+        for index in start..end {
+            if let Some(mut pod) = old.remove(&index) {
+                // Survivor: rebuild in place against its own previous view
+                // (reconstructed from the pure builder) — state preserved.
+                let prev_view = (prev.builder)(index);
+                let next_view = (self.builder)(index);
+                flags |= crate::authoring::rebuild_child(&prev_view, &next_view, &mut pod, ctx);
+                new_children.push(pod);
+            } else {
+                new_children.push(crate::authoring::build_child(&(self.builder)(index), ctx));
+                structural = true;
+            }
+            new_keys.push(index);
+        }
+
+        // Indices that left the window are torn down (cancel-if-active inside
+        // teardown_child unwinds an armed child).
+        for (index, mut pod) in old.drain() {
+            crate::authoring::teardown_child(&(prev.builder)(index), &mut pod, ctx);
+            structural = true;
+        }
+
+        element.children = new_children;
+        element.keys = new_keys;
+        element.sync_child_origins();
+
+        if structural {
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        flags
+    }
+
+    /// Reconcile the materialized window to `[start, end)` **by stable key** —
+    /// the [`ListView::builder_keyed`] path.
+    ///
+    /// Slots stay the contiguous index run `[start, end)` (the uniform-extent
+    /// fast path is untouched); identity is matched through the retained
+    /// [`ListViewWidget::key_index`] map instead. For each slot: the key
+    /// `key_of(index)` names the item index that row occupied last frame, whose
+    /// live pod is relocated into this slot and rebuilt against
+    /// `prev.builder(prev_index)` → `self.builder(index)`. Keys with no entry
+    /// build fresh; pods no slot claimed are torn down with the same
+    /// cancel-if-active [`crate::authoring::teardown_child`] path the positional
+    /// reconciler uses — nothing more.
+    ///
+    /// A duplicate key is ambiguous and trips a `debug_assert!` mirroring
+    /// [`crate::authoring::rebuild_children`]'s; release builds carry on (first
+    /// claim keeps the live row, later duplicates build fresh) rather than panic.
+    fn reconcile_keyed(
+        &self,
+        prev: &Self,
+        element: &mut ListViewWidget,
+        ctx: &mut BuildCtx<'_>,
+        start: usize,
+        end: usize,
+        key_of: &KeyOf,
+    ) -> ChangeFlags {
+        let capacity = end.saturating_sub(start);
+        // One pass over the new window: each slot's key (so `key_of` runs exactly
+        // once per slot), the map this frame will retain, and the duplicate check
+        // — done up front, like the authoring reconciler's, so a debug build trips
+        // before any pod has been moved.
+        let mut slot_keys: Vec<ChildKey> = Vec::with_capacity(capacity);
+        let mut next_index_of: HashMap<ChildKey, usize> = HashMap::with_capacity(capacity);
+        let mut duplicate = false;
+        for index in start..end {
+            let key = key_of(index);
+            duplicate |= next_index_of.insert(key, index).is_some();
+            slot_keys.push(key);
+        }
+        debug_assert!(!duplicate, "{}", DUPLICATE_KEY_MSG);
+
+        // Move the live window out so surviving rows can be relocated by key: the
+        // previous frame's `key -> item index` map, and the pods by the item index
+        // each rendered.
+        let prev_index_of = std::mem::take(&mut element.key_index);
+        let old_keys = std::mem::take(&mut element.keys);
+        let old_children = std::mem::take(&mut element.children);
+        // A moved window range owes a layout pass on its own, without depending on
+        // the match outcome below to prove it (the window is a contiguous run, so
+        // first index + length pin it exactly).
+        let window_shifted = old_keys.first().copied() != (capacity > 0).then_some(start)
+            || old_keys.len() != capacity;
+        let mut old: HashMap<usize, ChildPod> = old_keys.into_iter().zip(old_children).collect();
+
+        let mut new_children = Vec::with_capacity(capacity);
+        let mut new_keys = Vec::with_capacity(capacity);
+        let mut flags = ChangeFlags::NONE;
+        let mut structural = window_shifted;
+
+        for (index, key) in (start..end).zip(slot_keys) {
+            let survivor = prev_index_of
+                .get(&key)
+                .copied()
+                .and_then(|prev_index| old.remove(&prev_index).map(|pod| (prev_index, pod)));
+            match survivor {
+                Some((prev_index, mut pod)) => {
+                    // The row survived under its key: relocate its live pod into
+                    // this slot and rebuild it in place against the view it
+                    // actually holds — `prev.builder(prev_index)`, the index it
+                    // rendered last frame. That redirection is the whole point of
+                    // the retained map; state (hosted component, press, toggle)
+                    // rides along with the pod.
+                    let prev_view = (prev.builder)(prev_index);
+                    let next_view = (self.builder)(index);
+                    flags |= crate::authoring::rebuild_child(&prev_view, &next_view, &mut pod, ctx);
+                    if prev_index != index {
+                        // Same row, different slot: its origin moves, so the frame
+                        // owes a layout pass even though nothing was built or torn
+                        // down.
+                        structural = true;
+                    }
+                    new_children.push(pod);
+                }
+                None => {
+                    // A key with no live row: entering the window, or new data.
+                    new_children.push(crate::authoring::build_child(&(self.builder)(index), ctx));
+                    structural = true;
+                }
+            }
+            new_keys.push(index);
+        }
+
+        // Every pod no slot claimed is a key that left the window or the data.
+        for (index, mut pod) in old.drain() {
+            crate::authoring::teardown_child(&(prev.builder)(index), &mut pod, ctx);
+            structural = true;
+        }
+
+        element.children = new_children;
+        element.keys = new_keys;
+        element.key_index = next_index_of;
+        element.sync_child_origins();
+
+        if structural {
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        flags
+    }
+}
+
 /// Create a virtualized [`ListView`] — the free-function spelling of
 /// [`ListView::builder`].
 pub fn list_view<State: 'static>(
@@ -231,6 +502,18 @@ pub struct ListViewWidget {
     /// The item index each entry of [`ListViewWidget::children`] renders. Always
     /// a contiguous ascending run (uniform extent → the window is a range).
     keys: Vec<usize>,
+    /// Row identity for a [`ListView::builder_keyed`] list: `stable key -> the
+    /// item index that row occupied in the materialized window`, as of the last
+    /// build/rebuild. Empty for a positional [`ListView::builder`] list (and
+    /// cleared by any positional rebuild, so a list switched between the two
+    /// constructors never matches against a window the other path materialized).
+    ///
+    /// This is the retained half of keyed reconciliation: window slots stay
+    /// contiguous indices for the uniform-extent fast path, and identity is
+    /// carried here instead — read back by `rebuild` off the element exactly like
+    /// [`ListViewWidget::offset`]/[`ListViewWidget::viewport`], since the view is
+    /// reconstructed from scratch every frame.
+    key_index: HashMap<ChildKey, usize>,
     item_count: usize,
     item_extent: f64,
     /// Current scroll offset in `[0, max_offset]` (px scrolled down).
@@ -282,6 +565,7 @@ impl ListViewWidget {
         Self {
             children: Vec::new(),
             keys: Vec::new(),
+            key_index: HashMap::new(),
             item_count,
             item_extent,
             offset: 0.0,
@@ -643,12 +927,19 @@ impl<State: 'static> View<State> for ListView<State> {
         // Conservative initial window from a zero viewport (converges within one
         // extra frame via paint's continuation request — see the module docs).
         let (start, end) = widget.desired_window();
+        let mut duplicate = false;
         for index in start..end {
             widget
                 .children
                 .push(crate::authoring::build_child(&(self.builder)(index), ctx));
             widget.keys.push(index);
+            if let Some(key_of) = self.key_of.as_ref() {
+                // Seed the retained identity map so the first rebuild can already
+                // relocate these rows by key.
+                duplicate |= widget.key_index.insert(key_of(index), index).is_some();
+            }
         }
+        debug_assert!(!duplicate, "{}", DUPLICATE_KEY_MSG);
         widget.sync_child_origins();
         widget
     }
@@ -688,44 +979,18 @@ impl<State: 'static> View<State> for ListView<State> {
         element.clamp_offset();
 
         let (start, end) = element.desired_window();
-        // Move the live window out so surviving indices can be relocated by key.
-        let old_keys = std::mem::take(&mut element.keys);
-        let old_children = std::mem::take(&mut element.children);
-        let mut old: HashMap<usize, ChildPod> = old_keys.into_iter().zip(old_children).collect();
-
-        let mut new_children = Vec::with_capacity(end.saturating_sub(start));
-        let mut new_keys = Vec::with_capacity(end.saturating_sub(start));
-        let mut structural = false;
-
-        for index in start..end {
-            if let Some(mut pod) = old.remove(&index) {
-                // Survivor: rebuild in place against its own previous view
-                // (reconstructed from the pure builder) — state preserved.
-                let prev_view = (prev.builder)(index);
-                let next_view = (self.builder)(index);
-                flags |= crate::authoring::rebuild_child(&prev_view, &next_view, &mut pod, ctx);
-                new_children.push(pod);
-            } else {
-                new_children.push(crate::authoring::build_child(&(self.builder)(index), ctx));
-                structural = true;
+        flags |= match self.key_of.as_ref() {
+            Some(key_of) => self.reconcile_keyed(prev, element, ctx, start, end, key_of),
+            None => {
+                // A positional frame owns no key identities: drop whatever map a
+                // previous keyed frame left, so a list switched back to keyed
+                // later cannot match against a window this path re-materialized
+                // by index (a one-frame full re-materialization is the price of
+                // swapping constructors mid-flight).
+                element.key_index.clear();
+                self.reconcile_positional(prev, element, ctx, start, end)
             }
-            new_keys.push(index);
-        }
-
-        // Indices that left the window are torn down (cancel-if-active inside
-        // teardown_child unwinds an armed child).
-        for (index, mut pod) in old.drain() {
-            crate::authoring::teardown_child(&(prev.builder)(index), &mut pod, ctx);
-            structural = true;
-        }
-
-        element.children = new_children;
-        element.keys = new_keys;
-        element.sync_child_origins();
-
-        if structural {
-            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-        }
+        };
         flags
     }
 
@@ -817,7 +1082,7 @@ mod tests {
     use super::*;
     use frust_core::{RenderRoot, any};
     use std::any::Any;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
     // --- A stateful row fixture: each built widget is stamped with a monotonic
@@ -891,18 +1156,20 @@ mod tests {
             .expect("root is a ListViewWidget")
     }
 
-    /// Drive a full rebuild → layout → paint frame at `ms`.
+    /// Drive a full rebuild → layout → paint frame at `ms`, returning the flags
+    /// the rebuild reported (what the layout-skip contract is asserted against).
     fn frame(
         root: &mut RenderRoot<(), ListView<()>>,
         logic: &mut impl FnMut(&mut ()) -> ListView<()>,
         state: &mut (),
         window: Size,
         ms: f64,
-    ) {
-        root.rebuild(logic, state);
+    ) -> ChangeFlags {
+        let flags = root.rebuild(logic, state);
         root.layout(window);
         let mut sink = NullScene;
         root.paint(&mut sink, FrameTime::from_nanos((ms * 1_000_000.0) as u64));
+        flags
     }
 
     fn ev(phase: PointerPhase, y: f64) -> InputEvent {
@@ -1386,5 +1653,430 @@ mod tests {
             state.count, 1,
             "a pending fire is delivered on the next event"
         );
+    }
+
+    // --- (9) Keyed reconciliation: row state follows the stable key. ---
+
+    /// Row height and viewport used by every keyed test: 200 / 50 = 4 visible
+    /// rows + 2×[`BUFFER`], so a list of ≤ 6 rows materializes whole and a longer
+    /// one virtualizes.
+    const ROW_EXTENT: f64 = 50.0;
+    const KEYED_WINDOW: Size = Size::new(200.0, 200.0);
+
+    /// What a keyed row reports about itself: which row id each live widget
+    /// painted, and which rows were torn down.
+    #[derive(Default)]
+    struct RowLog {
+        /// row id -> the build generation of the widget that painted it.
+        painted: RefCell<HashMap<u64, u64>>,
+        /// row ids whose pods were torn down, in teardown order.
+        torn: RefCell<Vec<u64>>,
+    }
+
+    impl RowLog {
+        /// This frame's `row id -> generation` map (the paint log is cleared at
+        /// the top of every keyed frame, so it describes exactly one frame).
+        fn painted(&self) -> HashMap<u64, u64> {
+            self.painted.borrow().clone()
+        }
+
+        fn torn(&self) -> Vec<u64> {
+            self.torn.borrow().clone()
+        }
+    }
+
+    /// A keyed-row fixture. The row carries a stable `id`; its widget is stamped
+    /// with a generation from a shared counter (like [`GenView`]) so a relocated —
+    /// i.e. state-preserving — row keeps its stamp while a rebuilt-fresh row gets
+    /// a new one, and its teardown is recorded.
+    ///
+    /// This is the host-side stand-in for a hosted `Component`: the generation is
+    /// the retained per-row state, and `View::teardown` is exactly the path a
+    /// hosted component's owner disposal rides on (`ComponentWidget::teardown`),
+    /// so "the removed row's pod was disposed" is observable here without pulling
+    /// the reactive runtime into this signal-free crate.
+    struct RowView {
+        id: u64,
+        gens: Rc<Cell<u64>>,
+        log: Rc<RowLog>,
+    }
+
+    struct RowWidget {
+        id: u64,
+        generation: u64,
+        log: Rc<RowLog>,
+    }
+
+    impl View<()> for RowView {
+        type Element = RowWidget;
+
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> RowWidget {
+            let generation = self.gens.get();
+            self.gens.set(generation + 1);
+            RowWidget {
+                id: self.id,
+                generation,
+                log: self.log.clone(),
+            }
+        }
+
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            element: &mut RowWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            // A same-type in-place rebuild keeps the generation (state preserved);
+            // only the content this row renders is updated.
+            element.id = self.id;
+            ChangeFlags::NONE
+        }
+
+        fn teardown(&self, element: &mut RowWidget, _ctx: &mut BuildCtx<'_>) {
+            element.log.torn.borrow_mut().push(element.id);
+        }
+    }
+
+    impl Widget for RowWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(bc.max())
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            self.log
+                .painted
+                .borrow_mut()
+                .insert(self.id, self.generation);
+        }
+    }
+
+    /// A mutable backing vec of row ids plus the shared generation counter and
+    /// log — the whole fixture one keyed test drives.
+    struct KeyedRows {
+        rows: Rc<RefCell<Vec<u64>>>,
+        gens: Rc<Cell<u64>>,
+        log: Rc<RowLog>,
+    }
+
+    impl KeyedRows {
+        fn new(ids: Vec<u64>) -> Self {
+            Self {
+                rows: Rc::new(RefCell::new(ids)),
+                gens: Rc::new(Cell::new(0)),
+                log: Rc::new(RowLog::default()),
+            }
+        }
+
+        /// The app-logic closure for a **keyed** list. Each frame captures a fresh
+        /// *snapshot* of the row ids into both `key_of` and `builder` — the real
+        /// app shape, and the one the reconciler depends on: the retained view of
+        /// the previous frame must still reconstruct the *previous* frame's rows
+        /// (`prev.builder(prev_index)`), which a shared live handle would not.
+        fn keyed_logic(&self) -> impl FnMut(&mut ()) -> ListView<()> + use<> {
+            let rows = self.rows.clone();
+            let gens = self.gens.clone();
+            let log = self.log.clone();
+            move |_: &mut ()| {
+                let snapshot: Rc<Vec<u64>> = Rc::new(rows.borrow().clone());
+                let (keys, items) = (snapshot.clone(), snapshot.clone());
+                let (gens, log) = (gens.clone(), log.clone());
+                ListView::builder_keyed(
+                    snapshot.len(),
+                    ROW_EXTENT,
+                    move |i| ChildKey::new(keys[i]),
+                    move |i| {
+                        any::<(), _>(RowView {
+                            id: items[i],
+                            gens: gens.clone(),
+                            log: log.clone(),
+                        })
+                    },
+                )
+            }
+        }
+
+        /// The same list built **positionally** — the contrast case that pins the
+        /// documented index-identity failure the keyed path fixes.
+        fn positional_logic(&self) -> impl FnMut(&mut ()) -> ListView<()> + use<> {
+            let rows = self.rows.clone();
+            let gens = self.gens.clone();
+            let log = self.log.clone();
+            move |_: &mut ()| {
+                let items: Rc<Vec<u64>> = Rc::new(rows.borrow().clone());
+                let (gens, log) = (gens.clone(), log.clone());
+                ListView::builder(items.len(), ROW_EXTENT, move |i| {
+                    any::<(), _>(RowView {
+                        id: items[i],
+                        gens: gens.clone(),
+                        log: log.clone(),
+                    })
+                })
+            }
+        }
+    }
+
+    /// Drive one frame with the log cleared first, so it describes exactly this
+    /// frame's materialized rows and this frame's teardowns.
+    fn keyed_frame(
+        root: &mut RenderRoot<(), ListView<()>>,
+        logic: &mut impl FnMut(&mut ()) -> ListView<()>,
+        log: &RowLog,
+        ms: f64,
+    ) -> ChangeFlags {
+        log.painted.borrow_mut().clear();
+        log.torn.borrow_mut().clear();
+        frame(root, logic, &mut (), KEYED_WINDOW, ms)
+    }
+
+    /// Build a root and converge its window (build frame + real-viewport frame).
+    fn converged(
+        logic: &mut impl FnMut(&mut ()) -> ListView<()>,
+        log: &RowLog,
+    ) -> RenderRoot<(), ListView<()>> {
+        let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        keyed_frame(&mut root, logic, log, 0.0);
+        keyed_frame(&mut root, logic, log, 16.0);
+        root
+    }
+
+    #[test]
+    fn keyed_mid_list_insert_keeps_each_row_with_its_key() {
+        let fx = KeyedRows::new(vec![10, 20, 30, 40, 50]);
+        let mut logic = fx.keyed_logic();
+        let mut root = converged(&mut logic, &fx.log);
+        let before = fx.log.painted();
+        assert_eq!(before.len(), 5, "all five rows fit the viewport");
+
+        // Insert in the MIDDLE: every row after it shifts one index down.
+        fx.rows.borrow_mut().insert(2, 25);
+        let flags = keyed_frame(&mut root, &mut logic, &fx.log, 32.0);
+
+        let after = fx.log.painted();
+        for id in [10, 20, 30, 40, 50] {
+            assert_eq!(
+                after[&id], before[&id],
+                "row {id} kept its own widget (and its state) across the insert"
+            );
+        }
+        let newest = before.values().copied().max().expect("rows painted");
+        assert!(
+            after[&25] > newest,
+            "the inserted row is built fresh, not handed a survivor's widget"
+        );
+        assert!(
+            fx.log.torn().is_empty(),
+            "no key left the window, so nothing is torn down"
+        );
+        assert!(
+            flags.contains(ChangeFlags::LAYOUT),
+            "a frame that materialized a new pod owes a layout pass"
+        );
+    }
+
+    #[test]
+    fn positional_mid_list_insert_still_misattaches_row_state() {
+        // The documented index-identity failure `builder_keyed` exists to fix,
+        // pinned so "the positional path is unchanged" is a test, not a claim.
+        let fx = KeyedRows::new(vec![10, 20, 30, 40, 50]);
+        let mut logic = fx.positional_logic();
+        let mut root = converged(&mut logic, &fx.log);
+        let before = fx.log.painted();
+
+        fx.rows.borrow_mut().insert(2, 25);
+        keyed_frame(&mut root, &mut logic, &fx.log, 32.0);
+
+        let after = fx.log.painted();
+        assert_ne!(
+            after[&30], before[&30],
+            "positional identity leaves row 30's state behind at index 2"
+        );
+        assert_eq!(
+            after[&25], before[&30],
+            "and hands it to whatever content now occupies that index"
+        );
+    }
+
+    #[test]
+    fn keyed_mid_list_remove_tears_down_only_the_removed_row() {
+        let fx = KeyedRows::new(vec![10, 20, 30, 40, 50]);
+        let mut logic = fx.keyed_logic();
+        let mut root = converged(&mut logic, &fx.log);
+        let before = fx.log.painted();
+
+        fx.rows.borrow_mut().remove(2); // drop row 30 from the middle
+        let flags = keyed_frame(&mut root, &mut logic, &fx.log, 32.0);
+
+        let after = fx.log.painted();
+        assert_eq!(
+            fx.log.torn(),
+            vec![30],
+            "exactly the removed row's pod is torn down (its owner disposed)"
+        );
+        assert!(!after.contains_key(&30), "row 30 no longer paints");
+        for id in [10, 20, 40, 50] {
+            assert_eq!(
+                after[&id], before[&id],
+                "row {id} kept its own widget across the removal"
+            );
+        }
+        assert!(
+            flags.contains(ChangeFlags::LAYOUT),
+            "a frame that tore a pod down owes a layout pass"
+        );
+    }
+
+    #[test]
+    fn keyed_reorder_relocates_rows_and_reports_layout() {
+        let fx = KeyedRows::new(vec![10, 20, 30, 40, 50]);
+        let mut logic = fx.keyed_logic();
+        let mut root = converged(&mut logic, &fx.log);
+        let before = fx.log.painted();
+
+        fx.rows.borrow_mut().reverse();
+        let flags = keyed_frame(&mut root, &mut logic, &fx.log, 32.0);
+
+        let after = fx.log.painted();
+        for id in [10, 20, 30, 40, 50] {
+            assert_eq!(
+                after[&id], before[&id],
+                "row {id} moved slot but kept its own widget"
+            );
+        }
+        assert!(
+            fx.log.torn().is_empty(),
+            "a reorder builds and tears down nothing"
+        );
+        assert!(
+            flags.contains(ChangeFlags::LAYOUT),
+            "relocated pods sit at new origins, so the frame owes a layout pass"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_keyed_frame_reports_no_layout() {
+        // The layout-skip contract in the other direction: a frame that neither
+        // built, tore down, relocated, nor re-ranged a pod must NOT force a
+        // layout pass, or the idiom degenerates into "relayout every frame".
+        let fx = KeyedRows::new(vec![10, 20, 30, 40, 50]);
+        let mut logic = fx.keyed_logic();
+        let mut root = converged(&mut logic, &fx.log);
+
+        let flags = keyed_frame(&mut root, &mut logic, &fx.log, 32.0);
+        assert!(
+            flags.is_empty(),
+            "an identical keyed frame is a no-op reconciliation, got {flags:?}"
+        );
+    }
+
+    #[test]
+    fn keyed_window_shift_relocates_survivors_and_tears_down_the_leaver() {
+        // A pure scroll over 1000 keyed rows: virtualization still works, and the
+        // retained key map tracks the window it materialized.
+        let fx = KeyedRows::new((0..1000).map(|i| i as u64 * 10).collect());
+        let mut logic = fx.keyed_logic();
+        let mut root = converged(&mut logic, &fx.log);
+        let before = fx.log.painted();
+        assert_eq!(list_widget(&root).window(), &[0, 1, 2, 3, 4, 5]);
+
+        // Scroll 150px: the window becomes 1..9 — row 0 leaves, rows 6..8 enter.
+        root.event(&mut (), &wheel(150.0));
+        let flags = keyed_frame(&mut root, &mut logic, &fx.log, 32.0);
+
+        let after = fx.log.painted();
+        assert_eq!(list_widget(&root).window(), &[1, 2, 3, 4, 5, 6, 7, 8]);
+        for id in [10, 20, 30, 40, 50] {
+            assert_eq!(
+                after[&id], before[&id],
+                "row {id} stayed in the window and kept its widget"
+            );
+        }
+        assert_eq!(
+            fx.log.torn(),
+            vec![0],
+            "the row that scrolled out is torn down"
+        );
+        assert!(
+            flags.contains(ChangeFlags::LAYOUT),
+            "a shifted window owes a layout pass"
+        );
+    }
+
+    #[test]
+    fn keyed_insert_under_a_scrolled_window_keeps_state_with_the_rows() {
+        // The hard case: a mid-list insert *while* the list is virtualized, so
+        // every row's index shifts under a window that does not move. Positional
+        // identity has no answer here; keys do.
+        let fx = KeyedRows::new((0..1000).map(|i| i as u64 * 10).collect());
+        let mut logic = fx.keyed_logic();
+        let mut root = converged(&mut logic, &fx.log);
+
+        root.event(&mut (), &wheel(500.0));
+        keyed_frame(&mut root, &mut logic, &fx.log, 32.0);
+        let before = fx.log.painted();
+        assert_eq!(list_widget(&root).window(), &[8, 9, 10, 11, 12, 13, 14, 15]);
+        // Rows 80..=150 (ids), one per materialized slot.
+        assert_eq!(before.len(), 8);
+
+        // Insert at the FRONT: every row slides one index down, the window (an
+        // offset, not an identity) stays at 8..16 — so it now shows ids 70..=140.
+        fx.rows.borrow_mut().insert(0, 5);
+        let flags = keyed_frame(&mut root, &mut logic, &fx.log, 48.0);
+
+        let after = fx.log.painted();
+        for id in [80, 90, 100, 110, 120, 130, 140] {
+            assert_eq!(
+                after[&id], before[&id],
+                "row {id} slid one index down and took its widget with it"
+            );
+        }
+        assert!(
+            after[&70] > before.values().copied().max().expect("rows painted"),
+            "the row that slid INTO the window from above is built fresh"
+        );
+        assert_eq!(
+            fx.log.torn(),
+            vec![150],
+            "the row pushed out of the bottom of the window is torn down"
+        );
+        assert!(flags.contains(ChangeFlags::LAYOUT));
+    }
+
+    // Duplicate keys are ambiguous: the debug tripwire is the contract (release
+    // carries on with first-claim-wins, documented on `builder_keyed`).
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "duplicate key")]
+    fn duplicate_keys_trip_the_debug_assert_on_build() {
+        let mut logic = |_: &mut ()| {
+            ListView::builder_keyed(
+                5,
+                ROW_EXTENT,
+                |_| ChildKey::new(7u32),
+                |i| any::<(), _>(gen_stub(i)),
+            )
+        };
+        let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        frame(&mut root, &mut logic, &mut (), KEYED_WINDOW, 0.0);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "duplicate key")]
+    fn duplicate_keys_trip_the_debug_assert_on_rebuild() {
+        let collide = Rc::new(Cell::new(false));
+        let collide_l = collide.clone();
+        let mut logic = move |_: &mut ()| {
+            let collide = collide_l.clone();
+            ListView::builder_keyed(
+                5,
+                ROW_EXTENT,
+                move |i| ChildKey::new(if collide.get() { 7 } else { i }),
+                |i| any::<(), _>(gen_stub(i)),
+            )
+        };
+        let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        frame(&mut root, &mut logic, &mut (), KEYED_WINDOW, 0.0);
+        collide.set(true);
+        frame(&mut root, &mut logic, &mut (), KEYED_WINDOW, 16.0);
     }
 }
