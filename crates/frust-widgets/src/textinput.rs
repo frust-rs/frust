@@ -52,16 +52,28 @@
 //! the caret to visible, and republishes the IME surface. The caret blinks while
 //! focused, its phase measured from the shared shell frame clock
 //! ([`PaintCtx::frame_time`] — no wall-clock reads in widget code) in `paint`.
-//! The continuation frame this requests is a paced (`CosmeticLoop`) request via
-//! [`PaintCtx::request_frame_paced`], the same classification the design-system
-//! decorative loops (skeleton/progress/dots/toast/spinner) use: the blink is an
-//! indefinite toggle with no user-visible endpoint, so the mobile frame gate may
-//! throttle its cadence without a perceptible glitch. This is safe at any
-//! repaint cadence because the phase is computed as `frame_time - blink_epoch`
+//! The continuation frame this requests is a paced (`CosmeticLoop`) request at
+//! the blink's own [`BLINK_MS`] half-period ([`PaintCtx::request_frame_paced_at`])
+//! — the same classification the design-system decorative loops
+//! (skeleton/progress/dots/toast/spinner) use, but naming its own (slower)
+//! cadence instead of the theme's cap rate, since one paint per visibility
+//! toggle is all a 500ms blink needs; the MIN-lattice still lets a concurrent
+//! cap-rate request (e.g. a shimmer sharing the frame) repaint it more often
+//! with no visible effect. This is safe at any repaint cadence because the
+//! phase is computed as `frame_time - blink_epoch`
 //! ([`caret_visible_at`](TextInputWidget::caret_visible_at)) — a pure function of
 //! the current frame's own timestamp, never of a delta between consecutive
-//! painted frames. An edit/focus during the (clockless) event pass flags the
-//! blink for reset; the next paint records the blink epoch from `frame_time`.
+//! painted frames, so pacing down the repaint rate never shifts the perceived
+//! phase. An edit/focus during the (clockless) event pass flags the blink for
+//! reset; the next paint records the blink epoch from `frame_time`.
+//!
+//! `reduce_motion` freezes the caret **visible** (lit, not hidden) instead of
+//! pausing it mid-blink, and stops requesting blink frames entirely while
+//! focused — unlike a purely decorative loop (skeleton/dots/toast/spinner),
+//! the caret also serves as the edit-point cue, so freezing it dark would hide
+//! where typing lands. The IME surface still republishes every painted frame
+//! regardless of `reduce_motion`. Blinking resumes on the next painted frame
+//! once the token clears.
 //!
 //! # Multi-line mode
 //!
@@ -238,6 +250,7 @@
 //! soft glow it does not.
 
 use std::rc::Rc;
+use std::time::Duration;
 
 use frust_core::accesskit::Role;
 use frust_core::{
@@ -1498,7 +1511,9 @@ impl Widget for TextInputWidget {
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let origin = ctx.origin();
         let size = ctx.size();
-        let chrome = Chrome::resolve(Theme::from_paint_ctx(ctx), self.enabled);
+        let theme = Theme::from_paint_ctx(ctx);
+        let reduce_motion = theme.map(|t| t.motion.reduce_motion).unwrap_or(false);
+        let chrome = Chrome::resolve(theme, self.enabled);
 
         // Record the blink epoch from the shared frame clock once per pending
         // reset (a focus/edit flagged it during the clockless event pass).
@@ -1597,23 +1612,30 @@ impl Widget for TextInputWidget {
         }
 
         // Caret: blink while focused. A paced (CosmeticLoop) continuation
-        // request keeps the desktop shell's wait-loop scheduling paints so the
-        // blink animates (the mobile shells' continuous loops already do), while
-        // letting the mobile frame gate throttle the cadence — the blink is an
-        // indefinite decorative toggle with no endpoint, the same classification
-        // as the design-system skeleton/progress/dots/toast/spinner loops. At
-        // rest (unfocused) we stop signalling.
+        // request at the blink's own [`BLINK_MS`] half-period keeps the desktop
+        // shell's wait-loop scheduling paints so the blink animates (the mobile
+        // shells' continuous loops already do), while letting the mobile frame
+        // gate throttle the cadence — the blink is an indefinite decorative
+        // toggle with no endpoint, the same classification as the
+        // design-system skeleton/progress/dots/toast/spinner loops, but naming
+        // its own slower cadence instead of the theme's cap rate (module docs'
+        // "Focus, IME and blink" section). At rest (unfocused) we stop
+        // signalling. `reduce_motion` freezes the caret **visible** and stops
+        // requesting blink frames entirely — it is a position cue, not a purely
+        // decorative loop, so it is the one exception among the paced loops
+        // that freezes lit rather than dark.
         if focused {
-            ctx.request_frame_paced();
+            if !reduce_motion {
+                ctx.request_frame_paced_at(Duration::from_millis(BLINK_MS as u64));
+            }
             // Republish the IME surface every painted frame while focused, so a
             // controlled change applied by a rebuild (a submit clearing the
             // field) refreshes the shell-facing state the event pass would
             // otherwise leave stale — the mobile IME mirror relies on this to
             // observe the clear (see `PaintCtx::publish_ime_state`).
             ctx.publish_ime_state(self.current_ime_state(origin, size));
-            if self.caret_visible_at(now)
-                && let Some(c) = self.display().cursor_rect(self.caret_width)
-            {
+            let caret_visible = reduce_motion || self.caret_visible_at(now);
+            if caret_visible && let Some(c) = self.display().cursor_rect(self.caret_width) {
                 let off = text_origin.to_vec2();
                 scene.fill_rect(
                     Point::new(c.x0 + off.x, c.y0 + off.y),
@@ -2163,6 +2185,74 @@ mod tests {
         assert!(
             outcome.needs_frame_paced_only,
             "the caret blink is a CosmeticLoop request — the frame gate must be able to pace it"
+        );
+    }
+
+    #[test]
+    fn blink_paces_at_its_own_500ms_interval() {
+        // The caret names its own (slower) cadence via
+        // `request_frame_paced_at` rather than a bare `request_frame_paced`
+        // (the theme's cosmetic-loop cap) — asserted on the paint outcome's
+        // `paced_interval`, mirroring `frust-core`'s
+        // `paint_surfaces_the_requested_paced_interval_on_outcome`.
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        let mut sink = NullScene;
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        let outcome = root.paint(&mut sink, FrameTime::ZERO);
+        assert!(outcome.needs_frame_paced_only);
+        assert_eq!(
+            outcome.paced_interval,
+            Some(Duration::from_millis(BLINK_MS as u64)),
+            "the caret paces at its own 500ms half-period, not the theme cap"
+        );
+    }
+
+    #[test]
+    fn reduce_motion_freezes_the_caret_visible_and_stops_requesting_frames() {
+        // reduce_motion is the one exception among the paced loops: the caret
+        // freezes VISIBLE (it is a position cue), not hidden, and stops
+        // requesting blink frames entirely while frozen.
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+        let mut theme = Theme::m3_baseline();
+        theme.motion.reduce_motion = true;
+        root.set_theme(Box::new(theme));
+        let caret_color = Theme::m3_baseline().scheme().primary;
+
+        // Focus seeds `blink_epoch` at the first paint (t=0).
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut NullScene, ft_ms(0.0));
+
+        // Mid-cycle from that epoch — an unfrozen caret would be hidden here
+        // (see `caret_visibility_toggles_across_the_blink_period`) — but
+        // reduce_motion must still paint it, and request no continuation frame.
+        let mut mid = CaretRecorder {
+            caret_color: Some(caret_color),
+            caret_fills: 0,
+        };
+        let outcome = root.paint(&mut mid, ft_ms(BLINK_MS + 10.0));
+        assert_eq!(
+            mid.caret_fills, 1,
+            "reduce_motion freezes the caret visible, even mid-blink-cycle"
+        );
+        assert!(
+            !outcome.needs_frame,
+            "a frozen caret must not request a continuation frame"
+        );
+
+        // Clearing the token resumes the ordinary paced blink.
+        let mut theme = Theme::m3_baseline();
+        theme.motion.reduce_motion = false;
+        root.set_theme(Box::new(theme));
+        let resumed = root.paint(&mut NullScene, ft_ms(2.0 * BLINK_MS + 20.0));
+        assert!(
+            resumed.needs_frame_paced_only,
+            "blinking resumes once reduce_motion clears"
+        );
+        assert_eq!(
+            resumed.paced_interval,
+            Some(Duration::from_millis(BLINK_MS as u64))
         );
     }
 
