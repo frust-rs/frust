@@ -20,7 +20,7 @@
 //! precedent the pre-skeleton theme screen used for its `ColorBoxView`.
 //! Everything else goes through the `frust` facade.
 //!
-//! # Roster container: a keyed, uniform-extent `ListView`
+//! # Roster container: a keyed, variable-extent `ListView`
 //!
 //! The roster renders through [`ListView::builder_keyed`](frust::ListView::builder_keyed)
 //! over a flat row list — the two singleton section header rows
@@ -29,13 +29,22 @@
 //! [`ChannelsController::data`](crate::features::channels::ChannelsController::data)
 //! every frame exactly like the earlier `keyed` `Column`'s children were —
 //! keyed by [`RosterRow::key`] (channel or DM id for real items, distinct
-//! collision-proof string keys for the two singletons). All rows are uniform
-//! height ([`ROSTER_ROW_EXTENT`]), so the list uses the closed-form
-//! [`ListView::builder_keyed`] path with no `estimated_item_extent` call
-//! (variable-extent mode is deferred; the feed's precedent proves that
-//! capacity). [`on_refresh_release`](frust::ListView::on_refresh_release)
-//! drives the pull-to-refresh operation at the same refresh op the earlier
-//! `scroll_view` version used. Keying by id means a mute/archive/reorder
+//! collision-proof string keys for the two singletons). A channel/DM row's
+//! avatar-driven height and a section header's shorter text-only height are
+//! *not* the same, so the list runs in **variable-extent** mode
+//! ([`ListView::estimated_item_extent`](frust::ListView::estimated_item_extent),
+//! seeded with [`ROSTER_ROW_EXTENT`] — the feed's precedent, `channel_feed`)
+//! rather than the closed-form uniform path: each row measures its own
+//! natural height (a header stays short; a channel/DM row's avatar +
+//! `row_layout` padding still comes out to exactly `ROSTER_ROW_EXTENT`) —
+//! forcing a header to the taller row extent (an earlier, reverted attempt at
+//! this) shifted every following row down far enough that a channel appended
+//! at the roster's live edge could land outside a caller's viewport.
+//! [`on_refresh_release`](frust::ListView::on_refresh_release) drives the
+//! pull-to-refresh operation at the same refresh op the earlier `scroll_view`
+//! version used — [`roster_list`] overlays its own centered spinner while a
+//! reload is in flight, since the callback is a pure gesture hook with no
+//! in-progress visual of its own. Keying by id means a mute/archive/reorder
 //! mutation keeps swipe/press state attached to the right channel — the
 //! keyed identity that the old positional Column couldn't maintain.
 //!
@@ -70,9 +79,10 @@ use frust::authoring::{
 use frust::{
     Align, Alignment, AnimationController, AnyView, Axis, ChildKey, Column, CrossAxisAlignment,
     DesignLanguage, EdgeInsets, FlexView, GestureDetector, Get, Image, ImageFit, ImageSource,
-    ListView, NavigatorController, Padding, PopResult, Row, SizedBox, Stack, Theme, View, action,
-    any, app_bar, button, component, dialog, flexible, hero, icon, icons, inflexible, safe_area,
-    scroll_view, show_cupertino_alert, show_dialog, switch, text, text_input, use_context,
+    ListView, NavigatorController, Padding, PopResult, ProgressValue, Row, SizedBox, Stack, Theme,
+    View, action, any, app_bar, button, circular_progress, component, dialog, flexible, hero, icon,
+    icons, inflexible, safe_area, scroll_view, show_cupertino_alert, show_dialog, switch, text,
+    text_input, use_context,
 };
 
 use clean_signals_frust::use_controller;
@@ -122,11 +132,13 @@ fn status_color(status: UserStatus) -> Color {
     }
 }
 
-/// [`ListView::builder_keyed`](frust::ListView::builder_keyed)'s uniform row height —
-/// all roster rows (section headers and channel/DM rows) are this height: avatar
-/// column (40) + row padding (20, split across top and bottom via
-/// [`row_layout`]'s EdgeInsets::symmetric), for a total of 60px. No measurement
-/// or estimation needed; all rows are rendered at this fixed extent.
+/// The roster [`ListView`](frust::ListView)'s variable-extent estimate, and a
+/// channel/DM row's actual measured height: avatar column (40) + row padding
+/// (20, split across top and bottom via [`row_layout`]'s
+/// `EdgeInsets::symmetric`), for a total of 60px. A section header measures
+/// shorter than this (its own natural text height) — see the [module
+/// docs](self)' *Roster container* section for why the list is
+/// variable-extent rather than closed-form uniform.
 const ROSTER_ROW_EXTENT: f64 = 60.0;
 
 // ---------------------------------------------------------------------------
@@ -349,7 +361,7 @@ impl frust::Component for HomeScreen {
         let async_state = state.controller.data.get(); // tracked
 
         let body: AnyView<HomeState> = if let Some(data) = async_state.value() {
-            roster_list(state, data)
+            roster_list(state, data, async_state.is_loading())
         } else if async_state.is_loading() {
             skeleton_list()
         } else {
@@ -476,10 +488,16 @@ fn skeleton_row() -> AnyView<HomeState> {
 // Loaded roster
 // ---------------------------------------------------------------------------
 
-/// The loaded roster: the keyed, uniform-extent `ListView` with section headers
-/// and channel/DM rows, wrapped in a pull-to-refresh `Padding` layer. See the
-/// [module docs](self)' *Roster container* section.
-fn roster_list(state: &HomeState, data: &channels::ChannelsData) -> AnyView<HomeState> {
+/// The loaded roster: the keyed, variable-extent `ListView` with section
+/// headers and channel/DM rows, wrapped in a pull-to-refresh `Padding` layer,
+/// with a centered indeterminate spinner overlaid while `refreshing` (a
+/// reload triggered by pull-to-refresh) is in flight. See the [module
+/// docs](self)' *Roster container* section.
+fn roster_list(
+    state: &HomeState,
+    data: &channels::ChannelsData,
+    refreshing: bool,
+) -> AnyView<HomeState> {
     // Build the roster row list: "Channels" header, then channels, then
     // "Direct messages" header, then DMs. This mirrors the earlier keyed
     // Column structure built by hand each frame.
@@ -523,6 +541,7 @@ fn roster_list(state: &HomeState, data: &channels::ChannelsData) -> AnyView<Home
     // The refresh callback: same operation the earlier scroll_view used.
     let pager = Arc::clone(&state.controller);
     let list = ListView::builder_keyed(row_count, ROSTER_ROW_EXTENT, key_of, builder)
+        .estimated_item_extent(ROSTER_ROW_EXTENT)
         .on_refresh_release(move |_s: &mut HomeState| {
             let handle = pager.clone();
             frust::spawn_local(async move {
@@ -533,24 +552,42 @@ fn roster_list(state: &HomeState, data: &channels::ChannelsData) -> AnyView<Home
     // The outer padding is the same 8px horizontal that the old scroll_view
     // used (and the vertical breathing room is unchanged too, just now applied
     // to the list's viewport rather than the column's content).
-    any(Padding(EdgeInsets::all(8.0), list))
+    let list = any(Padding(EdgeInsets::all(8.0), list));
+
+    if !refreshing {
+        return list;
+    }
+
+    // While a pull-to-refresh reload is in flight, overlay a centered
+    // indeterminate spinner on top of the (still-visible, stale) roster —
+    // `ListView::on_refresh_release`'s own rubber-band overscroll is a pure
+    // gesture/position effect with no in-progress visual of its own, so the
+    // app supplies one, exactly as the pre-`ListView` `scroll_view` version
+    // did. A `Stack` layer rather than a synthetic row, so it never
+    // participates in row keying/windowing.
+    any(Stack(vec![
+        list,
+        any(Align(
+            Alignment::new(0.0, -0.85), // near the top, matching the old top-of-content spinner
+            Padding(
+                EdgeInsets::all(8.0),
+                circular_progress(ProgressValue::Indeterminate),
+            ),
+        )),
+    ]))
 }
 
-/// A section header row: centered text at SECTION_LABEL_SIZE, padded to fill
-/// the [`ROSTER_ROW_EXTENT`] height by vertical centering within the row height.
+/// A section header row: left-aligned text at SECTION_LABEL_SIZE, its own
+/// natural height (shorter than a channel/DM row's avatar-driven
+/// [`ROSTER_ROW_EXTENT`]) — safe under the roster's variable-extent `ListView`
+/// (see [`roster_list`]), which measures each row rather than forcing every
+/// row to one uniform height.
 fn section_header(title: &str) -> AnyView<HomeState> {
-    // Wrap the header in a sized box to fill the row height, centering the text.
-    // This ensures the header row is exactly ROSTER_ROW_EXTENT tall, matching
-    // the content rows it separates (the rows use cross_axis::Center, so
-    // avatar-based sizing happens to match; headers get an explicit SizedBox).
-    any(SizedBox(None, Some(ROSTER_ROW_EXTENT)).child(Align(
-        Alignment::new(0.0, 0.5), // left-center
-        Padding(
-            // Start margin 16 (8 outer list pad + 8 here) — Material side margin.
-            EdgeInsets::symmetric(8.0, 0.0),
-            text(title.to_string()).size(SECTION_LABEL_SIZE),
-        ),
-    )))
+    any(Padding(
+        // Start margin 16 (8 outer list pad + 8 here) — Material side margin.
+        EdgeInsets::symmetric(8.0, 12.0),
+        text(title.to_string()).size(SECTION_LABEL_SIZE),
+    ))
 }
 
 /// Wrap a row (leading + tappable content, pre-swipe) so a long-press opens
