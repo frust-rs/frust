@@ -311,8 +311,75 @@
 //!
 //! Scroll extent is `item_count * item_extent` exactly on the uniform path (no
 //! estimation) and `Σ measured + estimate × unmeasured` in variable-extent mode
-//! (above); either way the offset is clamped to `[0, extent - viewport.height]`
-//! with no overscroll.
+//! (above); either way [`ListViewWidget::offset`] — the *windowing* offset that
+//! decides which item indices materialize — is clamped to
+//! `[0, extent - viewport.height]` and never leaves that range. See
+//! *Overscroll and pull-to-refresh* (below) for the bounded out-of-range
+//! *visual* displacement layered on top of it.
+//!
+//! # Overscroll and pull-to-refresh
+//!
+//! [`ListView::on_refresh_release`] and a drag's rubber-band overscroll feel
+//! are ported from [`crate::ScrollView`] (`scroll.rs`) verbatim: the same
+//! [`OVERSCROLL_RESISTANCE`](crate::scroll::OVERSCROLL_RESISTANCE) damping,
+//! the same [`REFRESH_TRIGGER_PX`](crate::scroll::REFRESH_TRIGGER_PX) release
+//! threshold, and the same
+//! [`SETTLE_DECAY`](crate::scroll::SETTLE_DECAY)/[`SETTLE_STOP_PX`](crate::scroll::SETTLE_STOP_PX)
+//! spring-back-during-paint settle — all four constants and the
+//! [`crossed_refresh_trigger`](crate::scroll::crossed_refresh_trigger)
+//! threshold check are `pub(crate)` items *shared* from `scroll.rs`, not a
+//! second hand-copied set, so the two surfaces can never drift apart. The
+//! settle animation itself is reimplemented against this widget's own data
+//! shape (below) rather than shared, since `ScrollWidget` has no windowing
+//! concept to keep separate from its overscroll — sharing would have meant
+//! churning `ScrollView`'s own tested field layout for one method, which this
+//! task does not do.
+//!
+//! **Windowing offset vs. painted offset.** A single `ScrollWidget::offset`
+//! can carry an out-of-range value directly, because nothing there ever reads
+//! it as an item index. A `ListView` cannot do that: [`ListViewWidget::offset`]
+//! *is* the item-index math, so it must stay in `[0, max_offset]` at all
+//! times — rows must never be asked to materialize for a negative or
+//! past-the-end index. So a drag past an edge splits the two: `offset` stays
+//! clamped (window planning, the prefix walk, the edge triggers, everything
+//! in *Variable extents* above all read [`ListViewWidget::placement_offset`],
+//! which is built on this clamped `offset`, exactly as before), while
+//! [`ListViewWidget::overscroll`] carries the signed, resisted past-edge
+//! displacement on its own, and only
+//! [`ListViewWidget::painted_offset`] (`placement_offset() + overscroll`) —
+//! read solely by [`ListViewWidget::sync_child_origins`] and
+//! [`Widget::semantics`]'s scroll position — ever sees the out-of-range
+//! number. This is what satisfies criterion 3: the content edge visually
+//! displaces, but no row is ever materialized outside `[0, item_count)`.
+//!
+//! **Resistance uses the *current*, converging `max_offset`.** Every drag
+//! `Move` recomputes `overscroll` against a freshly-read
+//! [`ListViewWidget::max_offset`] (not a value cached at takeover), so a
+//! bottom-edge overscroll in variable-extent mode tracks the content extent as
+//! it revises upward or downward from in-flight measurements, the same way
+//! every other offset-affecting read in this module already does.
+//!
+//! **`on_refresh_release` only ever arms at the top edge**, mirroring
+//! `ScrollView`: it fires on `Up` when `overscroll < -REFRESH_TRIGGER_PX`, a
+//! condition only the *negative* (past-top) direction can satisfy — a bottom
+//! overscroll releases into a settle like the top does under threshold, but
+//! can never fire it. [`ListView::on_near_start`]/[`ListView::on_near_end`]
+//! read `placement_offset()`, which overscroll never touches, so the two
+//! mechanisms coexist unmodified: a pull can cross the near-start threshold on
+//! its way down (firing the "load older" edge) and *then* cross the refresh
+//! trigger before release (firing refresh on `Up`) — two independent signals
+//! from one gesture, not a conflict.
+//!
+//! **Fling and wheel stay hard-clamped**, exactly like `ScrollView`: only a
+//! drag ever *sets* a nonzero `overscroll` — wheel forces it back to `0.0`
+//! outright, and a fling can never enter it to begin with. A new `Down` does
+//! *not* reset it: it only cancels any in-progress settle
+//! (`ListViewWidget::settling = false`), so a regrab mid-bounce continues from
+//! wherever the surface currently sits rather than snapping first (mirrors
+//! `ScrollWidget::event_at`'s `Down` arm, which leaves its own `offset`
+//! untouched for the same reason). [`ListViewWidget::tick`]'s existing at-bound
+//! check already stops a fling the instant `offset` reaches `0`/`max_offset`,
+//! so a fling never enters overscroll to begin with.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -328,6 +395,7 @@ use kurbo::{Point, Size};
 
 use crate::ChildKey;
 use crate::authoring::ErasedCallback;
+use crate::scroll::{OVERSCROLL_RESISTANCE, SETTLE_DECAY, SETTLE_STOP_PX, crossed_refresh_trigger};
 
 /// Extra items materialized above and below the visible window, so a small
 /// scroll (or a fling's per-frame advance) reveals already-built rows instead of
@@ -367,6 +435,11 @@ type OnNearStart<State> = Rc<dyn Fn(&mut State)>;
 /// A view-held near-end "load newer" callback (erased to [`ErasedCallback`] on
 /// build). Mirrors [`OnNearStart`].
 type OnNearEnd<State> = Rc<dyn Fn(&mut State)>;
+
+/// A view-held pull-to-refresh release callback (erased to [`ErasedCallback`]
+/// on build). Mirrors [`crate::ScrollView`]'s type of the same shape exactly —
+/// see the [module docs](self)' *Overscroll and pull-to-refresh* section.
+type OnRefresh<State> = Rc<dyn Fn(&mut State)>;
 
 /// A view-held stable-key function (`item index -> row identity`), installed by
 /// [`ListView::builder_keyed`] and absent for the positional
@@ -435,6 +508,10 @@ pub struct ListView<State: 'static> {
     on_near_end: Option<OnNearEnd<State>>,
     /// Distance from content end (px) at which `on_near_end` fires.
     near_end_threshold: f64,
+    /// Fired on pointer `Up` when the past-top overscroll exceeded
+    /// `REFRESH_TRIGGER_PX` (shared with [`crate::ScrollView`]). See
+    /// [`ListView::on_refresh_release`].
+    on_refresh_release: Option<OnRefresh<State>>,
 }
 
 impl<State: 'static> ListView<State> {
@@ -476,6 +553,7 @@ impl<State: 'static> ListView<State> {
             near_start_threshold: 0.0,
             on_near_end: None,
             near_end_threshold: 0.0,
+            on_refresh_release: None,
         }
     }
 
@@ -531,6 +609,7 @@ impl<State: 'static> ListView<State> {
             near_start_threshold: 0.0,
             on_near_end: None,
             near_end_threshold: 0.0,
+            on_refresh_release: None,
         }
     }
 
@@ -622,6 +701,19 @@ impl<State: 'static> ListView<State> {
     ) -> Self {
         self.on_near_end = Some(Rc::new(callback));
         self.near_end_threshold = threshold_px;
+        self
+    }
+
+    /// The pull-to-refresh trigger: fires on pointer `Up` when the list was
+    /// pulled past the top by more than `REFRESH_TRIGGER_PX` (post-resistance)
+    /// — the same name, signature, and threshold behavior as
+    /// [`crate::ScrollView::on_refresh_release`], so a screen can swap between
+    /// the two containers without relearning the contract. Never fires on a
+    /// `Cancel`, and a bottom overscroll can never trigger it (only a past-top
+    /// pull can). See the [module docs](self)' *Overscroll and pull-to-refresh*
+    /// section.
+    pub fn on_refresh_release<F: Fn(&mut State) + 'static>(mut self, callback: F) -> Self {
+        self.on_refresh_release = Some(Rc::new(callback));
         self
     }
 }
@@ -983,8 +1075,32 @@ pub struct ListViewWidget {
     pending_correction: f64,
     item_count: usize,
     item_extent: f64,
-    /// Current scroll offset in `[0, max_offset]` (px scrolled down).
+    /// The **windowing** scroll offset — always in `[0, max_offset]`, the
+    /// value every item-index computation (window planning, the prefix walk,
+    /// edge triggers) reads through [`ListViewWidget::placement_offset`]. Never
+    /// carries an out-of-range value; see [`ListViewWidget::overscroll`] and
+    /// the [module docs](self)' *Overscroll and pull-to-refresh* section for
+    /// where a drag past an edge is represented instead.
     offset: f64,
+    /// The raw (un-resisted) drag position accumulated during an active scroll
+    /// drag; seeded from [`ListViewWidget::painted_offset`] at takeover and
+    /// moved by each drag delta. [`OVERSCROLL_RESISTANCE`] is applied to its
+    /// out-of-range portion to derive [`ListViewWidget::overscroll`], so the
+    /// resistance never compounds across moves (mirrors `ScrollWidget`'s field
+    /// of the same name).
+    drag_raw: f64,
+    /// The signed, resisted past-edge visual displacement a drag shows beyond
+    /// the windowing [`ListViewWidget::offset`]: negative past the top,
+    /// positive past the bottom, `0.0` while in range. Only a drag ever sets
+    /// this nonzero; wheel and fling always force it back to `0.0` (both stay
+    /// hard-clamped, matching `ScrollView`). See
+    /// [`ListViewWidget::painted_offset`] and the [module docs](self)'
+    /// *Overscroll and pull-to-refresh* section.
+    overscroll: f64,
+    /// Whether a release-settle animation is easing an overscrolled
+    /// [`ListViewWidget::overscroll`] back to `0.0` (driven at paint via
+    /// [`ListViewWidget::settle_tick`], mirrors `ScrollWidget::settling`).
+    settling: bool,
     /// Resolved viewport size (this widget's own size), cached from the previous
     /// layout so rebuild can window against it (BuildCtx carries no viewport).
     viewport: Size,
@@ -1025,6 +1141,8 @@ pub struct ListViewWidget {
     /// A near-end fire detected by the paint-time fling pump (no `EventCtx`);
     /// delivered on the next event, cleared by a `Cancel` without firing.
     pending_near_end: bool,
+    /// The pull-to-refresh release callback (`None` if the view set none).
+    on_refresh_release: Option<ErasedCallback>,
 }
 
 impl ListViewWidget {
@@ -1045,6 +1163,9 @@ impl ListViewWidget {
             item_count,
             item_extent,
             offset: 0.0,
+            drag_raw: 0.0,
+            overscroll: 0.0,
+            settling: false,
             viewport: Size::ZERO,
             scrolling: false,
             down_active: false,
@@ -1062,6 +1183,7 @@ impl ListViewWidget {
             near_end_threshold: 0.0,
             near_end_armed: true,
             pending_near_end: false,
+            on_refresh_release: None,
         }
     }
 
@@ -1169,24 +1291,41 @@ impl ListViewWidget {
         (self.content_extent() - self.viewport.height).max(0.0)
     }
 
-    /// The content-space `y` the viewport's top edge is actually placed at this
-    /// frame: the committed [`ListViewWidget::offset`] plus the correction
-    /// `layout` has measured and no rebuild has committed yet, through the same
-    /// `[0, max_offset]` clamp every offset write takes.
+    /// The content-space `y` the viewport's top edge is at this frame **for
+    /// windowing purposes**: the committed [`ListViewWidget::offset`] plus the
+    /// correction `layout` has measured and no rebuild has committed yet,
+    /// through the same `[0, max_offset]` clamp every offset write takes —
+    /// always in range, never carrying [`ListViewWidget::overscroll`].
     ///
-    /// Everything that *places* content reads this — the prefix walk, the
-    /// window, each row's origin, the edge triggers, the semantics scroll
-    /// position — so a measured correction is honored the instant it is
-    /// recorded and committing it is visually a no-op. Everything that *moves*
+    /// Everything that decides item indices reads this — the prefix walk, the
+    /// window, each row's content-space `y`, the near-start/near-end edge
+    /// triggers — so a measured correction is honored the instant it is
+    /// recorded and committing it is visually a no-op, and a row is never
+    /// asked to materialize for an out-of-range index. Everything that *moves*
     /// the scroll (drag, wheel, fling, clamp) works on the raw offset instead.
     /// Identical to the offset on the uniform path, which never measures and so
     /// never has a pending correction. See the [module docs](self)' *Measured
-    /// anchor correction* section.
+    /// anchor correction* and *Overscroll and pull-to-refresh* sections; for
+    /// where content is actually **painted** (which does layer overscroll on
+    /// top), see [`ListViewWidget::painted_offset`].
     fn placement_offset(&self) -> f64 {
         if self.pending_correction == 0.0 {
             return self.offset;
         }
         (self.offset + self.pending_correction).clamp(0.0, self.max_offset())
+    }
+
+    /// The content-space `y` the viewport's top edge is actually **painted**
+    /// at this frame: [`ListViewWidget::placement_offset`] (always in range)
+    /// plus the current [`ListViewWidget::overscroll`] displacement (`0.0`
+    /// outside a drag past an edge). Read by
+    /// [`ListViewWidget::sync_child_origins`] and [`Widget::semantics`]'s
+    /// scroll position — the only two places the out-of-range number is ever
+    /// allowed to show, so the content edge visually displaces while no row
+    /// is ever asked to materialize outside `[0, item_count)`. See the
+    /// [module docs](self)' *Overscroll and pull-to-refresh* section.
+    fn painted_offset(&self) -> f64 {
+        self.placement_offset() + self.overscroll
     }
 
     /// Commit the pending measured correction into [`ListViewWidget::offset`] —
@@ -1242,6 +1381,53 @@ impl ListViewWidget {
         self.set_offset(self.offset);
     }
 
+    /// Derive the windowing [`ListViewWidget::offset`] and the resisted
+    /// [`ListViewWidget::overscroll`] displacement from the raw drag position,
+    /// mirroring [`crate::ScrollWidget::apply_drag_offset`]: the windowing
+    /// offset always stays in `[0, max_offset]` (so item-index math never sees
+    /// an out-of-range value — see the [module docs](self)' *Overscroll and
+    /// pull-to-refresh* section) while `overscroll` carries the resisted
+    /// past-edge portion for paint alone. `max_offset` is read fresh every
+    /// call, so a variable-extent list's still-converging content extent is
+    /// always what the resistance is computed against.
+    fn apply_drag_offset(&mut self) {
+        let max = self.max_offset();
+        let raw = self.drag_raw;
+        if raw < 0.0 {
+            self.offset = 0.0;
+            self.overscroll = raw * OVERSCROLL_RESISTANCE;
+        } else if raw > max {
+            self.offset = max;
+            self.overscroll = (raw - max) * OVERSCROLL_RESISTANCE;
+        } else {
+            self.offset = raw;
+            self.overscroll = 0.0;
+        }
+    }
+
+    /// Advance a release-settle by `dt_ms`, easing
+    /// [`ListViewWidget::overscroll`] back to `0.0` and returning whether it
+    /// is still animating. Pure and deterministic (mirrors
+    /// [`crate::ScrollWidget::settle_tick`]); the paint pump and the tests
+    /// both drive it. Only ever eases `overscroll` — the windowing
+    /// [`ListViewWidget::offset`] already sits at the exact edge (`0.0` or
+    /// `max_offset`) the moment a drag overscrolls, so it needs no motion of
+    /// its own here.
+    pub fn settle_tick(&mut self, dt_ms: f64) -> bool {
+        if !self.settling {
+            return false;
+        }
+        if self.overscroll.abs() <= SETTLE_STOP_PX {
+            self.overscroll = 0.0;
+            self.settling = false;
+            self.sync_child_origins();
+            return false;
+        }
+        self.overscroll *= SETTLE_DECAY.powf(dt_ms);
+        self.sync_child_origins();
+        true
+    }
+
     /// The `[start, end)` item range that should be materialized for the current
     /// offset + cached viewport, clamped to `[0, item_count]`, plus the
     /// content-space `y` of `start`. With a zero viewport (first build) this is
@@ -1284,24 +1470,27 @@ impl ListViewWidget {
         }
     }
 
-    /// Place each materialized row at its content position minus the scroll
-    /// offset (row `i` occupies `y ∈ [i*extent, (i+1)*extent)` in content space).
+    /// Place each materialized row at its content position minus the
+    /// **painted** offset (row `i` occupies `y ∈ [i*extent, (i+1)*extent)` in
+    /// content space) — [`ListViewWidget::painted_offset`], not the windowing
+    /// one, so an overscrolled drag's out-of-range displacement shows on
+    /// screen even though [`ListViewWidget::offset`] itself never leaves
+    /// `[0, max_offset]`.
     ///
     /// Variable-extent mode places each row at its own retained content `y`
     /// instead — the same rule, over the prefix walk's positions rather than the
     /// closed form.
     fn sync_child_origins(&mut self) {
+        let painted = self.painted_offset();
         if self.is_variable() {
-            let offset = self.placement_offset();
             for (y, pod) in self.slot_y.iter().zip(self.children.iter_mut()) {
-                pod.set_origin(Point::new(0.0, *y - offset));
+                pod.set_origin(Point::new(0.0, *y - painted));
             }
             return;
         }
         let extent = self.item_extent;
-        let offset = self.offset;
         for (index, pod) in self.keys.iter().zip(self.children.iter_mut()) {
-            pod.set_origin(Point::new(0.0, *index as f64 * extent - offset));
+            pod.set_origin(Point::new(0.0, *index as f64 * extent - painted));
         }
     }
 
@@ -1611,12 +1800,15 @@ impl ListViewWidget {
         }
     }
 
-    /// Advance the fling by the delta since the last paint and signal
-    /// [`PaintCtx::request_frame`] while it is still running (mirrors
-    /// [`crate::ScrollWidget`]'s pump). The continuation frame is what re-runs
-    /// the shell's rebuild → the window re-materializes as the fling carries on.
+    /// Advance the fling *or* the release-settle by the delta since the last
+    /// paint, and signal [`PaintCtx::request_frame`] while either is still
+    /// running (mirrors [`crate::ScrollWidget::pump_fling`]). The continuation
+    /// frame is what re-runs the shell's rebuild → the window re-materializes
+    /// as the fling carries on; a settle never changes the window (it only
+    /// eases [`ListViewWidget::overscroll`], which windowing never reads), so
+    /// it needs the request purely to keep painting the animation.
     fn pump_fling(&mut self, ctx: &mut PaintCtx) {
-        if self.fling.is_none() {
+        if self.fling.is_none() && !self.settling {
             self.last_anim = None;
             return;
         }
@@ -1627,10 +1819,15 @@ impl ListViewWidget {
         };
         self.last_anim = Some(now);
         if dt > 0.0 {
-            self.tick(dt);
+            if self.fling.is_some() {
+                self.tick(dt);
+            } else {
+                self.settle_tick(dt);
+            }
             // The fling moved the offset with no `EventCtx` in scope; if it
             // crossed the near-start/near-end edge, record the fire for the
-            // next event.
+            // next event. (A settle never moves `placement_offset()`, so this
+            // is a no-op there, not a special case worth branching out.)
             if self.evaluate_near_start() {
                 self.pending_near_start = true;
             }
@@ -1638,7 +1835,7 @@ impl ListViewWidget {
                 self.pending_near_end = true;
             }
         }
-        if self.fling.is_some() {
+        if self.fling.is_some() || self.settling {
             ctx.request_frame();
         }
     }
@@ -1683,7 +1880,11 @@ impl ListViewWidget {
                     ScrollDelta::Lines(_, y) => y * WHEEL_LINE_PX,
                     ScrollDelta::Pixels(_, y) => *y,
                 };
+                // Wheel scrolling stays hard-clamped — no overscroll rubber-band
+                // on wheel input, matching `ScrollView`.
                 self.fling = None;
+                self.settling = false;
+                self.overscroll = 0.0;
                 self.set_offset(self.offset + dy);
                 self.sync_child_origins();
                 self.fire_near_start(ctx);
@@ -1696,6 +1897,7 @@ impl ListViewWidget {
                     self.scrolling = false;
                     self.down_active = true;
                     self.fling = None;
+                    self.settling = false;
                     self.last_anim = None;
                     self.down_start = p.position;
                     self.last_drag = p.position;
@@ -1713,7 +1915,14 @@ impl ListViewWidget {
                     if self.scrolling {
                         let dy = p.position.y - self.last_drag.y;
                         self.last_drag = p.position;
-                        self.set_offset(self.offset - dy);
+                        // Accumulate the raw drag position (unclamped) and derive
+                        // the resisted windowing offset + overscroll — a drag past
+                        // an edge shows an iOS-style rubber-band overscroll, but
+                        // never a windowing offset outside `[0, max_offset]` (see
+                        // the module docs' *Overscroll and pull-to-refresh*
+                        // section).
+                        self.drag_raw -= dy;
+                        self.apply_drag_offset();
                         self.sync_child_origins();
                         self.fire_near_start(ctx);
                         self.fire_near_end(ctx);
@@ -1723,7 +1932,14 @@ impl ListViewWidget {
                         // forwarding — the documented window-shift capture-loss
                         // tradeoff's sibling.
                         self.scrolling = true;
+                        self.settling = false;
                         self.last_drag = p.position;
+                        // Seed the raw drag position from the current *painted*
+                        // offset (windowing offset + any live overscroll), so a
+                        // regrab mid-bounce continues smoothly from what is on
+                        // screen rather than snapping to the windowing offset
+                        // alone.
+                        self.drag_raw = self.painted_offset();
                         self.cancel_children(ctx, p.position);
                         ctx.request_redraw();
                     } else {
@@ -1733,10 +1949,27 @@ impl ListViewWidget {
                 }
                 PointerPhase::Up => {
                     if self.scrolling {
-                        let finger_v = self.tracker.velocity();
-                        if finger_v.abs() > FLING_STOP {
-                            self.fling = Some(-finger_v);
+                        // Pull-to-refresh: released past the top trigger fires the
+                        // app hook (an Up, so mutating state is allowed). Shares
+                        // the exact threshold check `ScrollView` uses — see the
+                        // module docs' *Overscroll and pull-to-refresh* section.
+                        if crossed_refresh_trigger(self.overscroll)
+                            && let Some(cb) = self.on_refresh_release.as_mut()
+                        {
+                            cb(ctx);
+                        }
+                        if self.overscroll != 0.0 {
+                            // Released while overscrolled: settle back to the
+                            // edge, never fling out of range.
+                            self.fling = None;
+                            self.settling = true;
                             self.last_anim = None;
+                        } else {
+                            let finger_v = self.tracker.velocity();
+                            if finger_v.abs() > FLING_STOP {
+                                self.fling = Some(-finger_v);
+                                self.last_anim = None;
+                            }
                         }
                     } else {
                         crate::authoring::route_event(&mut self.children, ctx, event);
@@ -1750,10 +1983,15 @@ impl ListViewWidget {
                     crate::authoring::route_event(&mut self.children, ctx, event);
                     self.scrolling = false;
                     self.down_active = false;
-                    // Cancel never fires a callback: drop any pending
-                    // near-start/near-end fire without invoking it.
+                    // Cancel never fires a callback and snaps any overscroll away
+                    // with no settle animation: drop any pending
+                    // near-start/near-end fire without invoking it, and never
+                    // fires on_refresh_release (mirrors `ScrollWidget`'s Cancel).
                     self.pending_near_start = false;
                     self.pending_near_end = false;
+                    self.settling = false;
+                    self.overscroll = 0.0;
+                    self.sync_child_origins();
                     ctx.request_redraw();
                     EventResult::Handled
                 }
@@ -1777,6 +2015,10 @@ impl<State: 'static> View<State> for ListView<State> {
             .as_ref()
             .map(crate::authoring::erase_callback);
         widget.near_end_threshold = self.near_end_threshold;
+        widget.on_refresh_release = self
+            .on_refresh_release
+            .as_ref()
+            .map(crate::authoring::erase_callback);
         // The key function and the unmeasured-row estimate are widget state (the
         // window math and layout's measurement both run without the view in
         // scope), and must be installed before the first window is planned.
@@ -1827,6 +2069,10 @@ impl<State: 'static> View<State> for ListView<State> {
             .as_ref()
             .map(crate::authoring::erase_callback);
         element.near_end_threshold = self.near_end_threshold;
+        element.on_refresh_release = self
+            .on_refresh_release
+            .as_ref()
+            .map(crate::authoring::erase_callback);
         // Closures are not comparable either — reinstall the key function the
         // widget's own passes key indices with (never the builder; see the
         // module docs' *Variable extents* section).
@@ -2026,11 +2272,15 @@ impl Widget for ListViewWidget {
         // produce `ListItem`s, so the container's `size_of_set` carries the count.
         let max_offset = self.max_offset();
         let count = self.item_count;
-        // The placement, not the raw offset: it is where the content actually
-        // sits, and it is the value that stays put across a correction commit
-        // (see the module docs' *Measured anchor correction* section). The two
-        // are the same number on the uniform path.
-        let offset = self.placement_offset();
+        // The painted position, not the windowing offset: it is where the
+        // content actually sits, and it is the value that stays put across a
+        // correction commit (see the module docs' *Measured anchor
+        // correction* section) — and, like `ScrollView`'s own semantics node,
+        // it can momentarily read outside `[0, max_offset]` mid-overscroll
+        // (see the module docs' *Overscroll and pull-to-refresh* section).
+        // Placement, overscroll, and the raw offset all agree once the list is
+        // in range, which is always true on the uniform path.
+        let offset = self.painted_offset();
         ctx.push_container(
             Role::List,
             move |node| {
@@ -2657,6 +2907,432 @@ mod tests {
             state.count, 1,
             "a pending fire is delivered on the next event"
         );
+    }
+
+    // --- (8b) Overscroll and pull-to-refresh: `ListViewWidget::offset` (the
+    //      windowing offset) must never leave `[0, max_offset]`, only
+    //      `ListViewWidget::overscroll` may — mirrors `scroll.rs`'s own
+    //      overscroll/refresh test group, see the module docs' *Overscroll
+    //      and pull-to-refresh* section. ---
+
+    /// A stateless stand-in row, like [`gen_stub`], used by every test in this
+    /// group (materialization-bounds assertions only, no per-row identity).
+    fn overscroll_logic(item_count: usize) -> impl FnMut(&mut ()) -> ListView<()> {
+        move |_: &mut ()| list_view(item_count, 50.0, |i| any::<(), _>(gen_stub(i)))
+    }
+
+    #[test]
+    fn top_overscroll_resists_never_moves_the_windowing_offset_and_settles_with_no_refresh() {
+        let refreshes = Rc::new(Cell::new(0u32));
+        let refreshes_l = refreshes.clone();
+        let mut logic = move |_: &mut ()| -> ListView<()> {
+            let refreshes = refreshes_l.clone();
+            list_view(1000, 50.0, |i| any::<(), _>(gen_stub(i)))
+                .on_refresh_release(move |_: &mut ()| refreshes.set(refreshes.get() + 1))
+        };
+        let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        let mut state = ();
+        let window = Size::new(200.0, 200.0);
+        frame(&mut root, &mut logic, &mut state, window, 0.0);
+        frame(&mut root, &mut logic, &mut state, window, 16.0);
+
+        // Down, then a drag downward crossing the slop takes the gesture over.
+        root.event(&mut state, &ev(PointerPhase::Down, 50.0));
+        frame(&mut root, &mut logic, &mut state, window, 32.0);
+        root.event(&mut state, &ev(PointerPhase::Move, 90.0)); // 40px > slop → takeover
+        assert!(list_widget(&root).scrolling);
+        assert_eq!(
+            list_widget(&root).offset(),
+            0.0,
+            "the takeover move does not itself scroll"
+        );
+        frame(&mut root, &mut logic, &mut state, window, 48.0);
+
+        // Drag 20px further down past the already-at-top edge → resisted
+        // overscroll, but the windowing offset stays put and no row
+        // materializes before index 0.
+        root.event(&mut state, &ev(PointerPhase::Move, 110.0));
+        let w = list_widget(&root);
+        assert_eq!(
+            w.offset(),
+            0.0,
+            "the windowing offset never leaves [0, max]"
+        );
+        assert_eq!(
+            w.overscroll, -10.0,
+            "overscroll is the raw excess (-20) * OVERSCROLL_RESISTANCE (0.5), \
+             matching ScrollView's own resistance exactly"
+        );
+        assert_eq!(w.window()[0], 0, "no row materializes before index 0");
+
+        // Release under the trigger (|-10| < 64) → settles, never refreshes.
+        root.event(&mut state, &ev(PointerPhase::Up, 110.0));
+        let w = list_widget(&root);
+        assert!(w.settling, "an overscrolled release settles, never flings");
+        assert!(!w.is_flinging());
+        assert_eq!(
+            refreshes.get(),
+            0,
+            "release under the trigger does not refresh"
+        );
+
+        // Pump frames until the settle completes.
+        let mut ms = 64.0;
+        for _ in 0..30 {
+            frame(&mut root, &mut logic, &mut state, window, ms);
+            ms += 16.0;
+            if !list_widget(&root).settling {
+                break;
+            }
+        }
+        let w = list_widget(&root);
+        assert!(!w.settling, "the settle terminated");
+        assert_eq!(
+            w.overscroll, 0.0,
+            "the surface settles back to the clamped edge"
+        );
+        assert_eq!(w.offset(), 0.0);
+    }
+
+    #[test]
+    fn on_refresh_release_fires_once_past_the_trigger_and_only_on_release() {
+        let refreshes = Rc::new(Cell::new(0u32));
+        let refreshes_l = refreshes.clone();
+        let mut logic = move |_: &mut ()| -> ListView<()> {
+            let refreshes = refreshes_l.clone();
+            list_view(1000, 50.0, |i| any::<(), _>(gen_stub(i)))
+                .on_refresh_release(move |_: &mut ()| refreshes.set(refreshes.get() + 1))
+        };
+        let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        let mut state = ();
+        let window = Size::new(200.0, 200.0);
+        frame(&mut root, &mut logic, &mut state, window, 0.0);
+        frame(&mut root, &mut logic, &mut state, window, 16.0);
+
+        root.event(&mut state, &ev(PointerPhase::Down, 50.0));
+        root.event(&mut state, &ev(PointerPhase::Move, 90.0)); // takeover
+        frame(&mut root, &mut logic, &mut state, window, 32.0);
+        root.event(&mut state, &ev(PointerPhase::Move, 290.0)); // raw -200 → -100
+
+        let w = list_widget(&root);
+        assert_eq!(w.overscroll, -100.0, "past the trigger (|-100| > 64)");
+        assert_eq!(
+            w.offset(),
+            0.0,
+            "windowing offset stays 0 even far past the trigger"
+        );
+        assert_eq!(w.window()[0], 0, "no row materializes before index 0");
+        assert_eq!(refreshes.get(), 0, "no fire before release");
+
+        root.event(&mut state, &ev(PointerPhase::Up, 290.0));
+        assert_eq!(refreshes.get(), 1, "release past the trigger fires once");
+        assert!(list_widget(&root).settling);
+    }
+
+    #[test]
+    fn bottom_overscroll_displaces_and_settles_but_never_fires_refresh() {
+        let refreshes = Rc::new(Cell::new(0u32));
+        let refreshes_l = refreshes.clone();
+        let mut logic = move |_: &mut ()| -> ListView<()> {
+            let refreshes = refreshes_l.clone();
+            list_view(1000, 50.0, |i| any::<(), _>(gen_stub(i)))
+                .on_refresh_release(move |_: &mut ()| refreshes.set(refreshes.get() + 1))
+        };
+        let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        let mut state = ();
+        let window = Size::new(200.0, 200.0);
+        frame(&mut root, &mut logic, &mut state, window, 0.0);
+        frame(&mut root, &mut logic, &mut state, window, 16.0);
+
+        // Scroll to the very bottom first.
+        root.event(&mut state, &wheel(1_000_000.0));
+        frame(&mut root, &mut logic, &mut state, window, 32.0);
+        let max_offset = list_widget(&root).max_offset();
+        assert_eq!(list_widget(&root).offset(), max_offset);
+
+        // Down, then a drag *upward* crossing the slop takes the gesture over
+        // (dragging the finger up exposes content past the bottom edge).
+        root.event(&mut state, &ev(PointerPhase::Down, 200.0));
+        frame(&mut root, &mut logic, &mut state, window, 48.0);
+        root.event(&mut state, &ev(PointerPhase::Move, 160.0)); // 40px > slop → takeover
+        assert_eq!(
+            list_widget(&root).offset(),
+            max_offset,
+            "the takeover move does not itself scroll"
+        );
+        frame(&mut root, &mut logic, &mut state, window, 64.0);
+
+        // Drag 60px further up past the bottom edge → resisted overscroll,
+        // the windowing offset pinned at max_offset, no row past the end.
+        root.event(&mut state, &ev(PointerPhase::Move, 100.0));
+        let w = list_widget(&root);
+        assert_eq!(
+            w.offset(),
+            max_offset,
+            "the windowing offset stays pinned at max_offset"
+        );
+        assert_eq!(
+            w.overscroll, 30.0,
+            "overscroll is the raw excess (60) * OVERSCROLL_RESISTANCE (0.5)"
+        );
+        assert_eq!(
+            *w.window().last().unwrap(),
+            999,
+            "no row materializes past the last item"
+        );
+
+        root.event(&mut state, &ev(PointerPhase::Up, 100.0));
+        let w = list_widget(&root);
+        assert!(
+            w.settling,
+            "a bottom overscroll release settles, never flings"
+        );
+        assert_eq!(
+            refreshes.get(),
+            0,
+            "a bottom overscroll never fires refresh"
+        );
+
+        let mut ms = 80.0;
+        for _ in 0..30 {
+            frame(&mut root, &mut logic, &mut state, window, ms);
+            ms += 16.0;
+            if !list_widget(&root).settling {
+                break;
+            }
+        }
+        let w = list_widget(&root);
+        assert!(!w.settling);
+        assert_eq!(w.overscroll, 0.0);
+        assert_eq!(w.offset(), max_offset);
+        assert_eq!(refreshes.get(), 0, "still never fired");
+    }
+
+    #[test]
+    fn cancel_during_overscroll_never_fires_refresh_and_snaps_back() {
+        let refreshes = Rc::new(Cell::new(0u32));
+        let refreshes_l = refreshes.clone();
+        let mut logic = move |_: &mut ()| -> ListView<()> {
+            let refreshes = refreshes_l.clone();
+            list_view(1000, 50.0, |i| any::<(), _>(gen_stub(i)))
+                .on_refresh_release(move |_: &mut ()| refreshes.set(refreshes.get() + 1))
+        };
+        let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        let mut state = ();
+        let window = Size::new(200.0, 200.0);
+        frame(&mut root, &mut logic, &mut state, window, 0.0);
+        frame(&mut root, &mut logic, &mut state, window, 16.0);
+
+        root.event(&mut state, &ev(PointerPhase::Down, 50.0));
+        root.event(&mut state, &ev(PointerPhase::Move, 90.0)); // takeover
+        frame(&mut root, &mut logic, &mut state, window, 32.0);
+        root.event(&mut state, &ev(PointerPhase::Move, 290.0)); // past trigger
+        assert_eq!(list_widget(&root).overscroll, -100.0);
+
+        // A Cancel (gesture steal) must not fire on_refresh_release and snaps
+        // the overscroll away with no settle animation.
+        root.event(&mut state, &ev(PointerPhase::Cancel, 290.0));
+        let w = list_widget(&root);
+        assert_eq!(
+            refreshes.get(),
+            0,
+            "Cancel never fires the refresh callback"
+        );
+        assert_eq!(
+            w.overscroll, 0.0,
+            "Cancel snaps the surface back into range"
+        );
+        assert!(!w.settling);
+        assert_eq!(w.offset(), 0.0);
+    }
+
+    #[test]
+    fn wheel_never_overscrolls_past_either_edge_and_starts_no_settle() {
+        let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        let mut state = ();
+        let window = Size::new(200.0, 200.0);
+        let mut logic = overscroll_logic(1000);
+        frame(&mut root, &mut logic, &mut state, window, 0.0);
+        frame(&mut root, &mut logic, &mut state, window, 16.0);
+
+        // A large negative wheel delta at the top stays hard-clamped at 0.
+        root.event(&mut state, &wheel(-5000.0));
+        let w = list_widget(&root);
+        assert_eq!(w.offset(), 0.0);
+        assert_eq!(w.overscroll, 0.0, "wheel input never overscrolls the top");
+        assert!(!w.settling, "wheel input starts no settle animation");
+
+        // A huge positive wheel delta at the bottom stays hard-clamped too.
+        root.event(&mut state, &wheel(1_000_000.0));
+        let w = list_widget(&root);
+        assert_eq!(w.offset(), w.max_offset());
+        assert_eq!(
+            w.overscroll, 0.0,
+            "wheel input never overscrolls the bottom"
+        );
+        assert!(!w.settling);
+    }
+
+    #[test]
+    fn near_start_and_refresh_fire_from_one_continuous_drag_sequence() {
+        // Criterion 4: `on_near_start` fires on approach, then continuing the
+        // same gesture past the top into overscroll and releasing fires
+        // `on_refresh_release` too — two independent signals, one gesture.
+        let loads = Rc::new(Cell::new(0u32));
+        let refreshes = Rc::new(Cell::new(0u32));
+        let (loads_l, refreshes_l) = (loads.clone(), refreshes.clone());
+        let mut logic = move |_: &mut ()| -> ListView<()> {
+            let (loads, refreshes) = (loads_l.clone(), refreshes_l.clone());
+            list_view(1000, 50.0, |i| any::<(), _>(gen_stub(i)))
+                .on_near_start(move |_: &mut ()| loads.set(loads.get() + 1), 100.0)
+                .on_refresh_release(move |_: &mut ()| refreshes.set(refreshes.get() + 1))
+        };
+        let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        let mut state = ();
+        let window = Size::new(200.0, 200.0);
+        frame(&mut root, &mut logic, &mut state, window, 0.0);
+        frame(&mut root, &mut logic, &mut state, window, 16.0);
+
+        // Start scrolled away from the top (150 > threshold, so approaching it
+        // is a real edge crossing, not a trivial already-there state).
+        root.event(&mut state, &wheel(150.0));
+        frame(&mut root, &mut logic, &mut state, window, 32.0);
+        assert_eq!(list_widget(&root).offset(), 150.0);
+        assert_eq!(loads.get(), 0);
+
+        root.event(&mut state, &ev(PointerPhase::Down, 50.0));
+        root.event(&mut state, &ev(PointerPhase::Move, 90.0)); // 40px > slop → takeover
+        frame(&mut root, &mut logic, &mut state, window, 48.0);
+
+        // Drag down 80px: offset 150 -> 70, inside the near-start threshold →
+        // fires once, in range (no overscroll yet).
+        root.event(&mut state, &ev(PointerPhase::Move, 170.0));
+        let w = list_widget(&root);
+        assert_eq!(w.offset(), 70.0);
+        assert_eq!(w.overscroll, 0.0);
+        assert_eq!(loads.get(), 1, "near-start fires on approach");
+        assert_eq!(refreshes.get(), 0, "still in range, no refresh yet");
+
+        // Keep dragging the same gesture on down past the top, deep into
+        // overscroll past the refresh trigger.
+        root.event(&mut state, &ev(PointerPhase::Move, 500.0));
+        let w = list_widget(&root);
+        assert_eq!(w.offset(), 0.0, "windowing offset stays clamped");
+        assert!(
+            w.overscroll < -64.0,
+            "well past the refresh trigger (REFRESH_TRIGGER_PX)"
+        );
+        assert_eq!(loads.get(), 1, "near-start does not re-fire mid-overscroll");
+
+        root.event(&mut state, &ev(PointerPhase::Up, 500.0));
+        assert_eq!(
+            refreshes.get(),
+            1,
+            "refresh fires on release, from the same gesture"
+        );
+        assert_eq!(loads.get(), 1, "and near-start's single fire still stands");
+    }
+
+    // --- (8c) A converging `max_offset` during content growth (rule 5:
+    //      overscroll resistance always reads the *current* max_offset, never
+    //      one cached at takeover — the mechanism the *Variable extents*
+    //      docs section relies on; exercised here at the uniform level, since
+    //      `apply_drag_offset` reads `max_offset()` fresh regardless of
+    //      mode). ---
+
+    #[test]
+    fn overscroll_resistance_tracks_a_max_offset_that_grows_mid_drag() {
+        // A short list (10 rows * 50px = 500 content over a 200px viewport,
+        // max_offset = 300) scrolled to the bottom, then overscrolled past it.
+        let mut logic = overscroll_logic(10);
+        let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        let mut state = ();
+        let window = Size::new(200.0, 200.0);
+        frame(&mut root, &mut logic, &mut state, window, 0.0);
+        frame(&mut root, &mut logic, &mut state, window, 16.0);
+
+        root.event(&mut state, &wheel(1_000_000.0));
+        frame(&mut root, &mut logic, &mut state, window, 32.0);
+        assert_eq!(list_widget(&root).max_offset(), 300.0);
+        assert_eq!(list_widget(&root).offset(), 300.0);
+
+        root.event(&mut state, &ev(PointerPhase::Down, 200.0));
+        root.event(&mut state, &ev(PointerPhase::Move, 160.0)); // takeover
+        frame(&mut root, &mut logic, &mut state, window, 48.0);
+
+        // Drag 60px further up past the (still 300px) bottom edge.
+        root.event(&mut state, &ev(PointerPhase::Move, 100.0));
+        let w = list_widget(&root);
+        assert_eq!(w.offset(), 300.0);
+        assert_eq!(
+            w.overscroll, 30.0,
+            "resisted against the old max_offset (300)"
+        );
+
+        // Grow the content mid-drag (still `w.scrolling`): 20 rows now, content
+        // 1000px, max_offset 800 — a rebuild interleaved into the same drag.
+        logic = overscroll_logic(20);
+        frame(&mut root, &mut logic, &mut state, window, 64.0);
+        assert_eq!(list_widget(&root).max_offset(), 800.0);
+
+        // The *same* continuing drag now reads the new, larger max_offset: 20
+        // more px up lands the raw drag position back in range.
+        root.event(&mut state, &ev(PointerPhase::Move, 80.0));
+        let w = list_widget(&root);
+        assert_eq!(
+            w.overscroll, 0.0,
+            "the grown content absorbed what used to be overscroll"
+        );
+        assert_eq!(
+            w.offset(),
+            380.0,
+            "the windowing offset advanced by the raw drag delta, now in range"
+        );
+    }
+
+    // --- (8d) Variable-extent overscroll: the same bounds hold when rows
+    //      size themselves (see the *Variable extents* module docs section
+    //      for `estimated_item_extent`). ---
+
+    #[test]
+    fn variable_extent_top_overscroll_never_materializes_before_index_zero() {
+        let fx = VarRows::new(tall_ids(60));
+        let mut logic = fx.logic();
+        let mut root = converged_var(&mut logic, &fx);
+        assert_eq!(list_widget(&root).window()[0], 0);
+
+        root.event(&mut (), &ev(PointerPhase::Down, 50.0));
+        root.event(&mut (), &ev(PointerPhase::Move, 90.0)); // 40px > slop → takeover
+        var_frame(&mut root, &mut logic, &fx, 100.0);
+
+        // Drag past the top edge.
+        root.event(&mut (), &ev(PointerPhase::Move, 150.0));
+        let w = list_widget(&root);
+        assert_eq!(
+            w.offset(),
+            0.0,
+            "the windowing offset never leaves [0, max] in variable-extent mode either"
+        );
+        assert!(w.overscroll < 0.0, "a past-top drag overscrolls");
+        assert_eq!(w.window()[0], 0, "no row materializes before index 0");
+
+        root.event(&mut (), &ev(PointerPhase::Up, 150.0));
+        assert!(
+            list_widget(&root).settling,
+            "an overscrolled release settles in variable-extent mode too"
+        );
+
+        // Pump frames until the settle completes.
+        for n in 0..60 {
+            var_frame(&mut root, &mut logic, &fx, 116.0 + 16.0 * n as f64);
+            if !list_widget(&root).settling {
+                break;
+            }
+        }
+        let w = list_widget(&root);
+        assert!(!w.settling);
+        assert_eq!(w.overscroll, 0.0);
+        assert_eq!(w.offset(), 0.0);
     }
 
     // --- (9) Keyed reconciliation: row state follows the stable key. ---

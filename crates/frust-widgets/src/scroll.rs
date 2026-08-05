@@ -56,16 +56,21 @@ use crate::authoring::{ErasedArgCallback, ErasedCallback};
 /// pull a heavier feel the further it is dragged in *raw* terms while staying
 /// cheap and deterministic to reason about. Tunable in one place if a
 /// diminishing curve is wanted later.
-const OVERSCROLL_RESISTANCE: f64 = 0.5;
+///
+/// `pub(crate)`, not `pub`: [`crate::list_view::ListViewWidget`] shares this
+/// exact value (and the three constants below) for overscroll feel parity
+/// (lazy-list 06) — never redeclare a second copy there.
+pub(crate) const OVERSCROLL_RESISTANCE: f64 = 0.5;
 
 /// Pull-past-top distance (logical px, measured on the *resisted* overscroll)
-/// beyond which releasing fires [`ScrollView::on_refresh_release`] — the
-/// pull-to-refresh trigger.
+/// beyond which releasing fires [`ScrollView::on_refresh_release`] (and
+/// `ListView::on_refresh_release`, which shares this constant and
+/// [`crossed_refresh_trigger`]) — the pull-to-refresh trigger.
 ///
 /// **Community-approximate**: iOS's `UIRefreshControl` trigger distance is not a
 /// published constant; ~64pt is the value community reimplementations converge
 /// on for a comfortable pull.
-const REFRESH_TRIGGER_PX: f64 = 64.0;
+pub(crate) const REFRESH_TRIGGER_PX: f64 = 64.0;
 
 /// Per-millisecond retain factor for the release-settle animation that returns
 /// an overscrolled surface to its clamped edge: after `dt` ms the remaining
@@ -73,11 +78,20 @@ const REFRESH_TRIGGER_PX: f64 = 64.0;
 ///
 /// **Community-approximate**: `0.988` settles ~95% of the way in ≈250 ms, an
 /// iOS-like snap-back with no published spring spec to match.
-const SETTLE_DECAY: f64 = 0.988;
+pub(crate) const SETTLE_DECAY: f64 = 0.988;
 
 /// Distance (logical px) below which the settle animation snaps exactly to the
 /// edge and stops, so it terminates instead of asymptotically approaching.
-const SETTLE_STOP_PX: f64 = 0.5;
+pub(crate) const SETTLE_STOP_PX: f64 = 0.5;
+
+/// Whether a past-top overscroll displacement crossed [`REFRESH_TRIGGER_PX`] —
+/// the pull-to-refresh release condition, shared with
+/// [`crate::list_view::ListViewWidget`] so both surfaces trigger at exactly the
+/// same pull distance (lazy-list 06) rather than two independently-typed
+/// comparisons drifting apart.
+pub(crate) fn crossed_refresh_trigger(overscroll: f64) -> bool {
+    overscroll < -REFRESH_TRIGGER_PX
+}
 
 /// A scroll observation snapshot handed to [`ScrollView::on_scroll`].
 ///
@@ -500,7 +514,7 @@ impl ScrollWidget {
                         let info = self.scroll_info();
                         // Pull-to-refresh: released past the top trigger fires the
                         // app hook (an Up, so mutating state is allowed).
-                        if info.overscroll < -REFRESH_TRIGGER_PX
+                        if crossed_refresh_trigger(info.overscroll)
                             && let Some(cb) = self.on_refresh_release.as_mut()
                         {
                             cb(ctx);
