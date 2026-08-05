@@ -182,14 +182,13 @@ speculatively enumerating a wider `BarcodeFormat` vocabulary ahead of one.
 ### `barcode-1d-deferred-rotation` — 1D symbologies are deferred until rotation tracking lands
 
 **Observed**: `CameraSession::start_barcode_stream` always requests
-`ImageFormat::Yuv420` at whatever rotation the platform reports, and both
-backends currently pin that rotation to a constant portrait 90° rather than
-tracking live device orientation (`plugins/camera/src/apple.rs`'s
-`STREAM_ROTATION_DEGREES`/`PORTRAIT_ROTATION_ANGLE`, and the Android stream's
-equivalent fixed contract). QR — the v1 engine's only symbology — is
-rotation-invariant, so this is unobservable today; a 1D symbology (Code128,
-EAN, UPC, …) is orientation-sensitive and would decode unreliably off-axis
-under the same fixed rotation.
+`ImageFormat::Yuv420` at whatever rotation the platform reports. On Apple,
+the backend currently pins that rotation to a constant portrait 90° rather
+than tracking live device orientation (`plugins/camera/src/apple.rs`'s
+`STREAM_ROTATION_DEGREES`/`PORTRAIT_ROTATION_ANGLE`, both hardcoded). QR — the
+v1 engine's only symbology — is rotation-invariant, so this is unobservable
+today; a 1D symbology (Code128, EAN, UPC, …) is orientation-sensitive and
+would decode unreliably off-axis under the same fixed rotation.
 
 **Applies to**: every platform this crate targets, once a non-QR 1D engine
 is added — not reachable today since v1 decodes QR only (see
@@ -231,6 +230,32 @@ barcode feature itself.
 (`resolution` accepted and not forwarded — "the frozen `openCamera(int
 lensFacing)` contract carries no resolution parameter"); barcode plugin
 implementation (task 02).
+
+---
+
+### `barcode-nodup-full-rate-decode` — NoDuplicates and Unrestricted policies decode every frame
+
+**Observed**: `DetectionPolicy::NoDuplicates` and `Unrestricted` decode every
+delivered camera frame (~30 fps) by design — only `Throttled` gates decode on
+time. The absence counter in `NoDuplicates` (`ABSENCE_FRAMES`, set to 30 frames)
+counts processed frames and is calibrated to camera rate, making the counter's
+cadence inseparable from the decode cadence.
+
+**Applies to**: every platform this crate targets — the barcode stream's
+`on_detect` callback fires at full camera rate for both policies, consuming CPU
+on every frame.
+
+**Why accepted**: the CPU and thermal cost on ARM mobile is unverified — no
+on-device benchmark exists for any pure-Rust decoder. Phase-4 device-gate
+metric: the catalog scan strip's timing mode exists to measure exactly this.
+
+**Future lever (documented option only, NOT implemented)**: advance the
+absence counter on skipped/undecoded frames too, decoupling counter cadence
+from decode cadence and allowing a slower-than-camera-rate re-arm delay.
+
+**Evidence**: `plugins/camera/src/barcode/stream.rs`'s `should_decode`
+(NoDuplicates and Unrestricted always return `true`); barcode plugin
+implementation (tasks 01-02).
 
 ---
 

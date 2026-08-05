@@ -326,7 +326,7 @@ a torch control:
 | Back lens with a flash unit | `true` | `Ok(())` |
 | Front lens (most devices), or any device with no flash unit — **Android** | `false` | `CameraError::Platform` |
 | Front lens (most devices), or any device with no flash unit — **Apple** | `false` | `Ok(())` — accepted onto the session queue, never applied; `torch_available()` stays `false` |
-| iOS, device cooling off (torch temporarily withdrawn) | `false` | `CameraError::Platform` |
+| iOS, device cooling off (torch temporarily withdrawn) | `false` | `Ok(())` — accepted onto the session queue, never applied; `torch_available()` stays `false` |
 | Android, before CameraX finishes binding the camera | `false` | `CameraError::Platform` — **retryable**, try again once the preview is live |
 | After `close()` | `false` | `CameraError::SessionClosed` |
 | Desktop/wasm (no camera backend) | `false` | `CameraError::PlatformNotInitialized` |

@@ -354,6 +354,8 @@ the plugin per `plugins/camera/README.md`:
 - **Capture + stream:** still capture produces an orientation-correct JPEG; the stream toggle shows a live fps readout (`docs/LIMITATIONS.md`'s `cam-bgra-apple-only`).
 - **A6 keep-alive:** scroll the preview slot off-screen and back; confirm it resumes without reopening the camera.
 - **Forced-blit degrade:** `FRUST_NO_DIRECT_SURFACE=1` on Android makes the preview invisible (`docs/LIMITATIONS.md`'s `cam-blit-opaque`) — expected.
+- **Torch:** toggle on/off on the back lens from the catalog camera page; confirm `torch_available()` is false on the front lens; confirm torch survives starting/stopping the barcode scan strip.
+- **Scan:** policy mode detects the dense muxr:// screen-QR once (NoDuplicates), timing mode shows decode ms + attempts/s for MEASUREMENTS.md.
 - **Add Plugin dialog:** clean scaffold, both platforms build with zero hand edits.
 
 ### Template development
