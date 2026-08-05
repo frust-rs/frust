@@ -1,6 +1,8 @@
 //! The virtualized `ListView`:
 //! `ListView::builder(item_count, item_extent, |index| -> AnyView)` with a
-//! uniform, required `item_extent` (variable-extent lazy layout is deferred).
+//! uniform, required `item_extent` — or, on a keyed list,
+//! `ListView::builder_keyed(..).estimated_item_extent(px)` for rows that size
+//! themselves (see *Variable extents*, below).
 //!
 //! # Windowed materialization at rebuild time (the novel pattern)
 //!
@@ -126,6 +128,95 @@
 //! tell a prepend from a full mutation (see *Row identity* above), so
 //! applying this correction there would be a guess, not a fact.
 //!
+//! # Variable extents (keyed lists only)
+//!
+//! [`ListView::estimated_item_extent`] switches a **keyed** list into
+//! variable-extent mode: a row that has not been laid out yet is assumed to be
+//! `estimate` tall, and a row that has been laid out contributes its own
+//! measured height instead. Without that call the list stays on the closed-form
+//! uniform path — which is kept as literally the code it always was, the
+//! regression guard, not a degenerate case of this math.
+//!
+//! **Keyed-only, enforced by a `debug_assert`.** A measured extent is cached
+//! under the row's *identity*, so it must ride along when the row moves. Under
+//! positional identity that cache would reattach a measurement to whatever
+//! content later occupies the index — the misattachment
+//! [`ListView::builder_keyed`] exists to kill. Calling `estimated_item_extent`
+//! on a positional list therefore trips a `debug_assert!` and is **inert** in
+//! release (the list stays uniform) rather than panicking live, exactly like
+//! the duplicate-key tripwire above. Type-state would make it a compile error,
+//! but at the cost of splitting `ListView`/`ListViewWidget` into two generic
+//! families for one misuse this module already has an idiom for.
+//!
+//! **The extent model.** [`ListViewWidget`] retains `key -> (last index,
+//! measured height)` for every row it has ever laid out, plus their running
+//! sum, so the content extent
+//!
+//! ```text
+//! total = Σ measured + estimate × (item_count − measured count)
+//! ```
+//!
+//! is O(1) to read. `max_offset`, the offset clamp, the unbounded-height layout
+//! size, and the semantics scroll range all read it, so the scroll range
+//! converges on the true content height as rows are visited.
+//!
+//! **Offset → index in O(window + step), never O(N).** A full prefix sum from
+//! item 0 would be O(N) per frame, so the widget instead retains one *prefix
+//! anchor*: the item index the materialized window starts at, plus that item's
+//! content-space `y`. Each frame's window walks from that anchor — a handful of
+//! items for a scroll or a fling step — accumulating `measured-or-estimated`
+//! extents until it reaches the offset, then out to cover the viewport ±
+//! [`BUFFER`]. Reaching item 0 re-pins `y = 0` exactly, so accumulated
+//! floating-point drift is erased at the top rather than persisting. A jump far
+//! enough from the anchor to be a data reset rather than a scroll
+//! ([`MAX_PREFIX_STEP`] items) resolves its bulk in closed form against the
+//! estimate first and walks only the remainder, so the per-frame cost stays
+//! bounded whatever the offset does. The walk's per-row content `y` is retained
+//! beside the window (`slot_y`), and each row is placed at its own content `y`
+//! minus the offset — generalizing the uniform path's `index * item_extent`.
+//!
+//! **The wake hazard: the builder never runs outside rebuild.** Frust builds
+//! children only at rebuild time, so the materialized window is decided there,
+//! from cached and estimated extents alone. `layout` only *measures* pods that
+//! already exist (bounded width, unbounded height — the [`crate::ScrollView`]
+//! precedent), and `paint` builds nothing. When a measurement changes the
+//! picture enough that the window no longer covers the viewport, paint requests
+//! one more frame on the existing viewport-staleness path (below) and the next
+//! rebuild re-windows — one convergence frame, not a layout-time build. That
+//! check is *coverage*, not equality, so a window that measured out wider than
+//! it needs to be asks for no extra frame: the next ordinary rebuild trims it
+//! and the frame after that is a clean no-op again.
+//!
+//! **Cache hygiene.** The measured cache is bounded by the keys a session has
+//! actually visited (one `f64` + index per visited row; an LRU cap is a named
+//! deferral if a very long session over a very long list ever makes that
+//! matter). Three rules trim it, all window-bounded or shrink-only:
+//!
+//! * a pod that no slot claimed is probed with the same two hypotheses
+//!   anchoring uses (unchanged index, or shifted by the frame's net item-count
+//!   delta); if neither still names its key, the row left the *data*, not just
+//!   the window, and its measurement is dropped — at most two `key_of` calls
+//!   per departing row,
+//! * a frame whose `item_count` shrank drops every entry whose recorded index
+//!   is past the new end (the only entries the new keying provably cannot
+//!   produce) — a scan of the cache, only on a shrink frame,
+//! * a frame where no previous-window key survives either hypothesis is a full
+//!   replace, which clears the cache outright.
+//!
+//! Two acknowledged gaps: a row removed while it was *outside* the materialized
+//! window keeps its entry (finding it would mean re-keying all `item_count`
+//! items, the O(N) this design exists to avoid), and a row that both left the
+//! window and moved to an index neither hypothesis names is evicted
+//! conservatively and re-measured on its next visit. Both cost accuracy in an
+//! already-estimated total, never a misattached measurement.
+//!
+//! **What this task does not do.** A measurement that lands *above* the anchor
+//! shifts the content under the viewport; correcting the offset for that is the
+//! next step's job, so a first visit to a region whose true extents differ from
+//! the estimate may still shift the visible rows slightly. The anchoring
+//! correction above likewise steps by the estimate in variable mode (the
+//! prepended rows are by definition unmeasured).
+//!
 //! # Viewport staleness
 //!
 //! [`frust_core::BuildCtx`] carries no viewport size, so the widget caches
@@ -150,8 +241,10 @@
 //! at paint and requests a continuation frame, so the shell's next
 //! rebuild→layout→paint re-windows as the fling carries the list.
 //!
-//! Scroll extent is `item_count * item_extent` exactly (no estimation); the
-//! offset is clamped to `[0, extent - viewport.height]` with no overscroll.
+//! Scroll extent is `item_count * item_extent` exactly on the uniform path (no
+//! estimation) and `Σ measured + estimate × unmeasured` in variable-extent mode
+//! (above); either way the offset is clamped to `[0, extent - viewport.height]`
+//! with no overscroll.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -182,6 +275,23 @@ const DUPLICATE_KEY_MSG: &str = "ListView::builder_keyed produced a duplicate ke
      window: row identity is ambiguous (release: the first slot claiming a key keeps the live \
      row, later duplicates build fresh)";
 
+/// The debug-only tripwire message for [`ListView::estimated_item_extent`] on a
+/// positional list. Variable extents cache a measurement under the row's stable
+/// identity, which a positional list does not have; release builds ignore the
+/// estimate and stay on the uniform path rather than panicking live (see the
+/// [module docs](self)' *Variable extents* section).
+const ESTIMATE_NEEDS_KEYS_MSG: &str = "ListView::estimated_item_extent requires \
+     ListView::builder_keyed: a measured extent is cached under the row's stable key, which a \
+     positional list has none of (release: the estimate is ignored and the uniform extent path \
+     runs)";
+
+/// The longest prefix walk a single frame will step item-by-item before
+/// resolving the remaining distance in closed form against the estimate. A
+/// scroll, a fling step, or a window shift moves the offset by far less than
+/// this; only a data reset or a programmatic jump reaches it, and the walk's
+/// result re-pins the anchor, so the very next frame is short again.
+const MAX_PREFIX_STEP: usize = 512;
+
 /// A view-held near-start "load older" callback (erased to [`ErasedCallback`] on
 /// build).
 type OnNearStart<State> = Rc<dyn Fn(&mut State)>;
@@ -196,6 +306,37 @@ type OnNearEnd<State> = Rc<dyn Fn(&mut State)>;
 /// builder — a pure function of the index.
 type KeyOf = Rc<dyn Fn(usize) -> ChildKey>;
 
+/// One row's cached measurement in variable-extent mode, held under the row's
+/// stable key. See the [module docs](self)' *Variable extents* section.
+#[derive(Clone, Copy, Debug)]
+struct Measured {
+    /// The item index this row occupied the last time it was measured — the
+    /// only handle the cache has on "the current keying can no longer produce
+    /// this entry" when `item_count` shrinks.
+    index: usize,
+    /// The row's laid-out height (logical px).
+    extent: f64,
+}
+
+/// The window one frame should materialize: the `[start, end)` slot range plus
+/// the content-space `y` of `start` (the prefix walk's result in variable-extent
+/// mode; `start * item_extent` on the uniform path).
+#[derive(Clone, Copy, Debug)]
+struct WindowPlan {
+    start: usize,
+    end: usize,
+    y_start: f64,
+}
+
+impl WindowPlan {
+    /// The empty window (an empty list, or a degenerate extent).
+    const EMPTY: Self = Self {
+        start: 0,
+        end: 0,
+        y_start: 0.0,
+    };
+}
+
 /// A declarative, virtualized vertical list. See the [module docs](self).
 ///
 /// `builder` is a pure function of the item index; it is retained (an [`Rc`]) so
@@ -209,6 +350,11 @@ pub struct ListView<State: 'static> {
     /// `None` selects the positional (index-identity) reconciliation path. See
     /// the [module docs](self)' *Row identity* section.
     key_of: Option<KeyOf>,
+    /// The assumed extent of an unmeasured row, installed by
+    /// [`ListView::estimated_item_extent`]; `None` (the default) keeps the
+    /// closed-form uniform path. Only honored on a keyed list — see the
+    /// [module docs](self)' *Variable extents* section.
+    estimated_item_extent: Option<f64>,
     /// Fired (edge-triggered) when the scrolled window comes within
     /// `near_start_threshold` of content start — the "load older" edge. See
     /// [`ListView::on_near_start`].
@@ -257,6 +403,7 @@ impl<State: 'static> ListView<State> {
             item_extent,
             builder: Rc::new(builder),
             key_of: None,
+            estimated_item_extent: None,
             on_near_start: None,
             near_start_threshold: 0.0,
             on_near_end: None,
@@ -311,10 +458,61 @@ impl<State: 'static> ListView<State> {
             item_extent,
             builder: Rc::new(builder),
             key_of: Some(Rc::new(key_of)),
+            estimated_item_extent: None,
             on_near_start: None,
             near_start_threshold: 0.0,
             on_near_end: None,
             near_end_threshold: 0.0,
+        }
+    }
+
+    /// Let rows size themselves, taking `estimate_px` as the assumed extent of
+    /// every row that has not been measured yet — **variable-extent mode**,
+    /// available on [`ListView::builder_keyed`] lists only.
+    ///
+    /// A materialized row is laid out under the list's width with unbounded
+    /// height and reports whatever height it wants; that height is cached under
+    /// the row's stable key and used from then on for window math, the scroll
+    /// extent, and the row's content position. Unmeasured rows (everything not
+    /// yet laid out) count as `estimate_px`, so the scroll range converges on
+    /// the true content height as the user visits rows. The constructor's
+    /// `item_extent` is unused in this mode — pass the same value as the
+    /// estimate for clarity.
+    ///
+    /// ```ignore
+    /// ListView::builder_keyed(rows.len(), 72.0, key_of, builder)
+    ///     .estimated_item_extent(72.0)
+    /// ```
+    ///
+    /// # Contract
+    ///
+    /// **Keyed lists only.** A measured extent is cached under row identity, so
+    /// it must move with the row; a positional list has no identity to cache
+    /// under. Calling this on a [`ListView::builder`] list trips a
+    /// `debug_assert!` and is **inert** in release — the list keeps its
+    /// closed-form uniform extent rather than panicking live (the same shape as
+    /// the duplicate-key tripwire, see the [module docs]' *Variable extents*
+    /// section for why this is a `debug_assert` and not type-state). Panics if
+    /// `estimate_px` is not positive, like the constructors' `item_extent`.
+    ///
+    /// [module docs]: self
+    pub fn estimated_item_extent(mut self, estimate_px: f64) -> Self {
+        assert!(
+            estimate_px > 0.0,
+            "ListView estimated_item_extent must be positive"
+        );
+        debug_assert!(self.key_of.is_some(), "{}", ESTIMATE_NEEDS_KEYS_MSG);
+        self.estimated_item_extent = Some(estimate_px);
+        self
+    }
+
+    /// The estimate this view actually runs in variable-extent mode with:
+    /// `Some` only when a keyed list also named an estimate (the keyed-only
+    /// contract's release behavior — see [`ListView::estimated_item_extent`]).
+    fn variable_estimate(&self) -> Option<f64> {
+        match (self.key_of.as_ref(), self.estimated_item_extent) {
+            (Some(_), Some(estimate)) => Some(estimate),
+            _ => None,
         }
     }
 
@@ -377,9 +575,9 @@ impl<State: 'static> ListView<State> {
         prev: &Self,
         element: &mut ListViewWidget,
         ctx: &mut BuildCtx<'_>,
-        start: usize,
-        end: usize,
+        plan: WindowPlan,
     ) -> ChangeFlags {
+        let (start, end) = (plan.start, plan.end);
         let mut flags = ChangeFlags::NONE;
         // Move the live window out so surviving indices can be relocated by key.
         let old_keys = std::mem::take(&mut element.keys);
@@ -438,15 +636,24 @@ impl<State: 'static> ListView<State> {
     /// A duplicate key is ambiguous and trips a `debug_assert!` mirroring
     /// [`crate::authoring::rebuild_children`]'s; release builds carry on (first
     /// claim keeps the live row, later duplicates build fresh) rather than panic.
+    ///
+    /// In variable-extent mode this pass additionally retains the window's slot
+    /// keys (so `layout` can cache each measurement under the right identity
+    /// without re-keying), re-pins the prefix anchor from `plan`, and applies
+    /// the departing-row half of the measured cache's hygiene rules — `delta` is
+    /// this frame's net `item_count` change, the second hypothesis of the same
+    /// probe [`ListView::anchor_shift_items`] uses. See the [module docs](self)'
+    /// *Variable extents* section.
     fn reconcile_keyed(
         &self,
         prev: &Self,
         element: &mut ListViewWidget,
         ctx: &mut BuildCtx<'_>,
-        start: usize,
-        end: usize,
+        plan: WindowPlan,
         key_of: &KeyOf,
+        delta: isize,
     ) -> ChangeFlags {
+        let (start, end) = (plan.start, plan.end);
         let capacity = end.saturating_sub(start);
         // One pass over the new window: each slot's key (so `key_of` runs exactly
         // once per slot), the map this frame will retain, and the duplicate check
@@ -480,7 +687,7 @@ impl<State: 'static> ListView<State> {
         let mut flags = ChangeFlags::NONE;
         let mut structural = window_shifted;
 
-        for (index, key) in (start..end).zip(slot_keys) {
+        for (index, key) in (start..end).zip(slot_keys.iter().copied()) {
             let survivor = prev_index_of
                 .get(&key)
                 .copied()
@@ -513,6 +720,23 @@ impl<State: 'static> ListView<State> {
             new_keys.push(index);
         }
 
+        // Measured-cache hygiene (variable extents only): a pod no slot claimed
+        // left the window *or* the data, and only the second case may drop its
+        // measurement. Probe each orphan's key at its unchanged index and at
+        // that index shifted by this frame's net item-count delta — the same two
+        // hypotheses anchoring uses, at most two `key_of` calls per departing
+        // row, never a scan of `item_count`.
+        if element.is_variable() {
+            let count = element.item_count;
+            for (key, prev_index) in prev_index_of.iter() {
+                if old.contains_key(prev_index)
+                    && !Self::key_survives(*key, *prev_index, delta, count, key_of)
+                {
+                    element.forget_measured(key);
+                }
+            }
+        }
+
         // Every pod no slot claimed is a key that left the window or the data.
         for (index, mut pod) in old.drain() {
             crate::authoring::teardown_child(&(prev.builder)(index), &mut pod, ctx);
@@ -522,6 +746,13 @@ impl<State: 'static> ListView<State> {
         element.children = new_children;
         element.keys = new_keys;
         element.key_index = next_index_of;
+        if let Some(estimate) = element.variable_estimate() {
+            // Retain this window's identities beside its slots, then re-pin the
+            // prefix anchor and the per-slot content positions to the plan the
+            // window was computed from (layout refines them from measurements).
+            element.slot_keys = slot_keys;
+            element.set_window_geometry(plan, estimate);
+        }
         element.sync_child_origins();
 
         if structural {
@@ -574,6 +805,34 @@ impl<State: 'static> ListView<State> {
         // reset semantics, not an anchoring case.
         None
     }
+
+    /// Whether `key` still identifies a row in this frame's data, probed at the
+    /// index it last occupied and at that index shifted by the frame's net
+    /// item-count `delta` — the same two hypotheses
+    /// [`ListView::anchor_shift_items`] tests, at most two `key_of` calls. Used
+    /// by the measured cache's departing-row eviction; a `false` here means the
+    /// row left the data, not merely the window.
+    fn key_survives(
+        key: ChildKey,
+        prev_index: usize,
+        delta: isize,
+        item_count: usize,
+        key_of: &KeyOf,
+    ) -> bool {
+        if prev_index < item_count && key_of(prev_index) == key {
+            return true;
+        }
+        if delta != 0 {
+            let candidate = prev_index as isize + delta;
+            if candidate >= 0
+                && (candidate as usize) < item_count
+                && key_of(candidate as usize) == key
+            {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 /// Create a virtualized [`ListView`] — the free-function spelling of
@@ -607,6 +866,43 @@ pub struct ListViewWidget {
     /// [`ListViewWidget::offset`]/[`ListViewWidget::viewport`], since the view is
     /// reconstructed from scratch every frame.
     key_index: HashMap<ChildKey, usize>,
+    /// The keyed list's own `index -> identity` function, retained (a cheap
+    /// [`Rc`] clone, reinstalled every rebuild like the erased callbacks) so the
+    /// widget's own passes can key an index without the view in scope: the
+    /// variable-extent prefix walk looks a row's measurement up by key, and
+    /// `paint`'s convergence check re-derives the same window. `None` for a
+    /// positional list. This is the *key* function only — the builder is never
+    /// retained here, and never runs outside rebuild (see the [module
+    /// docs](self)' *Variable extents* section).
+    key_of: Option<KeyOf>,
+    /// The assumed extent of an unmeasured row in variable-extent mode, or
+    /// `None` for the closed-form uniform path. Set from
+    /// [`ListView::estimated_item_extent`], already resolved against the
+    /// keyed-only contract.
+    estimated_extent: Option<f64>,
+    /// Variable-extent mode: every row this widget has ever laid out, by stable
+    /// key. Bounded by the keys a session has visited — see the [module
+    /// docs](self)' cache-hygiene rules (and the LRU deferral noted there).
+    measured: HashMap<ChildKey, Measured>,
+    /// The running Σ of [`ListViewWidget::measured`]'s extents, so the content
+    /// extent is O(1) rather than a scan of the cache.
+    measured_sum: f64,
+    /// Variable-extent mode: the identity of each materialized slot, parallel to
+    /// [`ListViewWidget::keys`], so `layout` can cache a measurement under the
+    /// right key without calling `key_of` again. Empty on the uniform path.
+    slot_keys: Vec<ChildKey>,
+    /// Variable-extent mode: each materialized slot's content-space `y`,
+    /// parallel to [`ListViewWidget::keys`] — what rows are placed at (minus the
+    /// offset) instead of the uniform path's `index * item_extent`. Empty on the
+    /// uniform path.
+    slot_y: Vec<f64>,
+    /// Variable-extent mode: the prefix anchor's item index — the item
+    /// [`ListViewWidget::anchor_y`] gives the content-space top of, and the
+    /// point every per-frame prefix walk starts from (the previous window's
+    /// start). See the [module docs](self)' *Variable extents* section.
+    anchor_index: usize,
+    /// The content-space `y` of [`ListViewWidget::anchor_index`]'s top.
+    anchor_y: f64,
     item_count: usize,
     item_extent: f64,
     /// Current scroll offset in `[0, max_offset]` (px scrolled down).
@@ -659,6 +955,14 @@ impl ListViewWidget {
             children: Vec::new(),
             keys: Vec::new(),
             key_index: HashMap::new(),
+            key_of: None,
+            estimated_extent: None,
+            measured: HashMap::new(),
+            measured_sum: 0.0,
+            slot_keys: Vec::new(),
+            slot_y: Vec::new(),
+            anchor_index: 0,
+            anchor_y: 0.0,
             item_count,
             item_extent,
             offset: 0.0,
@@ -775,7 +1079,21 @@ impl ListViewWidget {
 
     /// The maximum scroll offset (`extent − viewport`, never negative).
     pub fn max_offset(&self) -> f64 {
-        (self.item_count as f64 * self.item_extent - self.viewport.height).max(0.0)
+        (self.content_extent() - self.viewport.height).max(0.0)
+    }
+
+    /// The whole content's extent: `item_count * item_extent` exactly on the
+    /// uniform path, or `Σ measured + estimate × unmeasured` in variable-extent
+    /// mode (O(1) — the sum is maintained as rows are measured). See the [module
+    /// docs](self)' *Variable extents* section.
+    fn content_extent(&self) -> f64 {
+        match self.variable_estimate() {
+            Some(estimate) => {
+                let unmeasured = self.item_count.saturating_sub(self.measured.len());
+                self.measured_sum + estimate * unmeasured as f64
+            }
+            None => self.item_count as f64 * self.item_extent,
+        }
     }
 
     /// Whether a fling animation is in flight.
@@ -796,18 +1114,34 @@ impl ListViewWidget {
     }
 
     /// The `[start, end)` item range that should be materialized for the current
-    /// offset + cached viewport, clamped to `[0, item_count]`. With a zero
-    /// viewport (first build) this is the conservative initial window.
-    fn desired_window(&self) -> (usize, usize) {
+    /// offset + cached viewport, clamped to `[0, item_count]`, plus the
+    /// content-space `y` of `start`. With a zero viewport (first build) this is
+    /// the conservative initial window.
+    ///
+    /// Variable-extent mode takes the prefix-walk path instead; the uniform
+    /// closed form below is unchanged.
+    fn desired_window(&self) -> WindowPlan {
+        if let Some(estimate) = self.variable_estimate() {
+            return if self.item_count == 0 {
+                WindowPlan::EMPTY
+            } else {
+                self.desired_window_variable(estimate)
+            };
+        }
         if self.item_count == 0 || self.item_extent <= 0.0 {
-            return (0, 0);
+            return WindowPlan::EMPTY;
         }
         let vh = self.viewport.height;
         let first = (self.offset / self.item_extent).floor() as isize - BUFFER;
         let last = ((self.offset + vh) / self.item_extent).ceil() as isize + BUFFER;
         let start = first.max(0) as usize;
         let end = (last.max(0) as usize).min(self.item_count);
-        (start.min(end), end)
+        let start = start.min(end);
+        WindowPlan {
+            start,
+            end,
+            y_start: start as f64 * self.item_extent,
+        }
     }
 
     /// Whether the materialized window fully covers `[start, end)`.
@@ -823,12 +1157,277 @@ impl ListViewWidget {
 
     /// Place each materialized row at its content position minus the scroll
     /// offset (row `i` occupies `y ∈ [i*extent, (i+1)*extent)` in content space).
+    ///
+    /// Variable-extent mode places each row at its own retained content `y`
+    /// instead — the same rule, over the prefix walk's positions rather than the
+    /// closed form.
     fn sync_child_origins(&mut self) {
+        if self.is_variable() {
+            let offset = self.offset;
+            for (y, pod) in self.slot_y.iter().zip(self.children.iter_mut()) {
+                pod.set_origin(Point::new(0.0, *y - offset));
+            }
+            return;
+        }
         let extent = self.item_extent;
         let offset = self.offset;
         for (index, pod) in self.keys.iter().zip(self.children.iter_mut()) {
             pod.set_origin(Point::new(0.0, *index as f64 * extent - offset));
         }
+    }
+
+    // --- Variable extents (keyed lists only). See the module docs' *Variable
+    //     extents* section; every method here is inert on the uniform path. ---
+
+    /// The estimate this widget is running variable-extent mode with, or `None`
+    /// for the closed-form uniform path. Both halves are required: identity to
+    /// cache a measurement under, and an estimate for the rows without one.
+    fn variable_estimate(&self) -> Option<f64> {
+        match (self.key_of.as_ref(), self.estimated_extent) {
+            (Some(_), Some(estimate)) => Some(estimate),
+            _ => None,
+        }
+    }
+
+    /// Whether variable-extent mode is active (see
+    /// [`ListViewWidget::variable_estimate`]).
+    fn is_variable(&self) -> bool {
+        self.variable_estimate().is_some()
+    }
+
+    /// The extent one *unmeasured* row contributes: the estimate in
+    /// variable-extent mode, the uniform `item_extent` otherwise. The scroll
+    /// anchoring correction steps by this (a prepended row is by definition
+    /// unmeasured).
+    fn unmeasured_extent(&self) -> f64 {
+        self.variable_estimate().unwrap_or(self.item_extent)
+    }
+
+    /// The extent item `index` contributes: its cached measurement if it has
+    /// one, else the estimate. One `key_of` call, no builder call.
+    fn extent_at(&self, index: usize, estimate: f64) -> f64 {
+        let Some(key_of) = self.key_of.as_ref() else {
+            return estimate;
+        };
+        if index >= self.item_count {
+            return estimate;
+        }
+        self.measured
+            .get(&key_of(index))
+            .map(|m| m.extent)
+            .unwrap_or(estimate)
+    }
+
+    /// Walk the retained prefix anchor to the current offset, returning the
+    /// first item the offset falls inside and that item's content-space top.
+    ///
+    /// O(step): a scroll/fling frame moves a few items; a jump farther than
+    /// [`MAX_PREFIX_STEP`] items resolves its bulk in closed form against the
+    /// estimate first. Reaching item 0 re-pins `y = 0` exactly, erasing any
+    /// floating-point drift the walk accumulated.
+    fn walk_to_offset(&self, estimate: f64) -> (usize, f64) {
+        let count = self.item_count;
+        debug_assert!(count > 0, "walk_to_offset needs a non-empty list");
+        let target = self.offset;
+        let mut index = self.anchor_index.min(count - 1);
+        let mut y = self.anchor_y;
+
+        let gap = target - y;
+        if gap.abs() > estimate * MAX_PREFIX_STEP as f64 {
+            // A data reset or a programmatic jump, never a scroll: cover the
+            // bulk against the estimate so the walk below stays bounded.
+            let jump = (gap / estimate).trunc();
+            let landed = (index as f64 + jump).clamp(0.0, (count - 1) as f64);
+            y += (landed - index as f64) * estimate;
+            index = landed as usize;
+        }
+
+        let mut steps = 0usize;
+        while y > target && index > 0 && steps < MAX_PREFIX_STEP {
+            index -= 1;
+            y -= self.extent_at(index, estimate);
+            steps += 1;
+        }
+        while index + 1 < count && steps < MAX_PREFIX_STEP {
+            let extent = self.extent_at(index, estimate);
+            if y + extent <= target {
+                y += extent;
+                index += 1;
+                steps += 1;
+            } else {
+                break;
+            }
+        }
+        if index == 0 {
+            y = 0.0;
+        }
+        (index, y)
+    }
+
+    /// The variable-extent counterpart of [`ListViewWidget::desired_window`]:
+    /// the item the offset falls inside, widened by [`BUFFER`] above and by
+    /// whatever it takes to cover the viewport (plus [`BUFFER`]) below.
+    /// O(window + step).
+    fn desired_window_variable(&self, estimate: f64) -> WindowPlan {
+        let count = self.item_count;
+        let (first_visible, y_visible) = self.walk_to_offset(estimate);
+
+        // Leading buffer: back up from the first visible item, accumulating the
+        // same extents in reverse.
+        let mut start = first_visible;
+        let mut y_start = y_visible;
+        for _ in 0..BUFFER {
+            if start == 0 {
+                break;
+            }
+            start -= 1;
+            y_start -= self.extent_at(start, estimate);
+        }
+        if start == 0 {
+            y_start = 0.0;
+        }
+
+        // Forward to the viewport's bottom edge, then the trailing buffer.
+        let bottom = self.offset + self.viewport.height;
+        let mut end = first_visible + 1;
+        let mut y_end = y_visible + self.extent_at(first_visible, estimate);
+        while end < count && y_end < bottom {
+            y_end += self.extent_at(end, estimate);
+            end += 1;
+        }
+        let end = end.saturating_add(BUFFER as usize).min(count);
+        WindowPlan {
+            start,
+            end: end.max(start),
+            y_start,
+        }
+    }
+
+    /// Re-pin the prefix anchor to the window `plan` this frame materialized and
+    /// refill the per-slot content positions from the cached extents. Layout
+    /// refines those positions from the rows' actual measurements.
+    fn set_window_geometry(&mut self, plan: WindowPlan, estimate: f64) {
+        self.anchor_index = plan.start;
+        self.anchor_y = if plan.start == 0 { 0.0 } else { plan.y_start };
+        let keys = std::mem::take(&mut self.keys);
+        let mut ys = std::mem::take(&mut self.slot_y);
+        ys.clear();
+        let mut y = self.anchor_y;
+        for &index in &keys {
+            ys.push(y);
+            y += self.extent_at(index, estimate);
+        }
+        self.slot_y = ys;
+        self.keys = keys;
+    }
+
+    /// Cache one row's laid-out extent under its stable key, keeping the running
+    /// sum exact.
+    fn record_measurement(&mut self, key: ChildKey, index: usize, extent: f64) {
+        match self.measured.insert(key, Measured { index, extent }) {
+            Some(previous) => self.measured_sum += extent - previous.extent,
+            None => self.measured_sum += extent,
+        }
+    }
+
+    /// Drop one row's measurement (its key left the data).
+    fn forget_measured(&mut self, key: &ChildKey) {
+        if let Some(previous) = self.measured.remove(key) {
+            self.measured_sum -= previous.extent;
+        }
+    }
+
+    /// Drop every measurement — a full replace, where no previous key survives.
+    fn clear_measured(&mut self) {
+        self.measured.clear();
+        self.measured_sum = 0.0;
+    }
+
+    /// Drop measurements the current keying provably cannot produce any more:
+    /// entries recorded at an index past the (just shrunk) end. A scan of the
+    /// cache, run only on a frame whose `item_count` shrank. A stale recorded
+    /// index can evict a still-live row early; it is re-measured on its next
+    /// visit, which is the conservative direction.
+    fn evict_measured_stale_indices(&mut self) {
+        if self.measured.is_empty() {
+            return;
+        }
+        let count = self.item_count;
+        let mut dropped = 0.0;
+        self.measured.retain(|_, entry| {
+            let live = entry.index < count;
+            if !live {
+                dropped += entry.extent;
+            }
+            live
+        });
+        self.measured_sum -= dropped;
+    }
+
+    /// Drop every variable-extent artifact: the measured cache, the per-slot
+    /// identities and positions, and the prefix anchor. Run when a list leaves
+    /// variable-extent mode, so nothing stale can be read back if it re-enters.
+    fn reset_variable_state(&mut self) {
+        self.clear_measured();
+        self.slot_keys.clear();
+        self.slot_y.clear();
+        self.anchor_index = 0;
+        self.anchor_y = 0.0;
+    }
+
+    /// Drop every keyed-identity artifact: the `key -> index` map plus all
+    /// variable-extent bookkeeping (which is cached under those identities). Run
+    /// when a positional frame rebuilds a list a keyed frame materialized (see
+    /// [`View::rebuild`]).
+    fn reset_keyed_state(&mut self) {
+        self.key_index.clear();
+        self.reset_variable_state();
+    }
+
+    /// Apply a confirmed scroll-anchor shift of `items` rows: the offset absorbs
+    /// it, and (in variable-extent mode) so does the prefix anchor, which names
+    /// an item index that just moved by the same amount.
+    fn apply_anchor_shift(&mut self, items: isize) {
+        let step = self.unmeasured_extent();
+        self.set_offset(self.offset + items as f64 * step);
+        if self.is_variable() {
+            let index = (self.anchor_index as isize + items).max(0) as usize;
+            self.anchor_y = if index == 0 {
+                0.0
+            } else {
+                (self.anchor_y + items as f64 * step).max(0.0)
+            };
+            self.anchor_index = index;
+        }
+    }
+
+    /// Lay the materialized rows out under a bounded width and **unbounded**
+    /// height (the [`crate::ScrollView`] precedent), caching each row's chosen
+    /// height under its key and re-deriving the window's content positions from
+    /// those heights. Measures only pods that already exist — no builder call,
+    /// no materialization (the wake hazard the module docs call out).
+    fn layout_variable(&mut self, ctx: &mut LayoutCtx, vw: f64) {
+        let child_bc = BoxConstraints::new(Size::new(vw, 0.0), Size::new(vw, f64::INFINITY));
+        let mut children = std::mem::take(&mut self.children);
+        let mut ys = std::mem::take(&mut self.slot_y);
+        ys.clear();
+        let mut y = self.anchor_y;
+        for (slot, pod) in children.iter_mut().enumerate() {
+            let size = pod.layout_child(ctx, &child_bc);
+            ys.push(y);
+            y += size.height;
+            let key = self.slot_keys.get(slot).copied();
+            let index = self.keys.get(slot).copied();
+            if let (Some(key), Some(index)) = (key, index) {
+                self.record_measurement(key, index, size.height);
+            }
+        }
+        self.slot_y = ys;
+        self.children = children;
+        // The measurements just revised the content extent (the estimate still
+        // governs everything outside the window), so re-clamp before the caller
+        // syncs origins.
+        self.clamp_offset();
     }
 
     /// Advance an in-flight fling by `dt_ms`, returning whether it is still
@@ -1017,11 +1616,17 @@ impl<State: 'static> View<State> for ListView<State> {
             .as_ref()
             .map(crate::authoring::erase_callback);
         widget.near_end_threshold = self.near_end_threshold;
+        // The key function and the unmeasured-row estimate are widget state (the
+        // window math and layout's measurement both run without the view in
+        // scope), and must be installed before the first window is planned.
+        widget.key_of = self.key_of.clone();
+        widget.estimated_extent = self.variable_estimate();
         // Conservative initial window from a zero viewport (converges within one
         // extra frame via paint's continuation request — see the module docs).
-        let (start, end) = widget.desired_window();
+        let plan = widget.desired_window();
+        let variable = widget.is_variable();
         let mut duplicate = false;
-        for index in start..end {
+        for index in plan.start..plan.end {
             widget
                 .children
                 .push(crate::authoring::build_child(&(self.builder)(index), ctx));
@@ -1029,10 +1634,17 @@ impl<State: 'static> View<State> for ListView<State> {
             if let Some(key_of) = self.key_of.as_ref() {
                 // Seed the retained identity map so the first rebuild can already
                 // relocate these rows by key.
-                duplicate |= widget.key_index.insert(key_of(index), index).is_some();
+                let key = key_of(index);
+                duplicate |= widget.key_index.insert(key, index).is_some();
+                if variable {
+                    widget.slot_keys.push(key);
+                }
             }
         }
         debug_assert!(!duplicate, "{}", DUPLICATE_KEY_MSG);
+        if let Some(estimate) = widget.variable_estimate() {
+            widget.set_window_geometry(plan, estimate);
+        }
         widget.sync_child_origins();
         widget
     }
@@ -1054,6 +1666,10 @@ impl<State: 'static> View<State> for ListView<State> {
             .as_ref()
             .map(crate::authoring::erase_callback);
         element.near_end_threshold = self.near_end_threshold;
+        // Closures are not comparable either — reinstall the key function the
+        // widget's own passes key indices with (never the builder; see the
+        // module docs' *Variable extents* section).
+        element.key_of = self.key_of.clone();
 
         let mut flags = ChangeFlags::NONE;
         let old_item_count = element.item_count;
@@ -1067,6 +1683,18 @@ impl<State: 'static> View<State> for ListView<State> {
             element.item_extent = self.item_extent;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
+        let estimate = self.variable_estimate();
+        if element.estimated_extent != estimate {
+            // Entering, leaving, or re-scaling variable-extent mode is an
+            // extent-affecting change like `item_extent`: every row's position
+            // is derived from it. Leaving it also drops the bookkeeping, so a
+            // later re-entry starts from measurements this list actually took.
+            element.estimated_extent = estimate;
+            if estimate.is_none() {
+                element.reset_variable_state();
+            }
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
 
         // Prepend/removal scroll anchoring — keyed lists only (positional
         // identity cannot distinguish a prepend from a full mutation, see the
@@ -1076,14 +1704,22 @@ impl<State: 'static> View<State> for ListView<State> {
         // one corrected offset — never during paint. See the module docs'
         // anchoring section for the algorithm and the `offset == 0` decision.
         let mut prepend_correction = false;
-        if let Some(key_of) = self.key_of.as_ref()
-            && let Some(shift_items) =
-                Self::anchor_shift_items(prev, element, old_item_count, key_of)
-            && shift_items != 0
-        {
-            element.set_offset(element.offset + shift_items as f64 * element.item_extent);
-            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-            prepend_correction = shift_items > 0;
+        if let Some(key_of) = self.key_of.as_ref() {
+            match Self::anchor_shift_items(prev, element, old_item_count, key_of) {
+                Some(shift_items) if shift_items != 0 => {
+                    element.apply_anchor_shift(shift_items);
+                    flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+                    prepend_correction = shift_items > 0;
+                }
+                Some(_) => {}
+                None => {
+                    // No previous-window key survived either hypothesis: a full
+                    // replace, which is reset semantics for the measured cache
+                    // too — none of its keys is in this data (inert on the
+                    // uniform path, whose cache is always empty).
+                    element.clear_measured();
+                }
+            }
         }
 
         if item_count_changed {
@@ -1101,19 +1737,34 @@ impl<State: 'static> View<State> for ListView<State> {
             element.near_end_armed = true;
         }
 
-        element.clamp_offset();
+        if self.item_count < old_item_count {
+            // Cache hygiene: a shrunk keying provably cannot produce an entry
+            // recorded past the new end (inert on the uniform path).
+            element.evict_measured_stale_indices();
+        }
 
-        let (start, end) = element.desired_window();
+        let offset_before_clamp = element.offset;
+        element.clamp_offset();
+        if element.is_variable() && element.offset != offset_before_clamp {
+            // Variable extents only: measurements can revise the content extent
+            // out from under the offset, which moves every row — the same
+            // extent-affecting rule the item-count/extent checks above follow.
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+
+        let plan = element.desired_window();
+        let delta = self.item_count as isize - old_item_count as isize;
         flags |= match self.key_of.as_ref() {
-            Some(key_of) => self.reconcile_keyed(prev, element, ctx, start, end, key_of),
+            Some(key_of) => self.reconcile_keyed(prev, element, ctx, plan, key_of, delta),
             None => {
                 // A positional frame owns no key identities: drop whatever map a
-                // previous keyed frame left, so a list switched back to keyed
-                // later cannot match against a window this path re-materialized
-                // by index (a one-frame full re-materialization is the price of
+                // previous keyed frame left (and, with it, every measurement
+                // cached under one), so a list switched back to keyed later
+                // cannot match against a window this path re-materialized by
+                // index (a one-frame full re-materialization is the price of
                 // swapping constructors mid-flight).
-                element.key_index.clear();
-                self.reconcile_positional(prev, element, ctx, start, end)
+                element.reset_keyed_state();
+                self.reconcile_positional(prev, element, ctx, plan)
             }
         };
         flags
@@ -1137,14 +1788,19 @@ impl Widget for ListViewWidget {
             bc.max().height
         } else {
             // An unbounded height context: the list is as tall as its content.
-            self.item_count as f64 * self.item_extent
+            self.content_extent()
         };
         self.viewport = Size::new(vw, vh);
         self.clamp_offset();
-        // Uniform extent: every materialized row is exactly `item_extent` tall.
-        let child_bc = BoxConstraints::tight(Size::new(vw, self.item_extent));
-        for pod in &mut self.children {
-            pod.layout_child(ctx, &child_bc);
+        if self.is_variable() {
+            // Variable extents: rows size themselves and are measured here.
+            self.layout_variable(ctx, vw);
+        } else {
+            // Uniform extent: every materialized row is exactly `item_extent` tall.
+            let child_bc = BoxConstraints::tight(Size::new(vw, self.item_extent));
+            for pod in &mut self.children {
+                pod.layout_child(ctx, &child_bc);
+            }
         }
         self.sync_child_origins();
         bc.constrain(self.viewport)
@@ -1160,10 +1816,13 @@ impl Widget for ListViewWidget {
         }
         scene.pop_clip();
         // If the (now-known) viewport needs rows the materialized window does not
-        // yet hold — first build, a constraint change, or a fling that advanced
-        // the offset past the buffer — ask the shell for one more frame so the
-        // next rebuild re-windows. Converges without idling under-materialized.
-        let (start, end) = self.desired_window();
+        // yet hold — first build, a constraint change, a fling that advanced the
+        // offset past the buffer, or (variable extents) measurements that
+        // revised the window out from under the plan rebuild worked from — ask
+        // the shell for one more frame so the next rebuild re-windows. Converges
+        // without idling under-materialized, and is the only path by which a
+        // measurement changes what is materialized: layout and paint never build.
+        let WindowPlan { start, end, .. } = self.desired_window();
         if self.item_count > 0 && !self.window_covers(start, end) {
             ctx.request_frame();
         }
@@ -2444,6 +3103,595 @@ mod tests {
             offset_before,
             "the positional path never corrects the offset"
         );
+    }
+
+    // --- (11) Variable extents: estimate + measured-by-key cache. ---
+
+    /// The estimate every variable-extent test declares. Deliberately unequal to
+    /// any row's true height, so an unmeasured region is visibly *estimated* and
+    /// a measured one visibly is not.
+    const ESTIMATE: f64 = 60.0;
+
+    /// Deterministic row height by id: 40/60/80/100/120 px, cycling.
+    fn var_height(id: u64) -> f64 {
+        40.0 + (id % 5) as f64 * 20.0
+    }
+
+    /// Which pass the harness is currently driving — the invocation-context
+    /// probe's alphabet.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+    enum Pass {
+        #[default]
+        Idle,
+        Rebuild,
+        Layout,
+        Paint,
+    }
+
+    /// The invocation-context probe: the app's builder closure reports the pass
+    /// it was called in, so "the builder never runs from layout or paint" (the
+    /// wake hazard the module docs call out) is a test, not a claim.
+    #[derive(Default)]
+    struct BuildProbe {
+        pass: Cell<Pass>,
+        calls: Cell<usize>,
+        violations: RefCell<Vec<Pass>>,
+    }
+
+    impl BuildProbe {
+        fn note(&self) {
+            self.calls.set(self.calls.get() + 1);
+            let pass = self.pass.get();
+            if pass != Pass::Rebuild {
+                self.violations.borrow_mut().push(pass);
+            }
+        }
+    }
+
+    /// A keyed row of a *variable* height (`var_height(id)`), reporting the same
+    /// generation/paint/teardown log as [`RowView`]. The height is intrinsic: the
+    /// row honors the list's unbounded-height constraint by choosing its own
+    /// height, exactly like a real self-sizing row.
+    struct VarRowView {
+        id: u64,
+        gens: Rc<Cell<u64>>,
+        log: Rc<RowLog>,
+    }
+
+    struct VarRowWidget {
+        id: u64,
+        generation: u64,
+        log: Rc<RowLog>,
+    }
+
+    impl View<()> for VarRowView {
+        type Element = VarRowWidget;
+
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> VarRowWidget {
+            let generation = self.gens.get();
+            self.gens.set(generation + 1);
+            VarRowWidget {
+                id: self.id,
+                generation,
+                log: self.log.clone(),
+            }
+        }
+
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            element: &mut VarRowWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            element.id = self.id;
+            ChangeFlags::NONE
+        }
+
+        fn teardown(&self, element: &mut VarRowWidget, _ctx: &mut BuildCtx<'_>) {
+            element.log.torn.borrow_mut().push(element.id);
+        }
+    }
+
+    impl Widget for VarRowWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(bc.max().width, var_height(self.id)))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            self.log
+                .painted
+                .borrow_mut()
+                .insert(self.id, self.generation);
+        }
+    }
+
+    /// The variable-extent counterpart of [`KeyedRows`]: a mutable backing vec of
+    /// ids whose rows size themselves, plus the invocation probe.
+    struct VarRows {
+        rows: Rc<RefCell<Vec<u64>>>,
+        gens: Rc<Cell<u64>>,
+        log: Rc<RowLog>,
+        probe: Rc<BuildProbe>,
+    }
+
+    impl VarRows {
+        fn new(ids: Vec<u64>) -> Self {
+            Self {
+                rows: Rc::new(RefCell::new(ids)),
+                gens: Rc::new(Cell::new(0)),
+                log: Rc::new(RowLog::default()),
+                probe: Rc::new(BuildProbe::default()),
+            }
+        }
+
+        /// The app-logic closure: a keyed list in variable-extent mode, whose
+        /// builder reports every invocation to the probe.
+        fn logic(&self) -> impl FnMut(&mut ()) -> ListView<()> + use<> {
+            let rows = self.rows.clone();
+            let gens = self.gens.clone();
+            let log = self.log.clone();
+            let probe = self.probe.clone();
+            move |_: &mut ()| {
+                let snapshot: Rc<Vec<u64>> = Rc::new(rows.borrow().clone());
+                let (keys, items) = (snapshot.clone(), snapshot.clone());
+                let (gens, log, probe) = (gens.clone(), log.clone(), probe.clone());
+                ListView::builder_keyed(
+                    snapshot.len(),
+                    ESTIMATE,
+                    move |i| ChildKey::new(keys[i]),
+                    move |i| {
+                        probe.note();
+                        any::<(), _>(VarRowView {
+                            id: items[i],
+                            gens: gens.clone(),
+                            log: log.clone(),
+                        })
+                    },
+                )
+                .estimated_item_extent(ESTIMATE)
+            }
+        }
+
+        /// The true total content height of the current data.
+        fn true_extent(&self) -> f64 {
+            self.rows.borrow().iter().copied().map(var_height).sum()
+        }
+    }
+
+    /// Drive one frame with the probe told which pass is running, returning the
+    /// rebuild flags and paint's continuation request.
+    fn var_frame(
+        root: &mut RenderRoot<(), ListView<()>>,
+        logic: &mut impl FnMut(&mut ()) -> ListView<()>,
+        fx: &VarRows,
+        ms: f64,
+    ) -> (ChangeFlags, frust_core::PaintOutcome) {
+        fx.log.painted.borrow_mut().clear();
+        fx.log.torn.borrow_mut().clear();
+        fx.probe.pass.set(Pass::Rebuild);
+        let flags = root.rebuild(logic, &mut ());
+        fx.probe.pass.set(Pass::Layout);
+        root.layout(KEYED_WINDOW);
+        fx.probe.pass.set(Pass::Paint);
+        let mut sink = NullScene;
+        let outcome = root.paint(&mut sink, FrameTime::from_nanos((ms * 1_000_000.0) as u64));
+        fx.probe.pass.set(Pass::Idle);
+        (flags, outcome)
+    }
+
+    /// Drive frames until paint stops asking for another one, returning how many
+    /// it took. Panics past `limit` — the convergence-frame contract is "a
+    /// measurement that changes the window costs *frames*", never a loop.
+    fn settle(
+        root: &mut RenderRoot<(), ListView<()>>,
+        logic: &mut impl FnMut(&mut ()) -> ListView<()>,
+        fx: &VarRows,
+        first_ms: f64,
+        limit: usize,
+    ) -> usize {
+        for n in 0..limit {
+            let (_, outcome) = var_frame(root, logic, fx, first_ms + 16.0 * n as f64);
+            if !outcome.needs_frame {
+                return n + 1;
+            }
+        }
+        panic!("a variable-extent list did not settle within {limit} frames");
+    }
+
+    /// Build a root over a variable-extent list and settle its first window.
+    fn converged_var(
+        logic: &mut impl FnMut(&mut ()) -> ListView<()>,
+        fx: &VarRows,
+    ) -> RenderRoot<(), ListView<()>> {
+        let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        settle(&mut root, logic, fx, 0.0, 6);
+        root
+    }
+
+    /// Assert the materialized rows tile the content with no gap and no overlap,
+    /// and that they cover the whole viewport — the "cumulative extents minus
+    /// offset" property, read off the actual pod origins/sizes.
+    fn assert_tiles_and_covers(w: &ListViewWidget) {
+        assert!(!w.children.is_empty(), "something must be materialized");
+        for slot in 0..w.children.len() {
+            let pod = &w.children[slot];
+            let id = w.keys[slot] as u64;
+            assert_eq!(
+                pod.size().height,
+                var_height(id),
+                "row {id} laid out at its own intrinsic height"
+            );
+            assert_eq!(
+                pod.origin().y,
+                w.slot_y[slot] - w.offset(),
+                "row {id} paints at its content position minus the offset"
+            );
+            if slot + 1 < w.children.len() {
+                assert_eq!(
+                    w.children[slot + 1].origin().y,
+                    pod.origin().y + pod.size().height,
+                    "rows tile: no gap, no overlap between slots {slot} and {}",
+                    slot + 1
+                );
+            }
+        }
+        let first = w.children[0].origin().y;
+        let last = w.children.last().expect("non-empty");
+        let bottom = last.origin().y + last.size().height;
+        assert!(
+            first <= 0.0,
+            "the first materialized row starts at or above the viewport top (got {first})"
+        );
+        assert!(
+            bottom >= w.viewport.height,
+            "the materialized window reaches the viewport bottom (got {bottom})"
+        );
+    }
+
+    #[test]
+    fn variable_rows_tile_at_their_own_measured_heights() {
+        let fx = VarRows::new((0..60).collect());
+        let mut logic = fx.logic();
+        let mut root = converged_var(&mut logic, &fx);
+        assert_tiles_and_covers(list_widget(&root));
+
+        // Scroll into a region no row has been measured in yet, settle, and the
+        // same tiling property must hold there.
+        root.event(&mut (), &wheel(700.0));
+        settle(&mut root, &mut logic, &fx, 100.0, 4);
+        assert_tiles_and_covers(list_widget(&root));
+
+        // ...and back up over now-measured territory.
+        root.event(&mut (), &wheel(-300.0));
+        settle(&mut root, &mut logic, &fx, 200.0, 4);
+        assert_tiles_and_covers(list_widget(&root));
+    }
+
+    #[test]
+    fn variable_scroll_into_unmeasured_territory_converges_in_one_frame() {
+        let fx = VarRows::new((0..200).collect());
+        let mut logic = fx.logic();
+        let mut root = converged_var(&mut logic, &fx);
+
+        // A wheel jump far past anything measured: the next rebuild windows from
+        // the estimate, layout measures what it materialized, and at most one
+        // convergence frame re-windows against the revised extents.
+        root.event(&mut (), &wheel(2_000.0));
+        let frames = settle(&mut root, &mut logic, &fx, 100.0, 2);
+        assert!(
+            frames <= 2,
+            "a scroll into unmeasured territory converges within one extra frame (took {frames})"
+        );
+        assert_tiles_and_covers(list_widget(&root));
+        assert!(
+            fx.probe.violations.borrow().is_empty(),
+            "the builder ran outside rebuild: {:?}",
+            fx.probe.violations.borrow()
+        );
+    }
+
+    #[test]
+    fn the_builder_never_runs_outside_rebuild_even_under_a_fling() {
+        // The same probe across the hardest path: a drag/fling that advances the
+        // offset *at paint* across unmeasured rows. Paint must materialize
+        // nothing — it may only ask for another frame.
+        let fx = VarRows::new((0..400).collect());
+        let mut logic = fx.logic();
+        let mut root = converged_var(&mut logic, &fx);
+
+        root.event(&mut (), &ev(PointerPhase::Down, 180.0));
+        var_frame(&mut root, &mut logic, &fx, 100.0);
+        root.event(&mut (), &ev(PointerPhase::Move, 120.0)); // takeover
+        var_frame(&mut root, &mut logic, &fx, 116.0);
+        root.event(&mut (), &ev(PointerPhase::Move, 40.0)); // build velocity
+        root.event(&mut (), &ev(PointerPhase::Up, 40.0)); // release → fling
+        assert!(list_widget(&root).is_flinging());
+
+        for k in 0..12 {
+            var_frame(&mut root, &mut logic, &fx, 132.0 + 16.0 * k as f64);
+        }
+
+        assert!(fx.probe.calls.get() > 0, "the probe saw the builder at all");
+        assert!(
+            fx.probe.violations.borrow().is_empty(),
+            "the builder ran outside rebuild: {:?}",
+            fx.probe.violations.borrow()
+        );
+        // The fling crossed unmeasured rows without panicking or stalling.
+        assert!(list_widget(&root).offset() > 0.0);
+    }
+
+    #[test]
+    fn uniform_mode_takes_the_closed_form_path_and_measures_nothing() {
+        // Criterion 3: without `estimated_item_extent` nothing about the extent
+        // model changes — no measurement is cached, no per-slot geometry is
+        // retained, and rows sit at exactly `index * item_extent`.
+        let fx = KeyedRows::new((0..1000).map(|i| i as u64 * 10).collect());
+        let mut logic = fx.keyed_logic();
+        let mut root = converged(&mut logic, &fx.log);
+        root.event(&mut (), &wheel(500.0));
+        keyed_frame(&mut root, &mut logic, &fx.log, 32.0);
+
+        let w = list_widget(&root);
+        assert!(w.estimated_extent.is_none(), "no estimate was declared");
+        assert!(!w.is_variable(), "the uniform path is taken");
+        assert!(w.measured.is_empty(), "the measured cache stays empty");
+        assert_eq!(w.measured_sum, 0.0);
+        assert!(w.slot_keys.is_empty() && w.slot_y.is_empty());
+        assert_eq!(
+            w.max_offset(),
+            1000.0 * ROW_EXTENT - w.viewport.height,
+            "the closed-form scroll extent is unchanged"
+        );
+        assert_eq!(
+            painted_y(w, 10),
+            10.0 * ROW_EXTENT - w.offset(),
+            "rows sit at the closed-form position"
+        );
+    }
+
+    #[test]
+    fn variable_total_extent_converges_to_the_true_sum() {
+        use frust_core::accesskit::Role;
+
+        let fx = VarRows::new((0..30).collect());
+        let mut logic = fx.logic();
+        let mut root = converged_var(&mut logic, &fx);
+
+        // Before anything is visited the extent is mostly estimated.
+        let estimated_total = list_widget(&root).content_extent();
+        assert!(
+            (estimated_total - fx.true_extent()).abs() > 1.0,
+            "the estimate and the truth differ to begin with"
+        );
+
+        // Walk the whole list a viewport at a time, so every row is materialized
+        // (and therefore measured) at least once.
+        for step in 0..40 {
+            root.event(&mut (), &wheel(100.0));
+            var_frame(&mut root, &mut logic, &fx, 100.0 + 16.0 * step as f64);
+        }
+
+        let w = list_widget(&root);
+        assert_eq!(w.measured.len(), 30, "every row was visited and measured");
+        assert!(
+            (w.content_extent() - fx.true_extent()).abs() < 1e-6,
+            "the total extent converged to Σ true extents: {} vs {}",
+            w.content_extent(),
+            fx.true_extent()
+        );
+        assert!(
+            (w.max_offset() - (fx.true_extent() - w.viewport.height)).abs() < 1e-6,
+            "max_offset tracks the converged extent"
+        );
+
+        let update = root.semantics();
+        let (_, list) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::List)
+            .expect("the ListView contributes a Role::List container node");
+        assert_eq!(
+            list.scroll_y_max(),
+            Some(fx.true_extent() - KEYED_WINDOW.height),
+            "the semantics scroll range tracks it too"
+        );
+    }
+
+    #[test]
+    fn variable_cache_evicts_a_removed_row_but_keeps_a_scrolled_away_one() {
+        let fx = VarRows::new((0..40).collect());
+        let mut logic = fx.logic();
+        let mut root = converged_var(&mut logic, &fx);
+        assert!(
+            list_widget(&root)
+                .measured
+                .contains_key(&ChildKey::new(0u64)),
+            "row 0 was measured while it was on screen"
+        );
+
+        // Scroll it out of the window: it left the *window*, not the data, so its
+        // measurement must survive (this is what makes the extent converge).
+        root.event(&mut (), &wheel(400.0));
+        settle(&mut root, &mut logic, &fx, 100.0, 4);
+        let w = list_widget(&root);
+        assert!(!w.window().contains(&0), "row 0 is no longer materialized");
+        assert!(
+            w.measured.contains_key(&ChildKey::new(0u64)),
+            "a row that only left the window keeps its measurement"
+        );
+
+        // Now remove a row that IS in the window: its key left the data, so its
+        // measurement is evicted and the running sum drops by exactly its height.
+        let victim = list_widget(&root).window()[3] as u64;
+        let sum_before = list_widget(&root).measured_sum;
+        let count_before = list_widget(&root).measured.len();
+        fx.rows.borrow_mut().retain(|&id| id != victim);
+        root.rebuild(&mut logic, &mut ()); // rebuild alone: no re-measurement yet
+
+        let w = list_widget(&root);
+        assert!(
+            !w.measured.contains_key(&ChildKey::new(victim)),
+            "the removed row's measurement is evicted"
+        );
+        assert_eq!(w.measured.len(), count_before - 1);
+        assert!(
+            (w.measured_sum - (sum_before - var_height(victim))).abs() < 1e-9,
+            "the running sum drops by exactly the evicted extent"
+        );
+    }
+
+    #[test]
+    fn variable_full_replace_clears_the_measured_cache() {
+        let fx = VarRows::new((0..40).collect());
+        let mut logic = fx.logic();
+        let mut root = converged_var(&mut logic, &fx);
+        assert!(!list_widget(&root).measured.is_empty());
+
+        // Every id replaced: no previous-window key survives either hypothesis,
+        // which is reset semantics for the cache as well as for anchoring.
+        *fx.rows.borrow_mut() = (0..40).map(|i| 10_000 + i).collect();
+        root.rebuild(&mut logic, &mut ());
+
+        let w = list_widget(&root);
+        assert!(w.measured.is_empty(), "a full replace clears the cache");
+        assert_eq!(w.measured_sum, 0.0);
+    }
+
+    #[test]
+    fn variable_truncation_evicts_measurements_past_the_new_end() {
+        let fx = VarRows::new((0..40).collect());
+        let mut logic = fx.logic();
+        let mut root = converged_var(&mut logic, &fx);
+
+        // Visit the far end so those rows carry measurements, then drop them from
+        // the data while the viewport is nowhere near them.
+        root.event(&mut (), &wheel(2_000.0));
+        settle(&mut root, &mut logic, &fx, 100.0, 4);
+        assert!(list_widget(&root).measured.len() > 10);
+
+        fx.rows.borrow_mut().truncate(5);
+        root.rebuild(&mut logic, &mut ());
+
+        let w = list_widget(&root);
+        assert!(
+            w.measured.values().all(|m| m.index < 5),
+            "every entry the shrunk keying cannot produce is gone"
+        );
+        assert!(
+            (w.measured_sum - w.measured.values().map(|m| m.extent).sum::<f64>()).abs() < 1e-9,
+            "the running sum still matches the surviving entries"
+        );
+    }
+
+    #[test]
+    fn variable_prepend_anchors_by_the_estimate() {
+        // Anchoring (the previous step) still holds in variable-extent mode: the
+        // prepended rows are unmeasured by definition, so the correction — and
+        // the prefix anchor it moves with it — steps by the estimate.
+        let fx = VarRows::new((0..200).collect());
+        let mut logic = fx.logic();
+        let mut root = converged_var(&mut logic, &fx);
+
+        root.event(&mut (), &wheel(600.0));
+        settle(&mut root, &mut logic, &fx, 100.0, 4);
+        let anchor_id = list_widget(&root).window()[0] as u64;
+        let offset_before = list_widget(&root).offset();
+        let y_before = list_widget(&root).children[0].origin().y;
+        let painted_before = fx.log.painted();
+
+        fx.rows.borrow_mut().splice(0..0, [9001, 9002, 9003]);
+        let (flags, _) = var_frame(&mut root, &mut logic, &fx, 200.0);
+
+        let w = list_widget(&root);
+        assert_eq!(
+            w.offset(),
+            offset_before + 3.0 * ESTIMATE,
+            "the offset absorbs three unmeasured rows' worth of prepend"
+        );
+        assert_eq!(
+            w.children[0].origin().y,
+            y_before,
+            "the anchor row paints at the same pixel position"
+        );
+        assert_eq!(w.keys[0] as u64, anchor_id + 3, "shifted by three indices");
+        assert_eq!(
+            fx.log.painted()[&anchor_id],
+            painted_before[&anchor_id],
+            "and kept its own widget"
+        );
+        assert!(flags.contains(ChangeFlags::LAYOUT));
+    }
+
+    #[test]
+    fn an_unchanged_variable_frame_reports_no_layout_once_settled() {
+        // The layout-skip contract survives the extent model: once measurements
+        // have settled, an identical frame must be a no-op reconciliation, or
+        // variable extents would degenerate into "relayout every frame".
+        //
+        // Paint's convergence check asks for another frame only while the
+        // materialized window fails to *cover* the viewport, so a window that
+        // measured out *wider* than it needs to be is trimmed by the next
+        // rebuild instead — one more structural frame after `settle` returns,
+        // then steady. That trim frame is the one allowance here.
+        let fx = VarRows::new((0..60).collect());
+        let mut logic = fx.logic();
+        let mut root = converged_var(&mut logic, &fx);
+        root.event(&mut (), &wheel(500.0));
+        settle(&mut root, &mut logic, &fx, 100.0, 4);
+        var_frame(&mut root, &mut logic, &fx, 200.0); // the trim frame
+
+        for k in 0..4 {
+            let (flags, outcome) = var_frame(&mut root, &mut logic, &fx, 216.0 + 16.0 * k as f64);
+            assert!(
+                flags.is_empty(),
+                "identical variable-extent frame {k} is a no-op reconciliation, got {flags:?}"
+            );
+            assert!(
+                !outcome.needs_frame,
+                "and it does not keep asking for another frame"
+            );
+        }
+    }
+
+    #[test]
+    fn variable_short_and_empty_lists_are_well_behaved() {
+        // Content shorter than the viewport pins the offset at zero and still
+        // tiles from measured heights; an empty list materializes nothing and
+        // never walks a prefix at all.
+        let fx = VarRows::new(vec![0, 1, 2]); // 40 + 60 + 80 = 180 < 200
+        let mut logic = fx.logic();
+        let mut root = converged_var(&mut logic, &fx);
+
+        let w = list_widget(&root);
+        assert_eq!(w.window(), &[0, 1, 2]);
+        assert_eq!(
+            w.max_offset(),
+            0.0,
+            "content shorter than the viewport does not scroll"
+        );
+        assert_eq!(w.children[0].origin().y, 0.0);
+        assert_eq!(
+            w.children[2].origin().y,
+            100.0,
+            "rows 0 and 1 (40 + 60) stack above row 2"
+        );
+
+        fx.rows.borrow_mut().clear();
+        settle(&mut root, &mut logic, &fx, 100.0, 3);
+        assert!(list_widget(&root).window().is_empty());
+        assert_eq!(list_widget(&root).max_offset(), 0.0);
+        assert!(list_widget(&root).measured.is_empty());
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "requires ListView::builder_keyed")]
+    fn estimated_item_extent_needs_a_keyed_list() {
+        // Variable extents cache a measurement under row identity; a positional
+        // list has none. Debug trips the tripwire; release ignores the estimate
+        // and stays uniform (documented on the builder method).
+        let _ = list_view(10, ROW_EXTENT, |i| any::<(), _>(gen_stub(i)))
+            .estimated_item_extent(ROW_EXTENT);
     }
 
     // Duplicate keys are ambiguous: the debug tripwire is the contract (release
