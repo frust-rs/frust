@@ -1579,6 +1579,42 @@ impl<State: 'static> NavigatorWidget<State> {
         }
     }
 
+    /// Whether the page currently on top holds the recorded focus path
+    /// ([`ChildPod::is_focused`](frust_core::ChildPod::is_focused)) — the
+    /// outgoing/covered page's own half of the gate every
+    /// [`needs_ime_clear`](Self::needs_ime_clear) producer in this widget shares.
+    ///
+    /// # Why every producer is gated
+    ///
+    /// Raising `needs_ime_clear` makes the next [`paint`](Widget::paint) publish
+    /// [`cleared_ime_state`], and an **inactive** publish is not a value update:
+    /// `RenderRoot` reads it as a full focus/IME **session release** at the root
+    /// (see `docs/CORE_ARCHITECTURE.md`'s Focus/IME Lifecycle). The published
+    /// surface bubbles last-write-wins, so a navigator that mutates its stack
+    /// while the live session belongs to an *unrelated* subtree — a search field
+    /// sitting above the navigator, painted earlier in the same frame — would
+    /// otherwise kill that field's session every push/pop, deterministically and
+    /// with no self-heal (the next paint re-seeds `has_focus == false` for the
+    /// blurred field, so its own republish never fires; only a user tap recovers).
+    ///
+    /// So a producer clears only when the outgoing/covered subtree is the one
+    /// that actually owns the session: `ctx.has_focus()` ANDed with the outgoing
+    /// pod's own `is_focused()` — the same composition `frust-widgets`'
+    /// `mark_orphan_if_live` applies to the orphan mark, ANDing the rebuild-pass
+    /// chain down to *this navigator* onto the page's own link. Neither half
+    /// alone is evidence: a page-pod flag can be stale under an already-blurred
+    /// ancestor, and a live chain running past an unfocused navigator says
+    /// nothing about it.
+    ///
+    /// # Read it before [`cancel_top`](Self::cancel_top)
+    ///
+    /// `cancel_top` clears this very flag, so every caller reads it *first*;
+    /// reading after would report `false` unconditionally and suppress a clear
+    /// that was genuinely owed.
+    fn top_pod_focused(&self) -> bool {
+        self.pages.last().is_some_and(|p| p.pod.is_focused())
+    }
+
     /// The effective transition for an op, resolving a `None` per-op override to
     /// the navigator's default.
     fn effective_spec(&self, over: Option<TransitionSpec>) -> TransitionSpec {
@@ -1767,6 +1803,9 @@ impl<State: 'static> NavigatorWidget<State> {
             self.transition.is_none(),
             "steal requires no active transition"
         );
+        // The outgoing page's own focus link, read before `cancel_top` drops it
+        // (see `top_pod_focused`).
+        let outgoing_focused = self.top_pod_focused();
         self.cancel_top();
         let popped = self.pages.pop().expect("depth > 1 checked before steal");
         // Out of `self.pages`, so out of `publish_reach`'s sight — same
@@ -1807,7 +1846,27 @@ impl<State: 'static> NavigatorWidget<State> {
         // observer sees the edge on the next frame's build (the paint-time reader
         // still sees it this frame).
         self.publish_transition_start(from_depth, held, true, true);
-        self.needs_ime_clear = true;
+        // Gate the queued IME clear on the popped page's own focus link
+        // (`top_pod_focused`). **Pod-flag-only — the sanctioned fallback**: this
+        // is the one producer built entirely in the EVENT pass (see this
+        // method's doc), so no `BuildCtx` exists here to AND the live chain onto.
+        // `EventCtx::has_focus()` is deliberately *not* substituted: it carries
+        // this navigator's own pod flag as its parent recorded it, one link — not
+        // the root-down chain `BuildCtx::has_focus` composes — and reusing the
+        // name for a weaker value is how the two get confused later.
+        //
+        // Residual, bounded: a *stale* page-pod flag (set, but under an ancestor
+        // link some container already cleared) still clears here, i.e. the OLD
+        // unconditional behavior for this navigator alone. It cannot reach an
+        // unrelated subtree's session, because a stale flag on a page pod means
+        // focus was previously inside THIS navigator. In practice the window is
+        // narrower still: the `Down` that arms an edge swipe is itself a
+        // blur-on-outside-tap for anything it does not land in, so by the time a
+        // steal happens the root has usually already released the session and
+        // `RenderRoot::paint`'s `focus_active` guard makes the publish inert.
+        if outgoing_focused {
+            self.needs_ime_clear = true;
+        }
     }
 
     /// Settle a released interactive pop toward completion (`1.0`) or cancellation
@@ -2020,6 +2079,9 @@ impl<State: 'static> NavigatorWidget<State> {
     fn apply_pop(&mut self, result: PopResult, ctx: &mut BuildCtx<'_>) -> ChangeFlags {
         let mut flags = ChangeFlags::NONE;
         if self.pages.len() > 1 {
+            // The outgoing page's own focus link, read before `cancel_top` drops
+            // it (see `top_pod_focused`).
+            let outgoing_focused = self.top_pod_focused();
             self.cancel_top();
             // Disarm any pending edge-swipe: this pop shrinks the stack, so an arm
             // captured before it must not later steal an interactive pop against
@@ -2034,7 +2096,13 @@ impl<State: 'static> NavigatorWidget<State> {
                 // (FINDINGS #56).
                 frust_core::mark_pending_result_flush();
             }
-            self.needs_ime_clear = true;
+            // Full gate (`top_pod_focused`): the popped page's own link ANDed
+            // with the rebuild-pass chain down to this navigator. A pop inside a
+            // navigator that never held focus leaves an unrelated subtree's live
+            // session alone.
+            if outgoing_focused && ctx.has_focus() {
+                self.needs_ime_clear = true;
+            }
             if spec.is_animated() {
                 // Keep the popped page alive & painted, animating out; torn down
                 // on settle (a pop reverses its transition).
@@ -2094,6 +2162,14 @@ impl<State: 'static> NavigatorWidget<State> {
                     on_visibility,
                 } => {
                     let spec = self.effective_spec(transition);
+                    // A push severs nothing, but it does *cover* the current top
+                    // — and a covered page's session must go down with the
+                    // keyboard, which is why the existing
+                    // `push_clears_focused_field_ime_surface` behavior is
+                    // deliberate. The COVERED page is therefore the outgoing pod
+                    // here; read its link before `cancel_top` drops it (see
+                    // `top_pod_focused`).
+                    let covered_focused = self.top_pod_focused();
                     self.cancel_top();
                     // Disarm any pending edge-swipe: a structural stack mutation
                     // invalidates an arm captured against the pre-mutation stack
@@ -2126,7 +2202,13 @@ impl<State: 'static> NavigatorWidget<State> {
                         reconciled_covered: false,
                         reach,
                     });
-                    self.needs_ime_clear = true;
+                    // Full gate (`top_pod_focused`): the covered page's own link
+                    // ANDed with the rebuild-pass chain down to this navigator.
+                    // `ctx.has_focus()` is unchanged by the `build_child` above —
+                    // that descent restores the chain on the way out.
+                    if covered_focused && ctx.has_focus() {
+                        self.needs_ime_clear = true;
+                    }
                     // A push's leaving page (now at `len - 2`) stays in the stack;
                     // the transition keeps it painted (culling deferred to settle).
                     if spec.is_animated() && self.pages.len() >= 2 {
@@ -2146,6 +2228,9 @@ impl<State: 'static> NavigatorWidget<State> {
                     transition,
                 } => {
                     let spec = self.effective_spec(transition);
+                    // The replaced top is the outgoing pod; read its link before
+                    // `cancel_top` drops it (see `top_pod_focused`).
+                    let outgoing_focused = self.top_pod_focused();
                     self.cancel_top();
                     // Disarm any pending edge-swipe: replacing the top page
                     // invalidates an arm captured against the outgoing page
@@ -2205,7 +2290,11 @@ impl<State: 'static> NavigatorWidget<State> {
                             reach,
                         });
                     }
-                    self.needs_ime_clear = true;
+                    // Full gate (`top_pod_focused`): the replaced page's own link
+                    // ANDed with the rebuild-pass chain down to this navigator.
+                    if outgoing_focused && ctx.has_focus() {
+                        self.needs_ime_clear = true;
+                    }
                     flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
                 }
             }
@@ -2958,8 +3047,8 @@ fn cleared_ime_state() -> ImeState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Stack;
     use crate::test_support::RecordingScene;
+    use crate::{Column, FlexView, Stack};
     use frust_core::{FrameTime, PointerButton, PointerEvent, PointerPhase, RenderRoot, any};
     use kurbo::Rect;
     use std::cell::Cell;
@@ -3958,6 +4047,198 @@ mod tests {
             focused_gen.wrapping_add(1),
             "an idle popped screen fires no further focus/IME edges"
         );
+    }
+
+    // --- Cross-subtree survival: a navigator whose OWN subtree never held focus
+    //     must not release somebody else's live session (review-fix-3, FC). ---
+
+    /// The IME surface the sibling field owns for the whole of each test below.
+    fn field_surface() -> ImeState {
+        ImeState {
+            active: true,
+            editing: EditingState {
+                text: "query".to_string(),
+                selection_base: 5,
+                selection_extent: 5,
+                composing_base: -1,
+                composing_extent: -1,
+            },
+            caret: Some(Rect::new(0.0, 0.0, 1.0, 12.0)),
+            content_type: Default::default(),
+        }
+    }
+
+    /// A **persistent** field-shaped leaf: it claims focus and publishes on
+    /// `Down` like [`EditableLeaf`], and additionally **republishes the same
+    /// surface on every paint while it still holds focus** — the behavior a real
+    /// `TextInput` has, and the reason paint order decides the last write.
+    ///
+    /// Its size is bounded (unlike `EditableLeaf`'s `bc.max()`) so it can sit as
+    /// an inflexible child on a `Column`'s unbounded main axis.
+    struct PersistentField {
+        size: Size,
+    }
+    struct PersistentFieldWidget {
+        size: Size,
+    }
+    impl<S: 'static> View<S> for PersistentField {
+        type Element = PersistentFieldWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> PersistentFieldWidget {
+            PersistentFieldWidget { size: self.size }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut PersistentFieldWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+    impl Widget for PersistentFieldWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(self.size)
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            if ctx.has_focus() {
+                ctx.publish_ime_state(field_surface());
+            }
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if let InputEvent::Pointer(p) = event
+                && p.phase == PointerPhase::Down
+            {
+                ctx.request_focus();
+                ctx.publish_ime_state(field_surface());
+                return EventResult::Handled;
+            }
+            EventResult::Ignored
+        }
+    }
+
+    /// The search-bar-above-nav shape the defect was reported against: a
+    /// persistent field as the **earlier** sibling of an unrelated navigator, so
+    /// the field paints FIRST and any surface the navigator published would win
+    /// last-write-wins on the way to the root.
+    ///
+    /// Rows are 40 tall: the field owns `y ∈ [0, 40)`, the navigator `y ∈ [40, 80)`.
+    fn field_above_navigator_app(
+        controller: &NavigatorController<()>,
+    ) -> impl FnMut(&mut ()) -> FlexView<()> + use<> {
+        let ctrl = controller.clone();
+        move |_: &mut ()| {
+            Column(vec![
+                any(PersistentField {
+                    size: Size::new(100.0, 40.0),
+                }),
+                any(navigator(&ctrl, || sized_page(100.0, 40.0))),
+            ])
+        }
+    }
+
+    /// The mounted, focused cross-subtree fixture: the live root, its app logic
+    /// (boxed so the tuple stays a nameable type), and the focus/IME generation
+    /// the field's session is parked at.
+    type FixtureAppLogic = Box<dyn FnMut(&mut ()) -> FlexView<()>>;
+    type FocusedFieldFixture = (RenderRoot<(), FlexView<()>>, FixtureAppLogic, u64);
+
+    /// Mount [`field_above_navigator_app`], focus the field with a tap in ITS
+    /// row, and hand back the fixture.
+    fn field_focused_beside_navigator(controller: &NavigatorController<()>) -> FocusedFieldFixture {
+        let mut root: RenderRoot<(), FlexView<()>> = RenderRoot::new();
+        let mut app: FixtureAppLogic = Box::new(field_above_navigator_app(controller));
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut RecordingScene::default(), FrameTime::ZERO);
+
+        // Tap inside the field's row — never the navigator's, which would blur
+        // the field on the way in (blur-on-outside-tap) and hide the defect.
+        root.event(&mut state, &down(5.0, 5.0));
+        assert!(
+            root.is_focus_active(),
+            "the sibling field owns the focus session"
+        );
+        assert_eq!(
+            root.ime_state().map(|s| s.editing.text),
+            Some("query".to_string()),
+            "…and the shell-facing surface is the field's"
+        );
+        let generation = root.focus_ime_generation();
+        (root, app, generation)
+    }
+
+    /// Every navigator case asserts the same thing: the field's session is
+    /// untouched — still active, same surface, and **no generation edge at all**
+    /// (an edge is what wakes the shell's IME machinery).
+    fn assert_field_session_survived(
+        root: &RenderRoot<(), FlexView<()>>,
+        generation: u64,
+        op: &str,
+    ) {
+        assert!(
+            root.is_focus_active(),
+            "{op} in an unfocused navigator must not release the sibling field's session"
+        );
+        let ime = root
+            .ime_state()
+            .unwrap_or_else(|| panic!("{op} dropped the sibling field's IME surface entirely"));
+        assert!(ime.active, "{op} left the field's surface inactive");
+        assert_eq!(
+            ime.editing.text, "query",
+            "{op} replaced the field's surface with someone else's"
+        );
+        assert_eq!(
+            root.focus_ime_generation(),
+            generation,
+            "{op} in an unfocused navigator is not a focus/IME edge"
+        );
+    }
+
+    #[test]
+    fn pop_in_an_unfocused_navigator_leaves_a_sibling_fields_session_alive() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        // Depth 2 before the first frame, so the pop below is a real one.
+        controller.push(|| sized_page(100.0, 40.0));
+        let (mut root, mut app, generation) = field_focused_beside_navigator(&controller);
+        let mut state = ();
+
+        controller.pop();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut RecordingScene::default(), FrameTime::ZERO);
+
+        assert_field_session_survived(&root, generation, "a pop");
+    }
+
+    #[test]
+    fn push_in_an_unfocused_navigator_leaves_a_sibling_fields_session_alive() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let (mut root, mut app, generation) = field_focused_beside_navigator(&controller);
+        let mut state = ();
+
+        // A push COVERS the navigator's own top page — but that page holds no
+        // focus link, so there is no session of its own to end.
+        controller.push(|| sized_page(100.0, 40.0));
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut RecordingScene::default(), FrameTime::ZERO);
+
+        assert_field_session_survived(&root, generation, "a push");
+    }
+
+    #[test]
+    fn replace_in_an_unfocused_navigator_leaves_a_sibling_fields_session_alive() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let (mut root, mut app, generation) = field_focused_beside_navigator(&controller);
+        let mut state = ();
+
+        controller.replace(|| sized_page(100.0, 40.0));
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut RecordingScene::default(), FrameTime::ZERO);
+
+        assert_field_session_survived(&root, generation, "a replace");
     }
 
     // --- An example-style stack driven through the facade
