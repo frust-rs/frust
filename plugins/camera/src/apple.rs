@@ -572,11 +572,18 @@ impl SessionInner {
     /// `isTorchAvailable` is transient — AVFoundation withdraws the torch
     /// while the device is cooling off, and a control offered then would
     /// simply do nothing. The cache is seeded in [`AppleSession::open`]'s
-    /// configuration transaction and refreshed after [`Self::start`]'s
-    /// `startRunning()` returns and at the end of every [`Self::set_torch`]
-    /// queue body, so a `Relaxed` read here trades a small, bounded
-    /// staleness window (until the next refresh point) for never blocking
-    /// the calling thread on the session queue.
+    /// configuration transaction and refreshed at exactly two later points:
+    /// after [`Self::start`]'s `startRunning()` returns, and at the end of
+    /// every [`Self::set_torch`] queue body. Nothing refreshes it
+    /// autonomously — so between refreshes the value can lag reality in
+    /// either direction: a read before the post-`startRunning` refresh
+    /// answers from the pre-start seed, and a cool-off beginning after the
+    /// last refresh leaves a stale `true` until the app's next `set_torch`
+    /// (which may never come). That is the deliberate price of a `Relaxed`
+    /// read that never blocks the calling thread on the session queue;
+    /// consumers should re-check on later rebuilds rather than latch the
+    /// first answer (README §5). An autonomous refresh (session-state-edge
+    /// or age-stamped re-read) is a recorded follow-up option.
     fn torch_available(&self) -> bool {
         if self.closed.load(Ordering::Acquire) {
             return false;

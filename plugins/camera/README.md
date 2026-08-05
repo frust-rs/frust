@@ -328,6 +328,7 @@ a torch control:
 | Front lens (most devices), or any device with no flash unit — **Apple** | `false` | `Ok(())` — accepted onto the session queue, never applied; `torch_available()` stays `false` |
 | iOS, device cooling off (torch temporarily withdrawn) | `false` | `Ok(())` — accepted onto the session queue, never applied; `torch_available()` stays `false` |
 | Android, before CameraX finishes binding the camera | `false` | `CameraError::Platform` — **retryable**, try again once the preview is live |
+| Apple, before `startRunning` completes (cache still holds the pre-start seed) | may read `false` | `Ok(())` — accepted; **re-check availability** after the pipeline is live (a later rebuild), same guidance as the Android bind row |
 | After `close()` | `false` | `CameraError::SessionClosed` |
 | Desktop/wasm (no camera backend) | `false` | `CameraError::PlatformNotInitialized` |
 
@@ -382,7 +383,14 @@ test*.
   request without waiting on its `ListenableFuture` (that is what keeps the
   call non-blocking), so `Ok(())` means "the camera control took it", not
   "the LED is lit" — the same shape a torch toggle in any CameraX app has.
-  iOS applies it synchronously under the device configuration lock.
+  iOS fires the request onto the session's own queue **asynchronously** and
+  returns before that body runs — its effect is only ever observable via
+  `torch_available()`/the LED, never confirmed by the call's `Result` (see
+  §5). On BOTH platforms, re-check availability rather than latching its
+  first answer: Android's answer flips once CameraX binds; Apple's cached
+  answer is refreshed at three points only (configure, after `startRunning`,
+  after each `set_torch`), so between refreshes it can lag reality in either
+  direction.
 - **v1 is on/off only.** No torch *level* (`setTorchModeOnWithLevel:` on iOS
   has no CameraX equivalent), no `Auto` mode, and no zoom/focus control —
   those stay Future Enhancements rather than a half-symmetric API.

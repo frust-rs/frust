@@ -89,7 +89,10 @@
 //! CameraX a fire-and-forget `enableTorch` without waiting on its
 //! `ListenableFuture`; Apple fires the request onto the session's own serial
 //! queue with an **asynchronous** dispatch and answers availability from a
-//! cached atomic the queue keeps current, rather than the synchronous queue
+//! cached atomic refreshed at three explicit points (open's configuration
+//! transaction, after `startRunning` returns, after each `set_torch` body —
+//! it is NOT autonomously kept current; re-check on later rebuilds rather
+//! than latching the first answer), rather than the synchronous queue
 //! hop [`CameraSession::close`] still uses (a synchronous hop that, before
 //! this contract held, could still park a UI-thread caller behind
 //! `startRunning()` coming up right after open — the failure mode this
