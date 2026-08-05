@@ -52,9 +52,16 @@
 //! interval pair through [`FramePacing`] to [`FrameGate::decide_paced`]; any
 //! input/signal/change-flag/transition dirtiness is **never** paced (it runs
 //! immediately, per the default-to-run rule) — with one deliberate exception,
-//! the one-shot [`FrameInputs::focus_or_ime_changed`] edge (that field's doc has
-//! the reasoning: a blinking caret in a focused field is exactly the loop this
-//! gate must be able to throttle). The `FRUST_NO_FRAME_GATE` kill
+//! the [`FrameInputs::focus_or_ime_changed`] edge (that field's doc has the
+//! reasoning: a blinking caret in a focused field is exactly the loop this gate
+//! must be able to throttle). Because that edge *can* ride inside a paced
+//! decision, the shells **peek** it rather than drain it: they compare the live
+//! generation against their cache every tick but commit the cache only once the
+//! gate has decided to `Run`, so an edge landing on a skipped tick is deferred
+//! by the pacing — bounded by one cap interval — and never erased. Every other
+//! drained-on-gather latch is an [`FrameInputs::is_paced_only_frame`]
+//! disqualifier and so can never be true on a tick the gate skips. The
+//! `FRUST_NO_FRAME_GATE` kill
 //! switch disables pacing too (a disabled gate always runs), and
 //! [`NO_ANIM_PACING_VAR`] (`FRUST_NO_ANIM_PACING`) disables *only* the pacing
 //! while leaving the skip gate active.
@@ -222,9 +229,12 @@ pub struct FrameInputs {
     /// `AppTree`/`RenderRoot::is_pointer_captured`.
     pub pointer_capture_active: bool,
     /// *focus/IME session moved*. The root's focus flag or its published IME
-    /// surface changed since the shell last looked — an **edge**, not a level.
-    /// Source: [`AppTree::focus_ime_generation`](crate::AppTree::focus_ime_generation)
-    /// compared against the shell's cached copy (which the shell then updates).
+    /// surface changed since the shell last **produced a frame** — an **edge**,
+    /// not a level. Source:
+    /// [`AppTree::focus_ime_generation`](crate::AppTree::focus_ime_generation)
+    /// compared against the shell's cached copy, which the shell commits only
+    /// once the gate has decided to run this frame (a *peek* at gather time —
+    /// see the deferral note at the end of this doc).
     ///
     /// **Why an edge.** This was a *level* input
     /// (`RenderRoot::is_focus_active || ime_state().is_some()`) — the phase-7
@@ -249,9 +259,13 @@ pub struct FrameInputs {
     /// Unlike the other wake inputs this one is **not** an
     /// [`is_paced_only_frame`](Self::is_paced_only_frame) disqualifier, so an
     /// edge landing on a tick whose only other dirtiness is a paced loop is
-    /// consumed by that tick's pacing decision: the repaint then lands with the
-    /// loop's next paced frame (bounded by one `cosmetic_loop_rate` interval),
-    /// and the platform's IME poll is unaffected either way. A *per-request*
+    /// consumed by whichever tick's pacing decision resolves to `Run`: the
+    /// repaint then lands with the loop's next paced frame (bounded by one
+    /// `cosmetic_loop_rate` interval), and the platform's IME poll is unaffected
+    /// either way. This is exactly why the shells peek the generation rather
+    /// than draining it at gather time — an edge that a Skip erased would make
+    /// the next repaint wait out the loop's *full* effective interval instead of
+    /// the bound below. A *per-request*
     /// paced interval ([`FramePacing::requested_interval`]) never widens that
     /// bound — [`FrameGate::decide_paced`] tightens an edge-carrying tick back
     /// to the theme cap on purpose, so a 500ms caret cannot turn a focus
@@ -351,8 +365,11 @@ impl FrameInputs {
     /// a whole focus session — that is what made caret pacing unreachable: a
     /// blinking caret in a focused field is precisely the paced loop this gate
     /// must be able to throttle (that field's doc has the device measurement).
-    /// The edge that replaced it is one-shot, so an edge arriving mid-loop is
-    /// simply carried by the loop's next paced frame instead of pre-empting it.
+    /// The edge that replaced it reports one transition, not a session, so an
+    /// edge arriving mid-loop is simply carried by the loop's next paced frame
+    /// instead of pre-empting it. It is one repaint *per transition*, not
+    /// per tick: the shells peek it, so it keeps reporting across every skipped
+    /// tick in between and is cleared by the frame that finally runs.
     ///
     /// [`CosmeticLoop`]: frust_core::TickClass::CosmeticLoop
     pub fn is_paced_only_frame(&self) -> bool {
@@ -516,13 +533,22 @@ impl FrameGate {
     /// interval in force, so honoring a long per-request interval on that tick
     /// would stretch a focus/IME transition's repaint out to (say) a caret's
     /// 500ms. Instead a tick carrying the edge paces at
-    /// [`FramePacing::interval`] — the theme's own cap, `min`'d with the
-    /// effective interval — leaving the edge's worst-case deferral exactly what
-    /// it was before per-request intervals existed: one `cosmetic_loop_rate`
-    /// interval (33ms at the 30Hz default; ≤100ms at `CosmeticLoopRate::FLOOR_HZ`).
-    /// The cost is at most one extra frame per focus/IME *transition* — a
-    /// one-shot edge, not a per-tick level (see `docs/LIMITATIONS.md`'s
+    /// [`FramePacing::interval`] — the theme's own cap — leaving the edge's
+    /// worst-case deferral exactly what it was before per-request intervals
+    /// existed: one `cosmetic_loop_rate` interval (33ms at the 30Hz default;
+    /// ≤100ms at `CosmeticLoopRate::FLOOR_HZ`). The cost is at most one extra
+    /// frame per focus/IME *transition* — an edge reporting one transition, not
+    /// a per-tick level (see `docs/LIMITATIONS.md`'s
     /// `focus-ime-edge-paced-deferral`).
+    ///
+    /// That bound only holds end-to-end because the shells **peek** the edge:
+    /// the tightening itself resolves most edge-carrying ticks to `Skip` (the
+    /// anchor is typically one vsync old, well inside the cap), so a shell that
+    /// drained its generation cache at gather time would erase the edge on the
+    /// very tick the tightening deferred it, and the repaint would fall back to
+    /// the full [`FramePacing::effective_interval`]. The edge must keep being
+    /// reported until a tick actually runs — see
+    /// [`FrameInputs::focus_or_ime_changed`].
     ///
     /// [`CosmeticLoop`]: frust_core::TickClass::CosmeticLoop
     /// [`Skip`]: FrameDecision::Skip
@@ -561,10 +587,12 @@ impl FrameGate {
             // previous paint's requested interval, tightened back to the bare cap
             // when a focus/IME edge is riding along (see this method's docs — the
             // edge's deferral bound must not widen with a slow per-request
-            // interval). `effective_interval() >= p.interval` always, so the
-            // `min` is exactly "ignore the request on an edge tick".
+            // interval). The edge arm is literally `p.interval`: since
+            // `effective_interval() == max(cap, requested) >= p.interval`,
+            // tightening to the cap and `min`-ing with it are the same value —
+            // "ignore the request on an edge tick".
             let interval = if inputs.focus_or_ime_changed {
-                p.effective_interval().min(p.interval)
+                p.interval
             } else {
                 p.effective_interval()
             };
@@ -996,14 +1024,24 @@ mod tests {
     // The focus/IME EDGE, driven the way a shell drives it
     // -----------------------------------------------------------------
 
-    /// The shells' cache mechanics, verbatim: hold the last-seen
-    /// `AppTree::focus_ime_generation`, report `now != last`, then update the
-    /// cache. Both mobile shells are target-gated (`#[cfg(target_os = ...)]`)
-    /// so their own copies never compile on the host — this stands in for them,
-    /// with `frust-core`'s generation tests
-    /// (`focus_ime_generation_*`) pinning the other half: that the generation
-    /// moves exactly once per real focus/IME transition and never on a
-    /// same-value write.
+    /// The shells' cache mechanics, verbatim, in the two halves both mobile
+    /// shells actually run: [`peek`](FocusEdgeCache::peek) at gather time (a
+    /// non-mutating `generation != last_seen`, the value that feeds
+    /// [`FrameInputs::focus_or_ime_changed`]) and
+    /// [`commit`](FocusEdgeCache::commit) as the first statement past the
+    /// `decide_paced(..).is_skip()` early return, i.e. only on a frame that
+    /// actually runs.
+    ///
+    /// The split is the contract, not an implementation detail: this is the one
+    /// OR-list input that is both consumed-on-read and *not* an
+    /// [`FrameInputs::is_paced_only_frame`] disqualifier, so committing it at
+    /// gather time erases any edge the pacing defers.
+    ///
+    /// Both mobile shells are target-gated (`#[cfg(target_os = ...)]`) so their
+    /// own copies never compile on the host — this stands in for them, with
+    /// `frust-core`'s generation tests (`focus_ime_generation_*`) pinning the
+    /// other half: that the generation moves exactly once per real focus/IME
+    /// transition and never on a same-value write.
     struct FocusEdgeCache {
         last_seen: u64,
     }
@@ -1011,10 +1049,16 @@ mod tests {
         fn new(seed: u64) -> Self {
             Self { last_seen: seed }
         }
-        fn gather(&mut self, generation: u64) -> bool {
-            let changed = generation != self.last_seen;
+        /// Gather-time peek: "has the session moved since the last frame this
+        /// shell produced?" — never mutates, so a skipped tick keeps reporting
+        /// the same pending edge.
+        fn peek(&self, generation: u64) -> bool {
+            generation != self.last_seen
+        }
+        /// Run-time commit: the edge has now been consumed by a frame that is
+        /// actually being produced.
+        fn commit(&mut self, generation: u64) {
             self.last_seen = generation;
-            changed
         }
     }
 
@@ -1040,7 +1084,7 @@ mod tests {
         let mut gate = FrameGate::with_enabled(true);
         for (generation, expected_edge, what) in script {
             let inputs = FrameInputs {
-                focus_or_ime_changed: cache.gather(*generation),
+                focus_or_ime_changed: cache.peek(*generation),
                 ..FrameInputs::default()
             };
             assert_eq!(
@@ -1055,7 +1099,14 @@ mod tests {
             } else {
                 FrameDecision::Skip
             };
-            assert_eq!(gate.decide(inputs), expect, "decision for {what:?}");
+            let decision = gate.decide(inputs);
+            assert_eq!(decision, expect, "decision for {what:?}");
+            // The shells' commit site: only a produced frame consumes the edge.
+            // Here every edge tick Runs (nothing paces it), so the cache
+            // advances on exactly the transitions — one repaint each.
+            if decision.is_run() {
+                cache.commit(*generation);
+            }
         }
     }
 
@@ -1070,14 +1121,166 @@ mod tests {
         let mut runs = 0usize;
         for _ in 0..600 {
             let inputs = FrameInputs {
-                focus_or_ime_changed: cache.gather(7),
+                focus_or_ime_changed: cache.peek(7),
                 ..FrameInputs::default()
             };
             if gate.decide(inputs).is_run() {
+                cache.commit(7);
                 runs += 1;
             }
         }
         assert_eq!(runs, 0, "a steady focus session must produce no frames");
+    }
+
+    #[test]
+    fn a_focus_edge_persists_across_paced_skips_and_lands_within_one_cap_interval() {
+        // The end-to-end contract, driven exactly the way a mobile shell's
+        // `frame()` drives it: PEEK the generation into `FrameInputs`, decide,
+        // and commit the cache only past the `is_skip()` early return.
+        //
+        // Shape: a 120Hz tick stream, a caret loop naming its own 500ms cadence
+        // (`PaintCtx::request_frame_paced_at`), and a focus/IME transition
+        // landing one vsync into that interval. The edge tightening resolves
+        // that tick to Skip — the loop's anchor is one tick old, far inside the
+        // 33ms cap — which is precisely why the edge must NOT be consumed there:
+        // a shell draining its cache at gather time erases it, and the repaint
+        // then falls through to the caret's full 500ms interval (the pre-fix
+        // behaviour, contrasted at the end of this test).
+        let tick = step_nanos(120.0);
+        let cap = interval_30hz();
+        let at = |i: u64| FrameTime::from_nanos(i * tick);
+        let caret = |i: u64| FramePacing {
+            now: at(i),
+            interval: cap,
+            requested_interval: Some(interval_500ms()),
+        };
+        let inputs = |edge: bool| FrameInputs {
+            focus_or_ime_changed: edge,
+            ..paced_only()
+        };
+
+        let mut gate = FrameGate::with_flags(true, true);
+        let mut cache = FocusEdgeCache::new(5);
+
+        // Tick 0: the caret loop's own first paced frame, no edge — it anchors
+        // the pace clock at t=0.
+        assert!(!cache.peek(5));
+        assert!(gate.decide_paced(inputs(false), caret(0)).is_run());
+        cache.commit(5);
+
+        // The transition happens: the generation moves 5 -> 6. Every tick from
+        // here until the loop's next produced frame PEEKS the same still-pending
+        // edge — the persistence a drain-on-gather shell (and the pre-fix
+        // `gather` helper this suite used) could not express — and the frame the
+        // edge asked for lands on the first tick that runs, which is where it is
+        // finally consumed.
+        let mut landed_tick = None;
+        for i in 1..120u64 {
+            assert!(
+                cache.peek(6),
+                "the edge must still be pending at tick {i} — a Skip consumes nothing"
+            );
+            if gate.decide_paced(inputs(true), caret(i)).is_run() {
+                cache.commit(6);
+                landed_tick = Some(i);
+                break;
+            }
+        }
+        let landed_tick =
+            landed_tick.expect("the deferred edge must be consumed by a tick that runs");
+        let landed_ns = landed_tick * tick;
+        assert!(
+            landed_ns <= cap.as_nanos() as u64 + tick,
+            "the edge repaint must land within one cap interval of the loop's \
+             last produced frame (plus one tick of 120Hz grid rounding); landed \
+             at {landed_ns}ns"
+        );
+        assert!(
+            landed_ns < interval_500ms().as_nanos() as u64,
+            "…and nowhere near the caret's own 500ms request"
+        );
+
+        // Consumed exactly once: the next tick reports no edge, and the loop
+        // goes straight back to its own slow cadence (the tightening is scoped
+        // to the edge tick alone).
+        assert!(!cache.peek(6), "a produced frame clears the edge");
+        assert_eq!(
+            gate.decide_paced(inputs(false), caret(landed_tick + 1)),
+            FrameDecision::Skip
+        );
+
+        // The contrast that makes the shell-side split load-bearing: the same
+        // stream with the pre-fix shape — the generation cache committed at
+        // GATHER time, whatever the decision — loses the edge on the very first
+        // skipped tick, so the repaint waits out the caret's 500ms request.
+        let mut drained_gate = FrameGate::with_flags(true, true);
+        let mut drained_cache = FocusEdgeCache::new(5);
+        let mut first_run_after_bump: Option<u64> = None;
+        for i in 0..120u64 {
+            let generation = if i >= 1 { 6 } else { 5 };
+            let edge = drained_cache.peek(generation);
+            drained_cache.commit(generation); // the pre-fix drain: unconditional
+            if drained_gate.decide_paced(inputs(edge), caret(i)).is_run() && i >= 1 {
+                first_run_after_bump = Some(i * tick);
+                break;
+            }
+        }
+        assert!(
+            first_run_after_bump.is_some_and(|ns| ns >= interval_500ms().as_nanos() as u64),
+            "drain-on-gather erases the deferred edge, so the repaint falls \
+             through to the 500ms per-request interval; observed \
+             {first_run_after_bump:?}ns"
+        );
+    }
+
+    #[test]
+    fn a_warmup_run_commits_the_focus_edge_too() {
+        // The commit-on-Run rule keys off `is_skip()` and nothing else, so it
+        // needs no special-casing for the warmup path — which returns `Run`
+        // *before* `any_set()`/`is_paced_only_frame` are ever consulted. A
+        // pending edge riding a warmup frame is therefore consumed by it, once.
+        let cap = interval_30hz();
+        let mut gate = FrameGate::with_flags(true, true);
+        let mut cache = FocusEdgeCache::new(1);
+        gate.note_resumed();
+
+        // A focus/IME transition landing on the first post-resume tick.
+        assert!(cache.peek(2));
+        let decision = gate.decide_paced(
+            FrameInputs {
+                focus_or_ime_changed: cache.peek(2),
+                ..paced_only()
+            },
+            pacing(FrameTime::from_nanos(0), cap),
+        );
+        assert_eq!(
+            decision,
+            FrameDecision::Run,
+            "the resume warmup forces this frame to run"
+        );
+        assert_eq!(gate.warmup_remaining(), WARMUP_FRAMES - 1);
+        // A Run is a Run: the shell commits here exactly as on any other.
+        assert!(decision.is_run());
+        cache.commit(2);
+
+        // Consumed once — the rest of the warmup window still runs (that is the
+        // warmup's job), but it no longer carries an edge.
+        assert!(!cache.peek(2), "the warmup frame consumed the edge");
+        for i in 1..=u64::from(WARMUP_FRAMES - 1) {
+            assert!(!cache.peek(2));
+            assert!(
+                gate.decide_paced(
+                    FrameInputs {
+                        focus_or_ime_changed: cache.peek(2),
+                        ..paced_only()
+                    },
+                    pacing(FrameTime::from_nanos(i * step_nanos(120.0)), cap),
+                )
+                .is_run()
+            );
+            cache.commit(2);
+        }
+        assert_eq!(gate.warmup_remaining(), 0);
     }
 
     // -----------------------------------------------------------------
@@ -1567,6 +1770,14 @@ mod tests {
         // one `cosmetic_loop_rate` interval — never the (much longer) per-request
         // interval a caret named. Without the tightening this edge would sit
         // behind a 500ms caret blink, a user-visible focus lag.
+        //
+        // This pins the GATE half of that contract and holds unchanged: it feeds
+        // the edge to every tick by hand, which is what a shell must actually do
+        // for the bound to be real. The shell half — peeking the generation and
+        // committing it only on a Run, so a deferred edge survives the Skips in
+        // between — is pinned by
+        // `a_focus_edge_persists_across_paced_skips_and_lands_within_one_cap_interval`
+        // above.
         let cap = interval_30hz();
         let mut gate = FrameGate::with_flags(true, true);
         let at = |ms: u64| FrameTime::from_nanos(ms * 1_000_000);

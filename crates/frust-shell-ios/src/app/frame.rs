@@ -155,16 +155,19 @@ impl IosAppHandle {
         // the `FRUST_NO_FRAME_GATE` kill switch internally (always `Run` when
         // disabled). Correctness over savings: every input defaults toward "run".
         let signals_dirty = ReactiveRuntime::get().is_some_and(|rt| rt.take_signals_dirty());
-        // The focus/IME session's EDGE input: the live generation is read here
-        // and the cache updated below (beside the events-latch reset — this
-        // shell defers its resets past the input assembly), so
-        // `focus_or_ime_changed` reports "the session moved since the last
-        // gathered tick", never "something is focused". As a level read this
-        // forced a frame on every `CADisplayLink` tick for the whole life of a
-        // focus session and made caret pacing unreachable (62–120 fps measured
-        // on a static focused screen). Swift's per-frame `renderFrame` IME
-        // reconcile is unaffected: it polls the published Rust state directly,
-        // whether or not this tick produces a frame.
+        // The focus/IME session's EDGE input, PEEKED here and committed only
+        // past the skip return below (on a frame that actually runs), so
+        // `focus_or_ime_changed` reports "the session moved since the last tick
+        // that produced a frame", never "something is focused". Committing at
+        // gather time instead would erase an edge landing on a tick the pacing
+        // tightening itself resolves to Skip, and the edge's bound — one
+        // theme-cap interval, `docs/LIMITATIONS.md`'s
+        // `focus-ime-edge-paced-deferral` — depends on it surviving those skips.
+        // As a level read this forced a frame on every `CADisplayLink` tick for
+        // the whole life of a focus session and made caret pacing unreachable
+        // (62–120 fps measured on a static focused screen). Swift's per-frame
+        // `renderFrame` IME reconcile is unaffected: it polls the published Rust
+        // state directly, whether or not this tick produces a frame.
         let focus_ime_gen = self.app.focus_ime_generation();
         let inputs = FrameInputs {
             signals_dirty,
@@ -206,11 +209,13 @@ impl IosAppHandle {
             resumed_recently: false,
         };
         // The events latch has now been read into this frame's decision; reset it
-        // so the next frame only sees events that arrive from here on. Same for
-        // the focus/IME edge cache: this tick has consumed the transition, so
-        // the next one compares against what the tree reports now.
+        // so the next frame only sees events that arrive from here on. Clearing
+        // it eagerly (before the gate decides) is provably harmless: the events
+        // latch is an `is_paced_only_frame` disqualifier, so a tick carrying it
+        // can never be skipped. The focus/IME edge cache is NOT reset here — it
+        // is the one input that both rides inside a paced decision and is
+        // consumed on read, so its commit waits for a decided Run (see below).
         self.events_since_last_frame = false;
-        self.last_focus_ime_gen = focus_ime_gen;
 
         // Deadline-aware pacing: estimate this frame's target
         // budget from the tick-to-tick delta, updating the stored tick every
@@ -251,6 +256,17 @@ impl IosAppHandle {
             self.executor.record_skip();
             return;
         }
+
+        // The frame is known to RUN from here on, so the focus/IME edge peeked
+        // above is genuinely consumed: commit the generation. A tick the gate
+        // skipped deliberately leaves the cache alone, so the next tick still
+        // reports the same pending edge and the repaint lands with the loop's
+        // next produced frame — the one-cap-interval bound in
+        // `docs/LIMITATIONS.md`'s `focus-ime-edge-paced-deferral`. `last_paced_run`
+        // re-anchors only on a Run too, so a persisting edge accumulates wait
+        // against the same anchor and can never double-fire. Mirrors the Android
+        // shell's commit site seam-for-seam.
+        self.last_focus_ime_gen = focus_ime_gen;
 
         // Perf instrumentation: read the cached
         // switch exactly once per frame and gate every `Instant::now()` read

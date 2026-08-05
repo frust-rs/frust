@@ -185,13 +185,41 @@ impl AndroidAppHandle {
         // Gather the remaining inputs from the tree's existing accessors and the
         // handle-side latches, then let the gate decide. `mem::take` clears each
         // latch as it is read, so a skipped frame does not leave a stale signal
-        // for the next tick.
+        // for the next tick — every such latch is also an
+        // `is_paced_only_frame` disqualifier, so it can never be true on a tick
+        // the gate skips. The focus/IME edge is the one exception and is
+        // therefore *peeked* here and committed only past the skip return below.
         //
         // `pointer_capture_active` reads the dedicated `AppTree` accessor
         // (`is_pointer_captured`); `focus_or_ime_changed` compares
         // `AppTree::focus_ime_generation` against this handle's cache. Both are
         // the sources the iOS shell's gate uses — the two frame() bodies must
         // stay input-for-input comparable.
+        //
+        // Focus/IME EDGE, PEEKED (not drained): the live generation is read here
+        // and the cache is updated only once the gate has decided to run this
+        // frame. Draining it at gather time erases an edge that lands on a tick
+        // the pacing tightening itself resolves to Skip, and the edge's whole
+        // bound — one theme-cap interval, `docs/LIMITATIONS.md`'s
+        // `focus-ime-edge-paced-deferral` — depends on it surviving those skips
+        // and being consumed by the first tick that actually runs. Same
+        // non-draining shape as `change_flags_pending` /
+        // `deferred_callbacks_pending` below, and the same peek/commit split the
+        // iOS shell uses. One Run per focus/IME transition; a steady focus
+        // session (a caret blinking in an idle field) reports `false` and leaves
+        // the gate free to idle or pace — as a level read this input rendered
+        // every Choreographer tick for the whole session (62–120 fps measured on
+        // a Xiaomi 12) and made caret pacing unreachable. The platform-side IME
+        // reconcile is unaffected: Kotlin's per-frame `doFrame` poll reads the
+        // published Rust state directly, whether or not this tick produces a
+        // frame.
+        //
+        // Hoisting the read out of the struct literal cannot reorder anything
+        // observable: every other gather below either reads the tree (no
+        // mutation) or clears a shell-side latch the tree never sees.
+        let focus_generation = self.app.focus_ime_generation();
+        let focus_or_ime_changed = focus_generation != self.last_focus_ime_gen;
+
         let inputs = FrameInputs {
             signals_dirty,
             // Pending buffered pointer samples (a sample too new for this tick's
@@ -201,20 +229,8 @@ impl AndroidAppHandle {
             events_since_last_frame: std::mem::take(&mut self.events_since_last_frame)
                 || self.resampler.has_pending(),
             pointer_capture_active: self.app.is_pointer_captured(),
-            // Focus/IME EDGE, drained inline like every other latch here: the
-            // live generation replaces the cached one and the comparison IS the
-            // input. One Run per focus/IME transition; a steady focus session
-            // (a caret blinking in an idle field) reports `false` and leaves the
-            // gate free to idle or pace — as a level read this input rendered
-            // every Choreographer tick for the whole session (62–120 fps
-            // measured on a Xiaomi 12) and made caret pacing unreachable. The
-            // platform-side IME reconcile is unaffected: Kotlin's per-frame
-            // `doFrame` poll reads the published Rust state directly, whether or
-            // not this tick produces a frame.
-            focus_or_ime_changed: {
-                let generation = self.app.focus_ime_generation();
-                std::mem::replace(&mut self.last_focus_ime_gen, generation) != generation
-            },
+            // The focus/IME edge peeked above (committed past the skip return).
+            focus_or_ime_changed,
             last_needs_frame: self.last_needs_frame,
             last_needs_frame_paced_only: self.last_needs_frame_paced_only,
             change_flags_pending: self.app.has_pending_change_flags(),
@@ -291,6 +307,16 @@ impl AndroidAppHandle {
             self.executor.record_skip();
             return;
         }
+
+        // The frame is known to RUN from here on, so the focus/IME edge peeked
+        // above is now genuinely consumed: commit the generation. A tick the
+        // gate skipped deliberately leaves the cache alone, so the next tick
+        // still reports the same pending edge and the repaint lands with the
+        // loop's next produced frame — the one-cap-interval bound in
+        // `docs/LIMITATIONS.md`'s `focus-ime-edge-paced-deferral`. `last_paced_run`
+        // re-anchors only on a Run too, so a persisting edge simply accumulates
+        // wait against the same anchor; it can never double-fire.
+        self.last_focus_ime_gen = focus_generation;
 
         // ---------------------------------------------------------------
         // Run path: rebuild -> (layout iff needed) -> paint -> encode/present,
