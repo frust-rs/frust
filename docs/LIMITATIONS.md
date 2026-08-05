@@ -490,7 +490,17 @@ and slower cadences riding along cost no frame the fast loop wasn't already
 forcing. Motion that genuinely must run every vsync is a `TickClass::Transition`
 request, not paced at all.
 
-**Applies to**: Android, iOS, and desktop — all three shells support paced frame requests. The MIN-lattice fold happens core-side (`PaintCtx::request_frame_paced_at`, crates/frust-core/src/widget.rs), before any shell sees the aggregated `PaintOutcome::paced_interval`, so the starvation shape is identical everywhere — only the resolution mechanism differs. Android and iOS resolve it through the frame gate's pre-paint skip decision (`FrameGate::decide_paced` / `FramePacing::effective_interval`, crates/frust-shell-common/src/frame_gate.rs); desktop resolves it post-paint through delayed-redraw scheduling in `next_paced_wake` (crates/frust-shell-desktop/src/paced_wake.rs), the identical `max(cap, requested)` resolution, and pacing is on by default there too.
+**Applies to**: Android, iOS, and desktop — all three shells support paced frame
+requests. The MIN-lattice fold happens core-side
+(`PaintCtx::request_frame_paced_at`, crates/frust-core/src/widget.rs), before
+any shell sees the aggregated `PaintOutcome::paced_interval`, so the starvation
+shape is identical everywhere — only the resolution mechanism differs. Android
+and iOS resolve the requested interval through the frame gate's pre-paint skip
+decision (`FrameGate::decide_paced` / `FramePacing::effective_interval`,
+crates/frust-shell-common/src/frame_gate.rs); desktop resolves it post-paint
+through delayed-redraw scheduling in `next_paced_wake`
+(crates/frust-shell-desktop/src/paced_wake.rs), the identical
+`max(cap, requested)` resolution, and pacing is on by default there too.
 
 **Bound**: the repainting at the fast rate lasts exactly as long as the tighter
 paced loop is active. A static screen with a 2 Hz caret and no concurrent
@@ -502,7 +512,9 @@ motion reverts to 2 Hz caret repaints.
 aggregation" and "a *slow* request can never starve a fast one"), and resolved
 by the shell at `crates/frust-shell-common/src/frame_gate.rs`,
 `FramePacing::effective_interval` (the `effective_interval` method and its doc,
-especially the "MIN fold already happened in core" bullet).
+especially the "MIN fold already happened in core" bullet) and, on desktop, at
+`crates/frust-shell-desktop/src/paced_wake.rs`, `next_paced_wake` (the same
+`max(cap, requested)` rule, delayed-redraw side).
 
 ---
 
