@@ -2336,15 +2336,48 @@ mod tests {
 
     // --- (6) Semantics tree over the materialized window. ---
 
+    /// A minimal `Role::ListItem`-reporting row, standing in for
+    /// `material::list_item::ListItem` so this baseline module's own test
+    /// suite carries no dependency on a design-system catalog (see the
+    /// [module docs](self) — `ListView` itself takes no opinion on what a row
+    /// is; any child view that contributes a `Role::ListItem` node exercises
+    /// the same semantics-forwarding path).
+    struct RoleListItemRow;
+
+    struct RoleListItemRowWidget;
+
+    impl View<()> for RoleListItemRow {
+        type Element = RoleListItemRowWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> RoleListItemRowWidget {
+            RoleListItemRowWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut RoleListItemRowWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    impl Widget for RoleListItemRowWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(300.0, 56.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn semantics(&self, ctx: &mut SemanticsCtx) {
+            ctx.push_node(frust_core::accesskit::Role::ListItem, |_node| {});
+        }
+    }
+
     #[test]
     fn semantics_is_a_list_container_over_the_windowed_rows() {
         use frust_core::accesskit::Role;
         use frust_text::TextContext;
 
         fn logic(_s: &mut ()) -> ListView<()> {
-            list_view(1000, 56.0, |i| {
-                any::<(), _>(super::super::list_item::list_item(format!("Row {i}")))
-            })
+            list_view(1000, 56.0, |_i| any::<(), _>(RoleListItemRow))
         }
         let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
         let mut state = ();
@@ -2378,7 +2411,7 @@ mod tests {
             "only the materialized rows are semantics children of the list"
         );
 
-        // Every materialized row is a ListItem node with its headline announced.
+        // Every materialized row contributes its own Role::ListItem node.
         let list_items = update
             .nodes
             .iter()
