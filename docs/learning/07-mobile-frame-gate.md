@@ -16,29 +16,32 @@ under the vello 0.9 pin; Apple-Silicon Android emulators need
 | Thing | File | Anchor |
 |---|---|---|
 | `FrameGate::decide` — the OR-list | `crates/frust-shell-common/src/frame_gate.rs` | ≈257–272 |
-| `FrameInputs` — all ten signals | same | ≈109–157 |
+| `FrameInputs` — all twelve signals | same | ≈109–157 |
 | Kill switch `FRUST_NO_FRAME_GATE` | same | ≈63, 285–300 |
 | Android entry: `nativeOnFrame` JNI → `app.frame()` | `crates/frust-shell-android/src/jni_glue.rs` ≈742 → `app.rs` ≈776 |
-| Android gate consult | `crates/frust-shell-android/src/app.rs` | ≈903 |
-| Android **layout skip within a Run** (`needs_layout \|\| force_layout`) | same | ≈885, 976–988 |
+| Android gate consult | `crates/frust-shell-android/src/app/frame.rs` | ≈277 |
+| Android **layout skip within a Run** (`needs_layout \|\| force_layout`) | same | ≈246, 367–378 |
 | iOS entry: `frust_render_frame` (from `CADisplayLink`, ns timestamp) | `crates/frust-shell-ios/src/lib.rs` ≈157 → `ffi_glue.rs` ≈410 → `app.rs` ≈642 |
 | iOS gate consult (early-return skips the whole frame) | `crates/frust-shell-ios/src/app.rs` | ≈763 |
 | iOS `FrameTime::from_nanos(timestamp_ns)` | same | ≈865 |
 | `AppTree` type erasure (how a non-generic FFI handle drives any app) | `crates/frust-shell-common/src/app_tree.rs` | ≈1–28 |
 | `PointerResampler` + `FRUST_NO_RESAMPLE` | `crates/frust-shell-common/src/resample.rs` | ≈54, 121–156 |
 
-The ten `FrameInputs` fields (read them with the doc comments —
+The twelve `FrameInputs` fields (read them with the doc comments —
 `frame_gate.rs` ≈109–157): `signals_dirty`, `events_since_last_frame`,
-`pointer_capture_active`, `focus_or_ime_active`, `last_needs_frame`,
-`change_flags_pending`, `theme_or_appearance_changed`,
-`surface_changed_or_resized`, `a11y_action_performed`, `resumed_recently`.
-Any `true` ⇒ `Run`. The convention behind them
+`pointer_capture_active`, `focus_or_ime_changed`, `last_needs_frame`,
+`last_needs_frame_paced_only`, `change_flags_pending`, `deferred_callbacks_pending`,
+`theme_or_appearance_changed`, `surface_changed_or_resized`, `a11y_action_performed`,
+`resumed_recently`. Any `true` ⇒ `Run` — except `focus_or_ime_changed`, which is an **edge**
+(focus/IME session moved since the last tick), not a level: it forces one frame per transition
+but, unlike every other field, does not also disqualify pacing, so a steady focus session can
+still throttle to a paced loop's cadence (a blinking caret, say). The convention behind the rest
 (`docs/CODE_STANDARDS.md`): **a signal with no precise source defaults to
 must-run** — over-running wastes a frame; over-skipping drops real work.
 
 Precision worth keeping: **both** platforms gate whole frames identically.
 The platform *difference* is inside a `Run`: Android additionally skips the
-layout pass unless `needs_layout || force_layout` (≈976–988); iOS currently
+layout pass unless `needs_layout || force_layout` (≈367–378); iOS currently
 relayouts on every `Run` (the finer skip isn't wired there yet). Don't
 conflate the two skips.
 

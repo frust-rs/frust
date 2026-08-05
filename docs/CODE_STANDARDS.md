@@ -317,8 +317,22 @@ widget in `frust-widgets`:
   container simply forwards `Key`/`Ime` events to its focused child; a `Down` that doesn't
   (re)claim focus on the child it hits blurs the chain. **A structural container rebuild
   clears capture and focus only where identity is actually lost** —
-  stable-prefix/key-matched, not a blanket clear. `RenderRoot`'s cached
-  `focus_active`/`ime_state` self-correct on the next event pass.
+  stable-prefix/key-matched, not a blanket clear. A reconciler that tears down (or type-swaps) a
+  focused pod cannot reach `RenderRoot` itself (no handle inside a `BuildCtx` pass), so it marks the
+  pod orphaned instead, but only *on the live focus chain* — gate the mark on
+  `ctx.has_focus() && pod.is_focused()`, never on the recorded `focused` flag alone, since a
+  hand-rolled container's own teardown/type-swap path can hit a stale flag under an
+  already-blurred ancestor; `RenderRoot`'s cached `focus_active`/`ime_state` release on the same
+  rebuild that raised the mark, not merely "eventually" on a later event pass
+  (`docs/CORE_ARCHITECTURE.md`'s Focus/IME Lifecycle). **The same gate binds a container
+  that publishes a cleared IME surface** (the navigator's `needs_ime_clear` producers,
+  `PatternSwitcher`'s): an inactive publish *is* a session release, so raise it only for an
+  outgoing/covered subtree that was itself on the live chain — on a push the outgoing pod is
+  the page being **covered**. Two severing paths are known to be **uncovered** and are
+  registered rather than fixed: a type swap through a doubly-erased pod, which no reconciler
+  can observe (`focus-double-erasure-swap-blind`), and the hand-rolled navbar/tabbar item
+  lists, which never clear or mark a truncated item's own focus link
+  (`focus-navbar-item-truncation-unmarked`). See `docs/LIMITATIONS.md`.
 
 - **Keyed lists are all-or-nothing, and keys must be unique.** `keyed(key, view)` marks a
   `Flex` child list for identity-based reconciliation; a mixed or duplicate key set
@@ -351,7 +365,9 @@ widget in `frust-widgets`:
   their focus, and publish a cleared IME surface — in that order, with no bypass.** This
   binds any container that stops forwarding events to an already-interactive child (the
   navigator's mid-transition input block is the reference impl). Skipping this leaves a
-  child armed or a stale focus/IME surface behind after the block lifts.
+  child armed or a stale focus/IME surface behind after the block lifts. Publishing a cleared
+  surface here means the same thing it means everywhere: a full root focus/IME session release,
+  not a value update (`docs/CORE_ARCHITECTURE.md`'s Focus/IME Lifecycle).
 
 ## Semantics Conventions
 

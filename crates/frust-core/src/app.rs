@@ -154,6 +154,68 @@ impl Orientation {
 /// remaining work lands next frame instead of being lost.
 const MAX_PENDING_RESULT_FLUSH_PASSES: usize = 3;
 
+/// Change-guarded write of the shell-facing IME surface: replaces `slot` and
+/// bumps `generation` **only** when the value actually moves ([`ImeState`] is
+/// `PartialEq`).
+///
+/// A free function over the two fields rather than a `&mut self` method because
+/// [`RenderRoot::paint`] writes it while holding disjoint borrows of the tree
+/// and the theme, where no whole-`self` call is possible;
+/// [`RenderRoot::store_ime_state`] is the method form the event pass uses, so
+/// both paths share this one implementation.
+///
+/// The change guard is load-bearing, not an optimisation: the paint pass
+/// re-publishes the focused widget's IME surface every frame, so an
+/// unconditional bump would make the shell's `focus_or_ime_changed` edge fire on
+/// every vsync for the whole life of a focus session — the level-input behavior
+/// the generation exists to replace.
+fn store_ime_state_in(slot: &mut Option<ImeState>, generation: &mut u64, next: Option<ImeState>) {
+    if *slot != next {
+        *slot = next;
+        *generation = generation.wrapping_add(1);
+    }
+}
+
+/// Release the whole focus/IME session: drop `focus_active` **and** the
+/// shell-facing surface together, bumping `generation` **exactly once** if
+/// either actually moved.
+///
+/// The paired form of [`RenderRoot::set_focus_active`]`(false)` +
+/// [`RenderRoot::store_ime_state`]`(None)`, and the single primitive every
+/// release site goes through — the blur-on-outside-tap `Down`, an explicit
+/// [`EventCtx::release_focus`](crate::event::EventCtx::release_focus), a widget
+/// publishing an *inactive* surface (see [`RenderRoot::paint`]), and the
+/// generic-unmount orphan drain in [`RenderRoot::rebuild`]. Keeping them on one
+/// primitive is what makes "a session ends" mean the same thing everywhere,
+/// rather than four hand-assembled pairs that can drift apart.
+///
+/// **One release is one edge.** The two field writers bump on each field's own
+/// change, so calling them in sequence would move
+/// [`focus_ime_generation`](RenderRoot::focus_ime_generation) *twice* for the
+/// ordinary release (focus `true`→`false` and surface `Some`→`None`). A shell
+/// only ever compares the value, so two bumps and one bump raise the same single
+/// `focus_or_ime_changed` edge — but a counter that moves once per observable
+/// transition is the contract the field doc states, and is what the release
+/// tests pin. The change guard itself is unchanged: an already-released root
+/// writes the same values back and moves nothing.
+///
+/// A free function over the three fields (not a `&mut self` method) for the same
+/// reason [`store_ime_state_in`] is: [`RenderRoot::paint`] releases while holding
+/// disjoint borrows of the tree and the theme, where no whole-`self` call is
+/// possible. [`RenderRoot::release_focus_session`] is the method form.
+fn release_focus_session_in(
+    focus_active: &mut bool,
+    ime_slot: &mut Option<ImeState>,
+    generation: &mut u64,
+) {
+    let moved = *focus_active || ime_slot.is_some();
+    *focus_active = false;
+    *ime_slot = None;
+    if moved {
+        *generation = generation.wrapping_add(1);
+    }
+}
+
 /// Owns the retained tree and drives the rebuild/layout/paint passes for a
 /// single-root application.
 ///
@@ -173,14 +235,38 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     pointer_captured: bool,
     /// Whether some widget in the tree currently holds focus. Root-level mirror of
     /// the per-container `focused` path bookkeeping (the focus analog of
-    /// `pointer_captured`): set when a dispatch requested focus, cleared on a
-    /// release or a blur-on-outside-tap `Down`.
+    /// `pointer_captured`): set when a dispatch requested focus, cleared by a
+    /// session release — a blur-on-outside-tap `Down`, an explicit focus release,
+    /// a widget publishing an inactive IME surface, or the generic-unmount orphan
+    /// drain in [`RenderRoot::rebuild`] (see [`release_focus_session_in`]).
     focus_active: bool,
     /// The IME surface the focused widget last published (via
     /// [`EventCtx::publish_ime_state`]), surfaced to the shell by
     /// [`RenderRoot::ime_state`]. Persists across rebuilds/events until refreshed
-    /// by a new publish or cleared on blur.
+    /// by a new publish or dropped by a release (a blur, a focus release, an
+    /// inactive publish, or a generic-unmount orphan drain — see
+    /// [`release_focus_session_in`]).
+    ///
+    /// Only ever `None` or an **active** surface: an inactive publish is a
+    /// release, never a stored value (see [`RenderRoot::ime_state`]).
     ime_state: Option<ImeState>,
+    /// A monotonically-increasing generation bumped on every **actual** change
+    /// of `focus_active` or `ime_state` — the focus/IME session's edge signal,
+    /// read by a shell through [`RenderRoot::focus_ime_generation`].
+    ///
+    /// The mobile frame gate turns this into an *edge* input
+    /// (`FrameInputs::focus_or_ime_changed`): a shell caches the last value it
+    /// saw and runs a frame when it moves. A *level* input ("something holds
+    /// focus") forced a frame every vsync for as long as a field stayed focused,
+    /// which made caret pacing unreachable — measured at 62–120 fps on a static
+    /// screen whose only live input was focus (Xiaomi 12).
+    ///
+    /// Same-value writes deliberately do **not** bump it (see
+    /// [`RenderRoot::set_focus_active`]/[`RenderRoot::store_ime_state`]): the
+    /// paint pass republishes the focused widget's IME surface on *every* frame,
+    /// so bumping on write rather than on change would re-create exactly the
+    /// per-vsync forcing this edge exists to remove.
+    focus_ime_gen: u64,
     /// The [`PlatformViewFrame`]s the tree published during the most recent
     /// [`RenderRoot::paint`], surfaced to the shell via
     /// [`RenderRoot::platform_view_frames`]. Unlike `ime_state` above, this is
@@ -285,6 +371,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             pointer_captured: false,
             focus_active: false,
             ime_state: None,
+            focus_ime_gen: 0,
             platform_view_frames: Vec::new(),
             input_shields: Vec::new(),
             pending: ChangeFlags::NONE,
@@ -438,8 +525,90 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// Written by the focused widget through [`EventCtx::publish_ime_state`] during
     /// the event pass and refreshed on every event; it survives a rebuild (so the
     /// shell can query it between frames) and is cleared when focus is lost.
+    ///
+    /// # `None` is the only "no session" form — an inactive surface is never stored
+    ///
+    /// A widget publishing `ImeState { active: false, .. }` is ending the session,
+    /// not describing it, so both publish paths turn that into a full release
+    /// (see [`RenderRoot::paint`]) and this returns `None` rather than
+    /// `Some(inactive)`. A shell therefore never has to distinguish the two, and
+    /// `is_some()` means "a live IME session" with no second check.
+    ///
+    /// **The platform still sees the keyboard-hide.** All three shells already
+    /// map `None` onto the inactive form on the way out, so the observable wire
+    /// behavior is unchanged: `frust-shell-android`'s `ime_state_to_json` returns
+    /// `ImeJsonState::default()` (`active:false`, empty text, `-1` indices, null
+    /// caret, `"normal"`) and `frust-shell-ios`' returns the byte-identical
+    /// `ime_state_json(false, "", -1, -1, -1, -1, None, "normal")` — exactly what
+    /// the navigator's own cleared surface serialised to before. Kotlin's
+    /// `pollImeAfterDispatch` and Swift's `syncImeFocus` both branch on `active`
+    /// alone (an inactive surface's text/caret/content-type are ignored), and the
+    /// desktop shell's `sync_ime` reads `is_some_and(|s| s.active)`. Dropping the
+    /// inactive surface's payload also stops a disabled *secret* field's text
+    /// riding to the platform after its session ended.
     pub fn ime_state(&self) -> Option<ImeState> {
         self.ime_state.clone()
+    }
+
+    /// The focus/IME session generation — bumped on every **actual** change of
+    /// [`is_focus_active`](RenderRoot::is_focus_active) or
+    /// [`ime_state`](RenderRoot::ime_state), and on nothing else.
+    ///
+    /// The *edge* counterpart of those two level accessors, for a shell that
+    /// needs "did the focus/IME session move since I last looked?" rather than
+    /// "is something focused?". A shell caches the value it last saw and
+    /// compares (mirroring [`semantics_generation`](RenderRoot::semantics_generation)'s
+    /// cheap dirty gate) — that comparison is the mobile frame gate's
+    /// `FrameInputs::focus_or_ime_changed` input.
+    ///
+    /// A same-value write never moves it: re-publishing an identical IME
+    /// surface (which the paint pass does on every frame a field stays focused)
+    /// or re-blurring an already-blurred root is not an edge. Wrapping is
+    /// deliberate and harmless — a comparison, never an ordering.
+    pub fn focus_ime_generation(&self) -> u64 {
+        self.focus_ime_gen
+    }
+
+    /// Set the root's focus flag, bumping [`RenderRoot::focus_ime_generation`]
+    /// only when the value actually moves.
+    ///
+    /// One of the two writers of `focus_active` outside construction (the other
+    /// is [`release_focus_session_in`], which clears it together with the IME
+    /// surface as one edge): every focus/blur arm of [`RenderRoot::event`] goes
+    /// through one of them, so the edge generation cannot drift from the state it
+    /// describes. In practice this one only ever *sets* focus — a clear is always
+    /// a session release.
+    fn set_focus_active(&mut self, active: bool) {
+        if self.focus_active != active {
+            self.focus_active = active;
+            self.focus_ime_gen = self.focus_ime_gen.wrapping_add(1);
+        }
+    }
+
+    /// Store (or clear) the shell-facing IME surface, bumping
+    /// [`RenderRoot::focus_ime_generation`] only when the stored value actually
+    /// moves — the `&mut self` form of [`store_ime_state_in`], for the event
+    /// pass (the paint pass holds disjoint field borrows and calls that
+    /// function directly).
+    fn store_ime_state(&mut self, ime: Option<ImeState>) {
+        store_ime_state_in(&mut self.ime_state, &mut self.focus_ime_gen, ime);
+    }
+
+    /// End the focus/IME session: clear `focus_active` and drop the shell-facing
+    /// surface together, moving [`RenderRoot::focus_ime_generation`] exactly once
+    /// if either was set. The `&mut self` form of [`release_focus_session_in`]
+    /// (whose doc carries the full contract), for the event and rebuild passes;
+    /// the paint pass holds disjoint field borrows and calls that function
+    /// directly.
+    ///
+    /// Idempotent: releasing an already-released root writes the same values
+    /// back and fires no edge.
+    fn release_focus_session(&mut self) {
+        release_focus_session_in(
+            &mut self.focus_active,
+            &mut self.ime_state,
+            &mut self.focus_ime_gen,
+        );
     }
 
     /// The [`PlatformViewFrame`]s published during the most recent
@@ -611,6 +780,34 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             passes += 1;
         }
 
+        // Generic-unmount focus release. A reconciler that tears down (or
+        // type-swaps, or clears the `focused` flag of) a child pod holding the
+        // recorded focus path *on the live focus chain* has severed that path,
+        // but runs over a `BuildCtx` with no `RenderRoot` in scope — so it raises
+        // `mark_focus_orphaned` and this drain performs the release the
+        // reconciler could not. "On the live chain" is what `rebuild_view`'s seed
+        // buys: a mark means a live session lost its owner, never that some stale
+        // flag deep in an already-blurred branch went away (see
+        // `mark_focus_orphaned`). Without it the root's mirror stays standing over
+        // a widget that no longer exists: `is_focus_active()` keeps reporting
+        // true and `ime_state()` keeps handing the shell a surface for a dead
+        // field, self-correcting only on the next event pass — which never
+        // arrives on a screen the user has stopped touching (the pop-into-idle
+        // case this whole seam exists for).
+        //
+        // Drained *after* the flush loop so one release covers every pass: a
+        // flushed callback that navigates re-diffs, and either diff may orphan
+        // the focus. `Housekeeping` claims no focus of its own (its root arm is
+        // inert), so nothing the loop dispatched can be undone here.
+        //
+        // The release marks no `ChangeFlags` of its own: the structural change
+        // that severed the path already flagged `LAYOUT | PAINT`, and the
+        // generation bump is what wakes the mobile frame gate's
+        // `focus_or_ime_changed` edge for the one repaint the release needs.
+        if crate::event::take_focus_orphaned() {
+            self.release_focus_session();
+        }
+
         self.pending |= flags;
         // A rebuild that changed layout/paint could have changed the semantics
         // tree (added/removed/relabelled nodes); bump the dirty gate a shell polls
@@ -623,11 +820,26 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
 
     /// The rebuild body, split out so [`RenderRoot::rebuild`] can accumulate the
     /// result into [`RenderRoot::pending`] in one place.
+    ///
+    /// # Seeding the diff's focus chain
+    ///
+    /// The root is where the effective focus chain ([`BuildCtx::has_focus`])
+    /// starts: the root widget sits in no `ChildPod`, so its "link above" is the
+    /// root's own session mirror. A reconciler deep in the diff ANDs its pod's
+    /// `focused` flag onto this seed and marks an orphan only if the whole chain
+    /// holds — which is why the seed is "is there a session to lose" rather than
+    /// `focus_active` alone: an active surface parked without the flag is still a
+    /// live session `release_focus_session` would move. With neither set there is
+    /// nothing to release, so the seed is `false` and the diff marks nothing.
     fn rebuild_view(&mut self, view: V) -> ChangeFlags {
+        // Read before the `&mut self.next_id` borrow below (disjoint fields, but
+        // spelled out for the reader).
+        let session_live = self.focus_active || self.ime_state.is_some();
         match (self.root_id, self.prev_view.take()) {
             // Reconcile against the previous view of the same type.
             (Some(root_id), Some(prev)) => {
                 let mut ctx = BuildCtx::new(&mut self.next_id);
+                ctx.set_has_focus(session_live);
                 let flags = {
                     let pod = self
                         .tree
@@ -648,6 +860,10 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // First build: materialise the widget and insert it as the root.
             _ => {
                 let mut ctx = BuildCtx::new(&mut self.next_id);
+                // A first build tears nothing down, so the seed is moot — set it
+                // anyway so the rule is "the root always seeds the chain", with no
+                // arm exempt.
+                ctx.set_has_focus(session_live);
                 let id = ctx.alloc_id();
                 let element = view.build(&mut ctx);
                 let pod = WidgetPod::new(id, Box::new(element));
@@ -775,10 +991,45 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // cleared by a container-routed blur (but whose internal flag lags
             // one frame) can then never resurrect the `ime_state` the blur
             // cleared — even before it observes the blur via `PaintCtx::has_focus`.
+            //
+            // Routed through `store_ime_state_in` (the field form — this pass
+            // holds disjoint borrows of the tree and the theme, so no
+            // whole-`self` call is possible here) so an *unchanged* republish —
+            // the overwhelmingly common case, a focused field re-publishing the
+            // same surface frame after frame — moves no generation and
+            // therefore fires no `focus_or_ime_changed` edge at the shell.
+            //
+            // An **inactive** publish is not a surface refresh at all: it is the
+            // publishing widget saying "this session is over" — the navigator's
+            // post-pop `cleared_ime_state`, `PatternSwitcher`'s equivalent, and
+            // a `TextInput` turned disabled/read-only under a live focus are the
+            // three shipped producers, and every one of them is an unmount or a
+            // de-focus. Storing it as `Some(inactive)` and leaving `focus_active`
+            // standing is what leaked the session after a pop: the shells' gate
+            // saw `ime_state().is_some()`, `is_focus_active()` kept lying, and the
+            // next real focus interaction started from a corrupt baseline. So it
+            // takes the *full* release instead — the same one a blur-on-outside-tap
+            // `Down` performs — through the shared primitive, which fires exactly
+            // one edge.
+            //
+            // The `self.focus_active` guard stays, and covers both arms: an
+            // inactive publish arriving when focus is already false is a no-op
+            // (nothing to release — `release_focus_session_in` would move
+            // nothing anyway, but the guard means we never even take it), and an
+            // active publish from a widget whose pod focus was just cleared
+            // still cannot resurrect the surface that blur dropped.
             if self.focus_active
                 && let Some(ime) = ctx.take_ime_state()
             {
-                self.ime_state = Some(ime);
+                if ime.active {
+                    store_ime_state_in(&mut self.ime_state, &mut self.focus_ime_gen, Some(ime));
+                } else {
+                    release_focus_session_in(
+                        &mut self.focus_active,
+                        &mut self.ime_state,
+                        &mut self.focus_ime_gen,
+                    );
+                }
             }
             // Replace (never merge) the whole platform-view collection with
             // whatever this pass published — unlike `ime_state` above there is
@@ -954,9 +1205,29 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         };
 
         // A published IME surface refreshes the stored one (persists past this
-        // event, survives rebuild) until a blur clears it below.
-        if ime.is_some() {
-            self.ime_state = ime;
+        // event, survives rebuild) until a blur clears it below. `store_ime_state`
+        // bumps the focus/IME edge generation only if the surface actually moved
+        // (a keystroke that changes nothing observable is not an edge).
+        //
+        // An **inactive** publish carries the same release intent here as it does
+        // in `paint` (see that method's take path): a widget that publishes
+        // `active: false` is ending the session, not describing it, so it takes
+        // the full release. Reachable from this pass too — every paint-time
+        // producer of an inactive surface is a container/widget whose `event` arm
+        // can run first — and the two passes must not disagree about what an
+        // inactive surface means. No `focus_active` guard is needed (unlike
+        // `paint`, which must refuse to *resurrect* a cleared surface): releasing
+        // an already-released root moves nothing and fires no edge.
+        //
+        // Ordering: this runs before the focus match below, so a dispatch that
+        // both published an inactive surface and requested focus still ends up
+        // focused — the later, more specific claim wins.
+        match ime {
+            Some(ime) if !ime.active => {
+                self.release_focus_session();
+            }
+            Some(ime) => self.store_ime_state(Some(ime)),
+            None => {}
         }
 
         // Root-level capture path: a captured `Down` opens a gesture; `Up`/`Cancel`
@@ -967,6 +1238,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // blur-on-outside-tap and closes it (the per-container `focused` flags are
         // cleared by the routing helpers). Key/Ime/Scroll only adjust focus if the
         // dispatch explicitly requested or released it.
+        //
+        // Every arm mutates through `set_focus_active`/`store_ime_state` or the
+        // paired `release_focus_session`, the change-guarded writers that own the
+        // focus/IME edge generation: a `Down` on already-blurred chrome (the
+        // commonest event of all) writes the same values back and must therefore
+        // NOT fire an edge.
         match event {
             InputEvent::Pointer(pointer) => match pointer.phase {
                 PointerPhase::Down => {
@@ -974,11 +1251,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                         self.pointer_captured = true;
                     }
                     if focus_req {
-                        self.focus_active = true;
+                        self.set_focus_active(true);
                     } else {
-                        // Blur: no widget on the tapped path took focus.
-                        self.focus_active = false;
-                        self.ime_state = None;
+                        // Blur: no widget on the tapped path took focus. The
+                        // canonical release — flag and surface drop together, as
+                        // one edge (see `release_focus_session_in`).
+                        self.release_focus_session();
                     }
                 }
                 PointerPhase::Up | PointerPhase::Cancel => self.pointer_captured = false,
@@ -986,11 +1264,10 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             },
             InputEvent::Scroll { .. } | InputEvent::Key(_) | InputEvent::Ime(_) => {
                 if focus_req {
-                    self.focus_active = true;
+                    self.set_focus_active(true);
                 }
                 if focus_rel {
-                    self.focus_active = false;
-                    self.ime_state = None;
+                    self.release_focus_session();
                 }
             }
             // A broadcast is not user input: it opens no gesture, claims no
@@ -998,6 +1275,14 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // pass that moved the root's capture/focus bookkeeping would change
             // what the *next* real event does, which is exactly what this
             // mechanism must not do (see `InputEvent::Housekeeping`).
+            //
+            // The one thing a broadcast *can* still move is the IME surface, via
+            // the publish handling above (which is pass-agnostic by design, and
+            // was before this arm existed): a widget that publishes while
+            // flushing has said something about its session either way, and an
+            // inactive publish releases it. No shipped widget does — `TextInput`
+            // ignores a broadcast outright, and both cleared-surface publishers
+            // are paint-time — so this is a contract note, not live behavior.
             InputEvent::Housekeeping => {}
         }
 
@@ -2229,6 +2514,9 @@ mod tests {
     //     an IME surface on a `Down` in its left half, and blurs (no focus) on a
     //     `Down` in its right half. ---
 
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use crate::event::{EditingState, ImeState};
 
     struct ImeWidget;
@@ -2313,6 +2601,460 @@ mod tests {
         root.event(&mut state, &pointer(PointerPhase::Down, 80.0, 10.0));
         assert!(!root.is_focus_active());
         assert!(root.ime_state().is_none());
+    }
+
+    // --- Session release: the focus session must die with its owner -----------
+    //
+    // Two routes end a session without any user input reaching the root:
+    //
+    //  (a) a widget publishes an INACTIVE IME surface (the navigator's post-pop
+    //      `cleared_ime_state`, `PatternSwitcher`'s equivalent, a `TextInput`
+    //      turned disabled under a live focus), and
+    //  (b) a reconciler tears the focused pod out of the tree (any generic
+    //      unmount — `frust-widgets`' `cancel_active_children`/`teardown_child`),
+    //      which raises `mark_focus_orphaned` because it has no `RenderRoot` to
+    //      reach from a `BuildCtx` pass.
+    //
+    // Both must perform the SAME full release a blur does. Leaving either half
+    // standing — `focus_active` true, or `ime_state` parked at `Some(inactive)` —
+    // is what stranded a popped screen: `is_focus_active()` kept lying, the
+    // shell's IME poll kept seeing a surface, and the next real focus
+    // interaction started from a corrupt baseline.
+
+    /// The navigator's cleared surface, spelled out here so the fixture below
+    /// publishes exactly the shape `nav::navigator::cleared_ime_state` does
+    /// (`frust-core` cannot name it — `frust-widgets` sits above this crate).
+    fn cleared_surface() -> ImeState {
+        ImeState {
+            active: false,
+            editing: EditingState {
+                text: String::new(),
+                selection_base: -1,
+                selection_extent: -1,
+                composing_base: -1,
+                composing_extent: -1,
+            },
+            caret: None,
+            content_type: Default::default(),
+        }
+    }
+
+    /// A focused editable that publishes its active surface from paint (like a
+    /// real field), and — once `clear` is raised — publishes the *inactive*
+    /// surface from paint instead: the container-after-a-pop shape.
+    struct PopImeWidget {
+        clear: Rc<Cell<bool>>,
+    }
+    impl crate::widget::Widget for PopImeWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(100.0, 100.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            if self.clear.get() {
+                ctx.publish_ime_state(cleared_surface());
+            } else if ctx.has_focus() {
+                ctx.publish_ime_state(PaintImeWidget::surface("abc"));
+            }
+        }
+        fn event(&mut self, ctx: &mut crate::event::EventCtx, event: &InputEvent) -> EventResult {
+            match event {
+                InputEvent::Pointer(p) if p.phase == PointerPhase::Down => {
+                    ctx.request_focus();
+                    ctx.publish_ime_state(PaintImeWidget::surface("abc"));
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+    }
+
+    struct PopImeView {
+        clear: Rc<Cell<bool>>,
+    }
+    impl View<ClickState> for PopImeView {
+        type Element = PopImeWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> PopImeWidget {
+            PopImeWidget {
+                clear: self.clear.clone(),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut PopImeWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    #[test]
+    fn inactive_paint_publish_releases_the_whole_session() {
+        // (a) The pop shape. Before this, the paint take stored `Some(inactive)`
+        // and never touched `focus_active`, so the session outlived the page.
+        let clear = Rc::new(Cell::new(false));
+        let mut logic = {
+            let clear = clear.clone();
+            move |_state: &mut ClickState| PopImeView {
+                clear: clear.clone(),
+            }
+        };
+        let mut root: RenderRoot<ClickState, PopImeView> = RenderRoot::new();
+        let mut state = ClickState::default();
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        let mut scene = RecordingScene::default();
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut scene, FrameTime::ZERO);
+        assert!(root.is_focus_active());
+        assert!(root.ime_state().is_some_and(|s| s.active));
+        let focused = root.focus_ime_generation();
+
+        // The "pop": the next paint publishes the cleared surface.
+        clear.set(true);
+        root.paint(&mut scene, FrameTime::ZERO);
+        assert!(
+            !root.is_focus_active(),
+            "an inactive publish ends the session, not just the surface"
+        );
+        assert_eq!(
+            root.ime_state(),
+            None,
+            "the surface is dropped, never parked at Some(inactive)"
+        );
+        assert_eq!(
+            root.focus_ime_generation(),
+            focused.wrapping_add(1),
+            "one release is exactly one edge"
+        );
+
+        // The widget keeps publishing the cleared surface every frame (a real
+        // one-shot flag would not, but an idle screen must survive the worst
+        // case): the paint take's `focus_active` guard makes each a no-op, so
+        // the released session neither resurrects nor spins the edge.
+        let released = root.focus_ime_generation();
+        for _ in 0..30 {
+            root.paint(&mut scene, FrameTime::ZERO);
+        }
+        assert!(!root.is_focus_active());
+        assert!(root.ime_state().is_none());
+        assert_eq!(
+            root.focus_ime_generation(),
+            released,
+            "an inactive publish against an already-released root is inert"
+        );
+    }
+
+    /// A view whose rebuild raises the generic-unmount orphan mark on demand —
+    /// standing in for `frust-widgets`' reconcilers, which clear a focused
+    /// `ChildPod` mid-diff and raise exactly this flag (this crate has no
+    /// multi-child container of its own to diff).
+    struct UnmountView {
+        orphan: Rc<Cell<bool>>,
+    }
+    impl View<ClickState> for UnmountView {
+        type Element = ImeWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> ImeWidget {
+            ImeWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut ImeWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            if self.orphan.get() {
+                crate::event::mark_focus_orphaned();
+                return ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+            }
+            ChangeFlags::NONE
+        }
+    }
+
+    #[test]
+    fn generic_unmount_orphan_releases_the_whole_session() {
+        // (b) The child-list-diff shape: no publish, no event — the focused
+        // widget simply stops existing. Nothing self-corrects this on an idle
+        // screen, which is why the reconciler's mark is drained here.
+        let _ = crate::event::take_focus_orphaned();
+        let orphan = Rc::new(Cell::new(false));
+        let mut logic = {
+            let orphan = orphan.clone();
+            move |_state: &mut ClickState| UnmountView {
+                orphan: orphan.clone(),
+            }
+        };
+        let mut root: RenderRoot<ClickState, UnmountView> = RenderRoot::new();
+        let mut state = ClickState::default();
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert!(root.is_focus_active());
+        assert!(root.ime_state().is_some());
+        let focused = root.focus_ime_generation();
+
+        // The unmount rebuild.
+        orphan.set(true);
+        root.rebuild(&mut logic, &mut state);
+        assert!(
+            !root.is_focus_active(),
+            "the root's focus mirror does not outlive the widget it mirrors"
+        );
+        assert!(root.ime_state().is_none());
+        assert_eq!(
+            root.focus_ime_generation(),
+            focused.wrapping_add(1),
+            "one orphaned focus path is exactly one edge"
+        );
+
+        // The mark was drained, so an ordinary rebuild afterwards is inert...
+        let released = root.focus_ime_generation();
+        orphan.set(false);
+        root.rebuild(&mut logic, &mut state);
+        assert_eq!(root.focus_ime_generation(), released);
+
+        // ...and re-marking against an already-released root fires no edge
+        // either (a stale `focused` flag torn down later must not spin it).
+        orphan.set(true);
+        root.rebuild(&mut logic, &mut state);
+        assert_eq!(root.focus_ime_generation(), released);
+        assert!(!root.is_focus_active());
+    }
+
+    // --- The focus/IME EDGE generation ---------------------------------------
+    //
+    // `focus_ime_generation` is the shell-facing edge behind the mobile frame
+    // gate's `FrameInputs::focus_or_ime_changed`: a shell caches the value and
+    // runs a frame when it moves. Two properties make that safe, and both are
+    // pinned below: EVERY real transition moves it (or a focus change strands
+    // unpainted), and NO same-value write moves it (or a focused screen forces
+    // a frame every vsync — the level-input behavior this replaced, measured at
+    // 62–120 fps on a static focused screen).
+
+    /// A widget that focuses on `Down`, releases focus on any `Key`, and — the
+    /// point of the fixture — re-publishes an IME surface from its **paint**
+    /// pass on every frame, reading the text from a shared cell so a test can
+    /// make a republish genuinely change (or genuinely not).
+    struct PaintImeWidget {
+        published: Rc<RefCell<String>>,
+    }
+    impl PaintImeWidget {
+        fn surface(text: &str) -> ImeState {
+            ImeState {
+                active: true,
+                editing: EditingState {
+                    text: text.to_string(),
+                    selection_base: 0,
+                    selection_extent: 0,
+                    composing_base: -1,
+                    composing_extent: -1,
+                },
+                caret: Some(kurbo::Rect::new(0.0, 0.0, 1.0, 12.0)),
+                content_type: Default::default(),
+            }
+        }
+    }
+    impl crate::widget::Widget for PaintImeWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(100.0, 100.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            ctx.publish_ime_state(Self::surface(&self.published.borrow()));
+        }
+        fn event(&mut self, ctx: &mut crate::event::EventCtx, event: &InputEvent) -> EventResult {
+            match event {
+                InputEvent::Pointer(p) if p.phase == PointerPhase::Down => {
+                    ctx.request_focus();
+                    EventResult::Handled
+                }
+                InputEvent::Key(_) => {
+                    ctx.release_focus();
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+    }
+
+    struct PaintImeView {
+        published: Rc<RefCell<String>>,
+    }
+    impl View<ClickState> for PaintImeView {
+        type Element = PaintImeWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> PaintImeWidget {
+            PaintImeWidget {
+                published: self.published.clone(),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut PaintImeWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    fn key_event() -> InputEvent {
+        InputEvent::Key(crate::event::KeyEvent {
+            key: crate::event::Key::Named(crate::event::NamedKey::Enter),
+            modifiers: crate::event::Modifiers::default(),
+            repeat: false,
+        })
+    }
+
+    #[test]
+    fn focus_ime_generation_moves_on_every_pointer_transition_only() {
+        let mut root: RenderRoot<ClickState, ImeView> = RenderRoot::new();
+        let mut state = ClickState::default();
+        root.rebuild(&mut ime_logic, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        // Idle: a rebuild/layout touches neither focus nor the IME surface.
+        let idle = root.focus_ime_generation();
+        root.rebuild(&mut ime_logic, &mut state);
+        assert_eq!(
+            root.focus_ime_generation(),
+            idle,
+            "a rebuild is not an edge"
+        );
+
+        // Focus gained + IME surface published (one transition for a shell,
+        // however many field writes it took).
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        let focused = root.focus_ime_generation();
+        assert_ne!(
+            focused, idle,
+            "focus + IME publish must move the generation"
+        );
+
+        // The SAME tap again, on the already-focused widget publishing the
+        // identical surface: no state moved, so no edge. This is the case that
+        // decides whether a live text field forces a frame per vsync.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert_eq!(
+            root.focus_ime_generation(),
+            focused,
+            "a same-value focus/IME write must not spin the edge"
+        );
+
+        // Blur: focus cleared and the surface dropped — a real transition.
+        root.event(&mut state, &pointer(PointerPhase::Down, 80.0, 10.0));
+        let blurred = root.focus_ime_generation();
+        assert_ne!(blurred, focused, "a blur must move the generation");
+
+        // Blur while already blurred (a tap on inert chrome — the commonest
+        // event there is) writes `false`/`None` back over `false`/`None`.
+        root.event(&mut state, &pointer(PointerPhase::Down, 80.0, 20.0));
+        assert_eq!(
+            root.focus_ime_generation(),
+            blurred,
+            "blurring an already-blurred root must not move the generation"
+        );
+    }
+
+    #[test]
+    fn focus_ime_generation_ignores_an_unchanged_paint_republish() {
+        // The paint pass re-publishes the focused widget's IME surface on EVERY
+        // frame (that is how a rebuild-applied controlled change refreshes the
+        // shell-facing state). If that unconditional write moved the
+        // generation, the frame gate's edge would fire every single frame for
+        // the whole life of a focus session — exactly the per-vsync forcing the
+        // edge exists to remove.
+        let published = Rc::new(RefCell::new("abc".to_string()));
+        let mut logic = {
+            let published = published.clone();
+            move |_state: &mut ClickState| PaintImeView {
+                published: published.clone(),
+            }
+        };
+        let mut root: RenderRoot<ClickState, PaintImeView> = RenderRoot::new();
+        let mut state = ClickState::default();
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        // Focus the field, then let it paint: the first paint publishes.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        let mut scene = RecordingScene::default();
+        root.paint(&mut scene, FrameTime::ZERO);
+        let steady = root.focus_ime_generation();
+        assert_eq!(
+            root.ime_state(),
+            Some(PaintImeWidget::surface("abc")),
+            "the paint pass published the focused widget's surface"
+        );
+
+        // 120 further frames of the same focused, unchanged field: the caret
+        // blinks, nothing else moves. Not one edge.
+        for _ in 0..120 {
+            root.paint(&mut scene, FrameTime::ZERO);
+        }
+        assert_eq!(
+            root.focus_ime_generation(),
+            steady,
+            "an unchanged paint republish must never move the generation"
+        );
+
+        // A real change (the app applied a controlled edit) publishes a
+        // different surface: exactly one edge, then quiet again.
+        *published.borrow_mut() = "abcd".to_string();
+        root.paint(&mut scene, FrameTime::ZERO);
+        let edited = root.focus_ime_generation();
+        assert_ne!(edited, steady, "a changed republish IS an edge");
+        for _ in 0..10 {
+            root.paint(&mut scene, FrameTime::ZERO);
+        }
+        assert_eq!(
+            root.focus_ime_generation(),
+            edited,
+            "the session goes quiet again at the new value"
+        );
+    }
+
+    #[test]
+    fn focus_ime_generation_moves_on_a_focus_release_only_once() {
+        // The Key/Ime/Scroll arm of the root focus path: a dispatch that
+        // RELEASES focus clears both the flag and the published surface.
+        let published = Rc::new(RefCell::new("abc".to_string()));
+        let mut logic = {
+            let published = published.clone();
+            move |_state: &mut ClickState| PaintImeView {
+                published: published.clone(),
+            }
+        };
+        let mut root: RenderRoot<ClickState, PaintImeView> = RenderRoot::new();
+        let mut state = ClickState::default();
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        let mut scene = RecordingScene::default();
+        root.paint(&mut scene, FrameTime::ZERO);
+        let focused = root.focus_ime_generation();
+        assert!(root.is_focus_active());
+
+        // A key that releases focus: one edge.
+        root.event(&mut state, &key_event());
+        let released = root.focus_ime_generation();
+        assert!(!root.is_focus_active());
+        assert!(root.ime_state().is_none());
+        assert_ne!(
+            released, focused,
+            "a focus release must move the generation"
+        );
+
+        // A second release against an already-released root: no edge. (The
+        // paint pass republishes nothing now — the paint-take arm only accepts
+        // a publish while focus is active.)
+        root.event(&mut state, &key_event());
+        root.paint(&mut scene, FrameTime::ZERO);
+        assert_eq!(
+            root.focus_ime_generation(),
+            released,
+            "releasing an already-released focus must not move the generation"
+        );
     }
 
     // --- Semantics: stable ids + accessibility action routing ---

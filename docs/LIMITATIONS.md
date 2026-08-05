@@ -368,6 +368,132 @@ documented while fixing `performEditorAction`'s mirror-resync gap).
 
 ---
 
+### `focus-double-erasure-swap-blind` — a type swap through a doubly-erased pod is invisible to every reconciler
+
+**Observed**: `any(any(view))` — an `AnyView` erased a second time — produces a
+`ChildPod` whose stored element has the concrete type `Box<dyn Widget>`
+*whatever the inner view is*. Every swap-detection site in `frust-widgets`
+decides "did this rebuild replace the widget?" by comparing that erased
+element's `TypeId` across the rebuild
+(`authoring::rebuild_child_tracked`, the one funnel `rebuild_child` and
+`rebuild_children` both use), so a genuine **inner** concrete-type change
+reports `swapped == false`: the old widget really is torn down and replaced
+inside `AnyView::rebuild`, but the pod's recorded `active`/`focused` flags are
+neither cleared nor reported. When the live focus session belonged to the
+replaced widget, the pod keeps routing `Key`/`Ime` events into a fresh widget
+that never claimed focus, no `mark_focus_orphaned` is raised, and
+`RenderRoot`'s `focus_active`/`ime_state` stay standing over a widget that no
+longer exists — exactly the failure the single-erasure swap arms exist to
+prevent (`docs/CODE_STANDARDS.md`'s orphan contract).
+
+**Applies to**: any `ChildPod` built from a doubly-erased view, on every
+platform. It is reachable by accident rather than by intent: a builder that
+erases its own child (`pattern_switcher(key, pattern, child)` calls
+`any(child)` internally) double-erases whenever the caller already handed it an
+`AnyView`. **Single** erasure — the overwhelmingly common `any(concrete_view)`,
+and every in-crate container's own child list — detects swaps correctly and is
+unaffected.
+
+**Why not fixed**: pre-existing (it predates the focus/IME fix rounds that
+found it) and not fixable at a call site — the information the reconciler needs
+has already been erased by the time it looks. Closing it needs **shared
+swap-detection machinery**: `ErasedView` would have to report the *element's*
+concrete `TypeId` through the erasure so nesting composes, instead of each
+reconciler probing whatever boxed element it happens to hold. That is a
+`frust-core` trait-surface change landing on every reconciler at once, and was
+deliberately not attempted inside a focus/IME review fix.
+
+**Evidence**: source inspection of `crates/frust-core/src/view.rs`
+(`AnyView`'s `View`/`ErasedView` impls — the outer `dyn_build` boxes the inner
+`Box<dyn Widget>`) against `crates/frust-widgets/src/authoring.rs`'s
+`rebuild_child_tracked`; found during review-fix-3 (FC)'s audit of the
+focus-severing sites.
+
+---
+
+### `focus-navbar-item-truncation-unmarked` — a truncated navbar/tabbar item drops its focus link silently
+
+**Observed**: `material::navbar`'s `NavigationBarView::rebuild` and
+`cupertino::tabbar`'s equivalent hand-roll their item pod lists rather than
+going through `authoring::rebuild_children`. Their shrink arm honors half of
+the contract — an in-flight capture is cancelled (`cancel_item` +
+`set_active(false)`) and each item's icon/label children are torn down through
+`teardown_child`, which marks its own orphans — but never consults the **item
+pod's own** `is_focused()` flag: it is neither cleared nor reported via
+`mark_focus_orphaned` before `items.truncate(common)` drops the pod. An item
+holding the live focus path, truncated out of a shrinking bar, would leave
+`RenderRoot`'s `focus_active`/`ime_state` standing over a widget that no longer
+exists.
+
+**Applies to**: **latent — unreachable today.** Neither `NavItemWidget` nor
+`TabItemWidget` ever calls `EventCtx::request_focus`, so an item pod's
+`focused` flag is never set in the first place and the gap cannot be triggered
+from app code. It becomes real the moment either item type takes focus, or a
+future hand-rolled item list copies this shape for a focusable child.
+
+**Why accepted**: nothing is observably wrong today, and the two candidate
+fixes are both larger than the gap. Routing these lists through
+`authoring::rebuild_children` (which already implements capture-cancel,
+focus-clear, and the gated orphan mark in one place) is the right end state but
+re-shapes two catalog widgets' reconcilers; replicating the
+`ctx.has_focus() && pod.is_focused()` gate inline is smaller but adds a third
+hand-rolled copy of a contract that already has one home. Deliberately
+deferred rather than fixed speculatively during a focus/IME review round.
+
+**Evidence**: source inspection of
+`crates/frust-widgets/src/material/navbar.rs` and
+`crates/frust-widgets/src/cupertino/tabbar.rs` — the `self.items.len() <
+prev.items.len()` arm in each, plus the absence of any
+`request_focus`/`is_focused`/`set_focused` occurrence in either file (which is
+what makes it latent); found during review-fix-3 (FC)'s audit of the
+focus-severing sites.
+
+---
+
+### `focus-ime-edge-paced-deferral` — a focus/IME edge on a paced-only tick waits for the loop's next frame
+
+**Observed**: `FrameInputs::focus_or_ime_changed` is deliberately **not** an
+`is_paced_only_frame` disqualifier (every other wake input is). So when a
+focus/IME edge — focus gained or lost, an IME surface published or released —
+lands on a tick whose *only* other dirtiness is a paced
+`TickClass::CosmeticLoop` frame request, the edge is absorbed into the pacing
+decision instead of forcing the frame immediately: the repaint it would have
+caused rides along with the loop's next paced frame. The deferral is bounded by
+one `MotionScheme::cosmetic_loop_rate` interval — 33 ms at the 30 Hz framework
+default, and at most **100 ms** at `CosmeticLoopRate::FLOOR_HZ` (10 Hz), the
+lowest rate a theme can express (the constructor clamps up to the floor, so no
+slower value is representable).
+
+**Applies to**: Android and iOS — the two shells that feed `FrameInputs` into
+`FrameGate::decide_paced`. Desktop is unaffected: it runs no skip gate and its
+own paced wake (`app_handler`'s `next_paced_wake`) never consults a focus/IME
+input. Within those two shells it needs a paced decorative loop to be running
+with nothing else dirty at the instant of the edge; any concurrent
+input/signal/change-flag/transition dirtiness disqualifies pacing and the frame
+runs immediately.
+
+**Why accepted**: the alternative is what this replaced. `focus_or_ime_changed`
+was a *level* input (`is_focus_active || ime_state().is_some()`) and a pacing
+disqualifier, which meant any screen merely *holding* focus rendered every
+vsync for the whole session — measured at 62-120 fps on a static screen whose
+only live input was focus (Xiaomi 12) — and made caret pacing structurally
+unreachable, since a blinking caret in a focused field is precisely the
+cosmetic loop the gate exists to throttle. What is deferred is only a
+*cosmetic* repaint: the platform's own IME reconcile polls the published Rust
+state on its own cadence (Kotlin `doFrame` / Swift `renderFrame`), independent
+of whether Rust produced a frame, and every IME event the platform delivers
+also trips `events_since_last_frame`, which **is** a disqualifier — so the
+keyboard's view of the session is never the thing being delayed.
+
+**Evidence**: the contracts and device measurement recorded on
+`FrameInputs::focus_or_ime_changed` / `FrameInputs::is_paced_only_frame`
+(`crates/frust-shell-common/src/frame_gate.rs`, Xiaomi 12); the 100 ms bound
+from `CosmeticLoopRate::FLOOR_HZ` (`crates/frust-theme/src/motion.rs`);
+restated here during review-fix-3 (FC) so the app-visible consequence is
+discoverable from the register rather than only from a field doc.
+
+---
+
 ### `tui-raw-mode-signing-scrub` — plaintext signing scrub unavailable from TUI session keyboard signal
 
 **Observed**: a TUI session keeps the terminal in raw mode (via `cfmakeraw`,

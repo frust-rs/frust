@@ -66,10 +66,29 @@ pub trait AppTree {
     /// Whether some widget in the tree currently holds keyboard/IME focus
     /// (delegates to [`RenderRoot::is_focus_active`]).
     ///
-    /// A frame-gate input: a focused field's caret/selection
-    /// chrome may need repainting, so the mobile shells feed this into
-    /// [`crate::FrameInputs::focus_or_ime_active`].
+    /// A *level* read, used by a shell that needs the current state (an IME
+    /// reconcile, a caret decision). It is deliberately **not** what the mobile
+    /// frame gate consults any more — a focus session that lasts forces a frame
+    /// forever — see [`AppTree::focus_ime_generation`].
     fn is_focus_active(&self) -> bool;
+
+    /// The focus/IME session generation, bumped on every actual change of the
+    /// root's focus flag or published IME surface (delegates to
+    /// [`RenderRoot::focus_ime_generation`]).
+    ///
+    /// The frame gate's *edge* input: a shell caches the value it last saw and
+    /// feeds `last != now` into
+    /// [`crate::FrameInputs::focus_or_ime_changed`], so a focus/IME transition
+    /// forces exactly one frame while a steady focus session (a caret blinking
+    /// in an otherwise-idle field) leaves the gate free to skip or pace. The
+    /// same cheap compare-a-generation shape as
+    /// [`AppTree::semantics_generation`].
+    ///
+    /// Deliberately **not** defaulted, unlike [`AppTree::set_insets`] and the
+    /// other additive methods below: any constant default (`0` included) would
+    /// report "nothing ever changed" and silently strand a focus transition,
+    /// against the frame gate's default-to-run rule.
+    fn focus_ime_generation(&self) -> u64;
 
     /// Lay the tree out against a logical (density-independent) size, threading
     /// the shell-owned `TextContext` down type-erased.
@@ -290,6 +309,10 @@ where
         self.root.is_focus_active()
     }
 
+    fn focus_ime_generation(&self) -> u64 {
+        self.root.focus_ime_generation()
+    }
+
     fn layout(&mut self, logical: Size, text_ctx: &mut dyn Any) {
         self.root.layout_with_text(logical, text_ctx);
     }
@@ -460,6 +483,9 @@ mod tests {
             unimplemented!()
         }
         fn is_focus_active(&self) -> bool {
+            unimplemented!()
+        }
+        fn focus_ime_generation(&self) -> u64 {
             unimplemented!()
         }
         fn layout(&mut self, _logical: Size, _text_ctx: &mut dyn Any) {

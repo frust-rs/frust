@@ -76,7 +76,7 @@ fn workspace_root() -> PathBuf {
 const SHELL_SOURCES: &[&str] = &[
     "crates/frust-shell-desktop/src/app_handler.rs",
     "crates/frust-shell-android/src/app.rs",
-    "crates/frust-shell-ios/src/app.rs",
+    "crates/frust-shell-ios/src/app/theme.rs",
 ];
 
 /// The ladder's helpers, in the order a reader meets them. Each must exist,

@@ -51,9 +51,16 @@
 //! route down the focus path; after any edit the widget fires `on_change`, resets
 //! the caret to visible, and republishes the IME surface. The caret blinks while
 //! focused, its phase measured from the shared shell frame clock
-//! ([`PaintCtx::frame_time`] — no wall-clock reads in widget code) in
-//! `paint` via [`PaintCtx::request_frame`] — the same animation contract the
-//! scroll fling uses. An edit/focus during the (clockless) event pass flags the
+//! ([`PaintCtx::frame_time`] — no wall-clock reads in widget code) in `paint`.
+//! The continuation frame this requests is a paced (`CosmeticLoop`) request via
+//! [`PaintCtx::request_frame_paced`], the same classification the design-system
+//! decorative loops (skeleton/progress/dots/toast/spinner) use: the blink is an
+//! indefinite toggle with no user-visible endpoint, so the mobile frame gate may
+//! throttle its cadence without a perceptible glitch. This is safe at any
+//! repaint cadence because the phase is computed as `frame_time - blink_epoch`
+//! ([`caret_visible_at`](TextInputWidget::caret_visible_at)) — a pure function of
+//! the current frame's own timestamp, never of a delta between consecutive
+//! painted frames. An edit/focus during the (clockless) event pass flags the
 //! blink for reset; the next paint records the blink epoch from `frame_time`.
 //!
 //! # Multi-line mode
@@ -1589,11 +1596,15 @@ impl Widget for TextInputWidget {
             }
         }
 
-        // Caret: blink while focused. Requesting a frame keeps the desktop shell's
-        // wait-loop scheduling paints so the blink animates (the mobile shells'
-        // continuous loops already do). At rest (unfocused) we stop signalling.
+        // Caret: blink while focused. A paced (CosmeticLoop) continuation
+        // request keeps the desktop shell's wait-loop scheduling paints so the
+        // blink animates (the mobile shells' continuous loops already do), while
+        // letting the mobile frame gate throttle the cadence — the blink is an
+        // indefinite decorative toggle with no endpoint, the same classification
+        // as the design-system skeleton/progress/dots/toast/spinner loops. At
+        // rest (unfocused) we stop signalling.
         if focused {
-            ctx.request_frame();
+            ctx.request_frame_paced();
             // Republish the IME surface every painted frame while focused, so a
             // controlled change applied by a rebuild (a submit clearing the
             // field) refreshes the shell-facing state the event pass would
@@ -1615,7 +1626,7 @@ impl Widget for TextInputWidget {
             // publish an *inactive* IME surface so the shell dismisses the
             // keyboard on the very next frame rather than waiting for the
             // event-pass release (`release_focus_pending`). No caret, and no
-            // `request_frame` — a non-interactive field is at rest.
+            // frame request — a non-interactive field is at rest.
             let mut ime = self.current_ime_state(origin, size);
             ime.active = false;
             ime.caret = None;
@@ -2141,11 +2152,17 @@ mod tests {
             "an unfocused field is at rest"
         );
 
-        // Once focused, paint pumps the blink and asks for the next frame.
+        // Once focused, paint pumps the blink and asks for the next frame — a
+        // paced (CosmeticLoop) request, the same classification the
+        // design-system decorative loops (skeleton/progress/dots/toast) use,
+        // since the blink is an indefinite toggle with no endpoint the mobile
+        // frame gate may throttle.
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        let outcome = root.paint(&mut sink, FrameTime::ZERO);
+        assert!(outcome.needs_frame, "a focused field blinks its caret");
         assert!(
-            root.paint(&mut sink, FrameTime::ZERO).needs_frame,
-            "a focused field blinks its caret"
+            outcome.needs_frame_paced_only,
+            "the caret blink is a CosmeticLoop request — the frame gate must be able to pace it"
         );
     }
 
@@ -2873,6 +2890,290 @@ mod tests {
         assert!(
             !outcome.needs_frame,
             "deep-nested stale focus flag must not busy-loop the desktop shell"
+        );
+    }
+
+    // --- Cross-branch unmount: a stale flag must not kill a live session ------
+    //
+    // The shipped shape is a scrollable list above a persistent composer. The
+    // user taps a row's field, then taps the composer: `route_event`'s
+    // blur-on-outside-tap breaks the focus link at the NEAREST COMMON ANCESTOR
+    // (the outer Column's pod for the list branch), so the row field's own pod
+    // flag, one level deeper, legitimately stays set. The list then recycles /
+    // filters / shrinks and the generic reconciler tears that row down.
+    //
+    // The row owns no session — the composer does. A release here is a
+    // user-visible input regression: the keyboard drops mid-typing in a field
+    // nothing touched. The effective-focus chain threaded through `BuildCtx`
+    // (`has_focus`/`with_focus_link`) is what tells the two apart, and both
+    // directions are pinned below over the same fixture.
+
+    #[derive(Default)]
+    struct BranchState {
+        row: String,
+        composer: String,
+        show_row: bool,
+        show_composer: bool,
+    }
+
+    /// Outer Column: [ inner Column (the "list", 0-or-1 row field), composer
+    /// field ]. Each field's initial text names its branch, so `ime_state`
+    /// identifies which one owns the session.
+    fn branches_logic(state: &mut BranchState) -> crate::FlexView<BranchState> {
+        use frust_core::{AnyView, any};
+        let mut rows: Vec<AnyView<BranchState>> = Vec::new();
+        if state.show_row {
+            rows.push(any(text_input(
+                state.row.clone(),
+                |s: &mut BranchState, v: String| s.row = v,
+            )));
+        }
+        let mut outer: Vec<AnyView<BranchState>> = vec![any(crate::Column(rows))];
+        if state.show_composer {
+            outer.push(any(text_input(
+                state.composer.clone(),
+                |s: &mut BranchState, v: String| s.composer = v,
+            )));
+        }
+        crate::Column(outer)
+    }
+
+    /// Build the two-branch tree with both fields present, focus the ROW field,
+    /// then focus the COMPOSER — leaving the row's own pod flag stale below the
+    /// cleared outer link. Returns the root, its text context and the state.
+    fn focus_row_then_composer() -> (
+        RenderRoot<BranchState, crate::FlexView<BranchState>>,
+        frust_text::TextContext,
+        BranchState,
+    ) {
+        let mut state = BranchState {
+            row: "row".to_string(),
+            composer: "composer".to_string(),
+            show_row: true,
+            show_composer: true,
+        };
+        let mut root: RenderRoot<BranchState, crate::FlexView<BranchState>> = RenderRoot::new();
+        root.rebuild(&mut branches_logic, &mut state);
+        let mut tcx = frust_text::TextContext::new();
+        root.layout_with_text(Size::new(300.0, 200.0), &mut tcx as &mut dyn Any);
+
+        // Tap the row field (full Down+Up so the Up releases its capture and the
+        // next Down hit-tests afresh — see nested_blur_clears_ime_and_idles_paint).
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(
+            root.ime_state().map(|s| s.editing.text),
+            Some("row".to_string()),
+            "the row field owns the session first"
+        );
+
+        // Tap the composer: focus moves branches. The blur clears the link at the
+        // outer Column only; the row field's flag inside the inner Column stays.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 50.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 50.0));
+        assert!(root.is_focus_active());
+        assert_eq!(
+            root.ime_state().map(|s| s.editing.text),
+            Some("composer".to_string()),
+            "the composer now owns the session"
+        );
+        (root, tcx, state)
+    }
+
+    #[test]
+    fn tearing_down_a_stale_focused_branch_leaves_the_live_session_alone() {
+        let (mut root, _tcx, mut state) = focus_row_then_composer();
+        let ime_before = root.ime_state();
+        let gen_before = root.focus_ime_generation();
+
+        // The list shrinks: the row field — whose stale flag is still set — is
+        // torn down by the generic reconciler.
+        state.show_row = false;
+        root.rebuild(&mut branches_logic, &mut state);
+
+        assert!(
+            root.is_focus_active(),
+            "unmounting a stale-flagged row must not blur the composer the user is typing in"
+        );
+        assert_eq!(
+            root.ime_state(),
+            ime_before,
+            "the live IME surface is untouched by an unrelated branch's unmount"
+        );
+        assert_eq!(
+            root.focus_ime_generation(),
+            gen_before,
+            "zero spurious edges: the shell's frame gate must see no focus/IME change at all"
+        );
+    }
+
+    #[test]
+    fn tearing_down_the_live_focused_branch_still_releases_the_session() {
+        // The twin of the test above over the same fixture: when the pod that
+        // actually holds the session dies, the release must still happen — the
+        // narrowed gate must not have turned into "never mark".
+        let (mut root, _tcx, mut state) = focus_row_then_composer();
+        let gen_before = root.focus_ime_generation();
+
+        state.show_composer = false;
+        root.rebuild(&mut branches_logic, &mut state);
+
+        assert!(
+            !root.is_focus_active(),
+            "the focused composer's unmount releases the session"
+        );
+        assert_eq!(
+            root.ime_state(),
+            None,
+            "the shell-facing surface dies with the widget that published it"
+        );
+        assert_eq!(
+            root.focus_ime_generation(),
+            gen_before.wrapping_add(1),
+            "one orphaned live focus path is exactly one edge"
+        );
+    }
+
+    // --- Wrapper type swap: the severing path `rebuild_child` owns -----------
+    //
+    // `Padding(if editing { text_input } else { text })` is the single-child
+    // wrapper shape: the view swaps the padded child's concrete type, so the
+    // focused widget is torn down inside `AnyView::rebuild` and a fresh,
+    // non-focusable one takes its pod. Nothing about that reaches the root by
+    // itself — no event, no publish — so without the orphan mark the keyboard
+    // stays up over an idle screen, `is_focus_active()` keeps reporting a
+    // session, and `Key`/`Ime` events keep routing into a widget that ignores
+    // them. Both directions are pinned below over one fixture, exactly like the
+    // cross-branch unmount pair above.
+
+    #[derive(Default)]
+    struct WrapState {
+        row: String,
+        composer: String,
+        row_editing: bool,
+    }
+
+    /// Outer Column: [ Padding-wrapped slot, composer field ]. The slot holds a
+    /// `text_input` while `row_editing` and a plain `text` label otherwise, so
+    /// flipping the flag is an `AnyView` type swap inside the wrapper — the
+    /// `rebuild_child` path, not the multi-child reconciler's.
+    fn wrapped_slot_logic(state: &mut WrapState) -> crate::FlexView<WrapState> {
+        use frust_core::{AnyView, any};
+        // The branch is taken *inside* the wrapper, so the wrapper's own view
+        // type is stable across the flip and only its child's concrete type
+        // changes — the `rebuild_child` swap. (Branching outside and handing
+        // `Padding` a pre-erased `AnyView` would double-erase the child and
+        // hide the swap from the wrapper entirely; see the note in the
+        // completion summary.)
+        let slot: AnyView<WrapState> = if state.row_editing {
+            any(crate::Padding(
+                crate::EdgeInsets::all(0.0),
+                text_input(state.row.clone(), |s: &mut WrapState, v: String| s.row = v),
+            ))
+        } else {
+            any(crate::Padding(
+                crate::EdgeInsets::all(0.0),
+                crate::text(state.row.clone()),
+            ))
+        };
+        crate::Column(vec![
+            slot,
+            any(text_input(
+                state.composer.clone(),
+                |s: &mut WrapState, v: String| s.composer = v,
+            )),
+        ])
+    }
+
+    /// Build the fixture and focus the **wrapped** field, leaving it (and the
+    /// wrapper pod above it) on the live focus chain.
+    fn focus_the_wrapped_field() -> (
+        RenderRoot<WrapState, crate::FlexView<WrapState>>,
+        frust_text::TextContext,
+        WrapState,
+    ) {
+        let mut state = WrapState {
+            row: "row".to_string(),
+            composer: "composer".to_string(),
+            row_editing: true,
+        };
+        let mut root: RenderRoot<WrapState, crate::FlexView<WrapState>> = RenderRoot::new();
+        root.rebuild(&mut wrapped_slot_logic, &mut state);
+        let mut tcx = frust_text::TextContext::new();
+        root.layout_with_text(Size::new(300.0, 200.0), &mut tcx as &mut dyn Any);
+
+        // Full Down+Up so the Up releases the capture and a later Down
+        // hit-tests afresh (see the cross-branch fixture above).
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(
+            root.ime_state().map(|s| s.editing.text),
+            Some("row".to_string()),
+            "the wrapped field owns the session"
+        );
+        (root, tcx, state)
+    }
+
+    #[test]
+    fn swapping_a_live_focused_wrapper_child_releases_the_session() {
+        let (mut root, _tcx, mut state) = focus_the_wrapped_field();
+        let gen_before = root.focus_ime_generation();
+
+        // The wrapper's child type-swaps out from under the focused field.
+        state.row_editing = false;
+        root.rebuild(&mut wrapped_slot_logic, &mut state);
+
+        assert!(
+            !root.is_focus_active(),
+            "the root's focus mirror must not outlive the type-swapped field"
+        );
+        assert_eq!(
+            root.ime_state(),
+            None,
+            "the shell-facing surface dies with the widget that published it"
+        );
+        assert_eq!(
+            root.focus_ime_generation(),
+            gen_before.wrapping_add(1),
+            "one severed live focus path is exactly one edge"
+        );
+    }
+
+    #[test]
+    fn swapping_a_stale_focused_wrapper_child_leaves_the_live_session_alone() {
+        let (mut root, _tcx, mut state) = focus_the_wrapped_field();
+
+        // Focus moves to the composer: the blur clears the link at the outer
+        // Column (the wrapper's own pod), leaving the wrapped field's flag one
+        // level deeper legitimately stale.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 50.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 50.0));
+        assert_eq!(
+            root.ime_state().map(|s| s.editing.text),
+            Some("composer".to_string()),
+            "the composer now owns the session"
+        );
+        let ime_before = root.ime_state();
+        let gen_before = root.focus_ime_generation();
+
+        // The same swap as the twin above, now on a dead branch.
+        state.row_editing = false;
+        root.rebuild(&mut wrapped_slot_logic, &mut state);
+
+        assert!(
+            root.is_focus_active(),
+            "swapping a stale-flagged wrapper child must not blur the composer \
+             the user is typing in"
+        );
+        assert_eq!(
+            root.ime_state(),
+            ime_before,
+            "the live IME surface is untouched by an unrelated branch's swap"
+        );
+        assert_eq!(
+            root.focus_ime_generation(),
+            gen_before,
+            "zero spurious edges: the shell's frame gate must see no focus/IME change"
         );
     }
 
@@ -3612,13 +3913,21 @@ mod tests {
         );
 
         // Leg 1 — the next paint already refuses to act focused and hands the
-        // shell an inactive IME surface (dismissing the keyboard).
+        // shell an inactive IME surface (dismissing the keyboard). The root reads
+        // that inactive publish as a session release, so it drops the surface
+        // outright (both mobile bridges serialise `None` to the same inactive
+        // wire form — see `RenderRoot::ime_state`) and clears its focus mirror
+        // rather than leaving it standing over a field that stopped editing.
         let mut sink = NullScene;
         let outcome = root.paint(&mut sink, FrameTime::ZERO);
         assert!(!outcome.needs_frame, "a disabled field paints at rest");
         assert!(
-            !root.ime_state().expect("still published").active,
-            "the published IME surface goes inactive"
+            root.ime_state().is_none(),
+            "the published inactive surface releases the session"
+        );
+        assert!(
+            !root.is_focus_active(),
+            "the root's focus mirror goes with it"
         );
 
         // Leg 2 — the first event that reaches the field releases the pod-level
@@ -3768,13 +4077,19 @@ mod tests {
         );
 
         // Leg 1 — the next paint already refuses to act focused and hands the
-        // shell an inactive IME surface (dismissing the keyboard).
+        // shell an inactive IME surface (dismissing the keyboard), which the root
+        // reads as a session release: surface dropped, focus mirror cleared (see
+        // the disabled twin above).
         let mut sink = NullScene;
         let outcome = root.paint(&mut sink, FrameTime::ZERO);
         assert!(!outcome.needs_frame, "a read-only field paints at rest");
         assert!(
-            !root.ime_state().expect("still published").active,
-            "the published IME surface goes inactive"
+            root.ime_state().is_none(),
+            "the published inactive surface releases the session"
+        );
+        assert!(
+            !root.is_focus_active(),
+            "the root's focus mirror goes with it"
         );
 
         // Leg 2 — the first event that reaches the field releases the pod-level

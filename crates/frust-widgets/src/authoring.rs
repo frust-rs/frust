@@ -205,8 +205,14 @@ pub fn erase_callback_arg<State: 'static, A: 'static>(
 /// The element (`Box<dyn Widget>`) is stored double-boxed so a later
 /// [`rebuild_child`] can recover it as `&mut Box<dyn Widget>` — the type
 /// `AnyView`'s `rebuild` needs to swap the widget on a concrete-type change.
+///
+/// The build runs with the focus chain closed
+/// ([`BuildCtx::with_focus_link`]`(false, …)`): the pod being built is brand new,
+/// so by construction it holds no focus link — the same composition
+/// [`rebuild_child`] performs, kept uniform so "descending into a pod always
+/// recomputes the chain" has no exceptions.
 pub fn build_child<State: 'static>(view: &AnyView<State>, ctx: &mut BuildCtx<'_>) -> ChildPod {
-    let element: Box<dyn Widget> = view.build(ctx);
+    let element: Box<dyn Widget> = ctx.with_focus_link(false, |ctx| view.build(ctx));
     ChildPod::new(Box::new(element))
 }
 
@@ -221,15 +227,42 @@ pub fn build_child<State: 'static>(view: &AnyView<State>, ctx: &mut BuildCtx<'_>
 /// single-child wrappers (`Padding`/`Align`/`SizedBox`, and the interactive
 /// widgets' own label/track children) that call this instead of
 /// `rebuild_children`.
+///
+/// **A type swap severs the recorded focus path exactly like it severs the
+/// capture path**, and is handled the same way the keyed reconciler handles its
+/// own swap arm: the pod's `focused` flag is dropped (the fresh widget never
+/// claimed focus — leaving the link set would route `Key`/`Ime` events into a
+/// widget that ignores them) and
+/// [`mark_focus_orphaned`](frust_core::mark_focus_orphaned) is raised *when the
+/// severed link was on the live focus chain* ([`mark_orphan_if_live`]), so
+/// `RenderRoot::rebuild` releases `focus_active`/`ime_state` before the frame
+/// ends. This is the `Padding(if editing { text_input } else { text })` shape:
+/// without the release the keyboard stays up over an idle screen and
+/// `is_focus_active()` keeps reporting a session whose owner no longer exists. A
+/// swap of a merely *stale* flag under an already-blurred ancestor marks
+/// nothing — it owned no session.
 pub fn rebuild_child<State: 'static>(
     prev: &AnyView<State>,
     next: &AnyView<State>,
     pod: &mut ChildPod,
     ctx: &mut BuildCtx<'_>,
 ) -> ChangeFlags {
+    // Read before the nested rebuild, exactly as `rebuild_child_tracked` reads
+    // its own `link_focused`: the gate describes the link this pod held *going
+    // into* the swap.
+    let link_focused = pod.is_focused();
     let (flags, swapped) = rebuild_child_tracked(prev, next, pod, ctx);
-    if swapped && pod.is_active() {
-        pod.set_active(false);
+    if swapped {
+        if pod.is_active() {
+            pod.set_active(false);
+        }
+        if link_focused {
+            pod.set_focused(false);
+        }
+        // `ctx` carries the chain down to *this wrapper*; the pod's own flag is
+        // ANDed onto it inside, the same composition every other marking site
+        // uses.
+        mark_orphan_if_live(ctx, link_focused);
     }
     flags
 }
@@ -245,12 +278,22 @@ pub fn rebuild_child<State: 'static>(
 /// dropped without a synthetic `Cancel` (there is nothing armed to unwind).
 /// Detection compares the boxed element's concrete
 /// [`TypeId`](std::any::TypeId) across the rebuild.
+///
+/// **This is the descent that extends the focus chain.** The nested rebuild runs
+/// under [`BuildCtx::with_focus_link`]`(pod.is_focused(), …)`, so a container
+/// deeper in the tree sees `ctx.has_focus()` == "is the whole chain from the root
+/// to me focused" — the value the orphan-marking sites gate on. Every route into
+/// a child's `rebuild`/`teardown` funnels through here (or through
+/// [`teardown_child`]), which is what makes the chain complete through arbitrary
+/// nesting.
 fn rebuild_child_tracked<State: 'static>(
     prev: &AnyView<State>,
     next: &AnyView<State>,
     pod: &mut ChildPod,
     ctx: &mut BuildCtx<'_>,
 ) -> (ChangeFlags, bool) {
+    // Read before the `widget_mut` borrow below.
+    let link_focused = pod.is_focused();
     let element = pod
         .widget_mut()
         .downcast_mut::<Box<dyn Widget>>()
@@ -259,7 +302,7 @@ fn rebuild_child_tracked<State: 'static>(
         let any: &dyn Any = &**element;
         any.type_id()
     };
-    let flags = next.rebuild(prev, element, ctx);
+    let flags = ctx.with_focus_link(link_focused, |ctx| next.rebuild(prev, element, ctx));
     let after = {
         let any: &dyn Any = &**element;
         any.type_id()
@@ -274,6 +317,15 @@ fn rebuild_child_tracked<State: 'static>(
 /// armed widget dropped mid-gesture (e.g. the active row truncated out of a
 /// shrinking list) unwinds its state machine instead of vanishing with no
 /// terminating `Up`/`Cancel`.
+///
+/// A pod still holding the recorded **focus** path ([`ChildPod::is_focused`])
+/// *on the live focus chain* ([`BuildCtx::has_focus`]) raises
+/// [`mark_focus_orphaned`](frust_core::mark_focus_orphaned) instead: the focused
+/// widget is about to stop existing, so the whole focus/IME session dies with it
+/// and `RenderRoot::rebuild` releases it before the frame ends (see
+/// [`cancel_active_children`]'s note for the full mechanism, and why the pod
+/// cannot do it itself). A pod whose flag is stale — set, but under a link some
+/// ancestor already cleared — is torn down silently: it owns no session to lose.
 pub fn teardown_child<State: 'static>(
     view: &AnyView<State>,
     pod: &mut ChildPod,
@@ -283,8 +335,39 @@ pub fn teardown_child<State: 'static>(
         cancel_pod(pod);
         pod.set_active(false);
     }
+    let link_focused = pod.is_focused();
+    if link_focused {
+        // The pod is dropped by the caller right after this returns, so clearing
+        // the flag is bookkeeping hygiene, not the load-bearing part — the mark is.
+        pod.set_focused(false);
+    }
+    mark_orphan_if_live(ctx, link_focused);
     if let Some(element) = pod.widget_mut().downcast_mut::<Box<dyn Widget>>() {
-        view.teardown(element, ctx);
+        // Descend with the chain extended by the link this pod held *before* the
+        // clear above: a focused pod's subtree is still on the live chain while it
+        // is being torn down, so a focused descendant reports its own orphan.
+        ctx.with_focus_link(link_focused, |ctx| view.teardown(element, ctx));
+    }
+}
+
+/// Raise the orphan mark for a severed focus link, but **only when the link was
+/// live** — the one gate every marking site in this module shares
+/// ([`teardown_child`], [`cancel_active_children`], the keyed reconciler's
+/// type-swap arm, and [`rebuild_child`]'s).
+///
+/// `link_focused` is the dying pod's own [`ChildPod::is_focused`] flag and
+/// `ctx.has_focus()` is the chain above it, so the mark means exactly one thing:
+/// **a LIVE session just lost its owner.** Both halves are required. The flag
+/// alone is not evidence of a live session — a container-routed blur clears the
+/// focus link at the nearest common ancestor only, leaving flags deeper in the
+/// blurred branch legitimately set (see [`route_event`]) — and marking on the
+/// flag alone is what let a recycled list row, a filtered-out item, or a switched
+/// pattern release the *currently typed-into* field somewhere else in the tree.
+/// The chain alone is not evidence either: a live chain running past an unfocused
+/// sibling says nothing about that sibling.
+fn mark_orphan_if_live(ctx: &BuildCtx<'_>, link_focused: bool) {
+    if link_focused && ctx.has_focus() {
+        frust_core::mark_focus_orphaned();
     }
 }
 
@@ -328,7 +411,9 @@ pub(crate) fn cancel_pod(pod: &mut ChildPod) {
 ///
 /// For each pod handed in, any surviving armed widget is unwound via [`cancel_pod`]
 /// and its `active` flag dropped, and any focused child has its `focused` flag
-/// dropped.
+/// dropped. `ctx` carries the focus chain down to the *container*
+/// ([`BuildCtx::has_focus`]), which each pod's own flag is ANDed onto to decide
+/// whether the clear severed a live session (see [`mark_orphan_if_live`]).
 ///
 /// # Focus vs. capture: why one synthesizes a `Cancel` and the other does not
 ///
@@ -341,24 +426,57 @@ pub(crate) fn cancel_pod(pod: &mut ChildPod) {
 /// flag is enough — there is no widget-internal blur to drive, and (per the g5
 /// contract) a `Cancel` handler must not touch app state anyway.
 ///
-/// **RenderRoot desync note.** Clearing `focused` here does *not* notify
-/// [`RenderRoot`](frust_core::RenderRoot): the rebuild pass runs over a
-/// [`BuildCtx`], with no `RenderRoot` in scope, exactly as the g5 capture-cancel
-/// cannot reset `RenderRoot::pointer_captured`. So the root's
-/// `focus_active`/`ime_state` stay momentarily stale after a structural blur and
-/// self-correct on the next event pass (a `Down` re-evaluates focus/blur; a
-/// focus-routed event finds no focused pod and is ignored). This is the
-/// conservative, correct-by-convergence behavior — the same transient g5 already
-/// accepts for capture — not a new desync class.
-fn cancel_active_children(pods: &mut [ChildPod]) {
+/// # RenderRoot notification: the orphan mark
+///
+/// Clearing `focused` here cannot notify [`RenderRoot`](frust_core::RenderRoot)
+/// directly — the rebuild pass runs over a [`BuildCtx`], with no `RenderRoot` in
+/// scope, exactly as the g5 capture-cancel cannot reset
+/// `RenderRoot::pointer_captured`. It instead raises the thread-local
+/// [`mark_focus_orphaned`](frust_core::mark_focus_orphaned) flag, which
+/// `RenderRoot::rebuild` drains at the end of the same rebuild and turns into a
+/// full focus/IME session release (`focus_active` cleared, the shell-facing
+/// surface dropped, one edge on the focus/IME generation).
+///
+/// **Why the mark and not convergence.** The previous behavior was to leave the
+/// root's `focus_active`/`ime_state` stale and let the next event pass
+/// self-correct. That is fine while the user keeps touching the screen and wrong
+/// the moment they stop: on an idle screen no next event arrives, so the root
+/// keeps reporting a live focus session for a widget that no longer exists —
+/// which strands `ime_state()` at the shell and (measured on a Xiaomi 12) held
+/// the mobile frame gate's focus input up permanently after a navigator pop.
+/// A session must die with its owner, not with the next tap.
+///
+/// **Why a thread-local and not a tree walk.** Validating the root's mirror
+/// against reality after the diff would need to ask "does any pod in the tree
+/// still hold focus?", and there is no such iterator: `Widget` exposes no
+/// children, so nothing can walk the retained tree generically. The mark is the
+/// only channel available from inside a `BuildCtx` pass, and it mirrors
+/// `mark_pending_result_flush`'s shape exactly (data-free, idempotent,
+/// UI-thread-affine).
+///
+/// **A stale flag deep in a blurred branch is harmless by construction.** A
+/// container-routed blur clears the focus link at the nearest common ancestor
+/// only, so `focused` flags *below* that link stay set until focus next enters
+/// the subtree (see [`route_event`]). Such a pod is not evidence of a session:
+/// the mark is gated on the whole chain ([`mark_orphan_if_live`]), which a
+/// cleared ancestor link forces to `false` for the entire subtree below it —
+/// exactly as the same composition already hides those flags from paint
+/// (`ChildPod::paint_child`'s `self.focused && ctx.has_focus()`) and as
+/// focus-path routing already refuses to deliver into them. Tearing down a stale
+/// branch — a recycled list row, a filtered-out item, a switched pattern —
+/// therefore leaves the session of whatever field is *actually* focused
+/// untouched, instead of dropping the keyboard mid-typing somewhere unrelated.
+fn cancel_active_children(pods: &mut [ChildPod], ctx: &BuildCtx<'_>) {
     for pod in pods.iter_mut() {
         if pod.is_active() {
             cancel_pod(pod);
             pod.set_active(false);
         }
-        if pod.is_focused() {
+        let link_focused = pod.is_focused();
+        if link_focused {
             pod.set_focused(false);
         }
+        mark_orphan_if_live(ctx, link_focused);
     }
 }
 
@@ -384,6 +502,18 @@ fn cancel_active_children(pods: &mut [ChildPod]) {
 /// structural-change-free rebuild leaves every recorded path untouched, so an
 /// ordinary every-frame rebuild never breaks a captured drag or dismisses the
 /// keyboard for an unchanged child.
+///
+/// **A child that loses a LIVE focus path takes the root's session with it.**
+/// Every route that severs a recorded focus path here — a torn-down child
+/// ([`teardown_child`]), a cleared tail ([`cancel_active_children`]), a
+/// key-reused type swap — raises
+/// [`mark_focus_orphaned`](frust_core::mark_focus_orphaned) *when the severed
+/// link was on the live focus chain* ([`mark_orphan_if_live`]), and
+/// `RenderRoot::rebuild` releases `focus_active`/`ime_state` before the frame
+/// ends rather than leaving them standing over a widget that no longer exists. A
+/// severed link that was merely a stale flag deep in an already-blurred branch
+/// marks nothing: it owned no session. See [`cancel_active_children`] for the
+/// mechanism.
 pub fn rebuild_children<State: 'static, C>(
     prev: &[C],
     next: &[C],
@@ -483,7 +613,9 @@ fn rebuild_children_positional<State: 'static, C>(
     // active pod was already cancelled in `teardown_child`.
     if prev.len() != next.len() || first_swap.is_some() {
         let k = first_swap.unwrap_or(common);
-        cancel_active_children(&mut pods[k..]);
+        // `ctx` carries the chain down to *this container*; each pod's own flag
+        // is ANDed onto it inside.
+        cancel_active_children(&mut pods[k..], ctx);
     }
     flags
 }
@@ -564,7 +696,16 @@ fn rebuild_children_keyed<State: 'static, C>(
                 // key-matched non-swap relocates its pod (and thus its recorded
                 // focus/capture flags) intact, so no clearing happens there.
                 pod.set_active(false);
-                pod.set_focused(false);
+                // The focused widget died inside the swap: the recorded focus
+                // path is severed, so the root's session goes with it — but only
+                // if this pod's link was on the LIVE chain; a stale flag under a
+                // blurred ancestor owns no session (see `mark_orphan_if_live` and
+                // `cancel_active_children`'s note).
+                let link_focused = pod.is_focused();
+                if link_focused {
+                    pod.set_focused(false);
+                }
+                mark_orphan_if_live(ctx, link_focused);
             }
             new_pods.push(pod);
         } else {
@@ -633,9 +774,19 @@ fn is_pointer_down(event: &InputEvent) -> bool {
 /// the child it hits clears every focused child in this container. At the nearest
 /// common ancestor of a stale focus branch and the tapped branch, this breaks the
 /// recorded focus chain (a `Down` inside the still-focused child keeps it — that
-/// child stays focused and is not cleared). Deeper stale flags below a cleared
-/// link are unreachable and are corrected the next time focus enters that subtree
-/// (a focus request re-records the whole chain).
+/// child stays focused and is not cleared).
+///
+/// **Deeper stale flags below a cleared link are harmless by construction**, not
+/// merely "corrected later". Nothing reads a `focused` flag on its own: every
+/// consumer composes it with the chain above it, so a cleared link forces the
+/// whole subtree below to read as unfocused. Focus-routed events stop at the
+/// cleared link (this function finds no focused child to forward to); paint ANDs
+/// the same way (`ChildPod::paint_child`'s `self.focused && ctx.has_focus()`); and
+/// the rebuild pass ANDs the same way too ([`BuildCtx::has_focus`]), so tearing a
+/// stale branch down marks no orphan and cannot release the session of the field
+/// that really is focused ([`mark_orphan_if_live`]). The flags themselves are
+/// still cleaned up the next time focus enters that subtree (a focus request
+/// re-records the whole chain).
 pub fn route_event(
     children: &mut [ChildPod],
     ctx: &mut EventCtx<'_>,
@@ -809,7 +960,8 @@ mod authoring_surface_tests {
     }
 }
 
-/// Mechanism-level tests for [`rebuild_child`]'s type-swap capture handling:
+/// Mechanism-level tests for [`rebuild_child`]'s type-swap capture *and focus*
+/// handling, plus the orphan-marking sites of the multi-child reconcilers:
 /// every single-child container (`Padding`/`Align`/
 /// `SizedBox`, interactive widgets' labels) reconciles its child through this
 /// helper, so the clear-on-swap behavior is proven once here at the shared
@@ -819,10 +971,84 @@ mod authoring_surface_tests {
 mod tests {
     use super::*;
     use crate::test_support::{leaf_any, swap_leaf};
-    use frust_core::BuildCtx;
+    use frust_core::{BoxConstraints, BuildCtx, LayoutCtx, PaintCtx, PaintScene, any};
+    use kurbo::Size;
 
+    /// A context on the **live** focus chain — what a diff under a real focused
+    /// root sees (`BuildCtx::new`'s "unknown, assume live" default).
     fn ctx(counter: &mut u64) -> BuildCtx<'_> {
         BuildCtx::new(counter)
+    }
+
+    /// A context whose focus chain was broken by an ancestor: the diff of a
+    /// subtree hanging below a link a container-routed blur already cleared.
+    fn blurred_ctx(counter: &mut u64) -> BuildCtx<'_> {
+        let mut ctx = BuildCtx::new(counter);
+        ctx.set_has_focus(false);
+        ctx
+    }
+
+    /// A minimal multi-child container **view/widget pair** — the smallest thing
+    /// that reconciles a child list through [`rebuild_children`] — so the focus
+    /// chain can be exercised through genuine nesting (outer container → inner
+    /// container → leaf) rather than one level of pods.
+    struct NestView {
+        children: Vec<AnyView<()>>,
+    }
+
+    struct NestWidget {
+        children: Vec<ChildPod>,
+    }
+
+    impl View<()> for NestView {
+        type Element = NestWidget;
+
+        fn build(&self, ctx: &mut BuildCtx<'_>) -> NestWidget {
+            NestWidget {
+                children: self.children.iter().map(|c| build_child(c, ctx)).collect(),
+            }
+        }
+
+        fn rebuild(
+            &self,
+            prev: &Self,
+            element: &mut NestWidget,
+            ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            rebuild_children(
+                &prev.children,
+                &self.children,
+                &mut element.children,
+                ctx,
+                |v: &AnyView<()>| v,
+                |_: &AnyView<()>| None::<ChildKey>,
+            )
+        }
+
+        fn teardown(&self, element: &mut NestWidget, ctx: &mut BuildCtx<'_>) {
+            for (view, pod) in self.children.iter().zip(element.children.iter_mut()) {
+                teardown_child(view, pod, ctx);
+            }
+        }
+    }
+
+    impl Widget for NestWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(10.0, 10.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+    }
+
+    /// Reach the [`NestWidget`] inside a pod built from a [`NestView`] (double-boxed
+    /// by [`build_child`]), so a test can set a pod flag deep in the tree.
+    fn nest_in(pod: &mut ChildPod) -> &mut NestWidget {
+        let boxed = pod
+            .widget_mut()
+            .downcast_mut::<Box<dyn Widget>>()
+            .expect("pod holds a boxed AnyView widget");
+        (**boxed)
+            .downcast_mut::<NestWidget>()
+            .expect("the boxed widget is the NestWidget")
     }
 
     #[test]
@@ -861,6 +1087,300 @@ mod tests {
         assert!(
             pod.is_active(),
             "a content-only rebuild must not clear an in-flight capture"
+        );
+    }
+
+    /// [`rebuild_child`]'s type-swap marking site — the single-child wrappers
+    /// (`Padding`/`Align`/`SizedBox`/`GestureDetector`/`Scroll`, the card/dialog
+    /// slot helpers, `ListView`'s surviving rows) — pinned in both directions.
+    /// `Padding(if editing { text_input } else { text })` is the shipped shape:
+    /// the focused widget dies inside the swap, so a live session dies with it,
+    /// while the same swap over a stale flag under a blurred ancestor owns no
+    /// session to lose.
+    #[test]
+    fn a_wrapper_type_swap_marks_only_on_a_live_chain() {
+        fn swap_wrapped_child(build: &mut dyn FnMut(&mut u64) -> BuildCtx<'_>) -> bool {
+            let _ = frust_core::take_focus_orphaned();
+            let mut counter = 0u64;
+            let prev: AnyView<()> = leaf_any(10.0, 10.0);
+            let mut pod = build_child(&prev, &mut ctx(&mut counter));
+            // The wrapper's single child holds the recorded focus path.
+            pod.set_focused(true);
+
+            // Leaf -> SwapLeaf: a concrete-type change, so the old widget dies
+            // inside `AnyView::rebuild` and a fresh one takes its pod.
+            let next: AnyView<()> = swap_leaf().into_any();
+            rebuild_child::<()>(&prev, &next, &mut pod, &mut build(&mut counter));
+            assert!(
+                !pod.is_focused(),
+                "a swapped-in widget must not inherit the old focus link"
+            );
+            frust_core::take_focus_orphaned()
+        }
+
+        assert!(
+            swap_wrapped_child(&mut ctx),
+            "a live focus path dying inside a wrapper's type swap releases the session"
+        );
+        assert!(
+            !swap_wrapped_child(&mut blurred_ctx),
+            "the same swap over a stale flag below a cleared link marks nothing"
+        );
+    }
+
+    /// The negative guard for the site above: a same-type, content-only rebuild
+    /// through a wrapper keeps the focus path (Flutter's retention invariant),
+    /// so it must neither clear the flag nor mark — a mark here would drop the
+    /// keyboard on every frame a padded field re-renders.
+    #[test]
+    fn a_wrapper_content_only_rebuild_keeps_focus_and_marks_nothing() {
+        let _ = frust_core::take_focus_orphaned();
+        let mut counter = 0u64;
+        let prev: AnyView<()> = leaf_any(10.0, 10.0);
+        let mut pod = build_child(&prev, &mut ctx(&mut counter));
+        pod.set_focused(true);
+
+        let next: AnyView<()> = leaf_any(20.0, 20.0);
+        rebuild_child::<()>(&prev, &next, &mut pod, &mut ctx(&mut counter));
+
+        assert!(
+            pod.is_focused(),
+            "a content-only rebuild must not clear the recorded focus path"
+        );
+        assert!(
+            !frust_core::take_focus_orphaned(),
+            "an unchanged wrapper child must not orphan the focus session"
+        );
+    }
+
+    /// The producer half of the generic-unmount focus release: a reconciler that
+    /// severs a recorded focus path raises the orphan mark, which
+    /// `RenderRoot::rebuild` drains into a full session release (the consumer
+    /// half is pinned in `frust-core`'s
+    /// `generic_unmount_orphan_releases_the_whole_session`).
+    #[test]
+    fn a_truncated_focused_child_marks_the_focus_orphan() {
+        let _ = frust_core::take_focus_orphaned();
+        let mut counter = 0u64;
+        let prev: Vec<AnyView<()>> = vec![leaf_any(10.0, 10.0), leaf_any(10.0, 10.0)];
+        let mut pods: Vec<ChildPod> = prev
+            .iter()
+            .map(|v| build_child(v, &mut ctx(&mut counter)))
+            .collect();
+        // The second child holds the recorded focus path.
+        pods[1].set_focused(true);
+        assert!(
+            !frust_core::take_focus_orphaned(),
+            "building a list orphans nothing"
+        );
+
+        // Shrink the list: the focused child is torn down and dropped.
+        let next: Vec<AnyView<()>> = vec![leaf_any(10.0, 10.0)];
+        rebuild_children(
+            &prev,
+            &next,
+            &mut pods,
+            &mut ctx(&mut counter),
+            |v: &AnyView<()>| v,
+            |_: &AnyView<()>| None::<ChildKey>,
+        );
+        assert_eq!(pods.len(), 1);
+        assert!(
+            frust_core::take_focus_orphaned(),
+            "the focused child's unmount must be reported to the render root"
+        );
+    }
+
+    /// The cross-branch guard for the [`teardown_child`] marking site: the same
+    /// truncation as above, but with the container's own link to the root already
+    /// cleared (a blur moved focus to another branch, leaving this pod's flag
+    /// stale). The stale pod owns no session, so its unmount must mark nothing —
+    /// marking here is what dropped the keyboard out of an unrelated, still-live
+    /// field when a list recycled a row.
+    #[test]
+    fn a_truncated_stale_focused_child_under_a_blurred_link_marks_nothing() {
+        let _ = frust_core::take_focus_orphaned();
+        let mut counter = 0u64;
+        let prev: Vec<AnyView<()>> = vec![leaf_any(10.0, 10.0), leaf_any(10.0, 10.0)];
+        let mut pods: Vec<ChildPod> = prev
+            .iter()
+            .map(|v| build_child(v, &mut ctx(&mut counter)))
+            .collect();
+        // Stale: the flag is set, but the chain above this container is broken.
+        pods[1].set_focused(true);
+
+        let next: Vec<AnyView<()>> = vec![leaf_any(10.0, 10.0)];
+        rebuild_children(
+            &prev,
+            &next,
+            &mut pods,
+            &mut blurred_ctx(&mut counter),
+            |v: &AnyView<()>| v,
+            |_: &AnyView<()>| None::<ChildKey>,
+        );
+        assert_eq!(pods.len(), 1);
+        assert!(
+            !frust_core::take_focus_orphaned(),
+            "a stale flag below a cleared link owns no session — releasing here \
+             would kill the focus of whatever field really is focused"
+        );
+    }
+
+    /// The [`cancel_active_children`] marking site (the cleared tail past the
+    /// first type swap), pinned in both directions: it marks on a live chain and
+    /// stays silent under a blurred one.
+    #[test]
+    fn a_cleared_tail_marks_only_on_a_live_chain() {
+        // Index 0 type-swaps (Leaf -> SwapLeaf), so the tail from 0 onward has
+        // its recorded paths cleared; index 1 holds the focus flag.
+        fn shrink_tail(build: &mut dyn FnMut(&mut u64) -> BuildCtx<'_>) -> bool {
+            let _ = frust_core::take_focus_orphaned();
+            let mut counter = 0u64;
+            let prev: Vec<AnyView<()>> = vec![leaf_any(10.0, 10.0), leaf_any(10.0, 10.0)];
+            let mut pods: Vec<ChildPod> = prev
+                .iter()
+                .map(|v| build_child(v, &mut ctx(&mut counter)))
+                .collect();
+            pods[1].set_focused(true);
+            let next: Vec<AnyView<()>> = vec![swap_leaf().into_any(), leaf_any(10.0, 10.0)];
+            rebuild_children(
+                &prev,
+                &next,
+                &mut pods,
+                &mut build(&mut counter),
+                |v: &AnyView<()>| v,
+                |_: &AnyView<()>| None::<ChildKey>,
+            );
+            assert!(!pods[1].is_focused(), "the cleared tail drops the flag");
+            frust_core::take_focus_orphaned()
+        }
+
+        assert!(
+            shrink_tail(&mut ctx),
+            "a live focus link cleared by the tail sweep releases the session"
+        );
+        assert!(
+            !shrink_tail(&mut blurred_ctx),
+            "the same sweep over a stale flag below a cleared link marks nothing"
+        );
+    }
+
+    /// The keyed reconciler's type-swap marking site, pinned in both directions:
+    /// a key reused for a different concrete type breaks identity, so a *live*
+    /// focus link dies with it — but a stale one under a blurred ancestor does
+    /// not.
+    #[test]
+    fn a_keyed_type_swap_marks_only_on_a_live_chain() {
+        fn swap_keyed(build: &mut dyn FnMut(&mut u64) -> BuildCtx<'_>) -> bool {
+            let _ = frust_core::take_focus_orphaned();
+            let mut counter = 0u64;
+            let key = ChildKey::new(1u32);
+            let prev: Vec<(AnyView<()>, ChildKey)> = vec![(leaf_any(10.0, 10.0), key)];
+            let mut pods: Vec<ChildPod> = prev
+                .iter()
+                .map(|c| build_child(&c.0, &mut ctx(&mut counter)))
+                .collect();
+            pods[0].set_focused(true);
+            // Same key, different concrete view type: a swap, not a relocation.
+            let next: Vec<(AnyView<()>, ChildKey)> = vec![(swap_leaf().into_any(), key)];
+            rebuild_children(
+                &prev,
+                &next,
+                &mut pods,
+                &mut build(&mut counter),
+                |c: &(AnyView<()>, ChildKey)| &c.0,
+                |c: &(AnyView<()>, ChildKey)| Some(c.1),
+            );
+            assert!(!pods[0].is_focused(), "a swapped-away pod drops the flag");
+            frust_core::take_focus_orphaned()
+        }
+
+        assert!(
+            swap_keyed(&mut ctx),
+            "a live focus path dying inside a keyed swap releases the session"
+        );
+        assert!(
+            !swap_keyed(&mut blurred_ctx),
+            "a stale flag dying inside a keyed swap releases nothing"
+        );
+    }
+
+    /// The chain must compose through **nesting**, root → container → child: the
+    /// blur clears the link at the nearest common ancestor (the outer container's
+    /// pod), and the leaf's own flag two levels down stays stale. Tearing that
+    /// leaf out must mark nothing — while the identical teardown with the outer
+    /// link intact must still mark.
+    #[test]
+    fn the_focus_chain_composes_through_nested_containers() {
+        fn drop_inner_leaf(outer_link_focused: bool) -> bool {
+            let _ = frust_core::take_focus_orphaned();
+            let mut counter = 0u64;
+            let prev: Vec<AnyView<()>> = vec![any(NestView {
+                children: vec![leaf_any(10.0, 10.0)],
+            })];
+            let mut pods: Vec<ChildPod> = prev
+                .iter()
+                .map(|v| build_child(v, &mut ctx(&mut counter)))
+                .collect();
+            // The leaf deep inside holds the focus flag either way; only the
+            // OUTER link differs — that is the whole experiment.
+            nest_in(&mut pods[0]).children[0].set_focused(true);
+            pods[0].set_focused(outer_link_focused);
+
+            // The inner container loses its only child (a filtered/recycled row).
+            let next: Vec<AnyView<()>> = vec![any(NestView { children: vec![] })];
+            rebuild_children(
+                &prev,
+                &next,
+                &mut pods,
+                &mut ctx(&mut counter),
+                |v: &AnyView<()>| v,
+                |_: &AnyView<()>| None::<ChildKey>,
+            );
+            assert!(
+                nest_in(&mut pods[0]).children.is_empty(),
+                "the inner child was torn down"
+            );
+            frust_core::take_focus_orphaned()
+        }
+
+        assert!(
+            drop_inner_leaf(true),
+            "an unbroken chain root→container→leaf is a live session; its unmount releases it"
+        );
+        assert!(
+            !drop_inner_leaf(false),
+            "a cleared link at the nearest common ancestor makes every flag below it inert"
+        );
+    }
+
+    /// The negative guard: an ordinary content-only rebuild keeps the focus path
+    /// (Flutter's retention invariant) and must therefore orphan nothing — a mark
+    /// raised here would drop the keyboard on every frame.
+    #[test]
+    fn a_content_only_rebuild_marks_no_focus_orphan() {
+        let _ = frust_core::take_focus_orphaned();
+        let mut counter = 0u64;
+        let prev: Vec<AnyView<()>> = vec![leaf_any(10.0, 10.0), leaf_any(10.0, 10.0)];
+        let mut pods: Vec<ChildPod> = prev
+            .iter()
+            .map(|v| build_child(v, &mut ctx(&mut counter)))
+            .collect();
+        pods[1].set_focused(true);
+
+        let next: Vec<AnyView<()>> = vec![leaf_any(20.0, 20.0), leaf_any(20.0, 20.0)];
+        rebuild_children(
+            &prev,
+            &next,
+            &mut pods,
+            &mut ctx(&mut counter),
+            |v: &AnyView<()>| v,
+            |_: &AnyView<()>| None::<ChildKey>,
+        );
+        assert!(pods[1].is_focused(), "the focus path survives intact");
+        assert!(
+            !frust_core::take_focus_orphaned(),
+            "an unchanged child must not orphan the focus session"
         );
     }
 }

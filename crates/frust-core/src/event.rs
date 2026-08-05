@@ -394,6 +394,102 @@ pub fn take_pending_result_flush() -> bool {
     PENDING_RESULT_FLUSH.with(|flag| flag.replace(false))
 }
 
+/// Non-draining peek at the [`mark_pending_result_flush`] flag — whether a
+/// deferred state-bearing callback is owed a [`InputEvent::Housekeeping`]
+/// broadcast, without consuming the mark.
+///
+/// The [`take_change_flags`](crate::app::RenderRoot::take_change_flags) /
+/// [`has_pending_change_flags`](crate::app::RenderRoot::has_pending_change_flags)
+/// pairing, one layer down: the mobile shells read this while gathering their
+/// frame-gate inputs (`FrameInputs::deferred_callbacks_pending`) *before*
+/// deciding whether the frame runs at all, so a frame the gate would otherwise
+/// skip still runs and reaches the [`crate::app::RenderRoot::rebuild`] that
+/// drains the mark. Peeking must not consume it — draining stays that rebuild's
+/// job.
+///
+/// Thread-affine like both of its neighbours: it reports only marks raised on
+/// the calling thread (see the `PENDING_RESULT_FLUSH` doc for why the flag is
+/// thread-local rather than a process-global `AtomicBool`).
+pub fn has_pending_result_flush() -> bool {
+    PENDING_RESULT_FLUSH.with(|flag| flag.get())
+}
+
+thread_local! {
+    /// The "a focused child pod lost its identity during this thread's view
+    /// diff" flag, raised by [`mark_focus_orphaned`] and drained by
+    /// [`take_focus_orphaned`].
+    ///
+    /// A side channel for exactly the reason [`PENDING_RESULT_FLUSH`] above is
+    /// one: the reconciler that tears a focused pod down runs deep inside a
+    /// `View::rebuild` (a [`crate::view::BuildCtx`] pass) with no
+    /// [`RenderRoot`](crate::app::RenderRoot) handle to reach, so it cannot
+    /// clear the root's `focus_active`/`ime_state` mirror itself — the
+    /// long-standing desync `frust-widgets`' `cancel_active_children` documents.
+    /// *Which* pods may raise it is narrowed by the pass's own focus chain
+    /// ([`crate::view::BuildCtx::has_focus`]) — see [`mark_focus_orphaned`].
+    ///
+    /// **Data-free on purpose, and idempotent.** Only the *fact* that some
+    /// focused pod died rides here; there is nothing useful to carry (the root
+    /// keeps no id of the focused widget, only the boolean mirror). Several pods
+    /// cleared in one diff owe exactly one release.
+    ///
+    /// Thread-local rather than a process-global `AtomicBool` for the same
+    /// UI-thread-affinity reason: the tree that lost the focus, and the
+    /// `RenderRoot` that must release the session, live on one thread. A global
+    /// would let a root on one thread release a session another thread's tree
+    /// still holds.
+    static FOCUS_ORPHANED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Record that a structural rebuild severed the recorded focus path — a focused
+/// [`ChildPod`](crate::widget::ChildPod) was torn down, type-swapped, or had its
+/// `focused` flag cleared by a reconciler — so
+/// [`RenderRoot::rebuild`](crate::app::RenderRoot::rebuild) releases the whole
+/// focus/IME session before the frame ends.
+///
+/// # The invariant: a mark means a LIVE session lost its owner
+///
+/// Raise this only when the severed link was on the **live focus chain** — the
+/// pod's own `focused` flag AND
+/// [`BuildCtx::has_focus`](crate::view::BuildCtx::has_focus), the composed chain
+/// from the root down to it. A `focused` flag on its own is not evidence of a
+/// session: a container-routed blur clears the focus link at the nearest common
+/// ancestor only, so flags deeper in the blurred branch legitimately stay set,
+/// and marking on one of those releases whatever field is *actually* focused
+/// elsewhere in the tree — the keyboard dropping mid-typing because an unrelated
+/// list recycled a row. Every drain here performs a real, user-visible release;
+/// it must never fire on speculation.
+///
+/// Raised by `frust-widgets`' reconcilers (`teardown_child`,
+/// `cancel_active_children`, and the type-swap arms of both the keyed reconciler
+/// and the single-child `rebuild_child`), all four through one shared gate
+/// (`mark_orphan_if_live`), and by
+/// [`ComponentView::rebuild`](crate::component::ComponentView)'s own swap arm,
+/// which spells the identical gate by hand because this crate sits below
+/// `frust-widgets`. A hand-rolled container that clears a focused pod itself
+/// should raise it under the same condition.
+///
+/// Idempotent and thread-affine, exactly like [`mark_pending_result_flush`].
+pub fn mark_focus_orphaned() {
+    FOCUS_ORPHANED.with(|flag| flag.set(true));
+}
+
+/// Take (and clear) the [`mark_focus_orphaned`] flag.
+///
+/// Drained by [`RenderRoot::rebuild`](crate::app::RenderRoot::rebuild), which
+/// performs one full focus/IME session release per `true` it takes. Destructive,
+/// mirroring [`take_pending_result_flush`]: a caller that drains and drops the
+/// result loses that release until something marks again.
+///
+/// A mark can only be raised *during* a view diff, and the diff's own
+/// `RenderRoot::rebuild` drains it before returning, so the flag never survives
+/// a frame — there is no peeking counterpart (unlike
+/// [`has_pending_result_flush`], which a frame gate must consult before deciding
+/// whether to run the rebuild that drains it at all).
+pub fn take_focus_orphaned() -> bool {
+    FOCUS_ORPHANED.with(|flag| flag.replace(false))
+}
+
 /// What kind of content a focused editable field holds — the hint a widget
 /// publishes so each shell can configure the platform input method.
 ///
@@ -1056,5 +1152,33 @@ mod tests {
         let ime = InputEvent::Ime(ImeEvent::Commit("x".to_string()));
         assert!(ime.is_focus_routed());
         assert!(!down(1.0, 1.0).is_focus_routed());
+    }
+
+    #[test]
+    fn pending_result_flush_peek_observes_the_mark_without_draining_it() {
+        // The peek is what a mobile shell reads while gathering its frame-gate
+        // inputs, BEFORE deciding whether the frame runs — so it must be
+        // non-destructive: draining stays `RenderRoot::rebuild`'s job on a frame
+        // that actually runs. A peek that consumed the mark would leave the
+        // rebuild with nothing to flush, which is worse than never peeking.
+        //
+        // Thread-affine like mark/take, and libtest gives each test its own
+        // thread, so this needs no cross-test lock — but drain first anyway so
+        // it never inherits a mark from earlier work on this thread.
+        let _ = take_pending_result_flush();
+        assert!(!has_pending_result_flush(), "starts clear");
+
+        mark_pending_result_flush();
+        assert!(has_pending_result_flush(), "the peek observes the mark");
+        // Repeated peeks are idempotent — the mark survives every one of them.
+        assert!(has_pending_result_flush());
+        assert!(has_pending_result_flush());
+
+        // Only the drain clears it, and the drain still reports the mark it took.
+        assert!(take_pending_result_flush(), "the drain still sees the mark");
+        assert!(
+            !has_pending_result_flush(),
+            "the drain is what clears it, not the peek"
+        );
     }
 }

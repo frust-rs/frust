@@ -90,22 +90,95 @@ impl From<WidgetId> for u64 {
 
 /// Context threaded through [`View::build`] / [`View::rebuild`].
 ///
-/// For v0 its sole responsibility is allocating unique [`WidgetId`]s. It borrows
-/// the id counter owned by the render root so ids stay monotonic across passes.
+/// Two responsibilities: allocating unique [`WidgetId`]s (it borrows the id
+/// counter owned by the render root so ids stay monotonic across passes), and
+/// carrying the **effective focus chain** — whether every link from the root down
+/// to the node being built/rebuilt/torn down is focused (see
+/// [`BuildCtx::has_focus`]).
 pub struct BuildCtx<'a> {
     next_id: &'a mut u64,
+    /// The effective focus chain: `true` only while every recorded focus link
+    /// from the root down to the current node is set. See
+    /// [`BuildCtx::has_focus`].
+    has_focus: bool,
 }
 
 impl<'a> BuildCtx<'a> {
     /// Create a context borrowing the render root's id counter.
+    ///
+    /// The focus chain seeds **`true`** — "unknown, assume live". A caller that
+    /// does not thread the chain therefore keeps the pre-chain behavior (every
+    /// reconciler under it treats a `focused` pod as the live one) instead of
+    /// silently suppressing a release it owed: over-releasing costs the user one
+    /// tap, while under-releasing strands the shell's IME surface over a widget
+    /// that no longer exists and nothing on an idle screen ever corrects it (the
+    /// same default-to-must-run rule the frame gate follows). The seams that
+    /// *know* the real value — [`RenderRoot::rebuild`](crate::app::RenderRoot)'s
+    /// view diff and [`ComponentWidget`](crate::component::ComponentWidget)'s
+    /// inner context — set it explicitly with [`BuildCtx::set_has_focus`].
     pub fn new(next_id: &'a mut u64) -> Self {
-        Self { next_id }
+        Self {
+            next_id,
+            has_focus: true,
+        }
     }
 
     /// Allocate a fresh, unique widget id.
     pub fn alloc_id(&mut self) -> WidgetId {
         *self.next_id += 1;
         WidgetId(*self.next_id)
+    }
+
+    /// Whether the recorded focus path is live all the way from the root to the
+    /// node currently being built/rebuilt/torn down — the rebuild-pass mirror of
+    /// [`PaintCtx::has_focus`](crate::widget::PaintCtx::has_focus), composed the
+    /// same way (`self.focused && ctx.has_focus()`).
+    ///
+    /// This is what makes a `focused` [`ChildPod`](crate::widget::ChildPod) flag
+    /// *deep inside a blurred branch* harmless. A container-routed blur clears the
+    /// focus link at the nearest common ancestor only, so flags below it
+    /// legitimately go stale until focus next enters that subtree; a pod under a
+    /// cleared link sees `has_focus() == false` here, exactly as it sees `false`
+    /// in paint and exactly as focus-routed events never reach it. A reconciler
+    /// therefore raises [`mark_focus_orphaned`](crate::event::mark_focus_orphaned)
+    /// only when `ctx.has_focus() && pod.is_focused()` — only when the pod losing
+    /// its identity is the one whose session is actually live.
+    pub fn has_focus(&self) -> bool {
+        self.has_focus
+    }
+
+    /// Seed the effective focus chain (see [`BuildCtx::has_focus`]).
+    ///
+    /// For the two kinds of seam that *start* a chain rather than descend one:
+    /// [`RenderRoot`](crate::app::RenderRoot)'s view diff, which seeds it from the
+    /// root's own session mirror, and a component-style widget that builds an
+    /// inner `BuildCtx` over its own id counter
+    /// ([`ComponentWidget`](crate::component::ComponentWidget) is the in-crate
+    /// one) and must carry its outer chain across that boundary. A container
+    /// descending into a child pod uses [`BuildCtx::with_focus_link`] instead — it
+    /// can only narrow, which is what keeps this an AND-chain.
+    pub fn set_has_focus(&mut self, has_focus: bool) {
+        self.has_focus = has_focus;
+    }
+
+    /// Run `f` with the focus chain extended by one link, restoring the caller's
+    /// chain when it returns.
+    ///
+    /// `link_focused` is the descended-into pod's own
+    /// [`ChildPod::is_focused`](crate::widget::ChildPod::is_focused) flag, so the
+    /// closure sees `self.has_focus() && link_focused`: a cleared link anywhere
+    /// above forces `false` for the whole subtree below it, and no descent can
+    /// ever widen the chain. The rebuild-pass counterpart of
+    /// [`ChildPod::paint_child`](crate::widget::ChildPod::paint_child)'s
+    /// `set_has_focus(self.focused && ctx.has_focus())`, in the scoped-closure
+    /// shape [`SemanticsCtx::descend_into_pod`](crate::semantics::SemanticsCtx)
+    /// already uses for the semantics pass.
+    pub fn with_focus_link<R>(&mut self, link_focused: bool, f: impl FnOnce(&mut Self) -> R) -> R {
+        let outer = self.has_focus;
+        self.has_focus = outer && link_focused;
+        let result = f(self);
+        self.has_focus = outer;
+        result
     }
 }
 
@@ -437,5 +510,43 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(u64::from(a), 1);
         assert_eq!(u64::from(b), 2);
+    }
+
+    #[test]
+    fn build_ctx_focus_chain_only_narrows_and_restores() {
+        let mut counter = 0;
+        let mut ctx = BuildCtx::new(&mut counter);
+        assert!(
+            ctx.has_focus(),
+            "an unseeded context assumes a live chain (see BuildCtx::new)"
+        );
+
+        // A focused link keeps a live chain live...
+        ctx.with_focus_link(true, |ctx| assert!(ctx.has_focus()));
+        // ...and the descent is scoped: the caller's chain comes back.
+        assert!(ctx.has_focus());
+
+        // A cleared link closes the chain for the whole subtree below it —
+        // including a *focused* link nested under the cleared one, which is the
+        // stale-flag-below-a-blurred-ancestor case in one line.
+        ctx.with_focus_link(false, |ctx| {
+            assert!(!ctx.has_focus());
+            ctx.with_focus_link(true, |ctx| {
+                assert!(
+                    !ctx.has_focus(),
+                    "no descent may widen the chain a cleared ancestor closed"
+                );
+            });
+            assert!(!ctx.has_focus());
+        });
+        assert!(
+            ctx.has_focus(),
+            "the outer chain is restored, not clobbered"
+        );
+
+        // Seeding is the one absolute write (the root / a component boundary).
+        ctx.set_has_focus(false);
+        assert!(!ctx.has_focus());
+        ctx.with_focus_link(true, |ctx| assert!(!ctx.has_focus()));
     }
 }

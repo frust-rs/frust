@@ -325,8 +325,26 @@ impl<State: 'static, P: TransitionPattern + Clone + 'static> View<State>
             }
             if old.is_focused() {
                 old.set_focused(false);
+                // The cleared-IME publish is the third step of that contract, and
+                // it belongs INSIDE this arm: publishing an inactive surface is a
+                // full focus/IME **session release** at the root, not a value
+                // update (`docs/CORE_ARCHITECTURE.md`'s Focus/IME Lifecycle), and
+                // it bubbles last-write-wins. A switcher whose own child never
+                // held focus has no session to end — raising the flag anyway
+                // would release whatever *unrelated* subtree does own one (a
+                // field painted earlier in the same frame), with no self-heal.
+                //
+                // Gated on the same composition every severing site in the crate
+                // uses (`frust-widgets`' `mark_orphan_if_live`): the outgoing
+                // pod's own link ANDed with the rebuild-pass chain down to this
+                // switcher, so a *stale* flag under an already-blurred ancestor
+                // publishes nothing either. `ctx.has_focus()` is unaffected by the
+                // `build_child` above — that descent restores the chain on the
+                // way out.
+                if ctx.has_focus() {
+                    element.needs_ime_clear = true;
+                }
             }
-            element.needs_ime_clear = true;
 
             element.exiting = Some(old);
             element.key = self.key;
@@ -432,7 +450,9 @@ mod tests {
     use super::*;
     use crate::motion::patterns::SharedAxis;
     use crate::test_support::{RecordingScene, leaf_any};
-    use frust_core::{FrameTime, PointerButton, PointerEvent, PointerPhase};
+    use crate::{Column, FlexView};
+    use frust_core::{FrameTime, PointerButton, PointerEvent, PointerPhase, RenderRoot};
+    use kurbo::Rect;
     use std::cell::Cell;
     use std::rc::Rc;
 
@@ -612,6 +632,140 @@ mod tests {
         assert!(!ime.active);
         assert!(ime.editing.text.is_empty());
         assert!(!w.needs_ime_clear, "the queued clear was consumed");
+    }
+
+    // --- Cross-subtree survival: a switcher whose OWN child never held focus
+    //     must not release somebody else's live session (review-fix-3, FC). ---
+
+    /// The IME surface the sibling field owns for the whole test below.
+    fn field_surface() -> ImeState {
+        ImeState {
+            active: true,
+            editing: EditingState {
+                text: "query".to_string(),
+                selection_base: 5,
+                selection_extent: 5,
+                composing_base: -1,
+                composing_extent: -1,
+            },
+            caret: Some(Rect::new(0.0, 0.0, 1.0, 12.0)),
+            content_type: Default::default(),
+        }
+    }
+
+    /// A **persistent** field-shaped leaf: it claims focus and publishes on
+    /// `Down`, and republishes the same surface on every paint while it still
+    /// holds focus — a real `TextInput`'s behavior, and the reason paint order
+    /// (field first, switcher second) decides the last write. Bounded size so it
+    /// can sit as an inflexible child on a `Column`'s unbounded main axis.
+    struct PersistentField {
+        size: Size,
+    }
+    struct PersistentFieldWidget {
+        size: Size,
+    }
+    impl<S: 'static> View<S> for PersistentField {
+        type Element = PersistentFieldWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> PersistentFieldWidget {
+            PersistentFieldWidget { size: self.size }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut PersistentFieldWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+    impl Widget for PersistentFieldWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(self.size)
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            if ctx.has_focus() {
+                ctx.publish_ime_state(field_surface());
+            }
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if let InputEvent::Pointer(p) = event
+                && p.phase == PointerPhase::Down
+            {
+                ctx.request_focus();
+                ctx.publish_ime_state(field_surface());
+                return EventResult::Handled;
+            }
+            EventResult::Ignored
+        }
+    }
+
+    #[test]
+    fn identity_change_in_an_unfocused_switcher_leaves_a_sibling_fields_session_alive() {
+        // A persistent field as the EARLIER sibling of an unrelated switcher, so
+        // the field paints FIRST and anything the switcher published would win
+        // last-write-wins on the way to the root. Rows are 40 tall: the field
+        // owns `y ∈ [0, 40)`, the switcher `y ∈ [40, 80)`.
+        let key = Rc::new(Cell::new(1u32));
+        let mut app = {
+            let key = key.clone();
+            move |_: &mut ()| {
+                Column(vec![
+                    any(PersistentField {
+                        size: Size::new(100.0, 40.0),
+                    }),
+                    any(pattern_switcher(
+                        key.get(),
+                        FadeThrough,
+                        leaf_any(100.0, 40.0),
+                    )),
+                ])
+            }
+        };
+        let mut root: RenderRoot<(), FlexView<()>> = RenderRoot::new();
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut RecordingScene::default(), FrameTime::ZERO);
+
+        // Tap inside the field's row — never the switcher's, which would blur the
+        // field on the way in (blur-on-outside-tap) and hide the defect.
+        root.event(&mut state, &down(5.0, 5.0));
+        assert!(
+            root.is_focus_active(),
+            "the sibling field owns the focus session"
+        );
+        assert_eq!(
+            root.ime_state().map(|s| s.editing.text),
+            Some("query".to_string()),
+            "…and the shell-facing surface is the field's"
+        );
+        let generation = root.focus_ime_generation();
+
+        // The switcher's identity changes. Its own child never held focus, so
+        // there is no session here to end.
+        key.set(2);
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut RecordingScene::default(), FrameTime::ZERO);
+
+        assert!(
+            root.is_focus_active(),
+            "an identity change in an unfocused switcher must not release the \
+             sibling field's session"
+        );
+        let ime = root
+            .ime_state()
+            .expect("the identity change dropped the sibling field's IME surface entirely");
+        assert!(ime.active, "the field's surface was left inactive");
+        assert_eq!(
+            ime.editing.text, "query",
+            "the field's surface was replaced with the switcher's cleared one"
+        );
+        assert_eq!(
+            root.focus_ime_generation(),
+            generation,
+            "an identity change in an unfocused switcher is not a focus/IME edge"
+        );
     }
 
     // --- Exiting retained until progress 1.0, then torn down ---
