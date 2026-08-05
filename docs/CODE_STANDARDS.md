@@ -324,7 +324,15 @@ widget in `frust-widgets`:
   hand-rolled container's own teardown/type-swap path can hit a stale flag under an
   already-blurred ancestor; `RenderRoot`'s cached `focus_active`/`ime_state` release on the same
   rebuild that raised the mark, not merely "eventually" on a later event pass
-  (`docs/CORE_ARCHITECTURE.md`'s Focus/IME Lifecycle).
+  (`docs/CORE_ARCHITECTURE.md`'s Focus/IME Lifecycle). **The same gate binds a container
+  that publishes a cleared IME surface** (the navigator's `needs_ime_clear` producers,
+  `PatternSwitcher`'s): an inactive publish *is* a session release, so raise it only for an
+  outgoing/covered subtree that was itself on the live chain — on a push the outgoing pod is
+  the page being **covered**. Two severing paths are known to be **uncovered** and are
+  registered rather than fixed: a type swap through a doubly-erased pod, which no reconciler
+  can observe (`focus-double-erasure-swap-blind`), and the hand-rolled navbar/tabbar item
+  lists, which never clear or mark a truncated item's own focus link
+  (`focus-navbar-item-truncation-unmarked`). See `docs/LIMITATIONS.md`.
 
 - **Keyed lists are all-or-nothing, and keys must be unique.** `keyed(key, view)` marks a
   `Flex` child list for identity-based reconciliation; a mixed or duplicate key set
