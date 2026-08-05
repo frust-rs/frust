@@ -152,6 +152,88 @@ caveats.
 
 ---
 
+### `barcode-qr-only-v1` — the barcode decoder decodes QR only
+
+**Observed**: `frust_camera::barcode`'s public API is formats-general —
+`BarcodeFormat` is `#[non_exhaustive]` and `Barcode`/`decode_luma`/
+`decode_frame` all take a symbology filter — but the v1 engine behind that
+API (`rqrr`, a pure-Rust QR detector/decoder) only ever produces
+`BarcodeFormat::QrCode`. A white-on-black (inverted-contrast) QR code goes
+undecoded: `rqrr` inherits this from its `quirc` lineage, the same
+detector family MLKit's own barcode scanning draws its line at too.
+
+**Applies to**: every platform this crate targets (the decoder is
+platform-independent) — any app relying on a non-QR symbology, or on an
+inverted-contrast QR code, gets an empty detection list rather than an
+error.
+
+**Why accepted**: the engine seam (`barcode::engine::BarcodeEngine`) is
+private and swappable by design — a later engine adds symbology coverage
+without changing `decode_luma`/`decode_frame`'s public signatures. Widening
+past QR was deliberately deferred to a real second engine rather than
+speculatively enumerating a wider `BarcodeFormat` vocabulary ahead of one.
+
+**Evidence**: `plugins/camera/src/barcode/engine.rs` (the private
+`RqrrEngine`, `rqrr` the sole v1 implementation); `rqrr`'s own
+`quirc`-derived detection algorithm; barcode plugin implementation (task 01).
+
+---
+
+### `barcode-1d-deferred-rotation` — 1D symbologies are deferred until rotation tracking lands
+
+**Observed**: `CameraSession::start_barcode_stream` always requests
+`ImageFormat::Yuv420` at whatever rotation the platform reports, and both
+backends currently pin that rotation to a constant portrait 90° rather than
+tracking live device orientation (`plugins/camera/src/apple.rs`'s
+`STREAM_ROTATION_DEGREES`/`PORTRAIT_ROTATION_ANGLE`, and the Android stream's
+equivalent fixed contract). QR — the v1 engine's only symbology — is
+rotation-invariant, so this is unobservable today; a 1D symbology (Code128,
+EAN, UPC, …) is orientation-sensitive and would decode unreliably off-axis
+under the same fixed rotation.
+
+**Applies to**: every platform this crate targets, once a non-QR 1D engine
+is added — not reachable today since v1 decodes QR only (see
+`barcode-qr-only-v1` above).
+
+**Why accepted**: adding 1D coverage ahead of live rotation tracking would
+ship a symbology that only decodes correctly in one physical orientation.
+Deliberately sequenced: rotation tracking is a prerequisite for 1D support,
+not a parallel-track improvement.
+
+**Evidence**: `plugins/camera/src/apple.rs` (`STREAM_ROTATION_DEGREES`/
+`PORTRAIT_ROTATION_ANGLE`, both hardcoded 90°); barcode plugin implementation
+(tasks 01-02).
+
+---
+
+### `barcode-analysis-resolution-unpinned` — Android barcode decode runs at whatever resolution CameraX's analysis stream picks
+
+**Observed**: `CameraSession::start_barcode_stream` shares
+`start_image_stream`'s underlying Android image stream, and that stream's
+`openCamera(int lensFacing)` JNI contract carries no resolution parameter
+(see `cam-bgra-apple-only` above, and `AndroidSession::open`'s own doc) — a
+barcode decode on Android therefore runs against whatever `ImageAnalysis`
+resolution CameraX's own default selection strategy picks, with no way for
+an app to request a specific analysis resolution for detection accuracy or
+decode cost.
+
+**Applies to**: Android only. iOS's stream honors `Resolution` via
+`AVCaptureSessionPreset`/`AVCaptureSession` config, so this is an
+Android-specific gap in the same frozen-contract neighborhood as
+`cam-bgra-apple-only`.
+
+**Why accepted**: the `openCamera` JNI contract is a frozen v1 surface (see
+the module doc's *Backends*); threading a resolution parameter through it is
+a contract change, not a barcode-specific fix, and was out of scope for the
+barcode feature itself.
+
+**Evidence**: `plugins/camera/src/android.rs`'s `AndroidSession::open`
+(`resolution` accepted and not forwarded — "the frozen `openCamera(int
+lensFacing)` contract carries no resolution parameter"); barcode plugin
+implementation (task 02).
+
+---
+
 ### `clip-desktop-sensitivity-noop` — `set_text_sensitive` applies no sensitivity marking on desktop
 
 **Observed**: `Clipboard::set_text_sensitive` on macOS, Linux, and Windows (the

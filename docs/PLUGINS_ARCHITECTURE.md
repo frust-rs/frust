@@ -20,7 +20,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other unit
 | `crates/frust-plugin` | Android platform-handle substrate (JavaVM/Context) plus a scoped JNI-attach helper; inert on Apple |
 | `plugins/shared-preferences` | Synchronous KV store routed to NSUserDefaults, Android SharedPreferences, or a JSON file backend |
 | `plugins/secure-storage` | Synchronous, named-store secure string storage with an optional biometric gate, routed to Keychain, Android Keystore, or keyring-core |
-| `plugins/camera` | Camera capability (permission, still capture, image stream) over CameraX (Android) or AVFoundation (Apple); preview surfaces as a native platform-view slot |
+| `plugins/camera` | Camera capability (permission, still capture, image stream, barcode/QR decode, torch) over CameraX (Android) or AVFoundation (Apple); preview surfaces as a native platform-view slot |
 | `plugins/clipboard` | Synchronous plain-text clipboard over Android `ClipboardManager` (10+ returns nothing to an unfocused reader), iOS `UIPasteboard` (14+ shows a one-time paste banner), or desktop `arboard` (X11 clipboard content dies with the owning process unless a clipboard manager adopts it) |
 | `plugins/haptics` | Fire-and-forget haptic effects over Android `Vibrator`/`VibrationEffect` or iOS `UI*FeedbackGenerator`; desktop is unavailable by design (no first-class API to route to) |
 | `plugins/clean-signals-frust` | Facade-tier glue crate binding the `clean_signals` clean-architecture core into Frust's `Component`/reactive model |
@@ -63,6 +63,11 @@ permission/capture) — see [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md).
 - Camera preview mounts as a native-sibling compositing slot via `frust::platform_view` — the core
   render pipeline paints nothing for it (see [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)) —
   while the underlying camera session's lifetime is independent of any single preview slot.
+- The camera plugin's barcode/QR decoder runs Rust-side, synchronously inside the image-stream
+  callback on the plugin-owned thread (never the UI thread) — the same lossy-latest backpressure
+  that governs a raw image stream self-regulates decode cost. `rqrr` is the private v1 engine
+  behind an internal, swappable decode-engine seam. Torch control is session-level state,
+  independent of any stream, and dies with session close.
 - Blocking or gated calls (secure-storage's biometric gate, camera's permission/capture) fail fast
   with a typed UI-thread error rather than parking when invoked on the platform UI thread; callers
   re-issue the call via `frust_reactive::spawn_blocking`.
@@ -84,7 +89,8 @@ permission/capture) — see [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md).
 | `PlatformHandleError` | Error reported when platform handles aren't yet installed or a JNI attach fails |
 | `SharedPreferences` / `PrefsError` | The KV-store handle and its typed error enum |
 | `SecureStorage` / `SecureStorageError` / `AuthPolicy` / `Accessibility` | The secure-store handle, its error enum, and the biometric-gate/accessibility policy types |
-| `Camera` / `CameraSession` / `CameraError` / `ImageFrame` / `ImagePlane` | Camera entry point, an open session handle, its error enum, and the per-frame image-stream payload types |
+| `Camera` / `CameraSession` / `CameraError` / `ImageFrame` / `ImagePlane` | Camera entry point, an open session handle, its error enum (including `StreamBusy`, raised when the raw image stream and the barcode stream contend for the session's single stream claim), and the per-frame image-stream payload types |
+| `Barcode` / `BarcodeFormat` / `DetectionPolicy` | A decoded barcode/QR result; its symbology enum (`#[non_exhaustive]`, QR-only in v1); the emit-timing policy (`NoDuplicates`/`Throttled`/`Unrestricted`) for `CameraSession::start_barcode_stream` |
 | `Clipboard` / `ClipboardError` | Synchronous plain-text clipboard entry point and its error enum |
 | `Haptics` / `HapticEffect` / `HapticsError` | Haptic-feedback entry point, its closed effect vocabulary, and its error enum |
 | `use_controller` / `provide_controller` / `expect_controller` / `use_failure_listener` / `async_view` / `use_interval` | `clean-signals-frust`'s public hooks bridging a `clean_signals` controller into a Frust `Component`'s reactive `Owner` |
