@@ -499,6 +499,40 @@ discoverable from the register rather than only from a field doc.
 
 ---
 
+### `paced-starvation-min-lattice` — a fast paced loop repaints a slow loop at the fast rate
+
+**Observed**: multiple paced frame requests in the same paint pass fold to a
+MIN-lattice — the tightest interval wins. When a 30 Hz decorative shimmer runs
+beside a 2 Hz caret blink, the caret repaints at 30 Hz for as long as the
+shimmer runs. The caret sees 15 repaints for every frame it could display, all
+visually indistinguishable from its requested 2 Hz cadence and bearing no
+visible glitch or missed frame.
+
+**Why by design**: the core-side MIN fold guarantees a *slow* request can never
+starve a fast one — every paced requester is repainted at least as often as it
+asked. A fast loop's tighter interval sets the frame rate for the whole tick,
+and slower cadences riding along cost no frame the fast loop wasn't already
+forcing. Motion that genuinely must run every vsync is a [`TickClass::Transition`]
+request, not paced at all.
+
+**Applies to**: Android and iOS — the two shells that feed paced requests
+through the frame gate's MIN-lattice aggregation via [`FramePacing::effective_interval`].
+Desktop shells do not support paced frame requests.
+
+**Bound**: the repainting at the fast rate lasts exactly as long as the tighter
+paced loop is active. A static screen with a 2 Hz caret and no concurrent
+motion reverts to 2 Hz caret repaints.
+
+**Evidence**: the MIN-lattice contract is stated in
+`crates/frust-core/src/widget.rs`, `PaintCtx::request_frame_paced_at` rustdoc
+(the two contracts on `request_frame_paced_at`, especially "MIN-lattice
+aggregation" and "a *slow* request can never starve a fast one"), and resolved
+by the shell at `crates/frust-shell-common/src/frame_gate.rs`,
+`FramePacing::effective_interval` (the `effective_interval` method and its doc,
+especially the "MIN fold already happened in core" bullet).
+
+---
+
 ### `tui-raw-mode-signing-scrub` — plaintext signing scrub unavailable from TUI session keyboard signal
 
 **Observed**: a TUI session keeps the terminal in raw mode (via `cfmakeraw`,
