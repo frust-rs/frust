@@ -174,10 +174,13 @@ are exempt: on Apple, `request_permission` with an already-decided
 authorization status returns immediately and is callable from any thread.
 
 **The torch is not in the table above.** `set_torch`/`torch_available` (§5)
-never wait on a platform answer — Android hands CameraX a fire-and-forget
-`enableTorch`, Apple takes one short synchronous hop onto the session's own
-serial queue — so both are callable from **any** thread, including the UI
-thread, and neither needs `spawn_blocking`.
+never wait on a platform answer, and never hop onto a queue synchronously
+either — Android hands CameraX a fire-and-forget `enableTorch`, and Apple
+fires the request onto the session's own serial queue **asynchronously**,
+returning before the queue body ever runs, answering `torch_available` from a
+cached value the queue keeps current instead of asking the device live. Both
+are callable from **any** thread, including the UI thread, unconditionally,
+and neither needs `spawn_blocking`.
 
 `take_picture` correlates each attempt with its own completion, so `Ok(())`
 means *that* call's photo was written to the path you passed.
@@ -302,9 +305,13 @@ if session.torch_available() {
 }
 ```
 
-Both are **non-blocking and callable from any thread**, including the UI
-thread (§3) — no `spawn_blocking` wrapper, unlike `request_permission`/
-`take_picture`.
+Both are **non-blocking and callable from any thread, unconditionally**,
+including the UI thread (§3) — no `spawn_blocking` wrapper, unlike
+`request_permission`/`take_picture`. On Apple `set_torch` fires onto the
+session's own queue **asynchronously** and returns before that queue body
+ever runs, so no queue depth or device state can delay the calling thread —
+not even briefly, and not even right after `open()` while `startRunning()`
+is still coming up on the same queue.
 
 Torch is **session-level** state, not stream state: it survives
 `start_image_stream`/`start_barcode_stream` and their stops (a stream never
@@ -317,17 +324,25 @@ a torch control:
 | Situation | `torch_available()` | `set_torch(..)` |
 |---|---|---|
 | Back lens with a flash unit | `true` | `Ok(())` |
-| Front lens (most devices), or any device with no flash unit | `false` | `CameraError::Platform` |
+| Front lens (most devices), or any device with no flash unit — **Android** | `false` | `CameraError::Platform` |
+| Front lens (most devices), or any device with no flash unit — **Apple** | `false` | `Ok(())` — accepted onto the session queue, never applied; `torch_available()` stays `false` |
 | iOS, device cooling off (torch temporarily withdrawn) | `false` | `CameraError::Platform` |
 | Android, before CameraX finishes binding the camera | `false` | `CameraError::Platform` — **retryable**, try again once the preview is live |
 | After `close()` | `false` | `CameraError::SessionClosed` |
 | Desktop/wasm (no camera backend) | `false` | `CameraError::PlatformNotInitialized` |
 
-`set_torch` never panics and never silently no-ops: a lens with no torch is
-reported as an error, so a control wired to it can surface *why* nothing
-happened. On-device behavior (real illumination, front-lens refusal, the
-overheating path) is verified by the camera device gate, not by any host-side
-test — `docs/DEVELOPMENT.md`'s *Camera manual test*.
+`set_torch` never panics. On Android it never silently no-ops either: a lens
+with no torch is reported as a synchronous error, so a control wired to it
+can surface *why* nothing happened. **On Apple `set_torch` always returns
+`Ok(())` once past `SessionClosed`** — the request is accepted onto the
+session queue, not confirmed by AVFoundation, so a refusal (no controllable
+torch, the device mid cool-off, a configuration-lock conflict) surfaces only
+through `torch_available()`, never through this call's `Result`; check it
+before offering the control, and again afterward if the UI needs to know
+whether the LED actually changed. On-device behavior (real illumination,
+front-lens refusal, the overheating path) is verified by the camera device
+gate, not by any host-side test — `docs/DEVELOPMENT.md`'s *Camera manual
+test*.
 
 ---
 

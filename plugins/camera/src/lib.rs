@@ -85,10 +85,16 @@
 //!
 //! [`CameraSession::set_torch`] and [`CameraSession::torch_available`] are
 //! deliberately **not** rows in the table above: neither waits on a platform
-//! answer (Android hands CameraX a fire-and-forget `enableTorch`; Apple takes
-//! one short synchronous hop onto the session's own serial queue, the same
-//! shape [`CameraSession::close`] uses), so both stay callable from any
-//! thread — including the UI thread — and neither needs `spawn_blocking`.
+//! answer, and neither ever hops onto a queue synchronously. Android hands
+//! CameraX a fire-and-forget `enableTorch` without waiting on its
+//! `ListenableFuture`; Apple fires the request onto the session's own serial
+//! queue with an **asynchronous** dispatch and answers availability from a
+//! cached atomic the queue keeps current, rather than the synchronous queue
+//! hop [`CameraSession::close`] still uses (a synchronous hop that, before
+//! this contract held, could still park a UI-thread caller behind
+//! `startRunning()` coming up right after open — the failure mode this
+//! shape exists to close). Both stay callable from any thread — including
+//! the UI thread — and neither needs `spawn_blocking`.
 
 // Platform backends (the crate + frozen contract landed first; the real
 // implementations filled in behind the same
@@ -634,10 +640,12 @@ impl CameraSession {
     /// Turns the torch (the flash unit held on, in continuous mode) on or
     /// off.
     ///
-    /// **Non-blocking, callable from any thread — including the UI thread**
-    /// (module doc's *Blocking API*): Android hands CameraX a fire-and-forget
-    /// `enableTorch` without waiting on its `ListenableFuture`, and Apple
-    /// takes one short synchronous hop onto the session's serial queue.
+    /// **Non-blocking, callable from any thread — including the UI thread —
+    /// unconditionally** (module doc's *Blocking API*): Android hands CameraX
+    /// a fire-and-forget `enableTorch` without waiting on its
+    /// `ListenableFuture`, and Apple fires the request onto the session's
+    /// serial queue **asynchronously**, returning before the queue body ever
+    /// runs rather than waiting even briefly for its turn.
     ///
     /// Torch is **session-level** state: it survives
     /// [`Self::start_image_stream`]/[`Self::start_barcode_stream`] and their
@@ -645,12 +653,26 @@ impl CameraSession {
     /// releases the camera device and with it the torch.
     ///
     /// # Errors
-    /// [`CameraError::SessionClosed`] after [`Self::close`];
-    /// [`CameraError::Platform`] where the active lens has no controllable
-    /// torch (see [`Self::torch_available`]), where the platform has not
-    /// finished binding the camera yet (Android: before CameraX's first
-    /// `bindToLifecycle` completes — retry, this is not a permanent
-    /// refusal), or where the platform refuses the request;
+    /// [`CameraError::SessionClosed`] after [`Self::close`] — the only error
+    /// both platforms report synchronously.
+    ///
+    /// **Android** additionally reports [`CameraError::Platform`]
+    /// synchronously where the active lens has no controllable torch (see
+    /// [`Self::torch_available`]), where CameraX has not finished binding the
+    /// camera yet (before the first `bindToLifecycle` completes — retry,
+    /// this is not a permanent refusal), or where the camera control
+    /// otherwise refuses the request.
+    ///
+    /// **Apple never returns [`CameraError::Platform`] from this call.**
+    /// `Ok(())` means the request was *accepted* onto the session queue, not
+    /// that AVFoundation applied it — a refusal (no controllable torch, the
+    /// device mid cool-off, a configuration-lock conflict) surfaces only as
+    /// [`Self::torch_available`] not flipping (or flipping back) to `true`,
+    /// never through this method's `Result`. This is the crate's
+    /// already-documented "accepted, not confirmed" torch framing
+    /// (`README.md` §5), now true of the whole call on Apple rather than
+    /// only the Android arm it originally described.
+    ///
     /// [`CameraError::PlatformNotInitialized`] on a target with no camera
     /// backend at all.
     #[cfg(any(target_os = "android", target_vendor = "apple"))]
@@ -677,6 +699,10 @@ impl CameraSession {
     /// decide whether to offer a torch control.
     ///
     /// Non-blocking and callable from any thread, like [`Self::set_torch`].
+    /// On Apple this is a lock-free read of a cached value refreshed at
+    /// session open, once capture starts, and after every [`Self::set_torch`]
+    /// call — see the Apple backend's own doc for the refresh points — so it
+    /// never hops onto the session queue either.
     #[cfg(any(target_os = "android", target_vendor = "apple"))]
     pub fn torch_available(&self) -> bool {
         self.backend.torch_available()
