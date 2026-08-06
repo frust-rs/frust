@@ -1,7 +1,7 @@
-//! TestBackend + insta snapshot suite for the render layer (D2 testing
-//! strategy). Snapshots are the plain-text cell grid (symbols only) so they
-//! are terminal- and color-depth-independent; hover/pressed states are made
-//! text-visible where they matter.
+//! TestBackend + insta snapshot suite for the render layer. Snapshots are the
+//! plain-text cell grid (symbols only) so they are terminal- and
+//! color-depth-independent; hover/pressed states are made text-visible where
+//! they matter.
 
 use std::path::PathBuf;
 
@@ -63,7 +63,7 @@ fn workbench_state() -> AppState {
     }
 }
 
-/// F5: multiple detected projects — the sidebar lists every one, the active
+/// Multiple detected projects — the sidebar lists every one, the active
 /// (first) one highlighted with the hover chevron.
 fn multi_project_workbench_state() -> AppState {
     let bubblebench = PathBuf::from("/tmp/frust/examples/bubblebench");
@@ -116,7 +116,7 @@ fn workbench_multi_project_sidebar_100x30() {
     insta::assert_snapshot!(render_to_string(100, 30, &multi_project_workbench_state()));
 }
 
-/// F5 + D6b: the titlebar project-switcher dropdown open over a multi-project
+/// The titlebar project-switcher dropdown open over a multi-project
 /// workbench, the second project (bubblebench's sibling, huddle) highlighted
 /// by the switcher cursor while bubblebench stays the active (accented) one.
 #[test]
@@ -239,7 +239,7 @@ fn session_tabs_grouped_120x36() {
     insta::assert_snapshot!(render_to_string(120, 36, &multi_session_state()));
 }
 
-// ── Devices panel + run-config modal (D6b) ──────────────────────────────────
+// ── Devices panel + run-config modal ─────────────────────────────────────────
 
 fn device(id: &str, name: &str, platform: Platform, kind: Kind) -> Device {
     Device {
@@ -317,7 +317,7 @@ fn run_config_modal_100x30() {
     insta::assert_snapshot!(render_to_string(100, 30, &run_config_modal_state()));
 }
 
-// ── Create-project wizard (D6b) ─────────────────────────────────────────────
+// ── Create-project wizard ────────────────────────────────────────────────────
 
 /// A wizard on `step`, with `name`/`directory` filled and `arch_cursor` set.
 /// `clean_signals` is threaded through `set_clean_signals_available` for
@@ -441,7 +441,7 @@ fn add_plugin_report_100x30() {
     insta::assert_snapshot!(render_to_string(100, 30, &state));
 }
 
-// ── Doctor panel + titlebar chip (TUI2-07) ──────────────────────────────────
+// ── Doctor panel + titlebar chip ──────────────────────────────────────────────
 
 /// A `Pass`/`Partial`/`Fail` mix — the panel and chip both key off the worst
 /// (`overall`).
@@ -494,7 +494,7 @@ fn doctor_panel_100x30() {
     insta::assert_snapshot!(render_to_string(100, 30, &state));
 }
 
-// ── Build launcher (TUI2-07) ────────────────────────────────────────────────
+// ── Build launcher ────────────────────────────────────────────────────────────
 
 /// The build-launcher modal open over the workbench: an Apk target with
 /// split-per-ABI checked and a flavor set.
@@ -508,7 +508,7 @@ fn build_launcher_apk_100x30() {
     insta::assert_snapshot!(render_to_string(100, 30, &state));
 }
 
-// ── Clean confirm dialog (TUI2-07) ──────────────────────────────────────────
+// ── Clean confirm dialog ──────────────────────────────────────────────────────
 
 /// The clean-confirm dialog open over the workbench.
 #[test]
@@ -518,7 +518,7 @@ fn clean_confirm_100x30() {
     insta::assert_snapshot!(render_to_string(100, 30, &state));
 }
 
-// ── Build artifact copy-path (TUI2-07) ──────────────────────────────────────
+// ── Build artifact copy-path ──────────────────────────────────────────────────
 
 fn built_session_state() -> AppState {
     let root = "/tmp/huddle";
@@ -540,7 +540,7 @@ fn built_session_state() -> AppState {
     }
 }
 
-// ── Bootstrap wizard + toolchain chip (D6a) ─────────────────────────────────
+// ── Bootstrap wizard + toolchain chip ─────────────────────────────────────────
 
 fn comp(name: &str, status: ComponentStatus, fixes: Vec<FixCommand>) -> Component {
     Component {
@@ -695,7 +695,7 @@ fn bootstrap_wizard_missing_core_100x30() {
     ));
 }
 
-/// The titlebar chip reflecting a Partial report rollup (D6a) — the chip's real
+/// The titlebar chip reflecting a Partial report rollup — the chip's real
 /// source once a component report is cached.
 #[test]
 fn toolchain_chip_partial_from_report_100x30() {
@@ -716,7 +716,7 @@ fn session_log_built_artifacts_130x30() {
     insta::assert_snapshot!(render_to_string(130, 30, &built_session_state()));
 }
 
-// ── Command palette + toasts (D5) ────────────────────────────────────────────
+// ── Command palette + toasts ──────────────────────────────────────────────────
 
 /// The command palette open over the workbench with a "run" query: the ranked
 /// list is filtered/scored, the top row selected, and disabled commands (no
@@ -751,7 +751,7 @@ fn session_log_built_artifacts_narrow_100x30() {
     insta::assert_snapshot!(render_to_string(100, 30, &built_session_state()));
 }
 
-// ── Context menus + drag-to-resize (T04 / D4) ────────────────────────────────
+// ── Context menus + drag-to-resize ────────────────────────────────────────────
 
 /// A right-click context menu open over a session tab: the popup floats on the
 /// top z-layer with target-specific entries (Select / Stop / Follow / Copy
@@ -771,9 +771,9 @@ fn context_menu_session_tab_100x30() {
     insta::assert_snapshot!(render_to_string(100, 30, &state));
 }
 
-/// The workbench with a drag-widened sidebar (T04 splitter): the sidebar
-/// occupies more columns and the main area reflows to the narrower remainder,
-/// exercising `sidebar_main_at` with a non-default width.
+/// The workbench with a drag-widened sidebar (drag-to-resize splitter): the
+/// sidebar occupies more columns and the main area reflows to the narrower
+/// remainder, exercising `sidebar_main_at` with a non-default width.
 #[test]
 fn workbench_resized_sidebar_100x30() {
     let mut state = workbench_state();
@@ -781,7 +781,7 @@ fn workbench_resized_sidebar_100x30() {
     insta::assert_snapshot!(render_to_string(100, 30, &state));
 }
 
-// ── Help overlay (T05 / D5) ──────────────────────────────────────────────────
+// ── Help overlay ───────────────────────────────────────────────────────────────
 
 /// The keyboard/help overlay open over the workbench, listing every
 /// palette-sourced command's keyhint (single source of truth).
@@ -792,8 +792,8 @@ fn help_overlay_workbench_100x30() {
     insta::assert_snapshot!(render_to_string(100, 30, &state));
 }
 
-/// The same overlay reachable from the welcome screen too (T05: `?` works
-/// from either top-level screen, like the bootstrap/create wizards).
+/// The same overlay reachable from the welcome screen too (`?` works from
+/// either top-level screen, like the bootstrap/create wizards).
 #[test]
 fn help_overlay_welcome_80x24() {
     let state = AppState {
@@ -803,7 +803,7 @@ fn help_overlay_welcome_80x24() {
     insta::assert_snapshot!(render_to_string(80, 24, &state));
 }
 
-// ── Perf sparkline panel (T05 / D6) ──────────────────────────────────────────
+// ── Perf sparkline panel ──────────────────────────────────────────────────────
 
 /// A session with `frust-perf raw`/`frame`/`startup` lines already parsed and
 /// the panel toggled open: sparkline + p50/p95 stats + the startup summary.
@@ -866,7 +866,7 @@ fn session_perf_data_present_but_panel_closed_100x30() {
     insta::assert_snapshot!(render_to_string(100, 30, &state));
 }
 
-// ── Responsive breakpoints (T05 / D5) ────────────────────────────────────────
+// ── Responsive breakpoints ────────────────────────────────────────────────────
 
 /// A narrow (< `NARROW_WIDTH`) terminal: the sidebar collapses out of the
 /// inline layout entirely, the main area (and, once open, a session log
@@ -887,7 +887,7 @@ fn workbench_narrow_sidebar_overlay_open_70x24() {
 }
 
 /// A session whose log overflows the viewport: the log-view scrollbar thumb
-/// (T04) appears in the rightmost column, positioned near the bottom while the
+/// appears in the rightmost column, positioned near the bottom while the
 /// view follows the tail. Zero-noise on a short log (see the other session
 /// snapshots, which show no thumb).
 #[test]

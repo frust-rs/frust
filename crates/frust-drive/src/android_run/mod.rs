@@ -807,7 +807,7 @@ mod tests {
             let _ = fs::remove_dir_all(&dir);
         }
 
-        /// **The D1 backstop on the `frust run --release` side.** The gate
+        /// **The backstop on the `frust run --release` side.** The gate
         /// resolved material and wrote `.frust-signing.properties`, Gradle
         /// exited 0 — and said it debug-signed anyway. `prepare_session` must
         /// refuse before the APK reaches a device. No `adb install` fixture is
