@@ -77,12 +77,12 @@ pub enum Effect {
     /// Run `frust-drive`'s component-level toolchain report off-thread
     /// ([`frust_drive::doctor::build_report`]), posting the result back as
     /// [`Message::BootstrapReport`] — the titlebar chip's rollup source and the
-    /// bootstrap wizard's data (D6a).
+    /// bootstrap wizard's data.
     RunBootstrapReport,
     /// Run a bootstrap wizard's guided fix command off-thread as a supervised
     /// session (streamed into a log tab, reusing the ad-hoc-session machinery
     /// like [`Effect::LaunchBuild`]), then re-run the preflight report so the
-    /// chip/wizard reflect the fixed component (D6a's fresh-machine flow). Only
+    /// chip/wizard reflect the fixed component (the fresh-machine flow). Only
     /// ever carries an `auto_runnable` fix — one command, never chained.
     RunBootstrapCommand {
         /// The program to spawn (`rustup`, `cargo`, …).
@@ -93,17 +93,17 @@ pub enum Effect {
         label: String,
     },
     /// Enable (`true`) or disable (`false`) crossterm mouse capture at the
-    /// terminal level (T04 / D4) — the runner enacts the `EnableMouseCapture`/
+    /// terminal level — the runner enacts the `EnableMouseCapture`/
     /// `DisableMouseCapture` sequence; the pure engine only requests it. The
     /// runner also persists this as the mouse-capture preference alongside
-    /// the terminal-level toggle (T05 settings persistence).
+    /// the terminal-level toggle (settings persistence).
     SetMouseCapture(bool),
     /// Persist the sidebar's current width — the runner's enactment of a
-    /// just-completed `SidebarSplitter` drag (T05 settings persistence,
+    /// just-completed `SidebarSplitter` drag (settings persistence,
     /// fulfilling `DragEnd`'s previously-deferred note).
     SaveSidebarWidth(u16),
     /// Persist the follow-tail default — the runner's enactment of a
-    /// follow-tail toggle on the active session (T05 settings persistence).
+    /// follow-tail toggle on the active session (settings persistence).
     SaveFollowTailDefault(bool),
     /// Apply a registry plugin's contributions to `project_root` off-thread via
     /// [`frust_drive::plugin::add_plugin`], posting
@@ -224,7 +224,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                 return Outcome::idle();
             }
             let mut view = SessionView::new(id, project_root, target_label);
-            // Honor the persisted follow-tail default (T05): an empty log has
+            // Honor the persisted follow-tail default: an empty log has
             // nothing to anchor to yet, so `Anchored(0)` simply starts the
             // view "not following" until the first line arrives.
             if !state.follow_tail_default {
@@ -257,7 +257,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             };
             session.toggle_follow();
             // The most recently chosen follow state becomes the default a
-            // future session tab starts in (T05 settings persistence) —
+            // future session tab starts in (settings persistence) —
             // "last used" rather than a separate, undiscoverable preference
             // toggle.
             let now_following = session.is_following();
@@ -337,7 +337,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             None => Outcome::idle(),
         },
 
-        // ── Devices panel + run-config modal (D6b) ──────────────────────────
+        // ── Devices panel + run-config modal ────────────────────────────────
         Message::RefreshDevices => {
             state.devices_refreshing = true;
             Outcome {
@@ -423,7 +423,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             _ => Outcome::idle(),
         },
 
-        // ── Project switcher + recent-projects persistence (F5 / D6b) ───────
+        // ── Project switcher + recent-projects persistence ──────────────────
         Message::ToggleProjectSwitcher => {
             if state.project_switcher_open {
                 state.project_switcher_open = false;
@@ -445,7 +445,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         Message::ProjectSwitcherCursorDown => move_project_switcher_cursor(state, 1),
         Message::SwitchProject(index) => switch_project(state, index),
 
-        // ── Create-project wizard (D6b) ─────────────────────────────────────
+        // ── Create-project wizard ───────────────────────────────────────────
         Message::OpenCreateWizard => {
             if state.create_wizard.is_some() {
                 Outcome::idle()
@@ -579,7 +579,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         },
         Message::AddPluginFailed(message) => with_add_plugin(state, |d| d.fail(message)),
 
-        // ── Doctor panel + titlebar chip (TUI2-07) ──────────────────────────
+        // ── Doctor panel + titlebar chip ────────────────────────────────────
         Message::RunDoctor => {
             state.doctor.refreshing = true;
             Outcome {
@@ -622,7 +622,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             }
         }
 
-        // ── Bootstrap wizard + titlebar toolchain chip (D6a) ────────────────
+        // ── Bootstrap wizard + titlebar toolchain chip ──────────────────────
         Message::RunBootstrapReport => {
             state.bootstrap.refreshing = true;
             Outcome {
@@ -721,7 +721,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             }
         }
 
-        // ── Build launcher (TUI2-07) ────────────────────────────────────────
+        // ── Build launcher ──────────────────────────────────────────────────
         Message::OpenBuildLauncher => match run_config_project(state) {
             Some(project_root) if state.build_launcher.is_none() => {
                 state.build_launcher = Some(BuildLauncher::new(project_root));
@@ -763,7 +763,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             None => Outcome::idle(),
         },
 
-        // ── Clean confirm dialog (TUI2-07) ──────────────────────────────────
+        // ── Clean confirm dialog ────────────────────────────────────────────
         Message::OpenCleanConfirm => match run_config_project(state) {
             Some(project_root) if state.clean_confirm.is_none() => {
                 state.clean_confirm = Some(project_root);
@@ -786,7 +786,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             None => Outcome::idle(),
         },
 
-        // ── Build artifact copy-path (TUI2-07) ──────────────────────────────
+        // ── Build artifact copy-path ────────────────────────────────────────
         Message::CopyBuiltArtifacts => {
             let joined = state
                 .active_session()
@@ -807,7 +807,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             }
         }
 
-        // ── Command palette (D5) ─────────────────────────────────────────────
+        // ── Command palette ──────────────────────────────────────────────────
         Message::OpenPalette => {
             if state.palette.is_some() {
                 Outcome::idle()
@@ -832,7 +832,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
 
         Message::RunOnAllDevices => run_on_all_devices(state),
 
-        // ── Drag-to-resize + scrollbar thumb (T04 / D4) ─────────────────────
+        // ── Drag-to-resize + scrollbar thumb ────────────────────────────────
         Message::DragStart(kind) => {
             state.active_drag = Some(kind);
             // No visual change yet; the immediately-following DragMove (the
@@ -863,7 +863,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         },
         Message::DragEnd => {
             // A just-completed sidebar-splitter drag persists the new width
-            // (T05 settings persistence, fulfilling the note this arm used to
+            // (settings persistence, fulfilling the note this arm used to
             // carry); a scrollbar-thumb drag (or no drag at all) has nothing
             // to persist.
             let effect = match state.active_drag {
@@ -879,7 +879,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             }
         }
 
-        // ── Context menus (T04 / D4) ────────────────────────────────────────
+        // ── Context menus ───────────────────────────────────────────────────
         Message::OpenContextMenu { x, y, target } => open_context_menu(state, x, y, target),
         Message::CloseContextMenu => {
             if state.context_menu.take().is_some() {
@@ -893,7 +893,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         Message::ContextMenuActivate => activate_context_menu(state, None),
         Message::ContextMenuActivateAt(i) => activate_context_menu(state, Some(i)),
 
-        // ── Mouse-capture toggle (T04 / D4) ─────────────────────────────────
+        // ── Mouse-capture toggle ────────────────────────────────────────────
         Message::ToggleMouseCapture => {
             state.mouse_capture = !state.mouse_capture;
             let msg = if state.mouse_capture {
@@ -908,16 +908,16 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             }
         }
 
-        // ── Perf sparkline panel (T05 / D5/D6) ──────────────────────────────
+        // ── Perf sparkline panel ────────────────────────────────────────────
         Message::TogglePerfPanel => with_active(state, |s| s.perf.toggle()),
 
-        // ── Responsive breakpoints (T05 / D5) ───────────────────────────────
+        // ── Responsive breakpoints ──────────────────────────────────────────
         Message::ToggleSidebarOverlay => {
             state.sidebar_overlay_open = !state.sidebar_overlay_open;
             Outcome::redraw()
         }
 
-        // ── Help overlay (T05 / D5) ──────────────────────────────────────────
+        // ── Help overlay ─────────────────────────────────────────────────────
         Message::OpenHelpOverlay => {
             if state.help_open {
                 Outcome::idle()
@@ -1653,7 +1653,7 @@ mod tests {
         assert_eq!(st.search.filter.as_deref(), Some("er"));
     }
 
-    // ── Devices panel + run-config modal (D6b) ──────────────────────────────
+    // ── Devices panel + run-config modal ────────────────────────────────────
 
     use crate::engine::run_config::RunFocus;
     use frust_drive::build_info::BuildMode;
@@ -1895,7 +1895,7 @@ mod tests {
         );
     }
 
-    // ── Project switcher + recent-projects persistence (F5 / D6b) ───────────
+    // ── Project switcher + recent-projects persistence ──────────────────────
 
     fn multi_project_workbench() -> AppState {
         let a = PathBuf::from("/tmp/a");
@@ -1963,7 +1963,7 @@ mod tests {
         assert_eq!(st.project_root, Some(PathBuf::from("/tmp/a")));
     }
 
-    // ── Create-project wizard (D6b) ─────────────────────────────────────────
+    // ── Create-project wizard ───────────────────────────────────────────────
 
     use crate::engine::WizardStep;
 
@@ -2261,7 +2261,7 @@ mod tests {
         assert_eq!(st.active_session, Some(0));
     }
 
-    // ── Doctor panel + titlebar chip (TUI2-07) ──────────────────────────────
+    // ── Doctor panel + titlebar chip ────────────────────────────────────────
 
     use crate::engine::doctor::DoctorCheck;
     use frust_drive::doctor::Status;
@@ -2306,7 +2306,7 @@ mod tests {
         );
     }
 
-    // ── Build launcher (TUI2-07) ────────────────────────────────────────────
+    // ── Build launcher ──────────────────────────────────────────────────────
 
     use crate::engine::build_launcher::{ArtifactKind, BuildTargetSpec};
 
@@ -2368,7 +2368,7 @@ mod tests {
         assert_eq!(update(&mut st, Message::BuildLaunch).effect, None);
     }
 
-    // ── Clean confirm dialog (TUI2-07) ──────────────────────────────────────
+    // ── Clean confirm dialog ────────────────────────────────────────────────
 
     #[test]
     fn open_clean_confirm_primes_from_the_active_project_and_confirm_emits_effect() {
@@ -2393,7 +2393,7 @@ mod tests {
         assert_eq!(update(&mut st, Message::ConfirmClean).effect, None);
     }
 
-    // ── Build artifact copy-path (TUI2-07) ──────────────────────────────────
+    // ── Build artifact copy-path ────────────────────────────────────────────
 
     #[test]
     fn copy_built_artifacts_emits_effect_only_when_the_active_session_built_something() {
@@ -2409,7 +2409,7 @@ mod tests {
         );
     }
 
-    // ── Bootstrap wizard + titlebar toolchain chip (D6a) ────────────────────
+    // ── Bootstrap wizard + titlebar toolchain chip ──────────────────────────
 
     use crate::engine::bootstrap::tests::partial_report;
     use frust_drive::doctor::ComponentStatus;
@@ -2545,7 +2545,7 @@ mod tests {
         );
     }
 
-    // ── Drag-to-resize + scrollbar thumb (T04 / D4) ─────────────────────────
+    // ── Drag-to-resize + scrollbar thumb ────────────────────────────────────
 
     use crate::engine::message::{ContextTarget, DragKind};
 
@@ -2602,7 +2602,7 @@ mod tests {
         update(&mut st, Message::DragEnd);
     }
 
-    // ── Context menus (T04 / D4) ────────────────────────────────────────────
+    // ── Context menus ───────────────────────────────────────────────────────
 
     #[test]
     fn opening_a_session_tab_menu_focuses_the_tab_and_builds_entries() {
@@ -2705,7 +2705,7 @@ mod tests {
         assert!(st.context_menu.is_none());
     }
 
-    // ── Mouse-capture toggle (T04 / D4) ─────────────────────────────────────
+    // ── Mouse-capture toggle ────────────────────────────────────────────────
 
     #[test]
     fn toggle_mouse_capture_flips_state_and_requests_the_effect() {
@@ -2720,7 +2720,7 @@ mod tests {
         assert_eq!(out.effect, Some(Effect::SetMouseCapture(true)));
     }
 
-    // ── Settings persistence (T05 / D5/D6) ───────────────────────────────────
+    // ── Settings persistence ─────────────────────────────────────────────────
 
     #[test]
     fn ending_a_sidebar_splitter_drag_requests_the_save_effect() {
@@ -2786,7 +2786,7 @@ mod tests {
         );
     }
 
-    // ── Perf sparkline panel (T05 / D5/D6) ───────────────────────────────────
+    // ── Perf sparkline panel ─────────────────────────────────────────────────
 
     #[test]
     fn toggle_perf_panel_flips_the_active_session_only() {
@@ -2805,7 +2805,7 @@ mod tests {
         assert!(!out.redraw);
     }
 
-    // ── Responsive breakpoints (T05 / D5) ────────────────────────────────────
+    // ── Responsive breakpoints ───────────────────────────────────────────────
 
     #[test]
     fn toggle_sidebar_overlay_flips_and_redraws() {
@@ -2818,7 +2818,7 @@ mod tests {
         assert!(!st.sidebar_overlay_open);
     }
 
-    // ── Help overlay (T05 / D5) ───────────────────────────────────────────────
+    // ── Help overlay ──────────────────────────────────────────────────────────
 
     #[test]
     fn open_and_close_help_overlay() {

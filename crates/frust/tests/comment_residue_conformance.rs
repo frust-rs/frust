@@ -149,13 +149,14 @@
 //!   `vello#1031` ``) that a precise-enough PR-number pattern has no cheap
 //!   way to distinguish from an internal one without a maintained allowlist
 //!   of this repo's own PR range.
-//! - **Bare plan/workbook tags with no `PLAN`/`Plan` lead-in** — `T04`, `D4`,
-//!   `D6b`, `workbook B2` still appear in `crates/frust-tui/src/ui/`'s
-//!   comments. It is the lead-in word that makes the plan-document pattern
-//!   above safe; a bare uppercase-letter-plus-digits token collides head-on
-//!   with this codebase's own design vocabulary (`M3` Material 3, `R8`
-//!   texture formats, `B2` … ), so catching them needs a curated tag list, a
-//!   human, or a rename of the tags themselves.
+//! - **Bare plan/workbook tags with no `PLAN`/`Plan` lead-in** — shapes like
+//!   `T04`, `D4`, `D6b`, `workbook B2`. It is the lead-in word that makes the
+//!   plan-document pattern above safe; a bare uppercase-letter-plus-digits
+//!   token collides head-on with this codebase's own design vocabulary (`M3`
+//!   Material 3, `R8` texture formats, `B2` … ), so catching it needs a
+//!   curated tag list, a human, or a rename of the tags themselves. This scan
+//!   keeps no location inventory for the class — an instance is swept when a
+//!   human spots it during review, not tracked here as a standing to-do list.
 //!
 //! # Allowlist (a sanctioned citation exempts its own span, not the line)
 //!

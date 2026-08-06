@@ -337,7 +337,7 @@ fn render_sidebar(
 /// The titlebar toolchain chip's glyph/label/color: the component-level
 /// bootstrap report's rollup when one is cached (its `Ok`/`Partial`/`Missing`
 /// is the chip's real source), falling back to the flat doctor `overall`
-/// (TUI2-07) until the first report lands, then to "checking…" before either
+/// until the first report lands, then to "checking…" before either
 /// preflight completes. Shared with `views::welcome::titlebar`'s chip; clicking
 /// it opens the bootstrap wizard.
 pub(crate) fn toolchain_chip(
@@ -445,7 +445,7 @@ fn device_glyph(
     (color, format!("{platform}·{kind}"))
 }
 
-/// One line per detected project (F5 bounded-walk detection); the active one
+/// One line per detected project (bounded-walk detection); the active one
 /// (`state.project_root`, first found for now — a full switcher isn't built yet)
 /// gets the hover chevron and accent color, the rest render muted.
 fn project_lines(state: &AppState, theme: &Theme) -> Vec<Line<'static>> {

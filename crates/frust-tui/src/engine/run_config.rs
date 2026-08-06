@@ -1,5 +1,5 @@
-//! The devices-panel row model and the run-config modal state machine (PLAN
-//! D6b): device(s) + `BuildInfo` (mode / flavor / defines) → one supervised
+//! The devices-panel row model and the run-config modal state machine:
+//! device(s) + `BuildInfo` (mode / flavor / defines) → one supervised
 //! session per selected target.
 //!
 //! Everything here is plain data + pure transitions — no threads, no process,

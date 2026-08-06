@@ -4,7 +4,7 @@
 //! PATTERN source only — BSL-1.1, no verbatim copies).
 //!
 //! Everything here is plain data + pure transitions over the component-level
-//! report the drive side (T01) produces
+//! report the drive side produces
 //! ([`frust_drive::doctor::build_report`]): the wizard holds a snapshot of that
 //! [`DoctorReport`] plus the fdemon-style collapsed/expanded tree cursor, and
 //! projects it into a left step tree + a right detail pane. The two pieces of
