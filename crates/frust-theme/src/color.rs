@@ -1035,8 +1035,8 @@ mod tests {
 
     #[test]
     fn neutral_surface_on_surface_contrast_is_legible() {
-        // Task acceptance criterion 3: both brightnesses clear the WCAG AA
-        // normal-text floor (4.5:1) for the surface/on-surface pair.
+        // Both brightnesses clear the WCAG AA normal-text floor (4.5:1) for
+        // the surface/on-surface pair.
         const AA_NORMAL_TEXT: f64 = 4.5;
 
         let light = ColorScheme::neutral_light();

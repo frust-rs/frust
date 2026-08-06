@@ -5,10 +5,9 @@
 //! `frust_scene`, `frust_text`, `accesskit`, `kurbo`, or `peniko` as a crate
 //! path (the last three only outside their sanctioned `frust::`-prefixed
 //! valve — see below). Those
-//! five app-tier consumers were migrated onto `frust::authoring` (this
-//! feature's own `PLAN.md`); this test is what makes reopening that escape
-//! hatch a build failure instead of a silent regression the next PR review
-//! has to catch by eye.
+//! five app-tier consumers were migrated onto `frust::authoring`; this test
+//! is what makes reopening that escape hatch a build failure instead of a
+//! silent regression the next PR review has to catch by eye.
 //!
 //! Precedent (match structure/error-message style/doc-comment depth):
 //! - `crates/frust-widgets/tests/authoring_only_conformance.rs` — the
@@ -195,8 +194,8 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// stable failure order. Panics loudly — rather than silently scanning zero
 /// files — if a scanned directory is missing (moved/renamed/not-yet-migrated
 /// consumer removed from the list) or if the total looks implausibly small
-/// for five real app-tier consumers; this is the failure mode the task
-/// singles out as the one that matters most (a green test proving nothing).
+/// for five real app-tier consumers; this is the failure mode that matters
+/// most (a green test proving nothing).
 fn consumer_source_files() -> Vec<PathBuf> {
     let root = workspace_root();
     let mut out = Vec::new();
@@ -712,8 +711,9 @@ use frust::{
 
     #[test]
     fn out_of_line_cfg_test_mod_does_not_swallow_the_next_line() {
-        // The round-0 false negative: arming the skip on a brace-less
-        // `mod tests;` consumed exactly one following production line.
+        // A brace-less `mod tests;` used to arm the skip and then swallow
+        // exactly one following production line — the false negative this
+        // test guards against.
         let src = "#[cfg(test)]\nmod tests;\nuse kurbo::Point;\n";
         let hits = scan(src);
         assert_eq!(

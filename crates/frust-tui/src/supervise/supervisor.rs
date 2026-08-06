@@ -1,10 +1,10 @@
-//! The async session supervisor (PLAN D2/D3).
+//! The async session supervisor.
 //!
 //! [`Supervisor`] owns one supervised session per spawned process. Each
 //! session's blocking [`StreamHandle`] (from `frust-drive`'s cancellable
 //! `spawn_streaming` seam) is drained on a dedicated std thread that bridges
 //! every stdout line — and every inferred [`SessionState`] change — into a
-//! single tokio mpsc the engine will `select!` on (TUI2-03). The supervisor
+//! single tokio mpsc the engine will `select!` on. The supervisor
 //! owns the kill path: [`Supervisor::stop`] routes to
 //! [`StreamHandle::kill`]'s group-kill.
 //!
@@ -14,8 +14,8 @@
 //! it is a blocking loop that must not sit on a tokio worker. A plain std
 //! thread per session keeps the blocking recv off the async runtime while
 //! still feeding the async channel through `try_send` — a non-blocking,
-//! runtime-free call. This is the "spawn_blocking / std thread" split PLAN D2
-//! calls for.
+//! runtime-free call: the standard "spawn_blocking / std thread" split for a
+//! blocking source feeding an async channel.
 //!
 //! # Bounded channel + overflow policy (drop-newest, counted)
 //!
@@ -33,7 +33,7 @@
 //! keeps the channel near-empty in practice, so an overflow only happens under
 //! a pathological flood against a wedged consumer.
 //!
-//! # Terminal-state delivery guarantee (D1)
+//! # Terminal-state delivery guarantee
 //!
 //! A **terminal** [`SessionState`] ([`Killed`](SessionState::Killed)/
 //! [`Exited`](SessionState::Exited)) is the one event that must never be lost
@@ -54,7 +54,7 @@
 //! (`TrySendError::Closed`), so [`Supervisor`]'s `Drop` join stays prompt even
 //! against a genuinely wedged-but-alive consumer.
 //!
-//! # Shared-channel noisy-neighbor tradeoff (D2)
+//! # Shared-channel noisy-neighbor tradeoff
 //!
 //! **All** sessions feed one shared [`SESSION_CHANNEL_CAP`]-slot channel, not a
 //! channel per session. The upside is a single `select!` seam in the runner and
@@ -80,11 +80,11 @@
 //! interference. The cheap sender-only variants (a per-session token bucket)
 //! don't actually help: throttling by time drops a session's lines even when
 //! the shared channel has room, trading one unfairness for another. The
-//! **terminal-state guarantee (D1) is independent of this decision** — a
+//! **terminal-state guarantee above is independent of this decision** — a
 //! terminal state is exempt from the drop-newest policy and from any future
 //! per-session cap, so it is delivered regardless of which session is flooding.
 //!
-//! # Kill boundary (PLAN D3's known limitation)
+//! # Kill boundary (a known limitation)
 //!
 //! `stop` is prompt for anything spawned through `spawn_streaming` (the
 //! desktop `cargo run` preview, or a device session's logcat/console streaming
@@ -136,7 +136,7 @@ const SESSION_CHANNEL_CAP: usize = 256;
 
 /// Upper bound on how long a session's drain thread will retry delivering its
 /// one terminal [`SessionState`] into a momentarily-full channel before giving
-/// up (D1 — see the module docs' terminal-state guarantee).
+/// up (see the module docs' terminal-state guarantee).
 ///
 /// Generous relative to how fast the runner's `select!` loop actually drains
 /// (microseconds while the receiver lives), so a real, briefly-behind engine
@@ -212,7 +212,7 @@ impl DeviceControl {
 
     /// Install the just-started logcat/console stream and hand back its line
     /// receiver — the single-lock-hold install+recheck that closes the
-    /// device-stop race (G2).
+    /// device-stop race.
     ///
     /// Under **one continuous hold** of the same `logcat` mutex `stop`'s kill
     /// takes: store the handle, then re-check `cancel`; if a `stop` already set
@@ -291,7 +291,7 @@ impl Supervisor {
     }
 
     /// Start a session from an already-resolved [`LaunchPlan`] — the general
-    /// seam (TUI2-04 builds device plans and hands them here). Spawns the
+    /// seam device-plan dispatch builds on and hands plans to. Spawns the
     /// process through the cancellable `spawn_streaming` seam and begins
     /// supervising it; the returned [`SessionId`] tags every [`SessionEvent`]
     /// the session emits.
@@ -397,7 +397,7 @@ impl Supervisor {
         }
     }
 
-    /// Stop every session (the supervisor's job on quit — PLAN D3).
+    /// Stop every session (the supervisor's job on quit).
     pub fn stop_all(&mut self) {
         let ids: Vec<SessionId> = self.sessions.keys().copied().collect();
         for id in ids {
@@ -451,7 +451,7 @@ struct SessionSender {
     /// [`SessionEventKind::Dropped`], so we only re-report an increase.
     reported: u64,
     /// How long [`send_terminal_state`](Self::send_terminal_state) will retry a
-    /// full channel before giving up (D1). Defaults to [`TERMINAL_SEND_TIMEOUT`];
+    /// full channel before giving up. Defaults to [`TERMINAL_SEND_TIMEOUT`];
     /// tests override it to a short bound to exercise the wedged path quickly.
     terminal_timeout: Duration,
 }
@@ -517,7 +517,7 @@ impl SessionSender {
 
     /// Deliver a session's single **terminal** state ([`Killed`](SessionState::Killed)/
     /// [`Exited`](SessionState::Exited)) with a delivery guarantee, exempt from
-    /// the drop-newest overflow policy every other send obeys (D1 — see the
+    /// the drop-newest overflow policy every other send obeys (see the
     /// module docs' terminal-state guarantee).
     ///
     /// A full channel is retried with a short [`TERMINAL_SEND_RETRY`] backoff
@@ -707,7 +707,7 @@ fn run_device_session(
     let terminal = match pipeline {
         Ok(Some(handle)) => {
             // Install the stream under one continuous lock hold, closing the
-            // stop race (G2): a `stop` observed just before or after this
+            // stop race: a `stop` observed just before or after this
             // point kills the stream exactly once, so the drain always sees
             // EOF rather than blocking forever (see `install_logcat`).
             let lines = control.install_logcat(handle);
@@ -1038,7 +1038,7 @@ mod tests {
         assert!(sup.start_with_plan(plan("cargo", &["run"])).is_err());
     }
 
-    // ── Target dispatch (TUI2-04) ───────────────────────────────────────────
+    // ── Target dispatch ──────────────────────────────────────────────────────
 
     use frust_drive::build_info::{BuildInfo, BuildMode};
     use frust_drive::devices::{Device, Kind, Platform};
@@ -1131,7 +1131,7 @@ mod tests {
         assert_eq!(results[&b].1, SessionState::Killed);
     }
 
-    // ── G2: device-stop race (install+recheck under one lock) ───────────────
+    // ── Device-stop race (install+recheck under one lock) ───────────────────
 
     /// Spawn a hanging fake stream directly and hand back its [`StreamHandle`],
     /// the raw material for the install-race tests below.
@@ -1150,7 +1150,7 @@ mod tests {
             .join(" ")
     }
 
-    /// The classic G2 gap: a `stop` arrives *before* the logcat handle exists,
+    /// The classic device-stop-race gap: a `stop` arrives *before* the logcat handle exists,
     /// so its kill finds an empty slot and sets only `cancel`. `install_logcat`
     /// must — under the same lock — observe `cancel` and kill the
     /// just-installed stream, so its drain sees EOF promptly instead of
@@ -1205,7 +1205,7 @@ mod tests {
         );
     }
 
-    // ── G6: batch coalescing + bounded-channel overflow ─────────────────────
+    // ── Batch coalescing + bounded-channel overflow ──────────────────────────
 
     /// A burst of buffered lines drains into exactly ONE coalesced
     /// [`SessionEventKind::Lines`] batch — the whole point of the recv-then-
@@ -1306,9 +1306,9 @@ mod tests {
         assert_eq!(sender.send_state(SessionState::Running), Err(()));
     }
 
-    // ── D1: terminal-state delivery guarantee ───────────────────────────────
+    // ── Terminal-state delivery guarantee ────────────────────────────────────
 
-    /// The core D1 guarantee: a terminal state emitted into a **full** channel
+    /// The core delivery guarantee: a terminal state emitted into a **full** channel
     /// is *not* dropped (unlike a `Lines` batch) — the drain thread's bounded
     /// blocking send retries until the consumer drains a slot, and the terminal
     /// state then reaches the engine. This is what stops a dead session from
@@ -1345,7 +1345,7 @@ mod tests {
         worker.join().expect("terminal-send thread joins");
     }
 
-    /// The bound half of D1: a terminal send against a receiver that stays
+    /// The other half of the guarantee: a terminal send against a receiver that stays
     /// alive but never drains must still **return** (within a small multiple of
     /// its timeout), proving it can't wedge [`Supervisor`]'s `Drop` join. Uses
     /// a short per-sender timeout so the wedged path is exercised quickly.
