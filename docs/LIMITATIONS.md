@@ -343,31 +343,6 @@ fix, see its commit message); no device or simulator run has occurred.
 
 ---
 
-### `ime-android-resync-frames-dead` — `imeResyncFrames`/`resyncImeMirror()` are write-only, unreachable (Android)
-
-**Observed**: `FrustSurfaceView.imeResyncFrames` (a field) is set at both editor-
-action call sites (`performEditorAction`, `onKeyDown`) but never read back down,
-and `resyncImeMirror()` (a function) is declared but never called. Their gated
-consumer in `doFrame` was removed in `74fa25f` when that loop switched to an
-**unconditional** per-frame `pollImeAfterDispatch()` call, which reconciles the
-same staleness every frame without needing a counter.
-
-**Applies to**: Android only — `FrustSurfaceView.kt`'s IME mirror-resync path.
-
-**Why not fixed**: kept in place, not deleted, with corrected doc comments
-(`bff5122`) so a future reader isn't sent chasing a call site that no longer
-exists — misleading-but-harmless vestigial code, not a functional gap, since
-`doFrame`'s unconditional poll already covers what these existed to do. The
-cleanup decision (wire `imeResyncFrames` back to a real bounded purpose, or
-delete both) is deferred, not ruled on.
-
-**Evidence**: source inspection of `FrustSurfaceView.kt` (no call site for
-`resyncImeMirror()`; no read of `imeResyncFrames` outside its own assignment);
-`74fa25f` (removed the gated `doFrame` consumer) and `bff5122` (found and
-documented while fixing `performEditorAction`'s mirror-resync gap).
-
----
-
 ### `focus-double-erasure-swap-blind` — a type swap through a doubly-erased pod is invisible to every reconciler
 
 **Observed**: `any(any(view))` — an `AnyView` erased a second time — produces a
@@ -496,6 +471,50 @@ keyboard's view of the session is never the thing being delayed.
 from `CosmeticLoopRate::FLOOR_HZ` (`crates/frust-theme/src/motion.rs`);
 restated here during review-fix-3 (FC) so the app-visible consequence is
 discoverable from the register rather than only from a field doc.
+
+---
+
+### `paced-starvation-min-lattice` — a fast paced loop repaints a slow loop at the fast rate
+
+**Observed**: multiple paced frame requests in the same paint pass fold to a
+MIN-lattice — the tightest interval wins. When a 30 Hz decorative shimmer runs
+beside a 2 Hz caret blink, the caret repaints at 30 Hz for as long as the
+shimmer runs. The caret sees 15 repaints for every frame it could display, all
+visually indistinguishable from its requested 2 Hz cadence and bearing no
+visible glitch or missed frame.
+
+**Why by design**: the core-side MIN fold guarantees a *slow* request can never
+starve a fast one — every paced requester is repainted at least as often as it
+asked. A fast loop's tighter interval sets the frame rate for the whole tick,
+and slower cadences riding along cost no frame the fast loop wasn't already
+forcing. Motion that genuinely must run every vsync is a `TickClass::Transition`
+request, not paced at all.
+
+**Applies to**: Android, iOS, and desktop — all three shells support paced frame
+requests. The MIN-lattice fold happens core-side
+(`PaintCtx::request_frame_paced_at`, crates/frust-core/src/widget.rs), before
+any shell sees the aggregated `PaintOutcome::paced_interval`, so the starvation
+shape is identical everywhere — only the resolution mechanism differs. Android
+and iOS resolve the requested interval through the frame gate's pre-paint skip
+decision (`FrameGate::decide_paced` / `FramePacing::effective_interval`,
+crates/frust-shell-common/src/frame_gate.rs); desktop resolves it post-paint
+through delayed-redraw scheduling in `next_paced_wake`
+(crates/frust-shell-desktop/src/paced_wake.rs), the identical
+`max(cap, requested)` resolution, and pacing is on by default there too.
+
+**Bound**: the repainting at the fast rate lasts exactly as long as the tighter
+paced loop is active. A static screen with a 2 Hz caret and no concurrent
+motion reverts to 2 Hz caret repaints.
+
+**Evidence**: the MIN-lattice contract is stated in
+`crates/frust-core/src/widget.rs`, `PaintCtx::request_frame_paced_at` rustdoc
+(the two contracts on `request_frame_paced_at`, especially "MIN-lattice
+aggregation" and "a *slow* request can never starve a fast one"), and resolved
+by the shell at `crates/frust-shell-common/src/frame_gate.rs`,
+`FramePacing::effective_interval` (the `effective_interval` method and its doc,
+especially the "MIN fold already happened in core" bullet) and, on desktop, at
+`crates/frust-shell-desktop/src/paced_wake.rs`, `next_paced_wake` (the same
+`max(cap, requested)` rule, delayed-redraw side).
 
 ---
 

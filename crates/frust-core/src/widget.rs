@@ -924,13 +924,40 @@ impl<'a> PaintCtx<'a> {
     ///   to it. Motion that genuinely must run every vsync is not cosmetic —
     ///   use [`Self::request_frame`] ([`TickClass::Transition`]) for that.
     ///
-    /// `frust-core` never reads a clock or a theme, so neither the fold nor the
-    /// clamp happens here: the aggregate rides out on
-    /// [`PaintOutcome::paced_interval`] and the shell's frame gate resolves it.
+    /// `frust-core` never reads a clock or a theme, so neither the MIN-lattice
+    /// fold above nor the shell-side theme-cap clamp happens here: the
+    /// aggregate rides out on [`PaintOutcome::paced_interval`] and the shell's
+    /// frame gate resolves it.
+    ///
+    /// One clamp DOES happen here, though: `interval` is capped at
+    /// [`Self::MAX_PACED_INTERVAL`] before it is folded in, so no caller
+    /// (buggy or otherwise) can push a runaway value out to the shell's
+    /// pacing arithmetic. See that constant's doc comment for the full
+    /// rationale. This is a pure ceiling, never a target — every real cadence
+    /// in this codebase (a bare [`Duration::ZERO`] "theme rate" request, the
+    /// ~500ms caret blink above, or any plausible slow pulse) sits far below
+    /// it and passes through completely unchanged.
     pub fn request_frame_paced_at(&mut self, interval: Duration) {
         self.needs_frame = true;
-        self.merge_paced_interval(interval);
+        self.merge_paced_interval(interval.min(Self::MAX_PACED_INTERVAL));
     }
+
+    /// Ceiling on the `interval` [`Self::request_frame_paced_at`] accepts.
+    ///
+    /// 10 seconds comfortably clears every real cosmetic cadence in this
+    /// codebase — a bare [`Duration::ZERO`] "theme rate" request, the ~500ms
+    /// caret blink, muxr's ~550ms blink, or any plausible slow pulse — while
+    /// keeping the shell's downstream pacing arithmetic
+    /// (`frust-shell-common::frame_gate`'s `interval * 2` /
+    /// `interval.as_nanos() as u64`, `frust-shell-desktop::paced_wake`'s
+    /// `Instant + interval`) far below overflow or truncation even at the
+    /// widest legal input. [`Self::request_frame_paced_at`] is the single
+    /// entry point every paced interval flows through (see
+    /// [`Self::merge_paced_interval`]'s doc comment), so clamping here bounds
+    /// every downstream consumer for free — this must never change behavior
+    /// for any existing caller, since every shipped cadence is orders of
+    /// magnitude under it.
+    pub const MAX_PACED_INTERVAL: Duration = Duration::from_secs(10);
 
     /// Request a continuation frame of an explicit [`TickClass`] — the general
     /// form behind [`Self::request_frame`] (Transition) and
@@ -952,14 +979,31 @@ impl<'a> PaintCtx<'a> {
     }
 
     /// Fold one paced request's interval into this context's MIN-lattice
-    /// aggregate — the single mutation point for `paced_interval`, shared by
-    /// [`Self::request_frame_paced_at`] and the two bubble sites
-    /// ([`ChildPod::paint_child`], [`Self::with_hero_registry`]).
+    /// aggregate — the single mutation point for `paced_interval`, called
+    /// directly by [`Self::request_frame_paced_at`] and, for an already-`Some`
+    /// bubbled interval, by [`Self::absorb_paced_interval`] (the two paint
+    /// bubble sites' shared entry point).
     fn merge_paced_interval(&mut self, interval: Duration) {
         self.paced_interval = Some(match self.paced_interval {
             Some(current) => current.min(interval),
             None => interval,
         });
+    }
+
+    /// Fold a bubbled child's paced interval into this context's own
+    /// MIN-lattice aggregate — the one rule shared by both paced-interval
+    /// absorb sites ([`ChildPod::paint_child`], [`Self::with_hero_registry`]):
+    /// skip entirely when the child named none, rather than defaulting to
+    /// [`Duration::ZERO`] (the lattice's own tightest/absorbing element,
+    /// meaning "at the theme's own rate"). Folding that default in for a
+    /// child that named no interval at all would silently re-tighten this
+    /// context to the theme cap even though nothing downstream actually asked
+    /// for a frame at all — see [`Self::request_frame_paced_at`]'s MIN-lattice
+    /// contract.
+    fn absorb_paced_interval(&mut self, interval: Option<Duration>) {
+        if let Some(interval) = interval {
+            self.merge_paced_interval(interval);
+        }
     }
 
     /// Whether a continuation frame was requested during this (sub)paint.
@@ -1197,10 +1241,10 @@ impl<'a> PaintCtx<'a> {
         }
         // MIN-lattice fold of the paced interval, the orthogonal half of the
         // same absorb: a slower interval inside never loosens the outer
-        // aggregate, and a tighter one tightens it.
-        if let Some(interval) = child.paced_interval {
-            self.merge_paced_interval(interval);
-        }
+        // aggregate, and a tighter one tightens it. `absorb_paced_interval`
+        // is the shared rule with `ChildPod::paint_child`'s own bubble below —
+        // skip on `None` rather than folding in `Duration::ZERO`.
+        self.absorb_paced_interval(child.paced_interval);
         if let Some(ime) = child.ime_state.take() {
             self.ime_state = Some(ime);
         }
@@ -1782,9 +1826,33 @@ impl ChildPod {
             // `Duration::ZERO` (the theme cap) into the parent's MIN-lattice and
             // would silently re-tighten a child that asked for a *slower*
             // cadence. Forward the child's own aggregate interval instead — the
-            // MIN-lattice's bubbling identity.
+            // MIN-lattice's bubbling identity — via `absorb_paced_interval`,
+            // the same rule `with_hero_registry` uses.
             Some(TickClass::CosmeticLoop) => {
-                ctx.request_frame_paced_at(child_ctx.paced_interval().unwrap_or_default());
+                // Bubble `needs_frame` unconditionally: a CosmeticLoop
+                // `frame_class` means the child genuinely requested a frame,
+                // independent of whether an interval merges below (mirrors
+                // `with_hero_registry`'s unconditional `needs_frame` bubble,
+                // which is likewise separate from its interval fold).
+                ctx.needs_frame = true;
+                // Invariant: `frame_class() == Some(CosmeticLoop)` requires
+                // `needs_frame && !frame_unpaced`, and the only paths that can
+                // produce that pair — `request_frame_paced_at` directly, or a
+                // nested `paint_child`/`with_hero_registry` bubble grounded in
+                // the same call by this identical induction — always merge a
+                // paced interval in the same step. So `paced_interval()` is
+                // never actually `None` here through the public
+                // `request_frame_paced*` API; this documents that belief
+                // rather than silently trusting it. `absorb_paced_interval`
+                // (below) is what actually implements the fallback, so
+                // behavior stays correct even if a future caller manages to
+                // trip this.
+                debug_assert!(
+                    child_ctx.paced_interval().is_some(),
+                    "CosmeticLoop frame_class with no merged paced_interval — \
+                     a new caller must be bypassing request_frame_paced_at"
+                );
+                ctx.absorb_paced_interval(child_ctx.paced_interval());
             }
             None => {}
         }
@@ -2560,6 +2628,25 @@ mod tests {
     }
 
     #[test]
+    fn request_frame_paced_at_clamps_past_the_ten_second_ceiling() {
+        // Past the ceiling: clamps DOWN to it rather than carrying the raw
+        // caller value out to the shell's pacing arithmetic unbounded.
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx.request_frame_paced_at(Duration::from_secs(10) + Duration::from_secs(1));
+        assert_eq!(ctx.paced_interval(), Some(PaintCtx::MAX_PACED_INTERVAL));
+    }
+
+    #[test]
+    fn request_frame_paced_at_leaves_a_real_cadence_untouched() {
+        // Every shipped cadence (the ~500ms caret above, muxr's ~550ms blink)
+        // sits nowhere near the ceiling and must pass through byte-for-byte —
+        // the clamp must never change behavior for any existing caller.
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx.request_frame_paced_at(Duration::from_millis(550));
+        assert_eq!(ctx.paced_interval(), Some(Duration::from_millis(550)));
+    }
+
+    #[test]
     fn paced_intervals_aggregate_on_the_min_lattice() {
         // Two paced requests at different rates in one pass: the TIGHTEST wins,
         // so both are honored (the slower one is merely repainted more often
@@ -2692,6 +2779,41 @@ mod tests {
             pctx.paced_interval(),
             Some(SLOW_PACE),
             "a nested slow paced loop keeps its own cadence up the tree"
+        );
+    }
+
+    #[test]
+    fn absorb_paced_interval_skips_on_none_without_tightening_to_zero() {
+        // The one rule shared by both paced-interval absorb sites
+        // (`ChildPod::paint_child`'s CosmeticLoop arm, `with_hero_registry`):
+        // a `None` interval must leave the aggregate untouched rather than
+        // defaulting to `Duration::ZERO` (the MIN-lattice's own tightest,
+        // most-tightening value) — the exact defect class `unwrap_or_default`
+        // used to risk in `paint_child`.
+        //
+        // Exercised directly against the shared fold rather than through
+        // `paint_child`'s real bubble: that call site's `debug_assert!`
+        // documents `frame_class() == Some(CosmeticLoop)` with no merged
+        // interval as unreachable through the public `request_frame_paced*`
+        // API (a provable invariant — see its doc comment), so forcing that
+        // exact state through the full `ChildPod::paint_child` path would
+        // trip the tripwire instead of exercising the fallback it guards.
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx.absorb_paced_interval(None);
+        assert_eq!(
+            ctx.paced_interval(),
+            None,
+            "a None interval must not tighten the aggregate to Duration::ZERO"
+        );
+
+        // A pre-existing aggregate is likewise untouched by a `None` fold.
+        let mut ctx2 = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        ctx2.request_frame_paced_at(Duration::from_millis(500));
+        ctx2.absorb_paced_interval(None);
+        assert_eq!(
+            ctx2.paced_interval(),
+            Some(Duration::from_millis(500)),
+            "a None fold must not override an already-merged interval either"
         );
     }
 

@@ -759,8 +759,14 @@ impl Widget for GlyphSheetWidget {
         };
         match p.phase {
             PointerPhase::Down => {
-                // A Down anywhere in the sheet claims focus, so a subsequent
-                // Escape has a focus chain to travel.
+                // Claim focus on every Down anywhere in the sheet. Load-
+                // bearing: the root treats a Down that bubbles no claim as a
+                // blur (`release_focus_session` drops focus + IME state), so
+                // the re-claim is what keeps the session alive while this
+                // sheet is up. Re-claiming while already focused is a
+                // change-guarded no-op (no generation bump) — do not add a
+                // claim-once guard, it kills the session on the second tap
+                // (claim-once-hygiene review, 2026-08-06).
                 ctx.request_focus();
                 if self.handle_target.contains(p.position) {
                     self.drag_active = true;
@@ -1136,6 +1142,51 @@ mod tests {
         w.event(&mut ctx, &ev(PointerPhase::Up, 200.0, w.panel.y0 + 60.0));
         w.event(&mut ctx, &escape_event());
         assert_eq!(w.phase, Phase::Exit);
+    }
+
+    #[test]
+    fn a_down_reclaims_focus_after_an_external_blur() {
+        use frust_core::ChildPod;
+
+        let view: GlyphSheetView<()> = glyph_sheet(leaf_any(300.0, 200.0));
+        let area = Size::new(400.0, 600.0);
+        let mut counter = 0u64;
+        let w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
+        let mut pod = ChildPod::new(Box::new(w));
+        let mut lctx = LayoutCtx::new();
+        pod.layout_child(&mut lctx, &BoxConstraints::tight(area));
+
+        let mut dummy = ();
+        // A scrim press well above the panel (outside content/handle) claims
+        // focus, then releases outside — beginning the staged exit (mirrors
+        // `scrim_tap_outside_the_panel_begins_exit`), which clears
+        // `scrim_captured` regardless, returning to the "fresh events" arm.
+        {
+            let s: &mut dyn Any = &mut dummy;
+            let mut ctx = EventCtx::new(s, Point::ZERO, area);
+            pod.event_child(&mut ctx, &ev(PointerPhase::Down, 10.0, 10.0));
+        }
+        assert!(pod.is_focused(), "the first Down claims focus");
+        {
+            let s: &mut dyn Any = &mut dummy;
+            let mut ctx = EventCtx::new(s, Point::ZERO, area);
+            pod.event_child(&mut ctx, &ev(PointerPhase::Up, 10.0, 10.0));
+        }
+
+        // Simulate an external blur (mirrors the root's own `Down`-with-no-
+        // claim release path) so the second Down's own re-claim is what's
+        // under test, not a leftover flag.
+        pod.set_focused(false);
+        {
+            let s: &mut dyn Any = &mut dummy;
+            let mut ctx = EventCtx::new(s, Point::ZERO, area);
+            pod.event_child(&mut ctx, &ev(PointerPhase::Down, 10.0, 10.0));
+        }
+        assert!(
+            pod.is_focused(),
+            "a second Down must re-claim focus after an external blur — this is what \
+             keeps the root's focus/IME session alive while the sheet is up"
+        );
     }
 
     // -- Back-press dismiss signal --------------------------------------

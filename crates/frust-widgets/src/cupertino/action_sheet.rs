@@ -498,8 +498,14 @@ impl<State: 'static> Widget for CupertinoActionSheetWidget<State> {
         };
         match p.phase {
             PointerPhase::Down => {
-                // A press anywhere in the action sheet claims focus, so a
-                // subsequent Escape has a focus chain to travel.
+                // Claim focus on every Down anywhere in the action sheet.
+                // Load-bearing: the root treats a Down that bubbles no claim
+                // as a blur (`release_focus_session` drops focus + IME
+                // state), so the re-claim is what keeps the session alive
+                // while this sheet is up. Re-claiming while already focused
+                // is a change-guarded no-op (no generation bump) — do not
+                // add a claim-once guard, it kills the session on the second
+                // tap (claim-once-hygiene review, 2026-08-06).
                 ctx.request_focus();
                 self.captured = true;
                 ctx.capture_pointer();
@@ -933,6 +939,46 @@ mod tests {
         h.root.event(&mut h.state, &escape_event());
         h.drain();
         assert_eq!(h.state.calls, 0, "Escape without prior focus is a no-op");
+    }
+
+    #[test]
+    fn a_down_reclaims_focus_after_an_external_blur() {
+        use frust_core::ChildPod;
+
+        let view = sheet_view();
+        let w = build(&view);
+        let mut pod = ChildPod::new(Box::new(w));
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+        pod.layout_child(&mut lctx, &BoxConstraints::tight(WINDOW));
+
+        let mut dummy = ();
+        {
+            let s: &mut dyn Any = &mut dummy;
+            let mut ctx = EventCtx::new(s, Point::ZERO, WINDOW);
+            pod.event_child(&mut ctx, &Harness::ev(PointerPhase::Down, 5.0, 5.0));
+        }
+        assert!(pod.is_focused(), "the first Down claims focus");
+        {
+            let s: &mut dyn Any = &mut dummy;
+            let mut ctx = EventCtx::new(s, Point::ZERO, WINDOW);
+            pod.event_child(&mut ctx, &Harness::ev(PointerPhase::Up, 5.0, 5.0));
+        }
+
+        // Simulate an external blur (mirrors the root's own `Down`-with-no-
+        // claim release path) so the second Down's own re-claim is what's
+        // under test, not a leftover flag.
+        pod.set_focused(false);
+        {
+            let s: &mut dyn Any = &mut dummy;
+            let mut ctx = EventCtx::new(s, Point::ZERO, WINDOW);
+            pod.event_child(&mut ctx, &Harness::ev(PointerPhase::Down, 5.0, 5.0));
+        }
+        assert!(
+            pod.is_focused(),
+            "a second Down must re-claim focus after an external blur — this is what \
+             keeps the root's focus/IME session alive while the sheet is up"
+        );
     }
 
     #[test]

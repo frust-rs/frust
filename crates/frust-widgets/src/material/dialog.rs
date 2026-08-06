@@ -545,9 +545,14 @@ impl Widget for DialogWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        // A press anywhere in the modal claims focus, so a subsequent Escape has
-        // a focus chain to travel (see the module docs' Keyboard operability
-        // note — this is the opt-in that note describes).
+        // Claim focus on every Down (see the module docs' Keyboard
+        // operability note — this is the opt-in that note describes).
+        // Load-bearing: the root treats a Down that bubbles no claim as a
+        // blur (`release_focus_session` drops focus + IME state), so the
+        // re-claim is what keeps the session alive while this dialog is up.
+        // Re-claiming while already focused is a change-guarded no-op (no
+        // generation bump) — do not add a claim-once guard, it kills the
+        // session on the second tap (claim-once-hygiene review, 2026-08-06).
         if matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Down) {
             ctx.request_focus();
         }
@@ -1047,6 +1052,47 @@ mod tests {
             state.results,
             vec![None],
             "Escape dismisses the focused dialog"
+        );
+    }
+
+    #[test]
+    fn a_down_reclaims_focus_after_an_external_blur() {
+        use frust_core::ChildPod;
+
+        let view: DialogView<()> = dialog().title("Hi");
+        let area = Size::new(400.0, 600.0);
+        let w = build(&view);
+        let mut pod = ChildPod::new(Box::new(w));
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        pod.layout_child(&mut lctx, &BoxConstraints::tight(area));
+
+        let mut dummy = ();
+        {
+            let s: &mut dyn Any = &mut dummy;
+            let mut ctx = EventCtx::new(s, Point::ZERO, area);
+            pod.event_child(&mut ctx, &ev(PointerPhase::Down, 5.0, 5.0));
+        }
+        assert!(pod.is_focused(), "the first Down claims focus");
+        {
+            let s: &mut dyn Any = &mut dummy;
+            let mut ctx = EventCtx::new(s, Point::ZERO, area);
+            pod.event_child(&mut ctx, &ev(PointerPhase::Up, 5.0, 5.0));
+        }
+
+        // Simulate an external blur (mirrors the root's own `Down`-with-no-
+        // claim release path) so the second Down's own re-claim is what's
+        // under test, not a leftover flag.
+        pod.set_focused(false);
+        {
+            let s: &mut dyn Any = &mut dummy;
+            let mut ctx = EventCtx::new(s, Point::ZERO, area);
+            pod.event_child(&mut ctx, &ev(PointerPhase::Down, 5.0, 5.0));
+        }
+        assert!(
+            pod.is_focused(),
+            "a second Down must re-claim focus after an external blur — this is what \
+             keeps the root's focus/IME session alive while the dialog is up"
         );
     }
 

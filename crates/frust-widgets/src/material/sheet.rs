@@ -571,8 +571,15 @@ impl Widget for BottomSheetWidget {
             };
             match p.phase {
                 PointerPhase::Down => {
-                    // A Down anywhere in the sheet claims focus, so a
-                    // subsequent Escape has a focus chain to travel.
+                    // Claim focus on every Down anywhere in the sheet.
+                    // Load-bearing: the root treats a Down that bubbles no
+                    // claim as a blur (`release_focus_session` drops focus +
+                    // IME state), so the re-claim is what keeps the session
+                    // alive while this sheet is up. Re-claiming while already
+                    // focused is a change-guarded no-op (no generation bump)
+                    // — do not add a claim-once guard, it kills the session
+                    // on the second tap (claim-once-hygiene review,
+                    // 2026-08-06).
                     ctx.request_focus();
                     // A Down in the handle strip begins a drag.
                     if self.handle_target.contains(p.position) {
@@ -1061,6 +1068,124 @@ mod tests {
         assert!(
             state.results.is_empty(),
             "Escape without prior focus is a no-op"
+        );
+    }
+
+    #[test]
+    fn a_down_reclaims_focus_after_an_external_blur() {
+        use frust_core::ChildPod;
+
+        let view: BottomSheetView<()> = bottom_sheet(leaf_any(300.0, 200.0));
+        let area = Size::new(400.0, 600.0);
+        let w = build(&view);
+        let mut pod = ChildPod::new(Box::new(w));
+        let mut lctx = LayoutCtx::new();
+        pod.layout_child(&mut lctx, &BoxConstraints::tight(area));
+
+        let mut dummy = ();
+        // A scrim press well above the bottom-anchored panel (outside
+        // content/handle) claims focus, then releases outside — dismissing
+        // (mirrors `scrim_tap_outside_panel_dismisses`), which clears
+        // `scrim_captured` regardless, returning to the "fresh events" arm.
+        {
+            let s: &mut dyn Any = &mut dummy;
+            let mut ctx = EventCtx::new(s, Point::ZERO, area);
+            pod.event_child(&mut ctx, &ev(PointerPhase::Down, 5.0, 5.0));
+        }
+        assert!(pod.is_focused(), "the first Down claims focus");
+        {
+            let s: &mut dyn Any = &mut dummy;
+            let mut ctx = EventCtx::new(s, Point::ZERO, area);
+            pod.event_child(&mut ctx, &ev(PointerPhase::Up, 5.0, 5.0));
+        }
+
+        // Simulate an external blur (mirrors the root's own `Down`-with-no-
+        // claim release path) so the second Down's own re-claim is what's
+        // under test, not a leftover flag.
+        pod.set_focused(false);
+        {
+            let s: &mut dyn Any = &mut dummy;
+            let mut ctx = EventCtx::new(s, Point::ZERO, area);
+            pod.event_child(&mut ctx, &ev(PointerPhase::Down, 5.0, 5.0));
+        }
+        assert!(
+            pod.is_focused(),
+            "a second Down must re-claim focus after an external blur — this is what \
+             keeps the root's focus/IME session alive while the sheet is up"
+        );
+    }
+
+    // --- Root-level regression: an unclaimed Down must not blur a live focus/IME
+    //     session (claim-once-hygiene fix-2a). ---
+    //
+    // The h1 claim-once guard broke exactly this: a second Down landing on the
+    // sheet's own handle strip (a region the sheet's `event` handles itself,
+    // *before* routing reaches `content` — see the "fresh events" Down arm
+    // above) skipped `ctx.request_focus()` because the guard had already fired
+    // once. With nothing else on that dispatch's path claiming focus either
+    // (the handle-strip branch returns before `content` is ever routed to),
+    // `RenderRoot`'s own Down arm (`crates/frust-core/src/app.rs`) saw no claim
+    // bubble up at all and took its blur branch — `release_focus_session`,
+    // dropping `focus_active` **and** `ime_state` together — even though a
+    // `TextInput` inside the sheet's content was still mid-edit.
+
+    #[derive(Default)]
+    struct FieldState {
+        value: String,
+    }
+
+    // A fixed-height (200dp) content slot wrapping a real `TextInput`, giving
+    // the sheet the exact same panel geometry (`48 + 200 = 248dp`) the
+    // `bg_page(400.0, 200.0)`-based focus tests above already rely on, so
+    // `handle_y` below is derived the same way
+    // `escape_after_a_short_handle_press_claims_focus_and_dismisses_via_navigator`
+    // computes it.
+    fn field_sheet_logic(state: &mut FieldState) -> BottomSheetView<FieldState> {
+        bottom_sheet(crate::SizedBox(None, Some(200.0)).child(crate::text_input(
+            state.value.clone(),
+            |s: &mut FieldState, v: String| s.value = v,
+        )))
+    }
+
+    #[test]
+    fn a_second_down_on_chrome_keeps_the_root_focus_session() {
+        let mut root: RenderRoot<FieldState, BottomSheetView<FieldState>> = RenderRoot::new();
+        let mut state = FieldState::default();
+        let area = Size::new(400.0, 600.0);
+
+        root.rebuild(&mut field_sheet_logic, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        // Focus the field with a tap inside the content slot (panel height
+        // 248, so content spans y in [400, 600] — well clear of the handle
+        // strip at the panel's top).
+        root.event(&mut state, &ev(PointerPhase::Down, 200.0, 500.0));
+        root.event(&mut state, &ev(PointerPhase::Up, 200.0, 500.0));
+        assert!(root.is_focus_active(), "tap inside the field focuses it");
+        assert!(
+            root.ime_state().is_some(),
+            "focusing the field publishes an IME surface"
+        );
+
+        // A second, fresh Down on the handle strip (panel_y = 600 - 248 =
+        // 352; strip is the top 48dp of the panel) — a region the sheet's
+        // own `event` claims before `content` is ever routed to. Pre-fix,
+        // this is exactly the dispatch the claim-once guard broke: no widget
+        // on this path called `request_focus`, so the root's Down arm took
+        // its blur branch and released the whole session.
+        let handle_y = area.height - 248.0 + 10.0;
+        root.event(&mut state, &ev(PointerPhase::Down, 200.0, handle_y));
+
+        assert!(
+            root.is_focus_active(),
+            "a second Down on the sheet's own chrome must not blur the root's \
+             live focus session"
+        );
+        assert!(
+            root.ime_state().is_some(),
+            "the field's IME surface must survive a second Down on chrome that \
+             never itself routed to the field"
         );
     }
 
