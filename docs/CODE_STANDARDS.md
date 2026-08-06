@@ -580,7 +580,10 @@ Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantic
   module documents contract + rationale only — history lives in git, and content a unit spoke
   doc already owns gets one pointer there, not a restatement. Inline comments state
   constraints the code can't show on its own (a `# Safety` contract, a magic-number source).
-- **Mechanically checked.** `crates/frust/tests/comment_residue_conformance.rs` (a source-scan
-  conformance test, `print_free_cores.rs`'s precedent, above) scans for banned patterns; a
-  comment that fails it needs its ledger reference replaced per the rule above, not
-  suppressed.
+- **Mechanically checked.** `crates/frust/tests/comment_residue_conformance.rs` catches
+  plan-phase (dotted `9.B`, parenthesized, hyphenated `Phase-N`, "the Phase N"), plan-task
+  (`task-NN`), findings-ledger numbers, review-round (`re-review`, `cfix-N`, gated `round-N`),
+  plan-document (`PLAN <tag>`, `workflow/plans/`), and `review finding <id>` refs — sanctioned
+  citations (LIMITATIONS ids, R-rules, external rev pins) exempt only their match span, not the
+  line. Bare internal PR numbers (vs. upstream wgpu's `#7057`) and bare plan tags (`T04`/`D6a`
+  vs. `M3`/`R8`) stay human-reviewed — still banned, swept on sight; tree is clean of both today.
