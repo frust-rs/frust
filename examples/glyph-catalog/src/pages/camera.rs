@@ -56,7 +56,7 @@
 //! page always requests [`ImageFormat::Yuv420`], the cross-platform format
 //! both backends deliver.
 //!
-//! # Scan strip (Phase-4 measurement gate rig)
+//! # Scan strip (measurement gate rig)
 //!
 //! [`scan_block`] adds a two-mode strip below the readout above, exercising
 //! `plugins/camera`'s barcode API (`plugins/camera/README.md` §4 "Barcode

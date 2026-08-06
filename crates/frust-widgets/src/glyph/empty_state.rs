@@ -16,8 +16,8 @@
 //! EMPTY SET), but a char outside the bundled Glyph fonts' coverage falls
 //! back through the *platform's* system font — inconsistent, and on iOS
 //! frequently invisible (e.g. `▣`/`⚙` are absent or render differently across
-//! iOS/Android; see `crates/frust-widgets/src/icon.rs`'s module docs and
-//! FINDINGS #42). [`EmptyStateView::icon`] sets a deterministic vector path
+//! iOS/Android; see `crates/frust-widgets/src/icon.rs`'s module docs).
+//! [`EmptyStateView::icon`] sets a deterministic vector path
 //! instead — the same pixels on every platform, no font-fallback dependency.
 //!
 //! **Precedence: when both `.icon(..)` and `.glyph(..)` are set, the icon

@@ -306,7 +306,7 @@ pub struct FrameInputs {
     /// `frust-widgets`' paint-time long-press latch pairs its mark with a
     /// `request_frame`). This input closes the general case those two happen to
     /// cover — a mark raised with nothing else dirty must never wait for the
-    /// next stray touch (the FINDINGS #56 shape).
+    /// next stray touch.
     pub deferred_callbacks_pending: bool,
     /// *theme-override/appearance change*. The app-facing theme override
     /// or the platform light/dark preference changed this tick. Source: the
@@ -1302,7 +1302,7 @@ mod tests {
         // owed a `Housekeeping` broadcast that only `RenderRoot::rebuild` can
         // dispatch, and NOTHING else is dirty. Without this input the gate
         // skips, the rebuild never runs, and the callback waits for whatever
-        // touch happens to arrive next (FINDINGS #56's shape).
+        // touch happens to arrive next.
         let mut gate = FrameGate::with_enabled(true);
         let owed = FrameInputs {
             deferred_callbacks_pending: true,

@@ -354,7 +354,7 @@ mod tests {
 
     #[test]
     fn an_app_font_reaches_contexts_built_later_and_older_ones_on_sync() {
-        // The seam FINDINGS #35 turns on: `register_fonts` is what a shell's
+        // The seam under test: `register_fonts` is what a shell's
         // font drain calls, and a widget-owned context (a `TextInput`'s) is
         // built from `new()` long after that drain. Both legs below are
         // monotone — the record is append-only and never reset, so nothing
@@ -505,7 +505,7 @@ mod tests {
         );
     }
 
-    // --- Paragraph alignment (FINDINGS #39) ---
+    // --- Paragraph alignment ---
 
     use crate::style::TextAlign;
 

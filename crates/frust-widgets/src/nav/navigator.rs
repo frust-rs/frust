@@ -1473,7 +1473,7 @@ impl<State: 'static> NavigatorWidget<State> {
     /// **The single derivation of "visible" in the navigator**, computed from the
     /// same [`base_visible_index`](Self::base_visible_index) that `layout` and
     /// `paint` already cull against — the visibility seam, the covered-build cull
-    /// and (task 06) the semantics rule all read this one function rather than
+    /// and the semantics rule all read this one function rather than
     /// recomputing it.
     ///
     /// [`Current`](PageVisibility::Current) iff `index` is the top of the stack;

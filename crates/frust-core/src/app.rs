@@ -354,7 +354,7 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// dirty-driven (`ControlFlow::Wait`) and schedules off `needs_frame`, so the
     /// deferral has to surface there too — otherwise the remaining flush would
     /// wait for whatever input happens to arrive next, which is the exact
-    /// FINDINGS #56 failure this whole mechanism exists to remove.
+    /// failure this whole mechanism exists to remove.
     deferred_frame: bool,
     _state: core::marker::PhantomData<fn(&mut State)>,
 }
@@ -706,9 +706,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// [`InputEvent::Housekeeping`] broadcast through the ordinary
     /// [`event`](RenderRoot::event) plumbing, where `state` *is* in scope. This
     /// is the only unconditional per-frame pass that holds `&mut State`, which is
-    /// why the dispatch lives here and not in a shell (FINDINGS #56: flushing on
-    /// the next real input meant waiting seconds for a touch, or forever when the
-    /// next touch went to chrome outside the navigator).
+    /// why the dispatch lives here and not in a shell (flushing on the next
+    /// real input meant waiting seconds for a touch, or forever when the next
+    /// touch went to chrome outside the navigator).
     ///
     /// A flushed callback mutates `State`, so the view built before it ran is
     /// stale — the `app_logic` + `rebuild_view` cycle therefore re-runs after
@@ -762,7 +762,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // Housekeeping producers need it (a navigator pop-result callback
             // and `frust-widgets`' gesture long-press latch), and without it a
             // redraw-only effect waits for whatever input happens to arrive
-            // next — the FINDINGS #56 shape this mechanism exists to remove.
+            // next — exactly the failure this mechanism exists to remove.
             //
             // Non-empty flags also bump the semantics generation below, which
             // is correct: the callback just mutated real `State` through a live
@@ -3662,7 +3662,7 @@ mod tests {
     }
 
     // --- Deferred state-bearing callbacks: the `InputEvent::Housekeeping` flush
-    //     `RenderRoot::rebuild` dispatches (FINDINGS #56). ---
+    //     `RenderRoot::rebuild` dispatches. ---
 
     /// App state for the flush tests.
     #[derive(Default)]

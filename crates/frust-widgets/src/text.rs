@@ -509,7 +509,7 @@ mod tests {
         assert_eq!(stats.line_breaks, 1, "the width change re-breaks once");
     }
 
-    // --- Paragraph alignment (FINDINGS #39), end-to-end through the widget ---
+    // --- Paragraph alignment, end-to-end through the widget ---
 
     /// Builds, lays out, and paints `view` at `bc`, returning the painted
     /// glyph runs (unlike [`painted_color`], which discards everything but

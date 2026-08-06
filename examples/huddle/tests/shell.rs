@@ -201,7 +201,7 @@ fn modal_round_trip_delivers_its_result() {
     controller.pop_with_result(PopResult::of("confirmed".to_string()));
 
     // One REAL frame (rebuild + layout at W×H + paint), and NO input event of
-    // any kind. FINDINGS #56: the rebuild that applies the pop also dispatches
+    // any kind. The rebuild that applies the pop also dispatches
     // the `InputEvent::Housekeeping` broadcast that flushes the queued
     // `on_result`, so the result is in app state before this frame ends. The
     // whole point is that it no longer waits on a tap — which, in this shell,
