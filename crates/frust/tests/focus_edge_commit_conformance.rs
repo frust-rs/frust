@@ -13,7 +13,7 @@
 //! left to detect, and the edge — which exists specifically to survive a
 //! pacing-driven Skip until the next produced frame
 //! (`docs/LIMITATIONS.md`'s `focus-ime-edge-paced-deferral`) — is lost
-//! outright. That is the round-0 bug `dee29bb` fixed; this test keeps it
+//! outright. That is the bug `dee29bb` fixed; this test keeps it
 //! fixed.
 //!
 //! # Why a source scan

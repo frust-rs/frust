@@ -1279,7 +1279,7 @@ fn project_name_of(root: &std::path::Path) -> String {
 /// rollup and, if the wizard is open, refreshes its snapshot in place. On the
 /// first report of a launch it also drives the fresh-machine auto-open — the
 /// wizard pops once (never re-nags) when the core toolchain is `Missing` and no
-/// other modal is already up (PLAN D6a).
+/// other modal is already up.
 fn on_bootstrap_report(state: &mut AppState, report: frust_drive::doctor::DoctorReport) -> Outcome {
     use frust_drive::doctor::ComponentStatus;
 

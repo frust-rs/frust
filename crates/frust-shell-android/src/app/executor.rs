@@ -228,8 +228,8 @@ impl SplitExecutor {
         }
     }
 
-    /// Reclaim a reusable, empty `Scene` for the next frame (review finding
-    /// F5): prefer a scene already reclaimed from a stale [`Self::submit_frame`]
+    /// Reclaim a reusable, empty `Scene` for the next frame: prefer a scene
+    /// already reclaimed from a stale [`Self::submit_frame`]
     /// give-back ([`Self::spare_scene`]), else poll the render thread's
     /// give-back channel ([`Self::scene_return`]), else allocate a fresh one.
     /// Either reclaimed scene is [`Scene::reset`] before being handed out —
@@ -267,7 +267,7 @@ impl SplitExecutor {
             });
             // The UI thread outran the render thread: the just-overwritten,
             // never-rendered stale frame's scene is still perfectly reusable —
-            // reclaim its buffer instead of letting it drop (review finding F5).
+            // reclaim its buffer instead of letting it drop.
             if let Some(stale_frame) = stale {
                 let mut reclaimed = stale_frame.scene.scene;
                 reclaimed.reset();
@@ -413,7 +413,7 @@ impl FrameExecutor {
     /// tail synchronously (borrowing `scene`, reused next frame) and returns its
     /// encode span; the split moves the scene out into a [`SceneFrame`] and
     /// sends it across the channel, replacing it with a scene reclaimed off the
-    /// render thread's give-back channel (review finding F5) — `reset()`, so its
+    /// render thread's give-back channel — `reset()`, so its
     /// buffer is reused rather than reallocated — falling back to `Scene::new()`
     /// only when none is available yet, and returning `Duration::ZERO` (encode
     /// is off-thread, so it does not count against the UI thread's deadline).

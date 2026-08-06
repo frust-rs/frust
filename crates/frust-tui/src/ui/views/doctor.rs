@@ -1,4 +1,4 @@
-//! The doctor panel (PLAN D6/D6a): a shadowed, centered popup listing every
+//! The doctor panel: a shadowed, centered popup listing every
 //! validator's status + actionable hints, with a re-run action. The base
 //! workbench layer is rendered with a *suppressed* `MouseCtx` (see
 //! `crate::ui::render`), so only this panel's regions are live while it is

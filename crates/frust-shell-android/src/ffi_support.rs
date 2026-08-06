@@ -535,7 +535,7 @@ pub(crate) fn read_resolved_translucency(flag: &std::sync::atomic::AtomicBool) -
 }
 
 /// This frame's base clear color, chosen from the surface's **resolved**
-/// translucency (review finding M1).
+/// translucency.
 ///
 /// A surface that really came up translucent clears to `transparent` so a
 /// native sibling view behind it shows through wherever nothing painted (Mode

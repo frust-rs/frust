@@ -1,4 +1,4 @@
-//! The fuzzy command palette (PLAN D5 / workbook Part B): a single
+//! The fuzzy command palette: a single
 //! `Ctrl+P` / `:` launcher covering every workbench command, each carrying its
 //! enabled/disabled-with-reason gate (the workbook disabled pattern).
 //!

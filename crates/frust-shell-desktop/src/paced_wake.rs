@@ -12,7 +12,7 @@
 //! of a turn's coupled effects together: the value `ShellHandler::paced_wake`
 //! must take, whether the caller still owes an immediate `request_redraw()`,
 //! and the [`ControlFlowIntent`] to apply to the event loop. They are one
-//! value on purpose — the round-1 Critical was exactly a *split* between the
+//! value on purpose — the bug this prevents was exactly a *split* between the
 //! field and the control flow: a settle cleared `paced_wake` but left the
 //! loop parked on a stale `ControlFlow::WaitUntil`, so once that deadline
 //! elapsed winit treated `WaitUntil(past)` as a zero-timeout poll and
@@ -72,7 +72,7 @@ pub enum ControlFlowIntent {
 /// `request_redraw()`, and the [`ControlFlowIntent`] to apply. Returned as
 /// one value from *both* decision points so a call site can never update the
 /// field without also deciding the control flow — see the module docs for
-/// why that coupling is load-bearing (the round-1 busy-spin Critical).
+/// why that coupling is load-bearing (the busy-spin bug it prevents).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PacedDecision {
     /// What `ShellHandler::paced_wake` must become after this turn.
@@ -120,7 +120,7 @@ pub fn next_paced_wake(
 ) -> PacedDecision {
     if !needs_frame {
         // Settle: clear any stale deadline a prior paced frame left AND
-        // return the loop to `Wait`. The round-1 bug cleared the field here
+        // return the loop to `Wait`. The busy-spin bug cleared the field here
         // but left the control flow on a stale `WaitUntil`.
         return PacedDecision {
             paced_wake: None,

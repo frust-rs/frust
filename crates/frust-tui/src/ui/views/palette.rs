@@ -1,4 +1,4 @@
-//! The fuzzy command palette (PLAN D5 / workbook Part B): a shadowed, centered
+//! The fuzzy command palette: a shadowed, centered
 //! modal with a query prompt over a ranked command list, each row an enabled
 //! command (executes on click/Enter) or a disabled-with-reason one (muted, not
 //! runnable — the workbook disabled pattern). The base screen is rendered with

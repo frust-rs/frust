@@ -237,8 +237,8 @@ pub struct FrameInputs {
     /// see the deferral note at the end of this doc).
     ///
     /// **Why an edge.** This was a *level* input
-    /// (`RenderRoot::is_focus_active || ime_state().is_some()`) — the phase-7
-    /// conservative default. Because it forces a `Run` through
+    /// (`RenderRoot::is_focus_active || ime_state().is_some()`) — the
+    /// original conservative default. Because it forces a `Run` through
     /// [`any_set`](Self::any_set) *and* disqualified
     /// [`is_paced_only_frame`](Self::is_paced_only_frame), any screen holding
     /// root focus rendered every single vsync for as long as the focus lasted,

@@ -1,13 +1,12 @@
-//! `rows_profile` — B3-01 fixture changed-rows analysis for `muxr-row-scoped-reshape`.
+//! `rows_profile` — fixture changed-rows analysis for row-scoped terminal reshaping.
 //!
 //! Host-only, standalone measurement: replays the checked-in S9 terminal fixtures
 //! (`benchmarks/harness/fixtures/terminal/{typing,build-log,htop}.{chunks,json}`) through a
 //! real `vt100::Parser`, generation by generation, using the EXACT chunk-to-generation
 //! grouping `s9_terminal.rs`'s feed loop uses, and reports the changed-rows-per-generation
 //! distribution plus the shaping-cost saving a row-scoped reshape would realize — the
-//! GO/NO-GO input for
-//! `workflow/plans/features/muxr-row-scoped-reshape/PLAN.md`'s B3 pivot (see
-//! `measurements/ROWS.md` in that plan directory for the write-up this tool's output feeds).
+//! GO/NO-GO input for the pivot from run-granular to row-granular shape caching in the
+//! terminal widget (does a generation touch few enough rows for row scoping to pay?).
 //!
 //! Deliberately **std + `vt100` only** (no `serde_json`, no path back into `frustbench`
 //! itself): this is a throwaway measurement tool, not shipped/gated code (an example binary

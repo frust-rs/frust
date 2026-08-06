@@ -886,7 +886,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// The round-1 regression, in miniature: `prefix` with the **default**
+    /// The regression, in miniature: `prefix` with the **default**
     /// properties path. The gate resolves `prod.`-prefixed keys; the generated
     /// file it hands Gradle must carry them **unprefixed**, since the Gradle
     /// template has no prefix concept at all. Before the generated file
@@ -924,7 +924,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// The other round-1 case: a CI rig exporting the four `ANDROID_*`
+    /// The other regression case: a CI rig exporting the four `ANDROID_*`
     /// variables against a **stock** frust.toml — no `[signing.env]` block at
     /// all. The gate must resolve them (they are the documented defaults, and
     /// the same names the generated Gradle falls back to) instead of hard

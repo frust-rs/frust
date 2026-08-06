@@ -747,7 +747,7 @@ mod tests {
 
     #[test]
     fn a_resolved_translucency_downgrade_stops_the_punch_in_the_real_display_list() {
-        // Review finding M1: the shells now push the surface's RESOLVED
+        // The shells push the surface's RESOLVED
         // translucency (`SurfaceRenderer::surface_resolved_translucent`), not
         // the request latch, so a surface that asked for translucency and
         // fell back to an opaque swapchain flips this to `false` — and the

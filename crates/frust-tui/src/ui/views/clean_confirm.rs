@@ -1,4 +1,4 @@
-//! The clean-confirm dialog (PLAN D6 "clean"): a small shadowed, centered
+//! The clean-confirm dialog: a small shadowed, centered
 //! confirm popup over the workbench before running `cargo clean` +
 //! removing the generated Android/iOS build directories. The base workbench
 //! layer is rendered with a *suppressed* `MouseCtx` (see `crate::ui::render`),

@@ -1050,7 +1050,7 @@ where
         // next vsync. Park the loop on `WaitUntil(deadline)` so it wakes then;
         // once the deadline passes, request the redraw and revert to `Wait`.
         // With nothing pending, defensively return to `Wait` too, so no stale
-        // `WaitUntil` can ever survive a turn (the round-1 busy-spin Critical).
+        // `WaitUntil` can ever survive a turn (the busy-spin bug).
         // Any other redraw source (input, a signal wake, a resize) still wakes
         // the loop immediately regardless of this timer — pacing only bounds the
         // cosmetic loop's own cadence. The decision itself lives in the pure,
@@ -1363,7 +1363,7 @@ where
                 // (not just the `needs_frame` ones) precisely so its settle
                 // path covers that case: it clears the field AND returns the
                 // loop to `Wait`, never leaving a stale `WaitUntil` behind (the
-                // round-1 busy-spin Critical). The cap/fold arithmetic is
+                // busy-spin bug). The cap/fold arithmetic is
                 // computed only inside the branch that schedules (in
                 // `next_paced_wake`), so a settling frame never runs it; the
                 // rate is kept finite by `CosmeticLoopRate`'s NaN-safe clamp so

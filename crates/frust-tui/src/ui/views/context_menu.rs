@@ -1,4 +1,4 @@
-//! The right-click context-menu popup (T04 / PLAN D4): a small bordered menu
+//! The right-click context-menu popup: a small bordered menu
 //! anchored near the click, rendered on the top z-layer over the (still
 //! visible) workbench. The base layer is drawn with a *suppressed* `MouseCtx`
 //! (see `crate::ui::render`), so only the menu's own rows are hit-testable

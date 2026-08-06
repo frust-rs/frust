@@ -1,4 +1,4 @@
-//! The toolchain bootstrap wizard (PLAN D6a / workbook B6): a shadowed,
+//! The toolchain bootstrap wizard: a shadowed,
 //! centered two-pane modal — a left step tree (Prerequisites → Platforms ▾ →
 //! Doctor rollup, fdemon's collapsed/expanded projection) and a right detail
 //! pane listing the selected area's components + its guided fix commands, each

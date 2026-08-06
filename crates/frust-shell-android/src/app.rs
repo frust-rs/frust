@@ -345,7 +345,7 @@ pub struct AndroidAppHandle {
     frame_timeline_delta_nanos: u64,
     /// Whether this handle's GPU surface **actually came up** translucent
     /// (alpha-channel, Mode B) — the RESOLVED capability, not the
-    /// [`SurfaceModeWatcher`] request latch (review finding M1).
+    /// [`SurfaceModeWatcher`] request latch.
     ///
     /// The latch says what the app *asked* for; `frust-render` resolves that
     /// against the platform's advertised alpha modes and can silently fall

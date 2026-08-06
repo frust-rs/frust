@@ -1,5 +1,5 @@
-//! Component-level toolchain report (Plan D6a §Requirements): a structured,
-//! per-component breakdown of `doctor`'s checks, grouped by area
+//! Component-level toolchain report: a structured, per-component
+//! breakdown of `doctor`'s checks, grouped by area
 //! (Prerequisites / Android / iOS / Desktop), each component carrying a
 //! human summary and zero-or-more structured, possibly-runnable fix
 //! commands — the shape the TUI bootstrap wizard (fdemon's InstallWizard is
@@ -22,10 +22,9 @@ use super::{
     Validator, XcodeValidator,
 };
 
-/// Per-component/per-area/whole-report status (Plan D6a §Requirements 1):
-/// a tri-state distinct from [`Status`] (which stays the CLI's flat
-/// pass/partial/fail surface) — mirrors fdemon's InstallWizard rollup
-/// vocabulary.
+/// Per-component/per-area/whole-report status: a tri-state distinct from
+/// [`Status`] (which stays the CLI's flat pass/partial/fail surface) —
+/// mirrors fdemon's InstallWizard rollup vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComponentStatus {
     Ok,
@@ -43,11 +42,10 @@ impl From<Status> for ComponentStatus {
     }
 }
 
-/// A structured, single (never chained) fix step for one component
-/// (Plan D6a §Requirements 2). `auto_runnable` is `false` for
-/// privileged/system installs (Xcode, Android Studio, a JDK) — those carry
-/// a `doc_link` instead of a command the wizard could run as a supervised
-/// session.
+/// A structured, single (never chained) fix step for one component.
+/// `auto_runnable` is `false` for privileged/system installs (Xcode,
+/// Android Studio, a JDK) — those carry a `doc_link` instead of a command
+/// the wizard could run as a supervised session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FixCommand {
     /// Display string shown next to the wizard's action.
@@ -91,8 +89,8 @@ pub struct Component {
     pub fix_commands: Vec<FixCommand>,
 }
 
-/// A named grouping of components (Prerequisites / Android / iOS / Desktop
-/// — Plan D6a §Requirements 1).
+/// A named grouping of components (Prerequisites / Android / iOS /
+/// Desktop).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Area {
     pub name: String,
@@ -107,8 +105,8 @@ impl Area {
 }
 
 /// The area name gating the whole report's rollup — a `Missing` component
-/// here blocks; every other area's gaps are non-blocking (Plan D6a
-/// §Requirements 3, fdemon's rollup model).
+/// here blocks; every other area's gaps are non-blocking (fdemon's rollup
+/// model).
 pub const CORE_AREA: &str = "Prerequisites";
 
 /// The full component-level report; the titlebar toolchain chip and
@@ -119,7 +117,7 @@ pub struct DoctorReport {
 }
 
 impl DoctorReport {
-    /// Whole-report rollup (Plan D6a §Requirements 3): the core
+    /// Whole-report rollup: the core
     /// (Prerequisites) area gates — its `Missing` propagates straight
     /// through — while every other area's `Missing`/`Partial` degrades the
     /// rollup only as far as `Partial`, never blocking on a platform gap.
@@ -155,9 +153,9 @@ fn worst(statuses: impl Iterator<Item = ComponentStatus>) -> ComponentStatus {
 }
 
 /// Builds the full component-level report against `ctx`, reusing every
-/// existing validator's/preflight check's probe logic (Plan D6a
-/// §Requirements 4) instead of re-shelling: Prerequisites always runs;
-/// Android always runs (cross-compiled from any host, like
+/// existing validator's/preflight check's probe logic instead of
+/// re-shelling: Prerequisites always runs; Android always runs
+/// (cross-compiled from any host, like
 /// [`MobileTargetsValidator`]); iOS runs only on a macOS host (`xcodebuild`/
 /// the simulator toolchain don't exist elsewhere); Desktop is always `Ok`.
 pub fn build_report(ctx: &DoctorCtx) -> DoctorReport {
@@ -523,7 +521,7 @@ mod tests {
         assert_eq!(fix.program, "cargo");
         assert_eq!(fix.args, vec!["install", "cargo-ndk"]);
         // Core (Prerequisites) is untouched — rollup degrades only to
-        // Partial, a platform gap never blocks (Plan D6a §Requirements 3).
+        // Partial, a platform gap never blocks.
         assert_eq!(report.rollup(), ComponentStatus::Partial);
     }
 

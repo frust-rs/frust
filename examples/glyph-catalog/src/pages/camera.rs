@@ -69,8 +69,8 @@
 //! [`frust_camera::barcode::decode_frame`] by hand with
 //! [`std::time::Instant`] inside the callback, keeping a small ring buffer
 //! ([`TimingStats::durations_us`]) to surface last/median/p95 decode ms,
-//! effective attempts/sec, and the frame resolution — the numbers the
-//! Phase-4 gate session transcribes into `MEASUREMENTS.md`.
+//! effective attempts/sec, and the frame resolution — the numbers a
+//! device measurement session transcribes into `MEASUREMENTS.md`.
 //!
 //! Both modes hand results across the callback's plugin thread the same
 //! atomics/`Mutex` way [`StreamStats`] already does above — never a signal
@@ -835,7 +835,7 @@ enum ScanMode {
     Policy,
     /// Raw [`CameraSession::start_image_stream`] +
     /// [`frust_camera::barcode::decode_frame`], hand-timed with
-    /// [`std::time::Instant`] — the Phase-4 gate numbers.
+    /// [`std::time::Instant`] — the device measurement numbers.
     Timing,
 }
 
@@ -913,8 +913,8 @@ fn start_policy_stream(
 }
 
 /// Starts [`ScanMode::Timing`]: a raw `Yuv420` stream with [`decode_frame`]
-/// run and timed by hand inside the callback — produces the Phase-4 gate
-/// numbers. Resets `stats` first, like [`start_policy_stream`].
+/// run and timed by hand inside the callback — produces the device
+/// measurement numbers. Resets `stats` first, like [`start_policy_stream`].
 fn start_timing_stream(
     session: &CameraSession,
     stats: &Arc<TimingStats>,

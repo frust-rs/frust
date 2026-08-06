@@ -66,7 +66,7 @@ pub enum RunFocus {
     Launch,
 }
 
-/// The run-config modal state (PLAN D5/D6b): the target checklist plus the
+/// The run-config modal state: the target checklist plus the
 /// `BuildInfo` funnel, with a single focused control.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunConfig {

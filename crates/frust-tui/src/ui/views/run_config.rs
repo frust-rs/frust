@@ -1,4 +1,4 @@
-//! The run-config modal (PLAN D5/D6b): a shadowed, centered popup over the
+//! The run-config modal: a shadowed, centered popup over the
 //! workbench with the target checklist + `BuildInfo` funnel (mode / flavor /
 //! defines) and launch / cancel actions. The base workbench layer is rendered
 //! with a *suppressed* `MouseCtx` (see `crate::ui::render`), so only this

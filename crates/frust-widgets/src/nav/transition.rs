@@ -1225,9 +1225,9 @@ mod tests {
             assert!(d <= Duration::from_millis(120), "{preset:?} not ≤120ms");
             assert_eq!(curve, Curve::Linear, "{preset:?}");
             // The collapse target must carry ZERO geometric motion at every
-            // progress point — no slide, no scale (the round-1 review's
-            // scale-leak finding: M3FadeThrough's 0.92→1.0 zoom must not
-            // survive into reduced motion).
+            // progress point — no slide, no scale (the scale-leak trap:
+            // M3FadeThrough's 0.92→1.0 zoom must not survive into reduced
+            // motion).
             for p in [0.0, 0.25, 0.5, 0.75, 1.0] {
                 let (entering, leaving) =
                     resolve_layers(resolved.preset, p, false, Size::new(100.0, 100.0));
