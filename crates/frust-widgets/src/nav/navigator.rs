@@ -4,31 +4,30 @@
 //!
 //! # Shape
 //!
-//! [`navigator`] is the app-facing view fn (the snake_case spelling, like
-//! [`scroll_view`](crate::scroll_view)/[`text_input`](crate::text_input)):
-//! `navigator(controller, initial_page_builder)` produces a [`NavigatorView`]
-//! whose retained [`NavigatorWidget`] owns a `Vec` of page entries. The
-//! **[`NavigatorController`]** is the app-state handle — a cloneable
-//! `Rc<RefCell<…>>` the app keeps in its `Component::State`; it *records requested
-//! ops* (`push`/`pop`/`replace`), which the widget *applies at rebuild* (never
-//! self-mutating mid-event). This mirrors the controlled-component philosophy the
-//! interactive widgets follow (see `docs/CODE_STANDARDS.md`, "Controlled
-//! components never self-mutate").
+//! [`navigator`] is the app-facing view fn: `navigator(controller,
+//! initial_page_builder)` produces a [`NavigatorView`] whose retained
+//! [`NavigatorWidget`] owns a `Vec` of page entries. The
+//! **[`NavigatorController`]** is the app-state handle the app keeps in its
+//! `Component::State` (a cloneable `Rc<RefCell<…>>`): it *records requested ops*
+//! (`push`/`pop`/`replace`), which the widget *applies at rebuild*, never
+//! self-mutating mid-event (`docs/CODE_STANDARDS.md`, "Controlled components
+//! never self-mutate").
 //!
 //! # Op application is view-driven (at rebuild), not event-driven
 //!
 //! Structural ops are drained and applied in [`NavigatorView::rebuild`] (a
 //! `BuildCtx` pass), *not* inside `NavigatorWidget::event`: building a new page
 //! pod ([`crate::authoring::build_child`]) and tearing a popped one down
-//! ([`crate::authoring::teardown_child`]) both need a `BuildCtx`, and a rebuild always runs
-//! every frame so a *programmatic* push/pop (from a background task, with no
-//! triggering event) still lands. On every stack mutation the widget then applies
-//! the explicit page-switch contract the structural-rebuild machinery does not
-//! cover for a hand-managed stack: (a) it cancels an in-flight capture on the
-//! outgoing top ([`crate::authoring::cancel_pod`]'s synthetic-`Cancel`), (b) clears its focus
-//! flag, and (c) publishes a *cleared* IME surface on the next paint so the
-//! platform keyboard hides deterministically rather than waiting for the lazy
-//! event-pass convergence `RenderRoot` otherwise relies on.
+//! ([`crate::authoring::teardown_child`]) both need a `BuildCtx`, and a rebuild
+//! always runs every frame so a *programmatic* push/pop (from a background task,
+//! with no triggering event) still lands. On every stack mutation the widget then
+//! applies the page-switch contract the structural-rebuild machinery does not
+//! cover for a hand-managed stack, in that order: (a) cancel an in-flight capture
+//! on the outgoing page ([`crate::authoring::cancel_pod`]'s synthetic `Cancel`),
+//! (b) clear its focus flag, (c) publish a *cleared* IME surface on the next paint
+//! so the platform keyboard hides deterministically rather than waiting for the
+//! lazy event-pass convergence `RenderRoot` otherwise relies on. On a push the
+//! outgoing page is the one being **covered**.
 //!
 //! A [`pop`](NavigatorController::pop_with_result) result destined for a
 //! pusher-registered `on_result` callback needs `&mut State` — which a rebuild
@@ -37,12 +36,11 @@
 //! app state is in scope. Queuing it also raises
 //! [`frust_core::mark_pending_result_flush`], which makes the *same* rebuild
 //! dispatch a non-input [`InputEvent::Housekeeping`] broadcast and flush it
-//! before the frame ends — so a result lands on the frame that produced it
-//! rather than waiting on the next touch (FINDINGS #56; a menu row opening a
-//! sheet measured 3.2s late on device, and was dropped entirely when the next
-//! touch went to chrome outside the navigator). An eager `NavOp::Pop` delivers
-//! on the pop's own frame; an interactive edge-swipe pop delivers on its settle
-//! frame, since that is where it queues. See
+//! before the frame ends, so a result lands on the frame that produced it. Waiting
+//! on the next touch instead measured on device as a sheet opening seconds after
+//! its menu row — or never, when that touch went to chrome outside the navigator.
+//! An eager `NavOp::Pop` delivers on the pop's own frame; an interactive edge-swipe
+//! pop delivers on its settle frame, since that is where it queues. See
 //! [`NavigatorController::push_for_result`].
 //!
 //! # Paint culling (Flutter opaque-route parity)
@@ -51,46 +49,43 @@
 //! above it) is laid out and painted; pages fully covered by an opaque page keep
 //! their retained widgets (so their state survives) but are neither laid out nor
 //! painted while covered. Layout runs unconditionally every frame, so a page
-//! revealed by a pop is re-laid-out and correct on the very next frame — the same
-//! relayout-every-frame invariant the theme path leans on.
+//! revealed by a pop is re-laid-out and correct on the very next frame.
 //!
 //! # Root overlay host
 //!
-//! [`overlay_host`] is the same widget wearing a different hat: a navigator
-//! whose root page is the *whole app* and whose pushed pages are app-level
-//! modals, so an overlay dims and blocks chrome an inner navigator's overlay
-//! cannot reach. It is a constructor, not a second widget — everything below
-//! (input routing, R23, `BackPolicy`, dismiss signals, `on_result`) applies to
-//! it unchanged.
+//! [`overlay_host`] is the same widget wearing a different hat: a navigator whose
+//! root page is the *whole app* and whose pushed pages are app-level modals, so an
+//! overlay dims and blocks chrome an inner navigator's overlay cannot reach. A
+//! constructor, not a second widget — everything below (input routing, R23,
+//! `BackPolicy`, dismiss signals, `on_result`) applies to it unchanged.
 //!
 //! # Accessibility reach (R23)
 //!
 //! The accessibility tree follows **input routing**, not painting:
 //! [`NavigatorWidget::semantics`](Widget::semantics) forwards exactly the pages
-//! [`NavigatorWidget::input_routed_pages`] says an event could reach — today
-//! the top page alone — and omits every other page outright. That is a
-//! deliberate, documented exception to the forward-to-every-child container
-//! rule in `docs/CODE_STANDARDS.md`; the `semantics` doc comment carries the
-//! derivation.
+//! [`NavigatorWidget::input_routed_pages`] says an event could reach — today the
+//! top page alone — and omits every other page outright: a deliberate, documented
+//! exception to the forward-to-every-child container rule in
+//! `docs/CODE_STANDARDS.md`, whose derivation the `semantics` doc comment carries.
 //!
 //! # Observation seams (reactive-free, by construction)
 //!
 //! Nothing outside a page's own subtree can reach into the navigator, so every
 //! observation is *published* or *pushed* — never polled through the widget, and
-//! never through a signal (`frust-widgets` carries no reactive dependency; any
-//! signal mirroring is the facade's job, as `back_glue`/`router_glue` do it):
+//! never through a signal (`frust-widgets` carries no reactive dependency; signal
+//! mirroring is the facade's job, as `back_glue`/`router_glue` do it). The seams
+//! themselves are catalogued in `docs/WIDGETS_ARCHITECTURE.md`; what is fixed here
+//! is *where* each lives and why:
 //!
-//! * **Transition** — [`NavigatorController::transition`] reads a published
-//!   [`TransitionState`] snapshot (an `Rc<Cell<_>>` of `Copy`, `Send + Sync`
-//!   data, beside `depth`/`back_interest`). Published on the **controller**
-//!   because the chrome that wants to match page motion is a *sibling* of the
-//!   navigator, not a descendant. Its doc carries the read-timing contract.
-//! * **Page visibility** — [`PushOptions::on_visibility`] (and
-//!   [`NavigatorView::on_root_visibility`] for the root page) pushes
-//!   [`PageVisibility`] changes to the page itself. A callback rather than a
-//!   published cell because a covered page has no pass in which to poll one.
-//!   The single derivation is [`NavigatorWidget::visibility_of`], computed from
-//!   the same `base_visible_index` layout and paint cull against.
+//! * **Transition** — a published [`TransitionState`] snapshot, on the
+//!   **controller** ([`NavigatorController::transition`]) because the chrome
+//!   matching page motion is a *sibling* of the navigator, not a descendant. Its
+//!   own doc carries the read-timing contract.
+//! * **Page visibility** — a **callback** ([`PushOptions::on_visibility`],
+//!   [`NavigatorView::on_root_visibility`]) rather than a published cell, because
+//!   a covered page has no pass in which to poll one. Single derivation:
+//!   [`NavigatorWidget::visibility_of`], from the same `base_visible_index`
+//!   layout and paint cull against.
 //!
 //! Neither seam changes disposal: a covering push still does **not** run a
 //! page's `on_cleanup`, so its widget state survives the cover.
@@ -113,9 +108,8 @@
 //! ([`ambient_page_reach`]) as its own [`NavigatorWidget::host_reach`] and ANDs
 //! it into what it publishes — so the invariant composes to any depth with no
 //! tree walk, and holds even for a page frozen by
-//! [`cull_covered_builds`](NavigatorView::cull_covered_builds) (the cell is
-//! shared and live, not a per-wire snapshot). Reactive-free like the rest: a
-//! plain `Rc<Cell<_>>`, never a signal.
+//! [`cull_covered_builds`](NavigatorView::cull_covered_builds) (the cell is shared
+//! and live, not a per-wire snapshot).
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
@@ -590,7 +584,7 @@ pub struct NavigatorController<State: 'static> {
     /// that navigator does not rebuild at all (a page frozen by
     /// [`cull_covered_builds`](NavigatorView::cull_covered_builds), or one
     /// stashed out of the stack by a pop transition), and a baked-in value would
-    /// go stale exactly there — the case finding F1 called out as the worse one.
+    /// go stale exactly there — the worst case for this gate.
     ///
     /// A `RefCell` slot around a plain `Rc<Cell<bool>>`, like `ops` — a
     /// *binding* that moves when the widget re-captures its host, wrapping the
@@ -1721,7 +1715,7 @@ impl<State: 'static> NavigatorWidget<State> {
                         self.pending_results.push((callback, PopResult::empty()));
                         // Ask this frame's rebuild for a housekeeping pass so the
                         // callback runs on the settle frame instead of waiting for
-                        // whatever input happens to arrive next (FINDINGS #56).
+                        // whatever input happens to arrive next.
                         frust_core::mark_pending_result_flush();
                     }
                     crate::authoring::teardown_child(&stashed.view, &mut stashed.pod, ctx);
@@ -1856,8 +1850,8 @@ impl<State: 'static> NavigatorWidget<State> {
         // name for a weaker value is how the two get confused later.
         //
         // Residual, bounded: a *stale* page-pod flag (set, but under an ancestor
-        // link some container already cleared) still clears here, i.e. the OLD
-        // unconditional behavior for this navigator alone. It cannot reach an
+        // link some container already cleared) still clears here — an
+        // unconditional clear, but for this navigator alone. It cannot reach an
         // unrelated subtree's session, because a stale flag on a page pod means
         // focus was previously inside THIS navigator. In practice the window is
         // narrower still: the `Down` that arms an edge swipe is itself a
@@ -2092,8 +2086,7 @@ impl<State: 'static> NavigatorWidget<State> {
             if let Some(callback) = popped.on_result.take() {
                 self.pending_results.push((callback, result));
                 // Ask this frame's rebuild for a housekeeping pass so the callback
-                // runs on the very frame the pop applied, with no input needed
-                // (FINDINGS #56).
+                // runs on the very frame the pop applied, with no input needed.
                 frust_core::mark_pending_result_flush();
             }
             // Full gate (`top_pod_focused`): the popped page's own link ANDed
@@ -2711,7 +2704,7 @@ impl<State: 'static> View<State> for NavigatorView<State> {
         //    correct) while publishing depth/back_interest/transition/mounted
         //    into the cells captured at `build` (the old one) — an ops/state
         //    split, and the old controller's mounted count would never return to
-        //    0 (permanently "mounted", defeating F1's mounted-veto prune in
+        //    0 (permanently "mounted", defeating the mounted-veto prune in
         //    `frust::back_glue`).
         //
         //    Re-bind rather than rebuild the element: swapping which controller
@@ -2917,8 +2910,8 @@ impl<State: 'static> Widget for NavigatorWidget<State> {
         // Flush pop-result callbacks queued during the rebuild — this is the
         // first point after a pop where the erased app state is in scope. Runs
         // for every event kind, including the `Housekeeping` broadcast the
-        // rebuild dispatches for exactly this purpose (FINDINGS #56), so a result
-        // no longer waits on user input that may never arrive.
+        // rebuild dispatches for exactly this purpose, so a result never waits on
+        // user input that may never arrive.
         if !self.pending_results.is_empty() {
             let pending = std::mem::take(&mut self.pending_results);
             let state = ctx.state_mut::<State>();
@@ -2947,13 +2940,13 @@ impl<State: 'static> Widget for NavigatorWidget<State> {
         // mid-transition input block + top-page routing) runs against the
         // paint-derived event-pass clock. See [`event_at`](Self::event_at).
         //
-        // Input-blocking contract (refuter-verified, STRICT): while a
-        // non-interactive transition is in flight, `event_at` suppresses ALL
-        // routing to pages — a mid-transition `Down` reaches no page and records
-        // no `active`/focus path (the involved pages' captures were already
-        // synthetically cancelled at transition start via `cancel_top`). An
-        // interactive edge-swipe is the deliberate exception: it drives a held
-        // transition and keeps receiving its own pointer stream.
+        // Input-blocking contract (STRICT): while a non-interactive transition is
+        // in flight, `event_at` suppresses ALL routing to pages — a mid-transition
+        // `Down` reaches no page and records no `active`/focus path (the involved
+        // pages' captures were already synthetically cancelled at transition start
+        // via `cancel_top`). An interactive edge-swipe is the deliberate
+        // exception: it drives a held transition and keeps receiving its own
+        // pointer stream.
         let t_ms = self.event_time_ms();
         self.event_at(ctx, event, t_ms)
     }
@@ -3224,7 +3217,7 @@ mod tests {
         assert_eq!(observed.get(), 1, "page A's widget state survived push→pop");
     }
 
-    // --- G2 (closes review finding N3): rebuilding a `NavigatorView` slot
+    // --- Controller swap on rebuild: rebuilding a `NavigatorView` slot
     //     against a *different* `NavigatorController` must not split published
     //     state from the ops actually applied, and must not leave the old
     //     controller's mounted count stuck above zero forever. `AnyView::rebuild`
@@ -3422,8 +3415,8 @@ mod tests {
         root.rebuild(&mut app, &mut state);
 
         // Pop B with a payload. The structural pop applies at rebuild, queues the
-        // callback, and — FINDINGS #56 — the same rebuild flushes it through its
-        // own `InputEvent::Housekeeping` broadcast. No event pass, no input.
+        // callback, and the same rebuild flushes it through its own
+        // `InputEvent::Housekeeping` broadcast. No event pass, no input.
         controller.pop_with_result(PopResult::of(42i32));
         root.rebuild(&mut app, &mut state);
         assert_eq!(
@@ -3483,9 +3476,10 @@ mod tests {
         );
     }
 
-    // --- FINDINGS #56: a queued pop result is delivered by the rebuild that
-    //     queued it, driven by the `InputEvent::Housekeeping` broadcast
-    //     `RenderRoot::rebuild` dispatches — never by waiting for user input. ---
+    // --- Same-frame result delivery: a queued pop result is delivered by the
+    //     rebuild that queued it, driven by the `InputEvent::Housekeeping`
+    //     broadcast `RenderRoot::rebuild` dispatches — never by waiting for user
+    //     input. ---
 
     /// A leaf that counts the hit-tested pointer presses it fires on, so a test
     /// can prove the housekeeping broadcast fires **no** ordinary handler. Shaped
@@ -4406,18 +4400,18 @@ mod tests {
         );
     }
 
-    // --- R23 back reach (closes review finding F1): a nested navigator's
-    //     back interest is gated on its HOSTING page being input-routed. These
-    //     are the widget-level proofs; `frust::back_glue`'s tests prove the
-    //     arbitration consequence (which navigator a real press reaches). ---
+    // --- R23 back reach: a nested navigator's back interest is gated on its
+    //     HOSTING page being input-routed. These are the widget-level proofs;
+    //     `frust::back_glue`'s tests prove the arbitration consequence (which
+    //     navigator a real press reaches). ---
 
     /// The boxed app closure [`RenderRoot::rebuild`] drives, so a harness can
     /// store one (mirroring `frust::back_glue`'s `AppLogic`).
     type AppLogic = Box<dyn FnMut(&mut ()) -> NavigatorView<()>>;
 
     /// An outer navigator whose ROOT page hosts a nested navigator, with the
-    /// outer navigator's covered-build cull set to `cull` — the shape finding
-    /// F1 describes (a section stack with a detail page pushed over it).
+    /// outer navigator's covered-build cull set to `cull` — the shape R23 back
+    /// reach is about (a section stack with a detail page pushed over it).
     struct NestedHarness {
         outer: NavigatorController<()>,
         nested: NavigatorController<()>,
@@ -5817,9 +5811,8 @@ mod tests {
         root.event(&mut state, &up(80.0, 50.0));
 
         // Drive to settle/finalize. The callback is queued at finalize (a
-        // `BuildCtx` pass) and — FINDINGS #56 — flushed by that same rebuild's
-        // housekeeping broadcast, so it lands on the settle frame with no further
-        // input.
+        // `BuildCtx` pass) and flushed by that same rebuild's housekeeping
+        // broadcast, so it lands on the settle frame with no further input.
         assert!(!state.popped, "not delivered before the swipe settles");
         for t in [300u64, 316, 332, 348, 400, 500, 800, 1200, 2000] {
             root.rebuild(&mut app, &mut state);
@@ -6543,8 +6536,8 @@ mod tests {
         }
     }
 
-    // --- #40: the published TransitionState, observed from OUTSIDE the
-    //     navigator subtree (the case the seam exists for). ---
+    // --- The published TransitionState, observed from OUTSIDE the navigator
+    //     subtree (the case the seam exists for). ---
 
     /// What a chrome probe stacked above the navigator saw, per pass.
     #[derive(Default)]
@@ -6559,7 +6552,8 @@ mod tests {
     }
 
     /// A zero-content "chrome" widget that only *observes* the navigator through
-    /// a controller clone — the sibling-not-descendant position #40 is about.
+    /// a controller clone — the sibling-not-descendant position the seam exists
+    /// for.
     struct ProbeView {
         controller: NavigatorController<()>,
         log: Rc<RefCell<ProbeLog>>,
@@ -6815,7 +6809,7 @@ mod tests {
         assert!(!released.interactive, "the finger let go");
     }
 
-    // --- #28: page visibility. ---
+    // --- Page visibility. ---
 
     type VisLog = Rc<RefCell<Vec<(&'static str, PageVisibility)>>>;
 
@@ -7040,7 +7034,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // #44 — the root overlay host (`overlay_host`).
+    // The root overlay host (`overlay_host`).
     // ---------------------------------------------------------------------
 
     /// A full-screen stand-in for one piece of the app root (its content, its
@@ -7203,7 +7197,7 @@ mod tests {
         );
     }
 
-    /// The chrome-inertness half of #44, and the reason the host must sit
+    /// The chrome-inertness half of the overlay host, and the reason it must sit
     /// *above* the chrome rather than beside it: with an overlay up, a pointer
     /// at the chrome's own coordinates reaches the overlay. No new suppression
     /// code — `route_top` already routes to `input_routed_pages()` only.
@@ -7273,8 +7267,9 @@ mod tests {
     /// **R23 parity at the root.** With an overlay up, the app root and its
     /// chrome contribute NO accessibility nodes — asserted, not assumed, and
     /// asserted *together with* the input reach so the two can only ever agree.
-    /// A root overlay that dimmed the chrome visually while a screen reader
-    /// still read it out would be #44 re-created inside the accessibility tree.
+    /// A root overlay that dimmed the chrome visually while a screen reader still
+    /// read it out would re-create the reachable-but-inert chrome bug inside the
+    /// accessibility tree.
     #[test]
     fn an_overlay_host_omits_the_app_root_and_its_chrome_from_semantics() {
         let (controller, mut root, mut app, content_hits, chrome_hits) = overlay_host_fixture();
@@ -7283,7 +7278,7 @@ mod tests {
         root.layout(Size::new(100.0, 100.0));
 
         // With no overlay, the app root IS the routed page: both reaches carry
-        // the content and the chrome (the #23 regression guard, at the root).
+        // the content and the chrome (the R23 parity guard, at the root).
         let labels = semantic_labels(&root);
         assert!(
             labels.iter().any(|l| l == "app-content") && labels.iter().any(|l| l == "app-chrome"),

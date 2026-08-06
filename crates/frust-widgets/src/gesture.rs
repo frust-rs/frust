@@ -1,6 +1,5 @@
-//! The `GestureDetector` widget: a transparent wrapper that
-//! recognises a tap and a long-press on its child and forwards raw events
-//! through.
+//! The `GestureDetector` widget: a transparent wrapper that recognises a tap and
+//! a long-press on its child and forwards raw events through.
 //!
 //! [`GestureDetector`] wraps an arbitrary child view and fires either an
 //! `on_tap` closure (a `Down`→`Up` that stays within [`TOUCH_SLOP`]) or an
@@ -8,121 +7,103 @@
 //! past the slop). Moving past the slop disarms both (it became a drag). The
 //! wrapper is transparent — every event is still forwarded to the child, so
 //! interactive descendants keep working. v1 recognises **tap + long-press**;
-//! double-tap is still deferred (and, lacking an input-kind flag on events, the
-//! slop is [`TOUCH_SLOP`] uniformly).
+//! double-tap is deferred, and lacking an input-kind flag on events the slop is
+//! [`TOUCH_SLOP`] uniformly.
 //!
 //! # Long-press firing semantics
 //!
-//! Timing is measured across **paints**, not events: only the paint pass
-//! carries a clock ([`PaintCtx::frame_time`]), while events carry none. A press
-//! records `press_start` on its first paint and marks itself *elapsed* on a
-//! later paint once `frame_time - press_start >= LONG_PRESS_MS`.
+//! Timing is measured across **paints**, not events: only the paint pass carries
+//! a clock ([`PaintCtx::frame_time`]). A press records `press_start` on its first
+//! paint and marks itself *elapsed* on a later paint once
+//! `frame_time - press_start >= LONG_PRESS_MS`.
 //!
-//! **The callback still never fires during paint itself** (there is no `&mut
-//! State`/`EventCtx` there) — but paint no longer waits for the next *pointer*
-//! event to deliver it either. The instant a paint observes the threshold
-//! crossed, it calls [`frust_core::mark_pending_result_flush`] — the same
-//! mechanism [`crate::nav::navigator`] uses to run a queued pop-result
-//! callback from a state-free `View::rebuild` pass — and
-//! [`PaintCtx::request_frame`]s a follow-up frame. Every shipping shell
-//! (desktop/Android/iOS) runs `RenderRoot::rebuild` before `RenderRoot::paint`
-//! on every frame it drives, so the very next frame's rebuild drains that
-//! mark, dispatches an `InputEvent::Housekeeping` broadcast carrying a real
-//! `EventCtx`, and this widget fires `on_long_press` from there — **at the
-//! threshold, in wall time**, whether or not the finger ever moves again. The
-//! timer, the slop/cancel rules, and the fire-exactly-once guarantee below are
-//! unchanged; what the new vehicle *does* change is where the fire's
-//! `EventCtx::request_redraw` goes. A pointer-delivered fire's redraw request
-//! rides the shell's own `RenderRoot::event` call back out; a
-//! Housekeeping-delivered one is dispatched by `RenderRoot::rebuild` itself, so
-//! the repaint reaches the shell only because that method **propagates the
-//! broadcast's `EventOutcome`** — folding `needs_redraw` into the rebuild's
-//! `ChangeFlags::PAINT` (the mobile frame gate's `has_pending_change_flags`
-//! input) and into the deferred frame request the next `paint` surfaces as
-//! `needs_frame` (the desktop `ControlFlow::Wait` loop's wake). That fold is
-//! part of the flush contract, pinned core-side (`frust-core`'s
-//! `RenderRoot::rebuild`, its deferred-callback flush loop and that method's
-//! own tests) — a fire whose consumer mutates nothing the view diff can see
-//! still repaints on both loop styles because of it.
+//! **The callback never fires during paint itself** (there is no `&mut
+//! State`/`EventCtx` there). Instead, the paint that observes the threshold
+//! crossed calls [`frust_core::mark_pending_result_flush`] — the same mechanism
+//! [`crate::nav::navigator`] uses to run a queued pop-result callback from a
+//! state-free `View::rebuild` pass — and [`PaintCtx::request_frame`]s a follow-up
+//! frame. Every shipping shell (desktop/Android/iOS) runs `RenderRoot::rebuild`
+//! before `RenderRoot::paint` on every frame it drives, so the very next frame's
+//! rebuild drains that mark, dispatches an `InputEvent::Housekeeping` broadcast
+//! carrying a real `EventCtx`, and this widget fires `on_long_press` from there —
+//! **at the threshold, in wall time**, whether or not the finger ever moves again.
+//!
+//! A pointer-delivered fire's `EventCtx::request_redraw` rides the shell's own
+//! `RenderRoot::event` call back out; a Housekeeping-delivered one reaches the
+//! shell only because `RenderRoot::rebuild` propagates the broadcast's
+//! `EventOutcome` into `ChangeFlags::PAINT` and the deferred frame request
+//! (`docs/CORE_ARCHITECTURE.md`'s event-routing data flow) — so a fire whose
+//! consumer mutates nothing the view diff can see still repaints on both a
+//! frame-gated mobile loop and a dirty-driven desktop one.
 //!
 //! Two delivery paths race for the same fire, and whichever reaches the widget
-//! first wins — the `Recognizer::Fired` transition makes the other one a
-//! no-op:
+//! first wins — the `Recognizer::Fired` transition makes the other one a no-op:
 //!
 //! - the **Housekeeping broadcast** above, ordinarily one frame after the
 //!   threshold, needing no pointer event at all; or
 //! - a **live pointer event** that arrives first — `Up` (a hold that exceeded
 //!   the threshold releases as a long-press instead of a tap) or an in-slop
-//!   `Move` (so a context menu can still open the instant a held finger
-//!   jitters, without waiting out the extra frame).
+//!   `Move` (so a context menu can still open the instant a held finger jitters,
+//!   without waiting out the extra frame).
 //!
-//! The Housekeeping path runs only when `on_long_press` is wired (mirroring
-//! the paint timer's own gate below): an `on_hold_progress`-only detector
-//! keeps its final observation deferred to the next pointer event exactly as
-//! before — nothing here moves a hold-progress-only consumer onto the new
-//! path. When both are wired and `on_long_press` fires via Housekeeping,
-//! `on_hold_progress`'s paired final `1.0` observation (see below) rides along
-//! in the same pass, exactly as the `Move`-arrival path has always delivered
-//! them together.
+//! The Housekeeping path runs only when
+//! [`on_long_press`](GestureDetectorView::on_long_press) is wired: an
+//! `on_hold_progress`-only detector keeps its final observation deferred to the
+//! next pointer event, and when both are wired and `on_long_press` fires via
+//! Housekeeping the paired final `1.0` (below) rides along in the same pass. The
+//! paint timer itself runs for either handler and never for a **tap-only**
+//! detector, which therefore never marks `elapsed`: a press held past the threshold
+//! still resolves as an ordinary tap on an in-bounds release (the fire-on-up-inside
+//! contract is independent of hold duration when there is no long-press to promote
+//! it to), and the pending-timer [`PaintCtx::request_frame`] calls are skipped — a
+//! small battery win, since a tap-only hold needs no clock. A held-past-threshold
+//! resolution falls through to `on_tap` whenever `on_long_press` is absent (e.g.
+//! unwired mid-gesture), so a held press never silently swallows its release.
 //!
-//! The paint timer only runs when an [`on_long_press`](GestureDetectorView::on_long_press)
-//! handler is wired: a **tap-only** detector never marks `elapsed`, so a press
-//! held past the threshold still resolves as an ordinary tap on an in-bounds
-//! release (the fire-on-up-inside contract is independent of hold duration when
-//! there is no long-press to promote it to). Not running the timer for a
-//! tap-only press also skips the pending-timer [`PaintCtx::request_frame`]
-//! calls — a small battery win, since a tap-only hold needs no clock. A
-//! held-past-threshold resolution falls through to `on_tap` whenever
-//! `on_long_press` is absent (e.g. unwired mid-gesture), so a held press never
-//! silently swallows its release.
-//!
-//! Frame liveness while the finger is held still is guaranteed on mobile by
-//! the pointer capture keeping the `FrameGate` running; desktop is
-//! dirty-driven, so paint calls [`PaintCtx::request_frame`] both while the
-//! timer is pending, and once more on the frame that crosses the threshold —
-//! that second request is what actually reaches the Housekeeping-flushing
-//! rebuild above on a desktop shell with no further input.
+//! Frame liveness while the finger is held still is guaranteed on mobile by the
+//! pointer capture keeping the `FrameGate` running; desktop is dirty-driven, so
+//! paint calls [`PaintCtx::request_frame`] both while the timer is pending, and
+//! once more on the frame that crosses the threshold — that second request is
+//! what actually reaches the Housekeeping-flushing rebuild above on a desktop
+//! shell with no further input.
 //!
 //! # Hold-progress observation
 //!
 //! [`on_hold_progress`](GestureDetectorView::on_hold_progress) reuses the same
-//! paint-clock timer as `on_long_press` to let a widget render charge-up
-//! feedback (e.g. a charge ring) for a held press. Paint computes progress —
+//! paint-clock timer as `on_long_press` to let a widget render charge-up feedback
+//! (e.g. a charge ring) for a held press. Paint computes progress —
 //! `(frame_time - press_start) / threshold`, clamped `0.0..=1.0` — every frame
-//! while a press is pending, but (the same callback-from-paint caveat as
-//! `on_long_press` above) can only *record* it; the observation is delivered on
-//! the next pointer event that already carries a mutable `EventCtx` (an in-slop
-//! `Move`, matching `on_long_press`'s fire-on-move-arrival) — **or, when
-//! `on_long_press` is also wired, on the Housekeeping-triggered fire above,
-//! whichever reaches the widget first.** A drag past
-//! [`TOUCH_SLOP`] or an early release *before* the threshold — i.e. the
-//! `Move`/`Up` arm handling that transition, never `PointerPhase::Cancel`
-//! (see the Cancel staleness gap below) — delivers a final `0.0`; reaching the
-//! threshold delivers a final `1.0`. An `on_hold_progress`-only detector (no
-//! `on_long_press` wired) keeps the original deferred-to-next-pointer-event
-//! delivery for its final `1.0` too — the Housekeeping path never runs for it.
-//! [`hold_threshold_ms`](GestureDetectorView::hold_threshold_ms)
+//! while a press is pending, but (the same callback-from-paint caveat as above)
+//! can only *record* it; the observation is delivered on the next pointer event
+//! that already carries a mutable `EventCtx` (an in-slop `Move`, matching
+//! `on_long_press`'s fire-on-move-arrival) — **or, when `on_long_press` is also
+//! wired, on the Housekeeping-triggered fire above, whichever reaches the widget
+//! first.** A drag past [`TOUCH_SLOP`] or an early release *before* the threshold
+//! — i.e. the `Move`/`Up` arm handling that transition, never
+//! `PointerPhase::Cancel` (see the Cancel staleness gap below) — delivers a final
+//! `0.0`; reaching the threshold delivers a final `1.0`. An
+//! `on_hold_progress`-only detector (no `on_long_press` wired) has its final
+//! `1.0` deferred to the next pointer event too — the Housekeeping path never
+//! runs for it. [`hold_threshold_ms`](GestureDetectorView::hold_threshold_ms)
 //! overrides [`LONG_PRESS_MS`] for both `on_long_press` and this timer.
 //!
 //! ## Cancel staleness gap
 //!
-//! A platform `Cancel` (gesture steal, e.g. a parent `ScrollView` claiming
-//! the drag; or structural teardown, e.g. the child subtree changing shape
-//! mid-hold) delivers **no** final observation — the Cancel-never-mutates-state
-//! convention above means `on_hold_progress` is never called from that arm.
-//! The consumer's last-observed `progress` therefore stays stale (whatever it
-//! was mid-hold) until a full new press cycle (`Down`→...→`Up`/threshold)
+//! A platform `Cancel` (gesture steal, e.g. a parent `ScrollView` claiming the
+//! drag; or structural teardown, e.g. the child subtree changing shape mid-hold)
+//! delivers **no** final observation — the Cancel-never-mutates-state convention
+//! (`docs/CODE_STANDARDS.md`) means `on_hold_progress` is never called from that
+//! arm. The consumer's last-observed `progress` therefore stays stale (whatever
+//! it was mid-hold) until a full new press cycle (`Down`→...→`Up`/threshold)
 //! delivers a fresh `0.0`/`1.0` through the normal path — there is no
 //! Cancel-delivered reset. **Consumer-side reset idiom:** since a fresh press
-//! cycle's *first* observation is always a low value counting up from near
-//! `0.0`, a consumer that stored a stale non-zero `progress` can self-correct
-//! at the top of its `on_hold_progress` callback by detecting a restart (the
-//! incoming value is lower than the last-stored one after a gap) and treating
-//! it as the new cycle's baseline rather than carrying the stale high value
-//! forward — see `demo_charge_ring` in `examples/glyph-catalog`'s
-//! `pages/interactions.rs` for a worked instance. Do not add a Cancel-arm
-//! callback to close this gap; it would violate the Cancel-never-mutates-state
-//! convention (`docs/CODE_STANDARDS.md`).
+//! cycle's *first* observation is always a low value counting up from near `0.0`,
+//! a consumer that stored a stale non-zero `progress` can self-correct at the top
+//! of its `on_hold_progress` callback by treating an incoming value lower than
+//! the last-stored one as the new cycle's baseline rather than carrying the stale
+//! high value forward — `demo_charge_ring` in `examples/glyph-catalog`'s
+//! `pages/interactions.rs` is a worked instance. Do not add a Cancel-arm callback
+//! to close this gap; it would violate that convention.
 
 use std::rc::Rc;
 
@@ -359,9 +340,8 @@ impl Widget for GestureDetectorWidget {
                 if elapsed_ms >= self.threshold_ms {
                     *elapsed = true;
                     // Threshold-time firing (see the module docs' "Long-press
-                    // firing semantics"): paint still can't call `on_long_press`
-                    // itself (no `EventCtx` here), but it no longer waits for
-                    // the next pointer event either. Latch the same
+                    // firing semantics"): paint can't call `on_long_press`
+                    // itself (no `EventCtx` here), so latch the same
                     // deferred-callback flush `nav::navigator` uses for a
                     // queued pop-result, and request one more frame so a
                     // dirty-driven desktop shell actually reaches the
@@ -370,8 +350,8 @@ impl Widget for GestureDetectorWidget {
                     // dispatch) before its own paint, so the very next frame
                     // fires this at the threshold, in wall time, with no
                     // pointer event required. Gated on `on_long_press` being
-                    // wired: an `on_hold_progress`-only detector keeps its
-                    // original deferred-to-next-pointer-event delivery.
+                    // wired: an `on_hold_progress`-only detector has its
+                    // delivery deferred to the next pointer event instead.
                     if self.on_long_press.is_some() {
                         frust_core::mark_pending_result_flush();
                         ctx.request_frame();
@@ -921,14 +901,14 @@ mod tests {
         assert_eq!(state.long_presses, 0);
     }
 
-    // --- Tap-only held-press regression --------------------------------------
+    // --- Tap-only held press --------------------------------------------------
     //
-    // The event-only `only_on_tap_still_behaves_as_before` above never paints,
-    // so it never advanced the clock past the threshold and missed the bug: a
-    // tap-only detector held past LONG_PRESS_MS used to mark `elapsed` in paint,
-    // resolve as a would-be long-press with no handler, and fire NOTHING. These
-    // drive the real paint path with an advancing clock (like the both-handlers
-    // tests above) but wire ONLY `on_tap`.
+    // The event-only `only_on_tap_still_behaves_as_before` above never paints, so
+    // its clock never crosses the threshold. These drive the real paint path with
+    // an advancing clock (like the both-handlers tests above) but wire ONLY
+    // `on_tap`, pinning that a tap-only detector never marks `elapsed` — marking
+    // it would resolve the press as a would-be long-press with no handler and
+    // fire NOTHING, swallowing the release.
 
     /// A `RenderRoot` over a `GestureDetector` wired with ONLY `on_tap`.
     fn tap_only_root() -> RenderRoot<TapState, GestureDetectorView<TapState>> {
