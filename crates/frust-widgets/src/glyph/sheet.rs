@@ -4,146 +4,110 @@
 //!
 //! # Navigator-modal architecture (reuse, don't fork)
 //!
-//! Like [`crate::glyph::dialog`], a `GlyphSheetView` is pushed as a
-//! **transparent navigator page** via [`NavigatorController::push_with_options`]
-//! (with a [`BackPolicy`](crate::nav::navigator::BackPolicy) and a dismiss
-//! signal — the exact same seam [`show_glyph_dialog`](crate::glyph::dialog::show_glyph_dialog)
-//! uses) — the page below stays visible under the scrim, and the navigator's
-//! existing modal contract makes it modal. [`show_glyph_sheet`] wraps the push
-//! and wires dismissal to `controller.pop()`. This module edits **no** nav
-//! file. **Not** [`NavigatorController::push_transparent_for_result`] — that is
-//! `material::dialog`'s precedent, not this module's.
+//! A `GlyphSheetView` is pushed as a **transparent navigator page** via
+//! [`NavigatorController::push_with_options`] with a
+//! [`BackPolicy`](crate::nav::navigator::BackPolicy) and a dismiss signal — the
+//! seam [`show_glyph_dialog`](crate::glyph::dialog::show_glyph_dialog) uses,
+//! deliberately **not** [`NavigatorController::push_transparent_for_result`]
+//! (`material::dialog`'s). The page below stays visible under the scrim, the
+//! navigator's modal contract makes it modal, and [`show_glyph_sheet`] wraps the
+//! push, wiring dismissal to `controller.pop()`; nav is consumed read-only.
+//! Enforcing "at most one dialog/sheet/overlay at a time" stays the app's (or
+//! the navigator's) concern — this widget does not police it, like
+//! [`crate::glyph::dialog`].
 //!
 //! # Enter/exit staging — the scrim fades, the panel slides (independently)
 //!
-//! This is the module's one hard behavioural requirement, recorded at an
-//! on-device gate: **the scrim must fade while only the panel slides.** An
-//! app's first workaround pushed the whole page with
-//! [`PageTransition::SlideUp`](crate::PageTransition::SlideUp) — a scrim
-//! painted as part of that same page would visibly sweep bottom-to-top with
-//! it, since [`PageTransition::SlideUp`] offsets the *entire* page's paint
-//! (see `examples/glyph-catalog`'s `overlays.rs`, whose bottom-sheet demo
-//! pushed a bespoke card through exactly that raw primitive before this
-//! module existed — with no scrim of its own at all, since one drawn as part
-//! of that page would have had this bug). A single navigator
-//! [`Layer`](crate::nav::transition::Layer) transform applied to the
-//! *whole page* cannot express "panel translates but scrim only fades" — so,
-//! exactly like [`crate::glyph::dialog`] (which scales its panel while the
-//! scrim cross-fades on its own), this widget drives its **own** enter/exit
-//! timeline from `PaintCtx::frame_time` and is pushed with
-//! [`TransitionSpec::NONE`] (the navigator supplies the modal contract; the
-//! widget supplies the motion):
+//! The module's one hard behavioural requirement: **the scrim must fade while
+//! only the panel slides.** A whole-page
+//! [`PageTransition::SlideUp`](crate::PageTransition::SlideUp) offsets the
+//! *entire* page's paint (a scrim painted in that page would sweep up with it),
+//! and one navigator [`Layer`](crate::nav::transition::Layer) over the page
+//! cannot express "panel translates but scrim only fades". So, like
+//! [`crate::glyph::dialog`], this widget drives its **own** enter/exit timeline
+//! from `PaintCtx::frame_time` and is pushed with [`TransitionSpec::NONE`] —
+//! the navigator supplies the modal contract, the widget the motion:
 //!
-//! * the **scrim** is painted as a plain full-area fill *before* any
-//!   transform is pushed, its alpha driven straight off the timeline's
-//!   progress — it never moves, only fades;
+//! * the **scrim** is a plain full-area fill painted *before* any transform is
+//!   pushed, alpha driven straight off the timeline's progress — it never
+//!   moves, only fades;
 //! * the **panel** is painted *inside* a single [`kurbo::Affine::translate`]
-//!   pushed after the scrim, sliding from fully off-screen (`y` = panel
-//!   height below its rest position) up to rest over the enter duration, and
-//!   reversing on exit.
+//!   pushed after the scrim, sliding from fully off-screen (`y` = panel height
+//!   below its rest position) up to rest over the enter duration, reversing on
+//!   exit.
 //!
-//! Enter runs over `durations.base` (220ms, spatial easing); exit reverses
-//! over the faster `durations.fast` (150ms, exit easing) — "exits always
-//! faster than entrances" (mirrors [`crate::glyph::dialog`]'s rule). A dismiss
-//! gesture (scrim tap, handle drag past threshold, `Escape`, or an Android
-//! back press) does **not** pop immediately: it flips the widget into its exit
-//! phase via [`begin_exit`](GlyphSheetWidget::begin_exit), and only when that
-//! animation completes does the app-supplied close callback fire — from
-//! paint, which is sound because [`NavigatorController::pop`] merely enqueues
-//! an op applied on the next rebuild. **Every dismiss path funnels through
-//! `begin_exit`**, including the handle drag below, which is what keeps the
-//! drag from fighting the fade/slide requirement: there is no code path that
-//! pops the page without playing the staged exit first.
+//! Enter runs over `durations.base` (220ms, spatial easing), exit over the
+//! faster `durations.fast` (150ms, exit easing) — "exits always faster than
+//! entrances" (dialog's rule too). A dismiss gesture (scrim tap, handle drag
+//! past threshold, `Escape`, or an Android back press) does **not** pop
+//! immediately: it flips the widget into its exit phase via
+//! [`begin_exit`](GlyphSheetWidget::begin_exit), and only on completion does the
+//! app-supplied close callback fire — from paint, which is sound because
+//! [`NavigatorController::pop`] merely enqueues an op applied on the next
+//! rebuild. **Every dismiss path funnels through `begin_exit`**, the handle drag
+//! below included: no code path pops the page without playing the staged exit.
 //!
 //! # The dismiss callback is state-free (mirrors `glyph::dialog`)
 //!
-//! Because the close callback fires from **paint** (after the exit
-//! animation), it is a plain `Fn()` — not a `Fn(&mut State)` — exactly like
-//! [`crate::glyph::dialog`]'s [`on_close`](GlyphSheetView::on_close) (a
-//! deliberate divergence from [`crate::material::sheet`]'s `Fn(&mut State)`
-//! `on_dismiss`, whose dismiss is immediate with no staged exit to wait for).
-//! App state changes flow through the navigator's `on_result` callback
-//! instead, delivered with `&mut State` after the pop.
+//! Because it fires from **paint** (after the exit animation),
+//! [`on_close`](GlyphSheetView::on_close) is a plain `Fn()`, not a
+//! `Fn(&mut State)` — unlike [`crate::material::sheet`]'s `on_dismiss`, whose
+//! dismiss is immediate with no staged exit to wait for. App state changes ride
+//! the navigator's `on_result` instead, delivered with `&mut State` after the
+//! pop.
 //!
-//! [`on_close`]: GlyphSheetView::on_close
+//! # Drag-to-dismiss — routed through the staged exit
 //!
-//! # Drag-to-dismiss — added, but routed through the staged exit
-//!
-//! Material's bottom sheet has a threshold-simple handle drag
-//! ([`crate::material::sheet`]); Cupertino's action sheet has none. This
-//! module **adds** one, because a bottom sheet — unlike a centered dialog —
-//! is a strongly drag-affording shape (Flutter, M3, and iOS all offer it), and
-//! withholding it would be the more surprising choice for this widget
-//! specifically. It is threshold-simple like material's: a press starting in
-//! the top 44px handle strip that releases more than half the panel's height
-//! lower calls [`begin_exit`](GlyphSheetWidget::begin_exit) (never an
-//! immediate pop) — so a drag-dismiss plays the identical scrim-fade +
-//! panel-slide exit a scrim tap or `Escape` does. The sheet does **not**
-//! follow the finger frame-by-frame during the drag (no interactive
-//! held/settle transform); that richer treatment is deferred, same as
-//! material's.
+//! A bottom sheet, unlike a centered dialog, is a strongly drag-affording shape,
+//! so this module offers a threshold-simple handle drag: a press starting in the
+//! top 44px handle strip that releases more than half the panel's height lower
+//! calls [`begin_exit`](GlyphSheetWidget::begin_exit), never an immediate pop,
+//! so a drag-dismiss plays the identical scrim-fade + panel-slide exit. It does
+//! **not** follow the finger frame-by-frame (no interactive held/settle
+//! transform), same as [`crate::material::sheet`].
 //!
 //! # Content
 //!
-//! Unlike [`crate::glyph::dialog`]'s title/body/actions builder, a sheet wraps
-//! exactly **one** app-provided content view — mirroring
-//! [`crate::material::sheet::bottom_sheet`]'s generic single-child shape
-//! rather than [`crate::cupertino::action_sheet`]'s fixed action-row content
-//! model, since a Glyph sheet has no built-in notion of "rows" to lay out. The
-//! content lays out full-width, below the drag-handle strip, at its own
-//! intrinsic height (loose width, unbounded height) — the panel grows to fit,
-//! same overflow contract as `material::sheet`: an unbounded-height child can
-//! push the panel past the top of the viewport, so wrap genuinely unbounded
-//! content in its own scrolling container first.
+//! A sheet wraps exactly **one** app-provided content view (a Glyph sheet has no
+//! built-in notion of "rows" to lay out). It lays out full-width below the
+//! drag-handle strip at its own intrinsic height (loose width, unbounded height)
+//! and the panel grows to fit — same overflow contract as
+//! [`crate::material::sheet`]: an unbounded-height child can push the panel past
+//! the top of the viewport, so wrap genuinely unbounded content in its own
+//! scrolling container first.
 //!
 //! # Semantics — `Role::Dialog` with the modal flag (not `Role::Menu`)
 //!
-//! The sheet contributes one [`Role::Dialog`] container node with the
-//! accesskit **modal** flag set, and forwards the content subtree through
-//! [`ChildPod::semantics_child`]. This mirrors
-//! [`crate::material::sheet`]'s choice, **not**
-//! [`crate::cupertino::action_sheet`]'s `Role::Menu` (no modal flag): the
-//! cupertino sheet earns `Role::Menu` because its content is *always* a fixed
-//! list of selectable action rows — genuinely menu-shaped to assistive tech.
-//! This module's content is an arbitrary single child (same shape as
-//! `material::sheet`'s), with no menu semantics of its own to inherit, so
-//! there is nothing menu-like about it — a modal surface floating over the
-//! app is what it actually is, the same category [`crate::glyph::dialog`]
-//! occupies. accesskit has no dedicated "bottom sheet" role, so `Dialog` +
-//! modal is the closest honest fit, same reasoning `material::sheet`
-//! documents for its own identical choice.
+//! The sheet contributes one [`Role::Dialog`] container node with the accesskit
+//! **modal** flag set and forwards the content subtree through
+//! [`ChildPod::semantics_child`]. Not `Role::Menu`, which
+//! [`crate::cupertino::action_sheet`] earns with content that is *always* a
+//! fixed list of selectable action rows; this module's content is an arbitrary
+//! single child with no menu semantics to inherit, and accesskit has no "bottom
+//! sheet" role, so `Dialog` + modal is the closest honest fit.
 //!
 //! # `dismissable(bool)` + back-dismiss
 //!
 //! [`GlyphSheetView::dismissable`] (default `true`) is the single barrier flag
 //! gating the scrim tap, the handle drag, `Escape`, and an Android back press
 //! together — `false` disables all four (only an app-driven `controller.pop()`
-//! still closes it) and [`show_glyph_sheet`] pushes the page with
-//! [`BackPolicy::Veto`](crate::nav::navigator::BackPolicy::Veto). `true`
-//! pushes [`BackPolicy::DismissAnimated`](crate::nav::navigator::BackPolicy::DismissAnimated):
+//! still closes it) and [`show_glyph_sheet`] pushes with
+//! [`BackPolicy::Veto`](crate::nav::navigator::BackPolicy::Veto). `true` pushes
+//! [`BackPolicy::DismissAnimated`](crate::nav::navigator::BackPolicy::DismissAnimated):
 //! `show_glyph_sheet` hands the widget the shared dismiss-signal cell
 //! [`NavigatorController::request_back`] bumps on a back press, and the
 //! widget's `paint` pass compares it against the last-seen value and calls
 //! [`begin_exit`](GlyphSheetWidget::begin_exit) — the identical staged exit a
-//! scrim tap/drag/Escape cancel drives (mirrors
-//! [`crate::glyph::dialog`]'s `observe_dismiss_signal`).
+//! scrim tap/drag/`Escape` drives (mirrors dialog's `observe_dismiss_signal`).
 //!
 //! # Interaction with `overlay_host`
 //!
 //! This widget needs **no** change to be pushed on a root
 //! [`overlay_host`](crate::nav::navigator::overlay_host) controller instead of
 //! an inner navigator: it fills `ctx.origin()..ctx.size()` with its scrim, and
-//! at the root that rect *is* the window (`overlay_host`'s own module docs —
-//! "The host owns no scrim" — document this contract). Pushing on a host
-//! controller is what gives the sheet root-level modality (dimming chrome
-//! above an inner navigator); the sheet itself is unaware which controller it
-//! was pushed on.
-//!
-//! # Only one floating layer
-//!
-//! Enforcing "at most one dialog/sheet/overlay at a time" is the app's (or the
-//! navigator's) concern — this widget does not police it, exactly like
-//! [`crate::glyph::dialog`].
+//! at the root that rect *is* the window (the host owns no scrim of its own —
+//! its module docs state that contract). Pushing on a host is what gives the
+//! sheet root-level modality; the sheet is unaware which controller took it.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -237,10 +201,10 @@ fn with_alpha(color: Color, alpha: f32) -> Color {
 }
 
 /// The `(enter, exit)` [`Timing`]s for the current `reduce_motion` state —
-/// identical resolution to [`crate::glyph::dialog::resolve_timings`] (kept as
-/// its own copy rather than a shared helper: the two modules are intentionally
-/// not coupled, see this crate's `docs/REVIEW_FOCUS.md` on the material/
-/// cupertino sheet split this module was scoped to avoid repeating).
+/// identical resolution to [`crate::glyph::dialog::resolve_timings`], kept as
+/// its own copy rather than a shared helper because the two modules are
+/// intentionally not coupled (the same deliberate split the material and
+/// cupertino sheets keep).
 fn resolve_timings(theme: Option<&Theme>) -> (Timing, Timing) {
     if theme.map(|t| t.motion.reduce_motion).unwrap_or(false) {
         let t = Timing::Duration(REDUCE_MOTION_DURATION, Curve::Linear);
@@ -765,8 +729,7 @@ impl Widget for GlyphSheetWidget {
                 // the re-claim is what keeps the session alive while this
                 // sheet is up. Re-claiming while already focused is a
                 // change-guarded no-op (no generation bump) — do not add a
-                // claim-once guard, it kills the session on the second tap
-                // (claim-once-hygiene review, 2026-08-06).
+                // claim-once guard, it kills the session on the second tap.
                 ctx.request_focus();
                 if self.handle_target.contains(p.position) {
                     self.drag_active = true;

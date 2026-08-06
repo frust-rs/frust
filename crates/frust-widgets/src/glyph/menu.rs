@@ -1,147 +1,111 @@
-//! Glyph anchored dropdown menu: the framework's
-//! first anchored popup — a small chooser that scales in from an anchor's own
-//! corner rather than the screen center, the Glyph recipe over the existing
-//! navigator transparent-push modal plumbing. The Glyph design system's
-//! "overflow menu" section (retrieved 2026-07-23) is the primary source:
-//! the AppBar's overflow kebab is its first consumer,
-//! but the API is anchor-agnostic — any widget that can report
-//! its own painted window-coordinate rect can open one.
+//! Glyph anchored dropdown menu: a small chooser that scales in from an
+//! anchor's own corner rather than the screen center, the Glyph recipe over the
+//! existing navigator transparent-push modal plumbing. The Glyph design system's
+//! "overflow menu" section (retrieved 2026-07-23) is the primary source; the
+//! AppBar's overflow kebab is its first consumer, but the API is anchor-agnostic
+//! — any widget that can report its own painted window-coordinate rect can open
+//! one.
 //!
 //! # Navigator-modal architecture (reuse, don't fork)
 //!
 //! Like [`crate::glyph::dialog`]/[`crate::glyph::command_palette`], a
 //! [`GlyphMenuView`] is pushed as a **transparent navigator page** via
 //! [`NavigatorController::push_with_options`] — the page below stays visible
-//! under a fully transparent scrim (nothing is painted for it; only the
-//! event pass treats "outside the panel" as a dismiss gesture — a dropdown
-//! menu does not dim the screen behind it, unlike a dialog's opaque barrier).
+//! under a fully transparent scrim: nothing is painted for it, and only the
+//! event pass treats "outside the panel" as a dismiss gesture (a dropdown does
+//! not dim the screen behind it, unlike a dialog's opaque barrier).
 //! [`show_glyph_menu`] wraps the push and wires dismissal/selection to
-//! `controller.pop()`/`controller.pop_with_result(..)`. This module edits
-//! **no** nav file: it consumes `push_with_options`/`pop`/`pop_with_result`
-//! read-only.
+//! `controller.pop()`/`controller.pop_with_result(..)`, consuming nav read-only.
 //!
 //! # Anchoring (v1: caller-supplied window-coordinate rect)
 //!
-//! [`GlyphMenuView::anchor`] takes a `kurbo::Rect` **in window coordinates**
-//! — the same absolute space `ctx.origin()`/`ctx.size()` describe for a
-//! transparent full-page widget (this is also the space every other
-//! transparent-page overlay in this catalog already computes its own
-//! full-page layout in, so no coordinate conversion is needed at the push
-//! site). The caller is responsible for capturing that rect itself (e.g. an
-//! `AppBar`'s trailing icon records its own painted bounds during `paint`,
-//! mirroring how `HeroFrames` report bounds via paint). There is no
-//! ancestor-bounds query a widget can make mid-layout
-//! (the layout protocol gives a widget no visibility upward), so this
-//! caller-reports-its-own-rect shape is the simplest anchoring contract that
-//! works with the existing paint pipeline; a future addition could add an
-//! automatic bounds-reporting channel, but that is out of scope here.
+//! [`GlyphMenuView::anchor`] takes a `kurbo::Rect` **in window coordinates** —
+//! the absolute space `ctx.origin()`/`ctx.size()` describe for a transparent
+//! full-page widget, so no conversion is needed at the push site. The caller
+//! captures that rect itself (an `AppBar`'s trailing icon records its own
+//! painted bounds during `paint`): the layout protocol gives a widget no
+//! visibility upward, so there is no ancestor-bounds query to make mid-layout.
 //!
-//! The menu positions **below-trailing** the anchor by default: its trailing
-//! (right) edge aligns with the anchor's trailing edge, and its top edge
-//! sits just below the anchor's bottom edge — the standard "kebab in the
-//! corner" shape the design system depicts. The whole panel is then clamped
-//! inside the window bounds with an 8px margin on every side (an anchor near
-//! a window edge — e.g. a kebab icon flush against the trailing edge — would
-//! otherwise paint the panel partially off-window). The scale
+//! The menu positions **below-trailing** the anchor by default — its trailing
+//! edge aligned with the anchor's, its top just below the anchor's bottom (the
+//! "kebab in the corner" shape the design system depicts) — then clamps the
+//! panel inside the window bounds with an 8px margin on every side, so an anchor
+//! flush against a window edge still paints fully on-window. The scale
 //! transform-origin is pinned to the panel's own top-right corner
-//! (`transform-origin:top right` in the design system's CSS) — a v1
-//! simplification matching the fixed "AppBar kebab in the top-right" shape
-//! the design system depicts; a future consumer opening a menu from a
-//! bottom/leading anchor would want a dynamically-chosen corner, but nothing
-//! in this catalog needs that yet.
+//! (`transform-origin:top right` in the design system's CSS), a v1
+//! simplification matching that fixed shape; a bottom/leading anchor would want
+//! a dynamically-chosen corner.
 //!
 //! # Enter/exit staging + item stagger (widget-internal, not a navigator transition)
 //!
-//! Mirrors [`crate::glyph::dialog`]'s rationale: the panel drives its own
-//! enter/exit animation from `PaintCtx::frame_time` rather than riding a
-//! whole-page [`PageTransition`](crate::nav::transition::PageTransition), so
-//! it is pushed with [`TransitionSpec::NONE`] — the navigator gives the
-//! modal contract, the widget gives the motion. The panel **scales**
-//! `0.85 → 1.0` about its top-right corner while sliding down from `-8px` to
-//! `0px` (the design system: `transform:scale(0.85) translateY(-8px)` →
-//! `scale(1) translateY(0)`); unlike the dialog/palette, the panel's own
-//! fill/border/shadow are **never alpha-faded** — only geometry animates,
-//! matching this catalog's established modal-panel precedent (dialog/palette
-//! panels are likewise opacity-stable, animating scale only). Exit reverses
-//! over a faster duration ("exits always faster than
-//! entrances", the same rule dialog/palette apply).
+//! Like [`crate::glyph::dialog`], the panel drives its own enter/exit animation
+//! from `PaintCtx::frame_time` rather than riding a whole-page
+//! [`PageTransition`](crate::nav::transition::PageTransition), and is pushed with
+//! [`TransitionSpec::NONE`] — the navigator gives the modal contract, the widget
+//! gives the motion. The panel **scales** `0.85 → 1.0` about its top-right corner
+//! while sliding down from `-8px` to `0px` (the design system:
+//! `transform:scale(0.85) translateY(-8px)` → `scale(1) translateY(0)`); its own
+//! fill/border/shadow are **never alpha-faded** — only geometry animates, like
+//! the dialog/palette panels. Exit reverses over a faster duration ("exits
+//! always faster than entrances").
 //!
-//! Independently, each **item** fades/slides in on its own staggered
-//! sub-timeline ("items stagger in over ~90ms rather than
-//! appearing all at once") — a `crate::motion::patterns::GlyphStagger`
-//! (`per_item_delay: 90ms`) driven by its own dedicated
+//! Independently, each **item** fades/slides in on its own staggered sub-timeline
+//! ("items stagger in over ~90ms rather than appearing all at once") — a
+//! [`GlyphStagger`] (`per_item_delay: 90ms`) driven by its own dedicated
 //! `frust_core::AnimationController`, sized to
-//! `GlyphStagger::glyph().total_duration(n)` and armed once per item-list
-//! change (mirrors `crate::glyph::term_block`'s one-shot stagger-reveal
-//! idiom exactly — a **decoupled** timeline from the panel's own enter/exit
-//! driver, so the stagger's literal per-item millisecond spacing stays
-//! meaningful regardless of the panel's own duration). `reduce_motion`
-//! collapses the per-item windows to one synchronized reveal (the reduced
-//! variant `item_progress` already implements), matching `term_block`'s
-//! precedent; the panel's own timing also collapses to a fast linear
-//! crossfade under `reduce_motion` (dialog/palette's `resolve_timings`
-//! shape).
+//! `GlyphStagger::glyph().total_duration(n)` and armed once per item-list change
+//! (`crate::glyph::term_block`'s one-shot stagger-reveal idiom). It is
+//! **decoupled** from the panel's own enter/exit driver, so the literal per-item
+//! millisecond spacing stays meaningful regardless of the panel's duration.
+//! `reduce_motion` collapses the per-item windows to one synchronized reveal
+//! (`item_progress`'s reduced variant) and the panel's own timing to a fast
+//! linear crossfade (dialog/palette's `resolve_timings` shape).
 //!
 //! # Selection rides the same animated-exit + page-result path as cancel
 //!
-//! Unlike [`crate::glyph::dialog`] (whose *actions* pop the navigator
-//! immediately, bypassing the widget's own exit animation, and only a
-//! scrim/Escape *cancel* plays the staged exit) or
-//! [`crate::glyph::command_palette`] (whose row selection fires an
-//! immediate `on_select` callback with no dismissal at all), **every** menu
-//! dismissal — a scrim tap, `Escape`, a routed back press, *and* an item
-//! up-inside selection — stages the identical animated exit and only then
-//! delivers its outcome through the pushed page's `on_result` (a selection
-//! pops with `PopResult::of(index)`; every other path pops empty). A menu
-//! item is a transient chooser, not an action button with its own identity,
-//! so it gets no bypass: the panel always visibly collapses back toward its
-//! anchor before anything happens, which is also *why* the widget carries no
-//! `on_select` callback of its own — [`show_glyph_menu`]'s `on_result` is
-//! the only selection channel.
+//! **Every** menu dismissal — a scrim tap, `Escape`, a routed back press, *and*
+//! an item up-inside selection — stages the identical animated exit and only then
+//! delivers its outcome through the pushed page's `on_result` (a selection pops
+//! with `PopResult::of(index)`; every other path pops empty). A menu item is a
+//! transient chooser, not an action button with its own identity, so it gets no
+//! bypass (unlike [`crate::glyph::dialog`]'s actions, which pop immediately) —
+//! the panel always visibly collapses back toward its anchor first, which is
+//! also *why* this widget carries no `on_select` of its own: [`show_glyph_menu`]'s
+//! `on_result` is the only selection channel.
 //!
 //! # Always dismissable (no `dismissable(bool)`)
 //!
-//! Unlike the dialog/palette's `dismissable(bool)` barrier flag, a
-//! `GlyphMenuView` has none — a menu is a transient chooser the user can
-//! always back out of with no answer required, never a modal gate guarding
-//! an unavoidable decision. [`show_glyph_menu`] always pushes with
-//! [`BackPolicy::DismissAnimated`]: a routed back press
-//! bumps the shared dismiss-signal cell the widget's `paint` pass observes
-//! (`observe_dismiss_signal`, mirroring dialog/palette's identical
-//! back-press handling) and stages the same animated exit a scrim tap or
-//! `Escape` does.
+//! Unlike the dialog/palette's barrier flag, a `GlyphMenuView` has none — a menu
+//! is a transient chooser the user can always back out of with no answer
+//! required, never a modal gate guarding an unavoidable decision.
+//! [`show_glyph_menu`] always pushes with [`BackPolicy::DismissAnimated`]: a
+//! routed back press bumps the shared dismiss-signal cell the widget's `paint`
+//! pass observes (`observe_dismiss_signal`, dialog/palette's identical back-press
+//! handling) and stages the same animated exit a scrim tap or `Escape` does.
 //!
-//! # Leading icon slot (rider FINDINGS #46)
+//! # Leading icon slot
 //!
-//! Glyph's own overflow-menu design draws a leading icon per row, but
-//! [`MenuItem`] originally carried only `{label, variant}` — no way to
-//! vector one. [`MenuItem::icon`] (equivalently, [`MenuEntry::icon`] chained
-//! straight off [`menu_item`]/[`menu_item_danger`]) attaches an
-//! [`crate::icon::IconData`], painted at [`ITEM_ICON_SIZE`] just inside the
-//! row's leading padding, tinted the item's own normal/danger ink (the same
-//! color the label itself resolves), with [`ITEM_ICON_GAP`] before the
-//! label. A [`MenuEntry::Separator`] has no icon slot — chaining `.icon(..)`
-//! onto one is a no-op, not a panic (mirrors this catalog's general
-//! silent-drop-on-inapplicable-slot precedent rather than making a
-//! chainable builder fallible).
-//!
-//! **No `&str`-vs-icon precedence rule is needed here** (unlike
-//! [`crate::glyph::empty_state::EmptyStateView`], which has one glyph slot
-//! two representations compete for): `label` and `icon` are independent
-//! slots on the same [`MenuItem`] that always render *together* when both
-//! are set — the icon never replaces or hides the label text, so there is
-//! nothing to arbitrate between them.
+//! Glyph's overflow-menu design draws a leading icon per row: [`MenuItem::icon`]
+//! (equivalently [`MenuEntry::icon`], chained straight off
+//! [`menu_item`]/[`menu_item_danger`]) attaches an [`crate::icon::IconData`],
+//! painted at [`ITEM_ICON_SIZE`] just inside the row's leading padding, tinted the
+//! item's own normal/danger ink (the color the label resolves), with
+//! [`ITEM_ICON_GAP`] before the label. A [`MenuEntry::Separator`] has no icon slot
+//! — chaining `.icon(..)` onto one is a silent no-op, not a panic (this catalog's
+//! drop-on-inapplicable-slot precedent, not a fallible chainable builder). No
+//! `&str`-vs-icon precedence rule is needed, unlike
+//! [`crate::glyph::empty_state::EmptyStateView`]'s single contested glyph slot:
+//! `label` and `icon` are independent slots that always render *together* when
+//! both are set, so the icon never replaces or hides the label.
 //!
 //! # Semantics
 //!
-//! The whole menu contributes one [`Role::Menu`] container node with the
-//! accesskit **modal** flag set (the five-modal-widgets precedent
-//! `docs/ARCHITECTURE.md`'s Semantics pass names); each non-separator item
-//! contributes a [`Role::Button`] child node (`Action::Click`) — a separator
-//! contributes nothing (it carries no interactive meaning). Per-item bounds
-//! would need `SemanticsCtx::descend`, which is crate-private to
-//! `frust-core` (there is no `ChildPod` here to descend through — items are
-//! painted internally, not built as real child widgets), so every button
+//! The whole menu contributes one [`Role::Menu`] container node with the accesskit
+//! **modal** flag set; each non-separator item contributes a [`Role::Button`]
+//! child node (`Action::Click`), and a separator contributes nothing (it carries
+//! no interactive meaning). Per-item bounds would need `SemanticsCtx::descend`,
+//! crate-private to `frust-core` (there is no `ChildPod` here to descend through —
+//! items are painted internally, not built as real child widgets), so every button
 //! node shares the whole menu's bounds — the same v1 limitation
 //! [`crate::glyph::list`]'s `Role::ListItem` rows already accept.
 
@@ -1065,8 +1029,7 @@ impl Widget for GlyphMenuWidget {
         // focus + IME state), so the re-claim is what keeps the session alive
         // while this menu is up. Re-claiming while already focused is a
         // change-guarded no-op (no generation bump) — do not add a
-        // claim-once guard, it kills the session on the second tap
-        // (claim-once-hygiene review, 2026-08-06).
+        // claim-once guard, it kills the session on the second tap.
         if matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Down) {
             ctx.request_focus();
         }
@@ -1394,10 +1357,10 @@ mod tests {
         }
     }
 
-    /// FINDINGS #59 regression: the 3-item cascade (330ms) outlives the
-    /// panel's enter phase (200ms theme-less), so the tail item's reveal
-    /// window opens only once the panel is already `Shown` — the stagger
-    /// must keep advancing there or the item stays invisible forever.
+    /// Regression guard: the 3-item cascade (330ms) outlives the panel's
+    /// enter phase (200ms theme-less), so the tail item's reveal window opens
+    /// only once the panel is already `Shown` — the stagger must keep
+    /// advancing there or the item stays invisible forever.
     #[test]
     fn stagger_completes_after_panel_enter_ends() {
         let view = glyph_menu(Rect::new(700.0, 40.0, 740.0, 80.0), three_items());
@@ -1430,7 +1393,7 @@ mod tests {
         }
     }
 
-    // -- Leading icon slot (rider FINDINGS #46) --------------------------
+    // -- Leading icon slot -----------------------------------------------
 
     /// A 10×10-design filled diamond, mirroring
     /// `crate::glyph::navbar::tests::diamond_icon` — a known bounding box so
@@ -1709,7 +1672,7 @@ mod tests {
         assert_eq!(w.pending_result, None);
     }
 
-    // -- Every Down re-claims focus, self-healing an external blur (hygiene fix-2a) --
+    // -- Every Down re-claims focus, self-healing an external blur --------
 
     #[test]
     fn a_down_reclaims_focus_after_an_external_blur() {
