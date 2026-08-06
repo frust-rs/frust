@@ -4,9 +4,9 @@
 //! iOS simulator/codesign, `.ipa` export method) and launch/cancel actions.
 //! The base workbench layer is rendered with a *suppressed* `MouseCtx` (see
 //! `crate::ui::render`), so only this modal's regions are live while it is
-//! open — the D4 base-layer suppression, the same shape `run_config` uses.
+//! open — the base-layer suppression, the same shape `run_config` uses.
 //!
-//! Layering (D2): renders `&BuildLauncher` and only *registers* interaction;
+//! Layering: renders `&BuildLauncher` and only *registers* interaction;
 //! it never mutates the engine.
 
 use ratatui::Frame;

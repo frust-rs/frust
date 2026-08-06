@@ -2,9 +2,9 @@
 //! workbench with the target checklist + `BuildInfo` funnel (mode / flavor /
 //! defines) and launch / cancel actions. The base workbench layer is rendered
 //! with a *suppressed* `MouseCtx` (see `crate::ui::render`), so only this
-//! modal's regions are live while it is open — the D4 base-layer suppression.
+//! modal's regions are live while it is open — the base-layer suppression.
 //!
-//! Layering (D2): renders `&RunConfig` and only *registers* interaction; it
+//! Layering: renders `&RunConfig` and only *registers* interaction; it
 //! never mutates the engine.
 
 use ratatui::Frame;

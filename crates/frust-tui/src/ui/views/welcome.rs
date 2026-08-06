@@ -1,5 +1,5 @@
-//! The welcome screen (D6b / workbook B1): a brand splash with exactly one
-//! action — the single large Create button. Shown when no project is detected.
+//! The welcome screen: a brand splash with exactly one action — the single
+//! large Create button. Shown when no project is detected.
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -12,9 +12,9 @@ use crate::ui::mouse::MouseCtx;
 use crate::ui::theme::Theme;
 use crate::ui::widgets::{ButtonState, big_button};
 
-/// The brand wordmark ("Frust") in a 2-row half-block face (matches workbook
-/// B1). Hand-rolled rather than a `tui-big-text` dependency: deterministic in
-/// snapshot tests and free of an extra pre-1.0 pin.
+/// The brand wordmark ("Frust") in a 2-row half-block face. Hand-rolled
+/// rather than a `tui-big-text` dependency: deterministic in snapshot tests
+/// and free of an extra pre-1.0 pin.
 const WORDMARK: [&str; 2] = ["█▀▀ █▀█ █░█ █▀ ▀█▀", "█▀░ █▀▄ █▄█ ▄█ ░█░"];
 
 /// The orange horizontal-rule motif under the wordmark.
@@ -107,7 +107,7 @@ pub fn render(
 /// Render the titlebar toolchain chip for the welcome screen (right-aligned),
 /// wired to the real startup-preflight state — the same chip logic
 /// `views::workbench::titlebar` uses. Clicking it opens the bootstrap wizard
-/// (D6a; keyboard parity: `i`), so a fresh machine can reach the toolchain
+/// (keyboard parity: `i`), so a fresh machine can reach the toolchain
 /// setup even before creating a project.
 pub fn titlebar(
     frame: &mut Frame,

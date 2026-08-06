@@ -4,7 +4,7 @@
 //! (see `crate::ui::render`), so only the menu's own rows are hit-testable
 //! while it's open.
 //!
-//! Layering (D2): renders `&ContextMenu` (built in `crate::engine::context_menu`
+//! Layering: renders `&ContextMenu` (built in `crate::engine::context_menu`
 //! from the right-clicked target) and only *registers* interaction — it never
 //! mutates the engine. Every entry re-dispatches an existing `Message`; the
 //! entry → keyboard/palette parity table lives in that engine module.

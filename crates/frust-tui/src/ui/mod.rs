@@ -1,7 +1,7 @@
 //! The render layer: given `&AppState`, paints a frame and registers this
 //! frame's mouse regions through a [`MouseCtx`]. It never mutates the engine —
 //! interaction is expressed only as registered regions the loop turns into
-//! `Message`s (D2 layering).
+//! `Message`s.
 
 pub mod layout;
 pub mod mouse;
@@ -35,10 +35,10 @@ pub fn render(frame: &mut Frame, state: &AppState, theme: &Theme, mouse: &mut Mo
         return;
     }
 
-    // A right-click context menu (T04 / D4) floats on the top z-layer over the
+    // A right-click context menu floats on the top z-layer over the
     // still-visible base layer, which is drawn with a *suppressed* `MouseCtx`
     // so only the menu's own rows are hit-testable while it's open — the same
-    // D4 base-layer suppression the workbench modals use.
+    // base-layer suppression the workbench modals use.
     if let Some(menu) = &state.context_menu {
         let mut suppressed = MouseCtx::suppressed();
         render_base(frame, area, state, theme, &mut suppressed);
@@ -77,7 +77,7 @@ fn render_base(
     }
 }
 
-/// Render the auto-dismiss toast stack (D5) bottom-anchored just above the
+/// Render the auto-dismiss toast stack bottom-anchored just above the
 /// 1-row status bar, oldest-to-newest top-to-bottom, each colored by kind. A
 /// no-op when the stack is empty (the common case).
 fn render_toasts(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
@@ -120,7 +120,7 @@ fn render_toasts(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme)
 }
 
 /// Render the currently-active modal (`state.active_modal()`) over its base
-/// layer. Every arm shares the same D4 base-layer suppression: the chrome
+/// layer. Every arm shares the same base-layer suppression: the chrome
 /// beneath draws with no live mouse regions (a `MouseCtx::suppressed()`), so
 /// only the topmost modal's regions are live — `translate_key`
 /// (`crate::runner`) enforces the matching keyboard exclusivity.
@@ -262,7 +262,7 @@ fn welcome_status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme
     );
 }
 
-/// The status-bar mouse-capture indicator (T04 / D4): a check while capture is
+/// The status-bar mouse-capture indicator: a check while capture is
 /// on, an "off" hint (with the `⌥m` toggle key) while it's off so users know
 /// the terminal's own text selection is available. Shared by the welcome and
 /// workbench status bars.

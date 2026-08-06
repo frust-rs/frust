@@ -2,9 +2,9 @@
 //! validator's status + actionable hints, with a re-run action. The base
 //! workbench layer is rendered with a *suppressed* `MouseCtx` (see
 //! `crate::ui::render`), so only this panel's regions are live while it is
-//! open — the D4 base-layer suppression.
+//! open — the base-layer suppression.
 //!
-//! Layering (D2): renders `&DoctorState` and only *registers* interaction; it
+//! Layering: renders `&DoctorState` and only *registers* interaction; it
 //! never mutates the engine.
 
 use ratatui::Frame;
