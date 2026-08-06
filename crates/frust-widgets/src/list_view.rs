@@ -2,410 +2,357 @@
 //! `ListView::builder(item_count, item_extent, |index| -> AnyView)` with a
 //! uniform, required `item_extent` — or, on a keyed list,
 //! `ListView::builder_keyed(..).estimated_item_extent(px)` for rows that size
-//! themselves (see *Variable extents*, below).
+//! themselves (see *Variable extents*, below). Its place in the widget set, and
+//! why virtualization exists at all, are covered in
+//! `docs/WIDGETS_ARCHITECTURE.md` (*Virtualized ListView*); this header
+//! documents the contracts behind that summary.
 //!
-//! # Windowed materialization at rebuild time (the novel pattern)
+//! # Windowed materialization at rebuild time
 //!
-//! Child widgets in Frust only ever materialize at [`View::rebuild`] time
-//! (there is no lazy layout-time child building). But `rebuild` receives the
-//! retained `&mut Self::Element`, so the view can read the widget's *own*
-//! scroll offset and cached viewport and materialize only the visible window ±
-//! a small buffer. This is unprecedented — no other `View` reads element state
-//! during rebuild — hence the module's care.
-//!
+//! Children materialize only at [`View::rebuild`] time (there is no lazy
+//! layout-time child building), but `rebuild` receives the retained
+//! `&mut Self::Element`, so the view reads the widget's *own* scroll offset and
+//! cached viewport and materializes just the visible window ± a small buffer.
 //! Each frame's [`ListView::rebuild`] recomputes the window
 //! `[floor(offset/extent) - BUFFER, ceil((offset+viewport.h)/extent) + BUFFER]`
 //! (clamped to `[0, item_count]`) and reconciles the live children to it,
-//! **keyed by item index**: an index that stays in the window keeps its live
-//! [`ChildPod`] (and therefore all of the child's retained state) — it is
-//! *relocated* into the new order and rebuilt in place against its own previous
-//! view — while indices leaving the window are torn down and indices entering
-//! are built fresh. Because the builder is a pure function of the index, the
-//! *previous* frame's view for a surviving index is reconstructed with
-//! `prev.builder(i)` and the current one with `self.builder(i)`, so no separate
-//! per-window view cache is retained.
+//! **keyed by item index**: an index staying in the window keeps its live
+//! [`ChildPod`] — and all of that child's retained state — *relocated* into the
+//! new order and rebuilt in place against its own previous view; indices leaving
+//! are torn down, indices entering are built fresh. The builder being a pure
+//! function of the index, a survivor's previous view is `prev.builder(i)` and its
+//! current one `self.builder(i)`, so no per-window view cache is retained.
 //!
 //! # Row identity: positional by default, keyed on request
 //!
-//! [`ListView::builder`] reconciles rows **by their raw item index, not by any
-//! stable identity.** A retained [`ChildPod`] is kept for an index that stays in
-//! the window (preserving that row's *entire* retained state — hosted
-//! `Component` state, `StateLayer` interaction flags, a `ListItem`'s
-//! toggle/press state) and rebuilt in place against `builder(index)`. That is
-//! exactly correct when the backing data changes only in ways that don't shift
-//! what lives at an index:
-//!
-//! * **append-only** (add rows at the end — `item_count` grows),
-//! * **truncate-only** (drop rows from the end — `item_count` shrinks),
-//! * **full-replace** (every row's content changes anyway — no state worth
-//!   preserving is misattached).
-//!
-//! It is **wrong** — silently, with no panic or debug assertion — for a
-//! **mid-list insert, remove, or reorder**: because identity is positional, the
-//! row state retained at index *i* reattaches to whatever *different* content
-//! now occupies index *i*, so a `ListItem`'s pressed overlay, a hosted
-//! component's local state, or a row toggle appears to "jump" onto the wrong
-//! item. There is no signal that this happened; the list simply renders stale
-//! per-row state against new content at the same slot.
-//!
-//! [`ListView::builder_keyed`] is the fix for exactly that case: the app also
-//! supplies `key_of(index) -> ChildKey` (the same [`ChildKey`] that
-//! [`keyed`](crate::keyed) uses for `Flex`), and rows reconcile by that stable
-//! identity, so a mid-list mutation carries each row's live widget — and its
-//! retained state — with the row instead of leaving it on the slot. The three
-//! hard parts, and how each is met:
+//! [`ListView::builder`] reconciles rows by raw item index and
+//! [`ListView::builder_keyed`] by a caller-supplied `key_of(index) -> ChildKey`
+//! (the same [`ChildKey`] [`keyed`](crate::keyed) uses for `Flex`) — the two
+//! models the spoke doc summarizes. What a retained [`ChildPod`] carries through
+//! either is that row's *entire* state: hosted `Component` state, `StateLayer`
+//! interaction flags, a `ListItem`'s toggle/press state. Positional identity is
+//! exactly right while the data changes only in ways that don't shift what lives
+//! at an index — **append-only**, **truncate-only**, **full-replace** (every
+//! row's content changes anyway) — and reattaches, on a **mid-list insert,
+//! remove, or reorder**, the state retained at index *i* to whatever *different*
+//! content now occupies *i*: a pressed overlay or a row toggle jumping onto the
+//! wrong item, silently, with no panic or debug assertion to signal it. Keying is
+//! the fix for exactly that case; three hard parts:
 //!
 //! * **Slot vs. identity.** Window slots stay the contiguous ascending index run
 //!   the uniform-extent fast path (`window_covers`, the
 //!   `item_count * item_extent` scroll extent) relies on; identity lives *beside*
-//!   them in a retained `key -> the item index that row occupied last frame` map
-//!   on the widget, which rebuild reads off the element exactly like `offset`
-//!   and `viewport` (above) — the view is rebuilt from scratch every frame and
-//!   can remember nothing itself.
-//! * **A survivor's previous view.** A key found in that map names the index the
-//!   row rendered last frame, so its previous view is `prev.builder(prev_index)`
-//!   and its next one `self.builder(index)` — the positional `prev.builder(i)`
-//!   reconstruction, redirected through the map. Keys leaving the window (or the
-//!   data) are torn down; keys entering are built fresh.
-//! * **Duplicate keys.** Two slots claiming one identity is ambiguous, so it
-//!   trips a `debug_assert!` (mirroring [`crate::authoring::rebuild_children`]'s
-//!   keyed reconciler). Release builds never panic: the first slot claiming a key
-//!   keeps the live row, later duplicates build fresh, and the retained map keeps
-//!   the last index — deterministic, but which row keeps its state is arbitrary.
+//!   them, in a retained `key -> the index that row occupied last frame` map
+//!   rebuild reads off the element exactly like `offset` and `viewport` — the
+//!   view is rebuilt from scratch every frame and can remember nothing itself.
+//! * **A survivor's previous view.** That map names the index the row rendered
+//!   last frame, so its previous view is `prev.builder(prev_index)` and its next
+//!   `self.builder(index)` — the positional reconstruction, redirected through
+//!   the map. Keys leaving the window (or the data) are torn down; keys entering
+//!   are built fresh.
+//! * **Duplicate keys.** Ambiguous, so a duplicate trips a `debug_assert!`,
+//!   mirroring [`crate::authoring::rebuild_children`]'s keyed reconciler — but
+//!   with **no positional fallback** in release (spoke doc: first slot wins, the
+//!   map keeps the last index, which row keeps its state is arbitrary).
 //!
-//! Keyed reconciliation costs one `key_of` call per *materialized* slot per frame
+//! Keying costs one `key_of` call per *materialized* slot per frame
 //! (window-sized, never `item_count`-sized) plus that map; the positional path is
-//! untouched by it. Either path reports `ChangeFlags::LAYOUT` on any frame that
-//! built, tore down, relocated, or re-ranged pods — a freshly built or newly
-//! relocated pod has never been laid out where it now sits, so a frame that
-//! skipped layout would paint it unsized or at a stale origin.
+//! untouched. Either path reports `ChangeFlags::LAYOUT` on any frame that built,
+//! tore down, relocated, or re-ranged pods — a freshly built or relocated pod has
+//! never been laid out where it now sits, so a frame that skipped layout would
+//! paint it unsized or at a stale origin.
 //!
 //! # Prepend/removal scroll anchoring (keyed lists only)
 //!
-//! A keyed list additionally corrects the scroll offset so a mutation
-//! **above** the viewport — a "load older" prepend, or removing rows above
-//! what's currently on screen — doesn't visually jump the content the user is
-//! looking at. The correction runs inside [`View::rebuild`], **before** the
-//! window is recomputed for this frame, so layout and paint agree on one
-//! corrected offset; it never runs during paint.
+//! A keyed list also corrects the scroll offset so a mutation **above** the
+//! viewport — a "load older" prepend, or removing rows above what is on screen —
+//! doesn't visually jump the content the user is looking at. The correction runs
+//! inside [`View::rebuild`], **before** the window is recomputed for this frame,
+//! so layout and paint agree on one corrected offset; it never runs during paint.
 //!
 //! **Anchor selection.** The anchor is the topmost surviving keyed row of the
 //! previous window: walking [`ListViewWidget::keys`] (ascending, so topmost
-//! first), the first key that still identifies a row in the new data is the
-//! anchor. "Still identifies a row" is checked two ways, at most two extra
-//! `key_of` calls per candidate: unchanged position
-//! (`self.key_of(i_prev) == anchor_key`, the below-viewport/no-op case) or
-//! shifted by this frame's net `item_count` delta
-//! (`self.key_of(i_prev + delta) == anchor_key`, the prepend/removal-above
-//! case — correct precisely because nothing between the mutation and the
-//! anchor changed, so every surviving row at or above the old window shifts
-//! by the same net count). If neither check matches for any key in the
-//! previous window, no correction runs at all — a full replace is reset
-//! semantics, not an anchoring case. The search costs at most one extra
-//! `key_of` call pair per previous-window row it must walk past, bounded by
-//! the window size, never `item_count`.
+//! first), the first key that still identifies a row in the new data wins.
+//! "Still identifies a row" is checked two ways, at most two extra `key_of` calls
+//! per candidate: unchanged position (`self.key_of(i_prev) == anchor_key`, the
+//! below-viewport/no-op case) or shifted by this frame's net `item_count` delta
+//! (`self.key_of(i_prev + delta) == anchor_key`, the prepend/removal-above case —
+//! correct precisely because nothing between the mutation and the anchor changed,
+//! so every surviving row at or above the old window shifts by the same net
+//! count). If neither matches for any key in the previous window, no correction
+//! runs at all: a full replace is reset semantics, not an anchoring case. The
+//! search is bounded by the window size, never `item_count`.
 //!
 //! **Correction.** A confirmed shift of `d` items applies
-//! `offset += d as f64 * item_extent` (uniform extent — closed form once `d`
-//! is known, no search for *where* the anchor landed, since `d` is the
-//! item-count delta itself, merely confirmed against the anchor key),
-//! clamped to `[0, max_offset]`. Reported as `ChangeFlags::LAYOUT` on any
-//! frame that applied one.
+//! `offset += d as f64 * item_extent` — closed form, since `d` is the item-count
+//! delta itself, merely confirmed against the anchor key, so nothing searches for
+//! *where* the anchor landed — clamped to `[0, max_offset]` and reported as
+//! `ChangeFlags::LAYOUT`.
 //!
-//! **Decision: anchor always, even from `offset == 0`.** Prepending while the
-//! user is scrolled to the exact top could instead leave `offset` pinned at
-//! zero — treating that as "the user is reading the top row, don't move
-//! it" — but this module always shifts it instead, revealing the
-//! newly-prepended rows above rather than snapping the same old top row back
-//! under the user. A prepend that just answered a fired [`ListView::on_near_start`]
-//! also leaves that edge's armed flag exactly as the fire left it (disarmed)
-//! rather than letting the unconditional item-count-change rearm (below)
-//! force it back armed — otherwise the very next scroll event would
-//! re-trigger "load older" again at the freshly-corrected offset, before the
-//! user has done anything.
+//! **Anchor always, even from `offset == 0`.** Pinning `offset` at zero on a
+//! prepend ("the user is reading the top row, don't move it") would snap that
+//! same old top row back under the user; this module shifts instead, revealing
+//! the newly-prepended rows. A prepend answering a fired
+//! [`ListView::on_near_start`] also leaves that edge's armed flag as the fire
+//! left it (disarmed) rather than letting the unconditional item-count-change
+//! rearm force it back armed — otherwise the very next scroll event re-triggers
+//! "load older" at the freshly-corrected offset, before the user has done
+//! anything.
 //!
-//! **Positional lists are never anchored** — position-only identity cannot
-//! tell a prepend from a full mutation (see *Row identity* above), so
-//! applying this correction there would be a guess, not a fact.
+//! **Positional lists are never anchored** — position-only identity cannot tell a
+//! prepend from a full mutation (see *Row identity*), so the correction there
+//! would be a guess, not a fact.
 //!
 //! # Variable extents (keyed lists only)
 //!
 //! [`ListView::estimated_item_extent`] switches a **keyed** list into
-//! variable-extent mode: a row that has not been laid out yet is assumed to be
-//! `estimate` tall, and a row that has been laid out contributes its own
-//! measured height instead. Without that call the list stays on the closed-form
-//! uniform path — which is kept as literally the code it always was, the
-//! regression guard, not a degenerate case of this math.
+//! variable-extent mode: a row not yet laid out is assumed `estimate` tall, a row
+//! already laid out contributes its own measured height. Without that call the
+//! list stays on the closed-form uniform path, which is kept literal rather than
+//! folded into this math — it is the regression guard.
 //!
-//! **Keyed-only, enforced by a `debug_assert`.** A measured extent is cached
-//! under the row's *identity*, so it must ride along when the row moves. Under
-//! positional identity that cache would reattach a measurement to whatever
-//! content later occupies the index — the misattachment
-//! [`ListView::builder_keyed`] exists to kill. Calling `estimated_item_extent`
-//! on a positional list therefore trips a `debug_assert!` and is **inert** in
-//! release (the list stays uniform) rather than panicking live, exactly like
-//! the duplicate-key tripwire above. Type-state would make it a compile error,
-//! but at the cost of splitting `ListView`/`ListViewWidget` into two generic
-//! families for one misuse this module already has an idiom for.
+//! **Keyed-only, enforced by a `debug_assert`** that is **inert** in release (the
+//! list stays uniform), the duplicate-key tripwire's shape. A measured extent is
+//! cached under the row's *identity*, so it must ride along when the row moves;
+//! under positional identity it would reattach to whatever content later occupies
+//! the index — the misattachment [`ListView::builder_keyed`] exists to kill.
+//! Type-state would make the misuse a compile error, at the cost of splitting
+//! `ListView`/`ListViewWidget` into two generic families.
 //!
-//! **The extent model.** [`ListViewWidget`] retains `key -> (last index,
-//! measured height)` for every row it has ever laid out, plus their running
-//! sum, so the content extent
+//! **The extent model.** [`ListViewWidget`] retains `key -> (last index, measured
+//! height)` for every row it has ever laid out, plus their running sum, so the
+//! content extent
 //!
 //! ```text
 //! total = Σ measured + estimate × (item_count − measured count)
 //! ```
 //!
 //! is O(1) to read. `max_offset`, the offset clamp, the unbounded-height layout
-//! size, and the semantics scroll range all read it, so the scroll range
-//! converges on the true content height as rows are visited.
+//! size and the semantics scroll range all read it, so the scroll range converges
+//! on the true content height as rows are visited.
 //!
 //! **Offset → index in O(window + step), never O(N).** A full prefix sum from
-//! item 0 would be O(N) per frame, so the widget instead retains one *prefix
-//! anchor*: the item index the materialized window starts at, plus that item's
-//! content-space `y`. Each frame's window walks from that anchor — a handful of
-//! items for a scroll or a fling step — accumulating `measured-or-estimated`
-//! extents until it reaches the offset, then out to cover the viewport ±
-//! [`BUFFER`]. Reaching item 0 re-pins `y = 0` exactly, so accumulated
-//! floating-point drift is erased at the top rather than persisting. A jump far
-//! enough from the anchor to be a data reset rather than a scroll
+//! item 0 would be O(N) per frame, so the widget retains one *prefix anchor*: the
+//! item index the materialized window starts at, plus that item's content-space
+//! `y`. Each frame's window walks from that anchor — a handful of items for a
+//! scroll or a fling step — accumulating measured-or-estimated extents until it
+//! reaches the offset, then out to cover the viewport ± [`BUFFER`]. Reaching item
+//! 0 re-pins `y = 0` exactly, erasing accumulated floating-point drift at the top.
+//! A jump far enough from the anchor to be a data reset rather than a scroll
 //! ([`MAX_PREFIX_STEP`] items) resolves its bulk in closed form against the
-//! estimate first and walks only the remainder, so the per-frame cost stays
-//! bounded whatever the offset does. The walk's per-row content `y` is retained
-//! beside the window (`slot_y`), and each row is placed at its own content `y`
-//! minus the offset — generalizing the uniform path's `index * item_extent`.
+//! estimate and walks only the remainder, bounding per-frame cost whatever the
+//! offset does. The walk's per-row content `y` is retained beside the window
+//! (`slot_y`), and each row is placed at its own content `y` minus the offset —
+//! generalizing `index * item_extent`.
 //!
-//! **The wake hazard: the builder never runs outside rebuild.** Frust builds
-//! children only at rebuild time, so the materialized window is decided there,
-//! from cached and estimated extents alone. `layout` only *measures* pods that
-//! already exist (bounded width, unbounded height — the [`crate::ScrollView`]
-//! precedent), and `paint` builds nothing. When a measurement changes the
-//! picture enough that the window no longer covers the viewport, paint requests
-//! one more frame on the existing viewport-staleness path (below) and the next
-//! rebuild re-windows — one convergence frame, not a layout-time build. That
-//! check is *coverage*, not equality, so a window that measured out wider than
-//! it needs to be asks for no extra frame: the next ordinary rebuild trims it
-//! and the frame after that is a clean no-op again.
+//! **The wake hazard: the builder never runs outside rebuild.** The window is
+//! decided at rebuild from cached and estimated extents alone; `layout` only
+//! *measures* pods that already exist (bounded width, unbounded height — the
+//! [`crate::ScrollView`] precedent) and `paint` builds nothing. When a
+//! measurement leaves the window no longer covering the viewport, paint requests
+//! one more frame on the viewport-staleness path (below) and the next rebuild
+//! re-windows — one convergence frame, not a layout-time build. The check is
+//! *coverage*, not equality, so an over-wide window asks for no extra frame: the
+//! next ordinary rebuild trims it.
 //!
 //! **Cache hygiene.** The measured cache is bounded by the keys a session has
 //! actually visited (one `f64` + index per visited row; an LRU cap is a named
-//! deferral if a very long session over a very long list ever makes that
-//! matter). Three rules trim it, all window-bounded or shrink-only:
+//! deferral if a very long session over a very long list makes it matter). Three
+//! rules trim it, all window-bounded or shrink-only:
 //!
-//! * a pod that no slot claimed is probed with the same two hypotheses
-//!   anchoring uses (unchanged index, or shifted by the frame's net item-count
-//!   delta); if neither still names its key, the row left the *data*, not just
-//!   the window, and its measurement is dropped — at most two `key_of` calls
-//!   per departing row. Runs on every reconciled frame that isn't a genuine
-//!   full replace (the third bullet below), *including* one where the
-//!   anchor-shift probe below missed: a miss there only proves no single
-//!   uniform shift explained every row in the previous window at once (the
-//!   same-frame both-sides-of-the-anchor case) — it says nothing about
-//!   whether *this* orphaned row's own two hypotheses still hold. Leaving
-//!   the loop stale on such a frame instead would be a permanent leak, not a
-//!   bounded imprecision: a row genuinely removed from the data has no later
-//!   shrink or revisit to reclaim it (`record_measurement` never refreshes a
-//!   dead key, and the shrink rule below only scans a frame whose
-//!   `item_count` actually shrank, which a removal alongside a same-frame
-//!   addition need never be),
-//! * a frame whose `item_count` shrank drops every entry whose recorded index
-//!   is past the new end (the only entries the new keying provably cannot
-//!   produce) — a scan of the cache, only on a shrink frame,
-//! * a frame where the anchor-shift hypothesis probe (above) misses on every
-//!   previous-window key does **not** by itself clear the cache — that probe
-//!   only tests two candidate index shifts and can miss on a same-frame
-//!   mutation touching both sides of the anchor (a prepend above the viewport
-//!   plus an append below it in one frame) while on-screen rows are still
-//!   exactly the ones they were. The wholesale-replace decision is answered
-//!   instead against the reconciled window's own *exact* key matches
-//!   (`ListView::reconcile_keyed`'s per-slot lookup, not a hypothesis): only
-//!   when literally none of the previous window's keys matched a slot in this
-//!   frame's window is it a genuine full replace, which clears the cache
-//!   outright.
+//! * a pod no slot claimed is probed with the same two hypotheses anchoring uses
+//!   (unchanged index, or shifted by the frame's net item-count delta); if
+//!   neither still names its key the row left the *data*, not just the window,
+//!   and its measurement is dropped — at most two `key_of` calls per departing
+//!   row. This runs on every reconciled frame that isn't a genuine full replace
+//!   (third bullet), *including* one where the anchor-shift probe missed: that
+//!   miss only proves no single uniform shift explained the whole previous window
+//!   at once, never that *this* row's own two hypotheses fail. Skipping it there
+//!   leaks permanently rather than imprecisely — a removed row has no later
+//!   shrink or revisit to reclaim it (`record_measurement` never refreshes a dead
+//!   key; the shrink rule below only scans a frame whose `item_count` actually
+//!   shrank, which a removal alongside a same-frame addition need never be),
+//! * a frame whose `item_count` shrank drops every entry whose recorded index is
+//!   past the new end — the only entries the new keying provably cannot produce,
+//!   scanned only on a shrink frame,
+//! * a frame where the anchor-shift probe misses on every previous-window key
+//!   does **not** by itself clear the cache: it tests only two candidate index
+//!   shifts and can miss on a same-frame mutation touching both sides of the
+//!   anchor (a prepend above the viewport plus an append below it in one frame)
+//!   while the on-screen rows are still exactly the ones they were. Wholesale
+//!   replace is decided instead against the reconciled window's own *exact* key
+//!   matches (`ListView::reconcile_keyed`'s per-slot lookup, not a hypothesis):
+//!   only when none of the previous window's keys matched a slot in this frame's
+//!   window is it a genuine full replace, which clears the cache outright.
 //!
-//! Two acknowledged gaps: a row removed while it was *outside* the
-//! materialized window keeps its entry (finding it would mean re-keying all
-//! `item_count` items, the O(N) this design exists to avoid); and a same-frame
-//! mutation on both sides of the anchor can still miss the anchor-shift
-//! hypothesis probe itself, so the *scroll position* is left uncorrected for
-//! that one frame (a visible jump) even though — per the bullets above — the
-//! measured cache no longer pays for the same miss, wholesale or per-row, and
-//! any *pending measured-anchor correction* is discarded rather than
-//! committed into geometry it can no longer explain (see the next section).
-//! Both cost accuracy (or, for the scroll jump, one uncorrected frame) in an
-//! already-estimated total, never a misattached measurement or a leaked
-//! entry; the exact per-key anchor-position fix is a deferred follow-up.
+//! Two acknowledged gaps: a row removed while it was *outside* the materialized
+//! window keeps its entry (finding it would mean re-keying all `item_count`
+//! items, the O(N) this design exists to avoid); and a same-frame mutation on
+//! both sides of the anchor can still miss the anchor-shift probe itself, leaving
+//! the *scroll position* uncorrected for that one frame (a visible jump) — the
+//! cache no longer pays for that miss, and any pending measured-anchor correction
+//! is discarded rather than committed into geometry it can no longer explain
+//! (next section). Both cost accuracy in an already-estimated total, never a
+//! misattached measurement or a leaked entry; the exact per-key anchor-position
+//! fix is a deferred follow-up.
 //!
 //! # Measured anchor correction (variable extents only)
 //!
-//! A row that measures taller or shorter than it was *assumed* to be moves
-//! every row below it — including the row the viewport's top edge sits inside,
-//! the **anchor**. So layout accumulates, over the rows lying wholly above that
-//! top edge *in the geometry this frame's window was planned against*, the
-//! signed `measured − assumed` delta into one [`ListViewWidget::pending_correction`]:
-//! the amount the offset owes to leave the anchor row exactly where it is. Rows
-//! at or below the anchor contribute nothing — a row growing pushes the content
-//! *below* it down, which is the truth, not a jump. This generalizes the keyed
-//! anchoring correction above: there the shift is `count × extent` in closed
-//! form, here it is whatever the prefix bookkeeping actually measured.
+//! A row that measures taller or shorter than it was *assumed* to be moves every
+//! row below it — including the row the viewport's top edge sits inside, the
+//! **anchor**. So layout accumulates, over the rows lying wholly above that top
+//! edge *in the geometry this frame's window was planned against*, the signed
+//! `measured − assumed` delta into one [`ListViewWidget::pending_correction`]:
+//! what the offset owes to leave the anchor row exactly where it is. Rows at or
+//! below the anchor contribute nothing — a row growing pushes the content *below*
+//! it down, which is the truth, not a jump. This is the keyed anchoring
+//! correction above generalized from a closed-form `count × extent` shift to
+//! whatever the prefix bookkeeping measured.
 //!
 //! **Recorded at layout, committed at the next rebuild.** Measurement happens
 //! after this frame's rebuild has already windowed, and a *scroll* correction is
-//! not layout's or paint's to make: layout's only offset write stays the
-//! pre-existing range clamp (the viewport is known nowhere else) and paint's
-//! stays the fling pump. So paint asks for one continuation frame while a
-//! correction is pending — the
-//! same convergence path an uncovered window uses — and the next
+//! neither layout's nor paint's to make: layout's only offset write stays the
+//! range clamp (the viewport is known nowhere else) and paint's stays the fling
+//! pump. So paint asks for one continuation frame while a correction is pending —
+//! the convergence path an uncovered window uses — and the next
 //! [`View::rebuild`] commits it *before* planning the window, folding
 //! `ChangeFlags::LAYOUT` into its report.
 //!
-//! **The pending amount is honored visually the instant it is measured**,
-//! though, so nothing waits a frame to look right: everything that *places*
-//! content — the prefix walk, the window, each row's origin, the edge triggers
-//! and the semantics scroll position — reads
-//! [`ListViewWidget::placement_offset`] (`offset + pending`, clamped) rather
-//! than the raw offset. The anchor row therefore never moves at all, not even
-//! for the one frame between recording and committing, and committing is a pure
-//! bookkeeping step: `offset` absorbs the pending amount and placement lands on
-//! the number it was already painting at. The raw `offset` — the value the fling
-//! pump, the drag, the wheel and the clamp arithmetic own — moves only from
-//! input, from the fling pump, or from a rebuild-time correction.
+//! **The pending amount is honored visually the instant it is measured**, so
+//! nothing waits a frame to look right: everything that *places* content — the
+//! prefix walk, the window, each row's origin, the edge triggers, the semantics
+//! scroll position — reads [`ListViewWidget::placement_offset`]
+//! (`offset + pending`, clamped) rather than the raw offset. The anchor row
+//! therefore never moves at all, and committing is pure bookkeeping: `offset`
+//! absorbs the pending amount and placement lands on the number it was already
+//! painting at. The raw `offset` — what the fling pump, the drag, the wheel and
+//! the clamp arithmetic own — moves only from input, from the fling pump, or from
+//! a rebuild-time correction.
 //!
 //! **Fling interplay: accumulate, then apply at settle.** While a fling is live
-//! the pump is advancing `offset` at paint, and committing corrections into it
+//! the pump advances `offset` at paint, and committing corrections into it
 //! per-frame would fight that two ways: a correction *opposing* the fling (rows
 //! above measuring taller during an upward fling) exceeds a decayed fling step
-//! near the end of the animation and walks the offset backwards, and one
-//! *along* it can push the offset onto a bound, where [`ListViewWidget::tick`]'s
-//! at-bound check kills the fling early. So a correction taken during a fling
-//! only accumulates; the first rebuild after the fling stops — velocity below
+//! near the end of the animation and walks the offset backwards, and one *along*
+//! it can push the offset onto a bound, where [`ListViewWidget::tick`]'s at-bound
+//! check kills the fling early. So a correction taken during a fling only
+//! accumulates; the first rebuild after the fling stops — velocity below
 //! [`FLING_STOP`], a bound reached, or a pointer `Down` taking the gesture over,
-//! all three of which clear `fling` — commits the whole sum. Placement honors it
-//! every frame regardless, so the rows stay anchored throughout and the commit
-//! is invisible. The reversal is measured, not assumed: deleting the withhold
-//! makes this module's upward-fling test walk the offset backwards mid-flight
-//! (`7980 → 7993`, ~13px against the gesture), which is why the accumulator is
-//! not simplified into a per-frame commit. **Accepted artifact:** across a long fling over never-measured
-//! rows the *committed* offset drifts from the placement actually painted (by
-//! exactly the accumulated sum) until the fling settles — a reader of
+//! all three of which clear `fling` — commits the whole sum, invisibly, since
+//! placement honored it every frame anyway. The reversal is measured, not
+//! assumed: deleting the withhold makes this module's upward-fling test walk the
+//! offset backwards mid-flight (`7980 → 7993`, ~13px against the gesture).
+//! **Accepted artifact:** across a long fling over never-measured rows the
+//! *committed* offset drifts from the placement actually painted (by exactly the
+//! accumulated sum) until the fling settles, so a reader of
 //! [`ListViewWidget::offset`] alone sees a stale scroll position meanwhile.
 //!
 //! **Clamping.** A correction goes through the same `[0, max_offset]` clamp as
-//! every other offset write, against a `max_offset` that is itself moving as
-//! measurements revise the content extent. A correction clamped at an edge is
-//! truncated, not kept owing: the top/bottom of the list wins over anchor
-//! fidelity.
+//! every other offset write, against a `max_offset` itself moving as measurements
+//! revise the content extent. A correction clamped at an edge is truncated, not
+//! kept owing: the top/bottom of the list wins over anchor fidelity.
 //!
-//! **Edge triggers.** `near_start`/`near_end` evaluate on events and on the
-//! fling pump, never in rebuild, so a commit can never itself fire one; and
-//! because they read the *placement*, which a commit leaves unchanged, a
-//! correction cannot rearm or re-fire an edge that has not genuinely moved. At
-//! the very top there is nothing above the viewport to correct by in the first
-//! place, so the load-older edge never sees this motion at all.
+//! **Edge triggers.** `near_start`/`near_end` evaluate on events and on the fling
+//! pump, never in rebuild, so a commit can never itself fire one; and because they
+//! read the *placement*, which a commit leaves unchanged, a correction cannot
+//! rearm or re-fire an edge that has not genuinely moved. At the very top there is
+//! nothing above the viewport to correct by, so the load-older edge never sees
+//! this motion at all.
 //!
 //! **What stays estimated.** Only materialized rows are ever measured, so a
 //! prepend landing entirely *above* the window (the "load older while scrolled
 //! deep" case) is anchored by the estimate alone — the closed-form shift above —
-//! and refines only if the user scrolls back up over those rows. A prepend that
-//! lands inside the window takes both steps in consecutive frames: the estimate
-//! shift on the reconciling frame, the measured refinement on the next. That is
-//! the same accuracy tradeoff the content-extent total already accepts.
+//! and refines only if the user scrolls back up over those rows. A prepend landing
+//! inside the window takes both steps in consecutive frames: the estimate shift on
+//! the reconciling frame, the measured refinement on the next — the same accuracy
+//! tradeoff the content-extent total already accepts.
 //!
 //! # Viewport staleness
 //!
 //! [`frust_core::BuildCtx`] carries no viewport size, so the widget caches
-//! `viewport: Size` from the previous layout pass (the exact `ScrollWidget`
-//! precedent, which already caches `offset` + `viewport`) and rebuild reads it
-//! from the element. One frame of staleness on a constraint change is accepted;
-//! the very first `build` materializes a conservative window from a zero
-//! viewport. To converge, [`Widget::paint`] requests one more frame whenever the
-//! materialized window does not yet cover the now-known viewport — so a
-//! stationary list fills its screen within one extra frame and never idles
-//! under-materialized.
+//! `viewport: Size` from the previous layout pass (the `ScrollWidget` precedent,
+//! which already caches `offset` + `viewport`) and rebuild reads it off the
+//! element. One frame of staleness on a constraint change is accepted; the very
+//! first `build` materializes a conservative window from a zero viewport. To
+//! converge, [`Widget::paint`] requests one more frame whenever the materialized
+//! window does not yet cover the now-known viewport — so a stationary list fills
+//! its screen within one extra frame and never idles under-materialized.
 //!
 //! # Scroll machinery (reused, not reinvented)
 //!
-//! The widget owns its own vertical drag capture / wheel / fling, reusing the
-//! `frust-core::input` constants + fling math and the spring-during-paint
-//! pump exactly like [`crate::ScrollView`] (see `scroll.rs`). During a scroll
-//! drag the ListView captures the pointer and, on takeover, cancels any armed
-//! child (a `ListItem`'s press) via the structural-change contract — the
-//! accepted, Flutter-like tradeoff. Offset changes request a
-//! redraw so the next frame's rebuild re-windows; the fling advances the offset
-//! at paint and requests a continuation frame, so the shell's next
-//! rebuild→layout→paint re-windows as the fling carries the list.
+//! The widget owns its own vertical drag capture / wheel / fling, reusing
+//! `frust-core::input`'s constants + fling math and the spring-during-paint pump
+//! exactly like [`crate::ScrollView`] (see `scroll.rs`). During a scroll drag it
+//! captures the pointer and, on takeover, cancels any armed child (a `ListItem`'s
+//! press) via the structural-change contract — the accepted, Flutter-like
+//! tradeoff. An offset change requests a redraw so the next frame's rebuild
+//! re-windows; the fling advances the offset at paint and requests a continuation
+//! frame, so the shell's next rebuild→layout→paint re-windows as the fling
+//! carries the list.
 //!
 //! Scroll extent is `item_count * item_extent` exactly on the uniform path (no
-//! estimation) and `Σ measured + estimate × unmeasured` in variable-extent mode
-//! (above); either way [`ListViewWidget::offset`] — the *windowing* offset that
-//! decides which item indices materialize — is clamped to
-//! `[0, extent - viewport.height]` and never leaves that range. See
-//! *Overscroll and pull-to-refresh* (below) for the bounded out-of-range
-//! *visual* displacement layered on top of it.
+//! estimation) and `Σ measured + estimate × unmeasured` in variable-extent mode;
+//! either way [`ListViewWidget::offset`] — the *windowing* offset deciding which
+//! item indices materialize — is clamped to `[0, extent - viewport.height]` and
+//! never leaves that range. See *Overscroll and pull-to-refresh* for the bounded
+//! out-of-range *visual* displacement layered on top of it.
 //!
 //! # Overscroll and pull-to-refresh
 //!
-//! [`ListView::on_refresh_release`] and a drag's rubber-band overscroll feel
-//! are ported from [`crate::ScrollView`] (`scroll.rs`) verbatim: the same
-//! [`OVERSCROLL_RESISTANCE`](crate::scroll::OVERSCROLL_RESISTANCE) damping,
-//! the same [`REFRESH_TRIGGER_PX`](crate::scroll::REFRESH_TRIGGER_PX) release
-//! threshold, and the same
+//! [`ListView::on_refresh_release`] and a drag's rubber-band overscroll feel are
+//! ported from [`crate::ScrollView`] verbatim: the
+//! [`OVERSCROLL_RESISTANCE`](crate::scroll::OVERSCROLL_RESISTANCE) damping, the
+//! [`REFRESH_TRIGGER_PX`](crate::scroll::REFRESH_TRIGGER_PX) release threshold,
+//! the
 //! [`SETTLE_DECAY`](crate::scroll::SETTLE_DECAY)/[`SETTLE_STOP_PX`](crate::scroll::SETTLE_STOP_PX)
-//! spring-back-during-paint settle — all four constants and the
-//! [`crossed_refresh_trigger`](crate::scroll::crossed_refresh_trigger)
-//! threshold check are `pub(crate)` items *shared* from `scroll.rs`, not a
-//! second hand-copied set, so the two surfaces can never drift apart. The
-//! settle animation itself is reimplemented against this widget's own data
-//! shape (below) rather than shared, since `ScrollWidget` has no windowing
-//! concept to keep separate from its overscroll — sharing would have meant
-//! churning `ScrollView`'s own tested field layout for one method, which this
-//! task does not do.
+//! spring-back-during-paint settle and the
+//! [`crossed_refresh_trigger`](crate::scroll::crossed_refresh_trigger) check are
+//! `pub(crate)` items *shared* from `scroll.rs`, not a second hand-copied set, so
+//! the two surfaces can never drift apart. Only the settle animation is
+//! reimplemented against this widget's own data shape, since `ScrollWidget` has
+//! no windowing concept to keep separate from its overscroll.
 //!
-//! **Windowing offset vs. painted offset.** A single `ScrollWidget::offset`
-//! can carry an out-of-range value directly, because nothing there ever reads
-//! it as an item index. A `ListView` cannot do that: [`ListViewWidget::offset`]
-//! *is* the item-index math, so it must stay in `[0, max_offset]` at all
-//! times — rows must never be asked to materialize for a negative or
-//! past-the-end index. So a drag past an edge splits the two: `offset` stays
-//! clamped (window planning, the prefix walk, the edge triggers, everything
-//! in *Variable extents* above all read [`ListViewWidget::placement_offset`],
-//! which is built on this clamped `offset`, exactly as before), while
+//! **Windowing offset vs. painted offset.** A single `ScrollWidget::offset` can
+//! carry an out-of-range value directly, because nothing there reads it as an
+//! item index. A `ListView` cannot: [`ListViewWidget::offset`] *is* the
+//! item-index math, so it must stay in `[0, max_offset]` at all times — a row
+//! must never be asked to materialize for a negative or past-the-end index. So a
+//! drag past an edge splits the two: `offset` stays clamped (window planning, the
+//! prefix walk and the edge triggers all read
+//! [`ListViewWidget::placement_offset`], which is built on it),
 //! [`ListViewWidget::overscroll`] carries the signed, resisted past-edge
-//! displacement on its own, and only
-//! [`ListViewWidget::painted_offset`] (`placement_offset() + overscroll`) —
-//! read solely by [`ListViewWidget::sync_child_origins`] and
-//! [`Widget::semantics`]'s scroll position — ever sees the out-of-range
-//! number. This is what satisfies criterion 3: the content edge visually
-//! displaces, but no row is ever materialized outside `[0, item_count)`.
+//! displacement on its own, and only [`ListViewWidget::painted_offset`]
+//! (`placement_offset() + overscroll`) — read solely by
+//! [`ListViewWidget::sync_child_origins`] and [`Widget::semantics`]'s scroll
+//! position — ever sees the out-of-range number. The content edge visually
+//! displaces; no row is ever materialized outside `[0, item_count)`.
 //!
-//! **Resistance uses the *current*, converging `max_offset`.** Every drag
-//! `Move` recomputes `overscroll` against a freshly-read
+//! **Resistance uses the *current*, converging `max_offset`.** Every drag `Move`
+//! recomputes `overscroll` against a freshly-read
 //! [`ListViewWidget::max_offset`] (not a value cached at takeover), so a
-//! bottom-edge overscroll in variable-extent mode tracks the content extent as
-//! it revises upward or downward from in-flight measurements, the same way
-//! every other offset-affecting read in this module already does.
+//! bottom-edge overscroll in variable-extent mode tracks the content extent as it
+//! revises up or down from in-flight measurements, like every other
+//! offset-affecting read here.
 //!
 //! **`on_refresh_release` only ever arms at the top edge**, mirroring
 //! `ScrollView`: it fires on `Up` when `overscroll < -REFRESH_TRIGGER_PX`, a
 //! condition only the *negative* (past-top) direction can satisfy — a bottom
-//! overscroll releases into a settle like the top does under threshold, but
-//! can never fire it. [`ListView::on_near_start`]/[`ListView::on_near_end`]
-//! read `placement_offset()`, which overscroll never touches, so the two
-//! mechanisms coexist unmodified: a pull can cross the near-start threshold on
-//! its way down (firing the "load older" edge) and *then* cross the refresh
-//! trigger before release (firing refresh on `Up`) — two independent signals
-//! from one gesture, not a conflict.
+//! overscroll releases into a settle like the top does under threshold, but can
+//! never fire it. [`ListView::on_near_start`]/[`ListView::on_near_end`] read
+//! `placement_offset()`, which overscroll never touches, so the two mechanisms
+//! coexist: a pull can cross the near-start threshold on its way down (firing
+//! "load older") and *then* cross the refresh trigger before release (firing
+//! refresh on `Up`) — two independent signals from one gesture, not a conflict.
 //!
 //! **Fling and wheel stay hard-clamped**, exactly like `ScrollView`: only a
 //! drag ever *sets* a nonzero `overscroll` — wheel forces it back to `0.0`
-//! outright, and a fling can never enter it to begin with. A new `Down` does
-//! *not* reset it: it only cancels any in-progress settle
+//! outright, and a fling can never enter it, since [`ListViewWidget::tick`]'s
+//! at-bound check stops a fling the instant `offset` reaches `0`/`max_offset`.
+//! A new `Down` does *not* reset it: it only cancels any in-progress settle
 //! (`ListViewWidget::settling = false`), so a regrab mid-bounce continues from
-//! wherever the surface currently sits rather than snapping first (mirrors
+//! wherever the surface currently sits rather than snapping first (mirroring
 //! `ScrollWidget::event_at`'s `Down` arm, which leaves its own `offset`
-//! untouched for the same reason). [`ListViewWidget::tick`]'s existing at-bound
-//! check already stops a fling the instant `offset` reaches `0`/`max_offset`,
-//! so a fling never enters overscroll to begin with.
+//! untouched for the same reason).
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -3861,8 +3808,8 @@ mod tests {
     // --- (10) Prepend/removal scroll anchoring (keyed lists only). ---
 
     /// The pixel `y` a materialized row paints at (its `ChildPod` origin),
-    /// looked up by the item index it currently occupies — the literal "paint
-    /// position" acceptance criteria assert against.
+    /// looked up by the item index it currently occupies — the literal paint
+    /// position the anchoring assertions below are stated against.
     fn painted_y(w: &ListViewWidget, item_index: usize) -> f64 {
         let slot = w
             .keys
@@ -4021,10 +3968,9 @@ mod tests {
 
     #[test]
     fn keyed_prepend_at_the_very_top_still_anchors_off_zero() {
-        // Acceptance criterion 3's decision, recorded in the module docs:
-        // ANCHOR ALWAYS, even starting at offset == 0 — the offset shifts,
-        // revealing the new content above rather than staying pinned at the
-        // literal top.
+        // The module docs' anchor-always decision: even starting at
+        // offset == 0 the offset shifts, revealing the new content above
+        // rather than staying pinned at the literal top.
         let fx = KeyedRows::new((0..1000).map(|i| i as u64 * 10).collect());
         let mut logic = fx.keyed_logic();
         let mut root = converged(&mut logic, &fx.log);
@@ -4043,9 +3989,9 @@ mod tests {
 
     #[test]
     fn keyed_prepend_near_top_does_not_immediately_refire_near_start() {
-        // The edge-latch interaction the task calls out: a correction must
-        // not make the very next event refire an edge that just fired (and
-        // whose callback is presumably what triggered the prepend).
+        // The edge-latch interaction: a correction must not make the very
+        // next event refire an edge that just fired (and whose callback is
+        // presumably what triggered the prepend).
         let fx = KeyedRows::new((0..1000).map(|i| i as u64 * 10).collect());
         let loads = Rc::new(Cell::new(0u32));
         let loads_l = loads.clone();
@@ -5262,8 +5208,8 @@ mod tests {
     }
 
     /// Assert a fling trajectory only ever moved in the fling's own direction —
-    /// the monotonicity criterion 3 asks for, which is exactly what a
-    /// per-frame correction against a paint-advancing offset would break.
+    /// the monotonicity a per-frame correction against a paint-advancing offset
+    /// would break.
     fn assert_monotonic_upward(trace: &[(f64, bool, f64)]) {
         for pair in trace.windows(2) {
             let (before, _, _) = pair[0];
@@ -5484,10 +5430,10 @@ mod tests {
 
     #[test]
     fn an_uncommitted_correction_decides_no_edge() {
-        // The edge-latch half of criterion 5: edges read the placement, so an
-        // uncommitted correction neither fires one on the raw offset's say-so
-        // nor re-fires one when it commits (the placement is exactly what a
-        // commit leaves unchanged).
+        // The edge-latch half: edges read the placement, so an uncommitted
+        // correction neither fires one on the raw offset's say-so nor re-fires
+        // one when it commits (the placement is exactly what a commit leaves
+        // unchanged).
         let mut w = pending_correction_widget(500.0);
         let mut state = Loads::default();
         run_loads(&mut w, &mut state, &wheel(0.0));
