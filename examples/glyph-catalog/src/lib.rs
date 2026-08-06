@@ -238,8 +238,8 @@ fn catalog_app_bar(state: &CatalogState) -> AnyView<CatalogState> {
     let motion_label = if reduce_motion { "⏸" } else { "▶" };
     let animations_label = if animations_enabled { "⏵" } else { "⏹" };
 
-    // Live accent-text role — resolves per-brightness (round-0 review of the
-    // header row: a fixed dark amber failed AA on the light surface).
+    // Live accent-text role — resolves per-brightness (a fixed dark amber
+    // failed AA on the light surface).
     let accent = frust::use_context::<frust::Theme>()
         .unwrap_or_else(frust::Theme::glyph_baseline)
         .scheme()

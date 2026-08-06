@@ -32,14 +32,13 @@
 //! `button.rs`'s module docs) as part of reporting disabled semantics while
 //! shown, so a button can never toggle itself back off by pressing it a
 //! second time — the loading demo is instead driven by a paired checkbox. A
-//! timed 2s auto-reset (the task's stated preference) needs an async sleep
+//! timed 2s auto-reset would be preferable but needs an async sleep
 //! primitive; `examples/huddle`'s toast auto-dismiss uses
 //! `clean_signals::time::sleep` under `frust::spawn`, but that crate is a
 //! sibling-checkout-only dependency this standalone example doesn't carry
-//! (and adding one is out of this page's `src/pages/buttons_forms.rs`-only
-//! scope) — so this page falls back to the task's stated alternative, a
-//! manual toggle, which still exercises the same `.loading()` builder path
-//! interactively.
+//! (and adding one is out of scope for this page) — so this page falls back
+//! to a manual toggle instead, which still exercises the same `.loading()`
+//! builder path interactively.
 //!
 //! # Disabled state — no dedicated builder
 //!
@@ -339,7 +338,7 @@ fn disabled_demo_row() -> AnyView<ButtonsFormsState> {
         .loading(true))
 }
 
-/// Stretch-aware default from `ButtonView::label_alignment` (task 08): a
+/// Stretch-aware default from `ButtonView::label_alignment`: a
 /// button forced wider than its natural content ([`SizedBox`]-wrapped)
 /// auto-centers its label with *no* explicit `.label_alignment(..)` call,
 /// beside a natural-width button that's unaffected — there's no free space
@@ -361,9 +360,10 @@ fn stretched_button_row() -> AnyView<ButtonsFormsState> {
 
 /// Contrasts the default vs an explicit `Alignment::CENTER` on a button
 /// stretched on *both* axes (`SizedBox(width, height)`, both tightened): the
-/// default's y-component stays top-pinned even when x auto-centers (task
-/// 08's module docs — height stretch never auto-centers), so an explicit
-/// call is the only way to also center vertically.
+/// default's y-component stays top-pinned even when x auto-centers
+/// (`ButtonView::label_alignment`'s module docs — height stretch never
+/// auto-centers), so an explicit call is the only way to also center
+/// vertically.
 fn vertical_alignment_row() -> AnyView<ButtonsFormsState> {
     any(FlexView::new(
         Axis::Horizontal,
@@ -384,7 +384,7 @@ fn vertical_alignment_row() -> AnyView<ButtonsFormsState> {
     .cross_axis(CrossAxisAlignment::Center))
 }
 
-/// The disabled-vs-enabled `TextInput` pair (task 07's `.enabled(false)`):
+/// The disabled-vs-enabled `TextInput` pair (`.enabled(false)`):
 /// same style, one refuses focus and dims its chrome/content, the other is
 /// untouched — both pre-filled so the contrast is visible at a glance.
 fn disabled_vs_enabled_row(

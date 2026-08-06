@@ -5,13 +5,13 @@
 //! Every interactive demo needs state that survives the shell's per-frame
 //! rebuild (a toggle's checked flag, the demo-card index, a replay counter),
 //! but this page is a plain `page(&CatalogState)` function with no `Component`
-//! state of its own and may not touch [`CatalogState`] (the `c01` scaffold
+//! state of its own and may not touch [`CatalogState`] (the page-fn
 //! contract). So each demo's local state lives in a self-healing `thread_local!`
 //! [`RwSignal`] cached across rebuilds — the same screen-local-state idiom
 //! `examples/huddle`'s page functions use. `build` only ever *reads* those
 //! signals (subscribing); every *write* happens in an event handler.
 //!
-//! Stub scaffold (`c01`): a placeholder honoring the page-fn contract in
+//! Originally a stub scaffold placeholder honoring the page-fn contract in
 //! `pages/mod.rs`.
 
 use frust::glyph::TermLine;
@@ -31,8 +31,8 @@ use crate::CatalogState;
 
 /// Glyph accent amber — the reference build's `--accent-amber`.
 /// Live-theme accent-text role (`primary`) (falls back to the Glyph baseline pre-context, mirroring
-/// `navigation.rs`'s `accent()` — round-0 review: hardcoded dark-only hexes
-/// broke AA under the Light toggle).
+/// `navigation.rs`'s `accent()` — hardcoded dark-only hexes broke AA under
+/// the Light toggle).
 fn amber() -> Color {
     use_context::<Theme>()
         .unwrap_or_else(Theme::glyph_baseline)
@@ -41,8 +41,8 @@ fn amber() -> Color {
 }
 /// A muted caption ink for the per-demo timing notes.
 /// Live-theme muted-text role (`on_surface_variant`) (falls back to the Glyph baseline pre-context, mirroring
-/// `navigation.rs`'s `accent()` — round-0 review: hardcoded dark-only hexes
-/// broke AA under the Light toggle).
+/// `navigation.rs`'s `accent()` — hardcoded dark-only hexes broke AA under
+/// the Light toggle).
 fn muted() -> Color {
     use_context::<Theme>()
         .unwrap_or_else(Theme::glyph_baseline)
@@ -233,8 +233,8 @@ fn demo_modal() -> FlexChild<CatalogState> {
 }
 
 /// See `overlays.rs`'s twin: bottom-pinned, full width on phones, capped at
-/// 640dp + centered on larger screens (M3/Flutter convention; Ed's
-/// device-gate round 3). The glyph_card supplies the panel surface.
+/// 640dp + centered on larger screens (M3/Flutter convention, device-gate
+/// verified). The glyph_card supplies the panel surface.
 fn sheet_scaffold(panel: AnyView<CatalogState>) -> AnyView<CatalogState> {
     any(Align(
         Alignment { x: 0.0, y: 1.0 },

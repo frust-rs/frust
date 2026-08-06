@@ -1,4 +1,4 @@
-//! Overlays section (`c07`, reference §07): "Only one floating layer at a
+//! Overlays section (reference §07): "Only one floating layer at a
 //! time" — a confirmation dialog, the signature amber-ring command palette
 //! (with a live substring filter), and the Glyph modal bottom sheet
 //! (`frust::glyph::sheet`) holding the reference build's own pane-picker demo.
@@ -14,8 +14,8 @@
 //! survive across those re-invocations, so — mirroring the Huddle showcase's
 //! `workspace_drawer::entrance_progress` precedent — they live behind a
 //! self-healing `thread_local!` cache ([`demo_state`]) instead of a new field
-//! on the shared [`CatalogState`] (out of this task's scope: `src/pages/overlays.rs`
-//! only, see the task file's Hard rules).
+//! on the shared [`CatalogState`] (scoped to this page: `src/pages/overlays.rs`
+//! only).
 
 use std::cell::Cell;
 
@@ -34,8 +34,8 @@ use crate::CatalogState;
 /// Muted subhead ink (Glyph dark `fg-muted`), matching the reference build's
 /// `.subhead` treatment for each overlay's label.
 /// Live-theme muted-text role (`on_surface_variant`) (falls back to the Glyph baseline pre-context, mirroring
-/// `navigation.rs`'s `accent()` — round-0 review: hardcoded dark-only hexes
-/// broke AA under the Light toggle).
+/// `navigation.rs`'s `accent()` — hardcoded dark-only hexes broke AA under
+/// the Light toggle).
 fn subhead_ink() -> Color {
     use_context::<Theme>()
         .unwrap_or_else(Theme::glyph_baseline)
@@ -45,8 +45,8 @@ fn subhead_ink() -> Color {
 /// Result-caption ink (Glyph dark accent `#ffb627`) — the same amber used for
 /// the app title in `crate::header_row`.
 /// Live-theme accent-text role (`primary`) (falls back to the Glyph baseline pre-context, mirroring
-/// `navigation.rs`'s `accent()` — round-0 review: hardcoded dark-only hexes
-/// broke AA under the Light toggle).
+/// `navigation.rs`'s `accent()` — hardcoded dark-only hexes broke AA under
+/// the Light toggle).
 fn caption_ink() -> Color {
     use_context::<Theme>()
         .unwrap_or_else(Theme::glyph_baseline)
@@ -231,7 +231,7 @@ fn open_palette_button(
 
 /// The pane-picker rows from the motion reference build's own bottom-sheet
 /// demo (glyph-motion.html §06) — reused here as content, not the transition
-/// itself (`c08` owns the motion-pattern showcase).
+/// itself (the motion page owns the motion-pattern showcase).
 const SHEET_ROWS: [(&str, &str); 4] = [
     ("▣", "Split pane right"),
     ("▤", "Split pane down"),
@@ -252,9 +252,8 @@ fn sheet_row(glyph: &str, label: &str) -> FlexChild<CatalogState> {
 }
 
 /// The sheet's content: a heading, the four pane-picker rows, and a Close
-/// button that pops the navigator (the task's "close button pops"
-/// requirement) — in addition to the sheet's own scrim tap/handle drag/
-/// Escape/back dismiss vectors.
+/// button that pops the navigator — in addition to the sheet's own scrim
+/// tap/handle drag/Escape/back dismiss vectors.
 fn sheet_body(nav: NavigatorController<CatalogState>) -> AnyView<CatalogState> {
     let mut children: Vec<FlexChild<CatalogState>> = vec![
         inflexible(text("Pane picker".to_string()).size(13.5)),

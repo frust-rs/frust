@@ -122,8 +122,8 @@ fn setup_with_theme(brightness: Brightness) -> (Owner, Theme) {
     // (`root.set_theme(Box::new(theme))`): `provide_context` only serves
     // app-code `use_context` reads; every widget-internal color resolves from
     // the LayoutCtx/PaintCtx theme the shell threads via `set_theme`
-    // (docs/ARCHITECTURE.md's Theme delivery). Round-1 review: without this
-    // the brightness sweep silently exercised unthemed dark fallbacks.
+    // (docs/ARCHITECTURE.md's Theme delivery). Without this the brightness
+    // sweep silently exercised unthemed dark fallbacks.
     (owner, theme)
 }
 
@@ -256,8 +256,8 @@ fn every_page_mounts_at_every_size_and_brightness() {
     }
 }
 
-/// Round-1 review Major 2: the brightness sweep must actually verify COLOR
-/// values, not just paint counts — a page that hardcoded its dark-mode text
+/// The brightness sweep must actually verify COLOR values, not just paint
+/// counts — a page that hardcoded its dark-mode text
 /// colors would paint an identical color set under both brightnesses. Every
 /// page carries at least one theme-resolved text role (headings resolve
 /// `primary`, captions `on_surface_variant`), so the per-page painted color

@@ -230,10 +230,10 @@ fn emoji_button(scene: &RecScene) -> Point {
 }
 
 /// The topmost (other-user) message row's leading avatar tile — the leftmost
-/// small rounded rect in the feed content region. As of device-parity-round2
-/// task R2 the feed rows are FLAT (no `filled_card`/`elevated_card` bubble
-/// background), so the row's only recorded rounded chrome is its 40px avatar
-/// disc; it is the row anchor a long-press target is derived from.
+/// small rounded rect in the feed content region. The feed rows are FLAT (no
+/// `filled_card`/`elevated_card` bubble background), so the row's only
+/// recorded rounded chrome is its 40px avatar disc; it is the row anchor a
+/// long-press target is derived from.
 fn first_avatar_rect(scene: &RecScene) -> (Point, Size) {
     scene
         .rounded
@@ -245,7 +245,7 @@ fn first_avatar_rect(scene: &RecScene) -> (Point, Size) {
 }
 
 /// A safe long-press target inside the topmost message's flat content column —
-/// to the right of its avatar (task R2 rows are flat, so this is anchored off
+/// to the right of its avatar (the rows are flat, so this is anchored off
 /// the avatar rather than a bubble card that no longer paints).
 fn first_bubble(scene: &RecScene) -> Point {
     let (o, s) = first_avatar_rect(scene);
