@@ -10,145 +10,125 @@
 //! [`TextEditor`] — set-if-different, preserving the selection while the text is
 //! unchanged.
 //!
-//! [`TextInputView::text_style`] sets the content text's style
-//! (family/weight/style/size/letter-spacing/line-height, plus color when set
-//! explicitly) and never touches the chrome colors or geometry (see *Chrome*).
-//! Mirroring [`Text`](crate::TextView)'s
-//! [`effective_style`](TextInputWidget::effective_style), an app that did **not**
-//! call `.text_style(...)` gets the theme's `on_surface` role resolved at LAYOUT
+//! [`TextInputView::text_style`] sets the content text's style (family/weight/
+//! style/size/letter-spacing/line-height, plus color when set explicitly) and
+//! never touches the chrome colors or geometry (see *Chrome*). Mirroring
+//! [`Text`](crate::TextView)'s [`effective_style`](TextInputWidget::effective_style),
+//! a field that did not call `.text_style(...)` gets `on_surface` resolved at LAYOUT
 //! time — where `TextInput`, like `Text`, bakes color into the shaped editor
-//! state — falling back to black with no theme threaded; explicit > theme >
+//! state — falling back to black with no theme threaded: explicit > theme >
 //! black. Baked-at-layout resolution is safe only under the `set_theme` →
-//! `ChangeFlags::LAYOUT` contract (`docs/CODE_STANDARDS.md`'s Theming
-//! conventions), which `RenderRoot::set_theme` guarantees.
+//! `ChangeFlags::LAYOUT` contract (`docs/CODE_STANDARDS.md` Theming), which
+//! `RenderRoot::set_theme` guarantees.
 //!
 //! # Text context ownership
 //!
 //! Unlike the [`Text`](crate::TextView) leaf (which shapes against the shared
 //! `TextContext` threaded through `LayoutCtx`), a `TextInput` must apply edits
-//! *synchronously during the event pass*, where no context is threaded. It
-//! therefore owns its own [`TextContext`], so `on_change` and the published
-//! [`ImeState`] observe the fresh editing value immediately and layout needs no
-//! threaded context (it reads the editor's own refreshed metrics).
+//! *synchronously during the event pass*, where no context is threaded, so it owns
+//! its own [`TextContext`]: `on_change` and the published [`ImeState`] observe the
+//! fresh editing value at once, and layout needs no threaded one.
 //!
-//! **App fonts still reach it.** A private context is not a private font set:
-//! `TextContext::new` seeds itself from `frust-text`'s process-wide app-font
-//! record, where every `frust::register_app_fonts` payload lands when the shell
-//! drains it, so a field built after a design system installed its fonts shapes
-//! with them exactly like [`Text`](crate::TextView). A font registered *later* (a
-//! shell's per-frame late drain) is picked up by `TextContext::sync_app_fonts` at
-//! the top of [`Widget::layout`], which rebuilds the editor so its retained
-//! parley layout re-shapes too — the shape cache alone would not cover it.
+//! **App fonts still reach it.** `TextContext::new` seeds from `frust-text`'s
+//! process-wide app-font record, where every `frust::register_app_fonts` payload
+//! lands when the shell drains it. A font registered *later* is picked up by
+//! `TextContext::sync_app_fonts` at the top of [`Widget::layout`], which rebuilds
+//! the editor so its retained parley layout re-shapes too — the shape cache
+//! alone would not cover it.
 //!
 //! # Focus, IME and blink
 //!
 //! A `Down` inside the field requests focus, places the caret, and publishes an
-//! [`ImeState`] (the focus/IME channel, see `docs/CORE_ARCHITECTURE.md`'s
-//! Focus/IME Lifecycle) so the shell can drive the platform input method.
-//! Keyboard editing (`Key`) and IME composition/state-sync (`Ime`) route down the
-//! focus path; after any edit the widget fires `on_change`, resets the caret to
+//! [`ImeState`] so the shell can drive the platform input method — the focus/IME
+//! channel `docs/CORE_ARCHITECTURE.md`'s Focus/IME Lifecycle owns. Keyboard
+//! editing (`Key`) and IME composition/state-sync (`Ime`) route down the focus
+//! path; after any edit the widget fires `on_change`, resets the caret to
 //! visible, and republishes the IME surface.
 //!
 //! The caret blinks while focused, its phase measured in `paint` from the shell
 //! frame clock ([`PaintCtx::frame_time`] — no wall-clock reads in widget code).
 //! Its continuation frame is a paced (`CosmeticLoop`) request at the blink's own
-//! [`BLINK_MS`] half-period ([`PaintCtx::request_frame_paced_at`]): the
-//! classification every decorative loop uses, but naming its own slower cadence
-//! rather than the theme's cap rate, since one paint per visibility toggle is all
-//! a 500ms blink needs. A concurrent cap-rate request (a shimmer sharing the
-//! frame) still repaints it more often through the MIN-lattice, with no visible
-//! effect — safe at any cadence because the phase is `frame_time - blink_epoch`
-//! ([`caret_visible_at`](TextInputWidget::caret_visible_at)), a pure function of
-//! this frame's own timestamp rather than of a delta between painted frames. An
-//! edit/focus during the (clockless) event pass flags the blink for reset; the
-//! next paint records the epoch from `frame_time`.
+//! [`BLINK_MS`] half-period ([`PaintCtx::request_frame_paced_at`]) — its own
+//! slower cadence rather than the theme's cap rate, one paint per visibility
+//! toggle being all a 500ms blink needs. A concurrent cap-rate request repaints it
+//! more often through the MIN-lattice with no visible effect, safe at any cadence
+//! because the phase is `frame_time - blink_epoch`
+//! ([`caret_visible_at`](TextInputWidget::caret_visible_at)) — a pure function of
+//! this frame's own timestamp, not of a delta between painted frames. An
+//! edit/focus during the (clockless) event pass flags the blink for reset, the
+//! next paint recording the epoch from `frame_time`.
 //!
 //! `reduce_motion` freezes the caret **visible** (lit, not hidden) rather than
 //! mid-blink, and stops requesting blink frames while focused: unlike a purely
-//! decorative loop the caret is also the edit-point cue, so freezing it dark would
-//! hide where typing lands. The IME surface still republishes every painted frame
-//! regardless, and blinking resumes on the next painted frame once the token
-//! clears.
+//! decorative loop the caret is also the edit-point cue, so freezing it dark
+//! would hide where typing lands. The IME surface republishes every painted frame
+//! regardless, and blinking resumes once the token clears.
 //!
 //! # Multi-line mode
 //!
 //! [`TextInputView::multiline(max_visible_lines)`](TextInputView::multiline)
-//! switches the field into a wrapped multi-line mode: the layout width from the
-//! incoming constraints is fed to the editor as a soft-wrap width (see
-//! `TextEditor::set_wrap_width`), so the field grows vertically one line at a time
-//! as content wraps or newlines are inserted, capped at `max_visible_lines`. Past
-//! the cap the box height is frozen and the text scrolls vertically by a simple
-//! **keep-caret-in-view** paint offset, recomputed statelessly each pass from the
-//! caret's line rect (`ScrollView`-style composition, momentum and a scrollbar are
-//! deliberately out of scope); a rectangular clip keeps the overflow inside.
+//! feeds the layout width from the incoming constraints to the editor as a
+//! soft-wrap width (`TextEditor::set_wrap_width`), so the field grows vertically
+//! one line at a time as content wraps or newlines are inserted, capped at
+//! `max_visible_lines`. Past the cap the box height freezes and the text scrolls
+//! vertically by a **keep-caret-in-view** paint offset recomputed statelessly
+//! each pass from the caret's line rect (momentum and a scrollbar are out of
+//! scope), a rectangular clip keeping the overflow inside.
 //!
-//! Enter behavior is governed by
-//! [`submit_on_enter`](TextInputView::submit_on_enter): `true` (the single-line
-//! default) fires `on_submit`, `false` (the multi-line default) inserts a literal
-//! newline, and **Shift+Enter always does the opposite of the mode's default**
-//! (the `Key` surface exposes modifiers). A single-line field ignores the knob and
-//! always submits. On the mobile IME path a Return arrives as a `Commit("\n")`:
-//! single-line and submit-on-enter fields treat it as submit, a newline-inserting
-//! multi-line field inserts the literal newline.
+//! Enter is governed by [`submit_on_enter`](TextInputView::submit_on_enter):
+//! `true` (the single-line default) fires `on_submit`, `false` (the multi-line
+//! default) inserts a literal newline, and **Shift+Enter always does the opposite
+//! of the mode's default** (a single-line field ignores the knob and always
+//! submits). On the mobile IME path a Return arrives as a `Commit` of a newline,
+//! which submit-on-enter fields submit and a newline-inserting one inserts.
 //!
 //! # Disabled mode
 //!
 //! [`TextInputView::enabled(false)`](TextInputView::enabled) makes the field
 //! inert and dims it. Inertness hangs off **one** hook, the focus gate: a `Down`
-//! inside a disabled field neither requests focus nor captures the pointer, and
-//! since `Key`/`Ime` only reach a widget along the recorded focus path, refusing
-//! focus makes keyboard and IME editing impossible without a single
-//! `if disabled { return }` inside [`handle_key`]/[`handle_ime`]. A field disabled
-//! *while* focused releases the focus path on the first event that reaches it and
-//! stops behaving as focused (no caret, no blink frame, no active IME surface)
-//! from the very next paint — see [`Widget::paint`].
+//! in a disabled field neither requests focus nor captures the pointer, and since
+//! `Key`/`Ime` reach a widget only along the recorded focus path, refusing focus
+//! makes keyboard and IME editing impossible with no per-handler guard. A field
+//! disabled *while* focused releases the focus path on the first event reaching
+//! it and stops behaving as focused (no caret, no blink frame, no active IME
+//! surface) from the very next paint.
 //!
 //! Dimming multiplies the *resolved* role color's alpha rather than swapping in a
 //! dedicated "disabled" token, at **both** resolution points (the layout-baked
 //! glyph color in [`effective_style`](TextInputWidget::effective_style) and the
-//! paint-time [`Chrome`]), so it behaves identically under Material, Cupertino,
-//! Glyph and the unthemed fallbacks. That matters: `on_surface_variant` is opaque
-//! under Material/Glyph but translucent under Cupertino (`frust-theme`'s
-//! `ColorScheme` Cupertino arm, `secondaryLabel` at alpha 153), so it is *not* a
-//! portable disabled token. Dimming is keyed **strictly** off
-//! [`TextInputView::enabled`] at both points — see the next section for the
-//! sibling flag that intentionally does not dim.
+//! paint-time [`Chrome`]), so it behaves identically under every catalog and the
+//! unthemed fallbacks: `on_surface_variant` is opaque under Material/Glyph but
+//! translucent under Cupertino (`frust-theme`'s `ColorScheme` Cupertino arm,
+//! `secondaryLabel` at alpha 153), so it is *not* a portable disabled token, and
+//! it is keyed **strictly** off [`TextInputView::enabled`] at both points.
 //!
 //! # Read-only mode
 //!
 //! [`TextInputView::read_only(true)`](TextInputView::read_only) makes the field
 //! non-interactive **without** dimming it — the presentation `enabled(false)`
 //! cannot express, since disabled conflates two orthogonal questions
-//! (interactive? / dimmed?) a static-but-live-styled mock must keep apart: a
-//! splash screen's frozen preview of a field that goes live later must not pop
-//! from dimmed to full alpha at the handoff.
+//! (interactive? / dimmed?) a static-but-live-styled mock must keep apart (a
+//! splash screen's frozen preview must not pop to full alpha when it goes live).
 //!
-//! Non-interactivity reuses `enabled(false)`'s one suppression hook, the focus
-//! gate, rather than adding a parallel path: [`TextInputWidget::interactive`] is
-//! `enabled && !read_only`, and every gate (the top of [`Widget::event`], the
-//! focused-while-painting check, the disabled-while-focused IME-dismiss branch)
-//! reads it, so a field turned read-only while focused releases focus and
-//! dismisses the platform IME exactly like one turned disabled — same code path,
-//! same guarantees. **Dimming stays keyed to `enabled` alone**, never
+//! Non-interactivity reuses that same focus gate rather than a parallel path:
+//! [`TextInputWidget::interactive`] is `enabled && !read_only`, and every gate
+//! (the top of [`Widget::event`], the focused-while-painting check, the
+//! disabled-while-focused IME-dismiss branch) reads it, so a field turned
+//! read-only while focused releases focus and dismisses the platform IME exactly
+//! like one turned disabled. **Dimming stays keyed to `enabled` alone**, never
 //! `interactive`: both resolution points ([`Chrome::resolve`] and
-//! [`effective_style`](TextInputWidget::effective_style)) branch on `enabled`, so
-//! `read_only(true)` with `enabled(true)` paints at full alpha while
-//! `enabled(false)` dims exactly as it otherwise would.
+//! [`effective_style`](TextInputWidget::effective_style)) branch on `enabled`.
 //!
 //! **Semantics.** Read-only is a real accessibility distinction from disabled —
-//! accesskit exposes both node states and a screen reader announces them
-//! differently (disabled: nothing to interact with at all; read-only: present and
-//! readable, just not editable). [`Widget::semantics`] reports `set_disabled()`
-//! only when `!enabled` and `set_read_only()` when `enabled && read_only` — never
-//! both, and never by omitting the node (`docs/CODE_STANDARDS.md`'s Semantics
-//! Conventions: a widget with something to say about itself keeps its node).
+//! a screen reader announces them differently — so [`Widget::semantics`] reports
+//! `set_disabled()` only when `!enabled` and `set_read_only()` when
+//! `enabled && read_only`, never both, and never by omitting the node
+//! (`docs/CODE_STANDARDS.md` Semantics: a node with something to say keeps it).
 //!
 //! Read-only is orthogonal to [`obscured`](TextInputView::obscured) — never
 //! touching masking, the mirror or the published `ImeContentType` hint, so a
 //! read-only obscured field still reports `Role::PasswordInput` with a masked
-//! a11y value, it just never focuses (and so never publishes an *active* IME
-//! surface to race the hint against) — and to the *Chrome* geometry setters,
-//! which read identically regardless of `enabled`/`read_only`/`obscured`.
+//! a11y value, it just never focuses — and to the *Chrome* geometry setters.
 //!
 //! # Obscured (password) mode
 //!
@@ -156,7 +136,7 @@
 //! glyphs with U+2022 BULLET. The [`TextEditor`]'s model text stays **real** —
 //! every edit, selection, IME sync and `on_change` runs against the true buffer —
 //! while the masked mirror lives in a parallel [`TextEditor`] (`mask_editor`).
-//! That mirror, not the real editor, is measured, painted and hit-tested, because
+//! That mirror, not the real editor, is measured, painted and hit-tested, since
 //! masking only at glyph-emission time would leave the layout (and so the caret
 //! rect, the field width and the pointer hit test) measured from the real text.
 //! The mirror is a pure function of the real editing state, recomputed after every
@@ -164,52 +144,41 @@
 //! two-string walk ([`real_to_masked`]/[`masked_to_real`]) and a multi-byte
 //! grapheme masks to exactly one bullet.
 //!
-//! **Scope boundary.** Obscuring is visual masking plus accessibility (a
-//! [`Role::PasswordInput`] semantics node) plus an IME content-type hint:
-//! `obscured(true)` publishes [`ImeContentType::Password`] on
-//! [`ImeState::content_type`], computed live on every publication (event pass,
-//! paint-pass republish, disabled-while-focused release), so a newly focused
-//! obscured field never has a window where it publishes `Normal`. The published
-//! [`ImeState`] still carries the **real** text (the platform IME mirror requires
-//! it — see [`ImeState`]'s docs); the hint, not redaction, is what is supposed to
-//! keep the platform's suggestion strip and learned-word dictionary from seeing
-//! it, and **that guarantee is only as good as the shells honouring the hint** —
-//! this widget cannot prove the on-screen keyboard switches to secure entry, only
-//! that it asks. There is no builder for a different content type: `obscured` is
-//! the field's sole content-type signal, deliberately narrow (see
-//! [`ImeContentType`]'s docs on why a shell must not fall back to non-secret
-//! behaviour for an unrecognized variant).
+//! **Scope boundary.** Obscuring is visual masking plus a [`Role::PasswordInput`]
+//! semantics node plus an IME content-type hint: `obscured(true)` publishes
+//! [`ImeContentType::Password`] on [`ImeState::content_type`], computed live on
+//! every publication (event pass, paint-pass republish, disabled-while-focused
+//! release), so a newly focused obscured field never has a window where it
+//! publishes `Normal`. The published [`ImeState`] still carries the **real** text
+//! (the platform IME mirror requires it), and the hint, not redaction, is what is
+//! supposed to keep the platform's suggestion strip and learned-word dictionary
+//! from seeing it — **a guarantee only as good as the shells honouring the
+//! hint**, which this widget can ask for but never prove. `obscured` is the
+//! field's sole content-type signal (see [`ImeContentType`] on why a shell must
+//! not fall back to non-secret behaviour for an unrecognized variant).
 //!
 //! # Chrome
 //!
 //! The field's chrome **colors** (background/border/focus-accent/placeholder/
 //! selection/caret) resolve from the active [`Theme`]'s `ColorScheme` (see
-//! [`Chrome::resolve`]), so an app restyles them the way every other themed
-//! widget is restyled — by installing a different `Theme`. Its **geometry**
-//! ([`PAD_X`]/[`PAD_Y`] inner padding, [`BORDER_W`] border thickness, [`RADIUS`]
-//! corner radius, [`CARET_W`] caret width) is instead reachable per-instance,
-//! through [`TextInputView::padding`], [`TextInputView::border_width`],
-//! [`TextInputView::corner_radius`] and [`TextInputView::caret_width`]; each
-//! defaults to the constant it overrides, so a field calling none of them renders
-//! exactly as the defaults do. Colors stay theme-only: the seam closes the sizing
-//! gap beside `Chrome::resolve`, it does not duplicate its job.
+//! [`Chrome::resolve`]), so an app restyles them by installing a different
+//! `Theme`. Its **geometry** ([`PAD_X`]/[`PAD_Y`] inner padding, [`BORDER_W`]
+//! border thickness, [`RADIUS`] corner radius, [`CARET_W`] caret width) is
+//! instead reachable per-instance, through [`TextInputView::padding`] and its
+//! `border_width`/`corner_radius`/`caret_width` siblings; each defaults to the
+//! constant it overrides, so a field calling none renders exactly as the defaults
+//! do. Colors stay theme-only; geometry is builder-set rather than tokenized
+//! because
+//! [`PAD_X`]/[`CARET_W`] are read from the **event pass**
+//! ([`TextInputWidget::editor_point`], [`TextInputWidget::current_ime_state`]),
+//! which threads no `Theme` — `docs/CODE_STANDARDS.md` Theming cites these very
+//! constants as that precedent — so a token would duplicate them anyway.
 //!
-//! **Why builder setters, not new `Theme` tokens.** No built-in catalog wraps
-//! `TextInput` in a themed "text field" component (all three embed the bare
-//! [`text_input`] view), and `frust-theme::ShapeScale` specifies a corner-radius
-//! scale only — a geometry token family nothing else reads is the "tokens nothing
-//! reads" trap. Decisively, [`PAD_X`]/[`CARET_W`] are read from the **event pass**
-//! ([`TextInputWidget::editor_point`]/[`TextInputWidget::current_ime_state`]),
-//! which carries no threaded `Theme` (`docs/CODE_STANDARDS.md`'s Theming
-//! conventions cite these very constants as that precedent), so a token
-//! implementation would have to duplicate the geometry outside `Theme` anyway.
-//!
-//! **Focus treatment.** The focused state is an accent-colored border, with no
+//! **Focus treatment.** The focused state is an accent-colored border, no
 //! separate halo/glow. [`TextInputView::focus_ring_width`] is the one escape hatch
 //! on top — an optional border width used only while focused, defaulting to the
-//! idle width (no visual change) — so an app reaches the "thicker,
-//! differently-colored focus outline" look via a theme's `primary` role without
-//! this widget growing a soft-glow primitive it does not otherwise have.
+//! idle width — so an app reaches the "thicker, differently-colored focus outline"
+//! look via a theme's `primary` role without a soft-glow primitive here.
 
 use std::rc::Rc;
 use std::time::Duration;
