@@ -116,9 +116,9 @@
 //! accented part on an otherwise neutral surface (`Switch`/`Slider`'s
 //! thumb) is `primary` (never `primary_container`); conflating the two is
 //! the catalog's most common accent bug, and this module is the one place
-//! this plugin resolves either role. **Precedence**: *explicit builder value
-//! > theme > fallback* — no builder method sets a competing explicit
-//! colour/radius/size yet, so this module folds theme tokens
+//! this plugin resolves either role. **Precedence**:
+//! *explicit builder value > theme > fallback* — no builder method sets a
+//! competing explicit colour/radius/size yet, so this module folds theme tokens
 //! unconditionally; a future `.text_color()`/`.background_color()` override
 //! must thread its value through [`resolve`]'s callers ahead of the theme,
 //! not into this module.
