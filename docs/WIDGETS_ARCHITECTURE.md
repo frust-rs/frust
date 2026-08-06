@@ -16,8 +16,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how WIDGETS relates to the other unit
 | Module | Responsibility |
 |--------|-----------------|
 | `frust-widgets::authoring` | Public container/callback toolkit every widget in the crate builds from, instead of touching `frust-core` primitives directly — reachable by app code as `frust::authoring` (the facade's re-export, CORE unit); the toolkit itself is unchanged |
-| `frust-widgets` (baseline) | Baseline layout containers and interactive leaf widgets (text, forms, gestures, scrolling) |
-| `frust-widgets::material` | Material 3 (+Expressive) widget catalog |
+| `frust-widgets` (baseline) | Baseline layout containers and interactive leaf widgets (text, forms, gestures, scrolling, a virtualized `ListView`) |
+| `frust-widgets::material` | Material 3 (+Expressive) widget catalog (plus a deprecated `list_view` compatibility shim — `ListView` itself lives in the baseline set, see *Virtualized ListView* below) |
 | `frust-widgets::cupertino` | iOS-styled widget catalog painting from `Theme.glass`, degrading to opaque fill when unsupported |
 | `frust-widgets::glyph` | Third token-driven catalog shaping glyph runs directly rather than nesting `Text` |
 | `frust-widgets::motion` | Implicit-animation and transition-pattern vocabulary |
@@ -123,6 +123,7 @@ module; an app can disable all three to build its own design system on the same 
 | authoring module (`build_child`/`rebuild_child`/`teardown_child`/`rebuild_children`, `route_event`) | The sanctioned seam for authoring any widget against `frust-core` |
 | `Navigator` / `Router` / `hero()` | Page-stack and declarative routing plus shared-element transitions |
 | `ButtonStyle`, `ScrollInfo`, `IconData`/`IconSource`, `ImageSource`/`ImageFit` | Small per-widget config/state types shared across the baseline widget set |
+| `ListView` / `ListViewWidget` | Baseline virtualized list: windowed rebuild-time materialization, positional or keyed (`ChildKey`) row identity, optional variable extents, refresh/overscroll parity with `ScrollView` |
 | `NavigatorController::transition()` / `TransitionState` / `PageVisibility` | Navigation state observation seams |
 | `RouteNavigator` / `NavRequest` | Off-thread-safe navigation handle (Arc-backed plain data, no reactive types) |
 
@@ -144,6 +145,50 @@ set by modifying the script's source list, not the generated output.
 `TextInput`'s live-edited text is always start-aligned, regardless of `TextStyle::align`, because
 parley's `PlainEditor` exposes no text-alignment hook. This is a parley limitation, not a frust
 design decision; users cannot work around it per-field. `TextView` does honor `align`.
+
+### Virtualized ListView (baseline)
+`ListView`/`ListViewWidget`/`list_view()` live in `frust-widgets` proper (`list_view.rs`), not a
+design-system catalog — the facade re-exports them unconditionally, so a `no-catalogs` build
+compiles it. `frust-widgets::material::list_view` remains only as a deprecated compatibility shim
+(individually `#[deprecated]` type aliases/fn, not a re-exported module) so an existing
+`material::list_view::…` call site keeps resolving; new code uses the baseline path.
+
+Each frame's `rebuild` reads the retained widget's own scroll offset and cached viewport to
+materialize only the visible window (plus a small buffer) — the only `View` in the framework that
+reads retained element state during `rebuild`. Layout only measures pods that already exist and
+paint builds nothing, so the row-builder closure never runs outside `rebuild` — the same invariant
+every other widget upholds, exercised here against a windowed rather than fixed child set.
+
+**Two row-identity models.** `ListView::builder` reconciles rows by raw index — correct for
+append-only, truncate-only, or full-replace data, but a mid-list insert/remove/reorder silently
+reattaches a row's retained state to whatever now sits at that index. `ListView::builder_keyed`
+adds a `ChildKey` per row (the same identity `keyed()` uses for `Flex`, see CODE_STANDARDS.md) so
+state follows the row through a mutation instead; a keyed list additionally re-anchors its scroll
+offset in `rebuild`, before windowing, so a prepend/removal above the viewport never visibly jumps
+the content the user is looking at **when the mutation is single-sided** — a same-frame mutation on
+both sides of the anchor (e.g. a prepend above *and* an append below in one frame) can still miss
+the anchor-shift correction itself, a documented, deferred gap (`list_view.rs`'s module doc, *Cache
+hygiene*). Unlike `Flex`'s keyed reconciler, a duplicate key on `ListView`
+`debug_assert!`s but has **no positional fallback** in release — the first slot claiming a key wins
+deterministically, later duplicates rebuild fresh.
+
+**Variable extents are keyed-only.** `.estimated_item_extent(px)` switches a keyed list from the
+closed-form uniform path to a measured-by-key extent cache (an estimate for unvisited rows, the
+row's own layout height once visited); calling it on a positional list `debug_assert!`s and is
+inert in release. A measurement that revises a row's height above the viewport's top edge is
+corrected through the same rebuild-time anchoring path — recorded at layout, committed on the
+following rebuild so the anchor row never visibly moves. A correction observed mid-fling
+accumulates and commits only once the fling settles, so it never fights the fling pump.
+
+**Refresh/overscroll parity with ScrollView.** `on_refresh_release` and drag rubber-band overscroll
+share `scroll.rs`'s `pub(crate)` resistance/trigger/settle constants with `ScrollView` verbatim, so
+`ScrollView` is no longer the framework's only pull-to-refresh-capable widget.
+
+Virtualization exists because eager materialization doesn't scale: an in-repo host bench
+(`crates/frust-widgets/tests/list_virtualization_bench.rs`) shows `ListView`'s rebuild+layout cost
+staying flat against item count while an eagerly-built `ScrollView`+`Column` scales roughly
+linearly; a CI-durable structural assertion in the same file pins the windowed-materialization fact
+itself (not the timing) at `N = 10,000`.
 
 ### Recent Additions (Batch 2)
 **Navigator observation:** `TransitionState` and `PageVisibility` seams; `overlay_host()` constructor;

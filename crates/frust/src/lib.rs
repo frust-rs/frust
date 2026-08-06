@@ -100,13 +100,13 @@ pub use frust_widgets::{
     Align, AlignView, Alignment, Axis, BackPolicy, Button, ButtonStyle, ButtonView, Checkbox,
     CheckboxView, ChildKey, Column, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView,
     GestureDetector, GestureDetectorView, HeroView, Icon, IconData, IconSource, IconView,
-    IconWidget, Image, ImageError, ImageFit, ImageSource, ImageView, MainAxisAlignment,
-    NavigatorController, NavigatorId, NavigatorView, Padding, PaddingView, PageBuilder,
-    PageTransition, PageVisibility, PopResult, PushOptions, Radio, RadioView, RadioWidget,
-    ResultCallback, Row, SafeAreaView, ScrollInfo, ScrollView, SizedBox, SizedBoxView, Slider,
-    SliderView, Stack, StackView, TextInput, TextInputView, TextView, Timing, TransitionSpec,
-    TransitionState, VisibilityCallback, button, checkbox, flexible, hero, icon, inflexible, keyed,
-    radio, safe_area, scroll_view, slider, text, text_input,
+    IconWidget, Image, ImageError, ImageFit, ImageSource, ImageView, ListView, ListViewWidget,
+    MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView, Padding, PaddingView,
+    PageBuilder, PageTransition, PageVisibility, PopResult, PushOptions, Radio, RadioView,
+    RadioWidget, ResultCallback, Row, SafeAreaView, ScrollInfo, ScrollView, SizedBox, SizedBoxView,
+    Slider, SliderView, Stack, StackView, TextInput, TextInputView, TextView, Timing,
+    TransitionSpec, TransitionState, VisibilityCallback, button, checkbox, flexible, hero, icon,
+    inflexible, keyed, list_view, radio, safe_area, scroll_view, slider, text, text_input,
 };
 
 /// Platform-view embedding (platform-views feature, tasks 02/07): reserve
@@ -248,7 +248,7 @@ pub use frust_widgets::{
 pub use frust_widgets::nav::transition::{TransitionDriver, make_driver, resolve_spec};
 
 /// The Material 3 Expressive widget catalog: AppBar,
-/// Card, Chips, Dialog, FAB, ListView/ListItem, NavigationBar, BottomSheet,
+/// Card, Chips, Dialog, FAB, ListItem, NavigationBar, BottomSheet,
 /// Switch, and progress indicators — flat-re-exported from
 /// `frust-widgets` so app code (e.g. `examples/catalog`) never names that
 /// crate directly, mirroring the baseline-widget re-export block above.
@@ -264,15 +264,15 @@ pub use frust_widgets::{
     CircularProgressWidget, DialogView, DialogWidget, DockedToolbar, FabMenu, FabMenuItem,
     FabMenuView, FabMenuWidget, FabSize, FabView, FabWidget, FilterChip, FilterChipView,
     FilterChipWidget, FloatingToolbar, LinearProgress, LinearProgressView, LinearProgressWidget,
-    ListItem, ListItemLines, ListItemWidget, ListView, ListViewWidget, LoadingIndicator,
-    LoadingIndicatorView, LoadingIndicatorWidget, NavItem, NavigationBar, NavigationBarView,
-    NavigationBarWidget, ONE_LINE_HEIGHT, ProgressValue, RoundedPolygon, SplitButton,
-    SplitButtonView, SplitButtonWidget, Switch, SwitchView, SwitchWidget, THREE_LINE_HEIGHT,
-    TWO_LINE_HEIGHT, ToolbarVariant, ToolbarView, ToolbarWidget, app_bar, assist_chip,
-    bottom_sheet, button_group, card, circular_progress, dialog, docked_toolbar, elevated_card,
-    extended_fab, fab, fab_menu, fab_menu_item, filled_card, filter_chip, floating_toolbar,
-    linear_progress, list_item, list_view, loading_indicator, morph_path, nav_item, navigation_bar,
-    outlined_card, show_bottom_sheet, show_dialog, split_button, switch,
+    ListItem, ListItemLines, ListItemWidget, LoadingIndicator, LoadingIndicatorView,
+    LoadingIndicatorWidget, NavItem, NavigationBar, NavigationBarView, NavigationBarWidget,
+    ONE_LINE_HEIGHT, ProgressValue, RoundedPolygon, SplitButton, SplitButtonView,
+    SplitButtonWidget, Switch, SwitchView, SwitchWidget, THREE_LINE_HEIGHT, TWO_LINE_HEIGHT,
+    ToolbarVariant, ToolbarView, ToolbarWidget, app_bar, assist_chip, bottom_sheet, button_group,
+    card, circular_progress, dialog, docked_toolbar, elevated_card, extended_fab, fab, fab_menu,
+    fab_menu_item, filled_card, filter_chip, floating_toolbar, linear_progress, list_item,
+    loading_indicator, morph_path, nav_item, navigation_bar, outlined_card, show_bottom_sheet,
+    show_dialog, split_button, switch,
 };
 
 /// The Cupertino (iOS) widget catalog: the
