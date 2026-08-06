@@ -22,48 +22,42 @@
 //!
 //! Every action below packs its payload through the SAME primitive codec
 //! Android's listener uses ([`crate::events`]'s `pack_bool`/
-//! `pack_value_changed`, and the shared `EVENT_KIND_*` constants), and every
-//! control's Apple `on_event` calls the exact SAME decode function its
-//! Android counterpart does (`crate::events::decode_click`,
-//! `super::decode_toggled`, `super::decode_event` — see `controls/button.rs`/
-//! `switch.rs`/`slider.rs`'s Apple `on_event` impls). Parity therefore isn't
-//! a property this module has to assert; it falls out of both platforms
-//! funnelling into one shared decoder per control.
+//! `pack_value_changed`, and the shared `EVENT_KIND_*` constants) — bit-packed
+//! `i32`/`i64` primitives, not JSON, on this hot path (unlike `create`/
+//! `update`'s `params_json`). Every control's Apple `on_event` calls the
+//! exact SAME decode function its Android counterpart does
+//! (`crate::events::decode_click`, `super::decode_toggled`,
+//! `super::decode_event` — see `controls/button.rs`/`switch.rs`/`slider.rs`'s
+//! Apple `on_event` impls). Parity therefore isn't a property this module has
+//! to assert; it falls out of both platforms funnelling into one shared
+//! decoder per control.
 //!
 //! # Target retention: explicit, per slot, in the control's own `State`
 //!
 //! `UIControl` holds its targets **weakly** (`addTarget:action:forControlEvents:`
-//! does not retain `target` — Apple's own documented contract). An earlier
-//! prototype leaned on a factory-level cache to keep a target alive, which
-//! does not generalize to N independently-created-and-disposed slots;
-//! production must retain the target explicitly, for exactly the slot's own
-//! lifetime.
+//! does not retain `target` — Apple's own documented contract), so production
+//! must retain the target explicitly, for exactly the slot's own lifetime —
+//! this is the confined `addTarget:action:` attach/detach unsafe site named in
+//! `docs/CODE_STANDARDS.md`'s Language Idioms.
 //!
 //! That retention lives in each control's own `State` (`ButtonState`/
-//! `SwitchState`/`SliderState`'s new `target: Retained<FrustNativeControlTarget>`
-//! field), **not** in [`crate::registry::apple::AppleHandle`] (the
-//! `NativeView` the runtime's registry keys by slot). Android's equivalent
-//! secondary retention — the listener object a control's `create` attaches —
-//! lives in the registry entry's `extra` list precisely because Android's
-//! `NativeView` (`AndroidHandle`) is a bag of `Global<JObject>`s with no
-//! typed access back to the control; Apple's registry entry
-//! ([`crate::registry::apple::AppleHandle`]) already exists only to answer
-//! "which view is this" for identity-based dispose (`crate::apple::factory`'s
-//! *Which call carries the slot id*) and is never handed back to a control's
-//! own `update`/`dispose` — the control's typed `State` is. Extending
-//! `AppleHandle` with a second, untyped ARC slot would duplicate that
-//! retention discipline for no behavioral gain: ARC already releases
-//! whatever `State` holds the moment `Instance::dispose` drops it
-//! (`crate::runtime::Instance::dispose`'s `(vtable.dispose)(ctx, state)` step,
-//! immediately before the paired `drop(view)`), and a `State` field is
-//! exactly where the Apple arm already keeps its OWN second reference to the
-//! view too (`ButtonState`/`SwitchState`/`SliderState`'s `view` field). So the
-//! per-slot leak bar this task's acceptance calls for is the same one every
-//! other control cycle already satisfies:
-//! `crate::runtime::tests`'/`crate::registry::tests`' create→dispose cycles
-//! returning [`crate::runtime::NativeRuntime::live_count`] to zero — a target
-//! left retained only in `State` is dropped in that same step, with nothing
-//! left dangling.
+//! `SwitchState`/`SliderState`'s `target: Retained<FrustNativeControlTarget>`
+//! field), **not** in [`crate::registry::apple::AppleHandle`] — that entry
+//! exists only to answer "which view is this" for identity-based dispose
+//! (`crate::apple::factory`'s *Which call carries the slot id*) and is never
+//! handed back to a control's own `update`/`dispose`, the typed `State` is.
+//! ARC already releases whatever `State` holds the moment
+//! `Instance::dispose` drops it, and a `State` field is exactly where the
+//! Apple arm already keeps its OWN second reference to the view too
+//! (`ButtonState`/`SwitchState`/`SliderState`'s `view` field) — so a target
+//! retained only in `State` is dropped in that same step, with nothing left
+//! dangling, verified by `crate::runtime::tests`'/`crate::registry::tests`'
+//! create→dispose cycles returning
+//! [`crate::runtime::NativeRuntime::live_count`] to zero. (Android's
+//! equivalent secondary retention lives in the registry entry's `extra` list
+//! instead, because its `AndroidHandle` is an untyped bag of
+//! `Global<JObject>`s with no typed access back to the control — Apple's
+//! typed `State` needs no such indirection.)
 //!
 //! Each control's `dispose` additionally calls [`Self::detach_button`]/
 //! [`Self::detach_switch`]/[`Self::detach_slider`] before returning, mirroring

@@ -21,7 +21,7 @@
 //! | `accent_fill` | `scheme().primary_container` | `Button` background, `Switch` track tint, `Slider`/`ProgressBar` progress tint |
 //! | `on_accent_fill` | `scheme().on_primary_container` | `Button` text colour |
 //! | `body_text` | `scheme().on_surface` | `Label` text colour |
-//! | `surface_bg` | `scheme().surface` | `Label`/`ProgressBar` background (explicit — added by an earlier fix, later narrowed; see *Explicit backgrounds* below for why `Switch`/`Slider` are deliberately excluded) |
+//! | `surface_bg` | `scheme().surface` | `Label`/`ProgressBar` background (explicit — see *Explicit backgrounds* below for why `Switch`/`Slider` are deliberately excluded) |
 //! | `corner_radius_dp` | `shape.small` | `Button` background (via a `GradientDrawable`) |
 //! | `button_text_size_sp` | `type_scale.label_large.size` | `Button` text size |
 //! | `body_text_size_sp` | `type_scale.body_large.size` | `Label` text size |
@@ -38,16 +38,14 @@
 //! resolves both to [`typeface::Typeface::System`] — imposing Glyph's
 //! monospace faces on a theme that never asked for them would be a worse
 //! regression than leaving the platform's own face alone. `Button` gets
-//! Space Mono (Glyph's bolder display/heading face — an assertive face for
-//! a call-to-action caption) while `Label`/`Switch` share IBM Plex Mono
-//! (Glyph's body/reading face); `Switch` never actually shows text through
+//! Space Mono (Glyph's bolder display face); `Label`/`Switch` share IBM Plex
+//! Mono (Glyph's body face) — `Switch` never actually shows text through
 //! this plugin today, but it's still a `TextView` subclass under the hood
 //! (`android.widget.Switch extends CompoundButton extends Button extends
 //! TextView`), so setting it costs nothing and future-proofs against a later
-//! on/off-text builder. This is the same "PIN, not full fidelity"
-//! approximation policy as every other row (module doc above) — a future
-//! task can widen this to per-slot `TypeScale` family resolution if a
-//! control ever needs Glyph's display face specifically.
+//! on/off-text builder. Same "pin, not full fidelity" policy as every other
+//! row above — a future task can widen this to per-slot `TypeScale` family
+//! resolution if a control ever needs Glyph's display face specifically.
 //!
 //! `Image` folds only `dark` — tinting an app-supplied photo from the theme
 //! would corrupt its content, and no builder method exposes an explicit tint
@@ -56,97 +54,74 @@
 //! # Explicit backgrounds: closing the light-theme dark-on-dark defect
 //! without defeating the ripple
 //!
-//! An Android device gate found `Label`,
-//! `Switch`, `Slider` and `ProgressBar` all keeping a DARK background after a
-//! live flip to a light theme — worst for `Label`, whose text colour DID
-//! follow the theme (via the ordinary `TEXT_COLOR` setter below), landing
-//! dark text on a dark background. Root cause, confirmed against
-//! [`crate::android::theme`]'s own "Baked at construction, not live" doc: L1's
-//! night-qualified `Context` only resolves a control's platform-default
-//! background/chrome at CREATE time, so it stays pinned to whichever
-//! brightness the control was born under; only an EXPLICIT L2 setter
-//! re-applies live on a theme flip (the ordinary Props-diff-then-setter path
-//! every property already rides). `Button` never showed this defect because
-//! an explicit background fold already gave it one (`corner_radius_dp` row
-//! above, via `Setter::ThemedBackground`).
+//! L1's night-qualified `Context` ([`crate::android::theme`]) only resolves a
+//! control's platform-default background/chrome at CREATE time — Android
+//! bakes brightness at construction, unlike iOS which re-pins
+//! `overrideUserInterfaceStyle` live on every `update` (a deliberate
+//! per-platform asymmetry, `docs/CODE_STANDARDS.md`'s Plugin Conventions).
+//! So only an EXPLICIT L2 setter re-applies live on a theme flip (the
+//! ordinary Props-diff-then-setter path every property already rides);
+//! `Button` already has one (`corner_radius_dp` row above, via
+//! `Setter::ThemedBackground`).
 //!
-//! The original fix widened this to ALL FOUR controls with no explicit
-//! background setter — too broadly: `android.widget.Switch`
-//! (`Widget.Material.CompoundButton.Switch`) and `AbsSeekBar` (`Slider`'s
-//! superclass) both carry `?attr/selectableItemBackgroundBorderless` as their
-//! platform-default background, which paints the Material touch ripple. A
-//! flat `View.setBackgroundColor(int)` (`Setter::BackgroundColor`) REPLACES
-//! that drawable outright, so folding `surface_bg` into every themed
-//! `Switch`/`Slider` silently killed their ripple — directly contradicting
-//! [`crate::android::theme`]'s own reason for existing (getting the default
-//! ripple/state-layer colour right for exactly these controls). The
-//! device re-gate didn't catch it because it checked contrast, not
-//! interaction chrome. **The fix**: narrow the explicit background
-//! to only the controls that actually needed it.
+//! Folding `surface_bg` into every themed control unconditionally is wrong,
+//! though: `android.widget.Switch` (`Widget.Material.CompoundButton.Switch`)
+//! and `AbsSeekBar` (`Slider`'s superclass) both carry
+//! `?attr/selectableItemBackgroundBorderless` as their platform-default
+//! background, which paints the Material touch ripple — a flat
+//! `View.setBackgroundColor(int)` (`Setter::BackgroundColor`) REPLACES that
+//! drawable outright, silently killing the ripple. So only the controls with
+//! nothing to lose get an explicit fold:
 //!
 //! ## Which controls get an explicit background, and why
 //!
 //! | Control | Explicit background? | Why |
 //! |---|---|---|
-//! | `Label` | **Yes** | The only control with visible text — this is what actually closes the bar-3 contrast defect — and a `TextView`'s platform-default background is `null` (no ripple, nothing to lose). |
-//! | `ProgressBar` | **Yes** | Display-only — `ProgressBar` (unlike `Switch`/`AbsSeekBar`) is never clickable, so it carries no ripple to defeat; kept for the same "reads as part of the page, not a floating rectangle" reason as `Label`, matching `examples/glyph-catalog`'s root `AppBackground` fill. |
-//! | `Switch` | **No** | `?attr/selectableItemBackgroundBorderless` is its default background — an explicit fill would replace the ripple. Its `thumb_tint`/`track_tint` fold already carries the theme with no such tradeoff. |
-//! | `Slider` | **No** | Same reasoning as `Switch` — `AbsSeekBar` carries the same borderless-ripple background attr. Its `progress_tint`/`thumb_tint` fold already carries the theme. |
+//! | `Label` | **Yes** | The only control with visible text, and a `TextView`'s platform-default background is `null` (no ripple, nothing to lose). |
+//! | `ProgressBar` | **Yes** | Never clickable, so no ripple to defeat; kept so it reads as part of the page rather than a floating rectangle, matching `examples/glyph-catalog`'s root `AppBackground` fill. |
+//! | `Switch` | **No** | `?attr/selectableItemBackgroundBorderless` is its default background — an explicit fill would replace the ripple. Its `thumb_tint`/`track_tint` fold already carries the theme. |
+//! | `Slider` | **No** | Same reasoning — `AbsSeekBar` carries the same borderless-ripple background attr. Its `progress_tint`/`thumb_tint` fold already carries the theme. |
 //! | `Button` | N/A (already covered) | Gets `Setter::ThemedBackground` (accent-filled) instead — a deliberately opaque fill, not the page's `surface_bg` role. |
-//! | `Image` | **No** | A tint or background fill would corrupt app-supplied photo content (see the paragraph below). |
+//! | `Image` | **No** | A tint or background fill would corrupt app-supplied photo content. |
 //!
 //! **If a future task wants `Switch`/`Slider` to carry a themed background
 //! anyway**, the only acceptable route is a ripple-preserving
 //! `RippleDrawable`/`LayerDrawable` setter layering a themed fill UNDER the
 //! platform's own ripple foreground — a new [`crate::controls::Setter`]
-//! variant, needing its own on-device pass. Do not "helpfully" re-add a bare
-//! `Setter::BackgroundColor` fold for either control; that is exactly the
-//! regression this section documents.
+//! variant, needing its own on-device pass. Do not re-add a bare
+//! `Setter::BackgroundColor` fold for either control.
 //!
-//! `surface_bg` (`scheme().surface`) is the role chosen for `Label`/
-//! `ProgressBar`: the same role `examples/glyph-catalog`'s own root
+//! `surface_bg` is the same role `examples/glyph-catalog`'s own root
 //! `AppBackground` layer paints as the page's base fill, so a native
 //! control's background matches the page it sits on rather than floating as
-//! a mismatched rectangle — and, for `Label` specifically, so its background
-//! can never fail to contrast `body_text` (the two are resolved from the
-//! same `Theme` on the same rebuild, and `ColorScheme`'s surface/on_surface
-//! pairing is authored to contrast by construction, both brightnesses — see
-//! this module's own
+//! a mismatched rectangle; for `Label` specifically it also guarantees
+//! contrast with `body_text` (`ColorScheme`'s surface/on_surface pairing is
+//! authored to contrast by construction, both brightnesses — see this
+//! module's own
 //! `text_bearing_controls_pair_a_contrasting_background_and_foreground_in_both_brightnesses`
-//! test, which covers `Label`/`Button` only — never `Switch`/`Slider`/
-//! `ProgressBar`, none of which render visible text through this plugin).
-//! `Image` is deliberately excluded (same section) — a tint or a background
-//! fill are the same kind of risk to app-supplied photo content.
+//! test, covering `Label`/`Button` only). `Image` is excluded for the same
+//! tint-corruption reason as above.
 //!
 //! This folds through the same `Setter::BackgroundColor` (`Tier::Relayout`)
 //! every other flat, non-`Button` background already would — no new
-//! [`crate::controls::Setter`] variant, since neither `Label` nor
-//! `ProgressBar` also carries a corner radius the way `Button`'s combined
-//! `Setter::ThemedBackground` needs.
+//! [`crate::controls::Setter`] variant needed.
 //!
-//! # Accent-role split (the catalog's most common accent bug —
-//! `docs/CODE_STANDARDS.md`'s Theming conventions)
+//! # Accent-role split and explicit-override precedence
 //!
+//! This module resolves both `Theme` precedence rules from
+//! `docs/CODE_STANDARDS.md`'s Theming conventions. **Accent-role split**:
 //! `primary`/`on_primary` is the accent's TEXT/ICON ink; `primary_container`/
-//! `on_primary_container` is the bright FILL. A filled control's background
-//! is therefore `primary_container` (+ `on_primary_container` ink on top of
-//! it) — never `primary` — and a control's small accented part sitting on an
-//! otherwise neutral surface (`Switch`/`Slider`'s thumb) is `primary` — never
-//! `primary_container`. `docs/CODE_STANDARDS.md` names conflating the two as
-//! the catalog's most common accent bug; this module is the one place this
-//! plugin resolves either role, so getting the split right here is
-//! load-bearing for every control that folds a colour token.
-//!
-//! # No explicit-override precedence yet
-//!
-//! `docs/CODE_STANDARDS.md`'s Theming conventions rank precedence as
-//! *explicit builder value > theme > fallback*. This module folds theme tokens
-//! unconditionally (no builder method sets a competing explicit colour/
-//! radius/size yet — `crate::api::builders`'s own builders
-//! deliberately left those out), so there is no explicit value to rank above
-//! the theme here; a future task adding `.text_color()`/`.background_color()`
-//! overrides must thread an explicit value through [`resolve`]'s callers
-//! ahead of the theme, not into this module.
+//! `on_primary_container` is the bright FILL — a filled control's background
+//! is therefore `primary_container` (never bare `primary`), and a small
+//! accented part on an otherwise neutral surface (`Switch`/`Slider`'s
+//! thumb) is `primary` (never `primary_container`); conflating the two is
+//! the catalog's most common accent bug, and this module is the one place
+//! this plugin resolves either role. **Precedence**: *explicit builder value
+//! > theme > fallback* — no builder method sets a competing explicit
+//! colour/radius/size yet, so this module folds theme tokens
+//! unconditionally; a future `.text_color()`/`.background_color()` override
+//! must thread its value through [`resolve`]'s callers ahead of the theme,
+//! not into this module.
 
 use frust::{Brightness, Color, DesignLanguage, Theme};
 
