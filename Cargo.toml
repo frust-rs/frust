@@ -255,6 +255,27 @@ objc2-core-media = "0.3"
 objc2-core-video = "0.3"
 objc2-quartz-core = "0.3"
 dispatch2 = "0.3"
+# frust-camera's QR barcode decode stack (`plugins/camera/src/barcode`) —
+# platform-independent, unlike the AVFoundation pins above. `rqrr` is the
+# sole v1 decode engine, reached only through the crate's own private engine
+# seam (`barcode::engine`) so a future swap never touches the public API.
+# `default-features = false` drops its default `img`/`image` feature (the
+# `image` crate is version-pinned exactly elsewhere — see this file's
+# `image` row above — and unneeded here: the crate's own `LumaView` seam
+# feeds `rqrr::PreparedImage::prepare_from_greyscale` a stride-aware closure
+# directly, never a packed `image::GrayImage`); with it off, `rqrr`'s own
+# dependency graph is just `g2p` + `lru` (verified via `cargo tree -p
+# frust-camera`), both pure Rust with no build script. License `(MIT OR
+# Apache-2.0) AND ISC`, compatible with this workspace's `MIT OR Apache-2.0`.
+rqrr = { version = "0.10.1", default-features = false }
+# Dev-only QR fixture synthesis for `barcode`'s conformance tests
+# (`plugins/camera/src/barcode/conformance.rs`) — encodes a payload into its
+# module matrix so a test can scale/rotate/stride it into a synthetic luma
+# buffer, with no binary image assets and no `image` crate dependency.
+# `default-features = false` drops rendering-only features (`image`/`svg`/
+# `pic`) this crate never uses (only `QrCode::to_colors()`/`width()`, the
+# raw module matrix). 0.14.1 is the current pure-Rust release.
+qrcode = { version = "0.14.1", default-features = false }
 # frust-native-widgets's Apple control surface —
 # `UIView`/`UIButton`/etc. bindings for the plugin's Rust-built native
 # controls. Plain version string (no `default-features` set), matching

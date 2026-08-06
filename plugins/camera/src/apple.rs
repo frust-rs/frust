@@ -99,8 +99,9 @@ use objc2_av_foundation::{
     AVCaptureOutput, AVCapturePhoto, AVCapturePhotoCaptureDelegate, AVCapturePhotoOutput,
     AVCapturePhotoSettings, AVCaptureSession, AVCaptureSessionPreset,
     AVCaptureSessionPreset640x480, AVCaptureSessionPreset1280x720, AVCaptureSessionPreset1920x1080,
-    AVCaptureSessionPreset3840x2160, AVCaptureSessionPresetPhoto, AVCaptureVideoDataOutput,
-    AVCaptureVideoDataOutputSampleBufferDelegate, AVError, AVMediaType, AVMediaTypeVideo,
+    AVCaptureSessionPreset3840x2160, AVCaptureSessionPresetPhoto, AVCaptureTorchMode,
+    AVCaptureVideoDataOutput, AVCaptureVideoDataOutputSampleBufferDelegate, AVError, AVMediaType,
+    AVMediaTypeVideo,
 };
 use objc2_core_media::{
     CMSampleBuffer, CMTime, CMTimeFlags, CMVideoFormatDescriptionGetDimensions,
@@ -316,6 +317,15 @@ struct SessionInner {
     /// The preview aspect ratio (width / height, rotation-applied), stored as
     /// `f32` bits so a later phase can refresh it without a lock.
     aspect_ratio: AtomicU32,
+    /// Cached torch availability (`hasTorch() && isTorchAvailable()`),
+    /// mirroring [`Self::aspect_ratio`]'s atomic-cache shape so
+    /// [`Self::torch_available`] never hops onto the session queue — the
+    /// change that makes it, and therefore [`Self::set_torch`], genuinely
+    /// callable from the UI thread. Seeded inside [`AppleSession::open`]'s
+    /// configuration transaction and refreshed after [`Self::start`]'s
+    /// `startRunning()` returns and at the end of every
+    /// [`Self::set_torch`] queue body — see those methods' docs.
+    torch_available: AtomicBool,
     /// Set by [`Self::close`]; every subsequent operation reports
     /// [`CameraError::SessionClosed`].
     closed: AtomicBool,
@@ -353,6 +363,14 @@ impl SessionInner {
             // SAFETY: a lifecycle message on a fully configured session, sent
             // from that session's own serial queue (module doc's *Threading*).
             unsafe { session.objects.get().session.startRunning() };
+            // The pipeline is live now, and torch availability can change
+            // once capture actually starts — refresh the cache
+            // [`Self::torch_available`] answers from rather than trusting
+            // the configure-time seed forever.
+            session.torch_available.store(
+                device_torch_available(session.objects.get()),
+                Ordering::Relaxed,
+            );
         });
     }
 
@@ -482,6 +500,95 @@ impl SessionInner {
             return;
         }
         self.on_queue(detach_stream);
+    }
+
+    /// See [`crate::CameraSession::set_torch`].
+    ///
+    /// **Genuinely non-blocking, unconditionally.** Unlike [`Self::on_queue`]
+    /// (the `exec_sync` hop [`Self::close`]/[`Self::take_picture`] use
+    /// because their callers need the platform's answer), this fires the
+    /// request onto the session queue with `exec_async` and returns before
+    /// the body ever runs — there is nothing left to wait on, so no queue
+    /// depth or device state can delay the calling thread even briefly. This
+    /// is what makes the crate doc's "callable from any thread, including
+    /// the UI thread" claim actually hold: the previous shape's `exec_sync`
+    /// hop could still park a UI-thread caller behind
+    /// [`Self::start`]'s async `startRunning()` (hundreds of milliseconds on
+    /// a real device) whenever the two landed on the queue back to back —
+    /// `exec_async` never waits its turn, so that queue ordering is no
+    /// longer observable from here at all.
+    ///
+    /// `Ok(())` means the request was **accepted** onto the queue, not that
+    /// AVFoundation applied it: a refusal (`lockForConfiguration:`
+    /// contention, a lens with no torch, the device mid cool-off) surfaces
+    /// only through [`Self::torch_available`]'s cache not flipping (or
+    /// flipping back to `false`) — never through this method's `Result`.
+    /// This is the crate's already-documented "accepted, not confirmed"
+    /// torch framing (`README.md` §5), now true of the whole call rather
+    /// than only its Android arm.
+    ///
+    /// The torch is device state, not stream state, so it survives
+    /// [`Self::start_image_stream`]/[`Self::stop_image_stream`] and goes out
+    /// with the device [`Self::close`] releases.
+    ///
+    /// # Errors
+    /// [`CameraError::SessionClosed`] after [`Self::close`] — the only error
+    /// this method still reports synchronously.
+    fn set_torch(self: &Arc<Self>, on: bool) -> Result<(), CameraError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(CameraError::SessionClosed);
+        }
+
+        let session = Arc::clone(self);
+        self.queue.exec_async(move || {
+            if session.closed.load(Ordering::Acquire) {
+                // Closed while this request waited its turn on the queue —
+                // the device may already be releasing; drop the request
+                // rather than touching it.
+                return;
+            }
+            if let Err(error) = set_device_torch(session.objects.get(), on) {
+                log::debug!("frust-camera: apple set_torch({on}) refused: {error}");
+            }
+            // Refresh regardless of outcome: a successful set can still
+            // leave availability different than before (e.g. the device
+            // just finished cooling off), and a refusal is exactly the case
+            // a caller needs the fresh answer for — see this method's doc.
+            session.torch_available.store(
+                device_torch_available(session.objects.get()),
+                Ordering::Relaxed,
+            );
+        });
+        Ok(())
+    }
+
+    /// See [`crate::CameraSession::torch_available`] — a lock-free
+    /// `Ordering::Relaxed` read of the cached `hasTorch() && isTorchAvailable`
+    /// value; unlike [`Self::set_torch`]/[`Self::take_picture`]/
+    /// [`Self::close`], this never hops onto the session queue at all.
+    ///
+    /// Both halves of the cached value matter: `hasTorch` is the lens's
+    /// permanent capability (false on every front camera), while
+    /// `isTorchAvailable` is transient — AVFoundation withdraws the torch
+    /// while the device is cooling off, and a control offered then would
+    /// simply do nothing. The cache is seeded in [`AppleSession::open`]'s
+    /// configuration transaction and refreshed at exactly two later points:
+    /// after [`Self::start`]'s `startRunning()` returns, and at the end of
+    /// every [`Self::set_torch`] queue body. Nothing refreshes it
+    /// autonomously — so between refreshes the value can lag reality in
+    /// either direction: a read before the post-`startRunning` refresh
+    /// answers from the pre-start seed, and a cool-off beginning after the
+    /// last refresh leaves a stale `true` until the app's next `set_torch`
+    /// (which may never come). That is the deliberate price of a `Relaxed`
+    /// read that never blocks the calling thread on the session queue;
+    /// consumers should re-check on later rebuilds rather than latch the
+    /// first answer (README §5). An autonomous refresh (session-state-edge
+    /// or age-stamped re-read) is a recorded follow-up option.
+    fn torch_available(&self) -> bool {
+        if self.closed.load(Ordering::Acquire) {
+            return false;
+        }
+        self.torch_available.load(Ordering::Relaxed)
     }
 
     /// See [`crate::CameraSession::close`] — idempotent.
@@ -631,12 +738,21 @@ impl AppleSession {
         // aspect ratio, read on the queue *after* the preset has settled the
         // device's active format.
         let outcome: Mutex<Result<f32, String>> = Mutex::new(Ok(0.0));
+        // Seeded in the same `exec_sync` body as `configure`, on success only
+        // (a failed configuration never produces a session for
+        // `SessionInner::torch_available` to answer for): `hasTorch`/
+        // `isTorchAvailable` are readable here with zero extra queue hops.
+        let torch_available = AtomicBool::new(false);
         {
             let objects = &objects;
             let outcome = &outcome;
+            let torch_available = &torch_available;
             queue.exec_sync(move || {
-                *outcome.lock().unwrap_or_else(|e| e.into_inner()) =
-                    configure(objects.get(), resolution, lens);
+                let result = configure(objects.get(), resolution, lens);
+                if result.is_ok() {
+                    torch_available.store(device_torch_available(objects.get()), Ordering::Relaxed);
+                }
+                *outcome.lock().unwrap_or_else(|e| e.into_inner()) = result;
             });
         }
         let aspect = outcome
@@ -650,6 +766,7 @@ impl AppleSession {
             queue,
             objects,
             aspect_ratio: AtomicU32::new(aspect.to_bits()),
+            torch_available: AtomicBool::new(torch_available.into_inner()),
             closed: AtomicBool::new(false),
         });
         sessions().insert(id, Arc::clone(&inner));
@@ -705,6 +822,14 @@ impl SessionBackend for AppleSession {
 
     fn stop_image_stream(&self) {
         self.inner.stop_image_stream();
+    }
+
+    fn set_torch(&self, on: bool) -> Result<(), CameraError> {
+        self.inner.set_torch(on)
+    }
+
+    fn torch_available(&self) -> bool {
+        self.inner.torch_available()
     }
 
     fn close(&self) {
@@ -1392,6 +1517,66 @@ fn set_legacy_video_orientation(connection: &AVCaptureConnection) {
         if connection.isVideoOrientationSupported() {
             connection.setVideoOrientation(AVCaptureVideoOrientation::Portrait);
         }
+    }
+}
+
+// --- Torch ------------------------------------------------------------------
+
+/// [`SessionInner::set_torch`]'s body, run on the session's serial queue.
+///
+/// The device is reached through the input this session already holds
+/// ([`AvObjects::input`]) — the same read [`configure`] makes for geometry —
+/// rather than re-discovering it, so the torch is always the lens this
+/// session is actually streaming.
+fn set_device_torch(objects: &AvObjects, on: bool) -> Result<(), String> {
+    // SAFETY: `device` is a read-only property of the input this session owns
+    // (the precedent read in `configure`), taken on the session's own serial
+    // queue like every other device access in this module.
+    let device = unsafe { objects.input.device() };
+    let mode = if on {
+        AVCaptureTorchMode::On
+    } else {
+        AVCaptureTorchMode::Off
+    };
+
+    // SAFETY: `hasTorch`/`isTorchModeSupported:` are read-only queries, and
+    // they are precisely the predicates `setTorchMode:` documents as its
+    // preconditions — an unsupported mode raises `NSInvalidArgumentException`
+    // and a write without the configuration lock raises `NSGenericException`,
+    // neither of which Rust could catch. The lock/unlock pair below is the
+    // documented bracket for that write.
+    unsafe {
+        if !device.hasTorch() || !device.isTorchModeSupported(mode) {
+            return Err(
+                "apple camera backend: this capture device has no controllable torch (most front \
+                 lenses, and any device without a flash unit)"
+                    .to_string(),
+            );
+        }
+        device.lockForConfiguration().map_err(|error| {
+            format!(
+                "apple camera backend: could not lock the device to set the torch ({})",
+                describe(&error)
+            )
+        })?;
+        device.setTorchMode(mode);
+        // Released immediately: holding the configuration lock keeps every
+        // other client (and AVFoundation's own automatic adjustments) from
+        // touching the device, and this write needs it for one message only.
+        device.unlockForConfiguration();
+    }
+    Ok(())
+}
+
+/// [`SessionInner::torch_available`]'s body, run on the session's serial
+/// queue: the lens's permanent capability **and** its current availability
+/// (the torch is withdrawn while the device cools off).
+fn device_torch_available(objects: &AvObjects) -> bool {
+    // SAFETY: as in `set_device_torch` — a read-only property read on the
+    // session's own device, from that session's serial queue.
+    unsafe {
+        let device = objects.input.device();
+        device.hasTorch() && device.isTorchAvailable()
     }
 }
 

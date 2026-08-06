@@ -55,9 +55,41 @@
 //! [`ImageFormat::Bgra`] stays Apple-only (see that variant's doc), so this
 //! page always requests [`ImageFormat::Yuv420`], the cross-platform format
 //! both backends deliver.
+//!
+//! # Scan strip (Phase-4 measurement gate rig)
+//!
+//! [`scan_block`] adds a two-mode strip below the readout above, exercising
+//! `plugins/camera`'s barcode API (`plugins/camera/README.md` §4 "Barcode
+//! stream") end to end. [`ScanMode::Policy`] calls
+//! [`CameraSession::start_barcode_stream`] with
+//! [`DetectionPolicy::NoDuplicates`] and shows the last detection's
+//! (truncated) `raw_value`, its [`BarcodeFormat`], and a detection counter —
+//! the muxr consumer shape. [`ScanMode::Timing`] instead calls the raw
+//! [`CameraSession::start_image_stream`] and times
+//! [`frust_camera::barcode::decode_frame`] by hand with
+//! [`std::time::Instant`] inside the callback, keeping a small ring buffer
+//! ([`TimingStats::durations_us`]) to surface last/median/p95 decode ms,
+//! effective attempts/sec, and the frame resolution — the numbers the
+//! Phase-4 gate session transcribes into `MEASUREMENTS.md`.
+//!
+//! Both modes hand results across the callback's plugin thread the same
+//! atomics/`Mutex` way [`StreamStats`] already does above — never a signal
+//! write from inside `on_detect`/the frame callback (`plugins/camera`'s own
+//! doc). [`stop_all_streams`] is the one stop-before-start primitive every
+//! mode switch and (re)start routes through, since [`stream_block`]'s own
+//! raw stream and the scan strip's Policy/Timing streams all share the
+//! session's single underlying stream claim (`plugins/camera/README.md` §4's
+//! Occupancy table, [`crate::CameraError::StreamBusy`]) — this is what keeps
+//! a mode toggle from ever hitting [`CameraError::StreamBusy`]. Torch
+//! ([`torch_toggle_handler`], §5) is session-level and non-blocking; leaving
+//! this page disposes [`CameraPage`]'s owner, which runs the same
+//! `on_cleanup` that closes the session — [`CameraSession::close`] itself
+//! stops any running stream and takes the torch out with it (both
+//! documented on that method), so no extra teardown call is needed here.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -66,8 +98,10 @@ use frust::{
     Padding, PlatformViewView, SizedBox, Theme, UseTask, any, button, component, inflexible,
     on_cleanup, platform_view, spawn_blocking, text, use_context, use_task,
 };
+use frust_camera::barcode::{Barcode, BarcodeFormat, decode_frame};
 use frust_camera::{
-    Camera, CameraError, CameraSession, ImageFormat, Lens, PermissionStatus, Resolution,
+    BarcodeStreamOptions, Camera, CameraError, CameraSession, DetectionPolicy, ImageFormat, Lens,
+    PermissionStatus, Resolution,
 };
 
 // FrameTicker (mirrors `interactions.rs`'s `FrameTicker` / `appbar.rs`'s
@@ -159,6 +193,29 @@ struct CameraPageState {
     stream_started_at: Option<Instant>,
     /// The stream's shared counters — see [`StreamStats`].
     stream_stats: Arc<StreamStats>,
+    /// Which [`ScanMode`] the scan strip currently targets — see the
+    /// [module docs](self)'s Scan strip section.
+    scan_mode: ScanMode,
+    /// Whether the scan strip's own stream (of `scan_mode`'s kind) is
+    /// believed running.
+    scanning: bool,
+    /// The last `start_barcode_stream`/`start_image_stream` error the scan
+    /// strip hit, if any.
+    scan_error: Option<String>,
+    /// When the current scan-strip stream started, for Timing mode's
+    /// attempts/sec readout.
+    scan_started_at: Option<Instant>,
+    /// [`ScanMode::Policy`]'s shared counters.
+    policy_stats: Arc<PolicyStats>,
+    /// [`ScanMode::Timing`]'s shared counters.
+    timing_stats: Arc<TimingStats>,
+    /// Torch requested-on state. Optimistic, not a device readback:
+    /// `set_torch` is "accepted, not confirmed" (`plugins/camera/README.md`
+    /// §5) — this mirrors the last call this page made, not a live LED
+    /// state.
+    torch_on: bool,
+    /// The last `set_torch` error, if any.
+    torch_error: Option<String>,
 }
 
 /// The camera page's own [`Component`] (see the [module docs](self)).
@@ -236,6 +293,14 @@ impl Component for CameraPage {
             stream_error: None,
             stream_started_at: None,
             stream_stats: Arc::new(StreamStats::default()),
+            scan_mode: ScanMode::Policy,
+            scanning: false,
+            scan_error: None,
+            scan_started_at: None,
+            policy_stats: Arc::new(PolicyStats::default()),
+            timing_stats: Arc::new(TimingStats::default()),
+            torch_on: false,
+            torch_error: None,
         }
     }
 
@@ -263,6 +328,19 @@ impl Component for CameraPage {
             .expect("session cell poisoned")
             .is_some();
 
+        // Non-blocking, callable from any thread (`plugins/camera/README.md`
+        // §5) — read fresh every rebuild rather than cached in state, since
+        // Android's answer flips `true` only once CameraX finishes binding
+        // (that section's own "re-check rather than latch its first answer"
+        // note).
+        let torch_available = state
+            .session_cell
+            .lock()
+            .expect("session cell poisoned")
+            .as_ref()
+            .map(|session| session.torch_available())
+            .unwrap_or(false);
+
         let mut children: Vec<FlexChild<CameraPageState>> = vec![
             block(vec![
                 inflexible(label("Camera")),
@@ -281,10 +359,12 @@ impl Component for CameraPage {
             children.push(preview_block(state));
             children.push(capture_block(state));
             children.push(stream_block(state));
-            if state.streaming {
+            children.push(scan_block(state, torch_available));
+            if state.streaming || state.scanning {
                 // Keeps this Component's `build` re-invoked every frame while
-                // a stream is (believed) running, so the frames/sec readout
-                // stays live — see the [module docs](self)'s readout section.
+                // a stream is (believed) running, so the frames/sec and scan
+                // readouts stay live — see the [module docs](self)'s readout
+                // sections.
                 children.push(frame_ticker());
             }
         }
@@ -477,6 +557,33 @@ fn switch_lens_handler(state: &mut CameraPageState) {
     state.stream_stats.frames.store(0, Ordering::Relaxed);
     state.stream_stats.has_frame.store(false, Ordering::Relaxed);
     state.stream_stats.last_byte.store(0, Ordering::Relaxed);
+
+    // The scan strip's stream (whichever kind) and the torch both belonged
+    // to the outgoing session too — `session.close()` above already tore
+    // the stream down and took the torch out with it; reset this page's own
+    // belief state to match rather than showing a stale "scanning"/"torch
+    // on" readout against the fresh session that hasn't started either yet.
+    state.scanning = false;
+    state.scan_error = None;
+    state.scan_started_at = None;
+    state
+        .policy_stats
+        .last
+        .lock()
+        .expect("policy stats poisoned")
+        .take();
+    state.policy_stats.count.store(0, Ordering::Relaxed);
+    state
+        .timing_stats
+        .durations_us
+        .lock()
+        .expect("timing ring poisoned")
+        .clear();
+    state.timing_stats.attempts.store(0, Ordering::Relaxed);
+    state.timing_stats.frame_w.store(0, Ordering::Relaxed);
+    state.timing_stats.frame_h.store(0, Ordering::Relaxed);
+    state.torch_on = false;
+    state.torch_error = None;
     // Re-runs the capture task against the now-empty `session_cell`,
     // resolving to `Ready(None)` ("No capture requested yet.") rather than
     // showing a stale path/error from the outgoing session — the same
@@ -714,14 +821,406 @@ fn stream_block(state: &CameraPageState) -> FlexChild<CameraPageState> {
 }
 
 // ---------------------------------------------------------------------------
+// Scan strip — Policy mode (start_barcode_stream) / Timing mode
+// (start_image_stream + barcode::decode_frame, hand-timed) — see the
+// [module docs](self)'s Scan strip section.
+// ---------------------------------------------------------------------------
+
+/// The scan strip's two modes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ScanMode {
+    /// [`CameraSession::start_barcode_stream`] with
+    /// [`DetectionPolicy::NoDuplicates`] — the muxr consumer shape end to
+    /// end (`plugins/camera/README.md` §4).
+    Policy,
+    /// Raw [`CameraSession::start_image_stream`] +
+    /// [`frust_camera::barcode::decode_frame`], hand-timed with
+    /// [`std::time::Instant`] — the Phase-4 gate numbers.
+    Timing,
+}
+
+/// One [`ScanMode::Policy`] detection's display fields — never the whole
+/// [`Barcode`], so [`PolicyStats`] doesn't carry `corners`/`raw_bytes`
+/// across the hand-off.
+struct DetectedBarcode {
+    raw_value: String,
+    format: BarcodeFormat,
+}
+
+/// Shared counters [`start_policy_stream`]'s `on_detect` writes into — the
+/// same plain-atomics/`Mutex` hand-off [`StreamStats`] already uses above
+/// (never a signal write from inside the callback — `plugins/camera`'s own
+/// doc).
+#[derive(Default)]
+struct PolicyStats {
+    /// The most recent detection's display fields, or `None` before the
+    /// first one arrives (or after a mode/lens switch resets it).
+    last: Mutex<Option<DetectedBarcode>>,
+    /// Total `on_detect` invocations since the current Policy-mode stream
+    /// started.
+    count: AtomicU64,
+}
+
+/// Ring-buffer capacity for [`TimingStats::durations_us`] — enough recent
+/// samples for a stable median/p95 without growing unbounded.
+const TIMING_RING_CAPACITY: usize = 128;
+
+/// Shared counters [`start_timing_stream`]'s callback writes into, timing
+/// [`decode_frame`] by hand with [`std::time::Instant`] — the same
+/// atomics/`Mutex` hand-off [`PolicyStats`] uses.
+#[derive(Default)]
+struct TimingStats {
+    /// The last [`TIMING_RING_CAPACITY`] decode durations, in whole
+    /// microseconds, oldest-first.
+    durations_us: Mutex<VecDeque<u64>>,
+    /// Total decode attempts (every frame the callback runs) since the
+    /// current Timing-mode stream started.
+    attempts: AtomicU64,
+    /// Most recent frame's width, in pixels.
+    frame_w: AtomicU32,
+    /// Most recent frame's height, in pixels.
+    frame_h: AtomicU32,
+}
+
+/// Starts [`ScanMode::Policy`]: [`BarcodeFormat::QrCode`] only,
+/// [`DetectionPolicy::NoDuplicates`] — proves the end-to-end muxr consumer
+/// path. Resets `stats` first, matching [`start_stream`]'s own "clear
+/// counters at (re)start" precedent.
+fn start_policy_stream(
+    session: &CameraSession,
+    stats: &Arc<PolicyStats>,
+) -> Result<(), CameraError> {
+    stats.last.lock().expect("policy stats poisoned").take();
+    stats.count.store(0, Ordering::Relaxed);
+    let stats = Arc::clone(stats);
+    session.start_barcode_stream(
+        BarcodeStreamOptions {
+            formats: vec![BarcodeFormat::QrCode],
+            detection: DetectionPolicy::NoDuplicates,
+        },
+        move |found: &[Barcode]| {
+            // `found` is never empty (the crate's own doc) — `first()` is
+            // just the display convenience, not a defensive check.
+            if let Some(barcode) = found.first() {
+                *stats.last.lock().expect("policy stats poisoned") = Some(DetectedBarcode {
+                    raw_value: barcode.raw_value.clone(),
+                    format: barcode.format,
+                });
+            }
+            stats.count.fetch_add(1, Ordering::Relaxed);
+        },
+    )
+}
+
+/// Starts [`ScanMode::Timing`]: a raw `Yuv420` stream with [`decode_frame`]
+/// run and timed by hand inside the callback — produces the Phase-4 gate
+/// numbers. Resets `stats` first, like [`start_policy_stream`].
+fn start_timing_stream(
+    session: &CameraSession,
+    stats: &Arc<TimingStats>,
+) -> Result<(), CameraError> {
+    stats
+        .durations_us
+        .lock()
+        .expect("timing ring poisoned")
+        .clear();
+    stats.attempts.store(0, Ordering::Relaxed);
+    stats.frame_w.store(0, Ordering::Relaxed);
+    stats.frame_h.store(0, Ordering::Relaxed);
+    let stats = Arc::clone(stats);
+    session.start_image_stream(ImageFormat::Yuv420, move |frame| {
+        stats.frame_w.store(frame.width, Ordering::Relaxed);
+        stats.frame_h.store(frame.height, Ordering::Relaxed);
+
+        let started = Instant::now();
+        let _ = decode_frame(frame, &[]);
+        let elapsed_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+
+        stats.attempts.fetch_add(1, Ordering::Relaxed);
+        let mut ring = stats.durations_us.lock().expect("timing ring poisoned");
+        if ring.len() == TIMING_RING_CAPACITY {
+            ring.pop_front();
+        }
+        ring.push_back(elapsed_us);
+    })
+}
+
+/// Releases every stream claim the session might hold — [`stream_block`]'s
+/// own raw-stream claim above, and the scan strip's own barcode/raw claim,
+/// whichever kind is actually active. `stop_image_stream`/
+/// `stop_barcode_stream` are each a documented no-op unless *their* claim is
+/// the one held (`plugins/camera/README.md` §4's Occupancy table), so
+/// calling both unconditionally is safe — this is the "always stop the
+/// current mode's stream before starting the other" primitive the
+/// [module docs](self)'s Scan strip section calls for, and the one thing
+/// every mode switch/(re)start below routes through so a mode toggle never
+/// hits [`CameraError::StreamBusy`].
+fn stop_all_streams(state: &mut CameraPageState) {
+    {
+        let guard = state.session_cell.lock().expect("session cell poisoned");
+        if let Some(session) = guard.as_ref() {
+            session.stop_image_stream();
+            session.stop_barcode_stream();
+        }
+    }
+    if state.streaming {
+        state.streaming = false;
+        state.stream_started_at = None;
+    }
+}
+
+/// Starts `state.scan_mode`'s stream — call only right after
+/// [`stop_all_streams`] released every claim, so this never observes
+/// [`CameraError::StreamBusy`] from the scan strip's own prior stream.
+fn start_scan(state: &mut CameraPageState) {
+    let result = {
+        let guard = state.session_cell.lock().expect("session cell poisoned");
+        guard.as_ref().map(|session| match state.scan_mode {
+            ScanMode::Policy => start_policy_stream(session, &state.policy_stats),
+            ScanMode::Timing => start_timing_stream(session, &state.timing_stats),
+        })
+    };
+    match result {
+        Some(Ok(())) => {
+            state.scanning = true;
+            state.scan_started_at = Some(Instant::now());
+            state.scan_error = None;
+        }
+        Some(Err(err)) => {
+            state.scanning = false;
+            state.scan_started_at = None;
+            state.scan_error = Some(err.to_string());
+        }
+        None => {
+            state.scanning = false;
+            state.scan_started_at = None;
+            state.scan_error = Some("no active camera session".to_string());
+        }
+    }
+}
+
+fn toggle_scan_handler(state: &mut CameraPageState) {
+    if state.scanning {
+        stop_all_streams(state);
+        state.scanning = false;
+        state.scan_started_at = None;
+        return;
+    }
+    stop_all_streams(state);
+    start_scan(state);
+}
+
+/// Switches [`ScanMode`] — always [`stop_all_streams`] first, so this never
+/// hits [`CameraError::StreamBusy`] (module docs). A no-op stream-wise while
+/// nothing is scanning: the mode just flips for the next
+/// [`toggle_scan_handler`] press.
+fn mode_toggle_handler(state: &mut CameraPageState) {
+    let was_scanning = state.scanning;
+    if was_scanning {
+        stop_all_streams(state);
+    }
+    state.scan_mode = match state.scan_mode {
+        ScanMode::Policy => ScanMode::Timing,
+        ScanMode::Timing => ScanMode::Policy,
+    };
+    if was_scanning {
+        start_scan(state);
+    }
+}
+
+/// Torch is non-blocking and callable from any thread
+/// (`plugins/camera/README.md` §5) — called directly from this UI-thread
+/// handler, unlike the blocking `Camera::request_permission`/
+/// `CameraSession::take_picture` pair. Optimistic on success (`set_torch` is
+/// "accepted, not confirmed" — that section's own note), and leaves
+/// `torch_on` unchanged on failure so the readout keeps reflecting the last
+/// call that actually took.
+fn torch_toggle_handler(state: &mut CameraPageState) {
+    let guard = state.session_cell.lock().expect("session cell poisoned");
+    let Some(session) = guard.as_ref() else {
+        drop(guard);
+        state.torch_error = Some("no active camera session".to_string());
+        return;
+    };
+    let requested = !state.torch_on;
+    let result = session.set_torch(requested);
+    drop(guard);
+    match result {
+        Ok(()) => {
+            state.torch_on = requested;
+            state.torch_error = None;
+        }
+        Err(err) => state.torch_error = Some(err.to_string()),
+    }
+}
+
+/// Percentile helper over a **sorted** snapshot of
+/// [`TimingStats::durations_us`] — nearest-rank, `pct` in `0.0..=1.0`.
+fn percentile_us(sorted: &[u64], pct: f64) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let rank = (pct * (sorted.len() - 1) as f64).round() as usize;
+    sorted[rank.min(sorted.len() - 1)]
+}
+
+/// Truncates `s` to at most `max_chars` characters for display, marking the
+/// cut with an ellipsis — the dense muxr pairing fixture
+/// (`plugins/camera/src/barcode/conformance.rs`'s `PAYLOAD_DENSE`, 176
+/// chars) is exactly the case this exists for.
+fn truncate_display(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let truncated: String = s.chars().take(max_chars).collect();
+    format!("{truncated}\u{2026}")
+}
+
+fn policy_readout(state: &CameraPageState) -> String {
+    if let Some(err) = &state.scan_error {
+        return format!("scan error: {err}");
+    }
+    if !state.scanning {
+        return "scan stopped.".to_string();
+    }
+    let count = state.policy_stats.count.load(Ordering::Relaxed);
+    let last = state
+        .policy_stats
+        .last
+        .lock()
+        .expect("policy stats poisoned");
+    match last.as_ref() {
+        Some(barcode) => format!(
+            "{count} detection(s) \u{b7} last: {:?} \u{b7} \"{}\"",
+            barcode.format,
+            truncate_display(&barcode.raw_value, 40),
+        ),
+        None => format!("{count} detection(s) \u{b7} waiting for a QR code\u{2026}"),
+    }
+}
+
+fn timing_readout(state: &CameraPageState) -> String {
+    if let Some(err) = &state.scan_error {
+        return format!("scan error: {err}");
+    }
+    if !state.scanning {
+        return "scan stopped.".to_string();
+    }
+
+    let (last_us, sorted) = {
+        let ring = state
+            .timing_stats
+            .durations_us
+            .lock()
+            .expect("timing ring poisoned");
+        let Some(&last_us) = ring.back() else {
+            return "streaming \u{2014} waiting for the first decode attempt\u{2026}".to_string();
+        };
+        let mut sorted: Vec<u64> = ring.iter().copied().collect();
+        sorted.sort_unstable();
+        (last_us, sorted)
+    };
+
+    let median_us = percentile_us(&sorted, 0.5);
+    let p95_us = percentile_us(&sorted, 0.95);
+    let attempts = state.timing_stats.attempts.load(Ordering::Relaxed);
+    let width = state.timing_stats.frame_w.load(Ordering::Relaxed);
+    let height = state.timing_stats.frame_h.load(Ordering::Relaxed);
+    let attempts_per_sec = state
+        .scan_started_at
+        .map(|start| {
+            let secs = start.elapsed().as_secs_f64();
+            if secs > 0.0 {
+                attempts as f64 / secs
+            } else {
+                0.0
+            }
+        })
+        .unwrap_or(0.0);
+
+    format!(
+        "decode: last {:.2}ms \u{b7} median {:.2}ms \u{b7} p95 {:.2}ms \u{b7} \
+         {attempts_per_sec:.1} attempts/s \u{b7} frame {width}x{height}",
+        last_us as f64 / 1000.0,
+        median_us as f64 / 1000.0,
+        p95_us as f64 / 1000.0,
+    )
+}
+
+fn scan_block(state: &CameraPageState, torch_available: bool) -> FlexChild<CameraPageState> {
+    let mode_label = match state.scan_mode {
+        ScanMode::Policy => "Mode: Policy (tap for Timing)",
+        ScanMode::Timing => "Mode: Timing (tap for Policy)",
+    };
+    let toggle_label = if state.scanning {
+        "Stop scan"
+    } else {
+        "Start scan"
+    };
+
+    let mut rows: Vec<FlexChild<CameraPageState>> = vec![
+        inflexible(label("Scan")),
+        gap(6.0),
+        inflexible(caption(
+            "Policy mode proves the end-to-end muxr consumer path \
+             (start_barcode_stream + NoDuplicates). Timing mode hand-times \
+             barcode::decode_frame over a raw stream \u{2014} the Phase-4 \
+             gate numbers.",
+        )),
+        gap(6.0),
+        inflexible(any(button(mode_label, mode_toggle_handler)
+            .style(ButtonStyle::Secondary)
+            .small())),
+        gap(6.0),
+        inflexible(any(button(toggle_label, toggle_scan_handler)
+            .style(ButtonStyle::Primary)
+            .small())),
+        gap(6.0),
+    ];
+
+    if torch_available {
+        let torch_label = if state.torch_on {
+            "Torch: on (tap to turn off)"
+        } else {
+            "Torch: off (tap to turn on)"
+        };
+        rows.push(inflexible(any(button(torch_label, torch_toggle_handler)
+            .style(ButtonStyle::Secondary)
+            .small())));
+    } else {
+        rows.push(inflexible(caption(
+            "Torch unavailable \u{2014} no controllable flash on this lens/device.",
+        )));
+    }
+    rows.push(gap(6.0));
+
+    if let Some(err) = &state.torch_error {
+        rows.push(inflexible(any(text(format!("torch error: {err}"))
+            .size(11.0)
+            .color(error_ink()))));
+        rows.push(gap(6.0));
+    }
+
+    let readout = match state.scan_mode {
+        ScanMode::Policy => policy_readout(state),
+        ScanMode::Timing => timing_readout(state),
+    };
+    rows.push(inflexible(any(text(readout).size(11.0).color(muted()))));
+
+    block(rows)
+}
+
+// ---------------------------------------------------------------------------
 // FrameTicker — see `interactions.rs`'s twin for the full rationale.
 // ---------------------------------------------------------------------------
 
 /// A zero-size sentinel [`View`]/[`Widget`] pair whose only job is an
 /// unconditional [`PaintCtx::request_frame`] call in its own `paint` —
-/// mounted only while [`CameraPageState::streaming`] is true, so the
-/// frames/sec readout in [`stream_block`] keeps refreshing (the
-/// [module docs](self)'s Image-stream readout section).
+/// mounted while [`CameraPageState::streaming`] or
+/// [`CameraPageState::scanning`] is true, so the frames/sec readout in
+/// [`stream_block`] and the detection/timing readouts in [`scan_block`]
+/// keep refreshing (the [module docs](self)'s Image-stream readout and Scan
+/// strip sections).
 struct FrameTicker;
 
 impl<State: 'static> View<State> for FrameTicker {
