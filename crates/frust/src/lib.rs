@@ -88,7 +88,7 @@ pub use frust_core::view::{AnyView, View, any};
 //   otherwise unnameable without [`PageVisibility`]/[`VisibilityCallback`]/
 //   [`TransitionState`] themselves in scope.
 //
-// This is the FINDINGS #41 gap: `frust-widgets`' own `show_glyph_dialog`
+// This closes a re-export gap: `frust-widgets`' own `show_glyph_dialog`
 // (`push_with_options(.., PushOptions::transparent())` with a custom
 // [`BackPolicy`]) already depends on exactly this seam, so an app-authored
 // dialog/sheet could reach the *method* through [`NavigatorController`] but
@@ -109,7 +109,7 @@ pub use frust_widgets::{
     inflexible, keyed, list_view, radio, safe_area, scroll_view, slider, text, text_input,
 };
 
-/// Platform-view embedding (platform-views feature, tasks 02/07): reserve
+/// Platform-view embedding (platform-views feature): reserve
 /// layout space for a native view (a map, a video player, ...) composited
 /// alongside the frust surface. [`platform_view`] takes the
 /// `"dev.frust.<Factory>"`-style native factory name registered on each
@@ -220,7 +220,7 @@ pub use frust_widgets::{
 /// reduce-motion collapse (read `Theme.motion.reduce_motion`, apply the
 /// `120ms` + linear + zero-motion rule) instead of calling the framework's one
 /// implementation, so the two would silently drift the next time the
-/// framework's rule changes (FINDINGS #41).
+/// framework's rule changes.
 ///
 /// Not otherwise re-exported at `frust-widgets`' own crate root (reached here
 /// via `frust_widgets::nav::transition`, a `pub mod` two levels down) — this
@@ -1518,10 +1518,10 @@ mod glass_reexport {
     }
 }
 
-/// FINDINGS #41 acceptance test: an app-authored animation composed entirely
+/// Acceptance test: an app-authored animation composed entirely
 /// from facade names ([`resolve_spec`]/[`make_driver`]/[`TransitionDriver`]),
 /// with **no** hand-rolled reduce-motion branch anywhere in this module — the
-/// bar the task sets is the *absence* of an app-side `if reduce_motion { .. }`
+/// bar this test sets is the *absence* of an app-side `if reduce_motion { .. }`
 /// check, not merely that these names resolve.
 #[cfg(test)]
 mod motion_resolve_reuse {
@@ -1589,11 +1589,11 @@ mod motion_resolve_reuse {
     }
 }
 
-/// FINDINGS #41's sharper half: an app-authored modal using
+/// A second acceptance case, the sharper half: an app-authored modal using
 /// [`PushOptions`]/[`BackPolicy`]/[`NavigatorController::push_with_options`] —
-/// all facade-reachable only as of this task — with [`BackPolicy::DismissAnimated`]
+/// now facade-reachable — with [`BackPolicy::DismissAnimated`]
 /// and a dismiss-signal cell, the same mechanism `frust-widgets`' own
-/// `show_glyph_dialog` depends on. Before this task `PushOptions`/`BackPolicy`
+/// `show_glyph_dialog` depends on. Previously `PushOptions`/`BackPolicy`
 /// were unnameable through `frust::`, so this call could not be constructed at
 /// all: Android back on an app-authored sheet had no way to stage the exit and
 /// the sheet would vanish instead of sliding down (the `pop`-not-`request_back`

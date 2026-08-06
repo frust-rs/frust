@@ -398,10 +398,10 @@ mod tests {
         );
     }
 
-    // -- Type-swap capture clearing (re-review round 1: `rebuild_child` must
+    // -- Type-swap capture clearing: `rebuild_child` must
     // clear a stale capture on an AnyView type swap the same way
     // `rebuild_children` does for `Flex`/`Stack`, or a captured single child's
-    // fresh replacement wrongly keeps routing after the swap) --
+    // fresh replacement wrongly keeps routing after the swap --
 
     use std::cell::Cell;
     use std::rc::Rc;

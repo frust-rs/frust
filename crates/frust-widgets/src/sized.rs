@@ -376,9 +376,9 @@ mod tests {
         );
     }
 
-    // -- Type-swap capture clearing (re-review round 1: `rebuild_child` must
+    // -- Type-swap capture clearing: `rebuild_child` must
     // clear a stale capture on an AnyView type swap, matching
-    // `rebuild_children`'s semantics for `Flex`/`Stack`) --
+    // `rebuild_children`'s semantics for `Flex`/`Stack` --
 
     #[test]
     fn type_swap_at_captured_child_clears_active_and_stops_routing() {

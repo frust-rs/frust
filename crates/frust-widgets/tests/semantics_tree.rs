@@ -1,4 +1,4 @@
-//! Integration test for the semantics seam (phase-6c D1): drive a small widget
+//! Integration test for the semantics seam: drive a small widget
 //! tree through a real `RenderRoot` rebuild + layout, then assert the collected
 //! accessibility tree — node count, roles, labels/values, absolute bounds, and
 //! parent/child structure.

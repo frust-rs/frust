@@ -2988,7 +2988,7 @@ mod tests {
         assert!(!pod.contains(Point::new(9.9, 15.0)));
     }
 
-    /// A scene recorder that overrides the task-08 shadow/layer additions, to
+    /// A scene recorder that overrides the shadow/layer `PaintScene` additions, to
     /// prove they reach an implementor that opts in.
     #[derive(Default)]
     struct ShadowLayerRecordingScene {
@@ -3023,7 +3023,7 @@ mod tests {
 
     #[test]
     fn draw_shadow_and_push_layer_are_no_ops_when_not_overridden() {
-        // `RecordingScene` (defined above) does not override the task-08
+        // `RecordingScene` (defined above) does not override the shadow/layer
         // additions — the trait's default no-op bodies must compile
         // unchanged and simply do nothing.
         let mut scene = RecordingScene::default();
@@ -3036,7 +3036,7 @@ mod tests {
 
     #[test]
     fn fill_path_and_stroke_path_are_no_ops_when_not_overridden() {
-        // `RecordingScene` does not override the task-05 path additions
+        // `RecordingScene` does not override the path additions
         // either — the trait's default no-op bodies must compile unchanged.
         let mut scene = RecordingScene::default();
         let mut path = BezPath::new();
@@ -3048,7 +3048,7 @@ mod tests {
         assert!(scene.texts.is_empty());
     }
 
-    /// A scene recorder overriding the task-05 path additions, proving they
+    /// A scene recorder overriding the path additions, proving they
     /// reach an implementor that opts in.
     #[derive(Default)]
     struct PathRecordingScene {
