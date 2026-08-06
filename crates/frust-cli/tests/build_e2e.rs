@@ -466,7 +466,7 @@ fn scaffolded_project_produces_a_signed_release_apk() {
 
 /// **The primary acceptance case.** `[signing] prefix = "prod"` against the
 /// *default* properties path and a completely *unmodified* Gradle template —
-/// the shape review round 1 proved was broken: the gate resolved
+/// the exact shape that once shipped broken: the gate resolved
 /// `prod.storeFile` & co., passed with no warning, and Gradle (which has no
 /// prefix concept and looks for a bare `storeFile`) found nothing and
 /// debug-signed. Nothing about the template changed to fix it; the CLI now

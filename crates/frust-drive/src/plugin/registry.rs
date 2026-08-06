@@ -513,7 +513,7 @@ mod tests {
 
     #[test]
     fn clean_signals_frust_declares_no_sibling_requirement() {
-        // clean-signals is git+rev-pinned to its public repo (task 05); the
+        // clean-signals is git+rev-pinned to its public repo; the
         // plugin no longer needs a `../clean-signals-rs` sibling checkout.
         let spec = find_plugin("clean-signals-frust").unwrap();
         assert_eq!(spec.requires_sibling, None);

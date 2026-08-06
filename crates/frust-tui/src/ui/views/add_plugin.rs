@@ -1,6 +1,6 @@
-//! The Add Plugin dialog modal (`frust-secure-storage` PLAN Phase 7): a
-//! shadowed, centered popup over the welcome/workbench base layer, stepping
-//! select-plugin → toggle-features → an off-thread apply → a per-edit report
+//! The Add Plugin dialog modal: a shadowed, centered popup over the
+//! welcome/workbench base layer, stepping select-plugin → toggle-features →
+//! an off-thread apply → a per-edit report
 //! (or an error). The base layer is rendered with a *suppressed* `MouseCtx`
 //! (see `crate::ui::render`), so only this modal's regions are live while it is
 //! open — the D4 base-layer suppression, plus the binding `[Esc] Close` title

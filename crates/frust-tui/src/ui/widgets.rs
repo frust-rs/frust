@@ -1,4 +1,4 @@
-//! Reusable render widgets. Phase 1 ships the enlarged, padded button (D5:
+//! Reusable render widgets: the enlarged, padded button (D5:
 //! 3-row bordered target with hover + pressed states).
 
 use ratatui::Frame;

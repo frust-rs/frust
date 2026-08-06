@@ -54,7 +54,7 @@ pub use update::{Effect, Outcome, update};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// Owns the model and the single mpsc channel every asynchronous producer
-/// (Phase 2 session supervisors, preflight tasks) sends into.
+/// (session supervisors, preflight tasks) sends into.
 ///
 /// The channel is unbounded and cloneable: [`Engine::sender`] hands a producer
 /// a `Sender`, and the event loop drains the matching receiver

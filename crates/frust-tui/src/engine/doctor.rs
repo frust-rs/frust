@@ -3,8 +3,8 @@
 //! of `frust-drive`'s [`Validator`](frust_drive::doctor::Validator) set run
 //! off-thread (`spawn_blocking`, see `crate::runner`) at startup preflight and
 //! again on demand. Today's flat [`frust_drive::doctor::Validation`] is the
-//! source (the full D6a component-level report + guided commands stay
-//! Phase 3).
+//! source (the full D6a component-level report + guided commands are
+//! future work).
 //!
 //! `frust_drive::doctor::Validation` doesn't derive `PartialEq`/`Eq`, and
 //! [`crate::engine::Message`]/[`crate::engine::Effect`] both do — so

@@ -381,7 +381,7 @@ mod tests {
             .find(|c| c.tag.as_deref() == Some("clean-signals"))
             .expect("clean-signals card enumerated from KNOWN_ARCHES");
         assert_eq!(clean.label, "Clean Signals");
-        // clean-signals is git+rev-pinned to its public repo (task 05), so
+        // clean-signals is git+rev-pinned to its public repo, so
         // this card needs no sibling checkout and starts enabled like every
         // other card.
         assert!(!clean.sibling_gated);

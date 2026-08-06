@@ -1,6 +1,6 @@
 //! The workbench shell (D5 / workbook B2): titlebar / sidebar / main / status.
-//! Static content in Phase 1 — project detection, sessions, and interactivity
-//! land in Phase 2.
+//! Started as static content — project detection, sessions, and
+//! interactivity layered on top afterward.
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
@@ -446,7 +446,7 @@ fn device_glyph(
 }
 
 /// One line per detected project (F5 bounded-walk detection); the active one
-/// (`state.project_root`, first found for now — a full switcher is Phase 2)
+/// (`state.project_root`, first found for now — a full switcher isn't built yet)
 /// gets the hover chevron and accent color, the rest render muted.
 fn project_lines(state: &AppState, theme: &Theme) -> Vec<Line<'static>> {
     if state.projects.is_empty() {

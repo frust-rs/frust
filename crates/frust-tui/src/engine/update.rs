@@ -108,7 +108,7 @@ pub enum Effect {
     /// Apply a registry plugin's contributions to `project_root` off-thread via
     /// [`frust_drive::plugin::add_plugin`], posting
     /// [`Message::AddPluginSucceeded`]/[`Message::AddPluginFailed`] back — the
-    /// Add Plugin dialog's apply step (`frust-secure-storage` Phase 7).
+    /// Add Plugin dialog's apply step.
     AddPlugin {
         /// The generated project root the edits are applied to.
         project_root: PathBuf,
@@ -511,7 +511,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         }
         Message::ScaffoldFailed(message) => with_wizard(state, |w| w.fail(message)),
 
-        // ── Add plugin dialog (frust-secure-storage Phase 7) ────────────────
+        // ── Add plugin dialog ────────────────────────────────────────────────
         Message::OpenAddPlugin => open_add_plugin(state),
         Message::CloseAddPlugin => {
             if state.add_plugin.take().is_some() {
@@ -2004,7 +2004,7 @@ mod tests {
 
     #[test]
     fn probe_result_is_a_harmless_no_op_for_the_clean_signals_card() {
-        // clean-signals is git+rev-pinned to its public repo (task 05), so
+        // clean-signals is git+rev-pinned to its public repo, so
         // the card starts enabled and stays enabled regardless of the probe
         // result — the probe still fires (`Effect::ProbeCleanSignals`) but
         // no card depends on its outcome today.
@@ -2128,7 +2128,7 @@ mod tests {
         assert_eq!(st.create_wizard.as_ref().unwrap().step, WizardStep::Arch);
     }
 
-    // ── Add plugin dialog (frust-secure-storage Phase 7) ────────────────────
+    // ── Add plugin dialog ─────────────────────────────────────────────────
 
     use crate::engine::AddPluginStep;
 
@@ -2158,7 +2158,7 @@ mod tests {
     #[test]
     fn add_plugin_probe_is_a_harmless_no_op_with_no_sibling_gated_entries() {
         // clean-signals-frust was the sole `requires_sibling` registry user
-        // before clean-signals moved to a git+rev pin (task 05); no entry is
+        // before clean-signals moved to a git+rev pin; no entry is
         // sibling-gated today, so every card starts (and stays) enabled
         // regardless of the probe result.
         let mut st = workbench_with_project();
