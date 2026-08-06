@@ -196,12 +196,18 @@
 //!   anchoring uses (unchanged index, or shifted by the frame's net item-count
 //!   delta); if neither still names its key, the row left the *data*, not just
 //!   the window, and its measurement is dropped — at most two `key_of` calls
-//!   per departing row. **Suspended** on a frame where the anchor-shift probe
-//!   below already missed: trusting the same delta hypothesis for an
-//!   individual departing row after it has already proven unreliable this
-//!   frame would evict a row that is merely just outside the still-mis-
-//!   anchored window, not gone from the data — left alone instead, stale
-//!   until re-measured or reclaimed by a later shrink (next bullet),
+//!   per departing row. Runs on every reconciled frame that isn't a genuine
+//!   full replace (the third bullet below), *including* one where the
+//!   anchor-shift probe below missed: a miss there only proves no single
+//!   uniform shift explained every row in the previous window at once (the
+//!   same-frame both-sides-of-the-anchor case) — it says nothing about
+//!   whether *this* orphaned row's own two hypotheses still hold. Leaving
+//!   the loop stale on such a frame instead would be a permanent leak, not a
+//!   bounded imprecision: a row genuinely removed from the data has no later
+//!   shrink or revisit to reclaim it (`record_measurement` never refreshes a
+//!   dead key, and the shrink rule below only scans a frame whose
+//!   `item_count` actually shrank, which a removal alongside a same-frame
+//!   addition need never be),
 //! * a frame whose `item_count` shrank drops every entry whose recorded index
 //!   is past the new end (the only entries the new keying provably cannot
 //!   produce) — a scan of the cache, only on a shrink frame,
@@ -217,21 +223,18 @@
 //!   frame's window is it a genuine full replace, which clears the cache
 //!   outright.
 //!
-//! Three acknowledged gaps: a row removed while it was *outside* the
+//! Two acknowledged gaps: a row removed while it was *outside* the
 //! materialized window keeps its entry (finding it would mean re-keying all
-//! `item_count` items, the O(N) this design exists to avoid); a row that both
-//! left the window and moved to an index neither hypothesis names is evicted
-//! conservatively and re-measured on its next visit — *unless* the anchor
-//! probe itself already missed this frame, in which case (per the first
-//! bullet above) it is kept rather than evicted, the same conservative
-//! direction pointed the other way; and a same-frame mutation on both sides
-//! of the anchor can still miss the anchor-shift hypothesis probe itself, so
-//! the *scroll position* is left uncorrected for that one frame (a visible
-//! jump) even though — per the bullets above — the measured cache no longer
-//! pays for the same miss, wholesale or per-row. All three cost accuracy (or,
-//! for the last, one uncorrected frame) in an already-estimated total, never
-//! a misattached measurement; the exact per-key anchor-position fix is a
-//! deferred follow-up.
+//! `item_count` items, the O(N) this design exists to avoid); and a same-frame
+//! mutation on both sides of the anchor can still miss the anchor-shift
+//! hypothesis probe itself, so the *scroll position* is left uncorrected for
+//! that one frame (a visible jump) even though — per the bullets above — the
+//! measured cache no longer pays for the same miss, wholesale or per-row, and
+//! any *pending measured-anchor correction* is discarded rather than
+//! committed into geometry it can no longer explain (see the next section).
+//! Both cost accuracy (or, for the scroll jump, one uncorrected frame) in an
+//! already-estimated total, never a misattached measurement or a leaked
+//! entry; the exact per-key anchor-position fix is a deferred follow-up.
 //!
 //! # Measured anchor correction (variable extents only)
 //!
@@ -933,7 +936,7 @@ impl<State: 'static> ListView<State> {
                 // exactly the ones they were — see the [module docs](self)'
                 // *Cache hygiene* section.
                 element.clear_measured();
-            } else if !anchor_probe_missed {
+            } else {
                 // A pod no slot claimed left the window *or* the data, and only
                 // the second case may drop its measurement. Probe each orphan's
                 // key at its unchanged index and at that index shifted by this
@@ -945,20 +948,27 @@ impl<State: 'static> ListView<State> {
                 // clear above, since a false miss here only evicts one
                 // already-departed row's entry.
                 //
-                // Gated on `!anchor_probe_missed`: this loop tests a departing
-                // row's key against the exact same two hypotheses (unchanged
-                // index, or shifted by the frame's net `delta`) the anchor
-                // probe above already tested and found unreliable *this frame*
-                // (a same-frame both-sides mutation is the confirmed case —
-                // see `any_survivor` above). Trusting the same hypothesis here
-                // when it has already missed once this frame would evict a row
-                // that's merely just outside the (still mis-anchored) window,
-                // not gone from the data — the exact class of bug this
-                // decoupling exists to avoid. Left alone, such a row's entry is
-                // simply stale until re-measured or reclaimed by
-                // [`ListViewWidget::evict_measured_stale_indices`] on a later
-                // shrink; still `Widget::teardown`-torn-down like every other
-                // orphan below regardless, only its *measurement* survives.
+                // Runs on every frame that isn't a genuine full replace,
+                // including one where the anchor-shift probe above missed
+                // (`anchor_probe_missed && any_survivor`, the branch that lands
+                // here rather than in the wholesale clear above): a probe miss
+                // does not mean this loop's own two hypotheses are unreliable
+                // for a *specific* orphaned row — it only means no *single*
+                // uniform hypothesis explained every row in the previous
+                // window at once (the same-frame both-sides-of-the-anchor
+                // case). Gating this loop on the probe's outcome, as an
+                // earlier version of this fix did, traded a bounded
+                // over-eviction (re-measure one row that was merely outside
+                // the still-mis-anchored window) for an unbounded leak: a row
+                // truly removed from the data on such a frame has no later
+                // shrink or revisit to reclaim it — `record_measurement` never
+                // refreshes a dead key, and `evict_measured_stale_indices`
+                // only scans on a frame whose `item_count` shrank, which a
+                // frame that *adds* a sentinel/anchor row alongside a removal
+                // (any_survivor's own precondition) need never be. A false
+                // eviction here costs one row's re-measurement — the module's
+                // own documented conservative direction — never a permanent
+                // leak.
                 let count = element.item_count;
                 for (key, prev_index) in prev_index_of.iter() {
                     if old.contains_key(prev_index)
@@ -2207,9 +2217,12 @@ impl<State: 'static> View<State> for ListView<State> {
         // same-frame mutation touching both sides of the anchor (a prepend
         // above the viewport plus an append below it in one frame) even
         // though most on-screen rows are still exactly the ones they were.
-        // Whether the measured cache should reset on that is answered later,
-        // inside `reconcile_keyed`, against its own exact per-slot key
-        // matches — see the module docs' *Cache hygiene* section.
+        // Whether the measured *cache* should reset on that is answered
+        // later, inside `reconcile_keyed`, against its own exact per-slot key
+        // matches — see the module docs' *Cache hygiene* section. The
+        // *pending measured-anchor correction*, in contrast, is zeroed
+        // unconditionally the moment the probe misses (below) — a narrower,
+        // unrelated question the cache-reset decision does not gate.
         let mut anchor_probe_missed = false;
         if let Some(key_of) = self.key_of.as_ref() {
             match Self::anchor_shift_items(prev, element, old_item_count, key_of) {
@@ -2221,6 +2234,25 @@ impl<State: 'static> View<State> for ListView<State> {
                 Some(_) => {}
                 None => {
                     anchor_probe_missed = true;
+                    // A pending measured-anchor correction describes rows
+                    // wholly above the viewport top *in the geometry this
+                    // frame's now-superseded window was planned against*
+                    // (module docs' *Measured anchor correction* section).
+                    // The anchor probe just proved that geometry cannot be
+                    // explained against this mutation by either hypothesis —
+                    // committing the accumulated correction into new data
+                    // below (`apply_pending_correction`, called after this
+                    // match) would be a guess, not a measurement. Zero it
+                    // here, before that commit point, regardless of whether
+                    // the measured *cache* itself resets: that is a separate,
+                    // narrower decision made later in `reconcile_keyed`
+                    // against its own exact per-slot key matches (see the
+                    // module docs' *Cache hygiene* section) — a probe miss
+                    // with a surviving on-screen row keeps the cache but
+                    // still owes this reset, since the correction was
+                    // computed against the pre-mutation window regardless of
+                    // whether any individual row's measurement survives.
+                    element.pending_correction = 0.0;
                 }
             }
         }
@@ -4566,10 +4598,28 @@ mod tests {
         // unconditionally). This pins the fix: the scroll-position
         // correction itself is knowingly still absent this frame (a visible
         // jump — the exact per-key anchor fix is a deferred follow-up, see
-        // the module docs' *Cache hygiene* section), but the on-screen
-        // rows' measured heights must survive, because `reconcile_keyed`
-        // still matches them into this frame's window by *exact* key, not
-        // by the probe's hypotheses.
+        // the module docs' *Cache hygiene* section), but the wholesale clear
+        // no longer fires, because `reconcile_keyed` still matches *some*
+        // on-screen rows into this frame's window by *exact* key, not by the
+        // probe's hypotheses (`any_survivor`).
+        //
+        // Not every previously on-screen row is such a survivor, though: the
+        // window itself is recomputed against the same (uncorrected, since
+        // the probe missed) offset over now-shifted content, so a row whose
+        // slot falls outside the recomputed window becomes an orphan the
+        // main reconcile loop never claims. The departing-row eviction loop
+        // (`ListView::reconcile_keyed`'s *Cache hygiene* section) tests that
+        // orphan against the same two hypotheses the probe already found
+        // unreliable this frame, and — per the module docs' *acknowledged
+        // gaps* — conservatively evicts it rather than leaving it stale
+        // forever: a merely-window-departed row costs one re-measurement on
+        // its next visit; a genuinely data-departed row (a distinct
+        // scenario pinned by
+        // `probe_miss_with_survivor_evicts_a_row_that_left_the_data`) would
+        // otherwise leak permanently. Both outcomes are asserted below,
+        // derived from which rows the reconciled window actually still
+        // names — not hardcoded — so this test tracks the real reconciliation
+        // rather than one snapshot of its internals.
         let fx = VarRows::new((0..60).collect());
         let mut logic = fx.logic();
         let mut root = converged_var(&mut logic, &fx);
@@ -4605,19 +4655,154 @@ mod tests {
         root.rebuild(&mut logic, &mut ()); // rebuild alone: pins cache state, not paint/layout
 
         let w = list_widget(&root);
+        let new_window_ids: std::collections::HashSet<u64> =
+            w.window().iter().map(|&i| fx.rows.borrow()[i]).collect();
+        assert!(
+            on_screen_ids.iter().any(|id| new_window_ids.contains(id)),
+            "at least one previously on-screen row is still reconciled into this \
+             frame's window by exact key — `any_survivor`, the precondition that \
+             keeps the wholesale clear from firing"
+        );
+
+        let mut survivors = 0;
+        let mut departed = 0;
         for (id, extent_before) in &measured_before {
             let entry = w.measured.get(&ChildKey::new(*id));
-            assert!(
-                entry.is_some(),
-                "row {id}'s measurement survived the same-frame both-sides mutation \
-                 (no estimate collapse)"
-            );
-            assert_eq!(
-                entry.unwrap().extent,
-                *extent_before,
-                "row {id}'s measured height is unchanged"
-            );
+            if new_window_ids.contains(id) {
+                survivors += 1;
+                assert!(
+                    entry.is_some(),
+                    "row {id} is still named by this frame's reconciled window \
+                     (an exact key match), so its measurement must survive"
+                );
+                assert_eq!(
+                    entry.unwrap().extent,
+                    *extent_before,
+                    "row {id}'s measured height is unchanged"
+                );
+            } else {
+                departed += 1;
+                assert!(
+                    entry.is_none(),
+                    "row {id} left this frame's reconciled window and neither \
+                     departing-row hypothesis re-explains its new position — the \
+                     conservative eviction this fix restores (re-measured on its \
+                     next visit, never a permanent leak)"
+                );
+            }
         }
+        assert!(survivors > 0, "the survivor assertion above is exercised");
+        assert!(
+            departed > 0,
+            "the window-departure assertion above is exercised — if this ever \
+             stops firing (e.g. a wider window swallows the whole shift), widen \
+             the mutation so the same-frame-both-sides mismatch still orphans a \
+             row and this test keeps covering both outcomes"
+        );
+    }
+
+    #[test]
+    fn probe_miss_with_survivor_evicts_a_row_that_left_the_data() {
+        // A same-frame mutation on both sides of the anchor (prepend above
+        // the viewport, remove the topmost on-screen row itself, append
+        // below) is the same false-negative shape
+        // `same_frame_prepend_and_append_leaves_the_measured_cache_intact`
+        // pins for the anchor-shift probe: removing the *first* on-screen
+        // row means every remaining on-screen row's actual shift (+2: +3
+        // from the prepend, −1 from the row removed ahead of it) differs
+        // from the frame's net `item_count` delta (+3: +3 prepended, −1
+        // removed, +1 appended), so the probe's two hypotheses (unchanged
+        // position, or shifted by the net delta) miss for every key in the
+        // previous window — `anchor_probe_missed`.
+        //
+        // Unlike that test, `reconcile_keyed`'s own exact per-slot lookup
+        // still finds *some* of those rows in the new window
+        // (`any_survivor`) — the precondition this test targets: a
+        // probe-miss frame that is *not* a wholesale replace, so the
+        // measured cache's own wholesale reset stays off. But the removed
+        // row genuinely left the *data*, not merely the window, and must
+        // still be evicted by the per-row eviction loop this fix restores —
+        // left alone it would leak forever, since `record_measurement`
+        // never revives a dead key and this frame's *growing* `item_count`
+        // never triggers the shrink-only eviction rule either.
+        let fx = VarRows::new((0..60).collect());
+        let mut logic = fx.logic();
+        let mut root = converged_var(&mut logic, &fx);
+        root.event(&mut (), &wheel(400.0));
+        settle(&mut root, &mut logic, &fx, 100.0, 4);
+
+        let w = list_widget(&root);
+        let on_screen_ids: Vec<u64> = w.window().iter().map(|&i| fx.rows.borrow()[i]).collect();
+        assert!(
+            on_screen_ids.len() > 1,
+            "the window materialized more than the victim alone"
+        );
+        let victim = on_screen_ids[0];
+        let offset_before = w.offset();
+        let count_before = w.measured.len();
+        let sum_before = w.measured_sum;
+        assert!(
+            w.measured.contains_key(&ChildKey::new(victim)),
+            "the victim was already measured, laid out once by `converged_var`"
+        );
+
+        // Prepend 3 above the viewport, remove the topmost on-screen row
+        // itself, and append 1 below — all in one keyed rebuild.
+        {
+            let mut rows = fx.rows.borrow_mut();
+            rows.splice(0..0, [9_001u64, 9_002, 9_003]);
+            rows.retain(|&id| id != victim);
+            rows.push(9_050);
+        }
+        root.rebuild(&mut logic, &mut ()); // rebuild alone: pins cache state, not paint/layout
+
+        let w = list_widget(&root);
+        assert_eq!(
+            w.offset(),
+            offset_before,
+            "the anchor probe missed, so no anchor-shift correction ran this \
+             frame — the offset a genuine prepend/removal would anchor is \
+             untouched here"
+        );
+
+        let new_window_ids: std::collections::HashSet<u64> =
+            w.window().iter().map(|&i| fx.rows.borrow()[i]).collect();
+        assert!(
+            on_screen_ids[1..]
+                .iter()
+                .any(|id| new_window_ids.contains(id)),
+            "at least one other previously on-screen row is still reconciled \
+             into this frame's window by exact key — `any_survivor`, the \
+             precondition that keeps the wholesale clear from firing"
+        );
+        for id in &on_screen_ids[1..] {
+            if new_window_ids.contains(id) {
+                assert!(
+                    w.measured.contains_key(&ChildKey::new(*id)),
+                    "row {id} is still named by this frame's reconciled \
+                     window, so its measurement must survive"
+                );
+            }
+        }
+
+        assert!(
+            !w.measured.contains_key(&ChildKey::new(victim)),
+            "the removed row's measurement is evicted that same frame, even \
+             though the anchor probe missed — this fix's whole point"
+        );
+        assert!(
+            w.measured.len() <= count_before,
+            "the cache never grows across a rebuild-only pass over a removal"
+        );
+        assert!(
+            (w.measured_sum - w.measured.values().map(|m| m.extent).sum::<f64>()).abs() < 1e-9,
+            "the running sum still matches the surviving entries — \
+             `measured_sum` and `measured` stay consistent, no leak"
+        );
+        assert!(
+            w.measured_sum < sum_before,
+            "the sum strictly dropped (at least the victim's own extent left it)"
+        );
     }
 
     #[test]
@@ -4869,6 +5054,62 @@ mod tests {
              ({anchor_y} -> {y_after})"
         );
         assert!(flags.contains(ChangeFlags::LAYOUT));
+    }
+
+    #[test]
+    fn full_replace_after_a_pending_correction_discards_it_instead_of_committing_it() {
+        // Wheel-jump into unmeasured tall rows so a real frame leaves
+        // `pending_correction > 0` — the same idiom
+        // `measured_correction_holds_the_anchor_when_rows_measure_taller` and
+        // `drag_takeover_seeds_from_raw_offset_not_the_pending_corrected_painted_offset`
+        // use to produce a genuine (not synthetic) correction, rather than
+        // committing it on the very next ordinary frame.
+        let fx = VarRows::new(tall_ids(300));
+        let mut logic = fx.logic();
+        let mut root = converged_var(&mut logic, &fx);
+
+        root.event(&mut (), &wheel(1_500.0));
+        var_frame(&mut root, &mut logic, &fx, 100.0);
+
+        let w = list_widget(&root);
+        let pending = w.pending_correction;
+        let offset_before = w.offset();
+        assert!(
+            pending > 0.0,
+            "the rows above the viewport top measured taller than assumed"
+        );
+
+        // Instead of an ordinary next frame (which would commit `pending`),
+        // replace every id: no previous-window key survives either
+        // hypothesis, a genuine full replace exactly like
+        // `variable_full_replace_clears_the_measured_cache` — reset
+        // semantics for the measured cache *and* for anchoring, on a frame
+        // that also happens to be carrying a stale, now-unexplainable
+        // correction computed against geometry this list no longer holds.
+        *fx.rows.borrow_mut() = (0..300).map(|i| 10_000 + i).collect();
+        root.rebuild(&mut logic, &mut ()); // rebuild alone: pins offset/cache state
+
+        let w = list_widget(&root);
+        assert_eq!(
+            w.pending_correction, 0.0,
+            "the stale correction is discarded, not left pending"
+        );
+        assert_eq!(
+            w.offset(),
+            offset_before,
+            "the offset did NOT absorb the stale correction — `item_count` is \
+             unchanged (300 before and after) and {offset_before} is already \
+             far inside `max_offset` either way, so the only way this could \
+             differ is the bug this pins: committing `pending` (giving \
+             {}) into geometry the full replace made unexplainable",
+            offset_before + pending
+        );
+        assert!(
+            w.measured.is_empty(),
+            "a full replace clears the measured cache too (the round-0 fix, \
+             still intact — `reconcile_keyed`'s wholesale-clear branch)"
+        );
+        assert_eq!(w.measured_sum, 0.0);
     }
 
     #[test]
