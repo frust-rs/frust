@@ -1,44 +1,38 @@
-//! The six v1 controls: `Button`,
-//! `Label`, `Switch`, `Slider`, `ProgressBar`, `Image` — each an internal
-//! [`NativeWidget`](crate::runtime::NativeWidget) impl over
-//! [`crate::runtime`], with every property write a direct platform setter on
-//! the main thread.
+//! The six v1 controls — `Button`, `Label`, `Switch`, `Slider`, `ProgressBar`,
+//! `Image` — each an internal [`NativeWidget`](crate::runtime::NativeWidget)
+//! impl over [`crate::runtime`], with every property write a direct platform
+//! setter on the main thread.
 //!
 //! # Two halves per control, one file
 //!
 //! Each control module is split by *compilation target*, not by file:
 //!
 //! 1. a **platform-agnostic half** — the typed `Props`, its `decode` out of a
-//!    slot's `params_json`, and a pure `plan(old, new)` that turns a props
-//!    diff into an ordered list of [`Setter`]s. Compiled everywhere, so
-//!    `cargo test` pins every control's diff behaviour on any host with no
-//!    JNI at all (this is why the modules live in `src/controls/` rather than
-//!    under `src/android/`, which compiles on Android only);
-//! 2. a **platform half** — one `mod platform` per target, side by side in
-//!    the same file, each holding that platform's `NativeWidget` impl:
-//!    - `#[cfg(target_os = "android")] mod platform` — build the
-//!      `android.widget.*` view, hand each planned [`Setter`] to
-//!      `platform::apply`, retain/release the global refs;
-//!    - `#[cfg(target_os = "ios")] mod platform` — build the UIKit
-//!      view, apply the **same plan** through typed `objc2-ui-kit` setters,
-//!      and let ARC own the references.
+//!    slot's `params_json`, and a pure `plan(old, new)` turning a props diff
+//!    into an ordered list of [`Setter`]s. Compiled everywhere, so `cargo test`
+//!    pins every control's diff behaviour on any host with no JNI at all (which
+//!    is why these modules live in `src/controls/` rather than under
+//!    `src/android/`, which compiles on Android only);
+//! 2. a **platform half** — one `mod platform` per target, side by side in the
+//!    same file, each holding that platform's `NativeWidget` impl: the Android
+//!    arm builds the `android.widget.*` view, hands each planned [`Setter`] to
+//!    `platform::apply` and retains/releases the global refs; the iOS arm builds
+//!    the UIKit view, applies the **same plan** through typed `objc2-ui-kit`
+//!    setters, and lets ARC own the references.
 //!
-//!    Half 1 is shared verbatim: one `Props` definition, one `decode`, one
-//!    `plan`, two arms. That is the whole point of the split — a control's
-//!    diff behaviour is asserted once, on a host, and both platforms execute
-//!    the identical plan.
-//!
-//! The *only* thing a plan cannot express is view construction, so `create`
-//! is written as "apply the plan from the platform's own freshly-constructed
-//! state" (`Props::platform_default`) — one code path for create and update,
-//! and a `create` that sets nothing when the app asked for the platform
-//! defaults.
+//! Half 1 is shared verbatim — one `Props`, one `decode`, one `plan`, two arms —
+//! which is the point of the split: diff behaviour is asserted once, on a host,
+//! and both platforms execute the identical plan. The *only* thing a plan cannot
+//! express is view construction, so `create` is "apply the plan from the
+//! platform's own freshly-constructed state" (`Props::platform_default`) — one
+//! code path for create and update, and a `create` that sets nothing when the
+//! app asked for the platform defaults.
 //!
 //! # Property tiers — which setter you call is the whole cost story
 //!
-//! An earlier on-device measurement (an optimized `--profile`
-//! build, 50 retained `TextView`s, method ids cached) found the FFI crossing is
-//! not what costs — *which* Android property you set is.
+//! On-device measurement (an optimized `--profile` build, 50 retained
+//! `TextView`s, method ids cached) found the FFI crossing is not what costs —
+//! *which* Android property you set is.
 //!
 //! | Tier | What it costs | Measured, per call | Setters |
 //! |---|---|---|---|
@@ -52,30 +46,26 @@
 //! ~14.5 ms and does not. **Event-driven `setText` is fine; per-frame text
 //! streaming is not** — a high-rate surface should stream a cheap property
 //! (colour, progress, checked) and leave text/size/scale-type to
-//! interaction-rate changes. [`Tier::Decode`] never belongs on a frame path
-//! at all, which is why [`Setter::ImageBytes`] is emitted only when the bytes'
-//! *identity* changed (`crate::controls::image`), never per rebuild.
+//! interaction-rate changes. [`Tier::Decode`] never belongs on a frame path at
+//! all, which is why [`Setter::ImageBytes`] is emitted only when the bytes'
+//! *identity* changed (`crate::controls::image`), never per rebuild. Debug
+//! builds are 2–5× worse across the board — only judge these numbers on an
+//! optimized build.
 //!
-//! Debug builds are 2–5× worse across the board — only judge these
-//! numbers on an optimized build.
-//!
-//! **The table is Android-measured, and [`Tier`] is deliberately not
-//! re-derived per platform.** No equivalent UIKit measurement exists (the
-//! on-device measurement above ran on Android only), so the iOS arm applies
-//! the same plan without
-//! claiming the same costs. The *shape* is expected to carry — a UIKit
-//! caption/font change invalidates intrinsic content size and re-lays-out the
-//! view, a colour change only redisplays it — but the numbers above are not
-//! evidence for iOS and must not be cited as if they were. Re-measuring on
-//! device is future work, not a claim this module gets to make.
+//! **The table is Android-measured, and [`Tier`] is deliberately not re-derived
+//! per platform.** No equivalent UIKit measurement exists, so the iOS arm
+//! applies the same plan without claiming the same costs. The *shape* is
+//! expected to carry — a UIKit caption/font change invalidates intrinsic content
+//! size and re-lays-out the view, a colour change only redisplays it — but the
+//! numbers above are not evidence for iOS and must not be cited as if they were.
 //!
 //! # Field-level diffing is the control's job
 //!
-//! [`crate::runtime`]'s `Props: PartialEq` gate is **whole-struct**: it only
-//! decides whether `update` runs at all. Which *setters* run is decided here,
-//! per field, because only a control knows that its text setter costs 35× its
-//! colour setter (the table above). Every `plan` therefore emits a setter only
-//! for a field that actually changed, in a deterministic order the tests pin.
+//! [`crate::runtime`]'s `Props: PartialEq` gate is **whole-struct**: it decides
+//! only whether `update` runs at all. Which *setters* run is decided here, per
+//! field, because only a control knows its text setter costs 35× its colour
+//! setter (the table above). Every `plan` therefore emits a setter only for a
+//! field that actually changed, in a deterministic order the tests pin.
 //!
 //! # Controlled components, and the echo the platform sends back
 //!
@@ -89,31 +79,29 @@
 //!   re-asserts it when the platform has drifted;
 //! - **echo guard**: a value setter (`setChecked`/`setProgress`) notifies the
 //!   platform's own listener **synchronously, on every supported Android
-//!   version** (AOSP source: the same call stack as the setter, guarded only
-//!   by the widget's own reentrancy flag, never posted or animation-deferred —
-//!   see `switch.rs`'s module doc for the full account). `update` runs inside
+//!   version** (AOSP: the same call stack as the setter, guarded only by the
+//!   widget's own reentrancy flag, never posted or animation-deferred;
+//!   `switch.rs`'s module doc has the full account). `update` runs inside
 //!   `crate::runtime::with_runtime`, so that echo re-enters the same
 //!   thread-local `RefCell` mid-borrow and is dropped there, before
 //!   `NativeWidget::on_event`/each control's `decode_toggled`/`decode_event`
-//!   ever see it — the runtime's re-entrancy tolerance is the SOLE guard.
-//!   There is no per-instance suppression flag, and therefore nothing a panic
-//!   mid-`update` could leave latched. **This safety is incidental, not
+//!   ever see it — the runtime's re-entrancy tolerance is the SOLE guard. There
+//!   is no per-instance suppression flag, and therefore nothing a panic
+//!   mid-`update` could leave latched. **That safety is incidental, not
 //!   designed**: it holds only because
-//!   `crate::runtime::NativeRuntime::update_params` — which calls `update` —
-//!   is itself always invoked from inside `with_runtime`
-//!   (`crate::android`'s `nativeUpdateParams`). A future refactor that moved
-//!   `update` outside that borrow would silently remove the only echo
-//!   protection this crate has.
+//!   `crate::runtime::NativeRuntime::update_params` — which calls `update` — is
+//!   itself always invoked from inside `with_runtime` (`crate::android`'s
+//!   `nativeUpdateParams`), so a refactor moving `update` outside that borrow
+//!   would silently remove the only echo protection this crate has.
 //!
 //! **On iOS there is no echo to guard at all — and still no iOS-specific
-//! machinery.** UIKit's documented rule is that it does not send control
-//! events for programmatic changes, so `setOn:animated:`/`setValue:` are not
-//! expected to re-enter this crate the way `setChecked` does. That
-//! expectation carries two caveats worth keeping honest, and the same
-//! `with_runtime` re-entrancy drop above covers both if either bites — see
-//! `switch.rs`'s module doc, which is the reference description for this arm
-//! too. **Do not add a per-instance suppression flag on either platform**
-//! (Android's was deleted for good reasons; there is nothing to reinstate).
+//! machinery.** UIKit documents that it does not send control events for
+//! programmatic changes, so `setOn:animated:`/`setValue:` are not expected to
+//! re-enter this crate the way `setChecked` does; that expectation carries two
+//! caveats (`switch.rs`'s module doc, the reference description for this arm
+//! too), and the same `with_runtime` re-entrancy drop covers both if either
+//! bites. **Do not add a per-instance suppression flag on either platform** —
+//! there is nothing to reinstate.
 
 pub(crate) mod button;
 pub(crate) mod image;

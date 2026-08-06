@@ -1,23 +1,15 @@
 //! [`NativeComponent`] — the **public** trait a plugin author writes a native
 //! component against, from pure Rust, with no per-component Kotlin or Swift.
 //!
-//! **An app crate cannot implement this trait today** — which is why the line
-//! above says *plugin* author. `create` has to construct real native views,
-//! which means naming `jni::objects::JObject` on Android and `objc2-ui-kit`'s
-//! classes on iOS *in the implementing crate*; this plugin re-exports neither
-//! FFI crate, and `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions
-//! put an `examples/*` app on `frust` plus plugin crates only — a raw FFI
-//! dependency is not among them. So the practical audience today is plugin authors, not
-//! app authors, and the only implementor in this repo is this crate's own
-//! non-default `demo-components` composite (`crate::demo`, which spells the
-//! same wall out at length). Closing the gap — re-exporting a curated
-//! view-construction surface, or the FFI crates themselves — is a separate,
-//! unscheduled decision.
+//! **An app crate cannot implement this trait**: `create` constructs real native
+//! views, which means naming `jni`/`objc2-ui-kit` types in the implementing
+//! crate, and this plugin re-exports neither FFI crate — see
+//! `docs/NATIVE_WIDGETS_ARCHITECTURE.md` for that wall and the audience it
+//! leaves. The only implementor here is the non-default `demo-components`
+//! composite (`crate::demo`).
 //!
 //! Where `crate::runtime`'s `NativeWidget` is the plugin's **internal** dispatch
-//! contract — associated functions, `Result` returns, a `decode_props` step
-//! that reads a control's fields out of the slot's `params_json` — this trait
-//! is the shape a *third party* implements:
+//! contract, this trait is the shape a *third party* implements:
 //!
 //! | | internal `NativeWidget` | public [`NativeComponent`] |
 //! |---|---|---|
@@ -27,259 +19,179 @@
 //! | events | decoded into the crate's typed `EventPayload` | the raw [`NativeEvent`] pair, handled by the component itself |
 //! | context | the platform's own `NativeCtx` | the opaque [`ComponentCtx`] wrapper |
 //!
-//! # The six v1 controls are NOT ported onto this trait
-//!
-//! They stay internal `NativeWidget` impls, and this module **bridges** to
-//! them rather than rewriting them: `Bridge<C>` (crate-private) is one
-//! `NativeWidget` impl,
-//! generic over every public component, so both kinds of implementation are
-//! dispatched by the same runtime, the same registry, the same props diff
-//! gate and the same disposal path. That is a deliberate design decision, on
-//! three grounds: the six controls' whole wire is `params_json` (they cannot
-//! use the typed props channel below without their api-layer builders changing
-//! shape), a public trait implemented *by* an internal one would either need a
-//! blanket impl — which would then block every third-party impl on coherence
-//! grounds — or a rewrite of six shipped files, and "behaviour must not
-//! change" is only provable if their code does not move.
-//! The bridge is what makes the public trait a real dispatch path instead of a
-//! re-labelling: every guarantee documented below is the runtime's own, not a
-//! second implementation of it.
+//! The six v1 controls are **not** ported onto it: they stay internal
+//! `NativeWidget` impls, and this module **bridges** to them through
+//! `Bridge<C>` (crate-private), one `NativeWidget` impl generic over every
+//! public component, so both kinds reach the same runtime, registry, props diff
+//! gate and disposal path. Porting them is not on the table — their whole wire
+//! is `params_json`, and a public trait implemented *by* an internal one would
+//! need a blanket impl that then blocks every third-party impl on coherence
+//! grounds. Every guarantee below is therefore the runtime's own.
 //!
 //! # The lifecycle contract (what the runtime guarantees)
 //!
-//! **Every method here runs on the platform main thread**, from the host's
-//! post-frame command poll or from a platform listener firing — never from a
-//! frust rebuild, and never off-thread (`crate::runtime`'s *main-thread
-//! confinement*).
+//! **Every method here runs on the platform main thread** — the host's
+//! post-frame command poll or a platform listener firing, never a frust rebuild
+//! and never off-thread (`crate::runtime`'s *main-thread confinement*).
 //!
 //! 1. **`create` arrives a frame or more after the widget mounts.** Mounting a
-//!    slot publishes a `Create` command; the host drains its backlog on the
-//!    next post-frame poll, and *that* is what calls
-//!    [`NativeComponent::create`]. Anything the component retains lives in
-//!    [`NativeComponent::State`], which is born there — there is nothing
-//!    native to hold before it.
-//! 2. **Props coalesce until then, and are always whole state, never a
-//!    delta.** Each rebuild replaces a slot's staged props outright, so a
-//!    create landing after three rebuilds sees only the newest; replaying a
-//!    prefix of the command backlog (a surface-recreate replay, a backlog
-//!    compaction) lands in the same place.
+//!    slot publishes a `Create` command; the host drains its backlog on the next
+//!    post-frame poll, and *that* is what calls [`NativeComponent::create`].
+//!    Anything the component retains lives in [`NativeComponent::State`], born
+//!    there — there is nothing native to hold before it.
+//! 2. **Props coalesce until then, and are always whole state, never a delta.**
+//!    Each rebuild replaces a slot's staged props outright, so a create landing
+//!    after three rebuilds sees only the newest, and replaying a backlog prefix
+//!    (a surface-recreate replay, a compaction) lands in the same place.
 //! 3. **`update` runs only when props actually differ.** The runtime compares
 //!    the typed props with `PartialEq` **before** any platform call, so an
-//!    unchanged rebuild costs zero FFI crossings — *except* on the bounded
-//!    retry window a slot opens when its own `update` fails, during which the
-//!    next **two** rebuilds each cost one dispatch for byte-identical props,
-//!    after which the slot stops asking and the zero-crossing property holds
-//!    again for the rest of the process. That exception is deliberate, it is
-//!    the *only* one, and it is bounded on purpose; see *A failed `update` is
-//!    retried, up to a cap* below for the mechanism, which is not the obvious
-//!    one. Field-level diffing inside a changed props value is the component's
-//!    own job — only it knows which setter is cheap and which forces a
-//!    re-layout.
+//!    unchanged rebuild costs zero FFI crossings. The one exception is the
+//!    bounded retry window a failed `update` opens (below): the next **two**
+//!    rebuilds each cost one dispatch for byte-identical props. Field-level
+//!    diffing inside a changed props value is the component's own job — only it
+//!    knows which setter is cheap and which forces a re-layout.
 //! 4. **`on_event` fires between frames — except that no production path
-//!    attaches a listener to a public component's view, so overriding it has
-//!    no effect in this build.** A native interaction bypasses
-//!    `RenderRoot::event` entirely (see the crate doc): no `EventCtx`, no
-//!    capture/focus, none of `docs/CODE_STANDARDS.md`'s Interaction Semantics.
-//!    A listener that fires while the runtime is already borrowed — the
-//!    classic case is a setter provoking its own listener synchronously from
-//!    inside `update` — is **dropped with a warning**, not delivered
-//!    re-entrantly. Those ordering and re-entrancy guarantees are the
-//!    runtime's own, true of the internal `NativeWidget` path the six built-in
-//!    controls take — and **not observable through this trait yet**: no
-//!    production path attaches a listener to a view a component built, so
-//!    nothing an app can arrange makes this step of the lifecycle run for a
-//!    [`NativeComponent`]. Nothing an app can arrange — *not* nothing at all: a
-//!    listener carrying a fabricated slot id that names a live component's slot
-//!    still lands here, which is a misroute rather than a route, and is why
-//!    this dispatch is guarded like the other three. See
-//!    [`NativeComponent::on_event`], which owns the detail and names the
-//!    deferred Phase 4 gap.
+//!    attaches a listener to a public component's view, so overriding it has no
+//!    effect in this build** ([`NativeComponent::on_event`] owns that scope,
+//!    including the fabricated-slot-id misroute that *can* still reach it). A
+//!    native interaction bypasses `RenderRoot::event` entirely: no `EventCtx`,
+//!    no capture/focus, none of `docs/CODE_STANDARDS.md`'s Interaction
+//!    Semantics. And a listener that fires while the runtime is already
+//!    borrowed — the classic case is a setter provoking its own listener
+//!    synchronously from inside `update` — is **dropped with a warning**, not
+//!    delivered re-entrantly.
+//! 5. **The staged-`&self` re-read is component-only, and its `dispose` half is
+//!    live today.** The `&self` carried into `on_event`/`dispose` is re-read
+//!    from the staging table on **every** dispatch, not only when props changed
+//!    (`BridgeState::refresh_component`): the diff gate skips `update` on an
+//!    equal-props rebuild, so anything less would run a stale rebuild's closures
+//!    ([`NativeComponent::dispose`]). The six controls decode `params_json` and
+//!    never read this table.
+//! 6. **`dispose` is best-effort-prompt, and may be late** — below.
 //!
-//!    **The staged-`&self` re-read is a separate guarantee, it is
-//!    component-only, and its `dispose` half is live today.** The `&self`
-//!    carried into [`on_event`](NativeComponent::on_event) and
-//!    [`dispose`](NativeComponent::dispose) is re-read from the staging table
-//!    on **every** dispatch, not only when props changed
-//!    (`BridgeState::refresh_component`) — the props diff gate skips `update`
-//!    on an equal-props rebuild, so anything less would run a stale rebuild's
-//!    closures. This has no counterpart on the six controls' path, which
-//!    decodes `params_json` and never reads the staging table. Unlike
-//!    `on_event`, `dispose` **does** reach a component in this build, so the
-//!    re-read is load-bearing now — see [`NativeComponent::dispose`].
-//! 5. **`dispose` is best-effort-prompt, and may be late.** See *Disposal
-//!    promptness* below.
+//! # Three design decisions this trait settles
 //!
-//! # Three open design decisions this trait had to settle
+//! **1. The context a third-party impl receives** is [`ComponentCtx`], an
+//! **opaque wrapper** rather than the plugin's own per-platform `NativeCtx`, so
+//! the internal helper surface stays free to change without breaking a public
+//! impl; it also holds the error latch, which is what lets the trait's methods
+//! stay `Result`-free. Curated helpers can never cover "construct an arbitrary
+//! native view", so it carries each platform's own `#[cfg]`-gated escape hatch
+//! too (`ComponentCtx::env`, `ComponentCtx::mtm`) — already public types, so no
+//! new dependency.
 //!
-//! **1. What a third-party impl receives as a context.** [`ComponentCtx`] — an
-//! **opaque wrapper**, never the plugin's own per-platform `NativeCtx`. That
-//! keeps the internal helper surface (hot cached method ids, the classloader
-//! cache, the local-frame wrapper) free to change without breaking a public
-//! impl, and it is where the error latch lives, which is what lets the trait's
-//! own methods stay `Result`-free. The wrapper carries a deliberately narrow
-//! per-platform surface plus the platform's own escape hatch
-//! (`ComponentCtx::env` on Android, `ComponentCtx::mtm` on iOS — each
-//! `#[cfg]`-gated to its own target, so only a docs build for that target
-//! renders it): curated
-//! helpers can never cover "construct an arbitrary native view", and both
-//! escape-hatch types are already in this crate's public API (`AndroidHandle`
-//! names `jni`'s `Global<JObject>`, `AppleHandle` names objc2's
-//! `Retained<UIView>`), so no new dependency is exposed by admitting them
-//! here. The hierarchy-building half of that surface is described next — see
-//! *A component owns its own native subtree* below.
+//! **2. A component reaches the dispatch table through**
+//! [`register_component`], explicitly, from app or plugin init:
+//! `inventory`-style link-time auto-registration stays **banned**, being exactly
+//! the mechanism that fails silently in a stripped, LTO'd device build.
+//! Registration is **first-wins** — a kind already registered, including any of
+//! the six built-in controls (which the backend registers when the thread's
+//! runtime is first touched), is refused with a warning rather than replaced, so
+//! a third-party kind can never shadow a shipped one.
 //!
-//! **2. How a component reaches the runtime's dispatch table.**
-//! [`register_component`], explicitly, from app or plugin init —
-//! `inventory`-style link-time auto-registration stays **banned** (it is
-//! exactly the mechanism that fails silently in a stripped, LTO'd device
-//! build). Registration is
-//! **first-wins**: a kind string already registered — including any of the six
-//! built-in controls, which this build's backend registers when the thread's
-//! runtime is first touched — is refused with a warning rather than replaced,
-//! so a third-party kind can never shadow a shipped control.
-//!
-//! **3. Disposal promptness.** A public component gets **exactly the same
-//! guarantee the six controls get, and no more**: the framework's `retire()`
-//! (driven from the mounting widget's teardown) is the primary path and
-//! disposes promptly; the differ's missing-frame streak is the backstop, and
-//! it only advances on gate-`Run` frames, so on an idle screen a `dispose` can
-//! arrive many frames late — or after a replacement `create` already re-used
-//! the slot id, in which case the stale command resolves against the *old*
-//! view by identity, finds nothing, and is dropped. Two consequences a
-//! component must design for: `dispose` may run long after the widget
-//! disappeared, and (at process exit) may not run at all. Anything whose
-//! release cannot wait belongs in the component's own `State`, released when
-//! `State` drops — which happens immediately after [`NativeComponent::dispose`]
-//! returns, alongside the runtime's paired delete of the [`NativeRoot`].
+//! **3. Disposal promptness** is **exactly the guarantee the six controls get,
+//! and no more**: the framework's `retire()` (driven from the mounting widget's
+//! teardown) is the prompt primary path, and the differ's missing-frame streak
+//! is the backstop. That streak only advances on gate-`Run` frames, so on an
+//! idle screen a `dispose` can arrive many frames late — or after a replacement
+//! `create` already re-used the slot id, in which case the stale command
+//! resolves against the *old* view by identity, finds nothing, and is dropped.
+//! So `dispose` may run long after the widget disappeared, and at process exit
+//! may not run at all: anything whose release cannot wait belongs in `State`,
+//! dropped immediately after [`NativeComponent::dispose`] returns, alongside
+//! the runtime's paired delete of the [`NativeRoot`].
 //!
 //! # A component owns its own native subtree
 //!
 //! One component may build a whole native view *hierarchy* — a parent with
-//! native children — and ship it as ONE slot, which is what lets a composite
-//! (a card with an image and two buttons) stop leaking three slots to the
-//! consuming app. Four calls are the entire surface:
-//!
-//! | | Android | iOS |
-//! |---|---|---|
-//! | build a child | `ComponentCtx::new_view` | any `objc2-ui-kit` constructor, off `ComponentCtx::mtm` |
-//! | attach it | [`ComponentCtx::add_child`] (JNI `addView`) | [`ComponentCtx::add_child`] (`addSubview`) |
-//! | keep talking to it | [`ComponentCtx::retain_child`] → [`NativeChild`] (a global ref) | the same, or just keep your own `Retained<T>` |
-//! | bound the reference table | [`ComponentCtx::with_local_frame`] (real `PushLocalFrame`) | the same call, which does nothing here (ARC) |
-//!
-//! The two per-platform view constructors in the first row are `#[cfg]`-gated
-//! to Android/iOS respectively, so they render only in a docs build for that
-//! target — unlike the three below them, which every target carries (the host
-//! arm's stand-ins are what make a component's create/update/dispose plan
-//! assertable by an ordinary `cargo test`).
+//! native children — and ship it as ONE slot, which is what stops a composite
+//! from leaking three slots to the consuming app. Four calls on
+//! [`ComponentCtx`], which documents each, are the entire surface: build a
+//! child (`ComponentCtx::new_view`, or an `objc2-ui-kit` constructor off
+//! `ComponentCtx::mtm` — the one `#[cfg]`-gated pair), attach it
+//! ([`ComponentCtx::add_child`]), keep talking to it
+//! ([`ComponentCtx::retain_child`] → [`NativeChild`]), and bound the JNI
+//! reference table ([`ComponentCtx::with_local_frame`], a no-op under ARC). The
+//! last three exist on every target, and the host arm's stand-ins let an
+//! ordinary `cargo test` assert a component's create/update/dispose plan.
 //!
 //! **The platform lays the subtree out, and frust deliberately does not know
-//! the children exist.** frust's wire carries per-slot geometry only — a
-//! `rect`, an optional `clip`, `shields` — with no hierarchical child
-//! geometry, so a component positions its own children the platform's way (a
-//! `LinearLayout`, a `UIStackView`, explicit frames) and frust keeps seeing
-//! one opaque slot with one rect. This is the SwiftUI `UIViewRepresentable` /
-//! Compose `AndroidView` model, chosen over React Native's — where the
-//! framework's own layout engine walks into native containers — because
-//! buying that would mean re-acquiring, per child, the frame-pairing
-//! synchronisation, shield collection, culling and accessibility bridging
-//! frust gets per slot today. **No wire
-//! change**: a subtree costs the differ exactly what a single leaf control
-//! costs it. A11y comes out ahead, in fact — the platform owns the subtree,
+//! the children exist** — the wire carries per-slot geometry only (a `rect`, an
+//! optional `clip`, `shields`), so a component positions its own children the
+//! platform's way while frust keeps seeing one opaque slot with one rect
+//! ([`NativeComponent`]'s *No frust `View` children* has the model and why).
+//! **No wire change**: a subtree costs the differ exactly what a single leaf
+//! control costs it, and a11y comes out ahead — the platform owns the subtree,
 //! so it traverses it natively.
 //!
-//! ## Teardown: children are released with the parent
-//!
-//! An earlier device experiment built 50 native children in ONE slot and
-//! measured **52 global refs at peak → 0 after the dispose cycle**; this
-//! surface keeps that property by construction:
-//!
-//! - A child that is merely *attached* needs no handle at all — the platform
-//!   parent owns it (Android's `ViewGroup` holds its own strong reference,
-//!   UIKit retains a subview), so it dies with the parent.
-//! - A child you keep talking to lives in [`NativeComponent::State`] as a
-//!   [`NativeChild`], and `State` is dropped immediately after
-//!   [`NativeComponent::dispose`] returns, alongside the runtime's paired
-//!   delete of the [`NativeRoot`]. Dropping a [`NativeChild`] *is* the
-//!   release: `DeleteGlobalRef` on Android, `Retained`'s own `Drop` on iOS.
-//!
-//! So the leak bar is the same one the six controls already answer to, and
-//! `tests::a_component_builds_a_native_subtree_and_releases_every_child`
-//! counts it rather than merely surviving it.
+//! **Teardown releases children with the parent**, so peak global refs return
+//! to zero over a dispose cycle by construction: a merely *attached* child
+//! needs no handle at all (Android's `ViewGroup` holds its own strong
+//! reference, UIKit retains a subview) and dies with the parent, while a child
+//! you keep talking to lives in [`NativeComponent::State`] as a
+//! [`NativeChild`], whose `Drop` *is* the release (`DeleteGlobalRef` on
+//! Android, `Retained`'s own `Drop` on iOS). The leak bar is the six controls'
+//! own; `tests::a_component_builds_a_native_subtree_and_releases_every_child`
+//! counts refs rather than merely surviving the cycle.
 //!
 //! # Props travel beside the wire, not on it
 //!
-//! The framework's platform-view wire carries one `params_json` string per
-//! slot, and that is what the differ diffs to decide whether to emit an
-//! `UpdateParams` at all. A public component's props are typed Rust values
-//! that never touch JSON, so they ride a **thread-local staging table** here
-//! (written by this module's crate-private `publish`/`forget` pair, whose only
-//! production caller is the generic mounting builder) while the slot's
-//! `params_json` carries only the runtime's two identity keys plus a props
-//! **generation** counter that `publish` bumps when — and only when — the
-//! published props actually changed. The wire therefore changes exactly when
-//! the props do, which is what makes the differ emit the `UpdateParams` the
-//! typed props ride along with. None of that machinery is public: an app
+//! The platform-view wire carries one `params_json` string per slot, and that
+//! is what the differ diffs to decide whether to emit an `UpdateParams` at all.
+//! A public component's props are typed Rust values that never touch JSON, so
+//! they ride a **thread-local staging table** here (written by this module's
+//! crate-private `publish`/`forget` pair, whose one production caller is the
+//! generic mounting builder) while the slot's `params_json` carries only the
+//! runtime's two identity keys plus a props **generation** counter that
+//! `publish` bumps when — and only when — the published props actually changed.
+//! The wire therefore changes exactly when the props do, which is what makes
+//! the differ emit the `UpdateParams` the typed props ride along with. An app
 //! stages props by rebuilding
-//! [`native_component`](crate::api::native_component), never by calling into
-//! the table itself.
+//! [`native_component`](crate::api::native_component); none of this is public.
 //!
-//! Like every other slot-keyed table in this crate, the staging table is
-//! bounded by an explicit reaper (`forget`, from the mounting widget's
-//! teardown), never by disposal alone — the same leak shape
-//! `crate::runtime`'s `forget_pending_callback` guards against applies here
-//! verbatim: a culled slot's dispose resolves by view identity and never sees
-//! this table.
+//! Like every other slot-keyed table here, it is bounded by an explicit reaper
+//! (`forget`, from the mounting widget's teardown), never by disposal alone —
+//! the leak shape `crate::runtime`'s `forget_pending_callback` guards against
+//! applies verbatim: a culled slot's dispose resolves by view identity and
+//! never sees this table.
 //!
 //! # A failed `update` is retried, up to a cap
 //!
 //! The retry trigger is a **generation bump**, not `instance.props` differing,
-//! and that distinction is load-bearing. When `update` reports a failure the
-//! runtime keeps `old` as its diff baseline, so the change *would* be re-applied
-//! by the next `UpdateParams` command — but the differ only emits one when the
-//! slot's `params_json` changes, and `publish` moves the generation only when
-//! the app's props actually change. An app that republishes the same (already
-//! failed) props forever would therefore emit no `UpdateParams` at all, and the
-//! failed change would never be retried: the view would stay stale, silently,
-//! for the process lifetime.
+//! and that distinction is load-bearing. A failed `update` leaves `old` as the
+//! runtime's diff baseline, so the change *would* be re-applied by the next
+//! `UpdateParams` — but the differ only emits one when `params_json` changes,
+//! and `publish` moves the generation only when the app's props change, so an
+//! app republishing the same (already failed) props forever would emit none at
+//! all and the view would stay stale, silently, for the process lifetime. The
+//! staging table therefore carries the retry: a failed dispatch marks the slot
+//! (`request_update_retry`), and the **next `publish` for that slot bumps the
+//! generation even for identical props** — one wire change, one `UpdateParams`,
+//! one retry. Three consequences:
 //!
-//! So the staging table carries the retry itself. A failed dispatch marks the
-//! slot (`request_update_retry`, this module's crate-private half), and the
-//! **next `publish` for that slot bumps the generation even for identical
-//! props** — one wire change, one `UpdateParams`, one retry, whether or not the
-//! app's props moved. Three consequences worth stating plainly:
-//!
-//! - **A retry needs a rebuild.** Nothing here schedules one; the mark is
-//!   consumed by the next rebuild that publishes this slot. On a screen that
-//!   never rebuilds again, the failed change stays unapplied — the same bound
-//!   every other props change lives under.
-//! - **The retry is capped at three consecutive failed dispatches, and then
-//!   the slot goes inert.** Failure one and failure two each re-mark the slot,
-//!   so a transient refusal gets two more attempts; failure three reports once
-//!   at `warn` and marks nothing further, so an unchanged rebuild is back to
-//!   costing zero FFI crossings and zero log lines. Unbounded re-marking was
-//!   the alternative, and it is worse than it sounds: a permanently failing
-//!   slot would cost one dispatch **plus** a `log::warn!` on *every* rebuild
-//!   forever, on the platform main thread, and a component that keeps calling
-//!   a ctx helper after its first failure adds one refused-error warning per
-//!   call per rebuild on top ([`ComponentCtx`]'s error latch logs those). A
-//!   screen that rebuilds every frame — a ticking counter, an animation — turns
-//!   that into per-frame JNI traffic and per-frame log volume. Degrading a
-//!   broken component to inert is the trade taken instead; retrying cleverly
-//!   (backoff, a schedule of its own) is explicitly not a goal.
-//! - **The cap counts *consecutive* failures and a success clears it.** A slot
-//!   that fails twice and then applies is back to a full budget, so a flaky
-//!   platform never accumulates its way to inert. Only the framework's own
-//!   synthetic retry is capped: a genuine props change bumps the generation on
-//!   its own and is always dispatched, capped or not, because that is the
-//!   app's intent rather than ours.
+//! - **A retry needs a rebuild.** Nothing here schedules one — the mark is
+//!   consumed by the next rebuild that publishes this slot, so on a screen that
+//!   never rebuilds again the change stays unapplied, exactly as any other
+//!   props change would.
+//! - **Three consecutive failed dispatches spend the budget and the slot goes
+//!   inert.** Failures one and two each re-mark the slot, so a transient
+//!   refusal gets two more attempts; failure three reports once at `warn` and
+//!   marks nothing further, so an unchanged rebuild is back to zero FFI
+//!   crossings and zero log lines. Re-marking forever would instead cost a
+//!   permanently failing slot one dispatch **plus** a `log::warn!` on *every*
+//!   rebuild — per-frame main-thread JNI traffic and log volume, with one more
+//!   warning per refused ctx call on top. Inert is the trade taken; retrying
+//!   cleverly (backoff, a schedule of its own) is not a goal.
+//! - **The cap counts *consecutive* failures and a success clears it**, so a
+//!   flaky platform never accumulates its way to inert. Only this synthetic
+//!   retry is capped: a genuine props change bumps the generation on its own
+//!   and is always dispatched, capped or not — the app's intent, not ours.
 //!
 //! # Kind and type must agree, and a mismatch fails closed four different ways
 //!
 //! `kind` is passed twice — once to [`register_component`], once to the
-//! mounting builder — and nothing mechanically ties the two, so the mismatch
-//! cases are worth naming with their *actual* errors, correcting an earlier
-//! claim that all of them surface as the runtime's `UnknownControl`; only
-//! the first does):
+//! mounting builder — and nothing mechanically ties the two, so each mismatch
+//! is named with its *actual* error (only the first is `UnknownControl`):
 //!
 //! | case | what surfaces | logged | slot |
 //! |---|---|---|---|
@@ -288,53 +200,40 @@
 //! | registered to `C`, mounted with `D` | `NativeWidgetError::Params`, from `Bridge::<C>::decode_props` failing to downcast the staged props to `C::Props` | yes, by the platform export | dead |
 //! | registered to `C`, mounted with `D` where `D::Props == C::Props` | `NativeWidgetError::Params`, one step later — the props downcast *succeeds* and `Bridge::<C>::create` fails to downcast the staged component to `C` | yes, by the platform export | dead |
 //!
-//! A fifth shape reduces to the third: **two components registered under one
-//! kind**. Registration is first-wins, so the second `register_component`
-//! answers `false` with a warning and the incumbent keeps the kind; mounting
-//! the loser under it is then exactly the third row.
-//!
-//! Every one of them **fails closed** — no half-created slot, no instance
-//! retained, no silent no-op — and both mismatch rows say so in their message
-//! rather than reporting the reaped-entry wording they used to share with an
-//! ordinary "nothing staged here any more".
+//! Registering two components under one kind reduces to the third row, since
+//! first-wins refuses the second. Every case **fails closed** — no half-created
+//! slot, no instance retained, no silent no-op — and both mismatch rows name the
+//! wiring bug in their message rather than reading like an ordinary "nothing
+//! staged here any more".
 //!
 //! # Dispatch-boundary exception guard (Android)
 //!
-//! `ComponentCtx::env` (Android-only, so a host docs build does not render it)
-//! hands a component the live `jni::Env`, and a component is free to leave a
-//! Java exception pending on it — which is undefined behaviour for the *next*
-//! JNI call, not for the one that threw. So **all four** dispatches through
-//! this module — `create`, `update`, `dispose` and `on_event` — check and clear
-//! one on the way out, reusing the crate's own `run_jni` helper so the report
-//! names the throwable's class and message. On the three that carry a context a
-//! pending exception is folded into the same error channel as a latched one
-//! (the first failure stays the headline, the later one is logged); `on_event`
-//! has no error channel at all, so it logs at `warn` and returns.
+//! `ComponentCtx::env` (Android-only) hands a component the live `jni::Env`,
+//! and a component is free to leave a Java exception pending on it — undefined
+//! behaviour for the *next* JNI call, not for the one that threw. So **all
+//! four** dispatches through this module — `create`, `update`, `dispose` and
+//! `on_event` — check and clear one on the way out through the crate's own
+//! `run_jni` helper, whose report names the throwable's class and message. On
+//! the three carrying a context it folds into the same first-wins error channel
+//! as a latched error; `on_event` has none, so it logs at `warn`.
 //!
 //! **`on_event` is guarded through the VM, not through a context**, because it
-//! is handed neither: the runtime's `NativeWidget::on_event` takes only
-//! `(state, event)`. The `Env` comes from
-//! `JavaVM::with_top_local_frame` on the process VM
+//! is handed neither: `NativeWidget::on_event` takes only `(state, event)`. Its
+//! `Env` comes from `JavaVM::with_top_local_frame` on the process VM
 //! (`frust_plugin::android::vm`), which borrows the *existing* top JNI frame
-//! rather than pushing one, so the whole guard is a `GetEnv` plus an
-//! `ExceptionCheck` on the clean path and the few local references a report
-//! costs die with the export's own frame when `nativeOnEvent` returns.
-//!
-//! It is deliberately **not** `frust_plugin::android::with_jni_env`, which
-//! cannot see what this needs to see: jni 0.22's scoped attach defaults to
-//! `AttachmentExceptionPolicy::PreReThrowPostCatch`, which stashes any
-//! already-pending exception before running the closure and re-throws it
-//! afterwards. A check inside that closure would read *clean* every time and
-//! clear nothing — a guard that reports coverage it does not have. (The same
-//! policy is why a component that reaches JNI through `with_jni_env` is
-//! already caught on its own way out: the post-catch half turns whatever the
-//! closure left pending into `Error::CaughtJavaException`. This guard is for
-//! everything that does not go through that door — a raw `jni-sys` call, an
-//! attach configured with `Ignore`, an `Env` recovered by hand.)
+//! rather than pushing one, so the clean path is a `GetEnv` plus an
+//! `ExceptionCheck` and a report's locals die with `nativeOnEvent`'s own frame.
+//! It is deliberately **not** `frust_plugin::android::with_jni_env`: jni 0.22's
+//! scoped attach defaults to `AttachmentExceptionPolicy::PreReThrowPostCatch`,
+//! which stashes an already-pending exception before running the closure and
+//! re-throws it after, so a check inside would read *clean* every time and clear
+//! nothing. (That policy is also why a component reaching JNI through
+//! `with_jni_env` is caught on its own way out; this guard covers the paths that
+//! do not — a raw `jni-sys` call, an attach configured with `Ignore`, a
+//! hand-recovered `Env`.)
 //!
 //! `env` itself stays a **safe** fn: making it `unsafe` would tax the one
-//! audience that can use this trait at all, for a hazard the boundary guard
-//! already contains.
+//! audience that can use this trait at all, for a hazard this guard contains.
 
 // The publication half of this module (`publish`/`forget`/`component_params`)
 // has its production caller in `crate::api::mount`'s generic builder, which
@@ -389,7 +288,7 @@ const PROPS_GENERATION_KEY: &str = "__frustProps";
 /// - `on_event` would run from a platform listener between frames, but no
 ///   production path attaches one to a component's view, so overriding it has
 ///   no effect in this build — a misroute can still reach it, an app-arranged
-///   route cannot (a deferred Phase 4 gap — [`on_event`](Self::on_event));
+///   route cannot (a deliberately deferred gap — [`on_event`](Self::on_event));
 /// - `dispose` is prompt on teardown but may be late, and at process exit may
 ///   not run at all.
 ///
@@ -491,10 +390,10 @@ pub trait NativeComponent: 'static {
     /// three (the module doc's *Dispatch-boundary exception guard*) rather than
     /// treated as unreachable.
     ///
-    /// This is a **deliberately deferred Phase 4 gap**, not an oversight: the
-    /// dispatch half — runtime → bridge → this method — is wired and
-    /// unit-tested, and only the attach half is missing. The method stays on
-    /// the trait so the contract it will be given is already stated.
+    /// This is a **deliberately deferred gap**, not an oversight: the dispatch
+    /// half — runtime → bridge → this method — is wired and unit-tested, and
+    /// only the attach half is missing. The method stays on the trait so the
+    /// contract it will be given is already stated.
     ///
     /// # The shape the channel carries when it opens
     ///
@@ -674,11 +573,9 @@ impl ComponentCtx<'_, '_, '_> {
     /// table; `capacity` is the JVM's pre-allocation hint, not a cap).
     ///
     /// Fifty children built without one would pin fifty-plus local references
-    /// for the whole `create` call; an earlier device experiment built exactly
-    /// that, inside this frame, and measured the difference. A value the
-    /// closure returns must not *be* a local reference — that is what
-    /// [`Self::retain_child`] is for, and its [`NativeChild`] outlives the
-    /// frame.
+    /// for the whole `create` call. A value the closure returns must not *be* a
+    /// local reference — that is what [`Self::retain_child`] is for, and its
+    /// [`NativeChild`] outlives the frame.
     ///
     /// **The latch travels with you.** The closure runs against a context that
     /// already carries whatever this one latched — so `failed()` answers the
@@ -695,11 +592,10 @@ impl ComponentCtx<'_, '_, '_> {
     ) -> Option<T> {
         // A *fresh* inner context is structurally forced here — the pushed
         // frame's references carry different lifetimes than this context's —
-        // but a fresh *latch* is not, and was the whole divergence found by an
-        // earlier review: it made `failed()` read `false` inside a frame where
-        // the other two arms read `true`, and it re-latched the inner error on
-        // return, which silently dropped it whenever this context already
-        // held one.
+        // but a fresh *latch* must not be: that would make `failed()` read
+        // `false` inside a frame where the other two arms read `true`, and
+        // re-latching the inner error on return would silently drop it whenever
+        // this context already held one.
         let mut latched = self.error.take();
         let outcome = self.inner.with_frame(capacity, |inner| {
             let mut cx = ComponentCtx {
@@ -732,14 +628,14 @@ impl<'local, 'env> ComponentCtx<'_, 'local, 'env> {
     /// A pending Java exception is undefined behaviour for the next JNI call,
     /// so a component using this directly should check and clear its own —
     /// [`Self::new_view`] and [`Self::root`] do that for the calls they make.
-    /// **The runtime no longer takes that on trust:** every dispatch through
-    /// this module — the three that carry this context (`create`, `update`,
+    /// **The runtime does not take that on trust:** every dispatch through this
+    /// module — the three that carry this context (`create`, `update`,
     /// `dispose`) and `on_event`, which reaches the VM instead — checks and
     /// clears a leftover exception on the way out and reports it (the module
-    /// doc's *Dispatch-boundary exception guard*). Clearing your own is still the
-    /// right discipline — it keeps the *rest of your own call* on defined
+    /// doc's *Dispatch-boundary exception guard*). Clearing your own is still
+    /// the right discipline — it keeps the *rest of your own call* on defined
     /// ground, which the boundary guard cannot do for you — but forgetting it
-    /// can no longer poison the next unrelated JNI call.
+    /// cannot poison the next unrelated JNI call.
     ///
     /// This stays a **safe** fn on purpose: the hazard is bounded by the guard
     /// above, and an `unsafe` escape hatch would tax the small audience that
@@ -1424,9 +1320,9 @@ enum StagedMiss {
     /// or a dispatch arriving after the mounting widget's reaper ran.
     Unstaged,
     /// Something *is* staged, but it belongs to a different component than the
-    /// one this kind is registered to — a kind/type mismatch, which used to be
-    /// reported in the "nothing staged" wording and read as a lifecycle race
-    /// rather than the wiring bug it is.
+    /// one this kind is registered to — a kind/type mismatch, and a wiring bug
+    /// rather than the lifecycle race the "nothing staged" wording would
+    /// suggest.
     OtherComponent,
 }
 
@@ -1551,7 +1447,7 @@ impl<C: NativeComponent> BridgeState<C> {
     /// republishes equal props with a functionally different component value —
     /// new closures capturing a loop index, a different `Rc` — would otherwise
     /// leave the retained value stale and run the *old* closures on the next
-    /// event or dispose (review p3 M1).
+    /// event or dispose.
     ///
     /// A slot with nothing staged (its `forget` reaper already ran) keeps the
     /// retained value: there is no newer value to be had, and nothing here
@@ -2141,11 +2037,11 @@ mod tests {
 
     #[test]
     fn an_unchanged_props_republish_still_reaches_the_newest_component_value() {
-        // Review p3 M1, the regression this test exists for: the props diff
-        // gate (`crate::runtime`'s `update_params`) returns `Unchanged` before
-        // touching the vtable, and `update` used to be the ONLY thing that
-        // refreshed the bridge's retained component value — so a rebuild that
-        // republished equal props with functionally different closures left
+        // The regression this test exists for: the props diff gate
+        // (`crate::runtime`'s `update_params`) returns `Unchanged` before
+        // touching the vtable, so if `update` were the only thing refreshing
+        // the bridge's retained component value, a rebuild republishing equal
+        // props with functionally different closures would leave
         // `on_event`/`dispose` running the value `create` ran with.
         //
         // Two distinct log sinks stand in for those closures: each rebuild's
@@ -2735,18 +2631,18 @@ mod tests {
 
     #[test]
     fn a_later_error_inside_a_local_frame_is_logged_rather_than_swallowed() {
-        // Both halves of the same fix, pinned at once.
+        // Two properties, pinned at once.
         //
         // The latch is first-wins, so the frame's error cannot *replace* the
-        // root failure — but before this fix it vanished without a trace, and
-        // on Android it vanished twice over: that arm handed the closure a
-        // FRESH context, so `failed()` also read `false` inside a frame where
-        // this arm (and iOS) read `true`, and the merge back was a second,
+        // root failure — but it must not vanish without a trace either, and it
+        // would vanish twice over on Android if that arm handed the closure a
+        // FRESH latch: `failed()` would read `false` inside a frame where this
+        // arm (and iOS) read `true`, and the merge back would be a second,
         // silent first-wins drop on top of the latch's own.
         //
-        // Android's fresh context is structurally forced (a pushed frame's
-        // references carry other lifetimes); what it now carries is this
-        // arm's semantics, which is what this test pins.
+        // Android's fresh *context* is structurally forced (a pushed frame's
+        // references carry other lifetimes); what it carries is this arm's
+        // semantics, which is what this test pins.
         const ROOT: &str = "m-01 root failure";
         const INSIDE_FRAME: &str = "m-01 failure raised inside the frame";
         install_log_capture();
@@ -2789,16 +2685,14 @@ mod tests {
         // `(state, event)` and nothing else — so it reaches a JNI env through
         // the process VM instead (`guard_pending_exception_off_context`).
         //
-        // This assertion used to read `3`, with "on_event has no context to
-        // guard through" as the reason, which encoded the gap as intent for
-        // whoever eventually wires the missing attach path. It was wrong twice
-        // over: the export runs
-        // `debug_assert_main_thread` and further JNI after `runtime.on_event`
-        // returns, so a leftover exception is *ours* to trip over, and
-        // `NativeRuntime::on_event` routes on the slot id alone, so a
-        // fabricated id naming a live component's slot reaches the trait method
-        // today (`crate::runtime`'s own note). A reachable UB path guarded on
-        // three of four dispatches is not a resting place.
+        // Four, not three: "on_event has no context to guard through" is not a
+        // licence to skip it. The export runs `debug_assert_main_thread` and
+        // further JNI after `runtime.on_event` returns, so a leftover exception
+        // is *ours* to trip over, and `NativeRuntime::on_event` routes on the
+        // slot id alone, so a fabricated id naming a live component's slot
+        // reaches the trait method today (`crate::runtime`'s own note). A
+        // reachable UB path guarded on three of four dispatches is not a
+        // resting place.
         //
         // Whether the guard's JNI check actually *finds* a pending exception is
         // Android-only and unrunnable here (no embedded-JVM harness in this
@@ -2894,9 +2788,8 @@ mod tests {
     fn case_c_a_kind_registered_to_another_component_fails_at_decode() {
         // Registered to `Gauge`, mounted with `Card`: the staged props are
         // `CardProps`, so `Bridge::<Gauge>::decode_props` cannot downcast them.
-        // This case used to be mis-described as `UnknownControl` — it is
-        // actually a `Params` error, whose message previously read exactly
-        // like an ordinary reaped entry.
+        // This is a `Params` error, not `UnknownControl`, and its message names
+        // the mismatch rather than reading like an ordinary reaped entry.
         let log = Rc::new(RefCell::new(Vec::new()));
         register_component::<Gauge>(GAUGE_KIND);
         // A `Card` staged under the `Gauge` kind — the typo a `kind` string
