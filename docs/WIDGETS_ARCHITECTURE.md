@@ -165,7 +165,10 @@ reattaches a row's retained state to whatever now sits at that index. `ListView:
 adds a `ChildKey` per row (the same identity `keyed()` uses for `Flex`, see CODE_STANDARDS.md) so
 state follows the row through a mutation instead; a keyed list additionally re-anchors its scroll
 offset in `rebuild`, before windowing, so a prepend/removal above the viewport never visibly jumps
-the content the user is looking at. Unlike `Flex`'s keyed reconciler, a duplicate key on `ListView`
+the content the user is looking at **when the mutation is single-sided** — a same-frame mutation on
+both sides of the anchor (e.g. a prepend above *and* an append below in one frame) can still miss
+the anchor-shift correction itself, a documented, deferred gap (`list_view.rs`'s module doc, *Cache
+hygiene*). Unlike `Flex`'s keyed reconciler, a duplicate key on `ListView`
 `debug_assert!`s but has **no positional fallback** in release — the first slot claiming a key wins
 deterministically, later duplicates rebuild fresh.
 

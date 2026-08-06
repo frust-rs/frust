@@ -196,19 +196,42 @@
 //!   anchoring uses (unchanged index, or shifted by the frame's net item-count
 //!   delta); if neither still names its key, the row left the *data*, not just
 //!   the window, and its measurement is dropped — at most two `key_of` calls
-//!   per departing row,
+//!   per departing row. **Suspended** on a frame where the anchor-shift probe
+//!   below already missed: trusting the same delta hypothesis for an
+//!   individual departing row after it has already proven unreliable this
+//!   frame would evict a row that is merely just outside the still-mis-
+//!   anchored window, not gone from the data — left alone instead, stale
+//!   until re-measured or reclaimed by a later shrink (next bullet),
 //! * a frame whose `item_count` shrank drops every entry whose recorded index
 //!   is past the new end (the only entries the new keying provably cannot
 //!   produce) — a scan of the cache, only on a shrink frame,
-//! * a frame where no previous-window key survives either hypothesis is a full
-//!   replace, which clears the cache outright.
+//! * a frame where the anchor-shift hypothesis probe (above) misses on every
+//!   previous-window key does **not** by itself clear the cache — that probe
+//!   only tests two candidate index shifts and can miss on a same-frame
+//!   mutation touching both sides of the anchor (a prepend above the viewport
+//!   plus an append below it in one frame) while on-screen rows are still
+//!   exactly the ones they were. The wholesale-replace decision is answered
+//!   instead against the reconciled window's own *exact* key matches
+//!   (`ListView::reconcile_keyed`'s per-slot lookup, not a hypothesis): only
+//!   when literally none of the previous window's keys matched a slot in this
+//!   frame's window is it a genuine full replace, which clears the cache
+//!   outright.
 //!
-//! Two acknowledged gaps: a row removed while it was *outside* the materialized
-//! window keeps its entry (finding it would mean re-keying all `item_count`
-//! items, the O(N) this design exists to avoid), and a row that both left the
-//! window and moved to an index neither hypothesis names is evicted
-//! conservatively and re-measured on its next visit. Both cost accuracy in an
-//! already-estimated total, never a misattached measurement.
+//! Three acknowledged gaps: a row removed while it was *outside* the
+//! materialized window keeps its entry (finding it would mean re-keying all
+//! `item_count` items, the O(N) this design exists to avoid); a row that both
+//! left the window and moved to an index neither hypothesis names is evicted
+//! conservatively and re-measured on its next visit — *unless* the anchor
+//! probe itself already missed this frame, in which case (per the first
+//! bullet above) it is kept rather than evicted, the same conservative
+//! direction pointed the other way; and a same-frame mutation on both sides
+//! of the anchor can still miss the anchor-shift hypothesis probe itself, so
+//! the *scroll position* is left uncorrected for that one frame (a visible
+//! jump) even though — per the bullets above — the measured cache no longer
+//! pays for the same miss, wholesale or per-row. All three cost accuracy (or,
+//! for the last, one uncorrected frame) in an already-estimated total, never
+//! a misattached measurement; the exact per-key anchor-position fix is a
+//! deferred follow-up.
 //!
 //! # Measured anchor correction (variable extents only)
 //!
@@ -802,8 +825,13 @@ impl<State: 'static> ListView<State> {
     /// without re-keying), re-pins the prefix anchor from `plan`, and applies
     /// the departing-row half of the measured cache's hygiene rules — `delta` is
     /// this frame's net `item_count` change, the second hypothesis of the same
-    /// probe [`ListView::anchor_shift_items`] uses. See the [module docs](self)'
-    /// *Variable extents* section.
+    /// probe [`ListView::anchor_shift_items`] uses. `anchor_probe_missed` is
+    /// that same probe's own outcome (`true` when it matched no previous-window
+    /// key at all); this pass is where the wholesale-replace half of the
+    /// hygiene rules is actually decided, against its own exact per-slot key
+    /// matches below rather than the probe's hypotheses — see the [module
+    /// docs](self)' *Variable extents* and *Cache hygiene* sections.
+    #[allow(clippy::too_many_arguments)]
     fn reconcile_keyed(
         &self,
         prev: &Self,
@@ -812,6 +840,7 @@ impl<State: 'static> ListView<State> {
         plan: WindowPlan,
         key_of: &KeyOf,
         delta: isize,
+        anchor_probe_missed: bool,
     ) -> ChangeFlags {
         let (start, end) = (plan.start, plan.end);
         let capacity = end.saturating_sub(start);
@@ -846,6 +875,12 @@ impl<State: 'static> ListView<State> {
         let mut new_keys = Vec::with_capacity(capacity);
         let mut flags = ChangeFlags::NONE;
         let mut structural = window_shifted;
+        // Whether any slot in this frame's reconciled window matched a key the
+        // previous window also held — an *exact* hashmap lookup, unlike the
+        // rebuild-time anchor-shift probe's two index hypotheses. Read below to
+        // decide the wholesale-replace half of the measured-cache hygiene
+        // rules.
+        let mut any_survivor = false;
 
         for (index, key) in (start..end).zip(slot_keys.iter().copied()) {
             let survivor = prev_index_of
@@ -854,6 +889,7 @@ impl<State: 'static> ListView<State> {
                 .and_then(|prev_index| old.remove(&prev_index).map(|pod| (prev_index, pod)));
             match survivor {
                 Some((prev_index, mut pod)) => {
+                    any_survivor = true;
                     // The row survived under its key: relocate its live pod into
                     // this slot and rebuild it in place against the view it
                     // actually holds — `prev.builder(prev_index)`, the index it
@@ -880,19 +916,56 @@ impl<State: 'static> ListView<State> {
             new_keys.push(index);
         }
 
-        // Measured-cache hygiene (variable extents only): a pod no slot claimed
-        // left the window *or* the data, and only the second case may drop its
-        // measurement. Probe each orphan's key at its unchanged index and at
-        // that index shifted by this frame's net item-count delta — the same two
-        // hypotheses anchoring uses, at most two `key_of` calls per departing
-        // row, never a scan of `item_count`.
+        // Measured-cache hygiene (variable extents only).
         if element.is_variable() {
-            let count = element.item_count;
-            for (key, prev_index) in prev_index_of.iter() {
-                if old.contains_key(prev_index)
-                    && !Self::key_survives(*key, *prev_index, delta, count, key_of)
-                {
-                    element.forget_measured(key);
+            if anchor_probe_missed && !any_survivor {
+                // The rebuild-time anchor-shift probe matched no previous-window
+                // key by hypothesis, *and* literally no previous-window key
+                // matched a slot in this frame's reconciled window by exact
+                // lookup either — a genuine full replace (or a jump far enough
+                // that nothing on screen is recognizable), which is reset
+                // semantics for the measured cache too. Deliberately not
+                // triggered by `anchor_probe_missed` alone: that probe only
+                // tests two candidate index shifts and can miss on a same-frame
+                // mutation touching both sides of the anchor (a prepend above
+                // the viewport plus an append below it in one frame) while
+                // `any_survivor` above still proves most on-screen rows are
+                // exactly the ones they were — see the [module docs](self)'
+                // *Cache hygiene* section.
+                element.clear_measured();
+            } else if !anchor_probe_missed {
+                // A pod no slot claimed left the window *or* the data, and only
+                // the second case may drop its measurement. Probe each orphan's
+                // key at its unchanged index and at that index shifted by this
+                // frame's net item-count delta — the same two hypotheses
+                // anchoring uses, at most two `key_of` calls per departing row,
+                // never a scan of `item_count`. Same acknowledged imprecision as
+                // the anchor probe (see the module docs' *Cache hygiene*
+                // section's gaps) — narrower blast radius than the wholesale
+                // clear above, since a false miss here only evicts one
+                // already-departed row's entry.
+                //
+                // Gated on `!anchor_probe_missed`: this loop tests a departing
+                // row's key against the exact same two hypotheses (unchanged
+                // index, or shifted by the frame's net `delta`) the anchor
+                // probe above already tested and found unreliable *this frame*
+                // (a same-frame both-sides mutation is the confirmed case —
+                // see `any_survivor` above). Trusting the same hypothesis here
+                // when it has already missed once this frame would evict a row
+                // that's merely just outside the (still mis-anchored) window,
+                // not gone from the data — the exact class of bug this
+                // decoupling exists to avoid. Left alone, such a row's entry is
+                // simply stale until re-measured or reclaimed by
+                // [`ListViewWidget::evict_measured_stale_indices`] on a later
+                // shrink; still `Widget::teardown`-torn-down like every other
+                // orphan below regardless, only its *measurement* survives.
+                let count = element.item_count;
+                for (key, prev_index) in prev_index_of.iter() {
+                    if old.contains_key(prev_index)
+                        && !Self::key_survives(*key, *prev_index, delta, count, key_of)
+                    {
+                        element.forget_measured(key);
+                    }
                 }
             }
         }
@@ -1083,11 +1156,20 @@ pub struct ListViewWidget {
     /// where a drag past an edge is represented instead.
     offset: f64,
     /// The raw (un-resisted) drag position accumulated during an active scroll
-    /// drag; seeded from [`ListViewWidget::painted_offset`] at takeover and
-    /// moved by each drag delta. [`OVERSCROLL_RESISTANCE`] is applied to its
-    /// out-of-range portion to derive [`ListViewWidget::overscroll`], so the
-    /// resistance never compounds across moves (mirrors `ScrollWidget`'s field
-    /// of the same name).
+    /// drag, in the same **raw-offset space** [`ListViewWidget::offset`] itself
+    /// lives in — never [`ListViewWidget::placement_offset`]'s
+    /// pending-corrected space, since [`ListViewWidget::apply_drag_offset`]
+    /// writes it straight into `offset` by absolute assignment. Seeded at
+    /// takeover from `offset + overscroll` (the raw offset plus the live
+    /// overscroll displacement — the intentional regrab-mid-bounce term, so a
+    /// regrab mid-bounce continues smoothly from what is on screen) and moved
+    /// by each drag delta thereafter; deliberately **not**
+    /// [`ListViewWidget::painted_offset`], which would also fold in a nonzero
+    /// [`ListViewWidget::pending_correction`] and double-count it once
+    /// `placement_offset` re-adds it on the first post-takeover move.
+    /// [`OVERSCROLL_RESISTANCE`] is applied to its out-of-range portion to
+    /// derive [`ListViewWidget::overscroll`], so the resistance never compounds
+    /// across moves (mirrors `ScrollWidget`'s field of the same name).
     drag_raw: f64,
     /// The signed, resisted past-edge visual displacement a drag shows beyond
     /// the windowing [`ListViewWidget::offset`]: negative past the top,
@@ -1934,12 +2016,20 @@ impl ListViewWidget {
                         self.scrolling = true;
                         self.settling = false;
                         self.last_drag = p.position;
-                        // Seed the raw drag position from the current *painted*
-                        // offset (windowing offset + any live overscroll), so a
-                        // regrab mid-bounce continues smoothly from what is on
-                        // screen rather than snapping to the windowing offset
-                        // alone.
-                        self.drag_raw = self.painted_offset();
+                        // Seed the raw drag position from the raw offset plus
+                        // any live overscroll — never `painted_offset`, which
+                        // also folds in `pending_correction`:
+                        // `apply_drag_offset` writes `drag_raw` straight into
+                        // `offset` by absolute assignment, and
+                        // `placement_offset` unconditionally re-adds
+                        // `pending_correction` on top, so seeding from painted
+                        // space would double-count a nonzero pending
+                        // correction on the first post-takeover move.
+                        // Including `overscroll` (not just `offset`) is the
+                        // intentional regrab-mid-bounce term, so a regrab
+                        // mid-bounce still continues smoothly from what is on
+                        // screen.
+                        self.drag_raw = self.offset + self.overscroll;
                         self.cancel_children(ctx, p.position);
                         ctx.request_redraw();
                     } else {
@@ -2111,6 +2201,16 @@ impl<State: 'static> View<State> for ListView<State> {
         // one corrected offset — never during paint. See the module docs'
         // anchoring section for the algorithm and the `offset == 0` decision.
         let mut prepend_correction = false;
+        // Set when the anchor-shift hypothesis probe below misses on every key
+        // in the previous window. NOT itself proof of a full replace — the
+        // probe only tests two candidate index shifts and can miss on a
+        // same-frame mutation touching both sides of the anchor (a prepend
+        // above the viewport plus an append below it in one frame) even
+        // though most on-screen rows are still exactly the ones they were.
+        // Whether the measured cache should reset on that is answered later,
+        // inside `reconcile_keyed`, against its own exact per-slot key
+        // matches — see the module docs' *Cache hygiene* section.
+        let mut anchor_probe_missed = false;
         if let Some(key_of) = self.key_of.as_ref() {
             match Self::anchor_shift_items(prev, element, old_item_count, key_of) {
                 Some(shift_items) if shift_items != 0 => {
@@ -2120,11 +2220,7 @@ impl<State: 'static> View<State> for ListView<State> {
                 }
                 Some(_) => {}
                 None => {
-                    // No previous-window key survived either hypothesis: a full
-                    // replace, which is reset semantics for the measured cache
-                    // too — none of its keys is in this data (inert on the
-                    // uniform path, whose cache is always empty).
-                    element.clear_measured();
+                    anchor_probe_missed = true;
                 }
             }
         }
@@ -2177,7 +2273,9 @@ impl<State: 'static> View<State> for ListView<State> {
         let plan = element.desired_window();
         let delta = self.item_count as isize - old_item_count as isize;
         flags |= match self.key_of.as_ref() {
-            Some(key_of) => self.reconcile_keyed(prev, element, ctx, plan, key_of, delta),
+            Some(key_of) => {
+                self.reconcile_keyed(prev, element, ctx, plan, key_of, delta, anchor_probe_missed)
+            }
             None => {
                 // A positional frame owns no key identities: drop whatever map a
                 // previous keyed frame left (and, with it, every measurement
@@ -4454,6 +4552,75 @@ mod tests {
     }
 
     #[test]
+    fn same_frame_prepend_and_append_leaves_the_measured_cache_intact() {
+        // A same-frame mutation on BOTH sides of the anchor (a prepend above
+        // the viewport plus an append below it, in one keyed frame) is a
+        // false negative for the rebuild-time anchor-shift probe: the net
+        // `item_count` delta is +4 (3 prepended, 1 appended) but the true
+        // per-row shift for every already-existing row is +3 (the append
+        // never shifts an existing index), so the probe's two hypotheses
+        // (unchanged position, or shifted by the net delta) both miss.
+        //
+        // Before this fix that bare miss also wiped the whole measured
+        // cache (`ListView::rebuild`'s `None` arm called `clear_measured`
+        // unconditionally). This pins the fix: the scroll-position
+        // correction itself is knowingly still absent this frame (a visible
+        // jump — the exact per-key anchor fix is a deferred follow-up, see
+        // the module docs' *Cache hygiene* section), but the on-screen
+        // rows' measured heights must survive, because `reconcile_keyed`
+        // still matches them into this frame's window by *exact* key, not
+        // by the probe's hypotheses.
+        let fx = VarRows::new((0..60).collect());
+        let mut logic = fx.logic();
+        let mut root = converged_var(&mut logic, &fx);
+
+        // Scroll to a middle window so there is real content both above and
+        // below what is materialized.
+        root.event(&mut (), &wheel(400.0));
+        settle(&mut root, &mut logic, &fx, 100.0, 4);
+
+        let w = list_widget(&root);
+        let on_screen_ids: Vec<u64> = w.window().iter().map(|&i| fx.rows.borrow()[i]).collect();
+        assert!(!on_screen_ids.is_empty(), "the window materialized rows");
+        let measured_before: HashMap<u64, f64> = on_screen_ids
+            .iter()
+            .map(|&id| {
+                let m = w.measured[&ChildKey::new(id)];
+                (id, m.extent)
+            })
+            .collect();
+        assert_eq!(
+            measured_before.len(),
+            on_screen_ids.len(),
+            "every on-screen row was already measured, laid out once by `converged_var`"
+        );
+
+        // Prepend 3 above and append 1 below in one borrow_mut batch, so both
+        // mutations land in the same keyed rebuild.
+        {
+            let mut rows = fx.rows.borrow_mut();
+            rows.splice(0..0, [9_001u64, 9_002, 9_003]);
+            rows.push(9_050);
+        }
+        root.rebuild(&mut logic, &mut ()); // rebuild alone: pins cache state, not paint/layout
+
+        let w = list_widget(&root);
+        for (id, extent_before) in &measured_before {
+            let entry = w.measured.get(&ChildKey::new(*id));
+            assert!(
+                entry.is_some(),
+                "row {id}'s measurement survived the same-frame both-sides mutation \
+                 (no estimate collapse)"
+            );
+            assert_eq!(
+                entry.unwrap().extent,
+                *extent_before,
+                "row {id}'s measured height is unchanged"
+            );
+        }
+    }
+
+    #[test]
     fn variable_truncation_evicts_measurements_past_the_new_end() {
         let fx = VarRows::new((0..40).collect());
         let mut logic = fx.logic();
@@ -4702,6 +4869,62 @@ mod tests {
              ({anchor_y} -> {y_after})"
         );
         assert!(flags.contains(ChangeFlags::LAYOUT));
+    }
+
+    #[test]
+    fn drag_takeover_seeds_from_raw_offset_not_the_pending_corrected_painted_offset() {
+        // Wheel-jump into unmeasured tall rows so a real frame leaves
+        // `pending_correction > 0` — mirrors
+        // `measured_correction_holds_the_anchor_when_rows_measure_taller`'s
+        // idiom for producing a genuine (not synthetic) pending correction.
+        let fx = VarRows::new(tall_ids(300));
+        let mut logic = fx.logic();
+        let mut root = converged_var(&mut logic, &fx);
+
+        root.event(&mut (), &wheel(1_500.0));
+        var_frame(&mut root, &mut logic, &fx, 100.0);
+
+        let w = list_widget(&root);
+        let pending = w.pending_correction;
+        assert!(
+            pending > 0.0,
+            "the rows above the viewport top measured taller than assumed"
+        );
+        let painted_before = w.painted_offset();
+
+        // WITHOUT another rebuild: Down -> Move past TOUCH_SLOP (takeover) ->
+        // a second Move with a known finger delta `dy`.
+        let down_y = 100.0;
+        root.event(&mut (), &ev(PointerPhase::Down, down_y));
+        let takeover_y = down_y + TOUCH_SLOP + 1.0;
+        root.event(&mut (), &ev(PointerPhase::Move, takeover_y)); // takeover
+        assert!(
+            list_widget(&root).scrolling,
+            "the slop crossing took the gesture over"
+        );
+        assert_eq!(
+            list_widget(&root).pending_correction,
+            pending,
+            "takeover itself never touches pending_correction"
+        );
+
+        let dy = 30.0;
+        root.event(&mut (), &ev(PointerPhase::Move, takeover_y + dy));
+
+        let w = list_widget(&root);
+        assert!(
+            (w.painted_offset() - (painted_before - dy)).abs() < 1e-9,
+            "painted offset after the second Move equals the pre-takeover \
+             painted offset minus exactly the finger delta \
+             ({painted_before} - {dy} = {}, got {})",
+            painted_before - dy,
+            w.painted_offset()
+        );
+        assert_eq!(
+            w.pending_correction, pending,
+            "the drag path never commits or otherwise touches pending_correction \
+             (only a rebuild does — see `ListViewWidget::apply_pending_correction`)"
+        );
     }
 
     #[test]
