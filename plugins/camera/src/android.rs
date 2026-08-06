@@ -1,26 +1,20 @@
 //! The Android backend — CameraX, driven from a `dev.frust.camera.FrustCameraHost`
 //! Kotlin helper (`plugins/camera/platform/android/`) over this crate's own
 //! JNI surface, filling the `nativeOn*` export bodies against a frozen
-//! contract, including the image stream —
-//! [`AndroidSession::start_image_stream`]/[`AndroidSession::stop_image_stream`],
-//! the host's `startImageStream`/`stopImageStream`, and the one contract
-//! addition the frozen table reserved,
-//! [`Java_dev_frust_camera_FrustCameraHost_nativeOnImageFrame`]. Every
-//! operation this backend exposes is now real.
+//! contract: permission, session open/close, still capture, and the image
+//! stream ([`AndroidSession::start_image_stream`]/
+//! [`AndroidSession::stop_image_stream`], the host's
+//! `startImageStream`/`stopImageStream`, and
+//! [`Java_dev_frust_camera_FrustCameraHost_nativeOnImageFrame`]).
 //!
 //! # The frozen contract
 //!
-//! **`FrustCameraHost.kt` and this module's real backend
-//! build to this table — changing it means updating both files
-//! first.** The one **widening since the freeze** is a follow-up fix's
-//! still-capture request id (`takePicture`'s `long requestId`, echoed back by
-//! `nativeOnPictureTaken`) — see *Correlating a completion* below;
-//! `FrustCameraHost.kt`'s copy of this table was updated in the same change.
-//! `dev.frust.camera` is a subpackage of the embedding module's
-//! `dev.frust` (`dev.frust` is `frust-embedding`'s exclusive package —
-//! `docs/CODE_STANDARDS.md`'s Plugin Conventions); `FrustCameraHost`'s
-//! package is baked into every JNI symbol name below, so it may never move
-//! once shipped.
+//! **`FrustCameraHost.kt` and this module build to this table — changing it
+//! means updating both files together.** `dev.frust.camera` is a subpackage of
+//! the embedding module's `dev.frust` (`dev.frust` is `frust-embedding`'s
+//! exclusive package — `docs/CODE_STANDARDS.md`'s Plugin Conventions);
+//! `FrustCameraHost`'s package is baked into every JNI symbol name below, so it
+//! may never move once shipped.
 //!
 //! ## Rust → Kotlin (static methods on `FrustCameraHost`, resolved via
 //! `context.getClassLoader().loadClass(...)` — the `FrustBiometric`
@@ -36,12 +30,12 @@
 //! | `startImageStream` | `(int session, int format) -> int` | `0` started (frames arrive via [`Java_dev_frust_camera_FrustCameraHost_nativeOnImageFrame`]); <0 refused. `format`: [`FORMAT_CODE_YUV420`] / [`FORMAT_CODE_BGRA`] (Android refuses the latter — see [`stream_format_code`]) |
 //! | `stopImageStream` | `(int session) -> void` | Unbinds the `ImageAnalysis` use case only; the preview keeps running |
 //!
-//! ### Additive entries (post-freeze)
+//! ### Additive entries
 //!
 //! The table above is frozen verbatim; a capability added later arrives as an
-//! **additional static**, never as a changed row — the same additive rule
-//! `nativeOnImageFrame` followed on the Kotlin → Rust side below.
-//! `FrustCameraHost.kt`'s copy of this section is its mirror.
+//! **additional static**, never as a changed row — the same additive rule that
+//! binds the Kotlin → Rust exports below. `FrustCameraHost.kt`'s copy of this
+//! section is its mirror.
 //!
 //! | Method | Signature (Java) | Notes |
 //! |---|---|---|
@@ -55,7 +49,7 @@
 //! - [`Java_dev_frust_camera_FrustCameraHost_nativeOnPermissionResult`]`(env, class, granted: jboolean)`
 //! - [`Java_dev_frust_camera_FrustCameraHost_nativeOnCameraState`]`(env, class, session: jint, state: jint)` — `0` Configuring / `1` Running / `2` Closed / `3` Error
 //! - [`Java_dev_frust_camera_FrustCameraHost_nativeOnPictureTaken`]`(env, class, session: jint, request_id: jlong, ok: jboolean, path: JString)` — `request_id` is the value the matching `takePicture` was given, echoed back unchanged (*Correlating a completion* below)
-//! - [`Java_dev_frust_camera_FrustCameraHost_nativeOnImageFrame`]`(env, class, session: jint, format: jint, width: jint, height: jint, rotationDegrees: jint, planeCount: jint, plane0: JByteBuffer, rowStride0: jint, pixelStride0: jint, plane1: …, plane2: …)` — **a later contract addition.** Three fixed plane slots (never an array: an array would allocate on the Kotlin side once per frame at camera rate); slots past `planeCount` are null. Called on the host's own analyzer executor, and `ImageProxy.close()` runs only after it returns — see [`AndroidSession::start_image_stream`]'s close-deadline contract.
+//! - [`Java_dev_frust_camera_FrustCameraHost_nativeOnImageFrame`]`(env, class, session: jint, format: jint, width: jint, height: jint, rotationDegrees: jint, planeCount: jint, plane0: JByteBuffer, rowStride0: jint, pixelStride0: jint, plane1: …, plane2: …)` — three fixed plane slots (never an array: an array would allocate on the Kotlin side once per frame at camera rate); slots past `planeCount` are null. Called on the host's own analyzer executor, and `ImageProxy.close()` runs only after it returns — see [`AndroidSession::start_image_stream`]'s close-deadline contract.
 //!
 //! Each export upgrades its [`jni::EnvUnowned`] via
 //! [`jni::EnvUnowned::with_env`], which wraps the body in `catch_unwind` — the
@@ -94,11 +88,11 @@
 //!
 //! So each of the two entry points calls [`ensure_off_ui_thread`] **before**
 //! doing anything else and reports [`CameraError::UiThread`] immediately — no
-//! dialog shown, no capture armed, nothing to unwind. This is defence in
-//! depth, not the primary fix: the host also delivers completions off the main
-//! `Looper` now (`FrustCameraHost`'s `captureExecutor`), so an off-main-thread
-//! caller is served even while the UI thread is busy. The guard is what turns
-//! *one* misplaced call anywhere in an app from a 15 s silent freeze into a
+//! dialog shown, no capture armed, nothing to unwind. It is defence in depth
+//! rather than the load-bearing fix: the host delivers completions off the main
+//! `Looper` (`FrustCameraHost`'s `captureExecutor`), so an off-main-thread
+//! caller is served even while the UI thread is busy. The guard turns *one*
+//! misplaced call anywhere in an app from a 15 s silent freeze into a
 //! diagnosable typed error.
 //!
 //! # Correlating a completion
@@ -108,13 +102,12 @@
 //! mints a request id ([`crate::capture::CaptureSlot`]), hands it to
 //! `takePicture`, and the host echoes it back unchanged from the
 //! `OnImageSavedCallback` that capture created; a completion whose id is not
-//! the awaited one is **dropped**, never recorded. That is what keeps a late
-//! answer to a timed-out capture from resolving the next one — the failure
-//! mode where a caller believes a photo was written when none was. (Before
-//! round-1 fix f1 the export stamped completions with the session's
-//! *current* generation at delivery time, which defeated the guard entirely.)
-//! The pure matching logic lives in [`crate::capture`] so it can be
-//! unit-tested on a host that cannot compile this module at all.
+//! the awaited one is **dropped**, never recorded. The id must be the one the
+//! capture was armed with — stamping a completion at delivery time (with, say,
+//! the session's current generation) defeats the guard entirely, and the
+//! failure mode is a caller believing a photo was written when none was. The
+//! pure matching logic lives in [`crate::capture`] so it can be unit-tested on
+//! a host that cannot compile this module at all.
 //!
 //! # Session state
 //!
@@ -150,7 +143,8 @@
 //! the delivered geometry back via [`AndroidSession::preview_aspect_ratio`],
 //! exactly as [`crate::Resolution::Explicit`]'s "best-effort, always read it
 //! back" doc allows. Widening the contract with a resolution parameter means
-//! updating tasks 02/05/06 together, not improvising here.
+//! changing `FrustCameraHost.kt`, this module, and the table above together,
+//! not improvising here.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -1597,8 +1591,7 @@ pub extern "system" fn Java_dev_frust_camera_FrustCameraHost_nativeOnCameraState
 /// [`crate::capture::CaptureSlot::deliver`] enforces and the crate's own unit
 /// tests pin).
 ///
-/// Since round-1 fix f1 this runs on the host's `captureExecutor`, not the
-/// main `Looper`.
+/// This runs on the host's `captureExecutor`, not the main `Looper`.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_frust_camera_FrustCameraHost_nativeOnPictureTaken<'local>(
     mut env: EnvUnowned<'local>,
