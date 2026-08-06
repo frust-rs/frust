@@ -29,15 +29,18 @@ milestones are ms-deltas from process begin, the `SPAN_*` consts at
 `device_ready`, `renderer_ready`, `pipeline_cache_restored`,
 `first_rebuild_done`, `first_encode_done`, `first_frame_presented`.
 
-**Summary** (default), every ~2s of frames (`perf.rs` ≈403–427): p50/p95/p99
-totals, per-pass p95s (`rebuild/layout/paint/encode/present`), 60Hz/120Hz
-budget-overrun counts, `skipped`.
+**Summary** (default), every ~2s of frames (`perf.rs` ≈305–329 the
+`FrameSummary` shape, `emit_log` ≈536–569): p50/p95/p99 totals, per-pass p95s
+(`rebuild/layout/paint/encode/acquire/submit` — chapter 3's encode→acquire→submit
+split), 60Hz/120Hz budget-overrun counts, `skipped`.
 
-**Raw v2** (`FRUST_TRACE=1 FRUST_TRACE_RAW=1`), one line per frame,
-formatted at `perf.rs` ≈474–489:
+**Raw v3** (`FRUST_TRACE=1 FRUST_TRACE_RAW=1`), one line per frame,
+formatted at `perf.rs` ≈624–636 (v3 split the old v2 `present_us` into
+`acquire_us`+`submit_us` — see that function's doc comment for the full
+v1→v2→v3 history):
 
 ```
-frust-perf raw n=<u64> total_us=.. rebuild_us=.. layout_us=.. paint_us=.. encode_us=.. present_us=.. skipped=<0|1>
+frust-perf raw n=<u64> total_us=.. rebuild_us=.. layout_us=.. paint_us=.. encode_us=.. acquire_us=.. submit_us=.. skipped=<0|1>
 ```
 
 plus `bench-scenario-start/end <name>` markers (`perf.rs` ≈507–535) and
@@ -45,14 +48,28 @@ free-form `bench_emit` lines (≈549) for per-op scenario measurements.
 
 ## The harness (`benchmarks/`)
 
-Paired Frust/Flutter apps implementing the same eight scenarios
-(`benchmarks/frust_bench/src/scenarios/mod.rs` ≈82–91; described in
-`benchmarks/PROTOCOL.md` ≈256–271):
+Paired Frust/Flutter apps implementing the same eight *timed* scenarios
+(`benchmarks/frust_bench/src/scenarios/mod.rs` ≈83–94; described in
+`benchmarks/PROTOCOL.md` §8, "Scenarios (S1–S8)"):
 
 S1 animation storm (bubblebench workload) · S2 long-list scroll (10k rows) ·
 S3 table ops · S4 heavy-work responsiveness (50MB JSON parse) · S5 image
 pipeline · S6 text-shaping stress · S7 cold start + idle · S8 plugin-call
 overhead.
+
+`frust_bench`'s `SCENARIOS` array (same `mod.rs` anchor, ten entries now) adds
+two more that sit outside that paired eight, both excluded from
+`PROTOCOL.md`'s §8 and never entered in `RESULTS.md`:
+
+S9 terminal grid stream (replays a checked-in byte fixture through a real
+`vt100` VT emulator, batched into an 80×45 character grid — a
+candidate-versus-known-good measurement against Flutter's kterm 1.5.3, but
+paired only at the *protocol* level today; the Flutter side lives on a spike
+branch, not in this tree) · S10 IME keystroke probe (a **capability probe**,
+not a measurement — no Flutter counterpart, nothing timed: it recovers
+per-keystroke bytes from the mobile IME bridges' whole-state-sync snapshots
+via a sentinel-buffer diff, and the deliverable is a readable device log, not
+a number).
 
 ```bash
 ./benchmarks/harness/run.sh <scenario> --app frust|flutter --device <serial> [--runs N]
@@ -94,9 +111,14 @@ percentiles: gradient→solid (lab 2.1), bubble count sweep, `cpu` tier
 `FRUST_TRACE=1 (cd examples/huddle && cargo run)` and read the one
 `frust-perf startup` line. Which dominates on your machine —
 `device_ready` (wgpu adapter+device) or `first_encode_done` (first vello
-pipeline compile)? Match each milestone to the code that stamps it
-(desktop: `app_handler.rs` ≈943/1042/1101; the rest during render-context
-init, chapter 4). This is the map you'll need the day cold start regresses.
+pipeline compile)? Match each milestone to the code that stamps it —
+`adapter_ready`/`device_ready`/`renderer_ready`/`pipeline_cache_restored` all
+come from one `persist_and_record` call
+(`crates/frust-shell-desktop/src/render.rs` ≈723–745, run right after surface
+creation on both the inline and render-thread-split paths — chapter 3);
+`first_encode_done`/`first_frame_presented` are stamped inside the shared
+`render_frame` helper (`render.rs` ≈801/842). This is the map you'll need the
+day cold start regresses.
 
 ### 8.3 — Run one real benchmark scenario
 

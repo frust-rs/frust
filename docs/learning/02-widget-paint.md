@@ -13,7 +13,7 @@ reader.
 | `Widget` trait — `layout`/`paint`/`event`/`semantics` | `crates/frust-core/src/widget.rs` | ≈796–834 |
 | `RecordingScene` — GPU-free paint-assertion fake | `crates/frust-core/src/widget.rs` | ≈1162–1174 |
 | Smallest real paint impl: `Icon` (scaled `BezPath` fill) | `crates/frust-widgets/src/icon.rs` | ≈298–311 |
-| Animation-driven repaint: `LoadingIndicator` | `crates/frust-widgets/src/material/loading_indicator.rs` | ≈160, 194, 205 |
+| Animation-driven repaint: `LoadingIndicator` | `crates/frust-widgets/src/material/loading_indicator.rs` | ≈161, 200, 214 |
 | Full custom canvas: the S1 bubble chart | `benchmarks/frust_bench/src/scenarios/s1_animation/chart.rs` | whole file |
 | Custom widgets in an *app* (escape hatch) | `examples/huddle/src/ui/{fill_box,swipeable,sheet,toast}.rs` | see `examples/huddle/Cargo.toml` ≈47–61 |
 
@@ -31,16 +31,28 @@ up. Paint receives the `PaintScene` you met in chapter 1.
 
 ## The animation contract (learn it once, here)
 
-`LoadingIndicator::paint` (≈194) calls a private `step(ctx.frame_time())`,
-which calls `self.timer.advance(now)` (≈160) on its `AnimationController`;
-while the animation is live it calls `ctx.request_frame()` (≈205). That's the
-entire scheme:
+`LoadingIndicator::paint` (≈200) calls a private `step(ctx.frame_time())`,
+which calls `self.timer.advance(now)` (≈161) on its `AnimationController`;
+while the animation is live it calls `ctx.request_frame_paced()` (≈214),
+**not** the bare `request_frame()` — a perpetually-looping morph is exactly
+the decorative case `request_frame_paced()` exists for. That's the entire
+scheme:
 
 - **No timers.** Time enters only as `PaintCtx::frame_time()` (shell-fed;
   `Instant::now()` is banned in core/widgets — `docs/CODE_STANDARDS.md`).
-- **Repaint is requested, not assumed:** `request_frame()` bubbles up as
-  `PaintOutcome::needs_frame`, and the shell schedules exactly one more frame.
-  Forget it and your animation freezes the moment input stops — try it below.
+- **Repaint is requested, not assumed:** `request_frame()`/`request_frame_paced()`
+  bubble up as `PaintOutcome::needs_frame`, and the shell schedules exactly one
+  more frame. Forget it and your animation freezes the moment input stops —
+  try it below.
+- **Bare vs. paced isn't just a naming choice.** `request_frame()` tags the
+  request `TickClass::Transition` — always every-vsync, on both desktop and
+  mobile. `request_frame_paced()` tags it `TickClass::CosmeticLoop`: if
+  *every* frame-request this paint made is `CosmeticLoop` (no concurrent
+  `Transition`, e.g. a scroll fling), the mobile frame gate may throttle the
+  follow-up to the theme's `MotionScheme::cosmetic_loop_rate` instead of every
+  vsync; desktop paces the same way via a delayed wake rather than a skip gate
+  (chapter 3). A spinner that never stops is the textbook case for
+  `_paced` — nobody notices if its redraw lands a few ms later.
 
 ## Experiments
 
