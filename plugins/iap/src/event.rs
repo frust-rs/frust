@@ -75,9 +75,12 @@
 //!
 //! Listeners are snapshotted when an event is **dequeued**, not when it is
 //! emitted, and run in registration order. So a listener registered while an
-//! event is still in flight may see it, and a [`ListenerHandle`] dropped in
-//! that window stops it — the stronger reading of [`ListenerHandle::remove`]'s
-//! promise, never a weaker one. An event dequeued with nothing registered is
+//! event is still in flight may see it, and a [`ListenerHandle`] dropped
+//! before that dequeue-snapshot stops it. The snapshot is also the boundary
+//! of [`ListenerHandle::remove`]'s promise: a removal landing *after* the
+//! snapshot but before this listener's turn does not recall it — the
+//! callback runs one last time, so callbacks must tolerate a single
+//! invocation racing removal. An event dequeued with nothing registered is
 //! **dropped**, never buffered for a later listener: that is exactly the loss
 //! [`crate::Iap::request_purchase`] warns about, and recovering it is
 //! [`crate::Iap::get_available_purchases`]'s job rather than this queue's.
@@ -143,8 +146,13 @@ pub struct ListenerHandle {
 
 impl ListenerHandle {
     /// Unregister the listener now. No event emitted after this returns
-    /// reaches it — nor one already queued but not yet delivered, since the
-    /// delivery thread reads the registry when it dequeues (module doc).
+    /// reaches it. An event already queued is also stopped **if** removal
+    /// lands before the delivery thread snapshots the registry for it; a
+    /// fan-out whose snapshot was already taken still invokes this listener
+    /// one last time (module doc, *Who receives a queued event*). Callbacks
+    /// must therefore tolerate a single invocation racing `remove`/drop —
+    /// e.g. never `unwrap` a send to a receiver torn down alongside the
+    /// handle.
     ///
     /// The explicit form of dropping the handle — identical in effect, and
     /// worth spelling out at a call site where the drop would otherwise be
