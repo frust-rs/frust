@@ -92,9 +92,11 @@ permission/capture, every `iap` store round trip except `request_purchase`/
   own serializers on the host side, `serde`/`serde_json` on the Rust side — rather than typed
   per-field calls. A purchase is two-phase: `Iap::request_purchase` only acknowledges that the
   store accepted the request; the actual outcome (`IapEvent::PurchaseUpdated`/`PurchaseError`)
-  arrives later on the listener registered via `Iap::set_purchase_listener`, delivered on a
-  store-SDK callback thread (Play Billing's listener thread; StoreKit's transaction-update task) —
-  never the UI thread and never the thread that called `request_purchase`.
+  arrives later on the listener registered via `Iap::set_purchase_listener`, delivered in reported
+  order on the plugin's own event-delivery thread — one process-global consumer every store-SDK
+  callback is handed to, since both hosts report on the platform main thread (Play Billing's
+  `PurchasesUpdatedListener`; OpenIAP's main-actor listener delivery) — never the UI thread and
+  never the thread that called `request_purchase`.
 - Plugin distribution: `frust-drive`'s plugin registry applies each plugin's OS-side integration
   (Gradle module, Swift package, Info.plist key, manifest permission, Cargo dependency) onto a
   scaffolded app, driven by the `frust` TUI's Add Plugin dialog or manually per plugin README (see
