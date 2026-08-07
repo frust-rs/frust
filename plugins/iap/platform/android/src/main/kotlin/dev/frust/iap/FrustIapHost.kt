@@ -99,14 +99,23 @@ import org.json.JSONObject
  * `requestPurchase` branch validates its arguments, starts the flow in a
  * detached coroutine, and resolves immediately.
  *
- * **The detached flow's `catch` logs and emits nothing** (LAW). OpenIAP's own
- * `errorEventGate.publishOnce` is the canonical single delivery: every
- * non-cancellation throw out of `requestPurchase` has already published the
- * failure on the purchase-error listener registered in [bindings], and its
- * pre-flight validation failures publish without throwing at all. Emitting
- * again here would deliver the same failure to an app twice — a refund/retry
- * hazard, not a harmless duplicate. The `catch` stays only so a throw cannot
- * take [scope] down.
+ * **The detached flow's `catch` logs and emits nothing** (LAW) — for what the
+ * gate actually covers. `OpenIapModule.requestPurchase`'s own
+ * `errorEventGate.publishOnce` is the canonical single delivery, but it gates
+ * the **module**, not the `OpenIapStore.requestPurchase` wrapper this flow
+ * actually calls: every non-cancellation throw out of the *module's*
+ * `requestPurchase` handler has already published the failure on the
+ * purchase-error listener registered in [bindings], and its pre-flight
+ * validation failures publish without throwing at all — but `OpenIapStore`'s
+ * own wrapper body throws `OpenIapError.FeatureNotSupported` itself, ungated,
+ * when `module.mutationHandlers.requestPurchase` is unset (upstream
+ * `OpenIapStore.kt`). [dispatch]'s `requestPurchase` branch closes that one
+ * wrapper-level gap with a synchronous pre-check ahead of this detached
+ * flow, so it still reports through the normal ack path rather than
+ * reaching this `catch`. Emitting again for anything the module *did* gate
+ * would deliver the same failure to an app twice — a refund/retry hazard,
+ * not a harmless duplicate. The `catch` stays only so a throw cannot take
+ * [scope] down.
  *
  * ## Why an `OpenIapStore` **and** an `OpenIapProtocol`
  *
@@ -330,15 +339,32 @@ object FrustIapHost {
                         // `type`); report it as the caller error it is.
                         throw OpenIapError.DeveloperError(e.message)
                     }
+                // `OpenIapStore.requestPurchase` throws this same error itself
+                // when `module.mutationHandlers.requestPurchase` is unset —
+                // but only once called, from inside the detached flow below,
+                // past `errorEventGate.publishOnce`'s reach (upstream
+                // `OpenIapStore.kt`; that gate only covers throws the
+                // handler's own body raises, not the missing-handler
+                // fallback ahead of it). Checked synchronously here, alongside
+                // the Activity check below, so this one gap still reports
+                // through the normal ack path instead of vanishing into the
+                // detached `catch`'s log-only line.
+                if (bound.module.mutationHandlers.requestPurchase == null) {
+                    throw OpenIapError.FeatureNotSupported(
+                        "this openiap module exposes no requestPurchase handler",
+                    )
+                }
                 this.activity?.let { store.setActivity(it) }
                     ?: throw OpenIapError.MissingCurrentActivity
                 scope.launch {
                     try {
                         store.requestPurchase(props)
                     } catch (t: Throwable) {
-                        // Log only: OpenIAP published this failure on the
-                        // purchase-error listener before it threw (class doc's
-                        // LAW). Re-emitting it would double the event.
+                        // Log only: every throw reaching this point already
+                        // published on the purchase-error listener before it
+                        // threw (class doc's LAW) — the one throw that
+                        // wouldn't have is caught synchronously above.
+                        // Re-emitting here would double the event.
                         Log.w(TAG, "frust-iap: requestPurchase failed after dispatch", t)
                     }
                 }

@@ -103,10 +103,16 @@
 //! validated the request and started the flow. The outcome then arrives the only
 //! way it ever does: as an [`IapEvent`] on the listener registry, which is also
 //! where Play's own in-flow rejections (an unknown SKU, an already-owned
-//! product, a cancel) are published — **once** per failure: OpenIAP publishes
-//! every one of them through its own publish-once gate before the detached
-//! flow rethrows, and the host's `catch` around that flow logs rather than
-//! emitting a second copy.
+//! product, a cancel) are published — **once** per failure: `OpenIapModule`'s
+//! own `requestPurchase` handler publishes every one of them through its
+//! `errorEventGate.publishOnce` gate before rethrowing. That gate covers the
+//! **module**, not the `OpenIapStore.requestPurchase` wrapper the detached flow
+//! actually calls — the wrapper's own body throws `OpenIapError.FeatureNotSupported`
+//! itself, ungated, when the module's `requestPurchase` handler is unset
+//! (upstream `OpenIapStore.kt`). `FrustIapHost.kt`'s `requestPurchase` branch
+//! checks for exactly that synchronously, ahead of the detached flow, so this
+//! one wrapper-level gap still reports through the normal ack path instead of
+//! reaching the detached flow's log-only `catch`.
 //!
 //! # Connection state lives here
 //!
