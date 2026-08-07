@@ -387,6 +387,18 @@ unsafe extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
 }
 
+/// The signals `frust-drive::interrupt` owns, as a child's `WTERMSIG` would
+/// report them: SIGHUP(1), SIGINT(2), SIGTERM(15). Stable kernel-ABI numbers
+/// across every Unix target Frust builds for, like [`group_kill_unix`]'s
+/// `SIGKILL`.
+///
+/// A streamed child dying of one of these is the observable half of a
+/// process-group signal (a terminal Ctrl-C, a CI runner's `kill`) that this
+/// process was almost certainly also a target of — see
+/// [`RealProcessRunner::run_streaming`]'s reap.
+#[cfg(unix)]
+const TERMINATION_SIGNALS: [i32; 3] = [1, 2, 15];
+
 /// `SIGKILL`s the entire Unix process group whose id equals `child_pid`.
 ///
 /// [`ProcessRunner::spawn_streaming`] places each streamed child in its own
@@ -498,6 +510,30 @@ impl ProcessRunner for RealProcessRunner {
         let status = child
             .wait()
             .with_context(|| format!("waiting on `{cmd}`"))?;
+
+        // A child killed by a termination signal is usually not a tool that
+        // failed — it is this process's own Ctrl-C/SIGTERM arriving group-wide
+        // and killing both of us. Returning a plain `success: false` here
+        // hands the caller an ordinary build failure to `bail!` on, which
+        // races `interrupt`'s handler thread for the process's exit status
+        // (exit 1 versus its scrub-then-130) and used to win about as often as
+        // it lost. Deferring here — at the one seam every synchronous pipeline
+        // funnels its external tools through, rather than in each pipeline's
+        // own failure branch — makes the signal win, for every caller.
+        //
+        // Costs nothing on the ordinary paths: an exit status carries a
+        // `signal()` only for a signal-killed child, so a tool that merely
+        // exited non-zero (the normal build-failure case) never calls in.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if status
+                .signal()
+                .is_some_and(|signal| TERMINATION_SIGNALS.contains(&signal))
+            {
+                crate::interrupt::defer_to_pending_signal(crate::interrupt::SIGNAL_DEFER_TIMEOUT);
+            }
+        }
 
         Ok(Output {
             success: status.success(),
@@ -1432,6 +1468,29 @@ mod tests {
             out.stderr.contains("to-stderr"),
             "stderr should be captured into Output.stderr (piped, not inherited), got {:?}",
             out.stderr
+        );
+    }
+
+    /// A real child killed by a termination signal still returns an ordinary
+    /// unsuccessful `Output`. Nothing signals the test process itself, so
+    /// `interrupt`'s latch stays clear and the reap-time defer must time out
+    /// and hand control back — a child someone `kill`s by pid must never hang
+    /// the caller waiting for an exit that isn't coming.
+    #[cfg(unix)]
+    #[test]
+    fn run_streaming_real_signal_killed_child_returns_instead_of_hanging() {
+        use std::time::Instant;
+
+        let runner = RealProcessRunner;
+        let started = Instant::now();
+        let out = runner
+            .run_streaming("/bin/sh", &["-c", "kill -TERM $$"], None, &[], &mut |_| {})
+            .unwrap();
+        assert!(!out.success, "a signal-killed child is not a success");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the defer is bounded; this returned only after {:?}",
+            started.elapsed()
         );
     }
 

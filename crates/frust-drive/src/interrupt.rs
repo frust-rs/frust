@@ -45,11 +45,29 @@
 //! dedicated thread (so this code is *not* in an async-signal context and may
 //! lock, allocate, and touch the filesystem freely), and the handler's work is
 //! a few `unlink`s before `exit`.
+//!
+//! **The handler races the pipeline it interrupts.** A terminal Ctrl-C (and a
+//! CI runner's `kill`) reaches the whole process group, so the streamed child
+//! — `./gradlew`, `adb logcat`, `xcrun` — dies of the same signal at the same
+//! instant. Its closed stdout pipe then walks the pipeline down its ordinary
+//! "the tool failed" path (`Output { success: false }` → `bail!` → the CLI's
+//! `Err` arm → exit 1) on the main thread, while [`terminate`] scrubs and
+//! exits 130 on `ctrlc`'s thread. Whichever reaches `exit` first decides the
+//! status the shell reports, which made the interrupted-build exit code a coin
+//! flip. [`defer_to_pending_signal`] resolves it in the signal's favour: a
+//! caller that reaped a signal-killed child parks instead of reporting a
+//! failure, letting the handler own the exit. Deferring rather than
+//! synthesising 130 at the call site keeps one exit-status owner (the logcat
+//! phase's [`exit_code_on_signal`] override still decides its own status).
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, TryLockError};
+// The defer below is Unix-only — its whole trigger is a child's `WTERMSIG`,
+// which Windows has no equivalent of — so its clock types are too.
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 
@@ -61,6 +79,29 @@ const INTERRUPTED_EXIT_CODE: i32 = 130;
 /// `android_run`'s logcat phase documents Ctrl-C as the *intended* way to stop
 /// a streamed run and reports success for it — see [`exit_code_on_signal`].
 static EXIT_CODE: AtomicI32 = AtomicI32::new(INTERRUPTED_EXIT_CODE);
+
+/// Set by [`terminate`] before it does anything else: a one-way latch meaning
+/// "a termination signal reached this process and the handler now owns how it
+/// dies". One-way because every path that sets it ends in `process::exit` —
+/// nothing clears it, and nothing may treat it as "a signal happened once".
+static SIGNAL_RECEIVED: AtomicBool = AtomicBool::new(false);
+
+/// How long [`defer_to_pending_signal`] waits for the handler to claim a
+/// signal that has visibly already killed a child process. This bounds a
+/// scheduling delay, not work: `ctrlc`'s handler thread is woken by a
+/// semaphore the C-level handler posts, so it normally latches
+/// [`SIGNAL_RECEIVED`] within microseconds of the child dying. The half-second
+/// is slack for a loaded machine — generous because the only cost of waiting
+/// too long is a slower exit on a process that is already terminating, while
+/// waiting too little brings back the coin-flip exit status.
+#[cfg(unix)]
+pub(crate) const SIGNAL_DEFER_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Poll cadence for [`defer_to_pending_signal`] — short enough that the common
+/// case (the handler is already running) costs one sleep, coarse enough not to
+/// spin against the very thread it is waiting for.
+#[cfg(unix)]
+const SIGNAL_DEFER_POLL: Duration = Duration::from_millis(5);
 
 /// The process-wide armed set. `const`-constructed so no lazy initialisation
 /// stands between a caller and arming a path.
@@ -187,9 +228,53 @@ pub(crate) fn armed_paths() -> Vec<PathBuf> {
 /// dedicated handler thread, so blocking on the registry lock is safe (the
 /// thread holding it is making progress, and only ever holds it for a `push`,
 /// a `retain`, or the scrub itself).
+///
+/// [`SIGNAL_RECEIVED`] is latched **first**, ahead of the scrub: a pipeline
+/// thread that just reaped a child killed by the same group signal is polling
+/// for it, and every instant it isn't set is an instant that thread may
+/// instead report an ordinary tool failure and exit 1 out from under this one.
 fn terminate() -> ! {
+    SIGNAL_RECEIVED.store(true, Ordering::SeqCst);
     registry().scrub();
     std::process::exit(EXIT_CODE.load(Ordering::SeqCst))
+}
+
+/// Yields the process's exit status to a termination signal that is already in
+/// flight, for a caller holding evidence of one: a child it just reaped was
+/// killed by SIGINT/SIGTERM/SIGHUP, which for a process-group signal (a
+/// terminal Ctrl-C, a CI runner's `kill`) means this process was signalled
+/// too.
+///
+/// Parks **forever** once [`SIGNAL_RECEIVED`] is latched — the handler thread
+/// is by then inside [`terminate`], whose `process::exit` ends every thread
+/// including this one. The park is what stops the caller from racing ahead to
+/// report the dead child as an ordinary tool failure and exiting 1 first.
+///
+/// Returns instead — after at most `timeout` — when no signal is pending here,
+/// because a child can be signal-killed without this process being a target
+/// (someone `kill`s a stuck `./gradlew` by pid, a supervisor reaps a subtree).
+/// Reporting that child's failure normally is then the correct outcome, and
+/// blocking on a signal that is never coming would hang the CLI outright —
+/// hence a bounded wait rather than an unconditional park.
+///
+/// **Unix-only**, like the evidence it takes: only a Unix exit status carries
+/// the terminating signal a caller reads to decide it should defer at all.
+#[cfg(unix)]
+pub(crate) fn defer_to_pending_signal(timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if SIGNAL_RECEIVED.load(Ordering::SeqCst) {
+            // The handler owns the exit from here. `park` can wake
+            // spuriously, so this is a loop, not a single call.
+            loop {
+                std::thread::park();
+            }
+        }
+        if Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(SIGNAL_DEFER_POLL);
+    }
 }
 
 /// Installs the signal handler and panic hook exactly once per process,
@@ -335,6 +420,28 @@ mod tests {
         exit_code_on_signal(0).unwrap();
         assert_eq!(EXIT_CODE.load(Ordering::SeqCst), 0);
         EXIT_CODE.store(previous, Ordering::SeqCst);
+    }
+
+    /// The bounded half of the defer contract. A child can be signal-killed
+    /// without this process being a target, and in a test process nothing ever
+    /// signals us — so the deferring caller must get control back after its
+    /// timeout rather than parking on a signal that is never coming. (The
+    /// unbounded half, parking once the latch is set, is not unit-testable:
+    /// setting the latch for real ends in `process::exit`.)
+    #[cfg(unix)]
+    #[test]
+    fn deferring_returns_when_no_signal_is_pending() {
+        assert!(
+            !SIGNAL_RECEIVED.load(Ordering::SeqCst),
+            "a latched signal means the handler already ran, which exits the process"
+        );
+        let timeout = Duration::from_millis(30);
+        let started = Instant::now();
+        defer_to_pending_signal(timeout);
+        assert!(
+            started.elapsed() >= timeout,
+            "the wait must be the full timeout, not an immediate return"
+        );
     }
 
     /// The process-wide seam: arming registers, dropping the registration
