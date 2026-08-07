@@ -4,7 +4,7 @@ resolver = "2"
 # doesn't cover `plugins/`) — a platform plugin (frust-plugin + FFI crates
 # only, no frust-* framework deps), unlike the excluded facade-tier
 # plugins/clean-signals-frust below, which stays out of the root graph.
-members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics"]
+members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/iap"]
 # examples/no-catalogs is the catalog-free build's compile guard: unlike
 # every example excluded below, it is INCLUDED on purpose — a package-scoped
 # `cargo build -p no-catalogs`/`cargo check -p no-catalogs` compiles `frust

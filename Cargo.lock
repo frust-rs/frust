@@ -1560,6 +1560,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-iap"
+version = "0.1.0"
+dependencies = [
+ "block2 0.6.2",
+ "frust-plugin",
+ "jni 0.22.4",
+ "log",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "frust-native-widgets"
 version = "0.1.0"
 dependencies = [
