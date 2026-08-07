@@ -237,6 +237,29 @@ pub type ProductOrSubscription = Product;
 /// Every platform-specific field (`transactionId`, `signatureAndroid`,
 /// `offerIOS`, `revocationReasonIOS`, `__typename`, …) falls into
 /// [`Self::extra`].
+///
+/// # What a verifying server needs
+///
+/// [`Self::purchase_token`] is OpenIAP's *unified* verification credential —
+/// `Types.kt`/`Types.swift` both document it verbatim as "Unified purchase
+/// token (iOS JWS, Android purchaseToken)" on the shared `PurchaseCommon`
+/// interface/protocol. Concretely:
+///
+/// - **Android**: send [`Self::purchase_token`] plus [`Self::product_id`] to
+///   the Play Developer API (`purchases.products.get` /
+///   `purchases.subscriptions.get`). The legacy receipt-signature route
+///   still rides along losslessly in [`Self::extra`] as
+///   `"dataAndroid"`/`"signatureAndroid"` (`Types.kt`'s `PurchaseAndroid`)
+///   for a server that verifies that way instead.
+/// - **iOS**: [`Self::purchase_token`] *is* the StoreKit 2 JWS — send it to
+///   Apple's App Store Server API (or verify it locally against Apple's
+///   public keys). There is no separate field; iOS has no legacy-receipt
+///   fallback modeled here.
+///
+/// **[`Self::purchase_token`] is a bearer credential, not a log-safe
+/// value** — treat it like an API key: send it to your verifying server over
+/// a trusted channel, never log a `Purchase`'s `Debug` output (which prints
+/// it in full) anywhere it could reach shared logs or crash reports.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Purchase {
@@ -245,6 +268,9 @@ pub struct Purchase {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ids: Option<Vec<String>>,
     pub transaction_date: f64,
+    /// See this struct's *What a verifying server needs* doc — the unified
+    /// Android purchase token / iOS JWS, and a bearer credential to keep out
+    /// of logs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purchase_token: Option<String>,
     pub store: IapStore,

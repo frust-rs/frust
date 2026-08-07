@@ -74,6 +74,24 @@
 //! first [`Iap::request_purchase`] and keep the returned [`ListenerHandle`]
 //! alive.
 //!
+//! ## The revenue-safe sequence: request → event → verify → grant → finish
+//!
+//! The two phases above are five steps in practice, and skipping the middle
+//! one is the actual purchase-fraud hole this API leaves open if you let it:
+//!
+//! 1. [`Iap::request_purchase`] asks the store to open the flow — ack-only,
+//!    never a purchase.
+//! 2. The outcome lands on the listener as an [`IapEvent`] —
+//!    [`IapEvent::PurchaseUpdated`] carries a [`Purchase`] that is still
+//!    **unverified client input** at this point, not a fact.
+//! 3. **Verify the purchase server-side** — your server checks the token
+//!    (Android: [`Purchase::purchase_token`] against the Play Developer API;
+//!    iOS: the JWS carried in that same field) before anyone trusts it. See
+//!    [`Purchase`]'s doc for exactly which fields a verifying server needs.
+//! 4. Grant entitlement only once the server verdict is positive.
+//! 5. Only then call [`Iap::finish_transaction`] — see its doc for why
+//!    settling before verification forfeits the fraud check entirely.
+//!
 //! # Event delivery: one plugin-owned thread, and callbacks must not block
 //!
 //! Every [`IapEvent`] is delivered on **the** plugin-owned event thread — one
@@ -146,10 +164,16 @@ pub use types::{
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum IapError {
-    /// The Android host shell never installed the `(JavaVM, Context)`
-    /// platform handles this crate's Android backend needs
-    /// (`frust-plugin`'s pre-init state) — an old scaffold predating
-    /// `nativeInitPlatform`. Never a panic; the caller degrades gracefully.
+    /// The platform's backend has no store handle to work with yet — two
+    /// unrelated causes, one per platform: **Android** — the host shell
+    /// never installed the `(JavaVM, Context)` platform handles this crate's
+    /// backend needs (`frust-plugin`'s pre-init state), an old scaffold
+    /// predating `nativeInitPlatform`; **iOS** — `bridge()` (`apple.rs`)
+    /// couldn't resolve the `FrustIapBridge` Swift class or its `shared`
+    /// singleton at runtime, because the Swift package isn't linked into the
+    /// app or the linker dead-stripped it (nothing else in the app
+    /// references it directly). Never a panic; the caller degrades
+    /// gracefully.
     ///
     /// Checked **first**, ahead of every other guard — see [`Backend`]'s
     /// guard-order contract.
@@ -519,8 +543,12 @@ impl Iap {
     /// its next [`Self::get_available_purchases`] — register the listener
     /// first, and keep its [`ListenerHandle`] alive.
     ///
-    /// Grant entitlement only after [`Self::finish_transaction`] has settled
-    /// the purchase, never off this call's return.
+    /// The event's [`Purchase`] is **unverified input** — verify it
+    /// server-side before granting entitlement; see
+    /// [`Self::finish_transaction`] for where that check sits in the
+    /// sequence. Never grant off this call's own return either, which
+    /// reports only that the store accepted the request, not that anything
+    /// was bought.
     ///
     /// Non-blocking, and callable from any thread including the UI thread: the
     /// backend reaches whatever thread the platform demands itself (Play
@@ -539,6 +567,15 @@ impl Iap {
     /// Settle a purchase received from the event stream: acknowledge it
     /// (non-consumable/subscription) or consume it (consumable, making it
     /// buyable again).
+    ///
+    /// # This is step 5 — after server-verify and after granting
+    ///
+    /// Call this only once your server has verified the purchase (the crate
+    /// doc's *revenue-safe sequence*) and entitlement has been durably
+    /// granted. Finishing an unverified purchase acknowledges/consumes it on
+    /// the store's side, which forfeits the fraud check — the store
+    /// considers the transaction settled either way, and there is no way to
+    /// claw it back after the fact.
     ///
     /// # Play's 3-day acknowledgement deadline
     ///
