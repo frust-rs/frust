@@ -12,14 +12,15 @@ Like every frust **platform plugin**, this crate is added to your app's own
 not re-export it.
 
 > **Templates stay clean.** A generated frust project ships **no** IAP code,
-> permissions, or store wiring. You add exactly the lines below by hand.
-> Unlike `plugins/camera`/`plugins/secure-storage`, this plugin is **not yet**
-> a `frust tui` Add Plugin dialog contribution — every step in this document
-> is manual today. On Android the plugin's platform code still ships as its
-> own Gradle library module rather than files copied into your app, so there
-> is nothing to keep in sync by hand once it's wired in; on iOS it ships as
-> its own local Swift package, added as a second package reference beside the
-> embedding's `FrustEmbedding`.
+> permissions, or store wiring. The `frust` TUI's **Add Plugin** dialog
+> applies every §1 step below in one shot (`iap` card — Cargo dependency,
+> Android Gradle module, iOS Swift package); the manual steps are the same
+> edits, documented for hand-wiring and for auditing what the dialog did.
+> On Android the plugin's platform code ships as its own Gradle library
+> module rather than files copied into your app, so there is nothing to keep
+> in sync by hand once it's wired in; on iOS it ships as its own local Swift
+> package, added as a second package reference beside the embedding's
+> `FrustEmbedding`.
 
 ---
 
@@ -385,10 +386,10 @@ callback thread.
 ## 6. Manual verification gate
 
 A device/emulator gate for `frust-iap`, against an app that depends on the
-plugin per §1 above (no `frust tui` Add Plugin automation exists for this
-plugin yet — see §1's note):
+plugin per §1 above (via the `frust` TUI Add Plugin dialog, or the same
+edits by hand):
 
-- **Add Plugin scaffold builds clean, both platforms.** Apply §1 by hand to
+- **Add Plugin scaffold builds clean, both platforms.** Apply §1 to
   a fresh scaffold; confirm the Android Gradle build picks up the
   transitive `com.android.vending.BILLING` permission, and the iOS package
   resolves (the first build needs network reachability for the external
