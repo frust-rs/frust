@@ -67,3 +67,17 @@ gradle.lifecycle.beforeProject {
         layout.buildDirectory.set(rootDir.resolve("build/frust-native-widgets"))
     }
 }
+
+// frust-iap: not yet a `frust tui` Add Plugin contribution (spike task
+// 02-android-module-spike), so hand-wired exactly as
+// `frust-drive::plugin::apply_gradle_module` would apply it — the same
+// include/projectDir/build-dir-redirect trio `:frust-camera` above uses, per
+// that applier's own doc comment.
+include(":frust-iap")
+project(":frust-iap").projectDir = file("../../../plugins/iap/platform/android")
+
+gradle.lifecycle.beforeProject {
+    if (path == ":frust-iap") {
+        layout.buildDirectory.set(rootDir.resolve("build/frust-iap"))
+    }
+}
