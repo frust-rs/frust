@@ -1250,8 +1250,8 @@ mod tests {
 
     #[test]
     fn a_request_from_another_thread_pumps_normally() {
-        // The #29 shape's payoff: the handle crosses a thread boundary (it is
-        // `Send + Sync`), and the resolution still happens on the UI thread.
+        // The payoff of the `Send + Sync` handle shape: the handle crosses a
+        // thread boundary, and the resolution still happens on the UI thread.
         let mut h = PumpHarness::new(pump_routes());
         let nav = h.router.route_navigator();
         let woke = Arc::new(AtomicUsize::new(0));

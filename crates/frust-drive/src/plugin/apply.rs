@@ -1808,13 +1808,14 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// The regression guard for the drift `F3` fixed: `add_plugin`'s tests
-    /// above only ever exercise a **freshly scaffolded** project, which by
-    /// construction always carries the `// frust:plugin-includes`/
-    /// `// frust:plugin-dependencies` anchors `Contribution::GradleModule`
-    /// hard-requires — so they are structurally incapable of catching an
-    /// existing in-repo consumer drifting away from them (exactly how
-    /// `glyph-catalog` and `layer-bench` shipped without either anchor).
+    /// The regression guard for anchor drift in already-checked-in
+    /// consumers: `add_plugin`'s tests above only ever exercise a **freshly
+    /// scaffolded** project, which by construction always carries the
+    /// `// frust:plugin-includes`/`// frust:plugin-dependencies` anchors
+    /// `Contribution::GradleModule` hard-requires — so they are structurally
+    /// incapable of catching an existing in-repo consumer drifting away from
+    /// them (exactly how `glyph-catalog` and `layer-bench` shipped without
+    /// either anchor).
     ///
     /// This drives the real `add_plugin` path — not a grep — against a
     /// tempdir copy of every in-repo Android consumer, so a future project

@@ -458,11 +458,11 @@ mod tests {
         assert_eq!(warm.track_and_paint(), HOME);
     }
 
-    /// The #29 acceptance criterion: a [`RouteNavigator`] round-trips through
-    /// `provide_context`/`use_context` (which require `Send + Sync + 'static`)
-    /// and the recovered clone drives the *same* queue. Deliberately does not
-    /// build a [`RouterDeepLinks`], so it never touches the process-wide
-    /// deep-link slot the test above owns.
+    /// The context round-trip contract: a [`RouteNavigator`] round-trips
+    /// through `provide_context`/`use_context` (which require `Send + Sync +
+    /// 'static`) and the recovered clone drives the *same* queue.
+    /// Deliberately does not build a [`RouterDeepLinks`], so it never touches
+    /// the process-wide deep-link slot the test above owns.
     #[test]
     fn route_navigator_round_trips_through_context() {
         use frust_reactive::{provide_context, use_context};

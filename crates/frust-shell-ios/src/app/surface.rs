@@ -41,8 +41,7 @@ pub(super) fn seed_resolved_translucency(app: &mut dyn AppTree, translucent_reso
 
 impl IosAppHandle {
     /// Re-read the live surface's RESOLVED translucency and push it into the
-    /// render root, returning it for this frame's base-color choice (review
-    /// finding M1).
+    /// render root, returning it for this frame's base-color choice.
     ///
     /// Two sources, one flag:
     /// - **Inline** (`FRUST_NO_RENDER_THREAD`): the renderer lives on this

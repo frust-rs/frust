@@ -355,7 +355,7 @@ fn assert_input_parity(
     assert_eq!(semantic, expected, "and that set is the top page only");
 }
 
-/// The #23 regression guard: before this fix `NavigatorWidget` had **no**
+/// The routed-surface accessibility guard: `NavigatorWidget` once had **no**
 /// `semantics` impl at all, so the whole routed surface — every page of every
 /// routed app — was absent from the accessibility tree. A pushed page's label
 /// must be present.

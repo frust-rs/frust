@@ -588,7 +588,7 @@ mod tests {
         );
     }
 
-    // --- Theme-swap regression (review F1) ---
+    // --- Theme-swap regression ---
     //
     // `effective_style` (above) resolves the themed color at LAYOUT time and
     // bakes it into the cached `TextLayout`'s glyph brush; `paint` only replays

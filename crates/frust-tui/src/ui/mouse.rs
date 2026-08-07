@@ -9,7 +9,7 @@
 //! 2. During render, views receive a [`MouseCtx`] and register clickable /
 //!    hoverable / scrollable surfaces (`button`/`click`/`hover`/`scroll`). A
 //!    **suppressed** ctx ([`MouseCtx::suppressed`]) drops every registration —
-//!    the modal base-layer suppression calls for (pass `None`).
+//!    the modal base-layer suppression (pass `None`).
 //! 3. On a pointer event the loop hit-tests the registry:
 //!    [`MouseRegions::hover_at`] (topmost region id under the cursor, drives
 //!    hover-change redraws), [`MouseRegions::click_at`] (topmost bound click
@@ -167,7 +167,7 @@ impl MouseRegions {
 /// The render-time handle views push regions through.
 ///
 /// Wraps `Option<&mut MouseRegions>`: a **suppressed** ctx (`None`) makes every
-/// registration a no-op, the modal base-layer suppression specifies.
+/// registration a no-op — the modal base-layer suppression.
 pub struct MouseCtx<'a> {
     regions: Option<&'a mut MouseRegions>,
 }

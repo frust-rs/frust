@@ -1,6 +1,6 @@
 //! Notification settings (`/you/settings/notifications`) — a controller-backed
-//! frequency radio group plus per-type toggle switches (Huddle showcase, task
-//! 15).
+//! frequency radio group plus per-type toggle switches (a Huddle showcase
+//! screen).
 //!
 //! Hosts a [`NotificationsController`] via
 //! [`use_controller`](clean_signals_frust::use_controller) — the same

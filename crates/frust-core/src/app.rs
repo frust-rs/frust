@@ -986,8 +986,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // runs after every rebuild), so a controlled change applied by the
             // rebuild — e.g. a submit clearing the field — refreshes the
             // shell-facing `ime_state` that the event pass alone would leave
-            // stale. Defense-in-depth against F1: only accept a bubbled publish
-            // while focus is actually active. A widget whose pod focus was just
+            // stale. Defense-in-depth: only accept a bubbled publish while
+            // focus is actually active. A widget whose pod focus was just
             // cleared by a container-routed blur (but whose internal flag lags
             // one frame) can then never resurrect the `ime_state` the blur
             // cleared — even before it observes the blur via `PaintCtx::has_focus`.
@@ -2340,7 +2340,7 @@ mod tests {
 
     #[test]
     fn set_theme_marks_layout_and_paint_pending() {
-        // F1: `set_theme` alone (no rebuild) must dirty layout/paint so a shell
+        // `set_theme` alone (no rebuild) must dirty layout/paint so a shell
         // gating on `take_change_flags` doesn't skip re-resolving theme-baked
         // widget state (e.g. Text's themed glyph color) on a bare theme swap.
         let mut root: RenderRoot<AppState, MockTextView> = RenderRoot::new();

@@ -213,8 +213,8 @@ mod tests {
     /// The unconditional pre-init gate ([`ensure_initialized`](super::ensure_initialized)):
     /// with the flag unset it returns `NotInitialized` on a path that touches
     /// **no** panic machinery — a plain acquire load, not `catch_unwind` /
-    /// `ndk-context` (fix F1: the guarantee no longer rides on `catch_unwind`,
-    /// so it holds under `panic = "abort"`). Off-Android [`initialize`] does not
+    /// `ndk-context` (deliberately: a guarantee that rode on `catch_unwind`
+    /// would not hold under `panic = "abort"`). Off-Android [`initialize`] does not
     /// exist, so the flag is permanently `false` and this exercises exactly the
     /// pre-init branch every accessor takes first.
     #[test]

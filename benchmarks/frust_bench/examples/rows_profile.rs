@@ -313,12 +313,12 @@ fn run_survives(style: CellStyle, all_blank: bool) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Row-changed detection — F6's app-owned snapshot (NOT a `Screen` clone; NOT `rows_diff`)
+// Row-changed detection — an app-owned snapshot (NOT a `Screen` clone; NOT `rows_diff`)
 // ---------------------------------------------------------------------------
 
 /// An app-owned copy of the visible grid's cells, retained across generations so the CURRENT
 /// generation's live `Screen` can be compared against it without ever cloning a whole
-/// `Screen` (which would also copy scrollback in the real app — see PLAN.md's F4).
+/// `Screen` (which would also copy the scrollback in the real app).
 fn snapshot_rows(screen: &vt100::Screen) -> Vec<Vec<vt100::Cell>> {
     (0..ROWS)
         .map(|row| {
@@ -336,10 +336,9 @@ fn snapshot_rows(screen: &vt100::Screen) -> Vec<Vec<vt100::Cell>> {
 
 /// The app-style cell compare the task specifies: `Screen::cell(row, col)` (returning
 /// `Option<&Cell>`) against the retained snapshot's `Option<&Cell>`, using `Cell: PartialEq`
-/// directly — deliberately NOT `vt100::Screen::rows_diff` (PLAN.md's F5: it builds an
-/// escape-byte `Vec<u8>` per row by comparing every cell anyway, so a direct compare has the
-/// same cost with none of the byte-building, and the eventual row-scoped design won't use it
-/// either).
+/// directly — deliberately NOT `vt100::Screen::rows_diff`, which builds an escape-byte
+/// `Vec<u8>` per row by comparing every cell anyway: a direct compare has the same cost with
+/// none of the byte-building, and the eventual row-scoped design won't use it either.
 fn row_changed(screen: &vt100::Screen, row: u16, prev_row: &[vt100::Cell]) -> bool {
     (0..COLS).any(|col| screen.cell(row, col) != prev_row.get(col as usize))
 }
@@ -360,7 +359,8 @@ struct ProfileReport {
     /// generation (content-only — no cursor adjustment). The "raw saving" numerator.
     raw_skippable_sum: u64,
     /// Same, but a row is also excluded (not counted as skippable) if it is the cursor's
-    /// previous OR current row that generation (F7's carve-out). The "effective saving"
+    /// previous OR current row that generation (the cursor carve-out: a caret move reshapes
+    /// both of those rows even when their content is identical). The "effective saving"
     /// numerator.
     effective_skippable_sum: u64,
     /// Sum, across every generation, of total runs — the shared denominator for both
