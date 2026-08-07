@@ -5,30 +5,30 @@ expression: "render_to_string(100, 30, &add_plugin_state(AddPluginStep::Select, 
 ⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
 ━━━━━━━━                                                                                            
                                                                                                     
- PROJECTS                │                                                                          
-  ▸ huddle        ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
-                  │                                                              │▓▓                
- DEVICES ↻ r      │  Choose a plugin to add to this project                      │▓▓                
-   none found     │  ▸ (o) shared-preferences                                    │▓▓                
-                  │        Synchronous, thread-safe key-value store (plaintext)  │▓▓                
- SESSIONS         │    ( ) secure-storage                                        │▓▓                
-   none running   │        Encrypted key-value store (Keychain / Keystore / key  │▓▓                
-                  │    ( ) clean-signals-frust                                   │▓▓                
- ACTIONS          │        Clean-architecture facade binding the clean-signals   │▓▓                
-   New project · n│    ( ) camera                                                │▓▓                
-   Add plugin · a │        Camera preview (a platform view), still capture, and  │▓▓                
-   Doctor · d     │    ( ) native-widgets                                        │▓▓                
-   Build · b      │        Real OS controls (button, label, switch, slider, pro  │▓▓                
-   Clean · c      │    ( ) clipboard                                             │▓▓                
-                  │        Synchronous plain-text clipboard access (ClipboardMa  │▓▓                
+ PROJECTS         ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
+  ▸ huddle        │                                                              │▓▓                
+                  │  Choose a plugin to add to this project                      │▓▓                
+ DEVICES ↻ r      │  ▸ (o) shared-preferences                                    │▓▓                
+   none found     │        Synchronous, thread-safe key-value store (plaintext)  │▓▓                
+                  │    ( ) secure-storage                                        │▓▓                
+ SESSIONS         │        Encrypted key-value store (Keychain / Keystore / key  │▓▓                
+   none running   │    ( ) clean-signals-frust                                   │▓▓                
+                  │        Clean-architecture facade binding the clean-signals   │▓▓                
+ ACTIONS          │    ( ) camera                                                │▓▓                
+   New project · n│        Camera preview (a platform view), still capture, and  │▓▓                
+   Add plugin · a │    ( ) native-widgets                                        │▓▓                
+   Doctor · d     │        Real OS controls (button, label, switch, slider, pro  │▓▓                
+   Build · b      │    ( ) clipboard                                             │▓▓                
+   Clean · c      │        Synchronous plain-text clipboard access (ClipboardMa  │▓▓                
                   │    ( ) haptics                                               │▓▓                
                   │        Minimal haptic feedback (selection tick, impact, suc  │▓▓                
+                  │    ( ) iap                                                   │▓▓                
+                  │        In-app purchases and subscriptions over Play Billing  │▓▓                
                   │                                                              │▓▓                
                   │   Back    Next    Cancel                                     │▓▓                
                   │  ↑/↓ choose · Enter next · Esc close                         │▓▓                
                   ╰──────────────────────────────────────────────────────────────╯▓▓                
                     ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                
-                         │                                                                          
                          │                                                                          
                          │                                                                          
 ● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]
