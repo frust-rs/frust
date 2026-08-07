@@ -20,6 +20,21 @@
 //! real backends, and faking them here would test this file rather than the
 //! contract.
 //!
+//! # It implements every operation — including the three no real backend fully owns
+//!
+//! `acknowledge_purchase`/`consume_purchase` (Android-only) and
+//! `get_pending_transactions` (iOS-only) are each overridden below, unlike
+//! either real backend — `android.rs` owns the first two and falls through to
+//! the [`Backend`] trait's `NotSupportedOnPlatform` default for the third;
+//! `apple.rs` is the mirror image. This store therefore stands in for "a
+//! backend that supports every operation": its guard order for those three
+//! documents what a *supporting* backend must do (what Android already does
+//! for ack/consume, what iOS already does for get_pending), not a universal
+//! claim about every backend's unsupported arm, which short-circuits with
+//! `NotSupportedOnPlatform` before any guard runs at all. See
+//! `crate::conformance`'s `universal_store_ops` for the split this drives in
+//! the guard-order sweeps.
+//!
 //! # Rigging: events are held until the test releases them
 //!
 //! A real purchase acknowledges immediately and reports its outcome later, on
@@ -80,6 +95,9 @@ struct State {
     platform_ready: bool,
     /// Step 3 of the guard order: whether `init_connection` has run.
     connected: bool,
+    /// One-shot: the next `init_connection` reports the store's own decline
+    /// (`Ok(false)`) instead of connecting, then clears itself.
+    decline_connect: bool,
     products: Vec<Product>,
     subscriptions: Vec<ProductSubscription>,
     active: Vec<ActiveSubscription>,
@@ -109,6 +127,7 @@ impl MockStore {
             state: Mutex::new(State {
                 platform_ready: true,
                 connected: false,
+                decline_connect: false,
                 products: vec![product(
                     SKU_CONSUMABLE,
                     "Premium Upgrade",
@@ -139,6 +158,13 @@ impl MockStore {
     /// [`IapEvent::PurchaseError`] instead of a purchase.
     pub(crate) fn fail_sku(&self, sku: &str) {
         self.lock().failing.insert(sku.to_owned());
+    }
+
+    /// Rig the next `init_connection` to answer the store's own decline
+    /// (`Ok(false)`, never an error) instead of connecting — the one-shot
+    /// counterpart to a real backend's own store-refused-to-connect path.
+    pub(crate) fn decline_next_connect(&self) {
+        self.lock().decline_connect = true;
     }
 
     /// Deliver every queued event and wait for delivery to finish — see the
@@ -212,6 +238,9 @@ impl MockStore {
 impl Backend for MockStore {
     fn init_connection(&self, _config: Option<&serde_json::Value>) -> Result<bool, IapError> {
         let mut state = self.guard(false)?;
+        if std::mem::take(&mut state.decline_connect) {
+            return Ok(false);
+        }
         // Idempotent by contract — a second call is a success, not an
         // `AlreadyPrepared` error (see `Iap::init_connection`).
         state.connected = true;

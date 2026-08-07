@@ -59,6 +59,7 @@ pub(crate) fn run_conformance_suite(fresh: &dyn Fn() -> MockStore) {
     platform_readiness_precedes_every_other_guard(fresh);
     every_store_op_reports_not_connected_before_init(fresh);
     init_is_idempotent_and_end_reports_what_it_closed(fresh);
+    a_declined_connect_reports_ok_false_and_stays_unconnected(fresh);
     fetch_products_answers_the_requested_envelope(fresh);
     entitlement_queries_answer_the_seeded_account(fresh);
     a_purchase_acks_first_and_its_event_carries_the_purchase(fresh);
@@ -71,28 +72,28 @@ pub(crate) fn run_conformance_suite(fresh: &dyn Fn() -> MockStore) {
 }
 
 /// Guard order step 1 (see [`Backend`]'s contract): with no platform handles
-/// installed, **every** call reports [`IapError::PlatformNotInitialized`] —
-/// including `init_connection` itself, and including the calls that would
-/// otherwise report [`IapError::NotConnected`]. Getting this order wrong
-/// tells a user with an un-migrated scaffold to "call init_connection first",
-/// which cannot help them.
+/// installed, `init_connection` itself and every op [`universal_store_ops`]
+/// sweeps — including the ones that would otherwise report
+/// [`IapError::NotConnected`] — report [`IapError::PlatformNotInitialized`].
+/// Getting this order wrong tells a user with an un-migrated scaffold to
+/// "call init_connection first", which cannot help them.
 fn platform_readiness_precedes_every_other_guard(fresh: &dyn Fn() -> MockStore) {
     let store = fresh();
     store.disable_platform_handles();
 
     assert_platform_not_initialized("init_connection", store.init_connection(None));
     assert_platform_not_initialized("end_connection", store.end_connection());
-    for (label, result) in every_store_op(&store) {
+    for (label, result) in universal_store_ops(&store) {
         assert_platform_not_initialized(label, result);
     }
 }
 
-/// Guard order step 3: before [`Backend::init_connection`], every
-/// store-touching call reports [`IapError::NotConnected`] — never a panic, an
-/// empty success, or a platform error.
+/// Guard order step 3: before [`Backend::init_connection`], every op
+/// [`universal_store_ops`] sweeps reports [`IapError::NotConnected`] — never
+/// a panic, an empty success, or a platform error.
 fn every_store_op_reports_not_connected_before_init(fresh: &dyn Fn() -> MockStore) {
     let store = fresh();
-    for (label, result) in every_store_op(&store) {
+    for (label, result) in universal_store_ops(&store) {
         assert!(
             matches!(result, Err(IapError::NotConnected)),
             "{label} before init_connection: {result:?}"
@@ -138,6 +139,29 @@ fn init_is_idempotent_and_end_reports_what_it_closed(fresh: &dyn Fn() -> MockSto
         "a connection can be reopened after being closed"
     );
     assert!(store.get_storefront().is_ok());
+}
+
+/// A store decline (`init_connection` answering `Ok(false)`, the documented
+/// shape both real backends report when the store itself refuses to connect)
+/// is not an error, but it also never opens the connection: the next
+/// store-touching call is refused exactly as before any `init_connection`
+/// ran, and a later, un-rigged attempt still succeeds.
+fn a_declined_connect_reports_ok_false_and_stays_unconnected(fresh: &dyn Fn() -> MockStore) {
+    let store = fresh();
+    store.decline_next_connect();
+
+    assert!(
+        !store.init_connection(None).unwrap(),
+        "a store decline reports Ok(false), not an error"
+    );
+    assert!(
+        matches!(store.get_storefront(), Err(IapError::NotConnected)),
+        "a declined connect never opened the connection"
+    );
+    assert!(
+        store.init_connection(None).unwrap(),
+        "a later, un-rigged init_connection still succeeds"
+    );
 }
 
 /// The result envelope follows the request's own `type`, and an unknown SKU is
@@ -540,10 +564,97 @@ fn token_settlement_and_deep_link_reach_the_store(fresh: &dyn Fn() -> MockStore)
 
 // --- Helpers ----------------------------------------------------------------
 
-/// Every store-touching op, run against `store`, paired with its name — the
-/// list the guard-order sub-tests sweep. `init_connection`/`end_connection`
-/// are deliberately absent: they are the calls that *establish* the state the
-/// others are refused for.
+/// The eight ops both real backends implement directly — `android.rs` and
+/// `apple.rs` each override every one of these themselves, so the guard order
+/// asserted for them is a claim about every shipping backend, not just
+/// [`MockStore`]. This is what [`platform_readiness_precedes_every_other_guard`]
+/// and [`every_store_op_reports_not_connected_before_init`] sweep.
+///
+/// `acknowledge_purchase`/`consume_purchase`/`get_pending_transactions` are
+/// deliberately absent: each is concretely owned by *at most one* real
+/// backend, so the other real backend (and desktop) answers it from the
+/// [`Backend`] trait's own `NotSupportedOnPlatform` default, which
+/// short-circuits before any guard below it runs at all — sweeping them here
+/// would pin a guard order no shipping backend actually exhibits. See
+/// [`crate::mock::MockStore`]'s module doc, and [`every_store_op`] for where
+/// the three still get exercised. `init_connection`/`end_connection` are
+/// absent for the same reason as in [`every_store_op`]: they *establish* the
+/// state the others are refused for.
+fn universal_store_ops(store: &MockStore) -> Vec<(&'static str, Result<Erased, IapError>)> {
+    let ops = vec![
+        (
+            "fetch_products",
+            erase(store.fetch_products(&ProductRequest {
+                skus: vec![SKU_CONSUMABLE.to_owned()],
+                kind: ProductQueryType::InApp,
+            })),
+        ),
+        (
+            "get_available_purchases",
+            erase(store.get_available_purchases(None)),
+        ),
+        (
+            "get_active_subscriptions",
+            erase(store.get_active_subscriptions(None)),
+        ),
+        ("get_storefront", erase(store.get_storefront())),
+        (
+            "request_purchase",
+            erase(store.request_purchase(&crate::mock::purchase_props(SKU_CONSUMABLE))),
+        ),
+        (
+            "finish_transaction",
+            erase(store.finish_transaction(
+                &PurchaseInput {
+                    id: "mock-txn-1".to_owned(),
+                    product_id: SKU_CONSUMABLE.to_owned(),
+                    ids: None,
+                    transaction_date: 0.0,
+                    purchase_token: None,
+                    store: None,
+                    quantity: 1,
+                    purchase_state: PurchaseState::Purchased,
+                    is_auto_renewing: false,
+                },
+                None,
+            )),
+        ),
+        ("restore_purchases", erase(store.restore_purchases())),
+        (
+            "deep_link_to_subscriptions",
+            erase(store.deep_link_to_subscriptions(None)),
+        ),
+    ];
+
+    // A loud tripwire: a silent drift here would quietly widen the guard-order
+    // claim back onto ops no shipping backend implements uniformly.
+    assert_eq!(
+        ops.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
+        vec![
+            "fetch_products",
+            "get_available_purchases",
+            "get_active_subscriptions",
+            "get_storefront",
+            "request_purchase",
+            "finish_transaction",
+            "restore_purchases",
+            "deep_link_to_subscriptions",
+        ],
+        "universal_store_ops drifted from the eight both-backend-implemented ops"
+    );
+    ops
+}
+
+/// Every store-touching op, including the three platform-specific ones only
+/// [`MockStore`] implements uniformly — used where a sub-test needs their
+/// real settlement/pending behavior exercised (directly, not through this
+/// list: [`entitlement_queries_answer_the_seeded_account`] and
+/// [`token_settlement_and_deep_link_reach_the_store`]) alongside the
+/// post-teardown sweep in [`init_is_idempotent_and_end_reports_what_it_closed`],
+/// which still needs the full set. See [`universal_store_ops`] for the
+/// narrower list the guard-order sweeps use instead, and why.
+/// `init_connection`/`end_connection` are deliberately absent: they are the
+/// calls that *establish* the state the others are refused for.
 fn every_store_op(store: &MockStore) -> Vec<(&'static str, Result<Erased, IapError>)> {
     vec![
         (
