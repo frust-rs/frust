@@ -26,7 +26,8 @@
 //! For each production line, the substring from the first `//` (covering
 //! `//`, `///`, `//!`) is checked against the banned patterns below; every
 //! banned match is a failure unless that *match's own byte span* sits inside
-//! a sanctioned citation (see Allowlist).
+//! a sanctioned citation (see Allowlist). A citation split across a comment
+//! line break is caught too — see "Wrapped citations" below.
 //!
 //! # This test's own file is excluded from its own scan
 //!
@@ -56,6 +57,25 @@
 //! text — a genuine non-goal, not an oversight: this codebase's convention
 //! (see `docs/CODE_STANDARDS.md`) is exclusively `//`/`///`/`//!`, and no
 //! block comment exists in the scanned trees today.
+//!
+//! # Wrapped citations (the logical comment, not the physical line)
+//!
+//! A citation that wraps across a `//` line break — `(review` ending one
+//! line, `finding M1)` opening the next — matches nothing on either physical
+//! line, so a purely per-line scan would wave every one of them through. Each
+//! comment line is therefore ALSO scanned joined to the line after it, with
+//! that continuation's own `//`/`///`/`//!` marker stripped
+//! ([`continued_comment`]). The join is **pairwise, not whole-block**: a
+//! banned pattern only ever spans one sentence-worth of wrap, and joining a
+//! whole block would let signals many lines apart (a `phase` in the header,
+//! a `req 4` in a later paragraph) manufacture a hit no reader would call a
+//! citation. A continuation must be a comment-ONLY line with a non-empty
+//! body, so code, blank lines, and bare `//` spacers all end the run.
+//!
+//! A joined hit is reported only when the following line is clean on its own
+//! ([`wrapped_violation`]) — residue that already fails per-line is reported
+//! there, once, instead of twice. Failures anchor to the line the citation
+//! *starts* on and print both lines.
 //!
 //! # Banned patterns
 //!
@@ -114,9 +134,10 @@
 //! - **Workflow findings ledger numbers**: `FINDINGS #N` (the ledger's own
 //!   all-caps plural spelling) and singular `[Ff]inding #N`.
 //! - **Review-finding citations**: `review finding` (any case) when it either
-//!   sits directly after a `(` — the parenthesized citation form, whose id
-//!   often wraps onto the next line (`crates/frust-shell-android/src/app/
-//!   executor.rs`) — or is directly followed by a finding id (an uppercase
+//!   sits directly after a `(` — the parenthesized citation form, which
+//!   habitually wrapped its id onto the next line (`(review` / `// finding
+//!   M1)`, the shape the Wrapped-citations § above exists for) — or is
+//!   directly followed by a finding id (an uppercase
 //!   letter plus digits: `review finding F5`, `Review finding M1`). Prose
 //!   *about* review findings with neither marker ("this becomes a compile
 //!   error rather than a review finding", `crates/frust-widgets/src/nav/
@@ -300,6 +321,49 @@ fn comment_text(line: &str) -> Option<&str> {
         return None;
     }
     Some(&line[idx..])
+}
+
+/// The prose body of a comment text: its `//`/`///`/`//!` marker stripped and
+/// the indentation after it trimmed — what a continuation line contributes to
+/// the logical comment (see the module doc's Wrapped citations §).
+fn comment_body(comment: &str) -> &str {
+    let rest = comment.strip_prefix("//").unwrap_or(comment);
+    let rest = rest
+        .strip_prefix('/')
+        .or_else(|| rest.strip_prefix('!'))
+        .unwrap_or(rest);
+    rest.trim_start()
+}
+
+/// `comment` (an already-extracted comment text) joined to the comment text
+/// of `next_line`, marker stripped — the logical comment a wrapped citation
+/// actually lives in. `None` when `next_line` does not continue the run: it
+/// must be a comment-ONLY line (code before the `//` ends the run) and both
+/// bodies must be non-empty (a blank line or a bare `//` spacer ends it too).
+fn continued_comment(comment: &str, next_line: &str) -> Option<String> {
+    if !next_line.trim_start().starts_with("//") {
+        return None;
+    }
+    let tail = comment_body(comment_text(next_line)?);
+    if comment_body(comment).is_empty() || tail.is_empty() {
+        return None;
+    }
+    Some(format!("{} {tail}", comment.trim_end()))
+}
+
+/// The residue a citation hides by wrapping from `comment` onto `next_line`.
+/// Reported only when `next_line` is clean on its own — residue that already
+/// fails per-line belongs to that line, not to this one (see module doc).
+fn wrapped_violation(
+    comment: &str,
+    next_line: &str,
+    limitation_ids: &[String],
+) -> Option<&'static str> {
+    let joined = continued_comment(comment, next_line)?;
+    if scan_comment(comment_text(next_line)?, limitation_ids).is_some() {
+        return None;
+    }
+    scan_comment(&joined, limitation_ids)
 }
 
 /// Every starting byte offset of `needle` in `haystack` (non-overlapping,
@@ -859,22 +923,35 @@ fn scan_comment(comment: &str, limitation_ids: &[String]) -> Option<&'static str
 
 /// All violations found in `contents` (one file's full text), formatted
 /// `path:line: <reason> — see docs/CODE_STANDARDS.md § Comment Conventions.
-/// Line: <text>` — matching `print_free_cores.rs`'s reporting style.
+/// Line: <text>` — matching `print_free_cores.rs`'s reporting style. A
+/// wrapped citation (module doc's Wrapped citations §) reports at the line it
+/// starts on and prints both lines.
 fn violations_in(path: &Path, contents: &str, limitation_ids: &[String]) -> Vec<String> {
+    let lines: Vec<&str> = contents.lines().collect();
     let mut failures = Vec::new();
-    for (i, line) in contents.lines().enumerate() {
+    for (i, line) in lines.iter().enumerate() {
         let Some(comment) = comment_text(line) else {
             continue;
         };
-        let Some(reason) = scan_comment(comment, limitation_ids) else {
+        let location = format!("{}:{}", rel(path), i + 1);
+        if let Some(reason) = scan_comment(comment, limitation_ids) {
+            failures.push(format!(
+                "{location}: {reason} — see docs/CODE_STANDARDS.md § Comment Conventions. Line: {}",
+                line.trim(),
+            ));
+            continue;
+        }
+        let Some(next) = lines.get(i + 1) else {
             continue;
         };
-        failures.push(format!(
-            "{}:{}: {reason} — see docs/CODE_STANDARDS.md § Comment Conventions. Line: {}",
-            rel(path),
-            i + 1,
-            line.trim(),
-        ));
+        if let Some(reason) = wrapped_violation(comment, next, limitation_ids) {
+            failures.push(format!(
+                "{location}: {reason}, wrapped across the line break — see \
+                 docs/CODE_STANDARDS.md § Comment Conventions. Lines: {} | {}",
+                line.trim(),
+                next.trim(),
+            ));
+        }
     }
     failures
 }
@@ -1269,6 +1346,133 @@ mod scan_behavior {
             comment_text("    caption(\"… the Phase-4 gate numbers.\"),"),
             None,
             "UI copy in a string literal is never comment text (glyph-catalog camera.rs)"
+        );
+    }
+
+    #[test]
+    fn a_citation_wrapped_across_a_comment_line_break_is_caught() {
+        let ids = limitations_ids();
+
+        assert!(
+            wrapped_violation(
+                "// The Arc<AtomicBool> handoff the render-thread split runs on (review",
+                "        // finding M1), driven here with FAKE installs",
+                &ids,
+            )
+            .is_some(),
+            "the parenthesized review-finding form, id on the next line"
+        );
+        assert!(
+            wrapped_violation(
+                "        /// The keep-alive contract task",
+                "        /// 10 pinned: a detached slot never closes the session.",
+                &ids,
+            )
+            .is_some(),
+            "a plan-task number wrapped away from its `task` lead-in"
+        );
+        assert!(
+            wrapped_violation(
+                "// The Keychain-backed arm, still unimplemented (Phase",
+                "// 3) — every call returns `Unsupported`.",
+                &ids,
+            )
+            .is_some(),
+            "a parenthesized plan-phase whose digit wrapped"
+        );
+        assert!(
+            wrapped_violation(
+                "//! The encode phase's decode budget, from the pacing table",
+                "//! (req 4): the frame must still land inside 16ms.",
+                &ids,
+            )
+            .is_some(),
+            "`req N` and the phase signal it is gated on, on opposite sides of the break"
+        );
+    }
+
+    #[test]
+    fn wrapping_never_manufactures_a_violation() {
+        let ids = limitations_ids();
+
+        assert_eq!(
+            wrapped_violation(
+                "// The dot's own oscillator: at clock phase",
+                "// 0.0 it sits at the left edge, at 1.0 past the right one.",
+                &ids,
+            ),
+            None,
+            "a wrapped float phase is still the sanctioned animation idiom"
+        );
+        assert_eq!(
+            wrapped_violation(
+                "// The forced-blit gap this works around is",
+                "// `cam-blit-opaque`, and the blit arm still runs.",
+                &ids,
+            ),
+            None,
+            "an allowlisted citation still reads as one across the break"
+        );
+        assert_eq!(
+            wrapped_violation(
+                "// Phase",
+                "// 1 of the frame — the **encode** span, ending at submit.",
+                &ids,
+            ),
+            None,
+            "the renderer-span idiom is a KEEP class wrapped or not"
+        );
+        assert_eq!(
+            wrapped_violation(
+                "// A comment whose next line carries the residue on its own:",
+                "// FINDINGS #43 is flagged at ITS line, not reported twice here.",
+                &ids,
+            ),
+            None,
+            "the following line already fails per-line — never double-reported"
+        );
+        assert_eq!(
+            wrapped_violation(
+                "// The install path refuses a second claim (review",
+                "let finding = M1; // not a comment-only continuation",
+                &ids,
+            ),
+            None,
+            "code on the next line ends the comment run"
+        );
+        assert_eq!(
+            wrapped_violation("// the constants for task", "//", &ids),
+            None,
+            "a bare `//` spacer ends the comment run"
+        );
+    }
+
+    #[test]
+    fn a_wrapped_violation_is_reported_at_the_line_it_starts_on() {
+        let ids = limitations_ids();
+        let contents = concat!(
+            "fn f() {\n",
+            "    // The handoff the render-thread split runs on (review\n",
+            "    // finding M1), driven here with fakes.\n",
+            "    g();\n",
+            "}\n",
+        );
+
+        let failures = violations_in(Path::new("crates/x/src/lib.rs"), contents, &ids);
+        assert_eq!(
+            failures.len(),
+            1,
+            "one wrapped citation is one failure, not one per line: {failures:?}"
+        );
+        assert!(
+            failures[0].starts_with("crates/x/src/lib.rs:2:"),
+            "anchored to the line the citation starts on: {}",
+            failures[0]
+        );
+        assert!(
+            failures[0].contains("finding M1)"),
+            "both lines printed so the residue is visible: {}",
+            failures[0]
         );
     }
 
