@@ -24,12 +24,16 @@
 //!
 //! A real purchase acknowledges immediately and reports its outcome later, on
 //! another thread ([`crate::Iap::request_purchase`]). Emitting straight from
-//! `request_purchase` would make that ordering untestable, and emitting from a
-//! detached thread would make it racy. So a queued event stays queued until
-//! [`MockStore::release_events`], which drains the queue **on a spawned
-//! thread** and joins it: the assertion "nothing was delivered yet" is exact
-//! rather than a timing guess, and the listener still provably runs on a
-//! thread that is not the caller's.
+//! `request_purchase` would make that ordering untestable. So a queued event
+//! stays queued until [`MockStore::release_events`], which emits the queue and
+//! then waits on the registry's own delivery barrier: the assertion "nothing
+//! was delivered yet" is exact rather than a timing guess.
+//!
+//! The rig needs no thread of its own for the "not the caller's thread" half:
+//! the registry hands every event to the plugin-owned delivery thread
+//! ([`crate::event`]), so the mock emits from the test thread exactly as a
+//! platform callback would and the hop under test is the real one rather than
+//! a spawn staged here.
 
 use std::collections::HashSet;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -137,8 +141,8 @@ impl MockStore {
         self.lock().failing.insert(sku.to_owned());
     }
 
-    /// Deliver every queued event, on a spawned thread, and wait for delivery
-    /// to finish — see the module doc's *Rigging* section.
+    /// Deliver every queued event and wait for delivery to finish — see the
+    /// module doc's *Rigging* section.
     pub(crate) fn release_events(&self) {
         let queued = std::mem::take(&mut self.lock().queued);
 
@@ -151,14 +155,13 @@ impl MockStore {
             }
         }
 
-        // A real event arrives on a platform callback thread, never the
-        // caller's; the join keeps the test deterministic all the same.
-        let emitter = std::thread::spawn(move || {
-            for entry in queued {
-                crate::event::emit(&entry.event);
-            }
-        });
-        emitter.join().expect("the mock emitter thread panicked");
+        // Emitted from here exactly as a platform callback would: the registry
+        // owns the hop onto its delivery thread, and the barrier below is what
+        // keeps the test deterministic.
+        for entry in queued {
+            crate::event::emit(&entry.event);
+        }
+        crate::event::flush();
     }
 
     /// Transaction ids settled without being removed (the non-consumable

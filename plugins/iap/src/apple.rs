@@ -46,10 +46,13 @@
 //! that has to deliver its answer. [`Backend::request_purchase`] is the one
 //! exception and deliberately has **no** step 2 — see below.
 //!
-//! Events arrive on whatever thread StoreKit's transaction-update task
-//! delivers on and are handed straight to [`crate::event::emit`] there; that
-//! is the "plugin-owned or platform callback thread" the crate doc promises,
-//! and the listener contract (don't block, hand off) is what keeps it cheap.
+//! Events arrive on the **main thread**: OpenIAP snapshots its listeners in a
+//! `Task` and then invokes them inside `await MainActor.run { … }`, so the
+//! glue's sink block — and this module's [`deliver`] — run there. They only
+//! queue: [`crate::event::emit`] hands the event to the plugin-owned delivery
+//! thread and returns, which is what makes the crate doc's "never the UI
+//! thread" promise true on iOS. The listener contract (don't block, hand off)
+//! still binds, now against that thread rather than this one.
 //!
 //! # Two calls acknowledge rather than complete
 //!
@@ -64,7 +67,11 @@
 //!
 //! - a purchase the store rejects outright reports as an
 //!   [`crate::IapEvent::PurchaseError`] rather than as this call's `Err` —
-//!   the event stream is the documented single source of truth either way;
+//!   the event stream is the documented single source of truth either way,
+//!   and carries the failure exactly once (OpenIAP publishes it on its own
+//!   error listener before rethrowing, so the glue's detached `catch` logs
+//!   instead of re-emitting; its one synthesized event covers a throw that is
+//!   not a `PurchaseError`, which upstream never produces today);
 //! - a deep link that fails *after* dispatch is logged by the glue and
 //!   reported nowhere else. That is this backend's one blind spot.
 //!
@@ -455,12 +462,15 @@ fn install_event_sink(bridge: &AnyObject) {
     });
 }
 
-/// Turn one forwarded `(name, envelope)` pair into a delivered
+/// Turn one forwarded `(name, envelope)` pair into a queued
 /// [`crate::IapEvent`].
 ///
 /// Split out of the block so it is plain, testable Rust: the name selects
 /// whether this crate models the event at all, and the envelope — the
 /// adjacently-tagged shape [`crate::types`] designs — carries the payload.
+/// Runs on the main thread (the module doc's *Threading*) and runs no
+/// listener there: [`crate::event::emit`] queues for the plugin-owned
+/// delivery thread.
 fn deliver(name: Option<&str>, payload: Option<&str>) {
     let (Some(name), Some(payload)) = (name, payload) else {
         log::warn!("frust-iap: the iOS bridge forwarded an event with no name or no payload");
@@ -904,6 +914,7 @@ mod tests {
                 .to_string(),
             ),
         );
+        crate::event::flush();
 
         let IapEvent::PurchaseError(error) = rx.try_recv().unwrap() else {
             panic!("a purchase-error event must arrive as the PurchaseError variant");
@@ -925,6 +936,7 @@ mod tests {
         deliver(Some("promoted-product-ios"), Some("{}"));
         deliver(Some(EVENT_PURCHASE_UPDATED), Some("{ not json"));
         deliver(None, None);
+        crate::event::flush();
 
         assert!(rx.try_recv().is_err(), "nothing should have been delivered");
         handle.remove();

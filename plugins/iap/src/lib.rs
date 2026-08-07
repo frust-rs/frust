@@ -74,19 +74,26 @@
 //! first [`Iap::request_purchase`] and keep the returned [`ListenerHandle`]
 //! alive.
 //!
-//! # Event delivery: a plugin-owned thread, and callbacks must not block
+//! # Event delivery: one plugin-owned thread, and callbacks must not block
 //!
-//! An [`IapEvent`] is delivered on a plugin-owned or platform callback thread
-//! (Android: the Play Billing listener's own thread; iOS: the StoreKit
-//! transaction-update task) — **never** the UI thread, and never the thread
-//! that called [`Iap::request_purchase`]. The same heavy-work routing rule
-//! `frust-camera`'s image-stream callback documents applies
-//! (`docs/CODE_STANDARDS.md`): a listener must not block, must not do a
-//! signal write, and must not call back into [`Iap`]'s blocking API from
-//! inside the callback — hand the event off (`frust_reactive::use_task`, a
-//! channel, or a signal write scheduled back onto the UI thread) and return
-//! immediately. A listener that panics is caught and logged rather than
-//! poisoning the registry, but a panic inside one is still a bug.
+//! Every [`IapEvent`] is delivered on **the** plugin-owned event thread — one
+//! thread per process, shared by both platforms — **never** the UI thread, and
+//! never the thread that called [`Iap::request_purchase`]. The hop is this
+//! crate's own: each platform hands its event over on whatever thread it
+//! reports on (Android: Play Billing's listener, which is the main thread;
+//! iOS: OpenIAP's main-actor listener delivery), and the crate queues it
+//! rather than running an app callback there. Because there is one consumer,
+//! **events arrive in the order they were reported**, one at a time.
+//!
+//! The same heavy-work routing rule `frust-camera`'s image-stream callback
+//! documents applies (`docs/CODE_STANDARDS.md`): a listener must not block,
+//! must not do a signal write, and must not call back into [`Iap`]'s blocking
+//! API from inside the callback — hand the event off
+//! (`frust_reactive::use_task`, a channel, or a signal write scheduled back
+//! onto the UI thread) and return immediately. Blocking that one thread stalls
+//! every later event as well as every other listener. A listener that panics
+//! is caught and logged rather than poisoning the registry or ending the
+//! delivery thread, but a panic inside one is still a bug.
 //!
 //! # Backends
 //!
@@ -665,14 +672,16 @@ impl Iap {
     ///
     /// # Threading contract
     ///
-    /// `callback` runs on a plugin-owned or platform callback thread, never
-    /// the UI thread and never the caller's — hence `Send + Sync`. It **must
-    /// not block, must not do a signal write, and must not call back into
-    /// [`Iap`]'s blocking API**: hand the event off
-    /// (`frust_reactive::use_task`, a channel, a signal write scheduled onto
-    /// the UI thread) and return immediately, the same rule
-    /// `frust-camera`'s image-stream callback documents. Multiple listeners
-    /// are supported and each sees every event, in registration order.
+    /// `callback` runs on the plugin's own event-delivery thread — one thread
+    /// for the whole process, never the UI thread and never the caller's,
+    /// hence `Send + Sync`. It **must not block, must not do a signal write,
+    /// and must not call back into [`Iap`]'s blocking API**: hand the event
+    /// off (`frust_reactive::use_task`, a channel, a signal write scheduled
+    /// onto the UI thread) and return immediately, the same rule
+    /// `frust-camera`'s image-stream callback documents — that one thread is
+    /// what every later event queues behind. Multiple listeners are supported
+    /// and each sees every event, in registration order, in the order the
+    /// platform reported the events.
     ///
     /// Registration reaches no store and cannot fail — hence no `Result` —
     /// and stays valid across [`Self::end_connection`]/[`Self::init_connection`]

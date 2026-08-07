@@ -78,10 +78,15 @@ import org.json.JSONObject
  * re-posts it through `Activity.runOnUiThread` internally, so nothing here
  * hops threads on Play Billing's behalf.
  *
- * Purchase events arrive on Play Billing's own callback thread and are
- * forwarded straight to [nativeOnIapEvent] from it — no coroutine, no main
- * `Looper` — which is what makes an event's delivery independent of a busy UI
- * thread. The Rust registry documents the same contract to app listeners.
+ * Purchase events are forwarded straight to [nativeOnIapEvent] on whatever
+ * thread OpenIAP called the listener on — no coroutine, no thread hop here.
+ * That thread is usually the main one (Play Billing dispatches its
+ * `PurchasesUpdatedListener` there unless the `BillingClient` was built with a
+ * custom executor, and openiap-google builds it without one), so **the hop
+ * belongs to the Rust side**: `nativeOnIapEvent` only queues the event for the
+ * plugin's own delivery thread, which is what makes the "never the UI thread"
+ * contract app listeners are given true. Nothing here may assume the reverse
+ * and start blocking on this thread.
  *
  * ## `requestPurchase` resolves at dispatch, not at outcome (LAW)
  *
@@ -92,9 +97,16 @@ import org.json.JSONObject
  * the request, and the outcome arrives on the event stream (the two-phase
  * purchase contract in `plugins/iap/src/lib.rs`). So [dispatch]'s
  * `requestPurchase` branch validates its arguments, starts the flow in a
- * detached coroutine, and resolves immediately; a throw out of the detached
- * flow becomes a purchase-error **event**, which is where OpenIAP itself
- * already publishes every in-flow failure (`errorEventGate.publishOnce`).
+ * detached coroutine, and resolves immediately.
+ *
+ * **The detached flow's `catch` logs and emits nothing** (LAW). OpenIAP's own
+ * `errorEventGate.publishOnce` is the canonical single delivery: every
+ * non-cancellation throw out of `requestPurchase` has already published the
+ * failure on the purchase-error listener registered in [bindings], and its
+ * pre-flight validation failures publish without throwing at all. Emitting
+ * again here would deliver the same failure to an app twice — a refund/retry
+ * hazard, not a harmless duplicate. The `catch` stays only so a throw cannot
+ * take [scope] down.
  *
  * ## Why an `OpenIapStore` **and** an `OpenIapProtocol`
  *
@@ -324,7 +336,10 @@ object FrustIapHost {
                     try {
                         store.requestPurchase(props)
                     } catch (t: Throwable) {
-                        emitEvent(EVENT_PURCHASE_ERROR, errorJson(t))
+                        // Log only: OpenIAP published this failure on the
+                        // purchase-error listener before it threw (class doc's
+                        // LAW). Re-emitting it would double the event.
+                        Log.w(TAG, "frust-iap: requestPurchase failed after dispatch", t)
                     }
                 }
                 JSON_NULL
@@ -537,8 +552,10 @@ object FrustIapHost {
     }
 
     /**
-     * Forward one purchase event, on the caller's thread (class doc's
-     * *Threading*). Failures are logged for the same reason as [resolve]'s.
+     * Forward one purchase event, on the caller's thread — the Rust side owns
+     * the hop off it (class doc's *Threading*), so this returns as soon as the
+     * event is queued there. Failures are logged for the same reason as
+     * [resolve]'s.
      */
     private fun emitEvent(kind: String, payloadJson: String) {
         try {
@@ -571,7 +588,8 @@ object FrustIapHost {
     /**
      * Delivers one purchase event: `kind` is [EVENT_PURCHASE_UPDATED] (an
      * OpenIAP `Purchase` payload) or [EVENT_PURCHASE_ERROR] (a `PurchaseError`
-     * payload). Called on Play Billing's own callback thread.
+     * payload). Called on whatever thread OpenIAP delivered the event on; the
+     * Rust side queues it for its own delivery thread and returns.
      */
     @JvmStatic
     external fun nativeOnIapEvent(

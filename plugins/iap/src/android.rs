@@ -49,8 +49,10 @@
 //!   — exactly one of `okJson`/`errJson` is non-null (*Correlating an answer*).
 //! - [`Java_dev_frust_iap_FrustIapHost_nativeOnIapEvent`]`(env, class, kind: JString, payloadJson: JString)`
 //!   — [`EVENT_PURCHASE_UPDATED`] carries an OpenIAP `Purchase`,
-//!   [`EVENT_PURCHASE_ERROR`] a `PurchaseError`. Delivered on Play Billing's
-//!   own callback thread.
+//!   [`EVENT_PURCHASE_ERROR`] a `PurchaseError`. Called on whatever thread
+//!   Play Billing reported on (the main thread, for a `BillingClient` built
+//!   with no custom executor) and queued for the plugin's own delivery
+//!   thread rather than fanned out there.
 //!
 //! Each export upgrades its [`jni::EnvUnowned`] via
 //! [`jni::EnvUnowned::with_env`], which wraps the body in `catch_unwind` — the
@@ -95,7 +97,10 @@
 //! validated the request and started the flow. The outcome then arrives the only
 //! way it ever does: as an [`IapEvent`] on the listener registry, which is also
 //! where Play's own in-flow rejections (an unknown SKU, an already-owned
-//! product, a cancel) are published.
+//! product, a cancel) are published — **once** per failure: OpenIAP publishes
+//! every one of them through its own publish-once gate before the detached
+//! flow rethrows, and the host's `catch` around that flow logs rather than
+//! emitting a second copy.
 //!
 //! # Connection state lives here
 //!
@@ -591,10 +596,13 @@ fn map_host_error(error_json: &str) -> IapError {
 /// Rebuild one purchase event from the wire and hand it to the listener
 /// registry.
 ///
-/// Runs on Play Billing's own callback thread, which is exactly the delivery
-/// contract [`crate::Iap::set_purchase_listener`] states to apps: never the UI
-/// thread, never the thread that called [`crate::Iap::request_purchase`], and
-/// listeners must not block it.
+/// Runs on whatever thread Play Billing called the host's listener on — which
+/// is the main thread, since `openiap-google` builds its `BillingClient`
+/// without a custom executor — so it only *queues*: [`crate::event::emit`]
+/// hands the event to the plugin-owned delivery thread and returns, which is
+/// what makes [`crate::Iap::set_purchase_listener`]'s contract (never the UI
+/// thread, never the thread that called [`crate::Iap::request_purchase`])
+/// true on this platform.
 fn deliver_event(kind: &str, payload_json: &str) {
     match event_from_wire(kind, payload_json) {
         Some(event) => crate::event::emit(&event),
@@ -863,15 +871,15 @@ pub extern "system" fn Java_dev_frust_iap_FrustIapHost_nativeOnIapResult<'local>
 }
 
 /// `Java_dev_frust_iap_FrustIapHost_nativeOnIapEvent` — one purchase update or
-/// purchase failure, delivered on Play Billing's own callback thread.
+/// purchase failure, forwarded by the host on whatever thread Play Billing
+/// called it on.
 ///
-/// Runs the app's listeners synchronously on that thread (via
-/// [`crate::event::emit`]), which is the contract
-/// [`crate::Iap::set_purchase_listener`] states: a listener must hand the event
-/// off and return rather than block, because it is holding a platform callback
-/// thread while it runs. A panic inside one is caught by the registry, and a
-/// panic anywhere else here by [`jni::EnvUnowned::with_env`] — neither unwinds
-/// into the JVM frame below.
+/// Runs **no** app listener on that thread: it decodes the payload and queues
+/// it for the plugin-owned delivery thread ([`crate::event::emit`]), so the
+/// JVM frame below is released immediately and a listener never holds a
+/// platform callback thread. A panic inside a listener is caught by the
+/// registry, on that other thread; a panic anywhere here is caught by
+/// [`jni::EnvUnowned::with_env`] — neither unwinds into the JVM frame below.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_frust_iap_FrustIapHost_nativeOnIapEvent<'local>(
     mut env: EnvUnowned<'local>,
@@ -1046,6 +1054,7 @@ mod tests {
         let second = crate::event::register(Box::new(move |event| tx.send(event).unwrap()));
 
         deliver_event(EVENT_PURCHASE_UPDATED, &purchase_payload("premium_upgrade"));
+        crate::event::flush();
 
         let received: Vec<IapEvent> = rx.try_iter().collect();
         assert_eq!(received.len(), 2, "both listeners saw the event");
@@ -1061,6 +1070,7 @@ mod tests {
         // An undecodable event reaches nobody rather than emitting a fabricated
         // one.
         deliver_event(EVENT_PURCHASE_UPDATED, "{}");
+        crate::event::flush();
         assert!(rx.try_recv().is_err());
 
         first.remove();

@@ -72,10 +72,14 @@ import OpenIAP
 /// it out; `requestPurchase` in particular is documented non-blocking and
 /// UI-thread-callable on the Rust side, and its outcome is the event stream's
 /// job (see the crate doc's two-phase purchase contract). A purchase that then
-/// fails still reaches the app: `OpenIapModule.requestPurchase` emits the
-/// canonical failure on the purchase-error listener before it throws. A
-/// `deepLinkToSubscriptions` that fails after dispatch has no such event and is
-/// logged instead — the one accepted blind spot in this file.
+/// fails reaches the app **exactly once**: `OpenIapModule.requestPurchase`
+/// publishes the canonical failure on the purchase-error listener before it
+/// rethrows, so the detached `catch` here logs a `PurchaseError` and emits
+/// nothing. It synthesizes an event only for a throw that is *not* a
+/// `PurchaseError` — a shape upstream never produces today, and the one that
+/// would otherwise be lost with no report at all. A `deepLinkToSubscriptions`
+/// that fails after dispatch has no event of its own and is logged instead —
+/// the one accepted blind spot in this file.
 ///
 /// # Events
 ///
@@ -172,8 +176,11 @@ public final class FrustIapBridge: NSObject {
     ///
     /// Re-installing replaces the sink without re-registering: OpenIAP would
     /// otherwise deliver each event once per registered listener pair. The
-    /// sink is invoked on whatever thread OpenIAP delivers on — a StoreKit
-    /// transaction-update task, never a thread this class owns.
+    /// sink is invoked on whatever thread OpenIAP delivers on — today the
+    /// **main** thread, since `OpenIapModule` invokes its listeners inside
+    /// `await MainActor.run { … }`. Nothing app-facing runs there: the Rust
+    /// sink treats the call as a hand-off and queues the event for the
+    /// plugin's own delivery thread.
     ///
     /// - Tag: setEventSink
     @objc public func setEventSink(_ sink: @escaping (NSString, NSString) -> Void) {
@@ -275,10 +282,28 @@ public final class FrustIapBridge: NSObject {
             // caller; the purchase itself runs on past this ack (class doc).
             let props = try OpenIapSerialization.requestPurchaseProps(from: args)
             Task {
-                // A failure here is already published on the purchase-error
-                // listener by `requestPurchase` itself, which is the Rust
-                // crate's single source of truth for a purchase outcome.
-                _ = try? await OpenIapModule.shared.requestPurchase(props)
+                do {
+                    _ = try await OpenIapModule.shared.requestPurchase(props)
+                } catch let error as PurchaseError {
+                    // Already published on the purchase-error listener by
+                    // `requestPurchase` itself — the single source of truth for
+                    // a purchase outcome. Re-emitting would double the event,
+                    // so this arm only records that the throw happened.
+                    NSLog("[FrustIap] requestPurchase failed: \(error.code.rawValue) \(error.message)")
+                } catch {
+                    // Upstream canonicalizes every failure into a
+                    // `PurchaseError` before rethrowing, so this arm is a
+                    // backstop against a future upstream that does not: the
+                    // event stream is the app's only report, so synthesize it
+                    // here rather than let the outcome vanish.
+                    NSLog("[FrustIap] requestPurchase threw an unpublished error: \(error)")
+                    FrustIapBridge.shared.forward(
+                        .purchaseError,
+                        payload: OpenIapSerialization.encode(
+                            PurchaseError.wrap(error, fallback: .purchaseError)
+                        )
+                    )
+                }
             }
             return NSNull()
 

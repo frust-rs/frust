@@ -369,17 +369,30 @@ revenue-protecting check, not an oversight.
 
 ### Event-thread contract
 
-An `IapEvent` arrives on a platform callback thread — Play Billing's own
-listener thread on Android, StoreKit's transaction-update task on iOS —
-**never** the UI thread, and never the thread that called
-`request_purchase`. A registered listener must not block, must not write a
-signal directly, and must not call back into any of `Iap`'s blocking API
-from inside the callback — hand the event off
-(`frust_reactive::use_task`, a channel, or a signal write scheduled back
-onto the UI thread) and return immediately. Multiple listeners are
-supported; each sees every event, in registration order, on the same
-thread — a slow listener delays the ones behind it, and the platform's own
-callback thread.
+An `IapEvent` arrives on **the plugin's own event-delivery thread** — one
+thread per process, spawned on the first event and shared by both
+platforms — **never** the UI thread, and never the thread that called
+`request_purchase`. The hop belongs to this plugin: each host forwards on
+whatever thread the store reported on (Play Billing dispatches its purchase
+listener on the main thread; OpenIAP's iOS listeners are invoked on the main
+actor), and the Rust side queues the event instead of running your callback
+there.
+
+A registered listener must not block, must not write a signal directly, and
+must not call back into any of `Iap`'s blocking API from inside the
+callback — hand the event off (`frust_reactive::use_task`, a channel, or a
+signal write scheduled back onto the UI thread) and return immediately.
+Multiple listeners are supported; each sees every event, in registration
+order, and events arrive in the order the store reported them (one consumer,
+first in first out). A slow listener delays the listeners behind it *and*
+every later event.
+
+A purchase failure the store publishes is delivered **exactly once**: the
+OpenIAP host publishes it on its own error listener, and neither platform's
+glue re-reports it. The single exception is a backstop rather than a second
+delivery — the iOS glue synthesizes an error event for a post-dispatch throw
+that is not a `PurchaseError`, a shape upstream never produces today and one
+that would otherwise reach the app as nothing at all.
 
 ---
 
