@@ -184,17 +184,31 @@ const EVENT_TAG_PURCHASE_UPDATED: &str = "purchaseUpdated";
 /// [`IapEvent`]'s envelope tag for a purchase failure.
 const EVENT_TAG_PURCHASE_ERROR: &str = "purchaseError";
 
-/// How long a call parks on its `nativeOnIapResult` answer before reporting
-/// [`IapError::Platform`].
+/// How long a genuinely store-touching, UI-thread-refused call parks on its
+/// `nativeOnIapResult` answer before reporting [`IapError::Platform`].
 ///
-/// **Not a platform value** — neither Play Billing nor OpenIAP publishes a
-/// bound for a query's completion (OpenIAP's own longest internal wait, on a
-/// concurrent connection attempt, is 15 s). A minute comfortably covers a slow
-/// product query on a bad network while still failing a caller whose answer
-/// never arrives at all — which, since every call here is paired with
-/// `frust_reactive::spawn_blocking`, would otherwise pin a blocking-pool thread
-/// for the life of the process.
+/// Every method except [`Backend::request_purchase`] (which uses
+/// [`ACK_TIMEOUT`] instead — its dispatch-ack never reaches the store) waits
+/// this long. **Not a platform value** — neither Play Billing nor OpenIAP
+/// publishes a bound for a query's completion (OpenIAP's own longest internal
+/// wait, on a concurrent connection attempt, is 15 s). A minute comfortably
+/// covers a slow product query on a bad network while still failing a caller
+/// whose answer never arrives at all — which, since every call here is paired
+/// with `frust_reactive::spawn_blocking`, would otherwise pin a blocking-pool
+/// thread for the life of the process.
 const HOST_CALL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long the dispatch-only ack for [`Backend::request_purchase`] waits
+/// before reporting [`IapError::Platform`].
+///
+/// Nothing on this path touches the store: `FrustIapHost.call`'s
+/// `requestPurchase` branch validates the request, resolves the current
+/// Activity, detaches the actual `OpenIapStore.requestPurchase` flow into its
+/// own coroutine, and answers immediately — so the wait covers only a JNI hop
+/// plus a coroutine launch, nothing store-touching. Mirrors `apple.rs`'s
+/// `ACK_TIMEOUT` and its reasoning: a wait this long already means the host
+/// never ran.
+const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The cached `dev.frust.iap.FrustIapHost` class reference.
 ///
@@ -508,12 +522,14 @@ fn deliver_answer(request_id: u64, answer: HostAnswer) -> bool {
     true
 }
 
-/// Issue `method` against the host and park on its answer, returning the raw
-/// `okJson` document.
+/// Issue `method` against the host and park on its answer up to `timeout`,
+/// returning the raw `okJson` document.
 ///
 /// The wait happens **outside** the JNI attachment — [`with_host`] has already
-/// dropped it — so the host's own thread is free to attach and deliver.
-fn call_host_json(method: &str, args: &Value) -> Result<String, IapError> {
+/// dropped it — so the host's own thread is free to attach and deliver. The
+/// caller picks the bound: [`HOST_CALL_TIMEOUT`] for a genuinely store-touching
+/// call, [`ACK_TIMEOUT`] for [`Backend::request_purchase`]'s dispatch-only ack.
+fn call_host_json(method: &str, args: &Value, timeout: Duration) -> Result<String, IapError> {
     let args_json = serde_json::to_string(args).map_err(|err| {
         IapError::Serialization(format!(
             "android iap backend: could not encode the arguments for {method}: {err}"
@@ -543,14 +559,29 @@ fn call_host_json(method: &str, args: &Value) -> Result<String, IapError> {
         return Err(err);
     }
 
-    match answer.recv_timeout(HOST_CALL_TIMEOUT) {
+    await_answer(&answer, timeout, request_id, method)
+}
+
+/// Park on `answer` up to `timeout`, cancelling `request_id`'s slot on a
+/// timeout so a later answer can never resolve a different call.
+///
+/// Split out of [`call_host_json`] so the wait/timeout logic is testable
+/// against a fake boundary (this module's tests) rather than only through a
+/// real JNI call.
+fn await_answer(
+    answer: &Receiver<HostAnswer>,
+    timeout: Duration,
+    request_id: u64,
+    method: &str,
+) -> Result<String, IapError> {
+    match answer.recv_timeout(timeout) {
         Ok(Ok(payload)) => Ok(payload),
         Ok(Err(error_json)) => Err(map_host_error(&error_json)),
         Err(_) => {
             cancel_request(request_id);
             Err(IapError::Platform(format!(
                 "android iap backend: {method} did not answer within {}s",
-                HOST_CALL_TIMEOUT.as_secs()
+                timeout.as_secs()
             )))
         }
     }
@@ -558,8 +589,12 @@ fn call_host_json(method: &str, args: &Value) -> Result<String, IapError> {
 
 /// [`call_host_json`], with the answer parsed into the wire type the method
 /// promises (module doc's method table).
-fn call_host<T: DeserializeOwned>(method: &str, args: &Value) -> Result<T, IapError> {
-    let payload = call_host_json(method, args)?;
+fn call_host<T: DeserializeOwned>(
+    method: &str,
+    args: &Value,
+    timeout: Duration,
+) -> Result<T, IapError> {
+    let payload = call_host_json(method, args, timeout)?;
     serde_json::from_str(&payload).map_err(|err| {
         IapError::Serialization(format!(
             "android iap backend: {method} answered with a payload this crate could not parse: \
@@ -570,8 +605,8 @@ fn call_host<T: DeserializeOwned>(method: &str, args: &Value) -> Result<T, IapEr
 
 /// [`call_host_json`] for a method whose result is `null` — the payload is
 /// parsed only to prove it is well-formed JSON, then discarded.
-fn call_host_unit(method: &str, args: &Value) -> Result<(), IapError> {
-    call_host::<Value>(method, args).map(|_| ())
+fn call_host_unit(method: &str, args: &Value, timeout: Duration) -> Result<(), IapError> {
+    call_host::<Value>(method, args, timeout).map(|_| ())
 }
 
 /// Map the host's OpenIAP error JSON onto this crate's error type.
@@ -667,7 +702,11 @@ impl Backend for AndroidIap {
     /// either side's implementation detail.
     fn init_connection(&self, config: Option<&Value>) -> Result<bool, IapError> {
         Guards::LIFECYCLE.check()?;
-        let result = call_host::<bool>(METHOD_INIT_CONNECTION, &json!({ "config": config }));
+        let result = call_host::<bool>(
+            METHOD_INIT_CONNECTION,
+            &json!({ "config": config }),
+            HOST_CALL_TIMEOUT,
+        );
         match result {
             Ok(true) => {
                 CONNECTED.store(true, Ordering::Release);
@@ -701,7 +740,7 @@ impl Backend for AndroidIap {
             // cross JNI for it.
             return Ok(false);
         }
-        if let Err(err) = call_host_unit(METHOD_END_CONNECTION, &json!({})) {
+        if let Err(err) = call_host_unit(METHOD_END_CONNECTION, &json!({}), HOST_CALL_TIMEOUT) {
             log::warn!("frust-iap: end_connection: the host reported {err} — treated as closed");
         }
         Ok(true)
@@ -709,7 +748,7 @@ impl Backend for AndroidIap {
 
     fn fetch_products(&self, request: &ProductRequest) -> Result<FetchProductsResult, IapError> {
         Guards::FULL.check()?;
-        call_host(METHOD_FETCH_PRODUCTS, &encode(request)?)
+        call_host(METHOD_FETCH_PRODUCTS, &encode(request)?, HOST_CALL_TIMEOUT)
     }
 
     fn get_available_purchases(
@@ -720,6 +759,7 @@ impl Backend for AndroidIap {
         call_host(
             METHOD_GET_AVAILABLE_PURCHASES,
             &json!({ "options": options }),
+            HOST_CALL_TIMEOUT,
         )
     }
 
@@ -731,12 +771,13 @@ impl Backend for AndroidIap {
         call_host(
             METHOD_GET_ACTIVE_SUBSCRIPTIONS,
             &json!({ "subscriptionIds": ids }),
+            HOST_CALL_TIMEOUT,
         )
     }
 
     fn get_storefront(&self) -> Result<String, IapError> {
         Guards::FULL.check()?;
-        call_host(METHOD_GET_STOREFRONT, &json!({}))
+        call_host(METHOD_GET_STOREFRONT, &json!({}), HOST_CALL_TIMEOUT)
     }
 
     /// Hands the request to Play and returns as soon as the host has accepted
@@ -745,15 +786,16 @@ impl Backend for AndroidIap {
     ///
     /// It still uses the same request/answer correlation as every other call,
     /// so it does wait — but only for the host's *dispatch* acknowledgement (a
-    /// JNI round trip plus a coroutine hop), never for Play. That answer is
-    /// delivered off a background dispatcher rather than the main `Looper`, so
-    /// it lands even for a caller sitting on the UI thread, which is what makes
-    /// the exemption safe rather than merely permitted. The wait is what buys a
-    /// synchronous error for a malformed request or a missing Activity, instead
-    /// of silence.
+    /// JNI round trip plus a coroutine hop), bounded by [`ACK_TIMEOUT`] rather
+    /// than [`HOST_CALL_TIMEOUT`], never for Play. That answer is delivered off
+    /// a background dispatcher rather than the main `Looper`, so it lands even
+    /// for a caller sitting on the UI thread, which is what makes the exemption
+    /// safe rather than merely permitted. The wait is what buys a synchronous
+    /// error for a malformed request or a missing Activity, instead of
+    /// silence.
     fn request_purchase(&self, props: &RequestPurchaseProps) -> Result<(), IapError> {
         Guards::PURCHASE.check()?;
-        call_host_unit(METHOD_REQUEST_PURCHASE, &encode(props)?)
+        call_host_unit(METHOD_REQUEST_PURCHASE, &encode(props)?, ACK_TIMEOUT)
     }
 
     fn finish_transaction(
@@ -765,12 +807,13 @@ impl Backend for AndroidIap {
         call_host_unit(
             METHOD_FINISH_TRANSACTION,
             &json!({ "purchase": encode(purchase)?, "isConsumable": is_consumable }),
+            HOST_CALL_TIMEOUT,
         )
     }
 
     fn restore_purchases(&self) -> Result<(), IapError> {
         Guards::FULL.check()?;
-        call_host_unit(METHOD_RESTORE_PURCHASES, &json!({}))
+        call_host_unit(METHOD_RESTORE_PURCHASES, &json!({}), HOST_CALL_TIMEOUT)
     }
 
     fn deep_link_to_subscriptions(&self, options: Option<&Value>) -> Result<(), IapError> {
@@ -778,6 +821,7 @@ impl Backend for AndroidIap {
         call_host_unit(
             METHOD_DEEP_LINK_TO_SUBSCRIPTIONS,
             &json!({ "options": options }),
+            HOST_CALL_TIMEOUT,
         )
     }
 
@@ -811,9 +855,15 @@ impl Backend for AndroidIap {
 
 /// The shared body of [`Backend::acknowledge_purchase`]/
 /// [`Backend::consume_purchase`]: both hand Play a token and both answer with a
-/// boolean (see [`Backend::acknowledge_purchase`]'s doc).
+/// boolean (see [`Backend::acknowledge_purchase`]'s doc). Both callers run
+/// [`Guards::FULL`], so both are genuinely store-touching — [`HOST_CALL_TIMEOUT`]
+/// applies.
 fn settle_token(method: &str, purchase_token: &str) -> Result<(), IapError> {
-    let settled: bool = call_host(method, &json!({ "purchaseToken": purchase_token }))?;
+    let settled: bool = call_host(
+        method,
+        &json!({ "purchaseToken": purchase_token }),
+        HOST_CALL_TIMEOUT,
+    )?;
     if settled {
         return Ok(());
     }
@@ -1007,6 +1057,59 @@ mod tests {
         assert_eq!(first_answer.try_recv(), Err(mpsc::TryRecvError::Empty));
         assert_eq!(second_answer.try_recv(), Ok(Ok("second".to_string())));
         cancel_request(first);
+    }
+
+    /// [`await_answer`] honors whatever `timeout` its caller passes rather
+    /// than a single crate-wide bound: an answer delivered after a short
+    /// per-call timeout times that call out, while the identically-timed
+    /// delivery to a *separately* armed request still lands under a longer
+    /// timeout — a fake boundary (a thread standing in for the JNI answer),
+    /// no real JNI, pinning that `request_purchase`'s [`ACK_TIMEOUT`] and
+    /// every other call's [`HOST_CALL_TIMEOUT`] are genuinely per-call rather
+    /// than read from a shared constant.
+    #[test]
+    fn a_per_call_timeout_is_honored_independently_of_a_longer_default() {
+        let delivery_delay = Duration::from_millis(80);
+
+        // A short timeout: the answer arrives after the deadline, so this
+        // call times out even though an answer was in fact on its way.
+        let (short_id, short_answer) = arm_request();
+        let short_result = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(delivery_delay);
+                deliver_answer(short_id, Ok("late for the short wait".to_string()));
+            });
+            await_answer(
+                &short_answer,
+                Duration::from_millis(5),
+                short_id,
+                "requestPurchase",
+            )
+        });
+        match short_result {
+            Err(IapError::Platform(message)) => {
+                assert!(message.contains("requestPurchase"), "{message}");
+            }
+            other => panic!("expected a platform timeout error, got {other:?}"),
+        }
+
+        // The identical delivery timing against a longer, separately armed
+        // timeout still succeeds — the short call above did not shrink
+        // anyone else's bound.
+        let (long_id, long_answer) = arm_request();
+        let long_result = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(delivery_delay);
+                deliver_answer(long_id, Ok("on time for the long wait".to_string()));
+            });
+            await_answer(
+                &long_answer,
+                Duration::from_secs(5),
+                long_id,
+                "requestPurchase",
+            )
+        });
+        assert_eq!(long_result.unwrap(), "on time for the long wait");
     }
 
     /// The event boundary, exercised exactly as the JNI export exercises it:
