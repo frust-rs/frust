@@ -52,6 +52,12 @@
     **safe** property wrappers, each `// SAFETY:`-noted at its one call site; the same arm's
     `define_class!`/`extern_protocol!` factory/event-target registration and
     `addTarget:action:` attach/detach are the other confined sites.
+  - `frust-iap`'s `apple` backend — one untyped `msg_send![class, shared]` resolving the
+    Swift glue's singleton by runtime-only class name (no generated binding for it), plus two
+    completion blocks (`RcBlock`) receiving raw `NSString` pointers whose validity only the
+    glue's own contract establishes; each site is `# Safety`/`SAFETY`-noted and wraps its body
+    in `catch_unwind` per the no-unwind rule below. Its `android` backend holds no `unsafe`
+    block at all — only its two JNI exports' `#[unsafe(no_mangle)]` attributes.
 - **No unwind across FFI.** Every platform export routes through `frust-shell-common`'s
   `guard` helper (`catch_unwind` + log, returning a benign default) rather than unwinding
   into JVM-/Swift-owned stack frames — a panic crossing the FFI boundary is undefined

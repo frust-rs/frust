@@ -21,7 +21,7 @@
 | `RENDER` | crates/frust-render, crates/frust-text | docs/RENDER_ARCHITECTURE.md |
 | `WIDGETS` | crates/frust-widgets, crates/frust-theme | docs/WIDGETS_ARCHITECTURE.md |
 | `SHELLS` | crates/frust-shell-common, crates/frust-shell-desktop, crates/frust-shell-android, crates/frust-shell-ios | docs/SHELLS_ARCHITECTURE.md |
-| `PLUGINS` | crates/frust-plugin, plugins/shared-preferences, plugins/secure-storage, plugins/camera, plugins/clipboard, plugins/haptics, plugins/clean-signals-frust | docs/PLUGINS_ARCHITECTURE.md |
+| `PLUGINS` | crates/frust-plugin, plugins/shared-preferences, plugins/secure-storage, plugins/camera, plugins/clipboard, plugins/haptics, plugins/iap, plugins/clean-signals-frust | docs/PLUGINS_ARCHITECTURE.md |
 | `NATIVE_WIDGETS` | plugins/native-widgets | docs/NATIVE_WIDGETS_ARCHITECTURE.md |
 | `CLI` | crates/frust-cli, crates/frust-drive | docs/CLI_ARCHITECTURE.md |
 | `TUI` | crates/frust-tui | docs/TUI_ARCHITECTURE.md |

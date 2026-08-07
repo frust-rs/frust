@@ -245,30 +245,34 @@ cargo test -p frust-cli --test build_e2e -- --ignored
 # Android compile gate (no device needed): the whole facade graph must compile for Android.
 cargo check --target aarch64-linux-android \
   -p frust -p frust-plugin -p frust-shared-preferences -p frust-secure-storage \
-  -p frust-camera -p frust-native-widgets -p frust-clipboard -p frust-haptics
+  -p frust-camera -p frust-native-widgets -p frust-clipboard -p frust-haptics -p frust-iap
 cargo check --target aarch64-linux-android -p frust-native-widgets --features demo-components
 
 # --all-targets additionally compiles cfg(test) — the plain checks above never do, so a
-# mobile shell's own test module otherwise goes uncompiled by anything:
-cargo check --all-targets --target aarch64-linux-android -p frust-shell-android
+# mobile shell's or frust-iap's own target-gated test module otherwise goes uncompiled:
+cargo check --all-targets --target aarch64-linux-android -p frust-shell-android -p frust-iap
 
 # iOS compile gate (a type-check, no device/Xcode needed — runs on Linux too; only
 # building/running an iOS app needs macOS, see Prerequisites): the whole facade graph
 # must compile for the Simulator target (frust-secure-storage also gates the device target).
 cargo check --target aarch64-apple-ios-sim \
   -p frust -p frust-shared-preferences -p frust-secure-storage -p frust-camera \
-  -p frust-native-widgets -p frust-clipboard -p frust-haptics
+  -p frust-native-widgets -p frust-clipboard -p frust-haptics -p frust-iap
 cargo check --target aarch64-apple-ios -p frust-secure-storage
 cargo check --target aarch64-apple-ios-sim -p frust-native-widgets --features demo-components
 
 # Same --all-targets rationale as Android above:
-cargo check --all-targets --target aarch64-apple-ios-sim  -p frust-shell-ios
+cargo check --all-targets --target aarch64-apple-ios-sim  -p frust-shell-ios -p frust-iap
 ```
 
 The iOS compile gate above is also the only check of the `accesskit_ios` adapter today —
 uncompiled on any host in this repo's history. Screen-reader verification
 (TalkBack/VoiceOver) and the `cpu-tier` tier's visual behavior on real hardware are
 unverified — both need a device/Simulator or physical GPU this headless host cannot provide.
+**Running, not just type-checking, `frust-iap`'s iOS tests** needs a booted Simulator as the
+test runner — currently the only way this repo executes a target-gated mobile test at all:
+`CARGO_TARGET_AARCH64_APPLE_IOS_SIM_RUNNER="xcrun simctl spawn booted" cargo test --target
+aarch64-apple-ios-sim -p frust-iap --lib`.
 
 **Neither compile gate above touches Kotlin or Swift.** `cargo check --target
 aarch64-linux-android`/`aarch64-apple-ios*` only type-checks the Rust `frust-*` graph —
@@ -358,6 +362,14 @@ the plugin per `plugins/camera/README.md`:
 - **Scan:** policy mode detects the dense muxr:// screen-QR once (NoDuplicates), timing mode shows decode ms + attempts/s for MEASUREMENTS.md.
 - **Add Plugin dialog:** clean scaffold, both platforms build with zero hand edits.
 
+### IAP manual test (Android + iOS)
+
+A device/emulator gate for `frust-iap` (`plugins/iap`), against an app depending on the
+plugin per `plugins/iap/README.md` §1 — the full checklist (Add Plugin scaffold builds
+clean both platforms; a StoreKit-Testing smoke round trip needing no store account; a
+store-account-gated purchase/finish flow once a Play listing or App Store Connect product
+exists) is that README's §6, not repeated here.
+
 ### Template development
 
 `frust create` embeds `templates/app/` into the binary at compile time; the hidden,
@@ -445,6 +457,7 @@ not floating. Each row's tripwire must be re-run after touching that pin:
 | `ndk-context 0.1` minor | `frust-plugin`'s Android platform-handle slot (written by `nativeInitPlatform`, read by every plugin) | `cargo check --target aarch64-linux-android -p frust-plugin` |
 | `objc2 0.6` / `objc2-foundation 0.3` minor | Apple ObjC bridge (`frust-shared-preferences`'s `NSUserDefaults` backend; `frust-secure-storage`'s apple arm also pulls `objc2-foundation` for `NSString`/`NSError`; `frust-camera`'s apple arm pulls the full `objc2-av-foundation`/`objc2-core-media`/`objc2-core-video`/`objc2-quartz-core`/`dispatch2`/`block2` stack, each pinned `0.3`/`0.6` minor — `objc2-av-foundation 0.3.2` itself permits `objc2 >=0.6.2, <0.8.0`, wider than this workspace's own `0.6` caret) | `cargo check --target aarch64-apple-ios-sim -p frust-shared-preferences && cargo check --target aarch64-apple-ios-sim -p frust-camera` |
 | `androidx.camera:camera-{core,camera2,lifecycle} 1.6.1` (Gradle, not a Cargo pin) minor | `frust-camera`'s Android CameraX session/preview stack (`plugins/camera/platform/android/build.gradle.kts`); deliberately not `camera-view` (no `PreviewView`) | `(cd examples/glyph-catalog/android && ./gradlew :frust-camera:compileReleaseKotlin)` |
+| `openiap-google 3.0.1` exact (Gradle, `plugins/iap/platform/android/build.gradle.kts`) / `OpenIAP` SPM `exact: "3.0.1"` (`plugins/iap/platform/ios/Package.swift`) — LOCKSTEP | `frust-iap`'s Play Billing / StoreKit 2 hosts; upstream's `openiap-versions.json` pins spec/google/apple together, so the two sides must never be bumped independently (Play Billing 9.1.0 + kotlinx-coroutines ride transitively/alongside on Android) | `(cd examples/glyph-catalog/android && ./gradlew :frust-iap:compileReleaseKotlin)` + a consuming-app `xcodebuild` (Swift compiles under no cargo gate) |
 | `objc2-security 0.3` / `objc2-local-authentication 0.3` minor | `frust-secure-storage`'s Apple Keychain backend + biometric gate (`SecAccessControl`/`LAContext`) | the secure-storage mobile compile gates above |
 | `objc2-ui-kit` / `objc2-quartz-core` / `objc2-core-text` / `objc2-core-foundation` 0.3 minor | `frust-native-widgets`'s (`plugins/native-widgets`) UIKit binding, plus its theme-ladder L2 (`objc2-quartz-core`'s `CALayer.cornerRadius`) and L3 (`objc2-core-text`/`objc2-core-foundation` resolving the embedded Glyph font bytes to a `CTFont`) direct pins — each already resolved transitively before this crate named it directly, so no lockfile version change. Also consumed by `frust-clipboard` (iOS `UIPasteboard`) and `frust-haptics` (the three `UI*FeedbackGenerator` classes). `cargo tree -i objc2-ui-kit` legitimately shows two versions — `0.2.2` pulled transitively by `accesskit_ios`/`winit`, `0.3.2` consumed by `frust-native-widgets`/`frust-clipboard`/`frust-haptics` — an expected split, not `cargo tree -d` drift; do not force-align them | `cargo check --target aarch64-apple-ios-sim -p frust-native-widgets -p frust-clipboard -p frust-haptics` |
 | `keyring-core 1.0` / `zbus-secret-service-keyring-store 1.0` (`rt-async-io-crypto-rust` feature, keeps the plugin tokio-free) / `windows-native-keyring-store 1.1` minor | `frust-secure-storage`'s desktop Linux/Windows backend | `cargo test -p frust-secure-storage` |

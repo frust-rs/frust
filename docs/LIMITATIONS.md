@@ -714,3 +714,57 @@ rejected by Ed (2026-08-04) — "frust --args for CLI and frust for TUI should
 cover everything."
 
 **Evidence**: frust-single-binary reviews r0-r2 (2026-08-04); plan-verify sweep.
+
+---
+
+### `iap-desktop-unavailable-v1` — every `frust-iap` call errors on desktop, by deferral not by absence
+
+**Observed**: `Iap`'s desktop (macOS/Linux/Windows) backend reports
+`IapError::NotAvailable(Unavailability::UnsupportedPlatform)` for every call —
+there is no in-app-purchase backend on any desktop target in v1.
+
+**Applies to**: macOS, Linux, and Windows, but not uniformly in nature. macOS
+ships the Mac App Store's own StoreKit and Windows ships the Microsoft
+Store's API, so a real desktop backend on either is a buildable future
+addition kept out only by mobile-first v1 scope — a **deferral**. Linux
+alone has no store API to route to at all, the same genuine capability gap
+`frust-haptics`'s desktop arm documents.
+
+**Why accepted**: mobile-first v1 scope. The desktop arm is dependency-free
+by design (`plugins/iap/Cargo.toml`'s desktop-stanza comment) rather than a
+stub around an unfinished backend, so an app's desktop preview build runs
+its real store-code path and simply gets nothing back — the same fail-soft
+shape every sibling plugin uses.
+
+**Evidence**: `plugins/iap/src/desktop.rs`'s module doc; `plugins/iap/Cargo.toml`'s
+desktop-stanza comment; IAP plugin implementation.
+
+---
+
+### `iap-store-account-gated-verification` — runtime purchase flows are unverifiable in this repo until a store listing exists
+
+**Observed**: `frust-iap`'s connection/product/purchase flows against a real
+store need either a Play Console internal-testing-track listing (Android) or
+an App Store Connect product plus a sandbox tester (iOS) — neither exists
+for this repo yet, so no on-device purchase has ever been exercised end to
+end.
+
+**Applies to**: both mobile platforms' real-store paths. iOS is partially
+covered without an account via a `.storekit` local StoreKit-Testing
+configuration (`plugins/iap/README.md` §4), which exercises
+`init_connection`/`fetch_products`/`request_purchase`/`finish_transaction`
+against a simulated catalog. Android has no offline equivalent — Play
+Billing always talks to the real Play service — so its coverage today is
+limited to the mobile compile gates and the host-side conformance suite's
+error paths (`docs/PLUGINS_ARCHITECTURE.md`'s Data Flow).
+
+**Why accepted**: store-account setup (a paid developer account, a
+published or internal-track listing) is an operational prerequisite outside
+this crate's own scope; the connection state machine, guard order, and
+two-phase purchase contract are still verified host-side against the
+`cfg(test)` fake store (`plugins/iap/src/conformance.rs`), so the
+platform-independent contract has coverage even though the real store round
+trip does not.
+
+**Evidence**: `plugins/iap/README.md` §3 (Store setup) and §4 (Testing
+without a store account); `plugins/iap/src/conformance.rs`'s module doc.
