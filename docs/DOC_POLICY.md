@@ -1,7 +1,7 @@
 # Doc Policy
 
 **Set by:** agent
-**Scale:** large (225,723 source LOC, 22 non-example packages → 8 doc units, 3 stacks: Rust + Kotlin/Android + Swift/iOS)
+**Scale:** large (225,723 source LOC → 8 doc units, 3 stacks: Rust + Kotlin/Android + Swift/iOS)
 **Structure:** hub-and-spoke (all spokes central in `docs/`)
 
 ## Budgets

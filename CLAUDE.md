@@ -2,8 +2,8 @@
 
 Frust is a Rust-native, mobile-first declarative UI framework: a `View`/`Widget` retained tree with
 signal-based reactivity, rendered via vello/wgpu, with Android/iOS/desktop shells, a plugin tier,
-and CLI/TUI tooling. It is a 22-package Cargo workspace documented hub-and-spoke — this file is the
-index; follow a link below rather than reading source cold.
+and CLI/TUI tooling. It is a multi-crate Cargo workspace documented hub-and-spoke — this file is
+the index; follow a link below rather than reading source cold.
 
 ## Documentation
 

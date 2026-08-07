@@ -56,10 +56,12 @@ platform-independent public API, with FFI dependencies target-gated rather than 
 A few cross-plugin conventions hold as boundary facts rather than mere style: pre-init detection is
 a plain atomic flag checked first, so a `NotInitialized` error holds even under `panic=abort`; a JNI
 attach is always scoped per call, never held permanently; and a store shared with the OS namespaces
-its keys so plugin keys cannot collide with another library's. `frust-reactive`'s `spawn_blocking`
-is the documented pairing for every plugin's blocking or gated call (biometric prompts, camera
-permission/capture, every `iap` store round trip except `request_purchase`/
-`set_purchase_listener`) — see [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md).
+its keys so plugin keys cannot collide with another library's. Plugin Kotlin/Swift host code may
+ship warn-level store/host-failure logs in release builds — release-lean governs Rust's own `log`
+output only, and payload-content hygiene (truncation/redaction) is a separate concern.
+`frust-reactive`'s `spawn_blocking` is the documented pairing for every plugin's blocking or gated
+call (biometric prompts, camera permission/capture, every `iap` store round trip except
+`request_purchase`/`set_purchase_listener`) — see [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md).
 
 ## Data Flow
 

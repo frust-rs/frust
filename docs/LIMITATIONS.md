@@ -741,15 +741,17 @@ desktop-stanza comment; IAP plugin implementation.
 
 ---
 
-### `iap-store-account-gated-verification` — runtime purchase flows are unverifiable in this repo until a store listing exists
+### `iap-store-account-gated-verification` — no real-store-account purchase round trip has been exercised end to end
 
 **Observed**: `frust-iap`'s connection/product/purchase flows against a real
 store need either a Play Console internal-testing-track listing (Android) or
 an App Store Connect product plus a sandbox tester (iOS) — neither exists
-for this repo yet, so no on-device purchase has ever been exercised end to
-end.
+for this repo yet, so no purchase against a real store account has ever been
+exercised end to end. That is a coverage gap, not a capability gap: the
+mocked host-side path and, on iOS, the StoreKit-Testing path are both
+exercised today.
 
-**Applies to**: both mobile platforms' real-store paths. iOS is partially
+**Applies to**: both mobile platforms' real-store paths specifically. iOS is
 covered without an account via a `.storekit` local StoreKit-Testing
 configuration (`plugins/iap/README.md` §4), which exercises
 `init_connection`/`fetch_products`/`request_purchase`/`finish_transaction`
@@ -760,11 +762,16 @@ error paths (`docs/PLUGINS_ARCHITECTURE.md`'s Data Flow).
 
 **Why accepted**: store-account setup (a paid developer account, a
 published or internal-track listing) is an operational prerequisite outside
-this crate's own scope; the connection state machine, guard order, and
-two-phase purchase contract are still verified host-side against the
-`cfg(test)` fake store (`plugins/iap/src/conformance.rs`), so the
-platform-independent contract has coverage even though the real store round
-trip does not.
+this crate's own scope. The parts of the contract that don't need one are
+covered host-side: the connection state machine, guard order, and two-phase
+purchase contract against the `cfg(test)` fake store
+(`plugins/iap/src/conformance.rs`), and the plugin-owned event-delivery
+thread (`plugins/iap/src/event.rs`) — the single FIFO consumer every
+purchase-update callback is handed to, delivering off the UI thread and off
+the caller's thread in enqueue order — is unit-tested independent of any
+store backend. What remains unverified is narrowly the real store round trip
+itself, not the platform-independent contract around it.
 
 **Evidence**: `plugins/iap/README.md` §3 (Store setup) and §4 (Testing
-without a store account); `plugins/iap/src/conformance.rs`'s module doc.
+without a store account); `plugins/iap/src/conformance.rs`'s module doc;
+`plugins/iap/src/event.rs`'s module doc.
