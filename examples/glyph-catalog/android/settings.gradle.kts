@@ -35,9 +35,9 @@ gradle.lifecycle.beforeProject {
 
 // frust:plugin-includes — plugin-contributed `include(...)` lines go below.
 
-// frust-camera: not yet a `frust tui` Add Plugin contribution, so
-// hand-wired exactly as `frust-drive::plugin::apply_gradle_module` would
-// apply it — the same include/projectDir/build-dir-redirect
+// frust-camera: hand-wired exactly as `frust-drive::plugin::apply_gradle_module`
+// applies it to a scaffolded app (this example predates Add Plugin and wires
+// its plugins directly) — the same include/projectDir/build-dir-redirect
 // trio `:frust-embedding` above uses, per that applier's own doc comment.
 include(":frust-camera")
 project(":frust-camera").projectDir = file("../../../plugins/camera/platform/android")

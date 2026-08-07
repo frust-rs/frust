@@ -4,9 +4,9 @@
   Library AAR that `openiap-google` depends on declares
   `com.android.vending.BILLING` itself, and the Android manifest merger folds
   it into any app that (transitively) depends on `:frust-iap` — a consuming
-  app never edits its own AndroidManifest.xml to obtain it. This spike's
-  acceptance check is exactly that transitive fold, proven by grepping the
-  app's merged manifest for the permission.
+  app never edits its own AndroidManifest.xml to obtain it. BILLING arrives
+  transitively from the Play Billing AAR via the manifest merger — the transitive
+  fold is the contract here.
 
   The provider below is how `FrustIapHost` obtains an application `Context`
   BEFORE any Activity exists, mirroring `plugins/camera/platform/android`'s
