@@ -1,10 +1,10 @@
-//! Doctor panel state (PLAN D6/D6a): the titlebar toolchain chip and the
+//! Doctor panel state: the titlebar toolchain chip and the
 //! `d`-opened panel both read the same cached [`DoctorState`] — a flat mirror
 //! of `frust-drive`'s [`Validator`](frust_drive::doctor::Validator) set run
 //! off-thread (`spawn_blocking`, see `crate::runner`) at startup preflight and
 //! again on demand. Today's flat [`frust_drive::doctor::Validation`] is the
-//! source (the full D6a component-level report + guided commands stay
-//! Phase 3).
+//! source (the full component-level report + guided commands are
+//! future work).
 //!
 //! `frust_drive::doctor::Validation` doesn't derive `PartialEq`/`Eq`, and
 //! [`crate::engine::Message`]/[`crate::engine::Effect`] both do — so

@@ -1,4 +1,4 @@
-//! The "Add plugin" dialog state machine (`frust-secure-storage` PLAN Phase 7):
+//! The "Add plugin" dialog state machine:
 //! select a registry plugin → toggle its optional features → apply its
 //! contributions to the open generated project off-thread → show a per-edit
 //! report (or an error).
@@ -15,7 +15,7 @@
 //! action step, and an error step with retry. No registry entry is
 //! sibling-gated today — `clean-signals-frust` was the sole
 //! `requires_sibling` user before `clean-signals` moved to a git+rev pin
-//! (task 05) — but [`PluginEntry::sibling_gated`]/
+//! — but [`PluginEntry::sibling_gated`]/
 //! [`AddPluginDialog::set_sibling_available`] stay in place as the generic
 //! mechanism a future facade-tier plugin would reuse.
 
@@ -339,7 +339,7 @@ mod tests {
     #[test]
     fn no_registry_entry_is_currently_sibling_gated() {
         // clean-signals-frust was the sole `requires_sibling` user before
-        // clean-signals moved to a git+rev pin (task 05); every card starts
+        // clean-signals moved to a git+rev pin; every card starts
         // enabled today.
         let d = dialog();
         assert!(d.entries.iter().all(|e| !e.sibling_gated && e.enabled));

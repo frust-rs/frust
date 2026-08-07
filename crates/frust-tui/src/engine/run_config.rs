@@ -1,5 +1,5 @@
-//! The devices-panel row model and the run-config modal state machine (PLAN
-//! D6b): device(s) + `BuildInfo` (mode / flavor / defines) → one supervised
+//! The devices-panel row model and the run-config modal state machine:
+//! device(s) + `BuildInfo` (mode / flavor / defines) → one supervised
 //! session per selected target.
 //!
 //! Everything here is plain data + pure transitions — no threads, no process,
@@ -66,7 +66,7 @@ pub enum RunFocus {
     Launch,
 }
 
-/// The run-config modal state (PLAN D5/D6b): the target checklist plus the
+/// The run-config modal state: the target checklist plus the
 /// `BuildInfo` funnel, with a single focused control.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunConfig {

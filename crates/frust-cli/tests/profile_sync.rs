@@ -94,8 +94,8 @@ fn assert_section_identical(header: &str, expect_keys: &[&str]) {
             &blocks[0],
             other,
             "{header} in {} has drifted from the root Cargo.toml — the three \
-             manifests must stay identical (DEVELOPMENT.md; phase-7 review \
-             round-0 finding 4)",
+             manifests must stay identical (see DEVELOPMENT.md's profile-sync \
+             rule)",
             path.display()
         );
     }
@@ -130,7 +130,7 @@ fn shader_stack_dev_overrides_identical_across_all_three_manifests() {
     assert!(
         !overrides[0].is_empty(),
         "root Cargo.toml has no [profile.dev.package.*] overrides — the \
-         shader-stack dev-profile fix (6e Finding 5) has been removed?"
+         shader-stack dev-profile fix has been removed?"
     );
     for (path, other) in manifests.iter().zip(&overrides).skip(1) {
         assert_eq!(

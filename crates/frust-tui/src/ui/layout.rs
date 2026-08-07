@@ -4,7 +4,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 /// Height of the titlebar chrome (rows). A 2-row title + a 1-row underline
-/// motif (matches workbook B2).
+/// motif.
 pub const TITLEBAR_HEIGHT: u16 = 3;
 
 /// Height of the status bar (rows).
@@ -15,7 +15,7 @@ pub const STATUS_HEIGHT: u16 = 1;
 /// across the render/engine layer boundary).
 pub const SIDEBAR_WIDTH: u16 = crate::engine::SIDEBAR_DEFAULT_WIDTH;
 
-/// The narrow-terminal responsive breakpoint (T05 / D5): below this width the
+/// The narrow-terminal responsive breakpoint: below this width the
 /// workbench collapses its inline sidebar out of the layout (see
 /// `views::workbench::render`), reachable instead as a toggleable floating
 /// overlay (`s` / `AppState::sidebar_overlay_open`). Comfortably above
@@ -65,7 +65,7 @@ pub fn sidebar_main(body: Rect) -> (Rect, Rect) {
 }
 
 /// Split a body area into a `width`-column sidebar and the remaining main area
-/// (T04 drag-to-resize). `width` is clamped to the sidebar min/max and to
+/// (drag-to-resize). `width` is clamped to the sidebar min/max and to
 /// `body.width - 1` so the main area never vanishes.
 pub fn sidebar_main_at(body: Rect, width: u16) -> (Rect, Rect) {
     let w = crate::engine::clamp_sidebar_width(width).min(body.width.saturating_sub(1));

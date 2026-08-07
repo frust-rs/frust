@@ -1,17 +1,16 @@
-//! Integration suite (bug plan `catalog-animation-performance`, followup
-//! phase1-fix-2, task g1) proving the desktop shell's paced-wake mechanism
+//! Integration suite proving the desktop shell's paced-wake mechanism
 //! (`frust_shell_desktop::paced_wake`, doc-hidden but `pub` for exactly this
 //! test) both settles cleanly once a paced (`TickClass::CosmeticLoop`) loop
 //! stops requesting frames **and** always leaves the event loop's control
 //! flow consistent with the pending paced wake — never parked on a stale
 //! `WaitUntil` once a settle clears the field.
 //!
-//! The round-1 Critical this suite regression-guards: the settle path cleared
+//! The regression this suite guards against: the settle path cleared
 //! `paced_wake` but left `ControlFlow` on a stale `WaitUntil(deadline)`; once
 //! that deadline elapsed, winit treats `WaitUntil(past)` as a zero-timeout
 //! poll and busy-spins at ~100% CPU with no redraws. The fix couples the field
 //! and the control flow into one [`PacedDecision`] value; this suite models
-//! the [`ControlFlowIntent`] across turns (which the round-1 pure model never
+//! the [`ControlFlowIntent`] across turns (which the original pure model never
 //! carried) so the busy-spin is observable as a test failure.
 //!
 //! Mirrors `frust-shell-common/tests/pacing_integration.rs`'s tick-driven,
@@ -21,12 +20,12 @@
 //! winit event loop or window is ever constructed — both functions are pure
 //! and take `now` as a parameter.
 //!
-//! **Task 02 (A2) addition:** the per-request pacing interval
-//! (`PaintOutcome::paced_interval`, task 01) now flows into `next_paced_wake`
+//! **Per-request pacing interval:** the per-request pacing interval
+//! (`PaintOutcome::paced_interval`) now flows into `next_paced_wake`
 //! alongside `needs_frame_paced_only`, so a 500ms caret blink schedules its
 //! own ~500ms wake rather than always falling back to the theme's
 //! `cosmetic_loop_rate` cap. [`ShellModel::paint_at`] threads that interval
-//! through; [`ShellModel::paint`] still forwards `None` (the pre-A2 shape),
+//! through; [`ShellModel::paint`] still forwards `None` (the original shape),
 //! so every pre-existing test below is an unmodified regression guard for
 //! "no per-request interval latched ⇒ identical to today" (acceptance
 //! criterion 2). The new tests toward the end of this file cover a 500ms-only
@@ -51,7 +50,7 @@ fn interval_30hz() -> Duration {
 
 /// The event loop's control-flow state, modeled across turns — the concrete
 /// mirror of winit's `ControlFlow` (only the two states this mechanism uses).
-/// The round-1 pure model carried only the `paced_wake` field, not this, so a
+/// The original pure model carried only the `paced_wake` field, not this, so a
 /// stale `WaitUntil` surviving a settle was invisible to it; carrying it here
 /// is what makes the busy-spin observable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,7 +133,7 @@ impl ShellModel {
     }
 }
 
-/// (a) The round-1 Critical's exact trace (steps 1–4), written as the
+/// (a) The busy-spin regression's exact trace (steps 1–4), written as the
 /// regression test: a paced loop parks on `WaitUntil`, then a state/signal
 /// wake repaints with `needs_frame == false` *before* the deadline. The
 /// settle must clear the field AND return the loop to `Wait` — not leave it
@@ -176,7 +175,7 @@ fn settle_while_parked_returns_control_flow_to_wait() {
     assert_eq!(m.control_flow, ModeledControlFlow::Wait);
 
     // Past the old deadline: no spurious redraw, no reversion to a stale
-    // WaitUntil — the busy-spin the round-1 code exhibited is gone.
+    // WaitUntil — the busy-spin the original code exhibited is gone.
     let t2 = t0 + iv + Duration::from_millis(50);
     let requested = m.about_to_wait(t2);
     assert!(!requested, "no spurious redraw after a settle");
@@ -387,7 +386,7 @@ fn pacing_disabled_fires_now_and_stays_on_wait() {
 }
 
 // -----------------------------------------------------------------------
-// Per-request pacing interval (task 02, A2): the desktop shell must honor
+// Per-request pacing interval: the desktop shell must honor
 // `PaintOutcome::paced_interval` — the caret's own ~500ms ask — rather than
 // always deriving the wake deadline from `cosmetic_loop_rate` alone.
 // -----------------------------------------------------------------------

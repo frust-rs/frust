@@ -27,7 +27,7 @@
 //! mounts is **display-only**: no production path attaches a platform
 //! listener to a component-built view, so overriding
 //! `NativeComponent::on_event` has no effect for it — see that method's own
-//! doc for the deferred Phase 4 gap, and for the one reachability the code
+//! doc for the deferred gap, and for the one reachability the code
 //! does leave open (a *fabricated* slot id, which misroutes rather than
 //! routes). `crate::component`'s module doc states both limits in full.
 //!

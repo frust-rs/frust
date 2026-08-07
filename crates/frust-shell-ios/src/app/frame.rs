@@ -388,8 +388,8 @@ impl IosAppHandle {
         self.publish_semantics();
 
         // Push the render side's presented-frame count so a widget measuring FPS
-        // reports the presented rate, not its `CADisplayLink` paint cadence (task
-        // 10). A pure observation — `set_presented_frames` marks no ChangeFlags,
+        // reports the presented rate, not its `CADisplayLink` paint cadence.
+        // A pure observation — `set_presented_frames` marks no ChangeFlags,
         // so a ticking counter never dirties layout NOR feeds the frame gate (the
         // gate decision already ran above and never reads this), keeping a
         // menu-idle screen at zero frames.

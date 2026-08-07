@@ -1,4 +1,4 @@
-//! Async image decode (Phase 9.B step 1): [`decode_image_async`] is Frust's
+//! Async image decode: [`decode_image_async`] is Frust's
 //! off-thread counterpart to the existing synchronous
 //! [`ImageSource::decode`](frust_widgets::ImageSource::decode) — a thin
 //! `frust_reactive::spawn_blocking` wrapper meant to compose with

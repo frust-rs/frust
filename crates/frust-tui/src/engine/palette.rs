@@ -1,4 +1,4 @@
-//! The fuzzy command palette (PLAN D5 / workbook Part B): a single
+//! The fuzzy command palette: a single
 //! `Ctrl+P` / `:` launcher covering every workbench command, each carrying its
 //! enabled/disabled-with-reason gate (the workbook disabled pattern).
 //!
@@ -67,11 +67,10 @@ pub struct PaletteCommand {
 /// devices. The order here is the tie-break order [`ranked`] falls back to for
 /// equal fuzzy scores.
 ///
-/// Deliberately omitted (no existing `Message` to wire to — see the task
-/// completion summary): "open project by path" (needs a path-input flow not in
-/// the tree) and a "help" overlay (not yet landed). Each returns with no
-/// palette entry rather than a dead command. The mouse-capture toggle (T04) is
-/// now wired below.
+/// Deliberately omitted (no existing `Message` to wire to): "open project by
+/// path" (needs a path-input flow not in the tree) and a "help" overlay (not
+/// yet landed). Each returns with no palette entry rather than a dead command.
+/// The mouse-capture toggle is now wired below.
 pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
     let has_project = state.project_root.is_some();
     let has_devices = !state.devices.is_empty();

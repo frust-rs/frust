@@ -1,52 +1,40 @@
-//! Back-press ⇄ navigator glue (predictive-back + facade
-//! auto-wiring): the facade is the only crate
-//! that sees both `frust-widgets`' [`NavigatorController`] and `frust-reactive`'s
-//! back-press source together — mirroring [`router_glue`](crate::router_glue)
-//! exactly (`frust-widgets` stays reactive-free, `frust-reactive` stays
-//! navigator-free).
+//! Back-press ⇄ navigator glue (predictive-back + facade auto-wiring): the
+//! facade is the only crate seeing both `frust-widgets`'
+//! [`NavigatorController`] and `frust-reactive`'s back-press source, mirroring
+//! [`router_glue`](crate::router_glue) — `frust-widgets` stays reactive-free,
+//! `frust-reactive` navigator-free.
 //!
 //! # The Android back contract
 //!
-//! A shell delivers a hardware/gesture back press → the framework attempts an
-//! async back → the framework maintains a "handles back" boolean the shell reads
-//! so a *root-level* back falls through to the platform (activity finish). This
-//! module is the framework half. A back press is consumed exactly once and
-//! routed through [`NavigatorController::request_back`], which applies
-//! the top page's `BackPolicy` — `Pop` pops, `DismissAnimated` fires the
-//! overlay's dismiss signal, `Veto` swallows it — rather than a bare
-//! [`pop`](NavigatorController::pop). The "handles back" answer is computed from
-//! [`back_interest`](NavigatorController::back_interest) (not
-//! [`can_pop`](NavigatorController::can_pop)), so a dismissable/veto overlay at
-//! the *root* still claims the press ahead-of-time (predictive-back parity)
-//! instead of letting it exit the app.
+//! Shell delivers a hardware/gesture back press → framework attempts an async
+//! back → framework maintains a "handles back" boolean the shell reads, so a
+//! *root-level* press falls through to the platform (activity finish). This
+//! module is the framework half: a press is consumed exactly once and routed
+//! through [`NavigatorController::request_back`] — which applies the top page's
+//! `BackPolicy` (`Pop` pops, `DismissAnimated` fires the overlay's dismiss
+//! signal, `Veto` swallows it) — never a bare [`pop`](NavigatorController::pop).
+//! "Handles back" reads [`back_interest`](NavigatorController::back_interest),
+//! not [`can_pop`](NavigatorController::can_pop), so a dismissable/veto overlay
+//! at the *root* claims the press ahead-of-time (predictive-back parity) instead
+//! of exiting the app.
 //!
 //! # Two entry points, one consumption source
 //!
-//! Back handling reaches a controller two ways, and both funnel through the same
-//! process-wide consumption marker so a press is consumed *exactly once*:
-//!
-//! - **Automatic**: the facade's [`navigator`](crate::navigator)
-//!   wrapper calls [`auto_wire`] on every rebuild, so any app using
-//!   `frust::navigator` gets back handling with ZERO back-specific app code.
-//! - **Explicit**: [`BackHandler`]/[`attach_back_handler`] — the original
-//!   surface an app constructs in `Component::init` and drives with
-//!   [`track`](BackHandler::track) from every `Component::build`. Still fully
-//!   supported (Huddle uses it); it now shares the same consumption marker and
-//!   `request_back`/`back_interest` routing as the automatic path.
-//!
-//! A single process-wide (UI-thread-affine) [`SHARED`] marker is the "single
-//! consumption source": when Huddle constructs a [`BackHandler`] *and* calls
-//! `frust::navigator` on the same controller, whichever runs first in a given
-//! rebuild consumes the press; the other observes the same already-consumed
-//! count and no-ops, so one press = one `request_back` (no double-pop).
+//! [`auto_wire`], called from the facade's [`navigator`](crate::navigator)
+//! wrapper every rebuild (back handling with ZERO back-specific app code), and
+//! the explicit [`BackHandler`]/[`attach_back_handler`], constructed in
+//! `Component::init` and driven by [`track`](BackHandler::track) from every
+//! `Component::build` (Huddle's shape). Both funnel through one process-wide
+//! (UI-thread-affine) [`SHARED`] marker, so a press is consumed **exactly
+//! once**: whichever entry point runs first in a rebuild consumes it, the other
+//! sees the same already-consumed count and no-ops — never a double-pop.
 //!
 //! # R44-back: arbitration across more than one navigator
 //!
-//! An app with a root [`overlay_host`](crate::overlay_host) has **two**
-//! navigators wired at once — the host, and the inner navigator inside it — and
-//! both want the back press. `frust-reactive`'s live-provider slot stays
-//! single-registrant (see `frust_reactive::back`); this module owns that one
-//! registration and multiplexes behind it:
+//! An app with a root [`overlay_host`](crate::overlay_host) wires **two**
+//! navigators — the host and the navigator inside it — and both want the press.
+//! `frust-reactive`'s live-provider slot stays single-registrant (see
+//! `frust_reactive::back`); this module owns that registration and multiplexes:
 //!
 //! > **R44-back — a root overlay host outranks every plain navigator; among
 //! > [`Role::Navigator`] peers the innermost (last-wired) ranks first, LIFO —
@@ -54,89 +42,69 @@
 //! > first registrant reporting
 //! > [`back_interest()`](NavigatorController::back_interest)` == true`.**
 //!
-//! [`SharedBack::registrants`] is that ordered list, kept sorted by
-//! ([`Role`], wire sequence) — build order among hosts, but *reversed* among
-//! navigators so the innermost wins. **Rank comes from the call site, not from
-//! wire timing**: [`auto_wire_overlay_host`] (the facade's
-//! [`overlay_host`](crate::overlay_host)) registers [`Role::Host`], every other
-//! entry point registers [`Role::Navigator`]. That is what makes the order
-//! independent of *when* and *how many times* a controller wires — the two
-//! things an app genuinely varies:
-//!
-//! - An explicit [`BackHandler`] constructed in `Component::init` wires its
-//!   controller **before any view exists**, so first-wire order alone would put
-//!   an inner navigator ahead of a host that cannot possibly have wired yet.
-//! - The documented Huddle pattern wires one controller **twice in a single
-//!   build pass** (`state.back.track()` and `frust::navigator(&controller, …)`),
-//!   so "one wire per pass" is not a premise anything here may rest on.
-//!
-//! `handles_back`/the live provider answer `any(interest)`; a consumed press
-//! routes to the *first* registrant with interest. **The single-navigator case
-//! is unchanged bit for bit**: one registrant makes `any` and "the first with
-//! interest" both degenerate to that controller, whatever its rank. So does a
-//! host with no overlays — at depth 1 with the default `BackPolicy::Pop`,
-//! `compute_back_interest` is `false`, and the host transparently defers to the
-//! inner navigator.
+//! [`SharedBack::registrants`] is that ordered list, sorted by ([`Role`], wire
+//! sequence): build order among hosts, *reversed* among navigators so the
+//! innermost wins. **Rank comes from the call site, not wire timing** —
+//! [`auto_wire_overlay_host`] registers [`Role::Host`], every other entry point
+//! [`Role::Navigator`] — because both *when* and *how often* a controller wires
+//! genuinely vary: a [`BackHandler`] built in `Component::init` wires before any
+//! view exists, and Huddle's documented pattern wires one controller **twice in
+//! one build pass** (`state.back.track()` beside
+//! `frust::navigator(&controller, …)`), so neither first-wire order nor "one
+//! wire per pass" is a premise anything here may rest on. `handles_back`/the
+//! live provider answer `any(interest)`, and a consumed press goes to the
+//! *first* registrant with interest — so one registrant (or a host with no
+//! overlays, `compute_back_interest` `false` at depth 1) behaves exactly as if
+//! arbitration did not exist.
 //!
 //! ## Releasing a navigator that went away
 //!
 //! A navigator that goes away (a screen with its own nested navigator, popped)
-//! must not keep claiming presses, and must not keep its controller clone alive
-//! forever. Two rules drop it, in priority order:
+//! must stop claiming presses and release its controller clone. Two rules, in
+//! priority order:
 //!
-//! 1. **Mounted is live.** [`NavigatorController::is_mounted`] is exact — the
-//!    navigator's `View::build`/`teardown` write it — so a *mounted* registrant
-//!    is in the retained tree by definition and is never pruned, no matter how
-//!    the wire sequence looks. This is the load-bearing half: a root overlay
-//!    host is mounted from its own `build` (which runs before its page builder,
-//!    hence before the inner navigator wires at all), so nothing an inner
-//!    navigator does to the wire sequence can evict it.
-//! 2. **The one-cycle rule, for registrants that were never mounted.** A wire
-//!    from an already-registered controller ends a window; an unmounted
-//!    registrant that did not wire within it is dropped. This covers the only
-//!    case rule 1 cannot see — a controller wired through a `BackHandler` whose
-//!    navigator view never made it into the tree.
+//! 1. **Mounted is live.** [`NavigatorController::is_mounted`] is exact (the
+//!    navigator's `View::build`/`teardown` write it), so a *mounted* registrant
+//!    is in the retained tree by definition and is never pruned, however the
+//!    wire sequence looks — the load-bearing half: a root overlay host is
+//!    mounted from its own `build`, which runs before its page builder and hence
+//!    before the inner navigator wires at all.
+//! 2. **The one-cycle rule, for registrants never mounted.** A wire from an
+//!    already-registered controller ends a window; an unmounted registrant that
+//!    did not wire within it is dropped — the one case rule 1 cannot see (a
+//!    `BackHandler` whose navigator view never made it into the tree).
 //!
-//! Rule 2 is deliberately *not* trusted for mounted navigators: it infers a
-//! build cycle from a repeat wire, and the Huddle pattern above breaks that
-//! inference (the second wire of one pass looks exactly like the first wire of
-//! the next). Before rule 1 existed, that inference pruned the root overlay
-//! host mid-pass and re-created finding #44.
+//! **Rule 2 must not be trusted for a mounted navigator**: it infers a build
+//! cycle from a repeat wire, and the double-wire-per-pass pattern above breaks
+//! that inference (the second wire of one pass looks exactly like the first of
+//! the next). Before rule 1, that inference pruned the root overlay host
+//! mid-pass and re-created the root-modal double-claim bug.
 //!
-//! ## Reachability is upstream of arbitration, by design (H1/R23)
+//! ## Reachability is upstream of arbitration, by design (R23)
 //!
-//! Ranking decides *who wins among the claimants*; it deliberately does **not**
-//! decide who may claim. A navigator on a page input cannot reach — a nested
-//! navigator inside a page the outer navigator has covered — reports
-//! `back_interest() == false` at the source: `frust-widgets` gates it on the
-//! hosting page being in the host navigator's `input_routed_pages()` (rule
-//! **R23**: navigator reach follows input routing, exactly; see
-//! `frust_widgets::NavigatorController::back_interest`). So this module needs no
-//! visibility filter of its own, and there is **no second notion of
-//! reachability** to keep in sync with the widget's — the same reason
-//! `input_routed_pages` is the one derivation behind both input routing and R23
-//! semantics.
+//! Ranking decides who wins *among the claimants*, never who may claim. A
+//! navigator input cannot reach — one nested inside a page the outer navigator
+//! has covered — reports `back_interest() == false` at the source:
+//! `frust-widgets` gates it on the hosting page being in the host navigator's
+//! `input_routed_pages()` (rule **R23**: navigator reach follows input routing,
+//! exactly; see `frust_widgets::NavigatorController::back_interest`). So nothing
+//! here filters on visibility and there is **no second notion of reachability**
+//! to keep in sync with the widget's — load-bearing for innermost-first ranking,
+//! since an off-screen innermost navigator would otherwise outrank the one the
+//! user is actually looking at and swallow every press. Reach says *whether* a
+//! navigator is in the running, rank *which* of those gets it.
 //!
-//! That is load-bearing for `Role::Navigator`'s innermost-first order: without
-//! it, an innermost navigator that had gone off-screen would outrank the
-//! navigator the user is actually looking at and swallow every press (finding
-//! F1). The two rules are complements — reach says *whether* a navigator is in
-//! the running, rank says *which* of the ones in the running gets the press.
+//! # Timing: the live provider closes the stale window
 //!
-//! # Timing: the live provider closes the stale-window
-//!
-//! The wiring runs during a rebuild's *build* pass, **before** the navigator's
-//! `apply_ops` (a later reconciliation step) publishes the new stack depth — so
-//! the polled [`set_handles_back`] flag it writes lags a stack change by one
-//! frame, and if the frame gate skips the settle frame that stale value can
-//! persist. To close that window, the wiring also registers a live provider
-//! ([`set_can_pop_provider`]) reading `controller.back_interest()`, which
-//! `frust_reactive::handles_back` queries in preference to the flag: it reads
-//! the navigator's CURRENT interest at press time (after `apply_ops` published
-//! it), so a back press is always decided against the real state, with no
-//! one-frame lag. The provider is UI-thread-affine (it reads an `Rc`-backed
-//! controller through [`SHARED`]). See `frust_reactive::back`'s module docs for
-//! the source-side contract.
+//! Wiring runs during a rebuild's *build* pass, **before** the navigator's
+//! `apply_ops` publishes the new stack depth, so the polled [`set_handles_back`]
+//! flag lags a stack change by one frame — and a frame gate skipping the settle
+//! frame lets that stale value persist. So the wiring also registers a live
+//! provider ([`set_can_pop_provider`]) reading `controller.back_interest()`,
+//! which `frust_reactive::handles_back` prefers to the flag: it reads CURRENT
+//! interest at press time, after `apply_ops` published it. UI-thread-affine (it
+//! reads an `Rc`-backed controller through [`SHARED`]); `frust_reactive::back`'s
+//! module docs carry the source-side contract.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -169,7 +137,7 @@ thread_local! {
 enum Role {
     /// A root [`overlay_host`](crate::overlay_host). Its overlays are drawn over
     /// every piece of chrome, including any inner navigator, so an open one owns
-    /// the back press outright — the #44 contract.
+    /// the back press outright — R44-back's host-outranks-navigator half.
     Host,
     /// Any other wired navigator: [`navigator`](crate::navigator)'s auto-wiring
     /// or an explicit [`BackHandler`].
@@ -217,15 +185,14 @@ impl Registrant {
     /// `birth` among `Navigator` peers is the innermost one); `Role::Host`
     /// peers keep first-wire order (`birth` ascending), unchanged.
     ///
-    /// G1 (closing finding N1): pre-this-change every rank ordered by
-    /// first-wire (`birth` ascending), which meant an outer navigator at
-    /// depth > 1 — exactly the case where a pushed page hosts a nested
-    /// navigator — permanently outranked the nested navigator inside it, so a
-    /// back press always popped the outer stack (discarding the nested
-    /// navigator's own page) instead of reaching in. `Role::Host` keeps its
-    /// existing order: nothing in this cycle's evidence calls for changing it,
-    /// and the R44/#44 guard only ever required Host to rank above every
-    /// Navigator, never a particular order among multiple hosts.
+    /// Innermost-first is what lets a nested navigator take the press at all:
+    /// ordering every rank by first wire (`birth` ascending) would leave an
+    /// outer navigator at depth > 1 — exactly the case where a pushed page hosts
+    /// a nested navigator — permanently outranking the nested navigator inside
+    /// it, so back would pop the outer stack (discarding the whole page the
+    /// nested navigator lives on) instead of reaching in. `Role::Host` peers
+    /// keep first-wire order: R44-back only ever requires Host to rank above
+    /// every Navigator, never a particular order among multiple hosts.
     fn key(&self) -> (Role, u64) {
         match self.role {
             Role::Host => (self.role, self.birth),
@@ -928,8 +895,8 @@ mod tests {
     }
 
     /// **R44-back**: with a root overlay open, the press goes to the HOST even
-    /// though the inner navigator is poppable and wired *later*. Before
-    /// arbitration the last wire won outright, so this press popped the inner
+    /// though the inner navigator is poppable and wired *later*. Without the
+    /// rank the last wire would win outright and this press would pop the inner
     /// navigator — a page vanishing under an open modal.
     #[test]
     fn a_root_overlay_takes_the_back_press_from_the_inner_navigator() {
@@ -962,7 +929,7 @@ mod tests {
         assert_eq!(
             h.inner.depth(),
             2,
-            "and NOT to the inner navigator (the #44 back bug)"
+            "and NOT to the inner navigator (the root-modal back bug)"
         );
     }
 
@@ -1037,15 +1004,14 @@ mod tests {
     /// (no widget builds them), so the mounted veto never applies and this is
     /// the pure one-cycle path.
     ///
-    /// **G1 correction:** all three controllers here register as plain
-    /// `Role::Navigator` peers — despite the `outer`/`inner`/`nested` names,
-    /// nothing wires one *inside* another, so this test proves only the
-    /// birth tiebreak among equal-rank registrants (now innermost/last-wire
-    /// first), not `Role::Host`-first ranking (that's
-    /// `an_init_registered_backhandler_does_not_outrank_a_later_overlay_host`,
-    /// unchanged by this fix). The order below was previously build-order
-    /// (`outer, inner, nested`) and is now the reverse (last-wired sorts
-    /// first) — deliberately inverted, not a leftover mistake.
+    /// All three controllers here register as plain `Role::Navigator` peers —
+    /// despite the `outer`/`inner`/`nested` names, nothing wires one *inside*
+    /// another — so this test pins only the birth tiebreak among equal-rank
+    /// registrants (innermost/last-wire first), not `Role::Host`-first ranking
+    /// (that is
+    /// `an_init_registered_backhandler_does_not_outrank_a_later_overlay_host`).
+    /// The expected order below is therefore the REVERSE of build order, by
+    /// design.
     #[test]
     fn a_navigator_that_stops_wiring_is_pruned_after_one_full_cycle() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1092,9 +1058,9 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // F1: the two ways the pre-fix "a repeat wire proves a build cycle" premise
-    // broke — a controller wiring TWICE per pass, and a `BackHandler` wiring
-    // from `Component::init` before any view exists.
+    // The two ways a "a repeat wire proves a build cycle" premise breaks — a
+    // controller wiring TWICE per pass, and a `BackHandler` wiring from
+    // `Component::init` before any view exists.
     // -----------------------------------------------------------------------
 
     /// The REAL Huddle shape under a root overlay host: the inner navigator is
@@ -1103,11 +1069,11 @@ mod tests {
     /// automatic `navigator()` wiring right beside it
     /// (`examples/huddle/src/lib.rs` does exactly this pair).
     ///
-    /// Before the fix, the second wire's one-cycle prune read the FIRST wire of
-    /// the same pass as a cycle boundary and dropped the host, which then
-    /// re-appended *after* the inner navigator — permanently inverting
-    /// arbitration and re-creating finding #44 (a back press with a root modal
-    /// open popping the page underneath it).
+    /// Without the mounted veto, the second wire's one-cycle prune reads the
+    /// FIRST wire of the same pass as a cycle boundary and drops the host, which
+    /// then re-appends *after* the inner navigator — permanently inverting
+    /// arbitration and re-creating the root-modal back bug (a press with a root
+    /// modal open popping the page underneath it).
     #[test]
     fn an_overlay_host_survives_an_inner_navigator_wiring_twice_per_pass() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1171,16 +1137,16 @@ mod tests {
         assert_eq!(
             inner.depth(),
             2,
-            "and NOT the page under it (finding #44's back bug)"
+            "and NOT the page under it (the root-modal back bug)"
         );
     }
 
     /// The second ordering break: `BackHandler::new` wires from
     /// `Component::init`, which runs before ANY view is constructed — so a
-    /// first-wire-order rule alone gave the inner navigator position 0 from
-    /// frame 1, and no amount of "track from inside the host's page builder"
-    /// advice could fix a registration that already happened. Rank comes from
-    /// the entry point instead, so the host still sorts first.
+    /// first-wire-order rule alone would give the inner navigator position 0
+    /// from frame 1, and no amount of "track from inside the host's page
+    /// builder" advice could fix a registration that already happened. Rank
+    /// comes from the entry point instead, so the host still sorts first.
     #[test]
     fn an_init_registered_backhandler_does_not_outrank_a_later_overlay_host() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1213,11 +1179,10 @@ mod tests {
     /// unmounted, so the one-cycle rule drops it and releases the controller
     /// clone the registrant holds.
     ///
-    /// **G1 correction:** `nested` genuinely lives inside `outer`'s own page
-    /// here, so it wires after `outer` and — under the new innermost-first
-    /// `Role::Navigator` order — now sorts AHEAD of it; the order below
-    /// flipped from `[outer, nested]` to `[nested, outer]` for that reason,
-    /// this test's own point (mount-liveness pruning) is unaffected.
+    /// `nested` genuinely lives inside `outer`'s own page here, so it wires
+    /// after `outer` and — under innermost-first `Role::Navigator` order — sorts
+    /// AHEAD of it; that ordering is incidental to this test's own point
+    /// (mount-liveness pruning).
     #[test]
     fn a_torn_down_navigator_stops_vetoing_the_prune_and_is_released() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1298,19 +1263,17 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // G1 (closes review finding N1): a nested navigator must receive the
-    // back press.
+    // Innermost-first: a nested navigator must receive the back press.
     // -----------------------------------------------------------------------
 
-    /// **G1**: an outer navigator PUSHES a page that hosts a nested navigator
-    /// (the outer navigator is at depth > 1 — exactly what makes
-    /// `compute_back_interest` true for it too), and the nested navigator's
-    /// own stack is also poppable. A back press must reach the INNERMOST
-    /// (nested) navigator, popping its stack, and must leave the outer
-    /// navigator's depth untouched — the reverse of what plain build-order
-    /// (outermost-first) arbitration gave: before this fix the outer
-    /// navigator, wired first, always claimed the press and popped the whole
-    /// page hosting the nested navigator instead of reaching into it.
+    /// An outer navigator PUSHES a page that hosts a nested navigator (the outer
+    /// navigator is at depth > 1 — exactly what makes `compute_back_interest`
+    /// true for it too), and the nested navigator's own stack is also poppable.
+    /// A back press must reach the INNERMOST (nested) navigator, popping its
+    /// stack, and must leave the outer navigator's depth untouched — the reverse
+    /// of what plain build-order (outermost-first) arbitration gives, where the
+    /// outer navigator, wired first, claims the press and pops the whole page
+    /// hosting the nested navigator instead of reaching into it.
     #[test]
     fn a_nested_navigator_inside_a_pushed_page_gets_the_back_press() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1340,8 +1303,8 @@ mod tests {
         );
 
         // Push a page onto the OUTER navigator that hosts the nested
-        // navigator — outer is now at depth 2, the shape that made #44's
-        // regression reachable.
+        // navigator — outer is now at depth 2, so it claims back interest too:
+        // the shape the ranking has to arbitrate.
         {
             let inner_for_push = inner.clone();
             outer.push(move || {
@@ -1387,8 +1350,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // H1 (closes review finding F1): the converse of G1 — a nested navigator
-    // whose hosting page input can no longer reach must NOT take the press.
+    // R23, the converse of innermost-first: a nested navigator whose hosting
+    // page input can no longer reach must NOT take the press.
     // -----------------------------------------------------------------------
 
     /// An outer navigator whose ROOT page hosts a nested navigator, each
@@ -1437,16 +1400,16 @@ mod tests {
         }
     }
 
-    /// **H1 — the F1 case.** The outer navigator pushes a page OVER the one
-    /// hosting the nested navigator. Input can reach only the outer navigator's
-    /// top page (`input_routed_pages`), so back must follow: the press pops the
-    /// OUTER stack, and the nested (invisible) stack is untouched.
+    /// The outer navigator pushes a page OVER the one hosting the nested
+    /// navigator. Input can reach only the outer navigator's top page
+    /// (`input_routed_pages`), so back must follow: the press pops the OUTER
+    /// stack, and the nested (invisible) stack is untouched.
     ///
-    /// Before this fix `route_back` was a bare `find(|r| interest())` over a
-    /// list sorted innermost-first, and the covered page keeps reconciling (the
-    /// default) or stays `is_mounted()` (under the cull) either way — so the
-    /// nested navigator claimed the press, popped a stack nobody could see, and
-    /// the back button appeared to do nothing.
+    /// Without the R23 reach gate at the source, `route_back`'s
+    /// innermost-first `find(|r| interest())` would hand the press to the nested
+    /// navigator — the covered page keeps reconciling (the default) or stays
+    /// `is_mounted()` (under the cull) either way — popping a stack nobody can
+    /// see while the back button appears to do nothing.
     ///
     /// Run under BOTH `cull_covered_builds` settings: they are exactly the two
     /// ways the covered page's builder does or does not keep running, and the
@@ -1461,7 +1424,7 @@ mod tests {
             let mut h = NestedHarness::new(cull);
 
             // The nested stack is poppable while its page is still current —
-            // the G1 case, which must keep working (asserted below too).
+            // the innermost-first case, which must keep working (below too).
             h.nested.push(page);
             h.rebuild();
             assert_eq!((h.outer.depth(), h.nested.depth()), (1, 2));
@@ -1502,7 +1465,7 @@ mod tests {
             );
 
             // Revealed again, the nested navigator takes the next press — the
-            // G1 behaviour, unregressed, in the same harness.
+            // innermost-first behaviour, unregressed, in the same harness.
             push_back_press();
             h.rebuild();
             assert_eq!(

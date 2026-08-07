@@ -1,4 +1,4 @@
-//! Real-device gate (TUI2-04) for the streaming device pipeline
+//! Real-device gate for the streaming device pipeline
 //! [`android_run::spawn_session`] — the exact code path the `frust-tui`
 //! supervisor's `start_device` drives, exercised end-to-end against a real
 //! attached Android device.

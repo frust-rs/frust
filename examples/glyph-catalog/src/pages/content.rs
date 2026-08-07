@@ -7,7 +7,7 @@
 //! Every demo below is purely local interactivity (which row was last
 //! pressed, which accordion panel is open, the term block's replay epoch) —
 //! nothing this page needs lives in [`CatalogState`], so rather than grow the
-//! shared state (out of this task's scope — see `pages/mod.rs`'s page-fn
+//! shared state (out of scope for this page — see `pages/mod.rs`'s page-fn
 //! contract), the page hosts one nested [`frust::component`] owning its own
 //! retained [`ContentDemoState`], per `docs/CODE_STANDARDS.md`'s "local state
 //! lives in the retained `Component` element" rule.
@@ -26,8 +26,8 @@ use crate::CatalogState;
 /// Section-heading accent color (mirrors the shell header's amber title in
 /// `crate::header_row`).
 /// Live-theme accent-text role (`primary`) (falls back to the Glyph baseline pre-context, mirroring
-/// `navigation.rs`'s `accent()` — round-0 review: hardcoded dark-only hexes
-/// broke AA under the Light toggle).
+/// `navigation.rs`'s `accent()` — hardcoded dark-only hexes broke AA under
+/// the Light toggle).
 fn section_accent() -> Color {
     use_context::<Theme>()
         .unwrap_or_else(Theme::glyph_baseline)

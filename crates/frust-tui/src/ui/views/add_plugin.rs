@@ -1,12 +1,12 @@
-//! The Add Plugin dialog modal (`frust-secure-storage` PLAN Phase 7): a
-//! shadowed, centered popup over the welcome/workbench base layer, stepping
-//! select-plugin → toggle-features → an off-thread apply → a per-edit report
+//! The Add Plugin dialog modal: a shadowed, centered popup over the
+//! welcome/workbench base layer, stepping select-plugin → toggle-features →
+//! an off-thread apply → a per-edit report
 //! (or an error). The base layer is rendered with a *suppressed* `MouseCtx`
 //! (see `crate::ui::render`), so only this modal's regions are live while it is
-//! open — the D4 base-layer suppression, plus the binding `[Esc] Close` title
+//! open — the base-layer suppression, plus the binding `[Esc] Close` title
 //! affordance.
 //!
-//! Layering (D2): renders `&AddPluginDialog` and only *registers* interaction;
+//! Layering: renders `&AddPluginDialog` and only *registers* interaction;
 //! it never mutates the engine. Cloned in shape from `views::create_wizard`.
 
 use frust_drive::plugin::AddOutcome;
@@ -26,8 +26,7 @@ use crate::ui::theme::Theme;
 /// Modal width (columns) — matches the create wizard's `MODAL_WIDTH`.
 const MODAL_WIDTH: u16 = 64;
 
-/// The `[Esc] Close` title affordance text (a binding for new modals — see the
-/// design workbook Part B).
+/// The `[Esc] Close` title affordance text (a binding for new modals).
 const CLOSE_LABEL: &str = " [Esc] Close ";
 
 /// Render the Add Plugin dialog centered over `area`, registering its

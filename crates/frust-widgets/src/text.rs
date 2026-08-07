@@ -509,7 +509,7 @@ mod tests {
         assert_eq!(stats.line_breaks, 1, "the width change re-breaks once");
     }
 
-    // --- Paragraph alignment (FINDINGS #39), end-to-end through the widget ---
+    // --- Paragraph alignment, end-to-end through the widget ---
 
     /// Builds, lays out, and paints `view` at `bc`, returning the painted
     /// glyph runs (unlike [`painted_color`], which discards everything but
@@ -588,7 +588,7 @@ mod tests {
         );
     }
 
-    // --- Theme-swap regression (review F1) ---
+    // --- Theme-swap regression ---
     //
     // `effective_style` (above) resolves the themed color at LAYOUT time and
     // bakes it into the cached `TextLayout`'s glyph brush; `paint` only replays

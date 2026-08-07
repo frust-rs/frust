@@ -1,4 +1,4 @@
-//! Reactive-programming substrate for Frust (phase 5.5).
+//! Reactive-programming substrate for Frust.
 //!
 //! This crate owns the process-wide [`ReactiveRuntime`]: a background tokio
 //! runtime, a custom [`any_spawner`] executor that routes `spawn` to that

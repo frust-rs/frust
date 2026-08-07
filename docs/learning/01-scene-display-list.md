@@ -10,21 +10,29 @@ contract everything else plugs into. It is ~4 small files.
 
 | Thing | File | Anchor |
 |---|---|---|
-| `Scene` — `Vec<Command>` + a reusable `transform_stack: Vec<Affine>` | `crates/frust-scene/src/scene.rs` | ≈125–135 |
-| `Command` enum — **all 11 variants** | `crates/frust-scene/src/scene.rs` | ≈32–118 |
+| `Scene` — `Vec<Command>` + a reusable `transform_stack: Vec<Affine>` | `crates/frust-scene/src/scene.rs` | ≈179–188 |
+| `Command` enum — **all 14 variants** | `crates/frust-scene/src/scene.rs` | ≈33–171 |
 | `SceneBuilder` — thin `&mut Scene` wrapper, all record methods | `crates/frust-scene/src/builder.rs` | ≈14–184 |
 | `GlyphRun` / `Glyph` / `FontHandle` | `crates/frust-scene/src/glyph.rs` | ≈16–60 |
 | `PaintScene` trait (what widgets see) | `crates/frust-core/src/widget.rs` | ≈40–193 |
 | `impl PaintScene for SceneBuilder` (the bridge) | `crates/frust-core/src/widget.rs` | ≈203–277 |
 
-The 11 `Command` variants, verbatim:
+The 14 `Command` variants, verbatim:
 
 `FillRect{rect, brush, transform}` · `RoundedRect{rect, radius, brush, transform}` ·
 `Line{p0, p1, width, brush, transform}` · `GlyphRun(GlyphRun)` ·
-`PushClip{rect, transform}` · `PopClip` · `Image{data, dest, transform}` ·
+`PushClip{rect, transform}` ·
+`PushClipRounded{rect, radius, transform}` — a rounded-corner clip popped by
+the same `PopClip` (an avatar/thumbnail mask; no separate rounded clip stack) ·
+`PopClip` · `Image{data, dest, transform}` ·
 `BlurredRoundedRect{rect, radius, std_dev, color, transform}` ·
 `PushLayer{rect, alpha, transform}` · `PopLayer` ·
-`Path{path, style, brush, transform}`
+`ClearRect{rect, transform}` — clears to full transparency, erasing everything
+beneath it in the scene (the platform-view hole-punch's sole v1 producer) ·
+`Path{path, style, brush, transform}` ·
+`ShaderQuad{program, dest, transform, time}` — a fragment-shader-filled rect
+(the shader-showcase pre-pass; falls back to a placeholder fill when
+`FRUST_NO_SHADER_EFFECTS` is set)
 
 That's the entire drawing vocabulary of the framework. Every button, every
 page transition, every emoji ends up as a sequence of these.
@@ -38,7 +46,7 @@ page transition, every emoji ends up as a sequence of these.
    pushes. By the time a `Command` exists, the stack is irrelevant to it.
    Read `fill_rect` (`builder.rs` ≈60–67) — it's 8 lines.
 2. **The `Scene` is an arena reused across frames.** `SceneBuilder::new`
-   resets the stack; the shell calls `Scene::reset()` (`scene.rs` ≈144) each
+   resets the stack; the shell calls `Scene::reset()` (`scene.rs` ≈197) each
    frame so the `Vec` allocations survive. Nothing is retained frame-to-frame
    at this layer — it's an immediate-mode log over a retained widget tree.
 

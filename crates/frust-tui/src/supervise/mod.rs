@@ -1,4 +1,4 @@
-//! Async session supervision (PLAN D2/D3).
+//! Async session supervision.
 //!
 //! The layer between the TEA engine and `frust-drive`'s pipelines: it wraps
 //! the drive's cancellable `spawn_streaming` seam, bridges each session's

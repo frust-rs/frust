@@ -928,9 +928,9 @@ mod tests {
 
     #[test]
     fn resolved_translucency_handoff_survives_a_fake_install_sequence() {
-        // The Arc<AtomicBool> handoff the render-thread split runs on (review
-        // finding M1), driven with FAKE installs so it is host-testable (the
-        // real `install_surface` needs a GPU and a `CAMetalLayer`).
+        // The Arc<AtomicBool> handoff the render-thread split runs on, driven
+        // with FAKE installs so it is host-testable (the real
+        // `install_surface` needs a GPU and a `CAMetalLayer`).
         //
         // Seeded from the REQUEST: the app asked for translucency, so frame 1
         // renders Mode B optimistically rather than flashing opaque while the

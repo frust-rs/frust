@@ -1,4 +1,4 @@
-//! Right-click context menus (T04 / PLAN D4): a small positioned popup whose
+//! Right-click context menus: a small positioned popup whose
 //! entries are built from the [`ContextTarget`] the click landed on.
 //!
 //! Like the command palette ([`super::palette`]), the menu is a *launcher*, not

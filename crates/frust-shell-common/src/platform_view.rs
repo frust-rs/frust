@@ -1,17 +1,16 @@
 //! Platform-agnostic native-sibling compositor logic: turns the raw,
-//! per-paint-pass [`PlatformViewFrame`] collection (`frust-core`) into
-//! an idempotent, generation-stamped command list — [`ViewCommand`] — both
-//! mobile shells' FFI peek getters serve to their platform side.
+//! per-paint-pass [`PlatformViewFrame`] collection (`frust-core`) into an
+//! idempotent, generation-stamped command list — [`ViewCommand`] — both mobile
+//! shells' FFI peek getters serve to their platform side
+//! (`docs/SHELLS_ARCHITECTURE.md`'s platform-view embedding flow).
 //!
-//! # Why this lives in `frust-shell-common`
-//!
-//! This is pure diffing logic with no FFI, no JSON, and no platform types — the
-//! same "platform-agnostic brain, shell-owned wire format" split this crate
-//! already draws elsewhere (`frame_gate`'s skip decision, `resample`'s pointer
-//! interpolation). JSON encoding of a [`ViewCommand`] batch stays hand-rolled in
-//! each shell's own FFI glue (`docs/CODE_STANDARDS.md`'s "hand-roll JSON at the
-//! mobile FFI boundary" rule) — this module never touches `serde` or any string
-//! wire format, only the typed command vocabulary.
+//! Pure diffing logic with no FFI, no JSON, and no platform types — the same
+//! "platform-agnostic brain, shell-owned wire format" split this crate draws
+//! elsewhere (`frame_gate`'s skip decision, `resample`'s pointer
+//! interpolation). JSON encoding of a [`ViewCommand`] batch stays hand-rolled
+//! in each shell's own FFI glue (`docs/CODE_STANDARDS.md`'s "hand-roll JSON at
+//! the mobile FFI boundary" rule); this module owns only the typed command
+//! vocabulary, never `serde` or any wire format.
 //!
 //! # The `frust-core` → differ contract
 //!
@@ -19,30 +18,27 @@
 //! `Vec<PlatformViewFrame>` every paint pass and stays deliberately dumb: a
 //! slot absent from one pass's frames might be culled-but-still-alive,
 //! momentarily not repainting, or genuinely torn down — core has no teardown
-//! hook to tell those apart. [`PlatformViewState`] is where
-//! that ambiguity gets resolved, by watching how long a slot stays missing
-//! (see `missing_streak` below).
+//! hook to tell those apart. [`PlatformViewState`] resolves that ambiguity by
+//! watching how long a slot stays missing (`missing_streak`).
 //!
 //! # Command semantics
 //!
 //! - **New `slot_id`** ⇒ [`ViewCommand::Create`] then [`ViewCommand::Update`]
 //!   in the same ingest batch, in that order — the native side never sees an
 //!   `Update` for a view it hasn't been told to create yet.
-//! - **Rect/clip/visible change past [`EPSILON_PX`]** ⇒ `Update`; a change
-//!   smaller than that (or no change at all) emits nothing — a no-op poll is
-//!   free, so a shell can call [`PlatformViewState::commands`] every frame
-//!   with no cost when nothing moved.
+//! - **Rect/clip/visible change past [`EPSILON_PX`]** ⇒ `Update`; a smaller
+//!   change (or none at all) emits nothing, so a shell can call
+//!   [`PlatformViewState::commands`] every frame for free when nothing moved.
 //! - **`params_json` change** (detected via `params_generation`, bumped by the
-//!   widget whenever it edits `params_json`) ⇒
-//!   [`ViewCommand::UpdateParams`], independent of the rect/clip/visible
-//!   comparison above.
+//!   widget whenever it edits `params_json`) ⇒ [`ViewCommand::UpdateParams`],
+//!   independent of the rect/clip/visible comparison above.
 //! - **`view_type` change** on a live slot ⇒ [`ViewCommand::Dispose`] followed
 //!   by a fresh `Create` + `Update`, **in the same ingest**. A different
 //!   `view_type` is a different native factory, so the old view cannot be
 //!   re-parameterized into the new one; emitting only a `Create` would be
-//!   ignored by a host that already has a view for that slot id, and waiting
-//!   out the [`DISPOSE_AFTER_MISSING_FRAMES`] streak would never happen at all
-//!   (the slot is still present every pass). See the D-4 note in
+//!   ignored by a host that already has a view for that slot id, and the
+//!   [`DISPOSE_AFTER_MISSING_FRAMES`] streak would never fire at all (the slot
+//!   is still present every pass). See the view-type-swap arm in
 //!   [`PlatformViewState::ingest`].
 //! - **Missing for [`HIDE_AFTER_MISSING_FRAMES`] consecutive ingests** (while
 //!   the slot was last visible) ⇒ `Update { visible: false }` — a Hide. Only
@@ -51,10 +47,10 @@
 //! - **Missing for [`DISPOSE_AFTER_MISSING_FRAMES`] consecutive ingests** ⇒
 //!   [`ViewCommand::Dispose`], and the slot is forgotten — a later
 //!   reappearance of the same `slot_id` is indistinguishable from a brand-new
-//!   one and gets a fresh `Create` (idempotent either way — see module docs'
-//!   Widget teardown tradeoff below). [`PlatformViewState::retire`] is the
+//!   one and gets a fresh `Create`. [`PlatformViewState::retire`] is the
 //!   second, explicit path to the same outcome — the one a real widget
-//!   teardown takes, immediately — and both are kept deliberately.
+//!   teardown takes, immediately — and both are kept deliberately (Widget
+//!   teardown detection, below).
 //! - **Revive after Hide** (slot reappears in `ingest`'s frames before the
 //!   dispose threshold): since the slot is still tracked, this is just an
 //!   ordinary `Update` — `visible` flips back to `true` like any other
@@ -77,30 +73,25 @@
 //! A **non-interactive** slot always ships an empty list: shields only mean
 //! anything to a host that is forwarding touches to the native view in the
 //! first place, so carrying them would be noise the host must ignore. The
-//! resulting [`ViewCommand::Update`] shape is unchanged either way — the wire
-//! format the two embeddings already parse never moved.
+//! resulting [`ViewCommand::Update`] shape is the same either way.
 //!
 //! Comparison is epsilon-based, like `rect`/`clip` (and order-sensitive: the
 //! collection order is paint order, which is deterministic for an unchanged
 //! tree), so a shield drifting sub-pixel with its chrome emits nothing.
 //!
-//! # Widget teardown detection tradeoff
+//! # Widget teardown detection
 //!
-//! `frust-core`'s per-pass frame channel is deliberately dumb, so
-//! [`PlatformViewState`] cannot tell from `ingest` alone whether a missing
-//! slot's widget was dropped from the tree or merely culled/transiently not
-//! repainting. [`DISPOSE_AFTER_MISSING_FRAMES`] is a heuristic streak
-//! threshold covering that gap.
-//!
-//! It is now the **backstop**, not the primary path: a torn-down
-//! `platform_view` widget reports its slot id to `frust-core`'s pending-retire
-//! list (`RenderRoot::take_retired_platform_views`), which each shell drains
-//! after its rebuild and feeds to [`PlatformViewState::retire`] — an immediate
-//! `Dispose`, no streak. Both paths converge on the same command and the same
-//! "next Create is fresh" semantics, and the streak still covers the cases the
-//! teardown hook cannot see (a widget dropped without `View::teardown`
-//! running). A merely culled slot reports no retire, so it correctly keeps
-//! living behind the streak.
+//! Two paths converge on the same `Dispose`. A torn-down `platform_view`
+//! widget reports its slot id to `frust-core`'s pending-retire list
+//! (`RenderRoot::take_retired_platform_views`), which each shell drains after
+//! its rebuild and feeds to [`PlatformViewState::retire`] — an immediate
+//! `Dispose`, no streak. [`DISPOSE_AFTER_MISSING_FRAMES`] is the **backstop**
+//! for what that hook cannot see (a widget dropped without `View::teardown`
+//! running): a heuristic streak, since `ingest` alone cannot tell a dropped
+//! widget from a culled or transiently-not-repainting one. Both paths give the
+//! same command and the same "next `Create` is fresh" semantics, and a merely
+//! culled slot reports no retire, so it correctly keeps living behind the
+//! streak.
 //!
 //! # Generation / acknowledgement / compaction
 //!
@@ -124,12 +115,11 @@
 //!
 //! The backlog only shrinks on [`acknowledge`](PlatformViewState::acknowledge),
 //! so a native side that stops acking (a wedged host, a lost view hierarchy)
-//! would otherwise grow it for the process lifetime — and a camera preview is
-//! the first genuinely long-lived slot, so "the app exits before it matters" is
-//! no longer an answer. Past [`MAX_PENDING_COMMANDS`] entries the backlog is
-//! **compacted into its own net effect**: one `Dispose` per slot the dropped
-//! entries tore down, then a full `Create` + `Update` replay of every live slot
-//! — exactly the surface-recreate replay
+//! would otherwise grow it for the process lifetime — reachable, since a camera
+//! preview is a genuinely long-lived slot. Past [`MAX_PENDING_COMMANDS`]
+//! entries the backlog is **compacted into its own net effect**: one `Dispose`
+//! per slot the dropped entries tore down, then a full `Create` + `Update`
+//! replay of every live slot — exactly the surface-recreate replay
 //! ([`reset_for_surface_recreate`](PlatformViewState::reset_for_surface_recreate)),
 //! which is already the established "the native side must rebuild from this
 //! alone" batch. Every dropped intermediate is a state transition the replay
@@ -150,12 +140,11 @@
 //!
 //! # Skip-safety
 //!
-//! A gate-skipped frame (`docs/ARCHITECTURE.md`'s Frame gate) calls nothing —
-//! a shell simply never calls [`PlatformViewState::ingest`] on a `Skip`
-//! decision, so no rect can appear to "move" during a skip (paint doesn't run,
-//! so `PaintCtx::visible_rect`/scroll state can't have changed either) —
-//! nothing in this module special-cases a skip; the contract is entirely
-//! "don't call ingest".
+//! Nothing here special-cases a gate-skipped frame
+//! (`docs/SHELLS_ARCHITECTURE.md`'s `frame_gate` module); the contract is
+//! entirely "don't call [`ingest`](PlatformViewState::ingest) on a `Skip`".
+//! Paint doesn't run on a skip, so no rect can appear to "move" either
+//! (`PaintCtx::visible_rect`/scroll state can't have changed).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -176,7 +165,7 @@ pub const HIDE_AFTER_MISSING_FRAMES: u32 = 2;
 
 /// Consecutive `ingest` calls a slot may be absent from `frames` before it is
 /// Disposed outright. A heuristic streak, not a real teardown signal — see
-/// the module docs' Widget teardown detection tradeoff.
+/// the module docs' Widget teardown detection.
 pub const DISPOSE_AFTER_MISSING_FRAMES: u32 = 30;
 
 /// Upper bound on the not-yet-acknowledged command backlog before it is
@@ -248,7 +237,7 @@ pub enum ViewCommand {
     },
     /// Tear down a slot's native view entirely. A `slot_id` reused after this
     /// (the same numeric id reappearing in a later `ingest`) is treated as
-    /// brand-new — see the module docs' Widget teardown detection tradeoff.
+    /// brand-new — see the module docs' Widget teardown detection.
     Dispose {
         /// Which slot to tear down.
         slot_id: u64,
@@ -277,8 +266,8 @@ struct SlotEntry {
 ///
 /// `live` is a [`BTreeMap`] (keyed by `slot_id`), not a `HashMap` — iteration
 /// order must be deterministic (ascending `slot_id`) for the "same ingest
-/// sequence ⇒ identical command stream" golden-test guarantee (acceptance
-/// criterion 3); a frame's own `Create`+`Update` ordering is separately
+/// sequence ⇒ identical command stream" golden-test guarantee; a frame's own
+/// `Create`+`Update` ordering is separately
 /// guaranteed by iterating `frames` itself in the caller's given order.
 #[derive(Debug, Default)]
 pub struct PlatformViewState {
@@ -330,7 +319,7 @@ impl PlatformViewState {
             // Z-shields): its own manual rects plus the auto-collected ones
             // overlapping it, or nothing at all when it isn't interactive.
             let shields = resolve_shields(frame, input_shields);
-            // D-4: the slot's `view_type` changed under a live id. A different
+            // The slot's `view_type` changed under a live id. A different
             // `view_type` resolves to a different native factory, so the old
             // view must be torn down and a new one built — in THIS batch. Drop
             // the tracked entry first, so the `None` arm below emits the fresh
@@ -470,7 +459,7 @@ impl PlatformViewState {
 
     /// Explicit retire: dispose `slot_id` right now regardless of its missing
     /// streak, for a shell with a real teardown signal (see the module docs'
-    /// Widget teardown detection tradeoff). A no-op (returns `false`) if
+    /// Widget teardown detection). A no-op (returns `false`) if
     /// `slot_id` isn't currently live (already disposed, or never created).
     pub fn retire(&mut self, slot_id: u64) -> bool {
         if self.live.remove(&slot_id).is_some() {
@@ -594,7 +583,7 @@ impl PlatformViewState {
     /// The `Dispose`s must survive: a slot created *before* the un-acked window
     /// and disposed inside it is a native view the host already built and would
     /// otherwise never be told to tear down — a leak. A slot that was disposed
-    /// **and** is live again (a `slot_id` reuse, or the D-4 `view_type` swap)
+    /// **and** is live again (a `slot_id` reuse, or a `view_type` swap)
     /// keeps its `Dispose` too, and the replay's `Create` rebuilds it from the
     /// current `view_type`/params — the only ordering that survives a factory
     /// change.
@@ -1241,7 +1230,7 @@ mod tests {
         assert!(!state.retire(999));
     }
 
-    // ---- D-4: view_type swap ------------------------------------------------
+    // ---- view_type swap -----------------------------------------------------
 
     #[test]
     fn view_type_swap_disposes_and_recreates_in_the_same_ingest() {
@@ -1314,7 +1303,7 @@ mod tests {
         );
     }
 
-    // ---- D-8: backlog cap ---------------------------------------------------
+    // ---- backlog cap --------------------------------------------------------
 
     /// Drive `ingest` until the backlog cap trips (detected as the first poll
     /// where the backlog got *shorter*), never acknowledging. Returns the
@@ -1666,7 +1655,7 @@ mod tests {
         assert_eq!(last_update_shields(&state), vec![over]);
     }
 
-    // ---- Prompt teardown retire -----------------------
+    // ---- Widget teardown retire -------------------------
 
     #[test]
     fn a_retired_slot_disposes_immediately_and_the_next_ingest_is_quiet() {
@@ -1690,7 +1679,7 @@ mod tests {
 
     #[test]
     fn a_merely_culled_slot_is_never_disposed_by_the_retire_path() {
-        // The keep-alive contract (camera A6): a scrolled-offscreen slot runs no
+        // The keep-alive contract: a scrolled-offscreen slot runs no
         // teardown, so no retire arrives; it is Hidden by the streak and stays
         // live well past the point a retire would have disposed it.
         let mut state = PlatformViewState::new();

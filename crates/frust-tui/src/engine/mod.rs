@@ -2,7 +2,7 @@
 //! transition ([`update`]), and the [`Engine`] that owns the model plus the
 //! unified message channel background tasks feed.
 //!
-//! Layering (D2): this module never touches the terminal, ratatui, or any
+//! Layering: this module never touches the terminal, ratatui, or any
 //! render type — it is the testable core. `crate::ui` renders `&AppState` and
 //! emits `Message`s but never mutates the model; `crate::runner` owns the
 //! terminal lifecycle and drives the loop.
@@ -54,7 +54,7 @@ pub use update::{Effect, Outcome, update};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// Owns the model and the single mpsc channel every asynchronous producer
-/// (Phase 2 session supervisors, preflight tasks) sends into.
+/// (session supervisors, preflight tasks) sends into.
 ///
 /// The channel is unbounded and cloneable: [`Engine::sender`] hands a producer
 /// a `Sender`, and the event loop drains the matching receiver

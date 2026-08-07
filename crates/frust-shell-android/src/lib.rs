@@ -338,7 +338,7 @@ macro_rules! android_app {
         /// JNI `nativeAppIsDark`: the read half of the appearance seam —
         /// return whether the APP's currently active theme is dark right now,
         /// for Kotlin to drive `updateSystemBarsAppearance` from instead of
-        /// re-reading `Configuration.uiMode` directly (FINDINGS #43: the
+        /// re-reading `Configuration.uiMode` directly (the
         /// device and the app can legitimately disagree once an app-forced
         /// `frust::set_app_theme` override or a design system's seeded
         /// default is in play). Additive: older generated Kotlin that never

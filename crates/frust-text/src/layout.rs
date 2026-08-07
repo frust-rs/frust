@@ -20,7 +20,7 @@ pub struct TextLayout {
     size: Size,
     /// Memoized origin-independent glyph runs, built lazily on the first
     /// [`to_scene_runs`](Self::to_scene_runs) call and reused across every
-    /// later call while this layout is retained (phase 10.B, req 4). The only
+    /// later call while this layout is retained. The only
     /// origin-dependent field of a [`GlyphRun`] is its `transform`, so a paint
     /// at any origin clones these base runs and re-translates rather than
     /// re-walking the parley layout (font matching / `positioned_glyphs`) every

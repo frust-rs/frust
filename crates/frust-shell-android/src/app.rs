@@ -345,7 +345,7 @@ pub struct AndroidAppHandle {
     frame_timeline_delta_nanos: u64,
     /// Whether this handle's GPU surface **actually came up** translucent
     /// (alpha-channel, Mode B) — the RESOLVED capability, not the
-    /// [`SurfaceModeWatcher`] request latch (review finding M1).
+    /// [`SurfaceModeWatcher`] request latch.
     ///
     /// The latch says what the app *asked* for; `frust-render` resolves that
     /// against the platform's advertised alpha modes and can silently fall
@@ -953,7 +953,7 @@ mod tests {
 
     // --- the app-facing brightness getter (`nativeAppIsDark`) ----------------
     //
-    // FINDINGS #43's bug half: the Kotlin status-bar icon contrast must follow
+    // The bug this closes: the Kotlin status-bar icon contrast must follow
     // the APP's theme, not the device's `Configuration.uiMode`. These pin
     // `app_is_dark` — the pure decision `AndroidAppHandle::is_dark_theme`
     // (`nativeAppIsDark`) wraps — against the exact scenario that regresses
@@ -963,7 +963,7 @@ mod tests {
     fn app_is_dark_tracks_an_active_override_against_a_disagreeing_device() {
         // The device reports light (`isDarkMode == false` in Kotlin terms) but
         // the app forced a dark theme via `frust::set_app_theme` — the exact
-        // "permanently-dark app on a light-mode device" case FINDINGS #43
+        // "permanently-dark app on a light-mode device" case
         // observed on-device. `app_is_dark` must report the APP's theme (dark),
         // not the device's (light) — the whole point of this seam existing.
         let device_reports_light = Brightness::Light;

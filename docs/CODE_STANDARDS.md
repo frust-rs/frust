@@ -554,3 +554,37 @@ Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantic
 - **Template rendering uses `minijinja::UndefinedBehavior::Strict`**: an unresolved `{{
   placeholder }}` is a hard render-time error, catching template/context drift in tests
   instead of a generated project.
+
+## Comment Conventions
+
+- **A comment documents the code as it is — its contract, its rationale — never the
+  development process that produced it.** Banned in comments: plan/phase references
+  (`Phase 9.B step 1`, `(phase 5.5)`), plan-task references (`task-12`), workflow findings
+  ledger numbers (`FINDINGS #43`), review-round/fix-round references (`re-review round 1`,
+  `cfix-2`), plan requirement numbers (`req 4`), and internal PR numbers. Git history and the
+  private workflow ledger own that process context; a ledger number in a comment is a
+  dangling reference for every reader without that private repo.
+- **Sanctioned citations** stay fine: `docs/LIMITATIONS.md` stable ids (e.g.
+  `` `cam-blit-opaque` ``) — the register's documented purpose; named semantic rules (`R23`,
+  `R44-back`) — they name behavior, not a ledger entry; pointers to doc sections; and commit
+  SHAs/version pins of *external* repos (e.g. clean-signals' `910f626`).
+- **Substance over ledger number.** When the process context carried real meaning, keep the
+  substance and drop the number: `// re-created finding #44` becomes `// re-created the
+  root-modal double-claim bug`. If a `docs/LIMITATIONS.md` entry covers it, cite its stable id
+  instead.
+- **Domain vocabulary is not residue.** A render lifecycle's encode/present phases, an
+  animation/oscillator's phase, a device name in a benchmark note, and a doc comment
+  referring to its own numbered steps are all legitimate — the ban targets
+  development-process phases/rounds, not the word itself.
+- **Header budget scales with the module.** A simple module gets a 1–3 line header; a complex
+  module documents contract + rationale only — history lives in git, and content a unit spoke
+  doc already owns gets one pointer there, not a restatement. Inline comments state
+  constraints the code can't show on its own (a `# Safety` contract, a magic-number source).
+- **Mechanically checked.** `crates/frust/tests/comment_residue_conformance.rs` catches
+  plan-phase (dotted `9.B`, parenthesized, hyphenated `Phase-N`, "the Phase N"), plan-task
+  (`task-NN`), findings-ledger numbers, review-round (`re-review`, `cfix-N`, gated `round-N`),
+  plan-document (`PLAN <tag>`, `workflow/plans/`), phase-adjacent `req N`, and `review finding
+  <id>` refs — sanctioned citations (LIMITATIONS ids, R-rules, external rev pins) exempt only
+  their match span, not the line. Bare internal PR numbers (vs. upstream wgpu's `#7057`) and
+  bare plan tags (`T04`/`D6a` vs. `M3`/`R8`) stay human-reviewed — still banned, swept on sight
+  when review finds them.

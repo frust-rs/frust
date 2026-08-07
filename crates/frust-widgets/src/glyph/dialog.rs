@@ -1,127 +1,100 @@
-//! Glyph modal dialog: a scrim + centered
-//! surface panel confirmation dialog — the Glyph recipe over the existing
-//! navigator transparent-push modal plumbing.
+//! Glyph modal dialog: a scrim + centered surface panel confirmation dialog —
+//! the Glyph recipe over the existing navigator transparent-push modal plumbing.
 //!
 //! # Navigator-modal architecture (reuse, don't fork)
 //!
-//! Like [`crate::material::dialog`], a `GlyphDialog` is designed to be pushed
-//! as a **transparent navigator page** via
-//! [`NavigatorController::push_with_options`] (with a custom
-//! [`BackPolicy`](crate::nav::navigator::BackPolicy) and dismiss signal — see
-//! the `dismissable(bool)` + back-dismiss section below) — the page below
-//! stays visible under the scrim, and the navigator's existing modal contract
-//! (input routed only to the top page, pointer capture / focus / IME threaded
-//! through the page pod) is what makes it modal. [`show_glyph_dialog`] wraps
-//! the push and wires dismissal to `controller.pop()`. This module edits **no**
-//! nav file: it consumes `push_with_options`/`pop` read-only.
+//! A `GlyphDialog` is pushed as a **transparent navigator page** via
+//! [`NavigatorController::push_with_options`], with a
+//! [`BackPolicy`](crate::nav::navigator::BackPolicy) and dismiss signal (below):
+//! the page below stays visible under the scrim, and the navigator's modal
+//! contract — input routed only to the top page, pointer capture / focus / IME
+//! threaded through the page pod — is what makes it modal. [`show_glyph_dialog`]
+//! wraps the push, wiring dismissal to `controller.pop()`; nav is consumed
+//! read-only. Enforcing "at most one dialog/overlay at a time" stays the app's
+//! (or the navigator's) concern — a second transparent page just stacks.
 //!
 //! # Enter/exit staging (widget-internal, not a navigator transition)
 //!
-//! Unlike the material dialog — which rides a whole-page
-//! [`PageTransition::M3FadeThrough`] — the Glyph dialog drives its **own**
-//! enter/exit animation from `PaintCtx::frame_time`, because the two moving
-//! parts stage *independently*: the **panel** scales `0.94 → 1.0` over the
-//! spatial `enter` duration (220ms) while the **scrim** cross-fades on its own
-//! clamped progress. A single navigator [`Layer`](crate::nav::transition::Layer)
-//! (one alpha + one scale over the whole page) cannot express "panel scales but
-//! scrim only fades", so the staging lives here (the toast precedent —
-//! `crate::glyph::toast` — drives its own timeline the same way). The dialog is
-//! therefore pushed with [`TransitionSpec::NONE`] (the navigator gives the modal
-//! contract; the widget gives the motion).
+//! The dialog drives its **own** enter/exit animation from
+//! `PaintCtx::frame_time` because its two moving parts stage *independently*:
+//! the **panel** scales `0.94 → 1.0` over the spatial `enter` duration (220ms)
+//! while the **scrim** cross-fades on its own clamped progress. One navigator
+//! [`Layer`](crate::nav::transition::Layer) (a single alpha + scale over the
+//! whole page) cannot express that, so the staging lives here and the dialog is
+//! pushed with [`TransitionSpec::NONE`] — navigator gives the modal contract,
+//! widget gives the motion.
 //!
 //! Exit reverses over the faster `exit` duration (150ms) — "exits always faster
-//! than entrances" (the Glyph design system's rule). A dismiss gesture does **not** pop
-//! immediately: it flips the widget into its exit phase, and only when the exit
-//! animation completes is the app-supplied close callback ([`on_close`] /
-//! [`show_glyph_dialog`]'s auto-wired `controller.pop()`) fired — from paint,
+//! than entrances" (the Glyph design system's rule). A dismiss gesture does
+//! **not** pop immediately: it flips the widget into its exit phase, and only on
+//! completion is the app-supplied close callback
+//! ([`on_close`](GlyphDialogView::on_close) / [`show_glyph_dialog`]'s auto-wired
+//! `controller.pop()`) fired from [`GlyphDialogWidget::advance`] — during paint,
 //! which is sound because `NavigatorController::pop` merely enqueues an op
-//! applied on the next rebuild (see [`GlyphDialogWidget::advance`]).
+//! applied on the next rebuild.
 //!
-//! [`on_close`]: GlyphDialogView::on_close
+//! # Actions, and the dismiss callback is state-free
 //!
-//! # The dismiss callback is state-free (a deliberate divergence)
+//! Action buttons are app-provided [`AnyView`]s ([`crate::ButtonStyle`]: a ghost
+//! cancel + a danger/primary confirm) that pop the navigator **directly** on tap
+//! (e.g. `controller.pop_with_result(PopResult::of(true))`), bypassing the exit
+//! animation; only the scrim-tap / `Escape` *cancel* path plays the staging.
 //!
-//! Because the close callback fires from **paint** (after the exit animation),
-//! it is a plain `Fn()` — not the material dialog's `Fn(&mut State)`. App state
-//! changes flow through the navigator's `on_result` callback instead (delivered
-//! with `&mut State` after the pop, carrying the dialog's [`PopResult`]): an
-//! **action** button pops with a value (`controller.pop_with_result(..)`), a
-//! **scrim/Escape cancel** pops empty. This split — "close me" is state-free,
-//! "here's my answer" rides `on_result` — is the whole point of the
-//! result-callback shape.
-//!
-//! # Actions
-//!
-//! Action buttons are app-provided [`AnyView`]s ([`crate::ButtonStyle`] button
-//! styles: a ghost cancel + a danger/primary confirm). They pop the navigator **directly** on
-//! tap (e.g. `controller.pop_with_result(PopResult::of(true))`), bypassing the
-//! widget's own exit animation — the same immediacy the material dialog's
-//! actions have. Only the scrim-tap / Escape *cancel* path plays the exit
-//! staging.
+//! Firing from paint makes that close callback a plain `Fn()` — not the material
+//! dialog's `Fn(&mut State)`, a deliberate divergence. App state changes ride the
+//! navigator's `on_result` instead (delivered with `&mut State` after the pop,
+//! carrying the dialog's [`PopResult`]): an **action** pops with a value, a
+//! **cancel** pops empty.
 //!
 //! # Body/content slot
 //!
 //! [`body`](GlyphDialogView::body) (supporting text) and
 //! [`content`](GlyphDialogView::content) (an arbitrary app-provided
 //! [`AnyView`]) share one slot between the title and the action row —
-//! **`content` wins if both are set**, silently, in both debug and release
-//! (no panic, no assert — a `.body()` call is simply shadowed the moment
-//! `.content()` is also chained). Reach for `content` when the dialog needs
-//! more than static text — a text field is the motivating case (a name-input
-//! dialog no longer has to smuggle its field in as an "action").
+//! **`content` wins if both are set**, silently in debug and release (no panic,
+//! no assert: a `.body()` call is simply shadowed). Reach for `content` when the
+//! dialog needs more than static text; a text field is the motivating case.
 //!
-//! **Sizing:** the slot gets the same loose-width/unbounded-height
-//! constraints `body` always has (`BoxConstraints::loose(Size::new(w,
-//! f64::INFINITY))`) — it lays out at its own intrinsic height and the panel
-//! grows to fit. **This is a documented limit, not a bug:** the dialog never
-//! clips or auto-scrolls an oversized slot, so content that can grow
-//! arbitrarily tall (a long list, a growing log) can push the panel off
-//! the top/bottom of the viewport. Wrap genuinely unbounded content in your
-//! own scrolling container before passing it to `.content()`.
+//! **Sizing:** the slot gets `body`'s own loose-width/unbounded-height
+//! constraints (`BoxConstraints::loose(Size::new(w, f64::INFINITY))`), laying
+//! out at its intrinsic height while the panel grows to fit. **A documented
+//! limit, not a bug:** an oversized slot is never clipped or auto-scrolled, so
+//! arbitrarily tall content can push the panel off the top/bottom of the
+//! viewport — wrap genuinely unbounded content in your own scroller first.
 //!
-//! **Focus:** the slot is routed exactly like an action button — a `Down`
-//! that hits it is hit-tested and forwarded via
-//! [`crate::authoring::route_event_single`], and once it holds the recorded
-//! focus path, subsequent `Key`/`Ime` events (focus-routed, never hit-tested)
-//! go straight to it *before* the dialog's own Escape/dismiss handling gets a
-//! look — so a focused [`TextInput`](crate::TextInput) inside `.content()`
-//! receives every keystroke; only a key it declines (Escape, since a text
-//! field doesn't handle it) falls through to the dialog's dismiss check.
-//!
-//! # Only one floating layer
-//!
-//! Enforcing "at most one dialog/overlay at a time" is the app's (or the
-//! navigator's) concern — this widget does not police it. Pushing a second
-//! transparent page simply stacks another modal on top.
+//! **Focus:** the slot is routed exactly like an action button — a `Down` that
+//! hits it is hit-tested and forwarded via
+//! [`crate::authoring::route_event_single`], and once it holds the recorded focus
+//! path, `Key`/`Ime` events (focus-routed, never hit-tested) go straight to it
+//! *before* the dialog's own Escape/dismiss handling gets a look. So a focused
+//! [`TextInput`](crate::TextInput) inside `.content()` receives every keystroke;
+//! only a key it declines (Escape, which a text field doesn't handle) falls
+//! through to the dismiss check.
 //!
 //! # `dismissable(bool)` + back-dismiss
 //!
-//! [`GlyphDialogView::dismissable`] (default `true`) is the single barrier
-//! flag gating the scrim tap, `Escape`, and an Android back press together —
-//! `false` disables all three (only an action button or an app-driven
-//! `controller.pop()` can still close it) and [`show_glyph_dialog`] pushes the
-//! page with
+//! [`GlyphDialogView::dismissable`] (default `true`) is the single barrier flag
+//! gating the scrim tap, `Escape`, and an Android back press together — `false`
+//! disables all three (only an action button or an app-driven
+//! `controller.pop()` can still close it) and [`show_glyph_dialog`] pushes with
 //! [`BackPolicy::Veto`](crate::nav::navigator::BackPolicy::Veto), consuming a
 //! back press with no visible effect. `true` pushes
 //! [`BackPolicy::DismissAnimated`](crate::nav::navigator::BackPolicy::DismissAnimated):
 //! `show_glyph_dialog` hands the widget the shared dismiss-signal cell
-//! [`NavigatorController::request_back`] bumps on a back press, and the
-//! widget's `paint` pass (`observe_dismiss_signal`, mirroring
-//! [`BackPolicy`](crate::nav::navigator::BackPolicy)'s documented observation
-//! seam) compares it against the last-seen value and calls
-//! [`begin_exit`](GlyphDialogWidget::begin_exit) — the exact same staged exit
-//! a scrim/Escape cancel drives, so a back press gets the identical animation
-//! and pop-on-completion path rather than an immediate raw pop.
+//! [`NavigatorController::request_back`] bumps on a back press, and the widget's
+//! `paint` pass (`observe_dismiss_signal`, [`BackPolicy`]'s documented
+//! observation seam) compares it against the last-seen value and calls
+//! [`begin_exit`](GlyphDialogWidget::begin_exit) — the same staged exit a
+//! scrim/Escape cancel drives, never an immediate raw pop.
 //!
 //! # Semantics
 //!
-//! The whole dialog contributes one [`Role::Dialog`] container node with the
-//! accesskit **modal** flag set, labelled by the title; title/body-or-content/
-//! actions are its accesskit children (mirroring [`crate::material::dialog`]) —
-//! the body/content slot forwards through [`ChildPod::semantics_child`]
-//! regardless of which of `body`/`content` occupies it, so a `.content()`
-//! subtree's own semantics (e.g. a text field's role/label/value) reach the
-//! accessibility tree like any other child.
+//! The dialog contributes one [`Role::Dialog`] container node with the accesskit
+//! **modal** flag set, labelled by the title, with title/body-or-content/actions
+//! as its accesskit children (mirroring [`crate::material::dialog`]); the
+//! body/content slot forwards through [`ChildPod::semantics_child`] whichever of
+//! `body`/`content` occupies it, so a `.content()` subtree's own semantics reach
+//! the accessibility tree like any other child.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -316,7 +289,7 @@ fn body_view<State: 'static>(s: &str) -> AnyView<State> {
 }
 
 /// A state-free "close this dialog" callback — see the [module docs](self)'s
-/// "The dismiss callback is state-free" note.
+/// "Actions, and the dismiss callback is state-free" note.
 type OnClose = Rc<dyn Fn()>;
 
 /// A declarative Glyph modal dialog. See the [module docs](self).
@@ -1004,8 +977,7 @@ impl Widget for GlyphDialogWidget {
         // focus + IME state), so the re-claim is what keeps the session alive
         // while this dialog is up. Re-claiming while already focused is a
         // change-guarded no-op (no generation bump) — do not add a
-        // claim-once guard, it kills the session on the second tap
-        // (claim-once-hygiene review, 2026-08-06).
+        // claim-once guard, it kills the session on the second tap.
         if matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Down) {
             ctx.request_focus();
         }

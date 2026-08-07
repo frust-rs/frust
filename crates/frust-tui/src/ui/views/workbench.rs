@@ -1,6 +1,6 @@
-//! The workbench shell (D5 / workbook B2): titlebar / sidebar / main / status.
-//! Static content in Phase 1 — project detection, sessions, and interactivity
-//! land in Phase 2.
+//! The workbench shell: titlebar / sidebar / main / status.
+//! Started as static content — project detection, sessions, and
+//! interactivity layered on top afterward.
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
@@ -27,14 +27,14 @@ pub fn render(
     let shell = Shell::split(area);
     titlebar(frame, shell.titlebar, state, theme, mouse);
 
-    // Responsive breakpoint (T05 / D5): below `NARROW_WIDTH` the sidebar
+    // Responsive breakpoint: below `NARROW_WIDTH` the sidebar
     // collapses out of the inline layout, reachable instead as a
     // toggleable floating overlay (`s` / `AppState::sidebar_overlay_open`).
     let narrow = crate::ui::layout::is_narrow(area);
     if narrow && state.sidebar_overlay_open {
         // The body renders full-width but non-interactive beneath the
         // floating panel — the same base-layer suppression every
-        // workbench-blocking modal uses (D4), scoped to the body only (the
+        // workbench-blocking modal uses, scoped to the body only (the
         // titlebar/status stay live underneath).
         let mut suppressed = MouseCtx::suppressed();
         render_main_area(frame, shell.body, state, theme, &mut suppressed);
@@ -45,8 +45,8 @@ pub fn render(
         } else {
             let (sidebar, main) = sidebar_main_at(shell.body, state.sidebar_width);
             render_sidebar(frame, sidebar, state, theme, mouse);
-            // The sidebar's right border is a drag-to-resize splitter (T04 /
-            // D4): a left-press on that column starts a `SidebarSplitter`
+            // The sidebar's right border is a drag-to-resize splitter: a
+            // left-press on that column starts a `SidebarSplitter`
             // drag whose absolute column maps to a new sidebar width via
             // `x - body_left`.
             if sidebar.width > 0 && sidebar.height > 0 {
@@ -87,7 +87,7 @@ fn render_main_area(
     }
 }
 
-/// The narrow-terminal sidebar overlay (T05 / D5): a floating, bordered panel
+/// The narrow-terminal sidebar overlay: a floating, bordered panel
 /// pinned to the left edge of `body`, reusing [`render_sidebar`]'s exact
 /// content/regions — the same sidebar, just not part of the inline layout.
 fn render_sidebar_overlay(
@@ -334,10 +334,10 @@ fn render_sidebar(
     }
 }
 
-/// The titlebar toolchain chip's glyph/label/color (D6a): the component-level
+/// The titlebar toolchain chip's glyph/label/color: the component-level
 /// bootstrap report's rollup when one is cached (its `Ok`/`Partial`/`Missing`
 /// is the chip's real source), falling back to the flat doctor `overall`
-/// (TUI2-07) until the first report lands, then to "checking…" before either
+/// until the first report lands, then to "checking…" before either
 /// preflight completes. Shared with `views::welcome::titlebar`'s chip; clicking
 /// it opens the bootstrap wizard.
 pub(crate) fn toolchain_chip(
@@ -445,8 +445,8 @@ fn device_glyph(
     (color, format!("{platform}·{kind}"))
 }
 
-/// One line per detected project (F5 bounded-walk detection); the active one
-/// (`state.project_root`, first found for now — a full switcher is Phase 2)
+/// One line per detected project (bounded-walk detection); the active one
+/// (`state.project_root`, first found for now — a full switcher isn't built yet)
 /// gets the hover chevron and accent color, the rest render muted.
 fn project_lines(state: &AppState, theme: &Theme) -> Vec<Line<'static>> {
     if state.projects.is_empty() {

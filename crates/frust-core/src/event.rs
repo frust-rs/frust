@@ -258,9 +258,9 @@ pub enum InputEvent {
     /// navigator applies its queued push/pop ops) is state-free. A widget that
     /// needs to call back into app state from there had, before this variant, no
     /// pass to run in except the *next event*, which on a touch device may be
-    /// seconds away or may never reach that widget at all (FINDINGS #56: a
-    /// pop-result callback measured 3.2s late on device, and was lost entirely
-    /// when the next tap was consumed by chrome outside the navigator).
+    /// seconds away or may never reach that widget at all (a pop-result
+    /// callback measured 3.2s late on device, and was lost entirely when the
+    /// next tap was consumed by chrome outside the navigator).
     /// `rebuild` now dispatches this variant instead, so the deferred callback
     /// runs on the very frame that queued it.
     ///
@@ -364,7 +364,7 @@ thread_local! {
     /// [`RenderRoot`](crate::app::RenderRoot) on one thread *drain a mark raised
     /// on another*, broadcasting into a tree with nothing pending while the tree
     /// that actually owes the flush is left waiting — silently reintroducing the
-    /// FINDINGS #56 failure. UI-thread affinity is the same argument
+    /// failure this broadcast exists to fix. UI-thread affinity is the same argument
     /// `frust-reactive`'s `CAN_POP_PROVIDER` and `frust-widgets`' `PAGE_REACH`
     /// make for their own `Rc`-backed state.
     static PENDING_RESULT_FLUSH: Cell<bool> = const { Cell::new(false) };

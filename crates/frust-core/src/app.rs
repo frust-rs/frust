@@ -354,7 +354,7 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// dirty-driven (`ControlFlow::Wait`) and schedules off `needs_frame`, so the
     /// deferral has to surface there too — otherwise the remaining flush would
     /// wait for whatever input happens to arrive next, which is the exact
-    /// FINDINGS #56 failure this whole mechanism exists to remove.
+    /// failure this whole mechanism exists to remove.
     deferred_frame: bool,
     _state: core::marker::PhantomData<fn(&mut State)>,
 }
@@ -706,9 +706,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// [`InputEvent::Housekeeping`] broadcast through the ordinary
     /// [`event`](RenderRoot::event) plumbing, where `state` *is* in scope. This
     /// is the only unconditional per-frame pass that holds `&mut State`, which is
-    /// why the dispatch lives here and not in a shell (FINDINGS #56: flushing on
-    /// the next real input meant waiting seconds for a touch, or forever when the
-    /// next touch went to chrome outside the navigator).
+    /// why the dispatch lives here and not in a shell (flushing on the next
+    /// real input meant waiting seconds for a touch, or forever when the next
+    /// touch went to chrome outside the navigator).
     ///
     /// A flushed callback mutates `State`, so the view built before it ran is
     /// stale — the `app_logic` + `rebuild_view` cycle therefore re-runs after
@@ -762,7 +762,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // Housekeeping producers need it (a navigator pop-result callback
             // and `frust-widgets`' gesture long-press latch), and without it a
             // redraw-only effect waits for whatever input happens to arrive
-            // next — the FINDINGS #56 shape this mechanism exists to remove.
+            // next — exactly the failure this mechanism exists to remove.
             //
             // Non-empty flags also bump the semantics generation below, which
             // is correct: the callback just mutated real `State` through a live
@@ -986,8 +986,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // runs after every rebuild), so a controlled change applied by the
             // rebuild — e.g. a submit clearing the field — refreshes the
             // shell-facing `ime_state` that the event pass alone would leave
-            // stale. Defense-in-depth against F1: only accept a bubbled publish
-            // while focus is actually active. A widget whose pod focus was just
+            // stale. Defense-in-depth: only accept a bubbled publish while
+            // focus is actually active. A widget whose pod focus was just
             // cleared by a container-routed blur (but whose internal flag lags
             // one frame) can then never resurrect the `ime_state` the blur
             // cleared — even before it observes the blur via `PaintCtx::has_focus`.
@@ -2340,7 +2340,7 @@ mod tests {
 
     #[test]
     fn set_theme_marks_layout_and_paint_pending() {
-        // F1: `set_theme` alone (no rebuild) must dirty layout/paint so a shell
+        // `set_theme` alone (no rebuild) must dirty layout/paint so a shell
         // gating on `take_change_flags` doesn't skip re-resolving theme-baked
         // widget state (e.g. Text's themed glyph color) on a bare theme swap.
         let mut root: RenderRoot<AppState, MockTextView> = RenderRoot::new();
@@ -3662,7 +3662,7 @@ mod tests {
     }
 
     // --- Deferred state-bearing callbacks: the `InputEvent::Housekeeping` flush
-    //     `RenderRoot::rebuild` dispatches (FINDINGS #56). ---
+    //     `RenderRoot::rebuild` dispatches. ---
 
     /// App state for the flush tests.
     #[derive(Default)]

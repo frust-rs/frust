@@ -172,8 +172,8 @@ impl TextEditor {
     /// mirroring [`crate::TextContext::layout`]. No wrapping width is set —
     /// v1 is single-line.
     ///
-    /// **`style.align` is deliberately not applied here** (FINDINGS #39's
-    /// scope boundary): [`parley::PlainEditor`] manages its own layout
+    /// **`style.align` is deliberately not applied here**:
+    /// [`parley::PlainEditor`] manages its own layout
     /// internally and exposes no alignment override through
     /// [`parley::PlainEditor::edit_styles`] or any other hook this fn (or
     /// [`Self::apply`]'s driver) reaches — unlike the other style knobs

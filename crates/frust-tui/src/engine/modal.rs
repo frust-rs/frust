@@ -42,7 +42,7 @@ pub enum ActiveModal<'a> {
     /// can appear over either top-level screen (though it needs an open project
     /// to reach — see `crate::engine::update`'s `OpenAddPlugin`).
     AddPlugin(&'a AddPluginDialog),
-    /// The keyboard/help overlay (`state.help_open`, `?` — T05 / D5) — like
+    /// The keyboard/help overlay (`state.help_open`, `?`) — like
     /// the wizards above, reachable from either top-level screen (both
     /// status bars carry the `? help` hint).
     HelpOverlay,

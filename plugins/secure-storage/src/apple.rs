@@ -13,11 +13,10 @@
 //! - **account** = the caller's key, verbatim (unicode-safe).
 //! - **value** = the caller's `String` UTF-8 bytes, stored as `kSecValueData`.
 //!
-//! Because the store name is baked into the service attribute, store-name
-//! isolation is a property of the query itself: no key-prefixing inside the
-//! item is needed (unlike the process-wide `NSUserDefaults` domain that
-//! `frust-shared-preferences` shares — there keys carry a `frust.` prefix; a
-//! Keychain query is already service-scoped).
+//! Store-name isolation is therefore a property of the query itself: no
+//! key-prefixing inside the item is needed (unlike the process-wide
+//! `NSUserDefaults` domain `frust-shared-preferences` shares, where keys carry
+//! a `frust.` prefix).
 //!
 //! # Accessibility
 //!
@@ -25,29 +24,27 @@
 //! ([`WhenUnlocked`](Accessibility::WhenUnlocked) →
 //! `kSecAttrAccessibleWhenUnlocked`, the flutter_secure_storage-parity
 //! default; [`AfterFirstUnlock`](Accessibility::AfterFirstUnlock) →
-//! `kSecAttrAccessibleAfterFirstUnlock`). It is applied when an item is
-//! first added; an overwrite's handling of the protection posture is
-//! **asymmetric by store kind**, deliberately:
+//! `kSecAttrAccessibleAfterFirstUnlock`). It is applied when an item is first
+//! added; an overwrite's handling of the protection posture is **asymmetric by
+//! store kind**, deliberately:
 //!
-//! - A **plain** (`auth: None`) store's overwrite updates only the value
-//!   data (`SecItemUpdate`), leaving the item's original accessibility (or
-//!   a pre-existing gated item's `SecAccessControl`) untouched — a plain
-//!   `set` must never silently strip a gated item's protection.
-//! - A **gated** (`auth: Some`) store's overwrite instead deletes and
-//!   re-adds the item, re-using the freshly built protection pair — Keychain
-//!   does not reliably support mutating `kSecAttrAccessControl` via
-//!   `SecItemUpdate` (write-once-at-creation), so delete+re-add is the
-//!   ecosystem-wide convention. This is what lets a key first written while
-//!   the store was plain (or under stale gate flags) pick up the *current*
-//!   `AuthOptions`-derived protection the moment it's rewritten through a
-//!   gated store, rather than keeping whatever posture it was created
-//!   under. See [`Backend::set`]'s `errSecDuplicateItem` arm.
+//! - A **plain** (`auth: None`) store's overwrite updates only the value data
+//!   (`SecItemUpdate`), leaving the item's original accessibility (or a
+//!   pre-existing gated item's `SecAccessControl`) untouched — a plain `set`
+//!   must never silently strip a gated item's protection.
+//! - A **gated** (`auth: Some`) store's overwrite instead deletes and re-adds
+//!   the item with the freshly built protection pair: Keychain does not
+//!   reliably support mutating `kSecAttrAccessControl` via `SecItemUpdate`
+//!   (write-once-at-creation), so delete+re-add is the ecosystem-wide
+//!   convention. That is what lets a key first written while the store was
+//!   plain (or under stale gate flags) pick up the *current*
+//!   `AuthOptions`-derived protection the moment it is rewritten through a
+//!   gated store. See [`Backend::set`]'s `errSecDuplicateItem` arm.
 //!
-//! The residual limitation: a key only ever **read** (never rewritten)
-//! after a plain→gated switch keeps its old, unprotected posture — the
-//! re-assertion above only fires on a write. Retroactive protection for an
-//! existing store requires rewriting (`get` + `set`) every key, not just
-//! reopening the store gated.
+//! The residual limitation: a key only ever **read** (never rewritten) after a
+//! plain→gated switch keeps its old, unprotected posture — the re-assertion
+//! fires on a write only. Retroactive protection for an existing store means
+//! rewriting (`get` + `set`) every key, not just reopening the store gated.
 //!
 //! # Biometric gate
 //!
@@ -71,48 +68,48 @@
 //! the call **blocks while the system renders the Face ID/Touch ID dialog**.
 //! [`can_authenticate`] probes availability without prompting via
 //! [`LAContext::canEvaluatePolicy_error`], mapping the `LAError` code to an
-//! [`Unavailability`]. All of this is compiled on the iOS/macOS gates but
-//! only exercised by a **physical-device manual gate** — the Simulator
-//! cannot render the biometric prompt (`docs/DEVELOPMENT.md`), and an
-//! unauthenticated (`auth: None`) store is unaffected (host conformance).
-//! The write side of the gate has the same host limitation, one step
-//! further: on an unsigned/ad-hoc-signed host binary (no `TeamIdentifier`,
-//! e.g. a plain `cargo test`/`cargo run`), `SecItemAdd`ing *any*
-//! `kSecAttrAccessControl`-protected item — not just a gated read —
-//! fails `errSecMissingEntitlement` (-34018), confirmed independent of any
-//! particular code path here. A gated store's `set()` is host-conformance-
-//! tested only up to that documented, expected failure (see
-//! `apple::tests::gated_set_reprotects_plain_item`); a real gated write is
-//! a signed-app-or-physical-device feature like the read side.
+//! [`Unavailability`].
 //!
-//! A gated LAContext value is an Objective-C object, not a CoreFoundation
-//! type; passing it into the CF keychain query dictionary needs one confined,
-//! `# Safety`-noted pointer bridge ([`as_cf`]) — objc objects are
-//! CFTypeRef-compatible at the ABI level (a thin, confined CF shim).
+//! All of this compiles on the iOS/macOS gates but is only exercised by a
+//! **physical-device manual gate** — the Simulator cannot render the biometric
+//! prompt (`docs/DEVELOPMENT.md`); an unauthenticated (`auth: None`) store is
+//! unaffected. The write side carries the same host limitation one step
+//! further: on an unsigned/ad-hoc-signed host binary (no `TeamIdentifier`, e.g.
+//! a plain `cargo test`/`cargo run`), `SecItemAdd`ing *any*
+//! `kSecAttrAccessControl`-protected item — not just a gated read — fails
+//! `errSecMissingEntitlement` (-34018), independent of any code path here. So a
+//! gated store's `set()` is host-conformance-tested only up to that expected
+//! failure (`apple::tests::gated_set_reprotects_plain_item`); a real gated
+//! write is a signed-app-or-physical-device feature like the read side.
+//!
+//! An `LAContext` is an Objective-C object, not a CoreFoundation type; putting
+//! it into the CF keychain query dictionary needs one confined, `# Safety`-noted
+//! pointer bridge ([`as_cf`]) — objc objects are CFTypeRef-compatible at the ABI
+//! level.
 //!
 //! # macOS unbundled-preview caveat
 //!
 //! An unbundled binary (a `cargo run`/`cargo test` process with no
-//! `CFBundleIdentifier`, and no data-protection-keychain entitlement) writes
-//! to the login (file-based, "global") Keychain rather than an app-specific,
-//! iOS-style data-protection Keychain — a storage-*location* difference from
-//! a signed, bundled iOS/macOS app, not a behavioral one; the `frust.ss.`
-//! service namespace keeps entries isolated either way. This backend
-//! deliberately does *not* set `kSecUseDataProtectionKeychain`, which on
-//! macOS requires an application-identifier entitlement an unsigned binary
-//! lacks (it would fail `errSecMissingEntitlement`).
+//! `CFBundleIdentifier`, no data-protection-keychain entitlement) writes to the
+//! login (file-based, "global") Keychain rather than an app-specific,
+//! iOS-style data-protection Keychain — a storage-*location* difference from a
+//! signed, bundled app, not a behavioral one; the `frust.ss.` service namespace
+//! keeps entries isolated either way. This backend deliberately does *not* set
+//! `kSecUseDataProtectionKeychain`, which on macOS requires an
+//! application-identifier entitlement an unsigned binary lacks (it would fail
+//! `errSecMissingEntitlement`).
 //!
 //! # `unsafe`
 //!
-//! Confined to this module and each `# Safety`-noted, mirroring the
-//! `frust-shared-preferences` `apple` backend precedent (`docs/CODE_STANDARDS.md`):
+//! Confined to this module and each site `# Safety`-noted, mirroring the
+//! `frust-shared-preferences` `apple` backend (`docs/CODE_STANDARDS.md`):
 //! reading the Security-framework `extern` constant statics (edition-2024
 //! requires `unsafe` to read an `extern` static — each is a linker-provided,
-//! always-non-null CoreFoundation constant), and the `SecItem*` C calls
-//! (`objc2-security` marks them `unsafe`). This backend holds no
-//! CoreFoundation reference across calls (it rebuilds its `CFString`s per
-//! operation from the Rust-`String` service name — the shared-preferences
-//! precedent), so [`AppleStore`] is a plain value, trivially `Send + Sync`.
+//! always-non-null CoreFoundation constant), the `SecItem*` C calls
+//! (`objc2-security` marks them `unsafe`), and the [`as_cf`] bridge above. The
+//! backend holds no CoreFoundation reference across calls — it rebuilds its
+//! `CFString`s per operation from the Rust-`String` service name — so
+//! [`AppleStore`] is a plain value, trivially `Send + Sync`.
 
 // `objc2-security`'s `errSec*` status codes are `camelCase` `const`s; using
 // one in a `match` pattern trips `non_upper_case_globals` (an upstream naming
@@ -705,8 +702,8 @@ fn map_la_error(code: LAError) -> SecureStorageError {
 ///
 /// The two unambiguously authentication-domain statuses map to their typed
 /// variants ([`errSecUserCanceled`] → [`SecureStorageError::UserCanceled`],
-/// [`errSecAuthFailed`] → [`SecureStorageError::AuthFailed`]) — forward-useful
-/// once the Phase-5 biometric gate produces them; every other status
+/// [`errSecAuthFailed`] → [`SecureStorageError::AuthFailed`]), which the
+/// biometric gate is what actually produces; every other status
 /// (including `errSecItemNotFound`/`errSecDuplicateItem`, which each op
 /// handles before reaching here) is tolerantly folded into
 /// [`SecureStorageError::Storage`] carrying a human name plus the raw code,

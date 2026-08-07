@@ -322,10 +322,10 @@ fn install_surface(
         )
     })
     .context("frust-shell-ios: failed to create Metal render surface")?;
-    // Publish the surface's RESOLVED translucency to the UI thread (review
-    // finding M1): `alpha` above is only what we ASKED for — `frust-render`
-    // resolves it against the layer's advertised alpha modes and can fall back
-    // to an opaque swapchain. The UI thread reads this flag every frame
+    // Publish the surface's RESOLVED translucency to the UI thread: `alpha`
+    // above is only what we ASKED for — `frust-render` resolves it against the
+    // layer's advertised alpha modes and can fall back to an opaque
+    // swapchain. The UI thread reads this flag every frame
     // (`IosAppHandle::sync_translucent_resolved`) before choosing the base
     // color and pushing `set_surface_translucent`, so a fallback degrades to
     // the Mode A contract instead of `DestOut`-punching black rectangles.

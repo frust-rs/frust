@@ -32,8 +32,8 @@
 //! (MIT, deps `vte`/`itoa`/`unicode-width` only — no tokio, no PTY, no
 //! `std::process`) is the emulator here, which also settles a standing open
 //! question: **no VT crate had been verified to build for
-//! `aarch64-linux-android` / `aarch64-apple-ios` before this task.** It does
-//! (see this task's completion notes for the exact versions gated).
+//! `aarch64-linux-android` / `aarch64-apple-ios` before this scenario.** It
+//! does (see `Cargo.toml`'s `vt100` pin for the exact versions gated).
 //!
 //! # The 30 Hz coalescing mechanism (research finding 1)
 //!
@@ -175,7 +175,7 @@
 //! device in the S9 matrix (portrait phones) width is the binding axis; the
 //! diagnostic line's `cell_w`/`cell_h` make it checkable either way.
 //!
-//! # Profile selection (T3 must pin this into `PROTOCOL.md`)
+//! # Profile selection (must be pinned into `PROTOCOL.md`)
 //!
 //! The harness selects a *scenario*; S9 needs a second axis, and the two
 //! platforms have different delivery capabilities — the same asymmetry

@@ -448,7 +448,7 @@ mod tests {
 [FRUST-SIGNING-FALLBACK] Build with `frust build apk --release` …";
 
     /// The same line as an installed-base project generated *before* the
-    /// machine-stable token existed prints it — the D2 route, where the
+    /// machine-stable token existed prints it — the pre-token route, where the
     /// project's Gradle has no `frustSigning(...)` read at all.
     const FALLBACK_WARNING_LEGACY: &str =
         "Frust: release build is debug-signed; create android/key.properties …";
@@ -485,7 +485,7 @@ mod tests {
         apk
     }
 
-    /// **The D1 backstop.** The gate resolved material and wrote
+    /// **The backstop.** The gate resolved material and wrote
     /// `.frust-signing.properties`, Gradle exited 0 — and said it debug-signed
     /// anyway (the project's `build.gradle.kts` never read the file). Success
     /// plus a debug-signed artifact is the whole defect class; it must be a
@@ -516,7 +516,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// **The D2 route.** An installed-base project prints the *old* prose, with
+    /// **The pre-token route.** An installed-base project prints the *old* prose, with
     /// no `FRUST-SIGNING-FALLBACK` token in it — the matcher accepts both, so
     /// the projects that most need this backstop are the ones it covers.
     #[test]

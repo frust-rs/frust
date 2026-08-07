@@ -339,7 +339,7 @@ mod tests {
     }
 
     // --- Composition tests: hand-built `ImageFrame`s over fixture luma
-    // buffers reused from `barcode::conformance` (task 01) --------------
+    // buffers reused from `barcode::conformance` -----------------------
 
     /// Feed one luma buffer through `callback` as a single Yuv420 frame —
     /// mirrors exactly what `start_image_stream`'s real callback receives

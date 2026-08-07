@@ -102,7 +102,7 @@ const CONTENT_BOTTOM: f64 = 520.0;
 /// thread page's own content (above [`CONTENT_BOTTOM`]) — the field is the
 /// last thing laid out before the persistent bottom bar, and the root
 /// header's avatar disc (the only other rounded chrome the flat root/reply
-/// rows paint as of task R2b) sits well above it near the header, so
+/// rows paint) sits well above it near the header, so
 /// "bottommost", not "widest" (unlike `tests/search.rs::field_chrome`, which
 /// has no competing chrome), is what isolates it.
 fn composer_field_point(scene: &RecScene) -> Point {
@@ -237,16 +237,15 @@ fn mount_thread(
 
 /// The loaded thread renders the root message plus its two mock-seeded
 /// replies, painting four rounded rects: the root header's `fill_box` avatar
-/// disc (1 — the root/reply rows themselves are FLAT as of
-/// device-parity-round2 task R2b, painting no card chrome of their own), the
-/// composer's `TextInput` chrome (2 — a border rect plus a slightly inset
-/// fill rect, see `frust-widgets::textinput`'s paint impl), and the
-/// persistent bottom navigation bar's own selection-indicator pill (1) — plus
-/// real text glyphs for every header/body line. (Pre-R2b this was 7: the
-/// root's `elevated_card` + avatar + one `outlined_card` per reply — task R2b
-/// de-carded the root/reply rows the same way R2 de-carded the feed, so the
-/// count dropped by the 3 removed card fills: 7 − 1 (root card) − 2 (reply
-/// cards) = 4.)
+/// disc (1 — the root/reply rows themselves are FLAT, painting no card
+/// chrome of their own), the composer's `TextInput` chrome (2 — a border
+/// rect plus a slightly inset fill rect, see `frust-widgets::textinput`'s
+/// paint impl), and the persistent bottom navigation bar's own
+/// selection-indicator pill (1) — plus real text glyphs for every
+/// header/body line. (Previously this was 7: the root's `elevated_card` +
+/// avatar + one `outlined_card` per reply, before the root/reply rows were
+/// de-carded the same way the feed rows were — the count dropped by the 3
+/// removed card fills: 7 − 1 (root card) − 2 (reply cards) = 4.)
 #[test]
 fn thread_renders_root_and_existing_replies() {
     let _g = serial();
@@ -268,12 +267,12 @@ fn thread_renders_root_and_existing_replies() {
 }
 
 /// Composing a reply (typing into the composer, then Shift+Enter to submit —
-/// see [`shift_enter`]) appends it. As of device-parity-round2 task R2b the
-/// reply row is FLAT (no `outlined_card`), so a new reply paints no rounded
-/// chrome of its own — the rounded-rect count stays put and the new reply is
-/// observed instead through its own author/text glyph runs (deliberate, not a
-/// loosened assertion: pre-R2b this asserted `before + 1` off the removed
-/// card's fill rect).
+/// see [`shift_enter`]) appends it. The reply row is FLAT (no
+/// `outlined_card`), so a new reply paints no rounded chrome of its own —
+/// the rounded-rect count stays put and the new reply is observed instead
+/// through its own author/text glyph runs (deliberate, not a loosened
+/// assertion: previously this asserted `before + 1` off the removed card's
+/// fill rect).
 #[test]
 fn composing_a_reply_appends_it() {
     let _g = serial();
@@ -332,7 +331,7 @@ fn back_then_reopening_the_same_thread_keeps_the_composed_reply() {
     );
 }
 
-/// Task 19's real cross-page assertion: open the feed, open its thread,
+/// The real cross-page assertion: open the feed, open its thread,
 /// compose a reply there, pop back to the feed — and the feed's own
 /// controller (fetched the exact way `screens::channel_feed` sources it,
 /// [`MessagesController::for_channel`]) already shows the incremented reply

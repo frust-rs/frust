@@ -1,56 +1,40 @@
 //! The widget-authoring toolkit: the shared child plumbing, event routing and
-//! callback erasure every container/interactive widget is assembled from.
+//! callback erasure every container/interactive widget is assembled from — the
+//! surface for authoring widgets, and whole design systems, **outside this
+//! crate**.
 //!
-//! # What this module is for
-//!
-//! Authoring widgets — and whole design systems — **outside this crate**. A
-//! `View`/`Widget` pair that owns children (a container), or that reports a press
-//! back into application state (an interactive leaf), needs three things
+//! A container (a `View`/`Widget` pair owning children) or an interactive leaf
+//! (one reporting a press back into application state) needs three things
 //! `frust-core` deliberately does not provide:
 //!
 //! - **Child plumbing**: [`build_child`]/[`rebuild_child`]/[`teardown_child`] for
 //!   a single [`AnyView`] child, and [`rebuild_children`] for a `Vec` of them
-//!   (positional or [`ChildKey`]-keyed reconciliation, with the
-//!   focus/capture retention rules a hand-rolled diff gets wrong).
+//!   (positional or [`ChildKey`]-keyed reconciliation, with the focus/capture
+//!   retention rules a hand-rolled diff gets wrong).
 //! - **Event routing**: [`route_event`] (multi-child containers, reverse paint
 //!   order + capture/focus fast paths) and [`route_event_single`] (one-child
 //!   wrappers).
-//! - **Callback erasure**: [`erase_callback`]/[`erase_callback_arg`], which turn a
+//! - **Callback erasure**: [`erase_callback`]/[`erase_callback_arg`], turning a
 //!   view-held `Rc<dyn Fn(&mut State)>` into the [`ErasedCallback`]/
-//!   [`ErasedArgCallback`] adapter a non-generic widget can hold, so the retained
+//!   [`ErasedArgCallback`] adapter a non-generic widget holds, so the retained
 //!   widget never becomes generic over the application-state type.
+//! - **Themed text roles**: [`ThemeTextColor`] (re-exported here) and
+//!   [`TextView::themed_role`](crate::TextView::themed_role) — how a widget labels
+//!   a child [`text`](crate::text) run with the themed color role it should
+//!   default to, instead of hardcoding a color.
 //!
-//! [`ThemeTextColor`] (re-exported here) and
-//! [`TextView::themed_role`](crate::TextView::themed_role) complete the set: they
-//! are how a widget labels a child [`text`](crate::text) run with the themed color
-//! role it should default to, instead of hardcoding a color.
+//! **Application code should prefer `frust::authoring`**, which re-exports
+//! everything below plus the `frust-core` trait vocabulary and `kurbo`/`peniko`
+//! geometry — so an app depends on `frust` alone. The example spells its imports
+//! the long way only because this crate cannot name `frust` without a
+//! dev-dependency cycle; `frust::authoring`'s own module docs carry the
+//! facade-spelled version.
 //!
-//! # Authoring from an application
-//!
-//! This module is the `frust-widgets`-level surface. **Application code should
-//! prefer `frust::authoring`**, which re-exports everything below *plus* the
-//! `frust-core` trait vocabulary and the `kurbo`/`peniko` geometry the example
-//! below names — so an app depends on `frust` alone. The example below spells
-//! its imports the long way because this crate cannot name `frust` without a
-//! dev-dependency cycle; a facade-spelled version of the same example is in
-//! `frust::authoring`'s own module docs.
-//!
-//! # Stability
-//!
-//! **Pre-1.0.** This is a real, supported public API — not `#[doc(hidden)]`
-//! plumbing — and every item here is covered by the crate's normal stability
-//! posture: a change to any signature in this module is a **breaking change**,
-//! released as such. Pre-1.0 that still means breaking changes can happen; it
-//! does not mean they happen silently.
-//!
-//! # Proven sufficient
-//!
-//! The three widget catalogs that ship with this crate (`material`, `cupertino`,
-//! `glyph`) are themselves consumers of exactly this surface — nothing more.
-//! Everything a complete design system needs (app bars, dialogs, sheets, nav bars,
-//! chips, switches, progress indicators, command palettes …) is built from the
-//! items below, so a third-party design system authored against this module is at
-//! parity with the built-ins by construction.
+//! **Stability: pre-1.0, and a real supported public API** — not `#[doc(hidden)]`
+//! plumbing, so a change to any signature here is a **breaking change**, released
+//! as such. The three catalogs shipping with this crate (`material`, `cupertino`,
+//! `glyph`) consume exactly this surface and nothing more, so a third-party design
+//! system authored against it is at parity with the built-ins by construction.
 //!
 //! # Example: a one-child container widget
 //!
@@ -151,7 +135,7 @@ pub use crate::text::ThemeTextColor;
 
 /// Pressed-state overlay opacity (source: androidx Compose Material3
 /// `StateTokens` v0_210, retrieved 2026-07-17 — supersedes material-web
-/// v0.192's 12%, see R18).
+/// v0.192's 12%).
 ///
 /// Lives here, not with the rest of the M3 state-layer table, because it is the
 /// one interaction opacity a *language-neutral* widget needs: a press overlay is
@@ -372,14 +356,14 @@ fn mark_orphan_if_live(ctx: &BuildCtx<'_>, link_focused: bool) {
 }
 
 /// Deliver a synthetic [`PointerPhase::Cancel`] to a captured child whose
-/// in-flight gesture a structural rebuild has invalidated, so its
-/// (g2-hardened) state machine unwinds instead of firing on a later `Up`.
+/// in-flight gesture a structural rebuild has invalidated, so its state machine
+/// unwinds instead of firing on a later `Up`.
 ///
 /// # Cancel-during-rebuild contract
 ///
 /// The rebuild pass runs over a [`BuildCtx`], not an [`EventCtx`] — there is no
 /// application state in scope. This is sound *only because a `Cancel` handler
-/// must never read application state* (`EventCtx::state_mut`): post-g2 every
+/// must never read application state* (`EventCtx::state_mut`): every
 /// interactive widget's `Cancel` arm only clears internal flags. That invariant
 /// lets this build a minimal [`EventCtx`] over a throwaway `()` state to drive
 /// the unwind; a `Cancel` handler that reached for real state would panic here
@@ -423,24 +407,24 @@ pub(crate) fn cancel_pod(pod: &mut ChildPod) {
 /// a later hit-tested `Up`. Focus state, by contrast, is *reflected* from the pod
 /// flag into the widget each event (`EventCtx::has_focus`, threaded through
 /// [`ChildPod::event_child`]) rather than latched internally, so clearing the pod
-/// flag is enough — there is no widget-internal blur to drive, and (per the g5
-/// contract) a `Cancel` handler must not touch app state anyway.
+/// flag is enough — there is no widget-internal blur to drive, and a `Cancel`
+/// handler must not touch app state anyway (`docs/CODE_STANDARDS.md`).
 ///
 /// # RenderRoot notification: the orphan mark
 ///
 /// Clearing `focused` here cannot notify [`RenderRoot`](frust_core::RenderRoot)
 /// directly — the rebuild pass runs over a [`BuildCtx`], with no `RenderRoot` in
-/// scope, exactly as the g5 capture-cancel cannot reset
+/// scope, exactly as the capture-cancel path above cannot reset
 /// `RenderRoot::pointer_captured`. It instead raises the thread-local
 /// [`mark_focus_orphaned`](frust_core::mark_focus_orphaned) flag, which
 /// `RenderRoot::rebuild` drains at the end of the same rebuild and turns into a
 /// full focus/IME session release (`focus_active` cleared, the shell-facing
 /// surface dropped, one edge on the focus/IME generation).
 ///
-/// **Why the mark and not convergence.** The previous behavior was to leave the
-/// root's `focus_active`/`ime_state` stale and let the next event pass
-/// self-correct. That is fine while the user keeps touching the screen and wrong
-/// the moment they stop: on an idle screen no next event arrives, so the root
+/// **Why the mark and not convergence.** Leaving the root's
+/// `focus_active`/`ime_state` stale for the next event pass to self-correct is
+/// fine while the user keeps touching the screen and wrong the moment they
+/// stop: on an idle screen no next event arrives, so the root
 /// keeps reporting a live focus session for a widget that no longer exists —
 /// which strands `ime_state()` at the shell and (measured on a Xiaomi 12) held
 /// the mobile frame gate's focus input up permanently after a navigator pop.

@@ -17,8 +17,9 @@ the mechanism working in this repo.
 2. Actually run the experiments. The whole premise is that
    `FRUST_TRACE=1 cargo run` teaches you more than a chapter of prose.
 3. Line numbers were verified against the repo at the time of writing
-   (2026-07-22, HEAD `0f07565`) and **will drift**. Symbols won't — search
-   for the named function/type if a line number misses.
+   (2026-07-22, HEAD `0f07565`; re-verified 2026-08-06, HEAD `e2c95ff`) and
+   **will drift**. Symbols won't — search for the named function/type if a
+   line number misses.
 4. Everything desktop-runnable works on this machine today. Device labs
    (chapter 7) need a physical Android/iOS device — remember the iOS
    Simulator can't render under the vello 0.9 pin
@@ -69,6 +70,7 @@ chapter 7. Measuring all of it is chapter 8.
 | [6](06-text-pipeline.md) | Text: string → glyphs | Run the shaping tests; measure the shape cache doing its job |
 | [7](07-mobile-frame-gate.md) | Mobile loops & the frame gate | Flip the gate/resampler kill switches on a device and watch the cost |
 | [8](08-measure-everything.md) | Measurement lab | Drive raw per-frame traces, startup spans, and the S1–S8 benchmark harness |
+| [9](09-native-widgets-pipeline.md) | Native widgets | See how OS sibling views composite with the GPU surface (and how RN/Flutter do it) |
 
 ## Mapping to the external roadmap (when you want the theory)
 

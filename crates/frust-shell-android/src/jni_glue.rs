@@ -1490,7 +1490,7 @@ pub fn native_set_appearance(handle: jlong, dark: jboolean) {
 /// the APP's currently active theme is dark right now, for Kotlin to drive
 /// `updateSystemBarsAppearance` from instead of re-reading
 /// `Configuration.uiMode` (see [`AndroidAppHandle::is_dark_theme`]'s doc for
-/// the full FINDINGS #43 rationale). `FrustSurfaceView` calls this right
+/// the full rationale). `FrustSurfaceView` calls this right
 /// after every `nativeSetAppearance` (`surfaceCreated`/
 /// `onConfigurationChanged`) AND once per frame (`pollAppBrightness`), so a
 /// runtime `frust::set_app_theme`/`clear_app_theme` call — which has no

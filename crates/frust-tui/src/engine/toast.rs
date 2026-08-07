@@ -1,4 +1,4 @@
-//! Auto-dismiss toasts (PLAN D5 / workbook status-bar layer): transient
+//! Auto-dismiss toasts (the status-bar layer): transient
 //! info/success/warn/error notices that stack (capped, drop-oldest) and expire
 //! on the frame tick — no timers outside the tick loop.
 //!
