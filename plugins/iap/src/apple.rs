@@ -92,6 +92,42 @@
 //! UI-thread-callable contract while still reporting a malformed request
 //! synchronously.
 //!
+//! # A timeout abandons the wait, not the call
+//!
+//! There is no requestId table on this side to cancel in the first place —
+//! the completion block *is* the correlation (module doc's *Shape*), and
+//! [`await_answer`]'s timeout arm only stops waiting on [`Answer`]'s
+//! rendezvous channel; it never reaches back into the glue. The `Task` the
+//! glue's `call(_:argsJson:completion:)` spawned keeps running to completion
+//! on its own regardless: a call whose [`ACK_TIMEOUT`] elapsed still has its
+//! detached purchase/deep-link `Task` in flight against StoreKit, and a call
+//! whose [`STORE_TIMEOUT`]/[`PROMPT_TIMEOUT`] elapsed still has its
+//! synchronous `await` (`finishTransaction`, `restorePurchases`, …) running
+//! to whatever StoreKit ultimately decides. When that `Task` later completes
+//! and invokes the completion block, the block's `tx.try_send` lands on a
+//! rendezvous receiver this side has already dropped and is silently
+//! discarded (the block's own doc, above) — the side effect still happened;
+//! only this call's *notification* of it was lost.
+//!
+//! **This is the accepted design, not an oversight.** A requestId-keyed
+//! `Task`-cancellation table would let this side *ask* the `Task` to stop,
+//! but there is nothing on StoreKit's end for it to dismiss — the purchase
+//! sheet is already presented to the user, and a settlement call already
+//! sent is not something StoreKit lets Swift take back. Every call's side
+//! effect is therefore **at-least-once** from this backend's own point of
+//! view: a timed-out [`IapError::Platform`] means this call's *answer* never
+//! arrived, never that StoreKit didn't act on the request.
+//!
+//! Whether StoreKit itself tolerates a second `finishTransaction` call
+//! against a transaction it already finished is **not confirmed** anywhere
+//! in the vendored `OpenIAP` 3.0.1 sources — neither idempotency nor a
+//! defined error for it is documented there. Treat a timed-out settlement as
+//! an **unknown outcome**, not a confirmed failure: re-query
+//! [`crate::Iap::get_available_purchases`] (or, iOS-only,
+//! [`Backend::get_pending_transactions`]) to check whether the purchase
+//! still shows as unfinished before retrying [`Backend::finish_transaction`]
+//! against it.
+//!
 //! # Connection state, idempotency, and the event sink
 //!
 //! [`CONNECTED`] is this crate's own view of the store connection: guard-order
@@ -207,8 +243,13 @@ const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long a dispatch-only ack waits (the module doc's *Two calls
 /// acknowledge* section). Nothing on that path talks to the store or the user
 /// — it decodes arguments and starts a task — so a wait this long already
-/// means the glue never ran.
-const ACK_TIMEOUT: Duration = Duration::from_secs(5);
+/// means the glue never ran. **2s**: `requestPurchase` is the one call in
+/// this crate documented callable from the main thread (module doc's
+/// *Threading*), so this is the one blocking wait that can genuinely park it
+/// — matching `android.rs`'s `ACK_TIMEOUT`, which sits under Android's ~5s
+/// ANR watchdog for the same reason. The happy path is sub-millisecond; 2s is
+/// still generous headroom for a `msg_send` hop plus a `Task` spawn.
+const ACK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Whether [`Backend::init_connection`] has opened the store connection and
 /// [`Backend::end_connection`] has not closed it — guard-order step 3.

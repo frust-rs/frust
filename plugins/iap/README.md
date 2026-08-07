@@ -148,6 +148,20 @@ next launches — settle every purchase, including ones recovered from
 as it is durably recorded. iOS has no such deadline, but an unfinished
 transaction is **re-delivered to the app forever** until it is finished.
 
+### An `Err` from `request_purchase` doesn't prove the flow never started
+
+`request_purchase`'s own wait is dispatch-only — a 2s ack, not the purchase
+itself (§ *Pairing with `spawn_blocking`* below). If that ack times out, the
+call returns `Err(IapError::Platform(_))`, but neither backend cancels
+anything already sent to the host/glue on a Rust-side timeout: the JNI/ObjC
+call was already issued, so the store-side flow may still be running, and a
+purchase completed after this call returned `Err` is a normal, expected
+outcome, not a bug. **Keep the listener registered and tolerant of an
+`IapEvent` arriving after `request_purchase` already reported `Err`** — don't
+treat the `Err` as license to unregister the listener or assume the flow is
+dead. The same "unknown, not failed" treatment applies to a timed-out
+`finish_transaction` — see its doc comment.
+
 ```rust
 use frust_iap::{Iap, IapEvent, IapErrorCode};
 
@@ -235,7 +249,12 @@ Every operation except `request_purchase` and `set_purchase_listener`
 blocks its caller (a Play Billing round trip or a StoreKit `async` query).
 Pair each with `frust_reactive::spawn_blocking`, and never call one on the
 platform UI thread — every backend fails fast with `IapError::UiThread`
-instead of parking there:
+instead of parking there. `spawn_blocking`'s own doc frames it for CPU-bound
+one-offs (JSON parse, decode, hashing); this plugin's waits are store-bound
+rather than CPU-bound and can run up to 120s (`restore_purchases`'s
+`PROMPT_TIMEOUT`), but it is still the pragmatic off-UI-thread vehicle a
+platform plugin has, since standing up a bespoke thread pool for one plugin
+buys nothing over the pool the reactive runtime already runs:
 
 ```rust
 let connected = frust_reactive::spawn_blocking(|| Iap::init_connection(None)).await??;
@@ -256,9 +275,14 @@ from inside a purchase listener — `request_purchase` included — reports
 delivered on (see *Event-thread contract* below).
 
 Android splits its bound in two: `request_purchase`'s dispatch-ack — the one
-UI-thread-callable call — gets a short **5s** timeout (`android.rs`'s
+UI-thread-callable call — gets a short **2s** timeout (`android.rs`'s
 `ACK_TIMEOUT`), since nothing on that path talks to the store, only decodes
-arguments, resolves the current Activity, and detaches the flow. Every other
+arguments, resolves the current Activity, and detaches the flow. 2s isn't
+arbitrary: this is the one blocking wait that can genuinely park the platform
+UI thread, and Android's ANR watchdog fires at ~5s — sitting the timeout
+right under that bound (rather than on top of it) leaves real headroom before
+a slow-but-live device would ANR, while still comfortably covering the
+sub-millisecond happy path of a JNI hop plus a coroutine launch. Every other
 Android round trip, including `deep_link_to_subscriptions`'s **full** await
 (Android does **not** ack it the way iOS does — the dispatch waits for
 `OpenIapStore.deepLinkToSubscriptions` to return before answering, and the
@@ -267,10 +291,23 @@ timeout (`android.rs`'s `HOST_CALL_TIMEOUT`) before reporting
 `IapError::Platform` — a documented "the answer is never coming" bound, not
 a performance budget. iOS varies the bound by call: **30s** for a normal
 store query, **120s** for `restore_purchases` (which may present an App
-Store password prompt), and a short **5s** ack-only wait for
-`request_purchase`/`deep_link_to_subscriptions` (`apple.rs`'s `ACK_TIMEOUT`),
-since neither talks to the store on that path — only decodes arguments and
-starts a task.
+Store password prompt), and the same **2s** ack-only wait for
+`request_purchase`/`deep_link_to_subscriptions` (`apple.rs`'s `ACK_TIMEOUT`,
+mirroring `android.rs`'s reasoning), since neither talks to the store on that
+path — only decodes arguments and starts a task.
+
+**A timed-out ack is not a cancelled call.** Neither backend tells the
+host/glue side to stop once the JNI/ObjC call has been issued — there is no
+requestId-keyed cancellation table on either platform, and even if there
+were, it would have nothing to dismiss: a purchase sheet already presented to
+the user, or a settlement call already sent to the store, keeps running
+regardless of whether this side is still waiting on it. A timed-out
+`IapError::Platform` therefore means the *answer* didn't arrive in time, not
+that the store didn't act on the request — see `android.rs`'s/`apple.rs`'s
+module docs (*A timeout abandons the wait, not the call*) for the full
+reasoning, including the explicitly-unconfirmed question of whether either
+store tolerates a retried settlement call against a transaction it already
+settled.
 
 ### The 15 operations
 
@@ -283,10 +320,10 @@ starts a task.
 | `get_active_subscriptions` | yes | Android, iOS | |
 | `has_active_subscriptions` | yes | Android, iOS | boolean shortcut, always consistent with the above |
 | `get_storefront` | yes | Android, iOS | not normalized between the two platforms |
-| `request_purchase` | **ack only** | Android, iOS | outcome via the listener — see above; the one UI-thread-callable call, 5s ack timeout both platforms |
-| `finish_transaction` | yes | Android, iOS | the 3-day Play deadline governs this call |
+| `request_purchase` | **ack only** | Android, iOS | outcome via the listener — see above; the one UI-thread-callable call, 2s ack timeout both platforms |
+| `finish_transaction` | yes | Android, iOS | the 3-day Play deadline governs this call; a timed-out settle is an unknown outcome, not a confirmed failure — re-query before retrying |
 | `restore_purchases` | yes | Android, iOS | recovered purchases surface via the listener + `get_available_purchases`, not this call's return |
-| `deep_link_to_subscriptions` | Android: yes / iOS: **ack only** | Android, iOS | both platforms UI-thread-refused; Android: full await, 60s bound; iOS: ack only, 5s bound, post-dispatch failure is log-only |
+| `deep_link_to_subscriptions` | Android: yes / iOS: **ack only** | Android, iOS | both platforms UI-thread-refused; Android: full await, 60s bound; iOS: ack only, 2s bound, post-dispatch failure is log-only |
 | `acknowledge_purchase` | yes | **Android-only** | `IapError::NotSupportedOnPlatform` elsewhere |
 | `consume_purchase` | yes | **Android-only** | `IapError::NotSupportedOnPlatform` elsewhere |
 | `get_pending_transactions` | yes | **iOS-only** | `IapError::NotSupportedOnPlatform` elsewhere |

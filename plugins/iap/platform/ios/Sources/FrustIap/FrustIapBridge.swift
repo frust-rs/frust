@@ -88,6 +88,31 @@ import OpenIAP
 /// that fails after dispatch has no event of its own and is logged instead —
 /// the one accepted blind spot in this file.
 ///
+/// # A Rust-side timeout does not stop the `Task`
+///
+/// The Rust side's own wait on `call:argsJson:completion:` is bounded (a
+/// short ack for `requestPurchase`/`deepLinkToSubscriptions`, a longer bound
+/// for every other operation — `plugins/iap/src/apple.rs`'s
+/// `ACK_TIMEOUT`/`STORE_TIMEOUT`/`PROMPT_TIMEOUT`), and there is no
+/// requestId table on that side to cancel in the first place — the
+/// completion block *is* the correlation. So a Rust-side timeout only stops
+/// that side from waiting on its rendezvous channel; it never reaches back
+/// into this class to cancel the `Task` `call` spawned. That `Task` keeps
+/// running to whatever `OpenIapModule` member it awaits — including a
+/// purchase sheet already presented to the user, or a `finishTransaction`
+/// call already sent to StoreKit — and still invokes `completion` when it
+/// finishes; the answer simply lands on a channel the Rust side has already
+/// stopped listening on and is silently discarded there.
+///
+/// This is deliberate: a requestId-keyed `Task` cancellation table here
+/// would let the Rust side *ask* this `Task` to stop, but there would be
+/// nothing for it to dismiss once StoreKit's own sheet or settlement call is
+/// in flight — StoreKit does not offer a way to take either back. So a
+/// Rust-side timeout leaves a store-touching operation's own outcome
+/// **at-least-once** from this glue's point of view: it still runs to
+/// completion and still tries to answer, even when nothing is listening
+/// anymore.
+///
 /// # Events
 ///
 /// [`setEventSink(_:)`](x-source-tag://setEventSink) registers OpenIAP's

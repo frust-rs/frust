@@ -131,6 +131,39 @@
 //! one wrapper-level gap still reports through the normal ack path instead of
 //! reaching the detached flow's log-only `catch`.
 //!
+//! # A timeout abandons the wait, not the call
+//!
+//! [`cancel_request`] — run by [`await_answer`]'s timeout arm and by a failed
+//! JNI dispatch alike — only drops this side's [`PENDING`] slot; it never
+//! reaches back across the JNI boundary. Once `FrustIapHost.call` has been
+//! successfully dispatched, its `scope.launch`ed coroutine runs to completion
+//! on its own regardless of whether the Rust caller is still waiting — a
+//! [`Backend::request_purchase`] call whose [`ACK_TIMEOUT`] elapsed still has
+//! Play's purchase sheet live and the detached flow running; a settlement
+//! call whose [`HOST_CALL_TIMEOUT`] elapsed still has its
+//! `finishTransaction`/`acknowledgePurchaseAndroid`/`consumePurchaseAndroid`
+//! call in flight against Play.
+//!
+//! **This is the accepted design, not an oversight.** A requestId-keyed
+//! `Job`-cancellation table would let this side *ask* the coroutine to stop,
+//! but there is nothing on the other end for it to dismiss: Play's own
+//! purchase sheet is already presented to the user, and a settlement call
+//! already sent is not something Play lets Kotlin take back. Wiring
+//! cancellation through would only add a second failure path without
+//! changing what the store actually does. Every call's side effect is
+//! therefore **at-least-once** from this backend's own point of view: a
+//! timed-out [`IapError::Platform`] means this call's *answer* never arrived,
+//! never that Play didn't act on the request.
+//!
+//! Whether `openiap-google` 3.0.1 itself tolerates a second
+//! `acknowledgePurchaseAndroid`/`consumePurchaseAndroid` call against a token
+//! it already settled is **not confirmed** anywhere in the vendored upstream
+//! sources — neither idempotency nor a defined error for it is documented
+//! there. Treat a timed-out settlement as an **unknown outcome**, not a
+//! confirmed failure: re-query [`crate::Iap::get_available_purchases`] to
+//! check whether the purchase still shows as unsettled before retrying
+//! [`Backend::finish_transaction`] against it.
+//!
 //! # Connection state lives here
 //!
 //! [`CONNECTED`] is this backend's copy of the store connection's open/closed
@@ -246,10 +279,17 @@ const HOST_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 /// `requestPurchase` branch validates the request, resolves the current
 /// Activity, detaches the actual `OpenIapStore.requestPurchase` flow into its
 /// own coroutine, and answers immediately — so the wait covers only a JNI hop
-/// plus a coroutine launch, nothing store-touching. Mirrors `apple.rs`'s
-/// `ACK_TIMEOUT` and its reasoning: a wait this long already means the host
-/// never ran.
-const ACK_TIMEOUT: Duration = Duration::from_secs(5);
+/// plus a coroutine launch, nothing store-touching. **2s, not the 5s every
+/// other bound in this file might suggest**: this is the one store-touching
+/// call with no UI-thread guard (the module doc's *Guard order*), so it is
+/// the one blocking wait a UI thread can actually be parked on, and Android's
+/// ANR watchdog fires at ~5s — sitting `ACK_TIMEOUT` exactly on that bound
+/// would let a slow-but-still-live device ANR before this call ever reports
+/// its own timeout. The happy path is sub-millisecond; 2s stays generous
+/// headroom for a JNI hop plus a coroutine launch while leaving real margin
+/// under the watchdog. Mirrors `apple.rs`'s `ACK_TIMEOUT` and its reasoning: a
+/// wait this long already means the host never ran.
+const ACK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The cached `dev.frust.iap.FrustIapHost` class reference.
 ///

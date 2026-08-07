@@ -125,6 +125,29 @@ import org.json.JSONObject
  * not a harmless duplicate. The `catch` stays only so a throw cannot take
  * [scope] down.
  *
+ * ## A Rust-side timeout does not stop [scope]'s coroutine
+ *
+ * [call] never learns that its Rust caller stopped waiting: the Rust side's
+ * per-request wait is bounded (a short ack for `requestPurchase`, a longer
+ * bound for every other operation — `plugins/iap/src/android.rs`'s
+ * `ACK_TIMEOUT`/`HOST_CALL_TIMEOUT`), and a timeout there only drops that
+ * side's own correlation-table entry; it never reaches back over the JNI
+ * boundary to cancel anything here. The coroutine [call] launched keeps
+ * running to whatever `OpenIapStore`/`OpenIapModule` member it called —
+ * including a purchase sheet already presented to the user, or a
+ * `finishTransaction`/`acknowledgePurchaseAndroid`/`consumePurchaseAndroid`
+ * call already sent to Play — and, when it finishes, still calls [resolve];
+ * the answer simply lands on a request id the Rust side is no longer
+ * tracking and is dropped there.
+ *
+ * This is deliberate: a requestId-keyed `Job` cancellation table here would
+ * let the Rust side *ask* this coroutine to stop, but there would be nothing
+ * for it to dismiss once Play's own sheet or settlement call is in flight —
+ * Play does not offer a way to take either back. So a Rust-side timeout
+ * leaves a store-touching operation's own outcome **at-least-once** from
+ * this host's point of view: it still runs to completion and still tries to
+ * answer, even when nothing is listening anymore.
+ *
  * ## Why an `OpenIapStore` **and** an `OpenIapProtocol`
  *
  * [Bindings] holds both. `OpenIapStore` is the entry API for nine of the twelve

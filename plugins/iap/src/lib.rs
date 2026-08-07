@@ -35,7 +35,11 @@
 //! `async` query) and therefore blocks its caller. Like `frust-camera`'s
 //! blocking calls, each pairs with `frust_reactive::spawn_blocking` — named
 //! here as documentation only; the platform-plugin charter above forbids this
-//! crate from actually depending on `frust-reactive`.
+//! crate from actually depending on `frust-reactive`. `spawn_blocking`'s own
+//! doc frames it for CPU-bound one-offs; this crate's waits are store-bound
+//! rather than CPU-bound and can run up to `PROMPT_TIMEOUT`'s 120s
+//! (`apple.rs`), but it is still the pragmatic off-UI-thread vehicle this
+//! crate has, since the alternative is a bespoke thread pool for one plugin.
 //!
 //! | Call | Blocks until |
 //! |---|---|
@@ -607,11 +611,25 @@ impl Iap {
     /// backend reaches whatever thread the platform demands itself (Play
     /// Billing's `launchBillingFlow` is a main-thread API).
     ///
+    /// # An `Err` here does not mean the flow never started
+    ///
+    /// This call's own wait is dispatch-only (each backend's `ACK_TIMEOUT` —
+    /// android.rs's/apple.rs's module docs), and that ack can itself time out
+    /// as [`IapError::Platform`] without the underlying request having failed
+    /// to reach the store: the host/glue call was already issued, and neither
+    /// backend cancels it on a Rust-side timeout (each module doc's *A timeout
+    /// abandons the wait, not the call*). Keep the listener registered and
+    /// tolerant of an [`IapEvent`] arriving after this call already returned
+    /// `Err` — treat a timed-out ack as "unknown, not failed", the same way a
+    /// timed-out settlement is treated in [`Self::finish_transaction`]'s doc.
+    ///
     /// # Errors
     /// [`IapError::NotConnected`] before [`Self::init_connection`];
     /// [`IapError::Store`] when the store rejects the request outright (an
     /// unknown SKU, an already-owned non-consumable) rather than opening a
-    /// flow; otherwise as [`Self::init_connection`], minus
+    /// flow; [`IapError::Platform`] when the dispatch-only ack itself times
+    /// out or the JNI/glue hop fails — see the "does not mean the flow never
+    /// started" note above; otherwise as [`Self::init_connection`], minus
     /// [`IapError::UiThread`] which this call never reports.
     pub fn request_purchase(props: RequestPurchaseProps) -> Result<(), IapError> {
         with_backend(|backend| backend.request_purchase(&props))
@@ -650,9 +668,22 @@ impl Iap {
     ///
     /// **Blocking** — pair with `frust_reactive::spawn_blocking`.
     ///
+    /// # A timed-out `Err` here is an unknown outcome, not a confirmed failure
+    ///
+    /// Both backends' module docs flag the same fact for this call: their
+    /// timeout does not cancel anything already sent to the store (*A timeout
+    /// abandons the wait, not the call*), and neither vendored upstream
+    /// documents whether a retried acknowledge/consume/finish is safe against
+    /// a transaction it already settled. Re-query
+    /// [`Self::get_available_purchases`] (or, iOS, the platform's own pending
+    /// list) before retrying a settlement whose previous call timed out,
+    /// rather than assuming either "it settled" or "it didn't".
+    ///
     /// # Errors
     /// [`IapError::Store`] when the store rejects the settlement (an unknown
-    /// or already-settled transaction); otherwise as [`Self::fetch_products`].
+    /// or already-settled transaction); [`IapError::Platform`] when the call
+    /// itself times out or the JNI/glue hop fails — see the note above;
+    /// otherwise as [`Self::fetch_products`].
     pub fn finish_transaction(
         purchase: PurchaseInput,
         is_consumable: Option<bool>,
