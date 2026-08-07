@@ -5,6 +5,10 @@
 # plugin rules, and the rules cannot outlive the plugin. Every failure these
 # prevent is release-only: a debug build never reproduces them.
 #
+# Validated against a real minified build by examples/glyph-catalog/android's
+# `:app:minifyReleaseWithR8` — see docs/DEVELOPMENT.md's Version-Pin Policy
+# (openiap-google row) and this plugin's README.md §6 for the tripwire.
+#
 # `dev.frust.iap.FrustIapHost` is never referenced from Kotlin or Java by a
 # consuming app. The Rust backend resolves it at runtime through the application
 # classloader (`ClassLoader.loadClass`) and calls its `call` static over JNI, and

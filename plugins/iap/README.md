@@ -415,6 +415,13 @@ edits by hand):
   transitive `com.android.vending.BILLING` permission, and the iOS package
   resolves (the first build needs network reachability for the external
   OpenIAP SPM dependency).
+- **Minified release build survives R8 (Android).** `(cd
+  examples/glyph-catalog/android && ./gradlew :app:minifyReleaseWithR8)`
+  proves `consumer-rules.pro` is merged and effective under real
+  minification — `FrustIapHost`/`FrustIapHost$*`/`FrustIapInitProvider` and
+  the native methods must appear in
+  `app/build/outputs/mapping/release/seeds.txt`, never in that variant's
+  `usage.txt`.
 - **StoreKit-Testing smoke (iOS).** With a `.storekit` configuration
   enabled (§4): `init_connection` succeeds, `fetch_products` returns the
   configured catalog, and `request_purchase` + the registered listener +
