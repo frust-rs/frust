@@ -58,7 +58,9 @@ a plain atomic flag checked first, so a `NotInitialized` error holds even under 
 attach is always scoped per call, never held permanently; and a store shared with the OS namespaces
 its keys so plugin keys cannot collide with another library's. Plugin Kotlin/Swift host code may
 ship warn-level store/host-failure logs in release builds — release-lean governs Rust's own `log`
-output only, and payload-content hygiene (truncation/redaction) is a separate concern.
+output only, and payload-content hygiene (truncation/redaction) is a separate concern: `iap`'s
+`Purchase`/`PurchaseInput`/`ActiveSubscription` redact their bearer token in `Debug`, and
+host-payload excerpts embedded in error strings are capped at `PAYLOAD_EXCERPT_BYTES`.
 `frust-reactive`'s `spawn_blocking` is the documented pairing for every plugin's blocking or gated
 call (biometric prompts, camera permission/capture, every `iap` store round trip except
 `request_purchase`/`set_purchase_listener`) — see [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md).
@@ -121,5 +123,5 @@ call (biometric prompts, camera permission/capture, every `iap` store round trip
 | `Barcode` / `BarcodeFormat` / `DetectionPolicy` | A decoded barcode/QR result; its symbology enum (`#[non_exhaustive]`, QR-only in v1); the emit-timing policy (`NoDuplicates`/`Throttled`/`Unrestricted`) for `CameraSession::start_barcode_stream` |
 | `Clipboard` / `ClipboardError` | Synchronous plain-text clipboard entry point and its error enum |
 | `Haptics` / `HapticEffect` / `HapticsError` | Haptic-feedback entry point, its closed effect vocabulary, and its error enum |
-| `Iap` / `IapError` / `IapEvent` / `IapErrorCode` / `ListenerHandle` | In-app-purchase entry point (stateless, one store connection per process); its error enum; the two purchase-outcome events (`PurchaseUpdated`/`PurchaseError`) delivered on the registered listener; the store-reported failure code carried inside a `PurchaseError`; the drop-to-unregister handle returned by `set_purchase_listener` |
+| `Iap` / `IapError` / `IapEvent` / `IapErrorCode` / `ListenerHandle` | In-app-purchase entry point (stateless, one store connection per process); its error enum (`Store` = a store refusal, `Platform` = a glue/boundary defect — Android tells them apart via a `synthetic` marker field the host JSON can never legitimately carry, iOS via the throw's type); the two purchase-outcome events (`PurchaseUpdated`/`PurchaseError`) delivered on the registered listener; the store-reported failure code carried inside a `PurchaseError`; the drop-to-unregister handle returned by `set_purchase_listener` |
 | `use_controller` / `provide_controller` / `expect_controller` / `use_failure_listener` / `async_view` / `use_interval` | `clean-signals-frust`'s public hooks bridging a `clean_signals` controller into a Frust `Component`'s reactive `Owner` |
