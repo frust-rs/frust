@@ -180,11 +180,28 @@ let _listener = Iap::set_purchase_listener(Box::new(|event| match event {
         // normal flow — the user backed out of the store sheet
     }
     IapEvent::PurchaseError(err) => {
-        // a real failure — surface it
-        log::warn!("purchase failed: {err}");
+        // A real failure — surface it by CODE, never as a bare `{err}`; see
+        // *Logging: the code, not the payload* below.
+        log::warn!("purchase failed: {:?} ({:?})", err.code, err.product_id);
     }
 }));
 ```
+
+### Logging: the code, not the payload
+
+`IapPurchaseError`'s `Display` embeds the **host's own message**, and a host
+message can quote the document it choked on — which for a purchase is the
+bearer `purchaseToken`. So log `err.code` (plus `err.product_id` when you need
+it), never a bare `{err}` or a raw host payload, anywhere the output can reach
+shared logs or a crash reporter.
+
+The types themselves are safe by construction: `Purchase`, `PurchaseInput` and
+`ActiveSubscription` hand-write `Debug` so `{:?}` prints their token as
+`<redacted>` (no length), and `IapEvent::PurchaseUpdated` inherits that. The
+plugin bounds its own error strings the same way — a payload it quotes back is
+capped at a short excerpt rather than embedded whole. `IapPurchaseError` is the
+one type left needing the discipline above, because the sensitive part of it is
+a free-form message the host wrote.
 
 ### iOS: two calls acknowledge dispatch, not outcome
 
@@ -380,6 +397,20 @@ response into a typed `IapError::Platform` rather than reporting success —
 a silent no-op there would let Play's 3-day auto-refund revoke an
 entitlement the app already granted, so this is a deliberate
 revenue-protecting check, not an oversight.
+
+### Error taxonomy: a refusal is `Store`, a defect is `Platform`
+
+`IapError::Store` means **the store refused** — a code from the OpenIAP
+vocabulary that your app can branch on (already owned, item unavailable, user
+cancelled). `IapError::Platform` means something on the way to the store
+failed: a JNI/ObjC boundary error, a host that answered nothing, or a bug in
+the plugin's own Kotlin/Swift glue. The two never masquerade as each other:
+the Android host marks the error payloads it synthesizes itself so a glue
+failure cannot arrive wearing the spec's `unknown` code (a code the store also
+reports legitimately), and the iOS glue reports a local encode failure in its
+own code-less shape rather than borrowing a spec code. Match `Store` for
+product/entitlement logic; treat `Platform` as a bug report, not a purchase
+outcome.
 
 ### Event-thread contract
 

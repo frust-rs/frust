@@ -22,10 +22,17 @@
 //!   that return nothing;
 //! - a failure answers either the spec's `{code, message, productId?}` (a
 //!   store-reported `PurchaseError` → [`IapError::Store`]) or a code-less
-//!   `{message}` (a glue-level failure: unknown method, undecodable arguments
-//!   → [`IapError::Platform`]). A payload that is neither parses as
+//!   `{message}` (a glue-level failure: an unknown method, undecodable
+//!   arguments, a result the glue itself could not encode →
+//!   [`IapError::Platform`]). A payload that is neither parses as
 //!   [`IapError::Serialization`], as does a reply that does not fit the type
 //!   the caller expected.
+//!
+//! Which shape a failure takes is decided on the Swift side by the **type**
+//! of the throw (`PurchaseError` vs the glue's own `BridgeError`), never by
+//! re-labelling: a local encode failure is the glue's, so it never borrows a
+//! spec error code and cannot reach an app as a store refusal the store never
+//! made.
 //!
 //! [`crate::types`]'s two designed envelopes cross here unchanged:
 //! `FetchProductsResult`'s `{"type": …, "items": […]}` and `IapEvent`'s
@@ -409,6 +416,10 @@ fn await_answer(
 
 /// One `(result, error)` pair as a typed outcome — the module doc's wire
 /// contract, in code.
+///
+/// The unreadable-reply arm bounds what it quotes ([`crate::types::payload_excerpt`]):
+/// serde's diagnosis quotes the value it rejected, and the reply it is
+/// rejecting can be a purchase carrying a bearer token.
 fn interpret(answer: Answer, method: &str) -> Result<serde_json::Value, IapError> {
     match answer {
         // Checked first: a glue that somehow populated both is reporting a
@@ -417,7 +428,10 @@ fn interpret(answer: Answer, method: &str) -> Result<serde_json::Value, IapError
         (Some(result), None) => serde_json::from_str::<Reply>(&result)
             .map(|reply| reply.value)
             .map_err(|error| {
-                IapError::Serialization(format!("{method}: unreadable reply: {error}"))
+                IapError::Serialization(format!(
+                    "{method}: unreadable reply: {}",
+                    crate::types::payload_excerpt(&error.to_string())
+                ))
             }),
         (None, None) => Err(IapError::Platform(format!(
             "{method}: the iOS bridge answered with neither a result nor an error"
@@ -428,6 +442,10 @@ fn interpret(answer: Answer, method: &str) -> Result<serde_json::Value, IapError
 /// An error payload as a typed error: the spec shape (it carries `code`) is a
 /// store failure, the code-less shape is a glue failure, anything else is a
 /// contract break between the two sides.
+///
+/// The last arm is the only one that quotes the payload, and quotes a bounded
+/// excerpt of it ([`crate::types::payload_excerpt`]) — an unrecognized payload
+/// is exactly the case where nothing is known about what it holds.
 fn bridge_error(payload: &str, method: &str) -> IapError {
     if let Ok(store) = serde_json::from_str::<IapPurchaseError>(payload) {
         return IapError::Store(store);
@@ -435,13 +453,24 @@ fn bridge_error(payload: &str, method: &str) -> IapError {
     if let Ok(glue) = serde_json::from_str::<GlueError>(payload) {
         return IapError::Platform(glue.message);
     }
-    IapError::Serialization(format!("{method}: unreadable error payload: {payload}"))
+    IapError::Serialization(format!(
+        "{method}: unreadable error payload: {}",
+        crate::types::payload_excerpt(payload)
+    ))
 }
 
 /// A reply's `value` as the type the caller expected.
+///
+/// Bounded for the same reason as [`interpret`]'s reply arm: this is the step
+/// that decodes a purchase list, so serde's rejected-value quote is the one
+/// most likely to hold a token.
 fn decode<T: DeserializeOwned>(value: serde_json::Value, method: &str) -> Result<T, IapError> {
-    serde_json::from_value(value)
-        .map_err(|error| IapError::Serialization(format!("{method}: unexpected result: {error}")))
+    serde_json::from_value(value).map_err(|error| {
+        IapError::Serialization(format!(
+            "{method}: unexpected result: {}",
+            crate::types::payload_excerpt(&error.to_string())
+        ))
+    })
 }
 
 /// `value` as this bridge's argument JSON.
@@ -767,6 +796,51 @@ mod tests {
         let error =
             interpret((None, Some("not json at all".to_owned())), "getStorefront").unwrap_err();
         assert!(matches!(error, IapError::Serialization(_)), "{error:?}");
+    }
+
+    /// An unreadable payload is quoted as a bounded excerpt, never whole: a
+    /// payload this side cannot recognize is exactly the one nothing is known
+    /// about, and a purchase document holds a bearer token.
+    #[test]
+    fn an_unreadable_payload_is_truncated_before_it_reaches_the_error() {
+        let secret = "opaque-bearer-token-value";
+        let padding = "x".repeat(crate::types::PAYLOAD_EXCERPT_BYTES * 2);
+
+        let error = interpret(
+            (None, Some(format!("<html>{padding}{secret}</html>"))),
+            "getAvailablePurchases",
+        )
+        .unwrap_err();
+        let IapError::Serialization(message) = &error else {
+            panic!("expected a serialization error, got {error:?}");
+        };
+        assert!(!message.contains(secret), "{message}");
+        assert!(message.contains("truncated"), "{message}");
+
+        // The reply path bounds serde's own diagnosis the same way — it quotes
+        // the value it rejected, and that value comes out of the payload (here
+        // a token-shaped string where a timestamp was expected).
+        let error = decode::<Vec<Purchase>>(
+            json!([{
+                "id": "GPA.0000-1111-2222-33333",
+                "productId": "monthly_premium",
+                "transactionDate": format!("{padding}{secret}"),
+                "store": "google",
+                "quantity": 1,
+                "purchaseState": "purchased",
+                "isAutoRenewing": false,
+            }]),
+            "getAvailablePurchases",
+        )
+        .unwrap_err();
+        let IapError::Serialization(message) = &error else {
+            panic!("expected a serialization error, got {error:?}");
+        };
+        assert!(!message.contains(secret), "{message}");
+        assert!(
+            message.contains("truncated"),
+            "serde quoted the rejected value, so the bound must have applied: {message}"
+        );
     }
 
     /// An error wins over a result, so a glue bug cannot present a stale

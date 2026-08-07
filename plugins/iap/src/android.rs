@@ -60,6 +60,23 @@
 //! Language Idioms). This module holds **no `unsafe` block at all**; its only
 //! `unsafe` tokens are the two exports' `#[unsafe(no_mangle)]` attributes.
 //!
+//! ## An error payload names its own origin (LAW)
+//!
+//! `errJson` is one of two things: `OpenIapError.toJSON()` — a genuine store
+//! refusal, mapped to [`IapError::Store`] — or a payload `FrustIapHost.errorJson`
+//! synthesized around some other `Throwable` (a host bug, a JSON failure, a
+//! missing Activity), which carries the extra [`SYNTHETIC_MARKER`] field and
+//! maps to [`IapError::Platform`]. **The marker is the whole discrimination**:
+//! the synthesized payload reuses the spec's `unknown` code, and
+//! `ErrorCode.Unknown` is a code the store itself legitimately reports, so the
+//! code alone cannot tell a glue failure from a refusal an app should act on.
+//!
+//! The field is **additive on the wire**: nothing models it as a typed field
+//! ([`IapPurchaseError`] names three, and serde ignores members it does not
+//! model — this crate sets no `deny_unknown_fields` anywhere), so a Rust side
+//! predating the marker keeps reading a marked payload exactly as it did
+//! before, as a store error. Only [`map_host_error`] reads it.
+//!
 //! # Guard order
 //!
 //! Every method below runs [`Backend`]'s documented guard order before any host
@@ -195,6 +212,18 @@ const EVENT_PURCHASE_ERROR: &str = "purchase-error";
 const EVENT_TAG_PURCHASE_UPDATED: &str = "purchaseUpdated";
 /// [`IapEvent`]'s envelope tag for a purchase failure.
 const EVENT_TAG_PURCHASE_ERROR: &str = "purchaseError";
+
+/// The field `FrustIapHost.errorJson` stamps onto an error payload it
+/// synthesized itself, and which a genuine store refusal can never carry — the
+/// module doc's error-origin LAW, and the same constant on the Kotlin side
+/// (`FIELD_SYNTHETIC`).
+///
+/// `OpenIapError.toJSON()` emits `code`/`message`/`platform`/`debugMessage`/
+/// `subResponseCodeAndroid` (plus `productId`, and four more on its
+/// `PurchaseError` subclass) and nothing else at the pinned openiap-google
+/// 3.0.1, and `synthetic` appears nowhere in OpenIAP's own schema — so this
+/// key can only have come from the host's own synthesis path.
+const SYNTHETIC_MARKER: &str = "synthetic";
 
 /// How long a genuinely store-touching, UI-thread-refused call parks on its
 /// `nativeOnIapResult` answer before reporting [`IapError::Platform`].
@@ -605,6 +634,11 @@ fn await_answer(
 
 /// [`call_host_json`], with the answer parsed into the wire type the method
 /// promises (module doc's method table).
+///
+/// serde's diagnosis quotes the value it rejected, and the payload it is
+/// quoting from can be a purchase list — so the diagnosis rides through
+/// [`crate::types::payload_excerpt`] like every other payload-derived string
+/// here.
 fn call_host<T: DeserializeOwned>(
     method: &str,
     args: &Value,
@@ -613,8 +647,8 @@ fn call_host<T: DeserializeOwned>(
     let payload = call_host_json(method, args, timeout)?;
     serde_json::from_str(&payload).map_err(|err| {
         IapError::Serialization(format!(
-            "android iap backend: {method} answered with a payload this crate could not parse: \
-             {err}"
+            "android iap backend: {method} answered with a payload this crate could not parse: {}",
+            crate::types::payload_excerpt(&err.to_string())
         ))
     })
 }
@@ -627,19 +661,51 @@ fn call_host_unit(method: &str, args: &Value, timeout: Duration) -> Result<(), I
 
 /// Map the host's OpenIAP error JSON onto this crate's error type.
 ///
-/// A payload carrying the spec's `code`/`message` becomes the typed
-/// [`IapError::Store`] (a genuine store refusal the app can match on); anything
-/// else — a truncated payload, a shape from a future spec — degrades to
-/// [`IapError::Platform`] with the raw JSON preserved rather than being reported
-/// as a store error it may not be.
+/// Three outcomes, in the order they are tested:
+///
+/// 1. a payload carrying the host's own [`SYNTHETIC_MARKER`] is a **glue**
+///    failure wearing a store payload's clothes (module doc's error-origin
+///    LAW) → [`IapError::Platform`]. Checked **first**, ahead of the parse
+///    below: a synthesized payload is spec-shaped and would otherwise parse
+///    cleanly as a store refusal the store never made;
+/// 2. a payload carrying the spec's `code`/`message` is a genuine store
+///    refusal the app can match on → the typed [`IapError::Store`];
+/// 3. anything else — a truncated payload, a shape from a future spec —
+///    degrades to [`IapError::Platform`] rather than being reported as a store
+///    error it may not be.
+///
+/// Both [`IapError::Platform`] arms quote the payload through
+/// [`crate::types::payload_excerpt`] rather than whole: a host message can
+/// echo the document it choked on, and a purchase document holds a bearer
+/// token.
 fn map_host_error(error_json: &str) -> IapError {
+    if is_synthetic(error_json) {
+        return IapError::Platform(format!(
+            "android iap backend: the host reported a failure of its own rather than a store \
+             refusal: {}",
+            crate::types::payload_excerpt(error_json)
+        ));
+    }
     match serde_json::from_str::<IapPurchaseError>(error_json) {
         Ok(error) => IapError::Store(error),
         Err(err) => IapError::Platform(format!(
             "android iap backend: the host reported a failure this crate could not parse ({err}): \
-             {error_json}"
+             {}",
+            crate::types::payload_excerpt(error_json)
         )),
     }
+}
+
+/// Whether `error_json` carries the host's [`SYNTHETIC_MARKER`] set to `true`.
+///
+/// A payload that is not a JSON object at all is not marked — it takes
+/// [`map_host_error`]'s third arm, which reports the same [`IapError::Platform`]
+/// by a different route. The extra parse costs nothing outside the error path.
+fn is_synthetic(error_json: &str) -> bool {
+    let Ok(payload) = serde_json::from_str::<Value>(error_json) else {
+        return false;
+    };
+    payload.get(SYNTHETIC_MARKER) == Some(&Value::Bool(true))
 }
 
 // --- Event delivery ---------------------------------------------------------
@@ -1312,6 +1378,77 @@ mod tests {
     fn an_unparseable_error_payload_degrades_to_a_platform_error() {
         match map_host_error("<html>gateway timeout</html>") {
             IapError::Platform(message) => assert!(message.contains("gateway timeout")),
+            other => panic!("expected a platform error, got {other:?}"),
+        }
+    }
+
+    /// A payload the **host** synthesized around a non-`OpenIapError` throwable
+    /// is a glue failure, not a store refusal — and it is spec-shaped, so only
+    /// the marker can tell the two apart (module doc's error-origin LAW).
+    #[test]
+    fn a_synthetic_error_payload_becomes_a_platform_error() {
+        let payload = json!({
+            "code": "unknown",
+            "message": "org.json.JSONException: No value for purchaseToken",
+            "platform": "android",
+            SYNTHETIC_MARKER: true,
+        })
+        .to_string();
+
+        match map_host_error(&payload) {
+            IapError::Platform(message) => {
+                assert!(message.contains("org.json.JSONException"), "{message}");
+            }
+            other => panic!("expected a platform error, got {other:?}"),
+        }
+    }
+
+    /// The marker, not the code, is the discrimination: an **unmarked**
+    /// `unknown`-coded payload is a store refusal the store genuinely reported
+    /// (`ErrorCode.Unknown` is a real upstream code), and stays one.
+    #[test]
+    fn an_unmarked_unknown_code_is_still_a_store_error() {
+        match map_host_error(&error_payload("unknown")) {
+            IapError::Store(error) => assert_eq!(error.code, IapErrorCode::Unknown),
+            other => panic!("expected a store error, got {other:?}"),
+        }
+
+        // A marker that is present but not `true` is not a marker either.
+        let unmarked = json!({
+            "code": "unknown",
+            "message": "the store said no",
+            SYNTHETIC_MARKER: false,
+        })
+        .to_string();
+        assert!(matches!(map_host_error(&unmarked), IapError::Store(_)));
+    }
+
+    /// A host payload never rides whole into an error's `Display` string: an
+    /// `org.json` message quotes the document it choked on, and a purchase
+    /// document holds a bearer token.
+    #[test]
+    fn an_oversized_error_payload_is_truncated_before_it_reaches_the_error() {
+        let secret = "opaque-bearer-token-value";
+        let padding = "x".repeat(crate::types::PAYLOAD_EXCERPT_BYTES * 2);
+        let payload = json!({
+            "code": "unknown",
+            "message": format!("org.json.JSONException: {padding} {secret}"),
+            SYNTHETIC_MARKER: true,
+        })
+        .to_string();
+
+        match map_host_error(&payload) {
+            IapError::Platform(message) => {
+                assert!(!message.contains(secret), "{message}");
+                assert!(message.contains("truncated"), "{message}");
+            }
+            other => panic!("expected a platform error, got {other:?}"),
+        }
+
+        // The unparseable arm is bounded the same way.
+        let raw = format!("<html>{padding}{secret}</html>");
+        match map_host_error(&raw) {
+            IapError::Platform(message) => assert!(!message.contains(secret), "{message}"),
             other => panic!("expected a platform error, got {other:?}"),
         }
     }

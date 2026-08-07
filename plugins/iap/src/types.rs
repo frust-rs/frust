@@ -46,6 +46,26 @@
 //! typed `platform`/`kind` fields already common to both variants are enough
 //! to branch on Android vs iOS or product-vs-subscription without reading
 //! `extra["__typename"]`, though it is there too.
+//!
+//! # Bearer credentials are redacted in `Debug`, mechanically
+//!
+//! [`Purchase`], [`PurchaseInput`] and [`ActiveSubscription`] each carry a
+//! purchase token — Android's Play token, iOS's StoreKit JWS — which a
+//! verifying server accepts on its own, exactly like an API key. All three
+//! therefore hand-write [`fmt::Debug`] instead of deriving it (the `ImeState`
+//! precedent in `frust-core`'s `event.rs`): every other field prints as the
+//! derive would, and the token prints as the literal `"<redacted>"` with no
+//! length, which would itself leak. **Serialization is deliberately
+//! untouched** — `serde` is how the token legitimately reaches a verifying
+//! server, so every round trip below still carries it verbatim; only the
+//! log-shaped view is redacted.
+//!
+//! `payload_excerpt` is the same concern one layer out: a backend's error
+//! strings quote the raw host payload they could not read, and a host message
+//! can echo a document holding one of these tokens, so those excerpts are
+//! bounded rather than embedded whole.
+
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
@@ -265,11 +285,19 @@ pub type ProductOrSubscription = Product;
 ///   public keys). There is no separate field; iOS has no legacy-receipt
 ///   fallback modeled here.
 ///
-/// **[`Self::purchase_token`] is a bearer credential, not a log-safe
-/// value** — treat it like an API key: send it to your verifying server over
-/// a trusted channel, never log a `Purchase`'s `Debug` output (which prints
-/// it in full) anywhere it could reach shared logs or crash reports.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// **[`Self::purchase_token`] is a bearer credential** — treat it like an API
+/// key: send it to your verifying server over a trusted channel and keep it
+/// out of anything shared. Keeping *that field* out of a log is mechanical
+/// rather than a rule to remember: this type's hand-written [`fmt::Debug`]
+/// prints it as `"<redacted>"`, so `{:?}` on a `Purchase` — or on an
+/// [`IapEvent`] carrying one, which inherits this impl — never carries the
+/// token.
+///
+/// [`Self::extra`] still prints verbatim, and it is not credential-free: a
+/// Play purchase's `dataAndroid` passthrough is Play's own receipt JSON,
+/// which embeds the same token. Logging `extra` is logging a credential
+/// again.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Purchase {
     pub id: String,
@@ -291,6 +319,28 @@ pub struct Purchase {
     /// See [`Product::extra`].
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl fmt::Debug for Purchase {
+    /// Hand-written so the bearer [`Self::purchase_token`] never reaches a log
+    /// — the module doc's redaction rule, shaped like `frust-core`'s
+    /// `ImeState` impl: a `debug_struct` naming every field the derive would,
+    /// with the credential replaced by `"<redacted>"`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Purchase")
+            .field("id", &self.id)
+            .field("product_id", &self.product_id)
+            .field("ids", &self.ids)
+            .field("transaction_date", &self.transaction_date)
+            .field("purchase_token", &redacted(self.purchase_token.as_ref()))
+            .field("store", &self.store)
+            .field("quantity", &self.quantity)
+            .field("purchase_state", &self.purchase_state)
+            .field("is_auto_renewing", &self.is_auto_renewing)
+            .field("current_plan_id", &self.current_plan_id)
+            .field("extra", &self.extra)
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -406,7 +456,11 @@ pub struct PurchaseOptions {
 /// crate instead mirrors the GraphQL input shape's own, narrower field list
 /// (no platform-specific extras — a purchase-finishing call only needs
 /// enough to identify the transaction, not its full wire payload back).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// [`Self::purchase_token`] is the same bearer credential [`Purchase`]
+/// carries, so this type redacts it in [`fmt::Debug`] the same way (the
+/// module doc's redaction rule).
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PurchaseInput {
     pub id: String,
@@ -421,6 +475,23 @@ pub struct PurchaseInput {
     pub quantity: i32,
     pub purchase_state: PurchaseState,
     pub is_auto_renewing: bool,
+}
+
+impl fmt::Debug for PurchaseInput {
+    /// See [`Purchase`]'s impl — the same redaction, the same reason.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PurchaseInput")
+            .field("id", &self.id)
+            .field("product_id", &self.product_id)
+            .field("ids", &self.ids)
+            .field("transaction_date", &self.transaction_date)
+            .field("purchase_token", &redacted(self.purchase_token.as_ref()))
+            .field("store", &self.store)
+            .field("quantity", &self.quantity)
+            .field("purchase_state", &self.purchase_state)
+            .field("is_auto_renewing", &self.is_auto_renewing)
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -452,7 +523,12 @@ pub enum FetchProductsResult {
 /// [`IapPurchaseError`]'s narrower fields) there is no reason to lose it
 /// outright when a future task can start reading it without a wire-shape
 /// change.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Carries **two** bearer credentials — the unified
+/// [`Self::purchase_token`] and Play's own
+/// [`Self::purchase_token_android`] — and redacts both in [`fmt::Debug`]
+/// (the module doc's redaction rule).
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActiveSubscription {
     pub product_id: String,
@@ -477,6 +553,82 @@ pub struct ActiveSubscription {
     pub current_plan_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub renewal_info_ios: Option<serde_json::Value>,
+}
+
+impl fmt::Debug for ActiveSubscription {
+    /// See [`Purchase`]'s impl — the same redaction, applied to both token
+    /// fields this type carries.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ActiveSubscription")
+            .field("product_id", &self.product_id)
+            .field("is_active", &self.is_active)
+            .field("expiration_date_ios", &self.expiration_date_ios)
+            .field("auto_renewing_android", &self.auto_renewing_android)
+            .field("environment_ios", &self.environment_ios)
+            .field("days_until_expiration_ios", &self.days_until_expiration_ios)
+            .field("transaction_id", &self.transaction_id)
+            .field("purchase_token", &redacted(self.purchase_token.as_ref()))
+            .field("transaction_date", &self.transaction_date)
+            .field("base_plan_id_android", &self.base_plan_id_android)
+            .field(
+                "purchase_token_android",
+                &redacted(self.purchase_token_android.as_ref()),
+            )
+            .field("current_plan_id", &self.current_plan_id)
+            .field("renewal_info_ios", &self.renewal_info_ios)
+            .finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Payload hygiene
+// ---------------------------------------------------------------------------
+
+/// What a redacted credential prints as — a fixed literal, never a length or
+/// a prefix: both would leak part of what the redaction exists to hide
+/// (`frust-core`'s `ImeState` takes the same line).
+const REDACTED: &str = "<redacted>";
+
+/// An optional credential as the value a `Debug` impl prints in its place.
+///
+/// `None` stays `None`: whether a token is *present* is structural, not
+/// secret, and collapsing the two would hide a genuinely missing token from a
+/// bug report.
+fn redacted(value: Option<&String>) -> Option<&'static str> {
+    value.map(|_| REDACTED)
+}
+
+/// How many bytes of a raw host payload may ride inside an error's `Display`
+/// string (`payload_excerpt`).
+///
+/// **Not a platform value** — a hygiene budget this crate chooses. A failure
+/// payload from a host is a diagnostic, not data: its head names the shape
+/// that arrived (an HTML error page, a truncated document, a foreign wire
+/// shape), while its tail is whatever the platform echoed back — on Android an
+/// `org.json.JSONException` message quotes the document it choked on, and a
+/// purchase document holds the bearer [`Purchase::purchase_token`]. 256 bytes
+/// is comfortably enough to recognize the shape and far short of a whole
+/// purchase payload.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const PAYLOAD_EXCERPT_BYTES: usize = 256;
+
+/// `raw` bounded to [`PAYLOAD_EXCERPT_BYTES`], for embedding in an error
+/// message.
+///
+/// The cut lands on a UTF-8 character boundary at or below the budget, never
+/// mid-codepoint, and a shortened excerpt says so and reports the original
+/// length — a byte count is not the credential, and knowing an excerpt is
+/// partial is what stops a reader diagnosing against a fragment.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn payload_excerpt(raw: &str) -> String {
+    if raw.len() <= PAYLOAD_EXCERPT_BYTES {
+        return raw.to_owned();
+    }
+    let mut end = PAYLOAD_EXCERPT_BYTES;
+    while !raw.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}… (truncated, {} bytes total)", &raw[..end], raw.len())
 }
 
 // ---------------------------------------------------------------------------
@@ -972,5 +1124,184 @@ mod tests {
         let options = PurchaseOptions::default();
         let value = serde_json::to_value(&options).unwrap();
         assert_eq!(value, json!({}));
+    }
+
+    /// The token every redaction test below asserts the absence of.
+    const TOKEN: &str = "opaque-bearer-token-value";
+
+    /// A purchase carrying a bearer token, for the redaction tests.
+    fn purchase_with_token() -> Purchase {
+        Purchase {
+            id: "GPA.0000-1111-2222-33333".into(),
+            product_id: "monthly_premium".into(),
+            ids: None,
+            transaction_date: 1_738_000_000_000.0,
+            purchase_token: Some(TOKEN.into()),
+            store: IapStore::Google,
+            quantity: 1,
+            purchase_state: PurchaseState::Purchased,
+            is_auto_renewing: false,
+            current_plan_id: None,
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    /// `{:?}` on a `Purchase` never carries the bearer token, while `serde`
+    /// still does — the whole point of hand-writing `Debug` rather than
+    /// dropping the field (the module doc's redaction rule).
+    #[test]
+    fn purchase_debug_redacts_the_token_but_serde_still_carries_it() {
+        let purchase = purchase_with_token();
+        let debug = format!("{purchase:?}");
+
+        assert!(!debug.contains(TOKEN), "{debug}");
+        assert!(
+            debug.contains(r#"purchase_token: Some("<redacted>")"#),
+            "{debug}"
+        );
+        // No length disclosure: the literal is fixed-width regardless of the
+        // token it stands in for.
+        assert!(!debug.contains(&TOKEN.len().to_string()), "{debug}");
+        // Every other field still prints, so a redacted `Purchase` is still
+        // diagnosable.
+        assert!(debug.contains("monthly_premium"), "{debug}");
+        assert!(debug.contains("GPA.0000-1111-2222-33333"), "{debug}");
+
+        // Serialization is untouched — this is how the token reaches a
+        // verifying server.
+        let wire = serde_json::to_value(&purchase).unwrap();
+        assert_eq!(wire["purchaseToken"], json!(TOKEN));
+    }
+
+    /// An absent token stays visibly absent rather than being reported as a
+    /// redacted one — the presence of a credential is structural, not secret.
+    #[test]
+    fn purchase_debug_leaves_an_absent_token_as_none() {
+        let purchase = Purchase {
+            purchase_token: None,
+            ..purchase_with_token()
+        };
+        assert!(
+            format!("{purchase:?}").contains("purchase_token: None"),
+            "{purchase:?}"
+        );
+    }
+
+    /// `IapEvent` derives `Debug`, so a `PurchaseUpdated` inherits
+    /// [`Purchase`]'s redaction rather than needing its own impl.
+    #[test]
+    fn an_iap_event_inherits_the_purchase_redaction() {
+        let event = IapEvent::PurchaseUpdated(purchase_with_token());
+        let debug = format!("{event:?}");
+        assert!(!debug.contains(TOKEN), "{debug}");
+        assert!(debug.contains("<redacted>"), "{debug}");
+    }
+
+    /// The same redaction on the type `finish_transaction` sends back.
+    #[test]
+    fn purchase_input_debug_redacts_the_token() {
+        let input = PurchaseInput {
+            id: "GPA.0000-1111-2222-33333".into(),
+            product_id: "monthly_premium".into(),
+            ids: None,
+            transaction_date: 1_738_000_000_000.0,
+            purchase_token: Some(TOKEN.into()),
+            store: Some(IapStore::Google),
+            quantity: 1,
+            purchase_state: PurchaseState::Purchased,
+            is_auto_renewing: true,
+        };
+        let debug = format!("{input:?}");
+
+        assert!(!debug.contains(TOKEN), "{debug}");
+        assert!(
+            debug.contains(r#"purchase_token: Some("<redacted>")"#),
+            "{debug}"
+        );
+        assert_eq!(
+            serde_json::to_value(&input).unwrap()["purchaseToken"],
+            json!(TOKEN)
+        );
+    }
+
+    /// `ActiveSubscription` carries two token fields, and both are redacted.
+    #[test]
+    fn active_subscription_debug_redacts_both_tokens() {
+        let android_token = "play-token-value";
+        let subscription = ActiveSubscription {
+            product_id: "monthly_premium".into(),
+            is_active: true,
+            expiration_date_ios: None,
+            auto_renewing_android: Some(true),
+            environment_ios: None,
+            days_until_expiration_ios: None,
+            transaction_id: "GPA.1234-5678-9012-34567".into(),
+            purchase_token: Some(TOKEN.into()),
+            transaction_date: 1_738_000_000_000.0,
+            base_plan_id_android: Some("premium-month".into()),
+            purchase_token_android: Some(android_token.into()),
+            current_plan_id: None,
+            renewal_info_ios: None,
+        };
+        let debug = format!("{subscription:?}");
+
+        assert!(!debug.contains(TOKEN), "{debug}");
+        assert!(!debug.contains(android_token), "{debug}");
+        assert_eq!(debug.matches("<redacted>").count(), 2, "{debug}");
+        assert!(debug.contains("premium-month"), "{debug}");
+
+        let wire = serde_json::to_value(&subscription).unwrap();
+        assert_eq!(wire["purchaseToken"], json!(TOKEN));
+        assert_eq!(wire["purchaseTokenAndroid"], json!(android_token));
+    }
+
+    /// An oversized host payload is bounded before it can ride inside an
+    /// error's `Display` string: the excerpt keeps the head (which names the
+    /// shape that arrived) and drops the tail, which is where an echoed
+    /// document's bearer token sits.
+    #[test]
+    fn an_oversized_payload_excerpt_is_bounded_and_says_so() {
+        let raw = format!(
+            "{}{{\"purchaseToken\":\"{TOKEN}\"}}",
+            "x".repeat(PAYLOAD_EXCERPT_BYTES * 2)
+        );
+        let excerpt = payload_excerpt(&raw);
+
+        assert!(!excerpt.contains(TOKEN), "{excerpt}");
+        assert!(excerpt.contains("truncated"), "{excerpt}");
+        assert!(excerpt.contains(&raw.len().to_string()), "{excerpt}");
+        let head = excerpt.split('…').next().unwrap();
+        assert_eq!(head.len(), PAYLOAD_EXCERPT_BYTES);
+    }
+
+    /// A payload inside the budget is embedded verbatim — the bound is a cap,
+    /// not a reformat, so an ordinary diagnostic still reads as itself.
+    #[test]
+    fn a_payload_within_the_budget_is_embedded_verbatim() {
+        let raw = r#"{"code":"item-unavailable","message":"the store said no"}"#;
+        assert_eq!(payload_excerpt(raw), raw);
+
+        let exactly_at_the_budget = "x".repeat(PAYLOAD_EXCERPT_BYTES);
+        assert_eq!(
+            payload_excerpt(&exactly_at_the_budget),
+            exactly_at_the_budget
+        );
+    }
+
+    /// The cut lands on a character boundary: a multi-byte character
+    /// straddling the budget is dropped whole rather than sliced (which would
+    /// panic on a non-boundary index).
+    #[test]
+    fn a_payload_excerpt_cut_lands_on_a_character_boundary() {
+        let raw = format!(
+            "{}é{}",
+            "x".repeat(PAYLOAD_EXCERPT_BYTES - 1),
+            "y".repeat(64)
+        );
+        let excerpt = payload_excerpt(&raw);
+
+        let head = excerpt.split('…').next().unwrap();
+        assert_eq!(head.len(), PAYLOAD_EXCERPT_BYTES - 1);
+        assert!(head.ends_with('x'), "{head}");
     }
 }

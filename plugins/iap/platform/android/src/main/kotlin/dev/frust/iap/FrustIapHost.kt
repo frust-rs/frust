@@ -68,6 +68,14 @@ import org.json.JSONObject
  * nothing may answer twice — the Rust side drops a duplicate, but a *missing*
  * answer costs a blocked caller its whole timeout.
  *
+ * ## A synthesized error says so (LAW)
+ *
+ * Every failure leaves as OpenIAP error JSON, but only some of them are the
+ * store's: [errorJson] stamps [FIELD_SYNTHETIC] onto the payloads it builds
+ * itself around a non-[OpenIapError] throwable, and the Rust side routes those
+ * to `IapError::Platform` instead of `IapError::Store`. See [FIELD_SYNTHETIC]
+ * for why the error *code* cannot carry that distinction.
+ *
  * ## Threading
  *
  * [call] is invoked over JNI from a Rust background thread and **must not
@@ -175,6 +183,26 @@ object FrustIapHost {
 
     /** [nativeOnIapEvent] `kind`: the payload is an OpenIAP `PurchaseError`. */
     private const val EVENT_PURCHASE_ERROR = "purchase-error"
+
+    /**
+     * The marker field [errorJson] stamps onto a payload **it** synthesized,
+     * around a throwable that is not an [OpenIapError] (LAW — the Rust side's
+     * `SYNTHETIC_MARKER` in `plugins/iap/src/android.rs` reads it, and the two
+     * spellings must move together).
+     *
+     * It exists because the synthesized payload is otherwise
+     * indistinguishable from a store refusal: it is spec-shaped, and its
+     * `unknown` code is a code the store itself legitimately reports
+     * ([ErrorCode.Unknown]), so a Rust caller matching on `IapError::Store`
+     * would act on a glue bug as if Play had refused the purchase. A field
+     * `OpenIapError.toJSON()` can never emit is the only reliable
+     * discrimination; `synthetic` appears nowhere in OpenIAP's own schema.
+     *
+     * **Additive on the wire.** Nothing models it as a typed field, and the
+     * Rust wire types ignore members they do not model, so a Rust side
+     * predating this marker reads a marked payload exactly as it did before.
+     */
+    private const val FIELD_SYNTHETIC = "synthetic"
 
     /** The `null` JSON document — every operation whose result is `void`. */
     private const val JSON_NULL = "null"
@@ -541,9 +569,14 @@ object FrustIapHost {
      * `t` as OpenIAP error JSON — the wire shape the Rust side maps back onto
      * its own `IapErrorCode`/`IapError::Store` pair.
      *
-     * An [OpenIapError] carries its own `toJSON()`; anything else is synthesized
-     * with the spec's `unknown` code rather than dropped, so no failure ever
-     * reaches Rust as an empty or absent payload.
+     * An [OpenIapError] carries its own `toJSON()` and is passed through
+     * untouched — it *is* a store refusal. Anything else is synthesized with
+     * the spec's `unknown` code rather than dropped, so no failure ever reaches
+     * Rust as an empty or absent payload, and is stamped with
+     * [FIELD_SYNTHETIC] so the Rust side reports it as the glue failure it is
+     * (`IapError::Platform`) instead of a refusal Play never made. The stamp
+     * goes on the synthesized branch **only**: adding it to a genuine
+     * `toJSON()` payload would make every store refusal look like a host bug.
      */
     private fun errorJson(t: Throwable): String {
         val payload =
@@ -554,6 +587,7 @@ object FrustIapHost {
                         "code" to ErrorCode.Unknown.rawValue,
                         "message" to (t.message ?: t.javaClass.name),
                         "platform" to "android",
+                        FIELD_SYNTHETIC to true,
                     )
             }
         return JSONObject(payload).toString()

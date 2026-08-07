@@ -33,8 +33,15 @@ import OpenIAP
 ///     store/OpenIAP reported a `PurchaseError` — the Rust side maps a payload
 ///     carrying `code` onto `IapError::Store`;
 ///   - a bare `{"message": …}` with **no** `code` for a glue-level failure
-///     (unknown method, undecodable arguments) — the Rust side maps that onto
-///     `IapError::Platform`.
+///     (unknown method, undecodable arguments, a result this glue could not
+///     encode) — the Rust side maps that onto `IapError::Platform`.
+///
+/// **Which shape a failure takes is decided by the throw's type**
+/// (`PurchaseError` vs this file's own `BridgeError`, discriminated in
+/// `errorJson(from:method:)`), never by re-labelling a local failure with a
+/// spec code. A store refusal an app can act on and a bug in this glue are
+/// different things, and an app matching `IapError::Store` must never be
+/// handed the second as the first.
 ///
 /// The completion is the correlation: it fires exactly once per call, so
 /// neither side carries a request-id map. It fires on a cooperative-pool
@@ -381,10 +388,12 @@ public final class FrustIapBridge: NSObject {
         }
         let items = OpenIapSerialization.products(result)
         guard !items.contains(where: { $0.isEmpty }) else {
-            throw PurchaseError.make(
-                code: .billingResponseJsonParseError,
-                message: "Failed to serialize a fetched product"
-            )
+            // A `BridgeError`, not a `PurchaseError`: the store answered
+            // fine and *this* code could not encode the answer, so it takes
+            // the code-less glue shape (`IapError::Platform`) rather than
+            // borrowing a spec code the store never reported. See the class
+            // doc's error shapes.
+            throw BridgeError("fetchProducts: a fetched product could not be serialized")
         }
         return ["type": tag, "items": items]
     }
@@ -392,6 +401,9 @@ public final class FrustIapBridge: NSObject {
     /// Every element of `values` encoded, refusing the empty dictionary
     /// `OpenIapSerialization.encode` answers with on a serialization failure —
     /// an all-or-nothing result, never a silently half-populated one.
+    ///
+    /// The refusal is a `BridgeError` for the same reason `productsEnvelope`'s
+    /// is: a local encode failure is this glue's, not the store's.
     private static func encodeAll<T: Encodable>(
         _ values: [T],
         _ what: String
@@ -399,10 +411,7 @@ public final class FrustIapBridge: NSObject {
         try values.map { value in
             let encoded = OpenIapSerialization.encode(value)
             guard !encoded.isEmpty else {
-                throw PurchaseError.make(
-                    code: .billingResponseJsonParseError,
-                    message: "Failed to serialize native \(what) payload"
-                )
+                throw BridgeError("a native \(what) payload could not be serialized")
             }
             return encoded
         }
