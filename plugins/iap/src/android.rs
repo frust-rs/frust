@@ -63,11 +63,17 @@
 //! # Guard order
 //!
 //! Every method below runs [`Backend`]'s documented guard order before any host
-//! work: platform readiness ([`IapError::PlatformNotInitialized`], a plain flag
-//! inside `frust_plugin`, checked before any JNI call) → the UI-thread
-//! fail-fast ([`IapError::UiThread`], a live `Looper.myLooper() ==
+//! work: the delivery-thread fail-fast ([`IapError::EventThread`], a thread-id
+//! comparison, ahead of even the JNI attach) → platform readiness
+//! ([`IapError::PlatformNotInitialized`], a plain flag inside `frust_plugin`,
+//! checked before any JNI call) → the UI-thread fail-fast
+//! ([`IapError::UiThread`], a live `Looper.myLooper() ==
 //! Looper.getMainLooper()` test) → the connection state
 //! ([`IapError::NotConnected`]).
+//!
+//! Step 0 is the one guard **every** method runs, including
+//! [`Backend::request_purchase`]: its ack is short, but it still parks the one
+//! thread every purchase event in the process is delivered on.
 //!
 //! [`Backend::request_purchase`] is the one store-touching call with **no**
 //! UI-thread guard: `launchBillingFlow` is itself a main-thread Play API, and
@@ -458,9 +464,13 @@ impl Guards {
         connection: true,
     };
 
-    /// Run the guards in [`Backend`]'s documented order: readiness → UI thread
-    /// → connection state.
+    /// Run the guards in [`Backend`]'s documented order: delivery thread →
+    /// readiness → UI thread → connection state.
     fn check(self) -> Result<(), IapError> {
+        // Step 0, ahead of even the JNI attach: this is unconditional, unlike
+        // the two flags above — every method here reaches the host, and the
+        // delivery thread must never park on one (module doc's guard order).
+        crate::event::reject_from_delivery_thread()?;
         // Steps 1 and 2. `with_host` reports `PlatformNotInitialized` before it
         // performs any JNI work at all, so readiness genuinely precedes the
         // `Looper` test even though both live in this one call.
@@ -639,46 +649,60 @@ fn map_host_error(error_json: &str) -> IapError {
 /// thread, never the thread that called [`crate::Iap::request_purchase`])
 /// true on this platform.
 fn deliver_event(kind: &str, payload_json: &str) {
-    match event_from_wire(kind, payload_json) {
-        Some(event) => crate::event::emit(&event),
-        None => log::warn!(
-            "frust-iap: a `{kind}` event could not be decoded and was dropped — no listener saw it"
-        ),
+    if let Some(event) = event_from_wire(kind, payload_json) {
+        crate::event::emit(&event);
     }
 }
 
-/// `(kind, payload)` as an [`IapEvent`], or `None` for an event this crate
-/// cannot decode (a `kind` it doesn't know, a payload that isn't the shape that
-/// `kind` promises).
+/// `(kind, payload)` as an [`IapEvent`], or `None` for a `kind` this crate does
+/// not model at all.
 ///
 /// The pair is assembled into [`IapEvent`]'s own adjacently-tagged envelope
 /// (`types.rs`'s designed `{"event": ..., "data": ...}` shape) and deserialized
 /// through it, rather than the variants being constructed by hand — so the
 /// envelope stays the single definition of what an event *is*, and adding a
 /// third variant is a `kind` mapping and nothing else.
+///
+/// A **recognized** kind whose payload will not decode does not answer `None`:
+/// it answers the synthesized [`IapEvent::PurchaseError`]
+/// [`crate::event::decode_failure`] builds, so a purchase Play already
+/// completed is reported as a failure rather than silently lost. An
+/// unrecognized kind stays dropped — this crate models no event for it, so
+/// there is nothing to report.
 fn event_from_wire(kind: &str, payload_json: &str) -> Option<IapEvent> {
     let tag = match kind {
         EVENT_PURCHASE_UPDATED => EVENT_TAG_PURCHASE_UPDATED,
         EVENT_PURCHASE_ERROR => EVENT_TAG_PURCHASE_ERROR,
         unknown => {
-            log::warn!("frust-iap: nativeOnIapEvent reported an unknown kind `{unknown}`");
+            log::warn!(
+                "frust-iap: nativeOnIapEvent reported an unknown kind `{unknown}` — dropped"
+            );
             return None;
         }
     };
     let data: Value = match serde_json::from_str(payload_json) {
         Ok(data) => data,
-        Err(err) => {
-            log::warn!("frust-iap: a `{kind}` event payload was not valid JSON: {err}");
-            return None;
-        }
+        Err(err) => return Some(report_decode_failure(kind, &err.to_string())),
     };
     match serde_json::from_value(json!({ "event": tag, "data": data })) {
         Ok(event) => Some(event),
-        Err(err) => {
-            log::warn!("frust-iap: a `{kind}` event payload did not match its wire shape: {err}");
-            None
-        }
+        Err(err) => Some(report_decode_failure(kind, &err.to_string())),
     }
+}
+
+/// Log a recognized event's decode failure and build the event it becomes.
+///
+/// The log line names the **kind only**. `detail` — serde's own diagnosis —
+/// rides on the synthesized event instead, because an `invalid type` message
+/// quotes the value it rejected, and the payload it would be quoting from
+/// carries a bearer credential ([`Purchase`]'s doc). The app therefore gets the
+/// full diagnosis on its listener while the shared log stays credential-free.
+fn report_decode_failure(kind: &str, detail: &str) -> IapEvent {
+    log::warn!(
+        "frust-iap: a `{kind}` event payload did not decode; reporting it as a purchase failure \
+         rather than dropping it (the decoder's diagnosis rides on that event)"
+    );
+    crate::event::decode_failure(kind, detail)
 }
 
 // --- The backend ------------------------------------------------------------
@@ -1134,13 +1158,69 @@ mod tests {
         }
     }
 
-    /// An undecodable event is dropped rather than panicking across the JNI
-    /// frame or being reported as some other event.
+    /// A `kind` this crate models nothing for is dropped rather than panicking
+    /// across the JNI frame or being reported as some other event.
     #[test]
-    fn an_undecodable_event_is_dropped() {
+    fn an_unrecognized_event_kind_is_dropped() {
         assert!(event_from_wire("purchase-refunded", &purchase_payload("sku")).is_none());
-        assert!(event_from_wire(EVENT_PURCHASE_UPDATED, "not json at all").is_none());
-        assert!(event_from_wire(EVENT_PURCHASE_ERROR, r#"{"nope": true}"#).is_none());
+    }
+
+    /// A **recognized** kind whose payload will not decode is reported as a
+    /// typed parse failure instead of being dropped: an undecodable
+    /// `purchase-updated` is a purchase Play already completed, and losing it
+    /// silently is worse than reporting it as a failure.
+    #[test]
+    fn a_malformed_recognized_event_synthesizes_a_purchase_error() {
+        for (kind, payload) in [
+            (EVENT_PURCHASE_UPDATED, "not json at all"),
+            (EVENT_PURCHASE_UPDATED, "{}"),
+            (EVENT_PURCHASE_ERROR, r#"{"nope": true}"#),
+        ] {
+            match event_from_wire(kind, payload) {
+                Some(IapEvent::PurchaseError(error)) => {
+                    assert_eq!(error.code, IapErrorCode::BillingResponseJsonParseError);
+                    assert_eq!(error.product_id, None);
+                    assert!(error.message.contains(kind), "{error:?}");
+                }
+                other => panic!("expected a synthesized parse failure, got {other:?}"),
+            }
+        }
+    }
+
+    /// Guard-order step 0, wired into this backend's own guard set: a call made
+    /// from inside a listener is refused before any JNI work — including
+    /// `request_purchase`'s, which runs no UI-thread guard but still parks the
+    /// one delivery thread on its ack.
+    #[test]
+    fn every_guard_set_refuses_a_call_from_the_delivery_thread() {
+        let _guard = crate::event::test_guard();
+        let (tx, rx) = mpsc::channel();
+
+        let handle = crate::event::register(Box::new(move |_| {
+            tx.send((
+                Guards::FULL.check(),
+                Guards::LIFECYCLE.check(),
+                Guards::PURCHASE.check(),
+            ))
+            .unwrap();
+        }));
+
+        crate::event::emit(&IapEvent::PurchaseError(IapPurchaseError {
+            code: IapErrorCode::UserCancelled,
+            message: "cancelled".to_owned(),
+            product_id: None,
+        }));
+        crate::event::flush();
+
+        let (full, lifecycle, purchase) = rx.try_recv().expect("the listener ran");
+        for result in [full, lifecycle, purchase] {
+            assert!(
+                matches!(result, Err(IapError::EventThread)),
+                "every guard set refuses the delivery thread first: {result:?}"
+            );
+        }
+
+        handle.remove();
     }
 
     /// The whole callback path: what the export does with a delivered event
@@ -1170,9 +1250,24 @@ mod tests {
             }
         }
 
-        // An undecodable event reaches nobody rather than emitting a fabricated
-        // one.
+        // An undecodable payload under a recognized kind reaches both
+        // listeners too — as the synthesized parse failure, never as a
+        // fabricated purchase.
         deliver_event(EVENT_PURCHASE_UPDATED, "{}");
+        crate::event::flush();
+        let failures: Vec<IapEvent> = rx.try_iter().collect();
+        assert_eq!(failures.len(), 2);
+        for event in &failures {
+            match event {
+                IapEvent::PurchaseError(error) => {
+                    assert_eq!(error.code, IapErrorCode::BillingResponseJsonParseError);
+                }
+                other => panic!("expected a synthesized parse failure, got {other:?}"),
+            }
+        }
+
+        // An unrecognized kind still reaches nobody.
+        deliver_event("purchase-refunded", &purchase_payload("premium_upgrade"));
         crate::event::flush();
         assert!(rx.try_recv().is_err());
 

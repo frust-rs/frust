@@ -187,9 +187,17 @@ impl MockStore {
     }
 
     /// The guard order [`Backend`] documents, as far as this store can honour
-    /// it: readiness first, then (a real backend's UI-thread check, which has
-    /// no counterpart in-process), then the connection state.
+    /// it: the delivery-thread refusal, then readiness, then (a real backend's
+    /// UI-thread check, which has no counterpart in-process), then the
+    /// connection state.
+    ///
+    /// Step 0 is not platform-specific — the delivery thread is this crate's
+    /// own, on every target — so the fake store runs the real check rather than
+    /// skipping it like step 2. That is what lets the conformance suite assert
+    /// a listener's re-entrant call is refused, on every host, instead of only
+    /// on a device.
     fn guard(&self, needs_connection: bool) -> Result<MutexGuard<'_, State>, IapError> {
+        crate::event::reject_from_delivery_thread()?;
         let state = self.lock();
         if !state.platform_ready {
             return Err(IapError::PlatformNotInitialized);

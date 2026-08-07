@@ -39,6 +39,7 @@
 //! assertions rather than races against another test's listeners.
 
 use std::fmt::Debug;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 use std::thread::ThreadId;
 
@@ -64,6 +65,7 @@ pub(crate) fn run_conformance_suite(fresh: &dyn Fn() -> MockStore) {
     a_purchase_can_be_finished_from_its_own_event(fresh);
     a_rigged_sku_reports_on_the_error_event_path(fresh);
     a_removed_listener_receives_nothing_further(fresh);
+    a_listener_re_entering_the_store_api_is_refused(fresh);
     restore_re_emits_owned_purchases_without_duplicating_them(fresh);
     token_settlement_and_deep_link_reach_the_store(fresh);
 }
@@ -418,6 +420,50 @@ fn a_removed_listener_receives_nothing_further(fresh: &dyn Fn() -> MockStore) {
         second_events.try_recv().is_err(),
         "with no listener registered the outcome is lost, not queued"
     );
+}
+
+/// Guard order step 0: a listener that calls back into the store from inside
+/// its own callback is **refused**, not served — that caller is the one thread
+/// every later event queues behind, and a real backend would park it on a host
+/// answer for up to a store timeout.
+///
+/// Registry work is deliberately *not* refused alongside it: a callback may
+/// still register and remove listeners, which is what the delivery thread's
+/// snapshot-then-call strategy exists for.
+fn a_listener_re_entering_the_store_api_is_refused(fresh: &dyn Fn() -> MockStore) {
+    let store = Arc::new(fresh());
+    store.init_connection(None).unwrap();
+
+    let (sender, refusals) = mpsc::channel();
+    let listener = {
+        let store = Arc::clone(&store);
+        crate::Iap::set_purchase_listener(Box::new(move |_| {
+            // A blocking store call, plus the registry work that must stay
+            // allowed beside it.
+            let refused = store.get_storefront();
+            let inner = crate::Iap::set_purchase_listener(Box::new(|_| {}));
+            inner.remove();
+            let _ = sender.send(refused);
+        }))
+    };
+
+    store
+        .request_purchase(&crate::mock::purchase_props(SKU_CONSUMABLE))
+        .unwrap();
+    store.release_events();
+
+    let refused = refusals.try_recv().expect("the listener ran");
+    assert!(
+        matches!(refused, Err(IapError::EventThread)),
+        "a store call from inside a listener is refused rather than parking the delivery thread: \
+         {refused:?}"
+    );
+    assert!(
+        store.get_storefront().is_ok(),
+        "the same call from an ordinary thread is unaffected"
+    );
+
+    listener.remove();
 }
 
 /// A restore re-emits what the account already owns onto the same stream —

@@ -63,6 +63,13 @@
 //! is itself a main-thread API, so its backend hops onto the Activity's
 //! thread rather than refusing the caller).
 //!
+//! **One thread refuses even those two.** A call that reaches the store —
+//! every row above *and* [`Iap::request_purchase`] — made from inside a
+//! purchase listener fails fast with [`IapError::EventThread`], because that
+//! caller is the one thread every event is delivered on (see *Event delivery*
+//! below). [`Iap::set_purchase_listener`] itself stays callable from anywhere,
+//! including a listener.
+//!
 //! # A purchase is two-phase: an ack now, the outcome on the event stream
 //!
 //! [`Iap::request_purchase`] returns as soon as the store has **accepted** the
@@ -109,9 +116,21 @@
 //! API from inside the callback — hand the event off
 //! (`frust_reactive::use_task`, a channel, or a signal write scheduled back
 //! onto the UI thread) and return immediately. Blocking that one thread stalls
-//! every later event as well as every other listener. A listener that panics
-//! is caught and logged rather than poisoning the registry or ending the
-//! delivery thread, but a panic inside one is still a bug.
+//! every later event as well as every other listener. The last of those three
+//! is **enforced**, not merely documented: a store-touching call made from a
+//! listener reports [`IapError::EventThread`] instead of parking. A listener
+//! that panics is caught and logged rather than poisoning the registry or
+//! ending the delivery thread, but a panic inside one is still a bug.
+//!
+//! The queue between the platform callback and that thread is **bounded**. A
+//! listener that blocks long enough to fill it costs the newest events, which
+//! are dropped with a logged warning rather than growing the queue without
+//! limit or parking the platform's own callback thread; recover a lost outcome
+//! with [`Iap::get_available_purchases`]. An event whose payload the crate
+//! cannot decode is **not** dropped: it arrives as an
+//! [`IapEvent::PurchaseError`] carrying
+//! [`IapErrorCode::BillingResponseJsonParseError`], so a completed purchase can
+//! never be lost in silence.
 //!
 //! # Backends
 //!
@@ -194,6 +213,28 @@ pub enum IapError {
     )]
     UiThread,
 
+    /// A call that reaches the store was made from **inside a purchase
+    /// listener**, on this plugin's own event-delivery thread — the sibling
+    /// fail-fast to [`Self::UiThread`], for the other context that must never
+    /// park.
+    ///
+    /// That thread is the single consumer every [`IapEvent`] in the process is
+    /// delivered on, so parking it on a host answer stalls every later event
+    /// for as long as the store takes to reply. Refused rather than served:
+    /// hand the event off (a channel, `frust_reactive::use_task`, a signal
+    /// write scheduled onto the UI thread) and make the call from there — see
+    /// [`Iap::set_purchase_listener`]'s threading contract.
+    ///
+    /// Covers **every** store-touching call, including
+    /// [`Iap::request_purchase`], whose dispatch-only ack still parks the
+    /// consumer for seconds. Registering or removing a listener is not a store
+    /// call and stays allowed from inside a callback.
+    #[error(
+        "iap call refused: this call reaches the store and was made from a purchase listener on \
+         the event-delivery thread — hand the event off and make the call from your own thread"
+    )]
+    EventThread,
+
     /// An operation that needs an open store connection (fetching products,
     /// requesting a purchase, restoring purchases) was called before
     /// [`Iap::init_connection`] or after [`Iap::end_connection`].
@@ -268,11 +309,23 @@ pub enum Unavailability {
 /// A store-touching method checks, **in this order, before doing any platform
 /// work**:
 ///
+/// 0. **The delivery-thread guard** — the call was not made from inside a
+///    purchase listener, on the plugin's own event-delivery thread →
+///    [`IapError::EventThread`]. A thread-id comparison, cheaper than every
+///    guard below it and reached by **every** method including
+///    [`Self::request_purchase`], whose ack still parks that thread for
+///    seconds. It precedes step 1 rather than following it because being on
+///    that thread means an event was delivered, which means this backend was
+///    ready — the two can never disagree, so nothing is masked by putting the
+///    cheaper check first.
 /// 1. **Backend readiness** — the platform handles/host object this backend
 ///    needs exist at all. A plain atomic/`OnceLock` check, never a platform
 ///    round trip, so it holds even under `panic = "abort"`
 ///    (`docs/PLUGINS_ARCHITECTURE.md`'s pre-init convention) →
-///    [`IapError::PlatformNotInitialized`].
+///    [`IapError::PlatformNotInitialized`]. The `OnceLock` caches a host-class
+///    handle that is resolved lazily on first post-init use, so "never a
+///    platform round trip" is a steady-state property: exactly one call per
+///    process pays that resolution.
 /// 2. **The UI-thread guard** — the crate doc's *Blocking API* table →
 ///    [`IapError::UiThread`]. Live per-backend (Android's `Looper`, Apple's
 ///    main thread); an implementation with no UI thread to check (the fake
@@ -719,6 +772,24 @@ impl Iap {
     /// what every later event queues behind. Multiple listeners are supported
     /// and each sees every event, in registration order, in the order the
     /// platform reported the events.
+    ///
+    /// ## The last of those three is refused rather than trusted
+    ///
+    /// A call that reaches the store, made from inside a callback, reports
+    /// [`IapError::EventThread`] immediately instead of parking this thread —
+    /// **every** such call, including [`Self::request_purchase`], whose
+    /// dispatch-only ack would still hold the consumer for seconds. Make the
+    /// call from your own thread once the event has been handed off.
+    ///
+    /// What a callback *may* do here is registry work: registering another
+    /// listener, calling [`ListenerHandle::remove`], or dropping a handle —
+    /// none of those reach a store, and all three are supported from inside a
+    /// callback.
+    ///
+    /// A callback that blocks anyway costs events rather than memory: the queue
+    /// behind this thread is bounded, and a full queue drops the newest events
+    /// with a logged warning (recover them with
+    /// [`Self::get_available_purchases`]).
     ///
     /// Registration reaches no store and cannot fail — hence no `Result` —
     /// and stays valid across [`Self::end_connection`]/[`Self::init_connection`]

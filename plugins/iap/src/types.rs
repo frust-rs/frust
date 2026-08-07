@@ -90,14 +90,23 @@ pub enum PurchaseState {
 
 /// Mirrors `type.graphql`'s `enum IapStore` (wire values `"unknown"`/
 /// `"apple"`/`"google"`/`"horizon"`/`"amazon"`).
+///
+/// `#[serde(other)] Unknown` catches any store this crate doesn't recognize,
+/// the same forward-compatibility stance [`PurchaseState`]/[`IapErrorCode`]
+/// take here — and it matters more than for either of them: `store` sits on
+/// [`Purchase`], so a store name added ahead of this crate's own update would
+/// otherwise fail a whole *completed purchase* to deserialize rather than
+/// costing one field. `Unknown` is last because `#[serde(other)]` must be on
+/// the final variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum IapStore {
-    Unknown,
     Apple,
     Google,
     Horizon,
     Amazon,
+    #[serde(other)]
+    Unknown,
 }
 
 /// Mirrors `type.graphql`'s `enum ProductQueryType` (wire values
@@ -808,6 +817,34 @@ mod tests {
     fn purchase_state_unrecognized_value_falls_back_to_unknown() {
         let state: PurchaseState = serde_json::from_value(json!("some-future-state")).unwrap();
         assert_eq!(state, PurchaseState::Unknown);
+    }
+
+    /// `IapStore`'s `#[serde(other)]` fallback — and, because the field sits on
+    /// [`Purchase`], the whole purchase still deserializes rather than the
+    /// unknown store failing it outright.
+    #[test]
+    fn iap_store_unrecognized_value_falls_back_to_unknown() {
+        let store: IapStore = serde_json::from_value(json!("some-future-store")).unwrap();
+        assert_eq!(store, IapStore::Unknown);
+        assert_eq!(
+            serde_json::to_value(IapStore::Unknown).unwrap(),
+            json!("unknown"),
+            "the fallback still serializes as the spec's own `unknown`"
+        );
+
+        let purchase: Purchase = serde_json::from_value(json!({
+            "id": "GPA.0000-1111-2222-33333",
+            "productId": "monthly_premium",
+            "transactionDate": 1_738_000_000_000.0,
+            "purchaseToken": "opaque-token-value",
+            "store": "some-future-store",
+            "quantity": 1,
+            "purchaseState": "purchased",
+            "isAutoRenewing": false,
+        }))
+        .unwrap();
+        assert_eq!(purchase.store, IapStore::Unknown);
+        assert_eq!(purchase.product_id, "monthly_premium");
     }
 
     /// This crate's own designed envelope (`FetchProductsResult`'s doc) —

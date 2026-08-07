@@ -46,6 +46,11 @@
 //! that has to deliver its answer. [`Backend::request_purchase`] is the one
 //! exception and deliberately has **no** step 2 — see below.
 //!
+//! The delivery-thread refusal ([`reject_on_delivery_thread`], guard-order step
+//! 0) is the same argument one thread over, and has **no** exception: parking
+//! the plugin's own event thread stalls every later purchase event, so every
+//! method here — `request_purchase` included — refuses it first.
+//!
 //! Events arrive on the **main thread**: OpenIAP snapshots its listeners in a
 //! `Task` and then invokes them inside `await MainActor.run { … }`, so the
 //! glue's sink block — and this module's [`deliver`] — run there. They only
@@ -273,6 +278,19 @@ fn reject_on_main_thread() -> Result<(), IapError> {
     Ok(())
 }
 
+/// Guard-order step 0: refuse a call made from inside a purchase listener, on
+/// the plugin's own event-delivery thread.
+///
+/// Unlike step 2 this one binds **every** method, including
+/// [`Backend::request_purchase`]: its ack is short, but parking the one thread
+/// every purchase event is delivered on for even a few seconds stalls every
+/// later event. A thread-id comparison, so it runs ahead of the class lookup in
+/// [`bridge`] — see [`crate::Backend`]'s guard order for why step 0 can
+/// precede step 1 without masking it.
+fn reject_on_delivery_thread() -> Result<(), IapError> {
+    crate::event::reject_from_delivery_thread()
+}
+
 /// Guard-order step 3.
 fn require_connected() -> Result<(), IapError> {
     if CONNECTED.load(Ordering::Acquire) {
@@ -281,14 +299,16 @@ fn require_connected() -> Result<(), IapError> {
     Err(IapError::NotConnected)
 }
 
-/// The full guard order (readiness → UI thread → connection state) in one
-/// place, for the store-touching calls that need all three.
+/// The full guard order (delivery thread → readiness → UI thread → connection
+/// state) in one place, for the store-touching calls that need all four.
 ///
 /// The three calls that differ — `init_connection`/`end_connection` (no step
 /// 3; opening or closing *is* the state change) and `request_purchase` (no
 /// step 2; see the module doc) — compose the steps themselves so the deviation
-/// is visible at the call site rather than hidden in a flag.
+/// is visible at the call site rather than hidden in a flag. **Step 0 is not
+/// one of the deviations**: all four compose it first.
 fn connected_bridge() -> Result<Retained<AnyObject>, IapError> {
+    reject_on_delivery_thread()?;
     let bridge = bridge()?;
     reject_on_main_thread()?;
     require_connected()?;
@@ -471,6 +491,17 @@ fn install_event_sink(bridge: &AnyObject) {
 /// Runs on the main thread (the module doc's *Threading*) and runs no
 /// listener there: [`crate::event::emit`] queues for the plugin-owned
 /// delivery thread.
+///
+/// An event this crate models whose payload will not decode is **not**
+/// dropped: it is emitted as the synthesized failure
+/// [`crate::event::decode_failure`] builds, so a StoreKit transaction that
+/// really happened is reported rather than silently lost. An unmodelled name
+/// stays ignored — there is nothing for this crate to report about it.
+///
+/// The log line names the kind only; serde's own diagnosis rides on the
+/// synthesized event, because an `invalid type` message quotes the value it
+/// rejected and this payload carries the JWS bearer credential ([`Purchase`]'s
+/// doc).
 fn deliver(name: Option<&str>, payload: Option<&str>) {
     let (Some(name), Some(payload)) = (name, payload) else {
         log::warn!("frust-iap: the iOS bridge forwarded an event with no name or no payload");
@@ -483,7 +514,11 @@ fn deliver(name: Option<&str>, payload: Option<&str>) {
     match serde_json::from_str::<IapEvent>(payload) {
         Ok(event) => crate::event::emit(&event),
         Err(error) => {
-            log::warn!("frust-iap: dropped a malformed {name} event: {error}");
+            log::warn!(
+                "frust-iap: a {name} event payload did not decode; reporting it as a purchase \
+                 failure rather than dropping it (the decoder's diagnosis rides on that event)"
+            );
+            crate::event::emit(&crate::event::decode_failure(name, &error.to_string()));
         }
     }
 }
@@ -492,6 +527,7 @@ fn deliver(name: Option<&str>, payload: Option<&str>) {
 
 impl Backend for AppleIap {
     fn init_connection(&self, config: Option<&serde_json::Value>) -> Result<bool, IapError> {
+        reject_on_delivery_thread()?;
         let bridge = bridge()?;
         reject_on_main_thread()?;
         // Idempotent by contract: a second call is a success, not an error.
@@ -516,6 +552,7 @@ impl Backend for AppleIap {
     }
 
     fn end_connection(&self) -> Result<bool, IapError> {
+        reject_on_delivery_thread()?;
         let bridge = bridge()?;
         reject_on_main_thread()?;
         if !CONNECTED.swap(false, Ordering::AcqRel) {
@@ -571,8 +608,10 @@ impl Backend for AppleIap {
 
     /// Guard order **without step 2**: this call is documented non-blocking
     /// and callable from any thread including the UI thread, and the ack it
-    /// parks on resolves off the main actor (module doc).
+    /// parks on resolves off the main actor (module doc). Step 0 still binds:
+    /// "any thread" excludes the one thread that has to deliver the outcome.
     fn request_purchase(&self, props: &RequestPurchaseProps) -> Result<(), IapError> {
+        reject_on_delivery_thread()?;
         let bridge = bridge()?;
         require_connected()?;
         let args = to_args(props, "requestPurchase")?;
@@ -923,10 +962,10 @@ mod tests {
         handle.remove();
     }
 
-    /// An event this crate does not model, and a malformed payload, are both
-    /// dropped rather than delivered as something else.
+    /// An event this crate does not model at all, and a forward with nothing in
+    /// it, are both dropped rather than delivered as something else.
     #[test]
-    fn an_unmodelled_or_malformed_event_is_dropped() {
+    fn an_unmodelled_event_is_dropped() {
         let _guard = crate::event::test_guard();
         let (tx, rx) = std::sync::mpsc::channel();
         let handle = crate::Iap::set_purchase_listener(Box::new(move |event| {
@@ -934,11 +973,85 @@ mod tests {
         }));
 
         deliver(Some("promoted-product-ios"), Some("{}"));
-        deliver(Some(EVENT_PURCHASE_UPDATED), Some("{ not json"));
         deliver(None, None);
         crate::event::flush();
 
         assert!(rx.try_recv().is_err(), "nothing should have been delivered");
+        handle.remove();
+    }
+
+    /// A payload under a name this crate *does* model, which will not decode,
+    /// is reported as a typed parse failure rather than dropped — an
+    /// undecodable `purchase-updated` is a StoreKit transaction that already
+    /// happened.
+    #[test]
+    fn a_malformed_modelled_event_synthesizes_a_purchase_error() {
+        let _guard = crate::event::test_guard();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = crate::Iap::set_purchase_listener(Box::new(move |event| {
+            tx.send(event).unwrap();
+        }));
+
+        deliver(Some(EVENT_PURCHASE_UPDATED), Some("{ not json"));
+        deliver(
+            Some(EVENT_PURCHASE_ERROR),
+            Some(&json!({ "event": "purchaseError", "data": { "nope": true } }).to_string()),
+        );
+        crate::event::flush();
+
+        let delivered: Vec<IapEvent> = rx.try_iter().collect();
+        assert_eq!(delivered.len(), 2);
+        for event in &delivered {
+            let IapEvent::PurchaseError(error) = event else {
+                panic!("expected a synthesized parse failure, got {event:?}");
+            };
+            assert_eq!(error.code, IapErrorCode::BillingResponseJsonParseError);
+            assert_eq!(error.product_id, None);
+        }
+
+        handle.remove();
+    }
+
+    /// Guard-order step 0, wired into this backend: a store-touching call made
+    /// from inside a listener is refused before the bridge is even resolved —
+    /// including `request_purchase`, which runs no main-thread guard but still
+    /// parks the one delivery thread on its ack.
+    #[test]
+    fn a_store_call_from_the_delivery_thread_is_refused() {
+        let _guard = crate::event::test_guard();
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let handle = crate::Iap::set_purchase_listener(Box::new(move |_| {
+            tx.send((
+                AppleIap.get_storefront().err(),
+                AppleIap.init_connection(None).err(),
+                AppleIap
+                    .request_purchase(&crate::mock::purchase_props("premium_upgrade"))
+                    .err(),
+            ))
+            .unwrap();
+        }));
+
+        deliver(
+            Some(EVENT_PURCHASE_ERROR),
+            Some(
+                &json!({
+                    "event": "purchaseError",
+                    "data": { "code": "user-cancelled", "message": "cancelled" },
+                })
+                .to_string(),
+            ),
+        );
+        crate::event::flush();
+
+        let (storefront, init, purchase) = rx.try_recv().expect("the listener ran");
+        for error in [storefront, init, purchase] {
+            assert!(
+                matches!(error, Some(IapError::EventThread)),
+                "refused before any bridge lookup: {error:?}"
+            );
+        }
+
         handle.remove();
     }
 }

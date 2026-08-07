@@ -224,13 +224,19 @@ instead of parking there:
 let connected = frust_reactive::spawn_blocking(|| Iap::init_connection(None)).await??;
 ```
 
-The guard order every call runs, before any platform work: **pre-init
-readiness** (`IapError::PlatformNotInitialized`) → **UI-thread fail-fast**
+The guard order every call runs, before any platform work: **delivery-thread
+fail-fast** (`IapError::EventThread`) → **pre-init readiness**
+(`IapError::PlatformNotInitialized`) → **UI-thread fail-fast**
 (`IapError::UiThread`) → **connection state** (`IapError::NotConnected`).
 `request_purchase` is the one exception with no UI-thread guard — Play
 Billing's `launchBillingFlow` and StoreKit's purchase sheet are themselves
 main-thread/main-actor APIs, so each backend reaches that thread on its own
 rather than refusing the caller.
+
+The delivery-thread guard has **no** exception: a store-touching call made
+from inside a purchase listener — `request_purchase` included — reports
+`IapError::EventThread` instead of parking the one thread every event is
+delivered on (see *Event-thread contract* below).
 
 Android splits its bound in two: `request_purchase`'s dispatch-ack — the one
 UI-thread-callable call — gets a short **5s** timeout (`android.rs`'s
@@ -394,6 +400,25 @@ Multiple listeners are supported; each sees every event, in registration
 order, and events arrive in the order the store reported them (one consumer,
 first in first out). A slow listener delays the listeners behind it *and*
 every later event.
+
+The last of those three rules is **enforced**: a store-touching call from
+inside a callback returns `IapError::EventThread` immediately rather than
+parking. Registering or removing a listener is not a store call and stays
+allowed from inside one.
+
+The queue feeding that thread is **bounded** (256 undelivered events). A
+listener that blocks long enough to fill it costs the newest events, logged
+at error level by kind — never by payload, since a `Purchase` carries a
+bearer token — rather than growing without limit or parking the platform's
+own callback thread. Recover a lost outcome with
+`Iap::get_available_purchases`, exactly as for an event delivered with no
+listener registered.
+
+An event whose payload the crate cannot decode is **not** silently dropped:
+it arrives as `IapEvent::PurchaseError` with
+`IapErrorCode::BillingResponseJsonParseError`, so a purchase the store
+already completed can never vanish without the app hearing about it. An
+event *kind* this crate does not model at all is still ignored.
 
 A purchase failure the store publishes is delivered **exactly once**: the
 OpenIAP host publishes it on its own error listener, and neither platform's
