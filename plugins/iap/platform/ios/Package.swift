@@ -15,9 +15,13 @@ import PackageDescription
 // 2. An EXTERNAL package dependency. `FrustCamera` depends only on the
 //    sibling LOCAL `FrustEmbedding` package; this one resolves
 //    `github.com/hyodotdev/openiap` over the network, so a consuming app's
-//    first SwiftPM resolution needs GitHub reachable. Pinned `exact:`: the
-//    Apple SDK version and the store contract it encodes move together, so a
-//    range would let a store-behavior change in without a code change here.
+//    first SwiftPM resolution needs GitHub reachable. Pinned by commit
+//    `revision:`, not the mutable `3.0.1` tag it currently names — a
+//    payments-path dependency gets the same commit-pin rigor as
+//    `clean-signals`' git+rev (`docs/DEVELOPMENT.md`'s Version-Pin Policy):
+//    the tag alone can be force-moved upstream, the revision cannot. Bump
+//    the revision and this comment's tag name together, in LOCKSTEP with
+//    Android's `openiap-google` pin (same Version-Pin Policy row).
 //
 // `platforms:` mirrors `FrustEmbedding`'s `.iOS(.v15)` — the project-wide iOS
 // floor (`docs/DEVELOPMENT.md`'s Platform-Support Policy). OpenIAP's own
@@ -31,7 +35,12 @@ let package = Package(
         .library(name: "FrustIap", targets: ["FrustIap"])
     ],
     dependencies: [
-        .package(url: "https://github.com/hyodotdev/openiap.git", exact: "3.0.1")
+        // OpenIAP 3.0.1's tag commit — `git rev-parse '3.0.1^{commit}'`
+        // against the upstream repo — verified to resolve cleanly as a
+        // local package's external dependency added directly to an app
+        // target (SwiftPM's root-only restriction on unversioned
+        // requirements does not bite here: `FrustIap` is that root).
+        .package(url: "https://github.com/hyodotdev/openiap.git", revision: "43ecc85bfda0fcd8f56d381e43d9d661afbd4729")
     ],
     targets: [
         .target(

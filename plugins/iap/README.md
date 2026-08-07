@@ -90,10 +90,10 @@ SwiftPM dedupes the shared dependency rather than vendoring it twice).
 
 Unlike `plugins/camera/platform/ios` (a purely local package), `FrustIap`'s
 own `Package.swift` also resolves an **external** SwiftPM dependency —
-`github.com/hyodotdev/openiap`, pinned `exact: 3.0.1` — so the **first**
-resolution needs GitHub reachable over the network; Xcode does this
-automatically the first time you build (or open the project) after adding
-the package.
+`github.com/hyodotdev/openiap`, pinned by commit `revision:` (the `3.0.1`
+tag's commit, not the mutable tag itself) — so the **first** resolution needs
+GitHub reachable over the network; Xcode does this automatically the first
+time you build (or open the project) after adding the package.
 
 **No `Info.plist` key is needed** — unlike camera's
 `NSCameraUsageDescription`, Apple requires no usage-description string for
