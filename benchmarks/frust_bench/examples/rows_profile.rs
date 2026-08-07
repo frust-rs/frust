@@ -334,7 +334,7 @@ fn snapshot_rows(screen: &vt100::Screen) -> Vec<Vec<vt100::Cell>> {
         .collect()
 }
 
-/// The app-style cell compare the task specifies: `Screen::cell(row, col)` (returning
+/// The app-style cell compare: `Screen::cell(row, col)` (returning
 /// `Option<&Cell>`) against the retained snapshot's `Option<&Cell>`, using `Cell: PartialEq`
 /// directly — deliberately NOT `vt100::Screen::rows_diff`, which builds an escape-byte
 /// `Vec<u8>` per row by comparing every cell anyway: a direct compare has the same cost with

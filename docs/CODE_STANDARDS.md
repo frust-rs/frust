@@ -583,7 +583,8 @@ Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantic
 - **Mechanically checked.** `crates/frust/tests/comment_residue_conformance.rs` catches
   plan-phase (dotted `9.B`, parenthesized, hyphenated `Phase-N`, "the Phase N"), plan-task
   (`task-NN`), findings-ledger numbers, review-round (`re-review`, `cfix-N`, gated `round-N`),
-  plan-document (`PLAN <tag>`, `workflow/plans/`), and `review finding <id>` refs — sanctioned
-  citations (LIMITATIONS ids, R-rules, external rev pins) exempt only their match span, not the
-  line. Bare internal PR numbers (vs. upstream wgpu's `#7057`) and bare plan tags (`T04`/`D6a`
-  vs. `M3`/`R8`) stay human-reviewed — still banned, swept on sight; tree is clean of both today.
+  plan-document (`PLAN <tag>`, `workflow/plans/`), phase-adjacent `req N`, and `review finding
+  <id>` refs — sanctioned citations (LIMITATIONS ids, R-rules, external rev pins) exempt only
+  their match span, not the line. Bare internal PR numbers (vs. upstream wgpu's `#7057`) and
+  bare plan tags (`T04`/`D6a` vs. `M3`/`R8`) stay human-reviewed — still banned, swept on sight
+  when review finds them.
