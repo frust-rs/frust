@@ -305,6 +305,17 @@ impl AndroidAppHandle {
             // Choreographer keeps re-posting callbacks, so the loop cadence is
             // unchanged.
             self.executor.record_skip();
+            // A tick that produced nothing is exactly the evidence the
+            // platform-view release gate's staleness hatch needs and cannot get
+            // from the submission cursor, which freezes with the loop: a batch
+            // still held here is waiting on a frame that was submitted, never
+            // confirmed presented (any non-`Rendered` render outcome records no
+            // present), and can no longer be overtaken. Without this the settled
+            // geometry is held for the process lifetime and the native sibling
+            // stays parked mid-animation — see `FramePairing::note_idle_tick`.
+            // Bookkeeping only: nothing here schedules or forces a frame, so the
+            // loop stays at zero frames while idle.
+            self.platform_view_due.note_idle_tick();
             return;
         }
 
