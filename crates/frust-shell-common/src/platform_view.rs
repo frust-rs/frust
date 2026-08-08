@@ -137,6 +137,10 @@
 //! releasing only the prefix whose frame is already presented:
 //! [`FramePairing`] keeps the `(generation, frame_id)` bookkeeping and
 //! [`commands_up_to`](PlatformViewState::commands_up_to) serves the prefix.
+//! Holding geometry for a presentation that never comes is the gate's one
+//! failure mode, so it releases anyway once the frame it waits on has fallen far
+//! enough behind — counted in submissions while frames flow and in idle display
+//! ticks ([`FramePairing::note_idle_tick`]) once they stop.
 //!
 //! # Skip-safety
 //!
@@ -184,6 +188,11 @@ pub const MAX_PENDING_COMMANDS: usize = 256;
 /// never rendered at all, and a dropped frame's id never presents. Without this
 /// arm one dropped scene strands every later batch forever — a submission
 /// counter is not a presented counter.
+///
+/// The same bound counts idle display ticks
+/// ([`FramePairing::note_idle_tick`]), which is what keeps the hatch reachable
+/// once the frame loop stops producing frames and the submission cursor freezes
+/// with it.
 ///
 /// Measured pipeline depth on physical test devices was 2–4 frames, so
 /// 12 sits well above the working range while bounding worst-case staleness to
@@ -652,6 +661,13 @@ impl PlatformViewState {
 /// meaningful (backgrounding, surface recreation), after which the whole
 /// backlog releases immediately — a hide or a full replay must reach the native
 /// side even though no further frame will ever present to unlock it.
+///
+/// Going *idle* is the third such moment, and the only one with no lifecycle
+/// callback to hang a `clear` on: the loop simply stops producing frames while
+/// the display keeps ticking. A shell reports those ticks
+/// ([`note_idle_tick`](Self::note_idle_tick)) so the staleness hatch stays
+/// reachable there — without them a batch whose frame never presented is held
+/// for the process lifetime (see that method for the full failure mode).
 #[derive(Debug, Default)]
 pub struct FramePairing {
     /// `(generation, frame_id)` per produced batch, oldest first. Both
@@ -659,6 +675,14 @@ pub struct FramePairing {
     /// what lets [`releasable_generation`](Self::releasable_generation) stop at
     /// the first held entry.
     due: VecDeque<(u64, u64)>,
+    /// Display ticks that produced no frust frame since the last
+    /// [`record`](Self::record) — the idle half of the staleness cursor (see
+    /// [`note_idle_tick`](Self::note_idle_tick)). Reset by every produced batch
+    /// and by [`clear`](Self::clear), so it only ever measures the *current*
+    /// idle stretch: an entry recorded before an earlier stretch is aged by
+    /// fewer ticks than really elapsed, which errs toward holding, never toward
+    /// releasing early.
+    idle_ticks: u64,
 }
 
 /// Upper bound on tracked-but-unreleased batches. Reached only if the native
@@ -681,22 +705,67 @@ impl FramePairing {
             self.due.pop_front();
         }
         self.due.push_back((generation, frame_id));
+        // A produced frame ends the idle stretch: this batch's own frame is
+        // genuinely in flight, so from here the submission cursor is the honest
+        // clock to age every entry by again.
+        self.idle_ticks = 0;
+    }
+
+    /// Report one display tick on which the frame loop produced **no** frust
+    /// frame — the tick a shell's frame gate skipped. Ages every held batch
+    /// exactly as a submission does (see
+    /// [`releasable_generation`](Self::releasable_generation)).
+    ///
+    /// **Why the release gate needs an idle clock at all.** A batch is released
+    /// on one of two events: its own frame is confirmed *presented*, or the
+    /// submission cursor climbs [`MAX_FRAMES_IN_FLIGHT`] past it. A present is
+    /// recorded only for a `Rendered` render outcome, so any other one — an
+    /// encode or acquire skipped against a surface that is not ready, a
+    /// swapchain reconfigure, a lost surface, an encode/acquire error — leaves
+    /// the batch's frame permanently unconfirmed. That is survivable while
+    /// frames keep flowing, because the submission cursor walks past it within
+    /// twelve frames. Once the app settles, though, the submission cursor stops
+    /// too, and *neither* arm can ever fire again: the settled geometry is held
+    /// for the process lifetime and the native sibling stays parked at whatever
+    /// mid-animation rect it last applied — device-observed as a camera preview
+    /// stuck black behind correct-but-never-delivered geometry, healed only by a
+    /// surface recreate (which `clear`s the pairing). The display clock is the
+    /// one cursor still moving at idle, and an idle tick carries exactly the
+    /// evidence the submission cursor does: that frame is not coming.
+    ///
+    /// **Why an idle *bound* and not an immediate release.** Releasing the whole
+    /// backlog on the last painted frame is not expressible: a touch-driven drag
+    /// paints with `needs_frame == false` every frame, so "this paint asked for
+    /// no continuation frame" cannot tell a settle frame from a mid-drag one,
+    /// and keying the release on it would turn the gate off for exactly the
+    /// scrolling case it was built to smooth. Aging by idle ticks costs nothing
+    /// on any path where frames still flow — a present that does arrive still
+    /// releases the batch first, unchanged — and bounds the broken path to
+    /// [`MAX_FRAMES_IN_FLIGHT`] display ticks (~100 ms at 120 Hz).
+    pub fn note_idle_tick(&mut self) {
+        self.idle_ticks = self.idle_ticks.saturating_add(1);
     }
 
     /// The highest generation releasable right now, given the id of the last
     /// **presented** frame and of the last **submitted** one.
     ///
     /// A batch is releasable once its own frame is on screen, or once that
-    /// frame has fallen [`MAX_FRAMES_IN_FLIGHT`] behind the submission cursor
-    /// (it was dropped by the latest-wins channel and will never present). The
-    /// first batch that is neither caps the boundary at its own generation
-    /// minus one, so everything published before it — including a lifecycle
-    /// batch that was never paired with a frame at all — still goes out; an
-    /// empty queue releases everything.
+    /// frame has fallen [`MAX_FRAMES_IN_FLIGHT`] behind the staleness cursor
+    /// (it was dropped by the latest-wins channel, or never presented at all,
+    /// and will never reach the screen). The first batch that is neither caps
+    /// the boundary at its own generation minus one, so everything published
+    /// before it — including a lifecycle batch that was never paired with a
+    /// frame at all — still goes out; an empty queue releases everything.
+    ///
+    /// The staleness cursor is the submission cursor plus the current idle
+    /// stretch ([`note_idle_tick`](Self::note_idle_tick)): the two are the same
+    /// "frames have moved on past this one" evidence, and with no idle ticks
+    /// reported this is bit-for-bit the submission-only rule.
     pub fn releasable_generation(&self, presented_frame_id: u64, submitted_frame_id: u64) -> u64 {
+        let stale_cursor = submitted_frame_id.saturating_add(self.idle_ticks);
         for &(generation, due_frame) in &self.due {
             let on_screen = due_frame <= presented_frame_id;
-            let stranded = submitted_frame_id.saturating_sub(due_frame) >= MAX_FRAMES_IN_FLIGHT;
+            let stranded = stale_cursor.saturating_sub(due_frame) >= MAX_FRAMES_IN_FLIGHT;
             if !on_screen && !stranded {
                 return generation.saturating_sub(1);
             }
@@ -718,9 +787,12 @@ impl FramePairing {
     }
 
     /// Forget every pairing (backgrounding, surface recreation) — see the
-    /// type's Lifecycle note.
+    /// type's Lifecycle note. Also drops the idle stretch, so the ticks counted
+    /// against frames belonging to a surface (or a foreground session) that is
+    /// gone cannot age the first batch recorded after it.
     pub fn clear(&mut self) {
         self.due.clear();
+        self.idle_ticks = 0;
     }
 
     /// Whether any batch is still waiting to be paired off.
@@ -1534,6 +1606,128 @@ mod tests {
         assert_eq!(pairing.releasable_generation(9, 10), 0);
         pairing.clear();
         assert_eq!(pairing.releasable_generation(9, 10), u64::MAX);
+    }
+
+    #[test]
+    fn idle_ticks_release_a_batch_whose_frame_never_presents() {
+        let mut pairing = FramePairing::new();
+        // The settle frame: batch 1 rides frame 10, which is submitted and then
+        // never presented (any non-`Rendered` render outcome records nothing).
+        pairing.record(1, 10);
+        assert_eq!(
+            pairing.releasable_generation(9, 10),
+            0,
+            "held while that frame could still land"
+        );
+
+        // The app is now idle — no further submissions, so the display clock is
+        // the only cursor left moving.
+        for _ in 0..(MAX_FRAMES_IN_FLIGHT - 1) {
+            pairing.note_idle_tick();
+            assert_eq!(
+                pairing.releasable_generation(9, 10),
+                0,
+                "still inside the staleness bound"
+            );
+        }
+        pairing.note_idle_tick();
+        assert_eq!(
+            pairing.releasable_generation(9, 10),
+            u64::MAX,
+            "the idle stretch strands a frame that will never present"
+        );
+    }
+
+    #[test]
+    fn an_idle_released_batch_is_served_exactly_once() {
+        let mut state = PlatformViewState::new();
+        let mut pairing = FramePairing::new();
+        state.ingest(&[frame(1, r(0.0, 0.0, 10.0, 10.0), true)], &[]);
+        let generation = state.commands().0;
+        pairing.record(generation, 10);
+
+        // Frame 10 never presented and nothing else was submitted: the poll
+        // serves nothing at all.
+        let releasable = pairing.releasable_generation(9, 10);
+        assert!(state.commands_up_to(releasable).1.is_empty());
+
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            pairing.note_idle_tick();
+        }
+        let releasable = pairing.releasable_generation(9, 10);
+        let (reported, cmds) = state.commands_up_to(releasable);
+        assert_eq!(cmds.len(), 2, "the held Create+Update finally go out");
+        assert_eq!(reported, generation);
+
+        // The native side applies and acks: both halves compact, so no further
+        // poll — however many more idle ticks land — re-serves the batch.
+        state.acknowledge(reported);
+        pairing.acknowledge(reported);
+        pairing.note_idle_tick();
+        let releasable = pairing.releasable_generation(9, 10);
+        assert!(
+            state.commands_up_to(releasable).1.is_empty(),
+            "applied once, never re-applied"
+        );
+        assert!(pairing.is_empty());
+    }
+
+    #[test]
+    fn a_presented_frame_releases_before_the_idle_bound_is_reached() {
+        let mut pairing = FramePairing::new();
+        pairing.record(1, 10);
+        // The render tail runs a tick or two behind the UI thread, so a settle
+        // frame's present routinely lands after the loop has already idled.
+        pairing.note_idle_tick();
+        pairing.note_idle_tick();
+        assert_eq!(
+            pairing.releasable_generation(9, 10),
+            0,
+            "held: the frame is still well inside the bound"
+        );
+        assert_eq!(
+            pairing.releasable_generation(10, 10),
+            u64::MAX,
+            "the present releases it exactly as before"
+        );
+    }
+
+    #[test]
+    fn a_produced_batch_resets_the_idle_stretch() {
+        let mut pairing = FramePairing::new();
+        pairing.record(1, 10);
+        for _ in 0..(MAX_FRAMES_IN_FLIGHT - 1) {
+            pairing.note_idle_tick();
+        }
+        // The loop wakes and paints again before the bound trips: frames are
+        // flowing, so both batches are aged by the submission cursor alone.
+        pairing.record(2, 11);
+        assert_eq!(
+            pairing.releasable_generation(9, 11),
+            0,
+            "a spent idle stretch cannot strand a live pipeline"
+        );
+
+        // Idling again ages them from scratch.
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            pairing.note_idle_tick();
+        }
+        assert_eq!(pairing.releasable_generation(9, 11), u64::MAX);
+    }
+
+    #[test]
+    fn clear_drops_the_idle_stretch_with_the_pairings() {
+        let mut pairing = FramePairing::new();
+        pairing.record(1, 10);
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            pairing.note_idle_tick();
+        }
+        // Backgrounding / surface recreation: the ticks counted against a
+        // session whose frames are gone must not age the next session's first
+        // batch, which is gated normally.
+        pairing.clear();
+        pairing.record(2, 1);
+        assert_eq!(pairing.releasable_generation(0, 1), 1);
     }
 
     #[test]

@@ -46,7 +46,9 @@ impl AndroidAppHandle {
     /// of it while scrolling (see [`Self::platform_view_due`]).
     /// Held commands are not lost — the poll is idempotent and re-serves them
     /// the moment their frame lands (or the moment the staleness escape hatch
-    /// declares that frame dropped). Kotlin needs no change: it applies exactly
+    /// declares that frame gone, counted in submissions while frames flow and in
+    /// skipped ticks once the loop idles — see
+    /// [`Self::frame`]'s skip path). Kotlin needs no change: it applies exactly
     /// what it is handed and acks the generation it is told.
     pub(crate) fn platform_view_commands(&mut self) -> (u64, &[ViewCommand]) {
         let gated = self.platform_view_due.releasable_generation(

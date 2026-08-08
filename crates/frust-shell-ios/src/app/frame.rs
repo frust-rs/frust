@@ -254,6 +254,18 @@ impl IosAppHandle {
             // *production* stops, callbacks don't (the accepted v1 shape, same as
             // Android — see `docs/DEVELOPMENT.md`).
             self.executor.record_skip();
+            // Under present-sync the same gate Android runs holds geometry here,
+            // so it needs the same idle clock: a tick that produced nothing is
+            // the only evidence left that a batch's frame — submitted, never
+            // presented (this thread advances `presented_frame_id` solely from a
+            // parked frame, which a non-`Rendered` render outcome never
+            // produces) — is not coming, since the submission cursor freezes
+            // with the loop. Mirrors the Android skip site; bookkeeping only, so
+            // an idle screen stays at zero frames. See
+            // `FramePairing::note_idle_tick`.
+            if self.present_sync {
+                self.platform_view_due.note_idle_tick();
+            }
             return;
         }
 
