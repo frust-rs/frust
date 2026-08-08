@@ -406,6 +406,14 @@ build note.
   cursors, no migrations, no named parameters (positional only, matching this
   crate's v1 scope). Future enhancements (not v1) include named parameters,
   statement cache, streaming query results, and a migration runner.
+- **Param-count strictness differs by engine.** Supplying fewer positional
+  parameters than the statement declares placeholders is an error
+  (`DatabaseError::Sql`) on the SQLite engine — a client-side guard rusqlite
+  adds — but on the turso engine the missing placeholders silently bind as
+  `NULL` and the statement succeeds (turso `=0.7.2` performs no count check
+  and exposes no parameter-count API this crate could enforce one with).
+  Always supply exactly as many parameters as the SQL declares; the
+  conformance suite pins the strict behavior as sqlite-only.
 - **No code-level UI-thread guard.** Like `frust-secure-storage`, blocking-call
   discipline is docs-only. There is no shared guard helper in this codebase,
   and adding one would require an FFI dependency this pure-Rust crate
