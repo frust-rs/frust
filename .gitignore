@@ -27,6 +27,14 @@
 # same SwiftPM `.build/` index-build tree (~178MB for frust-camera); a
 # consuming app passes its own `-derivedDataPath`, so this only appears on a
 # direct package build. Globbed rather than path-pinned so a second plugin
-# Swift package is covered the day it lands — `frust-camera` is the only
-# instance today.
+# Swift package is covered the day it lands — `frust-camera` and
+# `frust-iap` are the instances today.
 /plugins/*/platform/ios/.build/
+
+# A direct/SourceKit package resolution also drops a `Package.resolved`
+# beside the manifest (frust-iap's external OpenIAP dependency makes this
+# routine — camera's all-local deps never produced one). A consuming app
+# records its own resolution in its project; the package-local file is
+# tooling exhaust, never committed.
+/plugins/*/platform/ios/Package.resolved
+/platform/ios/FrustEmbedding/Package.resolved

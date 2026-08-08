@@ -342,8 +342,8 @@ through `torch_available()`, never through this call's `Result`; check it
 before offering the control, and again afterward if the UI needs to know
 whether the LED actually changed. On-device behavior (real illumination,
 front-lens refusal, the overheating path) is verified by the camera device
-gate, not by any host-side test — `docs/DEVELOPMENT.md`'s *Camera manual
-test*.
+gate, not by any host-side test — `docs/PLUGINS_DEVELOPMENT.md`'s *Camera
+manual test*.
 
 ---
 

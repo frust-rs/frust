@@ -1,0 +1,90 @@
+[package]
+name = "frust-iap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# IapError variants callers match on — thiserror per CODE_STANDARDS.
+thiserror = { workspace = true }
+# The v1 serde type subset (`src/types.rs`) mirrors the OpenIAP 3.0.1 JSON
+# wire shapes (Product/Purchase/IapEvent/…) that cross the Rust<->Kotlin/
+# Swift FFI boundary as JSON strings — every host call and event this crate
+# will expose (task 04 onward) speaks JSON, never raw platform objects.
+serde = { workspace = true }
+serde_json = { workspace = true }
+# The Android platform-handle substrate this crate's Android backend calls
+# through (`frust_plugin::android::with_jni_env`); the only `frust-*`
+# dependency this crate is allowed (platform-plugin charter — see
+# `docs/ARCHITECTURE.md`'s Module Structure / `docs/CODE_STANDARDS.md`'s
+# Plugin Conventions). Unconditional like `frust-clipboard`'s/
+# `frust-haptics`'s own copy: the crate is inert off Android, so declaring
+# it target-gated would buy nothing.
+frust-plugin = { path = "../../crates/frust-plugin" }
+# The Android nativeOn* export stubs and the Apple backend's own diagnostics
+# both log rather than print (platform plugins never own stdout/stderr the
+# way `frust-drive` does) — a leaf, framework-free dependency, matching
+# `frust-camera`'s own copy.
+log = { workspace = true }
+
+# Android: the plugin's own JNI exports (the frozen Kotlin<->Rust contract
+# task 04/05 will define) and the Rust->Kotlin `FrustIapHost` calls both need
+# `jni` directly — matching `frust-camera`'s/`frust-clipboard`'s own Android
+# arm (their own JNI signature calls don't go through `frust-plugin`'s
+# re-export alone), so this crate depends on `jni` directly too.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { workspace = true }
+
+# iOS only — **not** `target_vendor = "apple"` (`frust-haptics`'s own
+# `target_os = "ios"` rationale: this is a JSON-string-only bridge onto
+# `platform/ios`'s Swift glue, which owns all StoreKit access; there is no
+# macOS desktop arm here to share `target_vendor = "apple"` with — see the
+# desktop comment below).
+[target.'cfg(target_os = "ios")'.dependencies]
+# `MainThreadMarker`: StoreKit's purchase/product APIs are main-actor-bound
+# on the Swift side, so the Rust->Swift call this crate's iOS backend
+# (task 06) makes needs to prove it is dispatching from the main thread the
+# same way `frust-haptics`'s three `MainThreadOnly` feedback-generator calls
+# do. Not `default-features = false`: this crate needs nothing narrower than
+# `objc2`'s own default feature set, matching `frust-haptics`'s own
+# `{ workspace = true }` edge.
+objc2 = { workspace = true }
+# `NSString`/`NSError`: the JSON-string bridge itself — every Rust->Swift
+# call marshals its request as an `NSString` and every Swift->Rust
+# response/error comes back the same way (this crate's "JSON-string-only
+# bridge" charter — no StoreKit/AV crate is a dependency here on purpose,
+# unlike `frust-camera`'s AVFoundation stack; the Swift glue in
+# `platform/ios` owns all StoreKit framework access). `default-features =
+# false` + a minimal feature list, matching `plugins/secure-storage`'s own
+# `objc2-foundation` edge (workspace-dependency inheritance forbids a member
+# from overriding `default-features` unless the workspace-level entry
+# already sets it, and it doesn't — see that crate's Cargo.toml comment for
+# the same restriction) — so this repeats the version literal instead of
+# inheriting.
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSString",
+    "NSError",
+] }
+# Constructing the completion block the Rust->Swift JSON-string call
+# receives its response/error through — `frust-camera`'s/`frust-haptics`'s
+# own rationale for depending on `block2` directly rather than relying on it
+# transitively (a block has to be *constructed* here, not just named).
+# `default-features = false` for the same reason as `objc2-foundation`
+# above; not `{ workspace = true }` since `block2` has no
+# `[workspace.dependencies]` entry (camera/haptics never added one either —
+# see this crate's sibling plugins' own Cargo.toml comments) — the version
+# below matches their `0.6` literal pin.
+block2 = { version = "0.6", default-features = false, features = ["std"] }
+
+# Desktop (macOS, Linux, Windows): no dependency needed — **not** the same
+# rationale as `frust-haptics`'s own no-desktop-stanza comment. Haptics has
+# no first-class desktop API to route to at all (a genuine capability
+# absence); IAP is the opposite: macOS ships the Mac App Store's StoreKit
+# and Windows ships the Microsoft Store's API, so a desktop backend is a
+# real, buildable future addition. Its absence here is a deliberate v1
+# **deferral** — mobile-first scope, not a platform limitation — tracked as
+# `IapError::NotAvailable(Unavailability::UnsupportedPlatform)` at the
+# `src/lib.rs` dispatch point tasks 04+ will add, the same fail-soft shape
+# `frust-haptics`'s desktop arm already uses for its own (permanent) gap.

@@ -3,7 +3,7 @@
 //! Every scenario is a zero-sized unit struct implementing [`Scenario`],
 //! registered once in [`SCENARIOS`]. A scenario is selected at launch via a
 //! deep link (`frustbench://<id>`, the on-device path the harness uses — see
-//! `docs/DEVELOPMENT.md`'s Deep-link manual test) or the `FRUST_BENCH_SCENARIO`
+//! `docs/SHELLS_DEVELOPMENT.md`'s Deep-link manual test) or the `FRUST_BENCH_SCENARIO`
 //! env var (the desktop fallback), and can be switched at runtime from the HUD
 //! button row or a warm deep link (see [`crate::BenchApp`]).
 //!

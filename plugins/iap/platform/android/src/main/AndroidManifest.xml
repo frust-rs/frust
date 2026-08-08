@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  This module carries no `<uses-permission>` of its own: the Play Billing
+  Library AAR that `openiap-google` depends on declares
+  `com.android.vending.BILLING` itself, and the Android manifest merger folds
+  it into any app that (transitively) depends on `:frust-iap` — a consuming
+  app never edits its own AndroidManifest.xml to obtain it. BILLING arrives
+  transitively from the Play Billing AAR via the manifest merger — the transitive
+  fold is the contract here.
+
+  The provider below is how `FrustIapHost` obtains an application `Context`
+  BEFORE any Activity exists, mirroring `plugins/camera/platform/android`'s
+  `FrustCameraInitProvider`. A billing client must be initializable as early as
+  possible (a purchase can be pending from a previous app run, and OpenIAP's
+  connection setup needs a `Context`), so waiting for the first Activity — the
+  only Context a plugin would otherwise see — is too late. A no-op
+  `ContentProvider` whose `onCreate` runs at process start is the standard
+  library-self-initialization mechanism for exactly this (`androidx.startup`'s
+  `InitializationProvider`, Firebase's `FirebaseInitProvider`).
+
+  `${applicationId}` is substituted by AGP at manifest-merge time, so the
+  authority is unique per consuming app (two apps on one device cannot collide).
+  `exported="false"`: nothing outside the app may reach it — it exposes no data
+  and every ContentProvider operation throws/returns null.
+
+  No `package` attribute: AGP takes the module's package from
+  `android.namespace` in `build.gradle.kts` (`dev.frust.iap`).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <provider
+            android:name="dev.frust.iap.FrustIapInitProvider"
+            android:authorities="${applicationId}.frustiapinit"
+            android:exported="false"
+            android:multiprocess="false" />
+    </application>
+
+</manifest>

@@ -1,4 +1,4 @@
-//! The static plugin registry (v1) — seven entries mirroring `plugins/`:
+//! The static plugin registry (v1) — eight entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
@@ -13,12 +13,15 @@
 //! module — and **nothing** on iOS, which is not an omission: that arm ships
 //! zero Swift by design), `clipboard` (dependency only — plain text
 //! clipboard access needs no manifest permission, plist key, Gradle module,
-//! or Swift package on either mobile platform), and `haptics` (dependency
+//! or Swift package on either mobile platform), `haptics` (dependency
 //! plus the `android.permission.VIBRATE` manifest permission — the first
 //! registry entry to use [`Contribution::ManifestPermission`] rather than a
 //! Gradle module for its Android addition, since the plugin's Android
 //! backend is plain JNI with no Kotlin helper class to carry the permission
-//! inside a module manifest; see `HAPTICS_BASE`'s doc comment).
+//! inside a module manifest; see `HAPTICS_BASE`'s doc comment), and `iap`
+//! (dependency, the plugin's own Android library module, and its own iOS
+//! Swift package — no plist key and no app-crate macro; see `IAP_BASE`'s doc
+//! comment for why).
 
 use super::{Contribution, FeatureSpec, PluginSpec};
 
@@ -251,6 +254,41 @@ const HAPTICS: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+/// `iap`'s base contributions — a Cargo dependency plus its own Android
+/// library module and its own iOS Swift package, the `camera`/`native-widgets`
+/// shape (a plugin's Kotlin/Swift never copied into the app).
+///
+/// No `ManifestPermission`: `com.android.vending.BILLING` arrives transitively
+/// from the `openiap-google` Play Billing AAR, folded into the app by the
+/// manifest merger exactly like `secure-storage`'s `USE_BIOMETRIC` and
+/// `camera`'s implicit `CAMERA` permission — proven by grepping a generated
+/// app's merged manifest. No `PlistEntry`: unlike camera's usage-description
+/// string, StoreKit needs no app-side privacy key. No `AppCrateMacro`: an app
+/// calls `frust_iap::Iap` explicitly, so there is no dead-code-elimination
+/// hazard for release LTO to strip (camera's export shim exists only because
+/// nothing in Rust calls the symbol it protects).
+const IAP_BASE: &[Contribution] = &[
+    Contribution::CargoDep { name: "frust-iap" },
+    Contribution::GradleModule {
+        gradle_name: ":frust-iap",
+        rel_path: "plugins/iap/platform/android",
+    },
+    Contribution::SwiftPackageRef {
+        package_name: "FrustIap",
+        rel_path: "plugins/iap/platform/ios",
+    },
+];
+
+const IAP: PluginSpec = PluginSpec {
+    id: "iap",
+    summary: "In-app purchases and subscriptions over Play Billing / StoreKit 2, \
+              speaking the OpenIAP wire protocol.",
+    crate_dir: "iap",
+    base: IAP_BASE,
+    optional_features: &[],
+    requires_sibling: None,
+};
+
 /// The v1 static plugin registry (Vec-factory convention). A caller (the CLI
 /// or the TUI Add Plugin dialog) enumerates this to drive selection without
 /// hardcoding plugin ids.
@@ -263,6 +301,7 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         NATIVE_WIDGETS,
         CLIPBOARD,
         HAPTICS,
+        IAP,
     ]
 }
 
@@ -282,7 +321,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_seven_v1_plugins() {
+    fn registry_lists_the_eight_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -294,6 +333,7 @@ mod tests {
                 "native-widgets",
                 "clipboard",
                 "haptics",
+                "iap",
             ]
         );
     }
@@ -431,6 +471,46 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// The `iap` entry's base contributions, exactly [`IAP_BASE`]'s own list
+    /// — a Cargo dependency, the plugin's own Android library module, and its
+    /// own iOS Swift package, no more and no fewer, in application order —
+    /// and no optional features / sibling requirement.
+    #[test]
+    fn iap_base_contributions_match_the_final_accounting() {
+        let spec = find_plugin("iap").unwrap();
+        assert_eq!(spec.crate_dir, "iap");
+        assert!(spec.optional_features.is_empty());
+        assert_eq!(spec.requires_sibling, None);
+
+        assert_eq!(spec.base.len(), 3);
+        assert!(matches!(
+            spec.base[0],
+            Contribution::CargoDep { name: "frust-iap" }
+        ));
+        assert!(matches!(
+            spec.base[1],
+            Contribution::GradleModule {
+                gradle_name: ":frust-iap",
+                rel_path: "plugins/iap/platform/android",
+            }
+        ));
+        assert!(matches!(
+            spec.base[2],
+            Contribution::SwiftPackageRef {
+                package_name: "FrustIap",
+                rel_path: "plugins/iap/platform/ios",
+            }
+        ));
+        assert!(
+            !spec
+                .base
+                .iter()
+                .any(|c| matches!(c, Contribution::ManifestPermission { .. })),
+            "iap must add no ManifestPermission — com.android.vending.BILLING \
+             arrives transitively from the openiap-google Play Billing AAR"
+        );
     }
 
     /// The `SwiftPackageRef` counterpart of
@@ -793,6 +873,80 @@ mod tests {
         let after_first = snapshot_tree(&root);
         let second = add_plugin(&root, "haptics", &[]).unwrap();
         assert_eq!(second.items.len(), 2);
+        assert!(
+            second
+                .items
+                .iter()
+                .all(|i| i.outcome == AddOutcome::AlreadyPresent),
+            "{second:?}"
+        );
+        assert_eq!(
+            after_first,
+            snapshot_tree(&root),
+            "a second apply must leave a byte-identical tree"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The `iap` counterpart of the camera/native-widgets/haptics end-to-end
+    /// cases above — the registry's second `GradleModule` +
+    /// `SwiftPackageRef` pairing, and the first with neither a `PlistEntry`
+    /// nor an `AppCrateMacro` (`IAP_BASE`'s doc comment says why). A fresh
+    /// scaffold, `add_plugin(.., "iap", ..)` applied twice: the app's
+    /// Cargo.toml gains the dependency, `settings.gradle.kts` gains the
+    /// include trio, the app's `build.gradle.kts` gains the project
+    /// dependency, and `project.pbxproj` gains the `FrustIap` package
+    /// reference — the second apply must report every item
+    /// `AlreadyPresent` and leave a byte-identical tree.
+    #[test]
+    fn iap_add_plugin_applies_every_contribution_and_reapply_is_idempotent() {
+        let root = scaffold_project("iap-idempotence");
+
+        let pre_plist = fs::read_to_string(root.join("ios/Runner/Info.plist")).unwrap();
+        let pre_lib_rs = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+
+        let first = add_plugin(&root, "iap", &[]).unwrap();
+        assert_eq!(first.plugin_id, "iap");
+        assert_eq!(first.items.len(), 3, "{first:?}");
+        assert!(
+            first.items.iter().all(|i| i.outcome == AddOutcome::Applied),
+            "{first:?}"
+        );
+
+        // The Cargo dependency, Gradle module wiring and Swift package
+        // reference all actually landed.
+        let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert!(cargo.contains("frust-iap"), "{cargo}");
+        let settings = fs::read_to_string(root.join("android/settings.gradle.kts")).unwrap();
+        assert!(settings.contains("include(\":frust-iap\")"), "{settings}");
+        assert!(
+            settings.contains("rootDir.resolve(\"build/frust-iap\")"),
+            "{settings}"
+        );
+        let app_build = fs::read_to_string(root.join("android/app/build.gradle.kts")).unwrap();
+        assert!(
+            app_build.contains("implementation(project(\":frust-iap\"))"),
+            "{app_build}"
+        );
+        let pbxproj =
+            fs::read_to_string(root.join("ios/Runner.xcodeproj/project.pbxproj")).unwrap();
+        assert!(pbxproj.contains("FrustIap"), "{pbxproj}");
+        assert_pbxproj_well_formed(&pbxproj);
+
+        // No Info.plist key and no app-crate macro invocation — the
+        // absences `IAP_BASE`'s own doc comment states.
+        let plist = fs::read_to_string(root.join("ios/Runner/Info.plist")).unwrap();
+        assert_eq!(plist, pre_plist, "iap must add no Info.plist key");
+        let lib_rs = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+        assert_eq!(
+            lib_rs, pre_lib_rs,
+            "iap must add no app-crate macro invocation"
+        );
+
+        let after_first = snapshot_tree(&root);
+        let second = add_plugin(&root, "iap", &[]).unwrap();
+        assert_eq!(second.items.len(), 3);
         assert!(
             second
                 .items
