@@ -1,5 +1,5 @@
 // `frust-camera`'s Android side — a `com.android.library` module holding the
-// plugin's CameraX session owner (`FrustCameraHost`) and its plain-SurfaceView
+// plugin's CameraX session owner (`FrustCameraHost`) and its TextureView-backed
 // preview factory (`CameraPreviewFactory`). It is wired into a generated app
 // exactly like `plugins/secure-storage/platform/android` (`frust tui` → Add
 // Plugin, or the plugin README by hand):
@@ -98,9 +98,12 @@ dependencies {
     // `bindToLifecycle` seam.
     //
     // `camera-view` is deliberately ABSENT: `PreviewView` owns its own view
-    // hierarchy and transform policy, while frust's Mode B compositing needs a
-    // plain `SurfaceView` (behind-window by default — exactly Mode B's bottom
-    // layer) whose transform this module computes itself. Adding `camera-view`
+    // hierarchy and transform policy, and defaults back to a `SurfaceView` —
+    // whose pixels live in a compositor layer no ancestor clip can trim, so a
+    // centre-crop escapes its slot. This module hosts a plain `TextureView`
+    // (bounded by its own frame, under frust's Mode B surface like any other
+    // window content) and computes the crop transform itself; see
+    // `CameraPreviewFactory.kt`'s `CameraPreviewView`. Adding `camera-view`
     // later would pull in a second, conflicting preview implementation.
     implementation("androidx.camera:camera-core:1.6.1")
     implementation("androidx.camera:camera-camera2:1.6.1")
