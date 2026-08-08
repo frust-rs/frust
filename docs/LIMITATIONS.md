@@ -775,3 +775,92 @@ itself, not the platform-independent contract around it.
 **Evidence**: `plugins/iap/README.md` §3 (Store setup) and §4 (Testing
 without a store account); `plugins/iap/src/conformance.rs`'s module doc;
 `plugins/iap/src/event.rs`'s module doc.
+
+---
+
+### `db-engine-dialect-divergence` — sqlite and turso diverge outside the shared conformance surface
+
+**Observed**: two SQL-dialect gaps between `frust-database`'s engines are carved out of
+the shared conformance suite as sqlite-only tests rather than both-engine assertions.
+`CREATE INDEX` support is experimental and off-by-default upstream in turso `0.7.2`.
+Under-supplied positional params (`?1`/`?2` with fewer bound values than placeholders)
+error as `DatabaseError::Sql` on sqlite (`rusqlite`'s own client-side count check) but
+silently bind the missing trailing placeholders as `NULL` and succeed on turso, which has
+no equivalent check or parameter-count API to build one on.
+
+**Applies to**: any app issuing `CREATE INDEX` or relying on param-count strictness
+against a `turso`-backed `Database`; both are absent from the shared suite an app author
+might otherwise assume covers the full SQL surface both engines accept.
+
+**Why accepted**: neither gap is fixable from this crate's side without either
+hand-parsing SQL for placeholders in the bridge (rejected — keeps the turso bridge "tiny
+and boring") or waiting on upstream turso index/param-count work. The shared suite sticks
+to the both-engine surface; each divergence is a named `sqlite_conformance`-only test
+instead of a silently weakened shared assertion.
+
+**Evidence**: `plugins/database/src/conformance.rs`'s module doc (`create_index`,
+`param_count_mismatch` carve-outs); `plugins/database/README.md` §7.
+
+---
+
+### `db-cross-engine-interop-subset` — a shared file is portable only inside the WAL/unencrypted subset
+
+**Observed**: a database file written by one engine and opened by the other stays
+correct only if both sides stick to WAL journal mode, no encryption, and no
+engine-specific pragma (`mvcc`, `cipher`, `hexkey`). Both backends enforce this
+themselves (sqlite sets WAL at open; turso asserts it and refuses anything else), but
+nothing stops an app from reaching around `Database` with raw SQL that breaks it.
+
+**Applies to**: any app opening the same file with both `engine-sqlite` and
+`engine-turso` builds, or sharing a file with an external SQLite tool that changes
+journal mode or applies encryption.
+
+**Why accepted**: this is the verified intersection of what both engines' SQLite builds
+(bundled `rusqlite` 3.53.2; turso self-reports `sqlite_version()` 3.50.4) actually
+support in common — not a narrower promise than necessary, but not a general SQLite-file
+compatibility guarantee either.
+
+**Evidence**: `plugins/database/src/conformance.rs`'s cross-engine round-trip tests and
+module doc; `plugins/database/README.md` §5.3.
+
+---
+
+### `db-ui-thread-docs-only` — no typed guard against calling `Database` on the platform UI thread
+
+**Observed**: unlike the boundary the `AsyncContext` error covers for turso, there is no
+guard of any kind — typed or otherwise — against calling `Database::execute`/`query`/
+`transaction` synchronously from the platform UI thread. It blocks the UI thread exactly
+like any other blocking call would.
+
+**Applies to**: both engines, on every platform. The documented mitigation is calling
+through `frust_reactive::spawn_blocking`, never directly from `build()`/an event handler.
+
+**Why accepted**: matches the `secure-storage` precedent already established in this
+tier — a code guard would need FFI/thread-identity dependencies this pure-Rust plugin
+deliberately avoids pulling in just to detect a caller mistake the docs already state.
+
+**Evidence**: `plugins/database/src/lib.rs`'s module doc (Threading model); `plugins/database/README.md`'s Threading section.
+
+---
+
+### `db-asynccontext-partial-guard` — the turso `AsyncContext` guard cannot see a call from inside a spawned async task
+
+**Observed**: `DatabaseError::AsyncContext` is reported only for the provable subset of
+wrong-context callers — inside a tokio runtime's own `block_on` body, not inside a task
+(`Handle::try_current().is_ok() && task::try_id().is_none()`). A call made from inside a
+spawned async task looks identical to a `spawn_blocking` closure through every public
+tokio API (same handle, same task id), so the guard cannot reject it. Such a call
+degrades to a blocked worker thread for the duration of the query — never a panic, never
+a deadlock, but also never a typed error.
+
+**Applies to**: `engine-turso` builds only; an app that calls `Database` from inside
+`tokio::spawn`-ed code rather than via `frust_reactive::spawn_blocking`.
+
+**Why accepted**: tokio publishes no API that distinguishes "inside a spawned task" from
+"inside a blocking-pool closure" from the caller's side — the measured four-context table
+backing this is in the module doc. Detecting it would need parsing tokio's internal
+thread-naming or task-local state, which is out of reach from a public dependency.
+
+**Evidence**: `plugins/database/src/turso.rs`'s module doc (the four-context
+`Handle::try_current()`/`task::try_id()`/`block_on` measurement table and the two guard
+tests).

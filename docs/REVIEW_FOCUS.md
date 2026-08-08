@@ -39,6 +39,7 @@
 | `frust-drive` cores | Print-free contract: a stray `print!`/`println!` garbles the TUI's raw-mode terminal. Guarded by the tripwire test `print_free_cores`; all process spawns must pipe stdout/stderr, never inherit. |
 | `frust-widgets` authoring boundary | Baseline widgets must never import `material`/`cupertino`/`glyph`; all container plumbing goes through the authoring module, enforced by the `authoring_only_conformance` source-scan test. A baseline widget reaching into a catalog is a boundary violation regardless of how small. |
 | Theme resolution (`frust-theme` / `Theme` recovery) | Precedence is explicit builder value > theme token > unthemed fallback. A hardcoded metric or color where a token already exists is a defect. `frust-core`/`frust-widgets` must never call `Instant::now()` directly — time enters only as shell-supplied `FrameTime`. |
+| `frust-database`'s turso bridge (`plugins/database/src/turso.rs`) | The tier's first plugin-owned OS thread + tokio runtime; a caller-thread `block_on` would panic under `panic="abort"`, so the bridge sends futures across a channel instead. The `AsyncContext` guard is a provable-subset detector (`try_current`+`try_id`), not exhaustive — a change to how it's computed can silently widen or narrow what it catches without any test failing outside the two cases already pinned. |
 
 ## Severity Calibration
 
