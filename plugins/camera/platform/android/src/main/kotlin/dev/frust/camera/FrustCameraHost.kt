@@ -787,7 +787,17 @@ object FrustCameraHost {
         // the app's slot sizing every time a preview scrolls out of view.
     }
 
-    /** Publish the resolved preview aspect ratio for [previewAspectRatio]. */
+    /**
+     * Publish the resolved preview aspect ratio for [previewAspectRatio] — the
+     * width/height of what the preview slot actually displays.
+     *
+     * An app is expected to size its slot from it (the Rust
+     * `CameraSession::preview_aspect_ratio` contract): the Android preview
+     * fits its content inside the slot rather than cropping to fill it, so a
+     * slot at this ratio is exactly filled and any other ratio letterboxes —
+     * see [CameraPreviewView]'s *Geometry* note for why a compositor-layer
+     * preview has no third option.
+     */
     internal fun setPreviewAspectRatio(sessionId: Int, ratio: Float) {
         sessions[sessionId]?.aspectRatio = ratio
     }
@@ -797,6 +807,13 @@ object FrustCameraHost {
      * `Surface.ROTATION_*` value), so CameraX's `TransformationInfo` reports
      * the rotation that makes the buffer upright *for this display*. Sessions
      * open before any view exists, so this cannot be set at build time.
+     *
+     * This is the **whole** of the preview's rotation handling: the stream's
+     * own buffer transform is derived from `targetRotation` and the system
+     * compositor is what applies it, and a `SurfaceView`-hosted preview has no
+     * content transform of its own to correct with ([CameraPreviewView]'s
+     * *Rotation* note). A `targetRotation` left stale therefore shows as a
+     * sideways preview, not as a slightly-off one.
      */
     internal fun setTargetRotation(sessionId: Int, rotation: Int) {
         val entry = sessions[sessionId] ?: return
