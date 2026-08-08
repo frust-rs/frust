@@ -161,7 +161,7 @@ use jni::{Env, EnvUnowned, jni_sig, jni_str};
 use crate::capture::CaptureSlot;
 use crate::{
     CameraError, ImageFormat, ImageFrame, ImageFrameCallback, ImagePlane, Lens, PermissionStatus,
-    Resolution, SessionBackend,
+    Resolution, SessionBackend, StreamErrorSink,
 };
 
 /// The `viewType` this crate's Android preview slot resolves to — the
@@ -1079,11 +1079,19 @@ impl SessionBackend for AndroidSession {
     /// [`CameraError::SessionClosed`] after [`Self::close`];
     /// [`CameraError::Platform`] for [`ImageFormat::Bgra`] (see
     /// [`stream_format_code`]), a host refusal, or a JNI failure.
+    ///
+    /// Every one of them is **synchronous**: `startImageStream` answers with
+    /// its own return code before this call returns, so the deferred
+    /// [`StreamErrorSink`] half of the trait's error contract has nothing to
+    /// carry here and is dropped unused (it exists for the Apple backend's
+    /// queue-async attach — see [`crate::SessionBackend::start_image_stream`]).
     fn start_image_stream(
         &self,
         format: ImageFormat,
         on_frame: Box<ImageFrameCallback>,
+        on_error: StreamErrorSink,
     ) -> Result<(), CameraError> {
+        drop(on_error);
         self.ensure_open()?;
 
         // Detach first (see this method's doc's *Detach before refuse*) —

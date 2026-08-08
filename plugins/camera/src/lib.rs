@@ -54,27 +54,31 @@
 //!
 //! # Blocking API — pair with `spawn_blocking`, never the UI thread
 //!
-//! **Two** calls block until the platform answers. Like
-//! `frust-secure-storage`'s gated calls, callers pair each with
-//! `frust_reactive::spawn_blocking`:
+//! **Three** calls in the table below can block the calling thread — but
+//! only the first two refuse to run on the platform's UI thread at all;
+//! [`CameraSession::close`] carries no such guard and genuinely blocks it
+//! (see the note below the table). Like `frust-secure-storage`'s gated
+//! calls, callers pair each with `frust_reactive::spawn_blocking`:
 //!
 //! | Call | Blocks until | Deadline (Android / Apple) |
 //! |---|---|---|
 //! | [`Camera::request_permission`] | the permission machinery resolves (a system dialog on Android; `AVCaptureDevice`'s `requestAccessForMediaType:completionHandler:` on iOS) | 120 s / 120 s |
 //! | [`CameraSession::take_picture`] | the photo has been written to disk, or the capture failed | 15 s / 10 s |
+//! | [`CameraSession::close`] (dropping a [`CameraSession`] without calling it first runs the identical hop) | the capture device is released — Apple parks on the session's serial queue, which may still be working through [`Camera::open`]'s in-flight `startRunning()` or a just-issued stream-start attach; Android's JNI call only waits for the teardown to be *scheduled*, not finished | doesn't block (Android) / none — no timeout, by design (Apple) |
 //!
-//! **Never call either on the UI thread.** On Android every answer above is
-//! relayed through the main `Looper` (CameraX's completion callbacks, the
-//! Activity lifecycle the permission relay rides on), so a UI-thread caller
-//! would park on the very queue carrying its own wake-up — a self-deadlock
-//! that could only end at the deadline above, far past Android's ~5 s ANR
-//! threshold. On Apple the shape differs — `requestAccess`'s completion runs
-//! on an arbitrary queue — but the consent alert still needs a free main
-//! thread to be presented, so a UI-thread caller waits out the deadline for a
-//! dialog its own wait is suppressing.
+//! **Never call [`Camera::request_permission`] or [`CameraSession::take_picture`]
+//! on the UI thread.** On Android every answer above is relayed through the
+//! main `Looper` (CameraX's completion callbacks, the Activity lifecycle the
+//! permission relay rides on), so a UI-thread caller would park on the very
+//! queue carrying its own wake-up — a self-deadlock that could only end at
+//! the deadline above, far past Android's ~5 s ANR threshold. On Apple the
+//! shape differs — `requestAccess`'s completion runs on an arbitrary queue —
+//! but the consent alert still needs a free main thread to be presented, so
+//! a UI-thread caller waits out the deadline for a dialog its own wait is
+//! suppressing.
 //!
-//! Both backends therefore **fail fast** instead of parking: a call made on
-//! the platform's UI thread (Android: `Looper.myLooper() ==
+//! Both therefore **fail fast** instead of parking: a call made on the
+//! platform's UI thread (Android: `Looper.myLooper() ==
 //! Looper.getMainLooper()`; Apple: the main run loop) returns
 //! [`CameraError::UiThread`] immediately, before any platform work starts.
 //! The guard covers every path that can block. Calls that answer without
@@ -82,6 +86,16 @@
 //! [`Camera::request_permission`] when the authorization status is already
 //! decided (granted/denied/restricted) returns straight away and is never
 //! refused — only the prompt-and-wait path is guarded.
+//!
+//! [`CameraSession::close`] carries **no** [`CameraError::UiThread`] guard:
+//! it never refuses the UI thread, it genuinely parks it — by design, since
+//! the whole point of the wait is that a caller reopening right after (a
+//! lens switch) can depend on the device having actually been released.
+//! Call it — and let a [`CameraSession`] drop, since dropping one on Apple
+//! runs the identical session-queue hop — off the UI thread whenever a
+//! stream start may still be mid-flight on the session queue;
+//! `frust_reactive::spawn_blocking` is still the right tool even though
+//! nothing here reports [`CameraError::UiThread`].
 //!
 //! [`CameraSession::set_torch`] and [`CameraSession::torch_available`] are
 //! deliberately **not** rows in the table above: neither waits on a platform
@@ -92,12 +106,29 @@
 //! cached atomic refreshed at three explicit points (open's configuration
 //! transaction, after `startRunning` returns, after each `set_torch` body —
 //! it is NOT autonomously kept current; re-check on later rebuilds rather
-//! than latching the first answer), rather than the synchronous queue
-//! hop [`CameraSession::close`] still uses (a synchronous hop that, before
-//! this contract held, could still park a UI-thread caller behind
-//! `startRunning()` coming up right after open — the failure mode this
-//! shape exists to close). Both stay callable from any thread — including
-//! the UI thread — and neither needs `spawn_blocking`.
+//! than latching the first answer), rather than the synchronous queue hop
+//! [`CameraSession::close`] still uses. Both stay callable from any thread —
+//! including the UI thread — and neither needs `spawn_blocking`.
+//!
+//! The stream **start/stop** calls
+//! ([`CameraSession::start_image_stream`],
+//! [`CameraSession::start_barcode_stream`], and their `stop_*` counterparts)
+//! are non-rows too, sharing `set_torch`'s treatment for the same reason:
+//! Android answers a start synchronously (its CameraX bind is itself
+//! fire-and-forget), and Apple hands the attach/detach to the session queue
+//! with an **asynchronous** dispatch, so neither can park a UI-thread caller
+//! behind an in-flight `startRunning()`. `Ok(())` from a start therefore
+//! means the stream was **accepted**; a failure only Apple's queue can
+//! discover (the session rejecting the video output) surfaces through
+//! [`CameraSession::take_stream_error`] instead, releasing that start's
+//! stream claim as it lands so a retry is never refused with
+//! [`CameraError::StreamBusy`] — except when the session closes while the
+//! start is still waiting its turn on the queue, which is treated as a
+//! cancellation and reports nothing at all (see
+//! [`SessionBackend::start_image_stream`]'s doc). A stop retires the
+//! running callback on the calling thread and returns before the platform
+//! detach runs, so no frame reaches the app's callback after `stop_*`
+//! returns.
 
 // Platform backends (the crate + frozen contract landed first; the real
 // implementations filled in behind the same
@@ -117,7 +148,7 @@ pub mod barcode;
 pub use barcode::{BarcodeStreamOptions, DetectionPolicy};
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use barcode::Barcode;
 
@@ -266,6 +297,17 @@ pub struct ImageFrame<'a> {
 /// signal write scheduled back onto the UI thread.
 pub type ImageFrameCallback = dyn Fn(&ImageFrame<'_>) + Send + 'static;
 
+/// How a backend reports a stream start it **accepted** but could not
+/// complete — the deferred half of [`SessionBackend::start_image_stream`]'s
+/// error contract, for a backend whose attach work runs on a platform queue
+/// the start call deliberately does not wait on.
+///
+/// `FnOnce`: one start can fail at most once, and a start that succeeds
+/// simply drops the sink. Fired from whatever thread the backend discovered
+/// the failure on — [`CameraSession`]'s own sink only touches a lock and an
+/// atomic, never app code.
+pub(crate) type StreamErrorSink = Box<dyn FnOnce(CameraError) + Send + 'static>;
+
 /// Errors from a [`Camera`]/[`CameraSession`] operation.
 ///
 /// `thiserror`-derived per `docs/CODE_STANDARDS.md`: callers match on the
@@ -327,7 +369,9 @@ pub enum CameraError {
     /// `frust_reactive::spawn_blocking`.
     ///
     /// A fail-fast guard, not a capability report: nothing about the camera
-    /// is wrong, only the calling thread.
+    /// is wrong, only the calling thread. The table's third row,
+    /// [`CameraSession::close`], deliberately has no guard of its own — see
+    /// its own doc for why it blocks the UI thread instead of refusing it.
     #[error(
         "camera call refused: this is a blocking call and was made on the UI thread — re-issue it \
          from `spawn_blocking`"
@@ -362,12 +406,29 @@ pub(crate) trait SessionBackend: Send + Sync {
     /// See [`CameraSession::take_picture`].
     fn take_picture(&self, path: &Path) -> Result<(), CameraError>;
     /// See [`CameraSession::start_image_stream`].
+    ///
+    /// Reports a failure through **exactly one** of two paths, never both
+    /// and never neither: a synchronous `Err` for everything it can decide
+    /// on the calling thread, or `on_error` for a failure it could only
+    /// discover after accepting the start (the Apple backend's queue-async
+    /// attach). A backend that decides everything synchronously (Android)
+    /// drops the sink unused.
+    ///
+    /// **Session-closed cancellation is the one documented exception.** If
+    /// [`CameraSession::close`] lands before a queue-async attach ever runs,
+    /// the backend may drop `on_error` unfired instead of reporting
+    /// anything: the caller already knows the session is gone from
+    /// `close()`'s own contract, so there is nothing left to report — only a
+    /// start that never got the chance to happen, not a failure of one that
+    /// did. The Apple backend takes exactly this path.
     fn start_image_stream(
         &self,
         format: ImageFormat,
         on_frame: Box<ImageFrameCallback>,
+        on_error: StreamErrorSink,
     ) -> Result<(), CameraError>;
-    /// See [`CameraSession::stop_image_stream`].
+    /// See [`CameraSession::stop_image_stream`] — infallible, and never
+    /// waits on a platform queue.
     fn stop_image_stream(&self);
     /// See [`CameraSession::set_torch`].
     ///
@@ -458,7 +519,8 @@ impl Camera {
 
         Ok(CameraSession {
             backend,
-            stream_claim: occupancy::StreamOccupancy::default(),
+            stream_claim: Arc::default(),
+            stream_error: Arc::default(),
         })
     }
 
@@ -479,7 +541,13 @@ pub struct CameraSession {
     backend: Arc<dyn SessionBackend>,
     /// Single-occupancy claim over this session's one image stream — see
     /// [`CameraError::StreamBusy`]'s doc for the semantics this enforces.
-    stream_claim: occupancy::StreamOccupancy,
+    /// Shared (`Arc`) because a deferred stream-start failure releases its
+    /// own claim from a backend queue, long after the start call returned —
+    /// see [`Self::stream_error_sink`].
+    stream_claim: Arc<occupancy::StreamOccupancy>,
+    /// Where a deferred stream-start failure lands until
+    /// [`Self::take_stream_error`] takes it. Shared for the same reason.
+    stream_error: Arc<StreamErrorSlot>,
 }
 
 impl CameraSession {
@@ -544,6 +612,15 @@ impl CameraSession {
     /// frames rather than queuing). See [`ImageFrame`]'s close-deadline
     /// contract and [`ImageFrameCallback`]'s threading contract.
     ///
+    /// **Never blocks, and is callable from any thread — including the UI
+    /// thread** (module doc's *Blocking API*): the platform-side attach is
+    /// handed to the backend's own queue rather than waited on, so `Ok(())`
+    /// means the stream was **accepted**, not that frames are flowing yet.
+    /// A failure discovered after that acceptance surfaces through
+    /// [`Self::take_stream_error`] instead of this `Result` — and releases
+    /// this call's stream claim as it lands, so a retry is not refused with
+    /// [`CameraError::StreamBusy`].
+    ///
     /// Never blocks on a frame; calling it again restarts the stream at the
     /// newly requested format — this raw-stream re-bind stays legal even
     /// after this method started sharing the session's stream claim with
@@ -554,14 +631,19 @@ impl CameraSession {
     /// holds the session's stream claim — call [`Self::stop_barcode_stream`]
     /// first. [`CameraError::SessionClosed`] after [`Self::close`];
     /// [`CameraError::Platform`] for [`ImageFormat::Bgra`] on Android (see
-    /// that variant's doc), or if the platform refuses the stream.
+    /// that variant's doc), or if the platform refuses the stream
+    /// synchronously.
     pub fn start_image_stream(
         &self,
         format: ImageFormat,
         on_frame: impl Fn(&ImageFrame<'_>) + Send + 'static,
     ) -> Result<(), CameraError> {
         let token = self.stream_claim.claim_raw()?;
-        let result = self.backend.start_image_stream(format, Box::new(on_frame));
+        let result = self.backend.start_image_stream(
+            format,
+            Box::new(on_frame),
+            self.stream_error_sink(token),
+        );
         if result.is_err() {
             // Android can refuse before anything is detached (its own
             // `ensure_open` check runs first — see
@@ -584,6 +666,11 @@ impl CameraSession {
     /// including while [`Self::start_barcode_stream`] holds the claim
     /// instead, which this never touches (see [`CameraError::StreamBusy`]'s
     /// doc).
+    ///
+    /// **Never blocks, callable from any thread** (module doc's *Blocking
+    /// API*): the running callback is retired on the calling thread, so no
+    /// frame reaches it after this returns, while the platform-side detach
+    /// runs on the backend's own queue afterwards.
     pub fn stop_image_stream(&self) {
         if self.stream_claim.release_raw() {
             self.backend.stop_image_stream();
@@ -604,6 +691,12 @@ impl CameraSession {
     /// [`barcode::decode_frame`] takes its zero-copy path for;
     /// [`ImageFormat::Bgra`] has no barcode-decode path of its own.
     ///
+    /// Non-blocking and accepted-not-confirmed exactly like
+    /// [`Self::start_image_stream`], including the
+    /// [`Self::take_stream_error`] path a deferred failure surfaces
+    /// through — this is the composition's own contract too, not just the
+    /// raw stream's.
+    ///
     /// # Errors
     /// [`CameraError::StreamBusy`] while [`Self::start_image_stream`]'s raw
     /// stream, or another [`Self::start_barcode_stream`] call, already
@@ -618,9 +711,11 @@ impl CameraSession {
     ) -> Result<(), CameraError> {
         let token = self.stream_claim.claim_barcode()?;
         let callback = barcode::stream::build_callback(opts, on_detect);
-        let result = self
-            .backend
-            .start_image_stream(ImageFormat::Yuv420, Box::new(callback));
+        let result = self.backend.start_image_stream(
+            ImageFormat::Yuv420,
+            Box::new(callback),
+            self.stream_error_sink(token),
+        );
         if result.is_err() {
             // Same generation-guarded restore as `start_image_stream` — see
             // that method's doc. `claim_barcode` never re-binds, so this
@@ -633,11 +728,50 @@ impl CameraSession {
 
     /// Stops a running barcode stream (no-op if none — including while
     /// [`Self::start_image_stream`] holds the claim instead, which this
-    /// never touches). Releases the stream claim.
+    /// never touches). Releases the stream claim. Non-blocking, from any
+    /// thread, exactly like [`Self::stop_image_stream`].
     pub fn stop_barcode_stream(&self) {
         if self.stream_claim.release_barcode() {
             self.backend.stop_image_stream();
         }
+    }
+
+    /// Take the most recent stream-start failure a backend reported
+    /// **after** its start call had already returned `Ok(())`, if any.
+    ///
+    /// The deferred half of
+    /// [`Self::start_image_stream`]/[`Self::start_barcode_stream`]'s error
+    /// contract (module doc's *Blocking API*): those calls hand the
+    /// platform-side attach to a backend queue rather than parking the
+    /// caller on it, which leaves a rejected attach no synchronous `Result`
+    /// to travel back through. It lands here instead — and releases the
+    /// failed start's stream claim on the way, so a retry sees a free
+    /// session rather than [`CameraError::StreamBusy`].
+    ///
+    /// Reading takes the value (it is reported once, and
+    /// [`CameraError`] is not [`Clone`]), so poll it from a rebuild and keep
+    /// what it returns in the caller's own state — the same "re-check rather
+    /// than latch" shape [`Self::torch_available`] asks for. `None` is the
+    /// normal answer, including on Android, whose backend reports every
+    /// start failure synchronously.
+    ///
+    /// A late `None` is not a health check: a stream that was accepted and
+    /// attached but has yet to deliver a frame reports nothing here — and
+    /// neither does a start cancelled by a session close that landed before
+    /// its queue-async attach ever ran ([`SessionBackend::start_image_stream`]'s
+    /// documented exception).
+    pub fn take_stream_error(&self) -> Option<CameraError> {
+        self.stream_error.take()
+    }
+
+    /// The [`StreamErrorSink`] for a start holding `token`. Delegates to
+    /// [`record_deferred_stream_error`], pulled out to a free function so it
+    /// can be unit-tested directly — no host test target can construct a
+    /// full [`CameraSession`] (module doc's *Backends*).
+    fn stream_error_sink(&self, token: occupancy::ClaimToken) -> StreamErrorSink {
+        let claim = Arc::clone(&self.stream_claim);
+        let slot = Arc::clone(&self.stream_error);
+        Box::new(move |error| record_deferred_stream_error(&claim, &slot, token, error))
     }
 
     /// Turns the torch (the flash unit held on, in continuous mode) on or
@@ -721,6 +855,18 @@ impl CameraSession {
     /// or barcode stream with it. A no-op if already closed; every
     /// subsequent fallible [`CameraSession`] method call reports
     /// [`CameraError::SessionClosed`].
+    ///
+    /// **Blocks the calling thread on Apple, with no [`CameraError::UiThread`]
+    /// guard** (module doc's *Blocking API* table): it hops onto the
+    /// session's serial queue synchronously and waits, by design — a caller
+    /// that reopens right after (a lens switch) depends on the release
+    /// having actually happened, so unlike [`Camera::request_permission`]/
+    /// [`Self::take_picture`] this call never refuses the UI thread, it
+    /// parks it. Call it (and let a [`CameraSession`] drop, which runs the
+    /// same hop on Apple) off the UI thread — `frust_reactive::spawn_blocking`
+    /// — whenever a stream start may still be mid-flight on the session
+    /// queue. Android's close does not block: its JNI call only schedules
+    /// the teardown.
     pub fn close(&self) {
         self.stream_claim.clear();
         self.backend.close();
@@ -758,6 +904,18 @@ impl CameraSession {
 /// other direction too: if some other call has claimed or released since,
 /// the restore is a no-op rather than clobbering state this call never
 /// actually disturbed.
+///
+/// [`StreamOccupancy::restore_on_deferred_error`] is the same idea for the
+/// *other* failure path — a queue-async backend's [`crate::StreamErrorSink`]
+/// firing after its start already returned `Ok(())` — but with different
+/// [`Prior::SameKind`] semantics: see that method's own doc for why a
+/// same-kind restart's claim must be released there even though the
+/// synchronous path above must not. Both methods report back whether the
+/// token they were handed was still current, which
+/// [`crate::CameraSession::stream_error_sink`] uses to decide whether a
+/// deferred failure is still worth recording at all — a stale generation's
+/// failure must not land in [`crate::StreamErrorSlot`] and overwrite (or be
+/// misread as belonging to) a newer stream's outcome.
 mod occupancy {
     use std::sync::Mutex;
 
@@ -801,11 +959,21 @@ mod occupancy {
     /// A successful [`StreamOccupancy::claim_raw`]/[`StreamOccupancy::claim_barcode`]
     /// call's receipt: the generation that transition produced, plus the
     /// [`Prior`] state it observed — consumed by
-    /// [`StreamOccupancy::restore_on_error`] if the backend call the claim
-    /// was gating then fails. Deliberately opaque: a caller holds this only
-    /// to hand it back, on either path — dropped (committed) on success, or
-    /// passed to [`StreamOccupancy::restore_on_error`] on failure.
-    #[derive(Debug)]
+    /// [`StreamOccupancy::restore_on_error`]/
+    /// [`StreamOccupancy::restore_on_deferred_error`] if the backend call
+    /// the claim was gating then fails. Deliberately opaque: a caller holds
+    /// this only to hand it back, on either path — dropped (committed) on
+    /// success, or passed to one of the two restores on failure.
+    ///
+    /// `Copy` because a start has **two** failure paths to restore from: the
+    /// synchronous `Err` a backend returns ([`StreamOccupancy::restore_on_error`]),
+    /// and the deferred [`crate::StreamErrorSink`] a queue-async backend
+    /// fires later ([`StreamOccupancy::restore_on_deferred_error`]). Only
+    /// one of them ever runs per start
+    /// ([`crate::SessionBackend::start_image_stream`]'s contract), so there
+    /// is never a race between the two — each token is restored at most
+    /// once.
+    #[derive(Debug, Clone, Copy)]
     pub(crate) struct ClaimToken {
         prior: Prior,
         generation: u64,
@@ -860,28 +1028,69 @@ mod occupancy {
             })
         }
 
-        /// Undo a [`ClaimToken`]'s transition after the backend call it
-        /// gated failed — the generation-guarded compare-and-restore
-        /// `start_image_stream`/`start_barcode_stream` call instead of an
-        /// unconditional release.
+        /// Undo a [`ClaimToken`]'s transition after the **synchronous**
+        /// backend call it gated failed — the generation-guarded
+        /// compare-and-restore `start_image_stream`/`start_barcode_stream`
+        /// call instead of an unconditional release.
         ///
-        /// If the current generation no longer matches the token's, some
+        /// Returns whether `token` was still current: `false` means some
         /// other call has claimed or released since — that state wins, and
         /// this is a no-op, never clobbering a claim this call never
         /// actually disturbed. Otherwise: a fresh claim ([`Prior::None`])
         /// clears back to [`Claim::None`]; a re-bind over the same kind
         /// ([`Prior::SameKind`]) leaves the claim exactly as it was — the
-        /// earlier stream it belonged to may still be running, and only its
-        /// own `stop_*` call may release it.
-        pub(crate) fn restore_on_error(&self, token: ClaimToken) {
+        /// earlier stream it belonged to may still be running (Android's
+        /// `ensure_open` can refuse *before* anything is detached — see the
+        /// module doc), and only its own `stop_*` call may release it.
+        ///
+        /// See [`Self::restore_on_deferred_error`] for the other failure
+        /// path's counterpart, which resolves the same [`Prior::SameKind`]
+        /// case differently.
+        pub(crate) fn restore_on_error(&self, token: ClaimToken) -> bool {
             let mut state = self.lock();
             if state.generation != token.generation {
-                return;
+                return false;
             }
             if token.prior == Prior::None {
                 state.claim = Claim::None;
                 state.generation += 1;
             }
+            true
+        }
+
+        /// Undo a [`ClaimToken`]'s transition after a **deferred** failure —
+        /// the [`crate::StreamErrorSink`] a queue-async backend fires after
+        /// its start call already returned `Ok(())`. Returns whether `token`
+        /// was still current, exactly like [`Self::restore_on_error`]; the
+        /// caller ([`crate::CameraSession::stream_error_sink`]) uses that to
+        /// decide whether the failure is still worth recording at all.
+        ///
+        /// Unlike [`Self::restore_on_error`], a same-kind restart's claim
+        /// ([`Prior::SameKind`]) is released here too, not left standing.
+        /// The two paths need different answers for the identical `Prior`
+        /// because they fail at different points relative to the platform
+        /// detach: [`Self::restore_on_error`]'s "leave it as-is" case exists
+        /// for Android's `ensure_open` shape, which can refuse a re-bind
+        /// *before* the previous stream is detached, so that earlier stream
+        /// may genuinely still be running. A deferred failure never has that
+        /// shape — the only backend that ever fires this sink is Apple's
+        /// queue-async attach, and `attach_stream` unconditionally detaches
+        /// whatever was running *before* it ever tries to add the
+        /// replacement output (`apple::detach_stream`), so by the time a
+        /// deferred failure lands nothing is attached, same-kind restart or
+        /// not. Leaving the claim standing here would strand it: a same-kind
+        /// retry stays legal regardless, but a kind switch
+        /// (`start_barcode_stream` after a failed raw re-bind) would wrongly
+        /// see [`crate::CameraError::StreamBusy`] over a stream that no
+        /// longer exists.
+        pub(crate) fn restore_on_deferred_error(&self, token: ClaimToken) -> bool {
+            let mut state = self.lock();
+            if state.generation != token.generation {
+                return false;
+            }
+            state.claim = Claim::None;
+            state.generation += 1;
+            true
         }
 
         /// [`crate::CameraSession::stop_image_stream`]: clears the claim
@@ -1019,6 +1228,48 @@ mod occupancy {
             );
         }
 
+        /// The deferred path's own bug, as a test: unlike the synchronous
+        /// path above, a **deferred** same-kind restart failure must
+        /// release the claim, not leave it standing — the queue-async
+        /// backend that ever fires this path (Apple) always detaches the
+        /// earlier stream before it even attempts the replacement, so by
+        /// the time this failure lands nothing is attached, same-kind
+        /// restart or not (see `restore_on_deferred_error`'s doc). Leaving
+        /// the claim as `Raw` here would strand a kind switch behind
+        /// `StreamBusy` over a stream that no longer exists.
+        #[test]
+        fn deferred_restore_releases_a_same_kind_restart_claim_too() {
+            let occ = StreamOccupancy::default();
+            occ.claim_raw().unwrap(); // the already-running raw stream
+            let token = occ.claim_raw().unwrap(); // the re-bind attempt
+
+            assert!(
+                occ.restore_on_deferred_error(token),
+                "the token was still current"
+            );
+
+            assert!(
+                occ.claim_barcode().is_ok(),
+                "the claim is released, not left standing as Raw"
+            );
+        }
+
+        /// The deferred restore's own generation guard: a stale token must
+        /// not clobber a claim taken since, exactly like the synchronous
+        /// path's `restore_is_a_no_op_once_someone_else_has_claimed_since`.
+        #[test]
+        fn deferred_restore_is_a_no_op_once_someone_else_has_claimed_since() {
+            let occ = StreamOccupancy::default();
+            let stale = occ.claim_raw().unwrap(); // A
+            occ.claim_raw().unwrap(); // B's concurrent re-bind
+
+            assert!(!occ.restore_on_deferred_error(stale), "A's token is stale");
+            assert!(
+                matches!(occ.claim_barcode(), Err(CameraError::StreamBusy)),
+                "B's claim is untouched"
+            );
+        }
+
         #[test]
         fn restore_after_a_failed_fresh_claim_clears_it() {
             let occ = StreamOccupancy::default();
@@ -1044,6 +1295,24 @@ mod occupancy {
                 "B's claim is untouched"
             );
             assert!(occ.release_raw(), "B's claim can still be stopped normally");
+        }
+
+        /// A start has two restore paths (a synchronous `Err` and the
+        /// deferred [`crate::StreamErrorSink`]), so one token can be
+        /// restored twice — the second must not clear a claim taken since.
+        #[test]
+        fn restoring_one_token_twice_never_clears_a_later_claim() {
+            let occ = StreamOccupancy::default();
+            let token = occ.claim_barcode().unwrap();
+            occ.restore_on_error(token);
+
+            occ.claim_raw().unwrap(); // a later, legitimate start
+            occ.restore_on_error(token); // the same token's second path
+
+            assert!(
+                matches!(occ.claim_barcode(), Err(CameraError::StreamBusy)),
+                "the later claim survives"
+            );
         }
 
         /// A token from before a `release_raw` cannot resurrect the claim it
@@ -1076,6 +1345,142 @@ mod occupancy {
                 "still None — nothing resurrected"
             );
         }
+    }
+}
+
+// --- Deferred stream-start failures ------------------------------------------
+
+/// Where a stream-start failure a backend could only discover **after**
+/// accepting the start waits until [`CameraSession::take_stream_error`]
+/// takes it.
+///
+/// One slot per session, holding the most recent failure: an unread earlier
+/// one is replaced rather than queued, since only the latest is still
+/// actionable. A stale generation's failure never reaches this slot at all
+/// — see [`record_deferred_stream_error`], the sink logic that guards
+/// entry here.
+#[derive(Debug, Default)]
+struct StreamErrorSlot(Mutex<Option<CameraError>>);
+
+impl StreamErrorSlot {
+    /// Poison-tolerant like [`occupancy::StreamOccupancy`]'s own lock: the
+    /// slot holds one `Option` no panic could half-break, and a poisoned
+    /// lock here would turn every later camera call into a panic of its own.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<CameraError>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn record(&self, error: CameraError) {
+        *self.lock() = Some(error);
+    }
+
+    fn take(&self) -> Option<CameraError> {
+        self.lock().take()
+    }
+}
+
+/// The core logic behind [`CameraSession::stream_error_sink`], pulled into a
+/// free function so it can be unit-tested without a full [`CameraSession`] —
+/// no host test target can construct one (module doc's *Backends*).
+///
+/// Restores `token`'s claim via
+/// [`occupancy::StreamOccupancy::restore_on_deferred_error`] first, and
+/// records the failure into `slot` only if that restore reports `token` was
+/// still current. Recording is deliberately gated on the *same* generation
+/// check the restore already makes — not run unconditionally before it —
+/// because a sink firing after a later start has already claimed this
+/// session's stream is reporting on a stale generation: recording it
+/// anyway would overwrite (or be misread as belonging to) the newer
+/// stream's own outcome. A stale failure is logged at `debug` and dropped
+/// instead of recorded; a live one is logged at `warn` as before.
+fn record_deferred_stream_error(
+    claim: &occupancy::StreamOccupancy,
+    slot: &StreamErrorSlot,
+    token: occupancy::ClaimToken,
+    error: CameraError,
+) {
+    if claim.restore_on_deferred_error(token) {
+        log::warn!("frust-camera: an accepted stream start then failed: {error}");
+        slot.record(error);
+    } else {
+        log::debug!(
+            "frust-camera: dropping a deferred stream-start failure from a superseded stream \
+             generation: {error}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod stream_error_tests {
+    use super::occupancy::StreamOccupancy;
+    use super::{CameraError, StreamErrorSlot, record_deferred_stream_error};
+
+    #[test]
+    fn an_empty_slot_reports_nothing() {
+        assert!(StreamErrorSlot::default().take().is_none());
+    }
+
+    #[test]
+    fn a_recorded_failure_is_reported_exactly_once() {
+        let slot = StreamErrorSlot::default();
+        slot.record(CameraError::Platform("rejected".to_string()));
+
+        assert!(matches!(slot.take(), Some(CameraError::Platform(m)) if m == "rejected"));
+        assert!(slot.take().is_none(), "taking clears the slot");
+    }
+
+    #[test]
+    fn the_most_recent_failure_wins() {
+        let slot = StreamErrorSlot::default();
+        slot.record(CameraError::Platform("first".to_string()));
+        slot.record(CameraError::SessionClosed);
+
+        assert!(matches!(slot.take(), Some(CameraError::SessionClosed)));
+    }
+
+    /// A deferred failure from a still-current generation is recorded
+    /// normally — the ordinary, non-stale path.
+    #[test]
+    fn a_current_generations_deferred_failure_is_recorded() {
+        let claim = StreamOccupancy::default();
+        let slot = StreamErrorSlot::default();
+        let token = claim.claim_raw().unwrap();
+
+        record_deferred_stream_error(
+            &claim,
+            &slot,
+            token,
+            CameraError::Platform("rejected".into()),
+        );
+
+        assert!(matches!(slot.take(), Some(CameraError::Platform(m)) if m == "rejected"));
+    }
+
+    /// The confirmed bug, pinned as a test: a sink from generation N firing
+    /// after generation N+1 has already started must record nothing — a
+    /// stale deferred failure must never overwrite (or be mistaken for) a
+    /// newer stream's own outcome in [`StreamErrorSlot`].
+    #[test]
+    fn a_stale_generations_deferred_failure_records_nothing() {
+        let claim = StreamOccupancy::default();
+        let slot = StreamErrorSlot::default();
+        let stale_token = claim.claim_raw().unwrap(); // generation N
+
+        claim.claim_raw().unwrap(); // generation N+1 starts before N's failure lands
+
+        record_deferred_stream_error(
+            &claim,
+            &slot,
+            stale_token,
+            CameraError::Platform("stale".into()),
+        );
+
+        assert!(
+            slot.take().is_none(),
+            "a stale generation's failure must not be recorded"
+        );
     }
 }
 
