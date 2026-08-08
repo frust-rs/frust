@@ -13,35 +13,51 @@
 //! self-mutating mid-event (`docs/CODE_STANDARDS.md`, "Controlled components
 //! never self-mutate").
 //!
-//! # Op application is view-driven (at rebuild), not event-driven
+//! # Op application is view-driven (at rebuild), which enqueue guarantees runs
 //!
 //! Structural ops are drained and applied in [`NavigatorView::rebuild`] (a
 //! `BuildCtx` pass), *not* inside `NavigatorWidget::event`: building a new page
 //! pod ([`crate::authoring::build_child`]) and tearing a popped one down
-//! ([`crate::authoring::teardown_child`]) both need a `BuildCtx`, and a rebuild
-//! always runs every frame so a *programmatic* push/pop (from a background task,
-//! with no triggering event) still lands. On every stack mutation the widget then
-//! applies the page-switch contract the structural-rebuild machinery does not
-//! cover for a hand-managed stack, in that order: (a) cancel an in-flight capture
-//! on the outgoing page ([`crate::authoring::cancel_pod`]'s synthetic `Cancel`),
-//! (b) clear its focus flag, (c) publish a *cleared* IME surface on the next paint
-//! so the platform keyboard hides deterministically rather than waiting for the
-//! lazy event-pass convergence `RenderRoot` otherwise relies on. On a push the
-//! outgoing page is the one being **covered**.
+//! ([`crate::authoring::teardown_child`]) both need a `BuildCtx`. A rebuild runs
+//! every frame only on desktop; the mobile shells gate a frame behind a run/skip
+//! decision (`frust-shell-common`'s `FrameGate`) that a bare queued op does not
+//! by itself satisfy, so a *programmatic* push/pop (from a background task, with
+//! no triggering event) is otherwise invisible to it. [`NavigatorController::enqueue`]
+//! closes that gap unconditionally: every recorded op also raises
+//! [`frust_core::mark_pending_result_flush`], which the mobile frame gate peeks
+//! (`FrameInputs::deferred_callbacks_pending`) as a run-forcing input independent
+//! of anything else dirty — the same flag [`finalize_transition`](NavigatorWidget::finalize_transition)
+//! already raises for a pop-result callback (below), reused here for a queued op
+//! rather than a callback needing `&mut State`. Left ungated, a programmatic push
+//! measured on device as a page mounted but painted nothing for 15+ seconds,
+//! until whatever input arrived next forced a frame. On every stack mutation the
+//! widget then applies the page-switch contract the structural-rebuild machinery
+//! does not cover for a hand-managed stack, in that order: (a) cancel an
+//! in-flight capture on the outgoing page ([`crate::authoring::cancel_pod`]'s
+//! synthetic `Cancel`), (b) clear its focus flag, (c) publish a *cleared* IME
+//! surface on the next paint so the platform keyboard hides deterministically
+//! rather than waiting for the lazy event-pass convergence `RenderRoot`
+//! otherwise relies on. On a push the outgoing page is the one being
+//! **covered**.
 //!
 //! A [`pop`](NavigatorController::pop_with_result) result destined for a
 //! pusher-registered `on_result` callback needs `&mut State` — which a rebuild
 //! (`BuildCtx`) does not carry — so the callback is queued at rebuild and flushed
 //! at the start of the next [`NavigatorWidget::event`] pass, where the erased
-//! app state is in scope. Queuing it also raises
-//! [`frust_core::mark_pending_result_flush`], which makes the *same* rebuild
-//! dispatch a non-input [`InputEvent::Housekeeping`] broadcast and flush it
-//! before the frame ends, so a result lands on the frame that produced it. Waiting
-//! on the next touch instead measured on device as a sheet opening seconds after
-//! its menu row — or never, when that touch went to chrome outside the navigator.
-//! An eager `NavOp::Pop` delivers on the pop's own frame; an interactive edge-swipe
-//! pop delivers on its settle frame, since that is where it queues. See
-//! [`NavigatorController::push_for_result`].
+//! app state is in scope. The mark already raised at `enqueue` time is what makes
+//! the *same* rebuild dispatch a non-input [`InputEvent::Housekeeping`] broadcast
+//! and flush the callback before the frame ends, so a result lands on the frame
+//! that produced it, not just on some later frame the gate happens to run — the
+//! [`apply_pop`](NavigatorWidget::apply_pop) call site that queues the callback
+//! marks it again regardless, a defensive second raise (idempotent, so free) in
+//! case a future caller ever reaches it outside the op queue. Waiting on the
+//! next touch instead measured on device as a sheet opening seconds after its
+//! menu row — or never, when that touch went to chrome outside the navigator. An
+//! eager `NavOp::Pop` delivers on the pop's own frame; an interactive edge-swipe
+//! pop delivers on its settle frame, since that is where it queues (via
+//! `finalize_transition`, not `enqueue` — an interactive pop is driven from
+//! `NavigatorWidget::event` directly, never through the op queue, so it still
+//! needs its own explicit mark). See [`NavigatorController::push_for_result`].
 //!
 //! # Paint culling (Flutter opaque-route parity)
 //!
@@ -944,8 +960,32 @@ impl<State: 'static> NavigatorController<State> {
         });
     }
 
+    /// Record `op`, then raise [`frust_core::mark_pending_result_flush`] so the
+    /// next tick's mobile frame gate `Run`s and reaches the rebuild that drains
+    /// it — the same guarantee [`finalize_transition`](NavigatorWidget::finalize_transition)
+    /// already gives a pop-result callback, reused here for a different reason:
+    /// this flag is not just "a callback needs `&mut State`", it is the shell's
+    /// one thread-affine "something is owed, run the next frame regardless of
+    /// what else is dirty" side channel, and a queued op recorded from outside
+    /// any input/signal path (a `spawn_local` continuation, e.g.) needs exactly
+    /// that with no callback involved at all. Without it a page could mount and
+    /// sit unpainted until whatever input happened to arrive next forced a
+    /// frame — see the [module docs](self).
+    ///
+    /// Unconditional, on every op, deliberately, even though the shared flag's
+    /// other reader (`RenderRoot::rebuild`'s pending-flush convergence loop)
+    /// cannot tell "just force a run" apart from "a callback is genuinely
+    /// owed": the frame that applies a queued op also pays one extra, empty
+    /// `app_logic` + view-diff pass it did not strictly need. That pass is
+    /// bounded (never more than one here, since nothing re-raises the flag for
+    /// a plain structural op) and lands only on the frame a nav op was actually
+    /// queued, not on every frame — a cost this crate's authoring toolkit
+    /// already treats as affordable (rebuilds are cheap by construction) and a
+    /// small, known price next to the bug it replaces: a page mounted with zero
+    /// frames painted for 15+ seconds.
     fn enqueue(&self, op: NavOp<State>) {
         self.ops.borrow_mut().push(op);
+        frust_core::mark_pending_result_flush();
     }
 
     /// Take the queued ops (leaving the queue empty). Called by
@@ -2087,6 +2127,10 @@ impl<State: 'static> NavigatorWidget<State> {
                 self.pending_results.push((callback, result));
                 // Ask this frame's rebuild for a housekeeping pass so the callback
                 // runs on the very frame the pop applied, with no input needed.
+                // `apply_pop` is only ever reached through the op queue, whose
+                // `enqueue` already raised this mark before the rebuild started —
+                // idempotent, so a defensive re-raise here is free insurance
+                // against a future caller reaching this method any other way.
                 frust_core::mark_pending_result_flush();
             }
             // Full gate (`top_pod_focused`): the popped page's own link ANDed
@@ -3529,6 +3573,95 @@ mod tests {
             }
             EventResult::Ignored
         }
+    }
+
+    #[test]
+    fn enqueue_marks_pending_flush_so_a_gated_frame_still_runs() {
+        // Regression pin for the device-proven gap: before this fix, `enqueue`
+        // only appended to the plain `Rc<RefCell<Vec<NavOp>>>` queue — nothing
+        // told the mobile frame gate a frame was owed, so a page pushed from
+        // outside any input/signal path (a `spawn_local` continuation, e.g.)
+        // could mount and paint nothing until whatever touch happened to arrive
+        // next. `has_pending_result_flush` is the exact peek
+        // `FrameInputs::deferred_callbacks_pending` reads to force a `Run`, so
+        // it is the reachable proxy here for "the gate would have run this
+        // frame" — there is no shell/gate type in scope from this crate.
+        let _ = frust_core::take_pending_result_flush();
+
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        assert!(
+            !frust_core::has_pending_result_flush(),
+            "a settled navigator with no queued op owes nothing"
+        );
+
+        // No input event, no signal write — exactly the async-continuation
+        // shape the device bug reproduced.
+        controller.push(|| sized_page(20.0, 20.0));
+        assert!(
+            frust_core::has_pending_result_flush(),
+            "a queued push must mark the flag with no rebuild involved yet"
+        );
+
+        // A queued op with nothing else dirty still gets drained on the next
+        // rebuild — the gated frame this mark exists to force.
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            nav_widget(&root).pages.len(),
+            2,
+            "the queued push was applied on the one rebuild that ran, with no \
+             input event of any kind"
+        );
+        assert!(
+            !frust_core::has_pending_result_flush(),
+            "the rebuild drained the mark it was forced to observe"
+        );
+    }
+
+    #[test]
+    fn every_controller_mutator_funnels_through_the_same_enqueue_mark() {
+        // `enqueue` is the single choke point behind every `NavigatorController`
+        // mutator (see the type's doc) — this pins that the mark travels with
+        // whichever op funnels through it, not just `push`, so a sibling
+        // programmatic mutation (`replace`, `pop`) can't reopen the gap `push`
+        // alone would leave closed.
+        let _ = frust_core::take_pending_result_flush();
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        controller.replace(|| sized_page(30.0, 30.0));
+        assert!(
+            frust_core::has_pending_result_flush(),
+            "replace must mark it too"
+        );
+        root.rebuild(&mut app, &mut state);
+        assert!(!frust_core::has_pending_result_flush());
+
+        controller.push(|| sized_page(20.0, 20.0));
+        root.rebuild(&mut app, &mut state);
+        assert!(!frust_core::has_pending_result_flush());
+
+        controller.pop();
+        assert!(
+            frust_core::has_pending_result_flush(),
+            "pop must mark it too"
+        );
+        root.rebuild(&mut app, &mut state);
+        assert!(!frust_core::has_pending_result_flush());
     }
 
     #[test]
@@ -6950,16 +7083,24 @@ mod tests {
         assert_eq!(builds.get(), frozen, "a covered page stops rebuilding");
 
         // The pop is applied before the reconcile loop, so the revealed page
-        // rebuilds on the SAME frame — nothing has to wake it.
+        // rebuilds on the SAME frame — nothing has to wake it. `enqueue` also
+        // raises the pending-flush mark on this `pop()` (see the type's doc),
+        // which this same `root.rebuild` drains into one extra `app_logic` +
+        // view-diff pass once the ops are already applied and the page is
+        // already revealed — so the now-uncovered root page rebuilds twice
+        // within this one call, not once: the revealing pass itself, plus the
+        // pending-flush convergence pass right behind it.
         controller.pop();
         root.rebuild(&mut app, &mut state);
         assert_eq!(
             builds.get(),
-            frozen + 1,
-            "a revealed page rebuilds in the pass that revealed it"
+            frozen + 2,
+            "a revealed page rebuilds in the pass that revealed it, plus once \
+             more in the same call's pending-flush convergence pass"
         );
+        // No op queued this time, so no mark to converge — a single pass.
         root.rebuild(&mut app, &mut state);
-        assert_eq!(builds.get(), frozen + 2, "and keeps rebuilding after that");
+        assert_eq!(builds.get(), frozen + 3, "and keeps rebuilding after that");
     }
 
     #[test]
