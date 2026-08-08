@@ -9,13 +9,12 @@
 //! [`Engine`] variant directly, since an `Engine` variant is itself
 //! feature-gated (e.g. `Engine::Sqlite` doesn't exist to name at all in a
 //! `--no-default-features --features engine-turso` build — see `lib.rs`'s
-//! `Engine` doc). Only the per-engine wrapper module below (`
-//! sqlite_conformance`) picks a concrete [`Engine`] and hands the suite a
-//! closure that captures it — that's also why the suite bodies contain
-//! zero `#[cfg(feature = "engine-sqlite")]`: engine-specifics live only in
-//! the wrapper mod, so a future turso-backend task can add a sibling
-//! `#[cfg(feature = "engine-turso")] mod turso_conformance` (plus its own
-//! cross-engine tests) purely additively.
+//! `Engine` doc). Only a per-engine wrapper module (`sqlite_conformance`,
+//! `turso_conformance`) picks a concrete [`Engine`] and hands the suite a
+//! closure that captures it — that's also why the suite bodies contain zero
+//! `#[cfg(feature = "engine-sqlite")]`/`#[cfg(feature = "engine-turso")]`:
+//! engine-specifics live only in the wrapper mods, each added purely
+//! additively.
 //!
 //! Every test opens either an in-memory database ([`Target::Memory`]) or a
 //! file under a per-test scratch directory ([`scratch_dir`]) — **never**
@@ -34,6 +33,44 @@
 //! experimental/off-by-default, so a `CREATE INDEX` assertion belongs only
 //! in `sqlite_conformance`'s own sqlite-only test, not in a helper every
 //! engine must pass.
+//!
+//! **No param-count-mismatch assertion in the shared suite either** (the
+//! second sqlite-only carve-out): rejecting an under-supplied positional
+//! parameter list is rusqlite client-side strictness, not a SQLite-core
+//! guarantee — turso `=0.7.2` silently binds the missing placeholders as
+//! `NULL` and succeeds, and exposes no parameter-count API to enforce the
+//! check in `turso.rs`. See `param_count_mismatch_is_sql_error`'s own doc;
+//! the behavioral divergence is a documented caveat (README, LIMITATIONS),
+//! decided at the conductor level during the db-plugin build (2026-08-09).
+//!
+//! # Dual-engine conformance and the cross-engine round trip
+//!
+//! [`sqlite_conformance`] and `turso_conformance` (below, `engine-turso`
+//! feature-gated) each run the exact same [`run_conformance_suite`] body
+//! against their own engine — dual-engine conformance means passing this
+//! one shared contract twice, not maintaining a second suite. `cross_engine`
+//! (feature-gated on both engines together) pins the promise underneath
+//! `Value` round-tripping and journal-mode symmetry: a database file is not
+//! an engine-specific artifact. It writes a fresh file with one engine,
+//! drops that handle, and reopens the *same file* with the other engine,
+//! asserting identical query results across all five [`Value`] classes and
+//! that `PRAGMA journal_mode` still reports WAL — in both directions
+//! (sqlite-writes/turso-reads and turso-writes/sqlite-reads).
+//!
+//! This rests on the interop discipline `sqlite.rs`/`turso.rs` each
+//! document and enforce from their own side: every file-backed connection
+//! is WAL journal mode (`sqlite.rs` sets it at open; `turso.rs` asserts it,
+//! refusing a non-WAL file outright), neither engine issues an
+//! engine-specific pragma (no `journal_mode = mvcc`, no `cipher`/`hexkey`),
+//! and no on-disk encryption is ever layered on — a `frust-database` file
+//! stays a plain, standard-SQLite-tool-readable file regardless of which
+//! engine last touched it. The two engines are not the same SQLite build:
+//! turso self-reports `sqlite_version()` `3.50.4` against this crate's
+//! bundled `rusqlite` build of `3.53.2` (measured, `engine-turso` on) — the
+//! SQL dialect this suite exercises (the shared helpers above, plus
+//! whatever `cross_engine` adds) must stay inside the subset both versions
+//! agree on; the `CREATE INDEX` carve-out above is the first instance of
+//! that constraint, not the last.
 
 use std::fs;
 use std::path::PathBuf;
@@ -44,9 +81,9 @@ use crate::{Database, DatabaseError, Engine, Value};
 
 /// Open a fresh connection for `engine` against `target` — the suite's one
 /// way to construct a [`Database`] handle, since it needs explicit engine
-/// control (a future turso-backend task targets both `Engine::Sqlite` and
-/// `Engine::Turso`) rather than this crate's public default-engine
-/// resolution ([`Database::open`]/[`Database::open_at`]).
+/// control (both `Engine::Sqlite` and `Engine::Turso`, and — in
+/// `cross_engine` — one of each per test) rather than this crate's public
+/// default-engine resolution ([`Database::open`]/[`Database::open_at`]).
 fn open(engine: Engine, target: Target) -> Result<Database, DatabaseError> {
     engine::open_conn(engine, target).map(Database::from_conn)
 }
@@ -94,17 +131,16 @@ fn must_query(
 }
 
 /// Run the full suite for one engine, tagged `tag` (used in every failure
-/// message so a run against multiple engines — a future turso-backend
-/// task's cross-engine tests — always names which engine failed). `open`
-/// must open a connection for that same engine against whatever
-/// [`Target`] it's given.
+/// message so a run against multiple engines — including `cross_engine`'s
+/// per-direction tags — always names which engine failed). `open` must open
+/// a connection for that same engine against whatever [`Target`] it's
+/// given.
 pub(crate) fn run_conformance_suite(
     tag: &str,
     open: &dyn Fn(Target) -> Result<Database, DatabaseError>,
 ) {
     value_round_trip_all_classes(tag, open);
     positional_param_binding(tag, open);
-    param_count_mismatch_is_sql_error(tag, open);
     execute_rows_affected(tag, open);
     query_column_names_and_order(tag, open);
     transaction_commits_on_ok(tag, open);
@@ -196,9 +232,19 @@ fn positional_param_binding(tag: &str, open: &dyn Fn(Target) -> Result<Database,
     );
 }
 
-/// Fewer bound parameters than the statement declares placeholders must
-/// surface as [`DatabaseError::Sql`], not panic and not silently bind
-/// `NULL` for the missing ones.
+/// Fewer bound parameters than the statement declares placeholders
+/// surfaces as [`DatabaseError::Sql`] — **on the sqlite engine only** (a
+/// second carve-out beside `CREATE INDEX`, see the module doc): the check
+/// is a client-side guard rusqlite adds on top of raw SQLite
+/// (`Statement::bind_parameters` compares `sqlite3_bind_parameter_count`
+/// against the supplied slice), while turso `=0.7.2` binds exactly the
+/// positional values it's given and leaves trailing unbound placeholders
+/// as `NULL`, succeeding silently. Turso exposes no statement
+/// parameter-count API this crate could enforce the check with, and
+/// hand-parsing SQL for placeholders in the bridge is out (the bridge
+/// stays tiny and boring), so the divergence is documented (README
+/// *Caveats*, LIMITATIONS.md) rather than papered over. Called from
+/// `sqlite_conformance::param_count_mismatch`, not the shared suite.
 fn param_count_mismatch_is_sql_error(
     tag: &str,
     open: &dyn Fn(Target) -> Result<Database, DatabaseError>,
@@ -529,11 +575,9 @@ fn multi_handle_same_file_reads_committed_writes(
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// `engine-sqlite` conformance wrappers — this phase's sole caller of
-/// [`run_conformance_suite`]. A future turso-backend task adds a sibling
-/// `#[cfg(feature = "engine-turso")] mod turso_conformance` (plus its own
-/// cross-engine tests) without needing to touch this module or any suite
-/// helper above.
+/// `engine-sqlite` conformance wrapper — see `turso_conformance` below for
+/// the same suite run against the other engine, and `cross_engine` for the
+/// file-format round trip between them.
 #[cfg(feature = "engine-sqlite")]
 mod sqlite_conformance {
     use super::{open, run_conformance_suite};
@@ -547,6 +591,14 @@ mod sqlite_conformance {
     #[test]
     fn conformance_suite() {
         run_conformance_suite("sqlite", &open_sqlite);
+    }
+
+    /// SQLite-only (the second carve-out, see the module doc and the
+    /// helper's own doc): rusqlite rejects an under-supplied positional
+    /// parameter list client-side; turso does not.
+    #[test]
+    fn param_count_mismatch() {
+        super::param_count_mismatch_is_sql_error("sqlite", &open_sqlite);
     }
 
     /// SQLite-only: `CREATE INDEX` is deliberately kept out of the shared
@@ -578,5 +630,158 @@ mod sqlite_conformance {
             "sqlite: indexed lookup must return exactly one row"
         );
         assert_eq!(rows[0].get(0), Some(&Value::Integer(1)));
+    }
+}
+
+/// `engine-turso` conformance wrapper — instantiates the exact same
+/// [`run_conformance_suite`] against the turso engine. Every helper the
+/// suite calls is engine-agnostic (this file's module doc), so this wrapper
+/// needs nothing beyond a closure capturing `Engine::Turso`; no turso-only
+/// test is added here (`sqlite_conformance::{create_index,
+/// param_count_mismatch}` are the only engine-specific tests either
+/// wrapper carries, and both are sqlite-only).
+#[cfg(feature = "engine-turso")]
+mod turso_conformance {
+    use super::{open, run_conformance_suite};
+    use crate::engine::Target;
+    use crate::{Database, DatabaseError, Engine};
+
+    fn open_turso(target: Target) -> Result<Database, DatabaseError> {
+        open(Engine::Turso, target)
+    }
+
+    #[test]
+    fn conformance_suite() {
+        run_conformance_suite("turso", &open_turso);
+    }
+}
+
+/// The cross-engine file-format round trip — see this file's module doc,
+/// *Dual-engine conformance and the cross-engine round trip*, for what this
+/// pins and why. Feature-gated on both engines together: `open`,
+/// `must_open`, `must_exec`, and `must_query` above are already
+/// engine-agnostic, so this module only adds the two round-trip cases
+/// themselves.
+#[cfg(all(feature = "engine-sqlite", feature = "engine-turso"))]
+mod cross_engine {
+    use std::fs;
+
+    use super::{must_exec, must_open, must_query, scratch_dir};
+    use crate::engine::Target;
+    use crate::{Database, Engine, Value};
+
+    /// One row per [`Value`] storage class — the fixed seed both round-trip
+    /// directions below write with one engine and re-read with the other.
+    fn seed_rows() -> Vec<(i64, Value)> {
+        vec![
+            (1, Value::Null),
+            (2, Value::Integer(-42)),
+            (3, Value::Real(2.5)),
+            (4, Value::Text("cross-engine".to_string())),
+            (5, Value::Blob(vec![9, 8, 7])),
+        ]
+    }
+
+    /// `PRAGMA journal_mode` must still report WAL once `db`'s engine has
+    /// opened (and, for a writer, written to) the file — the verified
+    /// interop boundary this suite pins; a silent header mutation away from
+    /// WAL would be a regression neither engine's own tests could catch
+    /// alone.
+    fn assert_journal_mode_wal(tag: &str, db: &Database) {
+        let rows = must_query(tag, db, "PRAGMA journal_mode", ());
+        let mode = match rows.first().and_then(|row| row.get(0)) {
+            Some(Value::Text(s)) => s.to_lowercase(),
+            other => panic!("{tag}: unexpected journal_mode result: {other:?}"),
+        };
+        assert_eq!(mode, "wal", "{tag}: journal mode must stay WAL");
+    }
+
+    /// Every [`seed_rows`] entry must be present under `db`, unchanged.
+    fn assert_seed_rows_present(tag: &str, db: &Database) {
+        for (id, value) in seed_rows() {
+            let rows = must_query(
+                tag,
+                db,
+                "SELECT v FROM t WHERE id = ?1",
+                [Value::Integer(id)],
+            );
+            assert_eq!(rows.len(), 1, "{tag}: expected exactly one row for id={id}");
+            assert_eq!(
+                rows[0].get(0),
+                Some(&value),
+                "{tag}: value mismatch for id={id}"
+            );
+        }
+    }
+
+    /// Write [`seed_rows`] through `writer_engine` (tagged `writer_tag`),
+    /// drop that handle, then open the same file with `reader_engine`
+    /// (tagged `reader_tag`) and assert identical rows plus a still-WAL
+    /// journal mode on both sides — the no-migration promise: a file one
+    /// engine wrote is read byte-faithfully by the other, with no silent
+    /// re-encoding.
+    fn round_trip(
+        case: &str,
+        writer_tag: &str,
+        writer_engine: Engine,
+        reader_tag: &str,
+        reader_engine: Engine,
+    ) {
+        let dir = scratch_dir("cross-engine", case);
+        fs::create_dir_all(&dir).expect("create scratch dir");
+        let path = dir.join("roundtrip.db");
+
+        {
+            let writer_open = |target: Target| super::open(writer_engine, target);
+            let db = must_open(writer_tag, &writer_open, Target::Path(path.clone()));
+            must_exec(
+                writer_tag,
+                &db,
+                "CREATE TABLE t (id INTEGER PRIMARY KEY, v BLOB)",
+                (),
+            );
+            for (id, value) in seed_rows() {
+                must_exec(
+                    writer_tag,
+                    &db,
+                    "INSERT INTO t (id, v) VALUES (?1, ?2)",
+                    [Value::Integer(id), value],
+                );
+            }
+            assert_journal_mode_wal(writer_tag, &db);
+            // `db` dropped here — the reader below sees only what actually
+            // made it to the on-disk file.
+        }
+
+        let reader_open = |target: Target| super::open(reader_engine, target);
+        let db = must_open(reader_tag, &reader_open, Target::Path(path));
+        assert_journal_mode_wal(reader_tag, &db);
+        assert_seed_rows_present(reader_tag, &db);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// sqlite writes a fresh file; turso opens and reads the same file.
+    #[test]
+    fn sqlite_write_turso_read_round_trip() {
+        round_trip(
+            "sqlite-write-turso-read",
+            "sqlite-write",
+            Engine::Sqlite,
+            "turso-read",
+            Engine::Turso,
+        );
+    }
+
+    /// The reverse direction: turso writes a fresh file; sqlite reads it.
+    #[test]
+    fn turso_write_sqlite_read_round_trip() {
+        round_trip(
+            "turso-write-sqlite-read",
+            "turso-write",
+            Engine::Turso,
+            "sqlite-read",
+            Engine::Sqlite,
+        );
     }
 }

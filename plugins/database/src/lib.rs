@@ -21,10 +21,10 @@
 //! [`Engine`] names the compiled backend a [`Database`] routes through:
 //! [`Engine::Sqlite`] (this crate's default — the `engine-sqlite` feature,
 //! `rusqlite`'s bundled, synchronous, in-process SQLite) and `Engine::Turso`
-//! (the `engine-turso` feature, added by a future turso-backend task — an
-//! async engine bridged onto this crate's synchronous API; not
-//! doc-linkable here since the variant only exists when that feature is
-//! compiled). [`OpenOptions::engine`] picks one explicitly;
+//! (the `engine-turso` feature — an async engine bridged onto this crate's
+//! synchronous API, see `turso.rs`; not doc-linkable here since the variant
+//! only exists when that feature is compiled). [`OpenOptions::engine`] picks
+//! one explicitly;
 //! [`Database::open`]/[`Database::open_in_memory`]/[`Database::open_at`]
 //! resolve a default instead — Sqlite when compiled, else Turso, else
 //! (neither compiled) a [`DatabaseError::Storage`] naming the missing
@@ -36,9 +36,9 @@
 //! # UI-thread discipline: pair every call with `spawn_blocking`
 //!
 //! Every [`Database`] operation is a **blocking** synchronous call — a
-//! `rusqlite` statement runs on the calling thread, and the future `turso`
-//! backend bridges its async engine onto this same blocking call shape
-//! (see [`DatabaseError::AsyncContext`]). Like every other plugin's
+//! `rusqlite` statement runs on the calling thread, and the `turso` backend
+//! bridges its async engine onto this same blocking call shape (see
+//! [`DatabaseError::AsyncContext`]). Like every other plugin's
 //! blocking/gated call (`docs/PLUGINS_ARCHITECTURE.md`'s Layer
 //! Dependencies), an app must never call [`Database::execute`] /
 //! [`Database::query`] / [`Database::transaction`] directly from the UI
@@ -94,22 +94,17 @@
 
 mod engine;
 
-// The default engine backend, real once the sqlite-backend task lands (a
-// compiling stub until then — see `sqlite.rs`'s own module doc).
+// The default engine backend — see `sqlite.rs`'s own module doc.
 #[cfg(feature = "engine-sqlite")]
 mod sqlite;
 
-// Declared now so this file never needs another edit once the turso-backend
-// task adds the crate's `engine-turso` feature: `feature = "engine-turso"`
-// is inert (always false) until that feature exists, so this line compiles
-// to nothing today. That task adds `src/turso.rs` alongside the feature.
+// The non-default, opt-in engine backend — see `turso.rs`'s own module doc.
 #[cfg(feature = "engine-turso")]
 mod turso;
 
-// The cross-engine conformance suite (empty stub until the sqlite-backend
-// task fills it in — see `conformance.rs`'s own module doc). Gated on the
-// `conformance` feature too, not just `test`, so a future harness can
-// compile it without a full test build.
+// The cross-engine conformance suite — see `conformance.rs`'s own module
+// doc. Gated on the `conformance` feature too, not just `test`, so a future
+// harness can compile it without a full test build.
 #[cfg(any(test, feature = "conformance"))]
 pub(crate) mod conformance;
 
@@ -323,7 +318,7 @@ pub enum Engine {
     #[cfg(feature = "engine-sqlite")]
     Sqlite,
     /// The turso async engine, bridged onto this crate's synchronous API —
-    /// added by a future turso-backend task.
+    /// see `turso.rs`'s module doc for the bridge design.
     #[cfg(feature = "engine-turso")]
     Turso,
 }

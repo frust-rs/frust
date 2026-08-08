@@ -3,9 +3,9 @@
 //! this crate's module doc (`lib.rs`)'s *Threading model* section.
 //!
 //! Crate-private end to end: nothing here is reachable outside
-//! `frust-database`. A backend module (`sqlite`, the future `turso`)
-//! implements [`EngineConn`] once; [`open_conn`] is the one place that
-//! picks which backend module's `open` a [`crate::Engine`] value routes to.
+//! `frust-database`. A backend module (`sqlite`, `turso`) implements
+//! [`EngineConn`] once; [`open_conn`] is the one place that picks which
+//! backend module's `open` a [`crate::Engine`] value routes to.
 
 use std::path::PathBuf;
 
