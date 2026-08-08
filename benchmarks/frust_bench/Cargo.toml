@@ -53,6 +53,14 @@ frust-shell-common = { path = "../../crates/frust-shell-common" }
 # Conventions).
 frust-shared-preferences = { path = "../../plugins/shared-preferences" }
 
+# `frust-database`: used by the DB op-latency scenarios (`d1_db_write.rs`,
+# `d2_db_read.rs` — PROTOCOL.md §9). Same directly-added-plugin model as
+# `frust-shared-preferences` above; default features (`engine-sqlite`) are
+# enough today — the crate's own default-engine resolution is what lets a
+# future `engine-turso` column reach these scenarios with no scenario-code
+# change (see `plugins/database/src/lib.rs`'s module doc, *Engines*).
+frust-database = { path = "../../plugins/database" }
+
 # `vt100`: the terminal emulator the S9 terminal-grid scenario
 # (`src/scenarios/s9_terminal.rs`) replays the checked-in fixture bytes through.
 # A REAL emulator, deliberately — the Flutter side of S9 drives kterm 1.5.3 (a
