@@ -182,6 +182,47 @@ cached value the queue keeps current instead of asking the device live. Both
 are callable from **any** thread, including the UI thread, unconditionally,
 and neither needs `spawn_blocking`.
 
+**Neither are the stream start/stop calls.** `start_image_stream`/
+`start_barcode_stream` and `stop_image_stream`/`stop_barcode_stream` are
+callable from **any** thread too, for the same reason: Android answers a
+start synchronously (its CameraX bind is itself fire-and-forget), and Apple
+hands the attach to the session's own serial queue **asynchronously**, just
+like `set_torch`. That last part is what keeps a start issued moments after
+`open()` — the scan-sheet shape, where one tap opens the session and starts
+a stream — from parking on the queue behind `startRunning()` coming up,
+which on the UI thread is a multi-second frozen app.
+
+So `Ok(())` from a start means the stream was **accepted**, not that frames
+are flowing yet. The one failure iOS can only discover once its queue runs
+the attach (the session refusing the video data output) is reported through
+`CameraSession::take_stream_error()`:
+
+```rust
+session.start_barcode_stream(BarcodeStreamOptions::default(), on_detect)?;
+
+// later — e.g. from a rebuild, if no detection ever arrives
+if let Some(err) = session.take_stream_error() {
+    // the stream never attached; its claim is already released, so this
+    // can just start again
+}
+```
+
+Reading takes the value (a `CameraError` is not `Clone`), so keep what it
+returns in your own state rather than polling for it twice. The failed start
+releases its own stream claim as it reports, so a retry is never refused
+with `CameraError::StreamBusy`. `None` is the normal answer — and always the
+answer on Android, whose start failures are all synchronous. It is not a
+health check either: an accepted, attached stream that has yet to deliver a
+frame reports nothing here.
+
+A stop retires the running callback on the calling thread, so no frame
+reaches your callback after `stop_*` returns, even though the platform-side
+detach runs afterwards.
+
+**`close()` is the one call that still waits** on the session queue (iOS):
+it releases the camera device, and a caller that reopens immediately — a
+lens switch — depends on that release having actually happened.
+
 `take_picture` correlates each attempt with its own completion, so `Ok(())`
 means *that* call's photo was written to the path you passed.
 
@@ -231,6 +272,9 @@ session.start_barcode_stream(
 // later
 session.stop_barcode_stream();
 ```
+
+Both calls are non-blocking and *accepted, not confirmed*, exactly like the
+raw stream — see §3 for that contract and `take_stream_error()`.
 
 ### Same thread + close-deadline LAW as raw frames
 
@@ -367,6 +411,12 @@ manual test*.
   `start_image_stream` reports `CameraError::Platform` for `Bgra` on Android
   rather than handing over mislabelled bytes — Flutter's `camera` plugin
   draws the same line. Ask for `ImageFormat::Yuv420` in cross-platform code.
+- **A stream start is accepted, not confirmed, on iOS.** Its attach runs on
+  the session queue after the call returns (§3, the same shape `set_torch`
+  has), so `Ok(())` is an acceptance and a rejected attach surfaces through
+  `take_stream_error()` instead. Android reports every start failure
+  synchronously, so this is a one-platform asymmetry a cross-platform app
+  handles by checking both.
 - **An image-stream callback has a hard deadline.** It runs on a
   plugin-owned thread with the platform's own buffer borrowed, and must copy
   or consume before returning: a late return stalls the Android stream

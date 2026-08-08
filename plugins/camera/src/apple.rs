@@ -37,6 +37,19 @@
 //! *allocation* (`AVCaptureSession::new()` and
 //! friends) happens on the calling thread, which mutates no live session.
 //!
+//! How a call reaches that queue is a contract of its own, because the queue
+//! can be busy for hundreds of milliseconds with [`SessionInner::start`]'s
+//! `startRunning()`. Anything that would otherwise park a UI-thread caller
+//! there dispatches **asynchronously** and reports through a side channel:
+//! [`SessionInner::set_torch`] (through
+//! [`SessionInner::torch_available`]'s cache) and
+//! [`SessionInner::start_image_stream`]/[`SessionInner::stop_image_stream`]
+//! (through the [`crate::StreamErrorSink`] the start is handed). The
+//! `exec_sync` hop ([`SessionInner::on_queue`]) is left to the two calls
+//! whose callers genuinely need the platform's answer —
+//! [`SessionInner::take_picture`], which refuses the main thread outright,
+//! and [`SessionInner::close`], whose whole purpose is releasing the device.
+//!
 //! A running image stream gets a **second**, dedicated serial queue
 //! ([`FRAMES_QUEUE_LABEL`]) for its sample-buffer delegate, never the session
 //! queue: a frame callback runs app code for as long as it likes, and sharing
@@ -83,7 +96,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::time::Duration;
@@ -118,7 +131,7 @@ use objc2_foundation::{NSDictionary, NSError, NSNumber, NSObjectProtocol, NSStri
 
 use crate::{
     CameraError, ImageFormat, ImageFrame, ImageFrameCallback, ImagePlane, Lens, PermissionStatus,
-    Resolution, SessionBackend,
+    Resolution, SessionBackend, StreamErrorSink,
 };
 
 /// The `viewType` this crate's iOS preview slot resolves to — the bare
@@ -314,6 +327,22 @@ struct SessionInner {
     queue: DispatchRetained<DispatchQueue>,
     /// The AVFoundation graph, queue-confined ([`QueueBound`]).
     objects: QueueBound<AvObjects>,
+    /// The epoch of the stream whose frames may still reach an app callback.
+    ///
+    /// Bumped on the **calling** thread by every
+    /// [`Self::start_image_stream`]/[`Self::stop_image_stream`]/[`Self::close`],
+    /// and compared against each [`SampleBufferDelegate`]'s own recorded
+    /// epoch before a frame is delivered. That is what keeps a stop's
+    /// observable behavior unchanged now that the platform-side detach runs
+    /// asynchronously: a delegate is retired the moment its stop is
+    /// *requested*, not when the session queue gets around to detaching it,
+    /// so no frame reaches the app after `stop_image_stream` returns.
+    ///
+    /// An `Arc` rather than a plain field because the delegate outlives this
+    /// call and reads it from the frames queue; `Relaxed` throughout — a
+    /// single atomic's modification order is coherent on its own, and the
+    /// delegate's other state is immutable.
+    stream_epoch: Arc<AtomicU64>,
     /// The preview aspect ratio (width / height, rotation-applied), stored as
     /// `f32` bits so a later phase can refresh it without a lock.
     aspect_ratio: AtomicU32,
@@ -334,9 +363,12 @@ struct SessionInner {
 impl SessionInner {
     /// Run `body` on this session's serial queue and wait for it.
     ///
-    /// `exec_sync` (not `exec_async`) because every caller needs the result:
-    /// a configuration failure has to surface as a [`CameraError`], and the
-    /// public API is documented blocking (module doc's *Threading*).
+    /// The **parking** hop, so its remaining callers are exactly the two the
+    /// module doc's *Threading* names: [`Self::take_picture`] (which needs
+    /// the platform's answer and refuses the main thread to get it) and
+    /// [`Self::close`] (whose caller depends on the device actually being
+    /// released). Anything a UI thread may call reaches the queue with
+    /// `exec_async` instead — never through here.
     fn on_queue<F: Send + FnOnce(&AvObjects)>(&self, body: F) {
         let objects = &self.objects;
         self.queue.exec_sync(move || body(objects.get()));
@@ -458,12 +490,29 @@ impl SessionInner {
     /// [`crate::ImageFrame`]'s doc, which states the same contract on the
     /// public API.
     ///
-    /// Blocks only for the configuration transaction on the session queue, not
-    /// for any frame.
+    /// # Genuinely non-blocking, unconditionally
+    ///
+    /// The attach is fired onto the session queue with `exec_async` — the
+    /// same shape [`Self::set_torch`] uses, for the same reason: the
+    /// `exec_sync` hop this replaced parked its caller behind
+    /// [`Self::start`]'s in-flight `startRunning()` (hundreds of
+    /// milliseconds on a real device), which on a UI-thread caller is a
+    /// multi-second frozen frame right when the app first shows a camera
+    /// surface. Only the closed check and the object allocation stay on the
+    /// calling thread, and neither touches a live session.
+    ///
+    /// `Ok(())` therefore means the stream was **accepted**, not attached.
+    /// The one failure the queue can still discover — the session refusing
+    /// the video data output — travels back through `on_error`
+    /// ([`crate::StreamErrorSink`]) rather than this `Result`; a session
+    /// closed while the request waited its turn is a cancellation the caller
+    /// already knows about, so it is dropped quietly like
+    /// [`Self::start`]'s and [`Self::set_torch`]'s own closed checks.
     fn start_image_stream(
-        &self,
+        self: &Arc<Self>,
         format: ImageFormat,
         on_frame: Box<ImageFrameCallback>,
+        on_error: StreamErrorSink,
     ) -> Result<(), CameraError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(CameraError::SessionClosed);
@@ -475,31 +524,48 @@ impl SessionInner {
         // instance.
         let output = unsafe { AVCaptureVideoDataOutput::new() };
         let queue = DispatchQueue::new(FRAMES_QUEUE_LABEL, DispatchQueueAttr::SERIAL);
-        let delegate = SampleBufferDelegate::new(format, on_frame);
+        // Retire whatever was running here, not at the (later) detach
+        // `attach_stream` performs on the queue — see [`Self::stream_epoch`].
+        let epoch = self.stream_epoch.fetch_add(1, Ordering::Relaxed) + 1;
+        let delegate =
+            SampleBufferDelegate::new(format, on_frame, Arc::clone(&self.stream_epoch), epoch);
         let staged = QueueBound::new((output, delegate, queue));
 
-        let outcome: Mutex<Result<(), String>> = Mutex::new(Ok(()));
-        {
-            let outcome = &outcome;
-            self.on_queue(move |objects| {
-                let (output, delegate, queue) = staged.into_inner();
-                *outcome.lock().unwrap_or_else(|e| e.into_inner()) =
-                    attach_stream(objects, output, delegate, queue, pixel_format_for(format));
-            });
-        }
-        outcome
-            .into_inner()
-            .unwrap_or_else(|e| e.into_inner())
-            .map_err(CameraError::Platform)
+        let session = Arc::clone(self);
+        self.queue.exec_async(move || {
+            if session.closed.load(Ordering::Acquire) {
+                return;
+            }
+            let (output, delegate, queue) = staged.into_inner();
+            if let Err(message) = attach_stream(
+                session.objects.get(),
+                output,
+                delegate,
+                queue,
+                pixel_format_for(format),
+            ) {
+                on_error(CameraError::Platform(message));
+            }
+        });
+        Ok(())
     }
 
     /// See [`crate::CameraSession::stop_image_stream`] — the preview and the
     /// capture device are untouched. A no-op if no stream is running.
-    fn stop_image_stream(&self) {
+    ///
+    /// Non-blocking like [`Self::start_image_stream`], and observably
+    /// unchanged by that: the epoch bump retires the running delegate on the
+    /// calling thread, so no frame reaches the app's callback after this
+    /// returns even though the detach itself runs on the session queue
+    /// afterwards (FIFO behind any attach still in flight).
+    fn stop_image_stream(self: &Arc<Self>) {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        self.on_queue(detach_stream);
+        self.stream_epoch.fetch_add(1, Ordering::Relaxed);
+        let session = Arc::clone(self);
+        self.queue
+            .exec_async(move || detach_stream(session.objects.get()));
     }
 
     /// See [`crate::CameraSession::set_torch`].
@@ -592,10 +658,18 @@ impl SessionInner {
     }
 
     /// See [`crate::CameraSession::close`] — idempotent.
+    ///
+    /// The one call that still hops onto the session queue **synchronously**:
+    /// it releases the capture device, and a caller that reopens right after
+    /// (a lens switch) depends on that release having actually happened, so
+    /// the wait is the contract rather than a hazard to remove. A running
+    /// stream's callback is retired before the wait, like
+    /// [`Self::stop_image_stream`]'s.
     fn close(&self) {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
+        self.stream_epoch.fetch_add(1, Ordering::Relaxed);
         sessions().remove(&self.id);
         self.on_queue(|objects| {
             // Drop any running stream first: its delegate owns the app's frame
@@ -765,6 +839,7 @@ impl AppleSession {
             id,
             queue,
             objects,
+            stream_epoch: Arc::new(AtomicU64::new(0)),
             aspect_ratio: AtomicU32::new(aspect.to_bits()),
             torch_available: AtomicBool::new(torch_available.into_inner()),
             closed: AtomicBool::new(false),
@@ -816,8 +891,9 @@ impl SessionBackend for AppleSession {
         &self,
         format: ImageFormat,
         on_frame: Box<ImageFrameCallback>,
+        on_error: StreamErrorSink,
     ) -> Result<(), CameraError> {
-        self.inner.start_image_stream(format, on_frame)
+        self.inner.start_image_stream(format, on_frame, on_error)
     }
 
     fn stop_image_stream(&self) {
@@ -1207,6 +1283,10 @@ struct SampleDelegateIvars {
     format: ImageFormat,
     /// The app's frame callback, invoked synchronously per frame.
     on_frame: Box<ImageFrameCallback>,
+    /// This delegate's own epoch, and the session counter it is checked
+    /// against before every delivery — see [`SessionInner::stream_epoch`].
+    epoch: u64,
+    session_epoch: Arc<AtomicU64>,
 }
 
 define_class!(
@@ -1250,9 +1330,20 @@ define_class!(
 );
 
 impl SampleBufferDelegate {
-    /// A delegate delivering `format` frames to `on_frame`.
-    fn new(format: ImageFormat, on_frame: Box<ImageFrameCallback>) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(SampleDelegateIvars { format, on_frame });
+    /// A delegate delivering `format` frames to `on_frame` for as long as
+    /// `session_epoch` still reads `epoch`.
+    fn new(
+        format: ImageFormat,
+        on_frame: Box<ImageFrameCallback>,
+        session_epoch: Arc<AtomicU64>,
+        epoch: u64,
+    ) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(SampleDelegateIvars {
+            format,
+            on_frame,
+            epoch,
+            session_epoch,
+        });
         // SAFETY: `NSObject`'s designated initializer, called on a freshly
         // allocated instance whose ivars are already set.
         unsafe { msg_send![super(this), init] }
@@ -1263,6 +1354,14 @@ impl SampleBufferDelegate {
     /// be locked) is dropped with a log line — never a panic on the delivery
     /// queue.
     fn deliver(&self, sample_buffer: &CMSampleBuffer) {
+        if self.ivars().session_epoch.load(Ordering::Relaxed) != self.ivars().epoch {
+            // Stopped, closed, or superseded by a re-bind: the detach is only
+            // queued at that point, so AVFoundation can still deliver here for
+            // a moment — but the app's callback must not (see
+            // `SessionInner::stream_epoch`).
+            return;
+        }
+
         // SAFETY: `sample_buffer` is the live buffer AVFoundation just handed
         // this delegate; `image_buffer` is a +1 accessor returning `None` for a
         // non-video sample.
