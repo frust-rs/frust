@@ -503,11 +503,27 @@ arbitrary fixed constant; no external standard prescribes a benchmark
 seed). Row `i`'s four fields are pure functions of `(seed, i)` — no
 wall-clock or process-local RNG state — so the two apps' generators
 produce byte-identical rows for the same `i`, mirroring §6's "identical
-logical work" fairness gate: `name` is a deterministic ~64-byte string
-built from `i`; `payload` is ~256 deterministic pseudo-random bytes seeded
-by `(seed, i)`. The canonical generator lives in
-`flutter_bench/lib/bench/datasets.dart` (mirrored on the frust side in the
-`d1`/`d2` scenario modules), per §8's S1/S3 shared-dataset-code precedent.
+logical work" fairness gate: `name` is a deterministic 64-byte string
+built from `i`; `payload` is 256 deterministic pseudo-random bytes seeded
+by `(seed, i)`.
+
+The **canonical** generator lives in
+`frust_bench/src/scenarios/d1_db_write.rs`; `flutter_bench/lib/scenarios/
+d1_db_write.dart` is a bit-for-bit port of it (same per-field seed
+derivation, same draw order, same little-endian byte order), per §8's
+S1/S3 shared-dataset-code precedent. "Byte-identical" is *enforced*, not
+asserted: both suites assert the same committed table of literal golden
+vectors — name, value, and payload hex for a fixed set of `i`, plus the
+first ten keys of §9.4's permutation — so a change to either generator
+fails both CIs instead of silently making the two columns benchmark
+different bytes.
+
+**Generation happens before the per-op timer starts.** On both apps, a
+row's parameters (and, for a batched insert, the whole batch's) are built
+*before* the timer that measures the op, so a `us` value covers the
+database call alone and never the generator. This matters because the two
+generators need not cost the same; excluding both from the measured window
+is what keeps their `us` values comparable.
 
 ### 9.3 d1 — Writes
 
@@ -562,7 +578,11 @@ by `(seed, i)`. The canonical generator lives in
   drawn from a fixed deterministic permutation of `0..SEED_ROWS` (seed =
   424242, same per-index draw order on both apps — mirrors S1's declared
   RNG-draw-order convention, §8's S1-specific notes) so both apps hit the
-  identical key sequence.
+  identical key sequence. Same enforcement as §9.2: the permutation is a
+  Fisher-Yates shuffle over the same unscaled `next_u64() % (i + 1)` draw
+  per swap on both sides, and its first ten keys are a committed literal
+  golden vector in both suites. The permutation itself is built before the
+  timed phase begins.
 - One `range_scan` op per run: `WHERE id BETWEEN 10000 AND 14999`
   (`RANGE_SPAN = 5,000` rows, a fixed declared offset/span, no per-run
   randomization), fully iterated (every returned row actually
@@ -573,7 +593,10 @@ by `(seed, i)`. The canonical generator lives in
   against the value the §9.2 generator deterministically produces for
   that `id` — a mismatch or unexpected-empty result sets `err=1`,
   mirroring S8's `read_unexpected_none`/`read_value_mismatch` split
-  (tallied the same way, into a `d2-errors` marker).
+  (tallied the same way, into a `d2-errors` marker). The verification (and
+  the expected-row generation it needs) runs **after** the op's timer
+  stops, per §9.2's generation-outside-the-timed-window rule — a `us` value
+  is the query alone.
 - Warmup discard: the first `select_point` sample of each run is excluded
   (mirrors d1/S8). `range_scan` is **not** warmup-excluded — it is the
   scenario's only per-run sample of that op, and excluding it would leave
@@ -642,10 +665,30 @@ Flutter SQLite story is itself split:
   fairness rules) — a claimed violation must point at a line of
   `pubspec.yaml`.
 
+**Storage-config parity — all three columns.** Every d-class connection,
+on every column, is opened with `PRAGMA journal_mode = WAL` and `PRAGMA
+foreign_keys = ON`. The frust column gets both from `frust-database`
+itself (WAL on every file open, foreign keys on every connection); both
+Flutter adapters issue the same two statements in their own `open()`.
+Declared the same way as the `sqlite3_flutter_libs` rule above, and
+checkable the same way: a claimed violation must point at the `open()`
+that omits a pragma. Rationale — SQLite's defaults are a rollback journal
+with foreign keys **off**, so a column left on defaults would be doing
+different durability and constraint work per write, which is a storage-
+config difference masquerading as a call-path difference.
+
 Each side's exact SQLite version actually linked is recorded per run in
 `RESULTS.md` (not assumed from a package's declared minimum) — the same
 per-run-environment-fact discipline as every device metadata block
 already in that file.
+
+The `DB_ADAPTER` / `--adapter` vocabulary is one word list end to end —
+`ffi` (package:sqlite3) and `sqflite`. The app rejects any other
+`DB_ADAPTER` value instead of defaulting, `harness/run.sh` rejects any
+other `--adapter` value, and each captured d-class run's reported
+`adapter=` is checked against the requested label before the run counts;
+a mismatch fails the run rather than publishing one column's numbers
+under the other's heading.
 
 ## 10. Reporting
 

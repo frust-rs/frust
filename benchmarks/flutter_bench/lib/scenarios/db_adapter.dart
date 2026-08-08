@@ -15,7 +15,18 @@
 ///
 /// Adapter selection mirrors how `SCENARIO` reaches the app (PROTOCOL's iOS
 /// mechanism, `registry.dart`'s `resolveScenarioId`): a compile-time
-/// `--dart-define=DB_ADAPTER=ffi|sqflite`, defaulting to `ffi`.
+/// `--dart-define=DB_ADAPTER=ffi|sqflite`, defaulting to `ffi`. An
+/// unrecognized value is rejected loudly rather than silently falling back to
+/// the default — see [selectDbAdapter].
+///
+/// **Storage-config parity** (PROTOCOL §9.7): both adapters apply the same
+/// two storage settings at [DbAdapter.open] — `journal_mode = WAL` and
+/// `foreign_keys = ON` — because the frust column gets them from
+/// `frust-database` itself (`plugins/database/src/sqlite.rs` sets WAL on
+/// every file open and foreign keys on every connection). Leaving either
+/// Flutter column on SQLite's defaults
+/// (rollback journal, foreign keys off) would compare different durability
+/// and constraint work, not different call paths.
 library;
 
 import 'dart:io';
@@ -78,16 +89,33 @@ abstract class DbAdapter {
 }
 
 /// Selects the adapter named by the `DB_ADAPTER` compile-time define
-/// (`ffi` | `sqflite`), defaulting to `ffi` — the same
-/// `String.fromEnvironment` mechanism `registry.dart` uses for `SCENARIO`.
-DbAdapter selectDbAdapter() {
-  const adapter = String.fromEnvironment('DB_ADAPTER', defaultValue: 'ffi');
-  switch (adapter) {
+/// (`ffi` | `sqflite`), defaulting to `ffi` only when the define is *absent*
+/// — the same `String.fromEnvironment` mechanism `registry.dart` uses for
+/// `SCENARIO`.
+///
+/// A present-but-unrecognized value throws [ArgumentError] rather than
+/// falling back to `ffi`: a typo'd `--dart-define=DB_ADAPTER=sqlite3` would
+/// otherwise produce a run that *looks* like the requested column but
+/// measures the other one, publishing a wrong number under the right label.
+/// `run.sh` additionally cross-checks the adapter each run actually reported
+/// against its `--adapter` label (PROTOCOL §9.7).
+DbAdapter selectDbAdapter() =>
+    dbAdapterForName(const String.fromEnvironment('DB_ADAPTER'));
+
+/// [selectDbAdapter]'s decision, as a plain function of the define's value —
+/// factored out because a `--dart-define` is compile-time and therefore
+/// untestable in place. An empty [name] means "define absent" (the only case
+/// that selects the default); anything else must name a known adapter.
+DbAdapter dbAdapterForName(String name) {
+  switch (name) {
     case 'sqflite':
       return SqfliteAdapter();
     case 'ffi':
-    default:
+    case '':
       return Sqlite3Adapter();
+    default:
+      throw ArgumentError(
+          "unknown DB_ADAPTER: '$name' (want 'ffi' or 'sqflite')");
   }
 }
 
@@ -103,7 +131,13 @@ class Sqlite3Adapter implements DbAdapter {
 
   @override
   Future<void> open(String path) async {
-    _db = sqlite3lib.sqlite3.open(path);
+    final db = sqlite3lib.sqlite3.open(path);
+    // Storage-config parity with the frust column and the sqflite column —
+    // see this library's doc comment and PROTOCOL §9.7. (`journal_mode` is a
+    // no-op for a `:memory:` database, which only tests open.)
+    db.execute('PRAGMA journal_mode = WAL');
+    db.execute('PRAGMA foreign_keys = ON');
+    _db = db;
   }
 
   sqlite3lib.Database get _requireDb {
@@ -163,7 +197,14 @@ class SqfliteAdapter implements DbAdapter {
 
   @override
   Future<void> open(String path) async {
-    _db = await sqflite.openDatabase(path);
+    final db = await sqflite.openDatabase(path);
+    // Storage-config parity with the frust column and the ffi column — see
+    // this library's doc comment and PROTOCOL §9.7. `journal_mode` goes
+    // through `rawQuery` because the pragma answers with the resulting mode
+    // and `execute` cannot carry a result row.
+    await db.rawQuery('PRAGMA journal_mode = WAL');
+    await db.execute('PRAGMA foreign_keys = ON');
+    _db = db;
   }
 
   sqflite.Database get _requireDb {

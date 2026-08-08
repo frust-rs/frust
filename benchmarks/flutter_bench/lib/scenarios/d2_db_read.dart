@@ -10,6 +10,12 @@
 /// one `range_scan` (`id BETWEEN [dRangeLow] AND [dRangeHigh]`, fully
 /// iterated).
 ///
+/// Nothing the §9.2 generator produces is inside a timed window here: the
+/// pre-seed and the key permutation are built before the timed phase, and
+/// each op's expected-row verification runs after its [Stopwatch] stops, so
+/// a `us` value is the query alone (§9.2's generation-outside-the-timed-
+/// window rule).
+///
 /// Per-op lines:
 /// ```
 /// flutter-perf op scenario=d2 op=select_point n=<u64> us=<u64> err=<0|1>

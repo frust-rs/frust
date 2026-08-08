@@ -65,7 +65,9 @@ impl Scenario for D2 {
 /// [`splitmix64`] generator [`row_name`]/[`row_value`]/[`row_payload`] use —
 /// PROTOCOL §9.4's "fixed deterministic permutation... same per-index draw
 /// order on both apps" (a Fisher-Yates shuffle, so nothing here depends on
-/// wall-clock or process-local RNG state).
+/// wall-clock or process-local RNG state). The Flutter side ports this
+/// exact draw sequence — `nextU64() % (i + 1)` per swap, unscaled — and
+/// both suites assert the same literal golden head (see `tests`).
 fn key_permutation(n: u64) -> Vec<u64> {
     let mut perm: Vec<u64> = (0..n).collect();
     let mut state = ROW_SEED ^ 0x4444;
@@ -287,6 +289,22 @@ fn run_d2_bench() -> D2Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The first ten keys `key_permutation(SEED_ROWS)` yields — a
+    /// cross-language golden vector, asserted as literals here and again, as
+    /// the same literals, in
+    /// `flutter_bench/test/db_scenarios_test.dart`. PROTOCOL §9.4 requires
+    /// both apps to hit the identical key sequence; this is what makes a
+    /// divergence fail a CI run rather than skew a published latency.
+    const GOLDEN_PERMUTATION_HEAD: [u64; 10] = [
+        38108, 16571, 44726, 49398, 6580, 17293, 11601, 47409, 1854, 49530,
+    ];
+
+    #[test]
+    fn key_permutation_matches_the_cross_language_golden_vector() {
+        let perm = key_permutation(SEED_ROWS);
+        assert_eq!(perm[..10], GOLDEN_PERMUTATION_HEAD);
+    }
 
     #[test]
     fn key_permutation_is_deterministic_and_a_bijection() {

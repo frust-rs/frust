@@ -30,14 +30,20 @@
 #                           (omit if already installed).
 #   --bundle-id <id>        iOS only: bundle id override (default
 #                           it.f0x.frustbench / it.f0x.flutterBench).
-#   --adapter <name>        flutter d-class runs only: labels which DB adapter
-#                           this run's already-installed build was compiled
-#                           against (`sqlite3` — the engine-parity column — or
-#                           `sqflite` — the ecosystem-typical column; see
-#                           PROTOCOL §9.7). Purely a label/output-directory
-#                           disambiguator: this script never builds anything,
-#                           it only installs/launches whatever `--install`
-#                           points at (or whatever is already on-device).
+#   --adapter <name>        flutter d-class runs only: which DB adapter this
+#                           run's already-installed build was compiled against
+#                           — `ffi` (package:sqlite3, the engine-parity
+#                           column) or `sqflite` (the ecosystem-typical
+#                           column); see PROTOCOL §9.7. The names are the
+#                           app's own `DB_ADAPTER` vocabulary, so the value
+#                           passed here is the value the build was compiled
+#                           with. This script never builds anything — it only
+#                           installs/launches whatever `--install` points at
+#                           (or whatever is already on-device) — but it does
+#                           verify each captured run's reported `adapter=`
+#                           against this label and fails the run on a
+#                           mismatch, so a mislabeled build can never be
+#                           published under the wrong column.
 #
 # --- iOS automation (--platform ios) ---------------------------------------
 #
@@ -107,12 +113,12 @@
 # `--duration` just needs to be long enough to outlast that; it is not a
 # per-op-specific concept).
 #
-# Flutter's two DB adapters (PROTOCOL §9.7 — `package:sqlite3`, the
+# Flutter's two DB adapters (PROTOCOL §9.7 — `ffi`, i.e. package:sqlite3, the
 # engine-parity column, vs `sqflite`, the ecosystem-typical column) are a
 # **compile-time** dimension on iOS, exactly like the existing
 # scenario-per-build split documented above: a physical-iPhone d-class matrix
 # pass needs **two separate `flutter build ios --profile
-# --dart-define=SCENARIO=<d1|d2> --dart-define=DB_ADAPTER=<sqlite3|sqflite>`
+# --dart-define=SCENARIO=<d1|d2> --dart-define=DB_ADAPTER=<ffi|sqflite>`
 # builds per d-scenario** (one per adapter), each installed and driven by its
 # own `run.sh <scenario> --app flutter --platform ios --install <app-path>
 # --adapter <adapter>` invocation — i.e. the caller's existing
@@ -120,7 +126,7 @@
 # adapter iteration for flutter d-class:
 #
 #   for scenario in d1 d2; do
-#     for adapter in sqlite3 sqflite; do
+#     for adapter in ffi sqflite; do
 #       flutter build ios --profile --dart-define=SCENARIO=${scenario} \
 #         --dart-define=DB_ADAPTER=${adapter}
 #       run.sh ${scenario} --app flutter --platform ios \
@@ -128,11 +134,14 @@
 #     done
 #   done
 #
-# This script never runs that build loop itself (no device runs ship with
-# this change) — `--adapter` only labels/disambiguates an already-installed
-# build's output directory and stats.py label. Android's two adapters are
-# runtime-selectable (no separate build needed) and are out of scope for
-# this documented loop.
+# `--adapter` and `DB_ADAPTER` therefore speak one vocabulary (`ffi` |
+# `sqflite`) end to end: the app rejects any other `DB_ADAPTER` value outright
+# (db_adapter.dart's `selectDbAdapter`), and this script rejects any other
+# `--adapter` value and then cross-checks the adapter each captured run
+# actually reported on its `*-perf info` line. This script never runs the
+# build loop itself; `--adapter` labels an already-installed build's output
+# directory and stats.py label. Android's two adapters are runtime-selectable
+# (no separate build needed) and are out of scope for this documented loop.
 #
 # Fairness note (protocol, see benchmarks/PROTOCOL.md): when comparing two
 # apps for the same scenario, alternate `run.sh` invocations between them
@@ -144,8 +153,9 @@
 # single `run.sh` call's failure/retry blast radius to one app's one
 # scenario.
 #
-# Exit status: non-zero on a usage error, an unreachable device, or a
-# capture step that fails outright; a soft fairness-gate warning
+# Exit status: non-zero on a usage error, an unreachable device, a capture
+# step that fails outright, or a captured d-class run whose reported adapter
+# disagrees with `--adapter`; a soft fairness-gate warning
 # (device_state.sh's airplane-mode/charger checks) never stops a run — see
 # device_state.sh's own header.
 
@@ -169,7 +179,7 @@ BUNDLE_OVERRIDE=""
 ADAPTER=""
 
 usage() {
-  sed -n '2,150p' "$0"
+  sed -n '2,159p' "$0"
 }
 
 # --- Arg parsing ------------------------------------------------------
@@ -349,15 +359,48 @@ if ! [[ "${DURATION}" =~ ^[0-9]+$ ]] || [ "${DURATION}" -lt 1 ]; then
   exit 2
 fi
 
+# The adapter vocabulary is the app's own `DB_ADAPTER` vocabulary (`ffi` for
+# package:sqlite3, `sqflite` for the platform-channel column — PROTOCOL §9.7),
+# so a label here always names the build that produced the numbers.
 if [ -n "${ADAPTER}" ]; then
   case "${ADAPTER}" in
-    sqlite3|sqflite) ;;
+    ffi|sqflite) ;;
     *)
-      echo "error: --adapter must be 'sqlite3' or 'sqflite', got '${ADAPTER}'" >&2
+      echo "error: --adapter must be 'ffi' or 'sqflite', got '${ADAPTER}'" >&2
       exit 2
       ;;
   esac
 fi
+
+# Verify a captured d-class run actually ran the adapter `--adapter` claims.
+#
+# `--adapter` only labels an already-installed build, and `DB_ADAPTER` is
+# baked in at build time — so without this check a stale install silently
+# publishes one column's numbers under the other column's heading. The app
+# emits its own adapter name once per run on the PROTOCOL §9.7 info line
+# (`flutter-perf info scenario=<id> adapter=<name> sqlite_version=<v>`);
+# compare that against the requested label and fail the run outright on a
+# mismatch (or on a missing line — an unverifiable run is not a usable one).
+# Only meaningful for flutter d-class runs with a label given; frust runs emit
+# no such line.
+assert_captured_adapter() {
+  local log="$1" observed
+  [ "${APP}" = "flutter" ] || return 0
+  [ -n "${ADAPTER}" ] || return 0
+  observed="$(grep -aoE 'flutter-perf info scenario=[^ ]+ adapter=[^ ]+' "${log}" 2>/dev/null \
+    | head -n 1 | grep -oE 'adapter=[^ ]+' | cut -d= -f2)"
+  if [ -z "${observed}" ]; then
+    echo "error: ${log} carries no 'flutter-perf info ... adapter=' line — cannot" >&2
+    echo "       verify it ran --adapter '${ADAPTER}'; refusing to record this run." >&2
+    exit 1
+  fi
+  if [ "${observed}" != "${ADAPTER}" ]; then
+    echo "error: adapter mismatch in ${log}: --adapter '${ADAPTER}' but the build" >&2
+    echo "       reported adapter='${observed}' — the installed build was compiled" >&2
+    echo "       with a different --dart-define=DB_ADAPTER. Reinstall and re-run." >&2
+    exit 1
+  fi
+}
 
 # d-class scenario detection (PROTOCOL §9.1's declared `d*` namespace) — a
 # `d` followed by one or more digits, e.g. `d1`/`d2`. Everything else
@@ -518,6 +561,7 @@ ios_run_matrix() {
       ios_capture_flutter "${bundle}" "${run_log}"
     fi
     if [ "${IS_DCLASS}" -eq 1 ]; then
+      assert_captured_adapter "${run_log}"
       frames="$(grep -c -e 'frust-perf op' -e 'flutter-perf op' -e 'frust-perf plugin op=' -e 'flutter-perf plugin op=' "${run_log}" 2>/dev/null || true)"
       echo "  captured ${run_log} (${frames:-0} per-op lines)"
     else
@@ -529,7 +573,7 @@ ios_run_matrix() {
   echo
   echo "Captured ${RUNS} runs for ${APP}/${SCENARIO} in ${OUT_DIR}"
   if [ -n "${ADAPTER}" ]; then
-    echo "  (flutter DB adapter: ${ADAPTER} — labeling/log-dir only, see --adapter)"
+    echo "  (flutter DB adapter: ${ADAPTER} — verified against each run's reported adapter=)"
   fi
 
   if [ "${SKIP_STATS}" -eq 0 ]; then
@@ -669,6 +713,7 @@ for i in $(seq 1 "${RUNS}"); do
   adb_shell am force-stop "${PKG}" >/dev/null 2>&1 || true
 
   if [ "${IS_DCLASS}" -eq 1 ]; then
+    assert_captured_adapter "${run_log}"
     op_count="$(grep -c -e 'frust-perf op' -e 'flutter-perf op' -e 'frust-perf plugin op=' -e 'flutter-perf plugin op=' "${run_log}" 2>/dev/null || true)"
     echo "  captured ${run_log} (${op_count:-0} per-op lines)"
   else

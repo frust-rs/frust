@@ -13,12 +13,27 @@
 //!
 //! # Row shape / seed dataset (PROTOCOL §9.2, shared with D2)
 //!
+//! This module is the **canonical** home of the §9.2 generator: the Flutter
+//! side's `flutter_bench/lib/scenarios/d1_db_write.dart` is a bit-for-bit
+//! port of the three functions below, and both suites assert the identical
+//! literal golden vectors (see this module's `tests`), so a parity break
+//! fails on both sides rather than silently skewing a published number.
+//!
 //! [`row_name`]/[`row_value`]/[`row_payload`] are pure functions of
 //! `(seed, i)` — no wall-clock or process-local RNG state — built from a
 //! small `splitmix64` generator ([`splitmix64`]) seeded with [`ROW_SEED`].
 //! D2 imports these three (plus [`splitmix64`], for its own deterministic
 //! key permutation) rather than duplicating them, per this module's role as
 //! the dataset owner.
+//!
+//! # Timed window (PROTOCOL §9.3)
+//!
+//! Row generation never happens inside a measured window: every op's
+//! parameters are built *before* the [`Instant`] that times it (the whole
+//! batch's parameters before the transaction starts), so a `us` value
+//! covers the database call alone. Both apps obey this rule, which is what
+//! keeps the two columns' `us` values comparable even though their
+//! generators cost different amounts.
 //!
 //! # Engine (PROTOCOL §9.7)
 //!
@@ -283,10 +298,13 @@ fn run_d1_bench() -> D1Report {
             ));
             continue;
         }
+        // Generated before the timer starts (PROTOCOL §9.3): the measured
+        // window is the transaction alone, never the §9.2 generator.
+        let batch_params: Vec<[Value; 4]> = (0..BATCH_N).map(|i| row_params(i as u64)).collect();
         let t = Instant::now();
-        let result = db.transaction(|txn| {
-            for i in 0..BATCH_N {
-                txn.execute(INSERT_ROW_SQL, row_params(i as u64))?;
+        let result = db.transaction(move |txn| {
+            for params in batch_params {
+                txn.execute(INSERT_ROW_SQL, params)?;
             }
             Ok(())
         });
@@ -320,10 +338,13 @@ fn run_d1_bench() -> D1Report {
             error: None,
         };
     }
+    // Same rule as the batch phase: the whole phase's parameters are
+    // generated up front, outside every timer (PROTOCOL §9.3).
+    let single_params: Vec<[Value; 4]> = (0..SINGLE_M).map(|i| row_params(i as u64)).collect();
     frust_shell_common::perf::mark_scenario_start("d1-insert-single");
-    for i in 0..SINGLE_M {
+    for (i, params) in single_params.into_iter().enumerate() {
         let t = Instant::now();
-        let result = db.execute(INSERT_ROW_SQL, row_params(i as u64));
+        let result = db.execute(INSERT_ROW_SQL, params);
         let us = t.elapsed().as_micros();
         single_inserts += 1;
         let err = result.is_err();
@@ -357,6 +378,79 @@ fn run_d1_bench() -> D1Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cross-language golden vectors for the PROTOCOL §9.2 generator, as
+    /// `(i, name, value, payload[..16] hex, payload[240..] hex)`.
+    ///
+    /// These are **literals on purpose**: the Flutter port asserts this
+    /// exact table in `flutter_bench/test/db_scenarios_test.dart`, so a
+    /// future change to either generator fails both suites instead of
+    /// silently making the two columns benchmark different bytes. The
+    /// payload's first and last 16 bytes pin the first and last
+    /// [`splitmix64`] draws of the 32 that fill it, so any divergence in
+    /// seed derivation, draw order, or byte order shows up here.
+    const GOLDEN_ROWS: [(u64, &str, f64, &str, &str); 6] = [
+        (
+            0,
+            "row-0000000000-68ae0df17b1e8e16f33806e2879f1a192fc0f9e9669731fd8",
+            141.727,
+            "16d09fc227e4e2551533c542b3d50565",
+            "f6bac1a555538369b3d8f72f7c5fcc8a",
+        ),
+        (
+            1,
+            "row-0000000001-fa056277dff1c0f1e190da2dbfcda3cd0d6a402bf608ef0ad",
+            707.948,
+            "7f0c9cbda74d1d5041240093ad1af6c6",
+            "657a4d65f1714d18b62c95c6f9b73741",
+        ),
+        (
+            7,
+            "row-0000000007-5930bfbe49a1003378b157c117a0aabef53fc6bdc4275b423",
+            461.577,
+            "9fcbd7fa58a67c677724c4623f5be1e5",
+            "a0da18640a0a75404ca622515992b654",
+        ),
+        (
+            42,
+            "row-0000000042-32647b1b168a72be2b6c15067008ba70890294a8ec66378d0",
+            893.322,
+            "59ececb64c866902eddbd8f03a48892b",
+            "a486a9d3a9c685dff6be820049868937",
+        ),
+        (
+            1999,
+            "row-0000001999-a2e1317d1982eb3940e6fb1d08960ad3b5f8458841f56f46b",
+            146.531,
+            "539b8392437263c1c54b66645eae9f02",
+            "b2012fe1bfa2a4b448634b4dac2f9cd5",
+        ),
+        (
+            49999,
+            "row-0000049999-8b62bde346120b04252d69eef2ef1c58d42dcda2c69714584",
+            617.393,
+            "47e4bcc02417b53c3bfdb8c3d3145a49",
+            "caa34662b313bab74f9e4ce4a6ef8b68",
+        ),
+    ];
+
+    /// Lowercase hex of `bytes`, the form [`GOLDEN_ROWS`] records (and the
+    /// form the Dart suite compares against).
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn generator_matches_the_cross_language_golden_vectors() {
+        for (i, name, value, head_hex, tail_hex) in GOLDEN_ROWS {
+            assert_eq!(row_name(ROW_SEED, i), name, "name for i={i}");
+            assert_eq!(row_value(ROW_SEED, i), value, "value for i={i}");
+            let payload = row_payload(ROW_SEED, i);
+            assert_eq!(payload.len(), 256, "payload length for i={i}");
+            assert_eq!(hex(&payload[..16]), head_hex, "payload head for i={i}");
+            assert_eq!(hex(&payload[240..]), tail_hex, "payload tail for i={i}");
+        }
+    }
 
     #[test]
     fn row_name_is_exactly_64_bytes_and_deterministic() {

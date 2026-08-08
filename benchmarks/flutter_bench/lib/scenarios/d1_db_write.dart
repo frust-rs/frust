@@ -7,9 +7,20 @@
 ///
 /// This file also carries the row-shape/seed-dataset generator (PROTOCOL
 /// §9.2) and the PROTOCOL §7 canonical per-op line formatter, both shared
-/// with `d2_db_read.dart` (which imports this file for them) — kept here
-/// rather than in `bench/datasets.dart` to keep this task's diff to the
-/// files it was scoped to touch.
+/// with `d2_db_read.dart` (which imports this file for them). The generator
+/// here is a **bit-for-bit port** of the canonical Rust implementation in
+/// `frust_bench/src/scenarios/d1_db_write.rs` — same seed derivation, same
+/// draw order, same byte order — and both suites assert the identical
+/// literal golden vectors (`test/db_scenarios_test.dart`), so a parity break
+/// fails on both sides rather than silently making the two columns
+/// benchmark different bytes.
+///
+/// **Timed window** (PROTOCOL §9.3): row generation never happens inside a
+/// measured window. Every op's parameters are built before its [Stopwatch]
+/// starts (the whole batch's parameters before the transaction begins), so a
+/// `us` value covers the database call alone — which is what keeps the two
+/// apps' `us` values comparable even though their generators cost different
+/// amounts.
 ///
 /// **Per-run sequence** (PROTOCOL §9.3): drop/recreate table → [dBatchReps] ×
 /// `insert_batch` (fresh empty table each rep) → drop/recreate table once →
@@ -61,46 +72,98 @@ const int dRangeLow = 10000;
 /// d2 sizing: the range scan's inclusive upper bound.
 const int dRangeHigh = 14999;
 
-const String _hexDigits = '0123456789abcdef';
+/// Per-field seed multipliers and salts — the exact constants the canonical
+/// Rust generator derives each field's PRNG state with (`seed ^ (i * MULT) ^
+/// SALT`). Dart's `int` is a fixed 64-bit two's-complement value that wraps
+/// on overflow, matching Rust's `u64` wrapping multiply bit-for-bit (see
+/// `bench/rng.dart`'s note).
+const int _nameMult = 0x2545F4914F6CDD1D;
+const int _nameSalt = 0x1111;
+const int _valueMult = 0x9E3779B97F4A7C15;
+const int _valueSalt = 0x2222;
+const int _payloadMult = 0xD6E8FEB86659FD93;
+const int _payloadSalt = 0x3333;
+const int _permSalt = 0x4444;
 
-/// Row `i`'s deterministic `name` (~64 bytes) — a pure function of
-/// `(dRowSeed, i)`, no wall-clock or process-local RNG state, so the frust
-/// side's mirrored generator reproduces the same value for the same `i`
-/// (PROTOCOL §9.2's "identical logical work" fairness gate).
+/// `v`, read as an **unsigned** 64-bit value, modulo [d] — i.e. Rust's
+/// `u64 % d`, which a bare Dart `%` does not reproduce because Dart's `int`
+/// is signed (a draw with its top bit set is negative here while Rust sees
+/// `v + 2^64`).
+///
+/// Splitting `v` into 32-bit halves (`U = hi * 2^32 + lo`) recovers the
+/// unsigned remainder exactly. Precondition: `d <= 2^20`, which keeps every
+/// intermediate below 2^41 — nowhere near the 2^63 wrap that would make the
+/// arithmetic itself unsigned again. Both call sites satisfy it (`1000000`,
+/// and `i + 1 <= dSeedRows`).
+int _unsignedMod(int v, int d) {
+  final hi = (v >>> 32) & 0xFFFFFFFF;
+  final lo = v & 0xFFFFFFFF;
+  return ((hi % d) * (0x100000000 % d) + lo) % d;
+}
+
+/// `v` as 16 lowercase hex digits, reading `v` as unsigned — Rust's
+/// `format!("{:016x}")`. (`toRadixString` alone would render a negative
+/// Dart `int` with a leading `-`.)
+String _hexU64(int v) {
+  final hi = (v >>> 32) & 0xFFFFFFFF;
+  final lo = v & 0xFFFFFFFF;
+  return hi.toRadixString(16).padLeft(8, '0') +
+      lo.toRadixString(16).padLeft(8, '0');
+}
+
+/// Row `i`'s deterministic `name` (exactly 64 bytes) — a pure function of
+/// `(dRowSeed, i)`, no wall-clock or process-local RNG state, byte-identical
+/// to the frust side's `row_name` for the same `i` (PROTOCOL §9.2's
+/// "identical logical work" fairness gate): the fixed `row-{i:010}-` prefix
+/// followed by 16-hex-digit renderings of successive draws, truncated to 64.
 String dRowName(int i) {
-  final rng = SplitMix64(dRowSeed + i * 4 + 1);
-  final sb = StringBuffer('row_')..write(i)..write('_');
+  final rng = SplitMix64(dRowSeed ^ (i * _nameMult) ^ _nameSalt);
+  final sb = StringBuffer('row-${i.toString().padLeft(10, '0')}-');
   while (sb.length < 64) {
-    sb.write(_hexDigits[rng.nextU64() & 0xF]);
+    sb.write(_hexU64(rng.nextU64()));
   }
   return sb.toString().substring(0, 64);
 }
 
 /// Row `i`'s deterministic `value` (REAL) — a pure function of `(dRowSeed,
-/// i)`.
+/// i)`. One draw, reduced in the integer domain and then scaled, exactly as
+/// the frust side's `row_value` does (a float-domain equivalent would not be
+/// bit-identical).
 double dRowValue(int i) {
-  final rng = SplitMix64(dRowSeed + i * 4 + 2);
-  return rng.nextF64() * 1000.0;
+  final rng = SplitMix64(dRowSeed ^ (i * _valueMult) ^ _valueSalt);
+  return _unsignedMod(rng.nextU64(), 1000000) / 1000.0;
 }
 
-/// Row `i`'s deterministic ~256-byte `payload` (BLOB) — a pure function of
-/// `(dRowSeed, i)`.
+/// Row `i`'s deterministic 256-byte `payload` (BLOB) — a pure function of
+/// `(dRowSeed, i)`. One draw per **eight** bytes, written little-endian
+/// (frust's `u64::to_le_bytes`): the same 32 draws in the same order as the
+/// canonical generator, so the two apps' generators also cost the same
+/// number of draws per row.
 List<int> dRowPayload(int i) {
-  final rng = SplitMix64(dRowSeed + i * 4 + 3);
-  return [for (var j = 0; j < 256; j++) rng.nextByte()];
+  final rng = SplitMix64(dRowSeed ^ (i * _payloadMult) ^ _payloadSalt);
+  final out = <int>[];
+  while (out.length < 256) {
+    final z = rng.nextU64();
+    for (var k = 0; k < 8; k++) {
+      out.add((z >>> (8 * k)) & 0xFF);
+    }
+  }
+  return out;
 }
 
 /// A fixed deterministic permutation of `0..dSeedRows` for d2's point-read
 /// key sequence (PROTOCOL §9.4: "a fixed deterministic permutation of
 /// `0..SEED_ROWS` (seed = 424242, same per-index draw order on both apps)")
-/// — a Fisher-Yates shuffle seeded by [dRowSeed]. Only the first [dPointM]
-/// entries are ever consumed by d2, but the full permutation is produced so
-/// every index is equally likely to appear in that prefix.
+/// — a Fisher-Yates shuffle seeded by `dRowSeed ^ 0x4444`, drawing
+/// `nextU64() % (i + 1)` unscaled per swap, index-for-index identical to the
+/// frust side's `key_permutation`. Only the first [dPointM] entries are ever
+/// consumed by d2, but the full permutation is produced so every index is
+/// equally likely to appear in that prefix.
 List<int> dPointReadPermutation() {
   final ids = List<int>.generate(dSeedRows, (i) => i);
-  final rng = SplitMix64(dRowSeed + 4 * dSeedRows);
+  final rng = SplitMix64(dRowSeed ^ _permSalt);
   for (var i = ids.length - 1; i > 0; i--) {
-    final j = rng.nextIntBelow(i + 1);
+    final j = _unsignedMod(rng.nextU64(), i + 1);
     final tmp = ids[i];
     ids[i] = ids[j];
     ids[j] = tmp;
@@ -130,16 +193,24 @@ Future<void> dResetTable(DbAdapter db) async {
   await db.execute(dCreateTableSql);
 }
 
-const String _insertSql =
+/// The one INSERT statement issued, identically, by every phase of d1 and by
+/// d2's pre-seed, on both adapters.
+const String dInsertSql =
     'INSERT INTO bench_rows (id, name, value, payload) VALUES (?, ?, ?, ?)';
 
-/// Inserts row `i` (PROTOCOL §9.2's generator) via [db] — the one INSERT
-/// statement issued, identically, by every phase of d1 and by d2's pre-seed,
-/// on both adapters.
-Future<void> dInsertRow(DbAdapter db, int i) => db.execute(
-      _insertSql,
-      [i, dRowName(i), dRowValue(i), dRowPayload(i)],
-    );
+/// Row `i`'s positional parameter list for [dInsertSql] — the whole cost of
+/// the PROTOCOL §9.2 generator for one row, isolated so a caller can build it
+/// *before* starting the timer that measures the insert (§9.3's
+/// generation-outside-the-timed-window rule).
+List<Object?> dRowParams(int i) =>
+    [i, dRowName(i), dRowValue(i), dRowPayload(i)];
+
+/// Inserts row `i` (PROTOCOL §9.2's generator) via [db] — for untimed paths
+/// only (d2's pre-seed, tests). A timed path builds [dRowParams] up front and
+/// issues [dInsertSql] itself, so the generator never lands inside the
+/// measured window.
+Future<void> dInsertRow(DbAdapter db, int i) =>
+    db.execute(dInsertSql, dRowParams(i));
 
 // ---------------------------------------------------------------------------
 // PROTOCOL §7 canonical per-op line format — shared by d1 and d2.
@@ -227,12 +298,17 @@ class _DbWriteViewState extends State<DbWriteView> {
     markScenarioStart('d1-insert-batch');
     for (var rep = 0; rep < dBatchReps; rep++) {
       await dResetTable(adapter);
+      // Generated before the timer starts (PROTOCOL §9.3): the measured
+      // window is the transaction alone, never the §9.2 generator.
+      final batchParams = [
+        for (var i = 0; i < dBatchN; i++) dRowParams(i),
+      ];
       var err = false;
       final sw = Stopwatch()..start();
       try {
         await adapter.transaction((txn) async {
-          for (var i = 0; i < dBatchN; i++) {
-            await dInsertRow(txn, i);
+          for (final params in batchParams) {
+            await txn.execute(dInsertSql, params);
           }
         });
       } catch (_) {
@@ -254,12 +330,17 @@ class _DbWriteViewState extends State<DbWriteView> {
     // --- insert_single: SINGLE_M single-row autocommit inserts into a table
     // dropped-and-recreated once ---
     await dResetTable(adapter);
+    // Same rule as the batch phase: the whole phase's parameters are
+    // generated up front, outside every timer (PROTOCOL §9.3).
+    final singleParams = [
+      for (var i = 0; i < dSingleM; i++) dRowParams(i),
+    ];
     markScenarioStart('d1-insert-single');
     for (var i = 0; i < dSingleM; i++) {
       var err = false;
       final sw = Stopwatch()..start();
       try {
-        await dInsertRow(adapter, i);
+        await adapter.execute(dInsertSql, singleParams[i]);
       } catch (_) {
         err = true;
       }
