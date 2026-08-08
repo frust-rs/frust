@@ -1,10 +1,13 @@
-/// The scenario registry (all eight) plus scenario selection — deep link
+/// The scenario registry (all eight frame-class scenarios plus the `d*`
+/// op-latency scenarios) plus scenario selection — deep link
 /// (`flutterbench://<id>`) with a `--dart-define=SCENARIO=<id>` fallback,
 /// mirroring the frust side's driver contract (task 9E-02).
 library;
 
 import 'package:flutter/material.dart';
 
+import '../scenarios/d1_db_write.dart';
+import '../scenarios/d2_db_read.dart';
 import '../scenarios/s1_animation.dart';
 import '../scenarios/s2_list.dart';
 import '../scenarios/s3_table.dart';
@@ -39,6 +42,10 @@ final List<Scenario> allScenarios = [
   const _WidgetScenario('s6', 'Text shaping stress', _s6),
   const _WidgetScenario('s7', 'Cold start + idle', _s7),
   const _WidgetScenario('s8', 'Plugin-call overhead', _s8),
+  // `d*` — op-latency DB scenarios (PROTOCOL §9), a second scenario-id
+  // namespace parallel to s1..s8 (§9.1).
+  const _WidgetScenario('d1', 'DB writes', _d1),
+  const _WidgetScenario('d2', 'DB reads', _d2),
 ];
 
 Widget _s1(BuildContext _) => const AnimationStormView();
@@ -49,6 +56,8 @@ Widget _s5(BuildContext _) => const ImagePipelineView();
 Widget _s6(BuildContext _) => const TextStressView();
 Widget _s7(BuildContext _) => const ColdStartIdleView();
 Widget _s8(BuildContext _) => const PluginOverheadView();
+Widget _d1(BuildContext _) => const DbWriteView();
+Widget _d2(BuildContext _) => const DbReadView();
 
 /// Look a scenario up by id, or null if none matches.
 Scenario? scenarioById(String? id) {

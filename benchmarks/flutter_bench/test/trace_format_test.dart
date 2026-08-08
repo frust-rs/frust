@@ -68,9 +68,11 @@ void main() {
   });
 
   group('registry', () {
-    test('has all eight scenarios s1..s8', () {
-      expect(allScenarios.map((s) => s.id).toList(),
-          ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8']);
+    test('has all eight frame-class scenarios plus d1/d2', () {
+      expect(allScenarios.map((s) => s.id).toList(), [
+        's1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', //
+        'd1', 'd2',
+      ]);
     });
     test('lookup is case-insensitive and trims', () {
       expect(scenarioById(' S4 ')?.id, 's4');
