@@ -1,5 +1,5 @@
 // `frust-camera`'s Android side — a `com.android.library` module holding the
-// plugin's CameraX session owner (`FrustCameraHost`) and its TextureView-backed
+// plugin's CameraX session owner (`FrustCameraHost`) and its SurfaceView-backed
 // preview factory (`CameraPreviewFactory`). It is wired into a generated app
 // exactly like `plugins/secure-storage/platform/android` (`frust tui` → Add
 // Plugin, or the plugin README by hand):
@@ -98,13 +98,16 @@ dependencies {
     // `bindToLifecycle` seam.
     //
     // `camera-view` is deliberately ABSENT: `PreviewView` owns its own view
-    // hierarchy and transform policy, and defaults back to a `SurfaceView` —
-    // whose pixels live in a compositor layer no ancestor clip can trim, so a
-    // centre-crop escapes its slot. This module hosts a plain `TextureView`
-    // (bounded by its own frame, under frust's Mode B surface like any other
-    // window content) and computes the crop transform itself; see
-    // `CameraPreviewFactory.kt`'s `CameraPreviewView`. Adding `camera-view`
-    // later would pull in a second, conflicting preview implementation.
+    // hierarchy and transform policy, and its fill scale types oversize the
+    // preview and rely on an ancestor clipping a compositor layer — which is
+    // exactly what real devices do not honour. This module hosts a plain
+    // `SurfaceView` sized to fit inside its slot instead; see
+    // `CameraPreviewFactory.kt`'s `CameraPreviewView` for the geometry that
+    // forces. A `TextureView` was tried here and is not usable: its content is
+    // composited inside the app window, and a vendor compositor was observed
+    // dropping that content on most frames for a window configured the way
+    // frust's is. Adding `camera-view` later would pull in a second,
+    // conflicting preview implementation.
     implementation("androidx.camera:camera-core:1.6.1")
     implementation("androidx.camera:camera-camera2:1.6.1")
     implementation("androidx.camera:camera-lifecycle:1.6.1")

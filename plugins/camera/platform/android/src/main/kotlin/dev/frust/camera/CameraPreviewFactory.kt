@@ -3,13 +3,12 @@ package dev.frust.camera
 import android.app.Activity
 import android.content.Context
 import android.graphics.Color
-import android.graphics.Matrix
-import android.graphics.SurfaceTexture
 import android.hardware.display.DisplayManager
 import android.util.Log
 import android.util.Size
-import android.view.Surface
-import android.view.TextureView
+import android.view.Gravity
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import android.view.View
 import android.widget.FrameLayout
 import androidx.camera.core.Preview
@@ -17,7 +16,8 @@ import androidx.camera.core.SurfaceRequest
 import dev.frust.FrustPlatformViewFactory
 import org.json.JSONException
 import org.json.JSONObject
-import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * The `frust-camera` plugin's platform-view factory: hosts a live CameraX
@@ -82,131 +82,149 @@ class CameraPreviewFactory : FrustPlatformViewFactory {
 private const val NO_SESSION = -1
 
 /**
- * The hosted view: a [FrameLayout] wrapping a [TextureView].
+ * The hosted view: a [FrameLayout] wrapping a plain [SurfaceView].
  *
  * **Why a wrapper.** The embedding's `FrustViewHost` owns the *hosted view's*
  * geometry — it writes `layoutParams`, `translationX/Y` and `clipBounds` on it
- * every frame — so the preview transform (rotation, crop, mirror, fill scale)
- * cannot live on the same view without the two fighting. The wrapper takes the
- * host's geometry; the inner [TextureView] takes the camera transform.
+ * every frame — so the preview's own sizing cannot live on the same view
+ * without the two fighting. The wrapper takes the host's geometry; the inner
+ * [SurfaceView] takes the preview's.
  *
- * **Why a TextureView, and why the crop is a content transform.** The preview
- * must never paint outside its slot, and a `SurfaceView` cannot promise that:
- * its pixels live in a compositor layer of its own whose on-screen rect follows
- * the view's own frame, so no ancestor's `clipBounds`/`clipChildren` trims
- * them. Centre-cropping a `SurfaceView` means oversizing it past the slot and
- * trusting that clip — which real devices do not honour, leaving the preview
- * spilling over surrounding chrome by the overflow of its buffer aspect. A
- * [TextureView] draws through the view hierarchy instead, so its content is
- * bounded by its own frame: it is laid out `MATCH_PARENT` here (frame == slot,
- * always) and the entire crop is a content matrix ([applyTransform]) — one that
- * *composes with* the camera stream's own transform rather than replacing it,
- * which is the whole of that method's subtlety. That is
- * the shape the iOS side has always had — an `AVCaptureVideoPreviewLayer`
- * pinned to the view's bounds with `resizeAspectFill` — and it makes the
- * host's per-frame `clipBounds` real rather than advisory, so a slot half
- * scrolled out of a viewport now clips too.
+ * **Why a SurfaceView.** Its pixels live in a compositor layer of its own,
+ * composited by the system *beside* the app window rather than inside it, so
+ * nothing about the window's own drawing can lose them. That is the property
+ * this preview needs. A `TextureView` was tried in this slot and draws through
+ * the view hierarchy instead — into a window frust configures unusually (a
+ * translucent window over a full-screen render surface that punches its own
+ * hole through it) — and a vendor compositor was observed dropping that
+ * window's TextureView content on most frames while the camera streamed into
+ * it perfectly happily: a black slot with a healthy session behind it, and no
+ * view-level knob (z, opacity, forced redraws) reaching the layer that was
+ * being dropped. A separate compositor layer is the only shape here that does
+ * not depend on the window's composition at all. `PreviewView` remains unused
+ * for its own reasons: it owns a view hierarchy and a transform policy of its
+ * own, and its fill scale types rely on exactly the clipping the *Geometry*
+ * note below rules out.
  *
- * Mode B is unaffected: frust's translucent render surface still composites on
- * top and punches the slot (`docs/ARCHITECTURE.md`'s Platform-view flow), and
- * what shows through is the app window's own pixels rather than a layer below
- * it — one *fewer* transparent layer in the chain. The cost is a GPU composite
- * of the slot per camera frame inside the app window instead of a
- * SurfaceFlinger overlay, and a self-update now redraws that window region
- * rather than nothing at all — still zero *frust* frames, which is the
- * property the render loop's frame gate depends on. `PreviewView` remains
- * unused: it owns its own view hierarchy and transform policy, and defaults
- * back to a `SurfaceView`. A [TextureView] needs a hardware-accelerated
- * window; every frust Activity has one.
+ * **Z-order: media overlay.** [SurfaceView.setZOrderMediaOverlay] puts this
+ * layer above other behind-window surfaces and still below the app window —
+ * the one placement that composites in both of frust's surface arrangements.
+ * With an opaque render surface the frust surface is itself behind the window
+ * (punching a full-screen hole through it) and `FrustViewHost` adds hosted
+ * views *above* it, so the preview has to be above that surface: media-overlay
+ * is. With a translucent render surface the frust surface is on top of the
+ * window and hosted views go below it: media-overlay is below both, and
+ * frust's own alpha hole is what reveals the preview. The default (no call)
+ * would leave this layer at the same level as an opaque-mode frust surface
+ * with no defined order between the two — composited or hidden by chance.
+ * `setZOrderOnTop` is the other wrong answer: it lifts the preview above the
+ * window *and* above a translucent frust surface, hiding whatever chrome the
+ * app paints over the slot.
  *
- * **Surface lifetime.** The inner texture comes and goes with the view's
+ * **Geometry: the preview is fitted, never cropped — and that is forced.** The
+ * system positions and scales this layer from the view's own frame: the frame
+ * becomes the layer's on-screen rect, and the buffer is mapped onto it with a
+ * positive, axis-aligned scale. Three consequences follow.
+ *  1. The layer's on-screen rect **is** the view frame. No ancestor's
+ *     `clipBounds`/`clipChildren` trims it — a preview laid out past its slot
+ *     was observed on device spilling over the surrounding chrome. Containment
+ *     has to be structural, so this inner view is never laid out larger than
+ *     the slot in either axis.
+ *  2. The two axes scale independently, so a frame whose aspect differs from
+ *     the displayed buffer's stretches the image. Uniform scale exists only
+ *     where the two agree.
+ *  3. There is no content transform: a rotation, a mirror or a matrix set on
+ *     the view never reaches the layer — only the frame and that positive
+ *     scale do.
+ *
+ * (1) and (2) leave exactly one mapping that is both undistorted and
+ * contained: fit the displayed buffer inside the slot and centre it — the
+ * largest slot-inscribed rect carrying the displayed aspect, which is what
+ * [updatePreviewLayout] computes. A centre-cropped fill needs a frame larger
+ * than the slot on one axis, and (1) says nothing will trim the overflow.
+ *
+ * CameraX's `ViewPort` cannot rescue the fill either, because a crop rect is
+ * **metadata, not a crop of the stream**: without a `CameraEffect` (whose
+ * surface processor is what actually renders a cropped, upright output buffer,
+ * and which this plugin does not build) the preview buffer carries the full
+ * field of view and `TransformationInfo.cropRect` merely says which part of it
+ * a consumer *should* show — which by (3) this consumer cannot. Every use case
+ * therefore keeps its default full-field crop rect, and that is coherent by
+ * construction: a still capture and an analysis frame cover exactly what the
+ * preview shows. An app sizes its slot from
+ * `CameraSession::preview_aspect_ratio` (published from here through
+ * [FrustCameraHost.setPreviewAspectRatio]) — a slot at that aspect fits
+ * exactly and shows no letterbox; any other aspect letterboxes against this
+ * view's black background rather than distorting or overflowing.
+ *
+ * **Rotation.** The camera stream carries its own buffer transform and the
+ * system compositor applies it — the same transform a `SurfaceTexture` hands a
+ * `TextureView`, which device readings showed carrying the *full*
+ * `TransformationInfo.rotationDegrees` and tracking whatever rotation the
+ * display is currently at. It is derived from the use case's `targetRotation`,
+ * which is per-session state on [FrustCameraHost] rather than something
+ * CameraX re-reads on its own, so keeping that value current is the whole of
+ * this view's rotation handling: [displayListener] re-pushes it for as long as
+ * this view stays attached, and the fresh `TransformationInfo` that follows
+ * re-runs [applyGeometry], which re-fits the inner view to the swapped
+ * extents. [onSizeChanged] and [onAttachedToWindow] are belts for a rotation
+ * that arrives as a resize or across a re-attach, and all of them share
+ * [maybeSyncTargetRotation]'s last-sent compare, so the redundancy costs a
+ * field read rather than a host round trip. `hasCameraTransform()` false —
+ * only behind an effect pipeline, which this plugin never builds — would mean
+ * no transform is applied at all; [applyGeometry] then fits the buffer as it
+ * actually stands instead of pretending it was uprighted.
+ *
+ * **What this shape does not do.** A front lens reports
+ * `TransformationInfo.isMirroring` and the preview convention is to mirror it;
+ * consequence (3) says this view cannot, so a front preview shows unmirrored
+ * (iOS's `AVCaptureVideoPreviewLayer` does mirror, so the platforms differ
+ * here). The host's per-frame `clipBounds` is advisory for the same reason: a
+ * slot scrolled half out of its viewport keeps painting its whole preview.
+ * Both are the price of the layer that makes the preview visible at all.
+ *
+ * **Surface lifetime.** The inner surface comes and goes with the view's
  * attachment (scrolled away, backgrounded, slot culled) while the CameraX
- * session does not. The two are reconciled with the APIs documented for exactly
- * this case: `SurfaceRequest.invalidate()` when a provided surface is destroyed
- * (CameraX then issues a fresh request to the same provider, in place, with no
- * unbind and no camera reopen), and `Preview.setSurfaceProvider(null)` — via
- * [FrustCameraHost.detachPreview] — to pause preview when the slot is disposed.
- * Ownership differs from a `SurfaceView`'s holder-owned surface: the [Surface]
- * handed to CameraX is built here over the [TextureView]'s [SurfaceTexture], so
- * this view releases it when the hand-over completes — and releases the texture
- * too if the [TextureView] gave it up while CameraX still held it.
+ * session does not. The two are reconciled with the APIs documented for
+ * exactly this case: `SurfaceRequest.invalidate()` when a provided surface is
+ * destroyed (CameraX then issues a fresh request to the same provider, in
+ * place, with no unbind and no camera reopen), and
+ * `Preview.setSurfaceProvider(null)` — via [FrustCameraHost.detachPreview] —
+ * to pause preview when the slot is disposed. The [SurfaceHolder] owns the
+ * `Surface`, so this view never releases one: it only stops offering it.
  *
- * **Hand-over contract.** At most one hand-over is in flight: [providedSurface],
- * its [providedRequest] and the [providedTexture] it was built over move as one
- * triple, and [tryProvideSurface] starts no second one — so one texture never
- * carries two producers, and a [Surface] is offered to exactly one request. A
- * request that arrives mid-flight waits in [pendingRequest]; the result callback
- * releases the old [Surface] and then re-drives [tryProvideSurface], and being
- * the only thing that clears the gate is what keeps every arrival order from
- * wedging the slot black. Releases are identity-gated: only [providedTexture]
- * can still be read by CameraX, so it alone survives its destroy callback (as
- * [detachedTexture], freed by that same result callback) while every other
- * texture goes straight back to the [TextureView]. [requestedResolution] is
- * pinned at hand-over rather than at request arrival, so [applyTransform] undoes
- * the stretch of the buffer actually on screen — and it is only one of that
- * transform's three inputs. The other two are the request's
- * `TransformationInfo` and a non-zero slot size, which a hand-over does not
- * imply: the host mounts every slot 0×0 and publishes real geometry in a later
- * update, so geometry readiness is routinely the last input to land. The three
- * settle in any order, and each setter re-drives [applyTransform] — but a
- * setter running while another input is still missing would otherwise be the
- * last word, leaving the slot black with frames streaming into it. A miss
- * therefore arms [transformPending] and the per-frame texture-update tick
- * retries it, so the transform converges within one camera frame of the third
- * input becoming available, whatever the order, and costs one boolean read per
- * frame once it has.
+ * **Hand-over contract.** At most one hand-over is live: [providedRequest]
+ * gates [tryProvideSurface], and only its result callback — CameraX reporting
+ * it has finished with the surface — clears that gate and re-drives, so one
+ * surface never carries two producers and a request that arrives mid-flight is
+ * served the moment the previous one ends rather than wedging the slot black.
+ * A request arriving while the surface is unusable simply waits in
+ * [pendingRequest]; `surfaceChanged` re-drives it.
  *
- * **First draw.** A [TextureView] gets its first camera frame onto the screen
- * through exactly one edge: the [SurfaceTexture]'s frame-available callback
- * marks the view's layer dirty and calls `invalidate()`, and the *window
- * traversal* that follows is what runs `updateTexImage` — and only then reports
- * [TextureView.SurfaceTextureListener.onSurfaceTextureUpdated]. `View.invalidate()`
- * is single-shot: a view already flagged invalidated returns without touching
- * its parent at all, so if that one traversal never happens, no *later* camera
- * frame can ask for another one either. The slot then stays black permanently
- * while the session streams into it perfectly happily — which is exactly the
- * shape this preview hit on device, hand-over complete and not one frame drawn.
- * An ordinary app never notices the fragility, because its own scrolls, ripples
- * and animations redraw the window constantly; frust does, because it paints
- * into its own surface on its own frame loop and never touches the view
- * hierarchy, so once a slot is mounted the window has *no other reason to
- * redraw* and a single lost redraw is forever. [armFirstFrameKick] is the belt:
- * a bounded main-thread watchdog that damages the window itself (via the
- * parent's `onDescendantInvalidated`, which — unlike `invalidate()` — is not
- * gated on the view's own dirty flags) until a frame is proven drawn, then
- * retires. It is armed per hand-over, so a re-attach gets a fresh one, and it
- * costs nothing on the happy path: the first frame normally lands inside its
- * grace period and disarms it before it ever ticks.
+ * **Buffer size.** `SurfaceHolder.setFixedSize` pins the buffer to the
+ * resolution CameraX asked for, and the hand-over waits for `surfaceChanged`
+ * to report *that exact size*: offering a surface whose buffer is still the
+ * previous size is the classic stretched-first-frame bug, and camera2 refuses
+ * a stream configured at a size it never offered. The frame that buffer is
+ * scaled onto is a separate matter, owned by [updatePreviewLayout].
  *
- * **Rotation tracking.** `targetRotation` is per-session state on
- * [FrustCameraHost], not something CameraX re-reads on its own — a bind, an
- * attach and a bounds resize each push the current [display]'s rotation once,
- * but none of the three repeats while the slot just sits there, and a square
- * slot's bounds never change size on a rotation at all. [displayListener] is
- * what closes that gap: registered for as long as this view stays attached,
- * it re-pushes [FrustCameraHost.setTargetRotation] whenever the tracked
- * display's rotation actually changes, so a rotation while the preview is
- * open converges on its own — a new `TransformationInfo` arrives on the
- * request's listener (registered in [onSurfaceRequested]) and [applyTransform]
- * re-runs against it, no reopen needed. [onSizeChanged] and
- * [textureListener]'s `onSurfaceTextureSizeChanged` are belts for a resize
- * that does land, and [applyTransform] itself re-reads [display] as the
- * self-heal of last resort, since some OEMs are observed to skip
- * `onDisplayChanged` for a rotation their Activity handles via
- * `configChanges` alone. Every path shares [maybeSyncTargetRotation]'s
- * last-sent compare, so the redundancy costs one field read and one
- * comparison per call rather than a duplicate host round trip.
+ * **Diagnostics.** The trail is surface created → buffer pinned and handed to
+ * CameraX → geometry applied, and there is deliberately no first-frame line:
+ * this layer's frames travel from the camera to the compositor without passing
+ * through this process, so nothing here could honestly claim one was drawn
+ * (`surfaceChanged` reports configuration, not content). A slot still black
+ * after the geometry line therefore has a live, correctly-sized surface, and
+ * the fault is below this view — composition or the session itself — which is
+ * the split those lines exist to make.
  *
  * All callbacks land on the main thread ([FrustCameraHost.mainExecutor] runs
  * inline there, `Preview.setSurfaceProvider(provider)`'s single-argument
- * overload dispatches on it, a [TextureView.SurfaceTextureListener] is called
- * from the view hierarchy, [displayListener] is registered against this
- * view's own [Handler][android.os.Handler] so it lands here too, and
- * [armFirstFrameKick] posts through this view), so no synchronization is
- * needed.
+ * overload dispatches on it, a [SurfaceHolder.Callback] is called from the view
+ * hierarchy, and [displayListener] is registered against this view's own
+ * [Handler][android.os.Handler]), so no synchronization is needed.
  */
 internal class CameraPreviewView(context: Context) : FrameLayout(context), Preview.SurfaceProvider {
-    private val textureView = TextureView(context)
+    private val surfaceView = SurfaceView(context)
 
     /** The session this slot is showing, or [NO_SESSION]. */
     private var sessionId: Int = NO_SESSION
@@ -223,8 +241,8 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
      * The last `Surface.ROTATION_*` value [maybeSyncTargetRotation] sent to
      * [FrustCameraHost] for the [sessionId] currently bound, or null before
      * anything has been sent for it. Every rotation-tracking path (bind,
-     * attach, [displayListener], a resize, [applyTransform]'s self-heal)
-     * compares against this rather than resending unconditionally.
+     * attach, [displayListener], a resize) compares against this rather than
+     * resending unconditionally.
      */
     private var lastSentRotation: Int? = null
 
@@ -234,93 +252,35 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
     /** The request currently holding our surface. */
     private var providedRequest: SurfaceRequest? = null
 
-    /** The [Surface] handed to CameraX — built here, so released here. */
-    private var providedSurface: Surface? = null
-
-    /** The texture [providedSurface] was built over: what gates its release. */
-    private var providedTexture: SurfaceTexture? = null
-
-    /** Buffer size of the handed-over surface; pinned onto its texture at hand-over. */
-    private var requestedResolution: Size? = null
-
-    /** The [TextureView]'s live texture, or null while it has none. */
-    private var surfaceTexture: SurfaceTexture? = null
-
     /**
-     * The [providedTexture] of an in-flight hand-over that the [TextureView]
-     * handed back: the destroy callback answered `false`, taking on its release
-     * once that hand-over completes. One slot suffices because only one
-     * hand-over — hence only one texture — is ever in flight.
+     * Size the holder last reported. The surface is only handed over once this
+     * matches the buffer size pinned for the request being served (class doc's
+     * *Buffer size*).
      */
-    private var detachedTexture: SurfaceTexture? = null
+    private var surfaceSize: Size? = null
 
-    /** Latest transform info, re-applied whenever this slot is resized. */
+    /** Whether the holder currently has a live surface. */
+    private var surfaceValid: Boolean = false
+
+    /** Latest transform info; [applyGeometry]'s first input. */
     private var transformationInfo: SurfaceRequest.TransformationInfo? = null
 
-    /**
-     * An apply is owed: [applyTransform] last ran without all of its inputs, or
-     * the buffer it computed for is gone. Only an apply that reaches
-     * `setTransform` clears it, and only a camera frame on [providedTexture]
-     * retries it — see the Hand-over contract.
-     */
-    private var transformPending = false
-
-    /** Reused by [applyTransform]; every op below is a `set`/`post`, never additive. */
-    private val transformMatrix = Matrix()
+    /** The buffer size [transformationInfo]'s crop rect is expressed in. */
+    private var infoResolution: Size? = null
 
     /**
-     * Whether the [TextureView] has drawn a camera frame for the CURRENT
-     * hand-over. Cleared at every hand-over and set by the first
-     * `onSurfaceTextureUpdated` — the only callback that proves a buffer
-     * actually reached the screen, and what retires [firstFrameKick].
+     * Extents of what the compositor actually displays — the crop rect swapped
+     * by the rotation the buffer transform applies — or `0` before the first
+     * `TransformationInfo`. [updatePreviewLayout] fits these inside the slot.
      */
-    private var firstFrameDrawn = false
+    private var contentWidth: Int = 0
 
-    /** Kicks [firstFrameKick] has left before it gives up; 0 = not armed. */
-    private var firstFrameKicksLeft = 0
-
-    /**
-     * The first-draw watchdog (class doc's *First draw*). Each tick asks the
-     * window for a redraw the [TextureView]'s own `invalidate()` can no longer
-     * ask for, so a frame already sitting in the texture is consumed on the next
-     * traversal instead of never.
-     */
-    private val firstFrameKick = object : Runnable {
-        override fun run() {
-            // Disarmed by everything that ends a hand-over, so these are belts
-            // against a tick already in the queue when that happened.
-            if (firstFrameDrawn || providedTexture == null) return
-            if (firstFrameKicksLeft <= 0) {
-                // Not the invalidate path failing, then: nothing is arriving on
-                // this texture at all. The hand-over and transform lines above
-                // say which of the two halves got as far as it should have.
-                Log.w(
-                    TAG,
-                    "frust-camera: preview slot drew no camera frame within " +
-                        "${FIRST_FRAME_GRACE_MS + FIRST_FRAME_KICKS * FIRST_FRAME_KICK_MS}ms " +
-                        "of hand-over (buffer $requestedResolution, slot " +
-                        "${this@CameraPreviewView.width}x${this@CameraPreviewView.height})",
-                )
-                return
-            }
-            firstFrameKicksLeft--
-            // Flag the TextureView so the traversal re-records it (its draw is
-            // what calls `updateTexImage`)...
-            textureView.invalidate()
-            // ...then damage the window unconditionally, so that traversal
-            // happens. `invalidate()` alone cannot: a view already flagged
-            // invalidated — precisely the wedged state — drops the call.
-            this@CameraPreviewView.parent?.onDescendantInvalidated(
-                this@CameraPreviewView,
-                textureView,
-            )
-            this@CameraPreviewView.postDelayed(this, FIRST_FRAME_KICK_MS)
-        }
-    }
+    /** Height half of [contentWidth]'s pair; the two are always set together. */
+    private var contentHeight: Int = 0
 
     /**
      * Registered against [displayManager] for the lifetime of this view's
-     * attach (class doc's *Rotation tracking*). `registerDisplayListener` is
+     * attach (class doc's *Rotation*). `registerDisplayListener` is
      * process-wide, not scoped to one display, so every callback re-checks
      * `displayId` against [display] before doing anything — a change on some
      * other display (a different window, a detached HDMI output) is not this
@@ -336,97 +296,56 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
         }
     }
 
-    private val textureListener = object : TextureView.SurfaceTextureListener {
-        override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
-            // Once per texture, i.e. once per attach — the head of the four-line
-            // trail (available → handed over → transform applied → first frame
-            // drawn) that says how far a black slot got.
-            Log.d(TAG, "frust-camera: preview texture available (${width}x$height)")
-            surfaceTexture = surface
+    private val holderCallback = object : SurfaceHolder.Callback {
+        override fun surfaceCreated(holder: SurfaceHolder) {
+            // Nothing usable yet: `surfaceChanged` always follows with the real
+            // size, and only a size matching the requested resolution is one
+            // this view may hand over. Head of the class doc's diagnostic trail.
+            Log.d(
+                TAG,
+                "frust-camera: preview surface created (slot ${width}x$height, view " +
+                    "${surfaceView.width}x${surfaceView.height})",
+            )
+        }
+
+        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+            surfaceValid = true
+            surfaceSize = Size(width, height)
             tryProvideSurface()
         }
 
-        override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
-            // A TextureView re-pins its texture's DEFAULT buffer size to the
-            // view size on every resize. Once camera2 has connected it sets the
-            // buffer dimensions explicitly and the default is inert, but a
-            // resize landing between hand-over and that connection would leave
-            // CameraX a wrongly-sized buffer — so restate the camera's own
-            // resolution on the handed-over texture. Any other texture is
-            // (re-)pinned by `tryProvideSurface` at its own hand-over.
-            if (surface === providedTexture) {
-                requestedResolution?.let { surface.setDefaultBufferSize(it.width, it.height) }
-                // Belt beside `onSizeChanged` (class doc's *Rotation
-                // tracking*): a buffer resize can land on the handed-over
-                // texture without this view's own bounds changing size at
-                // all, so this is a second, independent chance to catch a
-                // rotation `displayListener` missed.
-                maybeSyncTargetRotation()
-            }
-        }
-
-        override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
-            surfaceTexture = null
-            val provided = providedRequest
-            providedRequest = null
-            // The documented path for "the view destroyed its texture while the
+        override fun surfaceDestroyed(holder: SurfaceHolder) {
+            surfaceValid = false
+            surfaceSize = null
+            // The documented path for "the view lost its surface while the
             // session lives on": CameraX re-issues a fresh SurfaceRequest to
             // this same provider, in place — no unbind, no camera reopen. Any
-            // request outstanding here (this fresh one included) stays pending
-            // until a texture returns to serve it.
+            // request outstanding here (that fresh one included) waits in
+            // `pendingRequest` until a surface returns to serve it, which is
+            // what makes a scrolled-away-and-back slot cheap.
+            val provided = providedRequest
+            providedRequest = null
             provided?.invalidate()
-            // Identity, not presence: CameraX can only still be reading the
-            // Surface built over THIS texture, and `detachFromSession` clears
-            // the request while that read is live. Answering `false` for it
-            // alone keeps it alive and hands its release to that hand-over's
-            // result callback; a texture never handed over goes straight back.
-            if (surface === providedTexture) {
-                detachedTexture = surface
-                return false
-            }
-            return true
-        }
-
-        override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
-            // Per camera frame, and deliberately almost empty: the TextureView
-            // has already scheduled its own redraw and nothing here depends on
-            // frame timing. Both flags are tested first, so a converged frame
-            // costs two bool reads.
-            //
-            // Reaching here at all is the proof the class doc's *First draw*
-            // wants — `updateTexImage` ran, so a buffer is on screen — and it
-            // is what retires the watchdog.
-            if (!firstFrameDrawn && surface === providedTexture) {
-                firstFrameDrawn = true
-                disarmFirstFrameKick()
-                Log.d(
-                    TAG,
-                    "frust-camera: first preview frame drawn (buffer $requestedResolution, " +
-                        "slot ${this@CameraPreviewView.width}x${this@CameraPreviewView.height})",
-                )
-            }
-            // The other thing that depends on this tick is a transform still
-            // owed — the only tick guaranteed to keep coming while the inputs it
-            // needs settle, so it retries until the transform applies.
-            if (transformPending && surface === providedTexture) applyTransform()
         }
     }
 
     init {
         // Anything the camera does not cover reads as frame, not as a hole —
         // and in Mode B an unpainted region shows raw OS content
-        // (`docs/CODE_STANDARDS.md`'s Mode B paint contract).
+        // (`docs/CODE_STANDARDS.md`'s Mode B paint contract). It is also what
+        // the fitted preview's letterbox shows (class doc's *Geometry*).
         setBackgroundColor(Color.BLACK)
-        // MATCH_PARENT is load-bearing: the preview's frame is exactly this
-        // slot, and every crop/rotation/mirror is a content transform inside
-        // those bounds — never an oversized view.
-        addView(textureView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
-        // A transform can leave part of the bounds uncovered for a frame (before
-        // the first `TransformationInfo` lands), and Android's own guidance is
-        // to mark such a TextureView non-opaque; that makes the gap read as the
-        // black above rather than as undefined layer content.
-        textureView.setOpaque(false)
-        textureView.surfaceTextureListener = textureListener
+        // Before the surface exists, which is what this call requires: the
+        // layer's level is fixed at creation (class doc's *Z-order*).
+        surfaceView.setZOrderMediaOverlay(true)
+        // Starts slot-sized so a surface exists (and a hand-over can complete)
+        // before any geometry is known; the first `TransformationInfo` fits it
+        // properly. CENTER is the gravity every later size relies on.
+        addView(
+            surfaceView,
+            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT, Gravity.CENTER),
+        )
+        surfaceView.holder.addCallback(holderCallback)
     }
 
     /**
@@ -439,9 +358,6 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
         detachFromSession()
         sessionId = id
         if (id == NO_SESSION) return
-        // Every input this session's transform needs is still to come, and the
-        // matrix on screen (if any) belongs to the previous one.
-        transformPending = true
         // A session opened before any view existed has no idea what display it
         // will be shown on; tell it now (and again for as long as this slot
         // stays attached — see `maybeSyncTargetRotation`). Forced: the session
@@ -471,9 +387,9 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
      * A no-op with nothing bound ([NO_SESSION]) or no known display yet.
      *
      * Every caller shares this one compare so the several redundant triggers
-     * (class doc's *Rotation tracking*: [displayListener], [onSizeChanged],
-     * [onAttachedToWindow], [bindSession], and [applyTransform]'s self-heal)
-     * collapse into at most one host round trip per actual rotation change.
+     * (class doc's *Rotation*: [displayListener], [onSizeChanged],
+     * [onAttachedToWindow], [bindSession]) collapse into at most one host round
+     * trip per actual rotation change.
      */
     private fun maybeSyncTargetRotation(force: Boolean = false) {
         val id = sessionId
@@ -487,18 +403,23 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
     // --- Preview.SurfaceProvider -------------------------------------------
 
     override fun onSurfaceRequested(request: SurfaceRequest) {
-        // Any not-yet-served request is superseded by this one. Its resolution
-        // is deliberately NOT recorded here: until the hand-over happens, the
-        // buffer on screen is still the previous surface's.
+        // Any not-yet-served request is superseded by this one.
         pendingRequest?.willNotProvideSurface()
         pendingRequest = request
         request.setTransformationInfoListener(FrustCameraHost.mainExecutor) { info ->
             transformationInfo = info
-            applyTransform()
+            // The buffer this info's crop rect is expressed in — taken from the
+            // request that carried it rather than from whatever is handed over,
+            // so the two can never be read against each other.
+            infoResolution = request.resolution
+            applyGeometry()
         }
         request.addRequestCancellationListener(FrustCameraHost.mainExecutor) {
             if (pendingRequest === request) pendingRequest = null
         }
+        // The camera writes at ITS resolution, so the buffer is pinned before
+        // any hand-over can match it (class doc's *Buffer size*).
+        surfaceView.holder.setFixedSize(request.resolution.width, request.resolution.height)
         tryProvideSurface()
     }
 
@@ -506,74 +427,36 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
 
     private fun tryProvideSurface() {
         val request = pendingRequest ?: return
-        val texture = surfaceTexture ?: return
-        // One hand-over at a time: re-pointing a slot can raise the next request
-        // before CameraX has finished with (and let us release) the previous
-        // Surface, and two live producers on one texture is a stream
-        // configuration failure. The result callback below re-drives this, so
-        // the request waiting here is served the moment the gate clears.
-        if (providedSurface != null) return
-
-        // Identity, checked rather than assumed: the whole hand-over is
-        // pointless if the camera streams into a texture the view has stopped
-        // displaying, and that failure is invisible — a permanently black slot
-        // with a healthy CameraX session behind it. `getSurfaceTexture` is a
-        // plain field read, so this rides every hand-over rather than a debug
-        // flag. Diverging is a bug in the destroy/re-provide bookkeeping below,
-        // not something to paper over here, so it logs and proceeds.
-        if (textureView.surfaceTexture !== texture) {
-            Log.w(TAG, "frust-camera: preview hand-over texture is not the one on display")
-        }
-
-        // The camera writes at ITS resolution, so the texture must agree before
-        // the Surface is built (`onSurfaceTextureSizeChanged` restates it) —
-        // handing over a wrongly-sized surface is the classic
-        // stretched-first-frame bug, or a rejected stream configuration.
+        // One hand-over at a time: re-pointing a slot can raise the next
+        // request before CameraX has finished with the previous surface, and
+        // two live producers on one surface is a stream configuration failure.
+        // The result callback below re-drives this, so the request waiting here
+        // is served the moment the gate clears.
+        if (providedRequest != null) return
+        val size = surfaceSize ?: return
+        if (!surfaceValid) return
         val resolution = request.resolution
-        texture.setDefaultBufferSize(resolution.width, resolution.height)
-        val surface = Surface(texture)
+        // Wait for the holder to actually report the fixed size asked for
+        // (class doc's *Buffer size*).
+        if (size.width != resolution.width || size.height != resolution.height) return
+        val surface = surfaceView.holder.surface
+        if (surface == null || !surface.isValid) return
 
         // Every field settles BEFORE provideSurface: on an already-terminated
         // request the result callback runs inline from inside that call, and it
         // clears exactly what is set here.
         pendingRequest = null
         providedRequest = request
-        providedSurface = surface
-        providedTexture = texture
-        // The buffer on screen is this one from now on, so the transform that
-        // undoes its stretch is recomputed against it.
-        requestedResolution = resolution
-        // Same rule: armed before the call, so an inline re-drive re-arms it for
-        // whatever hand-over replaces this one rather than losing the watchdog.
-        armFirstFrameKick()
         Log.d(
             TAG,
             "frust-camera: preview surface handed to CameraX " +
-                "(buffer ${resolution.width}x${resolution.height}, slot ${width}x$height)",
+                "(buffer ${resolution.width}x${resolution.height}, slot ${width}x$height, " +
+                "view ${surfaceView.width}x${surfaceView.height})",
         )
-        applyTransform()
         request.provideSurface(surface, FrustCameraHost.mainExecutor) { result ->
-            // This view built the Surface, so this view releases it — the
-            // mirror image of the SurfaceView case, where the holder owned it.
-            // The texture underneath is only ours to free when the TextureView
-            // already gave it up (see the destroy callback).
-            surface.release()
-            if (providedSurface === surface) providedSurface = null
+            // The holder owns this Surface — never released here, whatever the
+            // outcome (class doc's *Surface lifetime*).
             if (providedRequest === request) providedRequest = null
-            if (providedTexture === texture) {
-                providedTexture = null
-                // The buffer the current matrix was computed for is gone, and
-                // the retry only fires for the texture actually handed over, so
-                // whatever surface replaces this one starts owing an apply.
-                transformPending = true
-                // Nothing left to watch for; the re-drive below arms the next
-                // hand-over's own watchdog.
-                disarmFirstFrameKick()
-            }
-            if (detachedTexture === texture) {
-                detachedTexture = null
-                texture.release()
-            }
             // All five documented codes are handled.
             when (result.resultCode) {
                 SurfaceRequest.Result.RESULT_SURFACE_USED_SUCCESSFULLY ->
@@ -589,11 +472,11 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
                 else ->
                     Log.w(TAG, "frust-camera: unknown SurfaceRequest result ${result.resultCode}")
             }
-            // The gate is clear and the old texture is gone: serve whatever
-            // arrived mid-flight. Without this the slot stays black forever on
-            // every interleaving that raises a request before this callback —
-            // a foregrounded preview, a re-pointed slot. It terminates because
-            // each pass consumes `pendingRequest`.
+            // The gate is clear: serve whatever arrived mid-flight. Without
+            // this the slot stays black forever on every interleaving that
+            // raises a request before this callback — a foregrounded preview, a
+            // re-pointed slot. It terminates because each pass consumes
+            // `pendingRequest`.
             tryProvideSurface()
         }
     }
@@ -601,60 +484,19 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
     private fun detachFromSession() {
         val id = sessionId
         if (id != NO_SESSION) FrustCameraHost.detachPreview(id)
-        // `invalidate` runs the hand-over's result callback, which is what frees
-        // the Surface (and any detached texture) — never released inline here.
         providedRequest?.invalidate()
         providedRequest = null
         pendingRequest?.willNotProvideSurface()
         pendingRequest = null
-        requestedResolution = null
         transformationInfo = null
-        // Nothing is owed with no inputs left to compute from; `bindSession`
-        // re-arms for the next session, so the flag never crosses one.
-        transformPending = false
-        // Same: no hand-over left to watch, and the next one arms its own.
-        disarmFirstFrameKick()
+        infoResolution = null
+        // The next session publishes its own extents; until it does, the inner
+        // view falls back to the slot's own size (class doc's *Geometry*).
+        contentWidth = 0
+        contentHeight = 0
     }
 
-    // --- First-draw watchdog -----------------------------------------------
-
-    /**
-     * Start watching this hand-over for its first drawn frame (class doc's
-     * *First draw*). The grace period is what keeps the happy path free: a
-     * camera that starts streaming normally reports its first frame — and
-     * disarms this — before the first kick is ever due.
-     */
-    private fun armFirstFrameKick() {
-        firstFrameDrawn = false
-        firstFrameKicksLeft = FIRST_FRAME_KICKS
-        removeCallbacks(firstFrameKick)
-        postDelayed(firstFrameKick, FIRST_FRAME_GRACE_MS)
-    }
-
-    /** Stop the watchdog: the frame arrived, or there is no hand-over left. */
-    private fun disarmFirstFrameKick() {
-        firstFrameKicksLeft = 0
-        removeCallbacks(firstFrameKick)
-    }
-
-    override fun onDetachedFromWindow() {
-        // Nothing can draw while detached, and a re-attach destroys the texture
-        // and re-hands-over — which arms a fresh watchdog of its own.
-        //
-        // BEFORE super, not after: `removeCallbacks` can only reach an already
-        // posted tick through the view's attach info, and the detach dispatch
-        // clears that on the way out. Disarming afterwards would leave the tick
-        // in the main queue to fire against a detached view.
-        disarmFirstFrameKick()
-        // Balanced with `onAttachedToWindow`'s register: a detached slot has no
-        // bounds to be rotated in, and leaving this registered would leak one
-        // listener per detach/reattach cycle (class doc's *Rotation tracking*).
-        displayManager?.unregisterDisplayListener(displayListener)
-        displayManager = null
-        super.onDetachedFromWindow()
-    }
-
-    // --- Transform ---------------------------------------------------------
+    // --- Geometry ----------------------------------------------------------
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
@@ -664,16 +506,16 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
         // `displayListener`, which is what covers a slot whose bounds never
         // change size on a rotation (a square slot).
         maybeSyncTargetRotation()
-        applyTransform()
+        updatePreviewLayout()
     }
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         // Registered for as long as this view stays attached (class doc's
-        // *Rotation tracking*) — the fix for a rotation with no accompanying
-        // resize, which nothing before this re-read `display.rotation` for.
-        // Passing this view's own Handler keeps the callback on the main
-        // thread this whole class already assumes.
+        // *Rotation*) — the cover for a rotation with no accompanying resize,
+        // which nothing else re-reads `display.rotation` for. Passing this
+        // view's own Handler keeps the callback on the main thread this whole
+        // class already assumes.
         val manager = context.getSystemService(DisplayManager::class.java)
         displayManager = manager
         manager?.registerDisplayListener(displayListener, handler)
@@ -685,190 +527,107 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
         maybeSyncTargetRotation(force = true)
     }
 
+    override fun onDetachedFromWindow() {
+        // Balanced with `onAttachedToWindow`'s register: a detached slot has no
+        // bounds to be rotated in, and leaving this registered would leak one
+        // listener per detach/reattach cycle (class doc's *Rotation*).
+        displayManager?.unregisterDisplayListener(displayListener)
+        displayManager = null
+        super.onDetachedFromWindow()
+    }
+
     /**
-     * Map the camera buffer's crop rect onto this slot: finish the rotation the
-     * [TextureView] has already part-applied, undo the stretch, scale to FILL
-     * the slot (centre-crop, the preview convention), mirror a front lens, and
-     * re-centre the crop — as a [TextureView] content matrix, so the fill's
-     * overflow is simply not drawn instead of spilling past the slot.
+     * Recompute what the compositor will actually put on screen from the
+     * latest `TransformationInfo`, re-fit the inner [SurfaceView] to it, and
+     * publish the displayed aspect ratio for `previewAspectRatio`.
      *
-     * **What an identity matrix already shows.** `setTransform`'s matrix does
-     * not replace the stream's transform, it composes on top of it: a
-     * [TextureView] always applies the [SurfaceTexture]'s own transform
-     * ([SurfaceTexture.getTransformMatrix]) first, and a camera buffer carries
-     * the camera's sensor-to-natural-orientation rotation in it (90° on a
-     * typical phone). So with an identity matrix the slot already shows the
-     * buffer *rotated by the sensor orientation*, stretched across the view's
-     * bounds — which is why the platform's own `TextureView` camera recipe sets
-     * no matrix at all on a device held at its natural rotation, and why
-     * CameraX's `PreviewView` corrects a `TextureView` by minus its TARGET
-     * rotation instead of rotating by `rotationDegrees`. Rotating by
-     * `rotationDegrees` here too is a double rotation, and the surrounding
-     * steps — sized for a rotate-from-raw-buffer model — then throw the content
-     * off the slot.
-     *
-     * **The share still owed — device-corrected.** The CameraX-arithmetic
-     * argument was that `rotationDegrees` (the clockwise rotation that makes
-     * the buffer upright for the target rotation) splits into a
-     * display-independent stream share, `rotationDegrees + targetRotation`,
-     * and a display-dependent remainder this matrix owes, `-targetRotation`:
-     * zero at the natural rotation, a real turn once rotated. A landscape
-     * reading on device refuted that derivation: with a camera transform the
-     * [SurfaceTexture]'s own stream transform already uprights the buffer for
-     * the CURRENT display orientation, whatever that orientation is — the
-     * stream carries the *full* `rotationDegrees`, not just the sensor share —
-     * so this matrix owes **zero** in every display rotation, not only the
-     * natural one, and `targetRotation` plays no further part here (CameraX
-     * still needs it, fed through [FrustCameraHost.setTargetRotation], because
-     * it is what makes `rotationDegrees` itself track the display). The one
-     * case still owed the full `rotationDegrees` is a buffer with no camera
-     * transform at all (`hasCameraTransform()` false, only behind an
-     * effect/processor pipeline, which this plugin never builds) — there is no
-     * stream transform to already have uprighted anything.
-     *
-     * Everything after that split works in **stream-content** pixels — the
-     * buffer as the stream transform leaves it — so the buffer size and crop
-     * rect are carried through that rotation first. Each step is a `post` op,
-     * i.e. applied in the order written, and content mapped outside the view's
-     * bounds is not drawn, which is exactly the centre-crop trim.
-     *
-     * Geometry check, 4:3 buffer on a sensor-90 phone (device-observed).
-     * Portrait (`rotationDegrees` 90, the stream carries it all, nothing owed
-     * here): upright content is 3:4, so a 1:1 slot fills on width and trims
-     * ~17% off each of top and bottom, a 3:4 slot maps exactly, a 9:16 slot
-     * fills on height and trims the sides. Landscape (`rotationDegrees` 0 —
-     * the stream is already the display's own upright frame, nothing owed
-     * here either): upright content is 4:3 as the buffer already sits, so a
-     * 1:1 slot fills on height and trims the sides, a 4:3 slot maps exactly.
-     * No slot aspect letterboxes, none can paint outside the slot, and a
-     * mirrored front lens changes no extent — only which side of the slot each
-     * column lands on.
+     * The rotation term is the one the buffer transform already applies (class
+     * doc's *Rotation*): a quarter turn swaps the crop's extents on screen, and
+     * nothing here can add to or undo it. With no camera transform on the
+     * buffer at all — only behind an effect pipeline, which this plugin never
+     * builds — the buffer is displayed as it stands and the crop's own extents
+     * are what shows.
      */
-    private fun applyTransform() {
-        // Armed ahead of the guards, cleared only once `setTransform` has run:
-        // every return below leaves the transform owed, and the frame tick is
-        // what comes back for it. An input setter therefore just calls this,
-        // in whatever order its input happened to arrive.
-        transformPending = true
-
-        // Self-heal of last resort (class doc's *Rotation tracking*): a
-        // display's rotation compare that costs one field read and runs on
-        // every apply, regardless of which of the guards below return early —
-        // the only one of the rotation-tracking triggers that fires even when
-        // `displayListener` does not, on OEMs observed to skip
-        // `onDisplayChanged` for a rotation their Activity handles via
-        // `configChanges` alone. `currentDisplayRotation` is also folded into
-        // the diagnostic log below, once this apply actually completes.
-        val currentDisplayRotation = display?.rotation
-        maybeSyncTargetRotation()
-
+    private fun applyGeometry() {
         val info = transformationInfo ?: return
-        val resolution = requestedResolution ?: return
-        val slotWidth = width
-        val slotHeight = height
-        if (slotWidth == 0 || slotHeight == 0) return
+        val resolution = infoResolution ?: return
         if (resolution.width <= 0 || resolution.height <= 0) return
 
         val crop = info.cropRect
         val cropWidth = if (crop.width() > 0) crop.width() else resolution.width
         val cropHeight = if (crop.height() > 0) crop.height() else resolution.height
-        val cropCenterX =
-            if (crop.width() > 0) crop.exactCenterX() else resolution.width / 2.0f
-        val cropCenterY =
-            if (crop.height() > 0) crop.exactCenterY() else resolution.height / 2.0f
 
-        // The rotation split (see above, device-corrected): with a camera
-        // transform the stream already carries the full `rotationDegrees` —
-        // it tracks the CURRENT display orientation on its own — so this
-        // matrix owes nothing. Only a buffer with no camera transform at all
-        // still needs `rotationDegrees` applied here.
         val rotationDegrees = normalizedDegrees(info.rotationDegrees)
         val streamDegrees = if (info.hasCameraTransform()) rotationDegrees else 0
-        val ownDegrees = if (info.hasCameraTransform()) 0 else rotationDegrees
+        val quarterTurned = streamDegrees == 90 || streamDegrees == 270
+        val displayedWidth = if (quarterTurned) cropHeight else cropWidth
+        val displayedHeight = if (quarterTurned) cropWidth else cropHeight
+        if (displayedWidth <= 0 || displayedHeight <= 0) return
 
-        // Buffer and crop as the stream transform leaves them on screen: a
-        // quarter turn swaps both extents and carries the crop centre with it
-        // (each case below is that rotation about the origin, then the shift
-        // that puts the rotated buffer's corner back at the origin).
-        val streamQuarterTurn = streamDegrees == 90 || streamDegrees == 270
-        val streamWidth = if (streamQuarterTurn) resolution.height else resolution.width
-        val streamHeight = if (streamQuarterTurn) resolution.width else resolution.height
-        val streamCropWidth = if (streamQuarterTurn) cropHeight else cropWidth
-        val streamCropHeight = if (streamQuarterTurn) cropWidth else cropHeight
-        val streamCropCenterX = when (streamDegrees) {
-            90 -> resolution.height - cropCenterY
-            180 -> resolution.width - cropCenterX
-            270 -> cropCenterY
-            else -> cropCenterX
-        }
-        val streamCropCenterY = when (streamDegrees) {
-            90 -> cropCenterX
-            180 -> resolution.height - cropCenterY
-            270 -> resolution.width - cropCenterX
-            else -> cropCenterY
-        }
+        contentWidth = displayedWidth
+        contentHeight = displayedHeight
+        updatePreviewLayout()
 
-        // What the user ends up looking at, and the scale that fills the slot
-        // with it. `uprightWidth`/`uprightHeight` are the crop's extents after
-        // BOTH rotations, so they stay the crop swapped by `rotationDegrees`
-        // however that total is split — which is what the aspect ratio
-        // published below has always meant.
-        val ownQuarterTurn = ownDegrees == 90 || ownDegrees == 270
-        val uprightWidth = if (ownQuarterTurn) streamCropHeight else streamCropWidth
-        val uprightHeight = if (ownQuarterTurn) streamCropWidth else streamCropHeight
-        if (uprightWidth <= 0 || uprightHeight <= 0) return
-
-        val scale = max(
-            slotWidth.toFloat() / uprightWidth.toFloat(),
-            slotHeight.toFloat() / uprightHeight.toFloat(),
-        )
-
-        // 1. Undo the content→bounds stretch: view px become stream-content px.
-        transformMatrix.setScale(
-            streamWidth.toFloat() / slotWidth.toFloat(),
-            streamHeight.toFloat() / slotHeight.toFloat(),
-        )
-        // 2. Origin on the crop centre, so every step below is about the crop.
-        transformMatrix.postTranslate(-streamCropCenterX, -streamCropCenterY)
-        // 3. Finish the rotation the stream transform started — no-op whenever
-        //    the slot is shown at the display's natural rotation.
-        if (ownDegrees != 0) transformMatrix.postRotate(ownDegrees.toFloat())
-        // 4. Mirror a front lens across the SCREEN's vertical axis, i.e. after
-        //    the rotation: `isMirroring` asks for a horizontal flip as
-        //    displayed, and flipping in buffer space instead lands as a
-        //    vertical one wherever the content is quarter-turned.
-        if (info.isMirroring) transformMatrix.postScale(-1.0f, 1.0f)
-        // 5. Fill the slot (centre-crop) and re-centre on it.
-        transformMatrix.postScale(scale, scale)
-        transformMatrix.postTranslate(slotWidth / 2.0f, slotHeight / 2.0f)
-        textureView.setTransform(transformMatrix)
-        transformPending = false
-        // `setTransform` only marks the matrix dirty and damages this view's
-        // PARENT; the layer picks the matrix up on the TextureView's own next
-        // draw, which — class doc's *First draw* — is exactly what nothing else
-        // here guarantees. Bounded: an apply that reaches this line clears
-        // `transformPending`, so the retry stops driving it.
-        textureView.invalidate()
-        // The inputs AND the result of the matrix actually on screen, once per
-        // convergence: the rotation split says how much of `rotation` the stream
-        // transform is carrying, `upright`/`scale` are what a wrongly-placed
-        // preview is measured against, and `display` is the rotation this apply
-        // self-healed against above — the value a frozen `targetRotation` bug
-        // would show staying constant across a live rotation.
+        // The inputs AND the resulting fit, once per convergence: `displayed`
+        // is what a wrongly-placed preview is measured against, `view` is the
+        // frame the compositor scales the buffer onto, and `display` is the
+        // rotation the buffer transform is tracking — the value a frozen
+        // `targetRotation` would show staying constant across a live rotation.
         Log.d(
             TAG,
-            "frust-camera: preview transform applied (buffer " +
-                "${resolution.width}x${resolution.height}, crop $crop, rotation " +
-                "$rotationDegrees = stream $streamDegrees + own $ownDegrees, mirrored " +
-                "${info.isMirroring}, upright ${uprightWidth}x$uprightHeight, scale $scale, " +
-                "slot ${slotWidth}x$slotHeight, display=$currentDisplayRotation)",
+            "frust-camera: preview geometry (buffer ${resolution.width}x${resolution.height}, " +
+                "crop $crop, rotation $rotationDegrees of which the stream applies " +
+                "$streamDegrees, mirroring ${info.isMirroring} (not applied), displayed " +
+                "${displayedWidth}x$displayedHeight, view " +
+                "${surfaceView.layoutParams.width}x${surfaceView.layoutParams.height}, slot " +
+                "${width}x$height, display=${display?.rotation})",
         )
 
         if (sessionId != NO_SESSION) {
             FrustCameraHost.setPreviewAspectRatio(
                 sessionId,
-                uprightWidth.toFloat() / uprightHeight.toFloat(),
+                displayedWidth.toFloat() / displayedHeight.toFloat(),
             )
+        }
+    }
+
+    /**
+     * Size the inner [SurfaceView] to the largest slot-inscribed rect carrying
+     * the displayed content's aspect ratio, centred — the fit the class doc's
+     * *Geometry* note derives. Before any geometry is known the slot's own size
+     * is used, which is what lets a surface exist (and a hand-over complete)
+     * ahead of the first `TransformationInfo`.
+     *
+     * Neither extent can exceed the slot's, so this view's frame — which is
+     * also its compositor layer's on-screen rect — is contained by
+     * construction.
+     */
+    private fun updatePreviewLayout() {
+        val slotWidth = width
+        val slotHeight = height
+        if (slotWidth <= 0 || slotHeight <= 0) return
+
+        val viewWidth: Int
+        val viewHeight: Int
+        if (contentWidth > 0 && contentHeight > 0) {
+            val scale = min(
+                slotWidth.toFloat() / contentWidth.toFloat(),
+                slotHeight.toFloat() / contentHeight.toFloat(),
+            )
+            viewWidth = (contentWidth * scale).roundToInt().coerceIn(1, slotWidth)
+            viewHeight = (contentHeight * scale).roundToInt().coerceIn(1, slotHeight)
+        } else {
+            viewWidth = slotWidth
+            viewHeight = slotHeight
+        }
+
+        val lp = surfaceView.layoutParams as LayoutParams
+        if (lp.width != viewWidth || lp.height != viewHeight) {
+            lp.width = viewWidth
+            lp.height = viewHeight
+            // Assigning is what schedules the layout pass; the compare above is
+            // what keeps a steady preview free of one.
+            surfaceView.layoutParams = lp
         }
     }
 
@@ -877,24 +636,5 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
 
     private companion object {
         const val TAG = "frust"
-
-        /**
-         * How long a hand-over is left alone before the first-draw watchdog
-         * starts kicking. A camera that streams normally puts its first frame up
-         * well inside this, so the watchdog costs a healthy preview nothing at
-         * all; it is long enough that a slow first frame does not buy a burst of
-         * pointless window redraws either.
-         */
-        const val FIRST_FRAME_GRACE_MS = 250L
-
-        /** Roughly two display frames between kicks — a redraw ask, not a poll. */
-        const val FIRST_FRAME_KICK_MS = 33L
-
-        /**
-         * Kicks before the watchdog gives up and logs. With the two above that
-         * is ~2s of watching, past which the cause is no longer a lost redraw:
-         * no camera frame is reaching this texture at all.
-         */
-        const val FIRST_FRAME_KICKS = 53
     }
 }
