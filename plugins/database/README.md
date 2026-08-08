@@ -259,9 +259,11 @@ bridge design, including the `DatabaseError::AsyncContext` guard mentioned in
 §3).
 
 **What it costs:**
-- A significant binary-size delta — the crate's own `Cargo.toml` records
-  turso as roughly doubling this crate's binary contribution (~5.7 MB
-  measured at the ship profile; see §6 for the README's own tracked figure)
+- A significant binary-size delta — **+9.83 MB** measured (Linux x86_64
+  desktop host, release/ship profile, `turso =0.7.2`, 2026-08-09): enabling
+  `engine-turso` alongside the always-on `engine-sqlite` default roughly
+  doubles this crate's own contribution to a shipped binary. See §6 for the
+  full measurement procedure and both absolute totals.
 - Pre-1.0 upstream churn — this crate exact-pins the dependency
   (`turso = "=0.7.2"`) rather than allowing a range, precisely because the
   crate hasn't reached a stable 1.0 API yet
@@ -333,11 +335,68 @@ The binary size impact of `frust-database` dependencies at the shipped profile
 | Engine | Binary impact | Notes |
 |--------|---------------|-------|
 | SQLite | 1.0–1.7 MB | `rusqlite`'s bundled SQLite; measured locally |
-| Turso | **PLACEHOLDER — to be measured** | Not yet measured at this crate's ship profile for this README; `Cargo.toml`'s own dependency comment records a rough ~5.7 MB estimate (roughly double the sqlite backend) pending an exact recorded figure here |
+| Turso | **+9.83 MB** (`engine-turso` added on top of the default `engine-sqlite` build) | `turso =0.7.2`; measured 2026-08-09 on a Linux x86_64 desktop host release binary — see *Turso size measurement procedure* below for the full method and raw figures |
 
 These figures are approximate, varies by target platform, and assume default
 link configuration (you may reduce size further by enabling LTO or other
 optimizations).
+
+### Turso size measurement procedure
+
+Reproducible on a `turso` pin bump — re-run this exact procedure and update
+the table row above plus the date/pin in this section.
+
+`scripts/size-report.sh` is this repo's standard release-artifact snapshot
+tool (see `docs/DEVELOPMENT.md`'s Instrumentation section), but it is a
+**whole-app snapshot, not a delta tool**: its primary target is a release
+`arm64-v8a` `.so` via `cargo ndk`, with a desktop `cargo-bloat` top-20 crate
+breakdown as a secondary host-proxy. It doesn't isolate one dependency's
+contribution by itself — getting a delta means running the underlying
+release build twice (once per feature set) against the same app and diffing
+the resulting artifact, which is what the steps below do explicitly. The
+figure recorded above was measured this way, on a Linux x86_64 host, against
+the release **desktop binary** (no Android SDK/NDK cross-compile was
+involved in this specific run — state which artifact your own re-run
+measures if it differs):
+
+1. Scaffold a minimal probe app **outside this repo** (a temp dir), with a
+   `Cargo.toml` `path`-dependency on this crate (`frust-database`) plus the
+   `frust` facade, and a couple of lines of `src/lib.rs` that actually call
+   `Database::open`/`execute`/`query` (not just list the dependency) — under
+   LTO, an unused dependency can get linked out entirely, which would silently
+   zero out the very delta being measured.
+2. Match this crate's `[profile.release]` shape (`lto = "fat"`,
+   `codegen-units = 1`, `strip = "symbols"`, `panic = "abort"` — the same
+   profile `templates/app`'s generated `Cargo.toml` ships) in the probe app's
+   own manifest, so the measurement reflects the ship floor rather than an
+   unoptimized default release build.
+3. `export CARGO_TARGET_DIR=<probe-app-dir>/target` before building, so the
+   probe app's build neither reads from nor writes into any other target
+   directory (including this repo's own, and any sibling in-flight build).
+4. Build once with default features (`engine-sqlite` only): `cargo build
+   --release`. Record the resulting binary's size (`ls -l`/`wc -c` on the
+   `target/release/<bin>` executable — an exact byte count, not an estimate).
+5. Add `features = ["engine-turso"]` (additive — `engine-sqlite` stays on,
+   matching this crate's own default-doesn't-disable-alongside shape) and
+   rebuild the same probe app: `cargo build --release --features
+   engine-turso`. Record the new binary's size the same way.
+6. Delta = (step 5's size) − (step 4's size). That delta, plus both raw
+   sizes, the date, the exact `turso` pin, and which artifact was measured
+   (desktop host binary vs. Android `.so`), is what belongs in the §6 table
+   and in this procedure section on every re-run.
+
+**2026-08-09 raw figures** (Linux x86_64 desktop host, release/ship profile,
+`turso =0.7.2`):
+
+| Build | Binary size | Bytes |
+|-------|------------:|------:|
+| `engine-sqlite` only (default features) | 12.97 MB | 13,601,560 |
+| `engine-sqlite` + `engine-turso` | 22.80 MB | 23,904,912 |
+| **Delta** | **+9.83 MB** | **+10,303,352** |
+
+The probe app was never committed and its temp `target/` directory was never
+written under this repo's own `target/`, per the wave's shared-target-dir
+build note.
 
 ---
 
