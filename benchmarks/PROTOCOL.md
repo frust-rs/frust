@@ -285,6 +285,80 @@ the common contract across both formats; `rebuild_us`/`layout_us`/
 `paint_us` vs `build_us`/`raster_us` are reported as each framework's own
 native pass breakdown, not force-unified into a single column.
 
+### Per-op line format (`*-perf plugin op=...`) — the general contract
+
+S8 already ships a **per-op** raw-line format, distinct from the per-frame
+`*-perf raw` lines above — every plugin-boundary call it exercises (each
+`shared_preferences` write/read) gets its own line, not a frame. This
+section formalizes that shape as the contract every future per-op-latency
+scenario (S8 itself, and the `d*` DB scenarios, §9) is expected to speak,
+staying byte-compatible with what S8 already emits wherever the two do not
+conflict.
+
+**Canonical shape, going forward:**
+
+```
+<app>-perf op scenario=<id> op=<name> n=<u64> us=<u64> err=<0|1> [<key>=<value> ...]
+```
+
+- `scenario` — the bench-scenario id this op belongs to (`s8`, `d1`, `d2`,
+  …), present **inline** on the line itself, not only inferable from the
+  bracketing `bench-scenario-start`/`-end` marker pair.
+- `op` — the operation name within that scenario (`write`, `read`,
+  `insert_batch`, `insert_single`, `select_point`, `range_scan`, …).
+- `n` — 0-indexed running counter of this exact `scenario`+`op` pair,
+  reset to 0 at the start of each run.
+- `us` — elapsed microseconds for this one op, timed window only
+  (verification/bookkeeping work happens outside the timed window and
+  must not be folded in).
+- `err` — `1` if the op itself failed, or (for a read/verification op)
+  its result didn't match the expected value; `0` otherwise.
+- Any additional scenario-specific keys are appended after these five
+  (e.g. S8's `type=`, d1/d2's `rows=` — see §9).
+
+A scenario using this format also emits a per-run failure-tally marker
+when any op errors, one line, matching S8's shape:
+
+```
+<app>-perf plugin <scenario>-errors <key>=<count> [<key>=<count> ...]
+```
+
+**S8's shipped lines** (already shipping —
+`frust_bench/src/scenarios/s8_prefs.rs`,
+`flutter_bench/lib/scenarios/s8_prefs.dart`) predate this formalization
+and differ from the canonical shape above in two ways, both **grandfathered
+as-is by this document — S8's emitters are unchanged by this doc edit**:
+
+```
+frust-perf plugin op=<write|read> type=<tag> n=<i> us=<us> err=<0|1>
+flutter-perf plugin op=<write|read_cached|read_crossing> type=<tag> n=<i> us=<us> err=<0|1>
+frust-perf plugin s8-errors write_errors=<n> read_unexpected_none=<n> read_value_mismatch=<n>
+```
+
+1. The marker's second token is `plugin`, not the canonical `op` token —
+   S8 groups all plugin-boundary scenarios under one token, distinct from
+   the frame-line family's `raw`/`startup` tokens.
+2. There is no inline `scenario=` key. The scenario id is supplied only by
+   the bracketing `bench-scenario-start s8-write`/`s8-read` marker pair —
+   a line read outside that bracket cannot self-identify its scenario.
+
+**Canonical going forward** is the `op`-token / inline-`scenario=` shape
+above — every new per-op-emitting scenario (starting with `d1`/`d2`, §9)
+speaks it. S8's `plugin`-token lines are **not** retrofitted by this doc
+edit; reconciling them (either teaching a per-op parser both shapes, or
+updating the two S8 emitters to the canonical form) is the harness task's
+job, tracked as a methodology deviation (also recorded in `RESULTS.md`).
+
+**Methodology-deviations note (also recorded in `RESULTS.md`):**
+`benchmarks/harness/stats.py` today parses only `*-perf raw` per-frame
+lines and `bench-scenario-*` markers (see its own module docstring) — it
+has never parsed a per-op `plugin`/`op` line. S8's per-op numbers already
+published in `RESULTS.md` were therefore computed **outside** the shared
+script, predating any shared-script parsing of per-op lines. The `d*`
+scenarios (§9) are the first to require it; extending `stats.py` (or an
+equivalent) to parse per-op lines — both S8's shipped shape and the
+canonical shape — is the harness task's job.
+
 ## 8. Scenarios (S1–S8)
 
 Every scenario below is the full specification (each app implements all
@@ -396,7 +470,184 @@ whole matrix):
   with a silent boundary failure is flagged rather than reported as a clean
   latency number.
 
-## 9. Reporting
+## 9. DB scenarios (`d*`)
+
+### 9.1 Scenario-ID convention (declared)
+
+`d*` is a deliberate **second scenario-ID namespace**, parallel to
+`s1..s8` (the frame-class table, §8): a `d`-prefixed id names a scenario
+whose headline metric is **op latency** (§7's per-op contract), not a
+per-frame render series. Frame-class ids stay `s`-prefixed even where a
+scenario carries per-op sub-metrics alongside its frame series (S3's
+`s3-*` markers, S8's plugin-op lines) — `d*` is reserved for scenarios
+that are *only* op-latency, with no frame series of their own. Selected
+via the same launch-arg/deep-link mechanism as `s1..s8` (§8's header), so
+one binary still drives the whole matrix including both namespaces. No id
+collision is possible between the two spaces (`stats.py --scenario`
+already takes the id as an opaque string), and this doc edit does not
+change the frame-class `s1..s8` table (§8) in any way.
+
+### 9.2 Row shape and seed dataset (declared convention)
+
+Fixed row shape, shared by d1 and d2:
+
+| Column | Type | Size |
+|---|---|---|
+| `id` | INTEGER (primary key) | 8 bytes |
+| `name` | TEXT | ~64 bytes |
+| `value` | REAL | 8 bytes |
+| `payload` | BLOB | ~256 bytes |
+
+Deterministic generator, seed = `424242` (declared convention — an
+arbitrary fixed constant; no external standard prescribes a benchmark
+seed). Row `i`'s four fields are pure functions of `(seed, i)` — no
+wall-clock or process-local RNG state — so the two apps' generators
+produce byte-identical rows for the same `i`, mirroring §6's "identical
+logical work" fairness gate: `name` is a deterministic ~64-byte string
+built from `i`; `payload` is ~256 deterministic pseudo-random bytes seeded
+by `(seed, i)`. The canonical generator lives in
+`flutter_bench/lib/bench/datasets.dart` (mirrored on the frust side in the
+`d1`/`d2` scenario modules), per §8's S1/S3 shared-dataset-code precedent.
+
+### 9.3 d1 — Writes
+
+| ID | Scenario | What it stresses | Rust-advantage claim under test |
+|---|---|---|---|
+| d1 | **DB writes** — an N-row batched insert inside one transaction, repeated, plus M single-row autocommit inserts, repeated | transactional batch-insert throughput vs per-call autocommit overhead | `frust-database`'s in-process call path vs each Flutter DB adapter's boundary (§9.7) |
+
+- Sizes (declared convention): `BATCH_N = 2,000` rows per `insert_batch`
+  transaction, `BATCH_REPS = 10` reps per run (each rep drops-and-recreates
+  the table first, so batch cost is never inflated by a growing table
+  across reps within a run); `SINGLE_M = 500` single-row autocommit
+  `insert_single` ops per run, into a table dropped-and-recreated once at
+  the start of that phase.
+- Each run performs, in order: drop/recreate table → `BATCH_REPS` ×
+  `insert_batch` (fresh empty table each rep) → drop/recreate table once
+  → `SINGLE_M` × `insert_single`.
+- Warmup discard (per run, mirrors S8's "first call... excluded as
+  warmup"): the first `insert_batch` sample and the first `insert_single`
+  sample of each run are excluded from percentile math (page-cache /
+  prepared-statement warmup), **in addition to** §4's first-2-runs
+  discard.
+- Markers: `bench-scenario-start d1` / `-end d1` bracket the whole
+  scenario; `d1-insert-batch` / `d1-insert-single` bracket each phase
+  (mirrors S8's `s8-write`/`s8-read` phase markers and S3's `s3-*`
+  sub-marker convention).
+- Per-op lines (§7's canonical contract):
+
+  ```
+  <app>-perf op scenario=d1 op=insert_batch n=<u64> us=<u64> err=<0|1> rows=<BATCH_N>
+  <app>-perf op scenario=d1 op=insert_single n=<u64> us=<u64> err=<0|1>
+  ```
+
+  `rows` on `insert_batch` records how many rows that one transaction
+  covered (always `BATCH_N` today, carried explicitly rather than assumed,
+  so a future variable-batch-size variant doesn't silently change the
+  contract).
+- `err`: `1` if the transaction/insert raised an error (`Result::Err` /
+  thrown exception), else `0`. d1 does **not** read back and verify its
+  own writes (that is d2's job) — `err` here is purely "did the write
+  itself fail."
+
+### 9.4 d2 — Reads
+
+| ID | Scenario | What it stresses | Rust-advantage claim under test |
+|---|---|---|---|
+| d2 | **DB reads** — point SELECT by primary key over a pre-seeded table, repeated, plus one range scan | point-lookup latency + sequential-scan throughput | same as d1: in-process call path vs each Flutter DB adapter's boundary (§9.7) |
+
+- Pre-seed (untimed setup, once per run): `SEED_ROWS = 50,000` rows loaded
+  via the §9.2 generator before the timed phase starts — the seed load
+  itself is never included in a `select_point`/`range_scan` `us` value.
+- `POINT_M = 500` point `select_point` ops per run, one row each, key
+  drawn from a fixed deterministic permutation of `0..SEED_ROWS` (seed =
+  424242, same per-index draw order on both apps — mirrors S1's declared
+  RNG-draw-order convention, §8's S1-specific notes) so both apps hit the
+  identical key sequence.
+- One `range_scan` op per run: `WHERE id BETWEEN 10000 AND 14999`
+  (`RANGE_SPAN = 5,000` rows, a fixed declared offset/span, no per-run
+  randomization), fully iterated (every returned row actually
+  read/consumed inside the timed window, not just the first), timed as
+  one op line covering the whole scan.
+- Verification: each `select_point` (and the `range_scan`, by checking its
+  row count and a spot-check of its first/last row) compares its result
+  against the value the §9.2 generator deterministically produces for
+  that `id` — a mismatch or unexpected-empty result sets `err=1`,
+  mirroring S8's `read_unexpected_none`/`read_value_mismatch` split
+  (tallied the same way, into a `d2-errors` marker).
+- Warmup discard: the first `select_point` sample of each run is excluded
+  (mirrors d1/S8). `range_scan` is **not** warmup-excluded — it is the
+  scenario's only per-run sample of that op, and excluding it would leave
+  zero; this small-N caveat (10 kept-run samples for `range_scan`, vs
+  `POINT_M`-scale for `select_point`) is recorded plainly rather than
+  hidden.
+- Markers: `bench-scenario-start d2` / `-end d2` (whole scenario);
+  `d2-select-point` / `d2-range-scan` (phases).
+- Per-op lines:
+
+  ```
+  <app>-perf op scenario=d2 op=select_point n=<u64> us=<u64> err=<0|1>
+  <app>-perf op scenario=d2 op=range_scan n=<u64> us=<u64> err=<0|1> rows=<matched-row-count>
+  ```
+
+### 9.5 Run count, warmup, cooldown
+
+Same as §3/§4, applied identically to d1/d2 — no separate convention:
+**≥10 runs** per scenario per app per device, **first 2 discarded**, the
+same environmental controls and thermal-cooldown gate between runs. There
+is no 30-second wall-clock target for a d-class run the way there is for a
+frame-class scenario (§4) — a d-class run's duration is whatever the
+declared iteration counts in §9.3/§9.4 take; both apps run the identical
+iteration counts, so run-to-run and cross-app duration variance is itself
+informative, not controlled to a fixed window.
+
+### 9.6 Statistics
+
+Per scenario, per app, per device, `stats.py` (extended by the harness
+task — see §7's methodology-deviations note) reports, over the kept runs'
+`us` values for each `op` name:
+
+- **p50 / p95 / p99 op latency (µs)** — nearest-rank percentile, the same
+  math as §5's frame percentiles, computed over the op-line series
+  instead of the frame series.
+- **ops/s** — `kept-sample-count ÷ (Σ us of kept samples ÷ 1e6)`: a
+  declared throughput figure assuming back-to-back execution (no
+  external wall-clock timestamp exists in a marker line to measure real
+  elapsed phase time instead — §7). This is a bound on achievable
+  throughput under the scenario's access pattern, not an observed
+  wall-clock rate.
+
+### 9.7 Fairness stance (declared convention)
+
+Frust column: **`frust-database`** — in-process `rusqlite`, **bundled
+SQLite 3.53.2** (version-pinned per this repo's Version-Pin Policy,
+`docs/DEVELOPMENT.md`). A **`turso`** column is added later, run through
+the identical d1/d2 scenarios, once that backend lands — same scenarios,
+same row shape, no separate protocol.
+
+Flutter columns — **two adapters, not one**, because "the" idiomatic
+Flutter SQLite story is itself split:
+
+- **`package:sqlite3` ≥3.5** — in-process FFI, bundles **SQLite 3.53.4**.
+  This is the **engine-parity column**: the closest apples-to-apples
+  comparison against `frust-database`'s in-process bundled-engine model.
+- **`sqflite`** — platform channel to the OS-provided SQLite, version
+  device-variable (recorded per run in `RESULTS.md`, same as every other
+  per-run environment fact). This is the **ecosystem-typical column**:
+  what most shipping Flutter apps actually use.
+- **Never `sqlite3_flutter_libs`** — deprecated no-op since 0.6.0+eol; a
+  benchmark run that pulled it in without noticing would silently fall
+  back to whatever `sqflite`/`package:sqlite3` already resolves, an
+  invisible fairness bug. Its absence from `pubspec.yaml` is checked the
+  same way S8's plugin-choice fairness rule is checked (§8's S8-specific
+  fairness rules) — a claimed violation must point at a line of
+  `pubspec.yaml`.
+
+Each side's exact SQLite version actually linked is recorded per run in
+`RESULTS.md` (not assumed from a package's declared minimum) — the same
+per-run-environment-fact discipline as every device metadata block
+already in that file.
+
+## 10. Reporting
 
 `RESULTS.md` (this directory) is the per-device × per-scenario results
 template this protocol feeds. Every published number must:

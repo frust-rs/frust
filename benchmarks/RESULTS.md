@@ -307,6 +307,15 @@ run this pass (deviation 4).
    cost (~10.4ms S2) or the governor's chosen cadence bounds the loop; all
    percentile math is per-frame and budget-referenced, unaffected by the
    attempted rate. Flutter's S1 similarly ran ~108fps.
+10. **S8 per-op numbers predate shared-script parsing.** The per-op
+    medians in the S8 table above were computed outside `stats.py` — the
+    shared script has never parsed a per-op `plugin`/`op` line (PROTOCOL
+    §7's per-op-line-format methodology-deviations note), only `*-perf
+    raw` frame lines and `bench-scenario-*` markers. Reconciling S8's
+    per-op parsing into the shared script is the harness task's job;
+    these numbers remain individually reproducible from the committed raw
+    logs but were not run through the single shared statistics script §5
+    otherwise mandates.
 
 ---
 
@@ -592,6 +601,12 @@ reproducing the retired iPhone series' ~13–30× at full-form sample counts.
     and the S5 mid-scroll parity eyeball could not be performed; deferred
     to the user. Plausibility was gated on frame-line counts, layout-health
     (`layout_us > 0`), marker structure, and cross-run uniformity instead.
+14. **S8 per-op numbers predate shared-script parsing.** As on every other
+    device, the S8 per-op medians above were computed outside `stats.py` —
+    the shared script has never parsed a per-op `plugin`/`op` line
+    (PROTOCOL §7's per-op-line-format methodology-deviations note), only
+    `*-perf raw` frame lines and `bench-scenario-*` markers. Reconciling
+    S8's per-op parsing into the shared script is the harness task's job.
 
 ---
 
@@ -911,6 +926,13 @@ run this pass (deviation 3).
    ~64.5fps, S2 ~60fps, S3 ~66fps, S5 ~48fps, S6 ~104fps; Flutter's S1 runs
    ~101.5fps and S5 ~112fps despite the 120Hz panel mode. Percentile math
    is per-frame and budget-referenced.
+10. **S8 per-op numbers predate shared-script parsing.** As on every
+    other device, the S8 per-op medians above were computed outside
+    `stats.py` — the shared script has never parsed a per-op `plugin`/`op`
+    line (PROTOCOL §7's per-op-line-format methodology-deviations note),
+    only `*-perf raw` frame lines and `bench-scenario-*` markers.
+    Reconciling S8's per-op parsing into the shared script is the harness
+    task's job.
 
 ### Cross-pass notes (vs this device's retired pre-reset series)
 
@@ -986,3 +1008,34 @@ break within ~3–7%; medians and raw-cadence comparisons against
 pre-2026-07-23 rows are invalid without a same-code release reference,
 which release-lean makes impossible by design — use the HUD presented-fps
 figure (parity) for mode-only questions.**
+
+---
+
+## DB scenarios (`d1`/`d2`) — no runs recorded yet
+
+`PROTOCOL.md` §9 specifies the `d*` scenario class: op-latency DB
+benchmarks distinct from the frame-class `s1..s8` table above — `d1`
+(batched-transaction + autocommit writes) and `d2` (point SELECT + range
+scan), both against the fixed row shape and deterministic seed dataset
+in PROTOCOL §9.2, and both speaking §7's per-op raw-line contract.
+
+**No device has run this matrix pass yet.** Per this file's own
+discipline (see the top of this file): a scenario or device with no
+completed runs is omitted here, not filled with placeholder numbers — so
+this section carries no table and no figures. Once a `d*` pass is
+captured, this section gains one subsection per device (mirroring the
+S1–S8 device blocks above), each carrying:
+
+- Three columns: Frust `frust-database` (in-process `rusqlite`), Flutter
+  `package:sqlite3` (engine-parity, in-process FFI), and Flutter
+  `sqflite` (ecosystem-typical, platform channel) — PROTOCOL §9.7. A
+  fourth `frust-database` (`turso`) column is added later, once that
+  backend lands.
+- A `d1` table: `insert_batch` / `insert_single` p50/p95/p99 op latency
+  (µs) + ops/s (PROTOCOL §9.3, §9.6).
+- A `d2` table: `select_point` / `range_scan` p50/p95/p99 op latency
+  (µs) + ops/s (PROTOCOL §9.4, §9.6).
+- Each side's exact linked SQLite version, recorded per run (not assumed
+  from a package's declared minimum — PROTOCOL §9.7).
+- A methodology-deviations subsection, same discipline as every device
+  block above.
