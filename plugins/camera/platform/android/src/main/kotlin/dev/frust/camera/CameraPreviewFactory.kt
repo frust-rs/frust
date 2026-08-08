@@ -153,10 +153,33 @@ private const val NO_SESSION = -1
  * input becoming available, whatever the order, and costs one boolean read per
  * frame once it has.
  *
+ * **First draw.** A [TextureView] gets its first camera frame onto the screen
+ * through exactly one edge: the [SurfaceTexture]'s frame-available callback
+ * marks the view's layer dirty and calls `invalidate()`, and the *window
+ * traversal* that follows is what runs `updateTexImage` — and only then reports
+ * [TextureView.SurfaceTextureListener.onSurfaceTextureUpdated]. `View.invalidate()`
+ * is single-shot: a view already flagged invalidated returns without touching
+ * its parent at all, so if that one traversal never happens, no *later* camera
+ * frame can ask for another one either. The slot then stays black permanently
+ * while the session streams into it perfectly happily — which is exactly the
+ * shape this preview hit on device, hand-over complete and not one frame drawn.
+ * An ordinary app never notices the fragility, because its own scrolls, ripples
+ * and animations redraw the window constantly; frust does, because it paints
+ * into its own surface on its own frame loop and never touches the view
+ * hierarchy, so once a slot is mounted the window has *no other reason to
+ * redraw* and a single lost redraw is forever. [armFirstFrameKick] is the belt:
+ * a bounded main-thread watchdog that damages the window itself (via the
+ * parent's `onDescendantInvalidated`, which — unlike `invalidate()` — is not
+ * gated on the view's own dirty flags) until a frame is proven drawn, then
+ * retires. It is armed per hand-over, so a re-attach gets a fresh one, and it
+ * costs nothing on the happy path: the first frame normally lands inside its
+ * grace period and disarms it before it ever ticks.
+ *
  * All callbacks land on the main thread ([FrustCameraHost.mainExecutor] runs
  * inline there, `Preview.setSurfaceProvider(provider)`'s single-argument
- * overload dispatches on it, and a [TextureView.SurfaceTextureListener] is
- * called from the view hierarchy), so no synchronization is needed.
+ * overload dispatches on it, a [TextureView.SurfaceTextureListener] is called
+ * from the view hierarchy, and [armFirstFrameKick] posts through this view), so
+ * no synchronization is needed.
  */
 internal class CameraPreviewView(context: Context) : FrameLayout(context), Preview.SurfaceProvider {
     private val textureView = TextureView(context)
@@ -204,8 +227,62 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
     /** Reused by [applyTransform]; every op below is a `set`/`post`, never additive. */
     private val transformMatrix = Matrix()
 
+    /**
+     * Whether the [TextureView] has drawn a camera frame for the CURRENT
+     * hand-over. Cleared at every hand-over and set by the first
+     * `onSurfaceTextureUpdated` — the only callback that proves a buffer
+     * actually reached the screen, and what retires [firstFrameKick].
+     */
+    private var firstFrameDrawn = false
+
+    /** Kicks [firstFrameKick] has left before it gives up; 0 = not armed. */
+    private var firstFrameKicksLeft = 0
+
+    /**
+     * The first-draw watchdog (class doc's *First draw*). Each tick asks the
+     * window for a redraw the [TextureView]'s own `invalidate()` can no longer
+     * ask for, so a frame already sitting in the texture is consumed on the next
+     * traversal instead of never.
+     */
+    private val firstFrameKick = object : Runnable {
+        override fun run() {
+            // Disarmed by everything that ends a hand-over, so these are belts
+            // against a tick already in the queue when that happened.
+            if (firstFrameDrawn || providedTexture == null) return
+            if (firstFrameKicksLeft <= 0) {
+                // Not the invalidate path failing, then: nothing is arriving on
+                // this texture at all. The hand-over and transform lines above
+                // say which of the two halves got as far as it should have.
+                Log.w(
+                    TAG,
+                    "frust-camera: preview slot drew no camera frame within " +
+                        "${FIRST_FRAME_GRACE_MS + FIRST_FRAME_KICKS * FIRST_FRAME_KICK_MS}ms " +
+                        "of hand-over (buffer $requestedResolution, slot " +
+                        "${this@CameraPreviewView.width}x${this@CameraPreviewView.height})",
+                )
+                return
+            }
+            firstFrameKicksLeft--
+            // Flag the TextureView so the traversal re-records it (its draw is
+            // what calls `updateTexImage`)...
+            textureView.invalidate()
+            // ...then damage the window unconditionally, so that traversal
+            // happens. `invalidate()` alone cannot: a view already flagged
+            // invalidated — precisely the wedged state — drops the call.
+            this@CameraPreviewView.parent?.onDescendantInvalidated(
+                this@CameraPreviewView,
+                textureView,
+            )
+            this@CameraPreviewView.postDelayed(this, FIRST_FRAME_KICK_MS)
+        }
+    }
+
     private val textureListener = object : TextureView.SurfaceTextureListener {
         override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+            // Once per texture, i.e. once per attach — the head of the four-line
+            // trail (available → handed over → transform applied → first frame
+            // drawn) that says how far a black slot got.
+            Log.d(TAG, "frust-camera: preview texture available (${width}x$height)")
             surfaceTexture = surface
             tryProvideSurface()
         }
@@ -248,10 +325,24 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
         override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
             // Per camera frame, and deliberately almost empty: the TextureView
             // has already scheduled its own redraw and nothing here depends on
-            // frame timing. The one thing that does is a transform still owed —
-            // this is the only tick guaranteed to keep coming while the inputs
-            // it needs settle, so it retries until the transform applies. The
-            // flag is tested first: once it has, a frame costs one bool read.
+            // frame timing. Both flags are tested first, so a converged frame
+            // costs two bool reads.
+            //
+            // Reaching here at all is the proof the class doc's *First draw*
+            // wants — `updateTexImage` ran, so a buffer is on screen — and it
+            // is what retires the watchdog.
+            if (!firstFrameDrawn && surface === providedTexture) {
+                firstFrameDrawn = true
+                disarmFirstFrameKick()
+                Log.d(
+                    TAG,
+                    "frust-camera: first preview frame drawn (buffer $requestedResolution, " +
+                        "slot ${this@CameraPreviewView.width}x${this@CameraPreviewView.height})",
+                )
+            }
+            // The other thing that depends on this tick is a transform still
+            // owed — the only tick guaranteed to keep coming while the inputs it
+            // needs settle, so it retries until the transform applies.
             if (transformPending && surface === providedTexture) applyTransform()
         }
     }
@@ -331,6 +422,17 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
         // the request waiting here is served the moment the gate clears.
         if (providedSurface != null) return
 
+        // Identity, checked rather than assumed: the whole hand-over is
+        // pointless if the camera streams into a texture the view has stopped
+        // displaying, and that failure is invisible — a permanently black slot
+        // with a healthy CameraX session behind it. `getSurfaceTexture` is a
+        // plain field read, so this rides every hand-over rather than a debug
+        // flag. Diverging is a bug in the destroy/re-provide bookkeeping below,
+        // not something to paper over here, so it logs and proceeds.
+        if (textureView.surfaceTexture !== texture) {
+            Log.w(TAG, "frust-camera: preview hand-over texture is not the one on display")
+        }
+
         // The camera writes at ITS resolution, so the texture must agree before
         // the Surface is built (`onSurfaceTextureSizeChanged` restates it) —
         // handing over a wrongly-sized surface is the classic
@@ -349,6 +451,14 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
         // The buffer on screen is this one from now on, so the transform that
         // undoes its stretch is recomputed against it.
         requestedResolution = resolution
+        // Same rule: armed before the call, so an inline re-drive re-arms it for
+        // whatever hand-over replaces this one rather than losing the watchdog.
+        armFirstFrameKick()
+        Log.d(
+            TAG,
+            "frust-camera: preview surface handed to CameraX " +
+                "(buffer ${resolution.width}x${resolution.height}, slot ${width}x$height)",
+        )
         applyTransform()
         request.provideSurface(surface, FrustCameraHost.mainExecutor) { result ->
             // This view built the Surface, so this view releases it — the
@@ -364,6 +474,9 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
                 // the retry only fires for the texture actually handed over, so
                 // whatever surface replaces this one starts owing an apply.
                 transformPending = true
+                // Nothing left to watch for; the re-drive below arms the next
+                // hand-over's own watchdog.
+                disarmFirstFrameKick()
             }
             if (detachedTexture === texture) {
                 detachedTexture = null
@@ -407,6 +520,41 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
         // Nothing is owed with no inputs left to compute from; `bindSession`
         // re-arms for the next session, so the flag never crosses one.
         transformPending = false
+        // Same: no hand-over left to watch, and the next one arms its own.
+        disarmFirstFrameKick()
+    }
+
+    // --- First-draw watchdog -----------------------------------------------
+
+    /**
+     * Start watching this hand-over for its first drawn frame (class doc's
+     * *First draw*). The grace period is what keeps the happy path free: a
+     * camera that starts streaming normally reports its first frame — and
+     * disarms this — before the first kick is ever due.
+     */
+    private fun armFirstFrameKick() {
+        firstFrameDrawn = false
+        firstFrameKicksLeft = FIRST_FRAME_KICKS
+        removeCallbacks(firstFrameKick)
+        postDelayed(firstFrameKick, FIRST_FRAME_GRACE_MS)
+    }
+
+    /** Stop the watchdog: the frame arrived, or there is no hand-over left. */
+    private fun disarmFirstFrameKick() {
+        firstFrameKicksLeft = 0
+        removeCallbacks(firstFrameKick)
+    }
+
+    override fun onDetachedFromWindow() {
+        // Nothing can draw while detached, and a re-attach destroys the texture
+        // and re-hands-over — which arms a fresh watchdog of its own.
+        //
+        // BEFORE super, not after: `removeCallbacks` can only reach an already
+        // posted tick through the view's attach info, and the detach dispatch
+        // clears that on the way out. Disarming afterwards would leave the tick
+        // in the main queue to fire against a detached view.
+        disarmFirstFrameKick()
+        super.onDetachedFromWindow()
     }
 
     // --- Transform ---------------------------------------------------------
@@ -501,6 +649,19 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
         transformMatrix.postTranslate(slotWidth / 2.0f, slotHeight / 2.0f)
         textureView.setTransform(transformMatrix)
         transformPending = false
+        // `setTransform` only marks the matrix dirty and damages this view's
+        // PARENT; the layer picks the matrix up on the TextureView's own next
+        // draw, which — class doc's *First draw* — is exactly what nothing else
+        // here guarantees. Bounded: an apply that reaches this line clears
+        // `transformPending`, so the retry stops driving it.
+        textureView.invalidate()
+        // The inputs of the matrix actually on screen, once per convergence.
+        Log.d(
+            TAG,
+            "frust-camera: preview transform applied (buffer " +
+                "${resolution.width}x${resolution.height}, crop $crop, rotation " +
+                "$rotationDegrees, mirrored ${info.isMirroring}, slot ${slotWidth}x$slotHeight)",
+        )
 
         if (sessionId != NO_SESSION) {
             FrustCameraHost.setPreviewAspectRatio(
@@ -512,5 +673,24 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
 
     private companion object {
         const val TAG = "frust"
+
+        /**
+         * How long a hand-over is left alone before the first-draw watchdog
+         * starts kicking. A camera that streams normally puts its first frame up
+         * well inside this, so the watchdog costs a healthy preview nothing at
+         * all; it is long enough that a slow first frame does not buy a burst of
+         * pointless window redraws either.
+         */
+        const val FIRST_FRAME_GRACE_MS = 250L
+
+        /** Roughly two display frames between kicks — a redraw ask, not a poll. */
+        const val FIRST_FRAME_KICK_MS = 33L
+
+        /**
+         * Kicks before the watchdog gives up and logs. With the two above that
+         * is ~2s of watching, past which the cause is no longer a lost redraw:
+         * no camera frame is reaching this texture at all.
+         */
+        const val FIRST_FRAME_KICKS = 53
     }
 }
