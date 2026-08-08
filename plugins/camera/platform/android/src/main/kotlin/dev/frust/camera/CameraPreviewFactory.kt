@@ -600,16 +600,24 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
      * steps — sized for a rotate-from-raw-buffer model — then throw the content
      * off the slot.
      *
-     * **The share still owed.** `rotationDegrees` is the clockwise rotation
-     * that makes the buffer upright *for the target rotation*, i.e. the display
-     * rotation this view pushes through [FrustCameraHost.setTargetRotation],
-     * and the stream contributes the display-independent sensor orientation —
-     * `rotationDegrees + targetRotation`. The remainder, all this matrix owes,
-     * is `-targetRotation`: **zero** while the slot is shown at the display's
-     * natural rotation (the common case), a real quarter/half turn once the
-     * device is rotated, and the *full* `rotationDegrees` for a buffer carrying
-     * no camera transform at all (`hasCameraTransform()`, false only behind an
-     * effect/processor pipeline, which this plugin never builds).
+     * **The share still owed — device-corrected.** The CameraX-arithmetic
+     * argument was that `rotationDegrees` (the clockwise rotation that makes
+     * the buffer upright for the target rotation) splits into a
+     * display-independent stream share, `rotationDegrees + targetRotation`,
+     * and a display-dependent remainder this matrix owes, `-targetRotation`:
+     * zero at the natural rotation, a real turn once rotated. A landscape
+     * reading on device refuted that derivation: with a camera transform the
+     * [SurfaceTexture]'s own stream transform already uprights the buffer for
+     * the CURRENT display orientation, whatever that orientation is — the
+     * stream carries the *full* `rotationDegrees`, not just the sensor share —
+     * so this matrix owes **zero** in every display rotation, not only the
+     * natural one, and `targetRotation` plays no further part here (CameraX
+     * still needs it, fed through [FrustCameraHost.setTargetRotation], because
+     * it is what makes `rotationDegrees` itself track the display). The one
+     * case still owed the full `rotationDegrees` is a buffer with no camera
+     * transform at all (`hasCameraTransform()` false, only behind an
+     * effect/processor pipeline, which this plugin never builds) — there is no
+     * stream transform to already have uprighted anything.
      *
      * Everything after that split works in **stream-content** pixels — the
      * buffer as the stream transform leaves it — so the buffer size and crop
@@ -617,15 +625,17 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
      * i.e. applied in the order written, and content mapped outside the view's
      * bounds is not drawn, which is exactly the centre-crop trim.
      *
-     * Geometry check, 4:3 buffer on a sensor-90 phone. Portrait
-     * (`rotationDegrees` 90, target 0, nothing owed here): upright content is
-     * 3:4, so a 1:1 slot fills on width and trims ~17% off each of top and
-     * bottom, a 3:4 slot maps exactly, a 9:16 slot fills on height and trims
-     * the sides. Landscape (`rotationDegrees` 0, target 90, a 270° turn owed):
-     * upright content is 4:3, so a 1:1 slot fills on height and trims the
-     * sides, a 4:3 slot maps exactly. No slot aspect letterboxes, none can
-     * paint outside the slot, and a mirrored front lens changes no extent —
-     * only which side of the slot each column lands on.
+     * Geometry check, 4:3 buffer on a sensor-90 phone (device-observed).
+     * Portrait (`rotationDegrees` 90, the stream carries it all, nothing owed
+     * here): upright content is 3:4, so a 1:1 slot fills on width and trims
+     * ~17% off each of top and bottom, a 3:4 slot maps exactly, a 9:16 slot
+     * fills on height and trims the sides. Landscape (`rotationDegrees` 0 —
+     * the stream is already the display's own upright frame, nothing owed
+     * here either): upright content is 4:3 as the buffer already sits, so a
+     * 1:1 slot fills on height and trims the sides, a 4:3 slot maps exactly.
+     * No slot aspect letterboxes, none can paint outside the slot, and a
+     * mirrored front lens changes no extent — only which side of the slot each
+     * column lands on.
      */
     private fun applyTransform() {
         // Armed ahead of the guards, cleared only once `setTransform` has run:
@@ -648,18 +658,14 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
         val cropCenterY =
             if (crop.height() > 0) crop.exactCenterY() else resolution.height / 2.0f
 
-        // The rotation split (see above): what the stream transform has already
-        // applied, and the remainder this matrix owes. `targetRotation` is read
-        // off the same `TransformationInfo` as `rotationDegrees` rather than off
-        // the live display, so the pair can never disagree about which rotation
-        // the buffer was measured against.
+        // The rotation split (see above, device-corrected): with a camera
+        // transform the stream already carries the full `rotationDegrees` —
+        // it tracks the CURRENT display orientation on its own — so this
+        // matrix owes nothing. Only a buffer with no camera transform at all
+        // still needs `rotationDegrees` applied here.
         val rotationDegrees = normalizedDegrees(info.rotationDegrees)
-        val streamDegrees = if (info.hasCameraTransform()) {
-            normalizedDegrees(rotationDegrees + surfaceRotationDegrees(info.targetRotation))
-        } else {
-            0
-        }
-        val ownDegrees = normalizedDegrees(rotationDegrees - streamDegrees)
+        val streamDegrees = if (info.hasCameraTransform()) rotationDegrees else 0
+        val ownDegrees = if (info.hasCameraTransform()) 0 else rotationDegrees
 
         // Buffer and crop as the stream transform leaves them on screen: a
         // quarter turn swaps both extents and carries the crop centre with it
@@ -747,18 +753,6 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
 
     /** Clockwise degrees in `[0, 360)`, for a value that may be either sign. */
     private fun normalizedDegrees(degrees: Int): Int = ((degrees % 360) + 360) % 360
-
-    /**
-     * A `Surface.ROTATION_*` constant as clockwise degrees. An unrecognized
-     * value degrades to the natural rotation rather than throwing (CameraX's own
-     * helper throws): a preview that is merely rotated beats a crashed slot.
-     */
-    private fun surfaceRotationDegrees(rotation: Int): Int = when (rotation) {
-        Surface.ROTATION_90 -> 90
-        Surface.ROTATION_180 -> 180
-        Surface.ROTATION_270 -> 270
-        else -> 0
-    }
 
     private companion object {
         const val TAG = "frust"
