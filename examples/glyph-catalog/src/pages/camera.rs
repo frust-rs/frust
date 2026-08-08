@@ -244,6 +244,8 @@ impl Component for CameraPage {
             let cell = session_cell.clone();
             on_cleanup(move || {
                 if let Some(session) = cell.lock().expect("session cell poisoned").take() {
+                    // Blocking `close()` on the UI thread — same demo-scope
+                    // caveat as `switch_lens_handler`'s doc comment.
                     session.close();
                 }
             });
@@ -523,11 +525,12 @@ fn retry_permission_handler(state: &mut CameraPageState) {
 /// `let...else` below), matching this control's "disabled (or a no-op)
 /// while no session exists" contract.
 ///
-/// `Camera::open` isn't itself one of the crate's two blocking calls (only
-/// [`Camera::request_permission`]/[`CameraSession::take_picture`] are — the
-/// crate's own Blocking API table); [`CameraPage::build`]'s open branch
-/// already calls it directly on the UI thread for the very first open, so
-/// reopening the same way here adds no second blocking call.
+/// `Camera::open` isn't a blocking call, so reopening on the UI thread here
+/// mirrors [`CameraPage::build`]'s first open. `session.close()` below IS one
+/// — the third row of the crate's Blocking API table — and can park briefly
+/// behind an in-flight session-queue op (e.g. a just-issued stream start).
+/// Accepted as a demo-scope simplification; a production consumer routes
+/// `close()` through `spawn_blocking`.
 fn switch_lens_handler(state: &mut CameraPageState) {
     let outgoing = state
         .session_cell
