@@ -98,7 +98,9 @@ private const val NO_SESSION = -1
  * spilling over surrounding chrome by the overflow of its buffer aspect. A
  * [TextureView] draws through the view hierarchy instead, so its content is
  * bounded by its own frame: it is laid out `MATCH_PARENT` here (frame == slot,
- * always) and the entire crop is a content matrix ([applyTransform]). That is
+ * always) and the entire crop is a content matrix ([applyTransform]) — one that
+ * *composes with* the camera stream's own transform rather than replacing it,
+ * which is the whole of that method's subtlety. That is
  * the shape the iOS side has always had — an `AVCaptureVideoPreviewLayer`
  * pinned to the view's bounds with `resizeAspectFill` — and it makes the
  * host's per-frame `clipBounds` real rather than advisory, so a slot half
@@ -577,29 +579,53 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
     }
 
     /**
-     * Map the camera buffer's crop rect onto this slot: rotate it upright,
-     * scale it to FILL the slot (centre-crop, the preview convention), mirror
-     * it for a front lens, and re-centre the crop — as a [TextureView] content
-     * matrix, so the fill's overflow is simply not drawn instead of spilling
-     * past the slot.
+     * Map the camera buffer's crop rect onto this slot: finish the rotation the
+     * [TextureView] has already part-applied, undo the stretch, scale to FILL
+     * the slot (centre-crop, the preview convention), mirror a front lens, and
+     * re-centre the crop — as a [TextureView] content matrix, so the fill's
+     * overflow is simply not drawn instead of spilling past the slot.
      *
-     * A [TextureView] draws its texture stretched across its own bounds, and
-     * `setTransform`'s matrix is then applied in view coordinates. So the
-     * matrix undoes that stretch first (step 1), which leaves the remaining
-     * steps working in plain buffer pixels; each is a `post` op, i.e. applied
-     * in the order written. Content mapped outside the view's bounds is not
-     * drawn, which is exactly the centre-crop trim.
+     * **What an identity matrix already shows.** `setTransform`'s matrix does
+     * not replace the stream's transform, it composes on top of it: a
+     * [TextureView] always applies the [SurfaceTexture]'s own transform
+     * ([SurfaceTexture.getTransformMatrix]) first, and a camera buffer carries
+     * the camera's sensor-to-natural-orientation rotation in it (90° on a
+     * typical phone). So with an identity matrix the slot already shows the
+     * buffer *rotated by the sensor orientation*, stretched across the view's
+     * bounds — which is why the platform's own `TextureView` camera recipe sets
+     * no matrix at all on a device held at its natural rotation, and why
+     * CameraX's `PreviewView` corrects a `TextureView` by minus its TARGET
+     * rotation instead of rotating by `rotationDegrees`. Rotating by
+     * `rotationDegrees` here too is a double rotation, and the surrounding
+     * steps — sized for a rotate-from-raw-buffer model — then throw the content
+     * off the slot.
      *
-     * Geometry check against a 4:3 buffer, portrait device (`rotationDegrees`
-     * 90, upright 3:4): a 1:1 slot fills on width and overflows ~33% of its
-     * height, trimmed evenly top and bottom; a 3:4 slot maps 1:1 with no trim;
-     * a 9:16 slot fills on height and trims the sides. Landscape (rotation 0,
-     * upright 4:3) mirrors that — a 16:9 slot fills on width and trims top and
-     * bottom. No slot aspect letterboxes, and none can paint outside the slot.
+     * **The share still owed.** `rotationDegrees` is the clockwise rotation
+     * that makes the buffer upright *for the target rotation*, i.e. the display
+     * rotation this view pushes through [FrustCameraHost.setTargetRotation],
+     * and the stream contributes the display-independent sensor orientation —
+     * `rotationDegrees + targetRotation`. The remainder, all this matrix owes,
+     * is `-targetRotation`: **zero** while the slot is shown at the display's
+     * natural rotation (the common case), a real quarter/half turn once the
+     * device is rotated, and the *full* `rotationDegrees` for a buffer carrying
+     * no camera transform at all (`hasCameraTransform()`, false only behind an
+     * effect/processor pipeline, which this plugin never builds).
      *
-     * The matrix shape follows CameraX's own `PreviewView` transform and the
-     * platform `TextureView` preview recipe; correctness lands at the device
-     * gate (both orientations + front-camera mirroring).
+     * Everything after that split works in **stream-content** pixels — the
+     * buffer as the stream transform leaves it — so the buffer size and crop
+     * rect are carried through that rotation first. Each step is a `post` op,
+     * i.e. applied in the order written, and content mapped outside the view's
+     * bounds is not drawn, which is exactly the centre-crop trim.
+     *
+     * Geometry check, 4:3 buffer on a sensor-90 phone. Portrait
+     * (`rotationDegrees` 90, target 0, nothing owed here): upright content is
+     * 3:4, so a 1:1 slot fills on width and trims ~17% off each of top and
+     * bottom, a 3:4 slot maps exactly, a 9:16 slot fills on height and trims
+     * the sides. Landscape (`rotationDegrees` 0, target 90, a 270° turn owed):
+     * upright content is 4:3, so a 1:1 slot fills on height and trims the
+     * sides, a 4:3 slot maps exactly. No slot aspect letterboxes, none can
+     * paint outside the slot, and a mirrored front lens changes no extent —
+     * only which side of the slot each column lands on.
      */
     private fun applyTransform() {
         // Armed ahead of the guards, cleared only once `setTransform` has run:
@@ -622,10 +648,49 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
         val cropCenterY =
             if (crop.height() > 0) crop.exactCenterY() else resolution.height / 2.0f
 
-        val rotationDegrees = ((info.rotationDegrees % 360) + 360) % 360
-        val quarterTurned = rotationDegrees == 90 || rotationDegrees == 270
-        val uprightWidth = if (quarterTurned) cropHeight else cropWidth
-        val uprightHeight = if (quarterTurned) cropWidth else cropHeight
+        // The rotation split (see above): what the stream transform has already
+        // applied, and the remainder this matrix owes. `targetRotation` is read
+        // off the same `TransformationInfo` as `rotationDegrees` rather than off
+        // the live display, so the pair can never disagree about which rotation
+        // the buffer was measured against.
+        val rotationDegrees = normalizedDegrees(info.rotationDegrees)
+        val streamDegrees = if (info.hasCameraTransform()) {
+            normalizedDegrees(rotationDegrees + surfaceRotationDegrees(info.targetRotation))
+        } else {
+            0
+        }
+        val ownDegrees = normalizedDegrees(rotationDegrees - streamDegrees)
+
+        // Buffer and crop as the stream transform leaves them on screen: a
+        // quarter turn swaps both extents and carries the crop centre with it
+        // (each case below is that rotation about the origin, then the shift
+        // that puts the rotated buffer's corner back at the origin).
+        val streamQuarterTurn = streamDegrees == 90 || streamDegrees == 270
+        val streamWidth = if (streamQuarterTurn) resolution.height else resolution.width
+        val streamHeight = if (streamQuarterTurn) resolution.width else resolution.height
+        val streamCropWidth = if (streamQuarterTurn) cropHeight else cropWidth
+        val streamCropHeight = if (streamQuarterTurn) cropWidth else cropHeight
+        val streamCropCenterX = when (streamDegrees) {
+            90 -> resolution.height - cropCenterY
+            180 -> resolution.width - cropCenterX
+            270 -> cropCenterY
+            else -> cropCenterX
+        }
+        val streamCropCenterY = when (streamDegrees) {
+            90 -> cropCenterX
+            180 -> resolution.height - cropCenterY
+            270 -> resolution.width - cropCenterX
+            else -> cropCenterY
+        }
+
+        // What the user ends up looking at, and the scale that fills the slot
+        // with it. `uprightWidth`/`uprightHeight` are the crop's extents after
+        // BOTH rotations, so they stay the crop swapped by `rotationDegrees`
+        // however that total is split — which is what the aspect ratio
+        // published below has always meant.
+        val ownQuarterTurn = ownDegrees == 90 || ownDegrees == 270
+        val uprightWidth = if (ownQuarterTurn) streamCropHeight else streamCropWidth
+        val uprightHeight = if (ownQuarterTurn) streamCropWidth else streamCropHeight
         if (uprightWidth <= 0 || uprightHeight <= 0) return
 
         val scale = max(
@@ -633,18 +698,22 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
             slotHeight.toFloat() / uprightHeight.toFloat(),
         )
 
-        // 1. Undo the default buffer→bounds stretch: view px become buffer px.
+        // 1. Undo the content→bounds stretch: view px become stream-content px.
         transformMatrix.setScale(
-            resolution.width.toFloat() / slotWidth.toFloat(),
-            resolution.height.toFloat() / slotHeight.toFloat(),
+            streamWidth.toFloat() / slotWidth.toFloat(),
+            streamHeight.toFloat() / slotHeight.toFloat(),
         )
         // 2. Origin on the crop centre, so every step below is about the crop.
-        transformMatrix.postTranslate(-cropCenterX, -cropCenterY)
-        // 3. Mirror a front lens, then rotate the buffer upright — both in
-        //    buffer space, the order the previous view-transform used.
+        transformMatrix.postTranslate(-streamCropCenterX, -streamCropCenterY)
+        // 3. Finish the rotation the stream transform started — no-op whenever
+        //    the slot is shown at the display's natural rotation.
+        if (ownDegrees != 0) transformMatrix.postRotate(ownDegrees.toFloat())
+        // 4. Mirror a front lens across the SCREEN's vertical axis, i.e. after
+        //    the rotation: `isMirroring` asks for a horizontal flip as
+        //    displayed, and flipping in buffer space instead lands as a
+        //    vertical one wherever the content is quarter-turned.
         if (info.isMirroring) transformMatrix.postScale(-1.0f, 1.0f)
-        transformMatrix.postRotate(rotationDegrees.toFloat())
-        // 4. Fill the slot (centre-crop) and re-centre on it.
+        // 5. Fill the slot (centre-crop) and re-centre on it.
         transformMatrix.postScale(scale, scale)
         transformMatrix.postTranslate(slotWidth / 2.0f, slotHeight / 2.0f)
         textureView.setTransform(transformMatrix)
@@ -655,12 +724,17 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
         // here guarantees. Bounded: an apply that reaches this line clears
         // `transformPending`, so the retry stops driving it.
         textureView.invalidate()
-        // The inputs of the matrix actually on screen, once per convergence.
+        // The inputs AND the result of the matrix actually on screen, once per
+        // convergence: the rotation split says how much of `rotation` the stream
+        // transform is carrying, and `upright`/`scale` are what a wrongly-placed
+        // preview is measured against.
         Log.d(
             TAG,
             "frust-camera: preview transform applied (buffer " +
                 "${resolution.width}x${resolution.height}, crop $crop, rotation " +
-                "$rotationDegrees, mirrored ${info.isMirroring}, slot ${slotWidth}x$slotHeight)",
+                "$rotationDegrees = stream $streamDegrees + own $ownDegrees, mirrored " +
+                "${info.isMirroring}, upright ${uprightWidth}x$uprightHeight, scale $scale, " +
+                "slot ${slotWidth}x$slotHeight)",
         )
 
         if (sessionId != NO_SESSION) {
@@ -669,6 +743,21 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
                 uprightWidth.toFloat() / uprightHeight.toFloat(),
             )
         }
+    }
+
+    /** Clockwise degrees in `[0, 360)`, for a value that may be either sign. */
+    private fun normalizedDegrees(degrees: Int): Int = ((degrees % 360) + 360) % 360
+
+    /**
+     * A `Surface.ROTATION_*` constant as clockwise degrees. An unrecognized
+     * value degrades to the natural rotation rather than throwing (CameraX's own
+     * helper throws): a preview that is merely rotated beats a crashed slot.
+     */
+    private fun surfaceRotationDegrees(rotation: Int): Int = when (rotation) {
+        Surface.ROTATION_90 -> 90
+        Surface.ROTATION_180 -> 180
+        Surface.ROTATION_270 -> 270
+        else -> 0
     }
 
     private companion object {
