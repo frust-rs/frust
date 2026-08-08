@@ -176,6 +176,25 @@ pub enum Contribution {
         /// to carry this.
         comment: &'static str,
     },
+    /// Enables a cargo feature on an already-contributed plugin dependency
+    /// line in the app's `Cargo.toml`.
+    ///
+    /// The dependency **must already exist** — a [`Contribution::CargoDep`]
+    /// for `name` applied by the same or an earlier contribution. Applying
+    /// this to a missing dep is [`PluginAddError::NoSuchCargoDep`], never a
+    /// silent dep creation (a feature with no base dependency line is a
+    /// registry bug, not something to paper over). The edit is
+    /// **idempotent**: re-applying pushes the feature into the dep's
+    /// `features` array only if it isn't already there, never duplicating
+    /// it.
+    CargoFeature {
+        /// The dependency name whose inline table gets a `features` entry —
+        /// must match a `name` already contributed via
+        /// [`Contribution::CargoDep`].
+        name: &'static str,
+        /// The cargo feature to enable, e.g. `"turso"`.
+        feature: &'static str,
+    },
 }
 
 impl Contribution {
@@ -196,6 +215,9 @@ impl Contribution {
             }
             Contribution::AppCrateMacro { invocation, .. } => {
                 format!("app crate `src/lib.rs` invocation `{invocation}`")
+            }
+            Contribution::CargoFeature { name, feature } => {
+                format!("Cargo.toml dependency `{name}` feature `{feature}`")
             }
         }
     }
@@ -298,4 +320,9 @@ pub enum PluginAddError {
     /// A filesystem write failed.
     #[error("writing `{path}`: {message}")]
     Io { path: String, message: String },
+    /// A [`Contribution::CargoFeature`] named a dependency with no existing
+    /// `[dependencies]` entry — a `CargoDep` contribution for that name must
+    /// apply first (in the same or an earlier `add_plugin` call).
+    #[error("no `[dependencies].{name}` entry to enable feature `{feature}` on")]
+    NoSuchCargoDep { name: String, feature: String },
 }
