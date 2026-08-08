@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.SurfaceTexture
+import android.hardware.display.DisplayManager
 import android.util.Log
 import android.util.Size
 import android.view.Surface
@@ -177,17 +178,55 @@ private const val NO_SESSION = -1
  * costs nothing on the happy path: the first frame normally lands inside its
  * grace period and disarms it before it ever ticks.
  *
+ * **Rotation tracking.** `targetRotation` is per-session state on
+ * [FrustCameraHost], not something CameraX re-reads on its own — a bind, an
+ * attach and a bounds resize each push the current [display]'s rotation once,
+ * but none of the three repeats while the slot just sits there, and a square
+ * slot's bounds never change size on a rotation at all. [displayListener] is
+ * what closes that gap: registered for as long as this view stays attached,
+ * it re-pushes [FrustCameraHost.setTargetRotation] whenever the tracked
+ * display's rotation actually changes, so a rotation while the preview is
+ * open converges on its own — a new `TransformationInfo` arrives on the
+ * request's listener (registered in [onSurfaceRequested]) and [applyTransform]
+ * re-runs against it, no reopen needed. [onSizeChanged] and
+ * [textureListener]'s `onSurfaceTextureSizeChanged` are belts for a resize
+ * that does land, and [applyTransform] itself re-reads [display] as the
+ * self-heal of last resort, since some OEMs are observed to skip
+ * `onDisplayChanged` for a rotation their Activity handles via
+ * `configChanges` alone. Every path shares [maybeSyncTargetRotation]'s
+ * last-sent compare, so the redundancy costs one field read and one
+ * comparison per call rather than a duplicate host round trip.
+ *
  * All callbacks land on the main thread ([FrustCameraHost.mainExecutor] runs
  * inline there, `Preview.setSurfaceProvider(provider)`'s single-argument
  * overload dispatches on it, a [TextureView.SurfaceTextureListener] is called
- * from the view hierarchy, and [armFirstFrameKick] posts through this view), so
- * no synchronization is needed.
+ * from the view hierarchy, [displayListener] is registered against this
+ * view's own [Handler][android.os.Handler] so it lands here too, and
+ * [armFirstFrameKick] posts through this view), so no synchronization is
+ * needed.
  */
 internal class CameraPreviewView(context: Context) : FrameLayout(context), Preview.SurfaceProvider {
     private val textureView = TextureView(context)
 
     /** The session this slot is showing, or [NO_SESSION]. */
     private var sessionId: Int = NO_SESSION
+
+    /**
+     * Non-null while attached ([onAttachedToWindow] registers [displayListener]
+     * against it, [onDetachedFromWindow] unregisters and clears it) — the
+     * source [displayListener] rides for the rest of this slot's rotation
+     * tracking.
+     */
+    private var displayManager: DisplayManager? = null
+
+    /**
+     * The last `Surface.ROTATION_*` value [maybeSyncTargetRotation] sent to
+     * [FrustCameraHost] for the [sessionId] currently bound, or null before
+     * anything has been sent for it. Every rotation-tracking path (bind,
+     * attach, [displayListener], a resize, [applyTransform]'s self-heal)
+     * compares against this rather than resending unconditionally.
+     */
+    private var lastSentRotation: Int? = null
 
     /** A request whose surface has not been handed over yet; it waits for one. */
     private var pendingRequest: SurfaceRequest? = null
@@ -279,6 +318,24 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
         }
     }
 
+    /**
+     * Registered against [displayManager] for the lifetime of this view's
+     * attach (class doc's *Rotation tracking*). `registerDisplayListener` is
+     * process-wide, not scoped to one display, so every callback re-checks
+     * `displayId` against [display] before doing anything — a change on some
+     * other display (a different window, a detached HDMI output) is not this
+     * slot's rotation.
+     */
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) = Unit
+
+        override fun onDisplayRemoved(displayId: Int) = Unit
+
+        override fun onDisplayChanged(displayId: Int) {
+            if (displayId == display?.displayId) maybeSyncTargetRotation()
+        }
+    }
+
     private val textureListener = object : TextureView.SurfaceTextureListener {
         override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
             // Once per texture, i.e. once per attach — the head of the four-line
@@ -299,6 +356,12 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
             // (re-)pinned by `tryProvideSurface` at its own hand-over.
             if (surface === providedTexture) {
                 requestedResolution?.let { surface.setDefaultBufferSize(it.width, it.height) }
+                // Belt beside `onSizeChanged` (class doc's *Rotation
+                // tracking*): a buffer resize can land on the handed-over
+                // texture without this view's own bounds changing size at
+                // all, so this is a second, independent chance to catch a
+                // rotation `displayListener` missed.
+                maybeSyncTargetRotation()
             }
         }
 
@@ -380,8 +443,13 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
         // matrix on screen (if any) belongs to the previous one.
         transformPending = true
         // A session opened before any view existed has no idea what display it
-        // will be shown on; tell it now (and again on every resize).
-        display?.let { FrustCameraHost.setTargetRotation(id, it.rotation) }
+        // will be shown on; tell it now (and again for as long as this slot
+        // stays attached — see `maybeSyncTargetRotation`). Forced: the session
+        // just bound has its own server-side `targetRotation`, defaulted to
+        // `ROTATION_0` independent of whatever this view last sent for a
+        // previous one, so a rebind must resend even when the display's own
+        // rotation hasn't changed.
+        maybeSyncTargetRotation(force = true)
         if (!FrustCameraHost.attachPreview(id, this)) {
             Log.w(TAG, "frust-camera: preview slot bound to unknown session $id")
             sessionId = NO_SESSION
@@ -392,6 +460,28 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
     fun release() {
         detachFromSession()
         sessionId = NO_SESSION
+    }
+
+    // --- Rotation tracking ---------------------------------------------------
+
+    /**
+     * Re-read [display]'s rotation and, if it differs from [lastSentRotation]
+     * (or [force] skips that compare), forward it to
+     * [FrustCameraHost.setTargetRotation] for the currently bound session.
+     * A no-op with nothing bound ([NO_SESSION]) or no known display yet.
+     *
+     * Every caller shares this one compare so the several redundant triggers
+     * (class doc's *Rotation tracking*: [displayListener], [onSizeChanged],
+     * [onAttachedToWindow], [bindSession], and [applyTransform]'s self-heal)
+     * collapse into at most one host round trip per actual rotation change.
+     */
+    private fun maybeSyncTargetRotation(force: Boolean = false) {
+        val id = sessionId
+        if (id == NO_SESSION) return
+        val rotation = display?.rotation ?: return
+        if (!force && rotation == lastSentRotation) return
+        lastSentRotation = rotation
+        FrustCameraHost.setTargetRotation(id, rotation)
     }
 
     // --- Preview.SurfaceProvider -------------------------------------------
@@ -556,6 +646,11 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
         // clears that on the way out. Disarming afterwards would leave the tick
         // in the main queue to fire against a detached view.
         disarmFirstFrameKick()
+        // Balanced with `onAttachedToWindow`'s register: a detached slot has no
+        // bounds to be rotated in, and leaving this registered would leak one
+        // listener per detach/reattach cycle (class doc's *Rotation tracking*).
+        displayManager?.unregisterDisplayListener(displayListener)
+        displayManager = null
         super.onDetachedFromWindow()
     }
 
@@ -563,19 +658,31 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
-        // A slot resize is also how a device rotation reaches us (the host
-        // rewrites every slot's layoutParams from the new frust layout).
-        if (sessionId != NO_SESSION) {
-            display?.let { FrustCameraHost.setTargetRotation(sessionId, it.rotation) }
-        }
+        // A slot resize is also how a device rotation reaches us on layouts
+        // that actually resize on one (the host rewrites every slot's
+        // layoutParams from the new frust layout) — a belt beside
+        // `displayListener`, which is what covers a slot whose bounds never
+        // change size on a rotation (a square slot).
+        maybeSyncTargetRotation()
         applyTransform()
     }
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        if (sessionId != NO_SESSION) {
-            display?.let { FrustCameraHost.setTargetRotation(sessionId, it.rotation) }
-        }
+        // Registered for as long as this view stays attached (class doc's
+        // *Rotation tracking*) — the fix for a rotation with no accompanying
+        // resize, which nothing before this re-read `display.rotation` for.
+        // Passing this view's own Handler keeps the callback on the main
+        // thread this whole class already assumes.
+        val manager = context.getSystemService(DisplayManager::class.java)
+        displayManager = manager
+        manager?.registerDisplayListener(displayListener, handler)
+        // A session opened before any view existed has no idea what display it
+        // will be shown on, and a re-attach (e.g. this slot scrolled off-screen
+        // and back) may follow a rotation that happened while `displayListener`
+        // was unregistered — forced for the same reason `bindSession` forces
+        // it.
+        maybeSyncTargetRotation(force = true)
     }
 
     /**
@@ -643,6 +750,18 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
         // what comes back for it. An input setter therefore just calls this,
         // in whatever order its input happened to arrive.
         transformPending = true
+
+        // Self-heal of last resort (class doc's *Rotation tracking*): a
+        // display's rotation compare that costs one field read and runs on
+        // every apply, regardless of which of the guards below return early —
+        // the only one of the rotation-tracking triggers that fires even when
+        // `displayListener` does not, on OEMs observed to skip
+        // `onDisplayChanged` for a rotation their Activity handles via
+        // `configChanges` alone. `currentDisplayRotation` is also folded into
+        // the diagnostic log below, once this apply actually completes.
+        val currentDisplayRotation = display?.rotation
+        maybeSyncTargetRotation()
+
         val info = transformationInfo ?: return
         val resolution = requestedResolution ?: return
         val slotWidth = width
@@ -732,15 +851,17 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
         textureView.invalidate()
         // The inputs AND the result of the matrix actually on screen, once per
         // convergence: the rotation split says how much of `rotation` the stream
-        // transform is carrying, and `upright`/`scale` are what a wrongly-placed
-        // preview is measured against.
+        // transform is carrying, `upright`/`scale` are what a wrongly-placed
+        // preview is measured against, and `display` is the rotation this apply
+        // self-healed against above — the value a frozen `targetRotation` bug
+        // would show staying constant across a live rotation.
         Log.d(
             TAG,
             "frust-camera: preview transform applied (buffer " +
                 "${resolution.width}x${resolution.height}, crop $crop, rotation " +
                 "$rotationDegrees = stream $streamDegrees + own $ownDegrees, mirrored " +
                 "${info.isMirroring}, upright ${uprightWidth}x$uprightHeight, scale $scale, " +
-                "slot ${slotWidth}x$slotHeight)",
+                "slot ${slotWidth}x$slotHeight, display=$currentDisplayRotation)",
         )
 
         if (sessionId != NO_SESSION) {
