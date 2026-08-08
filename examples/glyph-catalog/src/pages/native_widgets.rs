@@ -124,7 +124,7 @@
 //! `docs/CODE_STANDARDS.md`'s State & Reactivity Conventions put an app on
 //! `frust` alone (custom widgets via `frust::authoring`), never a raw FFI
 //! dependency, and
-//! `docs/DEVELOPMENT.md`'s Version-Pin Policy notes `objc2-ui-kit` is already
+//! `docs/PLUGINS_DEVELOPMENT.md`'s version pins note `objc2-ui-kit` is already
 //! resolving at two versions in this workspace. So this page does what an app
 //! actually can do with the public surface: enable the feature, register the
 //! component once, and mount it. **That still does not prove a third-party

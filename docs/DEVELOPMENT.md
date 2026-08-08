@@ -4,6 +4,21 @@ The canonical test-tier, golden-image, headless GPU, and Android emulator runboo
 `docs/TESTING.md`. This guide retains the concise build/test commands and platform
 prerequisites used during ordinary development.
 
+This is the shared index — prerequisites, build/run/test gates, benchmarks, instrumentation,
+the version-pin *policy*, platform-support floors, known issues. Per-unit device gates,
+template work, and the version-pin rows each unit owns live in its spoke:
+
+| Unit | Development spoke | Holds |
+|------|-------------------|-------|
+| CORE | [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md) | `reactive_graph`/`any_spawner`/`tokio`, `clean-signals`, `accesskit` pins |
+| RENDER | [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) | `vello`/`wgpu`, `image`, `vello_cpu` pins |
+| SHELLS | [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) | deep-link and safe-area/keyboard/back manual tests |
+| PLUGINS | [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) | shared-preferences, secure-storage, camera, and IAP manual tests; `ndk-context`, `objc2*`, CameraX, OpenIAP, `keyring-core`, `arboard` pins |
+| CLI | [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) | template development; `notify` pin |
+| TUI | [TUI_DEVELOPMENT.md](TUI_DEVELOPMENT.md) | `ratatui`/`crossterm`/`ansi-to-tui`, `toml_edit` pins |
+
+WIDGETS and NATIVE_WIDGETS have no development spoke — everything they need is here.
+
 ## Prerequisites
 
 - Rust 1.88+ (workspace `rust-version`), edition 2024.
@@ -22,7 +37,8 @@ prerequisites used during ordinary development.
   unlocked/paired/trusted with Developer Mode on (`frust doctor` checks Rust targets on
   macOS hosts only).
 - **clean-signals-rs**: not required to build. `clean-signals` is git+rev-pinned to its
-  public repo (see *Version-Pin Policy*), consumed by `examples/huddle`,
+  public repo (*Version-Pin Policy*; row in [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md)),
+  consumed by `examples/huddle`,
   `plugins/clean-signals-frust`, and `templates/app`'s clean-signals scaffold variant.
   Cloning it as a sibling directory (`../clean-signals-rs`) is still useful for local
   iteration on `clean-signals` itself, via a `[patch]` override in the consuming
@@ -94,8 +110,8 @@ frust run -d <device-id>           # build/install/launch/stream (Android or iOS
 
 The template `frust create` scaffolds is its own demo (a notes app,
 `templates/app/src/lib.rs.tmpl`) with no example counterpart to run directly in this
-repo; check scaffold changes via *Template development* below or the scaffold end-to-end
-test in *Test*.
+repo; check scaffold changes via *Template development*
+([CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md)) or the scaffold end-to-end test in *Test*.
 
 In a generated project, `frust run [-d <device>] [--release|--profile] [--flavor
 <name>]` builds and launches on a connected Android device/emulator (preflight →
@@ -215,7 +231,8 @@ so no local sibling checkout is required to run this gate. This gate is separate
 `frust build apk`/`run`'s pipeline gate (*Run*).
 
 **Non-default features are not compiled by the chain above.** `frust-render`'s
-`cpu-tier` (experimental `vello_cpu` render backend — see *Version-Pin Policy*) is
+`cpu-tier` (experimental `vello_cpu` render backend —
+[RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)'s pins) is
 headless and needs no GPU: run `cargo test -p frust-render --features cpu-tier` when
 touching `frust-render`. `frust-native-widgets`' `demo-components` is a composite
 `NativeComponent` demo of real JNI/UIKit view construction, shipped inside the plugin
@@ -281,115 +298,15 @@ fully green cargo gate undetected. The only gate that actually compiles Kotlin i
 Gradle build (`frust build apk --debug`, or the ignored `build_e2e`/scaffold tests
 above); compiling Swift needs an Xcode build (macOS only).
 
-### Deep-link manual test (Android)
+### Per-unit device gates
 
-A device/emulator gate for `nativeOnDeepLink` (`docs/SHELLS_ARCHITECTURE.md`'s cross-cutting host-signal flow, deep-link) on
-a project scaffolded with `--deeplink-scheme <scheme> [--deeplink-host <host>]`, installed
-via `frust run -d <device>`:
-
-```bash
-# Cold start (app not running; queues until the native handle exists):
-adb shell am force-stop <package>
-adb shell am start -a android.intent.action.VIEW -d "<scheme>://<path>" <package>
-
-# Warm (already foregrounded; singleTop routes via onNewIntent):
-adb shell am start -a android.intent.action.VIEW -d "<scheme>://<other-path>" <package>
-```
-
-Confirm the app navigates to the linked route both times. iOS (`frust_on_deep_link`) has
-a Simulator-only CLI trigger (`xcrun simctl openurl booted "<scheme>://<path>"`); a
-physical device has none — tap a registered `CFBundleURLSchemes` link instead.
-`frust.toml`'s `[deeplink]` section is informational only, so use `--overwrite` or edit
-the platform files directly to change the scheme.
-
-### Safe-area / keyboard / back manual test (Android + iOS)
-
-A device/emulator gate for the inset and back contracts (see `docs/SHELLS_ARCHITECTURE.md`'s
-cross-cutting host-signal flow), against an installed app (`frust run -d <device>`) — no CLI
-trigger like the deep-link gate above, so each is a person-driven check:
-
-- **Safe-area:** rotate the device; confirm top/bottom-anchored content reflows around
-  the status bar/notch/gesture-nav insets in both orientations.
-- **Keyboard:** focus a bottom text field; confirm content shifts clear of the on-screen
-  keyboard, then dismiss it and confirm the layout returns.
-- **Back:** press hardware/gesture back on a pushed route; confirm it pops one level,
-  and falls through to the platform's own default at the root.
-- **Density refresh:** move a running app between displays of different density; confirm
-  layout rescales rather than sticking to launch-time density.
-
-### Shared-preferences manual test (desktop + Android + iOS)
-
-A kill-and-relaunch persistence gate for `frust-shared-preferences`
-(`plugins/shared-preferences`), against the scaffolded notes app template (`frust
-create`'s default `lib.rs.tmpl`, persisting its notes list + draft):
-
-- **Persistence:** add a note (and/or edit the draft), kill the app, relaunch it, and
-  confirm it survived — desktop preview, an installed Android device, and an installed
-  iPhone.
-- **Old-scaffold graceful error:** a project scaffolded *before* the plugin existed must
-  still boot with empty state rather than crash (`PrefsError::PlatformNotInitialized`,
-  caught by the template's load path).
-- **macOS storage-location caveat:** the unbundled desktop preview (no
-  `CFBundleIdentifier`) writes `NSUserDefaults` to the global defaults domain rather
-  than an app-specific plist — a storage-location difference, not a behavioral one.
-
-### Secure-storage manual test (desktop + Android + iOS)
-
-A device/emulator gate for `frust-secure-storage`, against an app that depends on the
-plugin per **only** `plugins/secure-storage/README.md`:
-
-- **Persistence:** store a value, kill/relaunch the app, confirm it reads back —
-  desktop, an installed Android device, and an installed iPhone.
-- **Biometric round-trip (physical device only):** open a store with
-  `AuthPolicy::Required` following *only* the README's steps; confirm Face ID/Touch ID
-  (iOS) or `BiometricPrompt` (Android API 28+) gates each call.
-- **Old-scaffold graceful error:** a pre-plugin scaffold must surface a typed
-  `PlatformNotInitialized`, never crash.
-- **Add Plugin dialog:** clean scaffold builds with zero hand edits.
-- **`--overwrite` caveat:** `frust create --overwrite` re-renders the project and drops
-  every addition above; recovery is re-running Add Plugin (idempotent).
-
-### Camera manual test (Android + iOS)
-
-A device gate for `frust-camera` (`plugins/camera`), against an app depending on
-the plugin per `plugins/camera/README.md`:
-
-- **Permission + preview:** grant, deny, then re-grant via settings; confirm a live Mode B preview inside app chrome in both orientations.
-- **Capture + stream:** still capture produces an orientation-correct JPEG; the stream toggle shows a live fps readout (`docs/LIMITATIONS.md`'s `cam-bgra-apple-only`).
-- **A6 keep-alive:** scroll the preview slot off-screen and back; confirm it resumes without reopening the camera.
-- **Forced-blit degrade:** `FRUST_NO_DIRECT_SURFACE=1` on Android makes the preview invisible (`docs/LIMITATIONS.md`'s `cam-blit-opaque`) — expected.
-- **Torch:** toggle on/off on the back lens from the catalog camera page; confirm `torch_available()` is false on the front lens; confirm torch survives starting/stopping the barcode scan strip.
-- **Scan:** policy mode detects the dense muxr:// screen-QR once (NoDuplicates), timing mode shows decode ms + attempts/s for MEASUREMENTS.md.
-- **Add Plugin dialog:** clean scaffold, both platforms build with zero hand edits.
-
-### IAP manual test (Android + iOS)
-
-A device/emulator gate for `frust-iap` (`plugins/iap`), against an app depending on the
-plugin per `plugins/iap/README.md` §1 — the full checklist (Add Plugin scaffold builds
-clean both platforms; a StoreKit-Testing smoke round trip needing no store account; a
-store-account-gated purchase/finish flow once a Play listing or App Store Connect product
-exists) is that README's §6, not repeated here.
-
-### Template development
-
-`frust create` embeds `templates/app/` into the binary at compile time; the hidden,
-development-only `--template-dir <path>` flag iterates on template files without
-rebuilding the embedded copy. Every scaffold also gets a default launcher icon set and
-the platform-specific edge-to-edge/safe-area/keyboard-inset and back-navigation glue
-the generated app needs — see `docs/SHELLS_ARCHITECTURE.md`'s cross-cutting host-signal flow.
-
-`--arch clean-signals` scaffolds a clean-architecture variant (controller + use-case +
-`async_view` over `clean-signals-frust`) instead of the default notes-app template;
-`clean-signals` is git+rev-pinned to its public GitHub repo (see *Version-Pin Policy*), so
-the scaffold builds on any machine with no sibling checkout required.
-
-**Platform embedding modules ship in-repo, not templated.**
-`platform/android/frust-embedding` and `platform/ios/FrustEmbedding` are consumed by a
-scaffolded project by path — edit the module in place and rebuild the consuming app
-directly, no re-scaffold needed. A scaffolded project's embedding path is
-machine-specific: moving it means editing `gradle.properties`'s `frust.embedding.dir`
-line (Android) or the local package reference in `project.pbxproj` (iOS); `frust clean`
-also removes the redirected Gradle build output.
+The **deep-link** and **safe-area / keyboard / back** manual tests
+([SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md)), the **shared-preferences**,
+**secure-storage**, **camera**, and **IAP** manual tests
+([PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md)), and **template development**
+([CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md)) live in their unit spokes. Every one is a
+person-driven device/emulator check with no automated counterpart — none of them ride the
+gate chain above.
 
 ## Benchmarks
 
@@ -443,37 +360,29 @@ a printed note.
 
 ## Version-Pin Policy
 
-The rendering stack's versions in `[workspace.dependencies]` are pinned deliberately,
-not floating. Each row's tripwire must be re-run after touching that pin:
+Pinned versions in `[workspace.dependencies]` (and the Gradle/SPM equivalents) are deliberate,
+not floating. **Pins are LAW**: never bump one independently, and re-run that pin's tripwire
+after touching it. The pin rows themselves — pin, rationale, tripwire — live with the unit that
+owns them:
 
-| Pin | Why | Tripwire |
-|---|---|---|
-| `vello 0.9.0` / `wgpu 29.0.3` (resolves 29.0.4) | `vello` requires `wgpu ^29.0.3`; bumping `wgpu` independently (30.x is ecosystem-latest) breaks the build | `cargo build --workspace --locked` |
-| `image =0.25.10` exact (`Image` widget's PNG/JPEG decoder, `png`/`jpeg` only) | Only 0.25.x release whose MSRV equals the workspace `rust-version` (1.88) | fresh MSRV check before bumping, not just `cargo update` |
-| `reactive_graph 0.2` / `any_spawner 0.3` / `tokio 1` (no default features), minor | `frust-reactive` substrate, pre-1.0 Leptos-ecosystem churn expected; never enable `reactive_graph`'s `effects` feature — the frame path is a custom subscriber, not `RenderEffect` (see ARCHITECTURE's Key Types) | `cargo test -p frust-reactive` |
-| `clean-signals` (git, `rev = "910f626"` on `master`, not published to crates.io) | Consumed by `examples/huddle`, `plugins/clean-signals-frust` (dep + `test-fixtures` dev-dep), and `templates/app`'s clean-signals scaffold variant — all four sites must pin the identical git+rev spec (type-identity rule below). Never enable its `effects` feature (`reactive_graph/effects`, same prohibition as the `reactive_graph` row above) — absent at this rev, confirm it stays that way before bumping | `cargo generate-lockfile` + `cargo build --locked` in each of `examples/huddle`/`plugins/clean-signals-frust` |
-| `accesskit 0.24` minor + adapters (`accesskit_winit 0.33`, `accesskit_android 0.7` minor, `accesskit_ios =0.1.2` exact) | `frust-core`'s semantics-pass vocabulary; `accesskit_ios` is younger/less proven, compile-gate only (*Test*) | `cargo test -p frust-core semantics` |
-| `vello_cpu =0.0.9` exact | Experimental CPU render tier (`frust-render`'s non-default `cpu-tier` feature), pre-1.0 unstable API, isolated behind the `SceneSink` encode seam so a breaking bump never reaches the default GPU path | tripwire in *Test* |
-| `ndk-context 0.1` minor | `frust-plugin`'s Android platform-handle slot (written by `nativeInitPlatform`, read by every plugin) | `cargo check --target aarch64-linux-android -p frust-plugin` |
-| `objc2 0.6` / `objc2-foundation 0.3` minor | Apple ObjC bridge (`frust-shared-preferences`'s `NSUserDefaults` backend; `frust-secure-storage`'s apple arm also pulls `objc2-foundation` for `NSString`/`NSError`; `frust-camera`'s apple arm pulls the full `objc2-av-foundation`/`objc2-core-media`/`objc2-core-video`/`objc2-quartz-core`/`dispatch2`/`block2` stack, each pinned `0.3`/`0.6` minor — `objc2-av-foundation 0.3.2` itself permits `objc2 >=0.6.2, <0.8.0`, wider than this workspace's own `0.6` caret) | `cargo check --target aarch64-apple-ios-sim -p frust-shared-preferences && cargo check --target aarch64-apple-ios-sim -p frust-camera` |
-| `androidx.camera:camera-{core,camera2,lifecycle} 1.6.1` (Gradle, not a Cargo pin) minor | `frust-camera`'s Android CameraX session/preview stack (`plugins/camera/platform/android/build.gradle.kts`); deliberately not `camera-view` (no `PreviewView`) | `(cd examples/glyph-catalog/android && ./gradlew :frust-camera:compileReleaseKotlin)` |
-| `openiap-google 3.0.1` exact (Gradle, `plugins/iap/platform/android/build.gradle.kts`) / `OpenIAP` SPM `revision: "43ecc85bfda0fcd8f56d381e43d9d661afbd4729"` — `3.0.1`'s tag commit (`plugins/iap/platform/ios/Package.swift`) — LOCKSTEP | `frust-iap`'s Play Billing / StoreKit 2 hosts; upstream's `openiap-versions.json` pins spec/google/apple together, so the two sides must never be bumped independently (Play Billing 9.1.0 + kotlinx-coroutines ride transitively/alongside on Android). iOS pins the commit, not the mutable `3.0.1` tag itself — a payments-path dependency gets `clean-signals`-grade rigor (a force-moved tag upstream can't silently swap what a build resolves); bump the revision and its in-file tag-name comment together, in the same lockstep as the Android version | `(cd examples/glyph-catalog/android && ./gradlew :frust-iap:compileReleaseKotlin)` + a consuming-app `xcodebuild` (Swift compiles under no cargo gate) + the R8 keep-rule tripwire (`consumer-rules.pro` survives real minification): `(cd examples/glyph-catalog/android && ./gradlew :app:minifyReleaseWithR8)`, then `grep dev.frust.iap.FrustIapHost app/build/outputs/mapping/release/seeds.txt` must match (class + native methods kept, not in `usage.txt`) |
-| `objc2-security 0.3` / `objc2-local-authentication 0.3` minor | `frust-secure-storage`'s Apple Keychain backend + biometric gate (`SecAccessControl`/`LAContext`) | the secure-storage mobile compile gates above |
-| `objc2-ui-kit` / `objc2-quartz-core` / `objc2-core-text` / `objc2-core-foundation` 0.3 minor | `frust-native-widgets`'s (`plugins/native-widgets`) UIKit binding, plus its theme-ladder L2 (`objc2-quartz-core`'s `CALayer.cornerRadius`) and L3 (`objc2-core-text`/`objc2-core-foundation` resolving the embedded Glyph font bytes to a `CTFont`) direct pins — each already resolved transitively before this crate named it directly, so no lockfile version change. Also consumed by `frust-clipboard` (iOS `UIPasteboard`) and `frust-haptics` (the three `UI*FeedbackGenerator` classes). `cargo tree -i objc2-ui-kit` legitimately shows two versions — `0.2.2` pulled transitively by `accesskit_ios`/`winit`, `0.3.2` consumed by `frust-native-widgets`/`frust-clipboard`/`frust-haptics` — an expected split, not `cargo tree -d` drift; do not force-align them | `cargo check --target aarch64-apple-ios-sim -p frust-native-widgets -p frust-clipboard -p frust-haptics` |
-| `keyring-core 1.0` / `zbus-secret-service-keyring-store 1.0` (`rt-async-io-crypto-rust` feature, keeps the plugin tokio-free) / `windows-native-keyring-store 1.1` minor | `frust-secure-storage`'s desktop Linux/Windows backend | `cargo test -p frust-secure-storage` |
-| `arboard =3.6.1` exact | `frust-clipboard`'s desktop (macOS/Linux/Windows) text-clipboard backend; `default-features = false` drops the default `image-data` feature; `wl-clipboard-rs`'s native-Wayland `wayland-data-control` feature is deliberately not enabled | `cargo check -p frust-clipboard` |
-| `notify 8` minor (`frust-cli`-only) | `frust run --watch`'s filesystem watcher (`ctrlc` floats, shared by `frust-drive`/`frust-cli`, unpinned; `frust-drive`'s copy now enables the `termination` feature so `frust-drive::interrupt` also catches SIGTERM/SIGHUP — needed to scrub the plaintext release-signing file on a CI runner's kill, not just Ctrl-C. Visible consequence: interrupting a `--release` `frust run` before logcat streaming begins now exits 130 for SIGTERM/SIGHUP, where an unhandled signal previously exited 143/129; the logcat phase's own Ctrl-C-means-stop override still exits 0 for all three signals) | `cargo test -p frust-cli` |
-| `ratatui 0.30` / `crossterm 0.29` / `ansi-to-tui 8.0.1` minor | `frust-tui`'s render/terminal/log stack, pre-1.0 churn expected | `cargo test -p frust-tui` |
-| `toml_edit 0.25` minor | `frust-tui`'s config persistence and `frust-drive::plugin`'s format-preserving Cargo.toml/manifest edits | `cargo test -p frust-tui` && `cargo test -p frust-drive` |
+| Pins | Owner |
+|------|-------|
+| `vello`/`wgpu`, `image`, `vello_cpu` | [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) |
+| `reactive_graph`/`any_spawner`/`tokio`, `clean-signals`, `accesskit` + adapters | [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md) |
+| `ndk-context`, `objc2*` (Foundation/Security/LocalAuthentication/UIKit/QuartzCore/CoreText/CoreFoundation), `androidx.camera`, `openiap-google`/`OpenIAP`, `keyring-core`, `arboard` | [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) |
+| `notify` | [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) |
+| `ratatui`/`crossterm`/`ansi-to-tui`, `toml_edit` | [TUI_DEVELOPMENT.md](TUI_DEVELOPMENT.md) |
+
+The rules below bind every pin, wherever its row lives:
 
 - `examples/huddle` and `plugins/clean-signals-frust` are each a **standalone package**
   (own `[workspace]` root/`Cargo.lock`, excluded from the root `[workspace]`),
-  git+rev-pinning the `clean-signals` core crate to its public repo (see the table row
-  above) rather than a path dep — every consumer, including `templates/app`'s
-  clean-signals scaffold variant, must resolve the identical git+rev spec, or Cargo
-  builds two distinct crate identities. Neither manifest can use `{ workspace = true }`;
-  gate each from its own directory (`cargo test` + `cargo clippy --all-targets -- -D
-  warnings`).
+  git+rev-pinning the `clean-signals` core crate to its public repo (see
+  [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md)) rather than a path dep — every consumer,
+  including `templates/app`'s clean-signals scaffold variant, must resolve the identical
+  git+rev spec, or Cargo builds two distinct crate identities. Neither manifest can use
+  `{ workspace = true }`; gate each from its own directory (`cargo test` + `cargo clippy
+  --all-targets -- -D warnings`).
 - **Never run a blind `cargo update`.** After any pinned-dependency manifest change, run
   `cargo generate-lockfile` then confirm `cargo build --workspace --locked` still
   succeeds before committing.

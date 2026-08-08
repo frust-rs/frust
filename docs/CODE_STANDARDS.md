@@ -1,5 +1,14 @@
 # Frust - Code Standards
 
+The shared conventions every crate in the workspace follows. Three unit-specific rule sets hang
+off this index — read this plus the one that covers what you are touching:
+
+| Unit | Spoke | Holds |
+|------|-------|-------|
+| PLUGINS + NATIVE_WIDGETS | [PLUGINS_CODE_STANDARDS.md](PLUGINS_CODE_STANDARDS.md) | Plugin Conventions — backend gating, JNI attach scope, the platform/facade charter lines, theme-token folding, idempotent project mutation |
+| WIDGETS | [WIDGETS_CODE_STANDARDS.md](WIDGETS_CODE_STANDARDS.md) | Theming & Animation Conventions — token resolution/precedence, animation pacing, design-system installation |
+| TUI | [TUI_CODE_STANDARDS.md](TUI_CODE_STANDARDS.md) | TUI Conventions — render/update layering, keyboard parity, the single command registry |
+
 ## Language Idioms
 
 - **`unsafe` is confined to a small set of sanctioned platform-FFI boundaries.** Every other
@@ -148,71 +157,8 @@ unchecked.
 
 ## Plugin Conventions
 
-Both plugin tiers under `plugins/` (see `docs/ARCHITECTURE.md`'s Doc Map, PLUGINS + NATIVE_WIDGETS rows) follow
-these conventions:
-
-- **Backends are `#[cfg]`-gated modules** (`apple`/`android`/`file`) behind one
-  platform-independent public API; FFI deps are target-gated in the crate's `Cargo.toml`,
-  never unconditional.
-- **Errors are `thiserror` enums callers match on** (`PrefsError`, `PlatformHandleError`),
-  per the Error Handling rule above.
-- **A JNI attach is scoped per call, never permanent** — threads don't auto-detach on exit,
-  so `attach_permanently` leaks the attachment; use `frust-plugin::android::with_jni_env`'s
-  scoped `AttachGuard`.
-- **No panics/unwinds near an FFI boundary**, the same rule as shell exports (Language
-  Idioms, above).
-- **Platform plugins never depend on `frust-*` framework crates** (`frust-plugin` +
-  `frust-paths` + FFI crates only); **facade plugins depend on `frust` alone**. A plugin
-  needing both splits into a platform-core plus facade-glue crate — **or** ships as one
-  crate with a default-on `frust-api` feature gating the optional
-  `frust`/`frust-core`/`frust-theme` deps (`frust-native-widgets`'s shape), so `cargo check
-  -p <crate> --no-default-features` still resolves to the platform-plugin charter line.
-  Splitting would have left an almost-empty platform-core crate here; the charter line is
-  what actually matters, and it is mechanically checkable either way (`cargo tree -p <crate>
-  --no-default-features -e normal`). `frust-native-widgets` needs `frust-core`/`kurbo`
-  directly alongside `frust` (not the facade alone) because its builders hand-implement
-  `View<Outer>`/`Widget` in the plugin's own crate — the plugin tier's sanctioned, permanent
-  exception to the app-tier facade-first rule (State & Reactivity Conventions below);
-  plugins sit beside the facade, never inside it (`docs/ARCHITECTURE.md`'s facade/plugin
-  boundary), and are not expected to migrate onto `frust::authoring`.
-- **A store shared with the OS namespaces its keys `frust.`** (NSUserDefaults, Android
-  SharedPreferences) so plugin keys can't collide with other libraries'.
-- **`dev.frust` is the embedding module's exclusive package; a plugin's Android Kotlin ships
-  as a subpackage inside its own Gradle module (`plugins/<name>/platform/android`, e.g.
-  `dev.frust.securestorage`), wired by `Contribution::GradleModule` — never rendered from a
-  template or copied into the app.** AGP's `namespace` scopes generated `R`/`BuildConfig`
-  per module (a plugin's namespace must differ from `dev.frust`), and Kotlin's `internal` is
-  module-scoped (an `internal` embedding type stays invisible to a plugin module even under
-  the same source package) — two confirmed side-constraints this rule is built around.
-- **A plugin's theme-token folding pins a representative subset, never chases full
-  design-token fidelity.** `frust-native-widgets`' theme ladder resolves a fixed, documented
-  mapping of `Theme` roles into each control's props — no elevation, motion, glass, or
-  per-state (hover/pressed/disabled) variants, which the platform's own drawables already
-  provide for free; widening the mapping is additive, never a breaking republish.
-- **A platform capability gap is recorded per-platform, never "corrected" onto the platform
-  that doesn't have it.** `frust-native-widgets`' theme-ladder L1 (brightness) is
-  deliberately asymmetric: Android bakes it at control-construction time
-  (`createConfigurationContext` yields a `Context` consumed once, so a live brightness
-  toggle needs a rebuilt view), while iOS re-pins `overrideUserInterfaceStyle` on every
-  `update` and re-themes live. Mirroring one platform's constraint onto the other is a
-  real defect class — match each platform's own capability, not its sibling's.
-- **A native listener callback is wrapped into a plain signal-writing closure, not routed
-  through frust's event machinery.** `frust-native-widgets`' events-as-signals convention
-  (`crate::api::signals`) decodes each control's raw platform callback (Android JNI, iOS
-  target-action) into the closure shape a builder's `.on_press`/`.on_toggle`/`.on_change`
-  takes; since that callback runs on the platform main thread — the same thread the rest of
-  frust runs on — an app closure just writes an `RwSignal` (`move |v| sig.set(v)`) and wakes
-  the next frame normally, with no `TrackedScope`/`EventCtx` involved.
-- **A generated-project mutation is idempotent, never a blind overwrite.** Adding an OS-side
-  contribution (a Cargo dependency, a manifest permission, an Info.plist key, or a Gradle
-  module include) checks first and no-ops if already present — the contract
-  `frust-drive::plugin::add_plugin` implements (see `docs/CLI_ARCHITECTURE.md`'s plugin-add data flow).
-- **A call that blocks pairs with `spawn_blocking`, and every blockable path is
-  UI-thread-guarded.** A gated/platform-answer call (secure-storage's biometric prompt;
-  camera's `request_permission`/`take_picture`) fails fast with a typed error
-  (`CameraError::UiThread`) on the platform's UI thread instead of parking there. A call
-  that answers without waiting (e.g. an already-decided permission status) is exempt and
-  stays callable from anywhere.
+Both plugin tiers under `plugins/` carry additional conventions of their own —
+[PLUGINS_CODE_STANDARDS.md](PLUGINS_CODE_STANDARDS.md).
 
 ## Platform-View Conventions
 
@@ -233,17 +179,6 @@ these conventions:
   OS-routed through the host's own view hierarchy, not `EventCtx` — there is no
   hit-test/dispatch seam for a hosted view; don't add pointer handling to
   `PlatformViewWidget`.
-
-## TUI Conventions
-
-- **`ui` renders `&AppState`, never mutates the engine** — all state changes happen in
-  `engine::update`; a render fn taking `&mut` state is a layering violation.
-- **Every mouse action has keyboard parity** (e.g. the welcome Create button: `Enter`/`c`) —
-  mouse support is additive, never the sole path.
-- **Commands/keybindings have one registry**, `engine::palette::commands` — the palette and
-  help overlay both render from it; never a parallel list.
-- **fdemon is a pattern source, not a copy source** — it is BSL-1.1 licensed; study its
-  patterns but never copy a file verbatim.
 
 ## Anti-patterns
 
@@ -454,8 +389,8 @@ Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantic
   those crates is version-pinned in exactly one place (`docs/DEVELOPMENT.md` §
   Version-Pin Policy). Mechanically enforced
   across `benchmarks/frust_bench` and the four in-repo example apps by
-  `crates/frust/tests/authoring_seam_conformance.rs`; the plugin tier is exempt (Plugin
-  Conventions above).
+  `crates/frust/tests/authoring_seam_conformance.rs`; the plugin tier is exempt
+  ([PLUGINS_CODE_STANDARDS.md](PLUGINS_CODE_STANDARDS.md)).
 - **A rebuild must run inside a `TrackedScope` for a signal write to wake it later — an
   untracked read is a silent wake hazard, not a stale value.** `.get()` subscribes only from
   *inside* a live `TrackedScope::track` closure; both shells guarantee this for their
@@ -466,80 +401,8 @@ Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantic
 
 ## Theming & Animation Conventions
 
-- **Paint-time resolution is always safe; layout-time-baked resolution is only safe under
-  the `set_theme` → `ChangeFlags` contract.** Most themed widgets resolve tokens from
-  `PaintCtx` every paint pass and self-refresh on a live theme swap for free.
-  `Text`/`TextInput` instead bake resolved glyph color into the shaped layout at LAYOUT
-  time; a widget adding layout-time-baked resolution depends on relayout actually happening,
-  so treat a theme change as forcing `ChangeFlags::LAYOUT`, not just `PAINT`.
-- **Resolve theme tokens with an unthemed-fallback constant per resolved value.** A themed
-  widget looks up `Theme::from_paint_ctx(ctx)`/`from_layout_ctx(ctx)`, falling back to a
-  local constant (e.g. `Button`'s `FILL`/`RADIUS`) when no theme is threaded. Precedence is
-  **explicit builder value > theme > fallback** (see `Text`'s `color_explicit` flag).
-- **Token-not-hardcode: a widget authors against a `Theme` field first; a bare local
-  constant is the documented fallback, not the default.** A hardcoded metric/color is a
-  defect once a matching `ColorScheme`/`ShapeScale`/`Elevation`/`GlassScale`/`MotionScheme`
-  field exists. Only a genuine token-scale gap earns a hand-tuned constant, and it stays
-  named, doc-commented, and states *why* no token applies.
-- **A contested or unsourced design fact is resolved against a primary source and cited with
-  a retrieval date, not left as a guess** — record `<source>, retrieved <date>` in the
-  module doc, alongside the **Community-approximate** marker (above) for values that stay
-  genuinely unsourced.
-- **Event-pass code never reads a theme — `EventCtx` carries none.** Only
-  `LayoutCtx`/`PaintCtx` thread a theme; a metric an event handler also needs stays a plain
-  constant read from both passes (`TextInput`'s `PAD_X`/`PAD_Y`/`CARET_W` precedent).
-- **No `Instant::now()` in `frust-core`/`frust-widgets`.** Time enters the framework only
-  from a shell, as the `FrameTime` passed into `RenderRoot::paint`/`PaintCtx::frame_time` —
-  desktop reads its own `Instant` epoch; Android/iOS pass through the platform's frame
-  clock. Widget code only *differences* two `FrameTime`s, never reads a wall clock directly.
-- **An animation controller advances during paint, not on a timer.** A widget holds an
-  `anim::AnimationController`, calls `advance(ctx.frame_time())` once per paint and, while
-  it returns `true`, calls `PaintCtx::request_frame()`. **A layout-affecting animation calls
-  `request_layout()` instead** (implies `request_frame`) — reserve bare `request_frame` for
-  a paint-only animation, or the mobile intra-frame layout skip leaves it unresized
-  (`docs/SHELLS_ARCHITECTURE.md`'s frame-pipeline data flow).
-- **State-layer opacity has one source: `material::state_layer`'s constants**
-  (`HOVER_OPACITY`/`FOCUS_OPACITY`/`PRESSED_OPACITY`/ `DRAGGED_OPACITY`, M3 `StateTokens`) —
-  a catalog widget imports them rather than hardcoding overlay opacity, taking the
-  **maximum** of concurrently-active states, never their sum.
-- **Glyph's token set adds three resolution precedents.** A per-status color with no
-  `ColorScheme` field (Success/Warning/Info) resolves `Theme::extension::<StatusPalette>()`
-  first, before a role that already has one (Error) resolves it directly. `GlyphInk` is
-  never brightness-swapped like a scheme role. Accent role split: `primary`/`on_primary` is
-  accent text/icon ink, `primary_container`/`on_primary_container` is the bright fill —
-  conflating the two is the catalog's most common accent bug.
-- **A transition pattern's default timing resolves from `Theme.motion`, never a hand-rolled
-  duration, and collapses under `reduce_motion`.**
-  `PatternSwitcher`/`AnimatedOpacity`/`AnimatedScale` resolve `MotionScheme`'s
-  duration/easing/spring tokens by default (an explicit `.timing(...)` call always wins);
-  every pattern substitutes a short linear crossfade under `reduce_motion` instead of a
-  bespoke variant.
-- **A perpetual decorative loop calls `PaintCtx::request_frame_paced`
-  (`TickClass::CosmeticLoop`), never bare `request_frame`.** `request_frame` stays
-  `TickClass::Transition` (unpaced) — correct for a spring or any transition with a
-  user-visible endpoint. A shimmer/spinner/pulse with no endpoint requests the paced class
-  instead, letting the mobile frame gate throttle it to `MotionScheme::cosmetic_loop_rate`,
-  and must still honor `reduce_motion` (freeze in place, stop requesting frames).
-  **Input-driven frames are never paced.** A loop far slower than the cap (a ~500ms caret
-  blink against a 30Hz shimmer) names its own cadence with `request_frame_paced_at(interval)`
-  instead of the bare call — still `CosmeticLoop`-classified and still `reduce_motion`-honoring,
-  just at an explicit interval rather than the theme's default rate. `TextInput`'s caret is the
-  shipped example, with one deliberate exception to the freeze-in-place rule above: it freezes
-  **visible** rather than hidden (a position cue must stay legible) while still dropping all
-  frame requests when frozen.
-- **Design-system code targets `frust_widgets::authoring`, never a catalog module.** A baseline
-  widget never imports `material`/`cupertino`/`glyph`; the container/callback plumbing, event
-  routing, and callback erasure every widget needs live in the public `authoring` module
-  instead — the same surface the three built-in, feature-gated catalogs themselves consume,
-  pinned `authoring`-only by `authoring_only_conformance.rs`; `PRESSED_OPACITY`'s
-  `material::state_layer` re-export is compatibility-only. `PageTransition::Custom` needs an
-  explicit `Timing::Duration`/`Timing::Spring` (`Timing::ThemeDefault` falls back to the M3
-  default, 300ms + `Curve::Emphasized`); `reduce_motion` collapses it only programmatically,
-  and an interactive edge-swipe pop calls it like every preset.
-- **A design system installs itself via `set_default_theme` + `register_app_fonts` from an
-  `app!` `setup` block — never `Component::init` (no kept ordering contract) or
-  `set_app_theme` (pins brightness, breaking platform dark/light following).**
-  `frust::glyph_theme::install()` is the built-in Glyph caller.
+Token resolution and precedence, animation pacing, and design-system installation are the
+WIDGETS unit's rules — [WIDGETS_CODE_STANDARDS.md](WIDGETS_CODE_STANDARDS.md).
 
 ## Testing Patterns
 

@@ -25,6 +25,8 @@ the index; follow a link below rather than reading source cold.
 | Review priorities and hot spots | [docs/REVIEW_FOCUS.md](docs/REVIEW_FOCUS.md) |
 | Doc structure/budget record | [docs/DOC_POLICY.md](docs/DOC_POLICY.md) |
 
+Per-unit `*_DEVELOPMENT.md` / `*_CODE_STANDARDS.md` spokes hang off those last two indexes.
+
 ## Must-Know Commands
 
 ```

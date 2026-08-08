@@ -1,8 +1,8 @@
 //! Camera page: live Mode B preview behind frust
 //! chrome, permission flow, still capture, and an image-stream readout — the
 //! **device-gate vehicle for the whole `frust-camera` feature** (on-device
-//! proof is a separate, human-run gate — see `docs/DEVELOPMENT.md`'s Camera
-//! manual test; this page only owns wiring + compile/gate correctness).
+//! proof is a separate, human-run gate — see `docs/PLUGINS_DEVELOPMENT.md`'s
+//! Camera manual test; this page only owns wiring + compile/gate correctness).
 //!
 //! # Mode B slot, reusing the platform-views test bed
 //!
