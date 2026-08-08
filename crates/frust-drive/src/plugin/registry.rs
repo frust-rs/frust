@@ -1,4 +1,4 @@
-//! The static plugin registry (v1) — eight entries mirroring `plugins/`:
+//! The static plugin registry (v1) — nine entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
@@ -18,10 +18,11 @@
 //! registry entry to use [`Contribution::ManifestPermission`] rather than a
 //! Gradle module for its Android addition, since the plugin's Android
 //! backend is plain JNI with no Kotlin helper class to carry the permission
-//! inside a module manifest; see `HAPTICS_BASE`'s doc comment), and `iap`
+//! inside a module manifest; see `HAPTICS_BASE`'s doc comment), `iap`
 //! (dependency, the plugin's own Android library module, and its own iOS
 //! Swift package — no plist key and no app-crate macro; see `IAP_BASE`'s doc
-//! comment for why).
+//! comment for why), and `database` (dependency only — pure-Rust plugin, no
+//! OS-side integration).
 
 use super::{Contribution, FeatureSpec, PluginSpec};
 
@@ -289,6 +290,17 @@ const IAP: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+const DATABASE: PluginSpec = PluginSpec {
+    id: "database",
+    summary: "Embedded SQL database (SQLite via rusqlite; engine-agnostic API).",
+    crate_dir: "database",
+    base: &[Contribution::CargoDep {
+        name: "frust-database",
+    }],
+    optional_features: &[],
+    requires_sibling: None,
+};
+
 /// The v1 static plugin registry (Vec-factory convention). A caller (the CLI
 /// or the TUI Add Plugin dialog) enumerates this to drive selection without
 /// hardcoding plugin ids.
@@ -302,6 +314,7 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         CLIPBOARD,
         HAPTICS,
         IAP,
+        DATABASE,
     ]
 }
 
@@ -321,7 +334,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_eight_v1_plugins() {
+    fn registry_lists_the_nine_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -334,6 +347,7 @@ mod tests {
                 "clipboard",
                 "haptics",
                 "iap",
+                "database",
             ]
         );
     }
@@ -380,6 +394,25 @@ mod tests {
             spec.base[0],
             Contribution::CargoDep {
                 name: "frust-clipboard"
+            }
+        ));
+    }
+
+    /// The `database` entry is exactly one `CargoDep` — no manifest
+    /// permission, plist key, Gradle module, or Swift package, since this is
+    /// a pure-Rust plugin with no OS-side integration.
+    #[test]
+    fn database_is_a_cargo_dep_and_nothing_else() {
+        let spec = find_plugin("database").unwrap();
+        assert_eq!(spec.crate_dir, "database");
+        assert!(spec.optional_features.is_empty());
+        assert_eq!(spec.requires_sibling, None);
+
+        assert_eq!(spec.base.len(), 1, "{:?}", spec.base);
+        assert!(matches!(
+            spec.base[0],
+            Contribution::CargoDep {
+                name: "frust-database"
             }
         ));
     }
