@@ -4,7 +4,7 @@ resolver = "2"
 # doesn't cover `plugins/`) — a platform plugin (frust-plugin + FFI crates
 # only, no frust-* framework deps), unlike the excluded facade-tier
 # plugins/clean-signals-frust below, which stays out of the root graph.
-members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/iap"]
+members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/iap", "plugins/database"]
 # examples/no-catalogs is the catalog-free build's compile guard: unlike
 # every example excluded below, it is INCLUDED on purpose — a package-scoped
 # `cargo build -p no-catalogs`/`cargo check -p no-catalogs` compiles `frust
@@ -308,6 +308,23 @@ objc2-ui-kit = "0.3"
 # feature is deliberately NOT enabled (see `plugins/clipboard/src/desktop.rs`'s
 # module doc) — the tripwire is `cargo check -p frust-clipboard`.
 arboard = { version = "=3.6.1", default-features = false }
+# frust-database's default (`engine-sqlite`) backend — rusqlite's `bundled`
+# feature compiles SQLite 3.53.2 from source via `cc` rather than linking a
+# system libsqlite3, so the crate builds identically across every host and
+# mobile target this workspace targets, with no `pkg-config`/dev-package
+# prerequisite. Exact-pinned per the Version-Pin Policy: a pre-1.0 public
+# surface (`rusqlite`'s own `Connection`/`Statement` API still churns across
+# minor releases), so a bump is a deliberate, reviewed step rather than a
+# float. `default-features = false` drops rusqlite's own default `cache`
+# (statement-cache) and `ffi-sqlite-wasm-rs` features, neither of which this
+# crate's v1 API surface (no prepared-statement cache, no wasm shell) uses.
+# The tripwire is this crate's own cross-engine conformance suite
+# (`cargo test -p frust-database`), plus `cargo check -p frust-database
+# --no-default-features` to confirm the engine-optional skeleton still
+# compiles with this dependency off.
+rusqlite = { version = "=0.40.1", default-features = false, features = [
+    "bundled",
+] }
 # reactive stack (frust-reactive) — do not add reactive_graph's `effects`
 # feature anywhere (see docs/DEVELOPMENT.md's Version-Pin Policy)
 reactive_graph = "0.2"

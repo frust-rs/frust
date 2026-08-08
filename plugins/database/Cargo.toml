@@ -1,0 +1,40 @@
+[package]
+name = "frust-database"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# DatabaseError variants callers match on — thiserror per CODE_STANDARDS.
+thiserror = { workspace = true }
+# Leaf data-dir resolution only (`open(name)`'s `<data_dir>/databases/<name>.db`
+# path) — the sole `frust-*` dependency this crate needs. Unlike every other
+# plugin under `plugins/`, this crate carries NO `frust-plugin` dependency:
+# it needs no JNI/platform handle, since both SQL engines (rusqlite/turso)
+# reach on-disk SQLite storage directly rather than through an OS capability
+# API — see this crate's `lib.rs` charter doc.
+frust-paths = { path = "../../crates/frust-paths" }
+# The sqlite engine backend (default, `engine-sqlite`) — optional so
+# `cargo check -p frust-database --no-default-features` still resolves to a
+# database-engine-free skeleton (see `engine-turso`, added by the
+# turso-backend task together with its own pinned deps).
+rusqlite = { workspace = true, optional = true }
+
+[features]
+default = ["engine-sqlite"]
+engine-sqlite = ["dep:rusqlite"]
+# Placeholder only: no deps yet (`src/turso.rs` doesn't exist, and the `mod
+# turso;` line this feature gates in `src/lib.rs` is correspondingly inert).
+# Declared now — rather than left for the turso-backend task (06) to add
+# from scratch — purely so `#[cfg(feature = "engine-turso")]` sites written
+# in this wave check-cfg clean instead of tripping `unexpected_cfgs` under
+# `-D warnings`; task 06 fills this in with its real pinned deps.
+engine-turso = []
+# Compiles the crate-private cross-engine conformance suite (`src/conformance.rs`)
+# outside a `#[cfg(test)]` build too — off by default; `cargo test` already
+# implies `cfg(test)`, so a normal `cargo test -p frust-database` run needs no
+# extra flag. This widens the door for a future harness that exercises the
+# suite without a full test build, matching this crate's `mod conformance`
+# `cfg` (see `src/lib.rs`).
+conformance = []
