@@ -146,6 +146,9 @@ pub(crate) fn run_conformance_suite(
     transaction_commits_on_ok(tag, open);
     transaction_rolls_back_on_err(tag, open);
     transaction_no_nesting_surfaces_as_err(tag, open);
+    transaction_commit_failure_leaves_connection_clean(tag, open);
+    transaction_panic_leaves_connection_clean(tag, open);
+    transaction_reentrant_call_is_reported(tag, open);
     syntax_error_is_sql(tag, open);
     open_at_non_writable_dir_is_storage(tag, open);
     multi_handle_same_file_reads_committed_writes(tag, open);
@@ -446,7 +449,9 @@ fn transaction_rolls_back_on_err(
 /// an already-open transaction's own `execute` must surface as
 /// [`DatabaseError::Sql`] from the engine — not panic, and not silently
 /// succeed — and the outer transaction still rolls back cleanly on that
-/// propagated `Err`.
+/// propagated `Err`. (Reaching for [`Database::transaction`] itself from
+/// inside the closure is a different failure with its own case below:
+/// [`DatabaseError::Reentrant`], raised before any SQL runs.)
 fn transaction_no_nesting_surfaces_as_err(
     tag: &str,
     open: &dyn Fn(Target) -> Result<Database, DatabaseError>,
@@ -464,6 +469,187 @@ fn transaction_no_nesting_surfaces_as_err(
     assert!(
         rows.is_empty(),
         "{tag}: a failed nested-transaction attempt must leave no rows behind"
+    );
+}
+
+/// A **failing `COMMIT`** must still leave the connection clean.
+///
+/// This is the one abnormal exit plain `BEGIN`/`COMMIT` SQL cannot be
+/// trusted to unwind on its own: SQLite runs deferred constraint checks at
+/// `COMMIT`, and a failure there aborts the commit but leaves the
+/// transaction *open* — so a `transaction()` that merely propagated the
+/// error would strand the shared connection mid-transaction, failing every
+/// later `transaction` at `BEGIN` and silently swallowing every later bare
+/// `execute`'s writes into the orphan.
+///
+/// Forcing it portably: a `DEFERRABLE INITIALLY DEFERRED` foreign key
+/// violated inside the transaction. Both engines set `PRAGMA foreign_keys =
+/// ON` at open (`sqlite.rs`/`turso.rs`) and both defer that check to
+/// `COMMIT`, so this reproduces on either engine with plain SQL and no
+/// engine-specific hook. The assertion that matters is the *second*
+/// transaction: it can only succeed if the first one rolled back.
+fn transaction_commit_failure_leaves_connection_clean(
+    tag: &str,
+    open: &dyn Fn(Target) -> Result<Database, DatabaseError>,
+) {
+    let db = must_open(tag, open, Target::Memory);
+    must_exec(tag, &db, "CREATE TABLE parent (id INTEGER PRIMARY KEY)", ());
+    must_exec(
+        tag,
+        &db,
+        "CREATE TABLE child (id INTEGER PRIMARY KEY, pid INTEGER REFERENCES parent(id) \
+         DEFERRABLE INITIALLY DEFERRED)",
+        (),
+    );
+
+    let result = db.transaction(|txn| {
+        let inserted = txn.execute(
+            "INSERT INTO child (id, pid) VALUES (?1, ?2)",
+            [Value::Integer(1), Value::Integer(999)],
+        );
+        // Self-check, not incidental: the case only exercises the
+        // COMMIT-failure path while the engine actually *defers* the check.
+        // An engine that rejected the INSERT outright would quietly demote
+        // this to the closure-returns-Err path already covered above.
+        assert!(
+            inserted.is_ok(),
+            "{tag}: the deferred FK violation must reach COMMIT, not be rejected at INSERT \
+             — got {inserted:?}"
+        );
+        Ok(())
+    });
+    assert!(
+        matches!(result, Err(DatabaseError::Sql { .. })),
+        "{tag}: a deferred-constraint COMMIT failure must surface as DatabaseError::Sql, \
+         got {result:?}"
+    );
+
+    let recovered = db
+        .transaction(|txn| txn.execute("INSERT INTO parent (id) VALUES (?1)", [Value::Integer(1)]));
+    assert!(
+        recovered.is_ok(),
+        "{tag}: the connection must be left clean after a failed COMMIT — the next \
+         transaction got {recovered:?}"
+    );
+
+    let rows = must_query(tag, &db, "SELECT id FROM child", ());
+    assert!(
+        rows.is_empty(),
+        "{tag}: a transaction whose COMMIT failed must have rolled its write back"
+    );
+}
+
+/// A **panicking closure** must leave the connection clean too.
+///
+/// A panic unwinds straight past any commit/rollback branch, so only a
+/// `Drop`-based guard can roll back here — and the connection's mutex is
+/// poisoned on the way out, so this also pins that recovering the poison is
+/// safe (`lib.rs`'s [`Database::transaction`] / `lock_conn` poison policy).
+///
+/// Unwinding only: this asserts nothing about a `panic = "abort"` build
+/// (the release profile), where the process is gone before any guard runs.
+/// Tests build with the dev profile, so `catch_unwind` genuinely catches
+/// here. The panic message the closure prints to stderr is expected output,
+/// not a failure.
+fn transaction_panic_leaves_connection_clean(
+    tag: &str,
+    open: &dyn Fn(Target) -> Result<Database, DatabaseError>,
+) {
+    let db = must_open(tag, open, Target::Memory);
+    must_exec(tag, &db, "CREATE TABLE t (id INTEGER PRIMARY KEY)", ());
+
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _: Result<(), DatabaseError> = db.transaction(|txn| {
+            txn.execute("INSERT INTO t (id) VALUES (?1)", [Value::Integer(1)])?;
+            panic!("{tag}: forced panic inside a transaction closure")
+        });
+    }));
+    assert!(
+        caught.is_err(),
+        "{tag}: the forced panic must actually unwind out of transaction()"
+    );
+
+    let recovered =
+        db.transaction(|txn| txn.execute("INSERT INTO t (id) VALUES (?1)", [Value::Integer(2)]));
+    assert!(
+        recovered.is_ok(),
+        "{tag}: the connection must be left clean after a panicking closure — the next \
+         transaction got {recovered:?}"
+    );
+
+    let rows = must_query(tag, &db, "SELECT id FROM t", ());
+    assert_eq!(
+        rows.len(),
+        1,
+        "{tag}: only the post-panic transaction's row may survive"
+    );
+    assert_eq!(
+        rows[0].get(0),
+        Some(&Value::Integer(2)),
+        "{tag}: the panicking transaction's write must have rolled back"
+    );
+}
+
+/// Re-entering the *same* handle from inside its own transaction closure
+/// reports [`DatabaseError::Reentrant`] rather than deadlocking on the
+/// handle's non-reentrant connection mutex — all three entry points
+/// (`execute`, `query`, `transaction`), since they share one lock helper.
+///
+/// The last block is the negative control that pins the detector's shape:
+/// contention from *other* threads must still queue on the mutex and
+/// succeed (the module doc's *Threading model* contract). A blind
+/// `try_lock`-based reentrancy guard would pass every assertion above and
+/// fail exactly there.
+fn transaction_reentrant_call_is_reported(
+    tag: &str,
+    open: &dyn Fn(Target) -> Result<Database, DatabaseError>,
+) {
+    let db = must_open(tag, open, Target::Memory);
+    must_exec(tag, &db, "CREATE TABLE t (id INTEGER PRIMARY KEY)", ());
+
+    let db = &db;
+    let outer: Result<(), DatabaseError> = db.transaction(|_txn| {
+        let reentrant_execute = db.execute("SELECT 1", ());
+        assert!(
+            matches!(reentrant_execute, Err(DatabaseError::Reentrant)),
+            "{tag}: a reentrant execute must report Reentrant, got {reentrant_execute:?}"
+        );
+        let reentrant_query = db.query("SELECT 1", ());
+        assert!(
+            matches!(reentrant_query, Err(DatabaseError::Reentrant)),
+            "{tag}: a reentrant query must report Reentrant, got {reentrant_query:?}"
+        );
+        let reentrant_txn = db.transaction(|_| Ok::<(), DatabaseError>(()));
+        assert!(
+            matches!(reentrant_txn, Err(DatabaseError::Reentrant)),
+            "{tag}: a reentrant transaction must report Reentrant, got {reentrant_txn:?}"
+        );
+        Ok(())
+    });
+    assert!(
+        outer.is_ok(),
+        "{tag}: the outer transaction itself must still commit, got {outer:?}"
+    );
+
+    std::thread::scope(|scope| {
+        for id in 1..=4i64 {
+            scope.spawn(move || {
+                let result = db.transaction(|txn| {
+                    txn.execute("INSERT INTO t (id) VALUES (?1)", [Value::Integer(id)])
+                });
+                assert!(
+                    result.is_ok(),
+                    "{tag}: a cross-thread call must queue on the lock, not be refused as \
+                     reentrant — got {result:?}"
+                );
+            });
+        }
+    });
+    let rows = must_query(tag, db, "SELECT id FROM t", ());
+    assert_eq!(
+        rows.len(),
+        4,
+        "{tag}: every queued cross-thread transaction must have committed"
     );
 }
 

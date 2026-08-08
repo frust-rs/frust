@@ -111,7 +111,8 @@ pub(crate) mod conformance;
 use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 use engine::{EngineConn, Target};
 
@@ -298,8 +299,27 @@ pub enum DatabaseError {
 
     /// The requested (or resolved-default) [`Engine`] isn't compiled into
     /// this build.
+    ///
+    /// Reserved, and unconstructable by any of today's code paths: an
+    /// [`Engine`] variant only exists at all when the feature compiling its
+    /// backend is on, so an engine a caller can *name* is by construction
+    /// compiled in — see [`Database::open`]'s own *Errors* section for what
+    /// the neither-engine-compiled build reports instead.
     #[error("engine {0:?} is not available in this build")]
     EngineUnavailable(Engine),
+
+    /// A call re-entered a [`Database`] handle the calling thread already
+    /// holds — typically an `execute`/`query`/`transaction` issued on a
+    /// captured (e.g. `Arc`-shared) handle from *inside* that same handle's
+    /// [`Database::transaction`] closure.
+    ///
+    /// Reported rather than deadlocking on the handle's non-reentrant
+    /// connection mutex: run statements inside a transaction through the
+    /// [`Transaction`] handle the closure is given. Calls from *other*
+    /// threads are unaffected — they queue on the mutex as the module doc's
+    /// *Threading model* section promises.
+    #[error("a database call re-entered a handle already locked by the calling thread")]
+    Reentrant,
 }
 
 /// The compiled SQL engine backend a [`Database`] routes through.
@@ -353,13 +373,60 @@ impl OpenOptions {
 /// from the platform UI thread.
 pub struct Database {
     conn: Mutex<Box<dyn EngineConn>>,
+    /// The [`thread_token`] of whichever thread currently holds `conn`, or
+    /// `0` when it's unheld — the whole state behind [`Self::lock_conn`]'s
+    /// reentrancy check. Written only while the lock is held.
+    holder: AtomicU64,
 }
 
 impl Database {
     fn from_conn(conn: Box<dyn EngineConn>) -> Self {
         Self {
             conn: Mutex::new(conn),
+            holder: AtomicU64::new(UNHELD),
         }
+    }
+
+    /// Lock this handle's connection, reporting [`DatabaseError::Reentrant`]
+    /// instead of deadlocking when the calling thread already holds it.
+    ///
+    /// The connection sits behind a plain, non-reentrant `std::sync::Mutex`,
+    /// so a closure that captured the same handle (an `Arc<Database>` — the
+    /// sharing shape this crate recommends) and called back into
+    /// `execute`/`query`/`transaction` would otherwise park forever on a
+    /// lock only it can release. A blind `try_lock` would be the wrong
+    /// detector: it would also refuse legitimate *cross-thread* contention,
+    /// which the module doc's *Threading model* section promises will queue.
+    /// So the check is by owner identity instead — `holder` carries the
+    /// token of the thread holding the lock, written only under the lock, so
+    /// a caller that finds its own token there is provably re-entering while
+    /// every other caller blocks exactly as before.
+    ///
+    /// # Poison policy
+    /// A poisoned mutex is recovered (`into_inner()`) rather than
+    /// propagated, and that is sound **only because of [`RollbackGuard`]**:
+    /// the one way a panic can escape while this crate holds the connection
+    /// is a caller's transaction closure panicking, and that guard's `Drop`
+    /// issues the `ROLLBACK` on the way out. So the connection a later
+    /// caller recovers here is never left mid-transaction. Were the guard
+    /// removed, recovering a poisoned lock would hand out a connection with
+    /// an orphaned transaction still open — a silent data-loss path, not a
+    /// mere lost error.
+    ///
+    /// # Errors
+    /// [`DatabaseError::Reentrant`] if the calling thread already holds this
+    /// handle's connection.
+    fn lock_conn(&self) -> Result<ConnGuard<'_>, DatabaseError> {
+        let me = thread_token();
+        if self.holder.load(Ordering::Acquire) == me {
+            return Err(DatabaseError::Reentrant);
+        }
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        self.holder.store(me, Ordering::Release);
+        Ok(ConnGuard {
+            conn,
+            holder: &self.holder,
+        })
     }
 
     /// Open (creating if absent) the named database at this crate's
@@ -377,8 +444,12 @@ impl Database {
     /// current directory, matching `frust-shared-preferences`'s own
     /// `FileStore::standard` precedent), the `databases` directory can't be
     /// created, or (only once both engine features are compiled out) no
-    /// engine is available at all. [`DatabaseError::EngineUnavailable`] if
-    /// an explicitly-requested engine isn't compiled in.
+    /// engine is available at all — that last case reports `Storage` naming
+    /// the missing feature, *not* [`DatabaseError::EngineUnavailable`],
+    /// which no path here can construct: each [`Engine`] variant is gated on
+    /// the feature compiling its own backend, so an engine an
+    /// [`OpenOptions::engine`] caller can name is by construction compiled
+    /// in (see that variant's own doc).
     pub fn open(name: &str) -> Result<Self, DatabaseError> {
         Self::open_with(name, OpenOptions::default())
     }
@@ -426,20 +497,26 @@ impl Database {
     /// returning the number of rows affected.
     ///
     /// # Errors
-    /// [`DatabaseError::Sql`] if the engine rejects the statement.
+    /// [`DatabaseError::Sql`] if the engine rejects the statement;
+    /// [`DatabaseError::Reentrant`] if the calling thread is already inside
+    /// a [`Self::transaction`] closure on this same handle (use the
+    /// [`Transaction`]'s own `execute` there).
     pub fn execute(&self, sql: &str, params: impl IntoParams) -> Result<u64, DatabaseError> {
-        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute(sql, &params.into_params())
+        let mut conn = self.lock_conn()?;
+        conn.conn().execute(sql, &params.into_params())
     }
 
     /// Run a row-returning statement (`SELECT`), returning every resulting
     /// row.
     ///
     /// # Errors
-    /// [`DatabaseError::Sql`] if the engine rejects the statement.
+    /// [`DatabaseError::Sql`] if the engine rejects the statement;
+    /// [`DatabaseError::Reentrant`] if the calling thread is already inside
+    /// a [`Self::transaction`] closure on this same handle (use the
+    /// [`Transaction`]'s own `query` there).
     pub fn query(&self, sql: &str, params: impl IntoParams) -> Result<Vec<Row>, DatabaseError> {
-        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.query(sql, &params.into_params())
+        let mut conn = self.lock_conn()?;
+        conn.conn().query(sql, &params.into_params())
     }
 
     /// Run `f` inside a `BEGIN`/`COMMIT`/`ROLLBACK` transaction — the same
@@ -447,39 +524,148 @@ impl Database {
     /// `Ok`, rolls back on `Err`, and returns whatever `f` returned (or its
     /// error).
     ///
+    /// The transaction is rolled back on *every* path out that isn't a
+    /// successful `COMMIT` — including the `COMMIT` statement itself failing
+    /// (SQLite's deferred-constraint check runs there and leaves the
+    /// transaction open) and `f` panicking — so a call always leaves the
+    /// handle's connection ready for the next one, never stranded
+    /// mid-transaction.
+    ///
+    /// `f` must not call `execute`/`query`/`transaction` on the same
+    /// [`Database`] handle: the connection is already locked for the
+    /// transaction's whole span, and re-entering it from the same thread is
+    /// refused with [`DatabaseError::Reentrant`] rather than deadlocking.
+    /// Use the [`Transaction`] handle `f` is given instead. Other threads
+    /// calling this handle meanwhile are unaffected — they queue, per the
+    /// module doc's *Threading model* section.
+    ///
     /// # Errors
     /// `f`'s own error, if it returns `Err` (after rolling back). A
     /// `BEGIN`/`COMMIT`/`ROLLBACK` statement itself failing also surfaces
-    /// as [`DatabaseError::Sql`].
+    /// as [`DatabaseError::Sql`] (again after rolling back).
+    /// [`DatabaseError::Reentrant`] if the calling thread already holds this
+    /// handle's connection.
     pub fn transaction<T>(
         &self,
         f: impl FnOnce(&Transaction) -> Result<T, DatabaseError>,
     ) -> Result<T, DatabaseError> {
-        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute("BEGIN", &[])?;
-        // Scoped so `txn`'s borrow of `conn` ends before `conn` is used
-        // again below (COMMIT/ROLLBACK) — `Transaction` holds no resource
-        // of its own to release, only this borrow.
+        let mut locked = self.lock_conn()?;
+        locked.conn().execute("BEGIN", &[])?;
+        // Armed the moment BEGIN succeeds: from here on, *every* exit but a
+        // successful COMMIT rolls back through this guard's `Drop` — `f`
+        // returning `Err`, the COMMIT itself failing, and the case no match
+        // arm can reach, `f` panicking (see [`RollbackGuard`]).
+        let mut guard = RollbackGuard::new(locked.conn());
+        // Scoped so `txn`'s borrow of the connection ends before the COMMIT
+        // below — `Transaction` holds no resource of its own to release,
+        // only this borrow.
         let result = {
             let txn = Transaction {
-                conn: RefCell::new(&mut **conn),
+                conn: RefCell::new(guard.conn()),
             };
             f(&txn)
         };
-        match result {
-            Ok(value) => {
-                conn.execute("COMMIT", &[])?;
-                Ok(value)
-            }
-            Err(err) => {
-                // Best-effort: report the original failure even if the
-                // rollback statement itself also fails (an already-broken
-                // connection shouldn't hide the caller's real error).
-                let _ = conn.execute("ROLLBACK", &[]);
-                Err(err)
-            }
+        let value = result?;
+        guard.conn().execute("COMMIT", &[])?;
+        guard.disarm();
+        Ok(value)
+    }
+}
+
+/// The RAII lock on a [`Database`]'s connection: holds the `MutexGuard` and
+/// clears the owner [`Database::lock_conn`] recorded in `holder`, so the
+/// reentrancy check can never read a stale owner. `Drop` runs before the
+/// `MutexGuard` field is dropped, so the owner is always cleared *before*
+/// the mutex opens to the next thread.
+struct ConnGuard<'a> {
+    conn: MutexGuard<'a, Box<dyn EngineConn>>,
+    holder: &'a AtomicU64,
+}
+
+impl ConnGuard<'_> {
+    /// The locked connection. A method rather than a `DerefMut` impl
+    /// because every caller wants the unboxed `&mut dyn EngineConn`, not
+    /// the `Box`.
+    fn conn(&mut self) -> &mut dyn EngineConn {
+        &mut **self.conn
+    }
+}
+
+impl Drop for ConnGuard<'_> {
+    fn drop(&mut self) {
+        self.holder.store(UNHELD, Ordering::Release);
+    }
+}
+
+/// Arms a `ROLLBACK` over the span between a successful `BEGIN` and a
+/// successful `COMMIT` — [`Database::transaction`]'s cleanup for every
+/// abnormal exit, including the one no `match` arm can cover: the closure
+/// **panicking**, which unwinds straight past any commit/rollback logic.
+///
+/// Leaving any of those paths without a rollback strands the shared
+/// connection mid-transaction, and a `Database` handle outlives the call: a
+/// later `transaction` then fails at `BEGIN`, and a later bare
+/// `execute`/`query` silently *joins* the orphaned transaction and loses its
+/// writes when the handle is dropped. [`Database::lock_conn`]'s poison
+/// policy rests on this guard, too.
+///
+/// The rollback is best-effort (`let _ =`): an already-broken connection
+/// must not hide the caller's real error, and a `Drop` running during an
+/// unwind has nowhere to report to anyway.
+struct RollbackGuard<'a> {
+    conn: &'a mut dyn EngineConn,
+    armed: bool,
+}
+
+impl<'a> RollbackGuard<'a> {
+    /// Arm the guard over `conn` — the caller must already have run a
+    /// successful `BEGIN` on it.
+    fn new(conn: &'a mut dyn EngineConn) -> Self {
+        Self { conn, armed: true }
+    }
+
+    /// The guarded connection, reborrowed for as long as the caller holds
+    /// `&mut self`.
+    fn conn(&mut self) -> &mut dyn EngineConn {
+        &mut *self.conn
+    }
+
+    /// Disarm: the transaction ended on its own terms (a successful
+    /// `COMMIT`), so `Drop` must not roll anything back.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RollbackGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.conn.execute("ROLLBACK", &[]);
         }
     }
+}
+
+// --- Reentrancy tokens --------------------------------------------------
+
+/// [`Database::holder`]'s "no thread holds this connection" value —
+/// [`thread_token`] never mints it.
+const UNHELD: u64 = 0;
+
+/// A process-unique, never-reused identifier for the calling thread,
+/// allocated on that thread's first database call. Never [`UNHELD`].
+///
+/// `std::thread::ThreadId` is the natural source, but it is neither
+/// storable in an atomic nor numerically readable on stable — its only
+/// accessor, `ThreadId::as_u64`, is still unstable (`thread_id_value`,
+/// rust-lang/rust#67939) — so this crate mints its own token. Tokens are
+/// handed out monotonically and never recycled, so a token can only ever
+/// name the one thread it was minted for, even after that thread exits.
+fn thread_token() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(UNHELD + 1);
+    thread_local! {
+        static TOKEN: u64 = NEXT.fetch_add(1, Ordering::Relaxed);
+    }
+    TOKEN.with(|token| *token)
 }
 
 /// A handle to one open transaction, passed to [`Database::transaction`]'s
@@ -489,6 +675,11 @@ impl Database {
 /// transaction's lifetime — `execute`/`query` take `&self` (via an
 /// internal `RefCell`) so the closure can call either any number of times
 /// without needing `&mut`.
+///
+/// This is the *only* way to run a statement inside the transaction: the
+/// parent handle's own `execute`/`query`/`transaction` report
+/// [`DatabaseError::Reentrant`] for the whole span (see
+/// [`Database::transaction`]).
 pub struct Transaction<'a> {
     conn: RefCell<&'a mut dyn EngineConn>,
 }
