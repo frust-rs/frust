@@ -251,17 +251,23 @@ fn sessions() -> MutexGuard<'static, HashMap<i32, Arc<SessionInner>>> {
 /// Every `QueueBound` in this module wraps AVFoundation objects whose *use*
 /// is confined to one serial queue (module doc's *Threading*): the session,
 /// its input/output, and a per-capture settings+delegate pair are only ever
-/// messaged from inside a `DispatchQueue::exec_sync` body on the owning
-/// session's queue, and a serial queue runs at most one such body at a time.
-/// The wrapper is never cloned, never handed to a second queue, and the
-/// objects it holds are otherwise only released (a thread-safe operation on
-/// any ObjC object) when the wrapper drops.
+/// messaged from inside a body dispatched onto the owning session's queue —
+/// `exec_sync` where the caller waits for the platform's answer
+/// ([`SessionInner::on_queue`]: [`SessionInner::take_picture`],
+/// [`SessionInner::close`]), `exec_async` everywhere a UI-thread caller must
+/// not park instead ([`SessionInner::start`], [`SessionInner::start_image_stream`],
+/// [`SessionInner::stop_image_stream`], [`SessionInner::set_torch`]) — and a
+/// serial queue runs at most one such body at a time either way, so the two
+/// dispatch modes serialize access identically. The wrapper is never
+/// cloned, never handed to a second queue, and the objects it holds are
+/// otherwise only released (a thread-safe operation on any ObjC object)
+/// when the wrapper drops.
 struct QueueBound<T> {
     value: T,
 }
 
 // SAFETY: see the type's `# Safety` doc — access is serialized by the owning
-// session's serial dispatch queue.
+// session's serial dispatch queue, whichever dispatch mode reaches it.
 unsafe impl<T> Send for QueueBound<T> {}
 // SAFETY: as above; `&QueueBound<T>` only ever reaches a closure that runs on
 // that same serial queue.
@@ -507,7 +513,9 @@ impl SessionInner {
     /// ([`crate::StreamErrorSink`]) rather than this `Result`; a session
     /// closed while the request waited its turn is a cancellation the caller
     /// already knows about, so it is dropped quietly like
-    /// [`Self::start`]'s and [`Self::set_torch`]'s own closed checks.
+    /// [`Self::start`]'s and [`Self::set_torch`]'s own closed checks — the
+    /// session-closed cancellation exception
+    /// [`crate::SessionBackend::start_image_stream`]'s trait doc documents.
     fn start_image_stream(
         self: &Arc<Self>,
         format: ImageFormat,
@@ -665,6 +673,13 @@ impl SessionInner {
     /// the wait is the contract rather than a hazard to remove. A running
     /// stream's callback is retired before the wait, like
     /// [`Self::stop_image_stream`]'s.
+    ///
+    /// This is the crate doc's *Blocking API* table's third row: unlike
+    /// [`Self::take_picture`], this call carries no
+    /// [`crate::CameraError::UiThread`] guard — it parks the calling thread
+    /// rather than refusing it, so a caller on the UI thread should still
+    /// route through `frust_reactive::spawn_blocking`, especially when a
+    /// stream start may still be mid-flight on this same queue.
     fn close(&self) {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
@@ -861,6 +876,11 @@ impl Drop for AppleSession {
     /// leak Flutter's "dispose on inactive" lesson is about.
     /// [`SessionInner::close`] is idempotent, so an explicit `close()` first
     /// costs nothing here.
+    ///
+    /// [`SessionInner::close`] blocks (its own doc, and the crate doc's
+    /// *Blocking API* table) — so this `drop` does too. Dropping the last
+    /// [`crate::CameraSession`] handle on the UI thread pays the identical
+    /// cost `close()` documents; keep it off the UI thread the same way.
     fn drop(&mut self) {
         self.inner.close();
     }

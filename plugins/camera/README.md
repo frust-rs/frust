@@ -140,13 +140,17 @@ no capture/permission code of its own.
 
 ## 3. Blocking calls — pair with `spawn_blocking`, never the UI thread
 
-**Two** calls block until the platform answers, exactly like
-`frust-secure-storage`'s gated calls:
+**Three** calls in the table below can block the calling thread — but only
+the first two refuse to run on the platform's UI thread at all;
+`CameraSession::close` carries no such guard and genuinely blocks it (see
+below the table). Like `frust-secure-storage`'s gated calls, pair each with
+`frust_reactive::spawn_blocking`:
 
 | Call | Blocks until | Deadline (Android / Apple) |
 |---|---|---|
 | `Camera::request_permission` | the permission machinery resolves (a system dialog on Android; AVFoundation's `requestAccessForMediaType:completionHandler:` on iOS) | 120 s / 120 s |
 | `CameraSession::take_picture` | the photo has been written to disk, or the capture failed | 15 s / 10 s |
+| `CameraSession::close` (dropping a `CameraSession` without calling it first runs the identical hop) | the capture device is released — Apple parks on the session's serial queue, which may still be working through `open()`'s in-flight `startRunning()` or a just-issued stream-start attach; Android's JNI call only waits for the teardown to be *scheduled*, not finished | doesn't block (Android) / none — no timeout, by design (Apple) |
 
 Pair each with `frust-reactive`'s `spawn_blocking` (an app-tier concern — the
 plugin itself stays framework-free per the platform-plugin charter):
@@ -161,17 +165,25 @@ let path = photo_path.clone();
 frust_reactive::spawn_blocking(move || session.take_picture(&path)).await??;
 ```
 
-**Never call either on the UI thread.** On Android every completion is relayed
-through the main `Looper`, so a UI-thread caller parks on the very queue
-carrying its own wake-up; on Apple the completion arrives on an arbitrary
-queue, but the permission alert still needs a free main thread to be shown.
-Either way both backends refuse such a call immediately with
-`CameraError::UiThread` instead of freezing until the deadline above — a
-diagnosable error, not a silent hang.
+**Never call `request_permission` or `take_picture` on the UI thread.** On
+Android every completion is relayed through the main `Looper`, so a UI-thread
+caller parks on the very queue carrying its own wake-up; on Apple the
+completion arrives on an arbitrary queue, but the permission alert still
+needs a free main thread to be shown. Either way both backends refuse such a
+call immediately with `CameraError::UiThread` instead of freezing until the
+deadline above — a diagnosable error, not a silent hang.
 
 The guard covers every path that can block. Paths that answer without waiting
 are exempt: on Apple, `request_permission` with an already-decided
 authorization status returns immediately and is callable from any thread.
+
+**`CameraSession::close` carries no such guard.** Unlike the two calls above,
+calling it (or dropping a `CameraSession` without calling it — the same
+queue hop runs either way) on the UI thread is never refused with
+`CameraError::UiThread`; it genuinely blocks the calling thread, by design —
+the release is exactly what a caller reopening right after (a lens switch)
+depends on. Pair it with `frust_reactive::spawn_blocking` anyway, especially
+whenever a stream start may still be mid-flight on the session queue.
 
 **The torch is not in the table above.** `set_torch`/`torch_available` (§5)
 never wait on a platform answer, and never hop onto a queue synchronously
@@ -184,18 +196,21 @@ and neither needs `spawn_blocking`.
 
 **Neither are the stream start/stop calls.** `start_image_stream`/
 `start_barcode_stream` and `stop_image_stream`/`stop_barcode_stream` are
-callable from **any** thread too, for the same reason: Android answers a
-start synchronously (its CameraX bind is itself fire-and-forget), and Apple
-hands the attach to the session's own serial queue **asynchronously**, just
-like `set_torch`. That last part is what keeps a start issued moments after
-`open()` — the scan-sheet shape, where one tap opens the session and starts
-a stream — from parking on the queue behind `startRunning()` coming up,
-which on the UI thread is a multi-second frozen app.
+callable from **any** thread too, sharing `set_torch`'s treatment for the
+same reason: Android answers a start synchronously (its CameraX bind is
+itself fire-and-forget), and Apple hands the attach to the session's own
+serial queue **asynchronously**. That is what keeps a start issued moments
+after `open()` — the scan-sheet shape, where one tap opens the session and
+starts a stream — from parking behind `open()`'s own in-flight
+`startRunning()`, which would otherwise freeze the UI thread for however
+long that takes (hundreds of milliseconds on a real device).
 
 So `Ok(())` from a start means the stream was **accepted**, not that frames
 are flowing yet. The one failure iOS can only discover once its queue runs
 the attach (the session refusing the video data output) is reported through
-`CameraSession::take_stream_error()`:
+`CameraSession::take_stream_error()` — except when the session is closed
+before the queue ever gets to the attach: that's a cancellation, not a
+failure, and reports nothing here at all.
 
 ```rust
 session.start_barcode_stream(BarcodeStreamOptions::default(), on_detect)?;
@@ -218,10 +233,6 @@ frame reports nothing here.
 A stop retires the running callback on the calling thread, so no frame
 reaches your callback after `stop_*` returns, even though the platform-side
 detach runs afterwards.
-
-**`close()` is the one call that still waits** on the session queue (iOS):
-it releases the camera device, and a caller that reopens immediately — a
-lens switch — depends on that release having actually happened.
 
 `take_picture` correlates each attempt with its own completion, so `Ok(())`
 means *that* call's photo was written to the path you passed.
