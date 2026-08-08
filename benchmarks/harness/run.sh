@@ -6,12 +6,18 @@
 # Usage: run.sh <scenario> --app frust|flutter --device <serial> [--runs N]
 #                [--duration <secs>] [--out <dir>] [--pkg <package>]
 #                [--scheme <uri-scheme>] [--platform android|ios]
-#                [--install <app-path>] [--bundle-id <id>]
+#                [--install <app-path>] [--bundle-id <id>] [--adapter <name>]
 #                [--skip-device-state] [--skip-stats]
 #
-#   <scenario>              scenario id (e.g. s1..s8 — see PLAN Phase 9.E's
-#                           scenario table); passed through as the deep-link
-#                           path and the marker name stats.py slices by.
+#   <scenario>              scenario id — the frame-class table `s1..s8`
+#                           (benchmarks/PROTOCOL.md §8) or the op-latency-only
+#                           `d*` DB table `d1`/`d2` (§9); passed through as the
+#                           deep-link path and the marker name stats.py slices
+#                           by. A `d*` id routes this script's capture-summary
+#                           and stats.py invocation onto the d-class (per-op)
+#                           path instead of the frame-series path — see the
+#                           "d-class scenarios" note below; every other step
+#                           (install/device-state/log-pull) is identical.
 #   --app frust|flutter     which bench app to drive.
 #   --device <serial>       adb device serial (`adb devices`) for Android, or
 #                           the iOS device UDID for `--platform ios`.
@@ -24,6 +30,14 @@
 #                           (omit if already installed).
 #   --bundle-id <id>        iOS only: bundle id override (default
 #                           it.f0x.frustbench / it.f0x.flutterBench).
+#   --adapter <name>        flutter d-class runs only: labels which DB adapter
+#                           this run's already-installed build was compiled
+#                           against (`sqlite3` — the engine-parity column — or
+#                           `sqflite` — the ecosystem-typical column; see
+#                           PROTOCOL §9.7). Purely a label/output-directory
+#                           disambiguator: this script never builds anything,
+#                           it only installs/launches whatever `--install`
+#                           points at (or whatever is already on-device).
 #
 # --- iOS automation (--platform ios) ---------------------------------------
 #
@@ -71,6 +85,55 @@
 #                           running stats.py once at the end over the
 #                           combined file set).
 #
+# --- d-class scenarios (d1/d2, benchmarks/PROTOCOL.md §9) -----------------
+#
+# A `d*` scenario id reuses every install/device-state-gate/log-pull step
+# unchanged (install, `device_state.sh`, `am start`/`devicectl process
+# launch`, logcat/console/container-file capture, PSS snapshots, cleanup) —
+# none of that machinery is frame-specific. The only two things that differ:
+#
+#   - The per-run "captured N raw frame lines" summary line is meaningless
+#     for a d-class run (it never emits `*-perf raw` frame lines) — this
+#     script instead counts `*-perf op`/`*-perf plugin` per-op lines for a
+#     `d*` scenario id.
+#   - stats.py is invoked with `--dclass` instead of the default frame-series
+#     path, so it parses PROTOCOL §7's per-op line format and prints the
+#     d-class RESULTS table (§9.6: per-op p50/p95/p99 latency + ops/s)
+#     instead of the frame percentile/missed-budget table.
+#
+# `d*`'s `--duration` still bounds the capture window the same way as an
+# s-class run (PROTOCOL §9.5: a d-class run has no fixed wall-clock target of
+# its own — its length is whatever the declared iteration counts take — so
+# `--duration` just needs to be long enough to outlast that; it is not a
+# per-op-specific concept).
+#
+# Flutter's two DB adapters (PROTOCOL §9.7 — `package:sqlite3`, the
+# engine-parity column, vs `sqflite`, the ecosystem-typical column) are a
+# **compile-time** dimension on iOS, exactly like the existing
+# scenario-per-build split documented above: a physical-iPhone d-class matrix
+# pass needs **two separate `flutter build ios --profile
+# --dart-define=SCENARIO=<d1|d2> --dart-define=DB_ADAPTER=<sqlite3|sqflite>`
+# builds per d-scenario** (one per adapter), each installed and driven by its
+# own `run.sh <scenario> --app flutter --platform ios --install <app-path>
+# --adapter <adapter>` invocation — i.e. the caller's existing
+# once-per-scenario build/install/run loop just gains an inner once-per-
+# adapter iteration for flutter d-class:
+#
+#   for scenario in d1 d2; do
+#     for adapter in sqlite3 sqflite; do
+#       flutter build ios --profile --dart-define=SCENARIO=${scenario} \
+#         --dart-define=DB_ADAPTER=${adapter}
+#       run.sh ${scenario} --app flutter --platform ios \
+#         --install <path-to-that-build.app> --adapter ${adapter}
+#     done
+#   done
+#
+# This script never runs that build loop itself (no device runs ship with
+# this change) — `--adapter` only labels/disambiguates an already-installed
+# build's output directory and stats.py label. Android's two adapters are
+# runtime-selectable (no separate build needed) and are out of scope for
+# this documented loop.
+#
 # Fairness note (protocol, see benchmarks/PROTOCOL.md): when comparing two
 # apps for the same scenario, alternate `run.sh` invocations between them
 # (frust run 1, flutter run 1, frust run 2, flutter run 2, ...) rather than
@@ -103,9 +166,10 @@ SKIP_STATS=0
 PLATFORM="android"
 INSTALL_PATH=""
 BUNDLE_OVERRIDE=""
+ADAPTER=""
 
 usage() {
-  sed -n '2,87p' "$0"
+  sed -n '2,150p' "$0"
 }
 
 # --- Arg parsing ------------------------------------------------------
@@ -213,6 +277,15 @@ while [ $# -gt 0 ]; do
       BUNDLE_OVERRIDE="${1#--bundle-id=}"
       shift
       ;;
+    --adapter)
+      [ $# -ge 2 ] || { echo "error: --adapter requires a value" >&2; exit 2; }
+      ADAPTER="$2"
+      shift 2
+      ;;
+    --adapter=*)
+      ADAPTER="${1#--adapter=}"
+      shift
+      ;;
     --skip-device-state)
       SKIP_DEVICE_STATE=1
       shift
@@ -274,6 +347,25 @@ fi
 if ! [[ "${DURATION}" =~ ^[0-9]+$ ]] || [ "${DURATION}" -lt 1 ]; then
   echo "error: --duration must be a positive integer (seconds), got '${DURATION}'" >&2
   exit 2
+fi
+
+if [ -n "${ADAPTER}" ]; then
+  case "${ADAPTER}" in
+    sqlite3|sqflite) ;;
+    *)
+      echo "error: --adapter must be 'sqlite3' or 'sqflite', got '${ADAPTER}'" >&2
+      exit 2
+      ;;
+  esac
+fi
+
+# d-class scenario detection (PROTOCOL §9.1's declared `d*` namespace) — a
+# `d` followed by one or more digits, e.g. `d1`/`d2`. Everything else
+# (`s1..s8`, `s9`/`s10`, any future non-`d`-prefixed id) takes the untouched
+# s-class (frame-series) path — see the header's "d-class scenarios" note.
+IS_DCLASS=0
+if [[ "${SCENARIO}" =~ ^d[0-9]+$ ]]; then
+  IS_DCLASS=1
 fi
 
 # --- iOS path (--platform ios): physical iPhone via devicectl -----------
@@ -402,7 +494,7 @@ ios_run_matrix() {
 
   if [ -z "${OUT_DIR}" ]; then
     mkdir -p "${SCRIPT_DIR}/.runs"
-    OUT_DIR="$(mktemp -d "${SCRIPT_DIR}/.runs/${APP}-${SCENARIO}-XXXXXX")"
+    OUT_DIR="$(mktemp -d "${SCRIPT_DIR}/.runs/${APP}-${SCENARIO}${ADAPTER:+-${ADAPTER}}-XXXXXX")"
   else
     mkdir -p "${OUT_DIR}"
   fi
@@ -425,18 +517,32 @@ ios_run_matrix() {
     else
       ios_capture_flutter "${bundle}" "${run_log}"
     fi
-    frames="$(grep -c -e 'frust-perf raw' -e 'flutter-perf raw' "${run_log}" 2>/dev/null || true)"
-    echo "  captured ${run_log} (${frames:-0} raw frame lines)"
+    if [ "${IS_DCLASS}" -eq 1 ]; then
+      frames="$(grep -c -e 'frust-perf op' -e 'flutter-perf op' -e 'frust-perf plugin op=' -e 'flutter-perf plugin op=' "${run_log}" 2>/dev/null || true)"
+      echo "  captured ${run_log} (${frames:-0} per-op lines)"
+    else
+      frames="$(grep -c -e 'frust-perf raw' -e 'flutter-perf raw' "${run_log}" 2>/dev/null || true)"
+      echo "  captured ${run_log} (${frames:-0} raw frame lines)"
+    fi
   done
 
   echo
   echo "Captured ${RUNS} runs for ${APP}/${SCENARIO} in ${OUT_DIR}"
+  if [ -n "${ADAPTER}" ]; then
+    echo "  (flutter DB adapter: ${ADAPTER} — labeling/log-dir only, see --adapter)"
+  fi
 
   if [ "${SKIP_STATS}" -eq 0 ]; then
     echo
-    echo "-- stats.py (discarding first 2 runs, per protocol convention) --"
-    python3 "${SCRIPT_DIR}/stats.py" --scenario "${SCENARIO}" \
-      --label "${APP} ${SCENARIO}" "${RUN_LOGS[@]}"
+    if [ "${IS_DCLASS}" -eq 1 ]; then
+      echo "-- stats.py --dclass (discarding first 2 runs, per protocol convention) --"
+      python3 "${SCRIPT_DIR}/stats.py" --dclass --scenario "${SCENARIO}" \
+        --label "${APP} ${SCENARIO}${ADAPTER:+ (${ADAPTER})}" "${RUN_LOGS[@]}"
+    else
+      echo "-- stats.py (discarding first 2 runs, per protocol convention) --"
+      python3 "${SCRIPT_DIR}/stats.py" --scenario "${SCENARIO}" \
+        --label "${APP} ${SCENARIO}" "${RUN_LOGS[@]}"
+    fi
   else
     echo "note: --skip-stats given — run stats.py yourself over ${OUT_DIR}/run-*.log"
   fi
@@ -479,7 +585,7 @@ fi
 
 if [ -z "${OUT_DIR}" ]; then
   mkdir -p "${SCRIPT_DIR}/.runs"
-  OUT_DIR="$(mktemp -d "${SCRIPT_DIR}/.runs/${APP}-${SCENARIO}-XXXXXX")"
+  OUT_DIR="$(mktemp -d "${SCRIPT_DIR}/.runs/${APP}-${SCENARIO}${ADAPTER:+-${ADAPTER}}-XXXXXX")"
 else
   mkdir -p "${OUT_DIR}"
 fi
@@ -562,12 +668,20 @@ for i in $(seq 1 "${RUNS}"); do
 
   adb_shell am force-stop "${PKG}" >/dev/null 2>&1 || true
 
-  frame_count="$(grep -c -e 'frust-perf raw' -e 'flutter-perf raw' "${run_log}" 2>/dev/null || true)"
-  echo "  captured ${run_log} (${frame_count:-0} raw frame lines)"
+  if [ "${IS_DCLASS}" -eq 1 ]; then
+    op_count="$(grep -c -e 'frust-perf op' -e 'flutter-perf op' -e 'frust-perf plugin op=' -e 'flutter-perf plugin op=' "${run_log}" 2>/dev/null || true)"
+    echo "  captured ${run_log} (${op_count:-0} per-op lines)"
+  else
+    frame_count="$(grep -c -e 'frust-perf raw' -e 'flutter-perf raw' "${run_log}" 2>/dev/null || true)"
+    echo "  captured ${run_log} (${frame_count:-0} raw frame lines)"
+  fi
 done
 
 echo
 echo "Captured ${RUNS} runs for ${APP}/${SCENARIO} in ${OUT_DIR}"
+if [ -n "${ADAPTER}" ]; then
+  echo "  (flutter DB adapter: ${ADAPTER} — labeling/log-dir only, see --adapter)"
+fi
 
 # --- Verify captured runs -----------------------------------------------
 
@@ -581,8 +695,14 @@ fi
 
 if [ "${SKIP_STATS}" -eq 0 ]; then
   echo
-  echo "-- stats.py (discarding first 2 runs, per protocol convention) --"
-  python3 "${SCRIPT_DIR}/stats.py" --scenario "${SCENARIO}" --label "${APP} ${SCENARIO}" "${RUN_LOGS[@]}"
+  if [ "${IS_DCLASS}" -eq 1 ]; then
+    echo "-- stats.py --dclass (discarding first 2 runs, per protocol convention) --"
+    python3 "${SCRIPT_DIR}/stats.py" --dclass --scenario "${SCENARIO}" \
+      --label "${APP} ${SCENARIO}${ADAPTER:+ (${ADAPTER})}" "${RUN_LOGS[@]}"
+  else
+    echo "-- stats.py (discarding first 2 runs, per protocol convention) --"
+    python3 "${SCRIPT_DIR}/stats.py" --scenario "${SCENARIO}" --label "${APP} ${SCENARIO}" "${RUN_LOGS[@]}"
+  fi
 else
   echo "note: --skip-stats given — run stats.py yourself over ${OUT_DIR}/run-*.log"
 fi

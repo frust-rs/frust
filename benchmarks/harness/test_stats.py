@@ -332,5 +332,345 @@ class FixtureIntegrationTests(unittest.TestCase):
         )
 
 
+class ParseOpLineTests(unittest.TestCase):
+    """Canonical (PROTOCOL §7 `d*`) and grandfathered (S8) per-op line
+    shapes — see `stats.py`'s "Per-op lines" module docs."""
+
+    def test_parses_canonical_frust_op_line(self):
+        rec = stats.parse_op_line(
+            "frust-perf op scenario=d1 op=insert_batch n=3 us=41200 err=0 rows=2000"
+        )
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec.source, "frust")
+        self.assertEqual(rec.scenario, "d1")
+        self.assertEqual(rec.op, "insert_batch")
+        self.assertEqual(rec.n, 3)
+        self.assertEqual(rec.us, 41200)
+        self.assertFalse(rec.err)
+        self.assertEqual(rec.fields["rows"], "2000")
+
+    def test_parses_canonical_flutter_op_line_with_err(self):
+        rec = stats.parse_op_line(
+            "flutter-perf op scenario=d2 op=select_point n=17 us=88 err=1"
+        )
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec.source, "flutter")
+        self.assertEqual(rec.scenario, "d2")
+        self.assertEqual(rec.op, "select_point")
+        self.assertTrue(rec.err)
+
+    def test_parses_grandfathered_s8_plugin_line_with_no_inline_scenario(self):
+        # Real S8-shaped line (frust_bench/src/scenarios/s8_prefs.rs) — pins
+        # backward compatibility with the formalized PROTOCOL §7 contract.
+        rec = stats.parse_op_line(
+            "frust-perf plugin op=write type=bool n=0 us=612 err=0"
+        )
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec.source, "frust")
+        self.assertIsNone(rec.scenario, "S8's shape carries no inline scenario= field")
+        self.assertEqual(rec.op, "write")
+        self.assertEqual(rec.n, 0)
+        self.assertEqual(rec.us, 612)
+        self.assertFalse(rec.err)
+        self.assertEqual(rec.fields["type"], "bool")
+
+    def test_parses_grandfathered_flutter_plugin_line(self):
+        rec = stats.parse_op_line(
+            "flutter-perf plugin op=read_crossing type=string n=4 us=1500 err=0"
+        )
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec.source, "flutter")
+        self.assertEqual(rec.op, "read_crossing")
+
+    def test_rejects_s8_type_total_aggregate_line(self):
+        # `errors=` (plural), not `err=` — must not be mistaken for a
+        # per-op sample.
+        self.assertIsNone(
+            stats.parse_op_line(
+                "frust-perf plugin op=write type=total n=1000 us=612000 errors=3"
+            )
+        )
+
+    def test_rejects_s8_errors_tally_marker(self):
+        self.assertIsNone(
+            stats.parse_op_line(
+                "frust-perf plugin s8-errors write_errors=1 read_unexpected_none=0 "
+                "read_value_mismatch=0"
+            )
+        )
+
+    def test_rejects_unrelated_lines(self):
+        self.assertIsNone(stats.parse_op_line("some unrelated logcat noise"))
+        self.assertIsNone(stats.parse_op_line(""))
+        self.assertIsNone(
+            stats.parse_op_line("frust-perf raw n=1 total_us=100 skipped=0")
+        )
+
+    def test_rejects_op_line_missing_err(self):
+        self.assertIsNone(
+            stats.parse_op_line("frust-perf op scenario=d1 op=insert_batch n=1 us=100")
+        )
+
+    def test_rejects_op_line_with_non_boolean_err(self):
+        self.assertIsNone(
+            stats.parse_op_line("frust-perf op scenario=d1 op=insert_batch n=1 us=100 err=2")
+        )
+
+
+class SliceOpScenarioTests(unittest.TestCase):
+    def test_slices_canonical_lines_by_inline_scenario_regardless_of_bracket(self):
+        lines = [
+            "bench-scenario-start d1",
+            "frust-perf op scenario=d1 op=insert_batch n=0 us=100 err=0 rows=2000",
+            "frust-perf op scenario=d1 op=insert_single n=0 us=10 err=0",
+            "bench-scenario-end d1",
+        ]
+        ops = stats.slice_op_scenario(lines, "d1")
+        self.assertEqual([o.op for o in ops], ["insert_batch", "insert_single"])
+
+    def test_ignores_other_scenarios_inline(self):
+        lines = [
+            "frust-perf op scenario=d1 op=insert_batch n=0 us=100 err=0",
+            "frust-perf op scenario=d2 op=select_point n=0 us=10 err=0",
+        ]
+        ops = stats.slice_op_scenario(lines, "d1")
+        self.assertEqual([o.op for o in ops], ["insert_batch"])
+
+    def test_grandfathered_s8_lines_attributed_via_exact_marker_name(self):
+        lines = [
+            "bench-scenario-start s8-write",
+            "frust-perf plugin op=write type=bool n=0 us=612 err=0",
+            "frust-perf plugin op=write type=i64 n=1 us=580 err=0",
+            "frust-perf plugin op=write type=total n=2 us=1192 errors=0",
+            "bench-scenario-end s8-write",
+            "bench-scenario-start s8-read",
+            "frust-perf plugin op=read type=bool n=0 us=400 err=0",
+            "bench-scenario-end s8-read",
+        ]
+        write_ops = stats.slice_op_scenario(lines, "s8-write")
+        self.assertEqual([o.op for o in write_ops], ["write", "write"])
+        read_ops = stats.slice_op_scenario(lines, "s8-read")
+        self.assertEqual([o.op for o in read_ops], ["read"])
+
+    def test_grandfathered_lines_attributed_via_prefix_marker_name(self):
+        # A phase-marker bracket named "<scenario>-<phase>" (S8's own
+        # `s8-write`/`s8-read` convention) is recognized when the caller
+        # asks for the bare "s8" scenario id too.
+        lines = [
+            "bench-scenario-start s8-write",
+            "frust-perf plugin op=write type=bool n=0 us=612 err=0",
+            "bench-scenario-end s8-write",
+        ]
+        ops = stats.slice_op_scenario(lines, "s8")
+        self.assertEqual([o.op for o in ops], ["write"])
+
+    def test_lines_outside_any_bracket_are_excluded_for_grandfathered_shape(self):
+        lines = [
+            "frust-perf plugin op=write type=bool n=0 us=612 err=0",
+            "bench-scenario-start s8-write",
+            "frust-perf plugin op=write type=bool n=1 us=500 err=0",
+            "bench-scenario-end s8-write",
+        ]
+        ops = stats.slice_op_scenario(lines, "s8-write")
+        self.assertEqual([o.n for o in ops], [1])
+
+
+class ComputeOpStatsTests(unittest.TestCase):
+    def test_odd_count_percentiles_match_hand_computed_values(self):
+        # sorted: [90, 100, 110, 120, 150] -> p50=110 p95=150 p99=150
+        recs = [
+            stats.OpRecord(source="frust", scenario="d1", op="insert_batch", n=i, us=us, err=False)
+            for i, us in enumerate([100, 120, 90, 150, 110])
+        ]
+        result = stats.compute_op_stats(recs)
+        s = result["insert_batch"]
+        self.assertEqual(s.n_total, 5)
+        self.assertEqual(s.n_ok, 5)
+        self.assertEqual(s.errors, 0)
+        self.assertEqual(s.p50_us, 110)
+        self.assertEqual(s.p95_us, 150)
+        self.assertEqual(s.p99_us, 150)
+        self.assertEqual(s.worst_us, 150)
+
+    def test_even_count_percentiles_match_hand_computed_values(self):
+        # sorted: [50, 60, 70, 80] -> p50=60 p95=80 p99=80
+        recs = [
+            stats.OpRecord(source="frust", scenario="d1", op="insert_single", n=i, us=us, err=False)
+            for i, us in enumerate([50, 70, 60, 80])
+        ]
+        s = stats.compute_op_stats(recs)["insert_single"]
+        self.assertEqual(s.p50_us, 60)
+        self.assertEqual(s.p95_us, 80)
+        self.assertEqual(s.p99_us, 80)
+        self.assertEqual(s.worst_us, 80)
+
+    def test_err_lines_excluded_from_latency_but_counted(self):
+        recs = [
+            stats.OpRecord(source="frust", scenario="d2", op="select_point", n=0, us=100, err=False),
+            stats.OpRecord(source="frust", scenario="d2", op="select_point", n=1, us=200, err=False),
+            stats.OpRecord(source="frust", scenario="d2", op="select_point", n=2, us=999_999, err=True),
+            stats.OpRecord(source="frust", scenario="d2", op="select_point", n=3, us=300, err=False),
+        ]
+        s = stats.compute_op_stats(recs)["select_point"]
+        self.assertEqual(s.n_total, 4)
+        self.assertEqual(s.n_ok, 3)
+        self.assertEqual(s.errors, 1)
+        # ok values sorted: [100, 200, 300] -> p50=200 p95=300 p99=300
+        self.assertEqual(s.p50_us, 200)
+        self.assertEqual(s.p95_us, 300)
+        self.assertEqual(s.p99_us, 300)
+        self.assertEqual(s.worst_us, 300, "the err=1 sample must never surface as the worst")
+        self.assertAlmostEqual(s.ops_per_sec, 3 / ((100 + 200 + 300) / 1_000_000))
+
+    def test_mixed_op_interleaving_groups_correctly(self):
+        recs = [
+            stats.OpRecord(source="frust", scenario="d1", op="insert_batch", n=0, us=100, err=False),
+            stats.OpRecord(source="frust", scenario="d1", op="insert_single", n=0, us=10, err=False),
+            stats.OpRecord(source="frust", scenario="d1", op="insert_batch", n=1, us=120, err=False),
+            stats.OpRecord(source="frust", scenario="d1", op="insert_single", n=1, us=12, err=False),
+            stats.OpRecord(source="frust", scenario="d1", op="insert_batch", n=2, us=110, err=False),
+        ]
+        result = stats.compute_op_stats(recs)
+        self.assertEqual(set(result), {"insert_batch", "insert_single"})
+        self.assertEqual(result["insert_batch"].n_total, 3)
+        self.assertEqual(result["insert_single"].n_total, 2)
+
+    def test_ops_per_sec_round_number(self):
+        recs = [
+            stats.OpRecord(source="frust", scenario="d1", op="insert_batch", n=0, us=500_000, err=False),
+            stats.OpRecord(source="frust", scenario="d1", op="insert_batch", n=1, us=500_000, err=False),
+        ]
+        s = stats.compute_op_stats(recs)["insert_batch"]
+        self.assertEqual(s.ops_per_sec, 2.0)
+
+    def test_op_with_no_ok_samples_reports_all_zero(self):
+        recs = [
+            stats.OpRecord(source="frust", scenario="d2", op="select_point", n=0, us=100, err=True),
+        ]
+        s = stats.compute_op_stats(recs)["select_point"]
+        self.assertEqual(s.n_total, 1)
+        self.assertEqual(s.n_ok, 0)
+        self.assertEqual(s.errors, 1)
+        self.assertEqual(s.p50_us, 0)
+        self.assertEqual(s.worst_us, 0)
+        self.assertEqual(s.ops_per_sec, 0.0)
+
+    def test_empty_input_returns_empty_dict(self):
+        self.assertEqual(stats.compute_op_stats([]), {})
+
+
+class ExcludeDclassWarmupTests(unittest.TestCase):
+    def test_drops_n_zero_sample_per_run_for_d1_insert_batch_and_insert_single(self):
+        # Two runs' worth of insert_batch/insert_single, already concatenated
+        # (n resets to 0 at the start of each run, per PROTOCOL §7).
+        recs = [
+            stats.OpRecord(source="frust", scenario="d1", op="insert_batch", n=0, us=100, err=False),
+            stats.OpRecord(source="frust", scenario="d1", op="insert_batch", n=1, us=110, err=False),
+            stats.OpRecord(source="frust", scenario="d1", op="insert_single", n=0, us=10, err=False),
+            stats.OpRecord(source="frust", scenario="d1", op="insert_single", n=1, us=11, err=False),
+            # run 2
+            stats.OpRecord(source="frust", scenario="d1", op="insert_batch", n=0, us=105, err=False),
+            stats.OpRecord(source="frust", scenario="d1", op="insert_batch", n=1, us=115, err=False),
+            stats.OpRecord(source="frust", scenario="d1", op="insert_single", n=0, us=12, err=False),
+            stats.OpRecord(source="frust", scenario="d1", op="insert_single", n=1, us=13, err=False),
+        ]
+        kept = stats.exclude_dclass_warmup(recs, "d1")
+        self.assertEqual(
+            [(r.op, r.n) for r in kept],
+            [
+                ("insert_batch", 1),
+                ("insert_single", 1),
+                ("insert_batch", 1),
+                ("insert_single", 1),
+            ],
+        )
+
+    def test_d2_range_scan_is_not_warmup_excluded(self):
+        recs = [
+            stats.OpRecord(source="frust", scenario="d2", op="select_point", n=0, us=100, err=False),
+            stats.OpRecord(source="frust", scenario="d2", op="range_scan", n=0, us=5000, err=False),
+        ]
+        kept = stats.exclude_dclass_warmup(recs, "d2")
+        self.assertEqual([(r.op, r.n) for r in kept], [("range_scan", 0)])
+
+    def test_scenario_with_no_declared_warmup_ops_is_unchanged(self):
+        recs = [
+            stats.OpRecord(source="frust", scenario=None, op="write", n=0, us=612, err=False),
+        ]
+        self.assertEqual(stats.exclude_dclass_warmup(recs, "s8"), recs)
+
+
+class FormatOpTableTests(unittest.TestCase):
+    def test_reports_one_row_per_op_with_expected_fields(self):
+        op_stats = stats.compute_op_stats(
+            [
+                stats.OpRecord(source="frust", scenario="d1", op="insert_batch", n=0, us=100, err=False),
+                stats.OpRecord(source="frust", scenario="d1", op="insert_single", n=0, us=10, err=False),
+            ]
+        )
+        table = stats.format_op_table(op_stats, "frust d1")
+        self.assertIn("insert_batch", table)
+        self.assertIn("insert_single", table)
+        self.assertIn("d-class", table)
+
+    def test_empty_stats_reports_no_samples_note(self):
+        table = stats.format_op_table({}, "frust d1")
+        self.assertIn("no per-op samples", table)
+
+
+class DclassEndToEndTests(unittest.TestCase):
+    """Load-a-log-file-through-slice-through-discard-through-compute, the
+    same pipeline `_main_dclass` runs, over a hand-built multi-run fixture
+    written to a temp file per run."""
+
+    def test_full_pipeline_over_three_runs_discards_first_two(self):
+        import tempfile
+
+        run_lines = [
+            # run 1 (discarded) — deliberately wrong-looking numbers so a
+            # failure to discard would be obvious.
+            [
+                "bench-scenario-start d1",
+                "frust-perf op scenario=d1 op=insert_batch n=0 us=999999 err=0",
+                "bench-scenario-end d1",
+            ],
+            # run 2 (discarded)
+            [
+                "bench-scenario-start d1",
+                "frust-perf op scenario=d1 op=insert_batch n=0 us=888888 err=0",
+                "bench-scenario-end d1",
+            ],
+            # run 3 (kept) — insert_batch n=0 is warmup-excluded, n=1..3 kept
+            [
+                "bench-scenario-start d1",
+                "frust-perf op scenario=d1 op=insert_batch n=0 us=100 err=0",
+                "frust-perf op scenario=d1 op=insert_batch n=1 us=100 err=0",
+                "frust-perf op scenario=d1 op=insert_batch n=2 us=200 err=0",
+                "frust-perf op scenario=d1 op=insert_batch n=3 us=300 err=1",
+                "bench-scenario-end d1",
+            ],
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            for i, lines in enumerate(run_lines):
+                p = Path(tmp) / f"run-{i:02d}.log"
+                p.write_text("\n".join(lines) + "\n")
+                paths.append(p)
+
+            runs = [stats.load_run_op_records(p, "d1") for p in paths]
+            combined = stats.discard_first_runs(runs, 2)
+            combined = stats.exclude_dclass_warmup(combined, "d1")
+            result = stats.compute_op_stats(combined)
+
+        s = result["insert_batch"]
+        # n=0 (warmup) dropped, leaving n=1 (100), n=2 (200), n=3 (300, err).
+        self.assertEqual(s.n_total, 3)
+        self.assertEqual(s.n_ok, 2)
+        self.assertEqual(s.errors, 1)
+        self.assertEqual(s.p50_us, 100)
+        self.assertEqual(s.p95_us, 200)
+        self.assertEqual(s.worst_us, 200)
+
+
 if __name__ == "__main__":
     unittest.main()
