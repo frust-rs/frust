@@ -128,6 +128,20 @@ private const val NO_SESSION = -1
  * this view releases it when the hand-over completes — and releases the texture
  * too if the [TextureView] gave it up while CameraX still held it.
  *
+ * **Hand-over contract.** At most one hand-over is in flight: [providedSurface],
+ * its [providedRequest] and the [providedTexture] it was built over move as one
+ * triple, and [tryProvideSurface] starts no second one — so one texture never
+ * carries two producers, and a [Surface] is offered to exactly one request. A
+ * request that arrives mid-flight waits in [pendingRequest]; the result callback
+ * releases the old [Surface] and then re-drives [tryProvideSurface], and being
+ * the only thing that clears the gate is what keeps every arrival order from
+ * wedging the slot black. Releases are identity-gated: only [providedTexture]
+ * can still be read by CameraX, so it alone survives its destroy callback (as
+ * [detachedTexture], freed by that same result callback) while every other
+ * texture goes straight back to the [TextureView]. [requestedResolution] is
+ * pinned at hand-over rather than at request arrival, so [applyTransform] undoes
+ * the stretch of the buffer actually on screen.
+ *
  * All callbacks land on the main thread ([FrustCameraHost.mainExecutor] runs
  * inline there, `Preview.setSurfaceProvider(provider)`'s single-argument
  * overload dispatches on it, and a [TextureView.SurfaceTextureListener] is
@@ -139,7 +153,7 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
     /** The session this slot is showing, or [NO_SESSION]. */
     private var sessionId: Int = NO_SESSION
 
-    /** A request whose surface has not been handed over yet. */
+    /** A request whose surface has not been handed over yet; it waits for one. */
     private var pendingRequest: SurfaceRequest? = null
 
     /** The request currently holding our surface. */
@@ -148,16 +162,20 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
     /** The [Surface] handed to CameraX — built here, so released here. */
     private var providedSurface: Surface? = null
 
-    /** Buffer size CameraX asked for; pinned onto the texture before hand-over. */
+    /** The texture [providedSurface] was built over: what gates its release. */
+    private var providedTexture: SurfaceTexture? = null
+
+    /** Buffer size of the handed-over surface; pinned onto its texture at hand-over. */
     private var requestedResolution: Size? = null
 
     /** The [TextureView]'s live texture, or null while it has none. */
     private var surfaceTexture: SurfaceTexture? = null
 
     /**
-     * A texture the [TextureView] handed back while CameraX still held it: the
-     * destroy callback answered `false`, taking on its release once the
-     * in-flight hand-over completes.
+     * The [providedTexture] of an in-flight hand-over that the [TextureView]
+     * handed back: the destroy callback answered `false`, taking on its release
+     * once that hand-over completes. One slot suffices because only one
+     * hand-over — hence only one texture — is ever in flight.
      */
     private var detachedTexture: SurfaceTexture? = null
 
@@ -177,9 +195,13 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
             // A TextureView re-pins its texture's DEFAULT buffer size to the
             // view size on every resize. Once camera2 has connected it sets the
             // buffer dimensions explicitly and the default is inert, but a
-            // resize landing before that would offer CameraX a wrongly-sized
-            // surface — so restate the camera's own resolution here.
-            requestedResolution?.let { surface.setDefaultBufferSize(it.width, it.height) }
+            // resize landing between hand-over and that connection would leave
+            // CameraX a wrongly-sized buffer — so restate the camera's own
+            // resolution on the handed-over texture. Any other texture is
+            // (re-)pinned by `tryProvideSurface` at its own hand-over.
+            if (surface === providedTexture) {
+                requestedResolution?.let { surface.setDefaultBufferSize(it.width, it.height) }
+            }
         }
 
         override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
@@ -188,19 +210,19 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
             providedRequest = null
             // The documented path for "the view destroyed its texture while the
             // session lives on": CameraX re-issues a fresh SurfaceRequest to
-            // this same provider, in place — no unbind, no camera reopen. Held
-            // pending until a texture returns.
+            // this same provider, in place — no unbind, no camera reopen. Any
+            // request outstanding here (this fresh one included) stays pending
+            // until a texture returns to serve it.
             provided?.invalidate()
-            // The gate is the live hand-over, not the request: `detachFromSession`
-            // clears the request while CameraX may still be reading the Surface
-            // built over this texture. Answering `false` keeps the texture alive
-            // and hands its release to that hand-over's result callback.
-            if (providedSurface != null) {
+            // Identity, not presence: CameraX can only still be reading the
+            // Surface built over THIS texture, and `detachFromSession` clears
+            // the request while that read is live. Answering `false` for it
+            // alone keeps it alive and hands its release to that hand-over's
+            // result callback; a texture never handed over goes straight back.
+            if (surface === providedTexture) {
                 detachedTexture = surface
                 return false
             }
-            pendingRequest?.willNotProvideSurface()
-            pendingRequest = null
             return true
         }
 
@@ -255,10 +277,11 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
     // --- Preview.SurfaceProvider -------------------------------------------
 
     override fun onSurfaceRequested(request: SurfaceRequest) {
-        // Any not-yet-served request is superseded by this one.
+        // Any not-yet-served request is superseded by this one. Its resolution
+        // is deliberately NOT recorded here: until the hand-over happens, the
+        // buffer on screen is still the previous surface's.
         pendingRequest?.willNotProvideSurface()
         pendingRequest = request
-        requestedResolution = request.resolution
         request.setTransformationInfoListener(FrustCameraHost.mainExecutor) { info ->
             transformationInfo = info
             applyTransform()
@@ -273,24 +296,33 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
 
     private fun tryProvideSurface() {
         val request = pendingRequest ?: return
-        val resolution = requestedResolution ?: return
         val texture = surfaceTexture ?: return
         // One hand-over at a time: re-pointing a slot can raise the next request
         // before CameraX has finished with (and let us release) the previous
         // Surface, and two live producers on one texture is a stream
-        // configuration failure. The result callback below retries.
+        // configuration failure. The result callback below re-drives this, so
+        // the request waiting here is served the moment the gate clears.
         if (providedSurface != null) return
 
         // The camera writes at ITS resolution, so the texture must agree before
         // the Surface is built (`onSurfaceTextureSizeChanged` restates it) —
         // handing over a wrongly-sized surface is the classic
         // stretched-first-frame bug, or a rejected stream configuration.
+        val resolution = request.resolution
         texture.setDefaultBufferSize(resolution.width, resolution.height)
         val surface = Surface(texture)
 
+        // Every field settles BEFORE provideSurface: on an already-terminated
+        // request the result callback runs inline from inside that call, and it
+        // clears exactly what is set here.
         pendingRequest = null
         providedRequest = request
         providedSurface = surface
+        providedTexture = texture
+        // The buffer on screen is this one from now on, so the transform that
+        // undoes its stretch is recomputed against it.
+        requestedResolution = resolution
+        applyTransform()
         request.provideSurface(surface, FrustCameraHost.mainExecutor) { result ->
             // This view built the Surface, so this view releases it — the
             // mirror image of the SurfaceView case, where the holder owned it.
@@ -299,6 +331,7 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
             surface.release()
             if (providedSurface === surface) providedSurface = null
             if (providedRequest === request) providedRequest = null
+            if (providedTexture === texture) providedTexture = null
             if (detachedTexture === texture) {
                 detachedTexture = null
                 texture.release()
@@ -318,6 +351,12 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
                 else ->
                     Log.w(TAG, "frust-camera: unknown SurfaceRequest result ${result.resultCode}")
             }
+            // The gate is clear and the old texture is gone: serve whatever
+            // arrived mid-flight. Without this the slot stays black forever on
+            // every interleaving that raises a request before this callback —
+            // a foregrounded preview, a re-pointed slot. It terminates because
+            // each pass consumes `pendingRequest`.
+            tryProvideSurface()
         }
     }
 
