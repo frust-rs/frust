@@ -17,20 +17,30 @@ thiserror = { workspace = true }
 frust-paths = { path = "../../crates/frust-paths" }
 # The sqlite engine backend (default, `engine-sqlite`) — optional so
 # `cargo check -p frust-database --no-default-features` still resolves to a
-# database-engine-free skeleton (see `engine-turso`, added by the
-# turso-backend task together with its own pinned deps).
+# database-engine-free skeleton, the same way `engine-turso` below is optional.
 rusqlite = { workspace = true, optional = true }
+# The turso engine backend (non-default, `engine-turso`) — an async API this
+# crate bridges onto its synchronous seam. Optional, and off by default: it
+# roughly doubles this crate's binary contribution (~5.7 MB measured at the
+# ship profile), so an app opts in rather than paying for an engine it isn't
+# using.
+turso = { workspace = true, optional = true }
+# `rt` only — the whole tokio surface `src/turso.rs`'s bridge needs is one
+# current-thread runtime to drive turso's futures on its own thread.
+# Deliberately NOT `rt-multi-thread`/`time`/`net`: this crate never spawns a
+# worker pool, and turso's local engine drives its own IO rather than tokio's
+# reactor (`frust-reactive` owns the process's real multi-thread runtime — see
+# docs/CORE_ARCHITECTURE.md).
+tokio = { workspace = true, optional = true, features = ["rt"] }
 
 [features]
 default = ["engine-sqlite"]
 engine-sqlite = ["dep:rusqlite"]
-# Placeholder only: no deps yet (`src/turso.rs` doesn't exist, and the `mod
-# turso;` line this feature gates in `src/lib.rs` is correspondingly inert).
-# Declared now — rather than left for the turso-backend task (06) to add
-# from scratch — purely so `#[cfg(feature = "engine-turso")]` sites written
-# in this wave check-cfg clean instead of tripping `unexpected_cfgs` under
-# `-D warnings`; task 06 fills this in with its real pinned deps.
-engine-turso = []
+# The turso engine backend plus the tokio runtime its async-to-sync bridge
+# runs on (`src/turso.rs`). Strictly additive: off by default, and a build
+# with both engine features on compiles both backends and lets
+# `OpenOptions::engine` pick between them per handle.
+engine-turso = ["dep:turso", "dep:tokio"]
 # Compiles the crate-private cross-engine conformance suite (`src/conformance.rs`)
 # outside a `#[cfg(test)]` build too — off by default; `cargo test` already
 # implies `cfg(test)`, so a normal `cargo test -p frust-database` run needs no
