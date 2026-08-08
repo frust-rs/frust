@@ -140,7 +140,18 @@ private const val NO_SESSION = -1
  * [detachedTexture], freed by that same result callback) while every other
  * texture goes straight back to the [TextureView]. [requestedResolution] is
  * pinned at hand-over rather than at request arrival, so [applyTransform] undoes
- * the stretch of the buffer actually on screen.
+ * the stretch of the buffer actually on screen — and it is only one of that
+ * transform's three inputs. The other two are the request's
+ * `TransformationInfo` and a non-zero slot size, which a hand-over does not
+ * imply: the host mounts every slot 0×0 and publishes real geometry in a later
+ * update, so geometry readiness is routinely the last input to land. The three
+ * settle in any order, and each setter re-drives [applyTransform] — but a
+ * setter running while another input is still missing would otherwise be the
+ * last word, leaving the slot black with frames streaming into it. A miss
+ * therefore arms [transformPending] and the per-frame texture-update tick
+ * retries it, so the transform converges within one camera frame of the third
+ * input becoming available, whatever the order, and costs one boolean read per
+ * frame once it has.
  *
  * All callbacks land on the main thread ([FrustCameraHost.mainExecutor] runs
  * inline there, `Preview.setSurfaceProvider(provider)`'s single-argument
@@ -181,6 +192,14 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
 
     /** Latest transform info, re-applied whenever this slot is resized. */
     private var transformationInfo: SurfaceRequest.TransformationInfo? = null
+
+    /**
+     * An apply is owed: [applyTransform] last ran without all of its inputs, or
+     * the buffer it computed for is gone. Only an apply that reaches
+     * `setTransform` clears it, and only a camera frame on [providedTexture]
+     * retries it — see the Hand-over contract.
+     */
+    private var transformPending = false
 
     /** Reused by [applyTransform]; every op below is a `set`/`post`, never additive. */
     private val transformMatrix = Matrix()
@@ -227,8 +246,13 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
         }
 
         override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
-            // Per camera frame, deliberately empty: the TextureView has already
-            // scheduled its own redraw and nothing here depends on frame timing.
+            // Per camera frame, and deliberately almost empty: the TextureView
+            // has already scheduled its own redraw and nothing here depends on
+            // frame timing. The one thing that does is a transform still owed —
+            // this is the only tick guaranteed to keep coming while the inputs
+            // it needs settle, so it retries until the transform applies. The
+            // flag is tested first: once it has, a frame costs one bool read.
+            if (transformPending && surface === providedTexture) applyTransform()
         }
     }
 
@@ -259,6 +283,9 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
         detachFromSession()
         sessionId = id
         if (id == NO_SESSION) return
+        // Every input this session's transform needs is still to come, and the
+        // matrix on screen (if any) belongs to the previous one.
+        transformPending = true
         // A session opened before any view existed has no idea what display it
         // will be shown on; tell it now (and again on every resize).
         display?.let { FrustCameraHost.setTargetRotation(id, it.rotation) }
@@ -331,7 +358,13 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
             surface.release()
             if (providedSurface === surface) providedSurface = null
             if (providedRequest === request) providedRequest = null
-            if (providedTexture === texture) providedTexture = null
+            if (providedTexture === texture) {
+                providedTexture = null
+                // The buffer the current matrix was computed for is gone, and
+                // the retry only fires for the texture actually handed over, so
+                // whatever surface replaces this one starts owing an apply.
+                transformPending = true
+            }
             if (detachedTexture === texture) {
                 detachedTexture = null
                 texture.release()
@@ -371,6 +404,9 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
         pendingRequest = null
         requestedResolution = null
         transformationInfo = null
+        // Nothing is owed with no inputs left to compute from; `bindSession`
+        // re-arms for the next session, so the flag never crosses one.
+        transformPending = false
     }
 
     // --- Transform ---------------------------------------------------------
@@ -418,6 +454,11 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
      * gate (both orientations + front-camera mirroring).
      */
     private fun applyTransform() {
+        // Armed ahead of the guards, cleared only once `setTransform` has run:
+        // every return below leaves the transform owed, and the frame tick is
+        // what comes back for it. An input setter therefore just calls this,
+        // in whatever order its input happened to arrive.
+        transformPending = true
         val info = transformationInfo ?: return
         val resolution = requestedResolution ?: return
         val slotWidth = width
@@ -459,6 +500,7 @@ internal class CameraPreviewView(context: Context) : FrameLayout(context), Previ
         transformMatrix.postScale(scale, scale)
         transformMatrix.postTranslate(slotWidth / 2.0f, slotHeight / 2.0f)
         textureView.setTransform(transformMatrix)
+        transformPending = false
 
         if (sessionId != NO_SESSION) {
             FrustCameraHost.setPreviewAspectRatio(
