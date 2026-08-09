@@ -17,6 +17,17 @@ license.workspace = true
 # release. Additive: nothing in a release invocation enables it, so cargo's
 # feature unification keeps it off unless a build explicitly opts in.
 perf-trace = []
+# Opt-in in-app devtools service (the debug-build-only inspector/driver seam).
+# When ON, the `devtools` module compiles in: the `frust-devtools` loopback
+# service, the shell-side `DevtoolsBackend` implementation, the UI-thread hop
+# queue, and the per-frame stats publish inside `perf::FrameStats::record`. When
+# OFF (the default) the module, both `frust-devtools*` dependencies, and every
+# protocol symbol are absent from the build entirely — a release artifact
+# carries no listener, no discovery-line bytes, and no `input_*` surface. The
+# gate is the FEATURE, never a `debug_assertions` runtime check. Additive, so
+# cargo's feature unification keeps it off unless a build explicitly opts in
+# (the CLI turns it on for debug/profile builds — `BuildMode::cargo_features`).
+devtools = ["dep:frust-devtools", "dep:frust-devtools-protocol"]
 # Forwards into frust-theme's own `glyph-fonts` (gf2 opt-out chain). Nothing
 # in this crate is itself feature-gated on it — `font_registry` registers
 # whatever bytes a caller pushes — this is purely a pass-through edge so the
@@ -43,6 +54,14 @@ kurbo = { workspace = true }
 # `guard` logs a caught panic through the `log` facade only (no android_logger),
 # so it stays platform-free and host-testable.
 log = { workspace = true }
+# OPTIONAL, `devtools`-only (see the feature's comment): the in-app debug
+# service and its wire types. Path deps rather than workspace edges, matching
+# `frust-drive`'s own `frust-devtools-protocol` edge — these two crates are
+# consumed from exactly two places in the repo and neither is version-shared
+# with anything else. `frust-devtools` itself depends on no framework crate, so
+# this edge adds no layering cycle: the shell hands it a backend, nothing more.
+frust-devtools = { path = "../frust-devtools", optional = true }
+frust-devtools-protocol = { path = "../frust-devtools-protocol", optional = true }
 
 # DEV-ONLY: the shipped crate stays reactive-free (see docs/ARCHITECTURE.md's
 # Layer Dependencies). Both entries below are dev-dependencies ONLY — they never

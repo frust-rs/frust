@@ -158,3 +158,16 @@ perf-trace = [
     "frust-shell-android/perf-trace",
     "frust-shell-ios/perf-trace",
 ]
+# Opt-in in-app devtools service: re-exports devtools from all three shells,
+# with the identical per-target forwarding shape `perf-trace` uses above
+# (desktop's feature activates only on non-Android targets; Android/iOS's only
+# on their own). Empty by default — a release build carries no listener, no
+# discovery line and no protocol symbols, because the FEATURE is absent, not
+# because a runtime check is false. The CLI is the sole enabler
+# (`BuildMode::cargo_features` selects it for debug/profile alongside
+# `perf-trace`); an app can also turn it on by hand for a one-off inspection.
+devtools = [
+    "frust-shell-desktop/devtools",
+    "frust-shell-android/devtools",
+    "frust-shell-ios/devtools",
+]

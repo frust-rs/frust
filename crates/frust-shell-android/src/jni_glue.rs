@@ -849,6 +849,20 @@ pub fn native_init(
     make_app: impl FnOnce() -> Box<dyn AppTree>,
 ) -> jlong {
     init_logger_once();
+    // Devtools, compiled in only under this crate's `devtools` feature. Started
+    // here — after `init_logger_once` above, never before it — because the
+    // service's discovery line (`frust-devtools listening on <port>`) is a
+    // `log::info!` call, and tooling recovers the port by grepping it out of
+    // logcat: started ahead of `android_logger`, that one line would be lost
+    // and the port unrecoverable on a device. No wake callback: the
+    // Choreographer loop drains the hop queue every tick (see
+    // `AndroidAppHandle::frame`). The app name is the process name, which on
+    // Android is the package name.
+    #[cfg(feature = "devtools")]
+    frust_shell_common::devtools::start(
+        frust_shell_common::devtools::app_name_from_process(),
+        None,
+    );
     guard("nativeInit", 0, || {
         let cache_dir = env
             .with_env(|env| cache_dir.try_to_string(env))

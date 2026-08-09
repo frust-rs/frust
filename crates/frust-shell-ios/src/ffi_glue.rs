@@ -170,6 +170,17 @@ pub fn init(
     make_app: impl FnOnce() -> Box<dyn AppTree>,
 ) -> *mut c_void {
     init_logger_once();
+    // Devtools, compiled in only under this crate's `devtools` feature. Started
+    // here — after `init_logger_once` above, never before it — because the
+    // service's discovery line (`frust-devtools listening on <port>`) is a
+    // `log::info!` call that must reach this shell's stderr logger for tooling
+    // to recover the port. No wake callback: the `CADisplayLink` loop drains
+    // the hop queue every tick (see `IosAppHandle::frame`).
+    #[cfg(feature = "devtools")]
+    frust_shell_common::devtools::start(
+        frust_shell_common::devtools::app_name_from_process(),
+        None,
+    );
     guard("frust_init", std::ptr::null_mut(), || {
         match create_handle(metal_layer, width, height, scale, make_app) {
             Ok(handle) => handle,

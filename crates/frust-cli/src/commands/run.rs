@@ -169,7 +169,7 @@ fn run_desktop_fallback(
     // has it dropped here — with a one-time warning to stdout (the CLI
     // front-end owns printing) — so the desktop `cargo run` never carries an
     // undeclared `--features lean` and cargo's opaque hard error. The `frust`
-    // crate's own `perf-trace` (debug/profile) is never filtered.
+    // crate's own `perf-trace`/`devtools` (debug/profile) are never filtered.
     let (features, warning) =
         frust_drive::cargo_manifest::resolve_release_features(&cwd, info.mode);
     if let Some(warning) = warning {
@@ -491,10 +491,10 @@ fn drain_available_lines(
 /// build mode's cargo profile arg (`[]`/`--profile profile`/`--release`) so
 /// a `frust run --release`/`--profile` desktop preview builds in the
 /// requested profile instead of always debug, plus the resolved cargo
-/// `features` (`--features frust/perf-trace` for debug/profile, `--features
-/// lean` for release) so the desktop preview
-/// matches the device pipelines: instrumentation compiled IN for debug/profile,
-/// the log ceiling for release.
+/// `features` (`--features frust/perf-trace --features frust/devtools` for
+/// debug/profile, `--features lean` for release) so the desktop preview
+/// matches the device pipelines: instrumentation and the in-app devtools
+/// service compiled IN for debug/profile, the log ceiling for release.
 ///
 /// `features` is the release-lean-preflight-resolved list
 /// (`frust_drive::cargo_manifest::resolve_release_features`): a legacy app
@@ -668,7 +668,9 @@ mod tests {
                 "--profile",
                 "profile",
                 "--features",
-                "frust/perf-trace"
+                "frust/perf-trace",
+                "--features",
+                "frust/devtools"
             ]
         );
         let env = desktop_cargo_run_env(&info, None);
@@ -676,17 +678,23 @@ mod tests {
     }
 
     #[test]
-    fn desktop_cargo_run_args_default_debug_carries_perf_trace_feature() {
-        // Debug desktop preview compiles instrumentation in via
-        // `--features frust/perf-trace`.
+    fn desktop_cargo_run_args_default_debug_carries_perf_trace_and_devtools_features() {
+        // Debug desktop preview compiles instrumentation AND the in-app
+        // devtools service in — one `--features` pair per selected feature.
         assert_eq!(
             desktop_cargo_run_args(&debug_info()),
-            vec!["run", "--features", "frust/perf-trace"]
+            vec![
+                "run",
+                "--features",
+                "frust/perf-trace",
+                "--features",
+                "frust/devtools"
+            ]
         );
     }
 
     #[test]
-    fn desktop_cargo_run_args_release_carries_lean_not_perf_trace() {
+    fn desktop_cargo_run_args_release_carries_lean_not_perf_trace_or_devtools() {
         let info = BuildInfo::from_args(
             BuildArgs {
                 release: true,
@@ -751,7 +759,7 @@ mod tests {
         // override set; desktop_cargo_run_env's own tests above cover the
         // env-pair construction itself.
         let runner = FakeProcessRunner::new().with(
-            "cargo run --features frust/perf-trace",
+            "cargo run --features frust/perf-trace --features frust/devtools",
             Output {
                 success: true,
                 stdout: String::new(),

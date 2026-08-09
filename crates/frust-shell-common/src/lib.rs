@@ -48,6 +48,13 @@
 //! plumbing.
 
 mod app_tree;
+/// The in-app devtools service's shell side — the [`DevtoolsUi`](devtools::DevtoolsUi)
+/// hop seam, the process-wide [`start`](devtools::start)/[`pump`](devtools::pump)
+/// pair, and the `DevtoolsBackend` implementation behind them. Compiled only
+/// under the `devtools` cargo feature; absent entirely otherwise (see the
+/// module's own docs).
+#[cfg(feature = "devtools")]
+pub mod devtools;
 mod ffi_support;
 pub mod font_registry;
 pub mod frame_gate;

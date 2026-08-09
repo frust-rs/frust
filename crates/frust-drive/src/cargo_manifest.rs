@@ -53,10 +53,10 @@ pub fn declares_feature(project_root: &Path, feature: &str) -> bool {
 /// caller's own output channel (a CLI `println!` or a drive-core `on_line`
 /// sink).
 ///
-/// The debug/profile arm's `frust/perf-trace` is a feature of the *frust*
-/// crate (always present in a generated app's dependency graph), so it is
-/// never filtered — those modes pass [`BuildMode::cargo_features`] through
-/// verbatim with no warning. The release arm's `lean` is the *app's own*
+/// The debug/profile arm's `frust/perf-trace` and `frust/devtools` are both
+/// features of the *frust* crate (always present in a generated app's
+/// dependency graph), so neither is ever filtered — those modes pass
+/// [`BuildMode::cargo_features`] through verbatim with no warning. The release arm's `lean` is the *app's own*
 /// feature; an app scaffolded before release-lean existed does not declare it,
 /// and `--features lean` against such an app fails the whole build with
 /// cargo's opaque message. So for release we drop `lean` when the manifest
@@ -179,14 +179,20 @@ mod tests {
     }
 
     #[test]
-    fn resolve_debug_passes_perf_trace_through_regardless_of_manifest() {
+    fn resolve_debug_passes_frust_crate_features_through_regardless_of_manifest() {
         // A legacy manifest (no `lean`) must not affect the debug/profile
-        // arm — `frust/perf-trace` is a frust-crate feature, always present.
+        // arm — both `frust/perf-trace` and `frust/devtools` are frust-crate
+        // features, always present in a generated app's dependency graph
+        // whether or not the app declares anything of its own.
         let dir = unique_dir("resolve-debug");
         write_manifest(&dir, "[package]\nname = \"app\"\n");
         for mode in [BuildMode::Debug, BuildMode::Profile] {
             let (features, warning) = resolve_release_features(&dir, mode);
-            assert_eq!(features, vec!["frust/perf-trace"], "mode {mode:?}");
+            assert_eq!(
+                features,
+                vec!["frust/perf-trace", "frust/devtools"],
+                "mode {mode:?}"
+            );
             assert!(warning.is_none(), "mode {mode:?}: {warning:?}");
         }
         let _ = fs::remove_dir_all(&dir);

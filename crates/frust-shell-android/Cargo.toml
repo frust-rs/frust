@@ -68,6 +68,12 @@ frust-widgets = { workspace = true }
 # and frust-render/perf-trace. Empty by default (opt-in survives cargo's additive
 # unification; the CLI is the sole enabler).
 perf-trace = ["frust-shell-common/perf-trace", "frust-render/perf-trace"]
+# Opt-in in-app devtools service: re-exports frust-shell-common/devtools and
+# compiles this shell's service start + per-frame UI-thread drain in. Empty by
+# default, exactly like `perf-trace` above; like it, the frust-shell-common edge
+# this targets only exists in the Android-gated dependency block, so this is a
+# no-op off-Android.
+devtools = ["frust-shell-common/devtools"]
 # Forwards into frust-theme's own `glyph-fonts` (opt-out chain) — see
 # `frust-shell-common`'s Cargo.toml for the shape rationale. The frust-theme
 # edge this targets only exists in the Android-gated dependency block above;

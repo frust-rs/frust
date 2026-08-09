@@ -119,3 +119,23 @@ impl IosAppHandle {
         self.app.ime_state()
     }
 }
+
+/// The devtools UI-thread view of this handle (see
+/// `frust_shell_common::devtools`). Injection lands on exactly the path
+/// `dispatch_touch`/`ime_apply` above use — the `AppTree::event` seam inside
+/// [`under_root_owner`], plus the `events_since_last_frame` frame-gate latch —
+/// so a synthetic tap is hit-tested and routed like a real one and cannot be
+/// skipped by the gate on the frame that follows it. Coordinates are logical
+/// points, matching this shell's own touch path (no scale division).
+#[cfg(feature = "devtools")]
+impl frust_shell_common::devtools::DevtoolsUi for IosAppHandle {
+    fn inspect(&self) -> Vec<frust_core::InspectNode> {
+        self.app.inspect()
+    }
+
+    fn dispatch(&mut self, event: InputEvent) {
+        self.events_since_last_frame = true;
+        let app = &mut self.app;
+        let _ = under_root_owner(|| app.event(&event));
+    }
+}

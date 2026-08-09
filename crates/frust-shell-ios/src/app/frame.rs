@@ -56,6 +56,20 @@ impl IosAppHandle {
             rt.pump_local();
         }
 
+        // Drain the devtools UI-thread hop queue, beside the reactive pump and
+        // before the ready/paused gate: a widget-tree snapshot needs no
+        // renderer, and an injected event must reach the tree even while the
+        // surface is not ready. This IS the iOS hop mechanism — the shell
+        // registers no wake callback, because the `CADisplayLink` ticks every
+        // vsync while foregrounded, so a queued request waits at most one frame
+        // interval (well inside the service's 1s backend timeout). A
+        // backgrounded app pauses the display link, so a hop taken there times
+        // out to the client, which is the honest answer. `dispatch` sets
+        // `events_since_last_frame` itself, so an injection lands before this
+        // frame's gate inputs are gathered below and forces the frame to run.
+        #[cfg(feature = "devtools")]
+        frust_shell_common::devtools::pump(self);
+
         // Poll the app-facing theme override slot once per
         // frame, before the ready/paused gate — theme delivery needs no
         // renderer, so this stays in sync even while backgrounded/not-ready

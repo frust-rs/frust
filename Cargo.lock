@@ -2026,6 +2026,8 @@ name = "frust-shell-common"
 version = "0.1.0"
 dependencies = [
  "frust-core",
+ "frust-devtools",
+ "frust-devtools-protocol",
  "frust-reactive",
  "frust-scene",
  "frust-text",

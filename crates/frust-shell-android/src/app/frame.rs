@@ -115,6 +115,20 @@ impl AndroidAppHandle {
         // writes must be observed by *this* frame's dirty check below.
         crate::jni_glue::pump_reactive_runtime();
 
+        // Drain the devtools UI-thread hop queue, beside the reactive pump and
+        // before the surface-ready gate: a widget-tree snapshot needs no
+        // renderer, and an injected event must reach the tree even while the
+        // surface is churning. This IS the Android hop mechanism — the shell
+        // registers no wake callback, because the Choreographer reposts a frame
+        // callback every tick while resumed, so a queued request waits at most
+        // one frame interval (well inside the service's 1s backend timeout). A
+        // paused app posts no frames, so a hop taken while backgrounded times
+        // out to the client, which is the honest answer. `dispatch` sets
+        // `events_since_last_frame` itself, so an injection lands before this
+        // frame's gate inputs are gathered below and forces the frame to run.
+        #[cfg(feature = "devtools")]
+        frust_shell_common::devtools::pump(self);
+
         // Poll the app-facing theme override slot once per
         // frame, before the surface-ready gate — theme delivery needs no
         // renderer, so this stays in sync even while the surface is torn down
