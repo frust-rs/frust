@@ -248,7 +248,10 @@ rather than in `examples/playground` (which merely switches it on) because an ap
 crate cannot implement that trait without raw `jni`/`objc2-ui-kit` deps the plugin does
 not re-export; the mobile compile gates below are the only thing that builds it.
 `frust-database`'s `engine-turso` needs its own gate too: `cargo test -p frust-database
---features engine-turso` (libclang required — see *Prerequisites*).
+--features engine-turso` (libclang required — see *Prerequisites*). `devtools` (the in-app debug
+service — [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)) is the same shape: `cargo test -p
+frust-shell-common --features devtools` at minimum; `BuildMode::cargo_features()` enables it
+alongside `perf-trace` for generated apps' Debug/Profile builds, never Release.
 
 ```bash
 # frust-database mobile compile gates: run separately from the facade-graph gates below
@@ -354,6 +357,7 @@ coreutils`) until fixed.
 | Variable | Purpose | Default |
 |---|---|---|
 | `FRUST_TRACE` | Enables `frust-perf` frame/startup logging (`frust-shell-common::perf`); requires a `perf-trace` build (debug/profile compile it in by default) — release compiles the instrumentation out entirely, no code or strings. Runtime env var; `frust run --profile`/`frust build --profile` auto-inject `--define FRUST_TRACE=1` unless already set — opt out with `--define FRUST_TRACE=0`. | off |
+| `FRUST_DEVTOOLS` | Runtime kill switch for the in-app debug service (`frust-shell-common::devtools`, [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)): setting it to `0` skips starting the service even in a `devtools`-featured build. Same compile-time-or-runtime shape as `FRUST_TRACE` (the feature gates compilation; the var gates only startup). | unset (service starts if compiled in) |
 | `FRUST_NO_FRAME_GATE` | Kill switch for the mobile whole-frame skip gate (`docs/SHELLS_ARCHITECTURE.md`'s `frame_gate` module) — forces every Choreographer/`CADisplayLink` tick to run, restoring pre-gate behavior. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Reach for this first when diagnosing a suspected stuck-UI report. | off (gate active) |
 | `FRUST_NO_ANIM_PACING` | Kill switch for animation-loop pacing only (`docs/SHELLS_ARCHITECTURE.md`'s `frame_gate` module) — a paced (`TickClass::CosmeticLoop`) frame request runs on its vsync as before; the whole-frame skip gate (`FRUST_NO_FRAME_GATE` row above) stays active regardless. Same compile-time-or-runtime parsing as `FRUST_TRACE`. Narrower A/B valve than `FRUST_NO_FRAME_GATE` — reach for this when isolating pacing from skip-gate behavior. | off (pacing active) |
 | `FRUST_LOG` | Desktop-only stderr log level override (`frust-shell-desktop::logger`) — the sink `perf`'s `log::info!` lines print through; Android/iOS use their platform loggers instead. The logger suppresses only known-noisy vello Error/Warn messages below `debug` (see *Known Issues*' vello bitmap-emoji note); unknown vello errors still surface at the default level. Pass `FRUST_LOG=debug` to see all vello log lines when debugging the render stack. | `info` |

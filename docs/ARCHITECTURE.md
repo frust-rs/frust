@@ -24,6 +24,7 @@ its own spoke — read this to orient, then follow one link.
 | NATIVE_WIDGETS | `frust-native-widgets` (`plugins/native-widgets`) | A platform plugin rendering real OS controls plus plugin-authored native view hierarchies, driven through exactly one generic factory/listener per platform; its **theme ladder** folds `Theme` into control props every frame (diff-gated) and degrades bundled fonts to the platform system font when unavailable | [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md) |
 | CLI | `frust-cli`, `frust-drive` | Thin clap front-end plus the framework-free drive library: scaffolds projects, validates toolchain, discovers devices, drives Android/iOS run/build/clean pipelines | [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md) |
 | TUI | `frust-tui` | Mouse-first ratatui TEA terminal workbench supervising `frust-drive` sessions (scaffold/build/run/doctor/clean) | [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md) |
+| DEVTOOLS | `frust-devtools-protocol`, `frust-devtools` | Sanctioned dependency-free wire-protocol leaf plus the in-app loopback debug service (widget-tree inspection, frame stats, input injection) a shell hosts for `frust-drive`/`frust-tui` | [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md) |
 
 ## Examples
 
@@ -52,7 +53,10 @@ only (S1–S8, D1–D2 per `benchmarks/PROTOCOL.md`), not a framework showcase.
 - **`frust-paths` leaf charter** — depends only on `log`; every shell and plugin that needs a
   data/cache directory calls into it rather than resolving paths itself.
 - **Tooling isolation** — `frust-cli`, `frust-drive`, and `frust-tui` depend on NO framework crate
-  (no core/widgets/render/reactive); they only shell out to `cargo`/platform toolchains.
+  EXCEPT the `frust-devtools-protocol` leaf (`serde`/`serde_json` only); otherwise they only shell
+  out to `cargo`/platform toolchains. `frust-devtools` (the framework-side debug service a shell
+  hosts) is the mirror rule: it depends on no framework or tooling crate either — the two sides of
+  the devtools wire meet only at the protocol leaf. See [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md).
 - **Facade/plugin boundary** — the `frust` facade never depends on or re-exports a plugin. Plugins
   (`frust-plugin` substrate, `native-widgets`, `clean-signals-frust`) sit *beside* the facade in an
   app's own dependency list, never inside it.

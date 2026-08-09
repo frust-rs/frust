@@ -23,7 +23,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how CLI relates to the other units.
 | `frust-drive::scaffold` | Manifest-driven template rendering that produces a new Frust project tree |
 | `frust-drive::doctor` | Pluggable environment validators plus a structured, non-blocking toolchain report |
 | `frust-drive::devices` | Pluggable per-platform device discovery, aggregated non-fatally |
-| `frust-drive::build_info` | The debug/profile/release + flavor funnel shared by run and build |
+| `frust-drive::build_info` | The debug/profile/release + flavor funnel shared by run and build; `BuildMode::cargo_features()` also selects the `frust/perf-trace`+`frust/devtools` cargo-feature pair for Debug/Profile (see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)) |
+| `frust-drive::devtools_client` | Blocking NDJSON client for the devtools wire protocol plus `adb forward` helpers for Android — the tool-side half of [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md) |
 | `frust-drive` Android/iOS pipelines | The four platform pipelines: compile → install → launch/stream |
 | `frust-drive::plugin` | Static plugin registry plus the idempotent project-mutation engine that applies it |
 | `frust-drive::interrupt` | The process-wide SIGINT/SIGTERM/SIGHUP + panic-hook owner; scrubs registered secret files before the process dies |
@@ -33,8 +34,11 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how CLI relates to the other units.
 `frust-cli` depends on `clap` for argument parsing and on `frust-drive` for every operation it
 performs; it holds no toolchain-invocation logic of its own. `frust-drive` has zero dependency on
 `clap` or any framework crate — this is a charter boundary, not incidental, since `frust-tui` links
-the same library without pulling in a CLI parser or the render/widget stack. `frust-cli`'s `tui`
-subcommand hands off entirely to `frust-tui`, whose own dependency is on `frust-drive` alone (see
+the same library without pulling in a CLI parser or the render/widget stack. The one sanctioned
+exception is `frust-devtools-protocol` (the dependency-free wire-protocol leaf `devtools_client`
+speaks) — never `frust-devtools` itself, which stays framework-side (see
+[DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)). `frust-cli`'s `tui` subcommand hands off
+entirely to `frust-tui`, whose own dependency is on `frust-drive` alone (see
 [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)).
 
 Within `frust-drive`, `anyhow` sits at the CLI/pipeline-core boundary while library-contract errors

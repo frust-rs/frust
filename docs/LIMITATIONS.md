@@ -947,3 +947,40 @@ pushed out to call sites.
 `shimmer_spans_flat_bold`; `crates/frust-tui/src/ui/theme.rs`'s `ColorDepth`/
 `ThemeColor::resolve`; flagged as review Major M4 (shimmer color-depth degrade), fixed in
 the same round with this documented residual.
+
+---
+
+### `devtools-ios-physical-forward-deferred` — the devtools client can't reach a physical iOS device
+
+**Observed**: `frust-drive`'s devtools client connects directly over localhost (desktop, and
+iOS Simulator, which shares the host's loopback) and forwards through `adb` for a physical
+Android device. There is no equivalent for a physical iOS device — no forwarding helper
+exists, so a client cannot reach the in-app debug service on one.
+
+**Applies to**: `frust drive`/`frust-tui` devtools sessions targeting a physical iOS device.
+Desktop and both simulators/emulators are unaffected.
+
+**Why accepted**: physical-iOS forwarding needs `usbmuxd` (or an equivalent) and a Mac to
+build/verify against, neither available on this build host. Deferred by plan decision
+rather than discovered as a gap; the natural v2 step once a Mac session is available.
+
+**Evidence**: `workflow/plans/features/frust-tui-devex/PLAN.md`'s Non-Goals and Risks
+sections (iOS physical-device forwarding via usbmuxd).
+
+---
+
+### `devtools-screenshot-not-supported-v1` — the devtools `screenshot` method is unimplemented
+
+**Observed**: the protocol declares a `screenshot` method (`Capability::Screenshot`,
+result `{ png_base64 }`), but `DevtoolsBackend::screenshot`'s default — which every shell's
+backend implementation inherits — returns `BackendError::NotSupported`, which the wire
+reports as `RpcError::NOT_SUPPORTED`.
+
+**Applies to**: every shell in v1; no backend overrides the default.
+
+**Why accepted**: v1 scoped the wire shape for a future capability without shipping the
+capture path; the method and capability flag exist precisely so a client can detect support
+per-app rather than guessing, once a backend does implement it.
+
+**Evidence**: `crates/frust-devtools/src/backend.rs`'s `DevtoolsBackend::screenshot` default;
+`crates/frust-devtools-protocol/src/method.rs`'s `screenshot` doc comment.

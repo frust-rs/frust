@@ -22,6 +22,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how SHELLS relates to the other units
 | `frust-shell-common::render_split` | UI-thread/render-thread split vocabulary (scene handoff, lifecycle commands, completion barrier) all three shells' default frame path uses |
 | `frust-shell-common::platform_view` | Differ turning per-paint platform-view frames into an idempotent create/update/dispose backlog for embedding native views |
 | `frust-shell-common` (signal-poll seams) | Small process-global slot-plus-poll seams (surface mode, theme, fonts, system UI) each mobile shell drains once per frame |
+| `frust-shell-common::devtools` (feature `devtools`) | Shell-side `DevtoolsBackend` implementation plus the per-frame UI-thread hop and pump each shell drives; see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md) |
 | `frust-shell-desktop` | winit event loop with a UI-thread/render-thread surface split and pipeline-cache persistence |
 | `frust-shell-android` | Sanctioned-unsafe JNI FFI boundary, app-binding macro, and Choreographer-synced frame pipeline; `app.rs` is the handle-struct root (theme precedence ladder), with `app/frame.rs` (per-tick gate-input gathering + rebuild/layout/paint/present) and `app/surface.rs` (the conformance-pinned resolved-surface-mode publish site) among its submodules |
 | `frust-shell-ios` | Sanctioned-unsafe C-ABI FFI boundary, app-binding macro, and CADisplayLink-driven frame pipeline; unlike Android the handle struct lives in `app/mod.rs` (no root file), alongside the same `app/frame.rs`/`app/surface.rs` submodule split |
@@ -178,6 +179,13 @@ signal-poll seam race-free without a lock.
 - A set of additive, off-by-default kill-switch env vars (`FRUST_NO_RENDER_THREAD`,
   `FRUST_NO_FRAME_GATE`, `FRUST_NO_ANIM_PACING`, `FRUST_NO_RESAMPLE`, `FRUST_NO_DIRECT_SURFACE`,
   `FRUST_NO_SHADER_EFFECTS`) each revert one frame-pipeline seam independently.
+- **Devtools UI-thread hop** (feature-gated, `frust-shell-common::devtools`): a backend call
+  needing live app state queues onto a process-wide request, which each shell drains once per
+  frame — desktop wakes via its winit `EventLoopProxy`, Android/iOS have no wake and instead pump
+  at the top of every tick since their display loop runs continuously while resumed. An injected
+  event dispatches through the shell's real input path, never directly against widget code.
+  `FRUST_DEVTOOLS=0` skips starting the service even when the feature is compiled in. Full detail
+  in [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md).
 
 ## Key Types
 
