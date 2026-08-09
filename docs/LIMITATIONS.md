@@ -864,3 +864,37 @@ thread-naming or task-local state, which is out of reach from a public dependenc
 **Evidence**: `plugins/database/src/turso.rs`'s module doc (the four-context
 `Handle::try_current()`/`task::try_id()`/`block_on` measurement table and the two guard
 tests).
+
+---
+
+### `db-turso-bridge-serializes-handles` — turso handles do not get sqlite's read parallelism
+
+**Observed**: `plugins/database/src/lib.rs`'s module doc documents an `engine-sqlite`
+guarantee — "open multiple handles for concurrent readers" — that opening more than one
+`Database` handle onto the same file buys real, wall-clock read parallelism, because
+`rusqlite`'s bundled SQLite runs separate connections on separate OS threads.
+`engine-turso` does not honor this: every `TursoConn`, however many `Database` handles an
+app opens onto the same file, routes its operations through one process-wide,
+single-threaded bridge (`plugins/database/src/turso.rs`'s bridge thread and `run()`).
+Additional turso handles still buy correctness and cross-handle write visibility — each is
+an independent connection, each sees the others' commits — but their calls
+serialize/interleave on that one bridge thread rather than execute in parallel.
+
+**Applies to**: `engine-turso` builds only. `engine-sqlite` is unaffected — its concurrent-
+readers guarantee is real. An app that opens multiple turso handles expecting the
+sqlite-style read-parallelism speedup gets correct results at sqlite's single-connection
+throughput, not sqlite's multi-connection throughput.
+
+**Why accepted**: the bridge is deliberately minimal by charter — one process-wide,
+single-thread runtime, no worker pool, no timer, no socket of its own
+(`turso.rs`'s module doc, *The bridge*) — kept that way so the async-to-sync seam stays a
+small, auditable piece rather than growing its own scheduler. A per-handle or worker-pool
+bridge (one bridge thread per `Database`, or a small thread pool dispatching turso futures
+round-robin) would recover real parallelism, but is a materially bigger architectural
+change — connection-to-thread affinity, pool sizing, and a second place this crate would
+own concurrency policy — and was explicitly ruled out of v1 scope rather than overlooked.
+
+**Evidence**: `plugins/database/src/turso.rs`'s bridge/`run()` (the single
+`OnceLock<Result<Handle, String>>` and the one spawned bridge thread);
+`plugins/database/README.md` §4's `engine-turso` qualifier beside the `tokio::join!`
+example.

@@ -66,13 +66,24 @@
 //! crate-private `Mutex<Box<dyn engine::EngineConn>>`, so every call
 //! through one handle is serialized — `Database` is `Send + Sync` and
 //! cheap to share (e.g. behind an `Arc`), but two concurrent calls on the
-//! *same* handle queue rather than run in parallel. **Open multiple
-//! handles for concurrent readers**: every real backend opens its file in
-//! WAL journal mode (see *Interop discipline* below), which supports
-//! concurrent readers alongside one writer, but only across separate
-//! connections — an app that wants read parallelism opens more than one
-//! `Database` handle onto the same file rather than sharing one handle
-//! across threads expecting internal parallelism.
+//! *same* handle queue rather than run in parallel. Every real backend
+//! opens its file in WAL journal mode (see *Interop discipline* below),
+//! which supports concurrent readers alongside one writer, but only
+//! across separate connections — an app that wants read parallelism opens
+//! more than one `Database` handle onto the same file rather than sharing
+//! one handle across threads expecting internal parallelism.
+//!
+//! **"Open multiple handles for concurrent readers" is an `engine-sqlite`
+//! guarantee, not a cross-engine one.** `rusqlite`'s bundled SQLite really
+//! does run separate connections' reads on separate OS threads, in
+//! parallel. `engine-turso` cannot: every `Database` handle, however many
+//! an app opens onto the same file, routes its calls through one
+//! process-wide, single-threaded bridge (see `turso.rs`'s module doc, *The
+//! bridge*). Additional turso handles still buy correctness and
+//! cross-handle write visibility — each is its own connection, seeing the
+//! others' commits — but not wall-clock parallelism: their calls
+//! serialize/interleave on that one bridge thread exactly as if issued
+//! through a single handle.
 //!
 //! # Interop discipline (enforced by backends, not this module)
 //!

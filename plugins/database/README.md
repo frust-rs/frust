@@ -183,12 +183,15 @@ to share (e.g. behind an `Arc`), but two concurrent calls on the *same*
 handle queue rather than run in parallel. `Database` does **not** implement
 `Clone` — open a separate handle per connection you want instead.
 
-**Open multiple handles for concurrent readers.** Every real backend opens
-its file in **WAL (write-ahead logging) journal mode** (see *Interop
-discipline* below), which supports concurrent readers alongside one writer,
-but only across separate connections — an app that wants read parallelism
-opens more than one `Database` handle onto the same file rather than sharing
-one handle across threads expecting internal parallelism:
+**Open multiple handles for concurrent readers — `engine-sqlite` only.**
+Every real backend opens its file in **WAL (write-ahead logging) journal
+mode** (see *Interop discipline* below), which supports concurrent readers
+alongside one writer, but only across separate connections — an app that
+wants read parallelism opens more than one `Database` handle onto the same
+file rather than sharing one handle across threads expecting internal
+parallelism. On `engine-sqlite`, this is real wall-clock parallelism:
+`rusqlite`'s bundled SQLite runs separate connections' reads on separate OS
+threads.
 
 ```rust
 use frust_database::Database;
@@ -196,13 +199,54 @@ use frust_database::Database;
 let db1 = Database::open("app")?;
 let db2 = Database::open("app")?;  // Same file, different connection
 
-// Spawns two independent background tasks; both can read concurrently.
-// Each handle moves into its own closure — Database isn't Clone.
+// engine-sqlite: two independent background tasks that genuinely read in
+// parallel. Each handle moves into its own closure — Database isn't Clone.
 let task1 = frust_reactive::spawn_blocking(move || db1.query("SELECT * FROM notes", ()));
 let task2 = frust_reactive::spawn_blocking(move || db2.query("SELECT * FROM items", ()));
 
 let (rows1, rows2) = tokio::join!(task1, task2);
 ```
+
+**`engine-turso` does not get this parallelism.** Every `Database` handle
+routes its operations through one process-wide, single-threaded bridge
+(`src/turso.rs`'s module doc, *The bridge*) — however many turso handles an
+app opens onto the same file, their calls serialize/interleave on that one
+bridge thread rather than run in wall-clock parallel. The `tokio::join!`
+shape above still works and is still correct on turso — `db1` and `db2`
+are independent connections, each seeing the other's committed writes —
+but it buys correctness and visibility, not a faster read path. Do not
+reach for multiple turso handles expecting the sqlite-style speedup.
+
+---
+
+## 4a. Transaction hazards and how they're handled
+
+`Database::transaction` runs its closure inside `BEGIN`/`COMMIT`/`ROLLBACK`
+on the handle's one shared connection. Three ways that could go wrong are
+handled explicitly rather than left to hang or silently corrupt state:
+
+- **Same-thread reentrant use.** Calling `execute`/`query`/`transaction` on
+  the *same* `Database` handle from inside its own `transaction` closure —
+  e.g. an `Arc<Database>` captured and called back into — returns
+  `DatabaseError::Reentrant` immediately. It is a typed error, not a hang:
+  the connection's lock is non-reentrant, but re-entry is detected by
+  thread identity before ever blocking on it. Cross-thread contention on
+  the same handle is unaffected — it still queues, per §4 above. Run
+  statements inside the transaction through the `Transaction` handle the
+  closure is given instead.
+- **A failing `COMMIT`.** If the `COMMIT` statement itself is rejected (for
+  example, a deferred constraint check that only runs at commit time), the
+  transaction is rolled back before the error is returned — the handle is
+  left clean, not stranded mid-transaction. A later call on the same
+  handle works normally.
+- **A panicking closure.** If the closure passed to `transaction` panics, a
+  `Drop` guard armed since the `BEGIN` rolls back on unwind, so the
+  connection is never left mid-transaction for whoever holds the handle
+  next. This guard runs on ordinary unwind (the dev/debug profile). The
+  release profile is `panic = "abort"` (`docs/DEVELOPMENT.md`'s
+  release-profile hardening) — under abort the process exits before any
+  `Drop` runs, so there is no surviving handle left to strand in the first
+  place; the guard's job is specifically the unwind case.
 
 ---
 

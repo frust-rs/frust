@@ -23,6 +23,18 @@
 //! can never deadlock: the bridge runtime is independent of the caller's, so
 //! the work always completes and the (mis-parked) caller always wakes.
 //!
+//! **Every handle shares this one bridge — additional handles do not buy
+//! read parallelism.** `lib.rs`'s *Threading model* section documents
+//! `engine-sqlite`'s "open multiple handles for concurrent readers"
+//! guarantee; it does not hold here. However many [`TursoConn`]s an app
+//! opens — whether through one or many [`crate::Database`] handles onto the
+//! same file — each seam call still hands its future to this single
+//! current-thread runtime and parks until it returns, so their operations
+//! serialize/interleave on the one bridge thread rather than run in
+//! wall-clock parallel. What multiple handles still buy is correctness:
+//! each is an independent connection with its own committed-write
+//! visibility, not a faster read path.
+//!
 //! # Why the [`DatabaseError::AsyncContext`] guard is a *provable subset*
 //!
 //! Blocking a runtime worker is still a contract violation even when it can't
@@ -438,6 +450,11 @@ mod tests {
         // Two threads driving two independent connections through the one
         // process-wide bridge runtime: each call must complete rather than
         // wedge behind the other's turn on that single-threaded runtime.
+        //
+        // This is a correctness/liveness test, not a parallelism test: it
+        // asserts every caller eventually finishes and sees its own data,
+        // never that any two calls actually ran concurrently (they don't —
+        // see this module's doc, "Every handle shares this one bridge").
         let threads: Vec<_> = (0..4)
             .map(|i| {
                 std::thread::spawn(move || {
