@@ -13,6 +13,12 @@ license.workspace = true
 test-util = []
 
 [dependencies]
+# The devtools wire-protocol leaf (`docs/ARCHITECTURE.md`'s tooling-isolation
+# charter: `frust-drive` may depend on this crate — the one sanctioned
+# crossing between the in-app debug service and the tooling side — and
+# nothing else framework-adjacent). Path dep, like every other in-workspace
+# crate this crate consumes.
+frust-devtools-protocol = { path = "../frust-devtools-protocol" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

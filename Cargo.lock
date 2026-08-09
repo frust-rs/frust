@@ -1853,6 +1853,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ctrlc",
+ "frust-devtools-protocol",
  "include_dir",
  "minijinja",
  "serde",

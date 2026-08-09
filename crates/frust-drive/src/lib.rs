@@ -16,6 +16,7 @@ pub mod android_run;
 pub mod build_info;
 pub mod cargo_manifest;
 pub mod devices;
+pub mod devtools_client;
 pub mod doctor;
 /// Process-wide termination handling (the single SIGINT/SIGTERM/SIGHUP owner
 /// and the secret-file scrub it runs). Internal: it is machinery the pipelines
