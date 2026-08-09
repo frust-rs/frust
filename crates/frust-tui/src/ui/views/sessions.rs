@@ -29,6 +29,7 @@ use crate::engine::{
     LogLevel, Message, PanicBlock, RegionId, SOURCE_TAG_WIDTH, Scroll, SessionView, line_matches,
 };
 use crate::supervise::SessionState;
+use crate::ui::anim::{SPINNER_TICKS_PER_FRAME, spinner_char, themed_shimmer_spans};
 use crate::ui::mouse::MouseCtx;
 use crate::ui::theme::Theme;
 
@@ -54,12 +55,19 @@ pub fn render_main(
     // *and* the tab has toggled it open (`t`) — zero-noise otherwise.
     let active_session = state.active_session();
     let show_perf = active_session.is_some_and(|s| s.perf.visible && s.perf.has_data());
+    // The transient build/install phase status line (workbook §B10) —
+    // reserved only while the active session is actually `Building`/
+    // `Installing`, so a streaming/terminal session's log pane loses no rows
+    // to a hint it no longer needs.
+    let show_phase = active_session
+        .is_some_and(|s| matches!(s.state, SessionState::Building | SessionState::Installing));
 
-    let mut constraints = vec![
-        Constraint::Length(1), // tab bar
-        Constraint::Min(1),    // log view
-        Constraint::Length(1), // log status / keyhints
-    ];
+    let mut constraints = vec![Constraint::Length(1)]; // tab bar
+    if show_phase {
+        constraints.push(Constraint::Length(1)); // phase status line
+    }
+    constraints.push(Constraint::Min(1)); // log view
+    constraints.push(Constraint::Length(1)); // log status / keyhints
     if show_perf {
         constraints.push(Constraint::Length(perf_panel_height(
             active_session.unwrap(),
@@ -74,9 +82,21 @@ pub fn render_main(
         .split(area);
 
     render_tab_bar(frame, rows[0], state, theme, mouse);
-    render_log(frame, rows[1], state, theme, mouse);
-    render_log_status(frame, rows[2], state, theme, mouse);
-    let mut next = 3;
+    let mut next = 1;
+    if show_phase {
+        render_phase_line(
+            frame,
+            rows[next],
+            active_session.unwrap(),
+            state.animation_frame,
+            theme,
+        );
+        next += 1;
+    }
+    render_log(frame, rows[next], state, theme, mouse);
+    next += 1;
+    render_log_status(frame, rows[next], state, theme, mouse);
+    next += 1;
     if show_perf {
         render_perf_panel(frame, rows[next], active_session.unwrap(), theme);
         next += 1;
@@ -86,16 +106,74 @@ pub fn render_main(
     }
 }
 
-/// The status glyph + color for a session's lifecycle state.
-fn status_style(s: &SessionState, theme: &Theme) -> (&'static str, Color) {
+/// The transient build/install phase status line (workbook §B10), shown
+/// directly under the tab bar only while the active session is `Building` or
+/// `Installing` (see [`render_main`]'s `show_phase` gate). A parsed phase
+/// label shimmers (accent sweep over the muted base, via
+/// [`themed_shimmer_spans`]); `Building` with no label parsed yet falls back
+/// to a *plain* (unshimmered) `⠋ Building…` — shimmering a fallback string
+/// would imply progress the parser doesn't actually have. `Installing`
+/// always shimmers — there's no meaningfully "unknown" sub-case for install
+/// the way there is for a multi-crate build.
+fn render_phase_line(
+    frame: &mut Frame,
+    area: Rect,
+    session: &SessionView,
+    animation_frame: u64,
+    theme: &Theme,
+) {
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme.surface())),
+        area,
+    );
+    let mut spans: Vec<Span<'static>> = vec![Span::raw(" ")];
+    match (&session.state, &session.current_phase) {
+        (SessionState::Installing, Some(phase)) | (SessionState::Building, Some(phase)) => {
+            spans.extend(themed_shimmer_spans(
+                &phase.text(),
+                animation_frame,
+                theme,
+                Modifier::empty(),
+            ));
+        }
+        (SessionState::Installing, None) => {
+            spans.extend(themed_shimmer_spans(
+                "Installing\u{2026}",
+                animation_frame,
+                theme,
+                Modifier::empty(),
+            ));
+        }
+        (SessionState::Building, None) => {
+            let glyph = spinner_char(animation_frame / SPINNER_TICKS_PER_FRAME);
+            spans.push(Span::styled(
+                format!("{glyph} Building\u{2026}"),
+                Style::default().fg(theme.muted()),
+            ));
+        }
+        _ => return, // render_main only calls this while Building/Installing
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// The status glyph + color for a session's lifecycle state. `animation_frame`
+/// drives an animated braille spinner (workbook §B10's tab-glyph vocabulary)
+/// substituted for the static glyph while the session is actively `Building`
+/// or `Installing`; every other state (including `Configuring`, which has no
+/// per-toolchain phase to animate against) keeps its existing static glyph —
+/// a terminal state's glyph in particular never spins, "freezing" on its own
+/// static symbol once the build/install phase ends (§B10's failed row).
+fn status_style(s: &SessionState, animation_frame: u64, theme: &Theme) -> (String, Color) {
     match s {
-        SessionState::Configuring => ("\u{25cc}", theme.muted()), // ◌
-        SessionState::Building => ("\u{25d0}", theme.warn()),     // ◐
-        SessionState::Installing => ("\u{25d1}", theme.warn()),   // ◑
-        SessionState::Running => ("\u{25b6}", theme.success()),   // ▶
-        SessionState::Exited(true) => ("\u{2713}", theme.muted()), // ✓
-        SessionState::Exited(false) => ("\u{2717}", theme.error()), // ✗
-        SessionState::Killed => ("\u{25a0}", theme.muted()),      // ■
+        SessionState::Configuring => ("\u{25cc}".to_string(), theme.muted()), // ◌
+        SessionState::Building | SessionState::Installing => (
+            spinner_char(animation_frame / SPINNER_TICKS_PER_FRAME).to_string(),
+            theme.accent(),
+        ),
+        SessionState::Running => ("\u{25b6}".to_string(), theme.success()), // ▶
+        SessionState::Exited(true) => ("\u{2713}".to_string(), theme.muted()), // ✓
+        SessionState::Exited(false) => ("\u{2717}".to_string(), theme.error()), // ✗
+        SessionState::Killed => ("\u{25a0}".to_string(), theme.muted()),    // ■
     }
 }
 
@@ -138,7 +216,7 @@ fn render_tab_bar(
 
         for (idx, session) in group {
             let active = state.active_session == Some(idx);
-            let (glyph, glyph_color) = status_style(&session.state, theme);
+            let (glyph, glyph_color) = status_style(&session.state, state.animation_frame, theme);
             let number = if idx < 9 {
                 format!("{} ", idx + 1)
             } else {
@@ -168,12 +246,7 @@ fn render_tab_bar(
                     format!(" {number}"),
                     tab_style.fg(theme.muted()),
                 );
-                push(
-                    &mut spans,
-                    &mut col,
-                    glyph.to_string(),
-                    tab_style.fg(glyph_color),
-                );
+                push(&mut spans, &mut col, glyph, tab_style.fg(glyph_color));
                 push(
                     &mut spans,
                     &mut col,
@@ -223,6 +296,34 @@ fn render_log(
     mouse.context(area, ContextTarget::LogView);
 
     if session.log.is_empty() {
+        // Pre-first-line placeholder (workbook §B10): a transient session
+        // (still `Configuring`/`Building`/`Installing`, no output at all
+        // yet) gets a centered spinner + "waiting for X" message instead of
+        // the plain top-left hint every other empty state uses — no empty
+        // table chrome, and the first real line replaces it in place with no
+        // layout jump (this branch returns before any row/scrollbar setup).
+        if matches!(
+            session.state,
+            SessionState::Configuring | SessionState::Building | SessionState::Installing
+        ) {
+            let glyph = spinner_char(state.animation_frame / SPINNER_TICKS_PER_FRAME);
+            let line = Line::from(vec![
+                Span::styled(glyph.to_string(), Style::default().fg(theme.accent())),
+                Span::styled(
+                    format!(
+                        "  Waiting for first output from {}\u{2026}",
+                        session.target_label
+                    ),
+                    Style::default().fg(theme.muted()),
+                ),
+            ]);
+            let mid_y = area.y + area.height / 2;
+            frame.render_widget(
+                Paragraph::new(line).alignment(Alignment::Center),
+                Rect::new(area.x, mid_y, area.width, 1.min(area.height)),
+            );
+            return;
+        }
         let hint = match session.state {
             SessionState::Exited(_) | SessionState::Killed => "session ended · no output",
             _ => "waiting for output…",
@@ -637,11 +738,11 @@ pub fn sidebar_lines(state: &AppState, theme: &Theme) -> Vec<Line<'static>> {
         ));
         for (idx, session) in group {
             let active = state.active_session == Some(idx);
-            let (glyph, color) = status_style(&session.state, theme);
+            let (glyph, color) = status_style(&session.state, state.animation_frame, theme);
             let marker = if active { "\u{25b8}" } else { " " };
             lines.push(Line::from(vec![
                 Span::styled(format!("  {marker} "), Style::default().fg(theme.accent())),
-                Span::styled(glyph.to_string(), Style::default().fg(color)),
+                Span::styled(glyph, Style::default().fg(color)),
                 Span::styled(
                     format!(" {}", session.target_label),
                     if active {

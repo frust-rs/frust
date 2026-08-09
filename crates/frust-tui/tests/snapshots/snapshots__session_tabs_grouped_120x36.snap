@@ -5,9 +5,9 @@ expression: "render_to_string(120, 36, &multi_session_state())"
 ⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                                         ▶ Run    ⚒ Build 
 ━━━━━━━━                                                                                                                
                                                                                                                         
- PROJECTS                │huddle:  1 ▶ desktop   2 ◐ Pixel 7    bubblebench:  3 ✗ desktop                               
-  ▸ huddle               │   12:00:00 [app]    Building it.f0x.huddle…                                                  
-    bubblebench          │                                                                                              
+ PROJECTS                │huddle:  1 ▶ desktop   2 ⠋ Pixel 7    bubblebench:  3 ✗ desktop                               
+  ▸ huddle               │ ⠋ Building…                                                                                  
+    bubblebench          │   12:00:00 [app]    Building it.f0x.huddle…                                                  
                          │                                                                                              
  DEVICES ↻ r             │                                                                                              
    none found            │                                                                                              
@@ -15,7 +15,7 @@ expression: "render_to_string(120, 36, &multi_session_state())"
  SESSIONS                │                                                                                              
    huddle                │                                                                                              
      ▶ desktop           │                                                                                              
-   ▸ ◐ Pixel 7           │                                                                                              
+   ▸ ⠋ Pixel 7           │                                                                                              
    bubblebench           │                                                                                              
      ✗ desktop           │                                                                                              
                          │                                                                                              

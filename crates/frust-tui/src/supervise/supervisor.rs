@@ -116,6 +116,7 @@ use frust_drive::{android_run, ios_run};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
+use super::progress::{PhaseLabel, phase_from_output_line};
 use super::session::{
     DevicePlan, DeviceTarget, LaunchPlan, SessionEvent, SessionEventKind, SessionId, SessionSpec,
     SessionState, infer_state,
@@ -563,6 +564,22 @@ impl SessionSender {
         }
     }
 
+    /// Send a newly parsed phase label — best-effort and non-blocking
+    /// (`try_send`), like every non-terminal event: a label lost to a full
+    /// channel is transient and self-corrects (the next matching line, or the
+    /// state transition that clears it, resyncs the engine). `Err(())` once
+    /// the receiver is gone.
+    fn send_phase(&mut self, phase: PhaseLabel) -> Result<(), ()> {
+        match self.tx.try_send(SessionEvent {
+            id: self.id,
+            kind: SessionEventKind::Phase(phase),
+        }) {
+            Ok(()) => self.flush_dropped(),
+            Err(TrySendError::Full(_)) => Ok(()),
+            Err(TrySendError::Closed(_)) => Err(()),
+        }
+    }
+
     /// If more lines have been dropped than last reported, try (non-blocking)
     /// to deliver the new cumulative count. A full channel leaves it pending
     /// for the next successful send; `Err(())` once the receiver is gone.
@@ -584,22 +601,40 @@ impl SessionSender {
 /// Send one coalesced batch of lines and, for every phase transition the batch
 /// announces (forward-only, across the batch in order), the new state —
 /// keeping the desktop drain and the device pipeline/logcat feeds identical.
-/// Lines go out first, then any state transitions, matching the engine's
-/// "line then glyph" ordering. Returns `Err(())` once the engine has dropped
-/// the receiver.
+/// Also runs [`phase_from_output_line`] over every line still seen while the
+/// (possibly mid-batch-advancing) state is `Building`/`Installing`, sending
+/// the latest match (workbook §B10's transient status line) — "latest wins"
+/// across the batch, and extraction stops the moment a line's own transition
+/// carries the state past `Installing` (never labels a line that's actually
+/// past the transient window, e.g. streamed app output that happens to
+/// resemble a build marker). Lines go out first, then the phase (if any),
+/// then any state transitions, matching the engine's "line then glyph"
+/// ordering — the engine clears a stale label off the state transition
+/// regardless of arrival order (`crate::engine::update::on_session_event`),
+/// so this ordering is a convenience, not a correctness dependency. Returns
+/// `Err(())` once the engine has dropped the receiver.
 fn feed_lines(
     sender: &mut SessionSender,
     state: &mut SessionState,
     batch: Vec<String>,
 ) -> Result<(), ()> {
     let mut transitions = Vec::new();
+    let mut latest_phase: Option<PhaseLabel> = None;
     for line in &batch {
+        if matches!(state, SessionState::Building | SessionState::Installing)
+            && let Some(p) = phase_from_output_line(line)
+        {
+            latest_phase = Some(p);
+        }
         if let Some(next) = infer_state(state, line) {
             *state = next.clone();
             transitions.push(next);
         }
     }
     sender.send_lines(batch)?;
+    if let Some(p) = latest_phase {
+        sender.send_phase(p)?;
+    }
     for t in transitions {
         sender.send_state(t)?;
     }
@@ -833,6 +868,7 @@ mod tests {
             match ev.kind {
                 SessionEventKind::Lines(mut ls) => lines.append(&mut ls),
                 SessionEventKind::Dropped(_) => {}
+                SessionEventKind::Phase(_) => {}
                 SessionEventKind::State(s) if s.is_terminal() => return (lines, s),
                 SessionEventKind::State(_) => {}
             }
@@ -866,6 +902,7 @@ mod tests {
                     }
                 }
                 SessionEventKind::Dropped(_) => {}
+                SessionEventKind::Phase(_) => {}
                 SessionEventKind::State(s) if s.is_terminal() => {
                     terminals.insert(ev.id, s);
                 }
@@ -950,6 +987,92 @@ mod tests {
                 SessionState::Running,
                 SessionState::Exited(true),
             ]
+        );
+    }
+
+    /// [`feed_lines`] runs every line through [`phase_from_output_line`]
+    /// while the (possibly mid-batch-advancing) state is
+    /// `Building`/`Installing`, sending only the **latest** match found in
+    /// the whole batch — two `Compiling` lines followed by a Gradle task
+    /// line in one coalesced batch yields exactly one `Phase` event, the
+    /// Gradle one. Uses the same deterministic full-buffer-then-drain shape
+    /// as `a_buffered_burst_coalesces_into_one_lines_batch` (`wait()` before
+    /// draining) rather than `Supervisor`/a fake stream's own timing, so the
+    /// batch boundary is exact rather than a race.
+    #[test]
+    fn feed_lines_sends_only_the_latest_phase_match_per_batch() {
+        let runner = FakeProcessRunner::new().with_stream(
+            "cargo run",
+            [
+                "   Compiling frust-core v0.3.1",
+                "   Compiling frust-widgets v0.3.1",
+                "[gradle] > Task :app:assembleDebug",
+            ],
+            true,
+        );
+        let mut handle = runner
+            .spawn_streaming("cargo", &["run"], None, &[])
+            .expect("fake stream spawns");
+        let lines = handle.lines.clone();
+        handle.wait(); // fully buffer + close → one deterministic batch
+
+        let (tx, mut rx) = mpsc::channel(SESSION_CHANNEL_CAP);
+        let mut sender = SessionSender::new(tx, SessionId(0));
+        let mut state = SessionState::Building;
+        drain_receiver(&mut sender, &mut state, &lines).expect("receiver stays connected");
+        drop(sender);
+
+        let phases: Vec<PhaseLabel> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|ev| match ev.kind {
+                SessionEventKind::Phase(p) => Some(p),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            phases,
+            vec![PhaseLabel::GradleTask(":app:assembleDebug".to_string())],
+            "latest-wins: only the last matching line in the batch is reported"
+        );
+    }
+
+    /// Once a batch's own lines carry the state past `Installing` (to
+    /// `Running`), a later line in the *same* batch that happens to resemble
+    /// a phase marker is never labeled — extraction stops exactly where the
+    /// transient window ends, not at the batch boundary.
+    #[test]
+    fn feed_lines_stops_labeling_once_the_batch_advances_past_installing() {
+        let runner = FakeProcessRunner::new().with_stream(
+            "cargo run",
+            [
+                "     Running `target/debug/app`",
+                // Deliberately shaped exactly like a real cargo `Compiling`
+                // line — proving the *state* gate (not `phase_from_output_line`'s
+                // own text matching) is what suppresses it here.
+                "   Compiling late_dep v0.1.0",
+            ],
+            true,
+        );
+        let mut handle = runner
+            .spawn_streaming("cargo", &["run"], None, &[])
+            .expect("fake stream spawns");
+        let lines = handle.lines.clone();
+        handle.wait();
+
+        let (tx, mut rx) = mpsc::channel(SESSION_CHANNEL_CAP);
+        let mut sender = SessionSender::new(tx, SessionId(0));
+        let mut state = SessionState::Building;
+        drain_receiver(&mut sender, &mut state, &lines).expect("receiver stays connected");
+        drop(sender);
+
+        let phases: Vec<PhaseLabel> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|ev| match ev.kind {
+                SessionEventKind::Phase(p) => Some(p),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            phases.is_empty(),
+            "a post-Running line must never be mistaken for a build phase, got {phases:?}"
         );
     }
 

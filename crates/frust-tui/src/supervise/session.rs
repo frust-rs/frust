@@ -245,6 +245,14 @@ pub enum SessionEventKind {
     /// can show that a session's log is missing lines the consumer couldn't
     /// keep up with.
     Dropped(u64),
+    /// A newly parsed build/install/launch phase label
+    /// (`super::progress::phase_from_output_line`), latest-wins across a
+    /// batch (see `super::supervisor::feed_lines`) — only ever sent while
+    /// the session is still `Building`/`Installing`. The engine is the one
+    /// that clears a session's displayed label once a later [`State`](Self::State)
+    /// event reports a non-transient state; this event never carries a
+    /// clearing `None` itself (see `super::progress`'s module docs).
+    Phase(super::progress::PhaseLabel),
 }
 
 /// Tolerant, forward-only inference of a lifecycle phase from one streamed

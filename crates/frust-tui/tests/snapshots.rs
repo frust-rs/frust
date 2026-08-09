@@ -19,7 +19,7 @@ use frust_tui::engine::{
     Palette, RegionId, RunConfig, RunFocus, Screen, Scroll, SessionView, ToastKind, WizardStep,
     update,
 };
-use frust_tui::supervise::{SessionEvent, SessionEventKind, SessionId, SessionState};
+use frust_tui::supervise::{PhaseLabel, SessionEvent, SessionEventKind, SessionId, SessionState};
 use frust_tui::ui::mouse::{MouseCtx, MouseRegions};
 use frust_tui::ui::theme::{ColorDepth, Theme};
 
@@ -318,6 +318,57 @@ fn multi_session_state() -> AppState {
 #[test]
 fn session_tabs_grouped_120x36() {
     insta::assert_snapshot!(render_to_string(120, 36, &multi_session_state()));
+}
+
+// ── Build-phase progress (workbook §B10) ─────────────────────────────────────
+
+/// A `Building` session with a parsed phase label (`animation_frame` pinned
+/// for a deterministic spinner/shimmer-sweep frame): the tab glyph spins, and
+/// the transient status line under the tab bar shows the shimmered
+/// `Compiling frust-core (41/210)` label instead of a plain fallback.
+#[test]
+fn session_build_phase_known_100x30() {
+    let root = "/tmp/huddle";
+    let mut sess = session(
+        0,
+        root,
+        "Pixel 7",
+        SessionState::Building,
+        &["   Compiling frust-core v0.3.1 (41/210)"],
+    );
+    sess.current_phase = Some(PhaseLabel::Compiling {
+        crate_name: "frust-core".to_string(),
+        progress: Some((41, 210)),
+    });
+    let state = AppState {
+        screen: Screen::Workbench,
+        project_root: Some(PathBuf::from(root)),
+        projects: vec![PathBuf::from(root)],
+        sessions: vec![sess],
+        active_session: Some(0),
+        animation_frame: 4,
+        ..Default::default()
+    };
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+/// The pre-first-line placeholder (workbook §B10): a transient session with
+/// no output at all yet shows a centered spinner + "waiting for first output"
+/// message in the log pane, in place of the ordinary top-left log hint.
+#[test]
+fn session_empty_log_transient_placeholder_100x30() {
+    let root = "/tmp/huddle";
+    let sess = session(0, root, "Pixel 7", SessionState::Building, &[]);
+    let state = AppState {
+        screen: Screen::Workbench,
+        project_root: Some(PathBuf::from(root)),
+        projects: vec![PathBuf::from(root)],
+        sessions: vec![sess],
+        active_session: Some(0),
+        animation_frame: 4,
+        ..Default::default()
+    };
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
 }
 
 // ── Devices panel + run-config modal ─────────────────────────────────────────

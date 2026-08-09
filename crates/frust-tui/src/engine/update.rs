@@ -1354,8 +1354,12 @@ fn fix_copy_text(fix: &frust_drive::doctor::FixCommand) -> String {
 /// Redraw policy honors the dirty-frame skip: a **line batch** for a
 /// background (non-active) session is buffered without a repaint; a batch for
 /// the *active* followed session, and *any* state change (the sidebar/tab
-/// status glyph) or a new drop count, redraw. An event for an unknown id is
-/// dropped (the session must be registered first — see
+/// status glyph) or a new drop count, redraw. A **phase label**
+/// (`crate::supervise::progress`, workbook §B10's transient status line)
+/// mirrors the drop-count gating — dirty only on the active tab and only when
+/// the label actually changed, never an unconditional redraw, so a
+/// backgrounded session's build chatter doesn't force a repaint. An event for
+/// an unknown id is dropped (the session must be registered first — see
 /// [`Message::RegisterSession`]).
 fn on_session_event(state: &mut AppState, ev: SessionEvent) -> Outcome {
     let Some(idx) = state.session_index(ev.id) else {
@@ -1376,8 +1380,20 @@ fn on_session_event(state: &mut AppState, ev: SessionEvent) -> Outcome {
             }
             SessionEventKind::State(s) => {
                 session.state = s;
+                // Clear a stale phase label the moment the state leaves the
+                // transient (`Building`/`Installing`) window — the sole
+                // clearing point (`crate::supervise::progress`'s module
+                // docs), independent of `Phase` event arrival order.
+                if !super::state::is_transient(&session.state) {
+                    session.current_phase = None;
+                }
                 toast = terminal_toast(session);
                 Outcome::redraw()
+            }
+            SessionEventKind::Phase(p) => {
+                let changed = session.current_phase.as_ref() != Some(&p);
+                session.current_phase = Some(p);
+                Outcome::dirty(is_active && changed)
             }
             SessionEventKind::Dropped(n) => {
                 // The supervisor's bounded-channel overflow counter (cumulative,
@@ -1624,6 +1640,128 @@ mod tests {
         );
         assert!(out.redraw);
         assert_eq!(st.sessions[0].state, SessionState::Running);
+    }
+
+    // ── Build-phase progress (workbook §B10) ────────────────────────────────
+
+    fn phase_event(id: SessionId, phase: crate::supervise::PhaseLabel) -> Message {
+        Message::Session(SessionEvent {
+            id,
+            kind: SessionEventKind::Phase(phase),
+        })
+    }
+
+    fn compiling(crate_name: &str) -> crate::supervise::PhaseLabel {
+        crate::supervise::PhaseLabel::Compiling {
+            crate_name: crate_name.to_string(),
+            progress: None,
+        }
+    }
+
+    #[test]
+    fn a_phase_event_on_the_active_session_redraws_and_stores_the_label() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        st.sessions[0].state = SessionState::Building;
+        let out = update(&mut st, phase_event(a, compiling("frust-core")));
+        assert!(out.redraw);
+        assert_eq!(
+            st.active_session().unwrap().current_phase,
+            Some(compiling("frust-core"))
+        );
+    }
+
+    /// The redraw-gating half of criterion 4: a phase update for a
+    /// *background* session neither redraws nor is dropped — it's stored, so
+    /// switching to that tab later shows the latest label, but the frame
+    /// stays clean while it's not on screen (mirrors
+    /// `active_session_line_redraws_background_line_does_not`).
+    #[test]
+    fn a_phase_event_on_a_background_session_is_buffered_without_a_redraw() {
+        let mut st = welcome();
+        register(&mut st, 0, "/tmp/a", "desktop");
+        let b = register(&mut st, 1, "/tmp/b", "desktop");
+        st.sessions[1].state = SessionState::Building;
+        assert_eq!(st.active_session, Some(0));
+        let out = update(&mut st, phase_event(b, compiling("frust-widgets")));
+        assert!(
+            !out.redraw,
+            "a background session's phase update must not force a redraw"
+        );
+        assert_eq!(
+            st.sessions[1].current_phase,
+            Some(compiling("frust-widgets")),
+            "the label is still retained for when that tab becomes active"
+        );
+    }
+
+    /// A repeated identical phase (the same crate re-reported, or a
+    /// duplicate delivery) never re-dirties the active tab — only an actual
+    /// change does, the same "changed, not merely present" gate `Dropped`
+    /// uses.
+    #[test]
+    fn an_unchanged_phase_on_the_active_session_does_not_redraw() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        st.sessions[0].state = SessionState::Building;
+        assert!(update(&mut st, phase_event(a, compiling("frust-core"))).redraw);
+        let out = update(&mut st, phase_event(a, compiling("frust-core")));
+        assert!(
+            !out.redraw,
+            "an identical phase must not re-dirty the frame"
+        );
+    }
+
+    /// The clearing invariant: a `State` event that leaves the transient
+    /// window wipes any phase label the session was carrying, regardless of
+    /// whether a matching `Phase(None)`-shaped clear was ever sent (there is
+    /// no such variant — `State` is the sole clearing point, see
+    /// `crate::supervise::progress`'s module docs).
+    #[test]
+    fn a_state_transition_to_running_clears_a_stale_phase_label() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        st.sessions[0].state = SessionState::Building;
+        update(&mut st, phase_event(a, compiling("frust-core")));
+        assert!(st.active_session().unwrap().current_phase.is_some());
+
+        update(
+            &mut st,
+            Message::Session(SessionEvent {
+                id: a,
+                kind: SessionEventKind::State(SessionState::Running),
+            }),
+        );
+        assert_eq!(
+            st.active_session().unwrap().current_phase,
+            None,
+            "reaching Running must clear any phase label the tab was showing"
+        );
+    }
+
+    /// Same clearing invariant on the failure path: a `Building` session's
+    /// phase label is wiped the moment the state reports `Exited(false)`
+    /// (workbook §B10's failed row — spinner stopped, no lingering shimmer
+    /// text from the build that just failed).
+    #[test]
+    fn a_failed_build_clears_its_phase_label_too() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        st.sessions[0].state = SessionState::Building;
+        update(&mut st, phase_event(a, compiling("frust-core")));
+
+        update(
+            &mut st,
+            Message::Session(SessionEvent {
+                id: a,
+                kind: SessionEventKind::State(SessionState::Exited(false)),
+            }),
+        );
+        assert_eq!(st.active_session().unwrap().current_phase, None);
+        assert_eq!(
+            st.active_session().unwrap().state,
+            SessionState::Exited(false)
+        );
     }
 
     #[test]

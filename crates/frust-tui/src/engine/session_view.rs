@@ -16,7 +16,7 @@ use super::logstyle::{
     now_hms,
 };
 use super::perf::PerfPanel;
-use crate::supervise::{SessionId, SessionState};
+use crate::supervise::{PhaseLabel, SessionId, SessionState};
 
 /// Ring-buffer cap for a session's retained log lines.
 ///
@@ -215,6 +215,17 @@ pub struct SessionView {
     /// The Rust panic/backtrace fold-block state machine + block list for
     /// this session, fed one line at a time from [`Self::push_line`].
     panic_tracker: PanicTracker,
+    /// The latest parsed build/install/launch phase label
+    /// (`crate::supervise::progress::phase_from_output_line`, workbook
+    /// §B10's transient status line) — `None` before any marker line has
+    /// been seen, or once the session has left its transient window.
+    /// [`crate::engine::update::on_session_event`] is the sole clearer: the
+    /// moment a `SessionState` event reports a non-`Building`/`Installing`
+    /// state, it resets this to `None` regardless of send ordering, so a
+    /// mis-parse (or a `Phase` event racing a `State` event through the
+    /// bounded channel) can never linger past a real state advance — see
+    /// `crate::supervise::progress`'s module docs.
+    pub current_phase: Option<PhaseLabel>,
 }
 
 impl SessionView {
@@ -232,6 +243,7 @@ impl SessionView {
             perf: PerfPanel::default(),
             level_filter: LevelFilter::default(),
             panic_tracker: PanicTracker::default(),
+            current_phase: None,
         }
     }
 
