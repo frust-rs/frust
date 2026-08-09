@@ -15,7 +15,7 @@ use super::palette::Palette;
 use super::run_config::{DeviceRow, RunConfig};
 use super::session_view::SessionView;
 use super::toast::Toasts;
-use crate::supervise::SessionId;
+use crate::supervise::{SessionId, SessionState};
 
 /// Bounded-walk depth cap for [`detect`]/[`find_projects`]: `dir` itself is
 /// depth 0, its children depth 1, its grandchildren depth 2 — nothing past
@@ -183,6 +183,14 @@ pub struct AppState {
     pub sidebar_overlay_open: bool,
     /// The keyboard/help overlay (`?`), when open.
     pub help_open: bool,
+    /// A monotonically advancing frame counter, incremented once per
+    /// [`super::message::Message::Tick`] while [`Self::animating`] is `true`
+    /// (the runner only delivers ticks then — see `crate::runner`). Pure
+    /// animation math (`crate::ui::anim`) derives from this: `spinner_char`
+    /// wants the raw counter divided by its cadence constant, `shimmer_phase`
+    /// wants it directly. Wraps via `wrapping_add`, which every consumer's
+    /// modulo math already tolerates.
+    pub animation_frame: u64,
 }
 
 impl AppState {
@@ -257,15 +265,21 @@ impl AppState {
             context_menu: None,
             sidebar_overlay_open: false,
             help_open: false,
+            animation_frame: 0,
         }
     }
 
-    /// Whether the loop must keep processing the frame tick (to age toasts) and
-    /// redraw on change. `true` while any toast is live so its TTL counts down
-    /// off the tick loop (no ambient timer); `false` otherwise, restoring the
-    /// dirty-frame skip on an idle workbench.
+    /// Whether the loop must keep processing the frame tick (to age toasts
+    /// and advance `animation_frame`) and redraw on change. `true` while any
+    /// toast is live (its TTL counts down off the tick loop, no ambient
+    /// timer) OR any session is in a **transient** build/install phase (the
+    /// tab spinner has something to advance); `false` otherwise, restoring
+    /// the dirty-frame skip on an idle workbench. A session streaming stably
+    /// (`SessionState::Running`) does NOT count — only the pre-`Running`
+    /// phases the tab spinner covers do, so a long-lived running session
+    /// never pins the tick interval on indefinitely.
     pub fn animating(&self) -> bool {
-        !self.toasts.items.is_empty()
+        !self.toasts.items.is_empty() || self.sessions.iter().any(|s| is_transient(&s.state))
     }
 
     /// The active session's view-model, if a tab is selected.
@@ -381,8 +395,22 @@ impl Default for AppState {
             context_menu: None,
             sidebar_overlay_open: false,
             help_open: false,
+            animation_frame: 0,
         }
     }
+}
+
+/// Whether `state` is a transient (pre-`Running`) phase — the tab spinner
+/// has something to advance. `Running` (streaming stably) and the terminal
+/// states (`Exited`/`Killed`) are deliberately excluded: a session parked in
+/// either would otherwise pin [`AppState::animating`] `true` forever, keeping
+/// the tick interval (and its ~20 fps redraw budget) alive indefinitely for
+/// no visible benefit.
+pub(crate) fn is_transient(state: &SessionState) -> bool {
+    matches!(
+        state,
+        SessionState::Configuring | SessionState::Building | SessionState::Installing
+    )
 }
 
 /// Bounded depth-2 walk from `root` for `frust.toml` project markers: `root`
@@ -530,5 +558,78 @@ mod tests {
         assert_eq!(state.projects, vec![bubblebench.clone(), huddle]);
         assert_eq!(state.project_root, Some(bubblebench));
         let _ = fs::remove_dir_all(&root);
+    }
+
+    // ── animating() ─────────────────────────────────────────────────────────
+
+    fn session_with_state(state: SessionState) -> SessionView {
+        let mut view = SessionView::new(SessionId(0), PathBuf::from("/tmp/proj"), "desktop");
+        view.state = state;
+        view
+    }
+
+    #[test]
+    fn animating_false_with_no_sessions_and_no_toasts() {
+        let state = AppState::default();
+        assert!(state.sessions.is_empty());
+        assert!(!state.animating());
+    }
+
+    #[test]
+    fn animating_true_while_a_session_is_building() {
+        let mut state = AppState::default();
+        state
+            .sessions
+            .push(session_with_state(SessionState::Building));
+        assert!(state.animating());
+    }
+
+    #[test]
+    fn animating_true_while_a_session_is_configuring_or_installing() {
+        for s in [SessionState::Configuring, SessionState::Installing] {
+            let mut state = AppState::default();
+            state.sessions.push(session_with_state(s.clone()));
+            assert!(state.animating(), "{s:?} should count as transient");
+        }
+    }
+
+    #[test]
+    fn animating_false_when_all_sessions_are_streaming() {
+        let mut state = AppState::default();
+        state
+            .sessions
+            .push(session_with_state(SessionState::Running));
+        assert!(!state.animating());
+    }
+
+    #[test]
+    fn animating_false_when_sessions_are_terminal() {
+        let mut state = AppState::default();
+        state
+            .sessions
+            .push(session_with_state(SessionState::Exited(true)));
+        state
+            .sessions
+            .push(session_with_state(SessionState::Killed));
+        assert!(!state.animating());
+    }
+
+    #[test]
+    fn animating_true_when_toasts_live_even_with_no_sessions() {
+        let mut state = AppState::default();
+        state.toasts.push(crate::engine::ToastKind::Info, "hi");
+        assert!(state.animating());
+    }
+
+    #[test]
+    fn animating_true_when_one_session_builds_among_others_streaming() {
+        let mut state = AppState::default();
+        state
+            .sessions
+            .push(session_with_state(SessionState::Running));
+        state
+            .sessions
+            .push(session_with_state(SessionState::Building));
+        assert!(state.animating(), "one transient session is enough");
     }
 }

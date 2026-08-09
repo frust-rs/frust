@@ -3,6 +3,7 @@
 //! interaction is expressed only as registered regions the loop turns into
 //! `Message`s.
 
+pub mod anim;
 pub mod layout;
 pub mod mouse;
 pub mod theme;

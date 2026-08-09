@@ -168,11 +168,23 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             // No point drawing a frame we're about to tear down.
             Outcome::idle()
         }
-        // A tick ages the toast stack (the only animated state); it dirties a
-        // frame only when a toast actually expires (its content is otherwise
-        // static). With no live toast `animating()` is false and the runner
-        // never delivers a tick here — the dirty-frame skip.
-        Message::Tick => Outcome::dirty(state.toasts.tick()),
+        // A tick ages the toast stack and advances `animation_frame`, the
+        // clock every `crate::ui::anim` helper (spinner/shimmer) reads. It
+        // dirties a frame when a toast actually expires OR any session is
+        // still in a transient build/install phase (the tab spinner has a
+        // new frame to paint even though nothing else about the session
+        // changed). With no live toast and no transient session,
+        // `animating()` is false and the runner never delivers a tick here —
+        // the dirty-frame skip.
+        Message::Tick => {
+            state.animation_frame = state.animation_frame.wrapping_add(1);
+            let toast_expired = state.toasts.tick();
+            let session_animating = state
+                .sessions
+                .iter()
+                .any(|s| super::state::is_transient(&s.state));
+            Outcome::dirty(toast_expired || session_animating)
+        }
         Message::Resize(_, _) => Outcome::redraw(),
         Message::HoverChanged(next) => {
             let hover_changed = state.hover != next;
@@ -1451,6 +1463,44 @@ mod tests {
         let mut s = welcome();
         let out = update(&mut s, Message::Tick);
         assert!(!out.redraw, "no animation → tick skips the draw");
+    }
+
+    #[test]
+    fn tick_always_advances_animation_frame() {
+        let mut s = welcome();
+        assert_eq!(s.animation_frame, 0);
+        update(&mut s, Message::Tick);
+        assert_eq!(s.animation_frame, 1);
+        update(&mut s, Message::Tick);
+        assert_eq!(s.animation_frame, 2);
+    }
+
+    #[test]
+    fn tick_redraws_while_a_session_is_transient() {
+        let mut s = welcome();
+        let id = register(&mut s, 1, "/tmp/proj", "desktop");
+        assert_eq!(
+            s.session_index(id).map(|i| &s.sessions[i].state),
+            Some(&SessionState::Configuring)
+        );
+        let out = update(&mut s, Message::Tick);
+        assert!(
+            out.redraw,
+            "a transient session gives the tick spinner something to paint"
+        );
+    }
+
+    #[test]
+    fn tick_skips_redraw_once_session_is_running() {
+        let mut s = welcome();
+        let id = register(&mut s, 1, "/tmp/proj", "desktop");
+        let idx = s.session_index(id).unwrap();
+        s.sessions[idx].state = SessionState::Running;
+        let out = update(&mut s, Message::Tick);
+        assert!(
+            !out.redraw,
+            "a stably-streaming session is not transient → dirty-frame skip"
+        );
     }
 
     #[test]
