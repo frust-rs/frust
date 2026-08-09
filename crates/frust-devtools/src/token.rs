@@ -19,8 +19,11 @@
 //! is protocol + tokio + log, and version pins are law), so this module uses
 //! what std and the platform already provide, in this order:
 //!
-//! 1. `/dev/urandom`, when it can be read — a real kernel CSPRNG, and the case
-//!    that actually holds on every shipped target (Linux, Android, macOS, iOS).
+//! 1. `/dev/urandom`, when it can be read — a real kernel CSPRNG. This path
+//!    holds on every unix target (Linux, Android, macOS, iOS). **Windows has
+//!    no `/dev/urandom` and always takes path 2** — see the
+//!    `devtools-token-entropy-windows-fallback` entry in `docs/LIMITATIONS.md`;
+//!    a `BCryptGenRandom`-based Windows source is the known follow-up.
 //! 2. Otherwise a composition of [`RandomState`] hashes (whose keys std seeds
 //!    from OS entropy on first use), the wall clock, a monotonic instant, the
 //!    process id, and a stack address.

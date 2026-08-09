@@ -47,7 +47,9 @@ existing process-output threading idioms rather than pulling in an async runtime
 **not** the trust boundary on a device: any co-resident app can `connect("127.0.0.1", port)`,
 though (e.g. on Android) it cannot read another app's logcat, the channel the token travels over.
 The service mints a random per-process token (`frust-devtools::token` — `/dev/urandom` first, with
-a documented non-cryptographic fallback), prints it on the discovery line, and requires it at
+a documented non-cryptographic fallback; Windows always takes the fallback — see
+[LIMITATIONS.md](LIMITATIONS.md) `devtools-token-entropy-windows-fallback`), prints it on the
+discovery line, and requires it at
 `handshake` before dispatching any other method — `ServiceConfig::require_token` defaults **on**;
 the off switch exists only for in-process tests. Because the protocol's `input_*` methods also
 drive real UI, a shell additionally gates starting the service on a debug/profile build via the

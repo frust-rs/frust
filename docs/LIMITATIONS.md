@@ -1009,3 +1009,26 @@ dev-dependency), and is the closure path for this gap.
 **Evidence**: `crates/frust-drive/src/devtools_client.rs`'s hand-rolled fake-server tests;
 `crates/frust-devtools/tests/loopback.rs`'s hand-rolled fake-client test; DEVTOOLS_ARCHITECTURE.md's
 tooling/framework isolation charter.
+
+---
+
+### `devtools-token-entropy-windows-fallback` — Windows devtools tokens come from the non-CSPRNG fallback
+
+**Observed**: the devtools handshake token's strong-entropy path reads `/dev/urandom`, which does
+not exist on Windows; `os_random_bytes` is `#[cfg(unix)]`, so every Windows debug/profile session
+mints its token from the documented fallback (a composition of OS-seeded `RandomState` SipHash
+outputs, wall clock, monotonic instant, pid, and a stack address) — 128 bits an unprivileged
+co-resident peer cannot practically enumerate, but not a CSPRNG.
+
+**Applies to**: the Windows desktop shell only; Linux, Android, macOS, and iOS all take the
+kernel-CSPRNG path.
+
+**Why accepted**: `frust-devtools` carries no CSPRNG dependency budget (protocol + tokio + log;
+pins are law) and no Windows host exists in the current verify environment to validate a
+`BCryptGenRandom` FFI path. The fallback still gates the listener behind an unguessable-in-practice
+secret; the exposure window is debug/profile developer builds on the developer's own machine. A
+`BCryptGenRandom`-based source (via `std::os::windows` FFI, no new crate) is the named follow-up
+when a Windows verification host is available.
+
+**Evidence**: `crates/frust-devtools/src/token.rs` (`os_random_bytes` cfg gate + module doc);
+review finding recorded in `workflow/reviews/frust-tui-devex-phase2/REVIEW-round1.md`.
