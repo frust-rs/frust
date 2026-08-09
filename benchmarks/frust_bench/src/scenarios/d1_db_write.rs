@@ -1,7 +1,7 @@
 //! D1 — DB write latency (`frust-database`'s batched-transaction vs
 //! single-row-autocommit insert paths — `benchmarks/PROTOCOL.md` §9.3).
 //!
-//! Unlike the `s1..=s10` frame-class scenarios, D1 has no per-frame render
+//! Unlike the `s1..=s8` frame-class scenarios, D1 has no per-frame render
 //! series of its own — its headline metric is per-op latency (§7's per-op
 //! contract), the same `d*`-namespace shape §9.1 declares. Each run: opens a
 //! fresh scratch database file (never the app's real `frust-database`

@@ -5,8 +5,8 @@
 # plugin rules, and the rules cannot outlive the plugin. Every failure these
 # prevent is release-only: a debug build never reproduces them.
 #
-# Validated against a real minified build by examples/glyph-catalog/android's
-# `:app:minifyReleaseWithR8` — see docs/DEVELOPMENT.md's Version-Pin Policy
+# Validated against a real minified build by examples/playground/android's
+# `:app:minifyReleaseWithR8` — see docs/PLUGINS_DEVELOPMENT.md's pin table
 # (openiap-google row) and this plugin's README.md §6 for the tripwire.
 #
 # `dev.frust.iap.FrustIapHost` is never referenced from Kotlin or Java by a

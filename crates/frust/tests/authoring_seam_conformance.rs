@@ -1,7 +1,7 @@
 //! Source-scan conformance test locking the `frust::authoring` escape hatch
 //! shut for every migrated production consumer: no `benchmarks/frust_bench`,
 //! `examples/huddle`, `examples/shadertoy`, `examples/glyph-catalog`, or
-//! `examples/layer-bench` production source file may name `frust_core`,
+//! `examples/playground` production source file may name `frust_core`,
 //! `frust_scene`, `frust_text`, `accesskit`, `kurbo`, or `peniko` as a crate
 //! path (the last three only outside their sanctioned `frust::`-prefixed
 //! valve — see below). Those
@@ -157,7 +157,7 @@ const CONSUMER_SRC_DIRS: &[&str] = &[
     "examples/huddle/src",
     "examples/shadertoy/src",
     "examples/glyph-catalog/src",
-    "examples/layer-bench/src",
+    "examples/playground/src",
 ];
 
 /// True if `name` (a single path component) is a directory this scan must

@@ -2020,8 +2020,8 @@ mod tests {
     /// `// frust:plugin-includes`/`// frust:plugin-dependencies` anchors
     /// `Contribution::GradleModule` hard-requires — so they are structurally
     /// incapable of catching an existing in-repo consumer drifting away from
-    /// them (exactly how `glyph-catalog` and `layer-bench` shipped without
-    /// either anchor).
+    /// them (exactly how early consumers — `glyph-catalog` among them —
+    /// shipped without either anchor).
     ///
     /// This drives the real `add_plugin` path — not a grep — against a
     /// tempdir copy of every in-repo Android consumer, so a future project

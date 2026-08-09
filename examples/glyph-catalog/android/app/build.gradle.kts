@@ -174,16 +174,6 @@ android {
 dependencies {
     implementation(project(":frust-embedding"))
     // frust:plugin-dependencies — plugin-contributed dependencies go below.
-    implementation(project(":frust-camera"))
-    // frust-native-widgets' one factory + one listener class
-    // (`dev.frust.nativewidgets`), previously hand-copied into this app's own
-    // source tree and now supplied by the plugin's own library module.
-    implementation(project(":frust-native-widgets"))
-    // frust-iap (spike task 02-android-module-spike): pulled in so this app's
-    // merged manifest exercises the module's transitive `com.android.vending.
-    // BILLING` permission (from the `openiap-google` -> Play Billing AAR) and
-    // its `frustiapinit` provider — the spike's whole acceptance proof.
-    implementation(project(":frust-iap"))
 }
 
 // Per-ABI versionCode offsets, applied only when splits are enabled so each

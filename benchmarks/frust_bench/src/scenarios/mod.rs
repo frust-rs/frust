@@ -1,4 +1,4 @@
-//! The scenario driver contract shared by all twelve benchmark scenarios.
+//! The scenario driver contract shared by all ten benchmark scenarios.
 //!
 //! Every scenario is a zero-sized unit struct implementing [`Scenario`],
 //! registered once in [`SCENARIOS`]. A scenario is selected at launch via a
@@ -8,7 +8,7 @@
 //! button row or a warm deep link (see [`crate::BenchApp`]).
 //!
 //! Two id namespaces share this one registry (`benchmarks/PROTOCOL.md` §9.1):
-//! `s1..=s10`, the frame-class scenarios (a per-frame render series), and
+//! `s1..=s8`, the frame-class scenarios (a per-frame render series), and
 //! `d1..=d2`, the DB op-latency class (`d1_db_write`/`d2_db_read` —
 //! per-op latency only, no frame series of its own). Both namespaces are
 //! selected, switched, and marker-bracketed identically — [`Scenario::id`]
@@ -39,7 +39,6 @@ use frust::{AnyView, Get, RwSignal, Set, any, deep_links, text};
 
 pub mod d1_db_write;
 pub mod d2_db_read;
-pub mod s10_keys;
 pub mod s1_animation;
 pub mod s2_list;
 pub mod s3_table;
@@ -48,7 +47,6 @@ pub mod s5_image;
 pub mod s6_text;
 pub mod s7_startup;
 pub mod s8_prefs;
-pub mod s9_terminal;
 
 /// The deep-link scheme registered in the generated Android manifest / iOS
 /// Info.plist (`frust create --deeplink-scheme frustbench`); a link's host is
@@ -66,7 +64,7 @@ pub const SCENARIO_ENV: &str = "FRUST_BENCH_SCENARIO";
 /// [`SCENARIOS`] registry as a `&'static dyn Scenario`.
 pub trait Scenario: Sync {
     /// Stable id: the deep-link host (`frustbench://<id>`) and the default
-    /// scenario-marker name. One of `s1`..=`s10` (the frame-class table) or
+    /// scenario-marker name. One of `s1`..=`s8` (the frame-class table) or
     /// `d1`..=`d2` (the DB op-latency class — `benchmarks/PROTOCOL.md` §9
     /// DB scenarios).
     fn id(&self) -> &'static str;
@@ -90,10 +88,10 @@ pub trait Scenario: Sync {
     }
 }
 
-/// All twelve scenarios (the ten `s*` frame-class scenarios plus the two
+/// All ten scenarios (the eight `s*` frame-class scenarios plus the two
 /// `d*` DB op-latency scenarios), in id order. Index into this from
 /// [`BenchState::active`] / [`BenchState::selected`].
-pub static SCENARIOS: [&dyn Scenario; 12] = [
+pub static SCENARIOS: [&dyn Scenario; 10] = [
     &s1_animation::S1,
     &s2_list::S2,
     &s3_table::S3,
@@ -102,8 +100,6 @@ pub static SCENARIOS: [&dyn Scenario; 12] = [
     &s6_text::S6,
     &s7_startup::S7,
     &s8_prefs::S8,
-    &s9_terminal::S9,
-    &s10_keys::S10,
     &d1_db_write::D1,
     &d2_db_read::D2,
 ];
@@ -199,7 +195,7 @@ pub fn index_from_url(url: &str) -> Option<usize> {
     index_from_id(id)
 }
 
-/// Map a bare scenario id (`s1`..=`s10`) to its [`SCENARIOS`] index.
+/// Map a bare scenario id (`s1`..=`s8`) to its [`SCENARIOS`] index.
 pub fn index_from_id(id: &str) -> Option<usize> {
     SCENARIOS.iter().position(|s| s.id() == id)
 }

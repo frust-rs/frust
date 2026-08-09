@@ -223,15 +223,20 @@ Additionally run:
 ```bash
 (cd examples/huddle && cargo test) \
   && (cd examples/huddle && cargo clippy --all-targets -- -D warnings) \
+  && (cd examples/playground && cargo test) \
+  && (cd examples/playground && cargo clippy --all-targets -- -D warnings) \
+  && (cd examples/playground && cargo fmt --check) \
   && (cd plugins/clean-signals-frust && cargo test) \
   && (cd plugins/clean-signals-frust && cargo clippy --all-targets -- -D warnings)
 ```
 
-`examples/huddle` and `plugins/clean-signals-frust` each gate from their own directory
-rather than `-p` from the repo root because both are standalone workspaces excluded from
-the root one (*Version-Pin Policy*); both git+rev-pin `clean-signals` to its public repo,
-so no local sibling checkout is required to run this gate. This gate is separate from
-`frust build apk`/`run`'s pipeline gate (*Run*).
+`examples/huddle`, `examples/playground`, and `plugins/clean-signals-frust` each gate from
+their own directory rather than `-p` from the repo root because all three are standalone
+workspaces excluded from the root one (*Version-Pin Policy*) — the same shape
+`examples/shadertoy` and `examples/glyph-catalog` gate under, from their own directories,
+per their own READMEs. `huddle` and `clean-signals-frust` git+rev-pin `clean-signals` to
+its public repo, so no local sibling checkout is required to run this gate. This gate is
+separate from `frust build apk`/`run`'s pipeline gate (*Run*).
 
 **Non-default features are not compiled by the chain above.** `frust-render`'s
 `cpu-tier` (experimental `vello_cpu` render backend —
@@ -239,7 +244,7 @@ so no local sibling checkout is required to run this gate. This gate is separate
 headless and needs no GPU: run `cargo test -p frust-render --features cpu-tier` when
 touching `frust-render`. `frust-native-widgets`' `demo-components` is a composite
 `NativeComponent` demo of real JNI/UIKit view construction, shipped inside the plugin
-rather than in `examples/glyph-catalog` (which merely switches it on) because an app
+rather than in `examples/playground` (which merely switches it on) because an app
 crate cannot implement that trait without raw `jni`/`objc2-ui-kit` deps the plugin does
 not re-export; the mobile compile gates below are the only thing that builds it.
 `frust-database`'s `engine-turso` needs its own gate too: `cargo test -p frust-database
@@ -326,10 +331,11 @@ gate chain above.
 `benchmarks/` is a paired Frust-vs-Flutter measurement suite, out-of-tree from the crate
 workspace: `frust_bench/` (standalone Cargo package, gate from its own directory like
 `examples/huddle`) and `flutter_bench/` (Flutter SDK, tested against 3.44.2 stable)
-implement the same eight timed scenarios (S1–S8), driven by `harness/`'s shared scripts.
-`frust_bench` additionally carries S9 (terminal-grid) and S10 (an IME capability probe, never
-timed and never recorded in RESULTS.md); S9 is paired with a Flutter counterpart only at the
-protocol level today — the Flutter side remains on the spike branch, not in this tree.
+implement the same scenarios — eight timed UI scenarios (S1–S8) plus two DB op-latency
+scenarios (D1/D2) — driven by `harness/`'s shared scripts. `benchmarks/` is scoped strictly
+to this paired-comparison protocol; the terminal-grid and IME-capability probes that used to
+ride alongside it as S9/S10 now live in `examples/playground` as exploratory, single-sided
+demos instead.
 
 ```bash
 ./benchmarks/harness/run.sh <scenario> --app frust|flutter --device <serial>
@@ -398,7 +404,11 @@ The rules below bind every pin, wherever its row lives:
   --all-targets -- -D warnings`).
 - **Never run a blind `cargo update`.** After any pinned-dependency manifest change, run
   `cargo generate-lockfile` then confirm `cargo build --workspace --locked` still
-  succeeds before committing.
+  succeeds before committing. Exception: a manifest change that only **removes**
+  dependencies (nothing added, no range widened) is updated with a plain `cargo build`
+  instead — it prunes exactly the orphaned lockfile entries; `cargo generate-lockfile`
+  re-resolves the whole graph and is reserved for changes that add a dependency or widen
+  a range, and its full diff must be reviewed before committing.
 - Use `cargo tree -d` to check for duplicate/divergent versions of a crate across the
   dependency graph after any manifest change.
 - Android deps (`jni`, `ndk`, `ndk-sys`, `android_logger`) are target-gated (they only

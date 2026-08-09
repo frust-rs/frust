@@ -31,11 +31,14 @@ Consumers of the framework, not units — each keeps its own README, not an ARCH
 
 | Example | What it shows |
 |---------|---------------|
-| `examples/huddle` | The sole full example app; a standalone workspace |
+| `examples/huddle` | clean-signals clean-architecture showcase; the sole full example app |
 | `examples/shadertoy` | Fragment-shader effects showcase |
-| `examples/glyph-catalog` | The Glyph design-system catalog |
-| `examples/layer-bench` | Throwaway composite-cost benchmarking lab |
-| `examples/no-catalogs` | Compile guard proving all three design-system catalogs can be disabled |
+| `examples/glyph-catalog` | Glyph design-system showcase (theme only) |
+| `examples/playground` | Plugin functionality, native widgets, platform views, responsiveness, and general testing showcase; a standalone workspace |
+| `examples/no-catalogs` | Compile guard proving `frust --no-default-features` builds — part of the verify gate, not a showcase |
+
+`benchmarks/` is separate from the examples above: flutter-vs-frust comparative benchmarking
+only (S1–S8, D1–D2 per `benchmarks/PROTOCOL.md`), not a framework showcase.
 
 ## Cross-Unit Layer Dependencies
 

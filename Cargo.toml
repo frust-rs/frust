@@ -37,18 +37,15 @@ members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secu
 # the same reason as shadertoy: a full `frust create` scaffold with its own
 # project-local `target/` dir and hand-synced `[profile.*]` blocks (its
 # generated Android/iOS projects need a project-local `target/`).
-# examples/layer-bench (the retained-layers composite-cost exploratory bench,
-# a THROWAWAY LAB) is standalone for the same reason as the examples above: a
-# full `frust create` scaffold with its own project-local `target/` dir and
-# hand-synced `[profile.*]` blocks. It also reaches below the facade into
-# frust-render's shipped composite primitives to measure vello composite
-# economics — see its src/lib.rs top-of-file note; it never enters the root
-# graph.
+# examples/playground (the plugin/native-capability testing ground) is
+# standalone for glyph-catalog's reason: a full `frust create` scaffold whose
+# generated Android/iOS projects need a project-local `target/` dir, plus
+# hand-synced `[profile.*]` blocks that only take effect in a workspace root.
 # plugins/clean-signals-frust (a facade-tier plugin) is a standalone
 # excluded workspace like huddle: its `clean-signals` core dep is a sibling
 # path dep that must never enter the root graph (see docs/DEVELOPMENT.md's
 # Version-Pin Policy). Excluding a not-yet-migrated dir is harmless.
-exclude = ["examples/huddle", "examples/shadertoy", "examples/glyph-catalog", "examples/layer-bench", "plugins/clean-signals-frust"]
+exclude = ["examples/huddle", "examples/shadertoy", "examples/glyph-catalog", "examples/playground", "plugins/clean-signals-frust"]
 
 [workspace.package]
 version = "0.1.0"

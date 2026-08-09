@@ -8,7 +8,7 @@ publish = false
 # comment for the full picture, including a confirmed feature-unification
 # limitation on `cargo build --workspace`/`cargo test --workspace`). A
 # root-workspace member on purpose, unlike the standalone examples
-# (huddle/shadertoy/glyph-catalog/layer-bench) the root `Cargo.toml`'s
+# (huddle/shadertoy/glyph-catalog/playground) the root `Cargo.toml`'s
 # `[workspace] exclude` list carries.
 #
 # `default-features = false` disables every default-on catalog

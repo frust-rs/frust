@@ -9,8 +9,8 @@
 //! brand mark, "glyph catalog" title, and the brightness/reduce-motion/
 //! animations toggles folded into its trailing actions (superseding the old
 //! header-row `Row`) — over a [`safe_area`]'d body: the
-//! 10-section tab strip plus a [`pattern_switcher`](frust::motion::switcher::pattern_switcher)
-//! hosting one of ten section pages in a [`scroll_view`], under a bare
+//! 9-section tab strip plus a [`pattern_switcher`](frust::motion::switcher::pattern_switcher)
+//! hosting one of nine section pages in a [`scroll_view`], under a bare
 //! [`toast_host`](frust::glyph::toast_host) overlay (default bottom-center
 //! anchoring, no app-side positioning)), and the
 //! [`frust::app!`] entry binding all three platforms. The AppBar consumes the
@@ -24,20 +24,9 @@
 //! **zero** catalog code — `frust::navigator` (imported below) auto-wires
 //! Android/gesture back handling for the shared [`NavigatorController`].
 //!
-//! # Mode B background
-//!
-//! The generated Android/iOS glue now turns `FRUST_TRANSLUCENT_SURFACE`/
-//! `translucentSurface` ON (this catalog is the framework's Mode B testbed —
-//! see `pages::platform_views`'s module docs) — a process-wide, compile-time
-//! choice, not one scoped to that one section. Under Mode B the frust
-//! surface's own base clear turns alpha-0 (`frust-shell-*`'s per-frame
-//! `base_color` swap), so **every** pixel no widget explicitly paints becomes
-//! a window straight through to whatever sits behind the surface — not just
-//! `platform_views`'s own deliberate slot. [`home_page`]'s root [`Stack`]
-//! therefore paints an explicit, surface-colored [`AppBackground`] as its
-//! bottom-most layer, restoring every other section's opaque look; the
-//! `platform_views` section's own slot is the one deliberate hole punched
-//! through it.
+//! [`home_page`]'s root [`Stack`] paints an explicit, surface-colored
+//! [`AppBackground`] as its bottom-most layer beneath the app content and
+//! toast overlay, since [`Stack`] itself paints no implicit background.
 //!
 //! Run it with `cargo run` (desktop preview) or `frust run` (Android/iOS).
 
@@ -287,7 +276,7 @@ fn catalog_app_bar(state: &CatalogState) -> AnyView<CatalogState> {
 }
 
 /// The navigator's home page: the root AppBar over a safe-area'd body (the
-/// 10-section tab strip plus the pattern-switched section body in a scroll
+/// 9-section tab strip plus the pattern-switched section body in a scroll
 /// view), all under a bare toast overlay, over an [`AppBackground`] base
 /// layer (see the module docs' "Mode B background" section). Re-run on every
 /// rebuild (the navigator re-invokes its page builder), so the signal reads
@@ -350,12 +339,9 @@ fn home_page(state: &CatalogState) -> AnyView<CatalogState> {
     // bottom-center with inset-aware margins — no app-side `Align`/`Padding`
     // wrapper needed (framework-side anchoring).
     //
-    // `AppBackground` is the BOTTOM-most layer (see
-    // the module docs' "Mode B background" section above): under the now-ON
-    // `FRUST_TRANSLUCENT_SURFACE`/`translucentSurface` mobile glue, an
-    // unpainted pixel anywhere in `column` would otherwise be a window
-    // straight through the surface, not just `platform_views`'s own
-    // deliberate slot.
+    // `AppBackground` is the BOTTOM-most layer (see the module docs above):
+    // `Stack` itself paints no implicit background, so this is what gives
+    // `column` an opaque, surface-colored backdrop.
     let background_color = frust::use_context::<Theme>()
         .unwrap_or_else(Theme::glyph_baseline)
         .scheme()
