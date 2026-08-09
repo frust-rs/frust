@@ -52,7 +52,7 @@ use crate::PlaygroundState;
 /// divides the bar's width evenly across all six destinations, so at phone
 /// width (390px logical) each slot is only 65px wide. The longer human names
 /// ("Platform Views", "Native Widgets") wrapped to two lines there and
-/// overflowed the bar's declared 64dp height (round-0 finding M1) — every
+/// overflowed the bar's declared 64dp height — every
 /// label here is verified (see `tests/smoke.rs`'s
 /// `full_shell_nav_labels_fit_single_line_at_phone_width`) to shape on a
 /// single line at a 65px slot width. A page wanting a longer heading for

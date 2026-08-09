@@ -509,7 +509,7 @@ edits by hand):
   resolves (the first build needs network reachability for the external
   OpenIAP SPM dependency).
 - **Minified release build survives R8 (Android).** `(cd
-  examples/glyph-catalog/android && ./gradlew :app:minifyReleaseWithR8)`
+  examples/playground/android && ./gradlew :app:minifyReleaseWithR8)`
   proves `consumer-rules.pro` is merged and effective under real
   minification — `FrustIapHost`/`FrustIapHost$*`/`FrustIapInitProvider` and
   the native methods must appear in

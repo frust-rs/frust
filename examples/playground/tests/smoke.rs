@@ -285,7 +285,7 @@ fn out_of_range_section_falls_back() {
     assert!(scene.text_runs > 0, "the fallback page paints");
 }
 
-/// The regression test for round-0 finding M1 (Major/logic): at phone
+/// The regression test for nav-label wrapping: at phone
 /// portrait width the bottom `navigation_bar` divides its width evenly across
 /// all six [`SECTION_LABELS`] destinations — 390px / 6 = 65px per slot — and
 /// a label whose shaped text wraps to two lines overflows the bar's declared
@@ -350,7 +350,7 @@ fn full_shell_nav_labels_fit_single_line_at_phone_width() {
             runs_per_slot[slot], 1,
             "nav label {slot} ({label:?}) painted {} glyph run(s) inside its {SLOT_W}px slot at \
              {PHONE_W}px width — expected exactly 1 (a single line); more than 1 means the label \
-             wrapped and overflowed the nav bar's declared {NAV_HEIGHT}dp box (round-0 finding M1)",
+             wrapped and overflowed the nav bar's declared {NAV_HEIGHT}dp box",
             runs_per_slot[slot],
         );
     }
