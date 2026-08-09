@@ -1256,3 +1256,127 @@ fn log_styling_level_filter_degraded_chip_click_cycles_the_filter() {
     assert_eq!(regions.hover_at(x, y), Some(RegionId::LevelFilterChip));
     assert_eq!(regions.click_at(x, y), Some(Message::CycleLevelFilter(1)));
 }
+
+/// The formerly-broken band: at 80 columns the
+/// always-rendered `x stop · f follow · w wrap · / search` base hint used to
+/// paint over the level-filter chip unconditionally, since only the
+/// *optional* `l filter`/`z fold`/`t perf` additions were fit-checked — the
+/// chip was completely overwritten even though `select_chip_form` had
+/// already (correctly) chosen to render it. `render_log_status` now
+/// fit-checks/degrades the base hint too (`select_base_hint`), so the chip's
+/// painted cells survive at the width that used to erase them.
+#[test]
+fn log_styling_level_filter_chip_survives_narrow_paint_80x30() {
+    let mut state = log_styling_state();
+    state.sessions[0].set_level_filter(LevelFilter::WarnPlus);
+    let text = render_to_string(80, 30, &state);
+    insta::assert_snapshot!(text);
+    // The minimal chip's caret glyph and hidden-count digit are on screen,
+    // intact — not silently erased by the right-aligned hint painted after
+    // it.
+    assert!(
+        text.contains('\u{23f7}'),
+        "chip caret glyph missing:\n{text}"
+    );
+    assert!(
+        text.contains("warn+"),
+        "chip's active-segment label missing:\n{text}"
+    );
+    assert!(
+        text.contains('4'),
+        "chip's hidden-line count missing:\n{text}"
+    );
+}
+
+/// The same fix, exercised at 100 columns with a *committed search filter*
+/// also active (`/{f}/` widens `left` by ~12 columns) — a secondary repro:
+/// a filter alone fits at 100 cols (see
+/// `log_styling_level_filter_degraded_100x30`), but stacking a search filter
+/// on top used to clip the chip the same way the 80-col band did.
+#[test]
+fn log_styling_level_filter_chip_survives_search_filter_100x30() {
+    let mut state = log_styling_state();
+    state.sessions[0].set_level_filter(LevelFilter::WarnPlus);
+    state.search.filter = Some("failed".to_string());
+    let text = render_to_string(100, 30, &state);
+    insta::assert_snapshot!(text);
+    assert!(
+        text.contains('\u{23f7}'),
+        "chip caret glyph missing:\n{text}"
+    );
+    assert!(
+        text.contains("warn+"),
+        "chip's active-segment label missing:\n{text}"
+    );
+    assert!(
+        text.contains('4'),
+        "chip's hidden-line count missing:\n{text}"
+    );
+}
+
+/// Click-region honesty in the formerly-overlapping 80-col band: the chip's
+/// caret glyph is a live `RegionId::LevelFilterChip` click target, and no
+/// cell under the keyhint text on the same row is misregistered as the chip
+/// (the phantom-region secondary defect: clicking "· f follow" used to
+/// silently cycle the filter).
+#[test]
+fn log_styling_level_filter_chip_click_region_excludes_keyhint_text_80x30() {
+    let mut state = log_styling_state();
+    state.sessions[0].set_level_filter(LevelFilter::WarnPlus);
+
+    let backend = TestBackend::new(80, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let theme = Theme::frust_dark_at(ColorDepth::TrueColor);
+    let mut regions = MouseRegions::new();
+    terminal
+        .draw(|frame| {
+            let mut ctx = MouseCtx::new(&mut regions);
+            frust_tui::ui::render(frame, &state, &theme, &mut ctx);
+        })
+        .expect("draw");
+
+    let text = buffer_to_string(terminal.backend().buffer());
+    let (chip_x, row_y) = text
+        .lines()
+        .enumerate()
+        .find_map(|(y, line)| {
+            line.chars()
+                .position(|c| c == '\u{23f7}')
+                .map(|x| (x as u16, y as u16))
+        })
+        .expect("the chip's caret glyph is on screen");
+
+    // The chip itself is clickable.
+    assert_eq!(
+        regions.hover_at(chip_x, row_y),
+        Some(RegionId::LevelFilterChip)
+    );
+    assert_eq!(
+        regions.click_at(chip_x, row_y),
+        Some(Message::CycleLevelFilter(1))
+    );
+
+    // The base keyhint's `x stop` segment is the highest-priority level in
+    // `select_base_hint`'s degrade order, so it survives at every width this
+    // fix targets — none of ITS cells may be the chip's click region. A
+    // phantom region here would mean the hint text is (mis)clickable as a
+    // filter cycle even though it visually reads as a keyhint (the secondary
+    // defect: clicking "· f follow" used to silently cycle the filter).
+    let row = text.lines().nth(row_y as usize).expect("row exists");
+    let hint_start =
+        row.find("x stop")
+            .expect("the base hint's highest-priority segment is on screen") as u16;
+    for x in hint_start..hint_start + "x stop".chars().count() as u16 {
+        assert_ne!(
+            regions.hover_at(x, row_y),
+            Some(RegionId::LevelFilterChip),
+            "phantom LevelFilterChip region at col {x} on row {row_y}, over keyhint text: {row:?}"
+        );
+    }
+    // And the chip's click region does not extend rightward into the hint's
+    // start column either — the two must not touch.
+    assert!(
+        chip_x < hint_start,
+        "chip (col {chip_x}) does not precede the keyhint (col {hint_start}): {row:?}"
+    );
+}

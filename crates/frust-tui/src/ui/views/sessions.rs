@@ -492,7 +492,15 @@ fn render_log_status(
     // silently overwriting the tail of `left`'s text or crowding out the
     // filter-active indicator.
     let used_left: usize = left.iter().map(|s| s.content.chars().count()).sum();
-    let mut right_hint = "x stop · f follow · w wrap · / search".to_string();
+    // The base hint itself must honor `chip_reserved` up front — not only
+    // the optional `l filter`/`z fold`/`t perf` additions below — or the
+    // *always-rendered* hint paints over the chip's reserved columns at
+    // narrower widths, hiding the one indicator that must never go
+    // invisible while a filter is active. `select_base_hint` picks the
+    // widest degrade level that still leaves room for the chip's worst
+    // case, mirroring `select_chip_form`'s own graduated-degrade shape.
+    let base_hint_budget = (inner.width as usize).saturating_sub(used_left + chip_reserved + 2);
+    let mut right_hint = select_base_hint(base_hint_budget).to_string();
     let push_hint_if_it_fits = |hint: &mut String, extra: &str| {
         if used_left + hint.chars().count() + extra.chars().count() + chip_reserved + 2
             <= inner.width as usize
@@ -750,6 +758,36 @@ fn compact_chip_width(filter: LevelFilter, hidden: usize) -> usize {
 
 fn minimal_chip_width(filter: LevelFilter, hidden: usize) -> usize {
     MINIMAL_CHIP_SEP.chars().count() + minimal_chip_text(filter, hidden).chars().count()
+}
+
+/// The base keyhint's graduated degrade levels, widest first, each a prefix
+/// of the previous with one segment dropped — mirrors [`select_chip_form`]'s
+/// own shape so the *always-rendered* hint honestly fits instead of painting
+/// a fixed string over the level-filter chip's reserved columns. Dropped
+/// first: `w wrap` and `f follow` — both states are already shown on this
+/// same row via `left`'s own follow/wrap segments, so their keybinding hints
+/// are the most dispensable. Kept longest: `/ search` and `x stop` — neither
+/// is hinted anywhere else on screen.
+const BASE_HINT_LEVELS: [&str; 5] = [
+    "x stop · f follow · w wrap · / search",
+    "x stop · f follow · / search",
+    "x stop · / search",
+    "x stop",
+    "",
+];
+
+/// Pick the widest [`BASE_HINT_LEVELS`] entry that fits `budget` columns —
+/// pure so the paint-time fit decision is unit-testable without a terminal
+/// (see the tests below). `budget` is the caller's
+/// `inner.width - used_left - chip_reserved - 2`, so the level-filter chip's
+/// worst-case reserved width is honored regardless of which level wins; the
+/// last level is `""`, so this never fails to return something that fits.
+fn select_base_hint(budget: usize) -> &'static str {
+    BASE_HINT_LEVELS
+        .iter()
+        .find(|level| level.chars().count() <= budget)
+        .copied()
+        .unwrap_or("")
 }
 
 /// Pick the widest chip form that fits `available` columns — pure so the fit
@@ -1396,7 +1434,60 @@ mod tests {
         assert!(rows.iter().all(|(_, fold)| fold.is_none()));
     }
 
-    // ── Level-filter chip degrade: pure fit math (review Major M2) ─────────
+    // ── Base keyhint degrade: pure fit math ─────────────────────────────────
+
+    #[test]
+    fn select_base_hint_picks_the_widest_level_that_fits() {
+        assert_eq!(select_base_hint(37), BASE_HINT_LEVELS[0]);
+        assert_eq!(select_base_hint(36), BASE_HINT_LEVELS[1]);
+        assert_eq!(select_base_hint(28), BASE_HINT_LEVELS[1]);
+        assert_eq!(select_base_hint(27), BASE_HINT_LEVELS[2]);
+        assert_eq!(select_base_hint(17), BASE_HINT_LEVELS[2]);
+        assert_eq!(select_base_hint(16), BASE_HINT_LEVELS[3]);
+        assert_eq!(select_base_hint(6), BASE_HINT_LEVELS[3]);
+        assert_eq!(select_base_hint(5), BASE_HINT_LEVELS[4]);
+        assert_eq!(select_base_hint(0), "");
+        // Never panics/underflows at a huge budget either.
+        assert_eq!(select_base_hint(1000), BASE_HINT_LEVELS[0]);
+    }
+
+    /// The terminal-width band where the sidebar is still inline (≥
+    /// [`crate::ui::layout::NARROW_WIDTH`], 80 cols) but the log-status row
+    /// is narrow enough that a fixed-width base hint used to run into the
+    /// level-filter chip's reserved columns: terminal width 80..=93 with
+    /// `SIDEBAR_DEFAULT_WIDTH = 26` and the log-status row's `used_left = 21`
+    /// / `chip_reserved = 10` (a non-`All` filter with a single-digit hidden
+    /// count — the `log_styling_level_filter_chip_survives_narrow_paint_80x30`
+    /// snapshot's exact fixture). At every width in this band the resolved
+    /// budget must select something *narrower* than the full 37-char level —
+    /// painting the full string here is exactly the defect that let it run
+    /// into the chip's reserved columns (the fix under test), so
+    /// `select_base_hint` degrading away from `BASE_HINT_LEVELS[0]` across
+    /// this whole band is the fit-decision proof, independent of the
+    /// snapshot's exact pixels.
+    #[test]
+    fn select_base_hint_degrades_across_the_narrow_sidebar_band() {
+        let used_left = 21;
+        let chip_reserved = 10;
+        let sidebar_and_divider = 26;
+        for terminal_width in 80..=93u16 {
+            let inner_width = (terminal_width - sidebar_and_divider) as usize;
+            let budget = inner_width.saturating_sub(used_left + chip_reserved + 2);
+            let hint = select_base_hint(budget);
+            assert_ne!(
+                hint, BASE_HINT_LEVELS[0],
+                "terminal_width={terminal_width} inner_width={inner_width} budget={budget} \
+                 must not select the full hint — it would run into the chip's reserved columns"
+            );
+            assert!(
+                hint.chars().count() <= budget,
+                "terminal_width={terminal_width}: {hint:?} ({} cols) exceeds budget {budget}",
+                hint.chars().count()
+            );
+        }
+    }
+
+    // ── Level-filter chip degrade: pure fit math ────────────────────────────
 
     #[test]
     fn select_chip_form_omits_only_at_the_all_filter() {
