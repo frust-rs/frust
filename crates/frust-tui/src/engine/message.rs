@@ -161,9 +161,16 @@ pub enum RegionId {
     /// block's identity: the absolute index of its panic-header line); click
     /// toggles its collapsed state.
     LogFoldToggle(u64),
-    /// A segment of the log status bar's level-filter chip; click jumps the
-    /// active session straight to it.
+    /// A segment of the log status bar's level-filter chip (its full-pill
+    /// form); click jumps the active session straight to it.
     LevelFilterSegment(LevelFilter),
+    /// The level-filter chip's degraded (compact/minimal) single-token form
+    /// — a narrow terminal collapses the segmented pill into one region;
+    /// click cycles the filter (`Message::CycleLevelFilter(1)`, same as the
+    /// `l` key) rather than jumping to a specific segment, since there's no
+    /// room to show every segment to jump to (see
+    /// `ui::views::sessions::render_log_status`'s graduated chip degrade).
+    LevelFilterChip,
 }
 
 /// The kind of an in-progress drag, identifying which draggable chrome the

@@ -470,21 +470,49 @@ fn render_log_status(
         left.push(Span::styled("y copy", Style::default().fg(theme.accent())));
     }
 
+    let filter = session.level_filter;
+    let hidden = level_filter_hidden_count(session);
+    // The level-filter chip's worst-case (`ChipForm::Minimal`) width,
+    // reserved out of the optional-hint budget below so `l filter`/`z
+    // fold`/`t perf` can never crowd out the one indicator that must never
+    // go invisible while a filter is active (see `select_chip_form`). Zero
+    // while `filter == LevelFilter::All` — nothing to reserve for.
+    let chip_reserved = if filter == LevelFilter::All {
+        0
+    } else {
+        minimal_chip_width(filter, hidden)
+    };
+
     // `l filter`/`z fold`/`t perf` are appended only while there's still
-    // room beside the (always-shown) base hint and the `left` segments
-    // already built above — the same fit-check spirit the built-artifacts
-    // segment and the filter chip below use, so a narrow terminal degrades
-    // one hint at a time (mouse/base-key parity never lost) instead of the
-    // right-aligned hint silently overwriting the tail of `left`'s text.
+    // room beside the (always-shown) base hint, the `left` segments already
+    // built above, and the level-filter chip's reserved worst-case width —
+    // the same fit-check spirit the built-artifacts segment and the chip
+    // itself use below, so a narrow terminal degrades one hint at a time
+    // (mouse/base-key parity never lost) instead of the right-aligned hint
+    // silently overwriting the tail of `left`'s text or crowding out the
+    // filter-active indicator.
     let used_left: usize = left.iter().map(|s| s.content.chars().count()).sum();
     let mut right_hint = "x stop · f follow · w wrap · / search".to_string();
     let push_hint_if_it_fits = |hint: &mut String, extra: &str| {
-        if used_left + hint.chars().count() + extra.chars().count() + 2 <= inner.width as usize {
+        if used_left + hint.chars().count() + extra.chars().count() + chip_reserved + 2
+            <= inner.width as usize
+        {
             hint.push_str(extra);
         }
     };
+    // A currently-collapsed panic block outranks `l filter` for the
+    // remaining space: its own fold row already says "click or z to
+    // expand", but that row can scroll out of the viewport, so the
+    // persistent `z fold` keyhint matters more here than `l filter` does —
+    // `l filter` is the hint that yields when both can't fit. Once every
+    // block on this session is expanded (nothing left to re-fold), `l
+    // filter` regains its normal priority.
+    let has_collapsed_fold = session.has_collapsed_panic_blocks();
+    if has_collapsed_fold {
+        push_hint_if_it_fits(&mut right_hint, " · z fold");
+    }
     push_hint_if_it_fits(&mut right_hint, " · l filter");
-    if session.has_panic_blocks() {
+    if !has_collapsed_fold && session.has_panic_blocks() {
         push_hint_if_it_fits(&mut right_hint, " · z fold");
     }
     if session.perf.has_data() {
@@ -492,51 +520,79 @@ fn render_log_status(
     }
     let right_hint = right_hint;
 
-    // Level-filter chip (workbook §B11): a segmented pill, the active
-    // segment accent-filled — `l`/`L` cycles it by key, a click jumps
-    // straight to a segment. Skipped (mouse-only degrade; `l`/`L` still
-    // work) when it wouldn't fit beside the right-aligned keyhint — the same
-    // fit-check pattern the built-artifacts segment below uses.
-    let mut chip_clicks: Vec<(u16, u16, LevelFilter)> = Vec::new();
-    {
+    // Level-filter chip (workbook §B11): the widest form that fits beside
+    // the right-aligned keyhint (`select_chip_form`) — the full segmented
+    // pill when there's room, degrading through a compact single token and
+    // then a minimal marker as the row narrows. `l`/`L` cycles the filter by
+    // key regardless of which form (or none, at `LevelFilter::All`) renders.
+    let mut chip_segment_clicks: Vec<(u16, u16, LevelFilter)> = Vec::new();
+    let mut chip_cycle_click: Option<(u16, u16)> = None;
+    let available_for_chip =
+        (inner.width as usize).saturating_sub(used_left + right_hint.chars().count() + 2);
+    if let Some(form) = select_chip_form(available_for_chip, filter, hidden) {
         let used: usize = left.iter().map(|s| s.content.chars().count()).sum();
-        let sep = "  ·  ";
-        let mut chip_spans: Vec<Span<'static>> =
-            vec![Span::styled(sep, Style::default().fg(theme.border()))];
-        let mut col = sep.chars().count();
-        let mut rects = Vec::new();
-        for seg in LEVEL_FILTER_SEGMENTS {
-            let label = format!(" {} ", seg.label());
-            let width = label.chars().count();
-            let style = if seg == session.level_filter {
-                Style::default()
-                    .fg(theme.bg())
-                    .bg(theme.accent())
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.muted())
-            };
-            rects.push((used + col, width, seg));
-            chip_spans.push(Span::styled(label, style));
-            col += width;
-        }
-        let hidden = level_filter_hidden_count(session);
-        let hidden_note = if hidden > 0 {
-            format!(" {hidden} hidden by filter")
-        } else {
-            String::new()
-        };
-        col += hidden_note.chars().count();
-        if used + col + right_hint.chars().count() + 2 <= inner.width as usize {
-            left.extend(chip_spans);
-            if !hidden_note.is_empty() {
-                left.push(Span::styled(
-                    hidden_note,
-                    Style::default().fg(theme.muted()),
-                ));
+        match form {
+            ChipForm::Full => {
+                let mut chip_spans: Vec<Span<'static>> =
+                    vec![Span::styled(CHIP_SEP, Style::default().fg(theme.border()))];
+                let mut col = CHIP_SEP.chars().count();
+                let mut rects = Vec::new();
+                for seg in LEVEL_FILTER_SEGMENTS {
+                    let label = format!(" {} ", seg.label());
+                    let width = label.chars().count();
+                    let style = if seg == filter {
+                        Style::default()
+                            .fg(theme.bg())
+                            .bg(theme.accent())
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme.muted())
+                    };
+                    rects.push((used + col, width, seg));
+                    chip_spans.push(Span::styled(label, style));
+                    col += width;
+                }
+                if hidden > 0 {
+                    chip_spans.push(Span::styled(
+                        format!(" {hidden} hidden by filter"),
+                        Style::default().fg(theme.muted()),
+                    ));
+                }
+                left.extend(chip_spans);
+                chip_segment_clicks = rects
+                    .into_iter()
+                    .map(|(x, w, seg)| (x as u16, w as u16, seg))
+                    .collect();
             }
-            for (x, w, seg) in rects {
-                chip_clicks.push((x as u16, w as u16, seg));
+            ChipForm::Compact => {
+                left.push(Span::styled(CHIP_SEP, Style::default().fg(theme.border())));
+                let x = used + CHIP_SEP.chars().count();
+                let text = compact_chip_text(filter, hidden);
+                let w = text.chars().count();
+                left.push(Span::styled(
+                    text,
+                    Style::default()
+                        .fg(theme.bg())
+                        .bg(theme.accent())
+                        .add_modifier(Modifier::BOLD),
+                ));
+                chip_cycle_click = Some((x as u16, w as u16));
+            }
+            ChipForm::Minimal => {
+                left.push(Span::styled(
+                    MINIMAL_CHIP_SEP,
+                    Style::default().fg(theme.border()),
+                ));
+                let x = used + MINIMAL_CHIP_SEP.chars().count();
+                let text = minimal_chip_text(filter, hidden);
+                let w = text.chars().count();
+                left.push(Span::styled(
+                    text,
+                    Style::default()
+                        .fg(theme.accent())
+                        .add_modifier(Modifier::BOLD),
+                ));
+                chip_cycle_click = Some((x as u16, w as u16));
             }
         }
     }
@@ -587,7 +643,7 @@ fn render_log_status(
         inner,
     );
 
-    for (x, w, seg) in chip_clicks {
+    for (x, w, seg) in chip_segment_clicks {
         mouse.click(
             Rect::new(
                 inner.x + x,
@@ -599,6 +655,121 @@ fn render_log_status(
             Message::SetLevelFilter(seg),
         );
     }
+    if let Some((x, w)) = chip_cycle_click {
+        mouse.click(
+            Rect::new(
+                inner.x + x,
+                inner.y,
+                w.min(inner.right().saturating_sub(inner.x + x)),
+                1,
+            ),
+            RegionId::LevelFilterChip,
+            Message::CycleLevelFilter(1),
+        );
+    }
+}
+
+// ── Level-filter chip: graduated fit degrade ────────────────────────────────
+//
+// Workbook §B11's binding note: the hidden-line count stays visible next to
+// the chip so filtering never silently hides lines without a trace. A
+// non-`All` filter must therefore always render *some* indicator — never the
+// all-or-nothing "show the full pill or nothing at all" a narrow terminal
+// used to fall back to.
+
+/// Which form the level-filter chip renders in for the current row width —
+/// widest-that-fits, chosen by [`select_chip_form`]. Every form carries the
+/// hidden-line count (when nonzero) and a click region that changes the
+/// filter; only [`LevelFilter::All`] renders no chip at all, since there is
+/// nothing active to indicate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChipForm {
+    /// The full segmented pill — every [`LEVEL_FILTER_SEGMENTS`] entry, the
+    /// active one accent-filled — plus " N hidden by filter". One click
+    /// region per segment ([`RegionId::LevelFilterSegment`]), jumping
+    /// straight to it.
+    Full,
+    /// A single clickable token: the active segment's label plus the hidden
+    /// count, e.g. `" warn+ · 4 hidden "`. Click cycles the filter
+    /// ([`RegionId::LevelFilterChip`], same step as the `l` key).
+    Compact,
+    /// A minimal marker: the active segment behind a caret, e.g.
+    /// `"⏷warn+ ·4"` — the narrowest form and the floor: [`select_chip_form`]
+    /// still returns this rather than omit the chip when even this doesn't
+    /// cleanly fit, since a crowded row is recoverable and an invisible
+    /// active filter is not.
+    Minimal,
+}
+
+/// The separator preceding [`ChipForm::Full`]/[`ChipForm::Compact`] — matches
+/// the `"  ·  "` separator used elsewhere on this row.
+const CHIP_SEP: &str = "  \u{00b7}  ";
+/// [`ChipForm::Minimal`]'s separator: one column instead of five — the last
+/// form before "omit" would even be a choice, so it economizes on its own
+/// framing too.
+const MINIMAL_CHIP_SEP: &str = " ";
+
+/// [`ChipForm::Compact`]'s exact rendered text (the single source both its
+/// width math and its render call use, so the two can never drift).
+fn compact_chip_text(filter: LevelFilter, hidden: usize) -> String {
+    if hidden > 0 {
+        format!(" {} \u{00b7} {hidden} hidden ", filter.label())
+    } else {
+        format!(" {} ", filter.label())
+    }
+}
+
+/// [`ChipForm::Minimal`]'s exact rendered text (see [`compact_chip_text`]).
+fn minimal_chip_text(filter: LevelFilter, hidden: usize) -> String {
+    if hidden > 0 {
+        format!("\u{23f7}{} \u{00b7}{hidden}", filter.label())
+    } else {
+        format!("\u{23f7}{}", filter.label())
+    }
+}
+
+/// [`ChipForm::Full`]'s total column width (separator + every segment +
+/// the optional hidden-count note), for the fit check in
+/// [`select_chip_form`].
+fn full_chip_width(hidden: usize) -> usize {
+    let segs: usize = LEVEL_FILTER_SEGMENTS
+        .iter()
+        .map(|s| format!(" {} ", s.label()).chars().count())
+        .sum();
+    let note = if hidden > 0 {
+        format!(" {hidden} hidden by filter").chars().count()
+    } else {
+        0
+    };
+    CHIP_SEP.chars().count() + segs + note
+}
+
+fn compact_chip_width(filter: LevelFilter, hidden: usize) -> usize {
+    CHIP_SEP.chars().count() + compact_chip_text(filter, hidden).chars().count()
+}
+
+fn minimal_chip_width(filter: LevelFilter, hidden: usize) -> usize {
+    MINIMAL_CHIP_SEP.chars().count() + minimal_chip_text(filter, hidden).chars().count()
+}
+
+/// Pick the widest chip form that fits `available` columns — pure so the fit
+/// math is unit-testable without a terminal (see the tests below).
+/// `filter == LevelFilter::All` needs no chip (`None`, the only case
+/// rendering nothing is correct); every other filter always gets *some*
+/// form — [`ChipForm::Minimal`] is returned even when it doesn't cleanly
+/// fit `available`, rather than falling back to `None` (workbook §B11's
+/// binding note: an active filter must never go invisible).
+fn select_chip_form(available: usize, filter: LevelFilter, hidden: usize) -> Option<ChipForm> {
+    if filter == LevelFilter::All {
+        return None;
+    }
+    Some(if full_chip_width(hidden) <= available {
+        ChipForm::Full
+    } else if compact_chip_width(filter, hidden) <= available {
+        ChipForm::Compact
+    } else {
+        ChipForm::Minimal
+    })
 }
 
 /// The number of currently-retained lines hidden solely by the session's
@@ -1223,5 +1394,68 @@ mod tests {
         assert!(row_text(&rows[3].0).contains("my_app::state::reduce"));
         assert!(row_text(&rows[4].0).contains("at src/state.rs"));
         assert!(rows.iter().all(|(_, fold)| fold.is_none()));
+    }
+
+    // ── Level-filter chip degrade: pure fit math (review Major M2) ─────────
+
+    #[test]
+    fn select_chip_form_omits_only_at_the_all_filter() {
+        // Even zero available width doesn't matter — `All` has nothing
+        // active to indicate, so no chip is the *correct* choice, not a
+        // degrade.
+        assert_eq!(select_chip_form(0, LevelFilter::All, 0), None);
+        assert_eq!(select_chip_form(1000, LevelFilter::All, 4), None);
+    }
+
+    #[test]
+    fn select_chip_form_picks_the_widest_form_that_fits() {
+        let filter = LevelFilter::WarnPlus;
+        let hidden = 4;
+        let full = full_chip_width(hidden);
+        let compact = compact_chip_width(filter, hidden);
+        let minimal = minimal_chip_width(filter, hidden);
+        // Sanity: the three forms are strictly ordered widest-to-narrowest
+        // for this fixture — the degrade only makes sense if they are.
+        assert!(full > compact && compact > minimal);
+
+        assert_eq!(select_chip_form(full, filter, hidden), Some(ChipForm::Full));
+        assert_eq!(
+            select_chip_form(full - 1, filter, hidden),
+            Some(ChipForm::Compact)
+        );
+        assert_eq!(
+            select_chip_form(compact, filter, hidden),
+            Some(ChipForm::Compact)
+        );
+        assert_eq!(
+            select_chip_form(compact - 1, filter, hidden),
+            Some(ChipForm::Minimal)
+        );
+        assert_eq!(
+            select_chip_form(minimal, filter, hidden),
+            Some(ChipForm::Minimal)
+        );
+    }
+
+    #[test]
+    fn select_chip_form_never_vanishes_for_an_active_filter_even_when_too_narrow() {
+        // Zero columns available: even `ChipForm::Minimal` doesn't "fit"
+        // cleanly, but the fix is that it renders anyway rather than
+        // silently omitting the one indicator an active filter must show.
+        assert_eq!(
+            select_chip_form(0, LevelFilter::ErrorOnly, 12),
+            Some(ChipForm::Minimal)
+        );
+    }
+
+    #[test]
+    fn chip_labels_always_carry_the_hidden_count_when_nonzero() {
+        // Workbook §B11's binding note: the hidden-line count stays visible
+        // next to the chip in every form, not only the full pill.
+        assert!(compact_chip_text(LevelFilter::WarnPlus, 4).contains('4'));
+        assert!(minimal_chip_text(LevelFilter::WarnPlus, 4).contains('4'));
+        // ...and is omitted (not "0 hidden") when there's nothing hidden.
+        assert!(!compact_chip_text(LevelFilter::WarnPlus, 0).contains("hidden"));
+        assert!(!minimal_chip_text(LevelFilter::WarnPlus, 0).contains(char::is_numeric));
     }
 }

@@ -1158,3 +1158,56 @@ fn log_styling_level_filter_active_180x30() {
     state.sessions[0].set_level_filter(LevelFilter::WarnPlus);
     insta::assert_snapshot!(render_to_string(180, 30, &state));
 }
+
+/// The same active filter + hidden lines at 100 columns — too narrow for the
+/// full segmented pill (that needs ~135 cols; see `render_log_status`'s
+/// graduated chip degrade), so the chip renders in its minimal marker form
+/// instead of vanishing outright: an active filter must never go invisible
+/// (workbook §B11's binding note — the hidden-line count stays visible next
+/// to the chip so filtering never silently hides lines without a trace).
+#[test]
+fn log_styling_level_filter_degraded_100x30() {
+    let mut state = log_styling_state();
+    state.sessions[0].set_level_filter(LevelFilter::WarnPlus);
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+/// The degraded (minimal-form) chip is still a real click target: clicking
+/// it registers the same `Message::CycleLevelFilter(1)` the `l` key sends —
+/// mouse parity holds even in the narrowest form (see
+/// `render_log_status`'s graduated chip degrade; `RegionId::LevelFilterChip`
+/// is the degraded forms' shared region id, distinct from the full pill's
+/// per-segment `RegionId::LevelFilterSegment`).
+#[test]
+fn log_styling_level_filter_degraded_chip_click_cycles_the_filter() {
+    let mut state = log_styling_state();
+    state.sessions[0].set_level_filter(LevelFilter::WarnPlus);
+
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let theme = Theme::frust_dark_at(ColorDepth::TrueColor);
+    let mut regions = MouseRegions::new();
+    terminal
+        .draw(|frame| {
+            let mut ctx = MouseCtx::new(&mut regions);
+            frust_tui::ui::render(frame, &state, &theme, &mut ctx);
+        })
+        .expect("draw");
+
+    // The minimal chip's `⏷warn+ ·4` marker renders on the log status row —
+    // located here rather than hardcoded, so a chrome-width change elsewhere
+    // on the row can't silently make this test click the wrong cell.
+    let text = buffer_to_string(terminal.backend().buffer());
+    let (x, y) = text
+        .lines()
+        .enumerate()
+        .find_map(|(y, line)| {
+            line.chars()
+                .position(|c| c == '\u{23f7}')
+                .map(|x| (x as u16, y as u16))
+        })
+        .expect("the degraded chip's caret glyph is on screen");
+
+    assert_eq!(regions.hover_at(x, y), Some(RegionId::LevelFilterChip));
+    assert_eq!(regions.click_at(x, y), Some(Message::CycleLevelFilter(1)));
+}

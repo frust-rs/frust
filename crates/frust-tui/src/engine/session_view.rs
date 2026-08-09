@@ -380,6 +380,15 @@ impl SessionView {
         !self.panic_tracker.blocks().is_empty()
     }
 
+    /// Whether at least one panic/backtrace block is currently collapsed —
+    /// the stricter gate the log status row's `z` fold keyhint prioritizes
+    /// on when the bottom row is tight for space (a block that's been fully
+    /// expanded has no `▶ n frames…` row to re-collapse, so its keyhint is
+    /// less urgent than one still folded).
+    pub fn has_collapsed_panic_blocks(&self) -> bool {
+        self.panic_tracker.blocks().iter().any(|b| b.collapsed)
+    }
+
     /// Whether the view is currently following the tail.
     pub fn is_following(&self) -> bool {
         matches!(self.scroll, Scroll::Follow)
@@ -983,6 +992,27 @@ mod tests {
         // Mouse click toggle — same block id, re-collapses.
         assert!(s.toggle_fold(0));
         assert!(s.is_fold_collapsed(0));
+    }
+
+    #[test]
+    fn has_collapsed_panic_blocks_tracks_fold_state_not_just_presence() {
+        let mut s = sess();
+        assert!(!s.has_panic_blocks());
+        assert!(!s.has_collapsed_panic_blocks());
+
+        for l in panic_lines() {
+            s.push_line(l.to_string());
+        }
+        // Starts collapsed by default — both gates are true.
+        assert!(s.has_panic_blocks());
+        assert!(s.has_collapsed_panic_blocks());
+
+        // Expanding the only block drops the stricter (collapsed) gate but
+        // not the looser (any block at all) one — the distinction the log
+        // status row's `z fold` keyhint priority relies on.
+        s.toggle_fold(0);
+        assert!(s.has_panic_blocks());
+        assert!(!s.has_collapsed_panic_blocks());
     }
 
     #[test]

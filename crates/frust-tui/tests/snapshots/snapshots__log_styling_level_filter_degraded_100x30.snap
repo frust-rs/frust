@@ -1,16 +1,16 @@
 ---
 source: crates/frust-tui/tests/snapshots.rs
-assertion_line: 1137
-expression: "render_to_string(100, 30, &panic_backtrace_state())"
+assertion_line: 1172
+expression: "render_to_string(100, 30, &state)"
 ---
 ⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
 ━━━━━━━━                                                                                            
                                                                                                     
  PROJECTS                │huddle:  1 ◌ desktop                                                      
-  ▸ huddle               │ E 12:05:02 [app]    thread 'main' panicked at src/main.rs:42:9:          
-                         │                     called `Option::unwrap()` on a `None` value          
- DEVICES ↻ r             │                     ▶ 2 frames… (RUST_BACKTRACE=1) — click or z to expand
-   none found            │   12:05:03 [app]    app: recovering                                      
+  ▸ huddle               │ E 12:04:22 [gradle] FAILURE: Build failed with an exception.             
+                         │ E 12:04:24 [logcat] E/ActivityThread( 1234): Failed to find provider info
+ DEVICES ↻ r             │                                                                          
+   none found            │                                                                          
                          │                                                                          
  SESSIONS                │                                                                          
    huddle                │                                                                          
@@ -31,5 +31,5 @@ expression: "render_to_string(100, 30, &panic_backtrace_state())"
                          │                                                                          
                          │                                                                          
                          │                                                                          
-                         │● follow  ·  wrap:off       x stop · f follow · w wrap · / search · z fold
+                         │● follow  ·  wrap:off ⏷warn+ ·4      x stop · f follow · w wrap · / search
 ● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]
