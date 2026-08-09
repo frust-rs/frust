@@ -36,6 +36,17 @@ mod messages;
 mod method;
 mod types;
 
+/// Whole-crate valve for `serde_json`, this crate's one public-API dependency.
+///
+/// [`Request::params`]/[`Response`]'s `result` are `serde_json::Value`, so a
+/// peer cannot build or read a message without that crate — and it must be the
+/// *same* version this crate speaks. Reaching through this valve
+/// (`frust_devtools_protocol::serde_json::to_value(..)`) instead of
+/// re-declaring the dependency keeps the pin in exactly one manifest, the same
+/// rule `frust::kurbo`/`frust::peniko` follow for app code
+/// (`docs/CODE_STANDARDS.md`'s State & Reactivity Conventions).
+pub use serde_json;
+
 pub use codec::{DecodeError, decode_line, encode_line};
 pub use discovery::{DISCOVERY_PREFIX, parse_discovery_line};
 pub use messages::{
