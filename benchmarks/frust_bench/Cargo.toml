@@ -61,24 +61,6 @@ frust-shared-preferences = { path = "../../plugins/shared-preferences" }
 # change (see `plugins/database/src/lib.rs`'s module doc, *Engines*).
 frust-database = { path = "../../plugins/database" }
 
-# `vt100`: the terminal emulator the S9 terminal-grid scenario
-# (`src/scenarios/s9_terminal.rs`) replays the checked-in fixture bytes through.
-# A REAL emulator, deliberately — the Flutter side of S9 drives kterm 1.5.3 (a
-# full VT emulator), so a hand-rolled five-escape parser here would measure
-# frust's renderer against a strawman rather than against the incumbent.
-#
-# Pinned to an EXACT patch: this is a fairness-critical dependency (a parsing
-# behaviour change between versions would silently shift what the two apps
-# rasterize from identical bytes, exactly the comparability trap the fixture
-# README documents for the fixtures themselves), and every S9 number recorded in
-# `benchmarks/RESULTS.md` is measured against this emulator. Its whole tree is
-# pure Rust — `vte` + `itoa` + `unicode-width`; no tokio, no PTY, no
-# `std::process` — and it type-checks for `aarch64-linux-android`,
-# `aarch64-apple-ios` and `aarch64-apple-ios-sim` (verified while landing S9 —
-# the first VT crate in this project's history to be gated on the mobile
-# targets at all).
-vt100 = "=0.16.2"
-
 # `log` facade dependency, present only so the release-only `lean` feature
 # below can raise the compiled-in log ceiling (release-lean build mode).
 # `frust-perf` instrumentation rides `log::info!`, so the ceiling MUST be a

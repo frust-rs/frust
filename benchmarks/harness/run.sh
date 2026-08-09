@@ -404,8 +404,8 @@ assert_captured_adapter() {
 
 # d-class scenario detection (PROTOCOL §9.1's declared `d*` namespace) — a
 # `d` followed by one or more digits, e.g. `d1`/`d2`. Everything else
-# (`s1..s8`, `s9`/`s10`, any future non-`d`-prefixed id) takes the untouched
-# s-class (frame-series) path — see the header's "d-class scenarios" note.
+# (`s1..s8`, any future non-`d`-prefixed id) takes the untouched s-class
+# (frame-series) path — see the header's "d-class scenarios" note.
 IS_DCLASS=0
 if [[ "${SCENARIO}" =~ ^d[0-9]+$ ]]; then
   IS_DCLASS=1

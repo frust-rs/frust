@@ -4,6 +4,13 @@ Two paired apps implementing eight identical scenarios (S1–S8), one
 harness that drives both and computes identical statistics from their raw
 frame series, published methodology, and a results table.
 
+**Purpose, scoped narrowly.** `benchmarks/` exists ONLY for flutter-vs-frust
+comparative benchmarking per `PROTOCOL.md` — the S1–S8 frame-class scenarios
+plus the D1/D2 DB op-latency scenarios (§9), each implemented identically by
+both apps and measured by the shared harness. Exploratory scenarios, capability
+probes, or single-sided (frust-only) demos that don't fit that paired-comparison
+contract belong in `examples/playground`, not here.
+
 ## What's here
 
 | Path | What |

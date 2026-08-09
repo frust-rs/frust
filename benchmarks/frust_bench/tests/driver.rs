@@ -106,16 +106,14 @@ fn gated_frame<S: 'static, V: View<S>>(
 
 #[test]
 fn registry_has_ten_scenarios_in_id_order() {
-    // s1..=s10 (the frame-class table) stay in their original order and
+    // s1..=s8 (the frame-class table) stay in their original order and
     // indices unchanged, with d1/d2 (the DB op-latency class, PROTOCOL §9)
-    // appended after — the registry widened from ten to twelve entries, but
-    // nothing about the s1..=s10 slice moved.
+    // appended after — the registry widened from eight to ten entries, but
+    // nothing about the s1..=s8 slice moved.
     let ids: Vec<&str> = SCENARIOS.iter().map(|s| s.id()).collect();
     assert_eq!(
         ids,
-        [
-            "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "d1", "d2"
-        ]
+        ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "d1", "d2"]
     );
 }
 
@@ -123,34 +121,24 @@ fn registry_has_ten_scenarios_in_id_order() {
 fn deep_link_and_id_parsing() {
     assert_eq!(scenarios::index_from_id("s1"), Some(0));
     assert_eq!(scenarios::index_from_id("s7"), Some(6));
-    assert_eq!(scenarios::index_from_id("s9"), Some(8));
-    // Two-digit ids match exactly — `s10` must never resolve as `s1`.
-    assert_eq!(scenarios::index_from_id("s10"), Some(9));
-    assert_eq!(scenarios::index_from_id("s11"), None);
+    assert_eq!(scenarios::index_from_id("s8"), Some(7));
+    // Exact-match ids only — an unregistered id must never resolve.
+    assert_eq!(scenarios::index_from_id("nope"), None);
 
     // The `d*` DB op-latency namespace (PROTOCOL §9.1) resolves through the
     // exact same opaque-string lookup as `s*` — nothing here special-cases
     // the `d`-prefix.
-    assert_eq!(scenarios::index_from_id("d1"), Some(10));
-    assert_eq!(scenarios::index_from_id("d2"), Some(11));
+    assert_eq!(scenarios::index_from_id("d1"), Some(8));
+    assert_eq!(scenarios::index_from_id("d2"), Some(9));
     assert_eq!(scenarios::index_from_id("d3"), None);
-    assert_eq!(scenarios::index_from_url("frustbench://d1"), Some(10));
-    assert_eq!(scenarios::index_from_url("frustbench://d2"), Some(11));
+    assert_eq!(scenarios::index_from_url("frustbench://d1"), Some(8));
+    assert_eq!(scenarios::index_from_url("frustbench://d2"), Some(9));
 
     assert_eq!(scenarios::index_from_url("frustbench://s1"), Some(0));
     assert_eq!(scenarios::index_from_url("frustbench://s7/idle"), Some(6));
     assert_eq!(scenarios::index_from_url("frustbench://s3?x=1"), Some(2));
     assert_eq!(scenarios::index_from_url("frustbench://nope"), None);
     assert_eq!(scenarios::index_from_url("other://s1"), None);
-
-    // S9's profile rides a path segment on the same link (its only on-device
-    // selection channel — see `scenarios::s9_terminal`'s module docs); the host
-    // must still resolve to `s9`.
-    assert_eq!(scenarios::index_from_url("frustbench://s9/htop"), Some(8));
-
-    // S10 (the IME keystroke probe) rides the same host-is-the-id rule.
-    assert_eq!(scenarios::index_from_url("frustbench://s10"), Some(9));
-    assert_eq!(scenarios::index_from_url("frustbench://s1"), Some(0));
 }
 
 /// Drive one scenario's view over a `BenchState`, at a fixed index.
@@ -208,20 +196,6 @@ fn every_registered_scenario_mounts_and_paints() {
     // Each must mount from the registry and paint something on frame 0;
     // per-scenario behavior (animation liveness, scroll, decode) is covered
     // by the dedicated tests in this file and the scenario modules.
-    //
-    // **S9 (index 8) is deliberately outside this loop.** Its whole contract is
-    // that a frame happens only when its 30Hz feed loop publishes a generation,
-    // and that loop needs a `pump_local` this harness never performs — so at
-    // mount S9 correctly paints only its backdrop (a `fill_rect`, which
-    // `RecScene` does not record) and requests nothing. "Inert at mount" is the
-    // `idle` profile's rest-cost measurement, not a defect; S9's own coverage is
-    // in `scenarios::s9_terminal`'s unit tests.
-    //
-    // **S10 (index 9) is outside it too**, for the same shape of reason: it is a
-    // touch-driven IME probe, so its whole surface is exercised by
-    // `scenarios::s10_keys`' own unit tests (which mount it in a `RenderRoot`
-    // and dispatch real pointer/IME events) rather than by a mount-and-paint
-    // sweep.
     for idx in 0..8 {
         let _owner = setup();
         let mut root: RenderRoot<BenchState, AnyView<BenchState>> = RenderRoot::new();

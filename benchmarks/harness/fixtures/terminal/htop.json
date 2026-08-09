@@ -1,9 +1,0 @@
-{
-  "chunk_count": 300,
-  "cols": 80,
-  "duration_ms": 30000,
-  "hz": 10,
-  "profile": "htop",
-  "rows": 45,
-  "sha256": "bf9c2d46850f857bdc020f9cfd5e902f4be15ca8a535c10b6cf30e05fd5b3c2c"
-}
