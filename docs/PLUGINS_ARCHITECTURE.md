@@ -132,6 +132,10 @@ call (biometric prompts, camera permission/capture, every `iap` store round trip
   wrong-context callers (inside a runtime's `block_on` body, not inside a spawned task); like
   every plugin's UI-thread discipline, `database`'s is docs-only (no typed guard) and
   `frust_reactive::spawn_blocking` is the sanctioned call path, never rejected by the guard.
+  `Database::transaction` rolls back on every exit but a successful `COMMIT` — closure `Err`, a
+  failing `COMMIT`, or a panicking closure, the last via a `Drop`-guard rollback; same-thread
+  reentrancy is refused as a typed `Reentrant` error rather than deadlocking, while cross-thread
+  contention still queues on the connection mutex.
 
 ## Key Types
 
@@ -146,4 +150,4 @@ call (biometric prompts, camera permission/capture, every `iap` store round trip
 | `Haptics` / `HapticEffect` / `HapticsError` | Haptic-feedback entry point, its closed effect vocabulary, and its error enum |
 | `Iap` / `IapError` / `IapEvent` / `IapErrorCode` / `ListenerHandle` | In-app-purchase entry point (stateless, one store connection per process); its error enum (`Store` = a store refusal, `Platform` = a glue/boundary defect — Android tells them apart via a `synthetic` marker field the host JSON can never legitimately carry, iOS via the throw's type); the two purchase-outcome events (`PurchaseUpdated`/`PurchaseError`) delivered on the registered listener; the store-reported failure code carried inside a `PurchaseError`; the drop-to-unregister handle returned by `set_purchase_listener` |
 | `use_controller` / `provide_controller` / `expect_controller` / `use_failure_listener` / `async_view` / `use_interval` | `clean-signals-frust`'s public hooks bridging a `clean_signals` controller into a Frust `Component`'s reactive `Owner` |
-| `Database` / `Value` / `Engine` / `DatabaseError` | The embedded-SQL entry point (one serialized connection per handle, `Send + Sync`); the five-SQLite-storage-class param/result value; the compiled-engine selector (`Sqlite`/`Turso`, `#[non_exhaustive]`); the typed error enum (`Storage`, `Sql`, `AsyncContext`, `EngineUnavailable`) |
+| `Database` / `Value` / `Engine` / `DatabaseError` | The embedded-SQL entry point (one serialized connection per handle, `Send + Sync`); the five-SQLite-storage-class param/result value; the compiled-engine selector (`Sqlite`/`Turso`, `#[non_exhaustive]`); the typed error enum (`Storage`, `Sql`, `AsyncContext`, `EngineUnavailable`, `Reentrant`) |
