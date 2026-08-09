@@ -117,9 +117,13 @@ pub enum Scroll {
     ///
     /// **Invariant:** an `Anchored` index always names a line that has
     /// actually been pushed — never a placeholder on an empty log. Every
-    /// session starts `Follow` ([`SessionView::new`]); only a user scroll or
-    /// [`SessionView::toggle_follow`] (both of which read the buffer's real
-    /// tail) ever produce an `Anchored` value.
+    /// session starts `Follow` ([`SessionView::new`]); only a user scroll
+    /// (which anchors an entry of the real visible sequence, see
+    /// [`SessionView::visible_indices`]) or [`SessionView::toggle_follow`]
+    /// (which reads the buffer's real tail) ever produces an `Anchored`
+    /// value. The anchored line may later stop being *visible* — a filter
+    /// change or a fold can hide it — which is why every reader resolves it
+    /// through [`SessionView::bottom_pos`] rather than trusting it directly.
     Anchored(u64),
 }
 
@@ -381,37 +385,122 @@ impl SessionView {
         matches!(self.scroll, Scroll::Follow)
     }
 
-    /// Scroll up (toward older lines) by `n` lines, freezing the view at an
-    /// absolute anchor. Clamped so it never points above the oldest line.
-    pub fn scroll_up(&mut self, n: u64) {
-        let end = self.log.end_index();
-        if end == 0 {
-            return;
+    /// The absolute indices of the log lines the view actually shows, oldest
+    /// first — the **visible sequence** every scroll step and every rendered
+    /// row is measured in:
+    ///
+    /// - retained lines only (an evicted index never appears);
+    /// - passing this session's [`Self::level_filter`];
+    /// - passing the caller's committed free-text `filter` (`None` = no
+    ///   text filter);
+    /// - each *collapsed* panic block contributing exactly **one** entry —
+    ///   its oldest still-visible body line — because the log view draws it
+    ///   as one `▶ n frames…` row. An expanded block contributes one entry
+    ///   per body line, as it draws one row per line.
+    ///
+    /// A panic/backtrace-block line is always classified
+    /// [`LogLevel::Error`] regardless of its own text
+    /// ([`Self::push_line_at`]), so a block's body passes or fails the level
+    /// cutoff as one unit, never partially.
+    ///
+    /// `filter` is a parameter rather than session state because the
+    /// free-text search filter is *global* engine state
+    /// (`crate::engine::AppState::search`), shared by every session's log
+    /// view, while the level filter and the folds are per-session — see
+    /// [`crate::engine::update`]'s log-scroll arms, which supply it.
+    ///
+    /// Cost: O(retained lines) (plus an ANSI-strip + lowercase per line while
+    /// a text filter is active), paid only on a render or a scroll event.
+    /// [`Self::push_line`] never builds it, so ingesting output stays O(1).
+    pub fn visible_indices(&self, filter: Option<&str>) -> Vec<u64> {
+        let mut out = Vec::new();
+        // Absolute index through which a collapsed block already represented
+        // by an emitted entry still runs; its remaining body lines are
+        // absorbed into that one entry.
+        let mut absorb_through: Option<u64> = None;
+        for (abs, line) in self.log.iter() {
+            if let Some(end) = absorb_through {
+                if abs <= end {
+                    continue;
+                }
+                absorb_through = None;
+            }
+            let level_ok = self
+                .effective_level(abs)
+                .is_none_or(|lvl| self.level_filter.allows(lvl));
+            if !level_ok {
+                continue;
+            }
+            if filter.is_some_and(|q| !line_matches(line, q)) {
+                continue;
+            }
+            if let Some(block) = self.panic_block_covering(abs)
+                && self.is_fold_collapsed(block.start)
+            {
+                absorb_through = Some(block.end);
+            }
+            out.push(abs);
         }
-        let bottom = match self.scroll {
-            Scroll::Follow => end - 1,
-            Scroll::Anchored(b) => b,
-        };
-        let new = bottom.saturating_sub(n).max(self.log.base_index());
-        self.scroll = Scroll::Anchored(new);
+        out
     }
 
-    /// Scroll down (toward newer lines) by `n` lines. Reaching the last line
-    /// re-engages follow-tail.
-    pub fn scroll_down(&mut self, n: u64) {
-        let end = self.log.end_index();
-        if end == 0 {
+    /// The position within `vis` (a [`Self::visible_indices`] sequence) of
+    /// the entry drawn at the *bottom* of the viewport: the last entry while
+    /// following, else the newest entry at or before the absolute anchor.
+    ///
+    /// Anchors that name a line the current filters hide (or a line inside a
+    /// collapsed block's body) resolve to the entry that visually stands in
+    /// for them, which is what makes a stale anchor render — and scroll —
+    /// sensibly after a filter or fold change. `0` on an empty sequence;
+    /// callers treat "nothing visible" as its own case.
+    pub fn bottom_pos(&self, vis: &[u64]) -> usize {
+        match self.scroll {
+            Scroll::Follow => vis.len().saturating_sub(1),
+            Scroll::Anchored(b) => match vis.binary_search(&b) {
+                Ok(p) => p,
+                Err(0) => 0,
+                Err(p) => p - 1,
+            },
+        }
+    }
+
+    /// Scroll up (toward older entries) by `n` **visible** steps, freezing
+    /// the view at an absolute anchor. One step is one drawn row: a line the
+    /// filters hide is never landed on, and a collapsed panic block is
+    /// crossed in a single step. Clamped at the oldest visible entry; a
+    /// no-op while nothing is visible.
+    ///
+    /// `filter` is the committed free-text search filter — see
+    /// [`Self::visible_indices`].
+    pub fn scroll_up(&mut self, n: u64, filter: Option<&str>) {
+        let vis = self.visible_indices(filter);
+        if vis.is_empty() {
             return;
         }
-        let last = end - 1;
-        if let Scroll::Anchored(b) = self.scroll {
-            let new = b.saturating_add(n);
-            self.scroll = if new >= last {
-                Scroll::Follow
-            } else {
-                Scroll::Anchored(new)
-            };
+        let pos = self.bottom_pos(&vis);
+        let new = pos.saturating_sub(clamp_steps(n));
+        self.scroll = Scroll::Anchored(vis[new]);
+    }
+
+    /// Scroll down (toward newer entries) by `n` **visible** steps — the
+    /// mirror of [`Self::scroll_up`]. Reaching the last visible entry
+    /// re-engages follow-tail; a no-op while already following (there is
+    /// nothing below the tail) or while nothing is visible.
+    pub fn scroll_down(&mut self, n: u64, filter: Option<&str>) {
+        if self.is_following() {
+            return;
         }
+        let vis = self.visible_indices(filter);
+        if vis.is_empty() {
+            return;
+        }
+        let last = vis.len() - 1;
+        let pos = self.bottom_pos(&vis).saturating_add(clamp_steps(n));
+        self.scroll = if pos >= last {
+            Scroll::Follow
+        } else {
+            Scroll::Anchored(vis[pos])
+        };
     }
 
     /// Jump to the oldest retained line (top).
@@ -427,26 +516,26 @@ impl SessionView {
     }
 
     /// Set the scroll position from a scrollbar-thumb `frac` in `0.0..=1.0`
-    /// (top → oldest retained line, bottom → the tail) — the drag mapping for
+    /// (top → oldest visible entry, bottom → the tail) — the drag mapping for
     /// [`crate::engine::DragKind::LogScrollbar`]. Maps the fraction across the
-    /// exact retained range `[base_index, end_index-1]` so it honors the same
-    /// bounds `scroll_up`/`scroll_down` clamp to; at (or past) the very bottom
-    /// it re-engages follow-tail. A no-op on an empty log. Returns whether the
+    /// **visible sequence** ([`Self::visible_indices`]) — the same sequence
+    /// the thumb's own position is measured against and `scroll_up`/
+    /// `scroll_down` step through — so a drag can never land the anchor on a
+    /// filtered-out line; at (or past) the very bottom it re-engages
+    /// follow-tail. A no-op when nothing is visible. Returns whether the
     /// scroll position actually changed.
-    pub fn scroll_to_fraction(&mut self, frac: f32) -> bool {
-        let end = self.log.end_index();
-        if end == 0 {
+    pub fn scroll_to_fraction(&mut self, frac: f32, filter: Option<&str>) -> bool {
+        let vis = self.visible_indices(filter);
+        if vis.is_empty() {
             return false;
         }
-        let base = self.log.base_index();
-        let last = end - 1;
-        let span = last.saturating_sub(base);
+        let last = vis.len() - 1;
         let f = frac.clamp(0.0, 1.0);
-        let target = base + (f * span as f32).round() as u64;
+        let target = (f * last as f32).round() as usize;
         let next = if target >= last {
             Scroll::Follow
         } else {
-            Scroll::Anchored(target)
+            Scroll::Anchored(vis[target])
         };
         if next != self.scroll {
             self.scroll = next;
@@ -533,6 +622,14 @@ impl SessionView {
     }
 }
 
+/// A scroll distance in lines as a position step within the visible
+/// sequence, saturating instead of truncating on a 32-bit `usize` (the
+/// sequence is bounded by [`LOG_LINE_CAP`], so a saturated step just means
+/// "as far as it goes" — which is exactly what the callers clamp to anyway).
+fn clamp_steps(n: u64) -> usize {
+    usize::try_from(n).unwrap_or(usize::MAX)
+}
+
 /// Whether `line` matches a case-insensitive substring `query` (ANSI-stripped).
 pub fn line_matches(line: &str, query: &str) -> bool {
     strip_ansi(line)
@@ -580,7 +677,7 @@ mod tests {
         for i in 0..20 {
             s.push_line(format!("line {i}"));
         }
-        s.scroll_up(5); // freeze at an absolute anchor
+        s.scroll_up(5, None); // freeze at an absolute anchor
         let Scroll::Anchored(anchor) = s.scroll else {
             panic!("expected anchored");
         };
@@ -609,25 +706,25 @@ mod tests {
             s.push_line(format!("line {i}")); // base 0, end 100, last 99
         }
         // Top of the track → oldest line anchored.
-        assert!(s.scroll_to_fraction(0.0));
+        assert!(s.scroll_to_fraction(0.0, None));
         assert_eq!(s.scroll, Scroll::Anchored(0));
         // Middle → ~line 50.
-        s.scroll_to_fraction(0.5);
+        s.scroll_to_fraction(0.5, None);
         assert_eq!(s.scroll, Scroll::Anchored(50));
         // Bottom → follow re-engaged (never an out-of-range anchor).
-        s.scroll_to_fraction(1.0);
+        s.scroll_to_fraction(1.0, None);
         assert!(s.is_following());
         // Out-of-range fractions clamp, never panic.
-        s.scroll_to_fraction(-3.0);
+        s.scroll_to_fraction(-3.0, None);
         assert_eq!(s.scroll, Scroll::Anchored(0));
-        s.scroll_to_fraction(9.0);
+        s.scroll_to_fraction(9.0, None);
         assert!(s.is_following());
     }
 
     #[test]
     fn scroll_to_fraction_is_a_noop_on_empty_log() {
         let mut s = sess();
-        assert!(!s.scroll_to_fraction(0.5));
+        assert!(!s.scroll_to_fraction(0.5, None));
         assert!(s.is_following());
     }
 
@@ -637,9 +734,144 @@ mod tests {
         for i in 0..10 {
             s.push_line(format!("line {i}"));
         }
-        s.scroll_up(4);
+        s.scroll_up(4, None);
         assert!(!s.is_following());
-        s.scroll_down(100);
+        s.scroll_down(100, None);
+        assert!(s.is_following());
+    }
+
+    // ── Scrolling steps the *visible* sequence, not raw indices ────────────
+
+    /// Info/Error alternating: abs 0,2,4,… are Info and 1,3,5,… are Error.
+    fn interleaved() -> SessionView {
+        let mut s = sess();
+        for i in 0..6 {
+            s.push_line(format!("plain {i}"));
+            s.push_line(format!("error: boom {i}"));
+        }
+        s
+    }
+
+    #[test]
+    fn scroll_steps_visible_lines_only_under_a_level_filter() {
+        let mut s = interleaved();
+        // Negative control: unfiltered, one step is one raw line.
+        s.scroll_up(1, None);
+        assert_eq!(s.scroll, Scroll::Anchored(10));
+
+        s.scroll_to_bottom();
+        s.set_level_filter(LevelFilter::ErrorOnly);
+        assert_eq!(s.visible_indices(None), vec![1, 3, 5, 7, 9, 11]);
+
+        // One step from the tail lands on the previous *Error* line (11 → 9),
+        // not on the hidden Info line 10.
+        s.scroll_up(1, None);
+        assert_eq!(s.scroll, Scroll::Anchored(9));
+        s.scroll_up(2, None);
+        assert_eq!(s.scroll, Scroll::Anchored(5));
+        // Symmetric downward.
+        s.scroll_down(1, None);
+        assert_eq!(s.scroll, Scroll::Anchored(7));
+        s.scroll_down(2, None);
+        assert!(s.is_following(), "reaching the last visible line follows");
+        // Clamped at the oldest visible line, never above it.
+        s.scroll_up(500, None);
+        assert_eq!(s.scroll, Scroll::Anchored(1));
+    }
+
+    #[test]
+    fn scroll_steps_visible_lines_only_under_a_text_filter() {
+        let mut s = sess();
+        for l in ["hello 0", "noise", "hello 1", "noise", "hello 2"] {
+            s.push_line(l.to_string());
+        }
+        let q = Some("hello");
+        assert_eq!(s.visible_indices(q), vec![0, 2, 4]);
+        s.scroll_up(1, q);
+        assert_eq!(s.scroll, Scroll::Anchored(2));
+        s.scroll_up(1, q);
+        assert_eq!(s.scroll, Scroll::Anchored(0));
+        s.scroll_down(1, q);
+        assert_eq!(s.scroll, Scroll::Anchored(2));
+        s.scroll_down(1, q);
+        assert!(s.is_following());
+    }
+
+    #[test]
+    fn a_stale_anchor_on_a_now_hidden_line_steps_from_what_is_shown() {
+        let mut s = interleaved();
+        // Anchored on an Info line, then the filter hides it: the view draws
+        // the newest visible line at or before it (Error 9), so that — not
+        // the stale anchor — is what a step moves from.
+        s.scroll = Scroll::Anchored(10);
+        s.set_level_filter(LevelFilter::ErrorOnly);
+        s.scroll_up(1, None);
+        assert_eq!(s.scroll, Scroll::Anchored(7));
+    }
+
+    #[test]
+    fn scrolling_is_a_noop_while_the_filter_hides_everything() {
+        let mut s = sess();
+        for i in 0..5 {
+            s.push_line(format!("plain {i}"));
+        }
+        s.set_level_filter(LevelFilter::ErrorOnly);
+        assert!(s.visible_indices(None).is_empty());
+        s.scroll_up(1, None);
+        assert!(s.is_following(), "nothing visible to freeze on");
+        s.scroll = Scroll::Anchored(2);
+        s.scroll_down(1, None);
+        assert_eq!(s.scroll, Scroll::Anchored(2));
+        assert!(!s.scroll_to_fraction(0.5, None));
+    }
+
+    #[test]
+    fn a_collapsed_backtrace_is_one_scroll_step_and_expands_to_one_per_line() {
+        let mut s = sess();
+        for l in panic_lines() {
+            s.push_line(l.to_string());
+        }
+        // Collapsed (the default): the whole foldable body (2..=4) is one
+        // entry, exactly as the log view draws it — one `▶ n frames…` row.
+        assert_eq!(s.visible_indices(None), vec![0, 1, 2, 5]);
+        s.scroll_up(1, None); // tail (5) → the fold entry
+        assert_eq!(s.scroll, Scroll::Anchored(2));
+        s.scroll_up(1, None); // …and one more step is past it entirely
+        assert_eq!(s.scroll, Scroll::Anchored(1));
+
+        // Expanded: every frame line is its own step again.
+        s.toggle_fold(0);
+        s.scroll_to_bottom();
+        assert_eq!(s.visible_indices(None), vec![0, 1, 2, 3, 4, 5]);
+        s.scroll_up(1, None);
+        assert_eq!(s.scroll, Scroll::Anchored(4));
+        s.scroll_up(1, None);
+        assert_eq!(s.scroll, Scroll::Anchored(3));
+    }
+
+    #[test]
+    fn scroll_to_fraction_lands_inside_the_visible_sequence() {
+        let mut s = interleaved();
+        s.set_level_filter(LevelFilter::ErrorOnly);
+        // Six visible entries [1,3,5,7,9,11]: top → the oldest of them.
+        assert!(s.scroll_to_fraction(0.0, None));
+        assert_eq!(s.scroll, Scroll::Anchored(1));
+        // Mid-track lands on a visible (Error) line, never a hidden one.
+        s.scroll_to_fraction(0.5, None);
+        assert_eq!(s.scroll, Scroll::Anchored(7));
+        // Every reachable anchor is a visible line.
+        for step in 0..=10 {
+            s.scroll_to_fraction(step as f32 / 10.0, None);
+            if let Scroll::Anchored(a) = s.scroll {
+                assert_eq!(
+                    s.effective_level(a),
+                    Some(LogLevel::Error),
+                    "fraction {step}/10 anchored a filtered-out line"
+                );
+            }
+        }
+        // The bottom still re-engages follow rather than anchoring the tail.
+        s.scroll_to_fraction(1.0, None);
         assert!(s.is_following());
     }
 
@@ -817,9 +1049,9 @@ mod tests {
             s.push_line(format!("plain again {i}"));
         }
         s.push_line("error: second".to_string());
-        // Still following: a filter only changes what's *shown*, never the
-        // follow/anchored scroll mode itself (that's the render layer's
-        // `visible_indices` concern — see `ui::views::sessions`).
+        // Still following: a filter only changes what's *shown* (the visible
+        // sequence — see `visible_indices`), never the follow/anchored scroll
+        // mode itself.
         assert!(s.is_following());
         assert_eq!(s.effective_level(5), Some(LogLevel::Error));
         assert_eq!(s.effective_level(11), Some(LogLevel::Error));

@@ -298,9 +298,12 @@ pub enum Message {
     ToggleFollow,
     /// Toggle soft-wrap on the log view (`w`).
     ToggleWrap,
-    /// Scroll the active log view up / down by `n` lines (wheel / arrows).
+    /// Scroll the active log view up / down by `n` *visible* lines (wheel /
+    /// arrows) — steps through what the view actually draws (filters applied,
+    /// a collapsed panic block counting as one), never raw line indices; see
+    /// [`super::SessionView::visible_indices`].
     LogScrollUp(u64),
-    /// Scroll the active log view down by `n` lines.
+    /// Scroll the active log view down by `n` visible lines.
     LogScrollDown(u64),
     /// Jump the active log view to the oldest retained line (`Home`).
     LogScrollToTop,

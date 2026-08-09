@@ -44,8 +44,10 @@ use crate::ui::theme::Theme;
 /// auto-dismiss aging is the only thing that does today).
 const TICK: Duration = Duration::from_millis(50);
 
-/// Lines a `PageUp`/`PageDown` scrolls the log view. A fixed step (the event
-/// translator has no viewport height); a comfortable page on typical panes.
+/// Visible lines a `PageUp`/`PageDown` scrolls the log view (drawn rows, not
+/// raw log indices — see `SessionView::visible_indices`). A fixed step (the
+/// event translator has no viewport height); a comfortable page on typical
+/// panes.
 const PAGE_LINES: u64 = 10;
 
 /// Pure check: the TUI requires interactive stdin AND stdout. Testable without

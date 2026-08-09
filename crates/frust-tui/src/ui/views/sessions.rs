@@ -6,8 +6,12 @@
 //! Layering: every function here renders `&AppState` and only *registers*
 //! interaction (tab clicks, the log scroll region, fold-row/filter-chip
 //! clicks) through the [`MouseCtx`] — it never mutates the engine. The
-//! scroll/wrap/window/fold math is factored into pure helpers (`hard_wrap`,
-//! `display_window`, `visible_indices`) unit-tested below without a TTY.
+//! wrap/window math is factored into pure helpers (`hard_wrap`,
+//! `display_window`) unit-tested below without a TTY; which lines are visible
+//! at all, and where the anchor sits among them, is engine state logic
+//! ([`SessionView::visible_indices`]/[`SessionView::bottom_pos`]) shared with
+//! the scroll mutators so a rendered row and a scroll step always mean the
+//! same thing.
 //!
 //! §B11's badge/timestamp/source-tag prefix chrome and the ANSI-passthrough
 //! rule live in [`build_row`]/[`line_prefix`] — the one styling authority
@@ -26,7 +30,7 @@ use ratatui::widgets::{Block, Paragraph, Sparkline};
 
 use crate::engine::{
     AppState, ContextTarget, DragKind, LEVEL_FILTER_SEGMENTS, LevelFilter, LineMeta, LineRole,
-    LogLevel, Message, PanicBlock, RegionId, SOURCE_TAG_WIDTH, Scroll, SessionView, line_matches,
+    LogLevel, Message, PanicBlock, RegionId, SOURCE_TAG_WIDTH, SessionView,
 };
 use crate::supervise::SessionState;
 use crate::ui::anim::{SPINNER_TICKS_PER_FRAME, spinner_char, themed_shimmer_spans};
@@ -338,7 +342,7 @@ fn render_log(
         return;
     }
 
-    let vis = visible_indices(session, state.search.filter.as_deref());
+    let vis = session.visible_indices(state.search.filter.as_deref());
     if vis.is_empty() {
         let hint = if let Some(f) = &state.search.filter {
             format!("  no lines match /{f}/")
@@ -399,8 +403,10 @@ fn render_scrollbar(
     let track_top = area.y;
     let track_height = area.height;
 
-    // The fraction of the way down the log the bottom-visible line sits.
-    let bottom = bottom_pos(session, vis);
+    // The fraction of the way down the log the bottom-visible entry sits —
+    // measured in the same visible sequence `scroll_to_fraction` maps a drag
+    // back onto, so thumb and content never disagree.
+    let bottom = session.bottom_pos(vis);
     let denom = vis.len().saturating_sub(1).max(1) as f32;
     let frac = (bottom as f32 / denom).clamp(0.0, 1.0);
     let thumb_y = track_top + (frac * (track_height - 1) as f32).round() as u16;
@@ -759,53 +765,18 @@ pub fn sidebar_lines(state: &AppState, theme: &Theme) -> Vec<Line<'static>> {
 
 // ── Pure log-window helpers (unit-tested below) ─────────────────────────────
 
-/// The absolute indices of the log lines currently visible under the
-/// free-text search `filter` (all of them when `filter` is `None`) **and**
-/// the session's active level filter, oldest first. A panic/backtrace-block
-/// line is always tagged [`crate::engine::LogLevel::Error`] regardless of its
-/// own text (`SessionView::push_line_at`), so a collapsed block's foldable
-/// body passes or fails the level cutoff as one unit — never partially.
-fn visible_indices(session: &SessionView, filter: Option<&str>) -> Vec<u64> {
-    session
-        .log
-        .iter()
-        .filter(|(abs, s)| {
-            let level_ok = session
-                .effective_level(*abs)
-                .is_none_or(|lvl| session.level_filter.allows(lvl));
-            let text_ok = filter.is_none_or(|q| line_matches(s, q));
-            level_ok && text_ok
-        })
-        .map(|(i, _)| i)
-        .collect()
-}
-
-/// The position within `vis` of the bottom-most visible line for the current
-/// scroll: the last match when following, else the newest match at or before
-/// the absolute anchor.
-fn bottom_pos(session: &SessionView, vis: &[u64]) -> usize {
-    match session.scroll {
-        Scroll::Follow => vis.len().saturating_sub(1),
-        Scroll::Anchored(b) => match vis.binary_search(&b) {
-            Ok(p) => p,
-            Err(0) => 0,
-            Err(p) => p - 1,
-        },
-    }
-}
-
-/// Build the ≤`height` display rows ending at the bottom-anchored line: walk
-/// visible lines upward from `bottom_pos`, ANSI-parse + (hard-)wrap each, and
-/// keep the last `height` display rows so the bottom line sits at the bottom of
-/// the viewport. Exact wrap bounds by construction (we count the very rows we
-/// render — no word-wrap/scroll-offset mismatch).
+/// Build the ≤`height` display rows ending at the bottom-anchored entry: walk
+/// the visible sequence upward from [`SessionView::bottom_pos`], ANSI-parse +
+/// (hard-)wrap each, and keep the last `height` display rows so the bottom
+/// entry sits at the bottom of the viewport. Exact wrap bounds by
+/// construction (we count the very rows we render — no word-wrap/scroll-offset
+/// mismatch).
 ///
-/// A collapsed panic block's foldable body (`is_fold_collapsed`) collapses to
-/// exactly one synthetic `▶ n frames…` row — every retained abs index the
-/// block's body still contributes to `vis` is consumed in one pass rather
-/// than rendered individually. The second element of each returned pair is
-/// `Some(block_start)` for that synthetic row (the click target;
-/// [`render_log`] registers it), `None` for an ordinary line.
+/// `vis` is a [`SessionView::visible_indices`] sequence, which already folds a
+/// collapsed panic block's whole body into one entry; this draws that entry as
+/// the synthetic `▶ n frames…` row. The second element of each returned pair
+/// is `Some(block_start)` for that row (the click target; [`render_log`]
+/// registers it), `None` for an ordinary line.
 fn display_window(
     session: &SessionView,
     vis: &[u64],
@@ -820,7 +791,7 @@ fn display_window(
     let h = height as usize;
     let w = width as usize;
     let mut rows: VecDeque<(Line<'static>, Option<u64>)> = VecDeque::new();
-    let mut pos = bottom_pos(session, vis) as isize;
+    let mut pos = session.bottom_pos(vis) as isize;
     while pos >= 0 && rows.len() < h {
         let abs = vis[pos as usize];
         if let Some(block) = session.panic_block_covering(abs)
@@ -836,16 +807,7 @@ fn display_window(
             for l in wrapped.into_iter().rev() {
                 rows.push_front((l, Some(block_start)));
             }
-            // Consume every remaining `vis` entry that still belongs to this
-            // same collapsed block's foldable body (contiguous in `vis`) —
-            // they're represented by the one synthetic row above.
-            while pos >= 0
-                && session
-                    .panic_block_covering(vis[pos as usize])
-                    .is_some_and(|b| b.start == block_start)
-            {
-                pos -= 1;
-            }
+            pos -= 1;
             continue;
         }
         let styled = build_row(session, abs, theme);
@@ -1064,7 +1026,7 @@ fn hard_wrap(line: &Line<'static>, width: usize, indent: usize) -> Vec<Line<'sta
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{LineSelection, LogSource};
+    use crate::engine::{LineSelection, LogSource, Scroll};
     use crate::supervise::SessionId;
     use std::path::PathBuf;
 
@@ -1126,7 +1088,7 @@ mod tests {
     #[test]
     fn follow_window_shows_the_last_height_lines() {
         let s = session(20);
-        let vis = visible_indices(&s, None);
+        let vis = s.visible_indices(None);
         let rows = display_window(&s, &vis, false, 60, 5, &theme());
         assert_eq!(rows.len(), 5);
         let texts: Vec<String> = rows.iter().map(|(l, _)| msg_only(l)).collect();
@@ -1140,7 +1102,7 @@ mod tests {
     fn anchored_window_keeps_the_anchor_at_the_bottom() {
         let mut s = session(20);
         s.scroll = Scroll::Anchored(9); // line 9 at the bottom
-        let vis = visible_indices(&s, None);
+        let vis = s.visible_indices(None);
         let rows = display_window(&s, &vis, false, 60, 3, &theme());
         let texts: Vec<String> = rows.iter().map(|(l, _)| msg_only(l)).collect();
         assert_eq!(texts, vec!["line 7", "line 8", "line 9"]);
@@ -1152,7 +1114,7 @@ mod tests {
         s.push_line_at("hello world".into(), "00:00:00");
         s.push_line_at("ERROR boom".into(), "00:00:01");
         s.push_line_at("hello again".into(), "00:00:02");
-        let vis = visible_indices(&s, Some("hello"));
+        let vis = s.visible_indices(Some("hello"));
         assert_eq!(vis, vec![0, 2]);
     }
 
@@ -1163,9 +1125,9 @@ mod tests {
         s.push_line_at("warning: careful".into(), "00:00:01"); // Warn
         s.push_line_at("error: boom".into(), "00:00:02"); // Error
         s.set_level_filter(LevelFilter::WarnPlus);
-        assert_eq!(visible_indices(&s, None), vec![1, 2]);
+        assert_eq!(s.visible_indices(None), vec![1, 2]);
         s.set_level_filter(LevelFilter::ErrorOnly);
-        assert_eq!(visible_indices(&s, None), vec![2]);
+        assert_eq!(s.visible_indices(None), vec![2]);
     }
 
     #[test]
@@ -1175,7 +1137,7 @@ mod tests {
             anchor: 1,
             cursor: 2,
         });
-        let vis = visible_indices(&s, None);
+        let vis = s.visible_indices(None);
         let rows = display_window(&s, &vis, false, 60, 5, &theme());
         // rows: line0..line4; lines 1 and 2 carry the overlay bg.
         assert!(rows[0].0.style.bg.is_none());
@@ -1193,7 +1155,7 @@ mod tests {
         s.push_line_at("warning: careful".into(), "00:00:01");
         s.push_line_at("plain info".into(), "00:00:02");
         let t = theme();
-        let vis = visible_indices(&s, None);
+        let vis = s.visible_indices(None);
         let rows = display_window(&s, &vis, false, 60, 3, &t);
         assert_eq!(rows[0].0.style.fg, Some(t.error()));
         assert!(row_text(&rows[0].0).starts_with(" E "));
@@ -1207,7 +1169,7 @@ mod tests {
     fn gradle_source_tag_renders_and_strips_the_raw_marker() {
         let mut s = SessionView::new(SessionId(0), PathBuf::from("/tmp/a"), "desktop");
         s.push_line_at("[gradle] BUILD SUCCESSFUL".into(), "00:00:00");
-        let vis = visible_indices(&s, None);
+        let vis = s.visible_indices(None);
         let rows = display_window(&s, &vis, false, 60, 1, &theme());
         let text = row_text(&rows[0].0);
         assert!(text.trim_end().ends_with("BUILD SUCCESSFUL"));
@@ -1234,7 +1196,7 @@ mod tests {
         for (i, l) in panic_lines().into_iter().enumerate() {
             s.push_line_at(l.to_string(), format!("00:00:{i:02}"));
         }
-        let vis = visible_indices(&s, None);
+        let vis = s.visible_indices(None);
         let rows = display_window(&s, &vis, false, 60, 10, &theme());
         // header + message + one fold row + the trailing "app: recovering"
         // line — the backtrace header/frame/location lines are absorbed.
@@ -1253,7 +1215,7 @@ mod tests {
             s.push_line_at(l.to_string(), format!("00:00:{i:02}"));
         }
         s.toggle_fold(0);
-        let vis = visible_indices(&s, None);
+        let vis = s.visible_indices(None);
         let rows = display_window(&s, &vis, false, 60, 10, &theme());
         // header + message + backtrace-header + frame + location + trailer.
         assert_eq!(rows.len(), 6);

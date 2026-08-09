@@ -270,8 +270,8 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             state.wrap = !state.wrap;
             Outcome::redraw()
         }
-        Message::LogScrollUp(n) => with_active(state, |s| s.scroll_up(n)),
-        Message::LogScrollDown(n) => with_active(state, |s| s.scroll_down(n)),
+        Message::LogScrollUp(n) => with_active_filtered(state, |s, f| s.scroll_up(n, f)),
+        Message::LogScrollDown(n) => with_active_filtered(state, |s, f| s.scroll_down(n, f)),
         Message::LogScrollToTop => with_active(state, |s| s.scroll_to_top()),
         Message::LogScrollToBottom => with_active(state, |s| s.scroll_to_bottom()),
 
@@ -861,8 +861,9 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                 track_height,
             }) => {
                 let frac = track_fraction(y, track_top, track_height);
+                let filter = state.search.filter.clone();
                 match state.active_session_mut() {
-                    Some(s) => Outcome::dirty(s.scroll_to_fraction(frac)),
+                    Some(s) => Outcome::dirty(s.scroll_to_fraction(frac, filter.as_deref())),
                     None => Outcome::idle(),
                 }
             }
@@ -1461,6 +1462,26 @@ fn with_active(state: &mut AppState, f: impl FnOnce(&mut SessionView)) -> Outcom
     }
 }
 
+/// [`with_active`] for the log-scroll arms, which also need the committed
+/// free-text search filter: it is *global* state (`AppState::search`), not
+/// per-session, so the session's own visible-sequence math
+/// ([`SessionView::visible_indices`]) can only see it when routing passes it
+/// in. Cloned (rather than borrowed) because the session borrow is mutable —
+/// one short query string per scroll event.
+fn with_active_filtered(
+    state: &mut AppState,
+    f: impl FnOnce(&mut SessionView, Option<&str>),
+) -> Outcome {
+    let filter = state.search.filter.clone();
+    match state.active_session_mut() {
+        Some(s) => {
+            f(s, filter.as_deref());
+            Outcome::redraw()
+        }
+        None => Outcome::idle(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1811,6 +1832,27 @@ mod tests {
         ));
         update(&mut st, Message::ToggleFollow);
         // toggle from Anchored -> Follow
+        assert!(st.active_session().unwrap().is_following());
+    }
+
+    #[test]
+    fn scroll_routing_carries_the_committed_search_filter() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        for l in ["keep 0", "drop", "keep 1", "drop", "keep 2"] {
+            update(&mut st, line(a, l));
+        }
+        // The free-text filter is global (`AppState::search`), so only the
+        // routing here can hand it to the session's visible-sequence math —
+        // without it a step would land on a hidden line.
+        update(&mut st, Message::SearchOpen);
+        for c in "keep".chars() {
+            update(&mut st, Message::SearchInput(c));
+        }
+        update(&mut st, Message::SearchCommit);
+        update(&mut st, Message::LogScrollUp(1));
+        assert_eq!(st.active_session().unwrap().scroll, Scroll::Anchored(2));
+        update(&mut st, Message::LogScrollDown(1));
         assert!(st.active_session().unwrap().is_following());
     }
 
