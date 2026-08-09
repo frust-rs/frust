@@ -14,6 +14,7 @@ use frust_drive::plugin::AddReport;
 
 use super::build_launcher::BuildFocus;
 use super::doctor::DoctorCheck;
+use super::logstyle::LevelFilter;
 use super::run_config::RunFocus;
 use crate::supervise::{SessionEvent, SessionId};
 
@@ -156,6 +157,13 @@ pub enum RegionId {
     /// The keyboard/help overlay — a click anywhere in the panel
     /// closes it (mouse parity for `Esc`).
     HelpClose,
+    /// A panic/backtrace block's `▶ n frames…` fold affordance row (the
+    /// block's identity: the absolute index of its panic-header line); click
+    /// toggles its collapsed state.
+    LogFoldToggle(u64),
+    /// A segment of the log status bar's level-filter chip; click jumps the
+    /// active session straight to it.
+    LevelFilterSegment(LevelFilter),
 }
 
 /// The kind of an in-progress drag, identifying which draggable chrome the
@@ -319,6 +327,19 @@ pub enum Message {
     /// Copy the current selection to the clipboard (`y`) — routed to the runner
     /// as an [`super::Effect::Copy`].
     CopySelection,
+    /// Toggle a panic/backtrace block's fold state by its id (the block's
+    /// panic-header absolute line index) — a click on its `▶ n frames…`
+    /// affordance row.
+    ToggleFold(u64),
+    /// Toggle the fold state of whichever panic block is nearest the active
+    /// session's current scroll position (`z`) — the keyboard-only path
+    /// (workbook §B11's backtrace-fold affordance).
+    ToggleNearestFold,
+    /// Step the active session's level filter `delta` positions (`l`/`L`).
+    CycleLevelFilter(isize),
+    /// Jump the active session's level filter directly to `filter` (a
+    /// filter-chip segment click).
+    SetLevelFilter(LevelFilter),
 
     // ── Devices panel + run-config modal ─────────────────────────────────────
     /// Refresh the device list (`r` from the panel with no modal, or the

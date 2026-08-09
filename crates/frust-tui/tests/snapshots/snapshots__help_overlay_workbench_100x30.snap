@@ -6,28 +6,28 @@ expression: "render_to_string(100, 30, &state)"
 ━━━━━━━━                                                                                            
                                                                                                     
  PROJECTS                │                                                                          
-  ▸ huddle               │  Dashboard                                                               
-                         ╭ Keyboard Shortcuts ────────────────────────────╮                         
- DEVICES ↻ r             │                                                │▓▓                       
-   none found            │  r       Run on device(s)…                     │▓▓b here.                
-                         │  x       Stop session                          │▓▓                       
- SESSIONS                │  b       Build…                                │▓▓                       
-   none running          │  c       Clean…                                │▓▓                       
-                         │  d       Doctor                                │▓▓                       
- ACTIONS                 │  i       Toolchain setup…                      │▓▓                       
-   New project · n       │  n       New project…                          │▓▓                       
-   Add plugin · a        │  a       Add plugin…                           │▓▓                       
-   Doctor · d            │  ^O      Switch project…                       │▓▓                       
-   Build · b             │  R       Refresh devices                       │▓▓                       
-   Clean · c             │  ⌥m      Toggle mouse capture                  │▓▓                       
-                         │  f       Toggle follow-tail                    │▓▓                       
+  ▸ huddle               ╭ Keyboard Shortcuts ────────────────────────────╮                         
+                         │                                                │▓▓                       
+ DEVICES ↻ r             │  r       Run on device(s)…                     │▓▓                       
+   none found            │  x       Stop session                          │▓▓b here.                
+                         │  b       Build…                                │▓▓                       
+ SESSIONS                │  c       Clean…                                │▓▓                       
+   none running          │  d       Doctor                                │▓▓                       
+                         │  i       Toolchain setup…                      │▓▓                       
+ ACTIONS                 │  n       New project…                          │▓▓                       
+   New project · n       │  a       Add plugin…                           │▓▓                       
+   Add plugin · a        │  ^O      Switch project…                       │▓▓                       
+   Doctor · d            │  R       Refresh devices                       │▓▓                       
+   Build · b             │  ⌥m      Toggle mouse capture                  │▓▓                       
+   Clean · c             │  f       Toggle follow-tail                    │▓▓                       
                          │  /       Search logs…                          │▓▓                       
+                         │  l       Cycle log level filter                │▓▓                       
+                         │  z       Toggle nearest backtrace fold         │▓▓                       
                          │  q       Quit                                  │▓▓                       
                          │                                                │▓▓                       
                          │  Esc close                                     │▓▓                       
                          ╰────────────────────────────────────────────────╯▓▓                       
                          │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                       
-                         │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          

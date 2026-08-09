@@ -13,6 +13,7 @@ mod build_launcher;
 mod context_menu;
 mod create_wizard;
 mod doctor;
+mod logstyle;
 mod message;
 mod modal;
 pub mod palette;
@@ -32,6 +33,10 @@ pub use build_launcher::{ArtifactKind, BuildFocus, BuildLauncher, BuildSpec, Bui
 pub use context_menu::{ContextMenu, MenuEntry};
 pub use create_wizard::{ArchCard, CreateWizard, WizardAdvance, WizardStep};
 pub use doctor::{DoctorCheck, DoctorState};
+pub use logstyle::{
+    LEVEL_FILTER_SEGMENTS, LevelFilter, LineMeta, LineRole, LogLevel, LogSource, PanicBlock,
+    SOURCE_TAG_WIDTH, classify_level, classify_source,
+};
 pub use message::{ContextTarget, DragKind, Message, RegionId};
 pub use modal::ActiveModal;
 pub use palette::{Palette, PaletteCommand};
@@ -41,9 +46,7 @@ pub use persist::{
     record_recent_project, save_mouse_capture, save_sidebar_width,
 };
 pub use run_config::{DeviceRow, RunConfig, RunFocus, RunTarget};
-pub use session_view::{
-    LineSelection, LogBuffer, LogLevel, Scroll, SessionView, detect_level, line_matches, strip_ansi,
-};
+pub use session_view::{LineSelection, LogBuffer, Scroll, SessionView, line_matches, strip_ansi};
 pub use state::{
     AppState, SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, Screen, SearchState,
     clamp_sidebar_width,

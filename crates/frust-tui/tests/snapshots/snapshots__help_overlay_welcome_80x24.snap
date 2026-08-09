@@ -3,7 +3,6 @@ source: crates/frust-tui/tests/snapshots.rs
 expression: "render_to_string(80, 24, &state)"
 ---
                                                            toolchain ◌ checking…
-                                                                                
                ╭ Keyboard Shortcuts ────────────────────────────╮               
                │                                                │▓▓             
                │  r       Run on device(s)…                     │▓▓             
@@ -19,10 +18,11 @@ expression: "render_to_string(80, 24, &state)"
                │  ⌥m      Toggle mouse capture                  │▓▓             
                │  f       Toggle follow-tail                    │▓▓             
                │  /       Search logs…                          │▓▓             
+               │  l       Cycle log level filter                │▓▓             
+               │  z       Toggle nearest backtrace fold         │▓▓             
                │  q       Quit                                  │▓▓             
                │                                                │▓▓             
                │  Esc close                                     │▓▓             
                ╰────────────────────────────────────────────────╯▓▓             
                  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓             
-                                                                                
 ? help · ⌘ palette · a add plugin · q quit                             [mouse ✓]

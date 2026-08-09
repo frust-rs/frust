@@ -323,6 +323,14 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         Message::SelectionExtendUp(n) => with_active(state, |s| s.extend_selection_up(n)),
         Message::SelectionExtendDown(n) => with_active(state, |s| s.extend_selection_down(n)),
         Message::SelectionClear => with_active(state, |s| s.clear_selection()),
+        Message::ToggleFold(block_start) => with_active(state, |s| {
+            s.toggle_fold(block_start);
+        }),
+        Message::ToggleNearestFold => with_active(state, |s| {
+            s.toggle_nearest_fold();
+        }),
+        Message::CycleLevelFilter(delta) => with_active(state, |s| s.cycle_level_filter(delta)),
+        Message::SetLevelFilter(filter) => with_active(state, |s| s.set_level_filter(filter)),
         Message::CopySelection => match state.active_session().and_then(|s| s.selected_text()) {
             Some(text) => {
                 state

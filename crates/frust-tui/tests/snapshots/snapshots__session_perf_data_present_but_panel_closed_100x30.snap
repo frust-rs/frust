@@ -6,7 +6,7 @@ expression: "render_to_string(100, 30, &state)"
 ━━━━━━━━                                                                                            
                                                                                                     
  PROJECTS                │huddle:  1 ▶ desktop                                                      
-  ▸ huddle               │frust-perf frame n=1 total_p50_ms=8 total_p95_ms=14 total_p99_ms=22 skippe
+  ▸ huddle               │   12:00:01 [frust]  frust-perf frame n=1 total_p50_ms=8 total_p95_ms=14 t
                          │                                                                          
  DEVICES ↻ r             │                                                                          
    none found            │                                                                          
@@ -30,5 +30,5 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │                                                                          
-                         │● follow  ·  wrap:off       x stop · f follow · w wrap · / search · t perf
+                         │● follow  ·  wrap:off     x stop · f follow · w wrap · / search · l filter
 ● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]

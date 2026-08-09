@@ -1,11 +1,19 @@
 //! The session tab bar and the ANSI-aware log view: tabs grouped
-//! by project, per-session follow-tail / scroll / wrap / search-filter, level
-//! colorize, and a copy-while-scrolling selection highlight.
+//! by project, per-session follow-tail / scroll / wrap / search-filter /
+//! level-filter, level+source+timestamp styling (workbook §B11), Rust
+//! panic/backtrace fold rows, and a copy-while-scrolling selection highlight.
 //!
 //! Layering: every function here renders `&AppState` and only *registers*
-//! interaction (tab clicks, the log scroll region) through the [`MouseCtx`] —
-//! it never mutates the engine. The scroll/wrap/window math is factored into
-//! pure helpers (`hard_wrap`, `display_window`) unit-tested below without a TTY.
+//! interaction (tab clicks, the log scroll region, fold-row/filter-chip
+//! clicks) through the [`MouseCtx`] — it never mutates the engine. The
+//! scroll/wrap/window/fold math is factored into pure helpers (`hard_wrap`,
+//! `display_window`, `visible_indices`) unit-tested below without a TTY.
+//!
+//! §B11's badge/timestamp/source-tag prefix chrome and the ANSI-passthrough
+//! rule live in [`build_row`]/[`line_prefix`] — the one styling authority
+//! (`LineLevel`/`LogSource` classification itself lives in
+//! [`crate::engine::logstyle`], computed once at push time, never re-derived
+//! here).
 
 use std::collections::VecDeque;
 
@@ -17,12 +25,19 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Paragraph, Sparkline};
 
 use crate::engine::{
-    AppState, ContextTarget, DragKind, Message, RegionId, Scroll, SessionView, detect_level,
-    line_matches,
+    AppState, ContextTarget, DragKind, LEVEL_FILTER_SEGMENTS, LevelFilter, LineMeta, LineRole,
+    LogLevel, Message, PanicBlock, RegionId, SOURCE_TAG_WIDTH, Scroll, SessionView, line_matches,
 };
 use crate::supervise::SessionState;
 use crate::ui::mouse::MouseCtx;
 use crate::ui::theme::Theme;
+
+/// The badge/timestamp/source-tag prefix's total column width — one leading
+/// space + a 1-column badge + one space + an 8-column `HH:MM:SS` timestamp +
+/// one space + the (padded) source tag + one trailing space. A wrapped
+/// continuation row and every non-first line of a panic block indent under
+/// this boundary instead of repeating the chrome (workbook §B11).
+const PREFIX_WIDTH: usize = 1 + 1 + 1 + 8 + 1 + SOURCE_TAG_WIDTH + 1;
 
 /// Render the whole session workspace (tab bar + log view + log status + search
 /// overlay) into `area`, registering the tab click targets and the log scroll
@@ -224,21 +239,37 @@ fn render_log(
 
     let vis = visible_indices(session, state.search.filter.as_deref());
     if vis.is_empty() {
+        let hint = if let Some(f) = &state.search.filter {
+            format!("  no lines match /{f}/")
+        } else {
+            format!(
+                "  no lines at the \"{}\" level filter",
+                session.level_filter.label()
+            )
+        };
         frame.render_widget(
-            Paragraph::new(Line::styled(
-                format!(
-                    "  no lines match /{}/",
-                    state.search.filter.clone().unwrap_or_default()
-                ),
-                Style::default().fg(theme.muted()),
-            )),
+            Paragraph::new(Line::styled(hint, Style::default().fg(theme.muted()))),
             area,
         );
         return;
     }
 
-    let lines = display_window(session, &vis, state.wrap, area.width, area.height, theme);
+    let rows = display_window(session, &vis, state.wrap, area.width, area.height, theme);
+    let lines: Vec<Line<'static>> = rows.iter().map(|(l, _)| l.clone()).collect();
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
+
+    // A collapsed panic block's synthetic `▶ n frames…` row is its own click
+    // target (mouse parity for `z` — see `Message::ToggleFold`).
+    for (i, (_, fold_id)) in rows.iter().enumerate() {
+        if let Some(block_start) = fold_id {
+            let rect = Rect::new(area.x, area.y + i as u16, area.width, 1);
+            mouse.click(
+                rect,
+                RegionId::LogFoldToggle(*block_start),
+                Message::ToggleFold(*block_start),
+            );
+        }
+    }
 
     render_scrollbar(frame, area, session, &vis, theme, mouse);
 }
@@ -332,14 +363,76 @@ fn render_log_status(
         left.push(Span::styled("y copy", Style::default().fg(theme.accent())));
     }
 
-    // The perf-panel keyhint only shows once there's actually a panel to
-    // toggle (zero-noise) — the same gate `render_main` uses to decide
-    // whether to reserve its row.
+    // `l filter`/`z fold`/`t perf` are appended only while there's still
+    // room beside the (always-shown) base hint and the `left` segments
+    // already built above — the same fit-check spirit the built-artifacts
+    // segment and the filter chip below use, so a narrow terminal degrades
+    // one hint at a time (mouse/base-key parity never lost) instead of the
+    // right-aligned hint silently overwriting the tail of `left`'s text.
+    let used_left: usize = left.iter().map(|s| s.content.chars().count()).sum();
     let mut right_hint = "x stop · f follow · w wrap · / search".to_string();
+    let push_hint_if_it_fits = |hint: &mut String, extra: &str| {
+        if used_left + hint.chars().count() + extra.chars().count() + 2 <= inner.width as usize {
+            hint.push_str(extra);
+        }
+    };
+    push_hint_if_it_fits(&mut right_hint, " · l filter");
+    if session.has_panic_blocks() {
+        push_hint_if_it_fits(&mut right_hint, " · z fold");
+    }
     if session.perf.has_data() {
-        right_hint.push_str(" · t perf");
+        push_hint_if_it_fits(&mut right_hint, " · t perf");
     }
     let right_hint = right_hint;
+
+    // Level-filter chip (workbook §B11): a segmented pill, the active
+    // segment accent-filled — `l`/`L` cycles it by key, a click jumps
+    // straight to a segment. Skipped (mouse-only degrade; `l`/`L` still
+    // work) when it wouldn't fit beside the right-aligned keyhint — the same
+    // fit-check pattern the built-artifacts segment below uses.
+    let mut chip_clicks: Vec<(u16, u16, LevelFilter)> = Vec::new();
+    {
+        let used: usize = left.iter().map(|s| s.content.chars().count()).sum();
+        let sep = "  ·  ";
+        let mut chip_spans: Vec<Span<'static>> =
+            vec![Span::styled(sep, Style::default().fg(theme.border()))];
+        let mut col = sep.chars().count();
+        let mut rects = Vec::new();
+        for seg in LEVEL_FILTER_SEGMENTS {
+            let label = format!(" {} ", seg.label());
+            let width = label.chars().count();
+            let style = if seg == session.level_filter {
+                Style::default()
+                    .fg(theme.bg())
+                    .bg(theme.accent())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.muted())
+            };
+            rects.push((used + col, width, seg));
+            chip_spans.push(Span::styled(label, style));
+            col += width;
+        }
+        let hidden = level_filter_hidden_count(session);
+        let hidden_note = if hidden > 0 {
+            format!(" {hidden} hidden by filter")
+        } else {
+            String::new()
+        };
+        col += hidden_note.chars().count();
+        if used + col + right_hint.chars().count() + 2 <= inner.width as usize {
+            left.extend(chip_spans);
+            if !hidden_note.is_empty() {
+                left.push(Span::styled(
+                    hidden_note,
+                    Style::default().fg(theme.muted()),
+                ));
+            }
+            for (x, w, seg) in rects {
+                chip_clicks.push((x as u16, w as u16, seg));
+            }
+        }
+    }
 
     // Only add the built-artifacts segment (with its copy-path click region)
     // when it actually fits beside the right-aligned keyhint — both
@@ -386,6 +479,34 @@ fn render_log_status(
             .alignment(Alignment::Right),
         inner,
     );
+
+    for (x, w, seg) in chip_clicks {
+        mouse.click(
+            Rect::new(
+                inner.x + x,
+                inner.y,
+                w.min(inner.right().saturating_sub(inner.x + x)),
+                1,
+            ),
+            RegionId::LevelFilterSegment(seg),
+            Message::SetLevelFilter(seg),
+        );
+    }
+}
+
+/// The number of currently-retained lines hidden solely by the session's
+/// active level filter (independent of the free-text search filter) — the
+/// filter chip's "N hidden by filter" note (workbook §B11).
+fn level_filter_hidden_count(session: &SessionView) -> usize {
+    session
+        .log
+        .iter()
+        .filter(|(abs, _)| {
+            session
+                .effective_level(*abs)
+                .is_some_and(|lvl| !session.level_filter.allows(lvl))
+        })
+        .count()
 }
 
 /// The perf panel's row height: a sparkline row + a stats row, plus one more
@@ -537,18 +658,25 @@ pub fn sidebar_lines(state: &AppState, theme: &Theme) -> Vec<Line<'static>> {
 
 // ── Pure log-window helpers (unit-tested below) ─────────────────────────────
 
-/// The absolute indices of the log lines currently visible under `filter`
-/// (all of them when `filter` is `None`), oldest first.
+/// The absolute indices of the log lines currently visible under the
+/// free-text search `filter` (all of them when `filter` is `None`) **and**
+/// the session's active level filter, oldest first. A panic/backtrace-block
+/// line is always tagged [`crate::engine::LogLevel::Error`] regardless of its
+/// own text (`SessionView::push_line_at`), so a collapsed block's foldable
+/// body passes or fails the level cutoff as one unit — never partially.
 fn visible_indices(session: &SessionView, filter: Option<&str>) -> Vec<u64> {
-    match filter {
-        None => session.log.iter().map(|(i, _)| i).collect(),
-        Some(q) => session
-            .log
-            .iter()
-            .filter(|(_, s)| line_matches(s, q))
-            .map(|(i, _)| i)
-            .collect(),
-    }
+    session
+        .log
+        .iter()
+        .filter(|(abs, s)| {
+            let level_ok = session
+                .effective_level(*abs)
+                .is_none_or(|lvl| session.level_filter.allows(lvl));
+            let text_ok = filter.is_none_or(|q| line_matches(s, q));
+            level_ok && text_ok
+        })
+        .map(|(i, _)| i)
+        .collect()
 }
 
 /// The position within `vis` of the bottom-most visible line for the current
@@ -570,6 +698,13 @@ fn bottom_pos(session: &SessionView, vis: &[u64]) -> usize {
 /// keep the last `height` display rows so the bottom line sits at the bottom of
 /// the viewport. Exact wrap bounds by construction (we count the very rows we
 /// render — no word-wrap/scroll-offset mismatch).
+///
+/// A collapsed panic block's foldable body (`is_fold_collapsed`) collapses to
+/// exactly one synthetic `▶ n frames…` row — every retained abs index the
+/// block's body still contributes to `vis` is consumed in one pass rather
+/// than rendered individually. The second element of each returned pair is
+/// `Some(block_start)` for that synthetic row (the click target;
+/// [`render_log`] registers it), `None` for an ordinary line.
 fn display_window(
     session: &SessionView,
     vis: &[u64],
@@ -577,25 +712,49 @@ fn display_window(
     width: u16,
     height: u16,
     theme: &Theme,
-) -> Vec<Line<'static>> {
+) -> Vec<(Line<'static>, Option<u64>)> {
     if vis.is_empty() || width == 0 || height == 0 {
         return Vec::new();
     }
     let h = height as usize;
     let w = width as usize;
-    let mut rows: VecDeque<Line<'static>> = VecDeque::new();
+    let mut rows: VecDeque<(Line<'static>, Option<u64>)> = VecDeque::new();
     let mut pos = bottom_pos(session, vis) as isize;
     while pos >= 0 && rows.len() < h {
         let abs = vis[pos as usize];
-        let raw = session.log.get(abs).unwrap_or("");
-        let styled = ansi_line(raw, abs, session, theme);
+        if let Some(block) = session.panic_block_covering(abs)
+            && session.is_fold_collapsed(block.start)
+        {
+            let block_start = block.start;
+            let row = fold_row(block, theme);
+            let wrapped = if wrap {
+                hard_wrap(&row, w, PREFIX_WIDTH)
+            } else {
+                vec![row]
+            };
+            for l in wrapped.into_iter().rev() {
+                rows.push_front((l, Some(block_start)));
+            }
+            // Consume every remaining `vis` entry that still belongs to this
+            // same collapsed block's foldable body (contiguous in `vis`) —
+            // they're represented by the one synthetic row above.
+            while pos >= 0
+                && session
+                    .panic_block_covering(vis[pos as usize])
+                    .is_some_and(|b| b.start == block_start)
+            {
+                pos -= 1;
+            }
+            continue;
+        }
+        let styled = build_row(session, abs, theme);
         let wrapped = if wrap {
-            hard_wrap(&styled, w)
+            hard_wrap(&styled, w, PREFIX_WIDTH)
         } else {
             vec![styled]
         };
         for l in wrapped.into_iter().rev() {
-            rows.push_front(l);
+            rows.push_front((l, None));
         }
         pos -= 1;
     }
@@ -605,58 +764,178 @@ fn display_window(
     rows.into_iter().collect()
 }
 
-/// Parse one raw (possibly ANSI-colored) log line into an owned styled `Line`,
-/// applying a level colorize (only when the line carries no ANSI color of its
-/// own) and the selection-highlight background (absolute-index selection, so it
-/// tracks the same lines across incoming output).
-fn ansi_line(raw: &str, abs: u64, session: &SessionView, theme: &Theme) -> Line<'static> {
-    let text = raw
+/// The `▶ n frames…` fold affordance row for a collapsed panic block —
+/// clickable (mouse) and re-expandable via `z` (keyboard); see
+/// [`crate::engine::Message::ToggleFold`]/[`ToggleNearestFold`].
+///
+/// [`ToggleNearestFold`]: crate::engine::Message::ToggleNearestFold
+fn fold_row(block: &PanicBlock, theme: &Theme) -> Line<'static> {
+    let mut spans = blank_prefix();
+    spans.push(Span::styled(
+        format!("\u{25b6} {} frames\u{2026} ", block.frame_count),
+        Style::default().fg(theme.accent()),
+    ));
+    spans.push(Span::styled(
+        "(RUST_BACKTRACE=1) \u{2014} click or z to expand",
+        Style::default().fg(theme.muted()),
+    ));
+    Line::from(spans)
+}
+
+/// The badge/timestamp/source-tag prefix chrome for a line that shows it
+/// (workbook §B11's grammar: `badge · timestamp · source · message`).
+fn line_prefix(meta: &LineMeta, theme: &Theme) -> Vec<Span<'static>> {
+    let badge = meta
+        .level
+        .badge_char()
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| " ".to_string());
+    let badge_style = match meta.level {
+        LogLevel::Error => Style::default()
+            .fg(theme.error())
+            .add_modifier(Modifier::BOLD),
+        LogLevel::Warn => Style::default()
+            .fg(theme.warn())
+            .add_modifier(Modifier::BOLD),
+        LogLevel::Debug => Style::default().fg(theme.muted()),
+        LogLevel::Info => Style::default(),
+    };
+    vec![
+        Span::raw(" "),
+        Span::styled(badge, badge_style),
+        Span::raw(" "),
+        Span::styled(meta.timestamp.clone(), Style::default().fg(theme.muted())),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:<width$}", meta.source.tag(), width = SOURCE_TAG_WIDTH),
+            Style::default().fg(theme.muted()),
+        ),
+        Span::raw(" "),
+    ]
+}
+
+/// A blank prefix the same [`PREFIX_WIDTH`] as [`line_prefix`] — every
+/// non-first line of a panic block (and every wrapped continuation row, via
+/// [`hard_wrap`]'s `indent`) renders this instead of repeating the chrome, so
+/// the whole grouped entry reads as one timestamped unit (workbook §B11).
+fn blank_prefix() -> Vec<Span<'static>> {
+    vec![Span::raw(" ".repeat(PREFIX_WIDTH))]
+}
+
+/// The foreground color for a classified log level, or `None` for
+/// [`LogLevel::Info`] (the workbook's "plain `fg`, no tint" default).
+fn level_tint(level: LogLevel, theme: &Theme) -> Option<Color> {
+    match level {
+        LogLevel::Error => Some(theme.error()),
+        LogLevel::Warn => Some(theme.warn()),
+        LogLevel::Debug => Some(theme.muted()),
+        LogLevel::Info => None,
+    }
+}
+
+/// Parse one raw (possibly ANSI-colored) log line into an owned styled `Line`
+/// carrying its badge/timestamp/source prefix chrome ([`line_prefix`]), a
+/// level colorize (only when the line carries no ANSI color of its own — the
+/// existing ansi-passthrough rule, now sourced from the precomputed
+/// [`crate::engine::LineMeta`] rather than re-derived here), panic-block role
+/// styling (dim frame / dimmer frame-location — fdemon's dim-vs-highlighted
+/// distinction), and the selection-highlight background (absolute-index
+/// selection, so it tracks the same lines across incoming output).
+fn build_row(session: &SessionView, abs: u64, theme: &Theme) -> Line<'static> {
+    let raw = session.log.get(abs).unwrap_or("");
+    let meta = session.line_meta(abs);
+    let strip = meta.map_or(0, |m| m.source_prefix_strip);
+    let display_raw = raw.get(strip..).unwrap_or(raw);
+
+    let text = display_raw
         .into_text()
-        .unwrap_or_else(|_| Text::from(raw.to_string()));
+        .unwrap_or_else(|_| Text::from(display_raw.to_string()));
     // Flatten to a single line (our lines are newline-stripped upstream, but a
     // stray embedded newline is joined rather than dropped).
-    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut msg_spans: Vec<Span<'static>> = Vec::new();
     for (li, line) in text.lines.into_iter().enumerate() {
         if li > 0 {
-            spans.push(Span::raw(" "));
+            msg_spans.push(Span::raw(" "));
         }
-        spans.extend(line.spans);
+        msg_spans.extend(line.spans);
     }
-    let mut out = Line::from(spans);
+    let has_ansi_color = msg_spans.iter().any(|s| s.style.fg.is_some());
 
-    let has_ansi_color = out.spans.iter().any(|s| s.style.fg.is_some());
-    if !has_ansi_color && let Some(level) = detect_level(&crate::engine::strip_ansi(raw)) {
-        out.style = out.style.fg(level_color(level, theme));
-    }
+    let mut out_style = Style::default();
+    let prefix = if let Some(meta) = meta {
+        if !has_ansi_color && let Some(color) = level_tint(meta.level, theme) {
+            out_style = out_style.fg(color);
+        }
+        match meta.role {
+            LineRole::BacktraceHeader => {
+                msg_spans = vec![Span::styled(
+                    "\u{25be} stack backtrace:",
+                    Style::default().fg(theme.accent()),
+                )];
+            }
+            LineRole::Frame => {
+                out_style = Style::default().fg(theme.muted());
+            }
+            LineRole::FrameLocation => {
+                out_style = Style::default()
+                    .fg(theme.muted())
+                    .add_modifier(Modifier::DIM);
+            }
+            LineRole::Normal | LineRole::PanicHeader | LineRole::PanicMessage => {}
+        }
+        if meta.role.shows_prefix_chrome() {
+            line_prefix(meta, theme)
+        } else {
+            blank_prefix()
+        }
+    } else {
+        blank_prefix()
+    };
+
+    let mut spans = prefix;
+    spans.extend(msg_spans);
+    let mut out = Line::from(spans);
+    out.style = out_style;
+
     if session.selection.is_some_and(|s| s.contains(abs)) {
         out.style = out.style.bg(theme.overlay());
     }
     out
 }
 
-/// The foreground color for a detected log level.
-fn level_color(level: crate::engine::LogLevel, theme: &Theme) -> Color {
-    match level {
-        crate::engine::LogLevel::Error => theme.error(),
-        crate::engine::LogLevel::Warn => theme.warn(),
-    }
-}
-
 /// Hard-wrap a styled line to at most `width` columns per row, splitting spans
 /// (and carrying the line-level style onto every wrapped row). Column width is
 /// approximated as one column per char — exact for the ASCII-dominant log
-/// output the view renders; a wide-char line simply wraps a touch early.
-fn hard_wrap(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
+/// output the view renders; a wide-char line simply wraps a touch early. Every
+/// row after the first indents `indent` columns (workbook §B11: a wrapped
+/// continuation lines up under the message column, not column 0) instead of
+/// repeating the first row's prefix chrome.
+fn hard_wrap(line: &Line<'static>, width: usize, indent: usize) -> Vec<Line<'static>> {
     if width == 0 {
         return vec![line.clone()];
     }
+    let indent = indent.min(width.saturating_sub(1));
     let mut rows: Vec<Line<'static>> = Vec::new();
     let mut cur: Vec<Span<'static>> = Vec::new();
     let mut col = 0usize;
-    let flush = |rows: &mut Vec<Line<'static>>, cur: &mut Vec<Span<'static>>, style: Style| {
-        let mut l = Line::from(std::mem::take(cur));
-        l.style = style;
-        rows.push(l);
+    let mut first_row = true;
+    let flush =
+        |rows: &mut Vec<Line<'static>>, cur: &mut Vec<Span<'static>>, style: Style, first: bool| {
+            let mut spans = Vec::new();
+            if !first && indent > 0 {
+                spans.push(Span::raw(" ".repeat(indent)));
+            }
+            spans.extend(std::mem::take(cur));
+            let mut l = Line::from(spans);
+            l.style = style;
+            rows.push(l);
+        };
+    let row_budget = |first: bool| {
+        if first {
+            width
+        } else {
+            width.saturating_sub(indent).max(1)
+        }
     };
     for span in &line.spans {
         let style = span.style;
@@ -664,9 +943,10 @@ fn hard_wrap(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
         for ch in span.content.chars() {
             buf.push(ch);
             col += 1;
-            if col >= width {
+            if col >= row_budget(first_row) {
                 cur.push(Span::styled(std::mem::take(&mut buf), style));
-                flush(&mut rows, &mut cur, line.style);
+                flush(&mut rows, &mut cur, line.style, first_row);
+                first_row = false;
                 col = 0;
             }
         }
@@ -675,7 +955,7 @@ fn hard_wrap(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
         }
     }
     if !cur.is_empty() || rows.is_empty() {
-        flush(&mut rows, &mut cur, line.style);
+        flush(&mut rows, &mut cur, line.style, first_row);
     }
     rows
 }
@@ -683,7 +963,7 @@ fn hard_wrap(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::LineSelection;
+    use crate::engine::{LineSelection, LogSource};
     use crate::supervise::SessionId;
     use std::path::PathBuf;
 
@@ -691,22 +971,35 @@ mod tests {
         Theme::frust_dark_at(crate::ui::theme::ColorDepth::TrueColor)
     }
 
+    /// A session seeded with `n` plain lines, each pushed with a
+    /// deterministic synthetic timestamp (`push_line_at`) rather than the
+    /// real wall clock — every render-level test below asserts on exact row
+    /// text, which must never depend on the moment the test happened to run.
     fn session(n: u64) -> SessionView {
         let mut s = SessionView::new(SessionId(0), PathBuf::from("/tmp/app"), "desktop");
         for i in 0..n {
-            s.push_line(format!("line {i}"));
+            s.push_line_at(format!("line {i}"), format!("12:00:{:02}", i % 60));
         }
         s
+    }
+
+    /// A row's full rendered text (prefix chrome + message), concatenating
+    /// every span's content.
+    fn row_text(l: &Line<'static>) -> String {
+        l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// A row's message text only — the fixed-width badge/timestamp/source
+    /// prefix chrome ([`PREFIX_WIDTH`]) stripped off.
+    fn msg_only(l: &Line<'static>) -> String {
+        row_text(l).chars().skip(PREFIX_WIDTH).collect()
     }
 
     #[test]
     fn hard_wrap_splits_at_width_and_preserves_text() {
         let line = Line::from("abcdefghij".to_string());
-        let rows = hard_wrap(&line, 4);
-        let joined: Vec<String> = rows
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-            .collect();
+        let rows = hard_wrap(&line, 4, 0);
+        let joined: Vec<String> = rows.iter().map(row_text).collect();
         assert_eq!(joined, vec!["abcd", "efgh", "ij"]);
     }
 
@@ -714,21 +1007,28 @@ mod tests {
     fn hard_wrap_carries_line_style_onto_every_row() {
         let mut line = Line::from("abcdef".to_string());
         line.style = Style::default().fg(Color::Red);
-        let rows = hard_wrap(&line, 3);
+        let rows = hard_wrap(&line, 3, 0);
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|r| r.style.fg == Some(Color::Red)));
+    }
+
+    #[test]
+    fn hard_wrap_indents_continuation_rows_under_the_message_column() {
+        let line = Line::from("abcdefghij".to_string());
+        let rows = hard_wrap(&line, 6, 3);
+        let joined: Vec<String> = rows.iter().map(row_text).collect();
+        // First row: full 6-col budget ("abcdef"). Continuation rows: 3 cols
+        // of indent + a (6-3)=3-col message budget each.
+        assert_eq!(joined, vec!["abcdef", "   ghi", "   j"]);
     }
 
     #[test]
     fn follow_window_shows_the_last_height_lines() {
         let s = session(20);
         let vis = visible_indices(&s, None);
-        let rows = display_window(&s, &vis, false, 40, 5, &theme());
+        let rows = display_window(&s, &vis, false, 60, 5, &theme());
         assert_eq!(rows.len(), 5);
-        let texts: Vec<String> = rows
-            .iter()
-            .map(|l| l.spans.iter().map(|x| x.content.as_ref()).collect())
-            .collect();
+        let texts: Vec<String> = rows.iter().map(|(l, _)| msg_only(l)).collect();
         assert_eq!(
             texts,
             vec!["line 15", "line 16", "line 17", "line 18", "line 19"]
@@ -740,22 +1040,31 @@ mod tests {
         let mut s = session(20);
         s.scroll = Scroll::Anchored(9); // line 9 at the bottom
         let vis = visible_indices(&s, None);
-        let rows = display_window(&s, &vis, false, 40, 3, &theme());
-        let texts: Vec<String> = rows
-            .iter()
-            .map(|l| l.spans.iter().map(|x| x.content.as_ref()).collect())
-            .collect();
+        let rows = display_window(&s, &vis, false, 60, 3, &theme());
+        let texts: Vec<String> = rows.iter().map(|(l, _)| msg_only(l)).collect();
         assert_eq!(texts, vec!["line 7", "line 8", "line 9"]);
     }
 
     #[test]
     fn filter_restricts_visible_indices() {
         let mut s = SessionView::new(SessionId(0), PathBuf::from("/tmp/a"), "desktop");
-        s.push_line("hello world".into());
-        s.push_line("ERROR boom".into());
-        s.push_line("hello again".into());
+        s.push_line_at("hello world".into(), "00:00:00");
+        s.push_line_at("ERROR boom".into(), "00:00:01");
+        s.push_line_at("hello again".into(), "00:00:02");
         let vis = visible_indices(&s, Some("hello"));
         assert_eq!(vis, vec![0, 2]);
+    }
+
+    #[test]
+    fn level_filter_restricts_visible_indices() {
+        let mut s = SessionView::new(SessionId(0), PathBuf::from("/tmp/a"), "desktop");
+        s.push_line_at("plain".into(), "00:00:00"); // Info
+        s.push_line_at("warning: careful".into(), "00:00:01"); // Warn
+        s.push_line_at("error: boom".into(), "00:00:02"); // Error
+        s.set_level_filter(LevelFilter::WarnPlus);
+        assert_eq!(visible_indices(&s, None), vec![1, 2]);
+        s.set_level_filter(LevelFilter::ErrorOnly);
+        assert_eq!(visible_indices(&s, None), vec![2]);
     }
 
     #[test]
@@ -766,11 +1075,90 @@ mod tests {
             cursor: 2,
         });
         let vis = visible_indices(&s, None);
-        let rows = display_window(&s, &vis, false, 40, 5, &theme());
+        let rows = display_window(&s, &vis, false, 60, 5, &theme());
         // rows: line0..line4; lines 1 and 2 carry the overlay bg.
-        assert!(rows[0].style.bg.is_none());
-        assert!(rows[1].style.bg.is_some());
-        assert!(rows[2].style.bg.is_some());
-        assert!(rows[3].style.bg.is_none());
+        assert!(rows[0].0.style.bg.is_none());
+        assert!(rows[1].0.style.bg.is_some());
+        assert!(rows[2].0.style.bg.is_some());
+        assert!(rows[3].0.style.bg.is_none());
+    }
+
+    // ── Log styling: levels/sources render, panic-block folding ────────────
+
+    #[test]
+    fn each_level_gets_its_badge_and_a_no_ansi_message_tint() {
+        let mut s = SessionView::new(SessionId(0), PathBuf::from("/tmp/a"), "desktop");
+        s.push_line_at("error: boom".into(), "00:00:00");
+        s.push_line_at("warning: careful".into(), "00:00:01");
+        s.push_line_at("plain info".into(), "00:00:02");
+        let t = theme();
+        let vis = visible_indices(&s, None);
+        let rows = display_window(&s, &vis, false, 60, 3, &t);
+        assert_eq!(rows[0].0.style.fg, Some(t.error()));
+        assert!(row_text(&rows[0].0).starts_with(" E "));
+        assert_eq!(rows[1].0.style.fg, Some(t.warn()));
+        assert!(row_text(&rows[1].0).starts_with(" W "));
+        assert_eq!(rows[2].0.style.fg, None); // info: plain, no tint
+        assert!(row_text(&rows[2].0).starts_with("   ")); // blank badge column
+    }
+
+    #[test]
+    fn gradle_source_tag_renders_and_strips_the_raw_marker() {
+        let mut s = SessionView::new(SessionId(0), PathBuf::from("/tmp/a"), "desktop");
+        s.push_line_at("[gradle] BUILD SUCCESSFUL".into(), "00:00:00");
+        let vis = visible_indices(&s, None);
+        let rows = display_window(&s, &vis, false, 60, 1, &theme());
+        let text = row_text(&rows[0].0);
+        assert!(text.trim_end().ends_with("BUILD SUCCESSFUL"));
+        // The tag renders exactly once — the drive pipeline's raw `"[gradle]
+        // "` marker was stripped before ANSI-parsing the message, so it
+        // never doubles up with our own rendered source-tag chrome.
+        assert_eq!(text.matches(LogSource::Gradle.tag()).count(), 1);
+    }
+
+    fn panic_lines() -> Vec<&'static str> {
+        vec![
+            "thread 'main' panicked at src/main.rs:42:9:",
+            "called `Option::unwrap()` on a `None` value",
+            "stack backtrace:",
+            "   0: my_app::state::reduce",
+            "             at src/state.rs:88:13",
+            "app: recovering",
+        ]
+    }
+
+    #[test]
+    fn a_collapsed_panic_block_renders_as_one_fold_row() {
+        let mut s = SessionView::new(SessionId(0), PathBuf::from("/tmp/a"), "desktop");
+        for (i, l) in panic_lines().into_iter().enumerate() {
+            s.push_line_at(l.to_string(), format!("00:00:{i:02}"));
+        }
+        let vis = visible_indices(&s, None);
+        let rows = display_window(&s, &vis, false, 60, 10, &theme());
+        // header + message + one fold row + the trailing "app: recovering"
+        // line — the backtrace header/frame/location lines are absorbed.
+        assert_eq!(rows.len(), 4);
+        assert!(row_text(&rows[0].0).contains("panicked at"));
+        assert!(row_text(&rows[1].0).contains("Option::unwrap"));
+        assert_eq!(rows[2].1, Some(0)); // the fold row's click target
+        assert!(row_text(&rows[2].0).contains("1 frames"));
+        assert!(row_text(&rows[3].0).contains("app: recovering"));
+    }
+
+    #[test]
+    fn an_expanded_panic_block_renders_every_frame_line() {
+        let mut s = SessionView::new(SessionId(0), PathBuf::from("/tmp/a"), "desktop");
+        for (i, l) in panic_lines().into_iter().enumerate() {
+            s.push_line_at(l.to_string(), format!("00:00:{i:02}"));
+        }
+        s.toggle_fold(0);
+        let vis = visible_indices(&s, None);
+        let rows = display_window(&s, &vis, false, 60, 10, &theme());
+        // header + message + backtrace-header + frame + location + trailer.
+        assert_eq!(rows.len(), 6);
+        assert!(row_text(&rows[2].0).contains("stack backtrace:"));
+        assert!(row_text(&rows[3].0).contains("my_app::state::reduce"));
+        assert!(row_text(&rows[4].0).contains("at src/state.rs"));
+        assert!(rows.iter().all(|(_, fold)| fold.is_none()));
     }
 }

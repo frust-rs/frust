@@ -168,6 +168,20 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             has_session,
             "no active session",
         ),
+        gated(
+            "Cycle log level filter",
+            "l",
+            Message::CycleLevelFilter(1),
+            has_session,
+            "no active session",
+        ),
+        gated(
+            "Toggle nearest backtrace fold",
+            "z",
+            Message::ToggleNearestFold,
+            has_session,
+            "no active session",
+        ),
         always("Quit", "q", Message::Quit),
     ]
 }

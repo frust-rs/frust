@@ -15,8 +15,9 @@ use frust_drive::doctor::{Area, Component, ComponentStatus, DoctorReport, FixCom
 use frust_drive::plugin::{AddItem, AddOutcome, AddReport};
 use frust_tui::engine::{
     AddPluginDialog, AddPluginStep, AppState, BootstrapState, BootstrapWizard, BuildLauncher,
-    ContextTarget, CreateWizard, DeviceRow, DoctorCheck, DoctorState, Message, Palette, RegionId,
-    RunConfig, RunFocus, Screen, Scroll, SessionView, ToastKind, WizardStep, update,
+    ContextTarget, CreateWizard, DeviceRow, DoctorCheck, DoctorState, LevelFilter, Message,
+    Palette, RegionId, RunConfig, RunFocus, Screen, Scroll, SessionView, ToastKind, WizardStep,
+    update,
 };
 use frust_tui::supervise::{SessionEvent, SessionEventKind, SessionId, SessionState};
 use frust_tui::ui::mouse::{MouseCtx, MouseRegions};
@@ -35,6 +36,37 @@ fn render_to_string(w: u16, h: u16, state: &AppState) -> String {
         })
         .expect("draw");
     buffer_to_string(terminal.backend().buffer())
+}
+
+/// Blank out every `HH:MM:SS`-shaped substring in `s` — the log view's
+/// per-line timestamp column is stamped from the real wall clock
+/// ([`frust_tui::engine::logstyle::now_hms`]) when a test goes through the
+/// real [`SessionView::push_line`]/[`update`] path rather than the
+/// deterministic [`SessionView::push_line_at`] seam, so a snapshot exercising
+/// that path must redact it to stay reproducible across runs/days.
+fn redact_clock(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let looks_like_clock = i + 8 <= chars.len()
+            && chars[i].is_ascii_digit()
+            && chars[i + 1].is_ascii_digit()
+            && chars[i + 2] == ':'
+            && chars[i + 3].is_ascii_digit()
+            && chars[i + 4].is_ascii_digit()
+            && chars[i + 5] == ':'
+            && chars[i + 6].is_ascii_digit()
+            && chars[i + 7].is_ascii_digit();
+        if looks_like_clock {
+            out.push_str("--:--:--");
+            i += 8;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Dump a buffer as a newline-separated grid of cell symbols (version-stable,
@@ -135,12 +167,16 @@ fn too_small_terminal_40x10() {
 
 // ── Session workspace (tab bar + log view) ──────────────────────────────────
 
-/// A session on `project`/`target`, seeded with `lines`, in `state`.
+/// A session on `project`/`target`, seeded with `lines`, in `state`. Each
+/// line is pushed with a deterministic synthetic timestamp
+/// (`push_line_at`, never the real wall clock via `push_line`) — the log
+/// view now renders a timestamp column on every line (workbook §B11), and a
+/// snapshot must never depend on the moment the test happened to run.
 fn session(id: u64, project: &str, target: &str, s: SessionState, lines: &[&str]) -> SessionView {
     let mut sv = SessionView::new(SessionId(id), PathBuf::from(project), target);
     sv.state = s;
-    for l in lines {
-        sv.push_line((*l).to_string());
+    for (i, l) in lines.iter().enumerate() {
+        sv.push_line_at((*l).to_string(), format!("12:00:{:02}", i % 60));
     }
     sv
 }
@@ -218,7 +254,11 @@ fn registered_session_tracks_tail_through_update_100x30() {
         state.active_session().unwrap().is_following(),
         "a never-scrolled session stays in Follow through incoming lines"
     );
-    insta::assert_snapshot!(render_to_string(100, 30, &state));
+    // This test goes through the real `update()`/`push_line` path (the real
+    // wall clock), unlike every other session snapshot's `session()` helper
+    // — redact the per-line timestamp column so the snapshot stays
+    // reproducible across runs/days.
+    insta::assert_snapshot!(redact_clock(&render_to_string(100, 30, &state)));
 }
 
 #[test]
@@ -570,7 +610,10 @@ fn built_session_state() -> AppState {
         SessionState::Exited(true),
         &["Building `it.f0x.huddle`…"],
     );
-    sess.push_line("Built: /tmp/huddle/android/app/build/outputs/apk/release/app.apk".to_string());
+    sess.push_line_at(
+        "Built: /tmp/huddle/android/app/build/outputs/apk/release/app.apk".to_string(),
+        "12:00:01",
+    );
     AppState {
         screen: Screen::Workbench,
         project_root: Some(PathBuf::from(root)),
@@ -858,19 +901,26 @@ fn session_perf_panel_100x30() {
         SessionState::Running,
         &["app: booting up"],
     );
-    sess.push_line("frust-perf startup app_created=2ms first_frame_presented=45ms".to_string());
+    sess.push_line_at(
+        "frust-perf startup app_created=2ms first_frame_presented=45ms".to_string(),
+        "12:00:01",
+    );
     for i in 0..40 {
-        sess.push_line(format!(
-            "frust-perf raw n={i} total_us={} rebuild_us=200 layout_us=300 paint_us=400 \
-             encode_us=500 present_us=600 skipped=0",
-            2000 + i * 37 % 4000
-        ));
+        sess.push_line_at(
+            format!(
+                "frust-perf raw n={i} total_us={} rebuild_us=200 layout_us=300 paint_us=400 \
+                 encode_us=500 present_us=600 skipped=0",
+                2000 + i * 37 % 4000
+            ),
+            format!("12:00:{:02}", (i + 2) % 60),
+        );
     }
-    sess.push_line(
+    sess.push_line_at(
         "frust-perf frame n=40 total_p50_ms=8 total_p95_ms=14 total_p99_ms=22 \
          rebuild_p95_ms=1 layout_p95_ms=2 paint_p95_ms=2 encode_p95_ms=3 present_p95_ms=2 \
          over_60hz=1 over_120hz=5 skipped=0 total_frames=40"
             .to_string(),
+        "12:00:42",
     );
     sess.perf.toggle();
     let state = AppState {
@@ -891,10 +941,11 @@ fn session_perf_panel_100x30() {
 fn session_perf_data_present_but_panel_closed_100x30() {
     let root = "/tmp/huddle";
     let mut sess = session(0, root, "desktop", SessionState::Running, &[]);
-    sess.push_line(
+    sess.push_line_at(
         "frust-perf frame n=1 total_p50_ms=8 total_p95_ms=14 total_p99_ms=22 skipped=0 \
          total_frames=1"
             .to_string(),
+        "12:00:01",
     );
     let state = AppState {
         screen: Screen::Workbench,
@@ -946,4 +997,113 @@ fn session_log_scrollbar_thumb_100x30() {
         ..Default::default()
     };
     insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+// ── Log styling: levels/sources/timestamps, backtrace folding, level filter
+// (workbook §B11) ─────────────────────────────────────────────────────────
+
+/// One line per level (error/warn/info/debug) crossed with a source
+/// (cargo/rustc, Gradle, logcat, `frust-perf`, plain app output) — the
+/// badge/timestamp/source-tag prefix grammar and the ANSI-passthrough rule
+/// (the last line carries its own ANSI color and must render in *that*
+/// color, untouched by the level tint).
+fn log_styling_state() -> AppState {
+    let root = "/tmp/huddle";
+    let mut sess = SessionView::new(SessionId(0), PathBuf::from(root), "desktop");
+    let lines: &[(&str, &str)] = &[
+        (
+            "12:04:22",
+            "[gradle] FAILURE: Build failed with an exception.",
+        ),
+        (
+            "12:04:24",
+            "E/ActivityThread( 1234): Failed to find provider info",
+        ),
+        ("12:04:25", "Session ready, listening on :5037"),
+        (
+            "12:04:26",
+            "2026-08-09T12:04:26Z DEBUG frust_tui: poll: 0 pending signals",
+        ),
+        (
+            "12:04:27",
+            "frust-perf raw n=1 total_us=100 rebuild_us=10 layout_us=10 paint_us=10 \
+             encode_us=10 present_us=10 skipped=0",
+        ),
+        (
+            "12:04:28",
+            "\u{1b}[36mconnected\u{1b}[0m to ws://127.0.0.1:9229",
+        ),
+    ];
+    for (ts, l) in lines {
+        sess.push_line_at((*l).to_string(), (*ts).to_string());
+    }
+    AppState {
+        screen: Screen::Workbench,
+        project_root: Some(PathBuf::from(root)),
+        projects: vec![PathBuf::from(root)],
+        sessions: vec![sess],
+        active_session: Some(0),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn log_styling_all_levels_and_sources_100x30() {
+    insta::assert_snapshot!(render_to_string(100, 30, &log_styling_state()));
+}
+
+/// A session with a Rust panic + backtrace, seeded with the exact shape
+/// `RUST_BACKTRACE=1` produces. The block starts folded by default (`start`
+/// == absolute index `0`, the panic-header line).
+fn panic_backtrace_state() -> AppState {
+    let root = "/tmp/huddle";
+    let mut sess = SessionView::new(SessionId(0), PathBuf::from(root), "desktop");
+    let lines: &[(&str, &str)] = &[
+        ("12:05:02", "thread 'main' panicked at src/main.rs:42:9:"),
+        ("12:05:02", "called `Option::unwrap()` on a `None` value"),
+        ("12:05:02", "stack backtrace:"),
+        ("12:05:02", "   0: my_app::state::reduce"),
+        ("12:05:02", "             at src/state.rs:88:13"),
+        ("12:05:02", "   1: my_app::widget::on_tap"),
+        ("12:05:02", "             at src/widget.rs:206:21"),
+        ("12:05:03", "app: recovering"),
+    ];
+    for (ts, l) in lines {
+        sess.push_line_at((*l).to_string(), (*ts).to_string());
+    }
+    AppState {
+        screen: Screen::Workbench,
+        project_root: Some(PathBuf::from(root)),
+        projects: vec![PathBuf::from(root)],
+        sessions: vec![sess],
+        active_session: Some(0),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn log_styling_panic_backtrace_folded_100x30() {
+    insta::assert_snapshot!(render_to_string(100, 30, &panic_backtrace_state()));
+}
+
+#[test]
+fn log_styling_panic_backtrace_expanded_100x30() {
+    let mut state = panic_backtrace_state();
+    // The block's id is the panic-header line's absolute index (`0`) — the
+    // same key a fold-row click (`Message::ToggleFold`) or `z`
+    // (`Message::ToggleNearestFold`) would toggle.
+    state.sessions[0].toggle_fold(0);
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+/// The level-filter chip active at `warn+`: info lines are hidden, the
+/// active segment is accent-filled, and the hidden count shows beside it.
+/// Wide enough (180 cols) for the chip to fit beside the right-aligned
+/// keyhint — see `render_log_status`'s fit guard (the same one the
+/// built-artifacts segment uses).
+#[test]
+fn log_styling_level_filter_active_180x30() {
+    let mut state = log_styling_state();
+    state.sessions[0].set_level_filter(LevelFilter::WarnPlus);
+    insta::assert_snapshot!(render_to_string(180, 30, &state));
 }

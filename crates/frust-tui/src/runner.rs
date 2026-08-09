@@ -986,6 +986,14 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         KeyCode::Char('/') if has_active_session => vec![Message::SearchOpen],
         KeyCode::Char('f') if has_active_session => vec![Message::ToggleFollow],
         KeyCode::Char('w') if has_active_session => vec![Message::ToggleWrap],
+        // `l`/`L` cycle the log status bar's level-filter chip forward/back
+        // (workbook §B11 proposed `f`/`Shift+f`, but `f` is already
+        // `ToggleFollow` — `l`/`L` is the free key chosen instead); `z`
+        // toggles the nearest panic/backtrace block's fold state (mouse
+        // parity: a click on its `▶ n frames…` row).
+        KeyCode::Char('l') if has_active_session => vec![Message::CycleLevelFilter(1)],
+        KeyCode::Char('L') if has_active_session => vec![Message::CycleLevelFilter(-1)],
+        KeyCode::Char('z') if has_active_session => vec![Message::ToggleNearestFold],
         KeyCode::Char('v') if has_active_session => vec![Message::SelectionBegin],
         KeyCode::Char('y') if has_active_session => vec![Message::CopySelection],
         KeyCode::Up if has_active_session && shift => vec![Message::SelectionExtendUp(1)],

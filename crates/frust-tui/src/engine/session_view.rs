@@ -11,6 +11,10 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
+use super::logstyle::{
+    LevelFilter, LineMeta, LogLevel, PanicBlock, PanicTracker, classify_level, classify_source,
+    now_hms,
+};
 use super::perf::PerfPanel;
 use crate::supervise::{SessionId, SessionState};
 
@@ -31,17 +35,25 @@ pub const LOG_LINE_CAP: usize = 10_000;
 #[derive(Debug, Clone, Default)]
 pub struct LogBuffer {
     lines: VecDeque<String>,
+    /// Per-line classification metadata (level/source/timestamp/panic-role),
+    /// kept in lockstep with `lines` — same push/evict cycle, same absolute
+    /// indexing — so a render pass never re-derives what was already
+    /// computed once at [`SessionView::push_line`].
+    meta: VecDeque<LineMeta>,
     /// Absolute index of `lines.front()` — advances by one each time the cap
     /// evicts the oldest line.
     base: u64,
 }
 
 impl LogBuffer {
-    /// Append one line, evicting the oldest if the cap is exceeded.
-    pub fn push(&mut self, line: String) {
+    /// Append one line + its precomputed metadata, evicting the oldest pair
+    /// if the cap is exceeded.
+    pub fn push(&mut self, line: String, meta: LineMeta) {
         self.lines.push_back(line);
+        self.meta.push_back(meta);
         if self.lines.len() > LOG_LINE_CAP {
             self.lines.pop_front();
+            self.meta.pop_front();
             self.base += 1;
         }
     }
@@ -72,6 +84,13 @@ impl LogBuffer {
         abs.checked_sub(self.base)
             .and_then(|rel| self.lines.get(rel as usize))
             .map(String::as_str)
+    }
+
+    /// The precomputed metadata for the line at absolute index `abs`, if it
+    /// is still retained.
+    pub fn meta(&self, abs: u64) -> Option<&LineMeta> {
+        abs.checked_sub(self.base)
+            .and_then(|rel| self.meta.get(rel as usize))
     }
 
     /// Iterate `(absolute index, line)` from oldest to newest retained.
@@ -128,30 +147,6 @@ impl LineSelection {
     /// Whether absolute line `idx` falls inside the selection.
     pub fn contains(&self, idx: u64) -> bool {
         idx >= self.lo() && idx <= self.hi()
-    }
-}
-
-/// A detected log level, used only to colorize a line that carries no explicit
-/// ANSI color of its own (see [`crate::ui`]'s log view).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LogLevel {
-    /// An error / panic / failure line.
-    Error,
-    /// A warning line.
-    Warn,
-}
-
-/// Heuristically classify a (already ANSI-stripped) line's level, or `None` for
-/// an ordinary line. Deliberately simple — a substring probe, not a parser — so
-/// it never misfires into a wedge; the colorize is a hint, not semantics.
-pub fn detect_level(plain: &str) -> Option<LogLevel> {
-    let l = plain.to_lowercase();
-    if l.contains("error") || l.contains("panic") || l.contains("[e]") {
-        Some(LogLevel::Error)
-    } else if l.contains("warning") || l.contains("warn") || l.contains("[w]") {
-        Some(LogLevel::Warn)
-    } else {
-        None
     }
 }
 
@@ -214,6 +209,12 @@ pub struct SessionView {
     /// The parsed `frust-perf` sparkline/stats panel for this session —
     /// fed one line at a time from [`Self::push_line`].
     pub perf: PerfPanel,
+    /// The active minimum-level cutoff for this session's log view
+    /// (workbook §B11's filter chip) — `All` by default (zero-noise).
+    pub level_filter: LevelFilter,
+    /// The Rust panic/backtrace fold-block state machine + block list for
+    /// this session, fed one line at a time from [`Self::push_line`].
+    panic_tracker: PanicTracker,
 }
 
 impl SessionView {
@@ -229,6 +230,8 @@ impl SessionView {
             selection: None,
             dropped: 0,
             perf: PerfPanel::default(),
+            level_filter: LevelFilter::default(),
+            panic_tracker: PanicTracker::default(),
         }
     }
 
@@ -243,11 +246,41 @@ impl SessionView {
     /// Push one incoming log line, then clamp the scroll anchor and selection
     /// up to the (possibly advanced) oldest retained line so neither ever
     /// points below the buffer. A non-evicted anchor/selection is left exactly
-    /// where it was — the "survives incoming lines" invariant.
+    /// where it was — the "survives incoming lines" invariant. The line's
+    /// level/source/panic-role are classified once here (never at render —
+    /// see [`crate::engine::logstyle`]) against the real wall clock
+    /// ([`now_hms`]); see [`Self::push_line_at`] for a deterministic variant.
     pub fn push_line(&mut self, line: String) {
-        self.perf.ingest(&strip_ansi(&line));
-        self.log.push(line);
+        self.push_line_at(line, now_hms());
+    }
+
+    /// [`Self::push_line`] with an explicit `timestamp` instead of the real
+    /// wall clock — the primitive `push_line` delegates to, and the seam
+    /// tests (and snapshot fixtures) use for reproducible output.
+    pub fn push_line_at(&mut self, line: String, timestamp: impl Into<String>) {
+        let plain = strip_ansi(&line);
+        self.perf.ingest(&plain);
+        let abs = self.log.end_index();
+        let role = self.panic_tracker.feed(abs, &plain);
+        let (source, source_prefix_strip) = classify_source(&plain);
+        // A panic/backtrace-block line is always error-severity regardless of
+        // its own text — the level filter treats the whole block as one unit
+        // (see `logstyle::LineRole::is_panic_related`).
+        let level = if role.is_panic_related() {
+            LogLevel::Error
+        } else {
+            classify_level(&plain)
+        };
+        let meta = LineMeta {
+            level,
+            source,
+            timestamp: timestamp.into(),
+            role,
+            source_prefix_strip,
+        };
+        self.log.push(line, meta);
         let base = self.log.base_index();
+        self.panic_tracker.evict_before(base);
         if let Scroll::Anchored(b) = self.scroll
             && b < base
         {
@@ -263,6 +296,72 @@ impl SessionView {
                 });
             }
         }
+    }
+
+    /// The precomputed metadata for the line at absolute index `abs`, if
+    /// still retained.
+    pub fn line_meta(&self, abs: u64) -> Option<&LineMeta> {
+        self.log.meta(abs)
+    }
+
+    /// The panic block (if any) whose foldable body contains `abs`.
+    pub fn panic_block_covering(&self, abs: u64) -> Option<&PanicBlock> {
+        self.panic_tracker.block_covering(abs)
+    }
+
+    /// Whether the panic block starting at absolute index `block_start` is
+    /// currently collapsed.
+    pub fn is_fold_collapsed(&self, block_start: u64) -> bool {
+        self.panic_tracker.is_collapsed(block_start)
+    }
+
+    /// Toggle the fold state of the panic block starting at `block_start`
+    /// (mouse click on its `▶ n frames…` affordance row). A no-op — but
+    /// still returns `false` — on a stale/unknown id.
+    pub fn toggle_fold(&mut self, block_start: u64) -> bool {
+        self.panic_tracker.toggle(block_start)
+    }
+
+    /// Toggle the fold state of whichever panic block is nearest the current
+    /// scroll position (`z` — no mouse target under the cursor to aim at).
+    /// The "cursor" is the selection cursor when a selection is active, else
+    /// the bottom-of-viewport line (the tail when following). Returns the
+    /// toggled block's id, if any block exists yet.
+    pub fn toggle_nearest_fold(&mut self) -> Option<u64> {
+        let near = self
+            .selection
+            .map(|s| s.cursor)
+            .unwrap_or_else(|| match self.scroll {
+                Scroll::Follow => self.log.end_index().saturating_sub(1),
+                Scroll::Anchored(b) => b,
+            });
+        self.panic_tracker.toggle_nearest(near)
+    }
+
+    /// Step the level filter `delta` positions (`l`/`L`).
+    pub fn cycle_level_filter(&mut self, delta: isize) {
+        self.level_filter = self.level_filter.cycle(delta);
+    }
+
+    /// Jump the level filter directly to `filter` (a filter-chip segment
+    /// click).
+    pub fn set_level_filter(&mut self, filter: LevelFilter) {
+        self.level_filter = filter;
+    }
+
+    /// The effective level a `filter` cutoff should test for the line at
+    /// `abs` — `None` for an evicted/unknown line (never filtered out by a
+    /// missing classification; the caller's `vis` list already only holds
+    /// retained indices).
+    pub fn effective_level(&self, abs: u64) -> Option<LogLevel> {
+        self.log.meta(abs).map(|m| m.level)
+    }
+
+    /// Whether any panic/backtrace block has been detected yet — the
+    /// zero-noise gate for the log status row's `z` fold keyhint (mirrors
+    /// `PerfPanel::has_data`'s pattern for the `t` perf keyhint).
+    pub fn has_panic_blocks(&self) -> bool {
+        !self.panic_tracker.blocks().is_empty()
     }
 
     /// Whether the view is currently following the tail.
@@ -431,17 +530,28 @@ pub fn line_matches(line: &str, query: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::logstyle::{LineRole, LogSource};
     use super::*;
 
     fn sess() -> SessionView {
         SessionView::new(SessionId(0), PathBuf::from("/tmp/app"), "desktop")
     }
 
+    fn meta() -> LineMeta {
+        LineMeta {
+            level: LogLevel::Info,
+            source: LogSource::App,
+            timestamp: "00:00:00".to_string(),
+            role: LineRole::Normal,
+            source_prefix_strip: 0,
+        }
+    }
+
     #[test]
     fn ring_evicts_oldest_and_advances_base() {
         let mut buf = LogBuffer::default();
         for i in 0..(LOG_LINE_CAP as u64 + 3) {
-            buf.push(format!("line {i}"));
+            buf.push(format!("line {i}"), meta());
         }
         assert_eq!(buf.len(), LOG_LINE_CAP);
         assert_eq!(buf.base_index(), 3);
@@ -584,15 +694,123 @@ mod tests {
         );
     }
 
+    // ── Log-styling: classification wiring, folds, level filter ────────────
+
     #[test]
-    fn detect_level_classifies_common_lines() {
-        assert_eq!(
-            detect_level("thread panicked at ..."),
-            Some(LogLevel::Error)
-        );
-        assert_eq!(detect_level("error: cannot find"), Some(LogLevel::Error));
-        assert_eq!(detect_level("warning: unused import"), Some(LogLevel::Warn));
-        assert_eq!(detect_level("Compiling app v0.1.0"), None);
+    fn push_line_classifies_level_and_source_once() {
+        let mut s = sess();
+        s.push_line("warning: unused import".to_string());
+        s.push_line("[gradle] BUILD SUCCESSFUL".to_string());
+        assert_eq!(s.line_meta(0).unwrap().level, LogLevel::Warn);
+        assert_eq!(s.line_meta(1).unwrap().source, LogSource::Gradle);
+    }
+
+    fn panic_lines() -> Vec<&'static str> {
+        vec![
+            "thread 'main' panicked at src/main.rs:42:9:",
+            "called `Option::unwrap()` on a `None` value",
+            "stack backtrace:",
+            "   0: my_app::state::reduce",
+            "             at src/state.rs:88:13",
+            "app: recovering",
+        ]
+    }
+
+    #[test]
+    fn a_panic_backtrace_collapses_by_default_and_toggles_via_key_and_click() {
+        let mut s = sess();
+        for l in panic_lines() {
+            s.push_line(l.to_string());
+        }
+        // The block starts at abs 0 (the panic header); its foldable body
+        // covers the backtrace header through the last frame line (2..=4).
+        assert!(s.is_fold_collapsed(0));
+        for abs in 2..=4 {
+            assert_eq!(s.panic_block_covering(abs).map(|b| b.start), Some(0));
+        }
+        assert!(s.panic_block_covering(0).is_none()); // the header itself isn't foldable
+        assert!(s.panic_block_covering(1).is_none()); // nor the message line
+
+        // Keyboard toggle (`z`) — nearest block to the current tail.
+        let toggled = s.toggle_nearest_fold();
+        assert_eq!(toggled, Some(0));
+        assert!(!s.is_fold_collapsed(0));
+
+        // Mouse click toggle — same block id, re-collapses.
+        assert!(s.toggle_fold(0));
+        assert!(s.is_fold_collapsed(0));
+    }
+
+    #[test]
+    fn fold_state_survives_new_lines_streaming_in() {
+        let mut s = sess();
+        for l in panic_lines() {
+            s.push_line(l.to_string());
+        }
+        s.toggle_fold(0); // expand
+        assert!(!s.is_fold_collapsed(0));
+        for i in 0..50 {
+            s.push_line(format!("more output {i}"));
+        }
+        assert!(!s.is_fold_collapsed(0), "expand survives streaming lines");
+    }
+
+    #[test]
+    fn fold_group_is_dropped_once_fully_evicted_from_the_ring() {
+        let mut s = sess();
+        for l in panic_lines() {
+            s.push_line(l.to_string());
+        }
+        assert!(s.panic_block_covering(2).is_some());
+        // Push enough lines to fully evict the whole block (end abs = 4) past
+        // the ring cap.
+        for i in 0..LOG_LINE_CAP as u64 + 10 {
+            s.push_line(format!("filler {i}"));
+        }
+        assert!(s.panic_block_covering(2).is_none());
+        assert!(!s.is_fold_collapsed(0)); // unknown id — false, never panics
+    }
+
+    #[test]
+    fn level_filter_hides_and_shows_by_cutoff() {
+        let mut s = sess();
+        s.push_line("plain info line".to_string());
+        s.push_line("warning: careful".to_string());
+        s.push_line("error: boom".to_string());
+        assert_eq!(s.effective_level(0), Some(LogLevel::Info));
+        assert_eq!(s.effective_level(1), Some(LogLevel::Warn));
+        assert_eq!(s.effective_level(2), Some(LogLevel::Error));
+
+        s.set_level_filter(LevelFilter::WarnPlus);
+        assert!(!s.level_filter.allows(LogLevel::Info));
+        assert!(s.level_filter.allows(LogLevel::Warn));
+        assert!(s.level_filter.allows(LogLevel::Error));
+
+        s.cycle_level_filter(1);
+        assert_eq!(s.level_filter, LevelFilter::ErrorOnly);
+        s.cycle_level_filter(-2);
+        assert_eq!(s.level_filter, LevelFilter::InfoPlus);
+    }
+
+    #[test]
+    fn follow_tail_keeps_tracking_the_tail_while_a_level_filter_is_active() {
+        let mut s = sess();
+        s.set_level_filter(LevelFilter::ErrorOnly);
+        for i in 0..5 {
+            s.push_line(format!("plain {i}"));
+        }
+        s.push_line("error: first".to_string());
+        assert!(s.is_following());
+        for i in 0..5 {
+            s.push_line(format!("plain again {i}"));
+        }
+        s.push_line("error: second".to_string());
+        // Still following: a filter only changes what's *shown*, never the
+        // follow/anchored scroll mode itself (that's the render layer's
+        // `visible_indices` concern — see `ui::views::sessions`).
+        assert!(s.is_following());
+        assert_eq!(s.effective_level(5), Some(LogLevel::Error));
+        assert_eq!(s.effective_level(11), Some(LogLevel::Error));
     }
 
     #[test]

@@ -6,8 +6,8 @@ expression: "render_to_string(130, 30, &built_session_state())"
 ━━━━━━━━                                                                                                                          
                                                                                                                                   
  PROJECTS                │huddle:  1 ✓ build apk                                                                                  
-  ▸ huddle               │Building `it.f0x.huddle`…                                                                               
-                         │Built: /tmp/huddle/android/app/build/outputs/apk/release/app.apk                                        
+  ▸ huddle               │   12:00:00 [app]    Building `it.f0x.huddle`…                                                          
+                         │   12:00:01 [app]    Built: /tmp/huddle/android/app/build/outputs/apk/release/app.apk                   
  DEVICES ↻ r             │                                                                                                        
    none found            │                                                                                                        
                          │                                                                                                        
@@ -30,5 +30,5 @@ expression: "render_to_string(130, 30, &built_session_state())"
                          │                                                                                                        
                          │                                                                                                        
                          │                                                                                                        
-                         │● follow  ·  wrap:off  ·  1 built · c copy path                    x stop · f follow · w wrap · / search
+                         │● follow  ·  wrap:off  ·  1 built · c copy path         x stop · f follow · w wrap · / search · l filter
 ● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                                              [mouse ✓]
