@@ -418,8 +418,14 @@ impl SessionView {
     /// view, while the level filter and the folds are per-session — see
     /// [`crate::engine::update`]'s log-scroll arms, which supply it.
     ///
-    /// Cost: O(retained lines) (plus an ANSI-strip + lowercase per line while
-    /// a text filter is active), paid only on a render or a scroll event.
+    /// Cost: O(retained lines · log blocks) — each line also pays a
+    /// [`PanicTracker::block_covering`] lookup (binary search over the
+    /// panic-block list, itself capped at [`super::logstyle::MAX_TRACKED_BLOCKS`]),
+    /// not the O(blocks) linear scan an earlier revision of this walk paid
+    /// per line (the multiplier a crash-looping app — many concurrent
+    /// backtrace-less panic headers within one ring window — could otherwise
+    /// drive unbounded). Plus an ANSI-strip + lowercase per line while a text
+    /// filter is active. Paid only on a render or a scroll event —
     /// [`Self::push_line`] never builds it, so ingesting output stays O(1).
     pub fn visible_indices(&self, filter: Option<&str>) -> Vec<u64> {
         let mut out = Vec::new();
@@ -648,7 +654,7 @@ pub fn line_matches(line: &str, query: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::logstyle::{LineRole, LogSource};
+    use super::super::logstyle::{LineRole, LogSource, MAX_TRACKED_BLOCKS};
     use super::*;
 
     fn sess() -> SessionView {
@@ -1043,6 +1049,70 @@ mod tests {
         }
         assert!(s.panic_block_covering(2).is_none());
         assert!(!s.is_fold_collapsed(0)); // unknown id — false, never panics
+    }
+
+    // ── g2: bounded panic-block cost under a crash loop ─────────────────────
+
+    #[test]
+    fn visible_indices_stays_correct_over_hundreds_of_backtrace_less_panic_headers() {
+        // The debugging scenario this fix targets: a crash-looping app
+        // re-triggering panic after panic, none ever growing a backtrace
+        // (RUST_BACKTRACE unset — the default), so none is ever "absorbed"
+        // and each pushed line stays its own visible-sequence entry. Well
+        // within one ring window (LOG_LINE_CAP), so `evict_before`'s
+        // ring-position eviction never runs — only the block-count cap
+        // (`MAX_TRACKED_BLOCKS`) bounds `PanicTracker::blocks`, and the walk
+        // below must still complete correctly with hundreds of tracked (or
+        // cap-evicted) blocks behind it.
+        let mut s = sess();
+        let n = (MAX_TRACKED_BLOCKS * 4) as u64;
+        for i in 0..n {
+            s.push_line(format!("thread 'main' panicked at src/main.rs:{i}:1:"));
+        }
+        let vis = s.visible_indices(None);
+        assert_eq!(vis, (0..n).collect::<Vec<_>>());
+        // Scrolling still walks the full (uncollapsed) sequence correctly.
+        s.scroll_up(5, None);
+        assert_eq!(s.scroll, Scroll::Anchored(n - 6));
+        s.scroll_to_top();
+        assert_eq!(s.scroll, Scroll::Anchored(0));
+        s.scroll_to_bottom();
+        assert!(s.is_following());
+    }
+
+    #[test]
+    fn visible_indices_stays_correct_across_many_folded_blocks_beyond_the_cap() {
+        // Same crash-loop shape, but each panic *does* grow a full backtrace
+        // — every block is foldable and, collapsed by default, absorbs its
+        // body into one visible entry. More blocks than `MAX_TRACKED_BLOCKS`:
+        // the oldest blocks' fold state (and absorb behavior) drops once
+        // cap-evicted — same UX as ring eviction — so their backtrace lines
+        // simply become their own visible entries again, while the newest
+        // `MAX_TRACKED_BLOCKS` blocks stay tracked and folded.
+        let mut s = sess();
+        let block_count = MAX_TRACKED_BLOCKS * 3;
+        for _ in 0..block_count {
+            for l in panic_lines() {
+                s.push_line(l.to_string());
+            }
+        }
+        let vis = s.visible_indices(None);
+        // Cap-evicted blocks (the oldest `block_count - MAX_TRACKED_BLOCKS`)
+        // contribute all 6 pushed lines each (no fold — never absorbed);
+        // still-tracked blocks (the newest `MAX_TRACKED_BLOCKS`) contribute
+        // 4 each (header, message, one fold-row entry, trailing line) — see
+        // `a_collapsed_backtrace_is_one_scroll_step_and_expands_to_one_per_line`.
+        let evicted = block_count - MAX_TRACKED_BLOCKS;
+        let expected = evicted * panic_lines().len() + MAX_TRACKED_BLOCKS * 4;
+        assert_eq!(vis.len(), expected);
+
+        // Structural spot-check: the earliest block's backtrace line is no
+        // longer covered by any tracked block (cap-evicted), while the most
+        // recent block's still is and is still collapsed.
+        assert!(s.panic_block_covering(2).is_none());
+        let last_header = s.log.end_index() - panic_lines().len() as u64;
+        assert!(s.panic_block_covering(last_header + 2).is_some());
+        assert!(s.is_fold_collapsed(last_header));
     }
 
     #[test]

@@ -302,9 +302,33 @@ enum TrackState {
     InBacktrace(u64),
 }
 
+/// The maximum number of panic/backtrace blocks [`PanicTracker`] keeps at
+/// once. Generous headroom for real use (a session showing signs of dozens
+/// of concurrent unresolved panics is already deep in "something is very
+/// wrong" territory) while bounding the pathological case this cap exists
+/// for: a crash-looping app re-triggering the same panic on every restart
+/// can open hundreds of blocks well within one still-live [`LOG_LINE_CAP`]
+/// ring window (`evict_before`'s ring-position eviction alone would never
+/// trim any of them, since none has scrolled out of the ring). Beyond the
+/// cap, [`PanicTracker::push_block`] drops the *oldest* tracked block —
+/// exactly the same fold-state-disappears UX [`PanicTracker::evict_before`]
+/// already applies to a block that scrolls out of the ring: its lines stop
+/// being grouped behind a `▶ n frames…` row and simply render as normal
+/// lines again, never a panic or a stale fold toggle.
+///
+/// [`LOG_LINE_CAP`]: super::session_view::LOG_LINE_CAP
+pub const MAX_TRACKED_BLOCKS: usize = 64;
+
 /// Feeds pushed lines through the panic/backtrace block state machine,
 /// one per [`super::session_view::SessionView::push_line`] call, and owns
 /// the resulting block list + fold (collapsed) state.
+///
+/// `blocks` is sorted by `start` (and therefore by `backtrace_start` and
+/// `end` too) by construction: a new block is only ever opened after the
+/// previous one has closed (see [`TrackState`]), and `abs` strictly
+/// increases with every [`Self::feed`] call, so ranges never overlap and
+/// never appear out of order. [`Self::block_covering`] relies on this to
+/// binary-search rather than linear-scan.
 #[derive(Debug, Clone, Default)]
 pub struct PanicTracker {
     state: TrackState,
@@ -318,7 +342,7 @@ impl PanicTracker {
         match self.state {
             TrackState::Idle => {
                 if is_panic_header(plain) {
-                    self.blocks.push(PanicBlock {
+                    self.push_block(PanicBlock {
                         start: abs,
                         backtrace_start: None,
                         end: abs,
@@ -354,7 +378,7 @@ impl PanicTracker {
                     // a backtrace — close it (no foldable body) and start
                     // tracking the new one.
                     b.open = false;
-                    self.blocks.push(PanicBlock {
+                    self.push_block(PanicBlock {
                         start: abs,
                         backtrace_start: None,
                         end: abs,
@@ -394,18 +418,40 @@ impl PanicTracker {
         }
     }
 
-    /// The blocks detected so far, oldest first.
+    /// The blocks detected so far, oldest first, capped at
+    /// [`MAX_TRACKED_BLOCKS`].
     pub fn blocks(&self) -> &[PanicBlock] {
         &self.blocks
     }
 
+    /// Append a newly opened block, then enforce [`MAX_TRACKED_BLOCKS`] by
+    /// dropping the oldest tracked block beyond the cap. This is the sole
+    /// place a block is added, so the cap holds after every [`Self::feed`]
+    /// call. Distinct from, and in addition to, [`Self::evict_before`]'s
+    /// eviction by ring position — see [`MAX_TRACKED_BLOCKS`]'s doc comment
+    /// for why both are needed.
+    fn push_block(&mut self, block: PanicBlock) {
+        self.blocks.push(block);
+        if self.blocks.len() > MAX_TRACKED_BLOCKS {
+            self.blocks.remove(0);
+        }
+    }
+
     /// The block whose foldable body (`backtrace_start..=end`) contains
     /// `abs`, if any.
+    ///
+    /// `O(log blocks)`: `blocks` is sorted (and non-overlapping) by
+    /// construction — see [`PanicTracker`]'s doc comment — so at most one
+    /// block, the last one whose `start <= abs`, could possibly cover `abs`;
+    /// a full linear scan is unnecessary.
     pub fn block_covering(&self, abs: u64) -> Option<&PanicBlock> {
-        self.blocks.iter().rev().find(|b| {
-            b.backtrace_start
-                .is_some_and(|bs| abs >= bs && abs <= b.end)
-        })
+        let idx = self.blocks.partition_point(|b| b.start <= abs);
+        idx.checked_sub(1)
+            .and_then(|i| self.blocks.get(i))
+            .filter(|b| {
+                b.backtrace_start
+                    .is_some_and(|bs| abs >= bs && abs <= b.end)
+            })
     }
 
     /// Whether the block starting at absolute index `block_start` is
@@ -731,6 +777,51 @@ mod tests {
         assert_eq!(tracker.blocks().len(), 1);
         tracker.evict_before(8); // now fully below base
         assert!(tracker.blocks().is_empty());
+    }
+
+    #[test]
+    fn tracked_blocks_are_capped_dropping_the_oldest_first() {
+        // A crash-looping app re-triggering the same (backtrace-less) panic
+        // well within one still-live ring window: `evict_before` alone would
+        // never trim any of these (none has scrolled out of the ring), so
+        // the count cap is the only thing bounding memory/lookup cost.
+        let mut tracker = PanicTracker::default();
+        let total = MAX_TRACKED_BLOCKS + 20;
+        for i in 0..total as u64 {
+            tracker.feed(i, &format!("thread 'main' panicked at src/main.rs:{i}:1:"));
+        }
+        assert_eq!(tracker.blocks().len(), MAX_TRACKED_BLOCKS);
+        // Oldest 20 blocks (starts 0..20) evicted; the newest MAX_TRACKED_BLOCKS
+        // survive, oldest-first.
+        assert_eq!(tracker.blocks().first().unwrap().start, 20);
+        assert_eq!(tracker.blocks().last().unwrap().start, total as u64 - 1);
+    }
+
+    #[test]
+    fn cap_eviction_drops_fold_state_exactly_like_ring_eviction() {
+        // Block 0 gets a real foldable backtrace body; then enough further
+        // panic headers stream in to push it past MAX_TRACKED_BLOCKS, purely
+        // by *count* — the ring (LOG_LINE_CAP) never comes into play here.
+        let mut tracker = PanicTracker::default();
+        for (i, line) in PANIC_LINES.iter().enumerate() {
+            tracker.feed(i as u64, line);
+        }
+        assert!(tracker.block_covering(3).is_some());
+        assert!(tracker.is_collapsed(0));
+
+        for abs in (PANIC_LINES.len() as u64..).take(MAX_TRACKED_BLOCKS) {
+            tracker.feed(
+                abs,
+                &format!("thread 'main' panicked at src/main.rs:{abs}:1:"),
+            );
+        }
+        // Block 0 is now cap-evicted: covering lookups return None and the
+        // fold toggle is a stale-id no-op — the same shape
+        // `fold_group_is_dropped_once_fully_evicted_from_the_ring` asserts
+        // for ring eviction, never a panic.
+        assert!(tracker.block_covering(3).is_none());
+        assert!(!tracker.is_collapsed(0));
+        assert!(!tracker.toggle(0));
     }
 
     #[test]
