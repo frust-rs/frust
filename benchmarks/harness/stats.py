@@ -58,6 +58,45 @@ accumulates frames from every bracketed window into one combined series,
 the same as if the caller had run each op once for a very long single
 window. No special-casing was needed for this — verified by
 `test_stats.py`'s `test_repeated_marker_pairs_aggregate_across_cycles`.
+
+# Per-op lines (d1/d2, and S8 backward-compat) — a second parse path
+
+`benchmarks/PROTOCOL.md` §7's "Per-op line format" section formalizes a
+second raw-line family, distinct from the per-frame family above: one line
+per plugin-boundary/DB call, not per frame. This module's per-op path
+(`parse_op_line`/`slice_op_scenario`/`compute_op_stats`/`format_op_table`,
+driven by `--dclass` on the CLI) recognizes **both** shapes that line
+family can take, so a Frust vs Flutter d-class comparison and S8's own
+per-op numbers can both be computed by this one script instead of ad hoc
+external math (see PROTOCOL §7's "Methodology-deviations note" — S8's
+published per-op numbers predate this and were computed outside the shared
+script):
+
+- **Canonical** (PROTOCOL §7, `d1`/`d2` and any future per-op scenario):
+  `<app>-perf op scenario=<id> op=<name> n=<u64> us=<u64> err=<0|1> [...]`
+  — self-identifying via its inline `scenario=` field.
+- **Grandfathered** (S8's shipped shape, unchanged by PROTOCOL §7's
+  formalization): `<app>-perf plugin op=<name> type=<tag> n=<i> us=<us>
+  err=<0|1>` — no inline `scenario=` field; attributed to a scenario only
+  by the bracketing `bench-scenario-start/end` marker pair (S8's own
+  `s8-write`/`s8-read` phase markers).
+
+This is entirely additive: `parse_raw_line`/`slice_scenario`/
+`compute_stats`/`format_table` (the frame-series path above) are untouched
+by this module — a caller that never passes `--dclass` (i.e. every
+existing s-class invocation) runs exactly the code it always has. See
+`test_stats.py`'s per-op test classes.
+
+# d-class warmup discard (PROTOCOL §9.3/§9.4)
+
+`exclude_dclass_warmup` drops the first (`n=0`) per-run sample of each
+warmup-affected op (`DCLASS_WARMUP_EXCLUDE_OPS`) — declared *in addition
+to* the standard first-2-runs discard (`discard_first_runs`, reused
+unchanged for op records). Because `n` is a 0-indexed counter reset to 0
+at the start of each run (PROTOCOL §7), dropping every `n=0` record for a
+warmup-affected op removes exactly one sample per remaining run for that
+op, with no need to track run boundaries once the per-run lists have
+already been concatenated.
 """
 
 from __future__ import annotations
@@ -66,6 +105,7 @@ import argparse
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TypeVar
 
 # The 60Hz/120Hz frame budgets, in whole microseconds — matches
 # `frust-shell-common::perf::BUDGET_60HZ`/`BUDGET_120HZ` exactly (both
@@ -78,6 +118,24 @@ FRUST_RAW_PREFIX = "frust-perf raw"
 FLUTTER_RAW_PREFIX = "flutter-perf raw"
 MARKER_START_PREFIX = "bench-scenario-start"
 MARKER_END_PREFIX = "bench-scenario-end"
+
+# Per-op line prefixes (PROTOCOL §7) — see module docs' "Per-op lines"
+# section. Canonical shape uses the `op` token; S8's grandfathered shape
+# uses the `plugin` token.
+FRUST_OP_PREFIX = "frust-perf op"
+FLUTTER_OP_PREFIX = "flutter-perf op"
+FRUST_PLUGIN_PREFIX = "frust-perf plugin"
+FLUTTER_PLUGIN_PREFIX = "flutter-perf plugin"
+
+# d1/d2's declared warmup-discard convention (PROTOCOL §9.3/§9.4): the
+# first (n=0) per-run sample of these ops is excluded from percentile math,
+# in addition to the standard first-2-runs discard. `range_scan` (d2) is
+# deliberately absent — it is the scenario's only per-run sample of that
+# op, so warmup-excluding it would leave zero (see §9.4's small-N caveat).
+DCLASS_WARMUP_EXCLUDE_OPS: dict[str, frozenset[str]] = {
+    "d1": frozenset({"insert_batch", "insert_single"}),
+    "d2": frozenset({"select_point"}),
+}
 
 # Runs discarded by default before computing statistics (protocol
 # convention — declared as OUR convention, not a framework fact; see
@@ -122,6 +180,51 @@ class ScenarioStats:
             "worst_us": self.worst_us,
             "missed_60hz": self.missed_60hz,
             "missed_120hz": self.missed_120hz,
+        }
+
+
+@dataclass
+class OpRecord:
+    """One parsed per-op line (PROTOCOL §7), source-tagged. `scenario` is
+    `None` for S8's grandfathered shape (no inline `scenario=` field) —
+    see `slice_op_scenario` for how that case is attributed to a scenario
+    anyway."""
+
+    source: str  # "frust" | "flutter"
+    scenario: str | None
+    op: str
+    n: int
+    us: int
+    err: bool
+    fields: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class OpStats:
+    """Per-op latency/throughput table (PROTOCOL §9.6) — one instance per
+    `op` name within a d-class scenario (or S8 phase)."""
+
+    op: str
+    n_total: int
+    n_ok: int
+    errors: int
+    p50_us: int
+    p95_us: int
+    p99_us: int
+    worst_us: int
+    ops_per_sec: float
+
+    def as_dict(self) -> dict[str, int | float | str]:
+        return {
+            "op": self.op,
+            "n_total": self.n_total,
+            "n_ok": self.n_ok,
+            "errors": self.errors,
+            "p50_us": self.p50_us,
+            "p95_us": self.p95_us,
+            "p99_us": self.p99_us,
+            "worst_us": self.worst_us,
+            "ops_per_sec": self.ops_per_sec,
         }
 
 
@@ -228,21 +331,142 @@ def load_run_frames(path: Path, scenario: str | None) -> list[FrameRecord]:
     return slice_scenario(lines, scenario)
 
 
-def discard_first_runs(
-    runs: list[list[FrameRecord]], discard_first: int
-) -> list[FrameRecord]:
+_T = TypeVar("_T")
+
+
+def discard_first_runs(runs: list[list[_T]], discard_first: int) -> list[_T]:
     """Drops the first `discard_first` *runs* (not frames), then
     concatenates the remaining runs' frames into one series. If there
     aren't more runs than `discard_first`, nothing is discarded (a single
-    fixture/smoke-test log is still usable directly) rather than erroring."""
+    fixture/smoke-test log is still usable directly) rather than erroring.
+
+    Generic over the per-run record type — used unchanged for both
+    [`FrameRecord`] runs (the s-class path) and [`OpRecord`] runs (the
+    d-class path, see `exclude_dclass_warmup`); the logic itself has no
+    per-frame semantics, so no s-class behavior changes here."""
     if len(runs) > discard_first:
         kept = runs[discard_first:]
     else:
         kept = runs
-    combined: list[FrameRecord] = []
+    combined: list[_T] = []
     for run in kept:
         combined.extend(run)
     return combined
+
+
+# ---------------------------------------------------------------------
+# Per-op parsing (d-class + S8 backward-compat) — see module docs
+# ---------------------------------------------------------------------
+
+
+def parse_op_line(line: str) -> OpRecord | None:
+    """Parses one per-op raw line into an [`OpRecord`], or `None` if `line`
+    isn't a per-op line or is missing a required field. Recognizes both the
+    canonical `<app>-perf op scenario=<id> op=<name> n=<u64> us=<u64>
+    err=<0|1> [...]` shape (PROTOCOL §7, `d1`/`d2` and any future per-op
+    scenario) and S8's grandfathered `<app>-perf plugin op=<name>
+    type=<tag> n=<i> us=<us> err=<0|1>` shape (no inline `scenario=` field
+    — see `slice_op_scenario` for how that case is attributed to a
+    scenario).
+
+    Requiring `op`/`n`/`us`/`err` all be present (like [`parse_raw_line`]'s
+    `n`/`total_us` requirement) means S8's own `op=<name> type=total
+    n=<writes> us=<total> errors=<n>` aggregate line (`errors`, plural, not
+    `err`) and its `s8-errors` tally marker (no `op=`/`n=`/`us=` at all)
+    both parse as `None` here, exactly like any other non-per-op line —
+    same forward-compatible/skip-unknown posture as the frame parser."""
+    stripped = line.strip()
+
+    frust_op_idx = stripped.find(FRUST_OP_PREFIX)
+    flutter_op_idx = stripped.find(FLUTTER_OP_PREFIX)
+    frust_plugin_idx = stripped.find(FRUST_PLUGIN_PREFIX)
+    flutter_plugin_idx = stripped.find(FLUTTER_PLUGIN_PREFIX)
+
+    if frust_op_idx != -1:
+        source, rest = "frust", stripped[frust_op_idx + len(FRUST_OP_PREFIX) :]
+    elif flutter_op_idx != -1:
+        source, rest = "flutter", stripped[flutter_op_idx + len(FLUTTER_OP_PREFIX) :]
+    elif frust_plugin_idx != -1:
+        source, rest = "frust", stripped[frust_plugin_idx + len(FRUST_PLUGIN_PREFIX) :]
+    elif flutter_plugin_idx != -1:
+        source, rest = "flutter", stripped[flutter_plugin_idx + len(FLUTTER_PLUGIN_PREFIX) :]
+    else:
+        return None
+
+    fields = _parse_kv_tail(rest)
+    try:
+        op = fields["op"]
+        n = int(fields["n"])
+        us = int(fields["us"])
+        err_raw = fields["err"]
+    except (KeyError, ValueError):
+        return None
+    if err_raw not in ("0", "1"):
+        return None
+
+    # Canonical shape only — grandfathered S8 lines carry no inline
+    # `scenario=` field (see docstring).
+    scenario = fields.get("scenario")
+
+    return OpRecord(
+        source=source,
+        scenario=scenario,
+        op=op,
+        n=n,
+        us=us,
+        err=err_raw == "1",
+        fields=fields,
+    )
+
+
+def slice_op_scenario(lines: list[str], scenario: str) -> list[OpRecord]:
+    """Extracts the [`OpRecord`]s belonging to `scenario` from one run's
+    lines. A canonical-shape record (inline `scenario=` field) self-
+    identifies regardless of bracket position. A grandfathered S8-shape
+    record (no inline `scenario=` field) is instead attributed by the
+    bracketing `bench-scenario-start/end` marker — active for a marker name
+    equal to `scenario`, or beginning with `scenario + "-"` (a phase-marker
+    convention shared by S8's `s8-write`/`s8-read` and d1/d2's
+    `d1-insert-batch`/`d2-select-point`/etc. — though the canonical-shape
+    records never actually need this branch, since their own inline
+    `scenario=` field already identifies them)."""
+    ops: list[OpRecord] = []
+    active = False
+    for line in lines:
+        marker = parse_marker_line(line)
+        if marker is not None:
+            edge, name = marker
+            if name == scenario or name.startswith(scenario + "-"):
+                active = edge == "start"
+            continue
+        rec = parse_op_line(line)
+        if rec is None:
+            continue
+        if rec.scenario is not None:
+            if rec.scenario == scenario:
+                ops.append(rec)
+        elif active:
+            ops.append(rec)
+    return ops
+
+
+def load_run_op_records(path: Path, scenario: str) -> list[OpRecord]:
+    """Reads one run's log file and slices its per-op records for
+    `scenario` — the d-class analog of `load_run_frames`."""
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return slice_op_scenario(lines, scenario)
+
+
+def exclude_dclass_warmup(records: list[OpRecord], scenario: str) -> list[OpRecord]:
+    """Drops the first (`n=0`) per-run sample of each op in
+    `DCLASS_WARMUP_EXCLUDE_OPS[scenario]` (PROTOCOL §9.3/§9.4's declared
+    warmup-discard convention), applied *in addition to* the standard
+    first-2-runs discard (`discard_first_runs`) — see module docs. A
+    scenario with no declared warmup-excluded ops is returned unchanged."""
+    warmup_ops = DCLASS_WARMUP_EXCLUDE_OPS.get(scenario, frozenset())
+    if not warmup_ops:
+        return records
+    return [r for r in records if not (r.op in warmup_ops and r.n == 0)]
 
 
 # ---------------------------------------------------------------------
@@ -303,6 +527,61 @@ def format_table(stats: ScenarioStats, label: str) -> str:
     return "\n".join(lines)
 
 
+def compute_op_stats(records: list[OpRecord]) -> dict[str, OpStats]:
+    """Computes per-op p50/p95/p99/worst latency (µs) and ops/s (PROTOCOL
+    §9.6) over `records`, grouped by `op` name (iteration order:
+    alphabetical, for a stable table). An `err=1` sample is excluded from
+    the latency percentiles and the ops/s throughput figure — mirroring
+    `compute_stats`'s skipped-frame exclusion — but is still counted in
+    that op's `n_total`/`errors` tally, so a run with boundary failures is
+    never silently reported as clean. An op with zero non-err samples
+    reports an all-zero latency/throughput row (same all-zero-on-empty
+    posture as `compute_stats`)."""
+    by_op: dict[str, list[OpRecord]] = {}
+    for r in records:
+        by_op.setdefault(r.op, []).append(r)
+
+    result: dict[str, OpStats] = {}
+    for op in sorted(by_op):
+        recs = by_op[op]
+        ok_us = sorted(r.us for r in recs if not r.err)
+        errors = sum(1 for r in recs if r.err)
+        total_us = sum(ok_us)
+        ops_per_sec = (len(ok_us) / (total_us / 1_000_000)) if total_us > 0 else 0.0
+        result[op] = OpStats(
+            op=op,
+            n_total=len(recs),
+            n_ok=len(ok_us),
+            errors=errors,
+            p50_us=_nearest_rank_percentile(ok_us, 50),
+            p95_us=_nearest_rank_percentile(ok_us, 95),
+            p99_us=_nearest_rank_percentile(ok_us, 99),
+            worst_us=ok_us[-1] if ok_us else 0,
+            ops_per_sec=ops_per_sec,
+        )
+    return result
+
+
+def format_op_table(op_stats: dict[str, OpStats], label: str) -> str:
+    """Formats the d-class RESULTS table (PROTOCOL §9.6) — one row per op,
+    in `compute_op_stats`'s alphabetical-by-op-name order, so the table is
+    stable across runs with the identical op set."""
+    lines = [f"== {label} (d-class) =="]
+    if not op_stats:
+        lines.append("(no per-op samples)")
+        return "\n".join(lines)
+    lines.append(
+        f"{'op':<16}{'n':>8}{'errors':>8}{'p50_us':>10}{'p95_us':>10}"
+        f"{'p99_us':>10}{'worst_us':>10}{'ops/s':>12}"
+    )
+    for op, s in op_stats.items():
+        lines.append(
+            f"{op:<16}{s.n_total:>8}{s.errors:>8}{s.p50_us:>10}{s.p95_us:>10}"
+            f"{s.p99_us:>10}{s.worst_us:>10}{s.ops_per_sec:>12.1f}"
+        )
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------
@@ -339,12 +618,32 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="label for the printed table (default: derived from the input files)",
     )
     parser.add_argument(
+        "--dclass",
+        action="store_true",
+        help="parse per-op lines (PROTOCOL §7) instead of the per-frame series, "
+        "and emit the d-class RESULTS table (PROTOCOL §9.6) — for d1/d2 (and any "
+        "future op-latency-only scenario); requires --scenario. The s-class "
+        "(per-frame) path is entirely unaffected when this flag is omitted.",
+    )
+    parser.add_argument(
         "logfiles",
         nargs="*",
         type=Path,
         help="one raw log file per run, in chronological order",
     )
     return parser
+
+
+def _main_dclass(args: argparse.Namespace) -> int:
+    if not args.scenario:
+        raise SystemExit("error: --dclass requires --scenario")
+    runs = [load_run_op_records(path, args.scenario) for path in args.logfiles]
+    records = discard_first_runs(runs, args.discard_first)
+    records = exclude_dclass_warmup(records, args.scenario)
+    op_stats = compute_op_stats(records)
+    label = args.label or ", ".join(str(p) for p in args.logfiles)
+    print(format_op_table(op_stats, label))
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -356,6 +655,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.logfiles:
         parser.error("at least one logfile is required unless --self-test is given")
+
+    if args.dclass:
+        return _main_dclass(args)
 
     runs = [load_run_frames(path, args.scenario) for path in args.logfiles]
     frames = discard_first_runs(runs, args.discard_first)

@@ -43,6 +43,9 @@ WIDGETS and NATIVE_WIDGETS have no development spoke — everything they need is
   Cloning it as a sibling directory (`../clean-signals-rs`) is still useful for local
   iteration on `clean-signals` itself, via a `[patch]` override in the consuming
   workspace — not needed for ordinary development.
+- **`frust-database --features engine-turso`**: needs libclang on the host (pulls
+  `bindgen`/`clang-sys` as a build dependency). The default (`engine-sqlite`) build does
+  not — `rusqlite`'s `bundled` feature only needs a `cc`-compatible C toolchain.
 - No Docker, CI config, or `.env` setup exists in this repo yet.
 
 ## Build
@@ -239,6 +242,16 @@ touching `frust-render`. `frust-native-widgets`' `demo-components` is a composit
 rather than in `examples/glyph-catalog` (which merely switches it on) because an app
 crate cannot implement that trait without raw `jni`/`objc2-ui-kit` deps the plugin does
 not re-export; the mobile compile gates below are the only thing that builds it.
+`frust-database`'s `engine-turso` needs its own gate too: `cargo test -p frust-database
+--features engine-turso` (libclang required — see *Prerequisites*).
+
+```bash
+# frust-database mobile compile gates: run separately from the facade-graph gates below
+# (this crate's C/bindgen build needs cargo-ndk's CC_*/AR_* passthrough, which a plain
+# `cargo check --target` does not supply; the iOS gate needs xcrun, so macOS-only).
+cargo ndk -t arm64-v8a check -p frust-database
+cargo check -p frust-database --target aarch64-apple-ios
+```
 
 **Manual/gated tests** (not part of the default `cargo test --workspace` run — each
 requires local hardware or is slow, and is marked `#[ignore]` with a reason):

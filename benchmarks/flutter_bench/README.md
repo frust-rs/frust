@@ -24,6 +24,15 @@ Flutter implementation.
 | s6 | Text shaping stress (multilingual corpus under width animation) | `lib/scenarios/s6_text.dart` |
 | s7 | Cold start + 60s idle | `lib/scenarios/s7_cold_start.dart` |
 | s8 | Plugin-call overhead (`shared_preferences` write/read matrix) | `lib/scenarios/s8_prefs.dart` |
+| d1 | DB writes (batched-transaction insert + autocommit single inserts) | `lib/scenarios/d1_db_write.dart` |
+| d2 | DB reads (point selects + range scan) | `lib/scenarios/d2_db_read.dart` |
+
+`d1`/`d2` are op-latency scenarios (PROTOCOL §9), a second scenario-id
+namespace parallel to `s1..s8` — see `benchmarks/PROTOCOL.md` §9. Both run
+against whichever `DbAdapter` `db_adapter.dart` selects: `package:sqlite3`
+(in-process FFI, the engine-parity column) by default, or `sqflite`
+(platform channel, the ecosystem-typical column) via
+`--dart-define=DB_ADAPTER=sqflite`.
 
 ## Running a scenario
 
@@ -42,6 +51,8 @@ Extra defines:
 - `--dart-define=CAPTURE=0` — silence the raw trace (clean desktop smoke).
 - `--dart-define=S8_BURST=1` — run S8 with an animation concurrently
   (the burst-during-animation UI-thread-impact variant).
+- `--dart-define=DB_ADAPTER=ffi|sqflite` — select d1/d2's DB adapter
+  (default `ffi`, `package:sqlite3`).
 
 ## Trace output
 
@@ -56,6 +67,16 @@ Scenario windows are bracketed by byte-identical markers
 (`bench-scenario-start <name>` / `bench-scenario-end <name>`); S3/S4/S8 emit
 sub-op markers (`s3-create1k`, `s4-parse`, `s8-write`, …). See
 `lib/bench/perf.dart` for the exact contract and field mapping.
+
+`d1`/`d2` are op-latency, not per-frame — each op emits PROTOCOL §7's
+canonical per-op line instead of a `-raw` frame line:
+
+```
+flutter-perf op scenario=<d1|d2> op=<name> n=<u64> us=<u64> err=<0|1> [<key>=<value> ...]
+```
+
+See `lib/scenarios/d1_db_write.dart` (`formatDbOpLine`) for the formatter and
+`benchmarks/PROTOCOL.md` §9 for the full workload spec.
 
 ## Fairness gates
 

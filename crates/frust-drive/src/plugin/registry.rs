@@ -1,4 +1,4 @@
-//! The static plugin registry (v1) — eight entries mirroring `plugins/`:
+//! The static plugin registry (v1) — nine entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
@@ -18,10 +18,11 @@
 //! registry entry to use [`Contribution::ManifestPermission`] rather than a
 //! Gradle module for its Android addition, since the plugin's Android
 //! backend is plain JNI with no Kotlin helper class to carry the permission
-//! inside a module manifest; see `HAPTICS_BASE`'s doc comment), and `iap`
+//! inside a module manifest; see `HAPTICS_BASE`'s doc comment), `iap`
 //! (dependency, the plugin's own Android library module, and its own iOS
 //! Swift package — no plist key and no app-crate macro; see `IAP_BASE`'s doc
-//! comment for why).
+//! comment for why), and `database` (dependency only — pure-Rust plugin, no
+//! OS-side integration).
 
 use super::{Contribution, FeatureSpec, PluginSpec};
 
@@ -289,6 +290,40 @@ const IAP: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+/// `database`'s single optional feature — enables the Turso engine (a pure-Rust
+/// SQLite rewrite) as an alternative to SQLite. This is the first zero-OS-side
+/// optional feature: a pure Cargo-feature flip with no Gradle module, plist key,
+/// manifest permission, Swift package, or app-crate macro contribution.
+///
+/// See `plugins/database/README.md` for the binary-size cost and a comparison
+/// with SQLite. Engine selection is deferred until connection time (the API is
+/// engine-agnostic), so adding this feature does not lock an app to a single
+/// choice.
+const DATABASE_TURSO: &[Contribution] = &[Contribution::CargoFeature {
+    name: "frust-database",
+    feature: "engine-turso",
+}];
+
+/// database's single optional feature.
+const DATABASE_FEATURES: &[FeatureSpec] = &[FeatureSpec {
+    id: "engine-turso",
+    summary: "Adds the Turso (Rust SQLite rewrite) engine alongside SQLite. \
+              Significant binary-size cost (see plugin README); enables future \
+              vector-search/cloud-sync capabilities. Engine chosen at open time.",
+    contributions: DATABASE_TURSO,
+}];
+
+const DATABASE: PluginSpec = PluginSpec {
+    id: "database",
+    summary: "Embedded SQL database (SQLite via rusqlite; engine-agnostic API).",
+    crate_dir: "database",
+    base: &[Contribution::CargoDep {
+        name: "frust-database",
+    }],
+    optional_features: DATABASE_FEATURES,
+    requires_sibling: None,
+};
+
 /// The v1 static plugin registry (Vec-factory convention). A caller (the CLI
 /// or the TUI Add Plugin dialog) enumerates this to drive selection without
 /// hardcoding plugin ids.
@@ -302,6 +337,7 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         CLIPBOARD,
         HAPTICS,
         IAP,
+        DATABASE,
     ]
 }
 
@@ -321,7 +357,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_eight_v1_plugins() {
+    fn registry_lists_the_nine_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -334,6 +370,7 @@ mod tests {
                 "clipboard",
                 "haptics",
                 "iap",
+                "database",
             ]
         );
     }
@@ -380,6 +417,56 @@ mod tests {
             spec.base[0],
             Contribution::CargoDep {
                 name: "frust-clipboard"
+            }
+        ));
+    }
+
+    /// The `database` entry is exactly one `CargoDep` — no manifest
+    /// permission, plist key, Gradle module, or Swift package, since this is
+    /// a pure-Rust plugin with no OS-side integration. It now carries one
+    /// optional feature (`engine-turso`), the first zero-OS-side feature: a
+    /// pure Cargo-feature flip.
+    #[test]
+    fn database_is_a_cargo_dep_and_nothing_else() {
+        let spec = find_plugin("database").unwrap();
+        assert_eq!(spec.crate_dir, "database");
+        assert_eq!(spec.optional_features.len(), 1);
+        assert_eq!(spec.requires_sibling, None);
+
+        assert_eq!(spec.base.len(), 1, "{:?}", spec.base);
+        assert!(matches!(
+            spec.base[0],
+            Contribution::CargoDep {
+                name: "frust-database"
+            }
+        ));
+    }
+
+    /// The `database` entry's `engine-turso` feature is exactly one
+    /// `CargoFeature` — no manifest permission, plist key, Gradle module,
+    /// Swift package, or app-crate macro. It's the registry's first pure
+    /// Cargo-feature flip with zero OS-side integration (see `DATABASE_TURSO`'s
+    /// own doc comment for why).
+    #[test]
+    fn database_engine_turso_is_a_cargo_feature_and_nothing_else() {
+        let spec = find_plugin("database").unwrap();
+        let feature = spec
+            .optional_features
+            .iter()
+            .find(|f| f.id == "engine-turso")
+            .expect("engine-turso feature");
+
+        assert_eq!(
+            feature.contributions.len(),
+            1,
+            "{:?}",
+            feature.contributions
+        );
+        assert!(matches!(
+            feature.contributions[0],
+            Contribution::CargoFeature {
+                name: "frust-database",
+                feature: "engine-turso"
             }
         ));
     }
@@ -947,6 +1034,82 @@ mod tests {
         let after_first = snapshot_tree(&root);
         let second = add_plugin(&root, "iap", &[]).unwrap();
         assert_eq!(second.items.len(), 3);
+        assert!(
+            second
+                .items
+                .iter()
+                .all(|i| i.outcome == AddOutcome::AlreadyPresent),
+            "{second:?}"
+        );
+        assert_eq!(
+            after_first,
+            snapshot_tree(&root),
+            "a second apply must leave a byte-identical tree"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The `database` plugin with the `engine-turso` feature applied: a fresh
+    /// scaffold, `add_plugin(.., "database", &["engine-turso"])` applied twice.
+    /// The first apply reports two items (`Applied`: the base CargoDep and the
+    /// optional CargoFeature), and the app's Cargo.toml gains
+    /// `frust-database = { path = ..., features = ["engine-turso"] }`. The
+    /// second apply must report every item `AlreadyPresent` and leave a
+    /// byte-identical tree — the idempotence contract.
+    ///
+    /// This is the registry's first zero-OS-side optional feature, exercising
+    /// the pure Cargo-feature flip with no platform-side machinery.
+    #[test]
+    fn database_add_plugin_with_engine_turso_feature_and_reapply_is_idempotent() {
+        let root = scaffold_project("database-engine-turso-idempotence");
+
+        let first = add_plugin(&root, "database", &["engine-turso"]).unwrap();
+        assert_eq!(first.plugin_id, "database");
+        assert_eq!(first.items.len(), 2, "{first:?}");
+        assert!(
+            first.items.iter().all(|i| i.outcome == AddOutcome::Applied),
+            "{first:?}"
+        );
+
+        // The Cargo dependency with the feature enabled actually landed.
+        let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert!(cargo.contains("frust-database"), "{cargo}");
+        assert!(
+            cargo.contains("features = [\"engine-turso\"]"),
+            "Cargo.toml must contain the engine-turso feature: {cargo}"
+        );
+
+        // No Android manifest permission, iOS plist key, Gradle module, or
+        // Swift package — the absences this pure-Rust plugin's own registry
+        // entry states (and the zero-OS-side feature reinforces).
+        let manifest =
+            fs::read_to_string(root.join("android/app/src/main/AndroidManifest.xml")).unwrap();
+        assert!(
+            !manifest.contains("database"),
+            "database must add no manifest permission"
+        );
+        let plist = fs::read_to_string(root.join("ios/Runner/Info.plist")).unwrap();
+        assert!(
+            !plist.contains("database"),
+            "database must add no plist key"
+        );
+        let settings = fs::read_to_string(root.join("android/settings.gradle.kts")).unwrap();
+        assert!(
+            !settings.contains("database"),
+            "database must add no Gradle module include"
+        );
+        let pbxproj =
+            fs::read_to_string(root.join("ios/Runner.xcodeproj/project.pbxproj")).unwrap();
+        assert!(
+            !pbxproj.contains("FrustDatabase"),
+            "database must add no Swift package reference"
+        );
+        assert_pbxproj_well_formed(&pbxproj);
+
+        let after_first = snapshot_tree(&root);
+        let second = add_plugin(&root, "database", &["engine-turso"]).unwrap();
+        assert_eq!(second.items.len(), 2);
         assert!(
             second
                 .items

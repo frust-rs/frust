@@ -1,34 +1,35 @@
 ---
 source: crates/frust-tui/tests/snapshots.rs
+assertion_line: 390
 expression: "render_to_string(100, 30, &add_plugin_state(AddPluginStep::Select, false, 0))"
 ---
 ⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
 ━━━━━━━━                                                                                            
-                                                                                                    
- PROJECTS         ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
-  ▸ huddle        │                                                              │▓▓                
-                  │  Choose a plugin to add to this project                      │▓▓                
- DEVICES ↻ r      │  ▸ (o) shared-preferences                                    │▓▓                
-   none found     │        Synchronous, thread-safe key-value store (plaintext)  │▓▓                
-                  │    ( ) secure-storage                                        │▓▓                
- SESSIONS         │        Encrypted key-value store (Keychain / Keystore / key  │▓▓                
-   none running   │    ( ) clean-signals-frust                                   │▓▓                
-                  │        Clean-architecture facade binding the clean-signals   │▓▓                
- ACTIONS          │    ( ) camera                                                │▓▓                
-   New project · n│        Camera preview (a platform view), still capture, and  │▓▓                
-   Add plugin · a │    ( ) native-widgets                                        │▓▓                
-   Doctor · d     │        Real OS controls (button, label, switch, slider, pro  │▓▓                
-   Build · b      │    ( ) clipboard                                             │▓▓                
-   Clean · c      │        Synchronous plain-text clipboard access (ClipboardMa  │▓▓                
-                  │    ( ) haptics                                               │▓▓                
+                  ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
+ PROJECTS         │                                                              │▓▓                
+  ▸ huddle        │  Choose a plugin to add to this project                      │▓▓                
+                  │  ▸ (o) shared-preferences                                    │▓▓                
+ DEVICES ↻ r      │        Synchronous, thread-safe key-value store (plaintext)  │▓▓                
+   none found     │    ( ) secure-storage                                        │▓▓                
+                  │        Encrypted key-value store (Keychain / Keystore / key  │▓▓                
+ SESSIONS         │    ( ) clean-signals-frust                                   │▓▓                
+   none running   │        Clean-architecture facade binding the clean-signals   │▓▓                
+                  │    ( ) camera                                                │▓▓                
+ ACTIONS          │        Camera preview (a platform view), still capture, and  │▓▓                
+   New project · n│    ( ) native-widgets                                        │▓▓                
+   Add plugin · a │        Real OS controls (button, label, switch, slider, pro  │▓▓                
+   Doctor · d     │    ( ) clipboard                                             │▓▓                
+   Build · b      │        Synchronous plain-text clipboard access (ClipboardMa  │▓▓                
+   Clean · c      │    ( ) haptics                                               │▓▓                
                   │        Minimal haptic feedback (selection tick, impact, suc  │▓▓                
                   │    ( ) iap                                                   │▓▓                
                   │        In-app purchases and subscriptions over Play Billing  │▓▓                
+                  │    ( ) database                                              │▓▓                
+                  │        Embedded SQL database (SQLite via rusqlite; engine-a  │▓▓                
                   │                                                              │▓▓                
                   │   Back    Next    Cancel                                     │▓▓                
                   │  ↑/↓ choose · Enter next · Esc close                         │▓▓                
                   ╰──────────────────────────────────────────────────────────────╯▓▓                
                     ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                
-                         │                                                                          
                          │                                                                          
 ● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]

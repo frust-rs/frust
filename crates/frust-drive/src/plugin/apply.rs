@@ -6,7 +6,7 @@ use std::fs;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use toml_edit::{DocumentMut, InlineTable, Item, Value};
+use toml_edit::{Array, DocumentMut, InlineTable, Item, Value};
 
 use super::registry::find_plugin;
 use super::{AddItem, AddOutcome, AddReport, Contribution, PluginAddError, PluginSpec};
@@ -146,6 +146,9 @@ fn apply_contribution(
             cfg,
             comment,
         } => apply_app_crate_macro(project_root, invocation, *cfg, comment),
+        Contribution::CargoFeature { name, feature } => {
+            apply_cargo_feature(doc, cargo_changed, name, feature)
+        }
     }
 }
 
@@ -268,6 +271,49 @@ fn apply_cargo_dep(
     let mut inline = InlineTable::new();
     inline.insert("path", Value::from(plugin_dep_path(frust_path, crate_dir)));
     deps.insert(name, Item::Value(Value::InlineTable(inline)));
+    *changed = true;
+    Ok(AddOutcome::Applied)
+}
+
+/// Enable a cargo feature on an already-contributed dependency's inline table
+/// ([`Contribution::CargoFeature`]): get-or-create the dep's `features` array
+/// and push `feature` if it isn't already there.
+///
+/// The dependency must already carry an inline table (a prior
+/// [`Contribution::CargoDep`] applied by the same or an earlier `add_plugin`
+/// call, per [`apply_cargo_dep`]'s shape) — [`PluginAddError::NoSuchCargoDep`]
+/// if it doesn't, never a silently minted dep.
+fn apply_cargo_feature(
+    doc: &mut DocumentMut,
+    changed: &mut bool,
+    name: &str,
+    feature: &str,
+) -> Result<AddOutcome, PluginAddError> {
+    let no_such_dep = || PluginAddError::NoSuchCargoDep {
+        name: name.to_string(),
+        feature: feature.to_string(),
+    };
+
+    let deps = doc
+        .get_mut("dependencies")
+        .and_then(Item::as_table_like_mut)
+        .ok_or_else(no_such_dep)?;
+
+    let dep = deps
+        .get_mut(name)
+        .and_then(Item::as_inline_table_mut)
+        .ok_or_else(no_such_dep)?;
+
+    let features = dep
+        .entry("features")
+        .or_insert_with(|| Value::Array(Array::new()))
+        .as_array_mut()
+        .ok_or_else(no_such_dep)?;
+
+    if features.iter().any(|v| v.as_str() == Some(feature)) {
+        return Ok(AddOutcome::AlreadyPresent);
+    }
+    features.push(feature);
     *changed = true;
     Ok(AddOutcome::Applied)
 }
@@ -1367,6 +1413,166 @@ mod tests {
         // Untouched.
         assert_eq!(fs::read_to_string(dir.join("Cargo.toml")).unwrap(), bad);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // `Contribution::CargoFeature`
+    // -----------------------------------------------------------------------
+
+    /// Enabling a feature on a dep [`apply_cargo_dep`] just created lands a
+    /// `features = [...]` array on that same inline table.
+    #[test]
+    fn cargo_feature_applies_onto_a_cargo_dep_created_line() {
+        let root = scaffold_project("cargo-feature-apply");
+        let cargo_path = root.join(CARGO_TOML_REL);
+        let mut doc = fs::read_to_string(&cargo_path)
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        let mut changed = false;
+
+        apply_cargo_dep(
+            &mut doc,
+            &mut changed,
+            "frust-secure-storage",
+            "secure-storage",
+            "/nonexistent/frust/checkout",
+        )
+        .unwrap();
+        assert!(changed);
+
+        let outcome =
+            apply_cargo_feature(&mut doc, &mut changed, "frust-secure-storage", "biometric")
+                .unwrap();
+        assert_eq!(outcome, AddOutcome::Applied);
+
+        let rendered = doc.to_string();
+        assert!(rendered.contains("frust-secure-storage"), "{rendered}");
+        assert!(
+            rendered.contains("features = [\"biometric\"]"),
+            "{rendered}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Re-applying the same feature must not duplicate it in the array —
+    /// the second call reports `AlreadyPresent` and leaves the document
+    /// byte-identical.
+    #[test]
+    fn cargo_feature_is_idempotent_on_double_apply() {
+        let root = scaffold_project("cargo-feature-idempotent");
+        let cargo_path = root.join(CARGO_TOML_REL);
+        let mut doc = fs::read_to_string(&cargo_path)
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        let mut changed = false;
+
+        apply_cargo_dep(
+            &mut doc,
+            &mut changed,
+            "frust-secure-storage",
+            "secure-storage",
+            "/nonexistent/frust/checkout",
+        )
+        .unwrap();
+
+        let first =
+            apply_cargo_feature(&mut doc, &mut changed, "frust-secure-storage", "biometric")
+                .unwrap();
+        assert_eq!(first, AddOutcome::Applied);
+        let after_first = doc.to_string();
+
+        let second =
+            apply_cargo_feature(&mut doc, &mut changed, "frust-secure-storage", "biometric")
+                .unwrap();
+        assert_eq!(second, AddOutcome::AlreadyPresent);
+        let after_second = doc.to_string();
+
+        assert_eq!(
+            after_first, after_second,
+            "re-applying the same feature must not change the document"
+        );
+        assert_eq!(
+            after_second.matches("biometric").count(),
+            1,
+            "the feature must appear exactly once: {after_second}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Applying onto a dependency with no existing `CargoDep` line is an
+    /// error, not a silently minted dep.
+    #[test]
+    fn cargo_feature_errors_on_missing_dep() {
+        let root = scaffold_project("cargo-feature-missing-dep");
+        let cargo_path = root.join(CARGO_TOML_REL);
+        let mut doc = fs::read_to_string(&cargo_path)
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        let mut changed = false;
+
+        let err = apply_cargo_feature(&mut doc, &mut changed, "frust-not-a-real-dep", "biometric")
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PluginAddError::NoSuchCargoDep { name, feature }
+                    if name == "frust-not-a-real-dep" && feature == "biometric"
+            ),
+            "{err}"
+        );
+        assert!(!changed, "a failed apply must not mark the doc changed");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `apply_contribution`'s dispatch match handles `CargoFeature` — driven
+    /// the same way the plugin's own `add_plugin` call would, through the
+    /// real `secure-storage` registry entry rather than an ad hoc spec.
+    #[test]
+    fn cargo_feature_dispatches_through_apply_contribution() {
+        let root = scaffold_project("cargo-feature-dispatch");
+        let cargo_path = root.join(CARGO_TOML_REL);
+        let mut doc = fs::read_to_string(&cargo_path)
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        let mut changed = false;
+        let spec = find_plugin("secure-storage").unwrap();
+        const FRUST_PATH: &str = "/nonexistent/frust/checkout";
+
+        apply_contribution(
+            &Contribution::CargoDep {
+                name: "frust-secure-storage",
+            },
+            &spec,
+            &root,
+            FRUST_PATH,
+            &mut doc,
+            &mut changed,
+        )
+        .unwrap();
+
+        let outcome = apply_contribution(
+            &Contribution::CargoFeature {
+                name: "frust-secure-storage",
+                feature: "biometric",
+            },
+            &spec,
+            &root,
+            FRUST_PATH,
+            &mut doc,
+            &mut changed,
+        )
+        .unwrap();
+        assert_eq!(outcome, AddOutcome::Applied);
+        assert!(doc.to_string().contains("features = [\"biometric\"]"));
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

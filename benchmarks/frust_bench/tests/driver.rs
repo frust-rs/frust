@@ -106,10 +106,16 @@ fn gated_frame<S: 'static, V: View<S>>(
 
 #[test]
 fn registry_has_ten_scenarios_in_id_order() {
+    // s1..=s10 (the frame-class table) stay in their original order and
+    // indices unchanged, with d1/d2 (the DB op-latency class, PROTOCOL §9)
+    // appended after — the registry widened from ten to twelve entries, but
+    // nothing about the s1..=s10 slice moved.
     let ids: Vec<&str> = SCENARIOS.iter().map(|s| s.id()).collect();
     assert_eq!(
         ids,
-        ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10"]
+        [
+            "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "d1", "d2"
+        ]
     );
 }
 
@@ -121,6 +127,15 @@ fn deep_link_and_id_parsing() {
     // Two-digit ids match exactly — `s10` must never resolve as `s1`.
     assert_eq!(scenarios::index_from_id("s10"), Some(9));
     assert_eq!(scenarios::index_from_id("s11"), None);
+
+    // The `d*` DB op-latency namespace (PROTOCOL §9.1) resolves through the
+    // exact same opaque-string lookup as `s*` — nothing here special-cases
+    // the `d`-prefix.
+    assert_eq!(scenarios::index_from_id("d1"), Some(10));
+    assert_eq!(scenarios::index_from_id("d2"), Some(11));
+    assert_eq!(scenarios::index_from_id("d3"), None);
+    assert_eq!(scenarios::index_from_url("frustbench://d1"), Some(10));
+    assert_eq!(scenarios::index_from_url("frustbench://d2"), Some(11));
 
     assert_eq!(scenarios::index_from_url("frustbench://s1"), Some(0));
     assert_eq!(scenarios::index_from_url("frustbench://s7/idle"), Some(6));

@@ -775,3 +775,150 @@ itself, not the platform-independent contract around it.
 **Evidence**: `plugins/iap/README.md` §3 (Store setup) and §4 (Testing
 without a store account); `plugins/iap/src/conformance.rs`'s module doc;
 `plugins/iap/src/event.rs`'s module doc.
+
+---
+
+### `db-engine-dialect-divergence` — sqlite and turso diverge outside the shared conformance surface
+
+**Observed**: two SQL-dialect gaps between `frust-database`'s engines are carved out of
+the shared conformance suite as sqlite-only tests rather than both-engine assertions.
+`CREATE INDEX` support is experimental and off-by-default upstream in turso `0.7.2`.
+Under-supplied positional params (`?1`/`?2` with fewer bound values than placeholders)
+error as `DatabaseError::Sql` on sqlite (`rusqlite`'s own client-side count check) but
+silently bind the missing trailing placeholders as `NULL` and succeed on turso, which has
+no equivalent check or parameter-count API to build one on.
+
+**Applies to**: any app issuing `CREATE INDEX` or relying on param-count strictness
+against a `turso`-backed `Database`; both are absent from the shared suite an app author
+might otherwise assume covers the full SQL surface both engines accept.
+
+**Why accepted**: neither gap is fixable from this crate's side without either
+hand-parsing SQL for placeholders in the bridge (rejected — keeps the turso bridge "tiny
+and boring") or waiting on upstream turso index/param-count work. The shared suite sticks
+to the both-engine surface; each divergence is a named `sqlite_conformance`-only test
+instead of a silently weakened shared assertion.
+
+**Evidence**: `plugins/database/src/conformance.rs`'s module doc (`create_index`,
+`param_count_mismatch` carve-outs); `plugins/database/README.md` §7.
+
+---
+
+### `db-cross-engine-interop-subset` — a shared file is portable only inside the WAL/unencrypted subset
+
+**Observed**: a database file written by one engine and opened by the other stays
+correct only if both sides stick to WAL journal mode, no encryption, and no
+engine-specific pragma (`mvcc`, `cipher`, `hexkey`). Both backends enforce this
+themselves (sqlite sets WAL at open; turso asserts it and refuses anything else), but
+nothing stops an app from reaching around `Database` with raw SQL that breaks it.
+
+**Applies to**: any app opening the same file with both `engine-sqlite` and
+`engine-turso` builds, or sharing a file with an external SQLite tool that changes
+journal mode or applies encryption.
+
+**Why accepted**: this is the verified intersection of what both engines' SQLite builds
+(bundled `rusqlite` 3.53.2; turso self-reports `sqlite_version()` 3.50.4) actually
+support in common — not a narrower promise than necessary, but not a general SQLite-file
+compatibility guarantee either.
+
+**Evidence**: `plugins/database/src/conformance.rs`'s cross-engine round-trip tests and
+module doc; `plugins/database/README.md` §5.3.
+
+---
+
+### `db-ui-thread-docs-only` — no typed guard against calling `Database` on the platform UI thread
+
+**Observed**: unlike the boundary the `AsyncContext` error covers for turso, there is no
+guard of any kind — typed or otherwise — against calling `Database::execute`/`query`/
+`transaction` synchronously from the platform UI thread. It blocks the UI thread exactly
+like any other blocking call would.
+
+**Applies to**: both engines, on every platform. The documented mitigation is calling
+through `frust_reactive::spawn_blocking`, never directly from `build()`/an event handler.
+
+**Why accepted**: matches the `secure-storage` precedent already established in this
+tier — a code guard would need FFI/thread-identity dependencies this pure-Rust plugin
+deliberately avoids pulling in just to detect a caller mistake the docs already state.
+
+**Evidence**: `plugins/database/src/lib.rs`'s module doc (Threading model); `plugins/database/README.md`'s Threading section.
+
+---
+
+### `db-asynccontext-partial-guard` — the turso `AsyncContext` guard cannot see a call from inside a spawned async task
+
+**Observed**: `DatabaseError::AsyncContext` is reported only for the provable subset of
+wrong-context callers — inside a tokio runtime's own `block_on` body, not inside a task
+(`Handle::try_current().is_ok() && task::try_id().is_none()`). A call made from inside a
+spawned async task looks identical to a `spawn_blocking` closure through every public
+tokio API (same handle, same task id), so the guard cannot reject it. Such a call
+degrades to a blocked worker thread for the duration of the query — never a panic, never
+a deadlock, but also never a typed error.
+
+**Applies to**: `engine-turso` builds only; an app that calls `Database` from inside
+`tokio::spawn`-ed code rather than via `frust_reactive::spawn_blocking`.
+
+**Why accepted**: tokio publishes no API that distinguishes "inside a spawned task" from
+"inside a blocking-pool closure" from the caller's side — the measured four-context table
+backing this is in the module doc. Detecting it would need parsing tokio's internal
+thread-naming or task-local state, which is out of reach from a public dependency.
+
+**Evidence**: `plugins/database/src/turso.rs`'s module doc (the four-context
+`Handle::try_current()`/`task::try_id()`/`block_on` measurement table and the two guard
+tests).
+
+---
+
+### `db-turso-bridge-serializes-handles` — turso handles do not get sqlite's read parallelism
+
+**Observed**: `plugins/database/src/lib.rs`'s module doc documents an `engine-sqlite`
+guarantee — "open multiple handles for concurrent readers" — that opening more than one
+`Database` handle onto the same file buys real, wall-clock read parallelism, because
+`rusqlite`'s bundled SQLite runs separate connections on separate OS threads.
+`engine-turso` does not honor this: every `TursoConn`, however many `Database` handles an
+app opens onto the same file, routes its operations through one process-wide,
+single-threaded bridge (`plugins/database/src/turso.rs`'s bridge thread and `run()`).
+Additional turso handles still buy correctness and cross-handle write visibility — each is
+an independent connection, each sees the others' commits — but their calls
+serialize/interleave on that one bridge thread rather than execute in parallel.
+
+**Applies to**: `engine-turso` builds only. `engine-sqlite` is unaffected — its concurrent-
+readers guarantee is real. An app that opens multiple turso handles expecting the
+sqlite-style read-parallelism speedup gets correct results at sqlite's single-connection
+throughput, not sqlite's multi-connection throughput.
+
+**Why accepted**: the bridge is deliberately minimal by charter — one process-wide,
+single-thread runtime, no worker pool, no timer, no socket of its own
+(`turso.rs`'s module doc, *The bridge*) — kept that way so the async-to-sync seam stays a
+small, auditable piece rather than growing its own scheduler. A per-handle or worker-pool
+bridge (one bridge thread per `Database`, or a small thread pool dispatching turso futures
+round-robin) would recover real parallelism, but is a materially bigger architectural
+change — connection-to-thread affinity, pool sizing, and a second place this crate would
+own concurrency policy — and was explicitly ruled out of v1 scope rather than overlooked.
+
+**Evidence**: `plugins/database/src/turso.rs`'s bridge/`run()` (the single
+`OnceLock<Result<Handle, String>>` and the one spawned bridge thread);
+`plugins/database/README.md` §4's `engine-turso` qualifier beside the `tokio::join!`
+example.
+
+### `db-rollback-failure-residual` — a failed recovery ROLLBACK can leave a handle silently mid-transaction
+
+**Observed**: `Database::transaction`'s `RollbackGuard` rolls the transaction back on
+every abnormal exit (closure `Err`, failing `COMMIT`, panicking closure), but that
+recovery `ROLLBACK` is itself issued best-effort (`let _ =`). If it also fails — an I/O
+error mid-WAL-rollback, disk full — the connection is handed back with the transaction
+still open and no taint recorded: the next `transaction()` on the handle fails at
+`BEGIN`, and bare `execute`/`query` calls silently join the orphaned transaction, whose
+writes are discarded when the handle drops.
+
+**Applies to**: both engines; only reachable when a `ROLLBACK` statement fails
+immediately after another failure on the same connection (a second-order fault).
+
+**Why accepted**: the primary failure paths (round-0 review F2/F9) are closed — the
+guard makes "no exit without a rollback attempt" structural, and the double-fault
+window is narrow and requires storage-level failure. A `tainted`-handle flag with a
+typed error on subsequent use is the known remedy if this residual is later promoted;
+it was deferred rather than designed under the review-loop cap. Apps needing robustness
+against this class drop the handle on any `transaction` error and reopen (README §4a).
+
+**Evidence**: `plugins/database/src/lib.rs` `RollbackGuard::drop` (best-effort
+`ROLLBACK`), the qualified poison-policy doc on `lock_conn`, README §4a's closing
+caveat; flagged by phase-review round 1 (`workflow/reviews/db-plugin/REVIEW.md`).

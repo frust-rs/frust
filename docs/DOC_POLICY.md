@@ -25,7 +25,7 @@ Partial coverage is expected — a unit with nothing to say beyond the shared in
 | `RENDER` | crates/frust-render, frust-text | A D |
 | `WIDGETS` | crates/frust-widgets, frust-theme | A C |
 | `SHELLS` | crates/frust-shell-{common,desktop,android,ios} | A D |
-| `PLUGINS` | crates/frust-plugin, plugins/{shared-preferences,secure-storage,camera,clipboard,haptics,iap,clean-signals-frust} | A D C |
+| `PLUGINS` | crates/frust-plugin, plugins/{shared-preferences,secure-storage,camera,clipboard,haptics,iap,clean-signals-frust,database} | A D C |
 | `NATIVE_WIDGETS` | plugins/native-widgets | A |
 | `CLI` | crates/frust-cli, frust-drive | A D |
 | `TUI` | crates/frust-tui | A D C |
