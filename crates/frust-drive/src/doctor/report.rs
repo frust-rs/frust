@@ -311,10 +311,10 @@ fn jdk_component(ctx: &DoctorCtx) -> Component {
         is_macos: ctx.is_macos,
     };
     match preflight::check_java(&preflight_ctx) {
-        Ok(home) => Component {
+        Ok((home, source)) => Component {
             name: "JDK".to_string(),
             status: ComponentStatus::Ok,
-            summary: format!("Java 17+ at {home}"),
+            summary: format!("Java 17+ at {home} (via {})", source.label()),
             fix_commands: Vec::new(),
         },
         Err(message) => Component {
@@ -664,5 +664,52 @@ mod tests {
         let signing = ios.components.iter().find(|c| c.name == "Signing").unwrap();
         assert_eq!(signing.status, ComponentStatus::Partial);
         assert_eq!(report.rollup(), ComponentStatus::Partial);
+    }
+
+    #[test]
+    fn jdk_component_reports_env_var_as_its_resolution_source() {
+        let runner = all_green_runner();
+        let env = all_green_env();
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: true,
+        };
+        let report = build_report(&ctx);
+        let android = report.areas.iter().find(|a| a.name == "Android").unwrap();
+        let jdk = android.components.iter().find(|c| c.name == "JDK").unwrap();
+        assert_eq!(jdk.status, ComponentStatus::Ok);
+        assert!(jdk.summary.contains("JAVA_HOME"), "{}", jdk.summary);
+    }
+
+    #[test]
+    fn jdk_component_reports_path_java_as_its_resolution_source_when_java_home_unset() {
+        let runner = all_green_runner().with(
+            "java -XshowSettings:properties -version",
+            ok_stderr(
+                "openjdk version \"17.0.9\" 2024-01-16\njava.home = /usr/lib/jvm/java-17-openjdk\n",
+            ),
+        ).with(
+            "/usr/lib/jvm/java-17-openjdk/bin/java -version",
+            ok_stderr("openjdk version \"17.0.9\" 2024-01-16\n"),
+        );
+        let env = FakeEnv::new()
+            .set("ANDROID_HOME", "/sdk")
+            .set("ANDROID_NDK_HOME", "/sdk/ndk/26.1.10909125"); // no JAVA_HOME
+        let ctx = DoctorCtx {
+            runner: &runner,
+            env: &env,
+            is_macos: false,
+        };
+        let report = build_report(&ctx);
+        let android = report.areas.iter().find(|a| a.name == "Android").unwrap();
+        let jdk = android.components.iter().find(|c| c.name == "JDK").unwrap();
+        assert_eq!(jdk.status, ComponentStatus::Ok);
+        assert!(jdk.summary.contains("java` on PATH"), "{}", jdk.summary);
+        assert!(
+            jdk.summary.contains("/usr/lib/jvm/java-17-openjdk"),
+            "{}",
+            jdk.summary
+        );
     }
 }
