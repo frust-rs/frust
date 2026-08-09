@@ -16,12 +16,13 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how DEVTOOLS relates to the other uni
 
 | Module | Responsibility |
 |--------|-----------------|
-| `frust-devtools-protocol` | NDJSON JSON-RPC 2.0 wire types: `Request`/`Response`/`Notification`/`Incoming`, the typed v1 `Method` set with per-method param/result structs, `encode_line`/`decode_line` framing, and `DISCOVERY_PREFIX`/`parse_discovery_line` — the single source of truth for the discovery-line contract both sides use |
+| `frust-devtools-protocol` | NDJSON JSON-RPC 2.0 wire types: `Request`/`Response`/`Notification`/`Incoming`, the typed v1 `Method` set with per-method param/result structs, `encode_line`/`decode_line` framing, `HandshakeParams`/`RpcError::UNAUTHORIZED`, and `format_discovery_line`/`parse_discovery_line -> Discovery` — the single source of truth for the discovery-line and handshake-token contract both sides use |
 | `frust-devtools::backend` | `DevtoolsBackend` trait a shell implements (`widget_tree`, `widget_props`, `metrics_snapshot`, `inject_tap`/`inject_scroll`/`inject_text`, `screenshot` defaulting to `NotSupported`), plus `AppInfo` and `BackendError` |
-| `frust-devtools::service` | `Service::start`/`ServiceHandle`: binds `127.0.0.1:0`, owns a small internal current-thread tokio runtime, logs the discovery line, and exposes `publish_frame_stats` (bounded, drop-oldest, never blocks the caller) |
-| `frust-devtools::{server,dispatch,frame_stats,hop}` | The accept loop, request→backend-call dispatch, the frame-stats broadcast bus, and the backend-thread hop that carries every backend call through one 1s-timeout channel round trip |
+| `frust-devtools::service` | `Service::start`/`ServiceHandle`: binds `127.0.0.1:0`, owns a small internal current-thread tokio runtime, logs the discovery line (with token), and exposes `publish_frame_stats` (bounded, drop-oldest, never blocks the caller) |
+| `frust-devtools::token` | Mints the per-process handshake token: `/dev/urandom`-backed, with a documented non-cryptographic fallback when it can't be read |
+| `frust-devtools::{server,dispatch,frame_stats,hop}` | The accept loop (rejects any pre-`handshake` method without a valid token), request→backend-call dispatch, the frame-stats broadcast bus, and the backend-thread hop that carries every backend call through one 1s-timeout channel round trip |
 | `frust-shell-common::devtools` (feature `devtools`) | The shell-side `DevtoolsBackend` implementation: maps `RenderRoot::inspect()` output into protocol types, hops backend calls to each shell's UI thread, and drives service start/pump/frame-stats publish |
-| `frust-drive::devtools_client` | The tool-side client: blocking `std::net::TcpStream` request/response plus a frame-stats subscription, `adb_forward_ephemeral`/`adb_forward_remove` for Android, and discovery-line parsing reused from the protocol leaf |
+| `frust-drive::devtools_client` | The tool-side client: blocking `std::net::TcpStream` request/response plus a frame-stats subscription, token-aware `connect`/`handshake`, `adb_forward_ephemeral`/`adb_forward_remove` for Android, and discovery-line parsing reused from the protocol leaf |
 
 ## Layer Dependencies
 
@@ -42,22 +43,29 @@ leaf — preserving its no-framework-crate, no-tokio charter (`docs/CLI_ARCHITEC
 client is `std::net::TcpStream` plus a background reader thread, mirroring `frust-drive`'s
 existing process-output threading idioms rather than pulling in an async runtime.
 
-**Trust model.** The service binds `127.0.0.1` only, never configurably wider, and ships with no
-authentication in v1 — the trust boundary is the loopback interface itself (plus, on a device, an
-`adb forward` a developer sets up deliberately), the same assumption a debugger attaching to the
-process makes. Because the protocol's `input_*` methods drive real UI, a shell gates starting the
-service on a debug/profile build via the `devtools` cargo feature (never a `debug_assertions`
-runtime check alone) — a release build compiles the listener out entirely, and the
-`FRUST_DEVTOOLS=0` env var is a runtime kill switch for the compiled-in case. See
+**Trust model.** The service binds `127.0.0.1` only, never configurably wider. Loopback alone is
+**not** the trust boundary on a device: any co-resident app can `connect("127.0.0.1", port)`,
+though (e.g. on Android) it cannot read another app's logcat, the channel the token travels over.
+The service mints a random per-process token (`frust-devtools::token` — `/dev/urandom` first, with
+a documented non-cryptographic fallback), prints it on the discovery line, and requires it at
+`handshake` before dispatching any other method — `ServiceConfig::require_token` defaults **on**;
+the off switch exists only for in-process tests. Because the protocol's `input_*` methods also
+drive real UI, a shell additionally gates starting the service on a debug/profile build via the
+`devtools` cargo feature (never a `debug_assertions` runtime check alone) — a release build
+compiles the listener out entirely, and the `FRUST_DEVTOOLS=0` env var is a runtime kill switch for
+the compiled-in case. `PROTOCOL_VERSION` deliberately stays `1` — token auth is a transport-level
+addition to the v1 wire contract, not a new protocol version. See
 [DEVELOPMENT.md](DEVELOPMENT.md) for the feature/build-mode funnel and
 [CODE_STANDARDS.md](CODE_STANDARDS.md) for the frame-stats publish-ordering convention.
 
 ## Data Flow
 
-- **Discovery.** The service logs one line built from `DISCOVERY_PREFIX` via `log::info!` on
-  start; tooling recovers the port from a log/logcat stream via `parse_discovery_line` (a
-  substring match tolerant of timestamp/tag prefixes — the same function formats and parses, so
-  the two sides can never drift). Android/iOS device access additionally routes through
+- **Discovery.** The service logs one line via `format_discovery_line(port, token)` on start
+  (`DISCOVERY_PREFIX`, via `log::info!`); tooling recovers both via
+  `parse_discovery_line -> Discovery { port, token }` (a substring match tolerant of
+  timestamp/tag prefixes — the same module formats and parses, so the two sides can never
+  drift; `token` is `None` for an auth-off server or a build predating the token). Android/iOS
+  device access additionally routes through
   `frust-drive`'s `adb_forward_ephemeral`/`adb_forward_remove` (Android) to map a device-loopback
   port to a host-loopback one; iOS physical-device forwarding is not implemented in v1 (simulator
   and desktop connect directly over localhost) — see [LIMITATIONS.md](LIMITATIONS.md).
@@ -92,11 +100,12 @@ runtime check alone) — a release build compiles the listener out entirely, and
 | Type | Purpose |
 |------|---------|
 | `Method` / `Request` / `Response` / `Notification` / `Incoming` | The typed v1 NDJSON JSON-RPC message set and framing discriminator (`frust-devtools-protocol`) |
+| `Discovery` / `HandshakeParams` / `RpcError::UNAUTHORIZED` | Auth wire types: the parsed discovery line (port + optional token), the client's handshake token, and the rejection code for any method sent before a valid token (`frust-devtools-protocol`) |
 | `WidgetTreeDump` / `WidgetNode` / `WidgetProps` | The wire shape of an inspected widget tree and one widget's props |
 | `DevtoolsBackend` | The trait a shell implements to answer every devtools request; the seam decoupling the service from `frust-core` |
-| `Service` / `ServiceHandle` / `ServiceConfig` | The framework-side server: start/stop, `publish_frame_stats`, and its 1s backend-call timeout |
+| `Service` / `ServiceHandle` / `ServiceConfig` | The framework-side server: start/stop, `publish_frame_stats`, its 1s backend-call timeout, and (`ServiceConfig::require_token`, `ServiceHandle::token()`) the per-process auth token |
 | `DevtoolsUi` | `frust-shell-common`'s per-shell view the hop's per-frame `pump` drains against |
-| `DevtoolsClient` | `frust-drive`'s blocking tool-side client: typed requests plus a `subscribe_frame_stats` receiver |
+| `DevtoolsClient` | `frust-drive`'s blocking tool-side client: `connect(addr, timeout, token)`, typed requests, a `subscribe_frame_stats` receiver, and `DevtoolsRpcError`/`is_unauthorized` for token-rejection detection |
 
 ## See Also
 

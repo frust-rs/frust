@@ -16,7 +16,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how CORE relates to the other units.
 | Module | Responsibility |
 |--------|-----------------|
 | `frust-core::view` / `widget` | `View` (per-frame declarative descriptor) and `Widget` (retained tree element: layout/paint/event) — the core declarative/retained trait pair |
-| `frust-core::app` / `tree` | `RenderRoot` owns the widget tree and theme, driving the rebuild → layout → paint → event pass |
+| `frust-core::app` / `tree` | `RenderRoot` owns the widget tree and theme, driving the rebuild → layout → paint → event pass; `WidgetTree`/`RenderRoot::inspect()` expose a read-only pre-order snapshot for external tooling |
 | `frust-core::component` | `Component`/`ComponentView`/`ComponentWidget` — a stateful-widget analog with retained state and its own reactive `Owner` |
 | `frust-core::event` / `animation` / `semantics` | Input/gesture routing, animation curve vocabulary, window insets, and pull-based accesskit semantics |
 | `frust-scene::scene` / `builder` | `Scene`/`SceneBuilder`/`Command` — the renderer-agnostic vector display list consumed by `frust-render` |
@@ -90,6 +90,16 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
 - `frust-paths`' dir/atomic-write helpers back GPU pipeline-cache persistence and preference
   storage in the shells and plugins that consume it.
 - A compile-time `Send` assertion on `Scene` guards a future render-thread split.
+- **Introspection is read-only and zero cost when unused.** `WidgetTree::roots()`/`children()`
+  return the arena's own insertion order (the arena stays authoritative); `WidgetTree::inspect()`
+  (and `RenderRoot::inspect()`, the same walk over the live tree) produce a plain, owned
+  `InspectNode` snapshot per node — id, type name, debug label, absolute bounds, children —
+  descending through both the arena's own children and each widget's `Widget::visit_children`
+  (default-empty, so a container that hasn't opted in reads as a leaf), naming each node via
+  `Widget::type_name` (vtable dispatch) and `ChildPod::inspect_id`. A `WidgetPod`'s type name is
+  instead captured once at `WidgetPod::new_typed` construction, since a root pod's element type
+  cannot swap. Core carries no serde or devtools-specific knowledge; the DEVTOOLS unit owns
+  turning the snapshot into wire types (see DEVTOOLS_ARCHITECTURE.md).
 
 ## Window Metrics and Context Delivery
 
@@ -161,6 +171,7 @@ releases the session, so the root's cached focus/IME state can never outlive the
 |------|---------|
 | `View<State>` / `Widget` | The declarative/retained pair every UI element implements |
 | `RenderRoot<State, V>` | Owns the widget tree and theme; drives rebuild/layout/paint/event |
+| `WidgetTree` / `InspectNode` | Read-only tree accessors (`roots`/`children`/`inspect`) and the plain owned snapshot node (id, type name, debug label, absolute bounds, children) they produce |
 | `Component` / `ComponentView` / `ComponentWidget` | Stateful widget analog with a per-instance reactive `Owner` |
 | `EventCtx` / `EventOutcome` / `InputEvent` | Event-pass context, result, and input vocabulary — including the `Housekeeping` broadcast variant (see Data Flow) |
 | `PaintCtx` / `PaintScene` / `PaintOutcome` | Paint-pass context and the renderer-agnostic paint target |

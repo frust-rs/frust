@@ -984,3 +984,28 @@ per-app rather than guessing, once a backend does implement it.
 
 **Evidence**: `crates/frust-devtools/src/backend.rs`'s `DevtoolsBackend::screenshot` default;
 `crates/frust-devtools-protocol/src/method.rs`'s `screenshot` doc comment.
+
+---
+
+### `devtools-e2e-component-only` — no test binds the real drive client to the real service in one process
+
+**Observed**: the drive-client↔real-service path is component-tested from both directions — the
+real `DevtoolsClient` against a hand-rolled canned wire server (`frust-drive`), and the real
+`Service` against a hand-rolled NDJSON client (`frust-devtools`'s `loopback.rs`) — but no test
+exercises the real client and the real service together in one process. Adding one would need a
+direct dev-dependency from `frust-drive` (tooling) onto `frust-devtools` (framework) or vice versa,
+which breaches the tooling/framework isolation charter (see DEVTOOLS_ARCHITECTURE.md's Layer
+Dependencies): the two sides may meet only at the protocol leaf.
+
+**Applies to**: the devtools wire protocol end to end; each side's contract is covered, but never
+the pair.
+
+**Why accepted**: the charter this would breach is load-bearing (it is what keeps a tooling crate
+from dragging `tokio` into the framework graph, and vice versa), so a same-process integration test
+is structurally out of reach from either crate alone. Phase 3's TUI integration exercises the real
+client against a real app's real service as an ordinary consumer (a separate binary, not a
+dev-dependency), and is the closure path for this gap.
+
+**Evidence**: `crates/frust-drive/src/devtools_client.rs`'s hand-rolled fake-server tests;
+`crates/frust-devtools/tests/loopback.rs`'s hand-rolled fake-client test; DEVTOOLS_ARCHITECTURE.md's
+tooling/framework isolation charter.
