@@ -291,10 +291,15 @@ pub struct PanicBlock {
 enum TrackState {
     #[default]
     Idle,
-    /// Seen the panic header; `usize` indexes into `PanicTracker::blocks`.
-    SawHeader(usize),
-    /// Seen the backtrace header; collecting frames/locations.
-    InBacktrace(usize),
+    /// Seen the panic header; `u64` is the tracked block's stable `start`
+    /// (looked up by value in `PanicTracker::blocks`, never a positional
+    /// index — `evict_before` compacts the Vec, so a cached index would go
+    /// stale/out-of-bounds the moment an earlier block is evicted while this
+    /// one is still open; `start` survives that compaction unchanged).
+    SawHeader(u64),
+    /// Seen the backtrace header; collecting frames/locations. Same
+    /// by-`start` addressing as `SawHeader`.
+    InBacktrace(u64),
 }
 
 /// Feeds pushed lines through the panic/backtrace block state machine,
@@ -321,24 +326,34 @@ impl PanicTracker {
                         open: true,
                         collapsed: true,
                     });
-                    self.state = TrackState::SawHeader(self.blocks.len() - 1);
+                    self.state = TrackState::SawHeader(abs);
                     LineRole::PanicHeader
                 } else {
                     LineRole::Normal
                 }
             }
-            TrackState::SawHeader(idx) => {
+            TrackState::SawHeader(start) => {
+                // Defensive: `evict_before` (called on every line, see its
+                // doc comment) may have dropped the tracked block out from
+                // under a stale state — a future change to its predicate
+                // could make this reachable even though today's `end >=
+                // base` retain can't fully evict a still-open block. Reset
+                // to `Idle` and re-classify the line on its own merits
+                // rather than risk a stale/wrong lookup.
+                let Some(b) = self.blocks.iter_mut().find(|b| b.start == start) else {
+                    self.state = TrackState::Idle;
+                    return self.feed(abs, plain);
+                };
                 if is_backtrace_header(plain) {
-                    let b = &mut self.blocks[idx];
                     b.backtrace_start = Some(abs);
                     b.end = abs;
-                    self.state = TrackState::InBacktrace(idx);
+                    self.state = TrackState::InBacktrace(start);
                     LineRole::BacktraceHeader
                 } else if is_panic_header(plain) {
                     // A fresh panic header while the previous one never grew
                     // a backtrace — close it (no foldable body) and start
                     // tracking the new one.
-                    self.blocks[idx].open = false;
+                    b.open = false;
                     self.blocks.push(PanicBlock {
                         start: abs,
                         backtrace_start: None,
@@ -347,28 +362,31 @@ impl PanicTracker {
                         open: true,
                         collapsed: true,
                     });
-                    self.state = TrackState::SawHeader(self.blocks.len() - 1);
+                    self.state = TrackState::SawHeader(abs);
                     LineRole::PanicHeader
                 } else {
-                    self.blocks[idx].end = abs;
+                    b.end = abs;
                     LineRole::PanicMessage
                 }
             }
-            TrackState::InBacktrace(idx) => {
+            TrackState::InBacktrace(start) => {
+                let Some(b) = self.blocks.iter_mut().find(|b| b.start == start) else {
+                    self.state = TrackState::Idle;
+                    return self.feed(abs, plain);
+                };
                 if is_frame_line(plain) {
-                    let b = &mut self.blocks[idx];
                     b.end = abs;
                     b.frame_count += 1;
                     LineRole::Frame
                 } else if is_frame_location(plain) {
-                    self.blocks[idx].end = abs;
+                    b.end = abs;
                     LineRole::FrameLocation
                 } else {
                     // The first non-matching line closes the block (task
                     // spec: "end: first non-matching line") — re-feed it
                     // fresh from `Idle` so it's classified on its own merits
                     // (it may itself open a new panic block).
-                    self.blocks[idx].open = false;
+                    b.open = false;
                     self.state = TrackState::Idle;
                     self.feed(abs, plain)
                 }
@@ -713,6 +731,72 @@ mod tests {
         assert_eq!(tracker.blocks().len(), 1);
         tracker.evict_before(8); // now fully below base
         assert!(tracker.blocks().is_empty());
+    }
+
+    #[test]
+    fn evicting_an_earlier_block_mid_track_of_a_later_one_does_not_panic() {
+        // Regression for the M1 crash: block A completes and closes, block B
+        // opens and is still `InBacktrace` when `evict_before` compacts A out
+        // of `blocks` — the state machine must resolve B by its stable
+        // `start`, not by a now-stale Vec position.
+        let mut tracker = PanicTracker::default();
+        // Block A: full panic + backtrace, lines 0..=7 (mirrors PANIC_LINES).
+        for (i, line) in PANIC_LINES.iter().enumerate() {
+            tracker.feed(i as u64, line);
+        }
+        assert_eq!(tracker.blocks().len(), 1);
+        assert!(!tracker.blocks()[0].open);
+
+        // Some ordinary lines stream by without yet evicting A — mirroring
+        // `push_line_at`'s per-line `feed → push → evict_before`, but with a
+        // ring base that hasn't outgrown A's `end` (7) yet, so A is still
+        // present in `blocks` (at Vec position 0) when B opens below.
+        for i in 10..15u64 {
+            tracker.feed(i, "app: still running");
+        }
+
+        // Block B opens at abs 20 — with A still present, B lands at Vec
+        // position 1, which is exactly the stale index the pre-fix code
+        // would have cached.
+        assert_eq!(
+            tracker.feed(20, "thread 'b' panicked at src/b.rs:5:5:"),
+            LineRole::PanicHeader
+        );
+        assert_eq!(
+            tracker.feed(21, "called `Option::unwrap()` on a `None` value"),
+            LineRole::PanicMessage
+        );
+        assert_eq!(
+            tracker.feed(22, "stack backtrace:"),
+            LineRole::BacktraceHeader
+        );
+
+        // Evict now — A (end=7) is fully below base and gets dropped, while
+        // B (start=20) is still open and mid-`InBacktrace`. Pre-fix, this
+        // compacted B from Vec position 1 to 0 while `InBacktrace(1)` still
+        // pointed at the old position — the next feed indexed out of bounds.
+        tracker.evict_before(15);
+        assert_eq!(tracker.blocks().len(), 1);
+        assert_eq!(tracker.blocks()[0].start, 20);
+
+        // Continue feeding B's backtrace body — no panic, fields correct.
+        assert_eq!(tracker.feed(23, "   0: rust_begin_unwind"), LineRole::Frame);
+        assert_eq!(
+            tracker.feed(24, "   1: my_app::state::reduce"),
+            LineRole::Frame
+        );
+        assert_eq!(
+            tracker.feed(25, "             at src/state.rs:88:13"),
+            LineRole::FrameLocation
+        );
+        assert_eq!(tracker.feed(26, "app: recovered"), LineRole::Normal);
+
+        let b = tracker.blocks()[0];
+        assert_eq!(b.start, 20);
+        assert_eq!(b.backtrace_start, Some(22));
+        assert_eq!(b.end, 25);
+        assert_eq!(b.frame_count, 2);
+        assert!(!b.open);
     }
 
     #[test]
