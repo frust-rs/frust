@@ -1051,7 +1051,7 @@ mod tests {
         assert!(!s.is_fold_collapsed(0)); // unknown id — false, never panics
     }
 
-    // ── g2: bounded panic-block cost under a crash loop ─────────────────────
+    // ── Bounded panic-block cost under a crash loop ──────────────────────────
 
     #[test]
     fn visible_indices_stays_correct_over_hundreds_of_backtrace_less_panic_headers() {
