@@ -1,7 +1,6 @@
-//! The four playground sections, one module per section: `platform_views`,
-//! `camera`, `native_widgets`, and `responsive` — each one an OS-facing
-//! capability exercised end to end rather than a widget gallery. Terminal and
-//! key-handling sections land here later.
+//! The six playground sections, one module per section: `platform_views`,
+//! `camera`, `native_widgets`, `responsive`, `terminal`, and `keys` — each one
+//! an OS-facing capability exercised end to end rather than a widget gallery.
 //!
 //! # Page-fn contract (fixed across every section)
 //!
@@ -35,20 +34,29 @@
 //! the `build` body.
 
 pub mod camera;
+pub mod keys;
 pub mod native_widgets;
 pub mod platform_views;
 pub mod responsive;
+pub mod terminal;
 
 use frust::AnyView;
 
 use crate::PlaygroundState;
 
-/// The four section labels, in order. Indexed by `PlaygroundState::section`
+/// The six section labels, in order. Indexed by `PlaygroundState::section`
 /// and dispatched by [`current`], and used verbatim as the shell's bottom
 /// navigation-bar destinations.
-pub const SECTION_LABELS: [&str; 4] = ["Platform Views", "Camera", "Native Widgets", "Responsive"];
+pub const SECTION_LABELS: [&str; 6] = [
+    "Platform Views",
+    "Camera",
+    "Native Widgets",
+    "Responsive",
+    "Terminal",
+    "Keys",
+];
 
-/// Dispatch to the section page for `section` (0..4), falling back to
+/// Dispatch to the section page for `section` (0..6), falling back to
 /// platform views for any out-of-range index (defensive — the navigation bar
 /// only ever yields a valid index).
 pub fn current(section: usize, state: &PlaygroundState) -> AnyView<PlaygroundState> {
@@ -57,6 +65,8 @@ pub fn current(section: usize, state: &PlaygroundState) -> AnyView<PlaygroundSta
         1 => camera::page(state),
         2 => native_widgets::page(state),
         3 => responsive::page(state),
+        4 => terminal::page(state),
+        5 => keys::page(state),
         _ => platform_views::page(state),
     }
 }

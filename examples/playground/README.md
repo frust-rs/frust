@@ -15,7 +15,7 @@ neutral backdrop for the capabilities under test.
 A Material `app_bar` (a plug brand mark, the title, and the
 brightness / reduce-motion / animations toggles) sits above the
 `pattern_switcher`-hosted section body, with a bottom `navigation_bar`
-selecting between four sections:
+selecting between six sections:
 
 1. **Platform Views** — the real `frust::platform_view` embedding contract: a
    300×400 `dev.frust.DemoStreamFactory` Mode B slot with chrome overlapping
@@ -36,8 +36,22 @@ selecting between four sections:
 4. **Responsive** — `frust::WindowMetrics` driving a **structural** layout
    switch between a single scrolling column and a two-pane master/detail split
    at a named breakpoint.
+5. **Terminal** — a checked-in byte stream replayed through a **real** VT
+   emulator (the pinned `vt100` crate) into a batched, painted 80×45 character
+   grid: five on-page profiles (idle / typing / build-log / htop / firehose),
+   30 Hz app-side repaint coalescing (one signal write per tick, never one per
+   chunk), width-derived cell geometry, and a live runs-per-frame readout.
+6. **Keys** — an IME keystroke probe: a hand-rolled `View`/`Widget` pair that
+   claims focus, publishes a sentinel `ImeState`, and recovers per-keystroke
+   bytes by diffing every platform snapshot against that sentinel — with the
+   derived stream and an event log rendered on screen (and logged; grep
+   `playground keys`).
 
-Terminal and key-handling sections arrive in a follow-up task.
+The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
+(bytes + the deterministic generator that produced them, embedded with
+`include_bytes!`); `examples/rows_profile.rs` is a host-only analysis tool that
+replays them offline and reports the changed-rows-per-generation distribution
+(`cargo run --example rows_profile`).
 
 ### Mode B
 

@@ -36,6 +36,20 @@ frust = { path = "../../crates/frust" }
 # long-tail valve, where a type isn't lifted by name); no production code
 # names `frust-core`/`kurbo`/`peniko` directly.
 
+# `vt100`: the terminal emulator the Terminal section
+# (`src/pages/terminal.rs`) replays the checked-in fixture bytes through.
+# A REAL emulator, deliberately — a hand-rolled five-escape parser would paint a
+# strawman grid and prove nothing about driving a real terminal from a frust app.
+#
+# Pinned to an EXACT patch: a parsing behaviour change between versions would
+# silently shift what the page rasterizes from identical fixture bytes, which is
+# the same comparability trap `fixtures/terminal/README.md` documents for the
+# fixtures themselves. Its whole tree is pure Rust — `vte` + `itoa` +
+# `unicode-width`; no tokio, no PTY, no `std::process` — and it type-checks for
+# `aarch64-linux-android`, `aarch64-apple-ios` and `aarch64-apple-ios-sim`,
+# which is what makes this section runnable on the devices playground exists for.
+vt100 = "=0.16.2"
+
 # `log` facade dependency, present only so the release-only `lean` feature
 # below can raise the compiled-in log ceiling (release-lean build mode).
 # `frust-perf` instrumentation rides `log::info!`, so the ceiling MUST be a

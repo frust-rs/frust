@@ -3,14 +3,15 @@
 //! (`examples/glyph-catalog` owns that) and **not** a benchmark
 //! (`benchmarks/` owns that): every section here exists to exercise a real
 //! OS-facing capability — platform-view embedding, the camera plugin, native
-//! platform controls, and window-shape responsiveness — on a real device.
+//! platform controls, window-shape responsiveness, driving a real terminal
+//! emulator, and the soft keyboard's IME seam — on a real device.
 //!
 //! This module is only the **shell**: the app state, the root [`navigator`]
 //! (whose home page is a Material [`app_bar`](frust::app_bar) — a plug brand
 //! mark, the "playground" title, and the brightness/reduce-motion/animations
 //! toggles folded into its trailing actions — over a
 //! [`pattern_switcher`](frust::motion::switcher::pattern_switcher) hosting one
-//! of four section pages in a [`scroll_view`], with a bottom
+//! of six section pages in a [`scroll_view`], with a bottom
 //! [`navigation_bar`](frust::navigation_bar) selecting between them, the whole
 //! column inside one [`safe_area`] and under a toast overlay), and the
 //! [`frust::app!`] entry binding all three platforms. The section pages
