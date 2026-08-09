@@ -27,7 +27,7 @@ use crate::event::{
 use crate::insets::WindowInsets;
 use crate::layout::BoxConstraints;
 use crate::semantics::{ROOT_NODE_ID, SemanticsCtx, SemanticsUpdate};
-use crate::tree::{WidgetPod, WidgetTree};
+use crate::tree::{InspectNode, WidgetPod, WidgetTree};
 use crate::view::{BuildCtx, ChangeFlags, View, WidgetId};
 use crate::widget::{LayoutCtx, PaintCtx, PaintOutcome, PaintScene, PlatformViewFrame};
 
@@ -689,6 +689,24 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         &self.tree
     }
 
+    /// A read-only, pre-order snapshot of the retained tree for tooling: per
+    /// node an id, its parent and children, the concrete widget's type name, an
+    /// optional debug label, and its absolute border box in logical px.
+    ///
+    /// Computed on demand in O(nodes) and takes `&self` — no per-frame
+    /// bookkeeping, no mutation, and nothing here participates in
+    /// build/layout/paint. Bounds reflect the **last layout pass**, so call it
+    /// after one (before the first, every rect is zero-sized).
+    ///
+    /// Scope: this walks the [`WidgetTree`] arena, which holds the root pod
+    /// only — a container owns its children as
+    /// [`ChildPod`](crate::widget::ChildPod)s, not as arena nodes (see that
+    /// type's docs). Descending into container children needs a child-enumeration
+    /// seam on [`Widget`](crate::widget::Widget) itself, which this does not add.
+    pub fn inspect(&self) -> Vec<InspectNode> {
+        self.tree.inspect()
+    }
+
     /// Run `app_logic`, then build (first call) or rebuild (subsequent calls)
     /// the root widget, returning what changed.
     ///
@@ -866,7 +884,10 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 ctx.set_has_focus(session_live);
                 let id = ctx.alloc_id();
                 let element = view.build(&mut ctx);
-                let pod = WidgetPod::new(id, Box::new(element));
+                // `new_typed` boxes the element exactly like `new` would, and
+                // additionally records `V::Element`'s type name for
+                // introspection — the concrete type is only nameable here.
+                let pod = WidgetPod::new_typed(id, element);
                 let root_id = self.tree.insert_root(pod);
                 self.root_id = Some(root_id);
                 self.prev_view = Some(view);
@@ -1514,6 +1535,37 @@ mod tests {
         let pod = root.tree().pod(id).unwrap();
         assert_eq!(pod.origin(), Point::ZERO);
         assert_eq!(pod.size(), Size::new(16.0, 16.0));
+    }
+
+    #[test]
+    fn inspect_reports_the_laid_out_root() {
+        let mut root: RenderRoot<AppState, MockTextView> = RenderRoot::new();
+        let mut state = AppState {
+            label: "hi".to_string(),
+        };
+        // Before the first build there is nothing to inspect.
+        assert!(root.inspect().is_empty());
+
+        root.rebuild(&mut app_logic, &mut state);
+        root.layout(Size::new(800.0, 600.0));
+
+        let nodes = root.inspect();
+        assert_eq!(nodes.len(), 1);
+        let node = &nodes[0];
+        assert_eq!(node.id, root.root_id().unwrap());
+        assert_eq!(node.parent, None);
+        assert_eq!(node.depth, 0);
+        assert!(node.children.is_empty());
+        // The concrete element type is captured, not the erased box.
+        assert!(node.type_name.ends_with("TextWidget"), "{}", node.type_name);
+        assert_eq!(node.debug_label, None);
+        // Bounds match what the layout pass recorded on the pod.
+        let pod = root.tree().pod(node.id).unwrap();
+        assert_eq!(
+            node.bounds,
+            Rect::from_origin_size(pod.origin(), pod.size())
+        );
+        assert_eq!(node.bounds, Rect::new(0.0, 0.0, 16.0, 16.0));
     }
 
     #[test]

@@ -20,8 +20,9 @@
 //!   [`VelocityTracker`](input::VelocityTracker), and the fling-decay math the
 //!   interactive widgets build on.
 //! * [`layout`] — the [`BoxConstraints`](layout::BoxConstraints) box model.
-//! * [`tree`] — the [`WidgetTree`](tree::WidgetTree) arena wrapper and
-//!   [`WidgetPod`](tree::WidgetPod).
+//! * [`tree`] — the [`WidgetTree`](tree::WidgetTree) arena wrapper,
+//!   [`WidgetPod`](tree::WidgetPod), and the read-only
+//!   [`InspectNode`](tree::InspectNode) walk tooling reads the tree through.
 //! * [`app`] — the [`RenderRoot`](app::RenderRoot) that drives rebuild → layout
 //!   → paint. This is what each platform shell owns.
 //! * [`component`] — [`Component`](component::Component), Flutter's
@@ -66,7 +67,7 @@ pub use input::{
 pub use insets::{EdgeInsets as WindowEdgeInsets, WindowInsets};
 pub use layout::BoxConstraints;
 pub use semantics::{SemanticsCtx, SemanticsUpdate};
-pub use tree::{WidgetPod, WidgetTree};
+pub use tree::{InspectNode, WidgetPod, WidgetTree};
 pub use view::{AnyView, BuildCtx, ChangeFlags, View, WidgetId, any};
 pub use widget::{
     ChildPod, HeroDirective, HeroFrames, LayoutCtx, PaintCtx, PaintOutcome, PaintScene, TickClass,
