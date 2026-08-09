@@ -23,11 +23,22 @@ use frust_tui::supervise::{PhaseLabel, SessionEvent, SessionEventKind, SessionId
 use frust_tui::ui::mouse::{MouseCtx, MouseRegions};
 use frust_tui::ui::theme::{ColorDepth, Theme};
 
-/// Render `state` at `w`x`h` and return the cell-grid text.
+/// Render `state` at `w`x`h` and return the cell-grid text, at `TrueColor`
+/// depth (every existing snapshot's depth).
 fn render_to_string(w: u16, h: u16, state: &AppState) -> String {
+    render_to_string_at(w, h, state, ColorDepth::TrueColor)
+}
+
+/// [`render_to_string`] at an explicit [`ColorDepth`] — used by the shimmer
+/// color-depth-degrade snapshot below. The cell grid captures symbols only
+/// (see the module doc), so a non-`TrueColor` depth only actually matters
+/// here insofar as it exercises the render path without panicking; the
+/// per-depth color behavior itself is unit-tested in
+/// `crates/frust-tui/src/ui/anim/shimmer.rs`.
+fn render_to_string_at(w: u16, h: u16, state: &AppState, depth: ColorDepth) -> String {
     let backend = TestBackend::new(w, h);
     let mut terminal = Terminal::new(backend).expect("test terminal");
-    let theme = Theme::frust_dark_at(ColorDepth::TrueColor);
+    let theme = Theme::frust_dark_at(depth);
     let mut regions = MouseRegions::new();
     terminal
         .draw(|frame| {
@@ -350,6 +361,40 @@ fn session_build_phase_known_100x30() {
         ..Default::default()
     };
     insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+/// Same scene as [`session_build_phase_known_100x30`], rendered at
+/// `ColorDepth::Xterm256` — the depth `themed_shimmer_spans` degrades to a
+/// ramp-bucketed sweep for (fixes review Major M4, see
+/// `crates/frust-tui/src/ui/anim/shimmer.rs`). The cell grid captures
+/// symbols only (module doc), so this snapshot's text is expected to be
+/// byte-identical to the TrueColor one — it exists to prove the render path
+/// doesn't panic/differ structurally at this depth; the actual per-depth
+/// color behavior is unit-tested in `shimmer.rs`.
+#[test]
+fn session_build_phase_known_xterm256_100x30() {
+    let root = "/tmp/huddle";
+    let mut sess = session(
+        0,
+        root,
+        "Pixel 7",
+        SessionState::Building,
+        &["   Compiling frust-core v0.3.1 (41/210)"],
+    );
+    sess.current_phase = Some(PhaseLabel::Compiling {
+        crate_name: "frust-core".to_string(),
+        progress: Some((41, 210)),
+    });
+    let state = AppState {
+        screen: Screen::Workbench,
+        project_root: Some(PathBuf::from(root)),
+        projects: vec![PathBuf::from(root)],
+        sessions: vec![sess],
+        active_session: Some(0),
+        animation_frame: 4,
+        ..Default::default()
+    };
+    insta::assert_snapshot!(render_to_string_at(100, 30, &state, ColorDepth::Xterm256));
 }
 
 /// The pre-first-line placeholder (workbook §B10): a transient session with

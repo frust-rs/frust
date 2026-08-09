@@ -922,3 +922,28 @@ against this class drop the handle on any `transaction` error and reopen (README
 **Evidence**: `plugins/database/src/lib.rs` `RollbackGuard::drop` (best-effort
 `ROLLBACK`), the qualified poison-policy doc on `lock_conn`, README §4a's closing
 caveat; flagged by phase-review round 1 (`workflow/reviews/db-plugin/REVIEW.md`).
+
+### `tui-shimmer-ansi16-degrade` — the §B10 phase-line shimmer degrades to flat+BOLD at Ansi16
+
+**Observed**: `themed_shimmer_spans` (`crates/frust-tui/src/ui/anim/shimmer.rs`) sweeps a
+real color ramp at TrueColor (a live RGB lerp) and at Xterm256 (`Theme::SHIMMER_RAMP_X256`,
+a fixed 5-entry palette-index table bucketed per character), but at `ColorDepth::Ansi16`
+there are only the theme's two named ANSI colors to choose from — too coarse a palette for
+a convincing color sweep between them. The head-tracking motion still plays: characters
+near the sweep head get `Modifier::BOLD` against a flat `theme.muted()` foreground
+everywhere else, rather than any color change.
+
+**Applies to**: any Ansi16-depth terminal (`ColorDepth::detect()`'s conservative floor for
+an unrecognized `$TERM`, `TERM=dumb`, or no `TERM` at all) rendering the build/install
+phase-line shimmer (workbook §B10).
+
+**Why accepted**: Ansi16 has no intermediate hues between the theme's muted and accent
+tokens to sweep through — a real color ramp needs a palette this depth doesn't have.
+BOLD-only motion is still a visible, cheap sweep at any depth, and keeps the degrade
+decision inside `themed_shimmer_spans` itself (dispatched on `theme.depth()`) rather than
+pushed out to call sites.
+
+**Evidence**: `crates/frust-tui/src/ui/anim/shimmer.rs`'s `themed_shimmer_spans`/
+`shimmer_spans_flat_bold`; `crates/frust-tui/src/ui/theme.rs`'s `ColorDepth`/
+`ThemeColor::resolve`; flagged as review Major M4 (shimmer color-depth degrade), fixed in
+the same round with this documented residual.

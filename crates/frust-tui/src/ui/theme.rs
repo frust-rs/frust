@@ -156,6 +156,34 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// Xterm256 shimmer ramp (`ui::anim::shimmer`'s `themed_shimmer_spans`):
+    /// a short, fixed set of palette indices approximating the TrueColor
+    /// muted→accent sweep through the 256-cube's own quantization.
+    /// `ThemeColor::resolve` only ever answers one of two fixed
+    /// `Color::Indexed` endpoints at this depth — there is no live RGB blend
+    /// to bucket a per-character `t` into — so the ramp is a small
+    /// hand-picked table rather than a `lerp_color` computation. Endpoints
+    /// are pinned to this theme's actual `t_muted`/`t_accent` x256 indices
+    /// (244/215 below); the three interior steps are cube entries whose own
+    /// RGB roughly tracks a straight-line lerp between muted's resolved gray
+    /// `(128,128,128)` and accent's resolved orange `(255,175,95)` (worked
+    /// out once, offline, against the standard 6×6×6 cube + grayscale-ramp
+    /// layout) — a visual judgment call within that constraint, not a
+    /// nearest-color search:
+    ///
+    /// | Step | Index | Cube/grayscale RGB   |
+    /// |------|-------|-----------------------|
+    /// | 0    | 244   | (128,128,128) — muted |
+    /// | 1    | 246   | (148,148,148)         |
+    /// | 2    | 137   | (175,135,95)          |
+    /// | 3    | 173   | (215,135,95)          |
+    /// | 4    | 215   | (255,175,95) — accent |
+    ///
+    /// Keep in lockstep with `t_muted`/`t_accent`'s x256 fields below if the
+    /// brand palette is ever re-sampled — the two endpoints must always
+    /// match.
+    pub const SHIMMER_RAMP_X256: [u8; 5] = [244, 246, 137, 173, 215];
+
     /// The Frust dark brand theme, probing the terminal for its color depth.
     pub fn frust_dark() -> Self {
         Self::frust_dark_at(ColorDepth::detect())

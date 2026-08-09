@@ -1,20 +1,37 @@
 //! Pure color-math utilities for a left-to-right shimmer sweep effect.
 //!
 //! A "shimmer" is a bright "head" that sweeps across text from left to
-//! right, lerping each character's foreground color between a `base` dim
-//! color and a `highlight` bright color based on the character's distance
-//! from the head.
+//! right, brightening each character's foreground based on its distance from
+//! the head. The exact mechanism depends on the terminal's color depth
+//! (`ColorDepth`, resolved once per [`crate::ui::theme::Theme`]) since the
+//! three depths do not offer the same palette:
 //!
-//! [`shimmer_spans`] is intentionally **pure** color math with no `Theme`
-//! dependency (no `AppState`, no rendering side effects, no I/O), so it's
-//! trivially testable and reusable with any two colors. [`themed_shimmer_spans`]
-//! is the call-site convenience that resolves those colors from the TUI's own
+//! - **TrueColor**: [`shimmer_spans`] lerps each character's fg between a
+//!   `base` dim color and a `highlight` bright color via [`lerp_color`] — a
+//!   real per-frame RGB blend.
+//! - **Xterm256**: [`shimmer_spans_indexed`] buckets the same per-character
+//!   `t` into a short fixed ramp of palette indices ([`ramp_color`],
+//!   `Theme::SHIMMER_RAMP_X256`) approximating the TrueColor sweep through
+//!   the 256-cube's own quantization — a real, visible sweep, not a
+//!   constant color.
+//! - **Ansi16**: [`shimmer_spans_flat_bold`] has no palette to sweep
+//!   through between two brand tokens, so it degrades to a flat `base`
+//!   foreground with `Modifier::BOLD` emphasis on characters near the head —
+//!   motion without color change. See `docs/LIMITATIONS.md`'s
+//!   `tui-shimmer-ansi16-degrade`.
+//!
+//! [`shimmer_spans`]/[`shimmer_spans_indexed`]/[`shimmer_spans_flat_bold`]
+//! are intentionally **pure** color math with no `Theme` dependency (no
+//! `AppState`, no rendering side effects, no I/O), so each is trivially
+//! testable and reusable with any color/ramp. [`themed_shimmer_spans`] is
+//! the call-site convenience that picks the right one of the three per
+//! `theme.depth()` and resolves colors from the TUI's own
 //! [`crate::ui::theme::Theme`] — never a hardcoded RGB palette.
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 
-use crate::ui::theme::Theme;
+use crate::ui::theme::{ColorDepth, Theme};
 
 /// Frames per full shimmer sweep (~1.5 s at the 50 ms / 20 fps tick cadence
 /// — see `crate::runner::TICK`).
@@ -28,11 +45,15 @@ const SHIMMER_HEAD_WIDTH: f32 = 3.5;
 /// all-dim rest gap between cycles instead of popping in / snapping back.
 const SHIMMER_LEAD: f32 = 3.0;
 
-/// Linearly interpolate between two colors. `t` is clamped to `[0.0, 1.0]`.
+/// Linearly interpolate between two `Color::Rgb` colors. `t` is clamped to
+/// `[0.0, 1.0]`.
 ///
-/// If either color is not `Color::Rgb`, returns `a` unchanged (graceful
-/// fallback for 16/256-color terminals, which `crossterm` down-converts
-/// anyway — see `crate::ui::theme::ColorDepth`).
+/// If either color is not `Color::Rgb`, returns `a` unchanged. In practice
+/// this only ever runs at `ColorDepth::TrueColor` — [`themed_shimmer_spans`]
+/// routes `Xterm256`/`Ansi16` through [`shimmer_spans_indexed`]/
+/// [`shimmer_spans_flat_bold`] instead, neither of which calls this
+/// function, so the fallback arm is a defensive default for a direct caller
+/// passing a non-`Rgb` pair, not a real code path.
 pub fn lerp_color(a: Color, b: Color, t: f32) -> Color {
     let t = t.clamp(0.0, 1.0);
     match (a, b) {
@@ -42,6 +63,39 @@ pub fn lerp_color(a: Color, b: Color, t: f32) -> Color {
         }
         _ => a,
     }
+}
+
+/// Bucket `t` (`[0.0, 1.0]`, clamped) into one of `ramp`'s indices — the
+/// discrete-palette analogue of [`lerp_color`] for a depth with no live RGB
+/// blend (`Xterm256`, see `Theme::SHIMMER_RAMP_X256`). `ramp` must be
+/// non-empty; the sole caller ([`shimmer_spans_indexed`]) always passes a
+/// fixed non-empty table, so an empty slice only reaches here through a
+/// direct misuse — `Color::Reset` is a defensive, visually-inert fallback
+/// for that case rather than a panic.
+pub fn ramp_color(ramp: &[u8], t: f32) -> Color {
+    let Some(last) = ramp.len().checked_sub(1) else {
+        return Color::Reset;
+    };
+    let t = t.clamp(0.0, 1.0);
+    let idx = (t * last as f32).round() as usize;
+    Color::Indexed(ramp[idx.min(last)])
+}
+
+/// Head position (in character units, may be negative or `>= n`) for a sweep
+/// over `n` characters at `phase`. Shared by [`shimmer_spans`],
+/// [`shimmer_spans_indexed`], and [`shimmer_spans_flat_bold`] so the three
+/// depth strategies sweep in lockstep.
+fn shimmer_head(n: f32, phase: f32) -> f32 {
+    phase * (n + SHIMMER_LEAD * 2.0) - SHIMMER_LEAD
+}
+
+/// Per-character brightness `t` (`1.0` at the head, `0.0` at/beyond
+/// `SHIMMER_HEAD_WIDTH` characters away) for character index `i` given the
+/// sweep `head` position. Shared by the three depth strategies, see
+/// [`shimmer_head`].
+fn shimmer_char_t(i: f32, head: f32) -> f32 {
+    let dist = (i - head).abs();
+    (1.0 - dist / SHIMMER_HEAD_WIDTH).max(0.0)
 }
 
 /// Current sweep position in `[0.0, 1.0)`, derived from the global animation
@@ -72,13 +126,12 @@ pub fn shimmer_spans(
     // all-dim rest gap between cycles — instead of snapping back to
     // character 0.
     let n = chars.len() as f32;
-    let head = phase * (n + SHIMMER_LEAD * 2.0) - SHIMMER_LEAD;
+    let head = shimmer_head(n, phase);
     chars
         .iter()
         .enumerate()
         .map(|(i, &c)| {
-            let dist = (i as f32 - head).abs();
-            let t = (1.0 - dist / SHIMMER_HEAD_WIDTH).max(0.0); // 1 at head → 0 away
+            let t = shimmer_char_t(i as f32, head); // 1 at head → 0 away
             let fg = lerp_color(base, highlight, t);
             Span::styled(
                 c.to_string(),
@@ -88,30 +141,108 @@ pub fn shimmer_spans(
         .collect()
 }
 
-/// [`shimmer_spans`] resolved against the TUI's own brand [`Theme`]: `base`
-/// is `theme.muted()`, `highlight` is `theme.accent()`, and `phase` is
-/// derived from `frame` via [`shimmer_phase`] — the shape a status-line
-/// caller wants (`themed_shimmer_spans(label, state.animation_frame, theme,
-/// Modifier::BOLD)`), so no call site hardcodes a color pair itself.
+/// [`shimmer_spans`]'s `Xterm256` counterpart: instead of a live RGB lerp,
+/// buckets each character's `t` into `ramp` via [`ramp_color`]. Same head
+/// motion/timing as `shimmer_spans` (`shimmer_head`/`shimmer_char_t`), so
+/// the sweep tracks identically across depths — only the color source
+/// differs. Empty `text` yields no spans, matching `shimmer_spans`.
+pub fn shimmer_spans_indexed(
+    text: &str,
+    ramp: &[u8],
+    phase: f32,
+    modifier: Modifier,
+) -> Vec<Span<'static>> {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+    let n = chars.len() as f32;
+    let head = shimmer_head(n, phase);
+    chars
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| {
+            let t = shimmer_char_t(i as f32, head);
+            let fg = ramp_color(ramp, t);
+            Span::styled(
+                c.to_string(),
+                Style::default().fg(fg).add_modifier(modifier),
+            )
+        })
+        .collect()
+}
+
+/// The width of `shimmer_char_t`'s bright zone (`t >= this`) that earns
+/// `Modifier::BOLD` in [`shimmer_spans_flat_bold`]. Chosen so roughly the
+/// same head-width characters that would visibly brighten under
+/// [`shimmer_spans`]/[`shimmer_spans_indexed`] go bold here too, keeping the
+/// three depths' sweeps the same apparent width.
+const SHIMMER_ANSI16_BOLD_THRESHOLD: f32 = 0.5;
+
+/// `Ansi16`'s degrade for [`shimmer_spans`]: there is no intermediate
+/// palette between two brand tokens at this depth (`docs/LIMITATIONS.md`'s
+/// `tui-shimmer-ansi16-degrade`), so every character stays a flat `base`
+/// foreground and the sweep is expressed purely as `Modifier::BOLD` on
+/// characters within [`SHIMMER_ANSI16_BOLD_THRESHOLD`] of the head. Same
+/// head motion/timing as `shimmer_spans`. Empty `text` yields no spans.
+pub fn shimmer_spans_flat_bold(
+    text: &str,
+    base: Color,
+    phase: f32,
+    modifier: Modifier,
+) -> Vec<Span<'static>> {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+    let n = chars.len() as f32;
+    let head = shimmer_head(n, phase);
+    chars
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| {
+            let t = shimmer_char_t(i as f32, head);
+            let mut m = modifier;
+            if t >= SHIMMER_ANSI16_BOLD_THRESHOLD {
+                m |= Modifier::BOLD;
+            }
+            Span::styled(c.to_string(), Style::default().fg(base).add_modifier(m))
+        })
+        .collect()
+}
+
+/// The shimmer sweep resolved against the TUI's own brand [`Theme`], picking
+/// the strategy that matches `theme.depth()` (see the module doc): a
+/// TrueColor RGB lerp ([`shimmer_spans`], `base` = `theme.muted()`,
+/// `highlight` = `theme.accent()`), an Xterm256 ramp bucket
+/// ([`shimmer_spans_indexed`], `Theme::SHIMMER_RAMP_X256`), or an Ansi16
+/// flat+BOLD degrade ([`shimmer_spans_flat_bold`], `base` = `theme.muted()`).
+/// `phase` is derived from `frame` via [`shimmer_phase`] in every case —
+/// the shape a status-line caller wants
+/// (`themed_shimmer_spans(label, state.animation_frame, theme,
+/// Modifier::BOLD)`), so no call site hardcodes a color pair, a ramp, or a
+/// depth check itself.
 pub fn themed_shimmer_spans(
     text: &str,
     frame: u64,
     theme: &Theme,
     modifier: Modifier,
 ) -> Vec<Span<'static>> {
-    shimmer_spans(
-        text,
-        theme.muted(),
-        theme.accent(),
-        shimmer_phase(frame),
-        modifier,
-    )
+    let phase = shimmer_phase(frame);
+    match theme.depth() {
+        ColorDepth::TrueColor => {
+            shimmer_spans(text, theme.muted(), theme.accent(), phase, modifier)
+        }
+        ColorDepth::Xterm256 => {
+            shimmer_spans_indexed(text, &Theme::SHIMMER_RAMP_X256, phase, modifier)
+        }
+        ColorDepth::Ansi16 => shimmer_spans_flat_bold(text, theme.muted(), phase, modifier),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::theme::ColorDepth;
 
     #[test]
     fn lerp_endpoints_and_midpoint() {
@@ -372,5 +503,202 @@ mod tests {
         );
         let themed = themed_shimmer_spans("hi", frame, &theme, Modifier::empty());
         assert_eq!(direct, themed);
+    }
+
+    // ── Xterm256: indexed ramp sweep (fixes review Major M4) ────────────────
+
+    #[test]
+    fn ramp_color_endpoints_and_midpoint() {
+        let ramp = [10u8, 20, 30, 40, 50];
+
+        assert_eq!(ramp_color(&ramp, 0.0), Color::Indexed(10));
+        assert_eq!(ramp_color(&ramp, 1.0), Color::Indexed(50));
+        // t=0.5 → the middle bucket of a 5-entry ramp.
+        assert_eq!(ramp_color(&ramp, 0.5), Color::Indexed(30));
+    }
+
+    #[test]
+    fn ramp_color_clamps_t_outside_range() {
+        let ramp = [10u8, 20, 30];
+        assert_eq!(ramp_color(&ramp, -1.0), Color::Indexed(10));
+        assert_eq!(ramp_color(&ramp, 2.0), Color::Indexed(30));
+    }
+
+    #[test]
+    fn ramp_color_empty_ramp_is_defensive_reset() {
+        // Not a real call path (themed_shimmer_spans always passes a fixed
+        // non-empty table) — just proves no panic on misuse.
+        assert_eq!(ramp_color(&[], 0.5), Color::Reset);
+    }
+
+    /// Mirrors `shimmer_spans_head_is_brightest`: an Indexed-pair sweep
+    /// actually moves through the ramp's steps as the head passes — the bug
+    /// this task fixes made this a constant `base` for every `t`.
+    #[test]
+    fn shimmer_spans_indexed_moves_through_ramp_steps() {
+        let ramp = [244u8, 246, 137, 173, 215];
+        let text = "ABCDEFGHIJ"; // 10 chars, n=10
+
+        // Same phase as shimmer_spans_head_is_brightest: head lands on index 4.
+        let phase = 7.0_f32 / 16.0;
+        let spans = shimmer_spans_indexed(text, &ramp, phase, Modifier::empty());
+
+        // Head (index 4) must resolve to the ramp's brightest (last) entry.
+        assert_eq!(spans[4].style.fg, Some(Color::Indexed(215)));
+        // Far ends (dist > SHIMMER_HEAD_WIDTH) must resolve to the ramp's
+        // dimmest (first) entry — the muted endpoint, not a constant
+        // mid-ramp value.
+        assert_eq!(spans[0].style.fg, Some(Color::Indexed(244)));
+        assert_eq!(spans[9].style.fg, Some(Color::Indexed(244)));
+
+        // At least one interior character must land on an intermediate
+        // ramp step — this is the actual "sweep" assertion: the rendered
+        // colors are not just the two endpoints.
+        let distinct: std::collections::BTreeSet<u8> = spans
+            .iter()
+            .filter_map(|s| match s.style.fg {
+                Some(Color::Indexed(idx)) => Some(idx),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            distinct.len() > 2,
+            "expected more than 2 distinct indexed colors across the sweep, got {distinct:?}"
+        );
+    }
+
+    #[test]
+    fn shimmer_spans_indexed_empty_text() {
+        let ramp = [244u8, 215];
+        assert!(shimmer_spans_indexed("", &ramp, 0.0, Modifier::empty()).is_empty());
+    }
+
+    #[test]
+    fn shimmer_spans_indexed_preserves_modifier() {
+        let ramp = [244u8, 215];
+        let spans = shimmer_spans_indexed("Bold", &ramp, 0.5, Modifier::BOLD);
+        for span in &spans {
+            assert!(span.style.add_modifier.contains(Modifier::BOLD));
+        }
+    }
+
+    // ── Ansi16: flat base + BOLD-head degrade ────────────────────────────────
+
+    #[test]
+    fn shimmer_spans_flat_bold_is_flat_color_everywhere() {
+        let base = Color::Gray;
+        let text = "ABCDEFGHIJ"; // 10 chars
+        let phase = 7.0_f32 / 16.0; // head over index 4, matching the TrueColor test
+
+        let spans = shimmer_spans_flat_bold(text, base, phase, Modifier::empty());
+
+        // Every span's fg is the flat base color, at the head and away from it.
+        for (i, span) in spans.iter().enumerate() {
+            assert_eq!(
+                span.style.fg,
+                Some(base),
+                "index {i} fg should stay flat base, never lerp toward an accent"
+            );
+        }
+    }
+
+    #[test]
+    fn shimmer_spans_flat_bold_bolds_only_near_head() {
+        let base = Color::Gray;
+        let text = "ABCDEFGHIJ"; // 10 chars
+        let phase = 7.0_f32 / 16.0; // head over index 4
+
+        let spans = shimmer_spans_flat_bold(text, base, phase, Modifier::empty());
+
+        // The head itself is bold (t = 1.0 >= threshold).
+        assert!(
+            spans[4].style.add_modifier.contains(Modifier::BOLD),
+            "head character should carry BOLD"
+        );
+        // Far ends (t = 0.0) are not bold.
+        assert!(
+            !spans[0].style.add_modifier.contains(Modifier::BOLD),
+            "far-left character should not carry BOLD"
+        );
+        assert!(
+            !spans[9].style.add_modifier.contains(Modifier::BOLD),
+            "far-right character should not carry BOLD"
+        );
+    }
+
+    #[test]
+    fn shimmer_spans_flat_bold_preserves_caller_modifier() {
+        // A caller-supplied modifier (e.g. an italic flag) must survive
+        // alongside the sweep's own conditional BOLD, everywhere.
+        let base = Color::Gray;
+        let spans = shimmer_spans_flat_bold("Hi", base, 0.0, Modifier::ITALIC);
+        for span in &spans {
+            assert!(span.style.add_modifier.contains(Modifier::ITALIC));
+        }
+    }
+
+    #[test]
+    fn shimmer_spans_flat_bold_empty_text() {
+        assert!(shimmer_spans_flat_bold("", Color::Gray, 0.0, Modifier::empty()).is_empty());
+    }
+
+    // ── themed_shimmer_spans: per-depth dispatch ─────────────────────────────
+
+    #[test]
+    fn themed_shimmer_xterm256_sweeps_through_ramp() {
+        let theme = Theme::frust_dark_at(ColorDepth::Xterm256);
+        let phase = 7.0_f32 / 16.0;
+        let frame = (phase * SHIMMER_PERIOD_FRAMES as f32).round() as u64;
+        let text = "ABCDEFGHIJ";
+
+        let spans = themed_shimmer_spans(text, frame, &theme, Modifier::empty());
+
+        // Every fg must be Indexed (never a plain named/Rgb color) and must
+        // vary across the sweep — not the constant muted base the pre-fix
+        // code produced for every t at this depth.
+        for span in &spans {
+            assert!(matches!(span.style.fg, Some(Color::Indexed(_))));
+        }
+        let distinct: std::collections::BTreeSet<u8> = spans
+            .iter()
+            .filter_map(|s| match s.style.fg {
+                Some(Color::Indexed(idx)) => Some(idx),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            distinct.len() > 1,
+            "Xterm256 shimmer must not collapse to a single constant color, got {distinct:?}"
+        );
+    }
+
+    #[test]
+    fn themed_shimmer_ansi16_is_flat_plus_bold() {
+        let theme = Theme::frust_dark_at(ColorDepth::Ansi16);
+        let phase = 7.0_f32 / 16.0;
+        let frame = (phase * SHIMMER_PERIOD_FRAMES as f32).round() as u64;
+        let text = "ABCDEFGHIJ";
+
+        let spans = themed_shimmer_spans(text, frame, &theme, Modifier::empty());
+
+        // Every fg is the theme's flat muted() Ansi16 color — no sweep color
+        // change is possible at this depth.
+        let muted = theme.muted();
+        for span in &spans {
+            assert_eq!(span.style.fg, Some(muted));
+        }
+        // But the head is expressed as BOLD, so the sweep is still visible.
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.style.add_modifier.contains(Modifier::BOLD)),
+            "expected at least one bold (head) character in the Ansi16 sweep"
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|s| !s.style.add_modifier.contains(Modifier::BOLD)),
+            "expected at least one non-bold (away-from-head) character too"
+        );
     }
 }
