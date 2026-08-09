@@ -33,7 +33,7 @@ numbers: labs 1–8's line anchors drift, names don't.
 | The hole punch | `crates/frust-widgets/src/platform_view.rs` → `crates/frust-render/src/convert.rs` | `PlatformViewWidget::paint`, `PaintScene::clear_rect`, `shield` |
 | Host-side factory resolution | `platform/android/frust-embedding/…/FrustViewHost.kt` · `platform/ios/FrustEmbedding/…/FrustViewHost.swift` | `resolveFactory`, `interactiveTargetAt` · `interactiveSlotContains` |
 | A plugin author's own native subtree | `plugins/native-widgets/src/component.rs` | `NativeComponent`, `ComponentCtx`, `register_component`, `native_component` |
-| The device-gate vehicle | `examples/glyph-catalog/src/pages/native_widgets.rs` | `page`, `theme_toggle_demo`, `gate_harness_block` |
+| The device-gate vehicle | `examples/playground/src/pages/native_widgets.rs` | `page`, `theme_toggle_demo`, `gate_harness_block` |
 
 ## The pipeline, in seven stages
 
@@ -317,6 +317,12 @@ and read `a_merely_culled_slot_is_never_disposed_by_the_retire_path`: you just
 made a scrolled-offscreen camera preview tear down and restart. Revert both.
 
 ### 9.3 — Mode A vs Mode B, on a device
+
+[The Native Widgets section now lives in `examples/playground` only —
+`examples/glyph-catalog` was stripped to a Glyph-theme-only showcase after this
+lab was written. Substitute `examples/playground`, package `it.f0x.playground`,
+and `MainActivity.kt`/`SceneDelegate.swift` under that app's tree when running
+the steps below.]
 
 `examples/glyph-catalog` is the vehicle — a standalone workspace, run from its
 own directory, and it ships in **Mode B**:

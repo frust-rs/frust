@@ -30,7 +30,7 @@ Partial coverage is expected — a unit with nothing to say beyond the shared in
 | `CLI` | crates/frust-cli, frust-drive | A D |
 | `TUI` | crates/frust-tui | A D C |
 
-**Excluded** (consumers, not units — index line + own README only): examples/huddle, examples/shadertoy, examples/glyph-catalog, examples/layer-bench, examples/no-catalogs.
+**Excluded** (consumers, not units — index line + own README only): examples/huddle, examples/shadertoy, examples/glyph-catalog, examples/playground, examples/no-catalogs.
 
 NATIVE_WIDGETS' pins and conventions ride the PLUGINS spokes (shared Apple FFI pins, one plugin
 charter). Conventions binding more than one unit — the sanctioned-unsafe register, interaction

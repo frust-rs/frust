@@ -66,7 +66,7 @@ by ~2-3 frames. Steady state (frame 11 onward) is 0 — this is an onset-only
 effect.
 
 **Applies to**: Android, a platform view hosted inside a scrolling container
-(e.g. the camera preview inside the catalog's `ScrollView`); measured on
+(e.g. the camera preview inside playground's `ScrollView`); measured on
 cupid.
 
 **Why not fixed**: the shape-aware sync tail's regime detector keys off an
@@ -99,7 +99,7 @@ device/session (p90 4.8-4.9 frames), zero overshoot at every velocity.
 Accepted by Ed on 2026-07-26 partly because a camera preview is expected to
 be placed on a static surface rather than inside a scroll view, which makes
 this residual unobservable for that use case — but the sync machinery itself
-stays load-bearing regardless: the catalog's own camera page deliberately
+stays load-bearing regardless: playground's own camera page deliberately
 scrolls the slot to exercise the dispose/revive cycle, and `platform_views`
 remains a scrolling Mode B testbed.
 
@@ -247,7 +247,7 @@ on every frame.
 
 **Why accepted**: the CPU and thermal cost on ARM mobile is unverified — no
 on-device benchmark exists for any pure-Rust decoder. Phase-4 device-gate
-metric: the catalog scan strip's timing mode exists to measure exactly this.
+metric: playground's scan strip's timing mode exists to measure exactly this.
 
 **Future lever (documented option only, NOT implemented)**: advance the
 absence counter on skipped/undecoded frames too, decoupling counter cadence
