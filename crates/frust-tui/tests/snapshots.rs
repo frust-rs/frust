@@ -18,7 +18,7 @@ use frust_tui::engine::{
     ContextTarget, CreateWizard, DeviceRow, DoctorCheck, DoctorState, Message, Palette, RegionId,
     RunConfig, RunFocus, Screen, Scroll, SessionView, ToastKind, WizardStep, update,
 };
-use frust_tui::supervise::{SessionId, SessionState};
+use frust_tui::supervise::{SessionEvent, SessionEventKind, SessionId, SessionState};
 use frust_tui::ui::mouse::{MouseCtx, MouseRegions};
 use frust_tui::ui::theme::{ColorDepth, Theme};
 
@@ -178,6 +178,47 @@ fn single_session_state() -> AppState {
 #[test]
 fn session_log_follow_100x30() {
     insta::assert_snapshot!(render_to_string(100, 30, &single_session_state()));
+}
+
+/// Goes through the real `update()` path — `Message::RegisterSession`
+/// followed by several `Message::Session(Lines(..))` batches, as the
+/// supervisor would deliver them — rather than constructing a `SessionView`
+/// directly like every other session snapshot above. This is the regression
+/// coverage for the seeded-`Anchored(0)` follow bug: a session used to be
+/// seeded not-following on an empty log (honoring a persisted global
+/// default), which was indistinguishable from a user having frozen at line 1
+/// once the first line landed — the render window then stuck at one row
+/// forever. With per-session follow there is no such seed: the rendered
+/// window must track the tail as lines arrive.
+#[test]
+fn registered_session_tracks_tail_through_update_100x30() {
+    let mut state = workbench_state();
+    let id = SessionId(0);
+    update(
+        &mut state,
+        Message::RegisterSession {
+            id,
+            project_root: PathBuf::from("/tmp/huddle"),
+            target_label: "desktop".to_string(),
+        },
+    );
+    for batch in 0..5 {
+        let lines = (0..20)
+            .map(|i| format!("line {}", batch * 20 + i))
+            .collect();
+        update(
+            &mut state,
+            Message::Session(SessionEvent {
+                id,
+                kind: SessionEventKind::Lines(lines),
+            }),
+        );
+    }
+    assert!(
+        state.active_session().unwrap().is_following(),
+        "a never-scrolled session stays in Follow through incoming lines"
+    );
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
 }
 
 #[test]

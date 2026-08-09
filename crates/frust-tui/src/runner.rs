@@ -244,7 +244,6 @@ fn apply_effect(
         }) => spawn_add_plugin(project_root, id, features, tx.clone()),
         Some(Effect::SetMouseCapture(on)) => set_mouse_capture(on),
         Some(Effect::SaveSidebarWidth(width)) => crate::engine::save_sidebar_width(width),
-        Some(Effect::SaveFollowTailDefault(on)) => crate::engine::save_follow_tail_default(on),
         None => {}
     }
 }

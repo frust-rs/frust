@@ -1,0 +1,35 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+assertion_line: 221
+expression: "render_to_string(100, 30, &state)"
+---
+⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
+━━━━━━━━                                                                                            
+                                                                                                    
+ PROJECTS                │huddle:  1 ◌ desktop                                                      
+  ▸ huddle               │line 76                                                                   
+                         │line 77                                                                   
+ DEVICES ↻ r             │line 78                                                                   
+   none found            │line 79                                                                   
+                         │line 80                                                                   
+ SESSIONS                │line 81                                                                   
+   huddle                │line 82                                                                   
+   ▸ ◌ desktop           │line 83                                                                   
+                         │line 84                                                                   
+ ACTIONS                 │line 85                                                                   
+   New project · n       │line 86                                                                   
+   Add plugin · a        │line 87                                                                   
+   Doctor · d            │line 88                                                                   
+   Build · b             │line 89                                                                   
+   Clean · c             │line 90                                                                   
+                         │line 91                                                                   
+                         │line 92                                                                   
+                         │line 93                                                                   
+                         │line 94                                                                   
+                         │line 95                                                                   
+                         │line 96                                                                   
+                         │line 97                                                                   
+                         │line 98                                                                   
+                         │line 99                                                                  █
+                         │● follow  ·  wrap:off                x stop · f follow · w wrap · / search
+● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]

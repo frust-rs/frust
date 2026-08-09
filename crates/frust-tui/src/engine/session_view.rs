@@ -95,6 +95,12 @@ pub enum Scroll {
     /// viewport. Absolute (not tail-relative) so incoming lines never move the
     /// content the user scrolled up to read — the fdemon 0.6.3
     /// "survives incoming lines" property.
+    ///
+    /// **Invariant:** an `Anchored` index always names a line that has
+    /// actually been pushed — never a placeholder on an empty log. Every
+    /// session starts `Follow` ([`SessionView::new`]); only a user scroll or
+    /// [`SessionView::toggle_follow`] (both of which read the buffer's real
+    /// tail) ever produce an `Anchored` value.
     Anchored(u64),
 }
 

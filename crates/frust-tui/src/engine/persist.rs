@@ -155,22 +155,21 @@ pub fn merge_recent_and_detected(recent: &[PathBuf], detected: &[PathBuf]) -> Ve
     out
 }
 
-// ── Settings persistence: sidebar width, mouse-capture
-// preference, follow-tail default ───────────────────────────────────────────
+// ── Settings persistence: sidebar width, mouse-capture preference ──────────
 
 /// Persisted workbench preferences (`[settings]` table in `tui.toml`),
 /// alongside the `[recent].projects` array above — a fresh launch's
 /// "last-active project" is already covered by that list (`AppState::new`
 /// opens `projects.first()` when the cwd has no project of its own), so it
-/// carries no separate key here.
+/// carries no separate key here. Follow-tail is per-session, in-memory-only
+/// state (every session starts following) and is deliberately not persisted
+/// here — see `engine::update`'s `RegisterSession`/`ToggleFollow` handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settings {
     /// The sidebar's drag-resized width (columns), from the sidebar splitter.
     pub sidebar_width: u16,
     /// Whether crossterm mouse capture is on.
     pub mouse_capture: bool,
-    /// The follow-tail state a freshly-registered session tab starts in.
-    pub follow_tail_default: bool,
 }
 
 impl Default for Settings {
@@ -178,7 +177,6 @@ impl Default for Settings {
         Self {
             sidebar_width: SIDEBAR_DEFAULT_WIDTH,
             mouse_capture: true,
-            follow_tail_default: true,
         }
     }
 }
@@ -218,14 +216,9 @@ fn settings_from_doc(doc: &DocumentMut) -> Settings {
         .and_then(|t| t.get("mouse_capture"))
         .and_then(Item::as_bool)
         .unwrap_or(default.mouse_capture);
-    let follow_tail_default = table
-        .and_then(|t| t.get("follow_tail_default"))
-        .and_then(Item::as_bool)
-        .unwrap_or(default.follow_tail_default);
     Settings {
         sidebar_width,
         mouse_capture,
-        follow_tail_default,
     }
 }
 
@@ -248,17 +241,6 @@ pub fn save_mouse_capture(on: bool) {
 
 fn save_mouse_capture_with(env: &dyn EnvLookup, on: bool) {
     save_setting(env, "mouse_capture", Value::from(on));
-}
-
-/// Persist the follow-tail default — updated whenever the user toggles
-/// follow-tail on the active session (`Message::ToggleFollow`), so a future
-/// session tab starts in whichever mode was last chosen.
-pub fn save_follow_tail_default(on: bool) {
-    save_follow_tail_default_with(&RealEnv, on);
-}
-
-fn save_follow_tail_default_with(env: &dyn EnvLookup, on: bool) {
-    save_setting(env, "follow_tail_default", Value::from(on));
 }
 
 /// Format-preserving save of exactly one `[settings].<key>` — mirrors
@@ -465,14 +447,12 @@ mod tests {
         let env = FakeEnv::home(&home);
         save_sidebar_width_with(&env, 40);
         save_mouse_capture_with(&env, false);
-        save_follow_tail_default_with(&env, false);
         let loaded = load_settings_with(&env);
         assert_eq!(
             loaded,
             Settings {
                 sidebar_width: 40,
                 mouse_capture: false,
-                follow_tail_default: false,
             }
         );
         let _ = fs::remove_dir_all(&home);
@@ -503,10 +483,6 @@ mod tests {
         assert!(!loaded.mouse_capture);
         assert_eq!(loaded.sidebar_width, Settings::default().sidebar_width);
         assert_eq!(
-            loaded.follow_tail_default,
-            Settings::default().follow_tail_default
-        );
-        assert_eq!(
             load_recent_projects_with(&env),
             vec![PathBuf::from("/tmp/huddle")],
             "the [recent] table must survive a [settings] save"
@@ -522,6 +498,34 @@ mod tests {
         fs::write(config.join("tui.toml"), "not [valid toml").unwrap();
         let env = FakeEnv::home(&home);
         assert_eq!(load_settings_with(&env), Settings::default());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// A `tui.toml` written by an older build still carries the now-removed
+    /// `follow_tail_default` key (follow-tail is per-session, in-memory-only
+    /// state now — see `Settings`'s doc comment). Loading it must not error
+    /// and must ignore the stale key, recovering only the settings still
+    /// modeled.
+    #[test]
+    fn a_legacy_settings_file_with_the_removed_follow_tail_key_loads_without_error() {
+        let home = unique_temp_home();
+        let config = home.join(".config").join("frust");
+        fs::create_dir_all(&config).unwrap();
+        fs::write(
+            config.join("tui.toml"),
+            "[settings]\nsidebar_width = 30\nmouse_capture = false\nfollow_tail_default = false\n",
+        )
+        .unwrap();
+        let env = FakeEnv::home(&home);
+        let loaded = load_settings_with(&env);
+        assert_eq!(
+            loaded,
+            Settings {
+                sidebar_width: 30,
+                mouse_capture: false,
+            },
+            "the stale key is ignored, not an error"
+        );
         let _ = fs::remove_dir_all(&home);
     }
 }

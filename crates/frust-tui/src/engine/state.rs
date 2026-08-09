@@ -175,12 +175,6 @@ pub struct AppState {
     /// captures keyboard nav and suppresses the base layer's mouse regions like
     /// a modal, but renders as a small popup over the (still-visible) workbench.
     pub context_menu: Option<ContextMenu>,
-    /// The follow-tail state a freshly-registered session tab starts in
-    /// (persisted via `tui.toml` settings) — updated whenever the user toggles follow-tail
-    /// on the active session (`Message::ToggleFollow`), so it always reflects
-    /// the most recently chosen preference. Loaded from `tui.toml` at startup
-    /// (see [`super::persist::load_settings`]); `true` by default.
-    pub follow_tail_default: bool,
     /// Whether the sidebar renders as a toggleable floating overlay instead
     /// of its normal inline column — the narrow-terminal responsive
     /// breakpoint. Meaningless (ignored) above
@@ -216,7 +210,6 @@ impl AppState {
         let settings = super::persist::load_settings();
         state.sidebar_width = settings.sidebar_width;
         state.mouse_capture = settings.mouse_capture;
-        state.follow_tail_default = settings.follow_tail_default;
         state
     }
 
@@ -262,7 +255,6 @@ impl AppState {
             mouse_capture: true,
             active_drag: None,
             context_menu: None,
-            follow_tail_default: true,
             sidebar_overlay_open: false,
             help_open: false,
         }
@@ -387,7 +379,6 @@ impl Default for AppState {
             mouse_capture: true,
             active_drag: None,
             context_menu: None,
-            follow_tail_default: true,
             sidebar_overlay_open: false,
             help_open: false,
         }

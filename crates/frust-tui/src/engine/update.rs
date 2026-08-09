@@ -16,7 +16,7 @@ use super::context_menu::ContextMenu;
 use super::create_wizard::{CreateWizard, WizardAdvance};
 use super::message::{ContextTarget, DragKind, Message};
 use super::run_config::{DeviceRow, RunConfig};
-use super::session_view::{Scroll, SessionView};
+use super::session_view::SessionView;
 use super::state::{AppState, Screen};
 use super::toast::ToastKind;
 use crate::supervise::{DeviceTarget, SessionEvent, SessionEventKind, SessionId, SessionSpec};
@@ -102,9 +102,6 @@ pub enum Effect {
     /// just-completed `SidebarSplitter` drag (settings persistence,
     /// fulfilling `DragEnd`'s previously-deferred note).
     SaveSidebarWidth(u16),
-    /// Persist the follow-tail default — the runner's enactment of a
-    /// follow-tail toggle on the active session (settings persistence).
-    SaveFollowTailDefault(bool),
     /// Apply a registry plugin's contributions to `project_root` off-thread via
     /// [`frust_drive::plugin::add_plugin`], posting
     /// [`Message::AddPluginSucceeded`]/[`Message::AddPluginFailed`] back — the
@@ -223,13 +220,12 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             if state.session_index(id).is_some() {
                 return Outcome::idle();
             }
-            let mut view = SessionView::new(id, project_root, target_label);
-            // Honor the persisted follow-tail default: an empty log has
-            // nothing to anchor to yet, so `Anchored(0)` simply starts the
-            // view "not following" until the first line arrives.
-            if !state.follow_tail_default {
-                view.scroll = Scroll::Anchored(0);
-            }
+            // Every session starts following its own tail; there is no
+            // persisted global default. `Scroll::Anchored` must always name
+            // an existing absolute line index, and a freshly registered
+            // session has no lines yet — so `Follow` is the only valid
+            // starting state.
+            let view = SessionView::new(id, project_root, target_label);
             state.sessions.push(view);
             // Auto-select the first session that appears.
             if state.active_session.is_none() {
@@ -256,16 +252,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                 return Outcome::idle();
             };
             session.toggle_follow();
-            // The most recently chosen follow state becomes the default a
-            // future session tab starts in (settings persistence) —
-            // "last used" rather than a separate, undiscoverable preference
-            // toggle.
-            let now_following = session.is_following();
-            state.follow_tail_default = now_following;
-            Outcome {
-                redraw: true,
-                effect: Some(Effect::SaveFollowTailDefault(now_following)),
-            }
+            Outcome::redraw()
         }
         Message::ToggleWrap => {
             state.wrap = !state.wrap;
@@ -2758,32 +2745,70 @@ mod tests {
     }
 
     #[test]
-    fn toggling_follow_updates_the_default_and_requests_the_save_effect() {
+    fn toggling_follow_is_purely_per_session_and_requests_no_persistence_effect() {
         let mut st = welcome();
         register(&mut st, 0, "/tmp/a", "desktop");
-        assert!(st.follow_tail_default);
         assert!(st.active_session().unwrap().is_following());
         let out = update(&mut st, Message::ToggleFollow);
         assert!(!st.active_session().unwrap().is_following());
-        assert!(!st.follow_tail_default, "the default follows the toggle");
-        assert_eq!(out.effect, Some(Effect::SaveFollowTailDefault(false)));
+        assert_eq!(
+            out.effect, None,
+            "follow-tail is in-memory, per-session state now — there is no \
+             persisted global default to save"
+        );
 
         let out = update(&mut st, Message::ToggleFollow);
         assert!(st.active_session().unwrap().is_following());
-        assert!(st.follow_tail_default);
-        assert_eq!(out.effect, Some(Effect::SaveFollowTailDefault(true)));
+        assert_eq!(out.effect, None);
     }
 
     #[test]
-    fn a_freshly_registered_session_honors_a_false_follow_tail_default() {
+    fn toggling_follow_on_one_session_does_not_affect_another() {
         let mut st = welcome();
-        st.follow_tail_default = false;
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        register(&mut st, 1, "/tmp/b", "desktop");
+        let a_idx = st.session_index(a).unwrap();
+        // `a` is active first (auto-selected on register); disengage its follow.
+        update(&mut st, Message::ToggleFollow);
+        assert!(!st.sessions[a_idx].is_following());
+
+        // Switch to the second session — untouched, still following.
+        update(&mut st, Message::SelectTab(1));
+        assert!(
+            st.active_session().unwrap().is_following(),
+            "session b was never toggled"
+        );
+        assert!(
+            !st.sessions[a_idx].is_following(),
+            "toggling the now-inactive session b must not re-engage a's follow"
+        );
+    }
+
+    #[test]
+    fn a_freshly_registered_session_always_starts_following() {
+        let mut st = welcome();
         register(&mut st, 0, "/tmp/a", "desktop");
         assert!(
-            !st.active_session().unwrap().is_following(),
-            "a new session tab starts anchored, not following, per the \
-             persisted default"
+            st.active_session().unwrap().is_following(),
+            "every session starts following its own tail — there is no \
+             persisted global default to seed a different starting state"
         );
+    }
+
+    #[test]
+    fn a_freshly_registered_session_tracks_the_tail_as_lines_arrive() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        for i in 0..500 {
+            update(&mut st, line(a, &format!("line {i}")));
+        }
+        let session = st.active_session().unwrap();
+        assert!(
+            session.is_following(),
+            "a session that was never scrolled stays in Follow, tracking the \
+             tail as lines arrive rather than freezing at the first line"
+        );
+        assert_eq!(session.log.end_index(), 500);
     }
 
     // ── Perf sparkline panel ─────────────────────────────────────────────────
