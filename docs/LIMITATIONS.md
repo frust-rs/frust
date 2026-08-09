@@ -898,3 +898,27 @@ own concurrency policy — and was explicitly ruled out of v1 scope rather than 
 `OnceLock<Result<Handle, String>>` and the one spawned bridge thread);
 `plugins/database/README.md` §4's `engine-turso` qualifier beside the `tokio::join!`
 example.
+
+### `db-rollback-failure-residual` — a failed recovery ROLLBACK can leave a handle silently mid-transaction
+
+**Observed**: `Database::transaction`'s `RollbackGuard` rolls the transaction back on
+every abnormal exit (closure `Err`, failing `COMMIT`, panicking closure), but that
+recovery `ROLLBACK` is itself issued best-effort (`let _ =`). If it also fails — an I/O
+error mid-WAL-rollback, disk full — the connection is handed back with the transaction
+still open and no taint recorded: the next `transaction()` on the handle fails at
+`BEGIN`, and bare `execute`/`query` calls silently join the orphaned transaction, whose
+writes are discarded when the handle drops.
+
+**Applies to**: both engines; only reachable when a `ROLLBACK` statement fails
+immediately after another failure on the same connection (a second-order fault).
+
+**Why accepted**: the primary failure paths (round-0 review F2/F9) are closed — the
+guard makes "no exit without a rollback attempt" structural, and the double-fault
+window is narrow and requires storage-level failure. A `tainted`-handle flag with a
+typed error on subsequent use is the known remedy if this residual is later promoted;
+it was deferred rather than designed under the review-loop cap. Apps needing robustness
+against this class drop the handle on any `transaction` error and reopen (README §4a).
+
+**Evidence**: `plugins/database/src/lib.rs` `RollbackGuard::drop` (best-effort
+`ROLLBACK`), the qualified poison-policy doc on `lock_conn`, README §4a's closing
+caveat; flagged by phase-review round 1 (`workflow/reviews/db-plugin/REVIEW.md`).

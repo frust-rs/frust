@@ -241,12 +241,19 @@ handled explicitly rather than left to hang or silently corrupt state:
   handle works normally.
 - **A panicking closure.** If the closure passed to `transaction` panics, a
   `Drop` guard armed since the `BEGIN` rolls back on unwind, so the
-  connection is never left mid-transaction for whoever holds the handle
+  connection is not left mid-transaction for whoever holds the handle
   next. This guard runs on ordinary unwind (the dev/debug profile). The
   release profile is `panic = "abort"` (`docs/DEVELOPMENT.md`'s
   release-profile hardening) — under abort the process exits before any
   `Drop` runs, so there is no surviving handle left to strand in the first
   place; the guard's job is specifically the unwind case.
+
+All of the above assumes the recovery `ROLLBACK` itself succeeds. It is
+issued best-effort: if that statement also fails (an I/O error mid-rollback,
+disk full), the transaction can remain open on the handle with no taint
+recorded — a narrow, accepted residual documented in `docs/LIMITATIONS.md`
+(`db-rollback-failure-residual`). If you must be robust against that class
+of failure, drop the handle on any `transaction` error and open a fresh one.
 
 ---
 

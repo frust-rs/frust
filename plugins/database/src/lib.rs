@@ -416,13 +416,19 @@ impl Database {
     /// # Poison policy
     /// A poisoned mutex is recovered (`into_inner()`) rather than
     /// propagated, and that is sound **only because of [`RollbackGuard`]**:
-    /// the one way a panic can escape while this crate holds the connection
-    /// is a caller's transaction closure panicking, and that guard's `Drop`
-    /// issues the `ROLLBACK` on the way out. So the connection a later
-    /// caller recovers here is never left mid-transaction. Were the guard
-    /// removed, recovering a poisoned lock would hand out a connection with
-    /// an orphaned transaction still open — a silent data-loss path, not a
-    /// mere lost error.
+    /// the only way a panic can escape *with a transaction open* is a
+    /// caller's transaction closure panicking (bare `execute`/`query` can
+    /// also panic while holding the lock, but no `BEGIN` ran there, so
+    /// nothing is stranded), and that guard's `Drop` issues the `ROLLBACK`
+    /// on the way out. So — **assuming that best-effort `ROLLBACK` itself
+    /// succeeds** — the connection a later caller recovers here is not left
+    /// mid-transaction. If the `ROLLBACK` statement itself fails (I/O error
+    /// mid-rollback, disk full), the transaction can remain open with no
+    /// taint recorded — an accepted, narrow residual documented in
+    /// `docs/LIMITATIONS.md` (`db-rollback-failure-residual`). Were the
+    /// guard removed entirely, recovering a poisoned lock would hand out a
+    /// connection with an orphaned transaction still open — a silent
+    /// data-loss path, not a mere lost error.
     ///
     /// # Errors
     /// [`DatabaseError::Reentrant`] if the calling thread already holds this
