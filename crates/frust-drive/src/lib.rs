@@ -26,6 +26,12 @@ pub mod ios_build;
 pub mod ios_id;
 pub mod ios_run;
 pub mod manifest;
+/// Streamable system-metrics collectors (per-process CPU/RSS/thermal,
+/// coarse network counters), sampled tool-side via `/proc`+`/sys` on desktop
+/// Linux or `adb` on Android — distinct from `devtools_client`'s in-app wire
+/// protocol, this reads OS-level process/host stats a running app never
+/// reports itself.
+pub mod metrics;
 pub mod plugin;
 pub mod process;
 pub mod scaffold;
