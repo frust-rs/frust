@@ -55,6 +55,16 @@ struct RecScene {
     text_colors: Vec<peniko::Color>,
     rounded: usize,
     fills: usize,
+    /// The absolute (canvas-space) block origin — [`GlyphRun::transform`]'s
+    /// translation — of every painted glyph run, in paint order. Every line
+    /// of one [`frust_text::TextLayout`] shares the SAME transform (the
+    /// block's own origin; see `frust_text::convert`'s "glyphs on the same
+    /// line share a y" contract and [`frust_text::TextLayout::to_scene_runs`]),
+    /// and a wrapped label's lines each land in a SEPARATE
+    /// `draw_glyph_run` call — so more than one recorded origin at the same
+    /// (x, y) is the two-line-wrap tripwire
+    /// `full_shell_nav_labels_fit_single_line_at_phone_width` checks for.
+    text_run_origins: Vec<Point>,
 }
 
 impl PaintScene for RecScene {
@@ -78,6 +88,8 @@ impl PaintScene for RecScene {
         if let peniko::Brush::Solid(c) = run.brush {
             self.text_colors.push(c);
         }
+        let t = run.transform.translation();
+        self.text_run_origins.push(Point::new(t.x, t.y));
         self.text_runs += 1;
     }
     fn draw_image(&mut self, _data: &peniko::ImageData, _dest: Rect) {}
@@ -271,6 +283,77 @@ fn out_of_range_section_falls_back() {
     let mut logic = |s: &mut PlaygroundState| pages::current(99, s);
     let (scene, _outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
     assert!(scene.text_runs > 0, "the fallback page paints");
+}
+
+/// The regression test for round-0 finding M1 (Major/logic): at phone
+/// portrait width the bottom `navigation_bar` divides its width evenly across
+/// all six [`SECTION_LABELS`] destinations — 390px / 6 = 65px per slot — and
+/// a label whose shaped text wraps to two lines overflows the bar's declared
+/// 64dp height (`label_y` = 44 inside a 64px box leaves only 20px, but two
+/// `labelMediumEmphasized` lines need 32px). Mounts the WHOLE
+/// [`PlaygroundApp`] shell (not a bare page, and not at the suite's other
+/// 900x700 desktop-ish size where a 150px slot never wrapped) and inspects
+/// the actual painted glyph runs: a wrapped label shapes to two separate
+/// `draw_glyph_run` calls sharing one block origin (see
+/// [`RecScene::text_run_origins`]'s doc comment), so more than one recorded
+/// origin per slot is the tripwire.
+///
+/// Verified locally (not committed) to actually catch the regression: with
+/// `SECTION_LABELS[0]` temporarily restored to `"Platform Views"`, this test
+/// fails with `nav label 0 ("Platform") painted 2 glyph run(s) ...`.
+#[test]
+fn full_shell_nav_labels_fit_single_line_at_phone_width() {
+    let _owner = setup();
+    let mut tcx = TextContext::new();
+
+    const PHONE_W: f64 = 390.0;
+    const PHONE_H: f64 = 844.0;
+    const NAV_HEIGHT: f64 = 64.0;
+    const SLOT_W: f64 = PHONE_W / SECTION_LABELS.len() as f64;
+    // Mirrors `frust_widgets::material::navbar`'s private `PAD_TOP` (8.0) +
+    // `INDICATOR_H` (32.0) + `LABEL_GAP` (4.0) — the label's top-edge offset
+    // from its item's own origin. Every item's label lands at exactly this Y
+    // (the label block's TOP, not its baseline — see
+    // `NavItemWidget::layout`'s `self.label.set_origin`), single-line or
+    // wrapped alike (both lines of a wrapped label share one block origin;
+    // see [`RecScene::text_run_origins`]'s doc comment) — so this is a tight,
+    // exact identifier for "a nav-bar label's glyph run", unlike a loose
+    // "anywhere in the bar's Y band" filter, which also catches unclipped
+    // off-screen page filler content that happens to paint in that band.
+    const LABEL_TOP_OFFSET: f64 = 44.0;
+    let nav_top = PHONE_H - NAV_HEIGHT;
+    let expected_label_y = nav_top + LABEL_TOP_OFFSET;
+
+    let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
+    let mut logic = |_s: &mut ()| any(component(PlaygroundApp));
+    let mut state = ();
+    let (scene, _outcome) = frame_at_size(
+        &mut root,
+        &mut logic,
+        &mut state,
+        &mut tcx,
+        Size::new(PHONE_W, PHONE_H),
+        0,
+    );
+
+    let mut runs_per_slot = [0usize; 6];
+    for origin in &scene.text_run_origins {
+        if (origin.y - expected_label_y).abs() > 0.5 {
+            continue;
+        }
+        let slot = ((origin.x / SLOT_W) as usize).min(SECTION_LABELS.len() - 1);
+        runs_per_slot[slot] += 1;
+    }
+
+    for (slot, label) in SECTION_LABELS.iter().enumerate() {
+        assert_eq!(
+            runs_per_slot[slot], 1,
+            "nav label {slot} ({label:?}) painted {} glyph run(s) inside its {SLOT_W}px slot at \
+             {PHONE_W}px width — expected exactly 1 (a single line); more than 1 means the label \
+             wrapped and overflowed the nav bar's declared {NAV_HEIGHT}dp box (round-0 finding M1)",
+            runs_per_slot[slot],
+        );
+    }
 }
 
 #[test]

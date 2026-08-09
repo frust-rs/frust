@@ -47,14 +47,19 @@ use crate::PlaygroundState;
 /// The six section labels, in order. Indexed by `PlaygroundState::section`
 /// and dispatched by [`current`], and used verbatim as the shell's bottom
 /// navigation-bar destinations.
-pub const SECTION_LABELS: [&str; 6] = [
-    "Platform Views",
-    "Camera",
-    "Native Widgets",
-    "Responsive",
-    "Terminal",
-    "Keys",
-];
+///
+/// Kept short on purpose: [`NavigationBarWidget`](frust::navigation_bar)
+/// divides the bar's width evenly across all six destinations, so at phone
+/// width (390px logical) each slot is only 65px wide. The longer human names
+/// ("Platform Views", "Native Widgets") wrapped to two lines there and
+/// overflowed the bar's declared 64dp height (round-0 finding M1) — every
+/// label here is verified (see `tests/smoke.rs`'s
+/// `full_shell_nav_labels_fit_single_line_at_phone_width`) to shape on a
+/// single line at a 65px slot width. A page wanting a longer heading for
+/// itself (e.g. `native_widgets`'s own on-page title) uses its own string
+/// literal rather than this array — see `pages/native_widgets.rs`.
+pub const SECTION_LABELS: [&str; 6] =
+    ["Platform", "Camera", "Native", "Layout", "Terminal", "Keys"];
 
 /// Dispatch to the section page for `section` (0..6), falling back to
 /// platform views for any out-of-range index (defensive — the navigation bar
