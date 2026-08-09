@@ -318,6 +318,8 @@ impl Widget for AnimatedOpacityWidget {
     fn semantics(&self, ctx: &mut SemanticsCtx) {
         self.child.semantics_child(ctx);
     }
+
+    crate::authoring::visit_children!(child);
 }
 
 // --- AnimatedScale ------------------------------------------------------------
@@ -463,6 +465,8 @@ impl Widget for AnimatedScaleWidget {
     fn semantics(&self, ctx: &mut SemanticsCtx) {
         self.child.semantics_child(ctx);
     }
+
+    crate::authoring::visit_children!(child);
 }
 
 #[cfg(test)]

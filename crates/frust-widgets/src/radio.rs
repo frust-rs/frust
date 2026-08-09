@@ -277,6 +277,8 @@ impl Widget for RadioWidget {
             node.add_action(Action::Click);
         });
     }
+
+    crate::authoring::visit_children!(label);
 }
 
 #[cfg(test)]

@@ -485,6 +485,8 @@ impl Widget for ShieldWidget {
         // Conventions — a container that skips this drops its whole subtree).
         self.child.semantics_child(ctx);
     }
+
+    crate::authoring::visit_children!(child);
 }
 
 #[cfg(test)]

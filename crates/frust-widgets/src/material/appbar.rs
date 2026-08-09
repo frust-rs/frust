@@ -305,6 +305,8 @@ impl Widget for AppBarWidget {
             },
         );
     }
+
+    crate::authoring::visit_children!(interactive, title);
 }
 
 #[cfg(test)]

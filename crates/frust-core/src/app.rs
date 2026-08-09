@@ -698,11 +698,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// build/layout/paint. Bounds reflect the **last layout pass**, so call it
     /// after one (before the first, every rect is zero-sized).
     ///
-    /// Scope: this walks the [`WidgetTree`] arena, which holds the root pod
-    /// only — a container owns its children as
-    /// [`ChildPod`](crate::widget::ChildPod)s, not as arena nodes (see that
-    /// type's docs). Descending into container children needs a child-enumeration
-    /// seam on [`Widget`](crate::widget::Widget) itself, which this does not add.
+    /// Scope: the walk covers the [`WidgetTree`] arena *and* the
+    /// [`ChildPod`](crate::widget::ChildPod)s containers own, reached through
+    /// [`Widget::visit_children`](crate::widget::Widget::visit_children) — so it
+    /// is the real retained hierarchy, not just the arena (which holds little
+    /// more than the root pod). A container that leaves that seam defaulted
+    /// reads as a leaf.
     pub fn inspect(&self) -> Vec<InspectNode> {
         self.tree.inspect()
     }

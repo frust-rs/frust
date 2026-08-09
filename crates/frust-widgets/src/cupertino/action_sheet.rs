@@ -561,6 +561,8 @@ impl<State: 'static> Widget for CupertinoActionSheetWidget<State> {
             },
         );
     }
+
+    crate::authoring::visit_children!(actions, cancel);
 }
 
 #[cfg(test)]

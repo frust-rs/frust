@@ -981,6 +981,8 @@ impl Widget for CommandPaletteWidget {
             },
         );
     }
+
+    crate::authoring::visit_children!(input);
 }
 
 #[cfg(test)]

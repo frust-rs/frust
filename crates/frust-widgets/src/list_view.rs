@@ -2311,6 +2311,8 @@ impl Widget for ListViewWidget {
             },
         );
     }
+
+    crate::authoring::visit_children!(children);
 }
 
 #[cfg(test)]

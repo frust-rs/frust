@@ -363,6 +363,8 @@ impl Widget for AssistChipWidget {
             node.add_action(Action::Click);
         });
     }
+
+    crate::authoring::visit_children!(leading, label);
 }
 
 // ---------------------------------------------------------------------
@@ -558,6 +560,8 @@ impl Widget for FilterChipWidget {
             node.add_action(Action::Click);
         });
     }
+
+    crate::authoring::visit_children!(label);
 }
 
 #[cfg(test)]

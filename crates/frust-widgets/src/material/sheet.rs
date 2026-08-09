@@ -617,6 +617,8 @@ impl Widget for BottomSheetWidget {
             },
         );
     }
+
+    crate::authoring::visit_children!(content);
 }
 
 #[cfg(test)]

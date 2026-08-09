@@ -546,6 +546,8 @@ impl<State: 'static> Widget for EmptyStateWidget<State> {
             },
         );
     }
+
+    crate::authoring::visit_children!(action);
 }
 
 #[cfg(test)]

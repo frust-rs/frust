@@ -504,6 +504,8 @@ impl Widget for ButtonGroupWidget {
             },
         );
     }
+
+    crate::authoring::visit_children!(members);
 }
 
 #[cfg(test)]

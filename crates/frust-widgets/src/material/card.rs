@@ -444,6 +444,8 @@ impl Widget for CardWidget {
             );
         }
     }
+
+    crate::authoring::visit_children!(child);
 }
 
 #[cfg(test)]

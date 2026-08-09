@@ -528,6 +528,8 @@ impl Widget for TooltipWidget {
             |ctx| self.child.semantics_child(ctx),
         );
     }
+
+    crate::authoring::visit_children!(child);
 }
 
 #[cfg(test)]

@@ -155,6 +155,8 @@ impl Widget for AlignWidget {
         // Transparent positioning wrapper: forward to the single child.
         self.child.semantics_child(ctx);
     }
+
+    crate::authoring::visit_children!(child);
 }
 
 #[cfg(test)]

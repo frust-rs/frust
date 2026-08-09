@@ -22,10 +22,18 @@
 //! only to *order* what the arena reports — the arena stays the single source of
 //! truth for membership, so a stale index entry can never surface a dangling id.
 //!
-//! Note what this walk does *and does not* cover: containers own their children
-//! as [`ChildPod`](crate::widget::ChildPod)s rather than as arena nodes (see that
-//! type's docs), so today the arena holds exactly the root pod. The walk is the
-//! arena's contents, not a full retained-UI hierarchy.
+//! Containers own their children as [`ChildPod`]s rather than as arena nodes
+//! (see that type's docs), so the arena itself holds little more than the root
+//! pod. [`WidgetTree::inspect`] therefore walks *both*: a node's arena children
+//! first, then the pods its widget hands to
+//! [`Widget::visit_children`] — so the snapshot is the real retained hierarchy
+//! rather than the arena's contents. Only `inspect` descends that way;
+//! [`WidgetTree::children`] stays strictly arena-scoped, since it answers "what
+//! does the arena hold under this id".
+//!
+//! The descent needs no cycle check: a pod owns its widget, ownership is a tree,
+//! and the visitor only ever hands out `&ChildPod`s the widget itself owns (see
+//! [`Widget::visit_children`]).
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -34,7 +42,7 @@ use kurbo::{Point, Rect, Size};
 use tree_arena::{ArenaMut, ArenaRef, TreeArena};
 
 use crate::view::{ChangeFlags, WidgetId};
-use crate::widget::Widget;
+use crate::widget::{ChildPod, Widget};
 
 /// A retained widget plus its layout results and dirty state.
 ///
@@ -103,6 +111,11 @@ impl WidgetPod {
     /// The concrete widget type's name, or
     /// [`ERASED_TYPE_NAME`](WidgetPod::ERASED_TYPE_NAME) when the pod was built
     /// from an already-erased box.
+    ///
+    /// Recorded at construction, which is sound here because a root pod's
+    /// element type is fixed by `RenderRoot<State, V>`'s `V` and cannot swap
+    /// under it. A [`ChildPod`], whose widget *can* be swapped by a rebuild,
+    /// asks the live widget instead ([`Widget::type_name`]).
     ///
     /// Diagnostic only: `type_name`'s output is not a stable contract across
     /// compiler versions, so never parse or match on it.
@@ -190,7 +203,8 @@ pub struct InspectNode {
     /// the pod's recorded layout origin accumulated down from the root, plus its
     /// recorded size. `Rect::ZERO`-sized until a layout pass has run.
     pub bounds: Rect,
-    /// This node's children, in insertion order.
+    /// This node's children: the arena's own children first (insertion order),
+    /// then the widget's owned [`ChildPod`]s in declaration order.
     pub children: Vec<WidgetId>,
     /// Distance from the root (roots are `0`).
     pub depth: usize,
@@ -268,14 +282,21 @@ impl WidgetTree {
         }
     }
 
-    /// A read-only snapshot of the whole tree in pre-order (a node precedes its
-    /// descendants; siblings follow insertion order).
+    /// A read-only snapshot of the whole retained tree in pre-order (a node
+    /// precedes its descendants; siblings follow declaration order).
     ///
-    /// O(nodes) — one pass, one `HashSet` of sibling ids per parent, no arena
-    /// mutation and no bookkeeping left behind. Bounds come from what the last
-    /// layout pass recorded on each pod ([`WidgetPod::origin`] /
-    /// [`WidgetPod::size`]), accumulated into absolute window coordinates on the
-    /// way down; call it after a layout pass or the rects are all zero-sized.
+    /// The walk covers **both** child mechanisms: the arena's own children, then
+    /// the [`ChildPod`]s a widget publishes through [`Widget::visit_children`] —
+    /// which is where nearly the whole hierarchy actually lives. A container
+    /// that does not override that seam reads as a leaf.
+    ///
+    /// O(nodes) — one pass, one `HashSet` of sibling ids per arena parent, no
+    /// arena mutation and no bookkeeping left behind (a pod's tooling id is
+    /// assigned once, on its first visit, and reused). Bounds come from what the
+    /// last layout pass recorded on each pod ([`WidgetPod::origin`] /
+    /// [`WidgetPod::size`], [`ChildPod::origin`] / [`ChildPod::size`]),
+    /// accumulated into absolute window coordinates on the way down; call it
+    /// after a layout pass or the rects are all zero-sized.
     pub fn inspect(&self) -> Vec<InspectNode> {
         let mut out = Vec::new();
         let roots = self.arena.roots();
@@ -287,8 +308,9 @@ impl WidgetTree {
         out
     }
 
-    /// Push `node`'s snapshot, then recurse into its children. `parent_origin`
-    /// is the parent's absolute origin; a pod's own origin is relative to it.
+    /// Push `node`'s snapshot, then recurse into its arena children and its
+    /// widget's owned pods. `parent_origin` is the parent's absolute origin; a
+    /// pod's own origin is relative to it.
     fn inspect_node(
         &self,
         node: ArenaRef<'_, WidgetPod>,
@@ -300,21 +322,78 @@ impl WidgetTree {
     ) {
         let pod = node.item;
         let origin = parent_origin + pod.origin().to_vec2();
-        let children = self.ordered_children(id, node);
+        let arena_children = self.ordered_children(id, node);
+        // Reserve this node's slot before descending, so pre-order holds and the
+        // `children` list can be filled in from the descent itself.
+        let slot = out.len();
         out.push(InspectNode {
             id,
             parent,
             type_name: pod.type_name(),
             debug_label: pod.debug_label.clone(),
             bounds: Rect::from_origin_size(origin, pod.size()),
-            children: children.clone(),
+            children: Vec::new(),
             depth,
         });
-        for child_id in children {
+        let mut children = Vec::with_capacity(arena_children.len());
+        for child_id in arena_children {
             if let Some(child) = node.children.into_item(child_id.0) {
+                children.push(child_id);
                 self.inspect_node(child, child_id, Some(id), origin, depth + 1, out);
             }
         }
+        Self::inspect_pods(pod.widget(), id, origin, depth, &mut children, out);
+        out[slot].children = children;
+    }
+
+    /// Push a snapshot for each of `widget`'s owned [`ChildPod`]s (and, through
+    /// them, the whole subtree below), recording their ids into `children`.
+    fn inspect_pods(
+        widget: &dyn Widget,
+        parent: WidgetId,
+        parent_origin: Point,
+        parent_depth: usize,
+        children: &mut Vec<WidgetId>,
+        out: &mut Vec<InspectNode>,
+    ) {
+        widget.visit_children(&mut |child| {
+            let child_id = child.inspect_id();
+            children.push(child_id);
+            Self::inspect_child(
+                child,
+                child_id,
+                parent,
+                parent_origin,
+                parent_depth + 1,
+                out,
+            );
+        });
+    }
+
+    /// The [`ChildPod`] mirror of [`WidgetTree::inspect_node`]: emit `child`'s
+    /// own node, then descend into whatever it owns.
+    fn inspect_child(
+        child: &ChildPod,
+        id: WidgetId,
+        parent: WidgetId,
+        parent_origin: Point,
+        depth: usize,
+        out: &mut Vec<InspectNode>,
+    ) {
+        let origin = parent_origin + child.origin().to_vec2();
+        let slot = out.len();
+        out.push(InspectNode {
+            id,
+            parent: Some(parent),
+            type_name: child.type_name(),
+            debug_label: child.debug_label_cow(),
+            bounds: Rect::from_origin_size(origin, child.size()),
+            children: Vec::new(),
+            depth,
+        });
+        let mut grandchildren = Vec::new();
+        Self::inspect_pods(child.widget(), id, origin, depth, &mut grandchildren, out);
+        out[slot].children = grandchildren;
     }
 
     /// The arena's children of `node`, ordered by the recorded insertion index.
@@ -365,6 +444,44 @@ mod tests {
             bc.max()
         }
         fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+    }
+
+    /// A container in the shape every real one has: children owned as
+    /// [`ChildPod`]s, published through [`Widget::visit_children`].
+    struct Container {
+        children: Vec<ChildPod>,
+    }
+
+    impl Container {
+        /// A container over `children`, each placed at `origin` with `size` the
+        /// way a layout pass would have left it.
+        fn new(children: Vec<(Point, Size, Box<dyn Widget>)>) -> Self {
+            Self {
+                children: children
+                    .into_iter()
+                    .map(|(origin, size, widget)| {
+                        let mut pod = ChildPod::new(widget);
+                        pod.set_origin(origin);
+                        // A pod records its size from `layout_child`; these tests
+                        // assert the walk, not layout, so drive it directly.
+                        pod.layout_child(&mut LayoutCtx::new(), &BoxConstraints::new(size, size));
+                        pod
+                    })
+                    .collect(),
+            }
+        }
+    }
+
+    impl Widget for Container {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn visit_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+            for child in &self.children {
+                visitor(child);
+            }
+        }
     }
 
     fn pod(id: u64) -> WidgetPod {
@@ -522,6 +639,136 @@ mod tests {
         assert_eq!(tree.children(root), vec![kept]);
         tree.root_order.clear();
         assert_eq!(tree.roots(), vec![root]);
+    }
+
+    #[test]
+    fn inspect_descends_through_child_pods() {
+        // The shape the arena alone cannot see: root -> container -> (leaf,
+        // nested container -> leaf). Only the root is an arena node; everything
+        // below it is a `ChildPod` reached through `visit_children`.
+        let inner = Container::new(vec![(
+            Point::new(1.0, 1.0),
+            Size::new(5.0, 5.0),
+            Box::new(Leaf),
+        )]);
+        let outer = Container::new(vec![
+            (Point::new(10.0, 5.0), Size::new(50.0, 40.0), Box::new(Leaf)),
+            (
+                Point::new(0.0, 60.0),
+                Size::new(20.0, 20.0),
+                Box::new(inner) as Box<dyn Widget>,
+            ),
+        ]);
+
+        let mut tree = WidgetTree::new();
+        let root = tree.insert_root(WidgetPod::new_typed(WidgetId(1), outer));
+        tree.pod_mut(root)
+            .unwrap()
+            .set_layout(Point::new(2.0, 3.0), Size::new(100.0, 100.0));
+
+        let nodes = tree.inspect();
+        assert_eq!(nodes.len(), 4, "root + two pods + one grandchild pod");
+
+        // Pre-order: root, first pod, second pod, the nested pod under it.
+        assert_eq!(
+            nodes.iter().map(|n| n.depth).collect::<Vec<_>>(),
+            vec![0, 1, 1, 2],
+            "a pod's depth continues from its owning node's"
+        );
+        assert_eq!(nodes[0].parent, None);
+        assert_eq!(nodes[1].parent, Some(nodes[0].id));
+        assert_eq!(nodes[2].parent, Some(nodes[0].id));
+        assert_eq!(nodes[3].parent, Some(nodes[2].id));
+        assert_eq!(nodes[0].children, vec![nodes[1].id, nodes[2].id]);
+        assert_eq!(nodes[2].children, vec![nodes[3].id]);
+        assert!(nodes[1].children.is_empty(), "a leaf publishes no children");
+
+        // Bounds accumulate through ChildPod origins, on top of the arena pod's
+        // own absolute origin: root at (2,3); first pod at (2+10, 3+5); the
+        // nested container at (2+0, 3+60); its child at (2+0+1, 3+60+1).
+        assert_eq!(nodes[0].bounds, Rect::new(2.0, 3.0, 102.0, 103.0));
+        assert_eq!(nodes[1].bounds, Rect::new(12.0, 8.0, 62.0, 48.0));
+        assert_eq!(nodes[2].bounds, Rect::new(2.0, 63.0, 22.0, 83.0));
+        assert_eq!(nodes[3].bounds, Rect::new(3.0, 64.0, 8.0, 69.0));
+
+        // Type names: the arena pod's is captured by `new_typed`, a child pod's
+        // by its construction path.
+        assert!(
+            nodes[0].type_name.ends_with("Container"),
+            "{}",
+            nodes[0].type_name
+        );
+        assert!(
+            nodes[1..]
+                .iter()
+                .all(|n| n.type_name.ends_with("Leaf") || n.type_name.ends_with("Container"))
+        );
+
+        // Ids are unique, and every pod id is drawn from the reserved range so
+        // it can never be mistaken for an arena `WidgetId`.
+        let ids: HashSet<u64> = nodes.iter().map(|n| n.id.0).collect();
+        assert_eq!(ids.len(), nodes.len(), "ids are unique across a snapshot");
+        assert!(
+            nodes[1..]
+                .iter()
+                .all(|n| n.id.0 >= crate::widget::ChildPod::INSPECT_ID_BASE)
+        );
+    }
+
+    #[test]
+    fn a_pods_tooling_id_and_label_survive_the_next_walk() {
+        // Selection stability: a devtools client holding an id must still be
+        // holding the same pod on the next frame's snapshot.
+        let mut tree = WidgetTree::new();
+        let root = tree.insert_root(WidgetPod::new_typed(
+            WidgetId(1),
+            Container::new(vec![(Point::ZERO, Size::new(4.0, 4.0), Box::new(Leaf))]),
+        ));
+        let first = tree.inspect();
+        let second = tree.inspect();
+        assert_eq!(first[1].id, second[1].id);
+
+        // A label attached to a child pod reaches the snapshot, and clearing it
+        // takes it back out.
+        let pod = tree.pod_mut(root).unwrap();
+        let container = pod
+            .widget_mut()
+            .downcast_mut::<Container>()
+            .expect("the root widget is the container");
+        container.children[0].set_debug_label("the-child");
+        assert_eq!(tree.inspect()[1].debug_label.as_deref(), Some("the-child"));
+        let container = tree
+            .pod_mut(root)
+            .unwrap()
+            .widget_mut()
+            .downcast_mut::<Container>()
+            .expect("the root widget is the container");
+        container.children[0].clear_debug_label();
+        assert_eq!(tree.inspect()[1].debug_label, None);
+    }
+
+    #[test]
+    fn a_widget_that_ignores_the_seam_reads_as_a_leaf() {
+        // The default impl is free to ignore: a container that never overrides
+        // `visit_children` contributes exactly one node, no matter what it owns.
+        struct Opaque {
+            _child: ChildPod,
+        }
+        impl Widget for Opaque {
+            fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                bc.max()
+            }
+            fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        }
+
+        let mut tree = WidgetTree::new();
+        tree.insert_root(WidgetPod::new_typed(
+            WidgetId(1),
+            Opaque {
+                _child: ChildPod::new(Box::new(Leaf)),
+            },
+        ));
+        assert_eq!(tree.inspect().len(), 1);
     }
 
     #[test]

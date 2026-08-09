@@ -504,6 +504,8 @@ impl Widget for AccordionWidget {
             },
         );
     }
+
+    crate::authoring::visit_children!(body);
 }
 
 /// Draw a chevron centered at `center`, rotated `angle` radians clockwise (0 =

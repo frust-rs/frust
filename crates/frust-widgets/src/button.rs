@@ -929,6 +929,8 @@ impl Widget for ButtonWidget {
             }
         });
     }
+
+    crate::authoring::visit_children!(label);
 }
 
 #[cfg(test)]

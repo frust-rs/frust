@@ -296,6 +296,13 @@ impl<C: Component> Widget for ComponentWidget<C> {
         self.child.semantics_child(ctx);
     }
 
+    fn visit_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+        // The component boundary is invisible to tooling for the same reason it
+        // is invisible to accessibility: it contributes no element of its own,
+        // only the child it wraps.
+        visitor(&self.child);
+    }
+
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         // The state boundary: build an inner context over the component's *own*
         // local state, seeded with the outer focus flag, dispatch through the

@@ -8,6 +8,7 @@
 //! * **paint** — emit draw commands into a scene.
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::num::NonZeroU64;
@@ -1610,6 +1611,46 @@ pub trait Widget: Any {
     /// [`SemanticsCtx::origin`]/[`SemanticsCtx::size`] carry valid absolute
     /// geometry.
     fn semantics(&self, _ctx: &mut SemanticsCtx) {}
+
+    /// This widget's concrete type name, for read-only tooling.
+    ///
+    /// Defaulted to [`core::any::type_name`] of the implementing type, so every
+    /// widget reports its own name through the vtable — including one reached
+    /// as a `dyn Widget`, where the concrete type is otherwise unrecoverable.
+    /// Asking the live widget beats recording a name when it was built: a
+    /// rebuild that swaps a child's concrete type cannot leave a stale name
+    /// behind, not even through the doubly-erased pods no reconciler can
+    /// observe (`docs/LIMITATIONS.md`'s `focus-double-erasure-swap-blind`).
+    ///
+    /// Diagnostic only: `type_name`'s output is not a stable contract across
+    /// compiler versions, so never parse or match on it. Overriding it is
+    /// sanctioned only for a transparent wrapper reporting what it wraps (the
+    /// `Box<dyn Widget>` blanket impl is the one in-crate case).
+    fn type_name(&self) -> &'static str {
+        core::any::type_name::<Self>()
+    }
+
+    /// Visit this widget's owned [`ChildPod`]s, in declaration (paint) order —
+    /// the read-only seam that makes the retained hierarchy enumerable.
+    ///
+    /// Containers own their children as `ChildPod` fields rather than as arena
+    /// nodes (see [`ChildPod`]), so nothing outside a container could walk into
+    /// its subtree; this is that walk, and
+    /// [`WidgetTree::inspect`](crate::tree::WidgetTree::inspect) is its one
+    /// in-crate consumer.
+    ///
+    /// **Defaulted to visiting nothing**, exactly like [`Widget::event`] and
+    /// [`Widget::semantics`]: a leaf widget needs no impl and pays nothing, and
+    /// a container that never overrides it simply reads as a leaf to tooling. It
+    /// runs behind `&self` and must not mutate anything a pass depends on — no
+    /// build/layout/paint/event behavior may be routed through it.
+    ///
+    /// **No cycles by construction.** A `ChildPod` owns its widget (`Box<dyn
+    /// Widget>`); ownership is a tree, so a descent through `visit_children`
+    /// terminates without any runtime cycle check. A widget that handed the
+    /// visitor a pod it does not own would break that, which is why the visitor
+    /// takes `&ChildPod` — there is no way to publish a shared one.
+    fn visit_children(&self, _visitor: &mut dyn FnMut(&ChildPod)) {}
 }
 
 impl dyn Widget {
@@ -1648,6 +1689,17 @@ impl Widget for Box<dyn Widget> {
     fn semantics(&self, ctx: &mut SemanticsCtx) {
         (**self).semantics(ctx);
     }
+
+    fn visit_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+        (**self).visit_children(visitor);
+    }
+
+    /// Report the *boxed* widget's name, not `Box<dyn Widget>` — the box is a
+    /// storage detail of type erasure, never a tree element in its own right,
+    /// and it nests (a doubly-boxed pod resolves through both layers).
+    fn type_name(&self) -> &'static str {
+        (**self).type_name()
+    }
 }
 
 /// A container's owned child: a boxed widget plus the layout geometry and
@@ -1664,6 +1716,12 @@ impl Widget for Box<dyn Widget> {
 /// `origin`/`size` are in the **container's** local coordinate space;
 /// [`ChildPod::event_child`] translates events into the child's local space and
 /// [`ChildPod::paint_child`] offsets the child's paint origin accordingly.
+///
+/// Because the arena cannot see into a container, the pod also carries what
+/// read-only tooling needs to describe the element it wraps —
+/// [`type_name`](ChildPod::type_name), [`debug_label`](ChildPod::debug_label),
+/// [`inspect_id`](ChildPod::inspect_id), plus the geometry above — and
+/// [`Widget::visit_children`] is how a walk reaches it.
 pub struct ChildPod {
     widget: Box<dyn Widget>,
     origin: Point,
@@ -1687,9 +1745,40 @@ pub struct ChildPod {
     /// "id 0 is not a valid base". `None` until the first semantics pass reaches
     /// this pod.
     semantics_id: Cell<Option<NonZeroU64>>,
+    /// An optional human name for tooling, `None` unless something calls
+    /// [`ChildPod::set_debug_label`]. Mirrors
+    /// [`WidgetPod::debug_label`](crate::tree::WidgetPod::debug_label).
+    debug_label: Option<Cow<'static, str>>,
+    /// This pod's persistent tooling id, lazily assigned on its first
+    /// [`ChildPod::inspect_id`] call and reused for the whole pod lifetime —
+    /// the same shape (and the same reason) as `semantics_id` above: an id a
+    /// devtools client selected must survive the next frame's rebuild, and must
+    /// survive a keyed reorder, which relocates the whole pod. `None` until a
+    /// walk first reaches this pod, so a process that never inspects allocates
+    /// nothing.
+    inspect_id: Cell<Option<NonZeroU64>>,
+}
+
+thread_local! {
+    /// The next tooling id [`ChildPod::inspect_id`] hands out.
+    ///
+    /// Thread-local and UI-thread-affine, mirroring `mark_focus_orphaned`'s
+    /// shape: the widget tree is single-threaded, and an inspect walk runs
+    /// behind `&self` with no allocator in scope to thread down.
+    static NEXT_INSPECT_ID: Cell<u64> = const { Cell::new(ChildPod::INSPECT_ID_BASE) };
 }
 
 impl ChildPod {
+    /// Where [`ChildPod::inspect_id`]'s allocator starts.
+    ///
+    /// Pod ids and arena [`WidgetId`](crate::view::WidgetId)s share one
+    /// namespace in an inspect snapshot, and the arena's are allocated from zero
+    /// upward by `BuildCtx::alloc_id`. Starting the pod allocator at 2^48 keeps
+    /// the two apart for any tree an app could plausibly build (the arena would
+    /// have to allocate 281 trillion ids to reach it) without threading a shared
+    /// counter through a read-only walk.
+    pub const INSPECT_ID_BASE: u64 = 1 << 48;
+
     /// Wrap a freshly built child widget at the origin, with zero size until its
     /// first layout.
     pub fn new(widget: Box<dyn Widget>) -> Self {
@@ -1700,7 +1789,67 @@ impl ChildPod {
             active: false,
             focused: false,
             semantics_id: Cell::new(None),
+            debug_label: None,
+            inspect_id: Cell::new(None),
         }
+    }
+
+    /// The wrapped widget's concrete type name, asked of the live widget
+    /// ([`Widget::type_name`]) rather than recorded at build time — so a
+    /// rebuild that swapped the child's type can never leave a stale name here,
+    /// and the double box `build_child` stores resolves through both layers.
+    ///
+    /// Diagnostic only: `type_name`'s output is not a stable contract across
+    /// compiler versions, so never parse or match on it.
+    pub fn type_name(&self) -> &'static str {
+        self.widget.type_name()
+    }
+
+    /// The human name attached for tooling, if any. `None` by default.
+    pub fn debug_label(&self) -> Option<&str> {
+        self.debug_label.as_deref()
+    }
+
+    /// Attach a human name for tooling (an inspector shows it beside the type
+    /// name). Purely descriptive — nothing in the build/layout/paint/event path
+    /// reads it.
+    pub fn set_debug_label(&mut self, label: impl Into<Cow<'static, str>>) {
+        self.debug_label = Some(label.into());
+    }
+
+    /// Drop any attached debug label.
+    pub fn clear_debug_label(&mut self) {
+        self.debug_label = None;
+    }
+
+    /// The attached label as an owned [`Cow`] for a snapshot, cloning the
+    /// borrowed case for free — what [`crate::tree::WidgetTree::inspect`] needs
+    /// and [`ChildPod::debug_label`]'s `&str` cannot give.
+    pub(crate) fn debug_label_cow(&self) -> Option<Cow<'static, str>> {
+        self.debug_label.clone()
+    }
+
+    /// This pod's tooling id, assigning one on the first call and reusing it
+    /// thereafter — so the id a devtools client holds keeps naming the same pod
+    /// across frames, and across a keyed reorder that relocates the pod.
+    ///
+    /// Behind `&self` (interior mutability) because the whole introspection
+    /// seam is read-only; ids come from [`INSPECT_ID_BASE`](ChildPod::INSPECT_ID_BASE)
+    /// upward and never collide with an arena `WidgetId`.
+    pub fn inspect_id(&self) -> crate::view::WidgetId {
+        let id = match self.inspect_id.get() {
+            Some(id) => id,
+            None => {
+                let id = NEXT_INSPECT_ID.with(|next| {
+                    let id = next.get();
+                    next.set(id + 1);
+                    NonZeroU64::new(id).expect("the allocator starts at 2^48, never zero")
+                });
+                self.inspect_id.set(Some(id));
+                id
+            }
+        };
+        crate::view::WidgetId(id.get())
     }
 
     /// Shared access to the boxed child widget.
@@ -3246,5 +3395,72 @@ mod tests {
         assert_eq!(scene.shadows, vec![(origin, size, 6.0, 3.0, Color::BLACK)]);
         assert_eq!(scene.layers, vec![(origin, size, 0.25)]);
         assert_eq!(scene.pops, 1);
+    }
+
+    #[test]
+    fn a_pods_type_name_resolves_through_every_box() {
+        // A pod's widget is always erased, and the container plumbing stores it
+        // double-boxed — the name must still be the widget's own, at any depth.
+        let single = ChildPod::new(Box::new(Animator));
+        assert!(
+            single.type_name().ends_with("Animator"),
+            "{}",
+            single.type_name()
+        );
+
+        let boxed: Box<dyn Widget> = Box::new(Animator);
+        let double = ChildPod::new(Box::new(boxed));
+        assert!(
+            double.type_name().ends_with("Animator"),
+            "{}",
+            double.type_name()
+        );
+    }
+
+    #[test]
+    fn a_pods_tooling_id_is_assigned_once_and_never_shared() {
+        let a = ChildPod::new(Box::new(Animator));
+        let b = ChildPod::new(Box::new(Animator));
+        let first = a.inspect_id();
+        assert_eq!(a.inspect_id(), first, "a pod keeps the id it was given");
+        assert_ne!(b.inspect_id(), first, "two pods never share an id");
+        assert!(
+            first.0 >= ChildPod::INSPECT_ID_BASE,
+            "pod ids stay in the range reserved against arena WidgetIds"
+        );
+    }
+
+    #[test]
+    fn a_leaf_visits_no_children_and_a_container_visits_all_of_its_own() {
+        struct Two {
+            children: Vec<ChildPod>,
+        }
+        impl Widget for Two {
+            fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                bc.max()
+            }
+            fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+            fn visit_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+                for child in &self.children {
+                    visitor(child);
+                }
+            }
+        }
+
+        // The trait default: a widget that says nothing publishes nothing.
+        let mut seen = 0;
+        Animator.visit_children(&mut |_| seen += 1);
+        assert_eq!(seen, 0);
+
+        let container = Two {
+            children: vec![
+                ChildPod::new(Box::new(Animator)),
+                ChildPod::new(Box::new(Animator)),
+            ],
+        };
+        let mut ids = Vec::new();
+        container.visit_children(&mut |child| ids.push(child.inspect_id()));
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
     }
 }

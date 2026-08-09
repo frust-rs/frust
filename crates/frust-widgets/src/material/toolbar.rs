@@ -495,6 +495,8 @@ impl Widget for ToolbarWidget {
             },
         );
     }
+
+    crate::authoring::visit_children!(slots);
 }
 
 #[cfg(test)]
