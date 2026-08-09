@@ -179,6 +179,13 @@ dependencies {
     // (`dev.frust.nativewidgets`), supplied by the plugin's own library module
     // — this app carries no per-control Kotlin of its own.
     implementation(project(":frust-native-widgets"))
+    // frust-iap: the R8 keep-rule tripwire vehicle for the openiap-google pin
+    // (docs/PLUGINS_DEVELOPMENT.md). This module is included so playground's
+    // merged manifest exercises the module's transitive permissions and compiled
+    // code; the R8 minification gate verifies the keep rules remain effective.
+    // Playground has no Rust-side IAP page or feature yet; this is the tripwire
+    // only — removing this line orphans the version pin.
+    implementation(project(":frust-iap"))
 }
 
 // Per-ABI versionCode offsets, applied only when splits are enabled so each

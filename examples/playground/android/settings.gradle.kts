@@ -66,3 +66,23 @@ gradle.lifecycle.beforeProject {
         layout.buildDirectory.set(rootDir.resolve("build/frust-native-widgets"))
     }
 }
+
+// frust-iap: the R8 keep-rule tripwire vehicle for the openiap-google pin
+// (docs/PLUGINS_DEVELOPMENT.md, `openiap-google 3.0.1` row): this Gradle module
+// ensures the plugin's `consumer-rules.pro` keep rules are exercised during
+// minification and the pin stays in sync with upstream. Playground has no
+// Rust-side IAP dep or page yet (this is scaffolding only); removing this
+// include orphans the tripwire and lets the version pin silently rot.
+//
+// Hand-wired exactly as `frust-drive::plugin::apply_gradle_module` applies it
+// to a scaffolded app (this example predates Add Plugin and wires its plugins
+// directly) — the same include/projectDir/build-dir-redirect trio `:frust-camera`
+// above uses, per that applier's own doc comment.
+include(":frust-iap")
+project(":frust-iap").projectDir = file("../../../plugins/iap/platform/android")
+
+gradle.lifecycle.beforeProject {
+    if (path == ":frust-iap") {
+        layout.buildDirectory.set(rootDir.resolve("build/frust-iap"))
+    }
+}
