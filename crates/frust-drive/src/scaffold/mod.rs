@@ -549,6 +549,43 @@ mod tests {
     }
 
     #[test]
+    fn generate_produces_debug_and_profile_manifest_overlays_granting_internet_only() {
+        let dest = unique_temp_dir("android-debug-profile-manifests");
+        let ctx = test_context();
+
+        let written = generate(&dest, &ctx, None, false, None).unwrap();
+
+        for overlay in [
+            "android/app/src/debug/AndroidManifest.xml",
+            "android/app/src/profile/AndroidManifest.xml",
+        ] {
+            assert!(
+                written.iter().any(|p| p == Path::new(overlay)),
+                "expected `{overlay}` in written paths: {written:?}"
+            );
+            let contents = fs::read_to_string(dest.join(overlay)).unwrap();
+            assert!(
+                contents
+                    .contains("<uses-permission android:name=\"android.permission.INTERNET\" />"),
+                "{contents}"
+            );
+            assert!(!contents.contains("{{"), "{contents}");
+        }
+
+        // Release keeps the empty permission set: no `src/release/` overlay
+        // ships, and the main manifest itself declares none.
+        assert!(!dest.join("android/app/src/release").exists());
+        let main_manifest =
+            fs::read_to_string(dest.join("android/app/src/main/AndroidManifest.xml")).unwrap();
+        assert!(
+            !main_manifest.contains("uses-permission"),
+            "{main_manifest}"
+        );
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
     fn generate_produces_ios_tree_with_stripped_dir_suffix_and_substitutions() {
         let dest = unique_temp_dir("ios-tree");
         let ctx = test_context();

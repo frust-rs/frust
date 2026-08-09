@@ -32,6 +32,8 @@
   "android.tmpl/app/build.gradle.kts.tmpl",
   "android.tmpl/app/proguard-rules.pro",
   "android.tmpl/app/src/main/AndroidManifest.xml.tmpl",
+  "android.tmpl/app/src/debug/AndroidManifest.xml.tmpl",
+  "android.tmpl/app/src/profile/AndroidManifest.xml.tmpl",
   "android.tmpl/app/src/main/kotlin/androidIdentifier/MainActivity.kt.tmpl",
   "android.tmpl/app/src/main/res/mipmap-mdpi/ic_launcher.png",
   "android.tmpl/app/src/main/res/mipmap-mdpi/ic_launcher_round.png",
