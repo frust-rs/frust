@@ -404,7 +404,11 @@ The rules below bind every pin, wherever its row lives:
   --all-targets -- -D warnings`).
 - **Never run a blind `cargo update`.** After any pinned-dependency manifest change, run
   `cargo generate-lockfile` then confirm `cargo build --workspace --locked` still
-  succeeds before committing.
+  succeeds before committing. Exception: a manifest change that only **removes**
+  dependencies (nothing added, no range widened) is updated with a plain `cargo build`
+  instead — it prunes exactly the orphaned lockfile entries; `cargo generate-lockfile`
+  re-resolves the whole graph and is reserved for changes that add a dependency or widen
+  a range, and its full diff must be reviewed before committing.
 - Use `cargo tree -d` to check for duplicate/divergent versions of a crate across the
   dependency graph after any manifest change.
 - Android deps (`jni`, `ndk`, `ndk-sys`, `android_logger`) are target-gated (they only
