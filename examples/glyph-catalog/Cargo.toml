@@ -53,8 +53,7 @@ log = "0.4"
 # (`tests/smoke.rs`) drives Frust's `RenderRoot` directly — the desktop
 # shell's own rebuild/layout/paint seam, no GPU, no window — the same harness
 # shape as `examples/huddle`'s own headless `tests/*.rs` and
-# `examples/layer-bench`/`examples/shadertoy`'s identical `[dev-dependencies]`
-# block. `RenderRoot` is deliberately not in `frust::authoring` (it is
+# `examples/shadertoy`'s identical `[dev-dependencies]` block. `RenderRoot` is deliberately not in `frust::authoring` (it is
 # shell-owned, not something an app constructs), so the harness still names
 # these crates the long way; migrating headless test harnesses onto the
 # facade is a separate design question. Production code names none of them.

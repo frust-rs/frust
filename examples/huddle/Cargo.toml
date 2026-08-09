@@ -78,8 +78,8 @@ log = "0.4"
 # the long way; migrating headless test harnesses onto the facade is a
 # separate design question. Production code names none of `frust-core`/
 # `frust-scene`/`frust-text`/`kurbo`/`peniko` — the same shape
-# `examples/layer-bench`/`examples/shadertoy`/`examples/glyph-catalog` and
-# `benchmarks/frust_bench` already carry. The harness (`tests/support/mod.rs`)
+# `examples/shadertoy`/`examples/glyph-catalog` and `benchmarks/frust_bench`
+# already carry. The harness (`tests/support/mod.rs`)
 # is lifted from `clean-signals-frust`'s own integration-test support module;
 # these deps mirror that crate's dev-deps so the geometry/color/signal/runtime
 # types unify. `tokio` is kept available for `#[tokio::test]`-style
