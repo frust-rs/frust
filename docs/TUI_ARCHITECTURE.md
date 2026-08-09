@@ -15,9 +15,9 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how TUI relates to the other units.
 
 | Module | Responsibility |
 |--------|-----------------|
-| `engine` | Pure TEA core: `AppState` model, `Message` enum, `update()` pure transition returning `Outcome`/`Effect`; terminal-free and unit-testable without a TTY. `engine::logstyle` classifies each log line once at push into per-line metadata (level, source, panic-fold role) consumed only by rendering |
+| `engine` | Pure TEA core: `AppState` model, `Message` enum, `update()` pure transition returning `Outcome`/`Effect`; terminal-free and unit-testable without a TTY. `engine::logstyle` classifies each log line once at push into per-line metadata (level, source, panic-fold role) consumed only by rendering. `SessionView` (`visible_indices`/`bottom_pos`) owns the visible-sequence/scroll-anchor math, computed once and consumed as-is by both scroll input and rendering |
 | `supervise` | Session-supervision layer over `frust-drive`: drives per-session build/run lifecycles and bridges process output into engine messages. `supervise::progress` is a pure, side-effect-free build-phase-label extractor over streamed output lines, called from the drain path |
-| `ui` | Render-only layer: paints `AppState` into `ratatui` frames and registers this frame's clickable/hoverable regions; never mutates engine state. `ui::anim` holds pure animation primitives (braille spinner, shimmer sweep) themed via `Theme` |
+| `ui` | Render-only layer: paints `AppState` into `ratatui` frames and registers this frame's clickable/hoverable regions; never mutates engine state. `ui::views::sessions` renders the log pane from the engine's `SessionView` visible-sequence rather than re-deriving line membership. `ui::anim` holds pure animation primitives (braille spinner, shimmer sweep) themed via `Theme` |
 | `runner` | Terminal lifecycle owner: `run()` first refuses a non-interactive terminal (stdin and stdout must both be TTYs) with a clean error, then owns raw-mode/panic-hook setup and the async event loop translating raw input into `Message`s and enacting `Effect`s |
 | `lib.rs` | Public entry point (`run()`), reached only through `frust-cli` — no standalone binary |
 
@@ -60,8 +60,9 @@ itself, not a Frust app.
   applies chrome from that metadata (level badges, timestamps, source tags), folds panic
   backtraces into a collapsible group keyed by absolute line index (so folds survive ring
   eviction), and a level filter narrows the visible line sequence — follow-tail tracks the tail of
-  that visible sequence, not the raw log. Lines already carrying their own ANSI color pass through
-  unstyled.
+  that visible sequence, and every scroll step (arrows, PageUp/PageDown, wheel, scrollbar drag)
+  moves through that same sequence, with a collapsed panic block counting as one step. Lines
+  already carrying their own ANSI color pass through unstyled.
 - Bootstrap/doctor: `frust-drive`'s doctor report drives a wizard in engine state; auto-runnable
   fixes launch as supervised sessions and re-preflight on exit.
 - Perf: session log lines are scanned for `frust-perf` trace output into a per-session sparkline
