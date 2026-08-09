@@ -19,7 +19,7 @@ use frust_devtools::{
     AppInfo, BackendError, DevtoolsBackend, Service, ServiceConfig, ServiceHandle,
 };
 use frust_devtools_protocol::{
-    AckResult, Capability, DISCOVERY_PREFIX, FrameStats, HandshakeInfo, Incoming,
+    AckResult, Capability, DISCOVERY_PREFIX, FrameStats, HandshakeInfo, HandshakeParams, Incoming,
     InputScrollParams, InputTapParams, InputTextParams, Method, Notification, PROTOCOL_VERSION,
     RectPx, Request, Response, ResponseOutcome, RpcError, WidgetNode, WidgetProps,
     WidgetPropsParams, WidgetTreeDump, decode_line, encode_line, parse_discovery_line, serde_json,
@@ -234,7 +234,20 @@ impl Harness {
         Self { handle, recorded }
     }
 
+    /// A connected client that has already presented this service's token, so
+    /// each test below reads as the v1 flow it is checking rather than as an
+    /// auth exercise. The auth gate itself is tested through
+    /// [`Harness::raw_client`].
     fn client(&self) -> Client {
+        let mut client = self.raw_client();
+        if let Some(token) = self.handle.token() {
+            client.authenticate(token);
+        }
+        client
+    }
+
+    /// A connected client that has presented nothing.
+    fn raw_client(&self) -> Client {
         Client::connect(self.handle.port())
     }
 }
@@ -242,6 +255,19 @@ impl Harness {
 fn default_harness() -> Harness {
     let recorded = Arc::new(Mutex::new(Recorded::default()));
     Harness::start(FakeBackend::new(recorded), ServiceConfig::default())
+}
+
+/// A service with `require_token` off — the escape hatch a host with its own
+/// trust boundary (or an in-process test) can use.
+fn unauthenticated_harness() -> Harness {
+    let recorded = Arc::new(Mutex::new(Recorded::default()));
+    Harness::start(
+        FakeBackend::new(recorded),
+        ServiceConfig {
+            require_token: false,
+            ..ServiceConfig::default()
+        },
+    )
 }
 
 /// A blocking NDJSON client — what tooling looks like from the service's side.
@@ -307,6 +333,21 @@ impl Client {
         assert_eq!(resp.id, id, "response id must correlate to the request");
         resp
     }
+
+    /// Opens the auth gate on this connection. Uses id 0, which no test below
+    /// uses, so a later `handshake` of its own still reads naturally.
+    fn authenticate(&mut self, token: &str) {
+        let resp = self.call(0, Method::Handshake, handshake_params(Some(token)));
+        expect_result(resp);
+    }
+}
+
+/// `handshake` params carrying `token` (or none at all).
+fn handshake_params(token: Option<&str>) -> Value {
+    serde_json::to_value(HandshakeParams {
+        token: token.map(str::to_string),
+    })
+    .expect("handshake params serialize")
 }
 
 fn expect_result(resp: Response) -> Value {
@@ -370,6 +411,9 @@ fn handshake_reports_identity_protocol_version_and_capabilities() {
 
 #[test]
 fn handshake_needs_no_params_field_at_all() {
+    // On an already-authenticated connection, where `handshake` is purely
+    // "identify this app" — a params-less handshake from a *fresh* connection
+    // is a token-less one, which is a rejection by design (covered below).
     let harness = default_harness();
     let mut client = harness.client();
 
@@ -379,6 +423,129 @@ fn handshake_needs_no_params_field_at_all() {
     let resp = client.next_response();
     assert_eq!(resp.id, 9);
     expect_result(resp);
+}
+
+#[test]
+fn an_unauthenticated_client_is_refused_every_method_but_handshake() {
+    let harness = default_harness();
+    let mut client = harness.raw_client();
+
+    for (id, method, params) in [
+        (1, Method::WidgetTree, Value::Null),
+        (2, Method::MetricsSnapshot, Value::Null),
+        (3, Method::FrameStatsSubscribe, Value::Null),
+        (
+            4,
+            Method::InputTap,
+            params!(InputTapParams { x: 1.0, y: 2.0 }),
+        ),
+        (
+            5,
+            Method::InputText,
+            params!(InputTextParams {
+                text: "typed".to_string(),
+            }),
+        ),
+        (6, Method::Screenshot, Value::Null),
+    ] {
+        let error = expect_error(client.call(id, method, params));
+        assert_eq!(
+            error.code,
+            RpcError::UNAUTHORIZED,
+            "{method} must not be served before handshake"
+        );
+    }
+
+    // Nothing reached the backend, either — the gate is ahead of the hop.
+    let recorded = harness.recorded.lock().expect("recorded mutex");
+    assert_eq!(*recorded, Recorded::default());
+}
+
+#[test]
+fn a_wrong_or_missing_token_is_unauthorized_and_the_right_one_opens_the_gate() {
+    let harness = default_harness();
+    let token = harness
+        .handle
+        .token()
+        .expect("auth is on by default")
+        .to_string();
+    let mut client = harness.raw_client();
+
+    let wrong = expect_error(client.call(1, Method::Handshake, handshake_params(Some("nope"))));
+    assert_eq!(wrong.code, RpcError::UNAUTHORIZED);
+
+    let missing = expect_error(client.call(2, Method::Handshake, handshake_params(None)));
+    assert_eq!(missing.code, RpcError::UNAUTHORIZED);
+
+    // A rejected handshake does not close the connection: the same socket goes
+    // on to authenticate and run the whole v1 flow.
+    expect_result(client.call(3, Method::Handshake, handshake_params(Some(&token))));
+    let dump: WidgetTreeDump = serde_json::from_value(expect_result(client.call(
+        4,
+        Method::WidgetTree,
+        Value::Null,
+    )))
+    .expect("a WidgetTreeDump result");
+    assert_eq!(dump.roots[0].type_name, "RootWidget");
+    let ack: AckResult = serde_json::from_value(expect_result(client.call(
+        5,
+        Method::InputTap,
+        params!(InputTapParams { x: 3.0, y: 4.0 }),
+    )))
+    .expect("an AckResult");
+    assert!(ack.ok);
+}
+
+#[test]
+fn authenticating_one_connection_does_not_authenticate_another() {
+    let harness = default_harness();
+    let _authenticated = harness.client();
+    let mut other = harness.raw_client();
+
+    let error = expect_error(other.call(1, Method::WidgetTree, Value::Null));
+    assert_eq!(error.code, RpcError::UNAUTHORIZED);
+}
+
+#[test]
+fn a_service_with_auth_off_serves_a_client_that_never_handshakes() {
+    let harness = unauthenticated_harness();
+    assert_eq!(harness.handle.token(), None);
+    let mut client = harness.raw_client();
+
+    let result = expect_result(client.call(1, Method::MetricsSnapshot, Value::Null));
+    let metrics: frust_devtools_protocol::MetricsSnapshot =
+        serde_json::from_value(result).expect("a MetricsSnapshot result");
+    assert_eq!(metrics.uptime_ms, 1_234);
+
+    // A client that presents a token anyway (an older discovery line) is not
+    // punished for it.
+    expect_result(client.call(2, Method::Handshake, handshake_params(Some("stale"))));
+}
+
+#[test]
+fn no_response_line_ever_carries_the_token() {
+    let harness = default_harness();
+    let token = harness
+        .handle
+        .token()
+        .expect("auth is on by default")
+        .to_string();
+    let mut client = harness.raw_client();
+
+    // Cover the reject path, the accept path, and a post-auth method: none of
+    // the three replies may echo the secret back onto the wire.
+    for (id, method, params) in [
+        (1, Method::Handshake, handshake_params(Some("wrong"))),
+        (2, Method::Handshake, handshake_params(Some(&token))),
+        (3, Method::WidgetTree, Value::Null),
+    ] {
+        client.send(&Request::new(id, method.as_str(), params));
+        let line = encode_line(&client.next_response());
+        assert!(
+            !line.contains(&token),
+            "a response leaked the devtools token: {line}"
+        );
+    }
 }
 
 #[test]
@@ -682,26 +849,45 @@ fn publishing_far_past_the_queue_depth_never_blocks_the_publisher() {
 }
 
 #[test]
-fn the_discovery_line_is_formatted_so_the_protocol_parser_recovers_the_port() {
+fn the_discovery_line_is_formatted_so_the_protocol_parser_recovers_port_and_token() {
     let harness = default_harness();
     let port = harness.handle.port();
+    let token = harness.handle.token().expect("auth is on by default");
 
-    let discovery: Vec<u16> = captured_lines()
+    let discovery = captured_lines()
         .iter()
         .filter_map(|line| parse_discovery_line(line))
-        .collect();
+        .find(|d| d.port == port)
+        .unwrap_or_else(|| {
+            panic!(
+                "no logged line parsed back to port {port}; captured: {:?}",
+                captured_lines()
+            )
+        });
 
-    assert!(
-        discovery.contains(&port),
-        "no logged line parsed back to port {port}; captured: {:?}",
-        captured_lines()
-    );
-    // ...and it really is built from the shared constant, not a lookalike.
+    // The token a client would recover is the one this process is checking
+    // against — the whole point of a single shared formatter/parser pair.
+    assert_eq!(discovery.token.as_deref(), Some(token));
+
+    // ...and the line really is built from the shared constant, not a lookalike.
     assert!(
         captured_lines()
             .iter()
             .any(|line| line.contains(DISCOVERY_PREFIX) && line.contains(&port.to_string()))
     );
+}
+
+#[test]
+fn a_service_with_auth_off_logs_a_tokenless_discovery_line() {
+    let harness = unauthenticated_harness();
+    let port = harness.handle.port();
+
+    let discovery = captured_lines()
+        .iter()
+        .filter_map(|line| parse_discovery_line(line))
+        .find(|d| d.port == port)
+        .expect("the service logs a discovery line even with auth off");
+    assert_eq!(discovery.token, None);
 }
 
 #[test]

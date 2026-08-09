@@ -25,8 +25,8 @@ use frust_core::InspectNode;
 use frust_core::event::{InputEvent, PointerPhase};
 use frust_core::view::WidgetId;
 use frust_devtools_protocol::{
-    Incoming, Method, Request, Response, ResponseOutcome, decode_line, encode_line, serde_json,
-    serde_json::Value,
+    HandshakeParams, Incoming, Method, Request, Response, ResponseOutcome, RpcError, decode_line,
+    encode_line, serde_json, serde_json::Value,
 };
 use frust_shell_common::devtools::{self, DevtoolsUi};
 use kurbo::Rect;
@@ -132,6 +132,13 @@ fn result_of(response: Response) -> Value {
     }
 }
 
+fn error_of(response: Response) -> RpcError {
+    match response.outcome {
+        ResponseOutcome::Error { error } => error,
+        ResponseOutcome::Success { result } => panic!("expected an error, got {result}"),
+    }
+}
+
 #[test]
 fn a_client_reads_the_live_tree_and_drives_the_ui_through_the_hop() {
     let wake = Arc::new(Wake::default());
@@ -143,6 +150,9 @@ fn a_client_reads_the_live_tree_and_drives_the_ui_through_the_hop() {
         Some(Box::new(move || wake.raise()))
     });
     let port = devtools::port().expect("the service bound a loopback port");
+    // Auth is on by default, and the shell never sees the token except through
+    // this in-process accessor — the same process that owns the secret.
+    let token = devtools::token().expect("the service minted a handshake token");
 
     // The stand-in UI thread: park on the wake, drain the queue, repeat —
     // structurally identical to the desktop shell's woken `user_event` turn.
@@ -167,12 +177,26 @@ fn a_client_reads_the_live_tree_and_drives_the_ui_through_the_hop() {
 
     let mut client = Client::connect(port);
 
+    // Nothing is served before the token is presented — not even against a
+    // fully live UI thread.
+    let refused = error_of(client.call(1, Method::WidgetTree, Value::Null));
+    assert_eq!(refused.code, RpcError::UNAUTHORIZED);
+
     // Handshake is answered from the cached info, without any hop.
-    let handshake = result_of(client.call(1, Method::Handshake, Value::Null));
+    let handshake = result_of(
+        client.call(
+            2,
+            Method::Handshake,
+            serde_json::to_value(HandshakeParams {
+                token: Some(token.clone()),
+            })
+            .expect("handshake params serialize"),
+        ),
+    );
     assert_eq!(handshake["app_name"], "test-app");
 
     // widget_tree hops to the UI thread and comes back nested.
-    let tree = result_of(client.call(2, Method::WidgetTree, Value::Null));
+    let tree = result_of(client.call(3, Method::WidgetTree, Value::Null));
     let roots = tree["roots"].as_array().expect("roots array");
     assert_eq!(roots.len(), 1);
     assert_eq!(roots[0]["id"], 1);
@@ -181,7 +205,7 @@ fn a_client_reads_the_live_tree_and_drives_the_ui_through_the_hop() {
     assert_eq!(roots[0]["children"][0]["bounds"]["width"], 40.0);
 
     // widget_props resolves against the same snapshot.
-    let props = result_of(client.call(3, Method::WidgetProps, serde_json::json!({ "id": 2 })));
+    let props = result_of(client.call(4, Method::WidgetProps, serde_json::json!({ "id": 2 })));
     assert_eq!(props["id"], 2);
     let entries: Vec<(String, String)> =
         serde_json::from_value(props["entries"].clone()).expect("entries decode");
@@ -189,13 +213,13 @@ fn a_client_reads_the_live_tree_and_drives_the_ui_through_the_hop() {
     assert!(entries.contains(&("parent".to_string(), "1".to_string())));
 
     // metrics needs no hop at all.
-    let metrics = result_of(client.call(4, Method::MetricsSnapshot, Value::Null));
+    let metrics = result_of(client.call(5, Method::MetricsSnapshot, Value::Null));
     assert!(metrics["uptime_ms"].is_u64());
 
     // input_tap: the ack means "delivered", so the events are already recorded
     // by the time it arrives — no sleep, no polling.
     let ack = result_of(client.call(
-        5,
+        6,
         Method::InputTap,
         serde_json::json!({ "x": 12.0, "y": 34.0 }),
     ));
@@ -220,7 +244,7 @@ fn a_client_reads_the_live_tree_and_drives_the_ui_through_the_hop() {
     // A malformed tap is answered with an error, never acked, and never
     // reaches the tree. (The non-finite-coordinate guard itself is unit-tested
     // in the module — JSON has no NaN literal to send here.)
-    let rejected = client.call(7, Method::InputTap, serde_json::json!({ "x": 12.0 }));
+    let rejected = client.call(8, Method::InputTap, serde_json::json!({ "x": 12.0 }));
     assert!(
         matches!(rejected.outcome, ResponseOutcome::Error { .. }),
         "a malformed tap must not be acked"

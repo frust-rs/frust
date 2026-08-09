@@ -17,11 +17,15 @@
 //! serialize/discriminate pair; [`Incoming`] tells the caller whether a
 //! decoded line was a [`Request`], [`Response`], or [`Notification`].
 //!
-//! # Discovery
+//! # Discovery and auth
 //!
-//! A server announces its listening port with one printed line built from
-//! [`DISCOVERY_PREFIX`]; [`parse_discovery_line`] is the single parser both
-//! the service (which formats it) and tooling (which greps for it) share.
+//! A server announces its listening port — and the per-process token a client
+//! must present at `handshake` — with one printed line built from
+//! [`DISCOVERY_PREFIX`]. [`format_discovery_line`]/[`parse_discovery_line`]
+//! are the single formatter/parser pair the service and tooling share, and
+//! [`Discovery`] is what a parsed line yields. The token travels back to the
+//! server exactly once, in [`HandshakeParams`]; a connection that has not
+//! presented it is answered [`RpcError::UNAUTHORIZED`] for every other method.
 //!
 //! # Methods
 //!
@@ -48,11 +52,11 @@ mod types;
 pub use serde_json;
 
 pub use codec::{DecodeError, decode_line, encode_line};
-pub use discovery::{DISCOVERY_PREFIX, parse_discovery_line};
+pub use discovery::{DISCOVERY_PREFIX, Discovery, format_discovery_line, parse_discovery_line};
 pub use messages::{
-    AckResult, Capability, FrameStats, HandshakeInfo, InputScrollParams, InputTapParams,
-    InputTextParams, MetricsSnapshot, RectPx, ScreenshotResult, WidgetNode, WidgetProps,
-    WidgetPropsParams, WidgetTreeDump,
+    AckResult, Capability, FrameStats, HandshakeInfo, HandshakeParams, InputScrollParams,
+    InputTapParams, InputTextParams, MetricsSnapshot, RectPx, ScreenshotResult, WidgetNode,
+    WidgetProps, WidgetPropsParams, WidgetTreeDump,
 };
 pub use method::Method;
 pub use types::{

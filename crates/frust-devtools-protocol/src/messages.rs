@@ -8,6 +8,24 @@
 
 use serde::{Deserialize, Serialize};
 
+/// `handshake` request params — the per-process auth token the server printed
+/// on its discovery line (`crate::format_discovery_line`).
+///
+/// **Inbound only.** The token travels client→server on this one method and
+/// appears in no result, notification, or error payload the server ever
+/// writes; a client that learned it from a log line must not echo it back
+/// anywhere else.
+///
+/// `token` is optional so a client can still handshake against a server
+/// running with auth switched off (and so a server can answer such a client's
+/// `null` params rather than failing to decode them) — a server that requires
+/// a token answers an absent one with [`crate::RpcError::UNAUTHORIZED`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandshakeParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+}
+
 /// `handshake` result — server identity plus the declared capability set a
 /// client uses to know which other methods are safe to call.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -167,6 +185,39 @@ pub struct ScreenshotResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handshake_params_round_trip_with_and_without_a_token() {
+        let with = HandshakeParams {
+            token: Some("0123456789abcdef".to_string()),
+        };
+        let json = serde_json::to_string(&with).unwrap();
+        assert_eq!(
+            serde_json::from_str::<HandshakeParams>(&json).unwrap(),
+            with
+        );
+
+        // Absent on the wire (an auth-off server, or a client that has no
+        // token to present) must decode, not fail.
+        let without: HandshakeParams = serde_json::from_str("{}").unwrap();
+        assert_eq!(without, HandshakeParams::default());
+        assert_eq!(without.token, None);
+        assert!(!serde_json::to_string(&without).unwrap().contains("token"));
+    }
+
+    #[test]
+    fn no_server_written_payload_carries_a_token_field() {
+        // The token is inbound-only: `handshake`'s *result* must never echo
+        // it back, or a log/transcript of the reply would leak the secret.
+        let info = HandshakeInfo {
+            app_name: "app".to_string(),
+            frust_version: "0.1.0".to_string(),
+            protocol_version: 1,
+            capabilities: vec![Capability::WidgetTree],
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(!json.contains("token"));
+    }
 
     #[test]
     fn capability_round_trips() {

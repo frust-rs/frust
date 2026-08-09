@@ -227,9 +227,11 @@ pub fn pump(ui: &mut dyn DevtoolsUi) {
 /// `app_name` identifies the app at handshake; `wake` is the shell's
 /// UI-thread nudge (see [`Bridge::wake`] — `None` for a continuously ticking
 /// mobile loop). Call this **after** the shell's logger is installed: the
-/// service logs its discovery line (`frust-devtools listening on <port>`)
-/// through the `log` facade, and tooling recovers the port by grepping that
-/// line out of stderr/logcat.
+/// service logs its discovery line (`frust-devtools listening on <port> token
+/// <token>`) through the `log` facade, and tooling recovers both the port and
+/// the handshake token by grepping that line out of stderr/logcat. The token
+/// is the service's own secret — this module only passes the log line along
+/// (and offers [`token`] to the in-process caller that already owns it).
 ///
 /// Never load-bearing: a bind failure, a repeat call, or the `FRUST_DEVTOOLS=0`
 /// kill switch all leave the app running exactly as it would without devtools.
@@ -273,6 +275,21 @@ pub fn start(app_name: impl Into<String>, wake: Option<Box<dyn Fn() + Send + Syn
 /// UI, reads.
 pub fn port() -> Option<u16> {
     SERVICE.get().map(ServiceHandle::port)
+}
+
+/// The handshake token this process's service requires, or `None` when no
+/// service is running (see [`port`]) or it was started with auth off.
+///
+/// The token is otherwise **service-internal**: this module neither generates
+/// nor checks it, and nothing in the shell needs it — the accessor exists for
+/// the in-process caller that is already inside the trust boundary (a test
+/// driving a loopback client, or an app choosing to surface it next to the
+/// port). Never send it anywhere the discovery line does not already go.
+pub fn token() -> Option<String> {
+    SERVICE
+        .get()
+        .and_then(ServiceHandle::token)
+        .map(str::to_string)
 }
 
 /// The kill-switch decision, pure so it is testable without touching the

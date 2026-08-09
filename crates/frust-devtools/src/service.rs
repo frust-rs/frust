@@ -5,7 +5,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use frust_devtools_protocol::{DISCOVERY_PREFIX, FrameStats};
+use frust_devtools_protocol::{FrameStats, format_discovery_line};
 use tokio::net::TcpListener;
 use tokio::runtime::Builder;
 use tokio::sync::watch;
@@ -15,6 +15,7 @@ use crate::dispatch::SessionCtx;
 use crate::frame_stats::{self, FrameStatsBus};
 use crate::hop::spawn_backend_thread;
 use crate::server::accept_loop;
+use crate::token;
 
 /// Tuning knobs. [`ServiceConfig::default`] is what [`Service::start`] uses;
 /// [`Service::start_with_config`] exists for tests and for a shell with an
@@ -32,6 +33,14 @@ pub struct ServiceConfig {
     pub max_clients: usize,
     /// How many backend calls may queue ahead of the one in flight.
     pub backend_queue_depth: usize,
+    /// Whether a client must present this process's token at `handshake`
+    /// before any other method is dispatched. **Default `true`, and a shell
+    /// should leave it that way**: loopback is not a trust boundary on a
+    /// device, where any co-resident app can reach the port (see
+    /// `crate::token`'s module doc). Switching it off is for an in-process
+    /// test or a host with a stronger boundary of its own, never for a shipped
+    /// build.
+    pub require_token: bool,
 }
 
 impl Default for ServiceConfig {
@@ -45,6 +54,7 @@ impl Default for ServiceConfig {
             // the OS has not reaped yet.
             max_clients: 4,
             backend_queue_depth: 16,
+            require_token: true,
         }
     }
 }
@@ -99,11 +109,17 @@ impl Service {
         let listener = runtime.block_on(TcpListener::bind(addr))?;
         let port = listener.local_addr()?.port();
 
-        // The one discovery contract, formatted from the protocol's own
-        // constant so the formatter and `parse_discovery_line` cannot drift.
-        // `log` (not `println!`) because that is the only sink that reaches
-        // logcat/oslog on a device, which is where tooling greps for it.
-        log::info!("{DISCOVERY_PREFIX}{port}");
+        // One token per process, minted here and never regenerated: a client
+        // that read the discovery line once can reconnect for the app's whole
+        // lifetime (see `crate::token` for the entropy source and its limits).
+        let token = config.require_token.then(token::generate);
+
+        // The one discovery contract, formatted by the protocol crate itself so
+        // the formatter and `parse_discovery_line` cannot drift. `log` (not
+        // `println!`) because that is the only sink that reaches logcat/oslog on
+        // a device, which is where tooling greps for it — and, with auth on, the
+        // only place the token appears at all.
+        log::info!("{}", format_discovery_line(port, token.as_deref()));
 
         let bus = Arc::new(FrameStatsBus::new(config.frame_stats_capacity));
         let backend_client =
@@ -112,6 +128,7 @@ impl Service {
             handshake,
             backend: backend_client,
             bus: Arc::clone(&bus),
+            token: token.clone(),
         });
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -127,6 +144,7 @@ impl Service {
 
         Ok(ServiceHandle {
             port,
+            token,
             bus,
             shutdown_tx,
             driver: Some(driver),
@@ -138,6 +156,7 @@ impl Service {
 /// simply hold it for as long as devtools should be available.
 pub struct ServiceHandle {
     port: u16,
+    token: Option<String>,
     bus: Arc<FrameStatsBus>,
     shutdown_tx: watch::Sender<bool>,
     driver: Option<std::thread::JoinHandle<()>>,
@@ -148,6 +167,18 @@ impl ServiceHandle {
     /// know it besides the discovery line.
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// This process's handshake token, or `None` when the service was started
+    /// with [`ServiceConfig::require_token`] off.
+    ///
+    /// The **in-process** counterpart of reading it off the discovery line, and
+    /// no weaker: the caller is the process that owns the secret. Handing it
+    /// anywhere else — a response body, a file, another process — defeats the
+    /// whole mechanism, which relies on the token reaching only readers of this
+    /// app's log stream.
+    pub fn token(&self) -> Option<&str> {
+        self.token.as_deref()
     }
 
     /// Publishes one frame's stats to every subscribed client.
@@ -192,6 +223,9 @@ impl Drop for ServiceHandle {
 }
 
 impl std::fmt::Debug for ServiceHandle {
+    /// Hand-written, and deliberately **not** derived: the token must never
+    /// reach a log line a `{:?}` produces (it belongs on the discovery line and
+    /// nowhere else), and a derive would leak it the moment a field is added.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServiceHandle")
             .field("port", &self.port)

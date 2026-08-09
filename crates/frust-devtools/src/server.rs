@@ -10,7 +10,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, broadcast, watch};
 use tokio::task::JoinSet;
 
-use crate::dispatch::{self, Decoded, SessionCtx, SideEffect};
+use crate::dispatch::{self, ConnState, Decoded, SessionCtx, SideEffect};
 
 /// A single request line longer than this is treated as a broken client and
 /// closes the connection. Nothing in the v1 protocol comes close (the largest
@@ -117,6 +117,9 @@ async fn connection(stream: TcpStream, ctx: Arc<SessionCtx>, mut shutdown: watch
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = LineReader::new(read_half);
     let mut stats: Option<broadcast::Receiver<frust_devtools_protocol::FrameStats>> = None;
+    // Per-connection, never shared: one client's handshake must not authorize
+    // any other socket (`crate::dispatch`'s `ConnState`).
+    let mut conn = ConnState::new(&ctx);
 
     if *shutdown.borrow() {
         return;
@@ -162,7 +165,8 @@ async fn connection(stream: TcpStream, ctx: Arc<SessionCtx>, mut shutdown: watch
             Step::Line(line) => {
                 let response = match dispatch::decode(&line) {
                     Decoded::Request(req) => {
-                        let (response, effect) = dispatch::handle_request(&ctx, &req).await;
+                        let (response, effect) =
+                            dispatch::handle_request(&ctx, &mut conn, &req).await;
                         if effect == SideEffect::SubscribeFrameStats && stats.is_none() {
                             stats = Some(ctx.bus.subscribe());
                         }

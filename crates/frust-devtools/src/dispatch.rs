@@ -9,13 +9,14 @@
 use std::sync::Arc;
 
 use frust_devtools_protocol::{
-    AckResult, FrameStats, HandshakeInfo, Incoming, InputScrollParams, InputTapParams,
-    InputTextParams, Method, Notification, Request, Response, RpcError, WidgetPropsParams,
-    decode_line, serde_json, serde_json::Value,
+    AckResult, FrameStats, HandshakeInfo, HandshakeParams, Incoming, InputScrollParams,
+    InputTapParams, InputTextParams, Method, Notification, Request, Response, RpcError,
+    WidgetPropsParams, decode_line, serde_json, serde_json::Value,
 };
 
 use crate::frame_stats::FrameStatsBus;
 use crate::hop::{BackendClient, Call, CallOutcome};
+use crate::token;
 
 /// Everything a connection needs to answer a request. One instance, shared by
 /// every connection task.
@@ -24,6 +25,30 @@ pub(crate) struct SessionCtx {
     pub(crate) handshake: HandshakeInfo,
     pub(crate) backend: BackendClient,
     pub(crate) bus: Arc<FrameStatsBus>,
+    /// This process's handshake token, or `None` when the service was started
+    /// with auth switched off (`ServiceConfig::require_token`). Never leaves
+    /// the process: it is compared against what a client presents, and is
+    /// written to no response, notification, or error payload.
+    pub(crate) token: Option<String>,
+}
+
+/// Per-connection protocol state. Separate from [`SessionCtx`] because it is
+/// exactly the state that must **not** be shared: one client authenticating
+/// must not authenticate any other connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ConnState {
+    authenticated: bool,
+}
+
+impl ConnState {
+    /// A fresh connection: unauthenticated when the service requires a token,
+    /// and pre-authenticated when it does not (so an auth-off service behaves
+    /// exactly as it did before auth existed).
+    pub(crate) fn new(ctx: &SessionCtx) -> Self {
+        Self {
+            authenticated: ctx.token.is_none(),
+        }
+    }
 }
 
 /// What a received line turned out to be.
@@ -90,7 +115,15 @@ pub(crate) enum SideEffect {
 }
 
 /// Answers one request, hopping to the backend where the method needs it.
-pub(crate) async fn handle_request(ctx: &SessionCtx, req: &Request) -> (Response, SideEffect) {
+///
+/// `conn` carries this connection's authentication state: `handshake` is the
+/// only method dispatched before it is established, and a successful one is
+/// what establishes it.
+pub(crate) async fn handle_request(
+    ctx: &SessionCtx,
+    conn: &mut ConnState,
+    req: &Request,
+) -> (Response, SideEffect) {
     let id = req.id;
     let Some(method) = Method::from_str(&req.method) else {
         return (
@@ -107,10 +140,40 @@ pub(crate) async fn handle_request(ctx: &SessionCtx, req: &Request) -> (Response
 
     let no_effect = |response| (response, SideEffect::None);
 
+    // The auth gate, ahead of every dispatch arm below: an unauthenticated
+    // connection may call `handshake` and nothing else. Deliberately *after*
+    // the unknown-method check only because an unknown name has no meaning to
+    // gate — it reaches no backend and reveals nothing about the app.
+    if method != Method::Handshake && !conn.authenticated {
+        return no_effect(Response::error(
+            id,
+            RpcError::unauthorized(format!(
+                "`{method}` requires an authenticated connection — call `handshake` with the \
+                 token from this app's devtools discovery line first"
+            )),
+        ));
+    }
+
     match method {
         // Answered from the startup cache, never from the backend: this is
-        // what keeps `handshake` available while the UI thread is wedged.
-        Method::Handshake => no_effect(result_response(id, serde_json::to_value(&ctx.handshake))),
+        // what keeps `handshake` available while the UI thread is wedged —
+        // including the token check, which touches no app state either.
+        //
+        // The token is checked once per connection, not once per call:
+        // `handshake` doubles as "identify this app", and a client that already
+        // proved itself re-asking for the app's identity gains nothing by
+        // presenting the secret again (it would only put the token on the wire
+        // more often). Authentication is never revoked on a live connection.
+        Method::Handshake if conn.authenticated => {
+            no_effect(result_response(id, serde_json::to_value(&ctx.handshake)))
+        }
+        Method::Handshake => match authenticate(ctx, req) {
+            Ok(()) => {
+                conn.authenticated = true;
+                no_effect(result_response(id, serde_json::to_value(&ctx.handshake)))
+            }
+            Err(error) => no_effect(Response::error(id, error)),
+        },
 
         // A pure connection-state change — nothing to ask the backend.
         Method::FrameStatsSubscribe => (
@@ -156,6 +219,30 @@ pub(crate) async fn handle_request(ctx: &SessionCtx, req: &Request) -> (Response
             Ok(p) => no_effect(backend_response(ctx, id, Call::InputText(p.text)).await),
             Err(e) => no_effect(Response::error(id, invalid_params(req, &e))),
         },
+    }
+}
+
+/// Checks a `handshake` request's token against this process's.
+///
+/// Malformed params are treated as "no token presented" rather than
+/// `INVALID_PARAMS`: an unauthenticated peer learns only that it is
+/// unauthorized, never anything about the shape the server expected.
+fn authenticate(ctx: &SessionCtx, req: &Request) -> Result<(), RpcError> {
+    let Some(expected) = ctx.token.as_deref() else {
+        return Ok(()); // Auth switched off for this service.
+    };
+    let presented = serde_json::from_value::<HandshakeParams>(req.params.clone())
+        .ok()
+        .and_then(|params| params.token);
+    match presented {
+        Some(token) if token::matches(expected, &token) => Ok(()),
+        Some(_) => {
+            log::warn!("frust-devtools: rejected a handshake presenting the wrong token");
+            Err(RpcError::unauthorized("invalid devtools token"))
+        }
+        None => Err(RpcError::unauthorized(
+            "this app's devtools service requires the token printed on its discovery line",
+        )),
     }
 }
 
@@ -205,6 +292,231 @@ pub(crate) fn frame_stats_notification(stats: FrameStats) -> Notification {
 mod tests {
     use super::*;
     use frust_devtools_protocol::encode_line;
+
+    /// The smallest backend that satisfies the trait — the auth gate is
+    /// decided before any of these are reachable, so they only need to exist.
+    struct StubBackend;
+
+    impl crate::DevtoolsBackend for StubBackend {
+        fn widget_tree(&self) -> frust_devtools_protocol::WidgetTreeDump {
+            frust_devtools_protocol::WidgetTreeDump { roots: Vec::new() }
+        }
+        fn widget_props(&self, _id: u64) -> Option<frust_devtools_protocol::WidgetProps> {
+            None
+        }
+        fn metrics_snapshot(&self) -> frust_devtools_protocol::MetricsSnapshot {
+            frust_devtools_protocol::MetricsSnapshot {
+                rss_bytes: None,
+                uptime_ms: 0,
+            }
+        }
+        fn inject_tap(
+            &self,
+            _p: frust_devtools_protocol::InputTapParams,
+        ) -> Result<(), crate::BackendError> {
+            Ok(())
+        }
+        fn inject_scroll(
+            &self,
+            _p: frust_devtools_protocol::InputScrollParams,
+        ) -> Result<(), crate::BackendError> {
+            Ok(())
+        }
+        fn inject_text(&self, _t: &str) -> Result<(), crate::BackendError> {
+            Ok(())
+        }
+    }
+
+    /// A [`SessionCtx`] over [`StubBackend`]: enough to drive `handle_request`
+    /// end to end without a socket.
+    fn ctx_with_token(token: Option<&str>) -> SessionCtx {
+        let backend =
+            crate::hop::spawn_backend_thread(StubBackend, 4, std::time::Duration::from_millis(500));
+        SessionCtx {
+            handshake: HandshakeInfo {
+                app_name: "fake-app".to_string(),
+                frust_version: "0.0.0".to_string(),
+                protocol_version: frust_devtools_protocol::PROTOCOL_VERSION,
+                capabilities: Vec::new(),
+            },
+            backend,
+            bus: Arc::new(FrameStatsBus::new(4)),
+            token: token.map(str::to_string),
+        }
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("current-thread runtime")
+            .block_on(future)
+    }
+
+    fn error_code(response: &Response) -> i32 {
+        match &response.outcome {
+            frust_devtools_protocol::ResponseOutcome::Error { error } => error.code,
+            other => panic!("expected an error outcome, got {other:?}"),
+        }
+    }
+
+    fn is_success(response: &Response) -> bool {
+        matches!(
+            response.outcome,
+            frust_devtools_protocol::ResponseOutcome::Success { .. }
+        )
+    }
+
+    fn handshake_request(id: u64, token: Option<&str>) -> Request {
+        Request::new(
+            id,
+            Method::Handshake.as_str(),
+            serde_json::to_value(HandshakeParams {
+                token: token.map(str::to_string),
+            })
+            .expect("params serialize"),
+        )
+    }
+
+    #[test]
+    fn an_unauthenticated_connection_is_refused_every_method_but_handshake() {
+        let ctx = ctx_with_token(Some("s3cret"));
+        let mut conn = ConnState::new(&ctx);
+        for method in [
+            Method::WidgetTree,
+            Method::WidgetProps,
+            Method::MetricsSnapshot,
+            Method::FrameStatsSubscribe,
+            Method::InputTap,
+            Method::InputScroll,
+            Method::InputText,
+            Method::Screenshot,
+            Method::FrameStats,
+        ] {
+            let req = Request::new(1, method.as_str(), Value::Null);
+            let (response, effect) = block_on(handle_request(&ctx, &mut conn, &req));
+            assert_eq!(
+                error_code(&response),
+                RpcError::UNAUTHORIZED,
+                "{method} must not be dispatched before handshake"
+            );
+            assert_eq!(
+                effect,
+                SideEffect::None,
+                "{method} must have no side effect"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrong_or_absent_token_leaves_the_connection_unauthenticated() {
+        let ctx = ctx_with_token(Some("s3cret"));
+        let mut conn = ConnState::new(&ctx);
+
+        for params in [
+            handshake_request(1, Some("not-the-token")),
+            handshake_request(2, None),
+            // Params that are not even a params object: still just "no token".
+            Request::new(3, Method::Handshake.as_str(), Value::Null),
+            Request::new(4, Method::Handshake.as_str(), serde_json::json!("nope")),
+        ] {
+            let (response, _) = block_on(handle_request(&ctx, &mut conn, &params));
+            assert_eq!(error_code(&response), RpcError::UNAUTHORIZED);
+        }
+
+        let (after, _) = block_on(handle_request(
+            &ctx,
+            &mut conn,
+            &Request::new(9, Method::MetricsSnapshot.as_str(), Value::Null),
+        ));
+        assert_eq!(error_code(&after), RpcError::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn the_right_token_authenticates_the_connection() {
+        let ctx = ctx_with_token(Some("s3cret"));
+        let mut conn = ConnState::new(&ctx);
+
+        let (response, _) = block_on(handle_request(
+            &ctx,
+            &mut conn,
+            &handshake_request(1, Some("s3cret")),
+        ));
+        assert!(is_success(&response));
+
+        // The gate is open: a subsequent method now reaches the backend.
+        let (next, _) = block_on(handle_request(
+            &ctx,
+            &mut conn,
+            &Request::new(2, Method::MetricsSnapshot.as_str(), Value::Null),
+        ));
+        assert!(is_success(&next));
+    }
+
+    #[test]
+    fn a_handshake_response_never_carries_the_token_back() {
+        let ctx = ctx_with_token(Some("s3cret"));
+        let mut conn = ConnState::new(&ctx);
+        let (response, _) = block_on(handle_request(
+            &ctx,
+            &mut conn,
+            &handshake_request(1, Some("s3cret")),
+        ));
+        assert!(!encode_line(&response).contains("s3cret"));
+
+        // ...and neither does the rejection.
+        let mut fresh = ConnState::new(&ctx);
+        let (rejected, _) = block_on(handle_request(
+            &ctx,
+            &mut fresh,
+            &handshake_request(2, Some("s3cret-ish")),
+        ));
+        let line = encode_line(&rejected);
+        assert!(!line.contains("s3cret"));
+    }
+
+    #[test]
+    fn auth_off_serves_every_method_without_a_handshake() {
+        let ctx = ctx_with_token(None);
+        let mut conn = ConnState::new(&ctx);
+        let (response, effect) = block_on(handle_request(
+            &ctx,
+            &mut conn,
+            &Request::new(1, Method::FrameStatsSubscribe.as_str(), Value::Null),
+        ));
+        assert!(is_success(&response));
+        assert_eq!(effect, SideEffect::SubscribeFrameStats);
+
+        // A token presented to an auth-off server is simply ignored, never an
+        // error: a client that read one from an older line still connects.
+        let (handshake, _) = block_on(handle_request(
+            &ctx,
+            &mut conn,
+            &handshake_request(2, Some("whatever")),
+        ));
+        assert!(is_success(&handshake));
+    }
+
+    #[test]
+    fn one_connection_authenticating_does_not_authenticate_another() {
+        let ctx = ctx_with_token(Some("s3cret"));
+        let mut first = ConnState::new(&ctx);
+        let mut second = ConnState::new(&ctx);
+
+        let (ok, _) = block_on(handle_request(
+            &ctx,
+            &mut first,
+            &handshake_request(1, Some("s3cret")),
+        ));
+        assert!(is_success(&ok));
+
+        let (denied, _) = block_on(handle_request(
+            &ctx,
+            &mut second,
+            &Request::new(1, Method::MetricsSnapshot.as_str(), Value::Null),
+        ));
+        assert_eq!(error_code(&denied), RpcError::UNAUTHORIZED);
+    }
 
     #[test]
     fn a_request_line_decodes_to_a_request() {

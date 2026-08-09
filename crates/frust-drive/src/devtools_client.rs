@@ -7,6 +7,19 @@
 //! (`Mutex`+`Condvar`, a dedicated reader thread, drop-oldest-under-load
 //! semantics) rather than inventing a new shape for this crate.
 //!
+//! # Auth
+//!
+//! A devtools service mints a random per-process token and prints it on its
+//! discovery line; every method but `handshake` is refused
+//! ([`frust_devtools_protocol::RpcError::UNAUTHORIZED`]) until a connection
+//! presents it. So the flow is: recover a
+//! [`Discovery`](frust_devtools_protocol::Discovery) from the app's log/logcat
+//! stream with `parse_discovery_line`, hand its `token` to
+//! [`DevtoolsClient::connect`], and call [`DevtoolsClient::handshake`] before
+//! anything else. A rejection surfaces as a [`DevtoolsRpcError`] carried
+//! through `anyhow`, so a caller can tell "wrong/no token" ([`is_unauthorized`])
+//! from an ordinary server-side failure instead of pattern-matching a string.
+//!
 //! # Threading model
 //!
 //! [`DevtoolsClient::connect`] opens a blocking [`TcpStream`] and spawns one
@@ -47,13 +60,44 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use frust_devtools_protocol::{
-    AckResult, FrameStats, HandshakeInfo, Incoming, InputScrollParams, InputTapParams,
-    InputTextParams, Method, MetricsSnapshot, Request, Response, ResponseOutcome, WidgetProps,
-    WidgetPropsParams, WidgetTreeDump, decode_line, encode_line,
+    AckResult, FrameStats, HandshakeInfo, HandshakeParams, Incoming, InputScrollParams,
+    InputTapParams, InputTextParams, Method, MetricsSnapshot, Request, Response, ResponseOutcome,
+    RpcError, WidgetProps, WidgetPropsParams, WidgetTreeDump, decode_line, encode_line,
 };
 use serde_json::Value;
 
 use crate::process::ProcessRunner;
+
+/// An RPC-level rejection: the server answered, and said no.
+///
+/// A `thiserror` enum would be the house style for a matched error, but the
+/// server's code set is open-ended (JSON-RPC reserves a whole
+/// implementation-defined range), so the code is carried as data with named
+/// predicates over it rather than enumerated into variants that would go stale.
+/// Returned inside `anyhow::Error`, so `err.downcast_ref::<DevtoolsRpcError>()`
+/// (or [`is_unauthorized`]) recovers it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("devtools server rejected `{method}` (code {code}): {message}")]
+pub struct DevtoolsRpcError {
+    pub method: String,
+    pub code: i32,
+    pub message: String,
+}
+
+impl DevtoolsRpcError {
+    /// The connection has not presented the app's devtools token. Retrying is
+    /// pointless — re-read the discovery line and reconnect with its token.
+    pub fn is_unauthorized(&self) -> bool {
+        self.code == RpcError::UNAUTHORIZED
+    }
+}
+
+/// Whether `err` is a devtools rejection for want of a valid token — the one
+/// failure a caller must act on differently (fix the token, don't retry).
+pub fn is_unauthorized(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<DevtoolsRpcError>()
+        .is_some_and(DevtoolsRpcError::is_unauthorized)
+}
 
 /// A blocking client over one devtools TCP connection. See the module doc
 /// for the threading model. `Send + Sync`: every field synchronizes its own
@@ -65,6 +109,11 @@ pub struct DevtoolsClient {
     pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Response>>>>,
     frame_stats: Arc<FrameStatsMailbox>,
     timeout: Duration,
+    /// The token this connection presents at `handshake`. Held (rather than
+    /// taken per call) because it belongs to the *connection*: the server
+    /// authenticates the socket once, and re-sending the secret on later
+    /// requests would only widen its exposure.
+    token: Option<String>,
     reader: Option<thread::JoinHandle<()>>,
 }
 
@@ -74,7 +123,17 @@ impl DevtoolsClient {
     /// [`frust_devtools_protocol::parse_discovery_line`]). `timeout` is both
     /// the socket's read/write timeout and the bound every subsequent call
     /// waits for its response before failing.
-    pub fn connect(addr: impl ToSocketAddrs, timeout: Duration) -> Result<Self> {
+    ///
+    /// `token` is the one the same discovery line carried
+    /// (`Discovery::token`), presented at [`handshake`](Self::handshake).
+    /// `None` is for a server running with auth off — against a default
+    /// (auth-on) service every other method then fails
+    /// [`is_unauthorized`].
+    pub fn connect(
+        addr: impl ToSocketAddrs,
+        timeout: Duration,
+        token: Option<&str>,
+    ) -> Result<Self> {
         let stream = TcpStream::connect(addr).context("failed to connect to devtools server")?;
         stream
             .set_read_timeout(Some(timeout))
@@ -105,13 +164,24 @@ impl DevtoolsClient {
             pending,
             frame_stats,
             timeout,
+            token: token.map(str::to_string),
             reader: Some(reader),
         })
     }
 
-    /// `handshake` — server identity plus its declared capability set.
+    /// `handshake` — presents this connection's token (see
+    /// [`connect`](Self::connect)) and returns the server's identity plus its
+    /// declared capability set.
+    ///
+    /// **Call this first.** Until it succeeds the server refuses every other
+    /// method; a rejection here is [`is_unauthorized`] and means the token is
+    /// wrong or missing, not that the app is unreachable.
     pub fn handshake(&self) -> Result<HandshakeInfo> {
-        self.typed_call(Method::Handshake, Value::Null)
+        let params = serde_json::to_value(HandshakeParams {
+            token: self.token.clone(),
+        })
+        .context("encoding `handshake` params")?;
+        self.typed_call(Method::Handshake, params)
     }
 
     /// `widget_tree` — the current retained widget tree, nested root-down.
@@ -211,13 +281,15 @@ impl DevtoolsClient {
 
         match response.outcome {
             ResponseOutcome::Success { result } => Ok(result),
-            ResponseOutcome::Error { error } => {
-                bail!(
-                    "devtools server rejected `{method}` (code {}): {}",
-                    error.code,
-                    error.message
-                )
+            // A typed error, not a formatted string: `UNAUTHORIZED` is the one
+            // failure a caller has to handle differently, and it must survive
+            // the trip through `anyhow` intact (see [`is_unauthorized`]).
+            ResponseOutcome::Error { error } => Err(DevtoolsRpcError {
+                method: method.to_string(),
+                code: error.code,
+                message: error.message,
             }
+            .into()),
         }
     }
 }
@@ -456,7 +528,13 @@ mod tests {
     use std::net::{SocketAddr, TcpListener};
     use std::time::Instant;
 
+    /// The token [`spawn_fake_server`] requires at handshake — the stand-in
+    /// for one recovered from a discovery line.
+    const FAKE_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
     /// A hand-rolled NDJSON fake devtools server: accepts one connection,
+    /// enforces the same auth gate the real service does (`handshake` with
+    /// [`FAKE_TOKEN`] first, `UNAUTHORIZED` for anything else until then),
     /// replies to `handshake`/`widget_tree`/`input_tap`/
     /// `frame_stats_subscribe` with canned success responses, then pushes
     /// one `frame_stats` notification right after acking the subscribe.
@@ -474,6 +552,7 @@ mod tests {
             let mut writer = stream.try_clone().unwrap();
             let mut reader = BufReader::new(stream);
             let mut line = String::new();
+            let mut authenticated = false;
             loop {
                 line.clear();
                 let n = reader.read_line(&mut line).unwrap_or(0);
@@ -483,6 +562,22 @@ mod tests {
                 let Ok(req) = serde_json::from_str::<Request>(line.trim_end()) else {
                     continue;
                 };
+
+                if req.method == "handshake" {
+                    let presented = serde_json::from_value::<HandshakeParams>(req.params.clone())
+                        .ok()
+                        .and_then(|p| p.token);
+                    authenticated = presented.as_deref() == Some(FAKE_TOKEN);
+                }
+                if !authenticated {
+                    let response = Response::error(
+                        req.id,
+                        RpcError::unauthorized("present the devtools token at handshake"),
+                    );
+                    writeln!(writer, "{}", encode_line(&response)).unwrap();
+                    continue;
+                }
+
                 let result = match req.method.as_str() {
                     "handshake" => serde_json::to_value(HandshakeInfo {
                         app_name: "fake-app".into(),
@@ -541,7 +636,8 @@ mod tests {
     #[test]
     fn loopback_handshake_widget_tree_tap_and_frame_stats_subscription() {
         let (addr, _server) = spawn_fake_server();
-        let client = DevtoolsClient::connect(addr, Duration::from_secs(2)).unwrap();
+        let client =
+            DevtoolsClient::connect(addr, Duration::from_secs(2), Some(FAKE_TOKEN)).unwrap();
 
         let handshake = client.handshake().unwrap();
         assert_eq!(handshake.app_name, "fake-app");
@@ -564,6 +660,43 @@ mod tests {
     }
 
     #[test]
+    fn a_wrong_token_is_surfaced_as_unauthorized_distinctly() {
+        let (addr, _server) = spawn_fake_server();
+        let client =
+            DevtoolsClient::connect(addr, Duration::from_secs(2), Some("not-the-token")).unwrap();
+
+        let err = client.handshake().unwrap_err();
+        assert!(
+            is_unauthorized(&err),
+            "a bad token must be distinguishable from any other failure: {err}"
+        );
+        assert_eq!(
+            err.downcast_ref::<DevtoolsRpcError>().map(|e| e.code),
+            Some(RpcError::UNAUTHORIZED)
+        );
+
+        // And the gate really holds: the connection stays useless afterwards.
+        assert!(is_unauthorized(&client.widget_tree().unwrap_err()));
+    }
+
+    #[test]
+    fn no_token_at_all_is_unauthorized_too_and_other_errors_are_not() {
+        let (addr, _server) = spawn_fake_server();
+        let client = DevtoolsClient::connect(addr, Duration::from_secs(2), None).unwrap();
+        assert!(is_unauthorized(&client.handshake().unwrap_err()));
+
+        // A non-auth rejection must NOT read as unauthorized — otherwise a
+        // caller would go re-reading discovery lines over an unrelated fault.
+        let other = anyhow!(DevtoolsRpcError {
+            method: "widget_props".to_string(),
+            code: RpcError::INVALID_PARAMS,
+            message: "no widget with id 9".to_string(),
+        });
+        assert!(!is_unauthorized(&other));
+        assert!(!is_unauthorized(&anyhow!("a plain transport failure")));
+    }
+
+    #[test]
     fn read_timeout_path_when_server_never_replies() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -577,7 +710,8 @@ mod tests {
             drop(stream);
         });
 
-        let client = DevtoolsClient::connect(addr, Duration::from_millis(200)).unwrap();
+        let client =
+            DevtoolsClient::connect(addr, Duration::from_millis(200), Some(FAKE_TOKEN)).unwrap();
         let start = Instant::now();
         let err = client.handshake().unwrap_err();
         assert!(
@@ -596,19 +730,30 @@ mod tests {
         // Reuses `frust_devtools_protocol::parse_discovery_line` directly —
         // no local re-implementation of discovery-line parsing exists in
         // this crate.
+        use frust_devtools_protocol::{Discovery, parse_discovery_line};
         assert_eq!(
-            frust_devtools_protocol::parse_discovery_line("frust-devtools listening on 54321"),
+            parse_discovery_line("frust-devtools listening on 54321").map(|d| d.port),
             Some(54321)
         );
         assert_eq!(
-            frust_devtools_protocol::parse_discovery_line(
+            parse_discovery_line(
                 "08-10 12:00:00.123  1234  5678 I Frust   : frust-devtools listening on 8123"
-            ),
+            )
+            .map(|d| d.port),
             Some(8123)
         );
+        assert_eq!(parse_discovery_line("some unrelated log line"), None);
+
+        // The token rides the same line, and is what `connect` is handed.
         assert_eq!(
-            frust_devtools_protocol::parse_discovery_line("some unrelated log line"),
-            None
+            parse_discovery_line(
+                "08-10 12:00:00.123  1234  5678 I Frust   : frust-devtools listening on 8123 \
+                 token 0123456789abcdef0123456789abcdef"
+            ),
+            Some(Discovery {
+                port: 8123,
+                token: Some("0123456789abcdef0123456789abcdef".to_string()),
+            })
         );
     }
 

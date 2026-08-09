@@ -114,10 +114,17 @@ impl RpcError {
     pub const INTERNAL_ERROR: i32 = -32603;
 
     /// JSON-RPC 2.0 reserves `-32000..=-32099` for implementation-defined
-    /// server errors (§5.1). `NOT_SUPPORTED` is v1's one occupant — a
+    /// server errors (§5.1). `NOT_SUPPORTED` is the first occupant — a
     /// capability-gated method (e.g. `screenshot`) rejects with it on a
     /// server whose handshake declared no matching [`crate::Capability`].
     pub const NOT_SUPPORTED: i32 = -32000;
+
+    /// The second occupant of the implementation-defined range: the
+    /// connection has not presented the server's per-process token
+    /// ([`crate::HandshakeParams`]), so no method but `handshake` is
+    /// dispatched. A client that receives this has the wrong token, or none —
+    /// it must re-read the discovery line, never retry blindly.
+    pub const UNAUTHORIZED: i32 = -32001;
 
     pub fn new(code: i32, message: impl Into<String>) -> Self {
         Self {
@@ -129,6 +136,10 @@ impl RpcError {
 
     pub fn not_supported(message: impl Into<String>) -> Self {
         Self::new(Self::NOT_SUPPORTED, message)
+    }
+
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self::new(Self::UNAUTHORIZED, message)
     }
 }
 
@@ -184,6 +195,18 @@ mod tests {
             }
             ResponseOutcome::Success { .. } => panic!("expected an error outcome"),
         }
+    }
+
+    #[test]
+    fn the_custom_error_codes_stay_inside_the_reserved_range() {
+        // JSON-RPC 2.0 §5.1 reserves -32000..=-32099 for implementation-
+        // defined server errors; drifting outside it would collide with a
+        // standard code.
+        for code in [RpcError::NOT_SUPPORTED, RpcError::UNAUTHORIZED] {
+            assert!((-32099..=-32000).contains(&code), "out of range: {code}");
+        }
+        assert_ne!(RpcError::NOT_SUPPORTED, RpcError::UNAUTHORIZED);
+        assert_eq!(RpcError::unauthorized("nope").code, RpcError::UNAUTHORIZED);
     }
 
     #[test]

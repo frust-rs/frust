@@ -4,10 +4,11 @@
 //! path (envelope → NDJSON line → envelope) preserves every field.
 
 use frust_devtools_protocol::{
-    AckResult, Capability, DecodeError, FrameStats, HandshakeInfo, Incoming, InputScrollParams,
-    InputTapParams, InputTextParams, Method, MetricsSnapshot, Notification, PROTOCOL_VERSION,
-    RectPx, Request, Response, ResponseOutcome, RpcError, ScreenshotResult, WidgetNode,
-    WidgetProps, WidgetPropsParams, WidgetTreeDump, decode_line, encode_line, parse_discovery_line,
+    AckResult, Capability, DecodeError, Discovery, FrameStats, HandshakeInfo, HandshakeParams,
+    Incoming, InputScrollParams, InputTapParams, InputTextParams, Method, MetricsSnapshot,
+    Notification, PROTOCOL_VERSION, RectPx, Request, Response, ResponseOutcome, RpcError,
+    ScreenshotResult, WidgetNode, WidgetProps, WidgetPropsParams, WidgetTreeDump, decode_line,
+    encode_line, format_discovery_line, parse_discovery_line,
 };
 
 fn round_trip_request<T: serde::Serialize>(method: Method, params: &T) -> Request {
@@ -44,6 +45,17 @@ fn round_trip_success<
 #[test]
 fn handshake_round_trips() {
     round_trip_request(Method::Handshake, &serde_json::Value::Null);
+    let req = round_trip_request(
+        Method::Handshake,
+        &HandshakeParams {
+            token: Some("0123456789abcdef0123456789abcdef".to_string()),
+        },
+    );
+    let params: HandshakeParams = serde_json::from_value(req.params).unwrap();
+    assert_eq!(
+        params.token.as_deref(),
+        Some("0123456789abcdef0123456789abcdef")
+    );
     round_trip_success(HandshakeInfo {
         app_name: "huddle".to_string(),
         frust_version: "0.1.0".to_string(),
@@ -238,19 +250,39 @@ fn decode_line_rejects_malformed_json_with_a_useful_error() {
 
 #[test]
 fn discovery_line_parses_across_prefix_variants() {
+    let port_of = |line: &str| parse_discovery_line(line).map(|d| d.port);
+    assert_eq!(port_of("frust-devtools listening on 54321"), Some(54321));
     assert_eq!(
-        parse_discovery_line("frust-devtools listening on 54321"),
-        Some(54321)
-    );
-    assert_eq!(
-        parse_discovery_line(
-            "08-10 12:00:00.123  1234  5678 I Frust   : frust-devtools listening on 8123"
-        ),
+        port_of("08-10 12:00:00.123  1234  5678 I Frust   : frust-devtools listening on 8123"),
         Some(8123)
     );
     assert_eq!(
-        parse_discovery_line("[2026-08-10T12:00:00Z] app: frust-devtools listening on 65000\n"),
+        port_of("[2026-08-10T12:00:00Z] app: frust-devtools listening on 65000\n"),
         Some(65000)
     );
     assert_eq!(parse_discovery_line("no marker here"), None);
+}
+
+#[test]
+fn a_tokened_discovery_line_round_trips_through_a_logger_prefix() {
+    let line = format!(
+        "08-10 12:00:00.123  1234  5678 I Frust   : {}",
+        format_discovery_line(54321, Some("0123456789abcdef0123456789abcdef"))
+    );
+    assert_eq!(
+        parse_discovery_line(&line),
+        Some(Discovery {
+            port: 54321,
+            token: Some("0123456789abcdef0123456789abcdef".to_string()),
+        })
+    );
+
+    // A server running with auth off writes the same line minus the token.
+    assert_eq!(
+        parse_discovery_line(&format_discovery_line(54321, None)),
+        Some(Discovery {
+            port: 54321,
+            token: None
+        })
+    );
 }

@@ -37,17 +37,23 @@
 //! # Trust model
 //!
 //! The listener binds `127.0.0.1:0` and **only** `127.0.0.1` — never
-//! `0.0.0.0`, not configurably. There is no authentication in v1: the trust
-//! boundary is the loopback interface itself, plus (on a device) the
-//! `adb forward` / port-forward a developer sets up deliberately. That is
-//! sound exactly as far as "any process on this machine is already inside the
-//! app's trust boundary" is true, which is the same assumption a debugger
-//! attaching to the process makes. It is not sound on a shared or
-//! multi-tenant host, and the protocol carries `input_*` methods that drive
-//! the real UI — so a shell must gate starting this service on a debug build,
-//! never ship it enabled in a release one. Adding auth (a token on the
-//! discovery line, checked at handshake) is the natural v2 step if that
-//! boundary ever has to move.
+//! `0.0.0.0`, not configurably. Loopback alone is *not* the boundary, though:
+//! on a device every co-resident app can reach `127.0.0.1:<port>` too, and the
+//! protocol carries `input_*` methods that drive the real UI plus a widget-tree
+//! dump that is user data. So the service also mints a random per-process
+//! **token**, prints it on its discovery line, and requires it at `handshake`
+//! before dispatching any other method — the same shape the Dart VM service's
+//! auth code has. That works because only a privileged reader sees the line:
+//! another Android app cannot read this app's logcat (`READ_LOGS` is a
+//! privileged permission), and a desktop app's stderr reaches only the tooling
+//! process that launched it.
+//!
+//! Two layers still sit above it, and neither is optional: a shell gates
+//! starting the service on a debug/profile build via a cargo feature (a release
+//! build compiles the listener out entirely), and `ServiceConfig::require_token`
+//! — default **on** — is the only way to run without auth, meant for in-process
+//! tests, never a shipped build. See `crate::token` for the token's entropy
+//! source, stated with its limits.
 //!
 //! # Threading & blocking model
 //!
@@ -69,11 +75,13 @@
 //!
 //! # Discovery
 //!
-//! On start the service logs one line built from
-//! [`frust_devtools_protocol::DISCOVERY_PREFIX`] at `info` level; tooling
-//! recovers the port from a log/logcat stream with
-//! [`frust_devtools_protocol::parse_discovery_line`]. [`ServiceHandle::port`]
-//! is the in-process equivalent.
+//! On start the service logs one line built by
+//! [`frust_devtools_protocol::format_discovery_line`] at `info` level, carrying
+//! the port and (with auth on) the token; tooling recovers both from a
+//! log/logcat stream with
+//! [`frust_devtools_protocol::parse_discovery_line`].
+//! [`ServiceHandle::port`]/[`ServiceHandle::token`] are the in-process
+//! equivalents.
 
 mod backend;
 mod dispatch;
@@ -81,6 +89,7 @@ mod frame_stats;
 mod hop;
 mod server;
 mod service;
+mod token;
 
 pub use backend::{AppInfo, BackendError, DevtoolsBackend};
 pub use service::{Service, ServiceConfig, ServiceHandle};
