@@ -330,7 +330,18 @@ impl SessionView {
             role,
             source_prefix_strip,
         };
-        self.log.push(line, meta);
+        // Store a redacted copy so the retained ring — surfaced verbatim by
+        // both the log view and `TuiSessionBackend::log_tail`'s MCP
+        // `app_logs` tool — never carries the devtools handshake token past
+        // this point. The parser above already saw the real token off
+        // `plain`, so the connect path is unaffected; only what gets
+        // *retained* changes. `Cow::Borrowed` (the overwhelming common case
+        // — no discovery line) means no allocation here.
+        let stored = match frust_devtools_protocol::redact_discovery_token(&line) {
+            std::borrow::Cow::Borrowed(_) => line,
+            std::borrow::Cow::Owned(redacted) => redacted,
+        };
+        self.log.push(stored, meta);
         let base = self.log.base_index();
         self.panic_tracker.evict_before(base);
         if let Scroll::Anchored(b) = self.scroll
@@ -1264,5 +1275,104 @@ mod tests {
         let mut s = sess();
         s.push_line("hello".to_string());
         assert!(s.built_artifact_paths().is_empty());
+    }
+
+    // ── Devtools token redaction at the log-ring edge (review defect C) ────
+
+    /// The stored ring copy of a discovery line never carries the token,
+    /// while the connect path (fed the pre-redaction `plain` text) still
+    /// fires — `app_logs`/the log view and the devtools handshake are
+    /// independent of each other.
+    #[test]
+    fn discovery_line_is_redacted_in_the_ring_but_still_parsed_for_connect() {
+        let mut s = SessionView::with_devtools(
+            SessionId(0),
+            PathBuf::from("/tmp/app"),
+            "desktop",
+            crate::engine::DevtoolsLaunch::from_launch(
+                frust_drive::build_info::BuildMode::Debug,
+                None,
+            ),
+        );
+        let discovered =
+            s.push_line("frust-devtools listening on 53214 token cafe1234".to_string());
+        // Connect path unaffected: the parser saw the real token.
+        assert!(discovered);
+        let found = s.devtools.discovered.clone().unwrap();
+        assert_eq!(found.port, 53214);
+        assert_eq!(found.token.as_deref(), Some("cafe1234"));
+
+        // But the retained ring copy — what `app_logs`/the log view surface
+        // — is redacted.
+        let stored = s.log.get(0).unwrap();
+        assert!(stored.contains("<redacted>"), "stored line: {stored}");
+        assert!(!stored.contains("cafe1234"), "stored line: {stored}");
+    }
+
+    /// The same redaction holds when the discovery line still carries ANSI
+    /// escapes around/inside it (the raw, unstripped form actually pushed
+    /// onto the ring) — `redact_discovery_token`'s substring search must
+    /// still land on the right span.
+    #[test]
+    fn ansi_wrapped_discovery_line_is_also_redacted() {
+        let mut s = SessionView::with_devtools(
+            SessionId(0),
+            PathBuf::from("/tmp/app"),
+            "desktop",
+            crate::engine::DevtoolsLaunch::from_launch(
+                frust_drive::build_info::BuildMode::Debug,
+                None,
+            ),
+        );
+        let raw = "\u{1b}[32mfrust-devtools listening on 53214 token cafe1234\u{1b}[0m";
+        let discovered = s.push_line(raw.to_string());
+        assert!(discovered, "ANSI must not defeat the plain-text parse");
+        let found = s.devtools.discovered.clone().unwrap();
+        assert_eq!(found.port, 53214);
+        assert_eq!(found.token.as_deref(), Some("cafe1234"));
+
+        let stored = s.log.get(0).unwrap();
+        assert!(stored.contains("<redacted>"), "stored line: {stored}");
+        assert!(!stored.contains("cafe1234"), "stored line: {stored}");
+        // The leading ANSI (before the discovery prefix) is untouched — the
+        // substring search only ever consumes from `DISCOVERY_PREFIX`
+        // onward.
+        assert!(stored.starts_with("\u{1b}[32m"));
+    }
+
+    /// A discovery line whose trailing ANSI reset is separated from the
+    /// token by whitespace (the realistic shape — a logger's reset code
+    /// follows the newline/line-end, not glued onto the token digits) keeps
+    /// that reset intact in the stored, redacted copy.
+    #[test]
+    fn ansi_reset_separated_by_whitespace_survives_redaction() {
+        let mut s = SessionView::with_devtools(
+            SessionId(0),
+            PathBuf::from("/tmp/app"),
+            "desktop",
+            crate::engine::DevtoolsLaunch::from_launch(
+                frust_drive::build_info::BuildMode::Debug,
+                None,
+            ),
+        );
+        let raw = "\u{1b}[32mfrust-devtools listening on 53214 token cafe1234 \u{1b}[0m(ready)";
+        let discovered = s.push_line(raw.to_string());
+        assert!(discovered);
+        let stored = s.log.get(0).unwrap();
+        assert!(stored.contains("<redacted>"), "stored line: {stored}");
+        assert!(!stored.contains("cafe1234"), "stored line: {stored}");
+        assert!(
+            stored.ends_with("\u{1b}[0m(ready)"),
+            "stored line: {stored}"
+        );
+    }
+
+    /// A normal (non-discovery) line is stored byte-identical — no
+    /// allocation regression for the common case.
+    #[test]
+    fn non_discovery_line_is_stored_unchanged() {
+        let mut s = sess();
+        s.push_line("just some ordinary app output".to_string());
+        assert_eq!(s.log.get(0), Some("just some ordinary app output"));
     }
 }
