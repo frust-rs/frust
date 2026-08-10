@@ -1,0 +1,86 @@
+{
+  "name": "vscode-frust",
+  "displayName": "Frust",
+  "description": "Debug adapter registration for Frust apps: launches `frust dap` over stdio.",
+  "version": "0.1.0",
+  "publisher": "f0x-it",
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Debuggers"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onDebugResolve:frust"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "Frust",
+      "properties": {
+        "frust.dapPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the `frust` executable used to launch the debug adapter (`frust dap`). Empty resolves `frust` from PATH."
+        }
+      }
+    },
+    "debuggers": [
+      {
+        "type": "frust",
+        "label": "Frust",
+        "languages": [
+          "rust"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "properties": {
+              "projectRoot": {
+                "type": "string",
+                "description": "Path to the Frust project root. Defaults to the workspace folder.",
+                "default": "${workspaceFolder}"
+              },
+              "device": {
+                "type": "string",
+                "description": "Target device ID to run/debug on. Defaults to the desktop preview when omitted."
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "debug",
+                  "profile",
+                  "release"
+                ],
+                "description": "Build mode to launch.",
+                "default": "debug"
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "frust",
+            "request": "launch",
+            "name": "Launch Frust app",
+            "projectRoot": "${workspaceFolder}",
+            "mode": "debug"
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "Frust: Launch",
+            "description": "Launch a Frust app via the `frust dap` debug adapter.",
+            "body": {
+              "type": "frust",
+              "request": "launch",
+              "name": "Launch Frust app",
+              "projectRoot": "^\"\\${workspaceFolder}\"",
+              "mode": "debug"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
