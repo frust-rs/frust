@@ -31,14 +31,11 @@ use frust_drive::process::RealProcessRunner;
 /// read the `command` parameter, never `cli.command`.
 pub fn dispatch(command: Command, cli: &Cli) -> Result<u8> {
     let verbose = cli.verbose > 0;
-    let runner = RealProcessRunner;
-    // The DAP handler needs Arc<dyn ProcessRunner + Send + Sync>; construct
-    // it from the same RealProcessRunner type here (the sole construction site).
-    let dap_runner = std::sync::Arc::new(RealProcessRunner)
-        as std::sync::Arc<dyn frust_drive::process::ProcessRunner + Send + Sync>;
+    let runner: std::sync::Arc<dyn frust_drive::process::ProcessRunner + Send + Sync> =
+        std::sync::Arc::new(RealProcessRunner);
     match command {
-        Command::Doctor => doctor::run_in(&runner, verbose),
-        Command::Devices => devices::run_in(&runner, verbose),
+        Command::Doctor => doctor::run_in(&*runner, verbose),
+        Command::Devices => devices::run_in(&*runner, verbose),
         Command::Create {
             dir,
             org,
@@ -64,16 +61,16 @@ pub fn dispatch(command: Command, cli: &Cli) -> Result<u8> {
         }),
         Command::Clean => {
             let cwd = std::env::current_dir().context("reading current directory")?;
-            clean::run_in(&runner, &cwd)
+            clean::run_in(&*runner, &cwd)
         }
-        Command::Dap { port } => dap::run_in(dap_runner, port),
+        Command::Dap { port } => dap::run_in(runner.clone(), port),
         Command::Tui => tui::run(),
         Command::Run {
             build,
             render_tier,
             watch,
         } => run::run_in(
-            &runner,
+            &*runner,
             build,
             cli.device_id.clone(),
             render_tier,
@@ -82,7 +79,7 @@ pub fn dispatch(command: Command, cli: &Cli) -> Result<u8> {
         ),
         Command::Build { target } => {
             let cwd = std::env::current_dir().context("reading current directory")?;
-            build::run_in(&runner, &cwd, target)
+            build::run_in(&*runner, &cwd, target)
         }
     }
 }
