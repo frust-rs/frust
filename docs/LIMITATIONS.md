@@ -1032,3 +1032,44 @@ when a Windows verification host is available.
 
 **Evidence**: `crates/frust-devtools/src/token.rs` (`os_random_bytes` cfg gate + module doc);
 review finding recorded in `workflow/reviews/frust-tui-devex-phase2/REVIEW-round1.md`.
+
+---
+
+### `tui-devtools-desktop-metrics-unavailable` — DevTools System/Network sampling never starts on desktop or iOS
+
+**Observed**: `frust-tui`'s DevTools System/Network tabs sample process metrics for Android
+sessions only. `frust-drive::process::StreamHandle` never exposes a spawned child's pid, and
+extending it is out of scope for this feature, so a desktop or iOS session's `MetricsIdentity`
+can never resolve past `NotAndroid` — the tabs render a permanent "sampling unavailable" state
+for the life of the session.
+
+**Applies to**: desktop and iOS sessions in the DevTools System/Network tabs. Android sessions are
+unaffected — their identity resolves from lines the session's own log already carries (`Launching
+{pkg}…` / `Streaming logs (pid {pid})`).
+
+**Why accepted**: threading a pid out of `StreamHandle` is a `frust-drive` process-plumbing change
+unrelated to the System/Network tabs feature itself; deferred as a named follow-up rather than
+folded in here.
+
+**Evidence**: `crates/frust-tui/src/engine/devtools.rs`'s `MetricsIdentity` doc (desktop honesty
+note); `workflow/plans/features/frust-tui-devex/phase3/TASKS.md`'s p3-06 completion note
+("desktop/iOS sampling unavailable — pid not exposed").
+
+---
+
+### `metrics-macos-desktop-unimplemented` — `frust-drive::metrics`'s desktop collector is Linux-only
+
+**Observed**: the desktop metrics collector reads `/proc`/`/sys` directly and only compiles a real
+implementation for Linux; on macOS and Windows every fetch returns `MetricsError::Unsupported` at
+runtime rather than failing to build.
+
+**Applies to**: macOS and Windows desktop sessions. Linux desktop (the dev/CI platform) and Android
+are both fully supported.
+
+**Why accepted**: a deliberate no-new-dependency decision for this feature — `sysinfo` was the
+plan's original option and was dropped to keep `frust-drive` free of the added dependency;
+a native macOS source (e.g. `host_statistics`/IOKit) is deferred rather than pursued in this phase.
+
+**Evidence**: `crates/frust-drive/src/metrics/desktop.rs`'s module doc ("Linux-only... the macOS
+gap is tracked as a `docs/LIMITATIONS.md` entry"); `workflow/plans/features/frust-tui-devex/phase3/TASKS.md`'s
+conductor decision ("No sysinfo dep... macOS metrics deferred to LIMITATIONS").
