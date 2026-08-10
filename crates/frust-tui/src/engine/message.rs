@@ -18,6 +18,7 @@ use super::devtools::{ConnEvent, DevtoolsLaunch, InspectorEvent};
 use super::doctor::DoctorCheck;
 use super::logstyle::LevelFilter;
 use super::run_config::RunFocus;
+use crate::supervise::mcp_backend::McpCommand;
 use crate::supervise::{SessionEvent, SessionId};
 
 /// A semantic id for a per-frame mouse region.
@@ -747,4 +748,21 @@ pub enum Message {
     OpenHelpOverlay,
     /// Close the help overlay (`Esc` / `?` again).
     CloseHelpOverlay,
+
+    // ── Embedded MCP server ───────────────────────────────────────────────────
+    /// A question (or lifecycle request) from an embedded MCP server's
+    /// [`crate::supervise::TuiSessionBackend`], carrying its own reply
+    /// channel. **Served by `crate::runner`, not by [`super::update`]** — it
+    /// needs the `Supervisor` the pure core deliberately cannot reach; see
+    /// [`crate::supervise::serve_command`].
+    Mcp(McpCommand),
+    /// The embedded MCP server's listener is up on this port — the answer to
+    /// `start_mcp`'s `ready` signal (the OS-assigned port when it was started
+    /// on `0`).
+    McpListening(u16),
+    /// The embedded MCP server task returned: cleanly (`None`) or with the
+    /// rendered error that ended it (`Some`). Clears the server handle from
+    /// the model; a stop the user asked for has already cleared it, so this
+    /// is then a no-op.
+    McpStopped(Option<String>),
 }

@@ -16,6 +16,10 @@
 //! - [`devtools_bridge`] is the second moving part — [`DevtoolsBridge`] owns
 //!   one devtools connection thread per session (workbook §B12's DevTools
 //!   mode), reporting into the engine's own message channel.
+//! - [`mcp_backend`] is the seam an **embedded MCP server** drives — a
+//!   [`TuiSessionBackend`] answering `frust-mcp`'s `SessionBackend` over
+//!   these same sessions, so an agent and the user share one session world
+//!   rather than each running the app once.
 //! - [`metrics_bridge`] is the third moving part — [`MetricsBridge`] owns
 //!   one System/Network metrics-sampling thread per session (workbook
 //!   §B12's System/Network tabs), a sibling to `devtools_bridge` rather than
@@ -37,6 +41,7 @@
 //! whole-TUI freeze.
 
 mod devtools_bridge;
+pub mod mcp_backend;
 mod metrics_bridge;
 mod progress;
 mod session;
@@ -47,6 +52,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 pub use devtools_bridge::DevtoolsBridge;
+pub use mcp_backend::{
+    EmbeddedError, McpCommand, McpServeCtx, McpServerHandle, McpSessionRecords, McpStatus,
+    TuiSessionBackend, serve_command,
+};
 pub use metrics_bridge::MetricsBridge;
 pub use progress::{PhaseLabel, phase_from_output_line};
 pub use session::{

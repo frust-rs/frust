@@ -1199,6 +1199,33 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                 Outcome::idle()
             }
         }
+
+        // ── Embedded MCP server ──────────────────────────────────────────────
+        // The command itself is served by `crate::runner`, which holds the
+        // `Supervisor` this pure core cannot reach — it never arrives here in
+        // a wired workbench. Reaching this arm therefore means nothing is
+        // serving MCP: dropping the command drops its reply channel, which is
+        // exactly the "the workbench did not answer" signal the backend
+        // reports as a typed error (`crate::supervise::EmbeddedError`).
+        Message::Mcp(_) => Outcome::idle(),
+        Message::McpListening(port) => match state.mcp.as_mut() {
+            Some(handle) => Outcome::dirty(handle.set_bound_port(port)),
+            // The server was stopped between spawning and binding; its own
+            // shutdown follows.
+            None => Outcome::idle(),
+        },
+        Message::McpStopped(error) => {
+            let was_running = state.mcp.take().is_some();
+            match error {
+                Some(error) => {
+                    state
+                        .toasts
+                        .push(ToastKind::Error, format!("MCP server stopped: {error}"));
+                    Outcome::redraw()
+                }
+                None => Outcome::dirty(was_running),
+            }
+        }
     }
 }
 
@@ -4377,5 +4404,89 @@ mod tests {
         update(&mut st, Message::OpenHelpOverlay);
         let out = update(&mut st, Message::OpenHelpOverlay);
         assert!(!out.redraw);
+    }
+
+    // ── Embedded MCP server ───────────────────────────────────────────────────
+
+    /// A handle for a server that was "started" without spawning anything —
+    /// enough to exercise the two reports the server sends back.
+    fn mcp_handle() -> crate::supervise::McpServerHandle {
+        crate::supervise::McpServerHandle::starting(
+            tokio_util::sync::CancellationToken::new(),
+            frust_mcp::ClientRegistry::new(),
+        )
+    }
+
+    #[test]
+    fn the_bound_port_report_promotes_starting_to_listening() {
+        let mut st = welcome();
+        st.mcp = Some(mcp_handle());
+        assert_eq!(st.mcp_status(), crate::supervise::McpStatus::Starting);
+
+        let out = update(&mut st, Message::McpListening(4848));
+        assert!(out.redraw);
+        assert_eq!(
+            st.mcp_status(),
+            crate::supervise::McpStatus::Listening {
+                port: 4848,
+                clients: 0
+            }
+        );
+        // The same report again changes nothing.
+        assert!(!update(&mut st, Message::McpListening(4848)).redraw);
+    }
+
+    #[test]
+    fn a_stopped_server_clears_the_handle_and_an_error_toasts() {
+        let mut st = welcome();
+        st.mcp = Some(mcp_handle());
+        let out = update(&mut st, Message::McpStopped(None));
+        assert!(out.redraw);
+        assert_eq!(st.mcp_status(), crate::supervise::McpStatus::Stopped);
+        assert!(st.toasts.items.is_empty(), "a clean stop is not an error");
+
+        st.mcp = Some(mcp_handle());
+        update(
+            &mut st,
+            Message::McpStopped(Some("address already in use".to_string())),
+        );
+        assert_eq!(st.mcp_status(), crate::supervise::McpStatus::Stopped);
+        assert_eq!(st.toasts.items.len(), 1);
+        assert!(st.toasts.items[0].text.contains("address already in use"));
+    }
+
+    /// An MCP command reaching the pure core (nothing is serving it) drops
+    /// its reply channel rather than answering — the backend reports that as
+    /// a typed error, never as a fabricated value.
+    #[test]
+    fn an_mcp_command_is_a_noop_in_the_pure_core() {
+        let mut st = welcome();
+        let (backend_tx, mut backend_rx) = tokio::sync::mpsc::unbounded_channel();
+        let backend = crate::supervise::TuiSessionBackend::new(
+            backend_tx,
+            std::sync::Arc::new(frust_drive::process::FakeProcessRunner::new()),
+        );
+        let asking = std::thread::spawn(move || {
+            use frust_mcp::SessionBackend;
+            backend.sessions()
+        });
+
+        let command = loop {
+            match backend_rx.try_recv() {
+                Ok(Message::Mcp(command)) => break command,
+                Ok(_) => {}
+                Err(_) => std::thread::yield_now(),
+            }
+        };
+        let out = update(&mut st, Message::Mcp(command));
+        assert!(!out.redraw);
+        assert!(out.effect.is_none());
+        assert!(
+            asking
+                .join()
+                .expect("the asking thread panicked")
+                .is_empty(),
+            "an unserved command yields nothing, never an invented session"
+        );
     }
 }

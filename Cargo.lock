@@ -2223,11 +2223,13 @@ dependencies = [
  "crossterm",
  "frust-devtools-protocol",
  "frust-drive",
+ "frust-mcp",
  "futures-util",
  "insta",
  "ratatui",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
  "toml_edit",
 ]
 

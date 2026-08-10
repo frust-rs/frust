@@ -15,7 +15,7 @@ use super::palette::Palette;
 use super::run_config::{DeviceRow, RunConfig};
 use super::session_view::SessionView;
 use super::toast::Toasts;
-use crate::supervise::{SessionId, SessionState};
+use crate::supervise::{McpServerHandle, McpStatus, SessionId, SessionState};
 
 /// Bounded-walk depth cap for [`detect`]/[`find_projects`]: `dir` itself is
 /// depth 0, its children depth 1, its grandchildren depth 2 — nothing past
@@ -191,6 +191,14 @@ pub struct AppState {
     /// wants it directly. Wraps via `wrapping_add`, which every consumer's
     /// modulo math already tolerates.
     pub animation_frame: u64,
+    /// The embedded MCP server, while one is running (`None` = stopped).
+    ///
+    /// The one field holding a live resource handle rather than a value:
+    /// [`super::Engine::start_mcp`]/[`super::Engine::stop_mcp`] own its
+    /// lifetime, and the pure `update` only records the server's own
+    /// asynchronous reports (bound port, stopped) against it. Read it through
+    /// [`Self::mcp_status`], never directly.
+    pub mcp: Option<McpServerHandle>,
 }
 
 impl AppState {
@@ -266,6 +274,7 @@ impl AppState {
             sidebar_overlay_open: false,
             help_open: false,
             animation_frame: 0,
+            mcp: None,
         }
     }
 
@@ -280,6 +289,16 @@ impl AppState {
     /// never pins the tick interval on indefinitely.
     pub fn animating(&self) -> bool {
         !self.toasts.items.is_empty() || self.sessions.iter().any(|s| is_transient(&s.state))
+    }
+
+    /// What the embedded MCP server is doing — the single read the UI (and
+    /// anything else) should take, rather than reaching into
+    /// [`Self::mcp`] itself.
+    pub fn mcp_status(&self) -> McpStatus {
+        match &self.mcp {
+            Some(handle) => handle.status(),
+            None => McpStatus::Stopped,
+        }
     }
 
     /// The active session's view-model, if a tab is selected.
@@ -396,6 +415,7 @@ impl Default for AppState {
             sidebar_overlay_open: false,
             help_open: false,
             animation_frame: 0,
+            mcp: None,
         }
     }
 }

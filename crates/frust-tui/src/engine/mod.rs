@@ -62,7 +62,18 @@ pub use state::{
 pub use toast::{Toast, ToastKind, Toasts};
 pub use update::{DevtoolsTarget, Effect, MetricsTarget, Outcome, update};
 
+use frust_mcp::{ClientRegistry, SharedBackend};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
+
+use crate::supervise::{McpServerHandle, McpStatus};
+
+/// The port the embedded MCP server binds when the workbench starts one —
+/// `frust-mcp`'s own default, so an agent configured for a standalone
+/// `frust mcp` finds the embedded server at the same address. `0` lets the OS
+/// assign an ephemeral port instead (what the tests use).
+pub const DEFAULT_MCP_PORT: u16 = frust_mcp::DEFAULT_MCP_PORT;
 
 /// Owns the model and the single mpsc channel every asynchronous producer
 /// (session supervisors, preflight tasks) sends into.
@@ -105,6 +116,81 @@ impl Engine {
     /// The single mutation point: apply one message to the model.
     pub fn handle(&mut self, msg: Message) -> Outcome {
         update(&mut self.state, msg)
+    }
+
+    /// Start an embedded MCP server over `backend`, bound to
+    /// `127.0.0.1:port` (`0` = OS-assigned).
+    ///
+    /// Returns `false` — and starts nothing — when one is already running.
+    /// The server is spawned on the **current** tokio runtime, so this must
+    /// be called from inside it (the workbench's event loop always is).
+    ///
+    /// This and [`Self::stop_mcp`] are the only two mutations that do not go
+    /// through [`Self::handle`]: the server handle is a live resource, not a
+    /// value the pure [`update`] could construct. Everything the server then
+    /// reports about itself — the port it bound, the fact that it stopped —
+    /// comes back as an ordinary [`Message`] and *is* applied through
+    /// `update`.
+    pub fn start_mcp(&mut self, backend: SharedBackend, port: u16) -> bool {
+        if self.state.mcp.is_some() {
+            return false;
+        }
+        let cancel = CancellationToken::new();
+        let registry = ClientRegistry::new();
+        let (ready_tx, ready_rx) = oneshot::channel();
+
+        let serving = tokio::spawn(frust_mcp::serve_embedded(
+            backend,
+            registry.clone(),
+            port,
+            Some(ready_tx),
+            cancel.clone(),
+        ));
+        // Two tasks rather than one: the ready signal has to be observed
+        // *while* the server runs, and the server future only resolves once
+        // it has stopped.
+        let listening_tx = self.tx.clone();
+        tokio::spawn(async move {
+            if let Ok(addr) = ready_rx.await {
+                let _ = listening_tx.send(Message::McpListening(addr.port()));
+            }
+        });
+        let stopped_tx = self.tx.clone();
+        tokio::spawn(async move {
+            let error = match serving.await {
+                Ok(Ok(())) => None,
+                Ok(Err(err)) => Some(format!("{err:#}")),
+                Err(err) => Some(format!("the MCP server task failed: {err}")),
+            };
+            let _ = stopped_tx.send(Message::McpStopped(error));
+        });
+
+        self.state.mcp = Some(McpServerHandle::starting(cancel, registry));
+        true
+    }
+
+    /// Stop the embedded MCP server, if one is running; returns whether there
+    /// was one.
+    ///
+    /// The handle is dropped here and the cancellation is what actually
+    /// closes the listener — the server's own [`Message::McpStopped`] follows
+    /// once its task has wound down, and finds nothing left to clear. A
+    /// caller that must know the port is free again (a restart on the *same*
+    /// fixed port) waits for that message.
+    pub fn stop_mcp(&mut self) -> bool {
+        match self.state.mcp.take() {
+            Some(handle) => {
+                handle.cancel();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// What the embedded MCP server is doing — [`AppState::mcp_status`],
+    /// reachable from an `Engine` handle.
+    pub fn mcp_status(&self) -> McpStatus {
+        self.state.mcp_status()
     }
 }
 

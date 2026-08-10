@@ -33,9 +33,10 @@ use crate::engine::{
     BuildFocus, BuildSpec, BuildTargetSpec, DevtoolsLaunch, DevtoolsState, DoctorCheck, Effect,
     Engine, Message, RegionId, RunFocus, Screen, WizardStep,
 };
+use crate::supervise::mcp_backend::MAX_ADHOC_SESSION_ID;
 use crate::supervise::{
-    DeviceTarget, DevtoolsBridge, MetricsBridge, SessionEvent, SessionEventKind, SessionId,
-    SessionSpec, SessionState, Supervisor, Teardown,
+    DeviceTarget, DevtoolsBridge, McpServeCtx, McpSessionRecords, MetricsBridge, SessionEvent,
+    SessionEventKind, SessionId, SessionSpec, SessionState, Supervisor, Teardown, serve_command,
 };
 use crate::ui::mouse::MouseRegions;
 use crate::ui::theme::Theme;
@@ -126,10 +127,17 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     let mut tick = tokio::time::interval(TICK);
     let mut needs_redraw = true;
     // Ids for ad-hoc (build/clean) sessions that never go through
-    // `Supervisor::start`, minted downward from `u64::MAX` so they can never
-    // collide with `Supervisor`'s own upward-counting ids for the life of one
-    // run — see `apply_effect`'s `LaunchBuild`/`RunClean` enactment.
-    let mut next_adhoc_id: u64 = u64::MAX;
+    // `Supervisor::start`, minted downward from `MAX_ADHOC_SESSION_ID` so they
+    // can never collide with `Supervisor`'s own upward-counting ids for the
+    // life of one run — see `apply_effect`'s `LaunchBuild`/`RunClean`
+    // enactment. `u64::MAX` itself is reserved (`UNRESOLVED_SESSION`), so an
+    // MCP `run_app` that finds no workbench left to answer it can name an id
+    // no session will ever hold.
+    let mut next_adhoc_id: u64 = MAX_ADHOC_SESSION_ID;
+    // What each MCP-describable session was launched from — the backing store
+    // for the embedded server's snapshots and its `restart_app`. Empty (and
+    // untouched) while no MCP server is running.
+    let mut mcp_records = McpSessionRecords::new();
 
     // Kick an initial device discovery + doctor preflight so the panel/chip
     // populate on open (the doctor run is the titlebar chip's cached
@@ -174,6 +182,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                                 &mut metrics,
                                 &msg_tx,
                                 &mut next_adhoc_id,
+                                &mut mcp_records,
                             );
                         }
                     }
@@ -184,16 +193,32 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                 }
             }
             Some(msg) = rx.recv() => {
-                let out = engine.handle(msg);
-                needs_redraw |= out.redraw;
-                apply_effect(
-                    out.effect,
-                    &mut supervisor,
-                    &mut devtools,
-                    &mut metrics,
-                    &msg_tx,
-                    &mut next_adhoc_id,
-                );
+                // An embedded MCP server's command is served here rather than
+                // in `update`: answering it needs the `Supervisor` and the
+                // launch records the pure core deliberately cannot reach.
+                // Nothing it changes bypasses the model — a launch registers
+                // itself with `RegisterSession` like every other one.
+                if let Message::Mcp(command) = msg {
+                    serve_command(command, &mut McpServeCtx {
+                        state: &engine.state,
+                        supervisor: &mut supervisor,
+                        records: &mut mcp_records,
+                        tx: &msg_tx,
+                        next_adhoc_id: &mut next_adhoc_id,
+                    });
+                } else {
+                    let out = engine.handle(msg);
+                    needs_redraw |= out.redraw;
+                    apply_effect(
+                        out.effect,
+                        &mut supervisor,
+                        &mut devtools,
+                        &mut metrics,
+                        &msg_tx,
+                        &mut next_adhoc_id,
+                        &mut mcp_records,
+                    );
+                }
             }
             Some(ev) = session_rx.recv() => {
                 let out = engine.handle(Message::Session(ev));
@@ -205,6 +230,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                     &mut metrics,
                     &msg_tx,
                     &mut next_adhoc_id,
+                    &mut mcp_records,
                 );
             }
             _ = tick.tick() => {
@@ -216,17 +242,23 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                     let out = engine.handle(Message::Tick);
                     needs_redraw |= out.redraw;
                     apply_effect(
-                    out.effect,
-                    &mut supervisor,
-                    &mut devtools,
-                    &mut metrics,
-                    &msg_tx,
-                    &mut next_adhoc_id,
-                );
+                        out.effect,
+                        &mut supervisor,
+                        &mut devtools,
+                        &mut metrics,
+                        &msg_tx,
+                        &mut next_adhoc_id,
+                        &mut mcp_records,
+                    );
                 }
             }
         }
     }
+
+    // Quit: cancel an embedded MCP server if one is running, so its listener
+    // closes here rather than only when the runtime is torn down. A no-op
+    // while nothing has started one.
+    engine.stop_mcp();
 
     Ok(())
 }
@@ -242,12 +274,13 @@ fn apply_effect(
     metrics: &mut MetricsBridge,
     tx: &UnboundedSender<Message>,
     next_adhoc_id: &mut u64,
+    records: &mut McpSessionRecords,
 ) {
     match effect {
         Some(Effect::StopSession(id)) => supervisor.stop(id),
         Some(Effect::Copy(text)) => copy_to_clipboard(&text),
         Some(Effect::RefreshDevices) => spawn_device_discovery(tx.clone()),
-        Some(Effect::LaunchSessions(specs)) => launch_sessions(specs, supervisor, tx),
+        Some(Effect::LaunchSessions(specs)) => launch_sessions(specs, supervisor, tx, records),
         Some(Effect::RecordRecentProject(path)) => crate::engine::record_recent_project(&path),
         Some(Effect::ProbeCleanSignals) => {
             // Neither the create wizard's arch cards nor the Add Plugin
@@ -312,6 +345,7 @@ fn apply_effect(
                     metrics,
                     tx,
                     next_adhoc_id,
+                    records,
                 );
             }
         }
@@ -792,6 +826,7 @@ fn launch_sessions(
     specs: Vec<SessionSpec>,
     supervisor: &mut Supervisor,
     tx: &UnboundedSender<Message>,
+    records: &mut McpSessionRecords,
 ) {
     for spec in specs {
         match supervisor.start(&spec) {
@@ -802,6 +837,11 @@ fn launch_sessions(
                     target_label: target_label(&spec.target),
                     devtools: devtools_launch(&spec),
                 });
+                // Record the launch even with no MCP server running: an agent
+                // that connects later must see the sessions the *user*
+                // started, not only its own (one session world), and nothing
+                // can reconstruct a spec after the fact.
+                records.insert(id, spec);
             }
             Err(err) => eprintln!("frust-tui: failed to start session: {err:#}"),
         }
