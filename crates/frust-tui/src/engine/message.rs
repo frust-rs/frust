@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use frust_drive::devices::Device;
 use frust_drive::doctor::DoctorReport;
+use frust_drive::metrics::MetricsSample;
 use frust_drive::plugin::AddReport;
 
 use super::build_launcher::BuildFocus;
@@ -673,6 +674,10 @@ pub enum Message {
     /// ([`crate::supervise::DevtoolsBridge`]) — connection state changes and
     /// coalesced frame-stats batches.
     DevtoolsConn(SessionId, ConnEvent),
+    /// A coalesced batch of System/Network metrics samples from the
+    /// session's sampler thread ([`crate::supervise::MetricsBridge`]),
+    /// oldest first — applied to [`super::DevtoolsState::metrics`].
+    DevtoolsMetrics(SessionId, Vec<MetricsSample>),
 
     // ── Performance tab (workbook §B12) ─────────────────────────────────────
     /// Move the scrubbed selection `delta` frames across the current

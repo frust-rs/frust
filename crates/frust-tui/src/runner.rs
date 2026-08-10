@@ -34,8 +34,8 @@ use crate::engine::{
     Engine, Message, RegionId, RunFocus, Screen, WizardStep,
 };
 use crate::supervise::{
-    DeviceTarget, DevtoolsBridge, SessionEvent, SessionEventKind, SessionId, SessionSpec,
-    SessionState, Supervisor,
+    DeviceTarget, DevtoolsBridge, MetricsBridge, SessionEvent, SessionEventKind, SessionId,
+    SessionSpec, SessionState, Supervisor,
 };
 use crate::ui::mouse::MouseRegions;
 use crate::ui::theme::Theme;
@@ -112,6 +112,11 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     // return its `Drop` stops and joins every thread (and removes any `adb`
     // forward they allocated).
     let mut devtools = DevtoolsBridge::new(Arc::new(RealProcessRunner));
+    // The metrics-sampling bridges (workbook §B12's System/Network tabs):
+    // one sampler thread per session whose Android identity has resolved
+    // and whose DevTools has been opened, reporting into the same engine
+    // channel. On return its `Drop` stops and joins every thread.
+    let mut metrics = MetricsBridge::new(Arc::new(RealProcessRunner));
     // A cloneable handle background tasks (device discovery, session
     // registration) post `Message`s back through.
     let msg_tx = engine.sender();
@@ -165,6 +170,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                                 out.effect,
                                 &mut supervisor,
                                 &mut devtools,
+                                &mut metrics,
                                 &msg_tx,
                                 &mut next_adhoc_id,
                             );
@@ -183,6 +189,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                     out.effect,
                     &mut supervisor,
                     &mut devtools,
+                    &mut metrics,
                     &msg_tx,
                     &mut next_adhoc_id,
                 );
@@ -194,6 +201,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                     out.effect,
                     &mut supervisor,
                     &mut devtools,
+                    &mut metrics,
                     &msg_tx,
                     &mut next_adhoc_id,
                 );
@@ -210,6 +218,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                     out.effect,
                     &mut supervisor,
                     &mut devtools,
+                    &mut metrics,
                     &msg_tx,
                     &mut next_adhoc_id,
                 );
@@ -229,6 +238,7 @@ fn apply_effect(
     effect: Option<Effect>,
     supervisor: &mut Supervisor,
     devtools: &mut DevtoolsBridge,
+    metrics: &mut MetricsBridge,
     tx: &UnboundedSender<Message>,
     next_adhoc_id: &mut u64,
 ) {
@@ -284,6 +294,22 @@ fn apply_effect(
         // between frame windows over its own blocking client.
         Some(Effect::DevtoolsFetchTree { session }) => devtools.fetch_tree(session, tx),
         Some(Effect::DevtoolsFetchProps { session, id }) => devtools.fetch_props(session, id, tx),
+        // Metrics sampling only *spawns* here too — the same "never stall
+        // this loop" shape as the devtools connect above.
+        Some(Effect::MetricsStart(target)) => metrics.start(target, tx.clone()),
+        Some(Effect::MetricsStop(session)) => metrics.stop(session),
+        Some(Effect::Batch(effects)) => {
+            for effect in effects {
+                apply_effect(
+                    Some(effect),
+                    supervisor,
+                    devtools,
+                    metrics,
+                    tx,
+                    next_adhoc_id,
+                );
+            }
+        }
         Some(Effect::SetMouseCapture(on)) => set_mouse_capture(on),
         Some(Effect::SaveSidebarWidth(width)) => crate::engine::save_sidebar_width(width),
         None => {}

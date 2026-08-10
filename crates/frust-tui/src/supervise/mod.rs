@@ -16,6 +16,10 @@
 //! - [`devtools_bridge`] is the second moving part — [`DevtoolsBridge`] owns
 //!   one devtools connection thread per session (workbook §B12's DevTools
 //!   mode), reporting into the engine's own message channel.
+//! - [`metrics_bridge`] is the third moving part — [`MetricsBridge`] owns
+//!   one System/Network metrics-sampling thread per session (workbook
+//!   §B12's System/Network tabs), a sibling to `devtools_bridge` rather than
+//!   part of it — see that module's doc for why.
 //!
 //! The desktop `cargo run` path and the multi-phase device pipeline (build →
 //! install → launch → logcat, via `frust-drive`'s `android_run`/`ios_run`
@@ -24,11 +28,13 @@
 //! against a scripted `FakeProcessRunner`.
 
 mod devtools_bridge;
+mod metrics_bridge;
 mod progress;
 mod session;
 mod supervisor;
 
 pub use devtools_bridge::DevtoolsBridge;
+pub use metrics_bridge::MetricsBridge;
 pub use progress::{PhaseLabel, phase_from_output_line};
 pub use session::{
     DevicePlan, DeviceTarget, LaunchError, LaunchPlan, SessionEvent, SessionEventKind, SessionId,

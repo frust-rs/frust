@@ -1,6 +1,6 @@
 ---
 source: crates/frust-tui/tests/snapshots.rs
-assertion_line: 1056
+assertion_line: 1117
 expression: "render_to_string(100, 30, &state)"
 ---
 ⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
@@ -10,14 +10,14 @@ expression: "render_to_string(100, 30, &state)"
   ▸ huddle               │ [1] Performance  [2] System  [3] Inspector  [4] Network        ● service 
                          │                  ━━━━━━━━━━                                              
  DEVICES ↻ r             │ desktop  ⚠ sampling unavailable — pid not exposed                        
-   none found            │ CPU    n/a — no samples yet                                              
-                         │  waiting for CPU samples…                                                
- SESSIONS                │                                                                          
-   huddle                │                                                                          
-   ▸ ▶ desktop           │ RSS    n/a — no samples yet                                              
-                         │ uptime n/a                                                               
- ACTIONS                 │ Thermal   n/a — no thermal zones reported                                
-   New project · n       │                                                                          
+   none found            │ CPU    38.0%   avg 25.2% over 2 samples                                  
+                         │ █                                                                        
+ SESSIONS                │ █                                                                        
+   huddle                │▇█                                                                        
+   ▸ ▶ desktop           │ RSS    91.00 MB   peak 91.00 MB                                          
+                         │ uptime 2s                                                                
+ ACTIONS                 │ Thermal                                                                  
+   New project · n       │   cpu-0   46.5°C                                                         
    Add plugin · a        │                                                                          
    Doctor · d            │                                                                          
    Build · b             │                                                                          

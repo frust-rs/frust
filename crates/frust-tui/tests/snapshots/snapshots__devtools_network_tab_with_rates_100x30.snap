@@ -1,6 +1,6 @@
 ---
 source: crates/frust-tui/tests/snapshots.rs
-assertion_line: 1056
+assertion_line: 1157
 expression: "render_to_string(100, 30, &state)"
 ---
 ⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
@@ -8,19 +8,19 @@ expression: "render_to_string(100, 30, &state)"
                                                                                                     
  PROJECTS                │huddle:  1 ▶ desktop                                                      
   ▸ huddle               │ [1] Performance  [2] System  [3] Inspector  [4] Network        ● service 
-                         │                  ━━━━━━━━━━                                              
+                         │                                             ━━━━━━━━━━━                  
  DEVICES ↻ r             │ desktop  ⚠ sampling unavailable — pid not exposed                        
-   none found            │ CPU    n/a — no samples yet                                              
-                         │  waiting for CPU samples…                                                
- SESSIONS                │                                                                          
-   huddle                │                                                                          
-   ▸ ▶ desktop           │ RSS    n/a — no samples yet                                              
-                         │ uptime n/a                                                               
- ACTIONS                 │ Thermal   n/a — no thermal zones reported                                
-   New project · n       │                                                                          
-   Add plugin · a        │                                                                          
-   Doctor · d            │                                                                          
-   Build · b             │                                                                          
+   none found            │ RX     19.5 KB/s                                                         
+                         │█                                                                         
+ SESSIONS                │█                                                                         
+   huddle                │ TX     4.9 KB/s                                                          
+   ▸ ▶ desktop           │█                                                                         
+                         │█                                                                         
+ ACTIONS                 │ totals since start   rx 19.5 KB   tx 4.9 KB                              
+   New project · n       │ ⚠ Namespace-wide counters (/proc/net/dev) — every process sharing this   
+   Add plugin · a        │   network namespace, not just this session. Process-level, not           
+   Doctor · d            │   request-level: request-level logging requires app-side                 
+   Build · b             │   instrumentation.                                                       
    Clean · c             │                                                                          
                          │                                                                          
                          │                                                                          
@@ -31,5 +31,5 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │                                                                          
-                         │ devtools: system │ [1234][ ] tabs · Esc back to log             [mouse ✓]
+                         │ devtools: network │ [1234][ ] tabs · Esc back to log            [mouse ✓]
 ● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]

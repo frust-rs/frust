@@ -15,14 +15,14 @@
 //! [`DevtoolsState`] deliberately holds only the state the chrome itself
 //! needs plus [`DevtoolsState::frames`] (Performance's ring),
 //! [`DevtoolsState::performance`] (Performance's own scrub/focus state — see
-//! [`PerformanceTab`]) and [`DevtoolsState::inspector`] (the widget-tree
-//! snapshot + selection — see [`InspectorTab`]). The remaining two tabs each
-//! add their own payload slot here — a System metrics/CPU sample, a Network
-//! counter ring — fed by new bridge reports. Adding a slot is additive:
-//! nothing outside this module reads the ring or the connection state except
-//! through the accessors below and [`DevtoolsState::phase`], whose five
-//! values are the §B12 screen set and are matched exhaustively by the render
-//! and key-routing layers.
+//! [`PerformanceTab`]), [`DevtoolsState::inspector`] (the widget-tree
+//! snapshot + selection — see [`InspectorTab`]) and
+//! [`DevtoolsState::metrics`] (the System/Network tabs' CPU/RSS/thermal/net
+//! rings, fed by `crate::supervise::MetricsBridge` — see [`MetricsState`]).
+//! Adding a slot is additive: nothing outside this module reads a tab's own
+//! state except through the accessors below and [`DevtoolsState::phase`],
+//! whose five values are the §B12 screen set and are matched exhaustively by
+//! the render and key-routing layers.
 //!
 //! The Inspector's payload arrives on its own report channel
 //! ([`InspectorEvent`], carried by `super::Message::DevtoolsInspector`)
@@ -37,12 +37,13 @@
 //! truth table — see that function's doc for exactly what a log-fallback
 //! frame can and can't show.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use frust_devtools_protocol::{
     Capability, Discovery, FrameStats, RectPx, WidgetNode, WidgetProps, WidgetTreeDump,
 };
 use frust_drive::build_info::BuildMode;
+use frust_drive::metrics::{MetricsSample, NetSample};
 
 use super::perf::PerfPanel;
 
@@ -246,13 +247,20 @@ pub struct DevtoolsState {
     /// expansion/selection, and the selected node's props) — see
     /// [`InspectorTab`].
     pub inspector: InspectorTab,
+    /// The System/Network tabs' shared metrics-sampler state — see
+    /// [`MetricsState`].
+    pub metrics: MetricsState,
 }
 
 impl DevtoolsState {
-    /// A fresh state for a session launched per `launch`.
+    /// A fresh state for a session launched per `launch`. `metrics` seeds its
+    /// Android identity from the same `android_serial` the devtools bridge
+    /// uses (`launch.android_serial`) — see [`MetricsState::new`].
     pub fn new(launch: DevtoolsLaunch) -> Self {
+        let metrics = MetricsState::new(launch.android_serial.clone());
         Self {
             launch,
+            metrics,
             ..Self::default()
         }
     }
@@ -720,6 +728,394 @@ pub fn perf_stats(window: &[PerfFrame]) -> Option<PerfStats> {
         jank_pct,
         jank_threshold_us: jank_threshold,
     })
+}
+
+// ── System/Network tabs (workbook §B12) ─────────────────────────────────────
+
+/// How many recent samples the System/Network rings retain — comfortably
+/// more than a typical pane's sparkline width, bounded the same drop-oldest
+/// way [`DevtoolsState::frames`] is.
+pub const METRICS_RING_CAP: usize = 120;
+
+/// One CPU-percent point (the System tab's sparkline).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CpuPoint {
+    pub percent: f32,
+    pub at_ms: u64,
+}
+
+/// One RSS (desktop `VmRSS`) / PSS (Android `TOTAL PSS`) point, bytes — see
+/// `frust_drive::metrics`'s module doc for the PSS-not-RSS-on-Android note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RssPoint {
+    pub rss_bytes: u64,
+    pub at_ms: u64,
+}
+
+/// One thermal zone's latest reading, unconverted (see
+/// `frust_drive::metrics::ThermalSample`'s doc: Android vendors aren't
+/// consistent about whether this is millidegrees or plain degrees).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThermalPoint {
+    pub millideg_c: i64,
+    pub at_ms: u64,
+}
+
+/// One derived network-rate point (bytes/second per direction), computed by
+/// diffing two consecutive cumulative [`NetSample`]s — see
+/// [`MetricsState::apply`]'s doc for the first-sample and counter-reset
+/// handling.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NetRatePoint {
+    pub rx_bps: f64,
+    pub tx_bps: f64,
+    pub at_ms: u64,
+}
+
+/// Cumulative rx/tx bytes since sampling started, or since the last counter
+/// reset (see [`MetricsState::apply`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NetTotals {
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
+/// One session's resolved OS-process identity for the System/Network
+/// metrics sampler — orthogonal to [`DevtoolsLaunch`], which is about
+/// reaching the in-process devtools *service*. Metrics sampling reads
+/// `/proc`/`/sys` (desktop) or `adb` (Android) directly
+/// (`frust_drive::metrics`), so it needs no devtools build feature and works
+/// against a release build too.
+///
+/// **Desktop honesty note**: `crate::supervise::session`'s process plumbing
+/// (`frust_drive::process::StreamHandle`) never exposes a spawned child's
+/// pid, and extending it is out of scope here (`frust-drive` stays
+/// untouched) — so a non-Android session can never resolve past
+/// [`MetricsIdentity::NotAndroid`]. This also folds in iOS: no pid plumbing
+/// exists for it either, so this type does not distinguish "desktop" from
+/// "iOS" — both render the same `desktop` source label and the same
+/// unavailable reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetricsIdentity {
+    /// Not an Android session — sampling can never start (see the doc
+    /// above).
+    NotAndroid,
+    /// An Android session. `pkg`/`pid` fill in as the session's own log
+    /// reports them (`Launching {pkg}…` / `Streaming logs (pid {pid})` — the
+    /// same lines `crate::supervise::session::infer_state` reads for its own
+    /// purpose), parsed by [`MetricsState::ingest_line`].
+    Android {
+        serial: String,
+        pkg: Option<String>,
+        pid: Option<String>,
+    },
+}
+
+impl MetricsIdentity {
+    fn new(android_serial: Option<String>) -> Self {
+        match android_serial {
+            Some(serial) => MetricsIdentity::Android {
+                serial,
+                pkg: None,
+                pid: None,
+            },
+            None => MetricsIdentity::NotAndroid,
+        }
+    }
+
+    /// `(serial, pid, pkg)` once every piece has arrived; `None` otherwise
+    /// (including [`Self::NotAndroid`], which never resolves).
+    fn ready(&self) -> Option<(&str, &str, &str)> {
+        match self {
+            MetricsIdentity::Android {
+                serial,
+                pkg: Some(pkg),
+                pid: Some(pid),
+            } => Some((serial, pid, pkg)),
+            _ => None,
+        }
+    }
+}
+
+/// Parses the drive's `Launching {package}…` phase line (`android_run::run`
+/// / `spawn_session_with_env`'s `on_line` calls) into the package name.
+fn parse_android_package_line(line: &str) -> Option<String> {
+    let pkg = line.strip_prefix("Launching ")?.strip_suffix('…')?;
+    (!pkg.is_empty()).then(|| pkg.to_string())
+}
+
+/// Parses the drive's `Streaming logs (pid {pid})` marker — the same line
+/// `crate::supervise::session::infer_state` reads to advance a session to
+/// `Running` — into the pid.
+fn parse_android_pid_line(line: &str) -> Option<String> {
+    let pid = line
+        .strip_prefix("Streaming logs (pid ")?
+        .strip_suffix(')')?;
+    (!pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit())).then(|| pid.to_string())
+}
+
+/// Whether a session's metrics sampler is running, has never been started,
+/// or can never be — the System/Network tabs' shared status badge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SamplingState {
+    /// Nothing has been started yet (an Android identity that hasn't
+    /// resolved, or DevTools hasn't been opened for this session yet).
+    Off,
+    /// A [`crate::supervise::MetricsBridge`] thread is sampling this
+    /// session.
+    On,
+    /// Sampling can never run (a non-Android session — see
+    /// [`MetricsIdentity::NotAndroid`]'s doc) or no longer can (the session
+    /// ended). `reason` is shown verbatim.
+    Unavailable { reason: String },
+}
+
+/// One session's System/Network tab state (workbook §B12): its resolved
+/// platform identity, whether a sampler is running, and the rings/totals fed
+/// by `crate::supervise::MetricsBridge`'s coalesced
+/// `super::Message::DevtoolsMetrics` batches.
+///
+/// Not `Eq`: the rate/CPU points carry `f32`/`f64`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MetricsState {
+    pub identity: MetricsIdentity,
+    pub sampling: SamplingState,
+    /// CPU-percent ring, oldest first, capped at [`METRICS_RING_CAP`].
+    pub cpu: VecDeque<CpuPoint>,
+    /// RSS/PSS ring, oldest first, capped at [`METRICS_RING_CAP`].
+    pub rss: VecDeque<RssPoint>,
+    /// The *latest* reading per thermal zone (not a ring — §B12 shows one
+    /// current row per zone, not a history).
+    pub thermal: BTreeMap<String, ThermalPoint>,
+    /// Derived rx/tx rate ring, oldest first, capped at [`METRICS_RING_CAP`].
+    pub net_rates: VecDeque<NetRatePoint>,
+    /// Cumulative rx/tx since sampling started (or since the last counter
+    /// reset — see [`Self::apply`]).
+    pub net_totals: NetTotals,
+    /// The most recent cumulative net sample, kept only to diff the next one
+    /// against — never rendered directly.
+    last_net: Option<NetSample>,
+    /// The sample [`Self::net_totals`] is measured from — reset to the
+    /// current sample whenever the counters (or the clock) go backward, so a
+    /// device reboot or an `adb forward` restart never reads as a negative
+    /// rate or an underflowed total.
+    net_baseline: Option<NetSample>,
+    /// The newest `at_ms` seen across every sample kind — the System tab's
+    /// uptime readout.
+    pub latest_at_ms: Option<u64>,
+}
+
+impl Default for MetricsState {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+impl MetricsState {
+    /// A fresh state for a session whose devtools launch metadata reported
+    /// `android_serial` (`None` for desktop/iOS — see [`MetricsIdentity`]'s
+    /// doc). A non-Android session starts already [`SamplingState::Unavailable`]:
+    /// there is nothing to wait for that would ever make it samplable.
+    pub fn new(android_serial: Option<String>) -> Self {
+        let identity = MetricsIdentity::new(android_serial);
+        let sampling = match &identity {
+            MetricsIdentity::NotAndroid => SamplingState::Unavailable {
+                reason: "sampling unavailable — pid not exposed".to_string(),
+            },
+            MetricsIdentity::Android { .. } => SamplingState::Off,
+        };
+        Self {
+            identity,
+            sampling,
+            cpu: VecDeque::new(),
+            rss: VecDeque::new(),
+            thermal: BTreeMap::new(),
+            net_rates: VecDeque::new(),
+            net_totals: NetTotals::default(),
+            last_net: None,
+            net_baseline: None,
+            latest_at_ms: None,
+        }
+    }
+
+    /// Whether any network sample has landed yet — distinguishes "no data"
+    /// from "totals are genuinely zero" for the Network tab's totals row.
+    pub fn has_net_data(&self) -> bool {
+        self.last_net.is_some()
+    }
+
+    /// Feed one session log line. Returns whether the identity just became
+    /// launch-ready (both `pkg` and `pid` now known) — the caller starts
+    /// sampling (if DevTools is open) on that transition, the same
+    /// discovery-line-triggers-a-connect shape [`DevtoolsState::ingest_line`]
+    /// uses for the frame-stats connection.
+    pub fn ingest_line(&mut self, line: &str) -> bool {
+        let MetricsIdentity::Android { pkg, pid, .. } = &mut self.identity else {
+            return false;
+        };
+        let was_ready = pkg.is_some() && pid.is_some();
+        if pkg.is_none() {
+            *pkg = parse_android_package_line(line);
+        }
+        if pid.is_none() {
+            *pid = parse_android_pid_line(line);
+        }
+        pkg.is_some() && pid.is_some() && !was_ready
+    }
+
+    /// Whether a sampler is worth starting right now: the identity has
+    /// resolved and nothing is already running.
+    pub fn wants_start(&self) -> bool {
+        matches!(self.sampling, SamplingState::Off) && self.identity.ready().is_some()
+    }
+
+    /// `(serial, pid, pkg)`, owned, for `super::Effect::MetricsStart` — `None`
+    /// unless [`Self::wants_start`] (or an equivalent ready check) already
+    /// passed.
+    pub fn target(&self) -> Option<(String, String, String)> {
+        self.identity
+            .ready()
+            .map(|(serial, pid, pkg)| (serial.to_string(), pid.to_string(), pkg.to_string()))
+    }
+
+    /// Mark a sampler as started — the caller pairs this with the matching
+    /// effect, the same optimistic-mark-before-enact shape
+    /// [`DevtoolsState::begin_connect`] uses.
+    pub fn begin_sampling(&mut self) {
+        self.sampling = SamplingState::On;
+    }
+
+    /// The session ended: stop a running sampler. Returns whether a
+    /// `super::Effect::MetricsStop` is warranted (a sampler was actually
+    /// running) — an idle/already-unavailable session has nothing to stop.
+    pub fn on_session_end(&mut self) -> bool {
+        if matches!(self.sampling, SamplingState::On) {
+            self.sampling = SamplingState::Unavailable {
+                reason: "the session ended — sampling stopped with it".to_string(),
+            };
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Ingest one sample into the matching ring/total. Pure — no I/O, no
+    /// clock read (`at_ms` is the sampler's own epoch, not wall time — see
+    /// `frust_drive::metrics::TimestampMs`). Always reports a visible
+    /// change: a sample is always worth a redraw while its tab is showing.
+    pub fn apply(&mut self, sample: MetricsSample) -> bool {
+        match sample {
+            MetricsSample::Cpu(s) => {
+                self.bump_latest(s.at_ms);
+                push_capped(
+                    &mut self.cpu,
+                    CpuPoint {
+                        percent: s.percent,
+                        at_ms: s.at_ms,
+                    },
+                );
+            }
+            MetricsSample::Mem(s) => {
+                self.bump_latest(s.at_ms);
+                push_capped(
+                    &mut self.rss,
+                    RssPoint {
+                        rss_bytes: s.rss_bytes,
+                        at_ms: s.at_ms,
+                    },
+                );
+            }
+            MetricsSample::Thermal(s) => {
+                self.bump_latest(s.at_ms);
+                self.thermal.insert(
+                    s.zone_label,
+                    ThermalPoint {
+                        millideg_c: s.millideg_c,
+                        at_ms: s.at_ms,
+                    },
+                );
+            }
+            MetricsSample::Net(s) => {
+                self.bump_latest(s.at_ms);
+                self.apply_net(s);
+            }
+        }
+        true
+    }
+
+    fn bump_latest(&mut self, at_ms: u64) {
+        self.latest_at_ms = Some(self.latest_at_ms.map_or(at_ms, |prev| prev.max(at_ms)));
+    }
+
+    /// Diff `sample` against the previous cumulative reading into a
+    /// bytes/second rate, and roll [`Self::net_totals`] forward from
+    /// [`Self::net_baseline`].
+    ///
+    /// **First sample**: nothing to diff against yet — no rate point, and
+    /// the sample becomes the baseline (totals start at zero).
+    ///
+    /// **Counter reset**: a device reboot or an `adb forward` restart can
+    /// make the cumulative counters go *backward* (or leave `at_ms`
+    /// non-increasing) — treated as a reset, never a negative rate: no rate
+    /// point is emitted for this tick, and the baseline rebases to the
+    /// current sample, so totals resume counting from zero rather than
+    /// underflowing.
+    fn apply_net(&mut self, sample: NetSample) {
+        let advances = matches!(self.last_net, Some(prev)
+            if sample.rx_bytes >= prev.rx_bytes
+                && sample.tx_bytes >= prev.tx_bytes
+                && sample.at_ms > prev.at_ms);
+        if advances {
+            let prev = self.last_net.expect("checked by `advances`");
+            let dt_s = (sample.at_ms - prev.at_ms) as f64 / 1000.0;
+            push_capped(
+                &mut self.net_rates,
+                NetRatePoint {
+                    rx_bps: (sample.rx_bytes - prev.rx_bytes) as f64 / dt_s,
+                    tx_bps: (sample.tx_bytes - prev.tx_bytes) as f64 / dt_s,
+                    at_ms: sample.at_ms,
+                },
+            );
+        } else {
+            // First sample, or the counters/clock went backward: rebase
+            // rather than reporting a bogus (or negative) rate.
+            self.net_baseline = Some(sample);
+        }
+        let baseline = self.net_baseline.unwrap_or(sample);
+        self.net_totals = NetTotals {
+            rx_bytes: sample.rx_bytes.saturating_sub(baseline.rx_bytes),
+            tx_bytes: sample.tx_bytes.saturating_sub(baseline.tx_bytes),
+        };
+        self.last_net = Some(sample);
+    }
+}
+
+fn push_capped<T>(ring: &mut VecDeque<T>, value: T) {
+    ring.push_back(value);
+    while ring.len() > METRICS_RING_CAP {
+        ring.pop_front();
+    }
+}
+
+/// The Network tab's honesty note (workbook §B12): what these counters are
+/// and are not. Android's `adb shell cat /proc/net/dev` is **device-wide**;
+/// desktop's `/proc/net/dev` is **namespace-wide** — see
+/// `frust_drive::metrics`'s module doc, which this text is a UI-facing
+/// paraphrase of. Rendered directly in the tab body (not a tooltip/doc link)
+/// per §B12's ask that the caveat live where the numbers do.
+pub fn network_honesty_note(identity: &MetricsIdentity) -> &'static str {
+    match identity {
+        MetricsIdentity::Android { .. } => {
+            "Device-wide counters (adb shell cat /proc/net/dev) — every process on the \
+             device, not just this app. Process-level, not request-level: request-level \
+             logging requires app-side instrumentation."
+        }
+        MetricsIdentity::NotAndroid => {
+            "Namespace-wide counters (/proc/net/dev) — every process sharing this network \
+             namespace, not just this session. Process-level, not request-level: \
+             request-level logging requires app-side instrumentation."
+        }
+    }
 }
 
 // ── Inspector tab (workbook §B12) ───────────────────────────────────────────
@@ -1269,6 +1665,259 @@ mod tests {
             vec![1, 2]
         );
         assert!(!state.apply(ConnEvent::Frames(Vec::new())));
+    }
+
+    // ── System/Network metrics (workbook §B12) ─────────────────────────────
+
+    fn android_metrics(serial: &str) -> MetricsState {
+        MetricsState::new(Some(serial.to_string()))
+    }
+
+    #[test]
+    fn a_non_android_identity_starts_already_unavailable() {
+        let metrics = MetricsState::new(None);
+        assert_eq!(metrics.identity, MetricsIdentity::NotAndroid);
+        assert!(matches!(
+            metrics.sampling,
+            SamplingState::Unavailable { .. }
+        ));
+        assert!(
+            !metrics.wants_start(),
+            "a desktop identity never wants a start"
+        );
+        assert!(metrics.target().is_none());
+    }
+
+    #[test]
+    fn an_android_identity_resolves_from_its_own_launch_lines_in_either_order() {
+        let mut metrics = android_metrics("emulator-5554");
+        assert_eq!(metrics.sampling, SamplingState::Off);
+        assert!(!metrics.wants_start(), "neither pkg nor pid known yet");
+
+        assert!(
+            !metrics.ingest_line("Launching it.f0x.huddle…"),
+            "pkg alone is not ready"
+        );
+        assert!(!metrics.wants_start());
+        assert!(
+            metrics.ingest_line("Streaming logs (pid 4242)"),
+            "the pid completes the pair"
+        );
+        assert!(metrics.wants_start());
+        assert_eq!(
+            metrics.target(),
+            Some((
+                "emulator-5554".to_string(),
+                "4242".to_string(),
+                "it.f0x.huddle".to_string()
+            ))
+        );
+
+        // Re-feeding either line again is not a fresh "became ready" edge.
+        assert!(!metrics.ingest_line("Launching it.f0x.huddle…"));
+        assert!(!metrics.ingest_line("Streaming logs (pid 4242)"));
+
+        // An unrelated line is ignored.
+        let mut fresh = android_metrics("emulator-5554");
+        assert!(!fresh.ingest_line("app: booting up"));
+    }
+
+    #[test]
+    fn a_started_sampler_stops_on_session_end_but_an_idle_one_has_nothing_to_stop() {
+        let mut metrics = android_metrics("emulator-5554");
+        metrics.ingest_line("Launching it.f0x.huddle…");
+        metrics.ingest_line("Streaming logs (pid 4242)");
+        metrics.begin_sampling();
+        assert_eq!(metrics.sampling, SamplingState::On);
+        assert!(metrics.on_session_end());
+        assert!(matches!(
+            metrics.sampling,
+            SamplingState::Unavailable { .. }
+        ));
+
+        let mut idle = android_metrics("emulator-5554");
+        assert!(!idle.on_session_end(), "nothing was ever started");
+
+        let mut desktop = MetricsState::new(None);
+        assert!(
+            !desktop.on_session_end(),
+            "an already-unavailable identity has nothing to stop either"
+        );
+    }
+
+    fn cpu(percent: f32, at_ms: u64) -> MetricsSample {
+        MetricsSample::Cpu(frust_drive::metrics::CpuSample { percent, at_ms })
+    }
+
+    fn mem(rss_bytes: u64, at_ms: u64) -> MetricsSample {
+        MetricsSample::Mem(frust_drive::metrics::MemSample { rss_bytes, at_ms })
+    }
+
+    fn thermal(zone: &str, millideg_c: i64, at_ms: u64) -> MetricsSample {
+        MetricsSample::Thermal(frust_drive::metrics::ThermalSample {
+            zone_label: zone.to_string(),
+            millideg_c,
+            at_ms,
+        })
+    }
+
+    fn net(rx_bytes: u64, tx_bytes: u64, at_ms: u64) -> MetricsSample {
+        MetricsSample::Net(NetSample {
+            rx_bytes,
+            tx_bytes,
+            at_ms,
+        })
+    }
+
+    #[test]
+    fn cpu_and_rss_rings_cap_and_keep_the_newest_samples() {
+        let mut metrics = MetricsState::new(None);
+        for n in 0..(METRICS_RING_CAP as u64 + 10) {
+            metrics.apply(cpu(1.0, n));
+            metrics.apply(mem(1000 + n, n));
+        }
+        assert_eq!(metrics.cpu.len(), METRICS_RING_CAP);
+        assert_eq!(metrics.cpu.front().unwrap().at_ms, 10);
+        assert_eq!(metrics.rss.len(), METRICS_RING_CAP);
+        assert_eq!(
+            metrics.rss.back().unwrap().rss_bytes,
+            1000 + METRICS_RING_CAP as u64 + 9
+        );
+    }
+
+    #[test]
+    fn latest_at_ms_tracks_the_newest_sample_across_every_kind() {
+        let mut metrics = MetricsState::new(None);
+        assert_eq!(metrics.latest_at_ms, None);
+        metrics.apply(cpu(5.0, 100));
+        assert_eq!(metrics.latest_at_ms, Some(100));
+        metrics.apply(mem(2048, 50));
+        assert_eq!(
+            metrics.latest_at_ms,
+            Some(100),
+            "an older sample never regresses it"
+        );
+        metrics.apply(thermal("cpu-0", 42000, 300));
+        assert_eq!(metrics.latest_at_ms, Some(300));
+    }
+
+    #[test]
+    fn thermal_keeps_only_the_latest_reading_per_zone() {
+        let mut metrics = MetricsState::new(None);
+        metrics.apply(thermal("cpu-0", 40000, 10));
+        metrics.apply(thermal("cpu-1", 38000, 10));
+        metrics.apply(thermal("cpu-0", 41500, 20));
+        assert_eq!(metrics.thermal.len(), 2);
+        assert_eq!(metrics.thermal["cpu-0"].millideg_c, 41500);
+        assert_eq!(metrics.thermal["cpu-0"].at_ms, 20);
+        assert_eq!(metrics.thermal["cpu-1"].millideg_c, 38000);
+    }
+
+    #[test]
+    fn the_first_net_sample_emits_no_rate_and_zeroes_the_totals() {
+        let mut metrics = MetricsState::new(None);
+        assert!(!metrics.has_net_data());
+        metrics.apply(net(1_000, 500, 0));
+        assert!(metrics.has_net_data());
+        assert!(metrics.net_rates.is_empty(), "nothing to diff against yet");
+        assert_eq!(
+            metrics.net_totals,
+            NetTotals {
+                rx_bytes: 0,
+                tx_bytes: 0
+            }
+        );
+    }
+
+    #[test]
+    fn a_second_net_sample_derives_a_rate_and_rolls_the_totals_forward() {
+        let mut metrics = MetricsState::new(None);
+        metrics.apply(net(1_000, 500, 0));
+        metrics.apply(net(3_000, 1_500, 1_000)); // +2000 rx, +1000 tx over 1s
+        assert_eq!(metrics.net_rates.len(), 1);
+        let rate = metrics.net_rates.back().unwrap();
+        assert!((rate.rx_bps - 2000.0).abs() < f64::EPSILON);
+        assert!((rate.tx_bps - 1000.0).abs() < f64::EPSILON);
+        assert_eq!(
+            metrics.net_totals,
+            NetTotals {
+                rx_bytes: 2_000,
+                tx_bytes: 1_000
+            }
+        );
+    }
+
+    #[test]
+    fn a_backward_counter_is_treated_as_a_reset_not_a_negative_rate() {
+        let mut metrics = MetricsState::new(None);
+        metrics.apply(net(5_000, 5_000, 0));
+        metrics.apply(net(6_000, 5_500, 1_000)); // one normal tick first
+        assert_eq!(metrics.net_rates.len(), 1);
+
+        // A reboot/forward-restart: counters go backward.
+        metrics.apply(net(100, 50, 2_000));
+        assert_eq!(
+            metrics.net_rates.len(),
+            1,
+            "a reset tick emits no new rate point"
+        );
+        assert_eq!(
+            metrics.net_totals,
+            NetTotals {
+                rx_bytes: 0,
+                tx_bytes: 0
+            },
+            "totals rebase to zero at the reset point"
+        );
+
+        // The tick after a reset resumes normal diffing from the new baseline.
+        metrics.apply(net(600, 350, 3_000));
+        assert_eq!(metrics.net_rates.len(), 2);
+        let rate = metrics.net_rates.back().unwrap();
+        assert!((rate.rx_bps - 500.0).abs() < f64::EPSILON);
+        assert_eq!(
+            metrics.net_totals,
+            NetTotals {
+                rx_bytes: 500,
+                tx_bytes: 300
+            }
+        );
+    }
+
+    #[test]
+    fn a_non_advancing_clock_is_also_treated_as_a_reset() {
+        let mut metrics = MetricsState::new(None);
+        metrics.apply(net(1_000, 1_000, 500));
+        // Same or earlier `at_ms` despite counters advancing: no wall-clock
+        // delta to divide by, so this rebases rather than dividing by zero.
+        metrics.apply(net(2_000, 1_500, 500));
+        assert!(metrics.net_rates.is_empty());
+        assert_eq!(
+            metrics.net_totals,
+            NetTotals {
+                rx_bytes: 0,
+                tx_bytes: 0
+            }
+        );
+    }
+
+    #[test]
+    fn network_honesty_note_names_the_right_scope_per_platform() {
+        assert!(
+            network_honesty_note(&MetricsIdentity::NotAndroid)
+                .to_lowercase()
+                .contains("namespace-wide")
+        );
+        let android = MetricsIdentity::Android {
+            serial: "emulator-5554".to_string(),
+            pkg: None,
+            pid: None,
+        };
+        assert!(
+            network_honesty_note(&android)
+                .to_lowercase()
+                .contains("device-wide")
+        );
     }
 
     #[test]

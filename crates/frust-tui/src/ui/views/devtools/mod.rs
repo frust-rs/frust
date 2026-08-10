@@ -8,14 +8,17 @@
 //! [`DevtoolsPhase`], derived once in the engine and matched exhaustively
 //! here — a sixth screen cannot be added without this dispatch handling it.
 //!
-//! The tab *bodies* live beside this module: [`performance`] and
-//! [`inspector`] render for real, System/Network are still placeholders
-//! naming what will live there. Everything outside those bodies — the strip,
-//! the empty states, the status row, the keyboard/mouse parity — is settled
-//! here.
+//! The tab *bodies* live beside this module: [`performance`], [`inspector`],
+//! [`system`] and [`network`] each render their own tab. Everything outside
+//! those bodies — the strip, the empty states, the status row, the
+//! keyboard/mouse parity — is settled here, along with
+//! [`metrics_status_line`] and [`wrap_words`], the two small helpers
+//! [`system`]/[`network`] share.
 
 pub mod inspector;
+pub mod network;
 pub mod performance;
+pub mod system;
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -24,8 +27,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use crate::engine::{
-    AppState, ConnState, DevtoolsPhase, DevtoolsTab, Message, PerfSource, RegionId, SessionView,
-    perf_window,
+    AppState, ConnState, DevtoolsPhase, DevtoolsTab, Message, MetricsIdentity, MetricsState,
+    PerfSource, RegionId, SamplingState, SessionView, perf_window,
 };
 use crate::ui::anim::spinner_char;
 use crate::ui::mouse::MouseCtx;
@@ -240,10 +243,8 @@ fn render_tab_strip(
     }
 }
 
-/// The active tab's body. Performance and Inspector render for real; the
-/// other two tabs' content arrives with their own tasks — until then a
-/// low-key placeholder naming what will live there, so the chrome, the
-/// routing, and the connection are reviewable on their own.
+/// The active tab's body — each of the four §B12 tabs renders for real,
+/// dispatched by [`DevtoolsTab`]'s exhaustive match.
 fn render_tab_body(
     frame: &mut Frame,
     area: Rect,
@@ -251,38 +252,40 @@ fn render_tab_body(
     theme: &Theme,
     mouse: &mut MouseCtx,
 ) {
-    let tab = session.devtools.active_tab;
-    match tab {
-        DevtoolsTab::Performance => {
-            performance::render(frame, area, session, theme, mouse);
-            return;
-        }
-        DevtoolsTab::Inspector => {
-            inspector::render(frame, area, session, theme, mouse);
-            return;
-        }
-        DevtoolsTab::System | DevtoolsTab::Network => {}
+    match session.devtools.active_tab {
+        DevtoolsTab::Performance => performance::render(frame, area, session, theme, mouse),
+        DevtoolsTab::Inspector => inspector::render(frame, area, session, theme, mouse),
+        DevtoolsTab::System => system::render(frame, area, session, theme, mouse),
+        DevtoolsTab::Network => network::render(frame, area, session, theme, mouse),
     }
-    let detail = match tab {
-        DevtoolsTab::Performance | DevtoolsTab::Inspector => unreachable!("handled above"),
-        DevtoolsTab::System => "CPU, RSS, thermal, and uptime",
-        DevtoolsTab::Network => "process-level rx/tx byte counters",
+}
+
+/// The System/Network tabs' shared status line: the source label (an
+/// Android session's serial + package once known, else `desktop`) and the
+/// sampler's own state (on / not yet started / unavailable, with its
+/// reason) — [`system::render`]/[`network::render`]'s first row.
+pub(super) fn metrics_status_line(metrics: &MetricsState, theme: &Theme) -> Line<'static> {
+    let source = match &metrics.identity {
+        MetricsIdentity::Android {
+            serial,
+            pkg: Some(pkg),
+            ..
+        } => format!("Android · {serial} · {pkg}"),
+        MetricsIdentity::Android { serial, .. } => format!("Android · {serial}"),
+        MetricsIdentity::NotAndroid => "desktop".to_string(),
     };
-    let samples = session.devtools.frames.len();
-    let lines = vec![
-        Line::from(""),
-        Line::styled(
-            format!("  {} — not rendered yet", tab.title()),
-            Style::default().fg(theme.muted()),
+    let (glyph, text, color) = match &metrics.sampling {
+        SamplingState::On => ("●", "sampling".to_string(), theme.success()),
+        SamplingState::Off => ("○", "not sampling yet".to_string(), theme.muted()),
+        SamplingState::Unavailable { reason } => ("⚠", reason.clone(), theme.warn()),
+    };
+    Line::from(vec![
+        Span::styled(
+            format!(" {source}  "),
+            Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD),
         ),
-        Line::styled(format!("  {detail}"), Style::default().fg(theme.muted())),
-        Line::from(""),
-        Line::styled(
-            format!("  {samples} frame samples collected"),
-            Style::default().fg(theme.muted()),
-        ),
-    ];
-    frame.render_widget(Paragraph::new(lines), area);
+        Span::styled(format!("{glyph} {text}"), Style::default().fg(color)),
+    ])
 }
 
 /// One branded empty state: a glyph + headline line, then muted detail lines,
@@ -354,7 +357,7 @@ const EMPTY_STATE_GLYPH_INDENT: u16 = 3;
 /// are plain prose plus an error string — no ANSI, no wide glyphs). A word
 /// longer than `width` gets its own over-long row rather than being cut, so a
 /// path or a URL in an error message stays selectable/copyable in full.
-fn wrap_words(text: &str, width: usize) -> Vec<String> {
+pub(super) fn wrap_words(text: &str, width: usize) -> Vec<String> {
     let mut rows = Vec::new();
     let mut row = String::new();
     for word in text.split_whitespace() {

@@ -1035,7 +1035,11 @@ fn devtools_connected_performance_100x30() {
 }
 
 /// The same surface with tab 2 selected — the strip's selection and the
-/// status row's label both follow.
+/// status row's label both follow. A desktop session's metrics sampling is
+/// permanently unavailable (no pid plumbing — see
+/// `crate::engine::MetricsIdentity`'s doc), so this is also the System tab's
+/// unavailable-state snapshot: no data, the `desktop` source label, and the
+/// `sampling unavailable — pid not exposed` badge.
 #[test]
 fn devtools_connected_system_tab_100x30() {
     let mut state = devtools_state(
@@ -1053,6 +1057,103 @@ fn devtools_connected_system_tab_100x30() {
         ),
     );
     update(&mut state, Message::DevtoolsTab(1));
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+/// The System tab with data — injected directly at the `Message` level
+/// (`Message::DevtoolsMetrics`), the same seam `crate::supervise::MetricsBridge`
+/// posts through, rather than driving a real sampler. The `desktop` source
+/// label persists even though the ring has data: metrics sampling never
+/// actually reaches a desktop session (see `MetricsIdentity`'s doc), so a
+/// populated chart here demonstrates the render path, not a claim that
+/// desktop sampling works — the same "leftover samples still draw" shape
+/// the Performance tab's ring keeps after a connection drop.
+#[test]
+fn devtools_system_tab_with_data_100x30() {
+    let mut state = devtools_state(
+        frust_drive::build_info::BuildMode::Debug,
+        &["app: booting up", DEVTOOLS_DISCOVERY],
+    );
+    update(
+        &mut state,
+        Message::DevtoolsConn(
+            SessionId(0),
+            ConnEvent::Connected {
+                app_name: "huddle".to_string(),
+                caps: Vec::new(),
+            },
+        ),
+    );
+    update(&mut state, Message::DevtoolsTab(1));
+    update(
+        &mut state,
+        Message::DevtoolsMetrics(
+            SessionId(0),
+            vec![
+                frust_drive::metrics::MetricsSample::Mem(frust_drive::metrics::MemSample {
+                    rss_bytes: 84 * 1024 * 1024,
+                    at_ms: 0,
+                }),
+                frust_drive::metrics::MetricsSample::Thermal(frust_drive::metrics::ThermalSample {
+                    zone_label: "cpu-0".to_string(),
+                    millideg_c: 46_500,
+                    at_ms: 0,
+                }),
+                frust_drive::metrics::MetricsSample::Cpu(frust_drive::metrics::CpuSample {
+                    percent: 12.5,
+                    at_ms: 1_000,
+                }),
+                frust_drive::metrics::MetricsSample::Cpu(frust_drive::metrics::CpuSample {
+                    percent: 38.0,
+                    at_ms: 2_000,
+                }),
+                frust_drive::metrics::MetricsSample::Mem(frust_drive::metrics::MemSample {
+                    rss_bytes: 91 * 1024 * 1024,
+                    at_ms: 2_000,
+                }),
+            ],
+        ),
+    );
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+/// The Network tab with a derived rate (two cumulative samples) and totals,
+/// plus the honesty note rendered directly in the tab body.
+#[test]
+fn devtools_network_tab_with_rates_100x30() {
+    let mut state = devtools_state(
+        frust_drive::build_info::BuildMode::Debug,
+        &["app: booting up", DEVTOOLS_DISCOVERY],
+    );
+    update(
+        &mut state,
+        Message::DevtoolsConn(
+            SessionId(0),
+            ConnEvent::Connected {
+                app_name: "huddle".to_string(),
+                caps: Vec::new(),
+            },
+        ),
+    );
+    update(&mut state, Message::DevtoolsTab(3));
+    update(
+        &mut state,
+        Message::DevtoolsMetrics(
+            SessionId(0),
+            vec![
+                frust_drive::metrics::MetricsSample::Net(frust_drive::metrics::NetSample {
+                    rx_bytes: 10_000,
+                    tx_bytes: 4_000,
+                    at_ms: 0,
+                }),
+                frust_drive::metrics::MetricsSample::Net(frust_drive::metrics::NetSample {
+                    rx_bytes: 30_000,
+                    tx_bytes: 9_000,
+                    at_ms: 1_000,
+                }),
+            ],
+        ),
+    );
     insta::assert_snapshot!(render_to_string(100, 30, &state));
 }
 

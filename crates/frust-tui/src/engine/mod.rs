@@ -34,10 +34,11 @@ pub use build_launcher::{ArtifactKind, BuildFocus, BuildLauncher, BuildSpec, Bui
 pub use context_menu::{ContextMenu, MenuEntry};
 pub use create_wizard::{ArchCard, CreateWizard, WizardAdvance, WizardStep};
 pub use devtools::{
-    ConnEvent, ConnState, DevtoolsLaunch, DevtoolsPhase, DevtoolsState, DevtoolsTab,
+    ConnEvent, ConnState, CpuPoint, DevtoolsLaunch, DevtoolsPhase, DevtoolsState, DevtoolsTab,
     FRAME_RING_CAP, INSPECTOR_AUTO_EXPAND_DEPTH, InspectorEvent, InspectorFocus, InspectorRow,
-    InspectorTab, PERF_WINDOW, PerfFocus, PerfFrame, PerfPhases, PerfSource, PerfStats,
-    PerformanceTab, perf_stats, perf_window, select_perf_source,
+    InspectorTab, METRICS_RING_CAP, MetricsIdentity, MetricsState, NetRatePoint, NetTotals,
+    PERF_WINDOW, PerfFocus, PerfFrame, PerfPhases, PerfSource, PerfStats, PerformanceTab, RssPoint,
+    SamplingState, ThermalPoint, network_honesty_note, perf_stats, perf_window, select_perf_source,
 };
 pub use doctor::{DoctorCheck, DoctorState};
 pub use logstyle::{
@@ -59,7 +60,7 @@ pub use state::{
     clamp_sidebar_width,
 };
 pub use toast::{Toast, ToastKind, Toasts};
-pub use update::{DevtoolsTarget, Effect, Outcome, update};
+pub use update::{DevtoolsTarget, Effect, MetricsTarget, Outcome, update};
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 

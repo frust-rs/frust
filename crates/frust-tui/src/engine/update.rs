@@ -142,6 +142,42 @@ pub enum Effect {
         /// The widget-tree node id to describe.
         id: u64,
     },
+    /// Start a session's System/Network metrics sampler (workbook §B12) —
+    /// the runner hands this to [`crate::supervise::MetricsBridge`], which
+    /// spawns `frust_drive::metrics::MetricsSampler` on its own thread and
+    /// drains it into coalesced [`Message::DevtoolsMetrics`] batches. Only
+    /// ever emitted for an Android session whose identity has resolved (see
+    /// [`super::MetricsIdentity`]'s doc for why desktop/iOS never reach
+    /// this).
+    MetricsStart(MetricsTarget),
+    /// Stop a session's metrics sampler (the session ended) — see
+    /// `crate::supervise::metrics_bridge`'s retention note (mirrors
+    /// [`Effect::DevtoolsDisconnect`]'s session-end-only teardown).
+    MetricsStop(SessionId),
+    /// Enact every effect in order — the escape hatch for a transition that
+    /// must kick off more than one independent side effect at once (opening
+    /// DevTools can both (re)open its frame-stats connection *and* start
+    /// metrics sampling in the same keypress). Every other transition still
+    /// returns at most one effect; see [`batch`].
+    Batch(Vec<Effect>),
+}
+
+/// Everything a session's metrics sampler needs to reach the running app's
+/// OS process — resolved by the pure engine from its Android identity
+/// ([`super::MetricsIdentity`]), enacted by the runner
+/// ([`crate::supervise::MetricsBridge`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetricsTarget {
+    /// The session whose sampler this is (and whose `DevtoolsMetrics`
+    /// messages it reports through).
+    pub session: SessionId,
+    /// The `adb` serial the sampler shells out against.
+    pub serial: String,
+    /// The running app's pid on that device.
+    pub pid: String,
+    /// The running app's package — Android's `dumpsys meminfo` probe is
+    /// keyed by package, not pid.
+    pub pkg: String,
 }
 
 /// Everything the bridge needs to reach one session's devtools service —
@@ -975,16 +1011,26 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             state.sessions[idx].devtools.open = !state.sessions[idx].devtools.open;
             // Opening is the trigger for the first connect: the discovery
             // line may have scrolled past long before the user asked to look.
-            let effect = state.sessions[idx]
-                .devtools
-                .open
-                .then(|| devtools_connect(state, idx))
-                .flatten()
-                // Re-opening onto a retained connection connects nothing, so
-                // an Inspector tab left selected gets its snapshot here
-                // instead (the two are mutually exclusive: a fresh connect
-                // leaves the phase `Connecting`, which pulls nothing).
-                .or_else(|| devtools_inspector_entry(&mut state.sessions[idx]));
+            // It is also the trigger for the metrics sampler — cheap either
+            // way, so it starts on open regardless of which tab is active
+            // rather than waiting for a first System/Network visit (see
+            // `metrics_start`'s doc).
+            let effect = if state.sessions[idx].devtools.open {
+                let mut effects = Vec::new();
+                match devtools_connect(state, idx) {
+                    Some(effect) => effects.push(effect),
+                    // Re-opening onto a retained connection connects
+                    // nothing, so an Inspector tab left selected gets its
+                    // snapshot here instead (the two are mutually
+                    // exclusive: a fresh connect leaves the phase
+                    // `Connecting`, which pulls nothing).
+                    None => effects.extend(devtools_inspector_entry(&mut state.sessions[idx])),
+                }
+                effects.extend(metrics_start(state, idx));
+                batch(effects)
+            } else {
+                None
+            };
             Outcome {
                 redraw: true,
                 effect,
@@ -1040,6 +1086,20 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                 redraw: changed && is_active && state.sessions[idx].devtools.open,
                 effect,
             }
+        }
+        Message::DevtoolsMetrics(id, samples) => {
+            let Some(idx) = state.session_index(id) else {
+                return Outcome::idle();
+            };
+            let is_active = state.active_session == Some(idx);
+            let mut changed = false;
+            for sample in samples {
+                changed |= state.sessions[idx].devtools.metrics.apply(sample);
+            }
+            // Same dirty-frame-skip gating as `DevtoolsConn`'s frame
+            // batches: only the visible, DevTools-open session's System/
+            // Network surface is worth a repaint.
+            Outcome::dirty(changed && is_active && state.sessions[idx].devtools.open)
         }
 
         // ── Performance tab (workbook §B12) ──────────────────────────────────
@@ -1559,6 +1619,11 @@ fn on_session_event(state: &mut AppState, ev: SessionEvent) -> Outcome {
     // a connection to tear down because the session itself ended.
     let mut discovered = false;
     let mut session_ended = false;
+    // Same shape, for the System/Network metrics sampler: its Android
+    // identity just resolved (pkg+pid both known), or the session ending
+    // means a running sampler has to stop.
+    let mut metrics_ready = false;
+    let mut metrics_ended = false;
     let outcome = {
         let session = &mut state.sessions[idx];
         match ev.kind {
@@ -1566,7 +1631,11 @@ fn on_session_event(state: &mut AppState, ev: SessionEvent) -> Outcome {
                 let following = session.is_following();
                 for line in lines {
                     // Every line is scanned for a devtools discovery
-                    // announcement as it is pushed (workbook §B12).
+                    // announcement (workbook §B12) and, independently, for
+                    // the drive's own `Launching {pkg}…`/`Streaming logs
+                    // (pid …)` lines the metrics sampler's Android identity
+                    // resolves from.
+                    metrics_ready |= session.devtools.metrics.ingest_line(&line);
                     discovered |= session.push_line(line);
                 }
                 // A discovery line changes what the DevTools surface shows
@@ -1577,6 +1646,7 @@ fn on_session_event(state: &mut AppState, ev: SessionEvent) -> Outcome {
                 session.state = s;
                 if session.state.is_terminal() {
                     session_ended = session.devtools.on_session_end();
+                    metrics_ended = session.devtools.metrics.on_session_end();
                 }
                 // Clear a stale phase label the moment the state leaves the
                 // transient (`Building`/`Installing`) window — the sole
@@ -1612,14 +1682,26 @@ fn on_session_event(state: &mut AppState, ev: SessionEvent) -> Outcome {
     // frame ring keeps filling behind a hidden tab, which is what makes
     // re-opening DevTools instant instead of a fresh handshake. It is closed
     // in exactly two places: the session ending (below) and an explicit
-    // reconnect replacing it.
-    let effect = if session_ended {
-        Some(Effect::DevtoolsDisconnect(ev.id))
-    } else if discovered {
-        on_devtools_discovery(state, idx)
-    } else {
-        None
-    };
+    // reconnect replacing it. The metrics sampler mirrors the same
+    // retention policy (`crate::supervise::metrics_bridge`'s module doc):
+    // once started it runs for the session's whole life too, stopping only
+    // here. `session_ended`/`discovered` and `metrics_ended`/`metrics_ready`
+    // are each set by exactly one of the match arms above (`State` vs.
+    // `Lines`), so at most one pair is ever non-trivial per call.
+    let mut effects = Vec::new();
+    if session_ended {
+        effects.push(Effect::DevtoolsDisconnect(ev.id));
+    }
+    if metrics_ended {
+        effects.push(Effect::MetricsStop(ev.id));
+    }
+    if discovered {
+        effects.extend(on_devtools_discovery(state, idx));
+    }
+    if metrics_ready {
+        effects.extend(metrics_start(state, idx));
+    }
+    let effect = batch(effects);
     Outcome {
         redraw: outcome.redraw || effect.is_some(),
         effect: outcome.effect.or(effect),
@@ -1656,6 +1738,43 @@ fn devtools_connect(state: &mut AppState, idx: usize) -> Option<Effect> {
         token: discovery.token,
         android_serial: session.devtools.launch.android_serial.clone(),
     }))
+}
+
+/// Start the System/Network metrics sampler for the session at `idx` when
+/// warranted: DevTools is open for it, its Android identity has resolved,
+/// and nothing is already running (see [`super::MetricsState::wants_start`]).
+/// Fires on DevTools open (regardless of which tab is showing — cheap, and
+/// it means switching to System/Network later never pays a cold start) and,
+/// symmetrically, the moment a still-open session's identity resolves from
+/// its own log lines (see `on_session_event`'s `Lines` arm). Marks the
+/// state `On` and hands the runner the target to reach; `None` (no state
+/// change) when a start isn't warranted right now.
+fn metrics_start(state: &mut AppState, idx: usize) -> Option<Effect> {
+    let session = state.sessions.get_mut(idx)?;
+    if !session.devtools.open || !session.devtools.metrics.wants_start() {
+        return None;
+    }
+    let (serial, pid, pkg) = session.devtools.metrics.target()?;
+    session.devtools.metrics.begin_sampling();
+    Some(Effect::MetricsStart(MetricsTarget {
+        session: session.id,
+        serial,
+        pid,
+        pkg,
+    }))
+}
+
+/// Fold a transition's independent effects into `Outcome::effect`'s single
+/// slot: zero effects is `None`, exactly one collapses to that effect
+/// directly (so every existing single-effect call site/assertion is
+/// unaffected), and two or more become one [`Effect::Batch`] the runner
+/// unpacks in order.
+fn batch(mut effects: Vec<Effect>) -> Option<Effect> {
+    match effects.len() {
+        0 => None,
+        1 => effects.pop(),
+        _ => Some(Effect::Batch(effects)),
+    }
 }
 
 /// The toast (if any) for a session that just reached a terminal state: a
