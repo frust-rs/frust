@@ -99,7 +99,8 @@ pub(crate) struct PerformanceResult {
     /// Why there is nothing to aggregate, when `stats` is absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-    /// Absent — never zeroed — when no frames have arrived.
+    /// Absent — never zeroed — when no frames have arrived, or when every
+    /// frame that has arrived was skipped by the mobile frame gate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stats: Option<FrameAggregate>,
 }
@@ -244,12 +245,10 @@ pub(crate) fn performance(
     let frames = engine.frame_ring(snapshot.id).unwrap_or_default();
     let stats = aggregate_frames(&frames);
     let note = stats.is_none().then(|| {
-        format!(
-            "no frame samples yet for session {} (state: {}). Frame stats arrive over the \
-             devtools connection once the app renders; a session that is still launching, or \
-             one whose devtools service never started, has none.",
-            snapshot.id,
-            super::state_name(&snapshot.state)
+        no_stats_note(
+            snapshot.id.0,
+            super::state_name(&snapshot.state),
+            frames.len(),
         )
     });
     Ok(Json(PerformanceResult {
@@ -437,21 +436,35 @@ fn render_node(
     }
 }
 
-/// Aggregates a session's retained frame samples. `None` for an empty ring —
-/// the caller reports that as "no frames yet", never as zeroed stats.
+/// Aggregates a session's retained frame samples, excluding samples the
+/// mobile frame gate skipped: a skipped frame's pass durations are all-zero
+/// on the wire (`frust-shell-common/src/devtools.rs`'s `publish_frame`), so
+/// folding it into the timing/percentile/jank math would deflate the mean
+/// and percentiles and inflate `fps_estimate` — the same reasoning the two
+/// sibling aggregators apply (`frust-shell-common::perf::FrameStats::summary`,
+/// `frust-tui::engine::devtools::perf_stats`). `None` for an empty ring, or
+/// for a non-empty ring every one of whose samples was skipped — the caller
+/// reports either as "nothing to aggregate", never as zeroed stats.
+/// `skipped_frames` and `frame_index_span` still cover the *full* window
+/// (a skipped frame was still counted by the app; only its timings are
+/// excluded here).
 pub(crate) fn aggregate_frames(frames: &[FrameStats]) -> Option<FrameAggregate> {
     let (first, last) = (frames.first()?, frames.last()?);
-    let count = frames.len();
+    let active: Vec<&FrameStats> = frames.iter().filter(|frame| !frame.skipped).collect();
+    if active.is_empty() {
+        return None;
+    }
+    let count = active.len();
 
-    let mut sorted_ms: Vec<f64> = frames
+    let mut sorted_ms: Vec<f64> = active
         .iter()
         .map(|frame| frame.total_us as f64 / 1000.0)
         .collect();
     sorted_ms.sort_by(f64::total_cmp);
 
-    let total_us: u64 = frames.iter().map(|frame| frame.total_us).sum();
+    let total_us: u64 = active.iter().map(|frame| frame.total_us).sum();
     let mean_ms = total_us as f64 / count as f64 / 1000.0;
-    let jank_frames = frames
+    let jank_frames = active
         .iter()
         .filter(|frame| frame.total_us as f64 / 1000.0 > JANK_BUDGET_MS)
         .count();
@@ -474,19 +487,39 @@ pub(crate) fn aggregate_frames(frames: &[FrameStats]) -> Option<FrameAggregate> 
         frame_index_span: last.n.saturating_sub(first.n) + 1,
         sampled_span_ms: us_to_ms(total_us),
         phase_means_ms: PhaseMeans {
-            rebuild: phase_mean(frames, |frame| frame.rebuild_us),
-            layout: phase_mean(frames, |frame| frame.layout_us),
-            paint: phase_mean(frames, |frame| frame.paint_us),
-            encode: phase_mean(frames, |frame| frame.encode_us),
-            acquire: phase_mean(frames, |frame| frame.acquire_us),
-            submit: phase_mean(frames, |frame| frame.submit_us),
+            rebuild: phase_mean(&active, |frame| frame.rebuild_us),
+            layout: phase_mean(&active, |frame| frame.layout_us),
+            paint: phase_mean(&active, |frame| frame.paint_us),
+            encode: phase_mean(&active, |frame| frame.encode_us),
+            acquire: phase_mean(&active, |frame| frame.acquire_us),
+            submit: phase_mean(&active, |frame| frame.submit_us),
         },
     })
 }
 
-fn phase_mean(frames: &[FrameStats], field: impl Fn(&FrameStats) -> u64) -> f64 {
-    let total: u64 = frames.iter().map(&field).sum();
+fn phase_mean(frames: &[&FrameStats], field: impl Fn(&FrameStats) -> u64) -> f64 {
+    let total: u64 = frames.iter().map(|frame| field(frame)).sum();
     round2(total as f64 / frames.len() as f64 / 1000.0)
+}
+
+/// The `note` text when `performance`'s `stats` is `None`: an empty ring
+/// (nothing has arrived over the devtools connection yet) reads very
+/// differently from a non-empty ring the frame gate skipped in its
+/// entirety (frames arrived; none of them rendered).
+fn no_stats_note(session_id: u64, state: &'static str, sample_count: usize) -> String {
+    if sample_count == 0 {
+        format!(
+            "no frame samples yet for session {session_id} (state: {state}). Frame stats \
+             arrive over the devtools connection once the app renders; a session that is \
+             still launching, or one whose devtools service never started, has none."
+        )
+    } else {
+        format!(
+            "{sample_count} frame sample(s) arrived for session {session_id} (state: {state}) \
+             but every one was skipped by the mobile frame gate — nothing rendered in this \
+             window to aggregate."
+        )
+    }
 }
 
 /// Nearest-rank percentile over an ascending-sorted, non-empty slice.
@@ -597,6 +630,23 @@ mod tests {
         }
     }
 
+    /// A frame the mobile frame gate skipped: all-zero pass durations, as
+    /// `frust-shell-common/src/devtools.rs`'s `publish_frame` puts on the
+    /// wire for a skipped `FramePasses`.
+    fn skipped_frame(n: u64) -> FrameStats {
+        FrameStats {
+            n,
+            total_us: 0,
+            rebuild_us: 0,
+            layout_us: 0,
+            paint_us: 0,
+            encode_us: 0,
+            acquire_us: 0,
+            submit_us: 0,
+            skipped: true,
+        }
+    }
+
     fn leaf(id: u64) -> WidgetNode {
         WidgetNode {
             id,
@@ -626,6 +676,59 @@ mod tests {
     #[test]
     fn an_empty_ring_aggregates_to_nothing_rather_than_zeros() {
         assert!(aggregate_frames(&[]).is_none());
+    }
+
+    #[test]
+    fn skipped_frames_are_counted_but_excluded_from_the_timing_math() {
+        // Two skipped frames bookend eight real 10ms frames — the skipped
+        // frames' all-zero durations must not pull the mean/percentiles
+        // down or inflate fps_estimate, but they still count toward
+        // skipped_frames and the full window's frame_index_span.
+        let mut frames = vec![skipped_frame(0)];
+        frames.extend((1..=8).map(|n| frame(n, 10_000)));
+        frames.push(skipped_frame(9));
+
+        let stats = aggregate_frames(&frames).expect("eight active samples aggregate");
+        assert_eq!(stats.frame_ms_mean, 10.0);
+        assert_eq!(stats.frame_ms_p50, 10.0);
+        assert_eq!(stats.frame_ms_max, 10.0);
+        assert_eq!(stats.fps_estimate, 100.0);
+        assert_eq!(stats.jank_frames, 0);
+        assert_eq!(stats.jank_percent, 0.0);
+        assert_eq!(stats.skipped_frames, 2);
+        // Full window: frame 0 through frame 9.
+        assert_eq!(stats.frame_index_span, 10);
+        assert_eq!(
+            stats.phase_means_ms,
+            PhaseMeans {
+                rebuild: 1.0,
+                layout: 2.0,
+                paint: 3.0,
+                encode: 4.0,
+                acquire: 5.0,
+                submit: 6.0,
+            }
+        );
+    }
+
+    #[test]
+    fn an_all_skipped_window_aggregates_to_nothing_rather_than_zeros() {
+        let frames: Vec<FrameStats> = (0..4).map(skipped_frame).collect();
+        assert!(aggregate_frames(&frames).is_none());
+    }
+
+    #[test]
+    fn the_no_stats_note_distinguishes_empty_from_all_skipped() {
+        let empty = no_stats_note(1, "running", 0);
+        assert!(empty.contains("no frame samples yet"), "{empty}");
+
+        let all_skipped = no_stats_note(1, "running", 4);
+        assert!(
+            all_skipped.contains("skipped by the mobile frame gate"),
+            "{all_skipped}"
+        );
+        assert!(all_skipped.contains('4'), "{all_skipped}");
+        assert_ne!(empty, all_skipped);
     }
 
     #[test]
