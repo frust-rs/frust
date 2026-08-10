@@ -13,6 +13,7 @@ use frust_drive::doctor::DoctorReport;
 use frust_drive::plugin::AddReport;
 
 use super::build_launcher::BuildFocus;
+use super::devtools::{ConnEvent, DevtoolsLaunch};
 use super::doctor::DoctorCheck;
 use super::logstyle::LevelFilter;
 use super::run_config::RunFocus;
@@ -171,6 +172,15 @@ pub enum RegionId {
     /// room to show every segment to jump to (see
     /// `ui::views::sessions::render_log_status`'s graduated chip degrade).
     LevelFilterChip,
+    /// A DevTools tab pill (0-based index into
+    /// [`super::DevtoolsTab::ALL`]); click selects that tab (keyboard parity:
+    /// `1`–`4`).
+    DevtoolsTabPill(usize),
+    /// The DevTools failed-state Retry button (keyboard parity: `r`).
+    DevtoolsRetry,
+    /// The DevTools status row's "back to log" affordance (keyboard parity:
+    /// `Esc` / `d`).
+    DevtoolsBack,
 }
 
 /// The kind of an in-progress drag, identifying which draggable chrome the
@@ -291,6 +301,12 @@ pub enum Message {
         project_root: PathBuf,
         /// A short target label (`desktop`, or a device name).
         target_label: String,
+        /// What the session's launch config says about reaching a devtools
+        /// service (workbook §B12) — carried here because only the launcher
+        /// knows the build mode and (for Android) the device serial. An
+        /// ad-hoc build/clean/toolchain session passes
+        /// [`DevtoolsLaunch::unavailable`].
+        devtools: DevtoolsLaunch,
     },
     /// Select the next / previous session tab (`Tab` / `Shift+Tab`).
     NextTab,
@@ -618,6 +634,29 @@ pub enum Message {
     /// runner as [`super::Effect::LaunchSessions`]. A no-op with no project or
     /// no discovered devices.
     RunOnAllDevices,
+
+    // ── DevTools mode (workbook §B12) ─────────────────────────────────────────
+    /// Toggle the active session tab between its log view and DevTools (`d`).
+    /// Per session — a tab keeps its own log/DevTools state, so switching
+    /// tabs never forces you out of DevTools where you opened it. A no-op
+    /// with no active session.
+    DevtoolsToggle,
+    /// Leave DevTools for the active session, back to its log view (`Esc`, or
+    /// the status row's back affordance). A no-op when it isn't open.
+    DevtoolsClose,
+    /// Select a DevTools tab by 0-based index (`1`–`4`, or a tab-pill click).
+    DevtoolsTab(usize),
+    /// Step the DevTools tab selection `delta` positions, wrapping (`[`/`]`).
+    DevtoolsTabCycle(isize),
+    /// Retry a failed devtools connection for the active session (`r` on the
+    /// failed screen, or its Retry button) — routed to the runner as
+    /// [`super::Effect::DevtoolsConnect`]. A no-op once the session itself
+    /// has ended (there is no service left to reach).
+    DevtoolsRetry,
+    /// A report from the session's devtools bridge thread
+    /// ([`crate::supervise::DevtoolsBridge`]) — connection state changes and
+    /// coalesced frame-stats batches.
+    DevtoolsConn(SessionId, ConnEvent),
 
     // ── Perf sparkline panel ──────────────────────────────────────────────────
     /// Toggle the active session's perf sparkline panel (`t`) — a no-op with

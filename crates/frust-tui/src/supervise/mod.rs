@@ -13,6 +13,9 @@
 //!   transient build/install/launch status line's source of truth.
 //! - [`supervisor`] is the moving part — [`Supervisor`] owns a supervision
 //!   thread per session and the single event channel.
+//! - [`devtools_bridge`] is the second moving part — [`DevtoolsBridge`] owns
+//!   one devtools connection thread per session (workbook §B12's DevTools
+//!   mode), reporting into the engine's own message channel.
 //!
 //! The desktop `cargo run` path and the multi-phase device pipeline (build →
 //! install → launch → logcat, via `frust-drive`'s `android_run`/`ios_run`
@@ -20,10 +23,12 @@
 //! dispatches on the [`SessionSpec`]'s target. The module is unit-tested
 //! against a scripted `FakeProcessRunner`.
 
+mod devtools_bridge;
 mod progress;
 mod session;
 mod supervisor;
 
+pub use devtools_bridge::DevtoolsBridge;
 pub use progress::{PhaseLabel, phase_from_output_line};
 pub use session::{
     DevicePlan, DeviceTarget, LaunchError, LaunchPlan, SessionEvent, SessionEventKind, SessionId,

@@ -11,6 +11,7 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
+use super::devtools::{DevtoolsLaunch, DevtoolsState};
 use super::logstyle::{
     LevelFilter, LineMeta, LogLevel, PanicBlock, PanicTracker, classify_level, classify_source,
     now_hms,
@@ -230,11 +231,35 @@ pub struct SessionView {
     /// bounded channel) can never linger past a real state advance — see
     /// `crate::supervise::progress`'s module docs.
     pub current_phase: Option<PhaseLabel>,
+    /// The session's DevTools mode state (workbook §B12): the discovery line
+    /// parsed out of its log, the bridge's connection, the selected tab, and
+    /// the frame-stats ring — see [`super::devtools`]. Per session, so
+    /// switching tabs never forces a tab out of DevTools.
+    pub devtools: DevtoolsState,
 }
 
 impl SessionView {
-    /// A fresh session view (empty log, following the tail, no selection).
+    /// A fresh session view (empty log, following the tail, no selection) for
+    /// a session that cannot host a devtools service — see
+    /// [`Self::with_devtools`] for a real app session.
     pub fn new(id: SessionId, project_root: PathBuf, target_label: impl Into<String>) -> Self {
+        Self::with_devtools(
+            id,
+            project_root,
+            target_label,
+            DevtoolsLaunch::unavailable(),
+        )
+    }
+
+    /// [`Self::new`] with the session's own devtools launch metadata (build
+    /// mode + Android serial), which decides §B12's app-without-devtools
+    /// state and how the bridge reaches the service.
+    pub fn with_devtools(
+        id: SessionId,
+        project_root: PathBuf,
+        target_label: impl Into<String>,
+        devtools: DevtoolsLaunch,
+    ) -> Self {
         Self {
             id,
             project_root,
@@ -248,6 +273,7 @@ impl SessionView {
             level_filter: LevelFilter::default(),
             panic_tracker: PanicTracker::default(),
             current_phase: None,
+            devtools: DevtoolsState::new(devtools),
         }
     }
 
@@ -266,16 +292,26 @@ impl SessionView {
     /// level/source/panic-role are classified once here (never at render —
     /// see [`crate::engine::logstyle`]) against the real wall clock
     /// ([`now_hms`]); see [`Self::push_line_at`] for a deterministic variant.
-    pub fn push_line(&mut self, line: String) {
-        self.push_line_at(line, now_hms());
+    ///
+    /// Returns whether the line carried a *new* devtools discovery
+    /// announcement (see [`Self::push_line_at`]).
+    pub fn push_line(&mut self, line: String) -> bool {
+        self.push_line_at(line, now_hms())
     }
 
     /// [`Self::push_line`] with an explicit `timestamp` instead of the real
     /// wall clock — the primitive `push_line` delegates to, and the seam
     /// tests (and snapshot fixtures) use for reproducible output.
-    pub fn push_line_at(&mut self, line: String, timestamp: impl Into<String>) {
+    ///
+    /// Returns whether the line announced a devtools service this session
+    /// hadn't already recorded (`frust-devtools listening on …` — workbook
+    /// §B12). The caller (`crate::engine::update`) turns a `true` into the
+    /// connect effect; the parse itself runs here, once, on the same
+    /// ANSI-stripped line the perf/level/panic classifiers already see.
+    pub fn push_line_at(&mut self, line: String, timestamp: impl Into<String>) -> bool {
         let plain = strip_ansi(&line);
         self.perf.ingest(&plain);
+        let discovered = self.devtools.ingest_line(&plain);
         let abs = self.log.end_index();
         let role = self.panic_tracker.feed(abs, &plain);
         let (source, source_prefix_strip) = classify_source(&plain);
@@ -312,6 +348,7 @@ impl SessionView {
                 });
             }
         }
+        discovered
     }
 
     /// The precomputed metadata for the line at absolute index `abs`, if
@@ -1177,6 +1214,48 @@ mod tests {
                 "/tmp/huddle/android/app/build/outputs/apk/release/app.apk",
                 "/tmp/huddle/android/app/build/outputs/apk/release/app2.apk",
             ]
+        );
+    }
+
+    // ── DevTools discovery capture (workbook §B12) ──────────────────────────
+
+    #[test]
+    fn push_line_captures_a_devtools_discovery_line_once_and_takes_the_latest() {
+        let mut s = SessionView::with_devtools(
+            SessionId(0),
+            PathBuf::from("/tmp/app"),
+            "desktop",
+            crate::engine::DevtoolsLaunch::from_launch(
+                frust_drive::build_info::BuildMode::Debug,
+                None,
+            ),
+        );
+        assert!(!s.push_line("app: booting up".to_string()));
+        assert!(s.push_line(
+            "08-09 12:00:01.234 1234 1234 I frust: frust-devtools listening on 53214 token cafe"
+                .to_string()
+        ));
+        let found = s.devtools.discovered.clone().unwrap();
+        assert_eq!(found.port, 53214);
+        assert_eq!(found.token.as_deref(), Some("cafe"));
+        // A repeat of the same announcement is not a fresh discovery…
+        assert!(!s.push_line("frust-devtools listening on 53214 token cafe".to_string()));
+        // …but a restart's re-announcement is, and the latest wins.
+        assert!(s.push_line("frust-devtools listening on 60001 token beef".to_string()));
+        assert_eq!(s.devtools.discovered.as_ref().unwrap().port, 60001);
+    }
+
+    #[test]
+    fn a_session_that_cannot_host_devtools_records_the_line_but_never_connects() {
+        let mut s = sess();
+        // The parse is unconditional (the state records what was actually
+        // logged); the *connect* decision is what capability gates.
+        assert!(s.push_line("frust-devtools listening on 53214 token cafe".to_string()));
+        assert!(s.devtools.discovered.is_some());
+        assert!(!s.devtools.launch.capable);
+        assert!(
+            !s.devtools.wants_connect(),
+            "an ad-hoc (build/clean) session is never devtools-capable"
         );
     }
 

@@ -1,0 +1,34 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: "render_to_string(100, 30, &state)"
+---
+⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
+━━━━━━━━                                                                                            
+                                                                                                    
+ PROJECTS                │huddle:  1 ▶ desktop                                                      
+  ▸ huddle               │                                                                          
+                         │                                                                          
+ DEVICES ↻ r             │                                                                          
+   none found            │                                                                          
+                         │                                                                          
+ SESSIONS                │                                                                          
+   huddle                │                                                                          
+   ▸ ▶ desktop           │                                                                          
+                         │                                                                          
+ ACTIONS                 │                                                                          
+   New project · n       │    ⚠  This build has no devtools service                                 
+   Add plugin · a        │    release builds compile the listener out entirely — rerun              
+   Doctor · d            │    with `frust run` (debug) or `--profile` to inspect this               
+   Build · b             │    session                                                               
+   Clean · c             │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │ devtools: unavailable │ Esc back to log                         [mouse ✓]
+● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]

@@ -182,6 +182,19 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             has_session,
             "no active session",
         ),
+        // `d` is the session view's own DevTools toggle and the workbench's
+        // doctor panel in the *other* context (no session open) — the
+        // full-screen key-namespace swap workbook §B12 defines. Both keep
+        // their key here because both are only ever reachable in their own
+        // context; the palette and help overlay render this one registry, so
+        // the pair shows exactly as the keyboard behaves.
+        gated(
+            "DevTools",
+            "d",
+            Message::DevtoolsToggle,
+            has_session,
+            "no active session",
+        ),
         always("Quit", "q", Message::Quit),
     ]
 }

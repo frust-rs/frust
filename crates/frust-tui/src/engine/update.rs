@@ -14,6 +14,7 @@ use super::bootstrap::BootstrapWizard;
 use super::build_launcher::{BuildLauncher, BuildSpec};
 use super::context_menu::ContextMenu;
 use super::create_wizard::{CreateWizard, WizardAdvance};
+use super::devtools::ConnState;
 use super::message::{ContextTarget, DragKind, Message};
 use super::run_config::{DeviceRow, RunConfig};
 use super::session_view::SessionView;
@@ -114,6 +115,35 @@ pub enum Effect {
         /// The checked optional-feature ids.
         features: Vec<String>,
     },
+    /// Open (or replace) the devtools connection for one session: the runner
+    /// hands this to [`crate::supervise::DevtoolsBridge`], which does the
+    /// `adb forward` (Android), the TCP connect, the token handshake, and the
+    /// frame-stats subscription on its own thread — never on the event loop.
+    /// Progress comes back as [`Message::DevtoolsConn`].
+    DevtoolsConnect(DevtoolsTarget),
+    /// Tear the devtools connection for one session down (session ended, or
+    /// a reconnect is about to replace it), removing any `adb forward` it
+    /// allocated.
+    DevtoolsDisconnect(SessionId),
+}
+
+/// Everything the bridge needs to reach one session's devtools service —
+/// resolved by the pure engine from the session's discovery line and its
+/// launch metadata, enacted by the runner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DevtoolsTarget {
+    /// The session whose bridge this is (and whose `DevtoolsConn` messages
+    /// it reports through).
+    pub session: SessionId,
+    /// The port the app announced. On Android this is a *device* port, which
+    /// the bridge maps to a host one with `adb forward`.
+    pub port: u16,
+    /// The handshake token from the same discovery line (`None` for a
+    /// service running with auth off, or a build predating the token).
+    pub token: Option<String>,
+    /// The `adb` serial when the session runs on an Android device — see
+    /// [`super::DevtoolsLaunch::android_serial`].
+    pub android_serial: Option<String>,
 }
 
 /// What the loop must do after a transition.
@@ -228,6 +258,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             id,
             project_root,
             target_label,
+            devtools,
         } => {
             if state.session_index(id).is_some() {
                 return Outcome::idle();
@@ -237,7 +268,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             // an existing absolute line index, and a freshly registered
             // session has no lines yet — so `Follow` is the only valid
             // starting state.
-            let view = SessionView::new(id, project_root, target_label);
+            let view = SessionView::with_devtools(id, project_root, target_label, devtools);
             state.sessions.push(view);
             // Auto-select the first session that appears.
             if state.active_session.is_none() {
@@ -919,6 +950,69 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         // ── Perf sparkline panel ────────────────────────────────────────────
         Message::TogglePerfPanel => with_active(state, |s| s.perf.toggle()),
 
+        // ── DevTools mode (workbook §B12) ────────────────────────────────────
+        Message::DevtoolsToggle => {
+            let Some(idx) = state.active_session else {
+                return Outcome::idle();
+            };
+            state.sessions[idx].devtools.open = !state.sessions[idx].devtools.open;
+            // Opening is the trigger for the first connect: the discovery
+            // line may have scrolled past long before the user asked to look.
+            let effect = state.sessions[idx]
+                .devtools
+                .open
+                .then(|| devtools_connect(state, idx))
+                .flatten();
+            Outcome {
+                redraw: true,
+                effect,
+            }
+        }
+        Message::DevtoolsClose => {
+            let Some(session) = state.active_session_mut() else {
+                return Outcome::idle();
+            };
+            if !session.devtools.open {
+                return Outcome::idle();
+            }
+            session.devtools.open = false;
+            Outcome::redraw()
+        }
+        Message::DevtoolsTab(index) => with_active(state, |s| {
+            s.devtools.select_tab(index);
+        }),
+        Message::DevtoolsTabCycle(delta) => with_active(state, |s| {
+            s.devtools.cycle_tab(delta);
+        }),
+        Message::DevtoolsRetry => {
+            let Some(idx) = state.active_session else {
+                return Outcome::idle();
+            };
+            // A terminal session's service died with the process — retrying
+            // would just re-fail against a port nobody is listening on.
+            if state.sessions[idx].state.is_terminal() {
+                return Outcome::idle();
+            }
+            match devtools_connect(state, idx) {
+                Some(effect) => Outcome {
+                    redraw: true,
+                    effect: Some(effect),
+                },
+                None => Outcome::idle(),
+            }
+        }
+        Message::DevtoolsConn(id, event) => {
+            let Some(idx) = state.session_index(id) else {
+                return Outcome::idle();
+            };
+            let is_active = state.active_session == Some(idx);
+            let changed = state.sessions[idx].devtools.apply(event);
+            // Only the visible session's DevTools surface can be dirtied by a
+            // report; a background session's ring keeps filling silently
+            // (the dirty-frame skip).
+            Outcome::dirty(changed && is_active && state.sessions[idx].devtools.open)
+        }
+
         // ── Responsive breakpoints ──────────────────────────────────────────
         Message::ToggleSidebarOverlay => {
             state.sidebar_overlay_open = !state.sidebar_overlay_open;
@@ -1369,18 +1463,29 @@ fn on_session_event(state: &mut AppState, ev: SessionEvent) -> Outcome {
     let is_active = state.active_session == Some(idx);
     // A toast to raise once the session borrow ends (a terminal transition).
     let mut toast: Option<(ToastKind, String)> = None;
+    // Deferred devtools work, likewise: a fresh discovery line to act on, or
+    // a connection to tear down because the session itself ended.
+    let mut discovered = false;
+    let mut session_ended = false;
     let outcome = {
         let session = &mut state.sessions[idx];
         match ev.kind {
             SessionEventKind::Lines(lines) => {
                 let following = session.is_following();
                 for line in lines {
-                    session.push_line(line);
+                    // Every line is scanned for a devtools discovery
+                    // announcement as it is pushed (workbook §B12).
+                    discovered |= session.push_line(line);
                 }
-                Outcome::dirty(is_active && following)
+                // A discovery line changes what the DevTools surface shows
+                // even when the log view itself is frozen off the tail.
+                Outcome::dirty(is_active && (following || discovered))
             }
             SessionEventKind::State(s) => {
                 session.state = s;
+                if session.state.is_terminal() {
+                    session_ended = session.devtools.on_session_end();
+                }
                 // Clear a stale phase label the moment the state leaves the
                 // transient (`Building`/`Installing`) window — the sole
                 // clearing point (`crate::supervise::progress`'s module
@@ -1410,7 +1515,55 @@ fn on_session_event(state: &mut AppState, ev: SessionEvent) -> Outcome {
     if let Some((kind, text)) = toast {
         state.toasts.push(kind, text);
     }
-    outcome
+    // Connection retention (workbook §B12): once DevTools has been opened for
+    // a session the connection is kept for the session's whole life — the
+    // frame ring keeps filling behind a hidden tab, which is what makes
+    // re-opening DevTools instant instead of a fresh handshake. It is closed
+    // in exactly two places: the session ending (below) and an explicit
+    // reconnect replacing it.
+    let effect = if session_ended {
+        Some(Effect::DevtoolsDisconnect(ev.id))
+    } else if discovered {
+        on_devtools_discovery(state, idx)
+    } else {
+        None
+    };
+    Outcome {
+        redraw: outcome.redraw || effect.is_some(),
+        effect: outcome.effect.or(effect),
+    }
+}
+
+/// A fresh devtools discovery line landed for the session at `idx`. While
+/// DevTools is open for that session, (re)open the connection: a
+/// re-announcement means the app restarted, so whatever the bridge is holding
+/// points at a dead port and must be replaced rather than kept.
+fn on_devtools_discovery(state: &mut AppState, idx: usize) -> Option<Effect> {
+    if !state.sessions.get(idx)?.devtools.open {
+        return None;
+    }
+    state.sessions[idx].devtools.conn = ConnState::Idle;
+    devtools_connect(state, idx)
+}
+
+/// Start a devtools connection for the session at `idx` when one is warranted
+/// — its build can host the service, a discovery line has landed, and nothing
+/// is already connected or in flight. Marks the state `Connecting` and hands
+/// the runner the target to reach; returns `None` (and changes nothing) when
+/// a connect isn't warranted.
+fn devtools_connect(state: &mut AppState, idx: usize) -> Option<Effect> {
+    let session = state.sessions.get_mut(idx)?;
+    if !session.devtools.wants_connect() {
+        return None;
+    }
+    let discovery = session.devtools.discovered.clone()?;
+    session.devtools.begin_connect();
+    Some(Effect::DevtoolsConnect(DevtoolsTarget {
+        session: session.id,
+        port: discovery.port,
+        token: discovery.token,
+        android_serial: session.devtools.launch.android_serial.clone(),
+    }))
 }
 
 /// The toast (if any) for a session that just reached a terminal state: a
@@ -1485,6 +1638,7 @@ fn with_active_filtered(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::devtools::{ConnEvent, DevtoolsLaunch, DevtoolsPhase, DevtoolsTab};
     use crate::engine::message::RegionId;
     use crate::engine::session_view::Scroll;
     use crate::engine::state::Screen;
@@ -1594,6 +1748,18 @@ mod tests {
     // ── Session wiring ──────────────────────────────────────────────────────
 
     fn register(state: &mut AppState, id: u64, project: &str, label: &str) -> SessionId {
+        register_with(state, id, project, label, DevtoolsLaunch::unavailable())
+    }
+
+    /// [`register`] for a real app session — `launch` decides whether it
+    /// could host a devtools service (workbook §B12).
+    fn register_with(
+        state: &mut AppState,
+        id: u64,
+        project: &str,
+        label: &str,
+        launch: DevtoolsLaunch,
+    ) -> SessionId {
         let id = SessionId(id);
         update(
             state,
@@ -1601,6 +1767,7 @@ mod tests {
                 id,
                 project_root: PathBuf::from(project),
                 target_label: label.to_string(),
+                devtools: launch,
             },
         );
         id
@@ -1626,6 +1793,7 @@ mod tests {
                 id: a,
                 project_root: PathBuf::from("/tmp/huddle"),
                 target_label: "desktop".into(),
+                devtools: DevtoolsLaunch::unavailable(),
             },
         );
         assert!(!out.redraw);
@@ -2081,6 +2249,7 @@ mod tests {
                     id: SessionId(i as u64),
                     project_root: spec.project_root.clone(),
                     target_label: label,
+                    devtools: DevtoolsLaunch::unavailable(),
                 },
             );
         }
@@ -3066,6 +3235,286 @@ mod tests {
         let mut st = welcome();
         let out = update(&mut st, Message::TogglePerfPanel);
         assert!(!out.redraw);
+    }
+
+    // ── DevTools mode (workbook §B12) ────────────────────────────────────────
+
+    const DISCOVERY: &str = "frust-devtools listening on 53214 token cafe";
+
+    fn debug_launch() -> DevtoolsLaunch {
+        DevtoolsLaunch::from_launch(frust_drive::build_info::BuildMode::Debug, None)
+    }
+
+    /// A workbench with one running, devtools-capable desktop session.
+    fn devtools_workbench() -> (AppState, SessionId) {
+        let mut st = workbench_with_project();
+        let id = register_with(&mut st, 0, "/tmp/huddle", "desktop", debug_launch());
+        update(&mut st, state_event(id, SessionState::Running));
+        (st, id)
+    }
+
+    fn state_event(id: SessionId, state: SessionState) -> Message {
+        Message::Session(SessionEvent {
+            id,
+            kind: SessionEventKind::State(state),
+        })
+    }
+
+    fn connect_target(effect: Option<Effect>) -> DevtoolsTarget {
+        match effect {
+            Some(Effect::DevtoolsConnect(target)) => target,
+            other => panic!("expected a DevtoolsConnect effect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn toggling_devtools_before_any_discovery_opens_the_mode_without_connecting() {
+        let (mut st, _) = devtools_workbench();
+        let out = update(&mut st, Message::DevtoolsToggle);
+        assert!(out.redraw);
+        assert!(st.active_session().unwrap().devtools.open);
+        assert_eq!(out.effect, None, "nothing discovered yet to connect to");
+        assert_eq!(
+            st.active_session().unwrap().devtools.phase(),
+            DevtoolsPhase::Discovering
+        );
+
+        // Toggling back off leaves the mode closed, no effect either way.
+        let out = update(&mut st, Message::DevtoolsToggle);
+        assert!(out.redraw);
+        assert!(!st.active_session().unwrap().devtools.open);
+        assert_eq!(out.effect, None);
+    }
+
+    #[test]
+    fn a_discovery_line_while_devtools_is_open_starts_the_connection() {
+        let (mut st, id) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        let out = update(&mut st, line(id, DISCOVERY));
+        let target = connect_target(out.effect);
+        assert_eq!(target.session, id);
+        assert_eq!(target.port, 53214);
+        assert_eq!(target.token.as_deref(), Some("cafe"));
+        assert_eq!(target.android_serial, None);
+        assert_eq!(
+            st.active_session().unwrap().devtools.phase(),
+            DevtoolsPhase::Connecting
+        );
+
+        // A re-announcement (the app restarted within the session) replaces
+        // the connection rather than being ignored — latest wins.
+        let out = update(
+            &mut st,
+            line(id, "frust-devtools listening on 60001 token beef"),
+        );
+        let target = connect_target(out.effect);
+        assert_eq!(target.port, 60001);
+        assert_eq!(target.token.as_deref(), Some("beef"));
+    }
+
+    #[test]
+    fn a_discovery_line_is_recorded_but_not_connected_while_devtools_is_closed() {
+        let (mut st, id) = devtools_workbench();
+        let out = update(&mut st, line(id, DISCOVERY));
+        assert_eq!(out.effect, None, "nobody is looking yet");
+        assert!(st.active_session().unwrap().devtools.discovered.is_some());
+
+        // Opening is what connects, using the line that already scrolled past.
+        let out = update(&mut st, Message::DevtoolsToggle);
+        assert_eq!(connect_target(out.effect).port, 53214);
+    }
+
+    #[test]
+    fn an_android_session_carries_its_serial_into_the_connect_target() {
+        let mut st = workbench_with_project();
+        let launch = DevtoolsLaunch::from_launch(
+            frust_drive::build_info::BuildMode::Profile,
+            Some("emulator-5554".to_string()),
+        );
+        let id = register_with(&mut st, 0, "/tmp/huddle", "Pixel 8", launch);
+        update(&mut st, line(id, DISCOVERY));
+        let out = update(&mut st, Message::DevtoolsToggle);
+        assert_eq!(
+            connect_target(out.effect).android_serial.as_deref(),
+            Some("emulator-5554")
+        );
+    }
+
+    #[test]
+    fn a_release_session_never_connects_and_shows_the_unavailable_screen() {
+        let mut st = workbench_with_project();
+        let launch = DevtoolsLaunch::from_launch(frust_drive::build_info::BuildMode::Release, None);
+        let id = register_with(&mut st, 0, "/tmp/huddle", "desktop", launch);
+        update(&mut st, line(id, DISCOVERY));
+        let out = update(&mut st, Message::DevtoolsToggle);
+        assert_eq!(out.effect, None);
+        assert_eq!(
+            st.active_session().unwrap().devtools.phase(),
+            DevtoolsPhase::Unavailable
+        );
+    }
+
+    #[test]
+    fn tabs_switch_by_index_and_cycle() {
+        let (mut st, _) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        let out = update(&mut st, Message::DevtoolsTab(1));
+        assert!(out.redraw);
+        assert_eq!(
+            st.active_session().unwrap().devtools.active_tab,
+            DevtoolsTab::System
+        );
+        update(&mut st, Message::DevtoolsTabCycle(1));
+        assert_eq!(
+            st.active_session().unwrap().devtools.active_tab,
+            DevtoolsTab::Inspector
+        );
+        update(&mut st, Message::DevtoolsTabCycle(-2));
+        assert_eq!(
+            st.active_session().unwrap().devtools.active_tab,
+            DevtoolsTab::Performance
+        );
+        // Wrapping backward from the first tab lands on the last.
+        update(&mut st, Message::DevtoolsTabCycle(-1));
+        assert_eq!(
+            st.active_session().unwrap().devtools.active_tab,
+            DevtoolsTab::Network
+        );
+    }
+
+    #[test]
+    fn conn_events_drive_the_state_and_only_dirty_a_visible_surface() {
+        let (mut st, id) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        update(&mut st, line(id, DISCOVERY));
+
+        let out = update(
+            &mut st,
+            Message::DevtoolsConn(
+                id,
+                ConnEvent::Connected {
+                    app_name: "huddle".to_string(),
+                    caps: Vec::new(),
+                },
+            ),
+        );
+        assert!(out.redraw);
+        assert_eq!(
+            st.active_session().unwrap().devtools.phase(),
+            DevtoolsPhase::Connected
+        );
+
+        // With the mode closed again, a background report keeps filling the
+        // ring but never dirties a frame (the dirty-frame skip).
+        update(&mut st, Message::DevtoolsClose);
+        let out = update(
+            &mut st,
+            Message::DevtoolsConn(id, ConnEvent::Frames(vec![frame_stats(1)])),
+        );
+        assert!(!out.redraw);
+        assert_eq!(st.active_session().unwrap().devtools.frames.len(), 1);
+    }
+
+    #[test]
+    fn the_frame_ring_caps_at_its_bound_across_batches() {
+        let (mut st, id) = devtools_workbench();
+        // Batches sized like the bridge's coalescing window forwards them.
+        for batch in 0..10u64 {
+            let frames = (0..40).map(|i| frame_stats(batch * 40 + i)).collect();
+            update(
+                &mut st,
+                Message::DevtoolsConn(id, ConnEvent::Frames(frames)),
+            );
+        }
+        let ring = &st.active_session().unwrap().devtools.frames;
+        assert_eq!(ring.len(), crate::engine::FRAME_RING_CAP);
+        assert_eq!(
+            ring.back().unwrap().n,
+            399,
+            "the newest sample is always retained"
+        );
+    }
+
+    #[test]
+    fn retry_reconnects_from_the_failed_state_but_not_after_the_session_ended() {
+        let (mut st, id) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        update(&mut st, line(id, DISCOVERY));
+        update(
+            &mut st,
+            Message::DevtoolsConn(id, ConnEvent::Failed("connection refused".into())),
+        );
+        assert_eq!(
+            st.active_session().unwrap().devtools.phase(),
+            DevtoolsPhase::Failed
+        );
+
+        let out = update(&mut st, Message::DevtoolsRetry);
+        assert_eq!(connect_target(out.effect).port, 53214);
+        assert_eq!(
+            st.active_session().unwrap().devtools.phase(),
+            DevtoolsPhase::Connecting
+        );
+
+        // Once the session itself has ended there is no service left to reach.
+        update(&mut st, state_event(id, SessionState::Exited(true)));
+        let out = update(&mut st, Message::DevtoolsRetry);
+        assert_eq!(out.effect, None);
+    }
+
+    #[test]
+    fn a_session_ending_tears_its_devtools_connection_down() {
+        let (mut st, id) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        update(&mut st, line(id, DISCOVERY));
+        update(
+            &mut st,
+            Message::DevtoolsConn(
+                id,
+                ConnEvent::Connected {
+                    app_name: "huddle".to_string(),
+                    caps: Vec::new(),
+                },
+            ),
+        );
+
+        let out = update(&mut st, state_event(id, SessionState::Exited(true)));
+        assert_eq!(out.effect, Some(Effect::DevtoolsDisconnect(id)));
+        assert_eq!(
+            st.active_session().unwrap().devtools.phase(),
+            DevtoolsPhase::Failed,
+            "the service went with the process"
+        );
+    }
+
+    #[test]
+    fn devtools_messages_are_noops_with_no_active_session() {
+        let mut st = welcome();
+        for msg in [
+            Message::DevtoolsToggle,
+            Message::DevtoolsClose,
+            Message::DevtoolsTab(2),
+            Message::DevtoolsTabCycle(1),
+            Message::DevtoolsRetry,
+        ] {
+            let out = update(&mut st, msg.clone());
+            assert!(!out.redraw, "{msg:?} should be a no-op");
+            assert_eq!(out.effect, None);
+        }
+    }
+
+    fn frame_stats(n: u64) -> frust_devtools_protocol::FrameStats {
+        frust_devtools_protocol::FrameStats {
+            n,
+            total_us: 16_000,
+            rebuild_us: 8_000,
+            layout_us: 3_000,
+            paint_us: 2_000,
+            encode_us: 1_400,
+            acquire_us: 600,
+            submit_us: 1_000,
+            skipped: false,
+        }
     }
 
     // ── Responsive breakpoints ───────────────────────────────────────────────

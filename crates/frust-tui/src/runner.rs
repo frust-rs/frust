@@ -19,7 +19,7 @@ use crossterm::event::{
     MouseButton as CtMouseButton, MouseEventKind,
 };
 use frust_drive::android_build::{self, AndroidArtifact};
-use frust_drive::devices::{default_discoverers, discover_all};
+use frust_drive::devices::{Platform, default_discoverers, discover_all};
 use frust_drive::doctor::{self, DoctorCtx, RealEnv};
 use frust_drive::ios_build::{self, IosArtifact};
 use frust_drive::process::{ProcessRunner, RealProcessRunner};
@@ -30,11 +30,12 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::engine::{
     ActiveModal, AddPluginDialog, AddPluginStep, AppState, BootstrapNode, BootstrapWizard,
-    BuildFocus, BuildSpec, BuildTargetSpec, DoctorCheck, Effect, Engine, Message, RegionId,
-    RunFocus, Screen, WizardStep,
+    BuildFocus, BuildSpec, BuildTargetSpec, DevtoolsLaunch, DevtoolsState, DoctorCheck, Effect,
+    Engine, Message, RegionId, RunFocus, Screen, WizardStep,
 };
 use crate::supervise::{
-    DeviceTarget, SessionEvent, SessionEventKind, SessionId, SessionSpec, SessionState, Supervisor,
+    DeviceTarget, DevtoolsBridge, SessionEvent, SessionEventKind, SessionId, SessionSpec,
+    SessionState, Supervisor,
 };
 use crate::ui::mouse::MouseRegions;
 use crate::ui::theme::Theme;
@@ -106,6 +107,11 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     // wires the channel and the kill/copy effect path every start call rides.
     // On return the supervisor's `Drop` stops+joins every session.
     let (mut supervisor, mut session_rx) = Supervisor::new(Arc::new(RealProcessRunner));
+    // The DevTools bridges (workbook §B12): one connection thread per session
+    // that has opened DevTools, reporting into the same engine channel. On
+    // return its `Drop` stops and joins every thread (and removes any `adb`
+    // forward they allocated).
+    let mut devtools = DevtoolsBridge::new(Arc::new(RealProcessRunner));
     // A cloneable handle background tasks (device discovery, session
     // registration) post `Message`s back through.
     let msg_tx = engine.sender();
@@ -155,7 +161,13 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                         for msg in translate_event(event, &engine.state, &regions) {
                             let out = engine.handle(msg);
                             needs_redraw |= out.redraw;
-                            apply_effect(out.effect, &mut supervisor, &msg_tx, &mut next_adhoc_id);
+                            apply_effect(
+                                out.effect,
+                                &mut supervisor,
+                                &mut devtools,
+                                &msg_tx,
+                                &mut next_adhoc_id,
+                            );
                         }
                     }
                     // A read error (rare) is logged and ignored — the loop
@@ -167,12 +179,24 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
             Some(msg) = rx.recv() => {
                 let out = engine.handle(msg);
                 needs_redraw |= out.redraw;
-                apply_effect(out.effect, &mut supervisor, &msg_tx, &mut next_adhoc_id);
+                apply_effect(
+                    out.effect,
+                    &mut supervisor,
+                    &mut devtools,
+                    &msg_tx,
+                    &mut next_adhoc_id,
+                );
             }
             Some(ev) = session_rx.recv() => {
                 let out = engine.handle(Message::Session(ev));
                 needs_redraw |= out.redraw;
-                apply_effect(out.effect, &mut supervisor, &msg_tx, &mut next_adhoc_id);
+                apply_effect(
+                    out.effect,
+                    &mut supervisor,
+                    &mut devtools,
+                    &msg_tx,
+                    &mut next_adhoc_id,
+                );
             }
             _ = tick.tick() => {
                 // Only touch the model while something is animating (a live
@@ -182,7 +206,13 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                 if engine.state.animating() {
                     let out = engine.handle(Message::Tick);
                     needs_redraw |= out.redraw;
-                    apply_effect(out.effect, &mut supervisor, &msg_tx, &mut next_adhoc_id);
+                    apply_effect(
+                    out.effect,
+                    &mut supervisor,
+                    &mut devtools,
+                    &msg_tx,
+                    &mut next_adhoc_id,
+                );
                 }
             }
         }
@@ -198,6 +228,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
 fn apply_effect(
     effect: Option<Effect>,
     supervisor: &mut Supervisor,
+    devtools: &mut DevtoolsBridge,
     tx: &UnboundedSender<Message>,
     next_adhoc_id: &mut u64,
 ) {
@@ -244,6 +275,11 @@ fn apply_effect(
             id,
             features,
         }) => spawn_add_plugin(project_root, id, features, tx.clone()),
+        // The bridge only *spawns* here: the `adb forward`, the TCP connect,
+        // the handshake and the frame-stats pump all run on its own thread,
+        // so a slow or unreachable service never stalls this loop.
+        Some(Effect::DevtoolsConnect(target)) => devtools.connect(target, tx.clone()),
+        Some(Effect::DevtoolsDisconnect(session)) => devtools.disconnect(session),
         Some(Effect::SetMouseCapture(on)) => set_mouse_capture(on),
         Some(Effect::SaveSidebarWidth(width)) => crate::engine::save_sidebar_width(width),
         None => {}
@@ -342,6 +378,9 @@ fn launch_bootstrap_fix_session(
         id,
         project_root: root,
         target_label: format!("fix: {label}"),
+        // A toolchain fix runs `rustup`/`cargo`, not the app — there is no
+        // devtools service to reach.
+        devtools: DevtoolsLaunch::unavailable(),
     });
     tokio::task::spawn_blocking(move || {
         let _ = tx.send(session_state(id, SessionState::Building));
@@ -384,6 +423,8 @@ fn launch_build_session(spec: BuildSpec, id: SessionId, tx: UnboundedSender<Mess
         id,
         project_root: spec.project_root.clone(),
         target_label: format!("build {}", build_target_label(&spec.target)),
+        // A build session produces an artifact; nothing is running to inspect.
+        devtools: DevtoolsLaunch::unavailable(),
     });
     tokio::task::spawn_blocking(move || {
         let _ = tx.send(session_state(id, SessionState::Building));
@@ -489,6 +530,8 @@ fn launch_clean_session(project_root: PathBuf, id: SessionId, tx: UnboundedSende
         id,
         project_root: project_root.clone(),
         target_label: "clean".to_string(),
+        // A clean session removes build output; nothing is running to inspect.
+        devtools: DevtoolsLaunch::unavailable(),
     });
     tokio::task::spawn_blocking(move || {
         let _ = tx.send(session_state(id, SessionState::Building));
@@ -693,11 +736,26 @@ fn launch_sessions(
                     id,
                     project_root: spec.project_root.clone(),
                     target_label: target_label(&spec.target),
+                    devtools: devtools_launch(&spec),
                 });
             }
             Err(err) => eprintln!("frust-tui: failed to start session: {err:#}"),
         }
     }
+}
+
+/// What a launched app session's own config says about reaching its devtools
+/// service (workbook §B12): the build mode decides whether the listener is
+/// even compiled in, and an Android target additionally needs its `adb`
+/// serial so the bridge can forward the device-loopback port to the host.
+fn devtools_launch(spec: &SessionSpec) -> DevtoolsLaunch {
+    let android_serial = match &spec.target {
+        DeviceTarget::Device(device) if device.platform == Platform::Android => {
+            Some(device.id.clone())
+        }
+        DeviceTarget::Device(_) | DeviceTarget::Desktop => None,
+    };
+    DevtoolsLaunch::from_launch(spec.build.mode, android_serial)
 }
 
 /// The short tab label for a launch target (`desktop`, or the device name).
@@ -914,6 +972,19 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
     if ctrl && matches!(code, KeyCode::Char('o')) && workbench {
         return vec![Message::ToggleProjectSwitcher];
     }
+    // DevTools mode owns the whole normal-mode key namespace for the active
+    // session tab while it is open (workbook §B12's full-screen namespace
+    // swap, the same shape the doctor panel's own key map takes over with):
+    // the session-level keys below (`r`/`b`/`x`/`/`/`f`/`z`/`l`) are out of
+    // scope inside it, so it defines its own small map from a clean slate.
+    // The global chords above (`Ctrl+Q`, `⌥m`, `Ctrl+C`, `Ctrl+P`, `?`) and
+    // session-tab switching (`Tab`/`Shift+Tab`) deliberately still apply.
+    if let Some(devtools) = state.active_session().map(|s| &s.devtools)
+        && devtools.open
+    {
+        return translate_devtools_key(code, state, devtools);
+    }
+
     // Keyboard focus heuristic (this crate has no true focus system yet): with no
     // session open the devices panel owns the arrows/Space/Enter; once a
     // session is running the log view owns them (devices stay mouse- and
@@ -957,8 +1028,12 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         KeyCode::Char(' ') if devices_focused => vec![Message::ToggleDeviceSelect],
         KeyCode::Up if devices_focused => vec![Message::DeviceCursorUp],
         KeyCode::Down if devices_focused => vec![Message::DeviceCursorDown],
-        // `d` opens the doctor panel; `b` opens the build launcher (mouse
-        // parity: the titlebar chip / sidebar ACTIONS "Doctor"/"Build" rows).
+        // `d` opens DevTools for the active session tab (workbook §B12) and,
+        // with no session open, the doctor panel — the two contexts never
+        // collide, and the doctor panel additionally stays on the sidebar
+        // ACTIONS row and in the palette. `b` opens the build launcher
+        // (mouse parity: the sidebar "Build" row).
+        KeyCode::Char('d') if has_active_session => vec![Message::DevtoolsToggle],
         KeyCode::Char('d') if workbench => vec![Message::OpenDoctorPanel],
         KeyCode::Char('b') if workbench => vec![Message::OpenBuildLauncher],
         // `c` copies a build session's artifact path(s) when one is active
@@ -1014,6 +1089,61 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
             vec![Message::SelectionClear]
         }
         _ => vec![],
+    }
+}
+
+/// Translate one key press while the active session tab is showing DevTools
+/// (workbook §B12's own key table, binding): `d`/`Esc` return to the log,
+/// `1`–`4` jump to a tab and `[`/`]` cycle them (connected only — there is no
+/// strip to move through otherwise), `r` retries a failed connection, and
+/// `Tab`/`Shift+Tab` still switch session tabs (a tab keeps its own
+/// log/DevTools state, so leaving and coming back lands right where you were).
+/// Every row has a mouse equivalent: a tab pill, the Retry button, and the
+/// status row's back affordance.
+///
+/// The [`DevtoolsPhase`] match is exhaustive: a new screen has to decide what
+/// its keys do rather than silently inheriting another screen's.
+fn translate_devtools_key(
+    code: KeyCode,
+    state: &AppState,
+    devtools: &DevtoolsState,
+) -> Vec<Message> {
+    use crate::engine::DevtoolsPhase;
+
+    match code {
+        KeyCode::Char('q') => return vec![Message::Quit],
+        KeyCode::Esc | KeyCode::Char('d') => return vec![Message::DevtoolsClose],
+        KeyCode::Tab => return vec![Message::NextTab],
+        KeyCode::BackTab => return vec![Message::PrevTab],
+        _ => {}
+    }
+    match devtools.phase() {
+        DevtoolsPhase::Connected => match code {
+            KeyCode::Char(c @ '1'..='4') => {
+                vec![Message::DevtoolsTab(c as usize - '1' as usize)]
+            }
+            KeyCode::Char(']') => vec![Message::DevtoolsTabCycle(1)],
+            KeyCode::Char('[') => vec![Message::DevtoolsTabCycle(-1)],
+            _ => vec![],
+        },
+        // `r` retries only where a retry is offered: a live session whose
+        // connection failed. A session that has already ended has no service
+        // left to reach, and the failed screen drops its Retry button to match.
+        DevtoolsPhase::Failed => match code {
+            KeyCode::Char('r')
+                if state
+                    .active_session()
+                    .is_some_and(|s| !s.state.is_terminal()) =>
+            {
+                vec![Message::DevtoolsRetry]
+            }
+            _ => vec![],
+        },
+        // Passive screens: they resolve on their own (or, for a release
+        // build, never) — nothing to drive from here.
+        DevtoolsPhase::Discovering | DevtoolsPhase::Connecting | DevtoolsPhase::Unavailable => {
+            vec![]
+        }
     }
 }
 
@@ -1706,6 +1836,155 @@ mod tests {
             translate_event(key(KeyCode::Char('t')), &workbench, &regions),
             Vec::<Message>::new(),
             "no active session — no-op"
+        );
+    }
+
+    // ── DevTools mode key routing (workbook §B12) ─────────────────────────────
+
+    /// A workbench with one running, devtools-capable desktop session that
+    /// has already announced its service.
+    fn devtools_state() -> AppState {
+        use crate::engine::SessionView;
+        let mut session = SessionView::with_devtools(
+            SessionId(0),
+            PathBuf::from("/tmp/huddle"),
+            "desktop",
+            DevtoolsLaunch::from_launch(frust_drive::build_info::BuildMode::Debug, None),
+        );
+        session.state = SessionState::Running;
+        session.push_line_at(
+            "frust-devtools listening on 53214 token cafe".to_string(),
+            "12:00:00",
+        );
+        AppState {
+            screen: Screen::Workbench,
+            project_root: Some(PathBuf::from("/tmp/huddle")),
+            projects: vec![PathBuf::from("/tmp/huddle")],
+            sessions: vec![session],
+            active_session: Some(0),
+            ..Default::default()
+        }
+    }
+
+    /// The §B12 entry/exit round trip driven purely by keys through the real
+    /// translate → `update` path: `d` opens DevTools (connecting, because a
+    /// discovery line already landed), `2` switches to the System tab once
+    /// connected, and `Esc` returns to the log view.
+    #[test]
+    fn d_opens_devtools_digits_switch_tabs_and_esc_returns_to_the_log() {
+        use crate::engine::{ConnEvent, DevtoolsPhase, DevtoolsTab, update};
+        let regions = MouseRegions::new();
+        let mut state = devtools_state();
+
+        let msgs = translate_event(key(KeyCode::Char('d')), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsToggle]);
+        let out = update(&mut state, msgs[0].clone());
+        assert!(state.active_session().unwrap().devtools.open);
+        assert!(
+            matches!(out.effect, Some(Effect::DevtoolsConnect(_))),
+            "opening connects against the already-announced service"
+        );
+
+        // While connecting, the tab keys have no strip to move through.
+        assert_eq!(
+            translate_event(key(KeyCode::Char('2')), &state, &regions),
+            Vec::<Message>::new()
+        );
+
+        update(
+            &mut state,
+            Message::DevtoolsConn(
+                SessionId(0),
+                ConnEvent::Connected {
+                    app_name: "huddle".to_string(),
+                    caps: Vec::new(),
+                },
+            ),
+        );
+        assert_eq!(
+            state.active_session().unwrap().devtools.phase(),
+            DevtoolsPhase::Connected
+        );
+
+        let msgs = translate_event(key(KeyCode::Char('2')), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsTab(1)]);
+        update(&mut state, msgs[0].clone());
+        assert_eq!(
+            state.active_session().unwrap().devtools.active_tab,
+            DevtoolsTab::System
+        );
+        let msgs = translate_event(key(KeyCode::Char(']')), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsTabCycle(1)]);
+
+        // The session-view key namespace is swapped while DevTools is open:
+        // the log-view keys below it are out of scope, not silently reused.
+        for swallowed in ['f', 'w', 'z', 'l', '/'] {
+            assert_eq!(
+                translate_event(key(KeyCode::Char(swallowed)), &state, &regions),
+                Vec::<Message>::new(),
+                "`{swallowed}` belongs to the log view, not DevTools"
+            );
+        }
+        // Session-tab switching and the global chords still work.
+        assert_eq!(
+            translate_event(key(KeyCode::Tab), &state, &regions),
+            vec![Message::NextTab]
+        );
+        assert_eq!(
+            translate_event(key(KeyCode::Char('q')), &state, &regions),
+            vec![Message::Quit]
+        );
+
+        let msgs = translate_event(key(KeyCode::Esc), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsClose]);
+        update(&mut state, msgs[0].clone());
+        assert!(!state.active_session().unwrap().devtools.open);
+        // Back in the log view, `d` is the entry key again and `f` is the
+        // log view's own follow toggle once more.
+        assert_eq!(
+            translate_event(key(KeyCode::Char('f')), &state, &regions),
+            vec![Message::ToggleFollow]
+        );
+    }
+
+    #[test]
+    fn r_retries_only_on_the_failed_screen_of_a_live_session() {
+        use crate::engine::{ConnEvent, update};
+        let regions = MouseRegions::new();
+        let mut state = devtools_state();
+        update(&mut state, Message::DevtoolsToggle);
+        update(
+            &mut state,
+            Message::DevtoolsConn(
+                SessionId(0),
+                ConnEvent::Failed("connection refused".to_string()),
+            ),
+        );
+        assert_eq!(
+            translate_event(key(KeyCode::Char('r')), &state, &regions),
+            vec![Message::DevtoolsRetry]
+        );
+
+        // A session that has already ended offers no retry — there is no
+        // service left to reach (the button is dropped from the screen too).
+        state.sessions[0].state = SessionState::Exited(true);
+        assert_eq!(
+            translate_event(key(KeyCode::Char('r')), &state, &regions),
+            Vec::<Message>::new()
+        );
+    }
+
+    #[test]
+    fn d_still_opens_the_doctor_panel_with_no_session_open() {
+        let regions = MouseRegions::new();
+        let workbench = AppState {
+            screen: Screen::Workbench,
+            ..Default::default()
+        };
+        assert_eq!(
+            translate_event(key(KeyCode::Char('d')), &workbench, &regions),
+            vec![Message::OpenDoctorPanel],
+            "the doctor panel keeps `d` in the context DevTools cannot claim"
         );
     }
 }

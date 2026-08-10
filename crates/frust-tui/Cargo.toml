@@ -18,6 +18,13 @@ path = "src/lib.rs"
 # detection and session supervision consume the same pipelines the `frust`
 # CLI does.
 frust-drive = { path = "../frust-drive" }
+# The devtools wire types the DevTools mode speaks (`Discovery`, `FrameStats`,
+# `Capability`) — the protocol leaf is the one sanctioned crossing of the
+# tooling-isolation charter (docs/DEVTOOLS_ARCHITECTURE.md): it depends on
+# `serde`/`serde_json` only, so pulling it in never drags the framework side's
+# graph along. `frust-devtools` itself (the framework-side service) stays out
+# of this crate's graph entirely.
+frust-devtools-protocol = { path = "../frust-devtools-protocol" }
 anyhow.workspace = true
 # `thiserror` backs the supervisor's matched `LaunchError` (CODE_STANDARDS'
 # "errors callers match on" rule); already a workspace dependency.

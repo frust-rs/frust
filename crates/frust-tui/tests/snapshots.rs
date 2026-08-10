@@ -15,9 +15,9 @@ use frust_drive::doctor::{Area, Component, ComponentStatus, DoctorReport, FixCom
 use frust_drive::plugin::{AddItem, AddOutcome, AddReport};
 use frust_tui::engine::{
     AddPluginDialog, AddPluginStep, AppState, BootstrapState, BootstrapWizard, BuildLauncher,
-    ContextTarget, CreateWizard, DeviceRow, DoctorCheck, DoctorState, LevelFilter, Message,
-    Palette, RegionId, RunConfig, RunFocus, Screen, Scroll, SessionView, ToastKind, WizardStep,
-    update,
+    ConnEvent, ContextTarget, CreateWizard, DeviceRow, DevtoolsLaunch, DoctorCheck, DoctorState,
+    LevelFilter, Message, Palette, RegionId, RunConfig, RunFocus, Screen, Scroll, SessionView,
+    ToastKind, WizardStep, update,
 };
 use frust_tui::supervise::{PhaseLabel, SessionEvent, SessionEventKind, SessionId, SessionState};
 use frust_tui::ui::mouse::{MouseCtx, MouseRegions};
@@ -247,6 +247,7 @@ fn registered_session_tracks_tail_through_update_100x30() {
             id,
             project_root: PathBuf::from("/tmp/huddle"),
             target_label: "desktop".to_string(),
+            devtools: DevtoolsLaunch::unavailable(),
         },
     );
     for batch in 0..5 {
@@ -894,6 +895,206 @@ fn toolchain_chip_partial_from_report_100x30() {
 #[test]
 fn session_log_built_artifacts_130x30() {
     insta::assert_snapshot!(render_to_string(130, 30, &built_session_state()));
+}
+
+// ── DevTools mode (workbook §B12) ─────────────────────────────────────────────
+
+/// Render `state` and hand back the frame's registered mouse regions, for the
+/// parity checks below.
+fn render_regions(w: u16, h: u16, state: &AppState) -> MouseRegions {
+    let backend = TestBackend::new(w, h);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let theme = Theme::frust_dark_at(ColorDepth::TrueColor);
+    let mut regions = MouseRegions::new();
+    terminal
+        .draw(|frame| {
+            let mut ctx = MouseCtx::new(&mut regions);
+            frust_tui::ui::render(frame, state, &theme, &mut ctx);
+        })
+        .expect("draw");
+    regions
+}
+
+/// The click message bound to `id` this frame, located by scanning cells the
+/// way the event loop hit-tests one — so this asserts the region is actually
+/// on screen, not merely that a call was made.
+fn click_message_for(regions: &MouseRegions, id: RegionId) -> Option<Message> {
+    for y in 0..200u16 {
+        for x in 0..200u16 {
+            if regions.hover_at(x, y) == Some(id) {
+                return regions.click_at(x, y);
+            }
+        }
+    }
+    None
+}
+
+/// A running, devtools-capable session with DevTools open. `build` decides
+/// §B12's app-without-devtools screen; `lines` seed the log the discovery
+/// scan runs over (deterministic timestamps, as everywhere else here).
+fn devtools_state(build: frust_drive::build_info::BuildMode, lines: &[&str]) -> AppState {
+    let root = "/tmp/huddle";
+    let mut sess = SessionView::with_devtools(
+        SessionId(0),
+        PathBuf::from(root),
+        "desktop",
+        DevtoolsLaunch::from_launch(build, None),
+    );
+    sess.state = SessionState::Running;
+    for (i, l) in lines.iter().enumerate() {
+        sess.push_line_at((*l).to_string(), format!("12:00:{:02}", i % 60));
+    }
+    sess.devtools.open = true;
+    AppState {
+        screen: Screen::Workbench,
+        project_root: Some(PathBuf::from(root)),
+        projects: vec![PathBuf::from(root)],
+        sessions: vec![sess],
+        active_session: Some(0),
+        // Pinned so the discovering/connecting spinner glyph is stable
+        // across runs (the same reason the build-phase snapshots pin it).
+        animation_frame: 0,
+        ..Default::default()
+    }
+}
+
+const DEVTOOLS_DISCOVERY: &str = "frust-devtools listening on 53214 token cafe";
+
+/// Nothing announced yet: the passive discovering screen, spinner pinned.
+#[test]
+fn devtools_discovering_100x30() {
+    let state = devtools_state(
+        frust_drive::build_info::BuildMode::Debug,
+        &["app: booting up"],
+    );
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+/// The discovery line landed and the connect is in flight — the endpoint is
+/// shown so a wrong port is visible rather than guessed at.
+#[test]
+fn devtools_connecting_100x30() {
+    let mut state = devtools_state(
+        frust_drive::build_info::BuildMode::Debug,
+        &["app: booting up", DEVTOOLS_DISCOVERY],
+    );
+    state.sessions[0].devtools.begin_connect();
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+/// The failed screen with its Retry button (a live session, so a retry is
+/// actually offered).
+#[test]
+fn devtools_failed_100x30() {
+    let mut state = devtools_state(
+        frust_drive::build_info::BuildMode::Debug,
+        &["app: booting up", DEVTOOLS_DISCOVERY],
+    );
+    update(
+        &mut state,
+        Message::DevtoolsConn(
+            SessionId(0),
+            ConnEvent::Failed(
+                "connection refused after 3s — the service may have exited".to_string(),
+            ),
+        ),
+    );
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+/// A release build: the listener is compiled out, so this screen never
+/// resolves — and offers no retry, only the way back.
+#[test]
+fn devtools_unavailable_release_100x30() {
+    let state = devtools_state(
+        frust_drive::build_info::BuildMode::Release,
+        &["app: booting up"],
+    );
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+/// Connected: the four-tab strip with the active pill underlined, the service
+/// badge, and the (placeholder) Performance body.
+#[test]
+fn devtools_connected_performance_100x30() {
+    let mut state = devtools_state(
+        frust_drive::build_info::BuildMode::Debug,
+        &["app: booting up", DEVTOOLS_DISCOVERY],
+    );
+    update(
+        &mut state,
+        Message::DevtoolsConn(
+            SessionId(0),
+            ConnEvent::Connected {
+                app_name: "huddle".to_string(),
+                caps: Vec::new(),
+            },
+        ),
+    );
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+/// The same surface with tab 2 selected — the strip's selection and the
+/// status row's label both follow.
+#[test]
+fn devtools_connected_system_tab_100x30() {
+    let mut state = devtools_state(
+        frust_drive::build_info::BuildMode::Debug,
+        &["app: booting up", DEVTOOLS_DISCOVERY],
+    );
+    update(
+        &mut state,
+        Message::DevtoolsConn(
+            SessionId(0),
+            ConnEvent::Connected {
+                app_name: "huddle".to_string(),
+                caps: Vec::new(),
+            },
+        ),
+    );
+    update(&mut state, Message::DevtoolsTab(1));
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+/// Every DevTools affordance is clickable (the Part B mouse-parity rule): the
+/// four tab pills, the Retry button on the failed screen, and the status
+/// row's back-to-log label.
+#[test]
+fn devtools_registers_a_click_region_per_affordance() {
+    let mut state = devtools_state(
+        frust_drive::build_info::BuildMode::Debug,
+        &["app: booting up", DEVTOOLS_DISCOVERY],
+    );
+    update(
+        &mut state,
+        Message::DevtoolsConn(
+            SessionId(0),
+            ConnEvent::Connected {
+                app_name: "huddle".to_string(),
+                caps: Vec::new(),
+            },
+        ),
+    );
+    let regions = render_regions(100, 30, &state);
+    for tab in 0..4 {
+        let msg = click_message_for(&regions, RegionId::DevtoolsTabPill(tab));
+        assert_eq!(msg, Some(Message::DevtoolsTab(tab)), "tab pill {tab}");
+    }
+    assert_eq!(
+        click_message_for(&regions, RegionId::DevtoolsBack),
+        Some(Message::DevtoolsClose)
+    );
+
+    update(
+        &mut state,
+        Message::DevtoolsConn(SessionId(0), ConnEvent::Failed("refused".to_string())),
+    );
+    let regions = render_regions(100, 30, &state);
+    assert_eq!(
+        click_message_for(&regions, RegionId::DevtoolsRetry),
+        Some(Message::DevtoolsRetry),
+        "the failed screen offers a Retry button"
+    );
 }
 
 // ── Command palette + toasts ──────────────────────────────────────────────────

@@ -2109,6 +2109,7 @@ dependencies = [
  "ansi-to-tui",
  "anyhow",
  "crossterm",
+ "frust-devtools-protocol",
  "frust-drive",
  "futures-util",
  "insta",

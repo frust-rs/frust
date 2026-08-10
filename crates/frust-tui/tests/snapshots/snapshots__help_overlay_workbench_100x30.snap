@@ -23,12 +23,12 @@ expression: "render_to_string(100, 30, &state)"
                          │  /       Search logs…                          │▓▓                       
                          │  l       Cycle log level filter                │▓▓                       
                          │  z       Toggle nearest backtrace fold         │▓▓                       
+                         │  d       DevTools                              │▓▓                       
                          │  q       Quit                                  │▓▓                       
                          │                                                │▓▓                       
                          │  Esc close                                     │▓▓                       
                          ╰────────────────────────────────────────────────╯▓▓                       
                          │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                       
-                         │                                                                          
                          │                                                                          
                          │                                                                          
 ● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]

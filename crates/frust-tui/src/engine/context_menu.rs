@@ -220,6 +220,7 @@ mod tests {
                 id: SessionId(0),
                 project_root: PathBuf::from("/tmp/huddle"),
                 target_label: "desktop".into(),
+                devtools: crate::engine::DevtoolsLaunch::unavailable(),
             },
         );
         st.sessions[0].state = SessionState::Running;

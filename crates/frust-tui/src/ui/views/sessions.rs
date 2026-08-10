@@ -54,10 +54,27 @@ pub fn render_main(
     theme: &Theme,
     mouse: &mut MouseCtx,
 ) {
+    let active_session = state.active_session();
+
+    // DevTools mode (workbook §B12) is a per-session *view swap*, not an
+    // overlay: the session tab bar stays live above it (switching tabs must
+    // never force a tab out of DevTools), and everything below it — the log
+    // pane, its status row, the perf panel, the search overlay — is replaced
+    // by the DevTools surface. `crate::runner`'s key routing performs the
+    // matching namespace swap.
+    if let Some(session) = active_session.filter(|s| s.devtools.open) {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .split(area);
+        render_tab_bar(frame, rows[0], state, theme, mouse);
+        super::devtools::render(frame, rows[1], state, session, theme, mouse);
+        return;
+    }
+
     // The perf sparkline panel
     // renders only once its session has actually seen a `frust-perf` line
     // *and* the tab has toggled it open (`t`) — zero-noise otherwise.
-    let active_session = state.active_session();
     let show_perf = active_session.is_some_and(|s| s.perf.visible && s.perf.has_data());
     // The transient build/install phase status line (workbook §B10) —
     // reserved only while the active session is actually `Building`/

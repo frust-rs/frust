@@ -12,6 +12,7 @@ mod bootstrap;
 mod build_launcher;
 mod context_menu;
 mod create_wizard;
+mod devtools;
 mod doctor;
 mod logstyle;
 mod message;
@@ -32,6 +33,9 @@ pub use bootstrap::{BootstrapNode, BootstrapState, BootstrapWizard};
 pub use build_launcher::{ArtifactKind, BuildFocus, BuildLauncher, BuildSpec, BuildTargetSpec};
 pub use context_menu::{ContextMenu, MenuEntry};
 pub use create_wizard::{ArchCard, CreateWizard, WizardAdvance, WizardStep};
+pub use devtools::{
+    ConnEvent, ConnState, DevtoolsLaunch, DevtoolsPhase, DevtoolsState, DevtoolsTab, FRAME_RING_CAP,
+};
 pub use doctor::{DoctorCheck, DoctorState};
 pub use logstyle::{
     LEVEL_FILTER_SEGMENTS, LevelFilter, LineMeta, LineRole, LogLevel, LogSource, PanicBlock,
@@ -52,7 +56,7 @@ pub use state::{
     clamp_sidebar_width,
 };
 pub use toast::{Toast, ToastKind, Toasts};
-pub use update::{Effect, Outcome, update};
+pub use update::{DevtoolsTarget, Effect, Outcome, update};
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
