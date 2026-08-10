@@ -1,0 +1,25 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: "render_mcp_panel(100, 30, &McpStatus::Starting, &[], None)"
+---
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                     ╭ MCP server ────────────────────────────────────────────╮                     
+                     │                                                        │▓▓                   
+                     │  ↻ starting…                                           │▓▓                   
+                     │  binding a loopback listener                           │▓▓                   
+                     │                                                        │▓▓                   
+                     │  no clients connected                                  │▓▓                   
+                     │                                                        │▓▓                   
+                     │   Stop     Close                                       │▓▓                   
+                     │  s stop · Esc close                                    │▓▓                   
+                     ╰────────────────────────────────────────────────────────╯▓▓                   
+                       ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓

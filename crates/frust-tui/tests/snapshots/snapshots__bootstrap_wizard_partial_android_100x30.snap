@@ -20,7 +20,7 @@ expression: "render_to_string(100, 30, &bootstrap_state(partial_report(), 2))"
    Doctor · d│                                                                        │▓▓           
    Build · b │                          ▶ Run in session    c copy                    │▓▓           
    Clean · c │                                                                        │▓▓           
-             │                                                                        │▓▓           
+   MCP off · │                                                                        │▓▓           
              │                                                                        │▓▓           
              │                                                                        │▓▓           
              │                                                                        │▓▓           

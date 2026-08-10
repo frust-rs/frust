@@ -196,6 +196,13 @@ pub enum RegionId {
     /// An Inspector-tab row's `▸`/`▾` affordance (the same row index); click
     /// expands/collapses that node (keyboard parity: `→`/`←`).
     DevtoolsInspectorTwisty(usize),
+    /// The sidebar ACTIONS "MCP" row (workbook §B13); click starts the
+    /// embedded MCP server, or stops the running one (keyboard parity: `M`).
+    McpToggle,
+    /// The MCP panel's Start/Stop button (keyboard parity: `s`).
+    McpPanelToggleServer,
+    /// The MCP panel's Close button (keyboard parity: `Esc` / `m`).
+    McpPanelClose,
 }
 
 /// The kind of an in-progress drag, identifying which draggable chrome the
@@ -765,4 +772,16 @@ pub enum Message {
     /// the model; a stop the user asked for has already cleared it, so this
     /// is then a no-op.
     McpStopped(Option<String>),
+    /// Start the embedded MCP server, or stop the running one (`M`, the
+    /// sidebar ACTIONS "MCP" row, the panel's Start/Stop button, or the
+    /// palette) — workbook §B13. Routed to the runner as
+    /// [`super::Effect::StartMcpServer`]/[`super::Effect::StopMcpServer`],
+    /// since the server handle is a live resource the pure core cannot build.
+    ToggleMcpServer,
+    /// Open the MCP panel — the server's state plus its connected-client list
+    /// (`m`, or the palette).
+    OpenMcpPanel,
+    /// Close the MCP panel (`Esc` / `m` / its Close button). The server keeps
+    /// running: closing the panel is not a stop.
+    CloseMcpPanel,
 }

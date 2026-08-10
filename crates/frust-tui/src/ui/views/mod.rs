@@ -10,6 +10,7 @@ pub mod create_wizard;
 pub mod devtools;
 pub mod doctor;
 pub mod help;
+pub mod mcp;
 pub mod palette;
 pub mod project_switcher;
 pub mod run_config;

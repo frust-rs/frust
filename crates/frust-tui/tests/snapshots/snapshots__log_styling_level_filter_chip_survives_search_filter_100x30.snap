@@ -1,6 +1,5 @@
 ---
 source: crates/frust-tui/tests/snapshots.rs
-assertion_line: 1299
 expression: text
 ---
 ⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
@@ -22,7 +21,7 @@ expression: text
    Doctor · d            │                                                                          
    Build · b             │                                                                          
    Clean · c             │                                                                          
-                         │                                                                          
+   MCP off · M           │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          

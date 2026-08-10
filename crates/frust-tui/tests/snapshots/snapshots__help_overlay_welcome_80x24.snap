@@ -14,6 +14,8 @@ expression: "render_to_string(80, 24, &state)"
                │  a       Add plugin…                           │▓▓             
                │  ^O      Switch project…                       │▓▓             
                │  R       Refresh devices                       │▓▓             
+               │  m       MCP server…                           │▓▓             
+               │  M       Start/stop MCP server                 │▓▓             
                │  ⌥m      Toggle mouse capture                  │▓▓             
                │  f       Toggle follow-tail                    │▓▓             
                │  /       Search logs…                          │▓▓             
@@ -23,6 +25,4 @@ expression: "render_to_string(80, 24, &state)"
                │  r       Refresh widget tree                   │▓▓             
                │  q       Quit                                  │▓▓             
                │                                                │▓▓             
-               │  Esc close                                     │▓▓             
-               ╰────────────────────────────────────────────────╯▓▓             
-? help · ⌘ palett▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓    [mouse ✓]
+? help · ⌘ pale╰────────────────────────────────────────────────╯▓▓    [mouse ✓]

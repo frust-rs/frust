@@ -21,7 +21,7 @@ expression: "render_to_string(100, 30, &state)"
    Doctor · d            │    127.0.0.1:53214 · handshake pending                                   
    Build · b             │                                                                          
    Clean · c             │                                                                          
-                         │                                                                          
+   MCP off · M           │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          

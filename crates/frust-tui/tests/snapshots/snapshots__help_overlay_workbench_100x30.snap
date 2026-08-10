@@ -4,22 +4,23 @@ expression: "render_to_string(100, 30, &state)"
 ---
 ⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
 ━━━━━━━━                                                                                            
-                                                                                                    
- PROJECTS                ╭ Keyboard Shortcuts ────────────────────────────╮                         
-  ▸ huddle               │                                                │▓▓                       
-                         │  r       Run on device(s)…                     │▓▓                       
- DEVICES ↻ r             │  x       Stop session                          │▓▓                       
-   none found            │  b       Build…                                │▓▓b here.                
-                         │  c       Clean…                                │▓▓                       
- SESSIONS                │  d       Doctor                                │▓▓                       
-   none running          │  i       Toolchain setup…                      │▓▓                       
-                         │  n       New project…                          │▓▓                       
- ACTIONS                 │  a       Add plugin…                           │▓▓                       
-   New project · n       │  ^O      Switch project…                       │▓▓                       
-   Add plugin · a        │  R       Refresh devices                       │▓▓                       
-   Doctor · d            │  ⌥m      Toggle mouse capture                  │▓▓                       
-   Build · b             │  f       Toggle follow-tail                    │▓▓                       
-   Clean · c             │  /       Search logs…                          │▓▓                       
+                         ╭ Keyboard Shortcuts ────────────────────────────╮                         
+ PROJECTS                │                                                │▓▓                       
+  ▸ huddle               │  r       Run on device(s)…                     │▓▓                       
+                         │  x       Stop session                          │▓▓                       
+ DEVICES ↻ r             │  b       Build…                                │▓▓                       
+   none found            │  c       Clean…                                │▓▓b here.                
+                         │  d       Doctor                                │▓▓                       
+ SESSIONS                │  i       Toolchain setup…                      │▓▓                       
+   none running          │  n       New project…                          │▓▓                       
+                         │  a       Add plugin…                           │▓▓                       
+ ACTIONS                 │  ^O      Switch project…                       │▓▓                       
+   New project · n       │  R       Refresh devices                       │▓▓                       
+   Add plugin · a        │  m       MCP server…                           │▓▓                       
+   Doctor · d            │  M       Start/stop MCP server                 │▓▓                       
+   Build · b             │  ⌥m      Toggle mouse capture                  │▓▓                       
+   Clean · c             │  f       Toggle follow-tail                    │▓▓                       
+   MCP off · M           │  /       Search logs…                          │▓▓                       
                          │  l       Cycle log level filter                │▓▓                       
                          │  z       Toggle nearest backtrace fold         │▓▓                       
                          │  d       DevTools                              │▓▓                       
@@ -29,6 +30,5 @@ expression: "render_to_string(100, 30, &state)"
                          │  Esc close                                     │▓▓                       
                          ╰────────────────────────────────────────────────╯▓▓                       
                          │ ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                       
-                         │                                                                          
                          │                                                                          
 ● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]

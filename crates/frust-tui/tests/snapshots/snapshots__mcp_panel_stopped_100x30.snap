@@ -2,7 +2,7 @@
 source: crates/frust-tui/tests/snapshots.rs
 expression: "render_to_string(100, 30, &state)"
 ---
-⚙ Frust │ huddle ▾ · frust 0.1.0 · ✓ toolchain                                     ▶ Run    ⚒ Build 
+⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
 ━━━━━━━━                                                                                            
                                                                                                     
  PROJECTS                │                                                                          
@@ -11,18 +11,18 @@ expression: "render_to_string(100, 30, &state)"
  DEVICES ↻ r             │                                                                          
    none found            │  No session running — start a run to open a log tab here.                
                          │                                                                          
- SESSIONS                │                                                                          
-   none running          │                                                                          
-                         │                                                                          
- ACTIONS                 │                                                                          
-   New project · n       │                                                                          
-   Add plugin · a        │                                                                          
-   Doctor · d            │                                                                          
-   Build · b             │                                                                          
-   Clean · c             │                                                                          
-   MCP off · M           │                                                                          
-                         │                                                                          
-                         │                                                                          
+ SESSIONS            ╭ MCP server ────────────────────────────────────────────╮                     
+   none running      │                                                        │▓▓                   
+                     │  ○ not running                                         │▓▓                   
+ ACTIONS             │  start it to let an agent drive this workbench's       │▓▓                   
+   New project · n   │  own sessions                                          │▓▓                   
+   Add plugin · a    │                                                        │▓▓                   
+   Doctor · d        │  no clients connected                                  │▓▓                   
+   Build · b         │                                                        │▓▓                   
+   Clean · c         │   Start     Close                                      │▓▓                   
+   MCP off · M       │  s start · Esc close                                   │▓▓                   
+                     ╰────────────────────────────────────────────────────────╯▓▓                   
+                       ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                   
                          │                                                                          
                          │                                                                          
                          │                                                                          

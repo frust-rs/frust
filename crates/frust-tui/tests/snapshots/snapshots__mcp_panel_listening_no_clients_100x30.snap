@@ -1,0 +1,25 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: "render_mcp_panel(100, 30, &McpStatus::Listening { port: 4848, clients: 0, },\n&[], None,)"
+---
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                     ╭ MCP server ────────────────────────────────────────────╮                     
+                     │                                                        │▓▓                   
+                     │  ● listening on 127.0.0.1:4848                         │▓▓                   
+                     │  an agent configured for `frust mcp` reaches this      │▓▓                   
+                     │  workbench's own sessions at the same address          │▓▓                   
+                     │                                                        │▓▓                   
+                     │  no clients connected                                  │▓▓                   
+                     │                                                        │▓▓                   
+                     │   Stop     Close                                       │▓▓                   
+                     │  s stop · Esc close                                    │▓▓                   
+                     ╰────────────────────────────────────────────────────────╯▓▓                   
+                       ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓

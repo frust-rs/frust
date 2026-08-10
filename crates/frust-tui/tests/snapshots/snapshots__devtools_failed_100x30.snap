@@ -21,7 +21,7 @@ expression: "render_to_string(100, 30, &state)"
    Doctor · d            │    connection refused after 3s — the service may have exited             
    Build · b             │                                                                          
    Clean · c             │                          ╭──────────────────╮                            
-                         │                          │ ⟳  Retry         │                            
+   MCP off · M           │                          │ ⟳  Retry         │                            
                          │                          ╰──────────────────╯                            
                          │                                                                          
                          │                                                                          

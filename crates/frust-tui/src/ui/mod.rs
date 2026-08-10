@@ -197,6 +197,29 @@ fn render_modal(
             views::workbench::render(frame, area, state, theme, &mut suppressed);
             views::doctor::render(frame, area, &state.doctor, theme, mouse);
         }
+        // The MCP panel reaches over either top-level screen (its `m` key and
+        // palette row are not workbench-gated — the embedded server serves
+        // the workbench itself, not one project).
+        ActiveModal::McpPanel => {
+            let mut suppressed = MouseCtx::suppressed();
+            match state.screen {
+                Screen::Welcome => render_welcome(frame, area, state, theme, &mut suppressed),
+                Screen::Workbench => {
+                    views::workbench::render(frame, area, state, theme, &mut suppressed)
+                }
+            }
+            views::mcp::render(
+                frame,
+                area,
+                &state.mcp_status(),
+                // One snapshot per frame: the registry is live, so every row
+                // in this panel must come from the same read.
+                &state.mcp_clients(),
+                state.mcp_error.as_deref(),
+                theme,
+                mouse,
+            );
+        }
         ActiveModal::BuildLauncher(launcher) => {
             let mut suppressed = MouseCtx::suppressed();
             views::workbench::render(frame, area, state, theme, &mut suppressed);

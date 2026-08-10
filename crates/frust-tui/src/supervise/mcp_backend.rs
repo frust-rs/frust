@@ -366,6 +366,13 @@ impl McpServerHandle {
         self.cancel.cancel();
     }
 
+    /// Every client connected to this server right now, oldest first — the
+    /// MCP panel's rows (workbook §B13). Read through
+    /// [`crate::engine::AppState::mcp_clients`] rather than off the handle.
+    pub fn clients(&self) -> Vec<frust_mcp::ClientEntry> {
+        self.registry.snapshot()
+    }
+
     /// What the status badge shows right now.
     pub fn status(&self) -> McpStatus {
         match self.bound_port {

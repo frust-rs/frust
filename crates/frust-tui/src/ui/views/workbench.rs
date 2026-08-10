@@ -9,6 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 
 use crate::engine::{AppState, ContextTarget, DeviceRow, DoctorState, DragKind, Message, RegionId};
+use crate::supervise::McpStatus;
 use crate::ui::layout::{Shell, sidebar_main_at};
 use crate::ui::mouse::MouseCtx;
 use crate::ui::theme::Theme;
@@ -294,6 +295,8 @@ fn render_sidebar(
     lines.push(item("Build · b"));
     let clean_row = lines.len();
     lines.push(item("Clean · c"));
+    let mcp_row = lines.len();
+    lines.push(mcp_line(state, theme));
     frame.render_widget(Paragraph::new(lines), inner);
 
     // Register the interactive regions now that row indices are known (a row
@@ -331,6 +334,46 @@ fn render_sidebar(
     }
     if let Some(rect) = row_rect(add_plugin_row) {
         mouse.click(rect, RegionId::AddPluginAction, Message::OpenAddPlugin);
+    }
+    // The whole MCP row *toggles* the server (workbook §B13's switch-and-
+    // readout row), exactly as `M` does; the panel behind it is `m` / the
+    // palette, so no single row carries two different click meanings.
+    if let Some(rect) = row_rect(mcp_row) {
+        mouse.click(rect, RegionId::McpToggle, Message::ToggleMcpServer);
+    }
+}
+
+/// The sidebar ACTIONS "MCP" row: the label, the server's current state, and
+/// the `M` keyhint (workbook §B13). The state token carries the color —
+/// muted off, warn while starting, success once listening, error after a
+/// failure — since the row is the switch *and* the readout.
+///
+/// The connected-client count is shown only when there is one to show:
+/// `(0)` beside a listening server would read as a problem rather than as an
+/// idle server waiting for an agent.
+fn mcp_line(state: &AppState, theme: &Theme) -> Line<'static> {
+    let (text, color) = mcp_state_token(&state.mcp_status(), state.mcp_error.is_some(), theme);
+    Line::from(vec![
+        Span::styled("  MCP ", Style::default().fg(theme.muted())),
+        Span::styled(text, Style::default().fg(color)),
+        Span::styled(" · M", Style::default().fg(theme.muted())),
+    ])
+}
+
+/// The MCP row's state token + its color — the four §B13 states. `failed` is
+/// a *stopped* server that carries a reason, so it is derived from the
+/// retained error rather than from a state of its own.
+fn mcp_state_token(
+    status: &McpStatus,
+    failed: bool,
+    theme: &Theme,
+) -> (String, ratatui::style::Color) {
+    match status {
+        McpStatus::Stopped if failed => ("failed".to_string(), theme.error()),
+        McpStatus::Stopped => ("off".to_string(), theme.muted()),
+        McpStatus::Starting => ("start…".to_string(), theme.warn()),
+        McpStatus::Listening { port, clients: 0 } => (format!(":{port}"), theme.success()),
+        McpStatus::Listening { port, clients } => (format!(":{port} ({clients})"), theme.success()),
     }
 }
 
@@ -537,4 +580,71 @@ fn status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, narrow
         .style(Style::default().bg(theme.surface())),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sidebar ACTIONS "MCP" row is the switch *and* the readout
+    /// (workbook §B13), so its four states must each read differently — and
+    /// a listening server with nobody attached must not read as `(0)`.
+    #[test]
+    fn the_mcp_row_reads_its_four_states_distinctly() {
+        let theme = Theme::frust_dark();
+        let token = |status: &McpStatus, failed: bool| mcp_state_token(status, failed, &theme).0;
+
+        assert_eq!(token(&McpStatus::Stopped, false), "off");
+        assert_eq!(token(&McpStatus::Stopped, true), "failed");
+        assert_eq!(token(&McpStatus::Starting, false), "start…");
+        assert_eq!(
+            token(
+                &McpStatus::Listening {
+                    port: 4848,
+                    clients: 0
+                },
+                false
+            ),
+            ":4848"
+        );
+        assert_eq!(
+            token(
+                &McpStatus::Listening {
+                    port: 4848,
+                    clients: 2
+                },
+                false
+            ),
+            ":4848 (2)"
+        );
+    }
+
+    /// Every state's row still fits the *default* sidebar (26 columns, less
+    /// its border and padding) — the row is a status readout, and a truncated
+    /// port number would be worse than no readout at all.
+    #[test]
+    fn the_mcp_row_fits_the_default_sidebar_width() {
+        let theme = Theme::frust_dark();
+        let inner_width = (crate::engine::SIDEBAR_DEFAULT_WIDTH - 3) as usize;
+        for (status, failed) in [
+            (McpStatus::Stopped, false),
+            (McpStatus::Stopped, true),
+            (McpStatus::Starting, false),
+            (
+                McpStatus::Listening {
+                    port: 65535,
+                    clients: 12,
+                },
+                false,
+            ),
+        ] {
+            let (token, _) = mcp_state_token(&status, failed, &theme);
+            // The row is `"  MCP " + token + " · M"` (see `mcp_line`).
+            let width = "  MCP ".chars().count() + token.chars().count() + " · M".chars().count();
+            assert!(
+                width <= inner_width,
+                "`{token}` row is {width} cols, sidebar inner is {inner_width}"
+            );
+        }
+    }
 }

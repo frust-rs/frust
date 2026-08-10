@@ -13,13 +13,16 @@ use ratatui::layout::Position;
 use frust_drive::devices::{Device, Kind, Platform};
 use frust_drive::doctor::{Area, Component, ComponentStatus, DoctorReport, FixCommand, Status};
 use frust_drive::plugin::{AddItem, AddOutcome, AddReport};
+use frust_mcp::ClientEntry;
 use frust_tui::engine::{
     AddPluginDialog, AddPluginStep, AppState, BootstrapState, BootstrapWizard, BuildLauncher,
     ConnEvent, ContextTarget, CreateWizard, DeviceRow, DevtoolsLaunch, DoctorCheck, DoctorState,
-    InspectorEvent, LevelFilter, Message, Palette, PerfSource, RegionId, RunConfig, RunFocus,
-    Screen, Scroll, SessionView, ToastKind, WizardStep, perf_window, update,
+    Effect, InspectorEvent, LevelFilter, Message, Palette, PerfSource, RegionId, RunConfig,
+    RunFocus, Screen, Scroll, SessionView, ToastKind, WizardStep, perf_window, update,
 };
-use frust_tui::supervise::{PhaseLabel, SessionEvent, SessionEventKind, SessionId, SessionState};
+use frust_tui::supervise::{
+    McpStatus, PhaseLabel, SessionEvent, SessionEventKind, SessionId, SessionState,
+};
 use frust_tui::ui::mouse::{MouseCtx, MouseRegions};
 use frust_tui::ui::theme::{ColorDepth, Theme};
 
@@ -2073,4 +2076,151 @@ fn log_styling_level_filter_chip_click_region_excludes_keyhint_text_80x30() {
         chip_x < hint_start,
         "chip (col {chip_x}) does not precede the keyhint (col {hint_start}): {row:?}"
     );
+}
+
+// ── MCP server (workbook §B13) ────────────────────────────────────────────────
+
+/// Render the MCP panel over an empty frame with an explicit server state.
+///
+/// The panel takes its values rather than reading `AppState`, which is what
+/// lets a test drive a registry state no external caller could otherwise
+/// build: `McpServerHandle` is minted only by `Engine::start_mcp`, and only
+/// `frust-mcp` itself can register a client in a live registry.
+fn render_mcp_panel(
+    w: u16,
+    h: u16,
+    status: &McpStatus,
+    clients: &[ClientEntry],
+    error: Option<&str>,
+) -> String {
+    let backend = TestBackend::new(w, h);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let theme = Theme::frust_dark_at(ColorDepth::TrueColor);
+    let mut regions = MouseRegions::new();
+    terminal
+        .draw(|frame| {
+            let mut ctx = MouseCtx::new(&mut regions);
+            let area = frame.area();
+            frust_tui::ui::views::mcp::render(
+                frame, area, status, clients, error, &theme, &mut ctx,
+            );
+        })
+        .expect("draw");
+    buffer_to_string(terminal.backend().buffer())
+}
+
+/// A connected client with a fixed wall-clock connect time (the panel prints
+/// it, so a real `SystemTime::now()` would move the snapshot every run).
+fn mcp_client(id: u64, at_secs: u64) -> ClientEntry {
+    ClientEntry {
+        id,
+        connected_at: std::time::UNIX_EPOCH + std::time::Duration::from_secs(at_secs),
+        connected_since: std::time::Instant::now(),
+    }
+}
+
+/// The sidebar ACTIONS row in its default (nothing started) state, reached
+/// through the normal render path, and the panel it describes.
+#[test]
+fn mcp_panel_stopped_100x30() {
+    let state = AppState {
+        mcp_panel_open: true,
+        ..workbench_state()
+    };
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+/// A stopped server that carries a reason is §B13's *failed* state: a refused
+/// bind must never look like a server nobody started.
+#[test]
+fn mcp_panel_bind_failed_100x30() {
+    insta::assert_snapshot!(render_mcp_panel(
+        100,
+        30,
+        &McpStatus::Stopped,
+        &[],
+        Some("binding 127.0.0.1:4848 failed: Address already in use (os error 98)"),
+    ));
+}
+
+#[test]
+fn mcp_panel_starting_100x30() {
+    insta::assert_snapshot!(render_mcp_panel(100, 30, &McpStatus::Starting, &[], None));
+}
+
+/// Listening with clients attached: the registry snapshot, one row each.
+#[test]
+fn mcp_panel_listening_with_clients_100x30() {
+    let clients = [mcp_client(0, 3_723), mcp_client(1, 45_296)];
+    insta::assert_snapshot!(render_mcp_panel(
+        100,
+        30,
+        &McpStatus::Listening {
+            port: 4848,
+            clients: clients.len(),
+        },
+        &clients,
+        None,
+    ));
+}
+
+/// Listening with nobody attached — the honest empty state, not an empty box.
+#[test]
+fn mcp_panel_listening_no_clients_100x30() {
+    insta::assert_snapshot!(render_mcp_panel(
+        100,
+        30,
+        &McpStatus::Listening {
+            port: 4848,
+            clients: 0,
+        },
+        &[],
+        None,
+    ));
+}
+
+/// §B13's mouse parity: the sidebar row toggles the server, and the panel's
+/// own buttons start/stop and close it — each located by hit-testing the
+/// frame the way the event loop does.
+#[test]
+fn mcp_affordances_are_clickable_and_carry_their_messages() {
+    let regions = render_regions(100, 30, &workbench_state());
+    assert_eq!(
+        click_message_for(&regions, RegionId::McpToggle),
+        Some(Message::ToggleMcpServer),
+        "the sidebar ACTIONS MCP row toggles the embedded server"
+    );
+
+    let state = AppState {
+        mcp_panel_open: true,
+        ..workbench_state()
+    };
+    let regions = render_regions(100, 30, &state);
+    assert_eq!(
+        click_message_for(&regions, RegionId::McpPanelToggleServer),
+        Some(Message::ToggleMcpServer)
+    );
+    assert_eq!(
+        click_message_for(&regions, RegionId::McpPanelClose),
+        Some(Message::CloseMcpPanel)
+    );
+    assert_eq!(
+        click_message_for(&regions, RegionId::McpToggle),
+        None,
+        "the workbench beneath an open panel is suppressed"
+    );
+}
+
+/// The click the sidebar row registers is the same transition `M` makes:
+/// start when stopped, and the effect the runner enacts is the only place a
+/// live server handle is ever built.
+#[test]
+fn clicking_the_sidebar_row_requests_a_server_start() {
+    let regions = render_regions(100, 30, &workbench_state());
+    let message = click_message_for(&regions, RegionId::McpToggle).expect("row is on screen");
+
+    let mut state = workbench_state();
+    let out = update(&mut state, message);
+    assert_eq!(out.effect, Some(Effect::StartMcpServer));
+    assert!(state.mcp.is_none());
 }

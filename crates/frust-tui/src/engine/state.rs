@@ -16,6 +16,7 @@ use super::run_config::{DeviceRow, RunConfig};
 use super::session_view::SessionView;
 use super::toast::Toasts;
 use crate::supervise::{McpServerHandle, McpStatus, SessionId, SessionState};
+use frust_mcp::ClientEntry;
 
 /// Bounded-walk depth cap for [`detect`]/[`find_projects`]: `dir` itself is
 /// depth 0, its children depth 1, its grandchildren depth 2 — nothing past
@@ -199,6 +200,16 @@ pub struct AppState {
     /// asynchronous reports (bound port, stopped) against it. Read it through
     /// [`Self::mcp_status`], never directly.
     pub mcp: Option<McpServerHandle>,
+    /// Whether the MCP panel is open (`m`, or the palette) — workbook §B13's
+    /// server state + connected-client list. While `true` it captures input
+    /// and suppresses background mouse regions like the other modals.
+    pub mcp_panel_open: bool,
+    /// Why the embedded MCP server last stopped unexpectedly (a bind failure,
+    /// or a server task that ended with an error), retained so the sidebar
+    /// row and the panel can *show* the reason rather than leaving a failed
+    /// start looking like a silent no-op. Cleared when the next start is
+    /// requested.
+    pub mcp_error: Option<String>,
 }
 
 impl AppState {
@@ -275,6 +286,8 @@ impl AppState {
             help_open: false,
             animation_frame: 0,
             mcp: None,
+            mcp_panel_open: false,
+            mcp_error: None,
         }
     }
 
@@ -287,8 +300,16 @@ impl AppState {
     /// (`SessionState::Running`) does NOT count — only the pre-`Running`
     /// phases the tab spinner covers do, so a long-lived running session
     /// never pins the tick interval on indefinitely.
+    ///
+    /// The open MCP panel counts too, for the same reason and with the same
+    /// bound: its client list is read live off the registry at render time
+    /// (nothing messages the engine when a client connects), so it needs the
+    /// tick to stay current — but only *while the panel is open*, never for
+    /// the whole life of a running server.
     pub fn animating(&self) -> bool {
-        !self.toasts.items.is_empty() || self.sessions.iter().any(|s| is_transient(&s.state))
+        !self.toasts.items.is_empty()
+            || self.mcp_panel_open
+            || self.sessions.iter().any(|s| is_transient(&s.state))
     }
 
     /// What the embedded MCP server is doing — the single read the UI (and
@@ -298,6 +319,21 @@ impl AppState {
         match &self.mcp {
             Some(handle) => handle.status(),
             None => McpStatus::Stopped,
+        }
+    }
+
+    /// Every MCP client connected to the embedded server right now, oldest
+    /// first — the MCP panel's row source (workbook §B13). Empty while no
+    /// server is running, which is the fact rather than a placeholder: a
+    /// stopped server has no registry to read.
+    ///
+    /// Read live off the registry each call (the server's own threads
+    /// register/unregister there), so two calls in one frame can legitimately
+    /// disagree — take one snapshot per render, as the panel does.
+    pub fn mcp_clients(&self) -> Vec<ClientEntry> {
+        match &self.mcp {
+            Some(handle) => handle.clients(),
+            None => Vec::new(),
         }
     }
 
@@ -416,6 +452,8 @@ impl Default for AppState {
             help_open: false,
             animation_frame: 0,
             mcp: None,
+            mcp_panel_open: false,
+            mcp_error: None,
         }
     }
 }

@@ -33,7 +33,7 @@ use std::time::Duration;
 
 use frust_drive::process::{FakeProcessRunner, ProcessRunner};
 use frust_mcp::{ClientRegistry, SharedBackend};
-use frust_tui::engine::{AppState, Engine, Message, Screen};
+use frust_tui::engine::{AppState, Effect, Engine, Message, Screen};
 use frust_tui::supervise::{
     McpServeCtx, McpSessionRecords, McpStatus, SessionState, Supervisor, TuiSessionBackend,
     mcp_backend::MAX_ADHOC_SESSION_ID, serve_command,
@@ -512,6 +512,49 @@ async fn start_stop_start_releases_the_port_and_tracks_clients() {
     assert_ne!(second, 0);
     engine.stop_mcp();
     pump_until_stopped(&mut engine, &mut rx).await;
+}
+
+/// The workbook §B13 toggle, end to end: the pure transition asks for a
+/// start, the runner's enactment binds a real listener a real client reaches,
+/// and the *same* message takes it back down.
+///
+/// The enactment here binds an OS-assigned port rather than
+/// `DEFAULT_MCP_PORT` (what `crate::runner` passes), so this test can never
+/// collide with a workbench — or another test — already holding the default.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_toggle_starts_and_stops_a_real_server() {
+    let mut engine = Engine::new(AppState::default());
+    let mut rx = engine.take_receiver();
+    let backend: SharedBackend = Arc::new(TuiSessionBackend::new(
+        engine.sender(),
+        Arc::new(FakeProcessRunner::new()),
+    ));
+
+    let out = engine.handle(Message::ToggleMcpServer);
+    assert_eq!(out.effect, Some(Effect::StartMcpServer));
+    assert_eq!(
+        engine.mcp_status(),
+        McpStatus::Stopped,
+        "the pure transition starts nothing itself"
+    );
+
+    assert!(engine.start_mcp(Arc::clone(&backend), 0));
+    let port = pump_until_listening(&mut engine, &mut rx).await;
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let client = McpClient::connect(addr).await;
+    wait_for_clients(&engine, 1).await;
+    client.disconnect().await;
+    wait_for_clients(&engine, 0).await;
+
+    let out = engine.handle(Message::ToggleMcpServer);
+    assert_eq!(out.effect, Some(Effect::StopMcpServer));
+    assert!(engine.stop_mcp());
+    pump_until_stopped(&mut engine, &mut rx).await;
+    assert_eq!(engine.mcp_status(), McpStatus::Stopped);
+    assert!(
+        TcpStream::connect_timeout(&addr, DEADLINE).is_err(),
+        "the toggle actually released the listener"
+    );
 }
 
 /// Drains the engine channel (the loop's job) until the server reports the

@@ -24,6 +24,7 @@ use frust_drive::doctor::{self, DoctorCtx, RealEnv};
 use frust_drive::ios_build::{self, IosArtifact};
 use frust_drive::process::{ProcessRunner, RealProcessRunner};
 use frust_drive::scaffold::{self, TemplateContext};
+use frust_mcp::SharedBackend;
 use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::UnboundedSender;
@@ -36,7 +37,8 @@ use crate::engine::{
 use crate::supervise::mcp_backend::MAX_ADHOC_SESSION_ID;
 use crate::supervise::{
     DeviceTarget, DevtoolsBridge, McpServeCtx, McpSessionRecords, MetricsBridge, SessionEvent,
-    SessionEventKind, SessionId, SessionSpec, SessionState, Supervisor, Teardown, serve_command,
+    SessionEventKind, SessionId, SessionSpec, SessionState, Supervisor, Teardown,
+    TuiSessionBackend, serve_command,
 };
 use crate::ui::mouse::MouseRegions;
 use crate::ui::theme::Theme;
@@ -177,12 +179,15 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                             needs_redraw |= out.redraw;
                             apply_effect(
                                 out.effect,
-                                &mut supervisor,
-                                &mut devtools,
-                                &mut metrics,
-                                &msg_tx,
-                                &mut next_adhoc_id,
-                                &mut mcp_records,
+                                &mut EffectCtx {
+                                    engine: &mut engine,
+                                    supervisor: &mut supervisor,
+                                    devtools: &mut devtools,
+                                    metrics: &mut metrics,
+                                    tx: &msg_tx,
+                                    next_adhoc_id: &mut next_adhoc_id,
+                                    records: &mut mcp_records,
+                                },
                             );
                         }
                     }
@@ -211,12 +216,15 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                     needs_redraw |= out.redraw;
                     apply_effect(
                         out.effect,
-                        &mut supervisor,
-                        &mut devtools,
-                        &mut metrics,
-                        &msg_tx,
-                        &mut next_adhoc_id,
-                        &mut mcp_records,
+                        &mut EffectCtx {
+                            engine: &mut engine,
+                            supervisor: &mut supervisor,
+                            devtools: &mut devtools,
+                            metrics: &mut metrics,
+                            tx: &msg_tx,
+                            next_adhoc_id: &mut next_adhoc_id,
+                            records: &mut mcp_records,
+                        },
                     );
                 }
             }
@@ -225,12 +233,15 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                 needs_redraw |= out.redraw;
                 apply_effect(
                     out.effect,
-                    &mut supervisor,
-                    &mut devtools,
-                    &mut metrics,
-                    &msg_tx,
-                    &mut next_adhoc_id,
-                    &mut mcp_records,
+                    &mut EffectCtx {
+                        engine: &mut engine,
+                        supervisor: &mut supervisor,
+                        devtools: &mut devtools,
+                        metrics: &mut metrics,
+                        tx: &msg_tx,
+                        next_adhoc_id: &mut next_adhoc_id,
+                        records: &mut mcp_records,
+                    },
                 );
             }
             _ = tick.tick() => {
@@ -243,12 +254,15 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                     needs_redraw |= out.redraw;
                     apply_effect(
                         out.effect,
-                        &mut supervisor,
-                        &mut devtools,
-                        &mut metrics,
-                        &msg_tx,
-                        &mut next_adhoc_id,
-                        &mut mcp_records,
+                        &mut EffectCtx {
+                            engine: &mut engine,
+                            supervisor: &mut supervisor,
+                            devtools: &mut devtools,
+                            metrics: &mut metrics,
+                            tx: &msg_tx,
+                            next_adhoc_id: &mut next_adhoc_id,
+                            records: &mut mcp_records,
+                        },
                     );
                 }
             }
@@ -263,19 +277,43 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     Ok(())
 }
 
+/// Everything enacting one [`Effect`] needs from [`run_loop`]'s scope —
+/// bundled the same way [`McpServeCtx`] bundles the MCP-command path's
+/// handles, and constructed fresh at each call site so the borrows live no
+/// longer than the enactment itself.
+struct EffectCtx<'a> {
+    /// The engine — needed only by the two MCP-server effects, which own a
+    /// live server handle rather than a value (see
+    /// [`crate::engine::Engine::start_mcp`]).
+    engine: &'a mut Engine,
+    /// The session supervisor (launch/stop).
+    supervisor: &'a mut Supervisor,
+    /// The per-session DevTools connection threads.
+    devtools: &'a mut DevtoolsBridge,
+    /// The per-session metrics sampler threads.
+    metrics: &'a mut MetricsBridge,
+    /// The engine channel every off-thread task reports back through.
+    tx: &'a UnboundedSender<Message>,
+    /// The ad-hoc session-id counter (see [`run_loop`]).
+    next_adhoc_id: &'a mut u64,
+    /// The MCP launch records a started session is recorded in.
+    records: &'a mut McpSessionRecords,
+}
+
 /// Enact an engine-requested [`Effect`] — the runner owns the side effects the
 /// pure engine can't perform: killing a session through the supervisor, writing
 /// the system clipboard, discovering devices off-thread, and launching
 /// sessions.
-fn apply_effect(
-    effect: Option<Effect>,
-    supervisor: &mut Supervisor,
-    devtools: &mut DevtoolsBridge,
-    metrics: &mut MetricsBridge,
-    tx: &UnboundedSender<Message>,
-    next_adhoc_id: &mut u64,
-    records: &mut McpSessionRecords,
-) {
+fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
+    let EffectCtx {
+        engine,
+        supervisor,
+        devtools,
+        metrics,
+        tx,
+        next_adhoc_id,
+        records,
+    } = ctx;
     match effect {
         Some(Effect::StopSession(id)) => supervisor.stop(id),
         Some(Effect::Copy(text)) => copy_to_clipboard(&text),
@@ -336,16 +374,34 @@ fn apply_effect(
         // hazard, since its `adb` probes are unbounded (see `spawn_teardown`).
         Some(Effect::MetricsStart(target)) => spawn_teardown(metrics.start(target, tx.clone())),
         Some(Effect::MetricsStop(session)) => spawn_teardown(metrics.stop(session)),
+        // The embedded MCP server (workbook §B13). Only the runner can start
+        // one: the backend it serves is built over *this* loop's supervisor,
+        // and the server itself is spawned on the runtime this loop runs on.
+        // Everything the server then reports (its bound port, a bind failure)
+        // travels back as an ordinary `Message`.
+        Some(Effect::StartMcpServer) => {
+            let backend: SharedBackend = Arc::new(TuiSessionBackend::new(
+                tx.clone(),
+                Arc::new(RealProcessRunner),
+            ));
+            engine.start_mcp(backend, crate::engine::DEFAULT_MCP_PORT);
+        }
+        Some(Effect::StopMcpServer) => {
+            engine.stop_mcp();
+        }
         Some(Effect::Batch(effects)) => {
             for effect in effects {
                 apply_effect(
                     Some(effect),
-                    supervisor,
-                    devtools,
-                    metrics,
-                    tx,
-                    next_adhoc_id,
-                    records,
+                    &mut EffectCtx {
+                        engine,
+                        supervisor,
+                        devtools,
+                        metrics,
+                        tx,
+                        next_adhoc_id,
+                        records,
+                    },
                 );
             }
         }
@@ -1023,6 +1079,7 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
             // Modal exclusivity — see `crate::ui::render`'s
             // workbench-modal dispatch, which shares this same priority order.
             ActiveModal::DoctorPanel => translate_doctor_key(code),
+            ActiveModal::McpPanel => translate_mcp_key(code),
             ActiveModal::BuildLauncher(launcher) => translate_build_key(code, mods, launcher),
             ActiveModal::CleanConfirm(_) => translate_clean_confirm_key(code),
             ActiveModal::HelpOverlay => translate_help_key(code),
@@ -1110,6 +1167,15 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         // sidebar "Add plugin" action / the palette). Gated on an open project
         // in `update` (a warn toast surfaces the reason on the welcome screen).
         KeyCode::Char('a') => vec![Message::OpenAddPlugin],
+
+        // `m` opens the MCP panel and `M` starts/stops the embedded MCP
+        // server, from either screen (workbook §B13) — the server hosts the
+        // *workbench*, not one project, so neither is workbench-gated. Mouse
+        // parity: the sidebar ACTIONS "MCP" row toggles it, the palette's
+        // "MCP server…" row opens the panel. `Alt+m` (mouse capture) is
+        // matched far above, so the two never collide.
+        KeyCode::Char('m') => vec![Message::OpenMcpPanel],
+        KeyCode::Char('M') => vec![Message::ToggleMcpServer],
 
         // `:` opens the command palette from either screen (the `Ctrl+P`
         // shorthand above).
@@ -1395,6 +1461,18 @@ fn translate_doctor_key(code: KeyCode) -> Vec<Message> {
     match code {
         KeyCode::Esc => vec![Message::CloseDoctorPanel],
         KeyCode::Char('r') => vec![Message::RunDoctor],
+        _ => vec![],
+    }
+}
+
+/// Translate one key press while the MCP panel is open (workbook §B13):
+/// `s` starts or stops the embedded server without leaving the panel, and
+/// `Esc`/`m` close it — closing the panel is never a stop. Mouse parity: the
+/// panel's own Start/Stop and Close buttons.
+fn translate_mcp_key(code: KeyCode) -> Vec<Message> {
+    match code {
+        KeyCode::Esc | KeyCode::Char('m') => vec![Message::CloseMcpPanel],
+        KeyCode::Char('s') => vec![Message::ToggleMcpServer],
         _ => vec![],
     }
 }
@@ -2393,6 +2471,69 @@ mod tests {
             translate_event(key(KeyCode::Char('d')), &workbench, &regions),
             vec![Message::OpenDoctorPanel],
             "the doctor panel keeps `d` in the context DevTools cannot claim"
+        );
+    }
+
+    // ── Embedded MCP server (workbook §B13) ──────────────────────────────
+
+    #[test]
+    fn m_opens_the_mcp_panel_and_shift_m_toggles_the_server() {
+        let regions = MouseRegions::new();
+        for state in [
+            AppState::default(), // welcome
+            AppState {
+                screen: Screen::Workbench,
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                translate_event(key(KeyCode::Char('m')), &state, &regions),
+                vec![Message::OpenMcpPanel]
+            );
+            assert_eq!(
+                translate_event(key(KeyCode::Char('M')), &state, &regions),
+                vec![Message::ToggleMcpServer]
+            );
+        }
+    }
+
+    /// `Alt+m` is matched before any plain letter, so the capture toggle and
+    /// the MCP keys cannot collide (§B13's no-overload claim).
+    #[test]
+    fn alt_m_still_toggles_mouse_capture() {
+        let regions = MouseRegions::new();
+        let state = AppState::default();
+        let ev = Event::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT));
+        assert_eq!(
+            translate_event(ev, &state, &regions),
+            vec![Message::ToggleMouseCapture]
+        );
+    }
+
+    #[test]
+    fn the_open_mcp_panel_owns_s_and_closes_on_esc_or_m() {
+        let regions = MouseRegions::new();
+        let state = AppState {
+            screen: Screen::Workbench,
+            mcp_panel_open: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            translate_event(key(KeyCode::Char('s')), &state, &regions),
+            vec![Message::ToggleMcpServer],
+            "`s` starts/stops without leaving the panel"
+        );
+        for code in [KeyCode::Esc, KeyCode::Char('m')] {
+            assert_eq!(
+                translate_event(key(code), &state, &regions),
+                vec![Message::CloseMcpPanel]
+            );
+        }
+        // The workbench's own `s` (sidebar overlay) is out of scope while the
+        // panel is up — the modal captures the namespace.
+        assert_eq!(
+            translate_event(key(KeyCode::Char('b')), &state, &regions),
+            Vec::<Message>::new()
         );
     }
 }

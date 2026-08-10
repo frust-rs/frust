@@ -154,6 +154,16 @@ pub enum Effect {
     /// `crate::supervise::metrics_bridge`'s retention note (mirrors
     /// [`Effect::DevtoolsDisconnect`]'s session-end-only teardown).
     MetricsStop(SessionId),
+    /// Start the embedded MCP server (workbook §B13) — the runner builds the
+    /// [`crate::supervise::TuiSessionBackend`] over its own supervisor and
+    /// calls [`super::Engine::start_mcp`], because the server handle is a
+    /// live resource the pure core cannot construct. Everything the server
+    /// then reports about itself (the bound port, a bind failure) arrives
+    /// back as an ordinary [`Message`].
+    StartMcpServer,
+    /// Stop the embedded MCP server — the runner's
+    /// [`super::Engine::stop_mcp`]. A no-op when none is running.
+    StopMcpServer,
     /// Enact every effect in order — the escape hatch for a transition that
     /// must kick off more than one independent side effect at once (opening
     /// DevTools can both (re)open its frame-stats connection *and* start
@@ -266,7 +276,11 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                 .sessions
                 .iter()
                 .any(|s| super::state::is_transient(&s.state));
-            Outcome::dirty(toast_expired || session_animating)
+            // The open MCP panel repaints on every tick: its client list is
+            // read live off the registry at render time, so nothing else
+            // would ever dirty the frame when a client connects or drops
+            // (see `AppState::animating`).
+            Outcome::dirty(toast_expired || session_animating || state.mcp_panel_open)
         }
         Message::Resize(_, _) => Outcome::redraw(),
         Message::HoverChanged(next) => {
@@ -1218,12 +1232,52 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             let was_running = state.mcp.take().is_some();
             match error {
                 Some(error) => {
+                    // Two surfaces, deliberately: the toast catches the eye of
+                    // someone looking elsewhere, and `mcp_error` keeps the
+                    // reason on the sidebar row / panel afterwards, so a
+                    // failed start never reads as a silent no-op (§B13).
                     state
                         .toasts
                         .push(ToastKind::Error, format!("MCP server stopped: {error}"));
+                    state.mcp_error = Some(error);
                     Outcome::redraw()
                 }
                 None => Outcome::dirty(was_running),
+            }
+        }
+        Message::ToggleMcpServer => {
+            if state.mcp.is_some() {
+                // The handle is dropped by the runner's `stop_mcp`, not here:
+                // cancelling a live server is exactly the impure work the
+                // pure core pushes out as an effect.
+                Outcome {
+                    redraw: true,
+                    effect: Some(Effect::StopMcpServer),
+                }
+            } else {
+                // A retry clears the previous failure first, so the panel
+                // shows "starting…" rather than the stale reason beside it.
+                state.mcp_error = None;
+                Outcome {
+                    redraw: true,
+                    effect: Some(Effect::StartMcpServer),
+                }
+            }
+        }
+        Message::OpenMcpPanel => {
+            if state.mcp_panel_open {
+                Outcome::idle()
+            } else {
+                state.mcp_panel_open = true;
+                Outcome::redraw()
+            }
+        }
+        Message::CloseMcpPanel => {
+            if state.mcp_panel_open {
+                state.mcp_panel_open = false;
+                Outcome::redraw()
+            } else {
+                Outcome::idle()
             }
         }
     }
@@ -4453,6 +4507,85 @@ mod tests {
         assert_eq!(st.mcp_status(), crate::supervise::McpStatus::Stopped);
         assert_eq!(st.toasts.items.len(), 1);
         assert!(st.toasts.items[0].text.contains("address already in use"));
+        assert_eq!(
+            st.mcp_error.as_deref(),
+            Some("address already in use"),
+            "the reason is retained for the sidebar row / panel, not just toasted"
+        );
+    }
+
+    /// The §B13 toggle: one message, two directions, each pushed out as the
+    /// effect only the runner can enact.
+    #[test]
+    fn the_toggle_starts_a_stopped_server_and_stops_a_running_one() {
+        let mut st = welcome();
+        let out = update(&mut st, Message::ToggleMcpServer);
+        assert!(out.redraw);
+        assert_eq!(out.effect, Some(Effect::StartMcpServer));
+        assert!(
+            st.mcp.is_none(),
+            "the pure core never builds the live server handle itself"
+        );
+
+        st.mcp = Some(mcp_handle());
+        let out = update(&mut st, Message::ToggleMcpServer);
+        assert!(out.redraw);
+        assert_eq!(out.effect, Some(Effect::StopMcpServer));
+    }
+
+    /// A failed start stays visible until the next attempt — and the next
+    /// attempt clears it, so a retry never renders "starting…" beside the
+    /// previous run's reason.
+    #[test]
+    fn requesting_a_start_clears_the_previous_failure_reason() {
+        let mut st = welcome();
+        st.mcp = Some(mcp_handle());
+        update(&mut st, Message::McpStopped(Some("boom".to_string())));
+        assert_eq!(st.mcp_error.as_deref(), Some("boom"));
+
+        update(&mut st, Message::ToggleMcpServer);
+        assert_eq!(st.mcp_error, None);
+    }
+
+    #[test]
+    fn the_mcp_panel_opens_and_closes_idempotently() {
+        let mut st = welcome();
+        assert!(update(&mut st, Message::OpenMcpPanel).redraw);
+        assert!(st.mcp_panel_open);
+        assert!(matches!(
+            st.active_modal(),
+            Some(super::super::ActiveModal::McpPanel)
+        ));
+        assert!(!update(&mut st, Message::OpenMcpPanel).redraw);
+
+        assert!(update(&mut st, Message::CloseMcpPanel).redraw);
+        assert!(!st.mcp_panel_open);
+        assert!(!update(&mut st, Message::CloseMcpPanel).redraw);
+    }
+
+    /// Closing the panel is never a stop: the server outlives the view of it.
+    #[test]
+    fn closing_the_panel_leaves_the_server_running() {
+        let mut st = welcome();
+        st.mcp = Some(mcp_handle());
+        st.mcp_panel_open = true;
+        let out = update(&mut st, Message::CloseMcpPanel);
+        assert!(out.effect.is_none());
+        assert_eq!(st.mcp_status(), crate::supervise::McpStatus::Starting);
+    }
+
+    /// The open panel reads its client list live off the registry, so the
+    /// tick is what keeps it current — the one thing that dirties a frame
+    /// with no session running and no toast alive.
+    #[test]
+    fn the_open_mcp_panel_keeps_the_frame_ticking() {
+        let mut st = welcome();
+        assert!(!st.animating());
+        assert!(!update(&mut st, Message::Tick).redraw);
+
+        st.mcp_panel_open = true;
+        assert!(st.animating());
+        assert!(update(&mut st, Message::Tick).redraw);
     }
 
     /// An MCP command reaching the pure core (nothing is serving it) drops

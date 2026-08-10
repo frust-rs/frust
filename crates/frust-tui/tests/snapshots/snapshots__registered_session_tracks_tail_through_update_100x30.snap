@@ -21,7 +21,7 @@ expression: "redact_clock(&render_to_string(100, 30, &state))"
    Doctor · d            │   --:--:-- [app]    line 88                                              
    Build · b             │   --:--:-- [app]    line 89                                              
    Clean · c             │   --:--:-- [app]    line 90                                              
-                         │   --:--:-- [app]    line 91                                              
+   MCP off · M           │   --:--:-- [app]    line 91                                              
                          │   --:--:-- [app]    line 92                                              
                          │   --:--:-- [app]    line 93                                              
                          │   --:--:-- [app]    line 94                                              

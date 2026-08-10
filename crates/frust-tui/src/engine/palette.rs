@@ -162,6 +162,12 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             "no projects detected",
         ),
         always("Refresh devices", "R", Message::RefreshDevices),
+        // Workbook §B13. Both are always enabled: the embedded server serves
+        // *this* workbench whether or not a project is open (a `run_app` with
+        // none open reports that itself), and the panel is readable in every
+        // state, including "not running".
+        always("MCP server…", "m", Message::OpenMcpPanel),
+        always("Start/stop MCP server", "M", Message::ToggleMcpServer),
         always("Toggle mouse capture", "⌥m", Message::ToggleMouseCapture),
         gated(
             "Toggle follow-tail",

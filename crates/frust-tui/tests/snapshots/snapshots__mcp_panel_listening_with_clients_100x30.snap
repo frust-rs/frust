@@ -1,0 +1,26 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: "render_mcp_panel(100, 30, &McpStatus::Listening\n{ port: 4848, clients: clients.len(), }, &clients, None,)"
+---
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                     ╭ MCP server ────────────────────────────────────────────╮                     
+                     │                                                        │▓▓                   
+                     │  ● listening on 127.0.0.1:4848                         │▓▓                   
+                     │  an agent configured for `frust mcp` reaches this      │▓▓                   
+                     │  workbench's own sessions at the same address          │▓▓                   
+                     │                                                        │▓▓                   
+                     │  Clients (2)                                           │▓▓                   
+                     │    #0  connected 01:02:03                              │▓▓                   
+                     │    #1  connected 12:34:56                              │▓▓                   
+                     │                                                        │▓▓                   
+                     │   Stop     Close                                       │▓▓                   
+                     │  s stop · Esc close                                    │▓▓                   
+                     ╰────────────────────────────────────────────────────────╯▓▓                   
+                       ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓

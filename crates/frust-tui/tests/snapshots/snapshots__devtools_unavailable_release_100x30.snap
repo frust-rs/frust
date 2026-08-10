@@ -21,7 +21,7 @@ expression: "render_to_string(100, 30, &state)"
    Doctor · d            │    with `frust run` (debug) or `--profile` to inspect this               
    Build · b             │    session                                                               
    Clean · c             │                                                                          
-                         │                                                                          
+   MCP off · M           │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          

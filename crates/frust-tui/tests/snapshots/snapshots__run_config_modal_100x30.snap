@@ -22,7 +22,7 @@ expression: "render_to_string(100, 30, &run_config_modal_state())"
    Doctor · d      │  Defines  FRUST_TRACE=1█                                   │▓▓                 
    Build · b       │                                                            │▓▓                 
    Clean · c       │   Launch (1)     Cancel                                    │▓▓                 
-                   │  Space toggle · ←/→ mode · Tab next · Enter launch · Esc   │▓▓                 
+   MCP off · M     │  Space toggle · ←/→ mode · Tab next · Enter launch · Esc   │▓▓                 
                    ╰────────────────────────────────────────────────────────────╯▓▓                 
                      ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                 
                          │                                                                          

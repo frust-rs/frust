@@ -252,7 +252,15 @@ pub struct LineMeta {
 /// only a plain clock read is needed, never a calendar date or timezone
 /// conversion.
 pub fn now_hms() -> String {
-    let secs = SystemTime::now()
+    hms_at(SystemTime::now())
+}
+
+/// [`now_hms`] for an arbitrary instant — the same `HH:MM:SS` (UTC) form, so
+/// every wall-clock time the workbench shows (log lines, the MCP panel's
+/// client connect times) reads the same way. A pre-epoch `at` (only reachable
+/// from a clock stepped backwards) formats as `00:00:00` rather than failing.
+pub fn hms_at(at: SystemTime) -> String {
+    let secs = at
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);

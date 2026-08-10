@@ -1,6 +1,5 @@
 ---
 source: crates/frust-tui/tests/snapshots.rs
-assertion_line: 1117
 expression: "render_to_string(100, 30, &state)"
 ---
 ⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
@@ -22,7 +21,7 @@ expression: "render_to_string(100, 30, &state)"
    Doctor · d            │                                                                          
    Build · b             │                                                                          
    Clean · c             │                                                                          
-                         │                                                                          
+   MCP off · M           │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          

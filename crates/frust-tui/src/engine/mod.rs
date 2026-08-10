@@ -43,7 +43,7 @@ pub use devtools::{
 pub use doctor::{DoctorCheck, DoctorState};
 pub use logstyle::{
     LEVEL_FILTER_SEGMENTS, LevelFilter, LineMeta, LineRole, LogLevel, LogSource, PanicBlock,
-    SOURCE_TAG_WIDTH, classify_level, classify_source,
+    SOURCE_TAG_WIDTH, classify_level, classify_source, hms_at,
 };
 pub use message::{ContextTarget, DragKind, Message, RegionId};
 pub use modal::ActiveModal;
