@@ -1384,17 +1384,24 @@ round.
 
 **Observed**: `frust-dap`'s `--port` mode binds `127.0.0.1` only and has no login, token, or
 capability check at the DAP protocol layer — any local process that can reach the port can drive a
-launch/stop session through it.
+launch/stop session through it. It **cannot**, however, choose the build directory: a TCP client's
+`launch.projectRoot` is ignored, and every TCP session launches from the server process's own
+working directory. (Stdio *does* honor `projectRoot`, since the client spawned the process.) So the
+reach is driving sessions against the server's own project, not running `cargo` — and therefore
+arbitrary `build.rs`/proc-macro/`.cargo` runner code — from an attacker-chosen directory.
 
 **Applies to**: every `frust-dap` TCP session; stdio mode (the default) has no equivalent exposure,
 since it inherits the launching process's own pipes.
 
 **Why accepted**: the same v1 stance as `frust-mcp`'s (see `mcp-server-unauthenticated-v1` above),
 matched to the same threat model — a loopback developer tool not reachable off-host. Server-side
-auth is a named follow-up, not a v1 requirement, for either server.
+auth is a named follow-up, not a v1 requirement, for either server. The `projectRoot` confinement
+above is not part of that follow-up — it ships now, so an unauthenticated TCP client cannot escalate
+a session into arbitrary local code execution from a directory of its choosing.
 
 **Evidence**: `crates/frust-dap/src/server/mod.rs`'s `BIND_ADDR` (hard-coded `127.0.0.1`, no auth
-handshake in `serve_tcp`); frust-dap feature plan.
+handshake in `serve_tcp`); `crates/frust-dap/src/adapter/resolve.rs`'s `resolve_project_root`
+(ignores a client `projectRoot` under `TransportMode::Tcp`); frust-dap feature plan.
 
 ---
 

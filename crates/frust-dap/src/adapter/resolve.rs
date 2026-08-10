@@ -9,7 +9,7 @@
 //! substring of id or name) and the physical-iOS refusal are the parts that
 //! must not drift.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use frust_drive::build_info::BuildMode;
@@ -17,24 +17,92 @@ use frust_drive::devices::{Device, Kind, Platform};
 use frust_mcp::SessionEngine;
 use frust_mcp::engine::RunTarget;
 
+use crate::transport::TransportMode;
+
 /// The one `device` value that names a host preview rather than a device.
 const DESKTOP: &str = "desktop";
 
-/// The project directory a launch builds from.
+/// The project root a launch resolved to, plus the note to surface when a
+/// client-supplied root was refused.
+pub(crate) struct ResolvedRoot {
+    /// The directory the session will build from.
+    pub(crate) root: PathBuf,
+    /// Present only when a TCP client sent a `projectRoot` that was ignored for
+    /// security — the `console` line `launch` emits so the deviation is visible
+    /// rather than silent.
+    pub(crate) ignored_note: Option<String>,
+}
+
+/// The project directory a launch builds from — with the client's own
+/// `projectRoot` honored only on the stdio transport.
 ///
 /// `projectRoot` is optional in a `launch.json`, and the process working
 /// directory is the only other thing the adapter can honestly default to: the
 /// CLI is started by the editor in the workspace folder.
-pub(crate) fn resolve_project_root(requested: Option<&str>) -> Result<PathBuf, String> {
-    match requested.map(str::trim).filter(|root| !root.is_empty()) {
-        Some(root) => Ok(PathBuf::from(root)),
-        None => std::env::current_dir().map_err(|err| {
-            format!(
-                "'projectRoot' was not set and this process's working directory is unreadable \
-                 ({err}); set 'projectRoot' in the launch configuration."
-            )
-        }),
+///
+/// On **stdio** the client spawned this process, so its `projectRoot` is as
+/// trustworthy as its own working directory and is honored verbatim. On **TCP**
+/// the listener is unauthenticated loopback (see `docs/LIMITATIONS.md`
+/// `dap-tcp-unauthenticated-v1`), so a client-chosen build directory would be
+/// arbitrary local code execution — `cargo` runs `build.rs`/proc-macros and a
+/// `.cargo/config.toml [target.*.runner]` from that directory. There the client
+/// `projectRoot` is ignored entirely and the session launches from the server's
+/// own working directory (the same fallback the unset case already uses).
+pub(crate) fn resolve_project_root(
+    requested: Option<&str>,
+    transport: TransportMode,
+) -> Result<ResolvedRoot, String> {
+    let requested = requested.map(str::trim).filter(|root| !root.is_empty());
+    match transport {
+        TransportMode::Stdio => match requested {
+            Some(root) => Ok(ResolvedRoot {
+                root: PathBuf::from(root),
+                ignored_note: None,
+            }),
+            None => current_dir_when_unset().map(|root| ResolvedRoot {
+                root,
+                ignored_note: None,
+            }),
+        },
+        TransportMode::Tcp { .. } => {
+            let cwd = current_dir_on_tcp()?;
+            let ignored_note = requested.filter(|root| Path::new(root) != cwd).map(|root| {
+                format!(
+                    "Ignoring the launch configuration's 'projectRoot' ({root}): on the TCP \
+                         transport frust-dap launches only from the server's working directory \
+                         ({}), because an unauthenticated client choosing the build directory \
+                         would run arbitrary local code. Use the stdio transport to build from a \
+                         client-supplied root.\n",
+                    cwd.display()
+                )
+            });
+            Ok(ResolvedRoot {
+                root: cwd,
+                ignored_note,
+            })
+        }
     }
+}
+
+/// The working directory to fall back to when stdio sends no `projectRoot`.
+fn current_dir_when_unset() -> Result<PathBuf, String> {
+    std::env::current_dir().map_err(|err| {
+        format!(
+            "'projectRoot' was not set and this process's working directory is unreadable \
+             ({err}); set 'projectRoot' in the launch configuration."
+        )
+    })
+}
+
+/// The working directory a TCP session always launches from — `projectRoot` is
+/// ignored on this transport, so there is nothing for the client to set.
+fn current_dir_on_tcp() -> Result<PathBuf, String> {
+    std::env::current_dir().map_err(|err| {
+        format!(
+            "the frust-dap server's working directory is unreadable ({err}); a TCP session \
+             launches only from it, and 'projectRoot' is ignored on this transport."
+        )
+    })
 }
 
 /// Maps the `mode` field onto a [`BuildMode`], defaulting to `debug`.
@@ -198,16 +266,55 @@ mod tests {
     }
 
     #[test]
-    fn an_explicit_project_root_wins_and_a_blank_one_does_not() {
-        assert_eq!(
-            resolve_project_root(Some("/home/me/app")),
-            Ok(PathBuf::from("/home/me/app"))
-        );
+    fn stdio_honors_an_explicit_project_root_and_a_blank_one_falls_back() {
+        let resolved = resolve_project_root(Some("/home/me/app"), TransportMode::Stdio)
+            .expect("an explicit root resolves");
+        assert_eq!(resolved.root, PathBuf::from("/home/me/app"));
+        assert!(resolved.ignored_note.is_none(), "stdio honors the root");
+
         // A blank string is what a half-filled launch.json produces; it must
         // fall back to the working directory, not launch at "".
         let cwd = std::env::current_dir().expect("a readable working directory");
-        assert_eq!(resolve_project_root(Some("   ")), Ok(cwd.clone()));
-        assert_eq!(resolve_project_root(None), Ok(cwd));
+        assert_eq!(
+            resolve_project_root(Some("   "), TransportMode::Stdio)
+                .expect("blank falls back")
+                .root,
+            cwd
+        );
+        assert_eq!(
+            resolve_project_root(None, TransportMode::Stdio)
+                .expect("unset falls back")
+                .root,
+            cwd
+        );
+    }
+
+    /// The security fix: on the unauthenticated TCP transport a client-supplied
+    /// `projectRoot` is ignored entirely — the session launches from the
+    /// server's own working directory — and the deviation is surfaced as a note
+    /// rather than dropped silently.
+    #[test]
+    fn tcp_ignores_a_client_project_root_and_notes_it() {
+        let cwd = std::env::current_dir().expect("a readable working directory");
+        let transport = TransportMode::Tcp { port: 4849 };
+
+        let resolved = resolve_project_root(Some("/home/attacker/evil"), transport)
+            .expect("a TCP launch still resolves");
+        assert_eq!(
+            resolved.root, cwd,
+            "TCP must launch from the server's cwd, never the client's root"
+        );
+        let note = resolved
+            .ignored_note
+            .expect("an ignored client root is surfaced");
+        assert!(note.contains("/home/attacker/evil"), "{note}");
+        assert!(note.contains("Ignoring"), "{note}");
+
+        // A TCP client that sends nothing (or the server's own cwd) gets the
+        // same root with no note — there was nothing to ignore.
+        let unset = resolve_project_root(None, transport).expect("unset resolves");
+        assert_eq!(unset.root, cwd);
+        assert!(unset.ignored_note.is_none(), "nothing to note when unset");
     }
 
     #[test]

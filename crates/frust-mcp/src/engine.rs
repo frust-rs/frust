@@ -207,7 +207,12 @@ impl SessionEngine {
     /// [`project_root`](Self::project_root) — there is no per-call override
     /// (a client-suppliable build directory would let any caller run
     /// `cargo`, and therefore arbitrary `build.rs`/proc-macro code, anywhere
-    /// readable).
+    /// readable). `frust-dap` builds a *fresh* engine per `launch` from the
+    /// request's `projectRoot`, so it confines that client-chosen root to its
+    /// stdio transport (where the client spawned the process); its
+    /// unauthenticated TCP transport ignores the client root and launches from
+    /// the server's cwd (see `docs/LIMITATIONS.md`
+    /// `dap-tcp-unauthenticated-v1`).
     ///
     /// After [`shutdown`](Self::shutdown) it launches nothing: the returned
     /// session is already [`SessionState::Failed`], carrying the refusal

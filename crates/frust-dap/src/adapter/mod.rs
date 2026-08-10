@@ -41,9 +41,10 @@ use frust_mcp::SessionEngine;
 use frust_mcp::engine::{SessionId, SessionSnapshot, SessionState};
 
 use self::pump::Pumps;
-use self::resolve::{mode_name, parse_mode, resolve_project_root, resolve_target};
+use self::resolve::{ResolvedRoot, mode_name, parse_mode, resolve_project_root, resolve_target};
 use crate::protocol::types::{Capabilities, LaunchArguments, Thread, ThreadsResponseBody};
 use crate::server::{AdapterResponse, DapAdapter, EventSender};
+use crate::transport::TransportMode;
 
 /// The process runner every session shells out through — the seam a test
 /// injects `frust_drive::process::FakeProcessRunner` at, and the one
@@ -93,6 +94,13 @@ struct Launched {
 pub struct OrchestrationAdapter {
     events: EventSender,
     runner: Runner,
+    /// The transport this connection is served over. It gates whether a
+    /// client-supplied `projectRoot` is honored: stdio (the client spawned this
+    /// process) honors it; the unauthenticated loopback TCP transport ignores
+    /// it and launches from the server's own cwd — see
+    /// [`resolve_project_root`] and `docs/LIMITATIONS.md`
+    /// `dap-tcp-unauthenticated-v1`.
+    transport: TransportMode,
     /// A caller-supplied engine, for tests that must observe the engine the
     /// adapter drives. `None` in production: the engine is built at launch
     /// time, from the launch request's own project root.
@@ -106,14 +114,16 @@ pub struct OrchestrationAdapter {
 }
 
 impl OrchestrationAdapter {
-    /// A fresh adapter for one DAP connection.
+    /// A fresh adapter for one DAP connection served over `transport`.
     ///
     /// No engine is built here: the project root it would need arrives with
-    /// the `launch` request.
-    pub fn new(events: EventSender, runner: Runner) -> Self {
+    /// the `launch` request. `transport` decides whether that request's
+    /// `projectRoot` is honored (stdio) or ignored for security (TCP).
+    pub fn new(events: EventSender, runner: Runner, transport: TransportMode) -> Self {
         Self {
             events,
             runner,
+            transport,
             injected: None,
             launched: None,
             ever_launched: false,
@@ -134,6 +144,10 @@ impl OrchestrationAdapter {
         Self {
             events,
             runner: engine.runner(),
+            // The injected engine already carries its own root, and this path
+            // ignores `projectRoot` entirely — so the transport is immaterial
+            // here; stdio is the honest default (the client owns the process).
+            transport: TransportMode::Stdio,
             injected: Some(engine),
             launched: None,
             ever_launched: false,
@@ -169,8 +183,11 @@ impl OrchestrationAdapter {
             None => LaunchArguments::default(),
         };
 
-        let project_root = match resolve_project_root(args.project_root.as_deref()) {
-            Ok(root) => root,
+        let ResolvedRoot {
+            root: project_root,
+            ignored_note,
+        } = match resolve_project_root(args.project_root.as_deref(), self.transport) {
+            Ok(resolved) => resolved,
             Err(message) => return AdapterResponse::failure(message),
         };
         let mode = match parse_mode(args.mode.as_deref()) {
@@ -190,6 +207,12 @@ impl OrchestrationAdapter {
             Err(message) => return AdapterResponse::failure(message),
         };
 
+        // A TCP client's ignored `projectRoot` is surfaced before the banner,
+        // so the security-relevant deviation reads first and the banner that
+        // follows names the directory the build actually used.
+        if let Some(note) = &ignored_note {
+            let _ = self.events.output("console", note).await;
+        }
         let _ = self
             .events
             .output(
@@ -589,7 +612,9 @@ mod tests {
     fn spawn_adapter_session(
         runner: Runner,
     ) -> (TestClient, JoinHandle<std::result::Result<(), CodecError>>) {
-        spawn_session_with(move |events| OrchestrationAdapter::new(events, Arc::clone(&runner)))
+        spawn_session_with(move |events| {
+            OrchestrationAdapter::new(events, Arc::clone(&runner), TransportMode::Stdio)
+        })
     }
 
     /// The same, against a caller-owned engine the test can assert on.

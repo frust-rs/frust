@@ -79,8 +79,11 @@ pub fn run_blocking(config: DapConfig) -> Result<u8, ServiceError> {
         .map_err(ServiceError::Runtime)?;
 
     let served = runtime.block_on(async move {
+        // `mode` is `Copy`; the adapter needs it too, to decide whether a
+        // client-supplied `projectRoot` is honored (stdio) or ignored for
+        // security (TCP) — see `OrchestrationAdapter::new`.
         serve(mode, move |events| {
-            OrchestrationAdapter::new(events, Arc::clone(&runner))
+            OrchestrationAdapter::new(events, Arc::clone(&runner), mode)
         })
         .await
     });
