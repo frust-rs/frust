@@ -15,6 +15,10 @@ pub mod android_id;
 pub mod android_run;
 pub mod build_info;
 pub mod cargo_manifest;
+/// The desktop `cargo run` launch plan shared by any front-end previewing a
+/// Frust project on the host (`frust-tui`'s own desktop session builder is
+/// not converged onto this module yet — see the module doc).
+pub mod desktop_run;
 pub mod devices;
 pub mod devtools_client;
 pub mod doctor;

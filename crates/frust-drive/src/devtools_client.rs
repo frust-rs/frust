@@ -67,9 +67,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use frust_devtools_protocol::{
-    AckResult, FrameStats, HandshakeInfo, HandshakeParams, Incoming, InputScrollParams,
+    AckResult, Capability, FrameStats, HandshakeInfo, HandshakeParams, Incoming, InputScrollParams,
     InputTapParams, InputTextParams, Method, MetricsSnapshot, Request, Response, ResponseOutcome,
-    RpcError, WidgetProps, WidgetPropsParams, WidgetTreeDump, decode_line, encode_line,
+    RpcError, ScreenshotResult, WidgetProps, WidgetPropsParams, WidgetTreeDump, decode_line,
+    encode_line,
 };
 use serde_json::Value;
 
@@ -97,6 +98,17 @@ impl DevtoolsRpcError {
     pub fn is_unauthorized(&self) -> bool {
         self.code == RpcError::UNAUTHORIZED
     }
+
+    /// The server has no matching [`Capability`] declared at handshake for
+    /// this method (e.g. `screenshot` on a backend defaulting to
+    /// `NotSupported`). Distinct from [`is_unauthorized`](Self::is_unauthorized):
+    /// the token was fine, the method just isn't offered — retrying won't
+    /// help, and a caller with the handshake's capability set in hand
+    /// ([`DevtoolsClient::capabilities`]) should generally check first rather
+    /// than round-trip into this.
+    pub fn is_not_supported(&self) -> bool {
+        self.code == RpcError::NOT_SUPPORTED
+    }
 }
 
 /// Whether `err` is a devtools rejection for want of a valid token — the one
@@ -104,6 +116,14 @@ impl DevtoolsRpcError {
 pub fn is_unauthorized(err: &anyhow::Error) -> bool {
     err.downcast_ref::<DevtoolsRpcError>()
         .is_some_and(DevtoolsRpcError::is_unauthorized)
+}
+
+/// Whether `err` is a devtools rejection because the server declared no
+/// matching capability at handshake — see
+/// [`DevtoolsRpcError::is_not_supported`].
+pub fn is_not_supported(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<DevtoolsRpcError>()
+        .is_some_and(DevtoolsRpcError::is_not_supported)
 }
 
 /// A blocking client over one devtools TCP connection. See the module doc
@@ -121,6 +141,11 @@ pub struct DevtoolsClient {
     /// authenticates the socket once, and re-sending the secret on later
     /// requests would only widen its exposure.
     token: Option<String>,
+    /// The capability set the last successful [`handshake`](Self::handshake)
+    /// declared, cached so a caller can ask "does this app support X?" via
+    /// [`capabilities`](Self::capabilities) without a second round trip —
+    /// `None` until `handshake` succeeds at least once.
+    capabilities: Mutex<Option<Vec<Capability>>>,
     reader: Option<thread::JoinHandle<()>>,
     /// Set by the reader thread when it closes the connection for a reason
     /// more specific than "nothing came back in time" (currently: an
@@ -186,6 +211,7 @@ impl DevtoolsClient {
             frame_stats,
             timeout,
             token: token.map(str::to_string),
+            capabilities: Mutex::new(None),
             reader: Some(reader),
             close_reason,
         })
@@ -203,7 +229,23 @@ impl DevtoolsClient {
             token: self.token.clone(),
         })
         .context("encoding `handshake` params")?;
-        self.typed_call(Method::Handshake, params)
+        let info: HandshakeInfo = self.typed_call(Method::Handshake, params)?;
+        *self.capabilities.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some(info.capabilities.clone());
+        Ok(info)
+    }
+
+    /// The capability set the last successful [`handshake`](Self::handshake)
+    /// declared, or `None` if `handshake` has not yet succeeded on this
+    /// connection. Lets a caller (e.g. an MCP screenshot tool) check "does
+    /// this app declare `Screenshot`?" against the cached handshake result
+    /// rather than a doomed round trip that a `NOT_SUPPORTED` server would
+    /// just reject.
+    pub fn capabilities(&self) -> Option<Vec<Capability>> {
+        self.capabilities
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// `widget_tree` — the current retained widget tree, nested root-down.
@@ -221,6 +263,17 @@ impl DevtoolsClient {
     /// `metrics_snapshot` — process RSS (best-effort) and uptime.
     pub fn metrics_snapshot(&self) -> Result<MetricsSnapshot> {
         self.typed_call(Method::MetricsSnapshot, Value::Null)
+    }
+
+    /// `screenshot` — a base64-encoded PNG of the current frame. Capability-
+    /// gated: a server whose handshake didn't declare
+    /// [`Capability::Screenshot`] rejects this with
+    /// [`RpcError::NOT_SUPPORTED`], detectable via
+    /// [`DevtoolsRpcError::is_not_supported`]/[`is_not_supported`] — check
+    /// [`capabilities`](Self::capabilities) first to avoid the round trip
+    /// entirely when the answer is already known.
+    pub fn screenshot(&self) -> Result<ScreenshotResult> {
+        self.typed_call(Method::Screenshot, Value::Null)
     }
 
     /// `input_tap` — synthesizes a tap at logical-px `(x, y)`.
@@ -690,6 +743,19 @@ mod tests {
     /// this crate may depend on `frust-devtools-protocol` only
     /// (`docs/ARCHITECTURE.md`'s tooling-isolation charter).
     fn spawn_fake_server() -> (SocketAddr, thread::JoinHandle<()>) {
+        spawn_fake_server_with_capabilities(vec![
+            Capability::WidgetTree,
+            Capability::FrameStats,
+            Capability::Input,
+        ])
+    }
+
+    /// Like [`spawn_fake_server`], but the handshake declares exactly
+    /// `capabilities` — lets a test control whether `screenshot` should
+    /// succeed or answer `NOT_SUPPORTED`.
+    fn spawn_fake_server_with_capabilities(
+        capabilities: Vec<Capability>,
+    ) -> (SocketAddr, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = thread::spawn(move || {
@@ -725,16 +791,21 @@ mod tests {
                     continue;
                 }
 
+                if req.method == "screenshot" && !capabilities.contains(&Capability::Screenshot) {
+                    let response = Response::error(
+                        req.id,
+                        RpcError::not_supported("this backend declares no Screenshot capability"),
+                    );
+                    writeln!(writer, "{}", encode_line(&response)).unwrap();
+                    continue;
+                }
+
                 let result = match req.method.as_str() {
                     "handshake" => serde_json::to_value(HandshakeInfo {
                         app_name: "fake-app".into(),
                         frust_version: "0.0.0".into(),
                         protocol_version: PROTOCOL_VERSION,
-                        capabilities: vec![
-                            Capability::WidgetTree,
-                            Capability::FrameStats,
-                            Capability::Input,
-                        ],
+                        capabilities: capabilities.clone(),
                     })
                     .unwrap(),
                     "widget_tree" => serde_json::to_value(WidgetTreeDump {
@@ -750,6 +821,10 @@ mod tests {
                             }),
                             children: vec![],
                         }],
+                    })
+                    .unwrap(),
+                    "screenshot" => serde_json::to_value(ScreenshotResult {
+                        png_base64: "ZmFrZS1wbmc=".into(),
                     })
                     .unwrap(),
                     _ => serde_json::to_value(AckResult { ok: true }).unwrap(),
@@ -804,6 +879,60 @@ mod tests {
             .expect("a frame_stats notification should arrive on the subscription receiver");
         assert_eq!(stats.n, 1);
         assert_eq!(stats.total_us, 1_000);
+    }
+
+    #[test]
+    fn capabilities_are_reachable_after_handshake_without_a_second_round_trip() {
+        let (addr, _server) = spawn_fake_server_with_capabilities(vec![
+            Capability::WidgetTree,
+            Capability::Screenshot,
+        ]);
+        let client =
+            DevtoolsClient::connect(addr, Duration::from_secs(2), Some(FAKE_TOKEN)).unwrap();
+
+        // No cached capabilities before the first handshake.
+        assert_eq!(client.capabilities(), None);
+
+        let handshake = client.handshake().unwrap();
+        assert_eq!(client.capabilities(), Some(handshake.capabilities.clone()));
+        assert!(
+            client
+                .capabilities()
+                .unwrap()
+                .contains(&Capability::Screenshot)
+        );
+    }
+
+    #[test]
+    fn screenshot_round_trips_against_a_capable_server() {
+        let (addr, _server) = spawn_fake_server_with_capabilities(vec![Capability::Screenshot]);
+        let client =
+            DevtoolsClient::connect(addr, Duration::from_secs(2), Some(FAKE_TOKEN)).unwrap();
+        client.handshake().unwrap();
+
+        let shot = client.screenshot().unwrap();
+        assert_eq!(shot.png_base64, "ZmFrZS1wbmc=");
+    }
+
+    #[test]
+    fn screenshot_not_supported_surfaces_as_a_typed_detectable_error() {
+        let (addr, _server) = spawn_fake_server_with_capabilities(vec![Capability::WidgetTree]);
+        let client =
+            DevtoolsClient::connect(addr, Duration::from_secs(2), Some(FAKE_TOKEN)).unwrap();
+        let handshake = client.handshake().unwrap();
+        assert!(!handshake.capabilities.contains(&Capability::Screenshot));
+
+        let err = client.screenshot().unwrap_err();
+        assert!(
+            is_not_supported(&err),
+            "a capability-gated rejection must be distinguishable from any other failure: {err}"
+        );
+        assert_eq!(
+            err.downcast_ref::<DevtoolsRpcError>().map(|e| e.code),
+            Some(RpcError::NOT_SUPPORTED)
+        );
+        // And not confusable with the unrelated auth failure code.
+        assert!(!is_unauthorized(&err));
     }
 
     #[test]
