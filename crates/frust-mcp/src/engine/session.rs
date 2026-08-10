@@ -77,6 +77,17 @@ impl RunTarget {
         }
     }
 
+    /// The Simulator udid this target is addressed by, or `None` for anything
+    /// that is not an iOS Simulator — the discriminator teardown's
+    /// `simctl terminate` keys off, mirroring
+    /// [`android_serial`](Self::android_serial).
+    pub fn ios_simulator_udid(&self) -> Option<&str> {
+        match self {
+            RunTarget::IosSimulator(device) => Some(device.id.as_str()),
+            RunTarget::Desktop | RunTarget::Android(_) => None,
+        }
+    }
+
     /// A short, stable label for reporting (`desktop`, `android:<serial>`,
     /// `ios-sim:<udid>`).
     pub fn label(&self) -> String {
@@ -154,6 +165,11 @@ pub struct SessionSnapshot {
     /// The installed Android package, from the drive's `Launching <pkg>…`
     /// marker.
     pub android_package: Option<String>,
+    /// The bundle id an iOS Simulator session actually launched, as
+    /// `frust_drive::ios_run::spawn_session` reported it. iOS Simulator only,
+    /// and the one thing teardown needs to `simctl terminate` the app —
+    /// killing the `simctl launch` bridge leaves the app itself running.
+    pub ios_bundle_id: Option<String>,
     /// The **local** loopback port the devtools client is connected on —
     /// for Android that is the `adb forward` host port, not the device port
     /// the discovery line announced.
@@ -191,6 +207,7 @@ struct SessionData {
     state: SessionState,
     pid: Option<String>,
     android_package: Option<String>,
+    ios_bundle_id: Option<String>,
     devtools_port: Option<u16>,
     devtools_handshake: Option<HandshakeInfo>,
     devtools_error: Option<String>,
@@ -253,6 +270,7 @@ impl Session {
                 state: SessionState::Launching,
                 pid: None,
                 android_package: None,
+                ios_bundle_id: None,
                 devtools_port: None,
                 devtools_handshake: None,
                 devtools_error: None,
@@ -304,6 +322,7 @@ impl Session {
             started_at: self.started_at,
             pid: data.pid.clone(),
             android_package: data.android_package.clone(),
+            ios_bundle_id: data.ios_bundle_id.clone(),
             devtools_port: data.devtools_port,
             devtools_handshake: data.devtools_handshake.clone(),
             devtools_error: data.devtools_error.clone(),
@@ -359,6 +378,17 @@ impl Session {
                 data.state = SessionState::Running;
             }
         });
+    }
+
+    /// Whether the session has reached a terminal state — the cheap read the
+    /// engine's retention sweep takes, rather than a whole
+    /// [`SessionSnapshot`] clone per session.
+    pub(crate) fn is_terminal(&self) -> bool {
+        self.data
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .state
+            .is_terminal()
     }
 
     /// Records the state only while the session is still live — a session
@@ -493,6 +523,14 @@ impl Session {
             data.android_package = Some(package);
             self.metrics_identity(data)
         })
+    }
+
+    /// Records the bundle id an iOS Simulator session launched, straight from
+    /// `frust_drive::ios_run::spawn_session`'s own return — teardown reads it
+    /// back to `simctl terminate` the app rather than re-deriving it from the
+    /// `Launching <bundle_id>…` log line.
+    pub(crate) fn note_ios_bundle_id(&self, bundle_id: String) {
+        self.with_data(|data| data.ios_bundle_id = Some(bundle_id));
     }
 
     /// `(serial, pid, package)` once all three are known and no sampler is

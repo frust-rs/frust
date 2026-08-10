@@ -75,6 +75,10 @@ pub(crate) struct SessionDto {
     pub pid: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub android_package: Option<String>,
+    /// The bundle id an iOS Simulator session launched — the app teardown
+    /// terminates, and the one an agent would pass to `simctl` itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ios_bundle_id: Option<String>,
     /// The loopback port this server reaches the app's devtools service on.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub devtools_port: Option<u16>,
@@ -458,6 +462,7 @@ pub(crate) fn session_dto(snapshot: &SessionSnapshot) -> SessionDto {
         failure_reason,
         pid: snapshot.pid.clone(),
         android_package: snapshot.android_package.clone(),
+        ios_bundle_id: snapshot.ios_bundle_id.clone(),
         devtools_port: snapshot.devtools_port,
         devtools_app_name: snapshot
             .devtools_handshake

@@ -417,6 +417,96 @@ async fn app_logs_filter_and_tail_the_session_ring() {
     mcp.shutdown().await;
 }
 
+/// The app's devtools token never reaches an agent: it is redacted on the way
+/// *into* the log ring, so no `app_logs` filter can dig it back out — while
+/// the connect path, which reads the real token off the original line, still
+/// handshook (the session reached `devtools_connected` above).
+#[tokio::test]
+async fn app_logs_never_hand_back_the_devtools_token() {
+    let (fixture, _engine, mcp, id) = connected(FixtureConfig::default()).await;
+
+    // Deliberately unfiltered and generous: whatever the ring holds is what an
+    // agent could read.
+    let logs = mcp.call_ok("app_logs", json!({ "limit": 2_000 })).await;
+    assert_eq!(logs["session_id"], json!(id));
+    let lines = logs["lines"].as_array().expect("the lines are listed");
+    assert!(!lines.is_empty(), "the session logged nothing: {logs}");
+    for line in lines {
+        let text = line.as_str().expect("a log line");
+        assert!(
+            !text.contains(FIXTURE_TOKEN),
+            "app_logs returned the devtools token: {text}"
+        );
+    }
+    // The discovery line itself is still retained — only its token is gone,
+    // so an agent can still see that the service announced itself.
+    assert!(
+        lines.iter().any(|line| line
+            .as_str()
+            .is_some_and(|text| text.contains("<redacted>"))),
+        "the discovery line was dropped rather than redacted: {logs}"
+    );
+    // A targeted search for the token finds nothing either.
+    let hunted = mcp
+        .call_ok("app_logs", json!({ "pattern": FIXTURE_TOKEN }))
+        .await;
+    assert_eq!(hunted["matched"], json!(0));
+
+    teardown(fixture, mcp).await;
+}
+
+/// Session resolution counts only *live* sessions: a single running session
+/// resolves straight through a pile of ended ones, and with nothing running
+/// the ambiguity says so rather than reporting dead sessions as running.
+#[tokio::test]
+async fn session_resolution_counts_only_live_sessions() {
+    // Only the Debug desktop invocation is scripted, so a profile-mode launch
+    // cannot spawn and lands terminal at once.
+    let engine = Arc::new(engine_with_hanging_desktop_stream(vec![
+        "Compiling frust v0.1.0".to_string(),
+    ]));
+    let mcp = McpTestServer::start(Arc::clone(&engine)).await;
+
+    for _ in 0..3 {
+        let failed = mcp
+            .call_ok("run_app", json!({ "target": "desktop", "mode": "profile" }))
+            .await;
+        let id = failed["session"]["id"].as_u64().expect("session id");
+        await_snapshot(&engine, SessionId(id), |s| s.state.is_terminal()).await;
+    }
+
+    let ambiguous = mcp.call_err("app_logs", json!({})).await;
+    let message = ambiguous["error"].as_str().expect("a message");
+    assert!(
+        message.contains("no session is running") && message.contains("3 have ended"),
+        "a dead session was reported as running: {message}"
+    );
+    assert_eq!(
+        ambiguous["sessions"]
+            .as_array()
+            .expect("the ended sessions are listed")
+            .len(),
+        3
+    );
+
+    // One live session among them is the obvious one — no ambiguity at all.
+    let started = mcp.call_ok("run_app", json!({ "target": "desktop" })).await;
+    let live = started["session"]["id"].as_u64().expect("session id");
+    await_snapshot(&engine, SessionId(live), |s| {
+        s.state == SessionState::Running
+    })
+    .await;
+
+    let logs = mcp.call_ok("app_logs", json!({})).await;
+    assert_eq!(
+        logs["session_id"],
+        json!(live),
+        "resolution must pick the only live session, not an ended one"
+    );
+
+    mcp.shutdown().await;
+}
+
 /// Every tool is listed with an input schema and a description an agent can
 /// actually work from — the only documentation it ever gets.
 #[tokio::test]

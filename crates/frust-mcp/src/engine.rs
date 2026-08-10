@@ -52,6 +52,7 @@ use frust_devtools_protocol::FrameStats;
 use frust_drive::build_info::BuildMode;
 use frust_drive::devices::{Device, default_discoverers, discover_all};
 use frust_drive::devtools_client::{DevtoolsClient, adb_forward_remove};
+use frust_drive::ios_run::simctl;
 use frust_drive::process::{ProcessRunner, RealProcessRunner};
 
 use session::Session;
@@ -66,6 +67,16 @@ pub const LOG_RING_CAP: usize = 10_000;
 /// 60fps: enough for the performance tool to aggregate a meaningful window
 /// on demand, small enough to keep per session for free.
 pub const FRAME_RING_CAP: usize = 600;
+
+/// How many **terminal** sessions the engine retains.
+///
+/// A stopped session stays readable — its final state and its log tail are
+/// exactly what an agent inspects after a crash — but that history cannot
+/// grow without bound on a server an agent drives for hours. Past this many,
+/// the oldest terminal sessions are dropped on the next insert. A live
+/// session is **never** evicted, whatever the count: dropping one would leave
+/// a running app with no handle to stop it.
+pub const TERMINAL_SESSION_CAP: usize = 32;
 
 /// How long teardown waits for a session's threads before detaching them.
 ///
@@ -100,10 +111,16 @@ pub struct SessionEngine {
     sessions: Mutex<BTreeMap<SessionId, Arc<Session>>>,
     next_id: AtomicU64,
     /// Set by [`shutdown`](SessionEngine::shutdown) *before* it snapshots the
-    /// session map, so a `run_app` racing a Ctrl-C is either refused outright
-    /// or torn down by the loser of the race — never left running past the
-    /// sweep that was meant to end it.
+    /// session map, and read by [`run_app`](SessionEngine::run_app) **inside**
+    /// the same `sessions` critical section that spawns the launch — the two
+    /// are therefore totally ordered, and a `run_app` racing a Ctrl-C either
+    /// launches nothing or leaves a session the sweep's snapshot contains.
     closed: AtomicBool,
+    /// Every off-runtime teardown thread still in flight, for
+    /// [`shutdown`](SessionEngine::shutdown) to join before it returns — a
+    /// teardown nothing joins is a kill that may still be pending when the
+    /// server thinks it has finished stopping.
+    detached: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl SessionEngine {
@@ -123,6 +140,7 @@ impl SessionEngine {
             sessions: Mutex::new(BTreeMap::new()),
             next_id: AtomicU64::new(1),
             closed: AtomicBool::new(false),
+            detached: Mutex::new(Vec::new()),
         }
     }
 
@@ -177,6 +195,16 @@ impl SessionEngine {
         let id = SessionId(self.next_id.fetch_add(1, Ordering::Relaxed));
         let session = Arc::new(Session::new(id, target, mode, root));
 
+        // The closed check, the launch, and the insert happen in **one**
+        // `sessions` critical section, and [`shutdown`](Self::shutdown) takes
+        // the same lock to snapshot — so the two are totally ordered and only
+        // two interleavings exist. Either this call ran first, and the sweep's
+        // snapshot holds a session whose launch thread is already registered
+        // (so teardown joins it, and the join is what makes the process dead
+        // before `shutdown` returns); or the sweep ran first, and the load
+        // below sees the flag it set and launches nothing at all. There is no
+        // window that starts an app the sweep cannot find.
+        let mut sessions = self.sessions.lock().unwrap_or_else(|p| p.into_inner());
         if self.closed.load(Ordering::SeqCst) {
             // Nothing spawned, so there is nothing to tear down — but the
             // session is still recorded, because a caller that got an id back
@@ -185,7 +213,7 @@ impl SessionEngine {
             session.set_state_if_live(SessionState::Failed {
                 reason: SHUTTING_DOWN.to_string(),
             });
-            self.insert(id, session);
+            insert_retaining(&mut sessions, id, session);
             return id;
         }
 
@@ -195,12 +223,14 @@ impl SessionEngine {
         // observable until this returns, so the reorder changes nothing else.
         let handle = launch::spawn(Arc::clone(&session), Arc::clone(&self.runner));
         session.add_thread(handle);
-        self.insert(id, Arc::clone(&session));
+        insert_retaining(&mut sessions, id, Arc::clone(&session));
+        drop(sessions);
 
         if self.closed.load(Ordering::SeqCst) {
-            // A `shutdown` snapshotted the map before this insert landed, so
-            // its sweep will never see this session: tear it down here instead
-            // of leaving a launch running past the server that owns it.
+            // A `shutdown` landed after the critical section above, so its own
+            // sweep already holds this session — this is a backstop, not the
+            // path that ends the app, and it costs only a redundant
+            // (idempotent) teardown that runs concurrently with the sweep's.
             self.tear_down_detached(session);
         }
         id
@@ -236,8 +266,15 @@ impl SessionEngine {
     /// `adb forward`s behind.
     ///
     /// Closes the engine to new launches first, so a `run_app` racing this
-    /// sweep is refused (or, if it already inserted its session, torn down by
-    /// `run_app` itself) rather than starting an app nothing will ever stop.
+    /// sweep is refused (or, having already inserted its session under the
+    /// same lock, swept here) rather than starting an app nothing will ever
+    /// stop — see [`run_app`](Self::run_app)'s ordering note.
+    ///
+    /// When this returns, every teardown it is responsible for has finished or
+    /// hit [`TEARDOWN_DEADLINE`]: the sweep's own teardowns run to completion,
+    /// and every off-thread teardown registered along the way is joined on the
+    /// way out — including on the path where the snapshot was empty, which is
+    /// exactly the path a launch racing this sweep registers one on.
     pub async fn shutdown(&self) {
         self.closed.store(true, Ordering::SeqCst);
         let sessions: Vec<Arc<Session>> = self
@@ -247,16 +284,28 @@ impl SessionEngine {
             .values()
             .cloned()
             .collect();
-        if sessions.is_empty() {
+        if !sessions.is_empty() {
+            let runner = Arc::clone(&self.runner);
+            let _ = tokio::task::spawn_blocking(move || {
+                for session in sessions {
+                    teardown(&session, runner.as_ref());
+                }
+            })
+            .await;
+        }
+        self.join_detached().await;
+    }
+
+    /// Drains the off-thread teardowns registered so far and bounded-joins
+    /// them, off the runtime (every one of them blocks on a kill, an `adb`
+    /// call, or a join of its own).
+    async fn join_detached(&self) {
+        let detached =
+            std::mem::take(&mut *self.detached.lock().unwrap_or_else(|p| p.into_inner()));
+        if detached.is_empty() {
             return;
         }
-        let runner = Arc::clone(&self.runner);
-        let _ = tokio::task::spawn_blocking(move || {
-            for session in sessions {
-                teardown(&session, runner.as_ref());
-            }
-        })
-        .await;
+        let _ = tokio::task::spawn_blocking(move || join_bounded(detached)).await;
     }
 
     /// A snapshot of every session, oldest id first.
@@ -319,22 +368,23 @@ impl SessionEngine {
             .ok()
     }
 
-    fn insert(&self, id: SessionId, session: Arc<Session>) {
-        self.sessions
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(id, session);
-    }
-
     /// Tears `session` down on a thread of its own — the late half of the
-    /// shutdown race. Detached because [`run_app`](Self::run_app) is sync and
-    /// reached from a runtime worker, while teardown blocks throughout (a
+    /// shutdown race. Off-thread because [`run_app`](Self::run_app) is sync
+    /// and reached from a runtime worker, while teardown blocks throughout (a
     /// kill, an `adb` call, a bounded join); the thread touches nothing but
     /// this one session.
+    ///
+    /// The handle is **registered**, not dropped: a
+    /// [`shutdown`](Self::shutdown) that returns while one of these is still
+    /// killing a process has not actually stopped the server's apps.
     fn tear_down_detached(&self, session: Arc<Session>) {
         session.request_stop();
         let runner = Arc::clone(&self.runner);
-        thread::spawn(move || teardown(&session, runner.as_ref()));
+        let handle = thread::spawn(move || teardown(&session, runner.as_ref()));
+        self.detached
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(handle);
     }
 
     fn lookup(&self, id: SessionId) -> Option<Arc<Session>> {
@@ -351,6 +401,32 @@ impl SessionEngine {
     }
 }
 
+/// Inserts a session and enforces [`TERMINAL_SESSION_CAP`] on what is left.
+///
+/// Eviction is oldest-terminal-first (a `BTreeMap` over the monotonic
+/// [`SessionId`] iterates in launch order) and skips every live session, so a
+/// long-lived server's history stays bounded without a running app ever losing
+/// the handle that stops it. Retention is enforced here, on insert, rather
+/// than when a session *becomes* terminal: a session count only grows by an
+/// insert, so that is the only moment the cap can be newly exceeded by more
+/// than the sessions still running.
+fn insert_retaining(
+    sessions: &mut BTreeMap<SessionId, Arc<Session>>,
+    id: SessionId,
+    session: Arc<Session>,
+) {
+    sessions.insert(id, session);
+    let terminal: Vec<SessionId> = sessions
+        .iter()
+        .filter(|(_, session)| session.is_terminal())
+        .map(|(id, _)| *id)
+        .collect();
+    let excess = terminal.len().saturating_sub(TERMINAL_SESSION_CAP);
+    for id in terminal.into_iter().take(excess) {
+        sessions.remove(&id);
+    }
+}
+
 /// Tears one session down, in the only order that works.
 ///
 /// Blocking throughout — callers reach it through
@@ -361,18 +437,26 @@ fn teardown(session: &Arc<Session>, runner: &dyn ProcessRunner) {
     // with a session lock held, because a session thread may be waiting for
     // the same lock and would then never reach the join.
     let mut resources = session.take_resources();
+    let snapshot = session.snapshot();
 
     // Android: killing the `logcat` stream ends our *view* of the app, not
     // the app — ask the OS to stop it. Best-effort: a device that has already
     // gone away must not block the rest of teardown.
-    if let (Some(serial), Some(package)) = (
-        session.target.android_serial(),
-        session.snapshot().android_package,
-    ) {
-        let _ = runner.run(
-            "adb",
-            &["-s", serial, "shell", "am", "force-stop", &package],
-        );
+    if let (Some(serial), Some(package)) =
+        (session.target.android_serial(), &snapshot.android_package)
+    {
+        let _ = runner.run("adb", &["-s", serial, "shell", "am", "force-stop", package]);
+    }
+
+    // iOS Simulator: the same gap, one platform over. Killing the
+    // `simctl launch` stream ends the foreground console bridge, not the app
+    // running inside the simulator — `simctl terminate` is what stops it, and
+    // it is best-effort for the same reason (the app may already be gone, or
+    // the simulator shut down).
+    if let (Some(udid), Some(bundle_id)) =
+        (session.target.ios_simulator_udid(), &snapshot.ios_bundle_id)
+    {
+        simctl::terminate(runner, udid, bundle_id);
     }
 
     // Closing the devtools socket also ends the frame-stats subscription the
@@ -498,5 +582,153 @@ pub(crate) mod test_support {
                 .push(handle.lines.clone());
             Ok(handle)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use frust_drive::devices::{Device, Kind, Platform};
+    use frust_drive::process::{FakeProcessRunner, TryRecvError};
+
+    use super::test_support::RecordingRunner;
+    use super::*;
+
+    /// A project root no test ever writes to — it only ever reaches the fake
+    /// runner.
+    const TEST_PROJECT_ROOT: &str = "/tmp/frust-mcp-engine-unit-test";
+
+    /// The scripted invocation the fake runner hands a hanging stream back
+    /// for.
+    const FAKE_STREAM_KEY: &str = "app --run";
+
+    fn session(id: u64, target: RunTarget) -> Arc<Session> {
+        Arc::new(Session::new(
+            SessionId(id),
+            target,
+            BuildMode::Debug,
+            PathBuf::from(TEST_PROJECT_ROOT),
+        ))
+    }
+
+    fn simulator() -> Device {
+        Device {
+            id: "AAAA-BBBB".to_string(),
+            name: "iPhone 15".to_string(),
+            platform: Platform::Ios,
+            kind: Kind::Simulator,
+            os_version: Some("17.5".to_string()),
+            connection_state: None,
+        }
+    }
+
+    /// A shutdown whose own snapshot is empty still has work to finish: the
+    /// off-thread teardown a launch racing it registered. Asserted with no
+    /// poll and no second deadline — the kill has either happened by the time
+    /// `shutdown` returns, or the engine returned while still killing.
+    #[tokio::test]
+    async fn shutdown_joins_an_off_thread_teardown_with_no_sessions_of_its_own() {
+        let recorder = Arc::new(RecordingRunner::new(
+            FakeProcessRunner::new().with_hanging_stream(FAKE_STREAM_KEY, Vec::<String>::new()),
+        ));
+        let engine = SessionEngine::with_runner(TEST_PROJECT_ROOT, Arc::clone(&recorder) as Runner);
+
+        // A session the engine's own map never held — the shape the loser of a
+        // launch/shutdown race leaves behind.
+        let session = session(1, RunTarget::Desktop);
+        let stream = recorder
+            .spawn_streaming("app", &["--run"], None, &[])
+            .expect("the scripted stream spawns");
+        assert!(session.set_stream(stream).is_none());
+        engine.tear_down_detached(session);
+
+        engine.shutdown().await;
+
+        assert!(
+            engine.sessions().is_empty(),
+            "the fixture session was never in the map — the empty-snapshot path is the one under test"
+        );
+        let spawned = recorder.spawned();
+        let [lines] = spawned.as_slice() else {
+            panic!(
+                "expected exactly one spawned process, got {}",
+                spawned.len()
+            );
+        };
+        // A scripted hanging stream closes its line buffer only once `kill`
+        // (and the `wait` that reaps it) has run, so a *disconnected* receiver
+        // read without any waiting at all is exactly "the teardown finished
+        // before `shutdown` returned".
+        assert_eq!(
+            lines.try_recv(),
+            Err(TryRecvError::Disconnected),
+            "shutdown returned while a teardown it registered was still running"
+        );
+    }
+
+    /// Killing the `simctl launch` stream ends the console bridge, not the app
+    /// in the simulator — teardown has to terminate it by bundle id.
+    #[test]
+    fn tearing_down_an_ios_simulator_session_terminates_the_app() {
+        let recorder = Arc::new(RecordingRunner::new(FakeProcessRunner::new()));
+        let session = session(1, RunTarget::IosSimulator(simulator()));
+        session.note_ios_bundle_id("dev.f0x.myapp".to_string());
+
+        teardown(&session, recorder.as_ref());
+
+        assert!(
+            recorder
+                .runs()
+                .iter()
+                .any(|run| run == "xcrun simctl terminate AAAA-BBBB dev.f0x.myapp"),
+            "teardown left the simulator app running: {:?}",
+            recorder.runs()
+        );
+    }
+
+    /// Nothing to terminate is not the same as terminating nothing: a session
+    /// that never reached a launch has no bundle id, and teardown must not
+    /// invent one.
+    #[test]
+    fn an_ios_session_that_never_launched_terminates_nothing() {
+        let recorder = Arc::new(RecordingRunner::new(FakeProcessRunner::new()));
+        let session = session(1, RunTarget::IosSimulator(simulator()));
+
+        teardown(&session, recorder.as_ref());
+
+        assert!(
+            !recorder.runs().iter().any(|run| run.contains("terminate")),
+            "{:?}",
+            recorder.runs()
+        );
+    }
+
+    /// Retention evicts the oldest *terminal* sessions past the cap and never
+    /// a live one, whatever the order they were launched in.
+    #[test]
+    fn retention_evicts_the_oldest_terminal_sessions_but_never_a_live_one() {
+        let mut sessions: BTreeMap<SessionId, Arc<Session>> = BTreeMap::new();
+        // The oldest session of all is still running: eviction must skip it.
+        let live = SessionId(1);
+        insert_retaining(&mut sessions, live, session(1, RunTarget::Desktop));
+
+        let ended: Vec<SessionId> = (2..=(TERMINAL_SESSION_CAP as u64 + 3))
+            .map(|id| {
+                let session = session(id, RunTarget::Desktop);
+                session.set_state_if_live(SessionState::Exited { success: true });
+                insert_retaining(&mut sessions, SessionId(id), session);
+                SessionId(id)
+            })
+            .collect();
+
+        assert!(
+            sessions.contains_key(&live),
+            "a live session must never be evicted for capacity"
+        );
+        let retained_terminal = sessions.len() - 1;
+        assert_eq!(retained_terminal, TERMINAL_SESSION_CAP);
+        // The survivors are the most recent ones, in launch order.
+        let expected: Vec<SessionId> = ended[ended.len() - TERMINAL_SESSION_CAP..].to_vec();
+        let retained: Vec<SessionId> = sessions.keys().copied().filter(|id| *id != live).collect();
+        assert_eq!(retained, expected);
     }
 }

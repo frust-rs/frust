@@ -18,7 +18,9 @@ mod common;
 use anyhow::Result;
 use common::{DEADLINE, DEBUG_DESKTOP_INVOCATION, TEST_PROJECT_ROOT, await_snapshot};
 use frust_drive::build_info::BuildMode;
-use frust_drive::process::{FakeProcessRunner, LineReceiver, Output, ProcessRunner, StreamHandle};
+use frust_drive::process::{
+    FakeProcessRunner, LineReceiver, Output, ProcessRunner, StreamHandle, TryRecvError,
+};
 use frust_mcp::SessionEngine;
 use frust_mcp::engine::{RunTarget, SessionState};
 
@@ -188,6 +190,44 @@ async fn launches_racing_shutdown_are_never_left_running() {
     while let Ok(lines) = spawned.try_recv() {
         assert_stream_killed(lines);
     }
+}
+
+/// The stronger form of the burst test above: a single launch racing the
+/// shutdown, asserted **the moment `shutdown` returns** rather than by a later
+/// generous poll. Whichever way the race resolves — the launch's critical
+/// section ran first and the sweep swept it, or the sweep ran first and the
+/// launch was refused — there is nothing left alive when `shutdown().await`
+/// hands control back.
+#[tokio::test]
+async fn a_launch_racing_shutdown_is_already_dead_when_shutdown_returns() {
+    // No scripted lines at all: the stream's line buffer then closes for
+    // exactly one reason, a kill, so a disconnected receiver is unambiguous.
+    let (engine, spawned) = recording_engine(Vec::new());
+    let engine = Arc::new(engine);
+
+    let launcher = {
+        let engine = Arc::clone(&engine);
+        tokio::task::spawn_blocking(move || engine.run_app(RunTarget::Desktop, BuildMode::Debug))
+    };
+    engine.shutdown().await;
+    let id = launcher.await.expect("the racing launch");
+
+    // Read without waiting: anything still open here outlived the shutdown
+    // that claimed to have finished.
+    while let Ok(lines) = spawned.try_recv() {
+        assert_eq!(
+            lines.try_recv(),
+            Err(TryRecvError::Disconnected),
+            "a process the racing launch spawned was still alive when shutdown returned"
+        );
+    }
+    let snapshot = engine
+        .session(id)
+        .expect("a session that got an id back is readable");
+    assert!(
+        snapshot.state.is_terminal(),
+        "the racing launch is neither refused nor torn down: {snapshot:?}"
+    );
 }
 
 /// After `shutdown`, a `run_app` racing it launches nothing and says why —

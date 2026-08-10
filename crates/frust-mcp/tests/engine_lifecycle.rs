@@ -14,7 +14,7 @@ use frust_devtools_protocol::{Capability, format_discovery_line, format_failure_
 use frust_drive::build_info::BuildMode;
 use frust_drive::process::FakeProcessRunner;
 use frust_mcp::SessionEngine;
-use frust_mcp::engine::{RunTarget, SessionState};
+use frust_mcp::engine::{RunTarget, SessionState, TERMINAL_SESSION_CAP};
 
 /// The headline lifecycle: launch → the app announces a devtools service →
 /// the engine connects and handshakes → `stop_app` kills and joins cleanly.
@@ -180,6 +180,53 @@ async fn shutdown_stops_every_session() {
             snapshot.id
         );
     }
+}
+
+/// A long-lived server's session history is bounded: terminal sessions are
+/// retained for reading back, but only the most recent `TERMINAL_SESSION_CAP`
+/// of them — and a still-running session is never evicted to make room,
+/// whatever its age (evicting one would leave a live app with no handle to
+/// stop it).
+#[tokio::test]
+async fn terminal_sessions_are_bounded_and_a_live_one_is_never_evicted() {
+    // Only the Debug desktop invocation is scripted, so the profile-mode
+    // launches below cannot spawn and land terminal (`Failed`) at once.
+    let engine = engine_with_hanging_desktop_stream(vec!["Compiling frust v0.1.0".to_string()]);
+    let live = engine.run_app(RunTarget::Desktop, BuildMode::Debug);
+    await_snapshot(&engine, live, |s| s.state == SessionState::Running).await;
+
+    let mut ended = Vec::new();
+    for _ in 0..(TERMINAL_SESSION_CAP + 3) {
+        let id = engine.run_app(RunTarget::Desktop, BuildMode::Profile);
+        // Awaited one at a time: each session must actually *be* terminal
+        // before the next insert, which is when retention is enforced.
+        await_snapshot(&engine, id, |s| s.state.is_terminal()).await;
+        ended.push(id);
+    }
+
+    assert!(
+        engine.session(live).is_some(),
+        "the live session was evicted for capacity"
+    );
+    assert!(
+        engine.session(ended[0]).is_none(),
+        "the oldest terminal session was retained past the cap"
+    );
+    assert!(
+        engine
+            .session(*ended.last().expect("a launched session"))
+            .is_some(),
+        "the newest terminal session must still be readable"
+    );
+    // The live session, the capped terminal set, and at most the newest
+    // terminal session (whose own insert swept before it ended).
+    assert!(
+        engine.sessions().len() <= TERMINAL_SESSION_CAP + 2,
+        "session retention is unbounded: {} retained",
+        engine.sessions().len()
+    );
+
+    engine.shutdown().await;
 }
 
 /// `restart_app` stops the old session and starts a new one with the same

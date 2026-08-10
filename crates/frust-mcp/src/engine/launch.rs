@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use anyhow::Result;
-use frust_devtools_protocol::{parse_discovery_line, parse_failure_line};
+use frust_devtools_protocol::{parse_discovery_line, parse_failure_line, redact_discovery_token};
 use frust_drive::android_run;
 use frust_drive::build_info::BuildInfo;
 use frust_drive::desktop_run;
@@ -125,7 +125,13 @@ fn start(session: &Arc<Session>, runner: &Runner) -> Result<Option<LineReceiver>
                 &mut on_line,
                 &session.stop,
             )?
-            .map(|launch| launch.stream)
+            .map(|launch| {
+                // Record what was actually launched: killing the
+                // `simctl launch` stream ends the foreground bridge, not the
+                // app, so teardown needs this id to terminate it.
+                session.note_ios_bundle_id(launch.bundle_id);
+                launch.stream
+            })
         }
     };
 
@@ -150,7 +156,12 @@ fn start(session: &Arc<Session>, runner: &Runner) -> Result<Option<LineReceiver>
 /// the pipeline's own `on_line` sink during build/install and from the drain
 /// loop afterwards, so both phases are scanned identically.
 pub(crate) fn ingest_line(session: &Arc<Session>, runner: &Runner, line: &str) {
-    session.push_log(line.to_string());
+    // The *retained* copy is redacted, never the one parsed below: a discovery
+    // line carries the app's handshake token, and the ring is what `app_logs`
+    // hands an agent back. Redacting at the ring's edge is what makes that
+    // unreachable — the connect path keeps reading the real token off the
+    // original line.
+    session.push_log(redact_discovery_token(line).into_owned());
     if session.stopping() {
         return;
     }

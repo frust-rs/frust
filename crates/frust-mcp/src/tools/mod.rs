@@ -196,6 +196,12 @@ pub(crate) fn session_ref(snapshot: &SessionSnapshot) -> SessionRef {
 /// the single still-live session, or — when nothing is live — the single
 /// session that ever ran. Anything else is ambiguous and says so, listing the
 /// candidates rather than picking for the caller.
+///
+/// The two ambiguities are reported **differently**, because they need
+/// different next steps: several *running* sessions want a `session_id`, while
+/// several *ended* ones mean nothing is running at all — an agent told "3
+/// sessions are running" about three dead ones would keep driving a corpse.
+/// A dead session is never counted as running.
 pub(crate) fn resolve_session(
     engine: &SessionEngine,
     requested: Option<u64>,
@@ -212,22 +218,33 @@ pub(crate) fn resolve_session(
     }
 
     let live: Vec<&SessionSnapshot> = all.iter().filter(|s| !s.state.is_terminal()).collect();
-    let candidates: Vec<&SessionSnapshot> = if live.is_empty() {
-        all.iter().collect()
-    } else {
-        live
-    };
-    match candidates.as_slice() {
-        [only] => Ok((*only).clone()),
+    match live.as_slice() {
+        [only] => return Ok((*only).clone()),
+        [] => {}
+        many => {
+            return Err(ToolError::new(format!(
+                "{} sessions are running — pass session_id to say which one.",
+                many.len()
+            ))
+            .with_sessions(many.iter().map(|s| session_ref(s)).collect()));
+        }
+    }
+
+    // Nothing is live: the single session that ever ran is still the obvious
+    // one (reading a crashed session's logs is exactly what an agent does
+    // next), but several ended ones are ambiguous in their own right.
+    match all.as_slice() {
+        [only] => Ok(only.clone()),
         [] => Err(ToolError::new(
             "no sessions yet — call run_app first (target \"desktop\", or a device id \
              from list_devices).",
         )),
-        many => Err(ToolError::new(format!(
-            "{} sessions are running — pass session_id to say which one.",
-            many.len()
+        ended => Err(ToolError::new(format!(
+            "no session is running; {} have ended — pass session_id to act on one of \
+             them, or run_app to start a new one.",
+            ended.len()
         ))
-        .with_sessions(many.iter().map(|s| session_ref(s)).collect())),
+        .with_sessions(ended.iter().map(session_ref).collect())),
     }
 }
 
