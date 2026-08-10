@@ -115,7 +115,7 @@ loopback bind returns `ECONNREFUSED`, with `INTERNET` still granted and no SELin
 | `DevtoolsBackend` | The trait a shell implements to answer every devtools request; the seam decoupling the service from `frust-core` |
 | `Service` / `ServiceHandle` / `ServiceConfig` | The framework-side server: start/stop, `publish_frame_stats`, its 1s backend-call timeout, and (`ServiceConfig::require_token`, `ServiceHandle::token()`) the per-process auth token |
 | `DevtoolsUi` | `frust-shell-common`'s per-shell view the hop's per-frame `pump` drains against |
-| `DevtoolsClient` | `frust-drive`'s blocking tool-side client: `connect(addr, timeout, token)`, typed requests, a `subscribe_frame_stats` receiver, and `DevtoolsRpcError`/`is_unauthorized` for token-rejection detection |
+| `DevtoolsClient` | `frust-drive`'s blocking tool-side client: `connect(addr, timeout, token)`, typed requests including `screenshot`/`capabilities`, a `subscribe_frame_stats` receiver, and `DevtoolsRpcError`/`is_unauthorized`/`is_not_supported` for rejection detection. Shared by `frust-tui` and `frust-mcp` (see [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)) |
 
 ## See Also
 

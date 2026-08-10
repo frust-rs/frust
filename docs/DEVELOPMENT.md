@@ -393,7 +393,7 @@ owns them:
 | `vello`/`wgpu`, `image`, `vello_cpu` | [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) |
 | `reactive_graph`/`any_spawner`/`tokio`, `clean-signals`, `accesskit` + adapters | [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md) |
 | `ndk-context`, `objc2*` (Foundation/Security/LocalAuthentication/UIKit/QuartzCore/CoreText/CoreFoundation), `androidx.camera`, `openiap-google`/`OpenIAP`, `keyring-core`, `arboard` | [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) |
-| `notify` | [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) |
+| `notify`, `rmcp`, `axum`, `base64`, `tokio-util` | [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) |
 | `ratatui`/`crossterm`/`ansi-to-tui`, `toml_edit` | [TUI_DEVELOPMENT.md](TUI_DEVELOPMENT.md) |
 
 The rules below bind every pin, wherever its row lives:

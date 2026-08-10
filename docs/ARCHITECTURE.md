@@ -22,7 +22,7 @@ its own spoke — read this to orient, then follow one link.
 | SHELLS | `frust-shell-common`, `frust-shell-desktop`, `frust-shell-android`, `frust-shell-ios` | The seam to each host: owns the event loop/frame callback, drives rebuild→layout→paint→encode→present, and translates native input/lifecycle/theme/insets/IME/deep-link/back/platform-view signals | [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md) |
 | PLUGINS | `frust-plugin`, `plugins/shared-preferences`, `plugins/secure-storage`, `plugins/camera`, `plugins/clipboard`, `plugins/haptics`, `plugins/iap`, `plugins/clean-signals-frust`, `plugins/database` | Shared Android platform-handle substrate; six OS-capability plugins behind a shared conformance suite; facade-tier glue for an external clean-architecture core; a pure-Rust embedded-SQL plugin | [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md) |
 | NATIVE_WIDGETS | `frust-native-widgets` (`plugins/native-widgets`) | A platform plugin rendering real OS controls plus plugin-authored native view hierarchies, driven through exactly one generic factory/listener per platform; its **theme ladder** folds `Theme` into control props every frame (diff-gated) and degrades bundled fonts to the platform system font when unavailable | [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md) |
-| CLI | `frust-cli`, `frust-drive` | Thin clap front-end plus the framework-free drive library: scaffolds projects, validates toolchain, discovers devices, drives Android/iOS run/build/clean pipelines | [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md) |
+| CLI | `frust-cli`, `frust-drive`, `frust-mcp` | Thin clap front-end plus the framework-free drive library: scaffolds projects, validates toolchain, discovers devices, drives Android/iOS run/build/clean pipelines; `frust-mcp` exposes the same driving/diagnosis surface to AI agents over an MCP Streamable HTTP server | [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md) |
 | TUI | `frust-tui` | Mouse-first ratatui TEA terminal workbench supervising `frust-drive` sessions (scaffold/build/run/doctor/clean) | [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md) |
 | DEVTOOLS | `frust-devtools-protocol`, `frust-devtools` | Sanctioned dependency-free wire-protocol leaf plus the in-app loopback debug service (widget-tree inspection, frame stats, input injection) a shell hosts for `frust-drive`/`frust-tui` | [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md) |
 
@@ -52,17 +52,19 @@ only (S1–S8, D1–D2 per `benchmarks/PROTOCOL.md`), not a framework showcase.
   `frust-reactive` wrapper; this is the single sanctioned bypass of the reactive seam.
 - **`frust-paths` leaf charter** — depends only on `log`; every shell and plugin that needs a
   data/cache directory calls into it rather than resolving paths itself.
-- **Tooling isolation** — `frust-cli`, `frust-drive`, and `frust-tui` depend on NO framework crate
-  EXCEPT the `frust-devtools-protocol` leaf (`serde`/`serde_json` only); otherwise they only shell
-  out to `cargo`/platform toolchains. `frust-devtools` (the framework-side debug service a shell
-  hosts) is the mirror rule: it depends on no framework or tooling crate either — the two sides of
-  the devtools wire meet only at the protocol leaf. See [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md).
+- **Tooling isolation** — `frust-cli`, `frust-drive`, `frust-tui`, and `frust-mcp` depend on NO
+  framework crate EXCEPT the `frust-devtools-protocol` leaf (`serde`/`serde_json` only); otherwise
+  they only shell out to `cargo`/platform toolchains. `frust-mcp` is a fourth tooling front-end
+  under this rule (an MCP server for AI agents, not `frust-devtools` — never a dev-dependency on it
+  either). `frust-devtools` (the framework-side debug service a shell hosts) is the mirror rule: it
+  depends on no framework or tooling crate either — the two sides of the devtools wire meet only at
+  the protocol leaf. See [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md).
 - **Facade/plugin boundary** — the `frust` facade never depends on or re-exports a plugin. Plugins
   (`frust-plugin` substrate, `native-widgets`, `clean-signals-frust`) sit *beside* the facade in an
   app's own dependency list, never inside it.
 
 ```
-frust-reactive (leaf)              frust-paths (leaf)             tooling: frust-cli/-drive/-tui
+frust-reactive (leaf)              frust-paths (leaf)          tooling: frust-cli/-drive/-tui/-mcp
         │                                  │                              (no framework crate)
 frust-scene/frust-text ──► frust-core ──► frust-widgets/frust-theme ──► frust (facade)
    (kurbo/peniko only)         │                                              │

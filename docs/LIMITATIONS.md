@@ -1035,24 +1035,27 @@ review finding recorded in `workflow/reviews/frust-tui-devex-phase2/REVIEW-round
 
 ---
 
-### `tui-devtools-desktop-metrics-unavailable` — DevTools System/Network sampling never starts on desktop or iOS
+### `tui-devtools-desktop-metrics-unavailable` — system-metrics sampling never starts on desktop or iOS
 
-**Observed**: `frust-tui`'s DevTools System/Network tabs sample process metrics for Android
-sessions only. `frust-drive::process::StreamHandle` never exposes a spawned child's pid, and
-extending it is out of scope for this feature, so a desktop or iOS session's `MetricsIdentity`
-can never resolve past `NotAndroid` — the tabs render a permanent "sampling unavailable" state
-for the life of the session.
+**Observed**: `frust-tui`'s DevTools System/Network tabs, and `frust-mcp`'s `metrics` tool, sample
+process metrics for Android sessions only. `frust-drive::process::StreamHandle` never exposes a
+spawned child's pid, and extending it is out of scope for either feature, so a desktop or iOS
+session's identity (`MetricsIdentity` in `frust-tui`; `Session::metrics_sampling` in `frust-mcp`)
+never resolves past "not Android" — `frust-tui`'s tabs render a permanent "sampling unavailable"
+state, and `frust-mcp`'s `metrics` tool reports `system.available: false` with a reason, never a
+zeroed reading, for the life of the session.
 
-**Applies to**: desktop and iOS sessions in the DevTools System/Network tabs. Android sessions are
-unaffected — their identity resolves from lines the session's own log already carries (`Launching
-{pkg}…` / `Streaming logs (pid {pid})`).
+**Applies to**: desktop and iOS sessions in the DevTools System/Network tabs and in `frust-mcp`
+sessions. Android sessions are unaffected — their identity resolves from lines the session's own
+log already carries (`Launching {pkg}…` / `Streaming logs (pid {pid})`).
 
 **Why accepted**: threading a pid out of `StreamHandle` is a `frust-drive` process-plumbing change
 unrelated to the System/Network tabs feature itself; deferred as a named follow-up rather than
 folded in here.
 
 **Evidence**: `crates/frust-tui/src/engine/devtools.rs`'s `MetricsIdentity` doc (desktop honesty
-note); `workflow/plans/features/frust-tui-devex/phase3/TASKS.md`'s p3-06 completion note
+note); `crates/frust-mcp/src/engine/metrics.rs`'s module doc ("Android only, and why");
+`workflow/plans/features/frust-tui-devex/phase3/TASKS.md`'s p3-06 completion note
 ("desktop/iOS sampling unavailable — pid not exposed").
 
 ---
@@ -1101,3 +1104,58 @@ listener succeeded, with no `avc: denied` for any socket/bind class; enabling ne
 the discovery line appear immediately. Surfacing path: `frust-devtools-protocol`'s
 `FAILURE_PREFIX`/`parse_failure_line`, `frust-shell-common::devtools::start`'s failure log, and
 `frust-tui`'s `DevtoolsState::start_error` (rendered on the Discovering screen).
+
+---
+
+### `mcp-screenshot-desktop-unsupported-v1` — the `screenshot` MCP tool has no desktop or iOS Simulator path
+
+**Observed**: `frust-mcp`'s `screenshot` tool tries the app's own devtools `screenshot` capability
+first, falls back to `adb screencap` for an Android session, and otherwise returns a clear
+in-band refusal. No shell backend declares `Capability::Screenshot` yet (see
+`devtools-screenshot-not-supported-v1`), so today the devtools path never fires and desktop/iOS
+Simulator sessions have no fallback at all — only Android sessions can be screenshotted.
+
+**Applies to**: `frust-mcp`'s `screenshot` tool for desktop and iOS Simulator sessions.
+
+**Why accepted**: the root cause (`devtools-screenshot-not-supported-v1`) is out of scope for this
+crate; the tool is written to pick up the devtools capability automatically once a backend
+implements it, with no MCP-side change needed.
+
+**Evidence**: `crates/frust-mcp/src/tools/diagnosis.rs`'s `screenshot` decision chain; the shared
+root cause is `devtools-screenshot-not-supported-v1`.
+
+---
+
+### `mcp-server-unauthenticated-v1` — the MCP server has no authentication beyond the loopback bind
+
+**Observed**: `frust-mcp` binds `127.0.0.1` only and relies on rmcp's default Host-header guard
+against DNS rebinding, but the MCP protocol layer itself has no login, token, or capability check
+— any local process that can reach the port can list, launch, drive, and stop app sessions.
+
+**Applies to**: every `frust-mcp` session, on every platform.
+
+**Why accepted**: a deliberate v1 stance ported from fdemon-pro, matched to the threat model of a
+loopback developer tool: the bind is not reachable off-host, and the devtools handshake token
+still protects the app-side service itself. Server-side auth (e.g. a bearer token) is a named
+follow-up, not a v1 requirement.
+
+**Evidence**: `crates/frust-mcp/src/config.rs`'s `McpConfig` doc comment (bind address is never
+configurable); `crates/frust-mcp/src/server.rs`'s module doc (Host-header guard, no other auth).
+
+---
+
+### `mcp-ios-simulator-unverified` — `frust-mcp` iOS Simulator sessions are compile-clean but unexercised
+
+**Observed**: `frust-mcp`'s session engine and tool layer share the same iOS Simulator run pipeline
+`frust-drive` already ships, but no device/Simulator run of an MCP-launched iOS session has been
+performed this phase — only desktop and Android sessions are exercised by the crate's own tests
+and manual runs.
+
+**Applies to**: `frust-mcp` sessions with `target` resolving to an iOS Simulator udid.
+
+**Why accepted**: no Mac was available this phase; the code path is shared with `frust-drive`'s
+already-verified iOS pipeline, so the residual risk is scoped to the MCP session engine's own
+wiring (devtools connect, log parsing) rather than the launch pipeline itself.
+
+**Evidence**: `crates/frust-mcp` test suite (`engine_lifecycle`, `tool_families`, `http_smoke`)
+exercises desktop and Android targets only, via `FakeProcessRunner`.
