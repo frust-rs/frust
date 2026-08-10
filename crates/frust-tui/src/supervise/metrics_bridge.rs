@@ -35,6 +35,29 @@
 //! start. It stops in exactly one place: the session ending
 //! ([`MetricsBridge::stop`], driven by `crate::engine::Effect::MetricsStop`).
 //!
+//! # Teardown, and the leak it accepts
+//!
+//! Nothing on this path may block `crate::runner`'s event loop, because the
+//! `adb` invocations underneath it are *unbounded*: `frust_drive::process`'s
+//! `run` puts no wall-clock timeout on a `Command`, so one wedged `adb shell`
+//! against an unresponsive device parks the sampler thread indefinitely.
+//! Two things keep that away from the loop:
+//!
+//! - [`run_sampler`] **detaches** its [`frust_drive::metrics::SamplerHandle`]
+//!   on the way out (signal, don't join — the handle's own `Drop` contract)
+//!   instead of joining a sampler that may be inside such a call, so this
+//!   thread itself always winds down within one [`POLL_SLICE`].
+//! - [`MetricsBridge::stop`] signals and hands the thread back as a
+//!   [`Teardown`] rather than joining it; the caller places that bounded wait
+//!   somewhere it can afford one (`crate::runner`: `spawn_blocking`).
+//!
+//! The residual is a leak: a session torn down while its `adb` probe is
+//! wedged leaves the *sampler* thread alive until that call returns, and past
+//! [`super::TEARDOWN_DEADLINE`] the drain thread is detached too. Both are
+//! bounded by how many sessions end while a device is unresponsive, and both
+//! exit on their own; a late batch from a straggler is a real sample for a
+//! real session, and the engine's ring bounds what it can cost.
+//!
 //! # Coalescing
 //!
 //! Mirrors [`super::devtools_bridge`]'s frame-stats pump in shape (batch for
@@ -48,6 +71,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -58,6 +82,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::engine::{Message, MetricsTarget};
 
 use super::session::SessionId;
+use super::{TEARDOWN_DEADLINE, Teardown, spawn_tracked};
 
 /// How long the drain loop gathers samples before forwarding a batch — the
 /// same order of magnitude as `devtools_bridge::COALESCE_WINDOW`, generous
@@ -93,9 +118,24 @@ pub struct MetricsBridge {
 struct Conn {
     /// Set to ask the thread to wind down at its next poll slice.
     stop: Arc<AtomicBool>,
-    /// Joined on stop/drop so no thread — and no background `adb`/`/proc`
-    /// polling — outlives the bridge.
-    worker: Option<JoinHandle<()>>,
+    /// Waited out (with a deadline) on stop/drop, so no thread — and no
+    /// background `adb`/`/proc` polling — outlives the bridge for longer than
+    /// its own wedged call.
+    worker: JoinHandle<()>,
+    /// Disconnects when `worker` returns — see [`spawn_tracked`].
+    done: mpsc::Receiver<()>,
+}
+
+impl Conn {
+    /// Signal the thread and package it for a bounded wait elsewhere.
+    fn into_teardown(self, session: SessionId) -> Teardown {
+        self.stop.store(true, Ordering::SeqCst);
+        Teardown::new(
+            format!("the metrics sampler for session {}", session.0),
+            self.done,
+            self.worker,
+        )
+    }
 }
 
 impl MetricsBridge {
@@ -114,27 +154,28 @@ impl MetricsBridge {
     /// session's identity, once resolved, never changes — this only
     /// protects against a caller that starts a session twice). Returns
     /// immediately; the sampling and draining happen on the spawned thread.
-    pub fn start(&mut self, target: MetricsTarget, tx: UnboundedSender<Message>) {
+    ///
+    /// The replaced sampler (if any) comes back as a [`Teardown`] for the
+    /// caller to wait out off the event loop — see [`Self::stop`].
+    pub fn start(
+        &mut self,
+        target: MetricsTarget,
+        tx: UnboundedSender<Message>,
+    ) -> Option<Teardown> {
         let session = target.session;
-        self.stop(session);
+        let replaced = self.stop(session);
 
         let stop = Arc::new(AtomicBool::new(false));
         let runner = Arc::clone(&self.runner);
-        let worker = {
+        let spawned = {
             let stop = Arc::clone(&stop);
-            thread::Builder::new()
-                .name(format!("frust-tui-metrics-{}", session.0))
-                .spawn(move || run_sampler(session, target, runner, stop, tx))
+            spawn_tracked(format!("frust-tui-metrics-{}", session.0), move || {
+                run_sampler(session, target, runner, stop, tx)
+            })
         };
-        match worker {
-            Ok(worker) => {
-                self.conns.insert(
-                    session,
-                    Conn {
-                        stop,
-                        worker: Some(worker),
-                    },
-                );
+        match spawned {
+            Ok((worker, done)) => {
+                self.conns.insert(session, Conn { stop, worker, done });
             }
             Err(err) => {
                 // Spawning failed (a resource limit) — logged rather than
@@ -149,24 +190,37 @@ impl MetricsBridge {
                 );
             }
         }
+        replaced
     }
 
-    /// Tear down `session`'s sampler, if any: flag the thread, join it, and
-    /// forget it. Idempotent; an unknown session is ignored.
-    pub fn stop(&mut self, session: SessionId) {
-        if let Some(mut conn) = self.conns.remove(&session) {
-            conn.stop.store(true, Ordering::SeqCst);
-            if let Some(worker) = conn.worker.take() {
-                let _ = worker.join();
-            }
-        }
+    /// Tear down `session`'s sampler, if any: flag the thread, forget it, and
+    /// hand it back as a [`Teardown`] the caller waits out *off* the event
+    /// loop (`crate::runner`: `spawn_blocking`). Idempotent; an unknown
+    /// session yields `None`.
+    ///
+    /// Signalling is what happens here — never joining. A sampler can be
+    /// parked in an unbounded `adb` call (see the module doc's Teardown
+    /// section), so a join on this side is a whole-workbench freeze on every
+    /// Android session's terminal transition.
+    pub fn stop(&mut self, session: SessionId) -> Option<Teardown> {
+        Some(self.conns.remove(&session)?.into_teardown(session))
     }
 
     /// Tear down every sampler (the bridge's job on quit).
+    ///
+    /// This is the one place the wait is taken inline — there is no loop left
+    /// to protect by then — and every thread is signalled before any of them
+    /// is waited on, so the whole set shares a single
+    /// [`TEARDOWN_DEADLINE`] rather than paying one per session.
     pub fn stop_all(&mut self) {
         let sessions: Vec<SessionId> = self.conns.keys().copied().collect();
-        for session in sessions {
-            self.stop(session);
+        let mut teardowns: Vec<Teardown> = sessions
+            .into_iter()
+            .filter_map(|session| self.stop(session))
+            .collect();
+        let deadline = Instant::now() + TEARDOWN_DEADLINE;
+        for teardown in &mut teardowns {
+            teardown.wait_until(deadline);
         }
     }
 }
@@ -179,7 +233,7 @@ impl Drop for MetricsBridge {
 
 /// One sampler thread: spawn `frust_drive::metrics::MetricsSampler` against
 /// `target`'s Android identity, drain it into coalesced batches until asked
-/// to stop, then stop the sampler cleanly on the way out.
+/// to stop, then signal the sampler and let it go on the way out.
 fn run_sampler(
     session: SessionId,
     target: MetricsTarget,
@@ -193,7 +247,7 @@ fn run_sampler(
         pid: target.pid,
         pkg: target.pkg,
     };
-    let mut handle = MetricsSampler::spawn(source, SAMPLE_INTERVAL, SAMPLER_CAPACITY);
+    let handle = MetricsSampler::spawn(source, SAMPLE_INTERVAL, SAMPLER_CAPACITY);
 
     let mut batch: Vec<MetricsSample> = Vec::new();
     let mut window_start = Instant::now();
@@ -231,7 +285,13 @@ fn run_sampler(
         thread::sleep(POLL_SLICE);
     }
     flush(&mut batch, session, &tx);
-    handle.stop();
+    // Signal-and-detach rather than `SamplerHandle::stop`, which *joins* the
+    // sampler: that join is unbounded whenever the sampler is inside an `adb`
+    // probe against an unresponsive device, and this thread is what a session
+    // teardown is waiting on. Dropping the handle is the sampler's documented
+    // stop signal; it exits at its next tick check, one probe set later at
+    // worst.
+    drop(handle);
 }
 
 /// Forward `batch` (if non-empty) and clear it. Returns whether the engine is
@@ -312,12 +372,19 @@ mod tests {
         panic!("no metrics batch arrived within the test timeout");
     }
 
+    /// Take the wait a caller would normally hand to `spawn_blocking`.
+    fn settle(teardown: Option<Teardown>) {
+        if let Some(teardown) = teardown {
+            teardown.wait();
+        }
+    }
+
     #[test]
     fn a_started_sampler_delivers_coalesced_batches_then_stops_cleanly() {
         let (tx, mut rx) = unbounded_channel();
         let mut bridge = MetricsBridge::new(Arc::new(fake_runner()));
         let session = SessionId(3);
-        bridge.start(target(session), tx);
+        settle(bridge.start(target(session), tx));
 
         let batch = wait_for_a_batch(&mut rx, session);
         assert!(!batch.is_empty(), "a forwarded batch is never empty");
@@ -326,14 +393,14 @@ mod tests {
             "the first tick's mem/thermal/net samples land in an early batch: {batch:?}"
         );
 
-        bridge.stop(session);
+        settle(bridge.stop(session));
         drop(bridge);
     }
 
     #[test]
     fn stopping_an_unknown_session_is_a_harmless_no_op() {
         let mut bridge = MetricsBridge::new(Arc::new(FakeProcessRunner::new()));
-        bridge.stop(SessionId(99));
+        assert!(bridge.stop(SessionId(99)).is_none());
     }
 
     #[test]
@@ -341,10 +408,105 @@ mod tests {
         let (tx, mut rx) = unbounded_channel();
         let mut bridge = MetricsBridge::new(Arc::new(fake_runner()));
         let session = SessionId(5);
-        bridge.start(target(session), tx);
+        settle(bridge.start(target(session), tx));
         let _ = wait_for_a_batch(&mut rx, session);
         drop(bridge);
         // No panic/hang on drop is the assertion; a stray late batch (the
         // thread was already mid-flush) is harmless and ignored here.
+    }
+
+    /// A `ProcessRunner` whose every invocation parks until the test releases
+    /// it — the wedged `adb shell` `frust_drive::process`'s unbounded `run`
+    /// makes reachable against an unresponsive device.
+    struct ParkingRunner {
+        /// Signals the test that a probe has actually reached the park.
+        entered: std::sync::Mutex<mpsc::Sender<()>>,
+        release: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    }
+
+    impl ProcessRunner for ParkingRunner {
+        fn run(&self, _cmd: &str, _args: &[&str]) -> anyhow::Result<Output> {
+            let _ = self
+                .entered
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .send(());
+            let (lock, ready) = &*self.release;
+            let mut released = lock.lock().unwrap_or_else(|p| p.into_inner());
+            while !*released {
+                released = ready.wait(released).unwrap_or_else(|p| p.into_inner());
+            }
+            Ok(ok(""))
+        }
+
+        fn run_streaming(
+            &self,
+            _cmd: &str,
+            _args: &[&str],
+            _cwd: Option<&std::path::Path>,
+            _env: &[(&str, &str)],
+            _on_line: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<Output> {
+            anyhow::bail!("the metrics sampler never streams")
+        }
+
+        fn spawn_streaming(
+            &self,
+            _cmd: &str,
+            _args: &[&str],
+            _cwd: Option<&std::path::Path>,
+            _env: &[(&str, &str)],
+        ) -> anyhow::Result<frust_drive::process::StreamHandle> {
+            anyhow::bail!("the metrics sampler never streams")
+        }
+    }
+
+    #[test]
+    fn stopping_a_sampler_wedged_in_an_adb_call_never_blocks_the_caller() {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let runner = ParkingRunner {
+            entered: std::sync::Mutex::new(entered_tx),
+            release: Arc::clone(&release),
+        };
+        let (tx, _rx) = unbounded_channel();
+        let mut bridge = MetricsBridge::new(Arc::new(runner));
+        let session = SessionId(13);
+        assert!(
+            bridge.start(target(session), tx).is_none(),
+            "nothing was sampling this session yet"
+        );
+        entered_rx
+            .recv_timeout(RECV_TIMEOUT)
+            .expect("the sampler reached the parked probe");
+
+        // Signalling is all `stop` does — the loop's half of the teardown is
+        // never allowed to wait on a device.
+        let signalled = StdInstant::now();
+        let teardown = bridge
+            .stop(session)
+            .expect("a running sampler hands back a teardown");
+        let signalled = signalled.elapsed();
+        assert!(
+            signalled < Duration::from_millis(100),
+            "stop() only signals, it never joins: took {signalled:?}"
+        );
+
+        // And the wait the caller places (`spawn_blocking`, in the runner) is
+        // bounded even though the probe underneath never returns: the drain
+        // thread detaches its sampler instead of joining it.
+        let waited = StdInstant::now();
+        teardown.wait();
+        let waited = waited.elapsed();
+        assert!(
+            waited < TEARDOWN_DEADLINE * 4,
+            "the teardown wait is bounded, not tied to the wedged probe: took {waited:?}"
+        );
+
+        // Let the parked probe go so the detached sampler thread can exit.
+        let (lock, ready) = &*release;
+        *lock.lock().unwrap_or_else(|p| p.into_inner()) = true;
+        ready.notify_all();
+        drop(bridge);
     }
 }

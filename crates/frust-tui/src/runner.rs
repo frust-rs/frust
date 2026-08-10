@@ -35,7 +35,7 @@ use crate::engine::{
 };
 use crate::supervise::{
     DeviceTarget, DevtoolsBridge, MetricsBridge, SessionEvent, SessionEventKind, SessionId,
-    SessionSpec, SessionState, Supervisor,
+    SessionSpec, SessionState, Supervisor, Teardown,
 };
 use crate::ui::mouse::MouseRegions;
 use crate::ui::theme::Theme;
@@ -109,13 +109,14 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     let (mut supervisor, mut session_rx) = Supervisor::new(Arc::new(RealProcessRunner));
     // The DevTools bridges (workbook §B12): one connection thread per session
     // that has opened DevTools, reporting into the same engine channel. On
-    // return its `Drop` stops and joins every thread (and removes any `adb`
-    // forward they allocated).
+    // return its `Drop` stops every thread and waits them out against one
+    // bounded deadline (see `spawn_teardown`), so a torn-down bridge removes
+    // the `adb` forwards it allocated without ever hanging the exit.
     let mut devtools = DevtoolsBridge::new(Arc::new(RealProcessRunner));
     // The metrics-sampling bridges (workbook §B12's System/Network tabs):
     // one sampler thread per session whose Android identity has resolved
     // and whose DevTools has been opened, reporting into the same engine
-    // channel. On return its `Drop` stops and joins every thread.
+    // channel. On return its `Drop` stops every thread the same bounded way.
     let mut metrics = MetricsBridge::new(Arc::new(RealProcessRunner));
     // A cloneable handle background tasks (device discovery, session
     // registration) post `Message`s back through.
@@ -285,19 +286,23 @@ fn apply_effect(
             id,
             features,
         }) => spawn_add_plugin(project_root, id, features, tx.clone()),
-        // The bridge only *spawns* here: the `adb forward`, the TCP connect,
-        // the handshake and the frame-stats pump all run on its own thread,
-        // so a slow or unreachable service never stalls this loop.
-        Some(Effect::DevtoolsConnect(target)) => devtools.connect(target, tx.clone()),
-        Some(Effect::DevtoolsDisconnect(session)) => devtools.disconnect(session),
+        // The bridge only *spawns* and *signals* here: the `adb forward`, the
+        // TCP connect, the handshake and the frame-stats pump all run on its
+        // own thread, and a teardown's wait is handed to `spawn_teardown`
+        // below — so a slow, unreachable, or wedged service never stalls this
+        // loop.
+        Some(Effect::DevtoolsConnect(target)) => {
+            spawn_teardown(devtools.connect(target, tx.clone()));
+        }
+        Some(Effect::DevtoolsDisconnect(session)) => spawn_teardown(devtools.disconnect(session)),
         // Inspector pulls only *queue* here: the bridge thread serves them
         // between frame windows over its own blocking client.
         Some(Effect::DevtoolsFetchTree { session }) => devtools.fetch_tree(session, tx),
         Some(Effect::DevtoolsFetchProps { session, id }) => devtools.fetch_props(session, id, tx),
-        // Metrics sampling only *spawns* here too — the same "never stall
-        // this loop" shape as the devtools connect above.
-        Some(Effect::MetricsStart(target)) => metrics.start(target, tx.clone()),
-        Some(Effect::MetricsStop(session)) => metrics.stop(session),
+        // Metrics sampling has the same shape — and the sharper teardown
+        // hazard, since its `adb` probes are unbounded (see `spawn_teardown`).
+        Some(Effect::MetricsStart(target)) => spawn_teardown(metrics.start(target, tx.clone())),
+        Some(Effect::MetricsStop(session)) => spawn_teardown(metrics.stop(session)),
         Some(Effect::Batch(effects)) => {
             for effect in effects {
                 apply_effect(
@@ -313,6 +318,35 @@ fn apply_effect(
         Some(Effect::SetMouseCapture(on)) => set_mouse_capture(on),
         Some(Effect::SaveSidebarWidth(width)) => crate::engine::save_sidebar_width(width),
         None => {}
+    }
+}
+
+/// Wait out a stopped DevTools bridge thread off the event loop.
+///
+/// Both bridges hand a signalled (and, for devtools, already muted) thread
+/// back as a [`Teardown`] instead of joining it, because a bridge thread can
+/// be parked in a call this side cannot bound — an `adb` probe against an
+/// unresponsive device has no wall-clock timeout at all. Waiting for one here
+/// would freeze the whole workbench: no repaint, no input, not even quit, on
+/// a path every Android session's terminal transition takes. So the wait goes
+/// to `spawn_blocking`, the same pool the other blocking effects in
+/// `apply_effect` use (`LaunchSessions`, `RunDoctor`, the ad-hoc build/clean
+/// sessions), and degrades to a lagging background task instead.
+///
+/// Only the *waiting* is deferred: each bridge's own bookkeeping already
+/// happened synchronously above, in effect order, so two effects for the same
+/// session can never be reordered by the blocking pool.
+///
+/// **Quit.** On the way out of [`run_loop`] each bridge's `Drop` signals every
+/// remaining thread and then waits *inline* against one shared deadline —
+/// there is no loop left to protect, and a torn-down bridge must not leave an
+/// `adb forward` behind if it can help it. Any teardown still parked in the
+/// blocking pool is waited out the same bounded way by the runtime's own
+/// shutdown. So quitting with a wedged device costs a bounded pause (a
+/// fraction of a second), never a hang.
+fn spawn_teardown(teardown: Option<Teardown>) {
+    if let Some(teardown) = teardown {
+        tokio::task::spawn_blocking(move || teardown.wait());
     }
 }
 

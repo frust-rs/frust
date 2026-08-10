@@ -57,23 +57,35 @@
 //! reconnect replacing it — see `crate::engine::update`'s retention policy),
 //! the peer goes away (the client's frame-stats relay closes, surfaced as
 //! [`ConnEvent::Failed`]), or the engine drops its receiver. [`Drop`] stops
-//! and joins every thread, so a torn-down bridge leaks neither a thread nor
-//! an `adb` forward.
+//! and waits out every thread, so a torn-down bridge leaks neither a thread
+//! nor an `adb` forward.
 //!
-//! Disconnecting *joins* rather than detaching, so a replaced connection can
-//! never race a stale thread's late report into the engine for the same
-//! session. The cost is that a disconnect waits for the thread's current
-//! step: at most one [`COALESCE_WINDOW`] while pumping, or
-//! [`CONNECT_TIMEOUT`] while still trying to reach a service that never
-//! answers — which is why the reachability probe is explicitly bounded
-//! rather than left to the platform's default connect behavior.
+//! # Teardown: mute, then wait elsewhere
+//!
+//! Disconnecting **mutes** the thread's report path ([`Sink`]) before handing
+//! the thread back as a [`super::Teardown`], rather than joining it here.
+//! Muting is what a join used to buy: a replaced connection can never race a
+//! stale thread's late `Closed`/`Failed` into the engine for the same
+//! session, because a muted thread's reports go nowhere at all (and it
+//! notices the closed sink and winds itself down).
+//!
+//! Not joining is what keeps the workbench responsive: a disconnect otherwise
+//! waits out the thread's current step on `crate::runner`'s event loop — one
+//! [`COALESCE_WINDOW`] while pumping, but [`CONNECT_TIMEOUT`] or
+//! [`REQUEST_TIMEOUT`] (seconds) while talking to a device that stopped
+//! answering, with no repaint, input, or quit meanwhile. The caller places
+//! that bounded wait instead (`crate::runner`: `spawn_blocking`), and past
+//! [`super::TEARDOWN_DEADLINE`] the thread is detached — harmless now that it
+//! is muted, and it still removes its own `adb` forward whenever it does
+//! finish. The reachability probe stays explicitly bounded regardless: an
+//! unbounded connect would leave a detached thread parked indefinitely.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use frust_devtools_protocol::FrameStats;
@@ -84,6 +96,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::engine::{ConnEvent, DevtoolsTarget, InspectorEvent, Message};
 
 use super::session::SessionId;
+use super::{TEARDOWN_DEADLINE, Teardown, spawn_tracked};
 
 /// Socket read/write timeout, and the bound each request waits for its
 /// response. Generous enough for a device round trip over `adb forward`,
@@ -115,6 +128,15 @@ pub struct DevtoolsBridge {
     conns: HashMap<SessionId, Conn>,
 }
 
+/// The engine channel one connection thread reports through, closable from
+/// this side.
+///
+/// Setting it to `None` (the mute in the module doc's Teardown section) both
+/// silences a thread that may outlive its disconnect and tells that thread to
+/// wind down — every report path already treats "the engine stopped
+/// listening" as a reason to return.
+type Sink = Mutex<Option<UnboundedSender<Message>>>;
+
 /// One live (or finishing) bridge thread.
 struct Conn {
     /// Set to ask the thread to wind down at its next window tick.
@@ -124,9 +146,28 @@ struct Conn {
     /// flight per session ([`crate::engine::InspectorTab`]'s gating), so the
     /// queue is bounded by that in practice.
     commands: mpsc::Sender<BridgeCommand>,
-    /// Joined on disconnect/drop so no thread — and no `adb` forward —
-    /// outlives the bridge.
-    worker: Option<JoinHandle<()>>,
+    /// Muted on disconnect/drop, before the thread is waited out.
+    sink: Arc<Sink>,
+    /// Waited out (with a deadline) on disconnect/drop so no thread — and no
+    /// `adb` forward — outlives the bridge for longer than its own wedged
+    /// call.
+    worker: JoinHandle<()>,
+    /// Disconnects when `worker` returns — see [`spawn_tracked`].
+    done: mpsc::Receiver<()>,
+}
+
+impl Conn {
+    /// Signal the thread, mute it, and package it for a bounded wait
+    /// elsewhere.
+    fn into_teardown(self, session: SessionId) -> Teardown {
+        self.stop.store(true, Ordering::SeqCst);
+        *self.sink.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        Teardown::new(
+            format!("the devtools bridge for session {}", session.0),
+            self.done,
+            self.worker,
+        )
+    }
 }
 
 /// One on-demand request for a bridge thread to serve.
@@ -159,28 +200,38 @@ impl DevtoolsBridge {
     /// port/token — the old socket points at a dead port). Returns
     /// immediately; everything else happens on the spawned thread and comes
     /// back as [`Message::DevtoolsConn`].
-    pub fn connect(&mut self, target: DevtoolsTarget, tx: UnboundedSender<Message>) {
+    ///
+    /// The replaced connection (if any) comes back as a [`Teardown`] for the
+    /// caller to wait out off the event loop — see [`Self::disconnect`].
+    pub fn connect(
+        &mut self,
+        target: DevtoolsTarget,
+        tx: UnboundedSender<Message>,
+    ) -> Option<Teardown> {
         let session = target.session;
-        self.disconnect(session);
+        let replaced = self.disconnect(session);
 
         let stop = Arc::new(AtomicBool::new(false));
         let runner = Arc::clone(&self.runner);
         let (commands, command_rx) = mpsc::channel::<BridgeCommand>();
-        let worker = {
+        let sink: Arc<Sink> = Arc::new(Mutex::new(Some(tx.clone())));
+        let spawned = {
             let stop = Arc::clone(&stop);
-            let tx = tx.clone();
-            thread::Builder::new()
-                .name(format!("frust-tui-devtools-{}", session.0))
-                .spawn(move || run_bridge(target, runner, stop, command_rx, tx))
+            let sink = Arc::clone(&sink);
+            spawn_tracked(format!("frust-tui-devtools-{}", session.0), move || {
+                run_bridge(target, runner, stop, command_rx, &sink)
+            })
         };
-        match worker {
-            Ok(worker) => {
+        match spawned {
+            Ok((worker, done)) => {
                 self.conns.insert(
                     session,
                     Conn {
                         stop,
                         commands,
-                        worker: Some(worker),
+                        sink,
+                        worker,
+                        done,
                     },
                 );
             }
@@ -194,6 +245,7 @@ impl DevtoolsBridge {
                 ));
             }
         }
+        replaced
     }
 
     /// Ask `session`'s bridge for a fresh `widget_tree` snapshot; the result
@@ -228,23 +280,34 @@ impl DevtoolsBridge {
         }
     }
 
-    /// Tear down `session`'s connection, if any: flag the thread, join it
-    /// (it removes its own `adb forward` on the way out), and forget it.
-    /// Idempotent; an unknown session is ignored.
-    pub fn disconnect(&mut self, session: SessionId) {
-        if let Some(mut conn) = self.conns.remove(&session) {
-            conn.stop.store(true, Ordering::SeqCst);
-            if let Some(worker) = conn.worker.take() {
-                let _ = worker.join();
-            }
-        }
+    /// Tear down `session`'s connection, if any: flag the thread, mute it,
+    /// forget it, and hand it back as a [`Teardown`] the caller waits out
+    /// *off* the event loop (`crate::runner`: `spawn_blocking`). The thread
+    /// removes its own `adb forward` on the way out. Idempotent; an unknown
+    /// session yields `None`.
+    ///
+    /// Signalling and muting are what happen here — never joining; see the
+    /// module doc's Teardown section for why a join on this side is a
+    /// seconds-long workbench freeze on an unresponsive device.
+    pub fn disconnect(&mut self, session: SessionId) -> Option<Teardown> {
+        Some(self.conns.remove(&session)?.into_teardown(session))
     }
 
     /// Tear down every connection (the bridge's job on quit).
+    ///
+    /// This is the one place the wait is taken inline — there is no loop left
+    /// to protect by then — and every thread is signalled before any of them
+    /// is waited on, so the whole set shares a single
+    /// [`TEARDOWN_DEADLINE`] rather than paying one per session.
     pub fn disconnect_all(&mut self) {
         let sessions: Vec<SessionId> = self.conns.keys().copied().collect();
-        for session in sessions {
-            self.disconnect(session);
+        let mut teardowns: Vec<Teardown> = sessions
+            .into_iter()
+            .filter_map(|session| self.disconnect(session))
+            .collect();
+        let deadline = Instant::now() + TEARDOWN_DEADLINE;
+        for teardown in &mut teardowns {
+            teardown.wait_until(deadline);
         }
     }
 }
@@ -268,7 +331,7 @@ fn run_bridge(
     runner: Arc<dyn ProcessRunner + Send + Sync>,
     stop: Arc<AtomicBool>,
     commands: mpsc::Receiver<BridgeCommand>,
-    tx: UnboundedSender<Message>,
+    tx: &Sink,
 ) {
     let session = target.session;
     let forward = match target.android_serial.as_deref() {
@@ -278,7 +341,7 @@ fn run_bridge(
                 local_port,
             }),
             Err(err) => {
-                report(&tx, session, ConnEvent::Failed(format!("{err:#}")));
+                report(tx, session, ConnEvent::Failed(format!("{err:#}")));
                 return;
             }
         },
@@ -290,14 +353,7 @@ fn run_bridge(
         .unwrap_or(target.port);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], local_port));
-    let result = connect_and_pump(
-        addr,
-        target.token.as_deref(),
-        session,
-        &stop,
-        &commands,
-        &tx,
-    );
+    let result = connect_and_pump(addr, target.token.as_deref(), session, &stop, &commands, tx);
 
     if let Some(forward) = forward {
         // Best-effort: the connection is over either way, and a failure to
@@ -309,7 +365,7 @@ fn run_bridge(
         Ok(()) => ConnEvent::Closed,
         Err(err) => ConnEvent::Failed(format!("{err:#}")),
     };
-    report(&tx, session, event);
+    report(tx, session, event);
 }
 
 /// Connect, handshake, arm the frame-stats subscription, and pump batches
@@ -321,15 +377,16 @@ fn connect_and_pump(
     session: SessionId,
     stop: &AtomicBool,
     commands: &mpsc::Receiver<BridgeCommand>,
-    tx: &UnboundedSender<Message>,
+    tx: &Sink,
 ) -> Result<()> {
     // A bounded reachability probe first. `DevtoolsClient::connect` uses the
     // platform's own TCP connect behavior, which has no bound this side can
-    // set — and `DevtoolsBridge::disconnect` *joins* this thread from the
-    // event loop, so an unbounded connect here would be an unbounded stall
-    // there. Probing with an explicit timeout puts the only wait that can
-    // actually hang under [`CONNECT_TIMEOUT`]; the client's own connect that
-    // follows is then to an already-proven-reachable loopback port.
+    // set, so an unbounded connect here would be a thread that never notices
+    // its stop flag — detached at teardown and parked for as long as the
+    // platform's own connect takes. Probing with an explicit timeout puts the
+    // only wait that can actually hang under [`CONNECT_TIMEOUT`]; the
+    // client's own connect that follows is then to an already-proven-
+    // reachable loopback port.
     let probe = std::net::TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)
         .with_context(|| format!("connecting to the devtools service at {addr}"))?;
     drop(probe);
@@ -361,40 +418,48 @@ fn connect_and_pump(
 /// request first — until `stop` is set (`Ok`), the engine drops its receiver
 /// (`Ok` — nothing left to report to), or the connection closes (`Err`, which
 /// surfaces §B12's failed screen).
+///
+/// The window is measured, not inferred from an idle receive: each batch is
+/// forwarded once [`COALESCE_WINDOW`] has *elapsed* since the last one,
+/// whatever the receive did meanwhile. Flushing only when a receive times out
+/// would starve exactly the case DevTools exists for — an app publishing
+/// faster than the window (>30fps) never leaves the receiver idle, so its
+/// batch would grow to [`MAX_BATCH_FRAMES`], silently shed its oldest samples,
+/// and reach the Performance tab only once the app went idle.
 fn pump_frames(
     client: &DevtoolsClient,
     frames: &mpsc::Receiver<FrameStats>,
     commands: &mpsc::Receiver<BridgeCommand>,
     session: SessionId,
     stop: &AtomicBool,
-    tx: &UnboundedSender<Message>,
+    tx: &Sink,
 ) -> Result<()> {
     let mut batch: Vec<FrameStats> = Vec::new();
+    let mut window_start = Instant::now();
     loop {
         if stop.load(Ordering::SeqCst) {
             return Ok(());
         }
         // Served at the top of every iteration rather than only on the
         // window's timeout branch: an app publishing faster than
-        // `COALESCE_WINDOW` never reaches that branch, and a request must not
-        // wait on a busy app to go idle.
+        // `COALESCE_WINDOW` iterates per frame, and a request must not wait on
+        // a busy app to go idle.
         if !serve_commands(client, commands, session, tx) {
             return Ok(());
         }
-        match frames.recv_timeout(COALESCE_WINDOW) {
+        // Only ever wait out the *rest* of the current window, so a steady
+        // stream of frames can't push the flush below past it.
+        let remaining = COALESCE_WINDOW.saturating_sub(window_start.elapsed());
+        match frames.recv_timeout(remaining) {
             Ok(stats) => {
                 batch.push(stats);
                 if batch.len() > MAX_BATCH_FRAMES {
                     batch.remove(0);
                 }
             }
-            // The window elapsed: forward whatever accumulated. This is the
-            // ordinary tick — an idle app simply forwards nothing.
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if !flush(&mut batch, session, tx) {
-                    return Ok(());
-                }
-            }
+            // Nothing arrived in the rest of the window — an idle app simply
+            // forwards nothing below.
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
             // The client's reader thread closed the frame-stats mailbox: the
             // peer is gone.
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -402,32 +467,47 @@ fn pump_frames(
                 anyhow::bail!("the devtools connection closed");
             }
         }
+        if window_start.elapsed() >= COALESCE_WINDOW {
+            if !flush(&mut batch, session, tx) {
+                return Ok(());
+            }
+            window_start = Instant::now();
+        }
     }
 }
 
 /// Forward `batch` (if non-empty) and clear it. Returns whether the engine is
 /// still listening.
-fn flush(batch: &mut Vec<FrameStats>, session: SessionId, tx: &UnboundedSender<Message>) -> bool {
+fn flush(batch: &mut Vec<FrameStats>, session: SessionId, tx: &Sink) -> bool {
     if batch.is_empty() {
-        return !tx.is_closed();
+        return listening(tx);
     }
     report(tx, session, ConnEvent::Frames(std::mem::take(batch)))
 }
 
 /// Post one report into the engine channel. Returns whether it was delivered
-/// — a closed channel means the engine is gone and the caller should wind
-/// down.
-fn report(tx: &UnboundedSender<Message>, session: SessionId, event: ConnEvent) -> bool {
-    tx.send(Message::DevtoolsConn(session, event)).is_ok()
+/// — a muted sink (this connection was disconnected) or a closed channel (the
+/// engine is gone) both mean the caller should wind down.
+fn report(tx: &Sink, session: SessionId, event: ConnEvent) -> bool {
+    send(tx, Message::DevtoolsConn(session, event))
 }
 
 /// [`report`] for the Inspector's own request/response channel.
-fn report_inspector(
-    tx: &UnboundedSender<Message>,
-    session: SessionId,
-    event: InspectorEvent,
-) -> bool {
-    tx.send(Message::DevtoolsInspector(session, event)).is_ok()
+fn report_inspector(tx: &Sink, session: SessionId, event: InspectorEvent) -> bool {
+    send(tx, Message::DevtoolsInspector(session, event))
+}
+
+/// The one place a bridge thread touches the engine channel, so muting a
+/// connection ([`Conn::into_teardown`]) is enough to silence it everywhere.
+fn send(sink: &Sink, message: Message) -> bool {
+    let sink = sink.lock().unwrap_or_else(|p| p.into_inner());
+    sink.as_ref().is_some_and(|tx| tx.send(message).is_ok())
+}
+
+/// Whether reports would still reach the engine, without posting one.
+fn listening(sink: &Sink) -> bool {
+    let sink = sink.lock().unwrap_or_else(|p| p.into_inner());
+    sink.as_ref().is_some_and(|tx| !tx.is_closed())
 }
 
 /// Serve every request queued right now (never blocking on an empty queue).
@@ -436,7 +516,7 @@ fn serve_commands(
     client: &DevtoolsClient,
     commands: &mpsc::Receiver<BridgeCommand>,
     session: SessionId,
-    tx: &UnboundedSender<Message>,
+    tx: &Sink,
 ) -> bool {
     loop {
         match commands.try_recv() {
@@ -462,7 +542,7 @@ fn serve_command(
     client: &DevtoolsClient,
     command: BridgeCommand,
     session: SessionId,
-    tx: &UnboundedSender<Message>,
+    tx: &Sink,
 ) -> bool {
     let event = match command {
         BridgeCommand::FetchTree => match client.widget_tree() {
@@ -487,8 +567,8 @@ mod tests {
     use frust_drive::process::FakeProcessRunner;
     use std::io::{BufRead, BufReader, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::Mutex;
-    use std::time::Instant;
+    use std::sync::atomic::AtomicU64;
+    use std::thread;
     use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
     /// The token the canned server below requires — the stand-in for one
@@ -513,15 +593,61 @@ mod tests {
         }
     }
 
+    /// How the canned server publishes `frame_stats` after a subscribe.
+    #[derive(Clone)]
+    struct PushPlan {
+        /// Stop after this many notifications; `None` pushes until [`stop`]
+        /// is set, which is what a *continuously rendering* app looks like.
+        limit: Option<u64>,
+        /// Gap between pushes.
+        gap: Duration,
+        /// How many have actually been written — the server-side witness a
+        /// test counts batches against.
+        pushed: Arc<AtomicU64>,
+        /// Set by the test to end an unlimited push loop.
+        stop: Arc<AtomicBool>,
+    }
+
+    impl PushPlan {
+        /// Push `count` frames, spread across more than one coalescing window
+        /// so the batching path is genuinely exercised.
+        fn fixed(count: u64) -> Self {
+            Self {
+                limit: Some(count),
+                gap: Duration::from_millis(20),
+                pushed: Arc::new(AtomicU64::new(0)),
+                stop: Arc::new(AtomicBool::new(false)),
+            }
+        }
+
+        /// Push every `gap` until told to stop.
+        fn continuous(gap: Duration) -> Self {
+            Self {
+                limit: None,
+                gap,
+                pushed: Arc::new(AtomicU64::new(0)),
+                stop: Arc::new(AtomicBool::new(false)),
+            }
+        }
+
+        fn pushed(&self) -> u64 {
+            self.pushed.load(Ordering::SeqCst)
+        }
+
+        fn end(&self) {
+            self.stop.store(true, Ordering::SeqCst);
+        }
+    }
+
     /// A hand-rolled NDJSON devtools server: accepts one connection, answers
     /// `handshake` (rejecting a wrong/missing token exactly as the real
     /// service does), `frame_stats_subscribe` (after which it pushes
-    /// `frame_count` `frame_stats` notifications *from its own thread*, so
+    /// `frame_stats` notifications per `plan` *from its own thread*, so
     /// requests keep being served while frames flow), `widget_tree` and
     /// `widget_props`. Deliberately *not* `frust-devtools` — the tooling
     /// charter keeps the framework-side service out of this crate's graph, so
     /// the wire contract is exercised against a canned peer.
-    fn spawn_canned_server(frame_count: u64) -> (SocketAddr, thread::JoinHandle<()>) {
+    fn spawn_canned_server(plan: PushPlan) -> (SocketAddr, thread::JoinHandle<()>) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind canned devtools server");
         let addr = listener.local_addr().expect("canned server addr");
         let handle = thread::spawn(move || {
@@ -531,7 +657,7 @@ mod tests {
             // the bound keeps a wedged test from hanging the suite.
             for stream in listener.incoming().take(MAX_CANNED_CONNECTIONS) {
                 let Ok(stream) = stream else { return };
-                if serve_canned(stream, frame_count) {
+                if serve_canned(stream, plan.clone()) {
                     return;
                 }
             }
@@ -546,7 +672,7 @@ mod tests {
     /// Serve one connection; returns whether it spoke the protocol at all (a
     /// bare reachability probe, which opens and closes without writing, does
     /// not).
-    fn serve_canned(stream: TcpStream, frame_count: u64) -> bool {
+    fn serve_canned(stream: TcpStream, plan: PushPlan) -> bool {
         let mut served = false;
         // Shared because the frame pusher below writes from its own thread:
         // two writers interleaving mid-line would corrupt the NDJSON stream.
@@ -601,8 +727,12 @@ mod tests {
                     break;
                 }
                 let write = Arc::clone(&write);
+                let plan = plan.clone();
                 pusher = Some(thread::spawn(move || {
-                    for n in 0..frame_count {
+                    let mut n = 0;
+                    while plan.limit.is_none_or(|limit| n < limit)
+                        && !plan.stop.load(Ordering::SeqCst)
+                    {
                         let note = Notification::new(
                             Method::FrameStats.as_str(),
                             serde_json::to_value(frame(n)).expect("encode frame stats"),
@@ -610,9 +740,9 @@ mod tests {
                         if write_line(&write, &encode_line(&note)).is_err() {
                             return;
                         }
-                        // Spread the pushes across more than one coalescing
-                        // window so the batching path is genuinely exercised.
-                        thread::sleep(Duration::from_millis(20));
+                        plan.pushed.fetch_add(1, Ordering::SeqCst);
+                        n += 1;
+                        thread::sleep(plan.gap);
                     }
                 }));
             } else if method == Method::WidgetTree.as_str() {
@@ -674,6 +804,25 @@ mod tests {
         stream.flush()
     }
 
+    /// Take the wait a caller would normally hand to `spawn_blocking`.
+    fn settle(teardown: Option<Teardown>) {
+        if let Some(teardown) = teardown {
+            teardown.wait();
+        }
+    }
+
+    /// Wait for the next forwarded frame-stats batch.
+    fn wait_for_frames(rx: &mut UnboundedReceiver<Message>) -> Vec<FrameStats> {
+        let msg = wait_for(rx, |msg| {
+            matches!(msg, Message::DevtoolsConn(_, ConnEvent::Frames(_)))
+        })
+        .expect("a frame-stats batch");
+        let Message::DevtoolsConn(_, ConnEvent::Frames(batch)) = msg else {
+            unreachable!("filtered above")
+        };
+        batch
+    }
+
     /// Drain messages until one satisfies `want`, or [`RECV_TIMEOUT`] passes.
     fn wait_for(
         rx: &mut UnboundedReceiver<Message>,
@@ -701,11 +850,11 @@ mod tests {
 
     #[test]
     fn bridge_handshakes_forwards_frame_stats_and_disconnects_cleanly() {
-        let (addr, server) = spawn_canned_server(6);
+        let (addr, server) = spawn_canned_server(PushPlan::fixed(6));
         let (tx, mut rx) = unbounded_channel();
         let mut bridge = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
         let session = SessionId(7);
-        bridge.connect(target(session, addr, Some(TOKEN)), tx);
+        settle(bridge.connect(target(session, addr, Some(TOKEN)), tx));
 
         let connected = wait_for(&mut rx, |msg| {
             matches!(msg, Message::DevtoolsConn(_, ConnEvent::Connected { .. }))
@@ -723,33 +872,76 @@ mod tests {
             "the declared capability set is forwarded verbatim"
         );
 
-        let frames = wait_for(&mut rx, |msg| {
-            matches!(msg, Message::DevtoolsConn(_, ConnEvent::Frames(_)))
-        })
-        .expect("a frame-stats batch");
-        let Message::DevtoolsConn(_, ConnEvent::Frames(batch)) = frames else {
-            unreachable!("filtered above")
-        };
+        let batch = wait_for_frames(&mut rx);
         assert!(!batch.is_empty(), "a forwarded batch is never empty");
         assert!(
             batch.len() <= MAX_BATCH_FRAMES,
             "a batch never exceeds its cap"
         );
 
-        // A clean disconnect stops and joins the thread — no report is
-        // required afterwards, and nothing leaks.
-        bridge.disconnect(session);
+        // A clean disconnect stops, mutes and winds down the thread — no
+        // report is required afterwards, and nothing leaks.
+        settle(bridge.disconnect(session));
+        drop(bridge);
+        let _ = server.join();
+    }
+
+    #[test]
+    fn frames_are_forwarded_every_window_while_the_app_keeps_publishing() {
+        // A frame every 2ms is ~500fps: far faster than COALESCE_WINDOW, i.e.
+        // the profiling case DevTools exists for. The server pushes until
+        // *this test* stops it, so every batch observed below necessarily
+        // arrived while frames were still flowing — the shape that used to
+        // starve, because a receive that never idles never timed out and the
+        // pump only flushed on a timeout.
+        let plan = PushPlan::continuous(Duration::from_millis(2));
+        let (addr, server) = spawn_canned_server(plan.clone());
+        let (tx, mut rx) = unbounded_channel();
+        let mut bridge = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let session = SessionId(21);
+        settle(bridge.connect(target(session, addr, Some(TOKEN)), tx));
+        wait_for(&mut rx, |msg| {
+            matches!(msg, Message::DevtoolsConn(_, ConnEvent::Connected { .. }))
+        })
+        .expect("a Connected report");
+
+        let first = wait_for_frames(&mut rx);
+        let pushed_after_first = plan.pushed();
+        let second = wait_for_frames(&mut rx);
+        let pushed_after_second = plan.pushed();
+
+        assert!(
+            !first.is_empty() && !second.is_empty(),
+            "a forwarded batch is never empty"
+        );
+        assert!(
+            first.len() <= MAX_BATCH_FRAMES && second.len() <= MAX_BATCH_FRAMES,
+            "a batch never exceeds its cap"
+        );
+        assert!(
+            second[0].n > first[first.len() - 1].n,
+            "consecutive windows carry consecutive frames, oldest first: \
+             {first:?} then {second:?}"
+        );
+        assert!(
+            pushed_after_second > pushed_after_first,
+            "the app kept publishing across both windows ({pushed_after_first} \
+             then {pushed_after_second} frames pushed)"
+        );
+
+        plan.end();
+        settle(bridge.disconnect(session));
         drop(bridge);
         let _ = server.join();
     }
 
     #[test]
     fn a_rejected_token_surfaces_as_a_failure() {
-        let (addr, server) = spawn_canned_server(0);
+        let (addr, server) = spawn_canned_server(PushPlan::fixed(0));
         let (tx, mut rx) = unbounded_channel();
         let mut bridge = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
         let session = SessionId(1);
-        bridge.connect(target(session, addr, Some("wrong-token")), tx);
+        settle(bridge.connect(target(session, addr, Some("wrong-token")), tx));
 
         let failed = wait_for(&mut rx, |msg| {
             matches!(msg, Message::DevtoolsConn(_, ConnEvent::Failed(_)))
@@ -770,11 +962,11 @@ mod tests {
     fn on_demand_pulls_are_served_between_frame_windows() {
         // Enough frames to still be flowing after both pulls have been served
         // (~20ms apart), so the interleaving is real rather than incidental.
-        let (addr, server) = spawn_canned_server(200);
+        let (addr, server) = spawn_canned_server(PushPlan::fixed(200));
         let (tx, mut rx) = unbounded_channel();
         let mut bridge = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
         let session = SessionId(11);
-        bridge.connect(target(session, addr, Some(TOKEN)), tx.clone());
+        settle(bridge.connect(target(session, addr, Some(TOKEN)), tx.clone()));
         wait_for(&mut rx, |msg| {
             matches!(msg, Message::DevtoolsConn(_, ConnEvent::Connected { .. }))
         })
@@ -825,7 +1017,7 @@ mod tests {
             "frame stats keep flowing around an on-demand pull"
         );
 
-        bridge.disconnect(session);
+        settle(bridge.disconnect(session));
         drop(bridge);
         let _ = server.join();
     }
@@ -859,7 +1051,7 @@ mod tests {
 
         let (tx, mut rx) = unbounded_channel();
         let mut bridge = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
-        bridge.connect(target(SessionId(2), addr, Some(TOKEN)), tx);
+        settle(bridge.connect(target(SessionId(2), addr, Some(TOKEN)), tx));
 
         let failed = wait_for(&mut rx, |msg| {
             matches!(msg, Message::DevtoolsConn(_, ConnEvent::Failed(_)))
