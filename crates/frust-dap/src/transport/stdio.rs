@@ -9,6 +9,7 @@
 //! process decides where that goes (stderr, a file), never stdout.
 
 use tokio::io::BufWriter;
+use tokio_util::sync::CancellationToken;
 
 use crate::protocol::codec::CodecError;
 use crate::server::session::{DapAdapter, EventSender, run_session};
@@ -18,7 +19,14 @@ use crate::server::session::{DapAdapter, EventSender, run_session};
 /// `make_adapter` is called once with this session's [`EventSender`]. The
 /// caller (the `frust` CLI) exits once this returns — the client has hung up,
 /// asked to disconnect, or never spoke DAP at all.
-pub async fn run_stdio_session<A, F>(make_adapter: F) -> Result<(), CodecError>
+///
+/// `cancel` covers the bare-terminal case: an editor that closes the pipe is
+/// seen as EOF, but a `frust dap` run by hand and stopped with Ctrl-C has no
+/// EOF to fall back on, so the same signal-driven token tears its session down.
+pub async fn run_stdio_session<A, F>(
+    make_adapter: F,
+    cancel: CancellationToken,
+) -> Result<(), CodecError>
 where
     A: DapAdapter,
     F: FnOnce(EventSender) -> A,
@@ -31,6 +39,7 @@ where
         tokio::io::stdin(),
         BufWriter::new(tokio::io::stdout()),
         make_adapter,
+        cancel,
     )
     .await;
 

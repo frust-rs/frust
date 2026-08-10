@@ -500,6 +500,7 @@ mod tests {
     use frust_mcp::engine::RunTarget;
     use tokio::io::{BufReader, DuplexStream};
     use tokio::task::JoinHandle;
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
     use crate::protocol::codec::{CodecError, read_message, write_message};
@@ -612,22 +613,42 @@ mod tests {
     fn spawn_adapter_session(
         runner: Runner,
     ) -> (TestClient, JoinHandle<std::result::Result<(), CodecError>>) {
-        spawn_session_with(move |events| {
-            OrchestrationAdapter::new(events, Arc::clone(&runner), TransportMode::Stdio)
-        })
+        spawn_session_with(
+            move |events| {
+                OrchestrationAdapter::new(events, Arc::clone(&runner), TransportMode::Stdio)
+            },
+            CancellationToken::new(),
+        )
     }
 
     /// The same, against a caller-owned engine the test can assert on.
     fn spawn_adapter_session_with_engine(
         engine: Arc<SessionEngine>,
     ) -> (TestClient, JoinHandle<std::result::Result<(), CodecError>>) {
-        spawn_session_with(move |events| {
-            OrchestrationAdapter::with_engine(events, Arc::clone(&engine))
-        })
+        let (client, _cancel, handle) = spawn_adapter_session_with_engine_and_cancel(engine);
+        (client, handle)
+    }
+
+    /// [`spawn_adapter_session_with_engine`], but also handing back the
+    /// session's [`CancellationToken`] for the shutdown-signal path.
+    fn spawn_adapter_session_with_engine_and_cancel(
+        engine: Arc<SessionEngine>,
+    ) -> (
+        TestClient,
+        CancellationToken,
+        JoinHandle<std::result::Result<(), CodecError>>,
+    ) {
+        let cancel = CancellationToken::new();
+        let (client, handle) = spawn_session_with(
+            move |events| OrchestrationAdapter::with_engine(events, Arc::clone(&engine)),
+            cancel.clone(),
+        );
+        (client, cancel, handle)
     }
 
     fn spawn_session_with<F>(
         make_adapter: F,
+        cancel: CancellationToken,
     ) -> (TestClient, JoinHandle<std::result::Result<(), CodecError>>)
     where
         F: FnOnce(EventSender) -> OrchestrationAdapter + Send + 'static,
@@ -635,10 +656,9 @@ mod tests {
         let (server_reader, client_writer) = tokio::io::duplex(DUPLEX_BUFFER);
         let (client_reader, server_writer) = tokio::io::duplex(DUPLEX_BUFFER);
 
-        let handle =
-            tokio::spawn(
-                async move { run_session(server_reader, server_writer, make_adapter).await },
-            );
+        let handle = tokio::spawn(async move {
+            run_session(server_reader, server_writer, make_adapter, cancel).await
+        });
 
         (
             TestClient {
@@ -866,6 +886,54 @@ mod tests {
                 Some(SessionState::Failed { .. })
             ),
             "the engine was not shut down: {:?}",
+            engine.session(probe).map(|s| s.state)
+        );
+    }
+
+    /// The signal-driven equivalent of the disconnect teardown: a shutdown
+    /// signal (Ctrl-C/SIGTERM) fires the session's cancellation token, and by
+    /// the time the session ends the launched app is *stopped* and the engine
+    /// is shut down — the same guarantee, reached without any client request.
+    #[tokio::test]
+    async fn cancellation_stops_the_app_and_shuts_the_engine_down() {
+        let engine = Arc::new(SessionEngine::with_runner(
+            TEST_PROJECT_ROOT,
+            hanging_desktop_runner(&["running"]),
+        ));
+        let (mut client, cancel, handle) =
+            spawn_adapter_session_with_engine_and_cancel(Arc::clone(&engine));
+        client.initialize().await;
+
+        client.request(2, "launch", launch_arguments()).await;
+        let (response, _) = client.next_response().await;
+        assert!(response.success, "{:?}", response.message);
+        // Real output means the process is provably live before the signal.
+        client.wait_for_output("running").await;
+
+        // No disconnect/terminate request — just the signal token, exactly what
+        // `run_blocking`'s Ctrl-C/SIGTERM listener fires.
+        cancel.cancel();
+        join(handle).await;
+
+        let sessions = engine.sessions();
+        let [session] = sessions.as_slice() else {
+            panic!("expected exactly one session, got {}", sessions.len());
+        };
+        assert!(
+            session.state.is_terminal(),
+            "a cancelled session left the app running: {:?}",
+            session.state
+        );
+
+        // A shut-down engine refuses new launches — proof the teardown ran the
+        // engine shutdown, not merely the app stop.
+        let probe = engine.run_app(RunTarget::Desktop, BuildMode::Debug);
+        assert!(
+            matches!(
+                engine.session(probe).map(|s| s.state),
+                Some(SessionState::Failed { .. })
+            ),
+            "the engine was not shut down on cancellation: {:?}",
             engine.session(probe).map(|s| s.state)
         );
     }

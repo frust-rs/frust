@@ -13,6 +13,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::adapter::{OrchestrationAdapter, Runner};
 use crate::server::{ServerError, serve};
 use crate::transport::TransportMode;
@@ -26,6 +28,13 @@ const EXIT_OK: u8 = 0;
 /// and dropping a runtime waits for blocking tasks to finish. The pumps notice
 /// their cancel flag within one tick, so this is only a backstop — but an
 /// unbounded wait here would turn any straggling task into a hung process.
+///
+/// Signal-driven teardown does *not* lean on this window: a cancelled session
+/// runs its `on_disconnect` (stop_app + engine shutdown) inside `serve` — the
+/// TCP accept loop drains its live sessions before returning, and stdio's one
+/// session tears down inline — so by the time `block_on` returns the apps are
+/// already stopped. This grace stays a pure backstop for a stray log-pump
+/// blocking task, which is why 5s is still enough after the signal wiring.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 /// How a DAP server run is configured.
@@ -79,12 +88,21 @@ pub fn run_blocking(config: DapConfig) -> Result<u8, ServiceError> {
         .map_err(ServiceError::Runtime)?;
 
     let served = runtime.block_on(async move {
+        // One root token drives every live connection's teardown on a shutdown
+        // signal: the listener spawns each session under a child of it (see
+        // `serve_tcp`), so a single `cancel()` breaks all their read loops into
+        // the same idempotent `on_disconnect` an EOF/disconnect runs.
+        let cancel = CancellationToken::new();
+        spawn_signal_listener(cancel.clone());
+
         // `mode` is `Copy`; the adapter needs it too, to decide whether a
         // client-supplied `projectRoot` is honored (stdio) or ignored for
         // security (TCP) — see `OrchestrationAdapter::new`.
-        serve(mode, move |events| {
-            OrchestrationAdapter::new(events, Arc::clone(&runner), mode)
-        })
+        serve(
+            mode,
+            move |events| OrchestrationAdapter::new(events, Arc::clone(&runner), mode),
+            cancel,
+        )
         .await
     });
 
@@ -94,6 +112,62 @@ pub fn run_blocking(config: DapConfig) -> Result<u8, ServiceError> {
 
     served?;
     Ok(EXIT_OK)
+}
+
+/// Cancel `cancel` on the first shutdown signal, so every live DAP session
+/// tears its app down before the process exits.
+///
+/// A `frust dap` process is a documented, long-lived server — `--port` mode is
+/// meant to be stopped with Ctrl-C or a `kill`. Without this, a signal bypasses
+/// the whole `on_disconnect` chain (stop_app + `SessionEngine::shutdown` →
+/// device force-stop + `adb forward` removal), because a launched child sits in
+/// its own process group and is never signalled with the parent — leaving
+/// orphaned apps and leaked forwards behind.
+///
+/// This uses `tokio::signal`, not `ctrlc::set_handler`, so it never collides
+/// with `frust-drive::interrupt` (that owner is armed only on the Android
+/// release-signing path, which `frust dap` does not take). Ctrl-C is honored
+/// on every platform; SIGTERM (a plain `kill`) additionally on unix.
+fn spawn_signal_listener(cancel: CancellationToken) {
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+
+            match signal(SignalKind::terminate()) {
+                Ok(mut term) => {
+                    tokio::select! {
+                        result = tokio::signal::ctrl_c() => log_signal("Ctrl-C", result.is_ok()),
+                        _ = term.recv() => log_signal("SIGTERM", true),
+                    }
+                }
+                Err(error) => {
+                    // A missing SIGTERM handler is not fatal: Ctrl-C alone still
+                    // gives an interactive `frust dap` its clean teardown.
+                    log::warn!("frust-dap: could not install a SIGTERM handler: {error}");
+                    log_signal("Ctrl-C", tokio::signal::ctrl_c().await.is_ok());
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            log_signal("Ctrl-C", tokio::signal::ctrl_c().await.is_ok());
+        }
+
+        cancel.cancel();
+    });
+}
+
+/// Log a received shutdown signal (or a failed wait on one) at a level a human
+/// reading `frust-dap`'s stderr sink will see.
+fn log_signal(name: &str, ok: bool) {
+    if ok {
+        log::info!("frust-dap: {name} received, tearing down live sessions");
+    } else {
+        // The wait itself failed (no controlling terminal, handler registration
+        // error); cancel anyway so the process still exits cleanly.
+        log::warn!("frust-dap: waiting on {name} failed; shutting down anyway");
+    }
 }
 
 #[cfg(test)]

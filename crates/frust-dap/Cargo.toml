@@ -32,19 +32,27 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
+# The `CancellationToken` that carries a Ctrl-C/SIGTERM from `run_blocking`
+# into every live session's read loop, so a signal drives the same
+# `on_disconnect` teardown a clean disconnect does. Already the same
+# workspace-pinned `0.7` `frust-mcp` wires its graceful shutdown through — no
+# new external package or version enters the graph.
+tokio-util = { workspace = true }
 # The workspace `tokio` pin is `default-features = false`; enable exactly
 # what this crate needs: rt-multi-thread (the stdio DAP server's own
 # runtime), io-util (`AsyncBufReadExt`/`AsyncReadExt`/`AsyncWriteExt` the
 # codec runs over), io-std (`tokio::io::stdin`/`stdout` — the stdio
 # transport's own pipes), net (the loopback TCP transport's listener), sync
 # (the outgoing response/event channel between the session and its writer
-# task), macros (`#[tokio::test]`), time (the handshake/teardown timeouts).
+# task), signal (`ctrl_c`/SIGTERM in `run_blocking`'s shutdown listener),
+# macros (`#[tokio::test]`), time (the handshake/teardown timeouts).
 tokio = { workspace = true, features = [
     "rt-multi-thread",
     "io-util",
     "io-std",
     "net",
     "sync",
+    "signal",
     "macros",
     "time",
 ] }

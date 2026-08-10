@@ -37,6 +37,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::protocol::codec::{CodecError, read_message, write_message};
 use crate::protocol::types::{
@@ -242,10 +243,16 @@ struct Session<A: DapAdapter> {
 ///
 /// `Err` is reserved for a genuine write failure: a read error or a vanished
 /// client is a routine end-of-session, logged and reported as `Ok`.
+///
+/// `cancel` is the shutdown signal: firing it breaks the read loop into the
+/// same [`on_disconnect`](DapAdapter::on_disconnect) teardown an EOF or a
+/// `disconnect` request runs, so a Ctrl-C/SIGTERM of the server tears the
+/// session's app down instead of orphaning it.
 pub async fn run_session<R, W, A, F>(
     reader: R,
     writer: W,
     make_adapter: F,
+    cancel: CancellationToken,
 ) -> Result<(), CodecError>
 where
     R: AsyncRead + Unpin + Send,
@@ -263,7 +270,7 @@ where
         out_tx,
     };
 
-    session.read_loop(reader).await;
+    session.read_loop(reader, cancel).await;
 
     // Runs for every exit path, exactly once — this is the hook an adapter
     // stops a launched app from.
@@ -318,10 +325,12 @@ where
 impl<A: DapAdapter> Session<A> {
     /// Read requests until the connection ends.
     ///
-    /// The `select!` below is cancellation-safe by shape, not by luck: the
-    /// only other arm terminates the loop, so a half-read message can never be
-    /// dropped by a competing branch waking first.
-    async fn read_loop<R>(&mut self, reader: R)
+    /// The `select!` below is cancellation-safe by shape, not by luck: every
+    /// other arm terminates the loop, so a half-read message can never be
+    /// dropped by a competing branch waking first. `cancel` is one such arm —
+    /// a shutdown signal ends the loop exactly like EOF, flowing into the same
+    /// `on_disconnect` teardown [`run_session`] runs after it returns.
+    async fn read_loop<R>(&mut self, reader: R, cancel: CancellationToken)
     where
         R: AsyncRead + Unpin + Send,
     {
@@ -361,6 +370,11 @@ impl<A: DapAdapter> Session<A> {
                         "DAP client sent no initialize within {}s; closing connection",
                         INIT_TIMEOUT.as_secs()
                     );
+                    break;
+                }
+
+                () = cancel.cancelled() => {
+                    log::info!("DAP: shutdown signal received; closing connection and tearing down");
                     break;
                 }
             }
@@ -649,17 +663,36 @@ mod tests {
         Recorder,
         JoinHandle<std::result::Result<(), CodecError>>,
     ) {
+        let (client, recorder, _cancel, handle) = spawn_session_with_cancel();
+        (client, recorder, handle)
+    }
+
+    /// The same as [`spawn_session`], but also hands back the session's
+    /// [`CancellationToken`] so a test can drive the shutdown-signal path.
+    fn spawn_session_with_cancel() -> (
+        TestClient,
+        Recorder,
+        CancellationToken,
+        JoinHandle<std::result::Result<(), CodecError>>,
+    ) {
         let (server_reader, client_writer) = tokio::io::duplex(DUPLEX_BUFFER);
         let (client_reader, server_writer) = tokio::io::duplex(DUPLEX_BUFFER);
 
         let recorder = Recorder::default();
         let adapter_recorder = recorder.clone();
+        let cancel = CancellationToken::new();
+        let session_cancel = cancel.clone();
 
         let handle = tokio::spawn(async move {
-            run_session(server_reader, server_writer, move |events| FakeAdapter {
-                events,
-                recorder: adapter_recorder,
-            })
+            run_session(
+                server_reader,
+                server_writer,
+                move |events| FakeAdapter {
+                    events,
+                    recorder: adapter_recorder,
+                },
+                session_cancel,
+            )
             .await
         });
 
@@ -668,7 +701,7 @@ mod tests {
             writer: client_writer,
         };
 
-        (client, recorder, handle)
+        (client, recorder, cancel, handle)
     }
 
     async fn join(handle: JoinHandle<std::result::Result<(), CodecError>>) {
@@ -968,6 +1001,31 @@ mod tests {
             "disconnect routes to the adapter like any other request"
         );
         assert_eq!(recorder.disconnects(), 1, "teardown runs exactly once");
+    }
+
+    #[tokio::test]
+    async fn test_cancellation_runs_the_teardown_hook() {
+        let (mut client, recorder, cancel, handle) = spawn_session_with_cancel();
+        initialize(&mut client).await;
+
+        // A shutdown signal (Ctrl-C/SIGTERM) fires the token; the read loop must
+        // break into the same idempotent teardown EOF and disconnect run.
+        cancel.cancel();
+
+        join(handle).await;
+        assert_eq!(
+            recorder.disconnects(),
+            1,
+            "cancellation runs the teardown hook exactly once"
+        );
+
+        // The server side closed the connection too — the client sees EOF.
+        let mut reader = client.hang_up();
+        let trailing = tokio::time::timeout(READ_TIMEOUT, read_message(&mut reader))
+            .await
+            .expect("stream should close")
+            .expect("read ok");
+        assert!(trailing.is_none(), "expected EOF, got {trailing:?}");
     }
 
     #[tokio::test]

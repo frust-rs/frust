@@ -164,9 +164,12 @@ fn spawn_session_with_engine(
     let (client_reader, server_writer) = tokio::io::duplex(DUPLEX_BUFFER);
 
     let handle = tokio::spawn(async move {
-        run_session(server_reader, server_writer, move |events: EventSender| {
-            OrchestrationAdapter::with_engine(events, engine)
-        })
+        run_session(
+            server_reader,
+            server_writer,
+            move |events: EventSender| OrchestrationAdapter::with_engine(events, engine),
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
     });
 

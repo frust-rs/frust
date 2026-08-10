@@ -26,6 +26,8 @@ use std::time::Duration;
 
 use tokio::net::TcpListener;
 use tokio::sync::{Semaphore, oneshot};
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 
 use crate::protocol::codec::CodecError;
 use crate::transport::TransportMode;
@@ -52,6 +54,16 @@ const MAX_CONCURRENT_CLIENTS: usize = 4;
 /// descriptor exhaustion) cannot spin the accept loop.
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 
+/// How long the accept loop waits for its live sessions to tear down after a
+/// shutdown signal before it abandons the stragglers and returns.
+///
+/// A cancelled session's teardown stops the app and joins the engine's own
+/// detached teardown (itself bounded, ~5s). This window sits just past that so
+/// a healthy stop completes in full, while a wedged one still cannot hold the
+/// process open — any session still running when it elapses is dropped (which
+/// aborts it), and `run_blocking`'s runtime grace is the final backstop.
+const SESSION_DRAIN_TIMEOUT: Duration = Duration::from_secs(6);
+
 /// Failures a DAP server start can report.
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
@@ -73,17 +85,26 @@ pub enum ServerError {
 /// `make_adapter` is invoked once per connection with that connection's
 /// [`EventSender`]. Stdio mode returns when its single session ends; TCP mode
 /// runs until the process is stopped (or the listener fails to bind).
-pub async fn serve<A, F>(mode: TransportMode, make_adapter: F) -> Result<(), ServerError>
+///
+/// `cancel` is the shutdown signal `run_blocking` fires on Ctrl-C/SIGTERM: it
+/// breaks the read loop of every live session into that session's own
+/// `on_disconnect` teardown, so no launched app is left orphaned when the
+/// process is asked to stop.
+pub async fn serve<A, F>(
+    mode: TransportMode,
+    make_adapter: F,
+    cancel: CancellationToken,
+) -> Result<(), ServerError>
 where
     A: DapAdapter,
     F: Fn(EventSender) -> A + Send + Sync + 'static,
 {
     match mode {
         TransportMode::Stdio => {
-            run_stdio_session(make_adapter).await?;
+            run_stdio_session(make_adapter, cancel).await?;
             Ok(())
         }
-        TransportMode::Tcp { port } => serve_tcp(port, make_adapter, None).await,
+        TransportMode::Tcp { port } => serve_tcp(port, make_adapter, None, cancel).await,
     }
 }
 
@@ -94,12 +115,18 @@ where
 /// (or an embedder) needs, since an OS-assigned port is otherwise only
 /// visible in the log line.
 ///
-/// Returns only on a bind failure: the accept loop itself is infinite, and a
-/// caller that needs to stop it drops or aborts the future driving it.
+/// Returns on a bind failure, or once `cancel` fires and the live sessions have
+/// drained: the accept loop otherwise runs until the process is stopped.
+///
+/// On cancellation the loop stops accepting and gives every live session a
+/// bounded window ([`SESSION_DRAIN_TIMEOUT`]) to run teardown — each session
+/// holds a child of `cancel`, so the same `cancel()` that ends the loop also
+/// breaks their read loops into `on_disconnect`.
 pub async fn serve_tcp<A, F>(
     port: u16,
     make_adapter: F,
     ready: Option<oneshot::Sender<u16>>,
+    cancel: CancellationToken,
 ) -> Result<(), ServerError>
 where
     A: DapAdapter,
@@ -125,39 +152,84 @@ where
     let factory = Arc::new(make_adapter);
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CLIENTS));
 
+    // Live sessions are tracked (not fire-and-forget) so a shutdown signal can
+    // wait for their teardown rather than pulling the process out from under it.
+    let mut sessions: JoinSet<()> = JoinSet::new();
+
     loop {
-        match listener.accept().await {
-            Ok((stream, peer)) => {
-                // Non-blocking: a full server rejects immediately rather than
-                // parking the accept loop behind a slot.
-                let Ok(permit) = Arc::clone(&semaphore).try_acquire_owned() else {
-                    log::warn!(
-                        "frust-dap at its {MAX_CONCURRENT_CLIENTS}-client cap; \
-                         rejecting connection from {peer}"
-                    );
-                    drop(stream);
-                    continue;
-                };
+        tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok((stream, peer)) => {
+                    // Non-blocking: a full server rejects immediately rather than
+                    // parking the accept loop behind a slot.
+                    let Ok(permit) = Arc::clone(&semaphore).try_acquire_owned() else {
+                        log::warn!(
+                            "frust-dap at its {MAX_CONCURRENT_CLIENTS}-client cap; \
+                             rejecting connection from {peer}"
+                        );
+                        drop(stream);
+                        continue;
+                    };
 
-                log::debug!("DAP client connected: {peer}");
+                    log::debug!("DAP client connected: {peer}");
 
-                let factory = Arc::clone(&factory);
-                tokio::spawn(async move {
-                    let (reader, writer) = stream.into_split();
+                    let factory = Arc::clone(&factory);
+                    // A child token: cancelling the root (a shutdown signal)
+                    // cancels every live session together, not just future ones.
+                    let session_cancel = cancel.child_token();
+                    sessions.spawn(async move {
+                        let (reader, writer) = stream.into_split();
 
-                    match run_session(reader, writer, move |events| factory(events)).await {
-                        Ok(()) => log::debug!("DAP client session ended: {peer}"),
-                        Err(error) => log::warn!("DAP client session failed ({peer}): {error}"),
-                    }
+                        match run_session(reader, writer, move |events| factory(events), session_cancel).await {
+                            Ok(()) => log::debug!("DAP client session ended: {peer}"),
+                            Err(error) => log::warn!("DAP client session failed ({peer}): {error}"),
+                        }
 
-                    drop(permit);
-                });
-            }
-            Err(error) => {
-                log::error!("frust-dap failed to accept a connection: {error}");
-                tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
+                        drop(permit);
+                    });
+                }
+                Err(error) => {
+                    log::error!("frust-dap failed to accept a connection: {error}");
+                    tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
+                }
+            },
+
+            // Reap finished sessions so the set (and its permits) do not grow
+            // across a long-lived server's lifetime.
+            Some(_) = sessions.join_next(), if !sessions.is_empty() => {}
+
+            () = cancel.cancelled() => {
+                log::info!(
+                    "frust-dap: shutdown requested; tearing down {} live session(s)",
+                    sessions.len()
+                );
+                break;
             }
         }
+    }
+
+    drain_sessions(sessions).await;
+    Ok(())
+}
+
+/// Wait — bounded — for cancelled sessions to finish their teardown.
+///
+/// The child tokens are already fired (the root cancelled), so each session's
+/// read loop has broken into `on_disconnect`. Dropping the [`JoinSet`] on
+/// timeout aborts whatever has not finished, so a wedged teardown cannot hold
+/// the process open past [`SESSION_DRAIN_TIMEOUT`].
+async fn drain_sessions(mut sessions: JoinSet<()>) {
+    let drained = tokio::time::timeout(SESSION_DRAIN_TIMEOUT, async {
+        while sessions.join_next().await.is_some() {}
+    })
+    .await;
+
+    if drained.is_err() {
+        log::warn!(
+            "frust-dap: {} session(s) did not tear down within {}s; abandoning them",
+            sessions.len(),
+            SESSION_DRAIN_TIMEOUT.as_secs()
+        );
     }
 }
 
@@ -199,7 +271,12 @@ mod tests {
     #[tokio::test]
     async fn test_tcp_serve_binds_loopback_and_completes_a_handshake() {
         let (ready_tx, ready_rx) = oneshot::channel();
-        let server = tokio::spawn(serve_tcp(0, |_events| PingAdapter, Some(ready_tx)));
+        let server = tokio::spawn(serve_tcp(
+            0,
+            |_events| PingAdapter,
+            Some(ready_tx),
+            CancellationToken::new(),
+        ));
 
         let port = tokio::time::timeout(Duration::from_secs(2), ready_rx)
             .await
@@ -266,6 +343,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_tcp_serve_returns_when_cancelled_with_a_live_connection() {
+        let cancel = CancellationToken::new();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let server = tokio::spawn(serve_tcp(
+            0,
+            |_events| PingAdapter,
+            Some(ready_tx),
+            cancel.clone(),
+        ));
+
+        let port = tokio::time::timeout(Duration::from_secs(2), ready_rx)
+            .await
+            .expect("listener did not come up")
+            .expect("ready channel closed");
+
+        // A live client occupies a session task; cancellation must still stop
+        // the accept loop and drain it, not hang.
+        let _client = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .expect("connect to the DAP listener");
+
+        cancel.cancel();
+
+        let result = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("serve_tcp did not return after cancellation")
+            .expect("serve_tcp task panicked");
+        assert!(
+            result.is_ok(),
+            "a cancelled serve_tcp ends cleanly: {result:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_tcp_serve_reports_a_bind_failure() {
         // Occupy a port, then ask the server for the same one.
         let squatter = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -273,7 +384,7 @@ mod tests {
             .expect("bind squatter");
         let port = squatter.local_addr().expect("local addr").port();
 
-        let result = serve_tcp(port, |_events| PingAdapter, None).await;
+        let result = serve_tcp(port, |_events| PingAdapter, None, CancellationToken::new()).await;
 
         match result {
             Err(ServerError::Bind { port: reported, .. }) => assert_eq!(reported, port),

@@ -1405,6 +1405,33 @@ handshake in `serve_tcp`); `crates/frust-dap/src/adapter/resolve.rs`'s `resolve_
 
 ---
 
+### `dap-sigkill-bypasses-teardown-residual` — only catchable signals tear a `frust dap` server down cleanly
+
+**Observed**: `frust dap` installs a `tokio::signal` handler (Ctrl-C on every platform, SIGTERM on
+unix) that drives every live connection's `on_disconnect` teardown — stop the app, shut the engine
+down, remove the `adb forward` — before the process exits. An **uncatchable** termination
+(`SIGKILL`/`kill -9`, an OOM kill, a host power-off) cannot run any handler, so it still leaves a
+launched device app running and its `adb forward` leaked, exactly as before. The catchable-signal
+teardown is also bounded, not unconditional: a session that does not finish tearing down within the
+accept loop's ~6s drain window (or the 5s runtime shutdown grace behind it) is abandoned so the
+process can still exit.
+
+**Applies to**: any `frust dap` process ended by `SIGKILL` or a host-level kill; a session whose
+teardown wedges past the drain window. Ctrl-C and SIGTERM — the documented ways to stop `--port`
+mode — are covered.
+
+**Why accepted**: `SIGKILL` is uncatchable by design; no user-space handler can intercept it, so
+there is nothing to fix in `frust-dap` — the residual is the OS's, not the adapter's. The bounded
+window is the same deliberate "a stuck teardown must not hang the process" stance the runtime
+shutdown grace already took. A leaked `adb forward` from a hard kill is reclaimed by the next
+`adb`-level cleanup or a device reconnect, and a killed preview process is reaped by the OS.
+
+**Evidence**: `crates/frust-dap/src/service.rs`'s `spawn_signal_listener` (catchable signals only);
+`crates/frust-dap/src/server/mod.rs`'s `SESSION_DRAIN_TIMEOUT` and `run_blocking`'s `SHUTDOWN_GRACE`
+(the two bounds); frust-dap review Major E.
+
+---
+
 ### `dap-exited-success-flag-only` — a DAP `exited` event carries 0/1, never a real process exit code
 
 **Observed**: `frust-dap`'s `exited` event body always carries `0` or `1` — `frust_mcp::engine`'s
