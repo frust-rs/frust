@@ -66,11 +66,19 @@ pub trait SessionBackend: Send + Sync {
 
     /// **Blocking.** Stops the session and releases everything it held.
     /// `Err` only for an unknown id.
+    ///
+    /// "Blocking" describes how long the *call* may take, not what has
+    /// finished when it returns: an implementer may treat a stop as a
+    /// **request** — the session's terminal state, and the best-effort
+    /// OS-level app termination that goes with it (`am force-stop`,
+    /// `simctl terminate`), may still be in flight. Returning does not
+    /// certify the app is already gone from the device.
     fn stop_app(&self, id: SessionId) -> Result<()>;
 
     /// **Blocking.** Stops the session and relaunches the same target and
     /// mode as a new one, returning the new id. The old id keeps reporting
-    /// its final state.
+    /// its final state. The stop half carries
+    /// [`stop_app`](Self::stop_app)'s request semantics.
     fn restart_app(&self, id: SessionId) -> Result<SessionId>;
 
     /// The session's retained log lines: the most recent `tail`, or every

@@ -102,6 +102,30 @@
 //! mid-flight), not instantly. The device path is driven by
 //! [`Supervisor::start_device`] over `frust-drive`'s `android_run`/`ios_run`
 //! cancellable `spawn_session` seams; the desktop path is fully killable.
+//!
+//! # Stopping the app, not just our view of it
+//!
+//! Killing a device session's stream ends the workbench's *view* of the app —
+//! `adb logcat` and the `simctl launch --console-pty` bridge are separate
+//! processes from the app itself, which keeps running on the device. So a
+//! device `stop` additionally asks the OS to terminate the app:
+//! `adb -s <serial> shell am force-stop <package>` on Android,
+//! `xcrun simctl terminate <udid> <bundle_id>` on an iOS Simulator (see
+//! [`TerminationTarget`]). Both are **best-effort** — a device that has gone
+//! away, or an app already gone, must not fail or delay a stop — and both run
+//! on a detached thread, never inline on the event-loop thread that calls
+//! [`Supervisor::stop`]. Those threads are *registered*, not dropped:
+//! [`Supervisor::stop_all`] (and therefore `Drop`) bounded-joins them
+//! ([`TERMINATION_JOIN_DEADLINE`]), so process exit cannot strand an
+//! un-issued force-stop.
+//!
+//! The termination target is only known once the drive pipeline has actually
+//! launched something, so it is **installed late**, under the same
+//! single-lock install-then-recheck shape [`DeviceControl::install_logcat`]
+//! uses: a `stop` that already ran when the target lands fires the
+//! termination at install time instead of losing it. A session whose target is
+//! never known (a physical iOS device, which has no `devicectl` termination
+//! call here) simply skips this step — the package/bundle id is never guessed.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -153,6 +177,16 @@ const TERMINAL_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 /// while waiting.
 const TERMINAL_SEND_RETRY: Duration = Duration::from_millis(2);
 
+/// Upper bound on how long [`Supervisor::stop_all`] waits for the best-effort
+/// OS-level app-termination threads a stop spawned (module docs' "Stopping the
+/// app" section) before detaching them.
+///
+/// Bounded so quitting the workbench is never held behind an `adb`/`xcrun`
+/// call against a wedged device, generous enough that a healthy device call
+/// (tens to a few hundred ms) always completes first — the same tradeoff, and
+/// the same 5s figure, `frust-mcp`'s own teardown join makes.
+const TERMINATION_JOIN_DEADLINE: Duration = Duration::from_secs(5);
+
 /// One live (or terminated) session's supervisor-side bookkeeping.
 struct SessionEntry {
     /// How `stop` terminates this session — a single streaming child (desktop
@@ -182,32 +216,144 @@ enum Killer {
     Device(Arc<DeviceControl>),
 }
 
+/// Where a stopped device session's app actually lives, so the OS can be asked
+/// to terminate it once the workbench's stream is dead (module docs' "Stopping
+/// the app" section).
+///
+/// Only ever built from what the drive pipeline reports having launched
+/// (`android_run`'s installed package, `ios_run`'s bundle id) — never derived
+/// from a project file or guessed, so a flavor's `applicationIdSuffix` can't
+/// send a force-stop at the wrong app. A physical iOS device has no variant
+/// here: `devicectl` app termination is not implemented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TerminationTarget {
+    Android { serial: String, package: String },
+    IosSimulator { udid: String, bundle_id: String },
+}
+
+impl TerminationTarget {
+    /// Ask the platform to terminate the app. Best-effort throughout: a
+    /// device that has gone away, an app that already exited, or a shut-down
+    /// simulator are all normal outcomes of a stop, not failures to report.
+    fn terminate(&self, runner: &dyn ProcessRunner) {
+        match self {
+            Self::Android { serial, package } => {
+                let _ = runner.run("adb", &["-s", serial, "shell", "am", "force-stop", package]);
+            }
+            Self::IosSimulator { udid, bundle_id } => {
+                ios_run::simctl::terminate(runner, udid, bundle_id);
+            }
+        }
+    }
+}
+
+/// The late-installed termination target plus its fired-once flag, both under
+/// one mutex so an install racing a `stop` issues the termination exactly once
+/// (see [`DeviceControl::install_termination`]).
+#[derive(Default)]
+struct TerminationSlot {
+    target: Option<TerminationTarget>,
+    fired: bool,
+}
+
+/// Every device session's termination threads, shared between the
+/// [`Supervisor`] that bounded-joins them and each [`DeviceControl`] that
+/// spawns them.
+type TerminationThreads = Arc<Mutex<Vec<JoinHandle<()>>>>;
+
 /// The cancel primitive for a supervised device session. `stop` sets `cancel`
 /// (checked between the drive pipeline's phases — a stop mid-build takes
-/// effect at the next boundary, matching the module doc's kill boundary) and
+/// effect at the next boundary, matching the module doc's kill boundary),
 /// kills the logcat [`StreamHandle`] once the pipeline has reached its
-/// streaming phase (prompt from there on).
+/// streaming phase (prompt from there on), and dispatches the best-effort
+/// OS-level app termination on a detached thread.
 struct DeviceControl {
     cancel: AtomicBool,
     /// The logcat/console stream, installed by the device worker once the
     /// build/install/launch core completes; `None` until then.
     logcat: Mutex<Option<StreamHandle>>,
+    /// What to terminate on the device, installed by the device worker the
+    /// moment the drive pipeline reports what it launched; empty until then
+    /// (and forever, for a target with no termination call).
+    termination: Mutex<TerminationSlot>,
+    /// The runner the termination invocation goes through — the supervisor's
+    /// own, so a test's `FakeProcessRunner` records it like any other spawn.
+    runner: Arc<dyn ProcessRunner + Send + Sync>,
+    /// Where a spawned termination thread registers itself for the
+    /// supervisor's bounded join.
+    terminations: TerminationThreads,
 }
 
 impl DeviceControl {
-    fn new() -> Self {
+    fn new(runner: Arc<dyn ProcessRunner + Send + Sync>, terminations: TerminationThreads) -> Self {
         Self {
             cancel: AtomicBool::new(false),
             logcat: Mutex::new(None),
+            termination: Mutex::new(TerminationSlot::default()),
+            runner,
+            terminations,
         }
     }
 
-    /// Request cancellation: flag the pipeline and, if streaming has begun,
-    /// group-kill the logcat stream (prompt). Idempotent.
+    /// Request cancellation: flag the pipeline, group-kill the logcat stream
+    /// if streaming has begun (prompt), then dispatch the OS-level app
+    /// termination if the target is already known. Idempotent — the
+    /// termination fires at most once per session, whichever of `stop` and
+    /// [`install_termination`](Self::install_termination) gets there first.
     fn stop(&self) {
         self.cancel.store(true, Ordering::SeqCst);
         if let Some(handle) = lock_logcat(&self.logcat).as_mut() {
             handle.kill();
+        }
+        // Held only after the logcat guard above is dropped: the two locks are
+        // never nested, in either direction.
+        let mut slot = lock_termination(&self.termination);
+        self.fire_termination(&mut slot);
+    }
+
+    /// Install the session's OS-level termination target once the drive
+    /// pipeline reports what it launched — the same single-lock-hold
+    /// install+recheck [`install_logcat`](Self::install_logcat) uses, for the
+    /// same race.
+    ///
+    /// Under **one continuous hold** of the `termination` mutex `stop` takes:
+    /// store the target, then re-check `cancel`; if a `stop` already ran (its
+    /// own dispatch found an empty slot), fire the termination now. Either
+    /// ordering issues it exactly once — the `fired` flag lives under this
+    /// same lock — so a stop can never be observed while the app keeps
+    /// running on the device.
+    fn install_termination(&self, target: TerminationTarget) {
+        let mut slot = lock_termination(&self.termination);
+        slot.target = Some(target);
+        if self.cancel.load(Ordering::SeqCst) {
+            self.fire_termination(&mut slot);
+        }
+    }
+
+    /// Dispatch the installed termination target on a detached thread, at most
+    /// once. Caller holds the `termination` lock, which is what makes
+    /// "at most once" true across the stop/install race.
+    ///
+    /// Off-thread because the call is an unbounded `adb`/`xcrun` invocation
+    /// and every caller reaches this from the runner's event loop; a thread
+    /// that cannot be spawned is skipped rather than run inline, since
+    /// blocking the event loop is the one outcome worse than a missed
+    /// best-effort force-stop. Such a session stays unfired, so a later stop
+    /// (or a target installed after one) tries again.
+    fn fire_termination(&self, slot: &mut TerminationSlot) {
+        if slot.fired {
+            return;
+        }
+        let Some(target) = slot.target.clone() else {
+            return;
+        };
+        let runner = Arc::clone(&self.runner);
+        let spawned = thread::Builder::new()
+            .name("frust-tui-terminate".to_string())
+            .spawn(move || target.terminate(runner.as_ref()));
+        if let Ok(handle) = spawned {
+            slot.fired = true;
+            lock_terminations(&self.terminations).push(handle);
         }
     }
 
@@ -250,6 +396,9 @@ pub struct Supervisor {
     events_tx: Sender<SessionEvent>,
     next_id: u64,
     sessions: HashMap<SessionId, SessionEntry>,
+    /// The detached OS-level app-termination threads every device `stop`
+    /// spawns, bounded-joined by [`Supervisor::stop_all`] (module docs).
+    terminations: TerminationThreads,
 }
 
 impl Supervisor {
@@ -267,6 +416,7 @@ impl Supervisor {
             events_tx,
             next_id: 0,
             sessions: HashMap::new(),
+            terminations: Arc::new(Mutex::new(Vec::new())),
         };
         (supervisor, events_rx)
     }
@@ -357,7 +507,10 @@ impl Supervisor {
     /// see [`DeviceControl`] and the module doc's kill boundary).
     pub fn start_device(&mut self, plan: DevicePlan) -> Result<SessionId> {
         let id = SessionId(self.next_id);
-        let control = Arc::new(DeviceControl::new());
+        let control = Arc::new(DeviceControl::new(
+            Arc::clone(&self.runner),
+            Arc::clone(&self.terminations),
+        ));
         let runner = Arc::clone(&self.runner);
         let events = self.events_tx.clone();
 
@@ -383,9 +536,15 @@ impl Supervisor {
     /// Stop a session. For a streaming (desktop) session: mark it killed, then
     /// group-kill its process — the drain thread observes the closed stdout
     /// pipe, reaps the child, and emits a final [`SessionState::Killed`]. For
-    /// a device session: cancel the pipeline and kill its logcat stream if
-    /// streaming. Idempotent and safe on an already-exited session; an unknown
-    /// id is ignored.
+    /// a device session: cancel the pipeline, kill its logcat stream if
+    /// streaming, and dispatch the best-effort OS-level app termination on a
+    /// detached thread (module docs). Idempotent and safe on an already-exited
+    /// session; an unknown id is ignored.
+    ///
+    /// Returns as soon as the kill/termination is *issued* — it does not wait
+    /// for the session's terminal state, nor for the device to confirm the app
+    /// is gone. This is the shared path behind both the user's keypress stop
+    /// and the embedded MCP server's `stop_app`/`restart_app`.
     pub fn stop(&mut self, id: SessionId) {
         if let Some(entry) = self.sessions.get(&id) {
             match &entry.killer {
@@ -398,12 +557,29 @@ impl Supervisor {
         }
     }
 
-    /// Stop every session (the supervisor's job on quit).
+    /// Stop every session (the supervisor's job on quit), then bounded-join
+    /// the OS-level termination threads those stops spawned.
+    ///
+    /// The join is what makes the termination more than a hope on the quit
+    /// path: a detached `am force-stop` thread that never runs before the
+    /// process exits leaves the app alive on the device. It is bounded by
+    /// [`TERMINATION_JOIN_DEADLINE`], so a wedged device delays the quit by at
+    /// most that and then loses the thread rather than the whole workbench.
     pub fn stop_all(&mut self) {
         let ids: Vec<SessionId> = self.sessions.keys().copied().collect();
         for id in ids {
             self.stop(id);
         }
+        self.join_terminations();
+    }
+
+    /// Take and bounded-join every registered termination thread. Taking
+    /// first (rather than joining under the lock) keeps a still-running
+    /// termination free to register nothing more and a concurrent `stop` free
+    /// to push a new one.
+    fn join_terminations(&self) {
+        let handles = std::mem::take(&mut *lock_terminations(&self.terminations));
+        join_bounded(handles);
     }
 
     /// The ids of every session the supervisor is tracking (running or
@@ -415,15 +591,42 @@ impl Supervisor {
 
 impl Drop for Supervisor {
     fn drop(&mut self) {
-        // Kill every still-running session, then join the drain threads so a
-        // dropped supervisor leaves no orphaned process or thread behind.
+        // Kill every still-running session (`stop_all` also bounded-joins the
+        // termination threads its stops spawned), then join the drain threads
+        // so a dropped supervisor leaves no orphaned process or thread behind.
         self.stop_all();
         for (_, mut entry) in self.sessions.drain() {
             if let Some(worker) = entry.worker.take() {
                 let _ = worker.join();
             }
         }
+        // A drain thread can install a termination target as it unwinds (a
+        // stop that raced its pipeline's launch), so sweep once more.
+        self.join_terminations();
     }
+}
+
+/// Join `threads`, giving up on — and detaching — whatever is left after
+/// [`TERMINATION_JOIN_DEADLINE`].
+///
+/// The joining itself happens on a throwaway thread because a `JoinHandle` has
+/// no timed join; that is what bounds the *caller's* wait. Past the deadline
+/// the joiner and whatever it is still waiting on are detached rather than
+/// holding a quit behind an unresponsive device, leaving a thread that
+/// outlives the supervisor and then exits on its own — the same shape (and
+/// residual) `frust-mcp`'s teardown join carries.
+fn join_bounded(threads: Vec<JoinHandle<()>>) {
+    if threads.is_empty() {
+        return;
+    }
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    thread::spawn(move || {
+        for thread in threads {
+            let _ = thread.join();
+        }
+        let _ = done_tx.send(());
+    });
+    let _ = done_rx.recv_timeout(TERMINATION_JOIN_DEADLINE);
 }
 
 /// Lock a session's kill handle, recovering from a poisoned mutex (a panicked
@@ -705,6 +908,22 @@ fn lock_logcat(
     slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Lock a device session's termination slot, poison-recovering like [`lock`].
+fn lock_termination(slot: &Mutex<TerminationSlot>) -> std::sync::MutexGuard<'_, TerminationSlot> {
+    slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Lock the shared termination-thread registry, poison-recovering like
+/// [`lock`] — a panicked prior holder must not stop a stop from registering
+/// (or the supervisor from joining) a termination thread.
+fn lock_terminations(
+    threads: &Mutex<Vec<JoinHandle<()>>>,
+) -> std::sync::MutexGuard<'_, Vec<JoinHandle<()>>> {
+    threads
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// The per-device-session pipeline loop, run on its own std thread: drive the
 /// drive's multi-phase device pipeline (feeding phase lines through
 /// [`feed_lines`]), then — once it hands back the logcat/console stream —
@@ -740,12 +959,20 @@ fn run_device_session(
     };
 
     let terminal = match pipeline {
-        Ok(Some(handle)) => {
+        Ok(Some(launched)) => {
+            // What the pipeline actually launched, so a stop can ask the OS to
+            // terminate it — installed before the stream, so the window in
+            // which a session is stoppable but not terminable is empty (see
+            // `install_termination`). `None` for a target with no termination
+            // call; never guessed.
+            if let Some(target) = launched.target {
+                control.install_termination(target);
+            }
             // Install the stream under one continuous lock hold, closing the
             // stop race: a `stop` observed just before or after this
             // point kills the stream exactly once, so the drain always sees
             // EOF rather than blocking forever (see `install_logcat`).
-            let lines = control.install_logcat(handle);
+            let lines = control.install_logcat(launched.stream);
 
             if drain_receiver(&mut sender, &mut state, &lines).is_err() {
                 return;
@@ -772,16 +999,31 @@ fn run_device_session(
     sender.send_terminal_state(terminal);
 }
 
+/// What a device pipeline hands back once it is streaming: the logcat/console
+/// stream to drain and kill, plus the [`TerminationTarget`] a `stop` should
+/// ask the OS to terminate — `None` when the platform has no termination call
+/// here (a physical iOS device), which downgrades that session's stop to the
+/// stream-only behavior every device session had before.
+struct LaunchedDevice {
+    stream: StreamHandle,
+    target: Option<TerminationTarget>,
+}
+
 /// Dispatch the drive's cancellable device pipeline by the plan's device
-/// platform/kind, returning the logcat/console [`StreamHandle`] to drain
-/// (`Ok(Some)`), a cancellation before streaming (`Ok(None)`), or a pipeline
-/// error (`Err`).
+/// platform/kind, returning the streaming session (`Ok(Some)`), a
+/// cancellation before streaming (`Ok(None)`), or a pipeline error (`Err`).
+///
+/// The termination target comes straight from what the drive reports having
+/// launched — `android_run`'s installed (badging-resolved) package,
+/// `ios_run`'s bundle id — rather than a re-parse of the pipeline's own
+/// `Launching …` log line.
 fn launch_device_stream(
     plan: &DevicePlan,
     runner: &dyn ProcessRunner,
     cancel: &AtomicBool,
     on_line: &mut dyn FnMut(&str),
-) -> Result<Option<StreamHandle>> {
+) -> Result<Option<LaunchedDevice>> {
+    let serial = plan.device.id.clone();
     match (plan.device.platform, plan.device.kind) {
         (Platform::Android, _) => android_run::spawn_session(
             runner,
@@ -790,7 +1032,18 @@ fn launch_device_stream(
             &plan.build,
             on_line,
             cancel,
-        ),
+        )
+        .map(|launch| {
+            launch.map(|l| LaunchedDevice {
+                stream: l.stream,
+                target: Some(TerminationTarget::Android {
+                    serial,
+                    package: l.package,
+                }),
+            })
+        }),
+        // A physical iOS device: no `devicectl` app-termination call is
+        // implemented, so its stop stays stream-only.
         (Platform::Ios, Kind::PhysicalDevice) => ios_run::spawn_physical_session(
             runner,
             &plan.project_root,
@@ -799,7 +1052,12 @@ fn launch_device_stream(
             on_line,
             cancel,
         )
-        .map(|launch| launch.map(|l| l.stream)),
+        .map(|launch| {
+            launch.map(|l| LaunchedDevice {
+                stream: l.stream,
+                target: None,
+            })
+        }),
         (Platform::Ios, _) => ios_run::spawn_session(
             runner,
             &plan.project_root,
@@ -808,7 +1066,15 @@ fn launch_device_stream(
             on_line,
             cancel,
         )
-        .map(|launch| launch.map(|l| l.stream)),
+        .map(|launch| {
+            launch.map(|l| LaunchedDevice {
+                stream: l.stream,
+                target: Some(TerminationTarget::IosSimulator {
+                    udid: serial,
+                    bundle_id: l.bundle_id,
+                }),
+            })
+        }),
     }
 }
 
@@ -1275,6 +1541,15 @@ mod tests {
             .join(" ")
     }
 
+    /// A [`DeviceControl`] over a throwaway fake runner and its own thread
+    /// registry — for the tests below that only care about the stream half.
+    fn stream_only_control() -> DeviceControl {
+        DeviceControl::new(
+            Arc::new(FakeProcessRunner::new()),
+            Arc::new(Mutex::new(Vec::new())),
+        )
+    }
+
     /// The classic device-stop-race gap: a `stop` arrives *before* the logcat handle exists,
     /// so its kill finds an empty slot and sets only `cancel`. `install_logcat`
     /// must — under the same lock — observe `cancel` and kill the
@@ -1283,7 +1558,7 @@ mod tests {
     #[test]
     fn install_logcat_closes_the_stop_race_when_stop_arrives_first() {
         let handle = hanging_handle("adb", &["logcat"]);
-        let control = DeviceControl::new();
+        let control = stream_only_control();
 
         // stop races ahead of the stream: cancel set, empty slot, nothing killed.
         control.stop();
@@ -1311,7 +1586,7 @@ mod tests {
     #[test]
     fn stop_kills_a_stream_installed_before_it() {
         let handle = hanging_handle("adb", &["logcat"]);
-        let control = Arc::new(DeviceControl::new());
+        let control = Arc::new(stream_only_control());
 
         let lines = control.install_logcat(handle);
         assert!(!control.cancel.load(Ordering::SeqCst), "not cancelled yet");
@@ -1327,6 +1602,217 @@ mod tests {
             started.elapsed() < PROMPT_STOP,
             "a stopped stream must drain to EOF promptly, took {:?}",
             started.elapsed()
+        );
+    }
+
+    // ── OS-level app termination on stop ────────────────────────────────────
+
+    /// A [`FakeProcessRunner`] that additionally records every one-shot
+    /// [`ProcessRunner::run`] invocation — how these tests observe the
+    /// termination a stop dispatches, with no device anywhere.
+    struct RecordingRunner {
+        inner: FakeProcessRunner,
+        runs: Mutex<Vec<String>>,
+    }
+
+    impl RecordingRunner {
+        fn new() -> Self {
+            Self {
+                inner: FakeProcessRunner::new(),
+                runs: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// Every one-shot invocation made so far, in order.
+        fn runs(&self) -> Vec<String> {
+            self.runs.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        }
+    }
+
+    impl ProcessRunner for RecordingRunner {
+        fn run(&self, cmd: &str, args: &[&str]) -> Result<frust_drive::process::Output> {
+            self.runs
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(invocation(cmd, args));
+            self.inner.run(cmd, args)
+        }
+
+        fn run_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: Option<&std::path::Path>,
+            env: &[(&str, &str)],
+            on_line: &mut dyn FnMut(&str),
+        ) -> Result<frust_drive::process::Output> {
+            self.inner.run_streaming(cmd, args, cwd, env, on_line)
+        }
+
+        fn spawn_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: Option<&std::path::Path>,
+            env: &[(&str, &str)],
+        ) -> Result<StreamHandle> {
+            self.inner.spawn_streaming(cmd, args, cwd, env)
+        }
+    }
+
+    /// A control over a recording runner, paired with the thread registry the
+    /// termination it spawns registers on.
+    fn recording_control(runner: &Arc<RecordingRunner>) -> (DeviceControl, TerminationThreads) {
+        let threads: TerminationThreads = Arc::new(Mutex::new(Vec::new()));
+        let control = DeviceControl::new(Arc::clone(runner) as _, Arc::clone(&threads));
+        (control, threads)
+    }
+
+    /// Join every registered termination thread — the test-side counterpart of
+    /// [`Supervisor::stop_all`]'s bounded join, deliberately *unbounded* so an
+    /// assertion can never race a deadline (and never a sleep).
+    fn join_all_terminations(threads: &TerminationThreads) {
+        for handle in std::mem::take(&mut *lock_terminations(threads)) {
+            handle.join().expect("termination thread joins");
+        }
+    }
+
+    fn android_target() -> TerminationTarget {
+        TerminationTarget::Android {
+            serial: "emulator-5554".to_string(),
+            package: "com.example.app".to_string(),
+        }
+    }
+
+    fn ios_target() -> TerminationTarget {
+        TerminationTarget::IosSimulator {
+            udid: "AAAA-BBBB".to_string(),
+            bundle_id: "dev.f0x.myapp".to_string(),
+        }
+    }
+
+    /// Stopping an Android device session asks the OS to stop the app, not
+    /// just the `logcat` view of it — the defect this whole path exists for.
+    #[test]
+    fn stopping_an_android_session_force_stops_the_app() {
+        let runner = Arc::new(RecordingRunner::new());
+        let (control, threads) = recording_control(&runner);
+
+        control.install_termination(android_target());
+        control.stop();
+        join_all_terminations(&threads);
+
+        assert_eq!(
+            runner.runs(),
+            vec!["adb -s emulator-5554 shell am force-stop com.example.app".to_string()]
+        );
+    }
+
+    /// The same gap one platform over: killing the `simctl launch` console
+    /// bridge leaves the app running inside the simulator, so a stop issues
+    /// `simctl terminate`.
+    #[test]
+    fn stopping_an_ios_simulator_session_terminates_the_app() {
+        let runner = Arc::new(RecordingRunner::new());
+        let (control, threads) = recording_control(&runner);
+
+        control.install_termination(ios_target());
+        control.stop();
+        join_all_terminations(&threads);
+
+        assert_eq!(
+            runner.runs(),
+            vec!["xcrun simctl terminate AAAA-BBBB dev.f0x.myapp".to_string()]
+        );
+    }
+
+    /// A session whose app was never named (a pipeline that never reached its
+    /// launch, or a physical iOS device) stops exactly as before: no
+    /// invention, no invocation, no error.
+    #[test]
+    fn a_session_with_no_known_app_terminates_nothing() {
+        let runner = Arc::new(RecordingRunner::new());
+        let (control, threads) = recording_control(&runner);
+
+        control.stop();
+
+        assert!(
+            lock_terminations(&threads).is_empty(),
+            "no termination thread is spawned without a target"
+        );
+        assert!(
+            runner.runs().is_empty(),
+            "an unknown app is never guessed at, got {:?}",
+            runner.runs()
+        );
+    }
+
+    /// The install-after-stop race: the target lands only *after* a stop
+    /// already ran (its dispatch found an empty slot), so the install's own
+    /// recheck under the same lock is what issues the termination.
+    #[test]
+    fn a_target_installed_after_a_stop_still_terminates_the_app() {
+        let runner = Arc::new(RecordingRunner::new());
+        let (control, threads) = recording_control(&runner);
+
+        control.stop(); // races ahead of the launch: nothing to terminate yet
+        assert!(runner.runs().is_empty(), "nothing known to terminate yet");
+
+        control.install_termination(android_target());
+        join_all_terminations(&threads);
+
+        assert_eq!(
+            runner.runs(),
+            vec!["adb -s emulator-5554 shell am force-stop com.example.app".to_string()],
+            "the install's recheck fires the termination a stop couldn't"
+        );
+    }
+
+    /// `stop` stays idempotent with the termination in it: a double stop (and
+    /// the install's own recheck path) issues exactly one force-stop.
+    #[test]
+    fn repeated_stops_terminate_the_app_once() {
+        let runner = Arc::new(RecordingRunner::new());
+        let (control, threads) = recording_control(&runner);
+
+        control.install_termination(android_target());
+        control.stop();
+        control.stop();
+        control.install_termination(android_target());
+        join_all_terminations(&threads);
+
+        assert_eq!(
+            runner.runs().len(),
+            1,
+            "fired exactly once, {:?}",
+            runner.runs()
+        );
+    }
+
+    /// The tracked-join guarantee: [`Supervisor::stop_all`] (and therefore
+    /// `Drop`) returns only once the termination threads its stops spawned
+    /// have been joined — a detached force-stop can't be stranded by process
+    /// exit. Asserted by observing the invocation *and* an emptied registry
+    /// straight after `stop_all`, with no sleep anywhere.
+    #[test]
+    fn stop_all_joins_the_termination_threads_it_spawned() {
+        let runner = Arc::new(RecordingRunner::new());
+        let (mut sup, _rx) = Supervisor::new(Arc::clone(&runner) as _);
+        // A device session's control, built exactly as `start_device` builds
+        // it — over the supervisor's own runner and thread registry.
+        let control = DeviceControl::new(Arc::clone(&sup.runner), Arc::clone(&sup.terminations));
+        control.install_termination(android_target());
+        control.stop();
+
+        sup.stop_all();
+
+        assert_eq!(
+            runner.runs(),
+            vec!["adb -s emulator-5554 shell am force-stop com.example.app".to_string()]
+        );
+        assert!(
+            lock_terminations(&sup.terminations).is_empty(),
+            "stop_all drains the registry it joined"
         );
     }
 

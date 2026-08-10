@@ -14,8 +14,8 @@
 //! the devtools discovery/failure lines (`frust-devtools-protocol`), and the
 //! drive's own `Launching <pkg>…` / `Streaming logs (pid N)` phase markers —
 //! the same two markers `frust-tui`'s DevTools metrics state parses, for the
-//! same reason (neither the package nor the pid is returned by
-//! `android_run::spawn_session`, only logged).
+//! same reason (the pid is not returned by `android_run::spawn_session`, only
+//! logged, and the metrics sampler needs it paired with the package).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,8 +33,9 @@ use super::session::{RunTarget, Session, SessionState};
 use super::{Runner, devtools, metrics};
 
 /// The drive's `Launching <package>…` phase marker (`android_run`'s
-/// `on_line`), the only channel carrying the *installed* package — which a
-/// flavor's `applicationIdSuffix` can move away from `frust.toml`'s app id.
+/// `on_line`), carrying the *installed* package — which a flavor's
+/// `applicationIdSuffix` can move away from `frust.toml`'s app id — as the
+/// launch happens, rather than only once the pipeline returns.
 const LAUNCH_MARKER_PREFIX: &str = "Launching ";
 
 /// The drive's `Streaming logs (pid N)` marker, the only channel carrying an
@@ -114,6 +115,7 @@ fn start(session: &Arc<Session>, runner: &Runner) -> Result<Option<LineReceiver>
                 &mut on_line,
                 &session.stop,
             )?
+            .map(|launch| launch.stream)
         }
         RunTarget::IosSimulator(device) => {
             let mut on_line = |line: &str| ingest_line(session, runner, line);

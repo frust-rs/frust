@@ -162,9 +162,12 @@ fn run_with_env(
 
 /// What the build → install → launch core resolves before the logcat
 /// streaming phase begins: the launched app's pid, for the `logcat --pid`
-/// stream both front-ends attach.
+/// stream both front-ends attach, plus the *installed* package it belongs to
+/// (badging-resolved, so a flavor's `applicationIdSuffix` is already folded
+/// in) for a caller that has to name the running app afterwards.
 struct PreparedSession {
     pid: String,
+    package: String,
 }
 
 /// The shared build → install → launch → resolve-pid core of the Android run
@@ -344,7 +347,18 @@ fn prepare_session(
         &mut sleep,
     )?;
 
-    Ok(Some(PreparedSession { pid }))
+    Ok(Some(PreparedSession { pid, package }))
+}
+
+/// What a [`spawn_session`] call hands back once the logcat stream is up: the
+/// killable/drainable [`StreamHandle`] plus the *installed* package that was
+/// actually launched, so a caller (e.g. a teardown path wanting
+/// `adb shell am force-stop <package>`) doesn't have to re-derive it out of
+/// the `Launching <package>…` log line. The iOS-side counterpart is
+/// [`crate::ios_run::IosLaunch`].
+pub struct AndroidLaunch {
+    pub stream: StreamHandle,
+    pub package: String,
 }
 
 /// The streaming, cancellable variant of [`run`] for a front-end that
@@ -358,7 +372,12 @@ fn prepare_session(
 ///
 /// Returns `Ok(None)` when `cancel` was observed before the streaming phase
 /// began (a stop during build/install/launch — the caller reports the session
-/// as killed), or `Ok(Some(handle))` with the live logcat stream otherwise.
+/// as killed), or `Ok(Some(launch))` with the live logcat stream (and the
+/// launched package, see [`AndroidLaunch`]) otherwise.
+///
+/// Killing the returned handle stops the `logcat` view of the app but does not
+/// itself terminate the app on the device — a caller that wants that asks the
+/// OS with `am force-stop <package>`.
 pub fn spawn_session(
     runner: &dyn ProcessRunner,
     root: &Path,
@@ -366,7 +385,7 @@ pub fn spawn_session(
     info: &BuildInfo,
     on_line: &mut dyn FnMut(&str),
     cancel: &AtomicBool,
-) -> Result<Option<StreamHandle>> {
+) -> Result<Option<AndroidLaunch>> {
     spawn_session_with_env(runner, root, device, info, on_line, cancel, &RealEnv)
 }
 
@@ -380,7 +399,7 @@ fn spawn_session_with_env(
     on_line: &mut dyn FnMut(&str),
     cancel: &AtomicBool,
     env: &dyn EnvLookup,
-) -> Result<Option<StreamHandle>> {
+) -> Result<Option<AndroidLaunch>> {
     let Some(prepared) = prepare_session(runner, root, device, info, env, on_line, cancel)? else {
         return Ok(None);
     };
@@ -391,7 +410,7 @@ fn spawn_session_with_env(
     // The `Streaming logs (pid …)` marker the supervisor's `infer_state`
     // reads to advance a session to `Running`, mirroring `run`'s own line.
     on_line(&format!("Streaming logs (pid {pid})"));
-    let handle = runner
+    let stream = runner
         .spawn_streaming(
             "adb",
             &["-s", &device.id, "logcat", "--pid", &pid],
@@ -399,7 +418,10 @@ fn spawn_session_with_env(
             &[],
         )
         .with_context(|| format!("spawning `adb logcat --pid {pid}`"))?;
-    Ok(Some(handle))
+    Ok(Some(AndroidLaunch {
+        stream,
+        package: prepared.package,
+    }))
 }
 
 #[cfg(test)]
@@ -1153,7 +1175,7 @@ mod tests {
 
             let cancel = AtomicBool::new(false);
             let mut lines = Vec::new();
-            let mut handle = spawn_session_with_env(
+            let launch = spawn_session_with_env(
                 &runner,
                 &dir,
                 &device(),
@@ -1170,7 +1192,11 @@ mod tests {
                 lines.iter().any(|l| l == "Streaming logs (pid 4242)"),
                 "{lines:?}"
             );
+            // The *installed* package rides back with the stream, so a caller
+            // wanting `am force-stop` never has to re-parse the launch line.
+            assert_eq!(launch.package, "dev.f0x.myapp");
 
+            let mut handle = launch.stream;
             let mut logcat = Vec::new();
             while let Ok(line) = handle.lines.recv() {
                 logcat.push(line);
