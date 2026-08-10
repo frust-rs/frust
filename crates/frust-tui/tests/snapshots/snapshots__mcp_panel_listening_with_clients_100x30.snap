@@ -13,8 +13,8 @@ expression: "render_mcp_panel(100, 30, &McpStatus::Listening\n{ port: 4848, clie
                      ╭ MCP server ────────────────────────────────────────────╮                     
                      │                                                        │▓▓                   
                      │  ● listening on 127.0.0.1:4848                         │▓▓                   
-                     │  an agent configured for `frust mcp` reaches this      │▓▓                   
-                     │  workbench's own sessions at the same address          │▓▓                   
+                     │  MCP agents connect at this address to drive the       │▓▓                   
+                     │  workbench's own sessions (one session world)          │▓▓                   
                      │                                                        │▓▓                   
                      │  Clients (2)                                           │▓▓                   
                      │    #0  connected 01:02:03                              │▓▓                   

@@ -80,8 +80,7 @@ const REPLY_DEADLINE: Duration = Duration::from_secs(5);
 /// What every session's `devtools_error` reports in embedded mode: the tools
 /// cannot borrow the workbench's devtools connection (see the module doc).
 pub const DEVTOOLS_OWNED_BY_WORKBENCH: &str = "the workbench owns this session's devtools connection and cannot share it with the \
-     embedded MCP server; inspection and input tools are unavailable in embedded mode \
-     (use `frust mcp` standalone for those)";
+     embedded MCP server; inspection and input tools are unavailable in embedded mode";
 
 /// A session id no session is ever assigned — what [`SessionBackend::run_app`]
 /// reports when the workbench event loop is already gone (the process is on

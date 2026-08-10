@@ -187,8 +187,8 @@ fn headline_lines(status: &McpStatus, error: Option<&str>, theme: &Theme) -> Vec
                 format!("listening on 127.0.0.1:{port}"),
                 theme.success(),
             ),
-            note("an agent configured for `frust mcp` reaches this".to_string()),
-            note("workbench's own sessions at the same address".to_string()),
+            note("MCP agents connect at this address to drive the".to_string()),
+            note("workbench's own sessions (one session world)".to_string()),
         ],
     }
 }

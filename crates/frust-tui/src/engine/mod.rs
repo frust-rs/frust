@@ -70,9 +70,9 @@ use tokio_util::sync::CancellationToken;
 use crate::supervise::{McpServerHandle, McpStatus};
 
 /// The port the embedded MCP server binds when the workbench starts one —
-/// `frust-mcp`'s own default, so an agent configured for a standalone
-/// `frust mcp` finds the embedded server at the same address. `0` lets the OS
-/// assign an ephemeral port instead (what the tests use).
+/// `frust-mcp`'s own default, so an agent configured for Frust's conventional
+/// MCP address finds the embedded server there. `0` lets the OS assign an
+/// ephemeral port instead (what the tests use).
 pub const DEFAULT_MCP_PORT: u16 = frust_mcp::DEFAULT_MCP_PORT;
 
 /// Owns the model and the single mpsc channel every asynchronous producer
