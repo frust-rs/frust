@@ -1185,7 +1185,7 @@ mod tests {
     #[tokio::test]
     async fn start_launches_a_desktop_session_per_spec() {
         let runner = FakeProcessRunner::new().with_stream(
-            "cargo run",
+            "cargo run --features frust/perf-trace --features frust/devtools",
             ["   Compiling app", "     Running `app`", "hello"],
             true,
         );

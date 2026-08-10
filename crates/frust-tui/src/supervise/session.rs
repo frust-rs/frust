@@ -78,6 +78,17 @@ impl SessionSpec {
         for arg in self.build.mode.cargo_profile_arg() {
             args.push((*arg).to_string());
         }
+        // Thread the mode's cargo features (`frust/perf-trace` +
+        // `frust/devtools` for debug/profile, none for release) exactly like
+        // the CLI's desktop fallback and the device pipelines do —
+        // `BuildMode::cargo_features` is the single mode→feature source.
+        // Without these the spawned preview compiles the devtools service and
+        // perf instrumentation OUT, so the workbench's DevTools mode would
+        // wait forever for a discovery line that can never be printed.
+        for feature in self.build.mode.cargo_features() {
+            args.push("--features".to_string());
+            args.push((*feature).to_string());
+        }
 
         // Every `--define KEY=VALUE` becomes an env var for the spawned
         // preview, matching on-device behavior. Sorted by key so the derived
@@ -318,7 +329,16 @@ mod tests {
         };
         let plan = spec.launch_plan().unwrap();
         assert_eq!(plan.program, "cargo");
-        assert_eq!(plan.args, vec!["run".to_string()]);
+        assert_eq!(
+            plan.args,
+            vec![
+                "run".to_string(),
+                "--features".to_string(),
+                "frust/perf-trace".to_string(),
+                "--features".to_string(),
+                "frust/devtools".to_string(),
+            ]
+        );
         assert_eq!(plan.cwd, PathBuf::from("/tmp/app"));
         assert!(plan.env.is_empty());
     }
@@ -331,7 +351,15 @@ mod tests {
             build: build(BuildMode::Release),
         };
         let plan = spec.launch_plan().unwrap();
-        assert_eq!(plan.args, vec!["run".to_string(), "--release".to_string()]);
+        assert_eq!(
+            plan.args,
+            vec![
+                "run".to_string(),
+                "--release".to_string(),
+                "--features".to_string(),
+                "lean".to_string(),
+            ]
+        );
     }
 
     #[test]
