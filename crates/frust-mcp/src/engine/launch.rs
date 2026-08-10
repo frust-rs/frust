@@ -125,6 +125,7 @@ fn start(session: &Arc<Session>, runner: &Runner) -> Result<Option<LineReceiver>
                 &mut on_line,
                 &session.stop,
             )?
+            .map(|launch| launch.stream)
         }
     };
 

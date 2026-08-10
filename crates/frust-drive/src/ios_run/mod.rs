@@ -188,12 +188,23 @@ fn prepare_simulator_session(
     }))
 }
 
+/// What a `spawn_session`/`spawn_physical_session` call hands back once the
+/// launch stream is up: the killable/drainable [`StreamHandle`] plus the
+/// bundle id that was actually launched, so a caller (e.g. a teardown path
+/// wanting `simctl terminate <udid> <bundle_id>`) doesn't have to re-derive
+/// it out of the `Launching <bundle_id>…` log line.
+pub struct IosLaunch {
+    pub stream: StreamHandle,
+    pub bundle_id: String,
+}
+
 /// The streaming, cancellable variant of [`run`] for the `frust-tui`
 /// supervisor: the same preflight → build → install core, then the
 /// `simctl launch --console-pty` stream spawned through the cancellable
-/// [`ProcessRunner::spawn_streaming`] seam, its [`StreamHandle`] handed back
-/// for the supervisor to drain and kill. Returns `Ok(None)` when `cancel` was
-/// observed before the launch stream began.
+/// [`ProcessRunner::spawn_streaming`] seam, its [`StreamHandle`] (plus the
+/// launched bundle id, see [`IosLaunch`]) handed back for the supervisor to
+/// drain and kill. Returns `Ok(None)` when `cancel` was observed before the
+/// launch stream began.
 ///
 /// Killing the returned handle stops the `simctl launch` foreground bridge but
 /// (like [`run`]'s own Ctrl-C path) does not itself terminate the app inside
@@ -206,7 +217,7 @@ pub fn spawn_session(
     info: &BuildInfo,
     on_line: &mut dyn FnMut(&str),
     cancel: &AtomicBool,
-) -> Result<Option<StreamHandle>> {
+) -> Result<Option<IosLaunch>> {
     let Some(prepared) = prepare_simulator_session(runner, root, device, info, on_line, cancel)?
     else {
         return Ok(None);
@@ -215,7 +226,7 @@ pub fn spawn_session(
         return Ok(None);
     }
     on_line(&format!("Launching {}…", prepared.bundle_id));
-    let handle = runner
+    let stream = runner
         .spawn_streaming(
             "xcrun",
             &[
@@ -229,7 +240,10 @@ pub fn spawn_session(
             &[],
         )
         .with_context(|| format!("spawning `simctl launch {}`", prepared.bundle_id))?;
-    Ok(Some(handle))
+    Ok(Some(IosLaunch {
+        stream,
+        bundle_id: prepared.bundle_id,
+    }))
 }
 
 /// Minimum `devicectl`-drivable iOS major version: devicectl only drives
@@ -372,8 +386,9 @@ fn prepare_physical_session(
 /// The streaming, cancellable variant of [`run_physical`] for the `frust-tui`
 /// supervisor: the same iOS-17+ gate → signed build → install core, then the
 /// `devicectl device process launch --console` stream spawned through the
-/// cancellable [`ProcessRunner::spawn_streaming`] seam. Returns `Ok(None)`
-/// when `cancel` was observed before the launch stream began.
+/// cancellable [`ProcessRunner::spawn_streaming`] seam, its [`StreamHandle`]
+/// (plus the launched bundle id, see [`IosLaunch`]) handed back. Returns
+/// `Ok(None)` when `cancel` was observed before the launch stream began.
 pub fn spawn_physical_session(
     runner: &dyn ProcessRunner,
     root: &Path,
@@ -381,7 +396,7 @@ pub fn spawn_physical_session(
     info: &BuildInfo,
     on_line: &mut dyn FnMut(&str),
     cancel: &AtomicBool,
-) -> Result<Option<StreamHandle>> {
+) -> Result<Option<IosLaunch>> {
     let Some(prepared) = prepare_physical_session(runner, root, device, info, on_line, cancel)?
     else {
         return Ok(None);
@@ -390,7 +405,7 @@ pub fn spawn_physical_session(
         return Ok(None);
     }
     on_line(&format!("Launching {}…", prepared.bundle_id));
-    let handle = runner
+    let stream = runner
         .spawn_streaming(
             "xcrun",
             &[
@@ -408,7 +423,10 @@ pub fn spawn_physical_session(
             &[],
         )
         .with_context(|| format!("spawning `devicectl process launch {}`", prepared.bundle_id))?;
-    Ok(Some(handle))
+    Ok(Some(IosLaunch {
+        stream,
+        bundle_id: prepared.bundle_id,
+    }))
 }
 
 /// Parses the major version number out of a `devicectl` `osVersionNumber`
@@ -753,6 +771,62 @@ mod tests {
             !lines.iter().any(|l| l.contains("lean")),
             "a declaring app must not warn: {lines:?}"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// [`spawn_session`]'s [`IosLaunch`] surfaces the exact bundle id
+    /// `simctl launch` was invoked with — the D4-prerequisite contract a
+    /// teardown path needs to later `simctl terminate <udid> <bundle_id>`
+    /// without re-parsing the `Launching …` log line.
+    #[test]
+    fn spawn_session_returns_the_bundle_id_simctl_launch_was_given() {
+        let dir = unique_project_dir("spawn-session-bundle-id");
+        let app_dir = dir.join("build/ios/Build/Products/Debug-iphonesimulator/Runner.app");
+        fs::create_dir_all(&app_dir).unwrap();
+        let app_path = app_dir.to_string_lossy().into_owned();
+
+        let runner = FakeProcessRunner::new()
+            .with(
+                "xcode-select -p",
+                ok("/Applications/Xcode.app/Contents/Developer\n"),
+            )
+            .with(
+                "rustup target list --installed",
+                ok("aarch64-apple-ios-sim\n"),
+            )
+            .with("xcrun simctl list devices --json", ok(BOOTED_JSON))
+            .with(
+                format!(
+                    "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} FRUST_FEATURES=ZnJ1c3QvcGVyZi10cmFjZSxmcnVzdC9kZXZ0b29scw== build",
+                    host_sim_arch()
+                ),
+                ok("Build succeeded"),
+            )
+            .with(format!("xcrun simctl install AAAA {app_path}"), ok(""))
+            .with_stream(
+                "xcrun simctl launch --console-pty AAAA dev.f0x.myapp",
+                ["hello from simulator"],
+                true,
+            );
+
+        let never = AtomicBool::new(false);
+        let mut lines = Vec::new();
+        let mut launch = spawn_session(
+            &runner,
+            &dir,
+            &device(),
+            &debug_info(),
+            &mut |l| lines.push(l.to_string()),
+            &never,
+        )
+        .unwrap()
+        .expect("a live launch, not a cancellation");
+
+        assert_eq!(launch.bundle_id, "dev.f0x.myapp");
+        let seen: Vec<String> = launch.stream.lines.iter().collect();
+        assert_eq!(seen, vec!["hello from simulator"]);
+        assert!(launch.stream.wait());
 
         let _ = fs::remove_dir_all(&dir);
     }

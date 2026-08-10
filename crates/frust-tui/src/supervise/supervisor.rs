@@ -798,7 +798,8 @@ fn launch_device_stream(
             &plan.build,
             on_line,
             cancel,
-        ),
+        )
+        .map(|launch| launch.map(|l| l.stream)),
         (Platform::Ios, _) => ios_run::spawn_session(
             runner,
             &plan.project_root,
@@ -806,7 +807,8 @@ fn launch_device_stream(
             &plan.build,
             on_line,
             cancel,
-        ),
+        )
+        .map(|launch| launch.map(|l| l.stream)),
     }
 }
 
