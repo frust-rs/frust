@@ -163,18 +163,17 @@ impl SessionEngine {
     /// device launch (whose failure arrives minutes later) could report it
     /// anyway. Await progress with [`wait_for`](Self::wait_for).
     ///
-    /// `project_root` overrides the engine's own default for this session.
+    /// Every session launches at the engine's own configured
+    /// [`project_root`](Self::project_root) — there is no per-call override
+    /// (a client-suppliable build directory would let any caller run
+    /// `cargo`, and therefore arbitrary `build.rs`/proc-macro code, anywhere
+    /// readable).
     ///
     /// After [`shutdown`](Self::shutdown) it launches nothing: the returned
     /// session is already [`SessionState::Failed`], carrying the refusal
     /// reason the tool layer reports in band.
-    pub fn run_app(
-        &self,
-        target: RunTarget,
-        mode: BuildMode,
-        project_root: Option<PathBuf>,
-    ) -> SessionId {
-        let root = project_root.unwrap_or_else(|| self.project_root.clone());
+    pub fn run_app(&self, target: RunTarget, mode: BuildMode) -> SessionId {
+        let root = self.project_root.clone();
         let id = SessionId(self.next_id.fetch_add(1, Ordering::Relaxed));
         let session = Arc::new(Session::new(id, target, mode, root));
 
@@ -218,18 +217,18 @@ impl SessionEngine {
             .context("the session teardown task failed")
     }
 
-    /// Stops the session and launches a new one with the same target, mode,
-    /// and project root, returning the new session's id. The old id keeps
-    /// reporting its final (stopped) state.
+    /// Stops the session and launches a new one with the same target and
+    /// mode (always at the engine's configured project root), returning the
+    /// new session's id. The old id keeps reporting its final (stopped)
+    /// state.
     pub async fn restart_app(&self, id: SessionId) -> Result<SessionId> {
         let session = self.session_arc(id)?;
         let target = session.target.clone();
         let mode = session.mode;
-        let root = session.project_root.clone();
         drop(session);
 
         self.stop_app(id).await?;
-        Ok(self.run_app(target, mode, Some(root)))
+        Ok(self.run_app(target, mode))
     }
 
     /// Tears every session down. Wired into [`crate::run`]'s cancellation, so

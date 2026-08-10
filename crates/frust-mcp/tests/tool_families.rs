@@ -486,6 +486,21 @@ async fn every_tool_is_listed_with_a_usable_description() {
         assert!(properties.contains_key(key), "tap is missing `{key}`");
     }
 
+    // `run_app` takes no client-suppliable project path — every session
+    // launches at the server's own configured root (review-fix-1 F3: a
+    // per-call override let any caller run `cargo` anywhere readable).
+    let run_app = tools
+        .iter()
+        .find(|tool| tool["name"] == json!("run_app"))
+        .expect("run_app is listed");
+    let run_app_properties = run_app["inputSchema"]["properties"]
+        .as_object()
+        .expect("run_app takes arguments");
+    assert!(
+        !run_app_properties.contains_key("project"),
+        "run_app must not accept a client-suppliable `project` path: {run_app_properties:?}"
+    );
+
     mcp.shutdown().await;
 }
 

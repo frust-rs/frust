@@ -116,7 +116,7 @@ async fn a_stop_racing_the_launch_still_kills_the_process() {
 
     // Deliberately no state await between the two: this is the window where
     // the launch thread may not have spawned anything yet.
-    let id = engine.run_app(RunTarget::Desktop, BuildMode::Debug, None);
+    let id = engine.run_app(RunTarget::Desktop, BuildMode::Debug);
     engine.stop_app(id).await.expect("stop_app");
 
     // The desktop pipeline has no cancel check, so the process is spawned
@@ -141,7 +141,7 @@ async fn a_stop_racing_the_launch_still_kills_the_process() {
 async fn a_stop_after_the_stream_is_live_kills_it_too() {
     let (engine, spawned) = recording_engine(vec!["Compiling frust v0.1.0".to_string()]);
 
-    let id = engine.run_app(RunTarget::Desktop, BuildMode::Debug, None);
+    let id = engine.run_app(RunTarget::Desktop, BuildMode::Debug);
     await_snapshot(&engine, id, |s| s.state == SessionState::Running).await;
     let lines = spawned
         .recv_timeout(DEADLINE)
@@ -165,7 +165,7 @@ async fn launches_racing_shutdown_are_never_left_running() {
         let engine = Arc::clone(&engine);
         tokio::task::spawn_blocking(move || {
             (0..BURST)
-                .map(|_| engine.run_app(RunTarget::Desktop, BuildMode::Debug, None))
+                .map(|_| engine.run_app(RunTarget::Desktop, BuildMode::Debug))
                 .collect::<Vec<_>>()
         })
     };
@@ -196,7 +196,7 @@ async fn launches_racing_shutdown_are_never_left_running() {
 async fn run_app_after_shutdown_is_refused_with_the_reason() {
     let (engine, spawned) = recording_engine(vec!["Compiling frust v0.1.0".to_string()]);
 
-    let first = engine.run_app(RunTarget::Desktop, BuildMode::Debug, None);
+    let first = engine.run_app(RunTarget::Desktop, BuildMode::Debug);
     await_snapshot(&engine, first, |s| s.state == SessionState::Running).await;
     let live = spawned
         .recv_timeout(DEADLINE)
@@ -205,7 +205,7 @@ async fn run_app_after_shutdown_is_refused_with_the_reason() {
     engine.shutdown().await;
     assert_stream_killed(live);
 
-    let refused = engine.run_app(RunTarget::Desktop, BuildMode::Debug, None);
+    let refused = engine.run_app(RunTarget::Desktop, BuildMode::Debug);
     let snapshot = engine
         .session(refused)
         .expect("a refused launch is still reportable");

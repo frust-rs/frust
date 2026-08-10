@@ -6,7 +6,6 @@
 //! engine's types are plain Rust and carry no serde/schema derives, on
 //! purpose: several of them are `frust-drive`'s).
 
-use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 
 use frust_devtools_protocol::Capability;
@@ -149,10 +148,6 @@ pub(crate) struct RunAppArgs {
     /// compiles the service out and no other tool here would work.
     #[serde(default)]
     pub mode: Option<String>,
-    /// Project root to run from. Defaults to the root the server was started
-    /// in.
-    #[serde(default)]
-    pub project: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -206,7 +201,7 @@ pub(crate) async fn run_app(engine: &SessionEngine, args: RunAppArgs) -> ToolRes
         Err(err) => return Err(Json(err)),
     };
 
-    let id = engine.run_app(target, mode, args.project.map(PathBuf::from));
+    let id = engine.run_app(target, mode);
     let Some(snapshot) = engine.session(id) else {
         return Err(Json(ToolError::new(
             "the session vanished immediately after launch — this is a bug in frust-mcp",

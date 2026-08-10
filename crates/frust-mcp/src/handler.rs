@@ -90,7 +90,7 @@ impl McpHandler {
     }
 
     #[tool(
-        description = "Launch a frust app and supervise it. `target` is \"desktop\" for a host preview or a device id from list_devices; `mode` is \"debug\" (default) or \"profile\"; `project` overrides the project root. Returns immediately with the new session id — building, installing, and connecting happen in the background, so poll list_sessions (and read app_logs) until the session reports devtools_connected or failed."
+        description = "Launch a frust app and supervise it. `target` is \"desktop\" for a host preview or a device id from list_devices; `mode` is \"debug\" (default) or \"profile\". Every session runs at the project root this server was started in — there is no per-call override. Returns immediately with the new session id — building, installing, and connecting happen in the background, so poll list_sessions (and read app_logs) until the session reports devtools_connected or failed."
     )]
     async fn run_app(
         &self,

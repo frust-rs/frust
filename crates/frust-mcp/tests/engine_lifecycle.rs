@@ -26,7 +26,7 @@ async fn desktop_session_connects_devtools_then_stops_cleanly() {
         format_discovery_line(fixture.addr.port(), Some(FIXTURE_TOKEN)),
     ]);
 
-    let id = engine.run_app(RunTarget::Desktop, BuildMode::Debug, None);
+    let id = engine.run_app(RunTarget::Desktop, BuildMode::Debug);
     let snapshot =
         await_snapshot(&engine, id, |s| s.state == SessionState::DevtoolsConnected).await;
 
@@ -80,7 +80,7 @@ async fn devtools_failure_line_surfaces_verbatim() {
         format_failure_line(REASON),
     ]);
 
-    let id = engine.run_app(RunTarget::Desktop, BuildMode::Debug, None);
+    let id = engine.run_app(RunTarget::Desktop, BuildMode::Debug);
     let snapshot = await_snapshot(&engine, id, |s| s.devtools_error.is_some()).await;
 
     assert_eq!(snapshot.devtools_error.as_deref(), Some(REASON));
@@ -100,7 +100,7 @@ async fn log_ring_retains_lines_and_serves_a_tail() {
     let lines: Vec<String> = (0..12).map(|i| format!("line {i}")).collect();
     let engine = engine_with_hanging_desktop_stream(lines.clone());
 
-    let id = engine.run_app(RunTarget::Desktop, BuildMode::Debug, None);
+    let id = engine.run_app(RunTarget::Desktop, BuildMode::Debug);
     let snapshot = await_snapshot(&engine, id, |s| s.log_lines >= 12).await;
     assert_eq!(snapshot.dropped_log_lines, 0);
 
@@ -127,7 +127,7 @@ async fn frame_stats_notifications_land_in_the_session_ring() {
         Some(FIXTURE_TOKEN),
     )]);
 
-    let id = engine.run_app(RunTarget::Desktop, BuildMode::Debug, None);
+    let id = engine.run_app(RunTarget::Desktop, BuildMode::Debug);
     let snapshot = await_snapshot(&engine, id, |s| s.frames >= 1).await;
     assert_eq!(snapshot.dropped_frames, 0);
     assert_eq!(
@@ -147,7 +147,7 @@ async fn an_unspawnable_launch_fails_with_a_reason() {
     // No stream registered for the desktop invocation at all.
     let engine = SessionEngine::with_runner(TEST_PROJECT_ROOT, Arc::new(FakeProcessRunner::new()));
 
-    let id = engine.run_app(RunTarget::Desktop, BuildMode::Debug, None);
+    let id = engine.run_app(RunTarget::Desktop, BuildMode::Debug);
     let snapshot = await_snapshot(&engine, id, |s| s.state.is_terminal()).await;
 
     match snapshot.state {
@@ -166,8 +166,8 @@ async fn an_unspawnable_launch_fails_with_a_reason() {
 #[tokio::test]
 async fn shutdown_stops_every_session() {
     let engine = engine_with_hanging_desktop_stream(vec!["Compiling frust v0.1.0".to_string()]);
-    let first = engine.run_app(RunTarget::Desktop, BuildMode::Debug, None);
-    let second = engine.run_app(RunTarget::Desktop, BuildMode::Debug, None);
+    let first = engine.run_app(RunTarget::Desktop, BuildMode::Debug);
+    let second = engine.run_app(RunTarget::Desktop, BuildMode::Debug);
     await_snapshot(&engine, first, |s| s.state == SessionState::Running).await;
     await_snapshot(&engine, second, |s| s.state == SessionState::Running).await;
 
@@ -187,7 +187,7 @@ async fn shutdown_stops_every_session() {
 #[tokio::test]
 async fn restart_replaces_the_session_with_an_identical_spec() {
     let engine = engine_with_hanging_desktop_stream(vec!["Compiling frust v0.1.0".to_string()]);
-    let first = engine.run_app(RunTarget::Desktop, BuildMode::Debug, None);
+    let first = engine.run_app(RunTarget::Desktop, BuildMode::Debug);
     await_snapshot(&engine, first, |s| s.state == SessionState::Running).await;
 
     let second = engine.restart_app(first).await.expect("restart_app");
