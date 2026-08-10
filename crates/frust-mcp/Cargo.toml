@@ -1,0 +1,55 @@
+[package]
+name = "frust-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# A library only, no standalone binary — a future CLI subcommand (outside
+# this task's scope) provides the `frust mcp` entry point over
+# `frust_mcp::run`. Charter (docs/ARCHITECTURE.md's Tooling isolation rule,
+# widened to this crate): frust-mcp depends on `frust-drive`/
+# `frust-devtools-protocol` (once the engine/tool-family tasks wire them in)
+# plus rmcp/axum/tokio/tokio-util/base64/serde/serde_json/log only — never
+# `frust-devtools`, never a framework crate, not even as a dev-dependency.
+[lib]
+name = "frust_mcp"
+path = "src/lib.rs"
+
+[dependencies]
+# `default-features = false` trims rmcp's client/reqwest/auth/elicitation
+# surface this tool-only, loopback-bound server never uses. `server` +
+# `transport-streamable-http-server` are the transport this crate runs;
+# `macros` pulls in the `#[tool_router]`/`#[tool]`/`#[tool_handler]`
+# attribute macros the `ping` tool (handler.rs) is built from — task 02's
+# acceptance criteria requires proving that macro plumbing end to end, which
+# the `server`/`transport-streamable-http-server` features alone do not
+# enable (verified: neither feature depends on `rmcp-macros`).
+rmcp = { workspace = true }
+# The HTTP layer rmcp's `StreamableHttpService` nests into.
+axum = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+log = { workspace = true }
+# The graceful-shutdown seam: a `CancellationToken` wired to ctrl-c in `run`,
+# and to the streamable-HTTP transport/`axum::serve` so a cancel unwinds the
+# whole server cleanly.
+tokio-util = { workspace = true }
+# The workspace `tokio` pin is `default-features = false`; enable exactly
+# what this crate needs: rt-multi-thread (the binary embedding `run` drives
+# its own runtime; also what `#[tokio::test]` needs below), macros
+# (`#[tokio::test]`), net (`TcpListener`), signal (`ctrl_c` in `run`), sync
+# (the `oneshot`/cancellation plumbing), time (test timeouts).
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "signal",
+    "sync",
+    "time",
+] }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+# The smoke test's raw-HTTP round trip reads/writes a `TcpStream` directly.
+tokio = { workspace = true, features = ["io-util"] }
