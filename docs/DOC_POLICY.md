@@ -28,11 +28,11 @@ tooling-isolation charter/verify-gate/pin policy with every unit rather than rea
 | `SHELLS` | crates/frust-shell-{common,desktop,android,ios} | A D |
 | `PLUGINS` | crates/frust-plugin, plugins/{shared-preferences,secure-storage,camera,clipboard,haptics,iap,clean-signals-frust,database} | A D C |
 | `NATIVE_WIDGETS` | plugins/native-widgets | A |
-| `CLI` | crates/frust-cli, frust-drive, frust-mcp | A D |
+| `CLI` | crates/frust-cli, frust-drive, frust-mcp, frust-dap | A D |
 | `TUI` | crates/frust-tui | A D C |
 | `DEVTOOLS` | crates/frust-devtools, frust-devtools-protocol | A |
 
-**Excluded** (consumers, not units — index line + own README only): examples/huddle, examples/shadertoy, examples/glyph-catalog, examples/playground, examples/no-catalogs.
+**Excluded** (consumers, not units — index line + own README only): examples/huddle, examples/shadertoy, examples/glyph-catalog, examples/playground, examples/no-catalogs, editors/vscode-frust.
 
 NATIVE_WIDGETS' pins/conventions ride PLUGINS' spokes (shared Apple FFI pins, one plugin charter).
 Conventions binding more than one unit (sanctioned-unsafe register, interaction/semantics

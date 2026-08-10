@@ -1337,3 +1337,160 @@ MCP path was judged the fix that matters for v1.
 **Evidence**: `crates/frust-tui/src/supervise/mcp_backend.rs` module doc ("What this backend
 deliberately cannot do" — "An evicted MCP record's tab still exists"); `McpSessionRecords::
 retain_bounded`; `run_app_refuses_bookkeeping_free_once_the_cap_of_live_sessions_is_reached` test.
+
+---
+
+### `dap-no-stepping-v1` — `frust-dap` has no breakpoints, stack, or variable inspection
+
+**Observed**: `frust-dap`'s DAP surface is launch orchestration only —
+`initialize`/`launch`/`configurationDone`/`threads`/`disconnect`/`terminate` plus the
+`frustRestart`/`frustWidgetTree` custom requests. There is no `setBreakpoints`, `continue`,
+`next`/`stepIn`/`stepOut`, `stackTrace`, `scopes`, or `variables` — `threads` answers a single
+static thread only so a client's UI has something to show, not because stepping is supported on it.
+
+**Applies to**: every `frust-dap` session, on every platform.
+
+**Why accepted**: ruling D6 — stepping is deliberately delegated to native lldb tooling (Xcode's
+debugger for iOS, Android Studio/`lldb.sh` for Android, a desktop `lldb`/`gdb` attach) rather than
+reimplemented on top of the launch-orchestration engine, which has no breakpoint/stack/variable
+model to build one on. `frust-dap` orchestrates build/deploy/launch/logs; a real debugger attaches
+to the running process for anything past that.
+
+**Evidence**: `crates/frust-dap/src/adapter/mod.rs`'s `threads`/dispatch surface (no
+breakpoint/stack/variable request handling); frust-dap feature plan ruling D6.
+
+---
+
+### `dap-launch-only-no-attach-v1` — `frust-dap` cannot attach to an already-running app
+
+**Observed**: `frust-dap`'s only entry into a session is its own `launch` request, which builds a
+new `frust_mcp::engine::SessionEngine` and drives build → deploy → launch itself. There is no
+`attach` request, and no way to hand an existing session (one started outside `frust-dap`, e.g. by
+`frust run` or `frust-mcp`) to a DAP client.
+
+**Applies to**: every `frust-dap` session; a client must always launch through it, never attach to
+an app already running.
+
+**Why accepted**: v1 scope — `attach` needs a way to discover and adopt a session `frust-dap` did
+not create, which the current one-engine-per-connection design does not support. Not attempted this
+round.
+
+**Evidence**: `crates/frust-dap/src/adapter/mod.rs`'s request dispatch (no `attach` handling);
+`OrchestrationAdapter`'s one-`SessionEngine`-per-connection construction in `launch`.
+
+---
+
+### `dap-tcp-unauthenticated-v1` — the DAP TCP transport has no authentication beyond the loopback bind
+
+**Observed**: `frust-dap`'s `--port` mode binds `127.0.0.1` only and has no login, token, or
+capability check at the DAP protocol layer — any local process that can reach the port can drive a
+launch/stop session through it.
+
+**Applies to**: every `frust-dap` TCP session; stdio mode (the default) has no equivalent exposure,
+since it inherits the launching process's own pipes.
+
+**Why accepted**: the same v1 stance as `frust-mcp`'s (see `mcp-server-unauthenticated-v1` above),
+matched to the same threat model — a loopback developer tool not reachable off-host. Server-side
+auth is a named follow-up, not a v1 requirement, for either server.
+
+**Evidence**: `crates/frust-dap/src/server/mod.rs`'s `BIND_ADDR` (hard-coded `127.0.0.1`, no auth
+handshake in `serve_tcp`); frust-dap feature plan.
+
+---
+
+### `dap-exited-success-flag-only` — a DAP `exited` event carries 0/1, never a real process exit code
+
+**Observed**: `frust-dap`'s `exited` event body always carries `0` or `1` — `frust_mcp::engine`'s
+`SessionState::Exited` is a success flag, not a real exit code (`StreamHandle` exposes none on any
+platform), so there is no underlying value to report faithfully.
+
+**Applies to**: every `frust-dap` session's `exited` event, on every platform.
+
+**Why accepted**: the underlying engine has never captured a real exit code (desktop/Android/iOS
+Simulator sessions alike) — `frust-dap` reports the same fidelity the engine has always had, rather
+than inventing a code that would not mean anything. A client relying on `exited`'s code for
+anything beyond success/failure will be misled.
+
+**Evidence**: `crates/frust-dap/src/adapter/pump.rs`'s `EXIT_OK`/`EXIT_FAILED` doc comments;
+`frust_mcp::engine::SessionState::Exited` (no exit-code field).
+
+---
+
+### `dap-log-subscription-may-drop-lines` — a slow DAP client can lose output lines under back-pressure
+
+**Observed**: `frust_mcp::engine::SessionEngine::subscribe_logs` is a bounded (4096-line) channel;
+a client that reads `output` events slower than the app produces lines causes `frust-dap`'s log
+pump to back up and the subscription to drop the oldest lines once full. Loss is never silent: an
+in-band `[frust] <N> log line(s) dropped (…)` line is delivered as its own `output` event before the
+gap.
+
+**Applies to**: any `frust-dap` session whose client (or the DAP wire itself) cannot keep up with
+the app's log rate; unreachable in ordinary interactive use.
+
+**Why accepted**: the alternative is an unbounded buffer (a memory-growth hazard) or blocking the
+app's own log-ingest thread on a slow client (a hang hazard) — neither acceptable for a debug
+server. A marked drop is the same trade-off `frust_mcp::engine`'s log ring itself already makes.
+
+**Evidence**: `crates/frust-mcp/src/engine/session.rs`'s `LogFeed`/`push_log` (bounded `try_send`,
+dropped-line marker); `crates/frust-dap/src/adapter/pump.rs`'s log pump.
+
+---
+
+### `dap-resolution-helpers-mirrored-from-mcp` — device/mode resolution is duplicated, not shared, between `frust-mcp` and `frust-dap`
+
+**Observed**: `frust_mcp::tools`'s device-matching, mode-parsing, and devtools-error-message
+helpers are a private module — `frust-dap`'s `adapter/resolve.rs` mirrors their behavior (exact-id
+match, then unique case-insensitive substring of id/name; the physical-iOS refusal; the
+not-connected/not-supported/unauthorized wording) rather than importing them, since they are not
+part of `frust-mcp`'s public API.
+
+**Applies to**: `frust-dap`'s `launch`'s `device`/`mode` resolution and its `frustWidgetTree`
+not-connected error wording; a future change to `frust-mcp`'s private resolution logic will not
+propagate to `frust-dap` automatically.
+
+**Why accepted**: exporting the helpers would widen `frust-mcp`'s public surface for a single
+internal consumer; mirroring was judged the smaller footprint for v1, with the drift risk recorded
+here so a future `frust-mcp` resolution change is checked against `frust-dap` too.
+
+**Evidence**: `crates/frust-dap/src/adapter/resolve.rs` (mirrored matching/parsing logic, doc
+comments naming the source); `crates/frust-mcp/src/tools/session.rs` (the private original).
+
+---
+
+### `dap-vscode-extension-unverified` — `editors/vscode-frust` has not been runtime-tested in a VS Code host
+
+**Observed**: `editors/vscode-frust` is verified only statically — `node --check` on
+`extension.js` and `JSON.parse` on `package.json` — never launched inside an actual VS Code
+extension host against a real `frust dap` process. It is also unpublished: install is
+`npx @vscode/vsce package` → `code --install-extension`, never the Marketplace.
+
+**Applies to**: anyone using the extension for the first time; the DAP server it spawns
+(`crates/frust-dap`) is itself covered by `cargo test -p frust-dap`'s headless session test, so this
+entry is about the editor-integration layer specifically.
+
+**Why accepted**: no VS Code host is available in this environment; the extension's own contract
+(spawn `frust dap [--port]`, fill `projectRoot` from the workspace folder) is small enough that
+static verification plus the crate's own headless test give reasonable confidence, but the
+end-to-end path — VS Code's debug UI actually driving a launch — is unexercised.
+
+**Evidence**: `editors/vscode-frust/README.md`; frust-dap feature plan task 03's completion summary
+(devbox `node --check`/`JSON.parse` only, no VS Code host run).
+
+---
+
+### `dap-ios-simulator-untested-pending-mac` — `frust-dap` iOS Simulator launches are unverified
+
+**Observed**: `frust-dap`'s `launch` shares `frust_mcp::engine::SessionEngine`'s iOS Simulator run
+pipeline (see `mcp-ios-simulator-unverified` above), but no Mac has been available to run a
+`frust-dap`-orchestrated iOS Simulator session end to end; only desktop targets are exercised by
+the crate's own tests.
+
+**Applies to**: `frust-dap` sessions with `device` resolving to an iOS Simulator udid — the
+standing gap every iOS path in this repo carries pending Mac device access.
+
+**Why accepted**: same cause and same mitigation as `mcp-ios-simulator-unverified` — the launch
+pipeline itself is already `frust-mcp`-verified; the residual risk is scoped to `frust-dap`'s own
+adapter wiring (log pump, exit watch) on that platform.
+
+**Evidence**: `crates/frust-dap` test suite (desktop targets only, via `FakeProcessRunner`); see
+`mcp-ios-simulator-unverified` above for the shared pipeline's own status.

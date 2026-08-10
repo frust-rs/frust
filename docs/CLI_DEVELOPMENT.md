@@ -1,9 +1,9 @@
 # Frust - CLI Development
 
 Template/scaffold development and version pins owned by the CLI unit (`frust-cli`,
-`frust-drive`, `frust-mcp`). Shared prerequisites, build/run commands, the standard verify gate, and the
-version-pin *policy* live in [DEVELOPMENT.md](DEVELOPMENT.md); the unit's design lives in
-[CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md).
+`frust-drive`, `frust-mcp`, `frust-dap`). Shared prerequisites, build/run commands, the standard
+verify gate, and the version-pin *policy* live in [DEVELOPMENT.md](DEVELOPMENT.md); the unit's
+design lives in [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md).
 
 ## Template development
 
@@ -58,6 +58,19 @@ that means for headless/CI use).
 `frust-mcp`'s integration tests (`http_smoke`, `engine_lifecycle`, `tool_families`,
 `mcp_embed_lifecycle`) each bind an ephemeral loopback port (`--port 0` / a hand-rolled NDJSON
 fixture server), relevant in a network-restricted sandbox that blocks even loopback binds.
+
+## `frust-dap`
+
+Verify with the standard `-p frust-dap` forms: `cargo test -p frust-dap`,
+`cargo clippy -p frust-dap --all-targets -- -D warnings`, `cargo fmt --check`. Its dev-dependency on
+`frust-drive`'s `test-util` feature (the scripted `FakeProcessRunner`) is a feature toggle on a
+dependency the crate already has — no new package enters `Cargo.lock`. Its TCP-mode tests bind
+ephemeral loopback ports, the same sandbox caveat as `frust-mcp`'s above.
+
+`editors/vscode-frust` is a plain-JavaScript, unpublished VS Code extension (no TypeScript, no
+bundler, no npm dependency) that spawns `frust dap` for debug type `frust`. Packaging is
+`npx @vscode/vsce package` → a local `.vsix`, run by hand, not by any workspace gate — Node.js is
+not required to build or test the Rust workspace.
 
 ## See Also
 
