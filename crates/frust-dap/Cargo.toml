@@ -48,3 +48,11 @@ tokio = { workspace = true, features = [
     "macros",
     "time",
 ] }
+
+[dev-dependencies]
+# Enables `frust-drive`'s `test-util` feature (its scripted
+# `FakeProcessRunner`) for this crate's tests only — the same shape
+# `frust-mcp`/`frust-tui` use, so an adapter test never shells out for real.
+# A feature toggle on a dependency this crate already has: no new package
+# enters the graph and `Cargo.lock` is unchanged.
+frust-drive = { path = "../frust-drive", features = ["test-util"] }
