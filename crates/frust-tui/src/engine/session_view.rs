@@ -1277,7 +1277,7 @@ mod tests {
         assert!(s.built_artifact_paths().is_empty());
     }
 
-    // ── Devtools token redaction at the log-ring edge (review defect C) ────
+    // ── Devtools token redaction at the log-ring edge ──────────────────────
 
     /// The stored ring copy of a discovery line never carries the token,
     /// while the connect path (fed the pre-redaction `plain` text) still

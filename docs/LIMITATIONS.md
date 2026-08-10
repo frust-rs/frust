@@ -1295,10 +1295,15 @@ could observe the app as still present for a short window after the tool call re
 
 **Applies to**: every `stop_app`/`restart_app` call through either `SessionBackend` implementation.
 
-**Why accepted**: this is request semantics, not a race to fix — the session itself is reliably
-terminal by the time the call returns (what every in-repo tool and the TUI's own UI rely on); only
-the underlying device app's teardown is decoupled, and coupling it would mean blocking the caller on
-an unbounded `adb`/`simctl` call for no benefit `frust-mcp`'s own tools need today.
+**Why accepted**: this is request semantics, not a race to fix. On `frust-mcp`'s own
+`SessionEngine` the session is terminal by the time the call returns (its teardown is synchronous);
+on the embedded `TuiSessionBackend` **neither** the session's terminal state **nor** the OS-level
+termination is complete when the call returns — the stop request has merely been posted, the kill
+issued best-effort, and the session's terminal state follows asynchronously through the workbench's
+normal event path (`serve_command`'s own doc: a `stop_app` is a *request*). A `stop_app` reply's
+snapshot can therefore still read `running`; an agent needing the terminal state must poll
+`list_sessions`. Coupling either side would mean blocking the caller (or the workbench event loop)
+on an unbounded `adb`/`simctl` call for no benefit `frust-mcp`'s own tools need today.
 
 **Evidence**: `crates/frust-mcp/src/backend.rs`'s `SessionBackend::stop_app`/`restart_app` doc
 comments ("Blocking' describes how long the call may take, not what has finished when it returns").

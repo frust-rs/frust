@@ -4555,7 +4555,7 @@ mod tests {
         assert_eq!(out.effect, Some(Effect::StopMcpServer));
     }
 
-    /// The race the generation tag exists for (review defect B): the user
+    /// The race the generation tag exists for: the user
     /// stops server A and immediately starts B, while A is still inside
     /// graceful shutdown. A's late reports name a generation the model no
     /// longer holds and must not touch B — clearing B's handle would drop its
