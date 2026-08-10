@@ -60,6 +60,14 @@ addition to the v1 wire contract, not a new protocol version. See
 [DEVELOPMENT.md](DEVELOPMENT.md) for the feature/build-mode funnel and
 [CODE_STANDARDS.md](CODE_STANDARDS.md) for the frame-stats publish-ordering convention.
 
+**When the service can't bind.** A bind failure is never load-bearing — the app runs unchanged —
+but the shell logs `frust-devtools: service did not start: <reason>` (via the protocol crate's
+`format_failure_line`), and the TUI parses that with `parse_failure_line` to replace its
+"waiting for a discovery line…" screen with the concrete reason. The common device cause is a
+per-app network toggle being off (MIUI/HyperOS): the app's uid is kernel-firewalled so even a
+loopback bind returns `ECONNREFUSED`, with `INTERNET` still granted and no SELinux denial — see
+[LIMITATIONS.md](LIMITATIONS.md) `devtools-android-per-app-network-toggle`.
+
 ## Data Flow
 
 - **Discovery.** The service logs one line via `format_discovery_line(port, token)` on start

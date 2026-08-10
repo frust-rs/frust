@@ -1073,3 +1073,31 @@ a native macOS source (e.g. `host_statistics`/IOKit) is deferred rather than pur
 **Evidence**: `crates/frust-drive/src/metrics/desktop.rs`'s module doc ("Linux-only... the macOS
 gap is tracked as a `docs/LIMITATIONS.md` entry"); `workflow/plans/features/frust-tui-devex/phase3/TASKS.md`'s
 conductor decision ("No sysinfo dep... macOS metrics deferred to LIMITATIONS").
+
+---
+
+### `devtools-android-per-app-network-toggle` — the in-app service silently fails to bind when an app's network access is off
+
+**Observed**: on Android (notably MIUI/HyperOS and other vendor skins with a per-app network
+toggle), if an app's "network access" is disabled in App info, its uid is firewalled at the kernel
+(eBPF owner-match) level. Every socket operation — **including a `127.0.0.1` loopback bind** —
+returns `ECONNREFUSED (os error 111)`, so the devtools `Service::start` fails and no discovery
+line is ever logged. The manifest's `INTERNET` permission still reads as *granted*: the vendor
+toggle is a separate runtime layer that overrides it, and there is **no SELinux denial** to point
+at. The symptom in the workbench is DevTools sitting on "waiting for a discovery line…" forever.
+
+**Applies to**: any Android device whose per-app network access has been turned off for the app
+under inspection; independent of build flavor and of the granted `INTERNET` permission.
+
+**Why accepted**: it is a device/OS policy, not something the framework can or should override —
+an app that the user has firewalled must stay firewalled. The service already logs the failure
+(`frust-devtools: service did not start: <reason>`), and the TUI now surfaces that reason on the
+DevTools screen (see below) instead of an eternal wait. The fix is operational: enable the app's
+network access, then relaunch.
+
+**Evidence**: reproduced on a Xiaomi 12 (2026-08-10) — `Service::start` returned `ECONNREFUSED`
+and a bare `toybox nc` loopback listener as the app's uid failed identically while a shell-uid
+listener succeeded, with no `avc: denied` for any socket/bind class; enabling network access made
+the discovery line appear immediately. Surfacing path: `frust-devtools-protocol`'s
+`FAILURE_PREFIX`/`parse_failure_line`, `frust-shell-common::devtools::start`'s failure log, and
+`frust-tui`'s `DevtoolsState::start_error` (rendered on the Discovering screen).

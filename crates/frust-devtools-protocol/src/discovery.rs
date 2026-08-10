@@ -22,6 +22,17 @@
 /// immediately by a bare decimal port number.
 pub const DISCOVERY_PREFIX: &str = "frust-devtools listening on ";
 
+/// The exact substring a shell logs (via [`format_failure_line`]) when the
+/// in-app devtools service is compiled in but could not start — a bind refused
+/// by the OS, an ephemeral-port exhaustion, a runtime that would not build. The
+/// human reason follows immediately.
+///
+/// Tooling greps for this the same way it greps for [`DISCOVERY_PREFIX`], so a
+/// session that will never announce a port turns "waiting for a discovery
+/// line…" into the concrete reason instead of an eternal silent wait. Shared
+/// here so the logging side and the parsing side cannot drift.
+pub const FAILURE_PREFIX: &str = "frust-devtools: service did not start: ";
+
 /// What separates the port from the auth token on a discovery line. Private:
 /// both sides go through [`format_discovery_line`]/[`parse_discovery_line`]
 /// rather than splicing the marker themselves.
@@ -81,12 +92,53 @@ pub fn parse_discovery_line(line: &str) -> Option<Discovery> {
     Some(Discovery { port, token })
 }
 
+/// Builds the one line a shell logs when the devtools service fails to start.
+/// The shell side's only formatter — pair of [`parse_failure_line`].
+pub fn format_failure_line(reason: &str) -> String {
+    format!("{FAILURE_PREFIX}{reason}")
+}
+
+/// Finds [`FAILURE_PREFIX`] anywhere in `line` (a substring search, for the
+/// same host-logger-prefix reason as [`parse_discovery_line`]) and returns the
+/// trimmed human reason after it, or `None` if the marker is absent or nothing
+/// non-empty follows it.
+pub fn parse_failure_line(line: &str) -> Option<&str> {
+    let idx = line.find(FAILURE_PREFIX)?;
+    let reason = line[idx + FAILURE_PREFIX.len()..].trim_end();
+    (!reason.is_empty()).then_some(reason)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn port_of(line: &str) -> Option<u16> {
         parse_discovery_line(line).map(|d| d.port)
+    }
+
+    #[test]
+    fn failure_line_round_trips() {
+        let line = format_failure_line("Connection refused (os error 111)");
+        assert_eq!(
+            parse_failure_line(&line),
+            Some("Connection refused (os error 111)")
+        );
+    }
+
+    #[test]
+    fn parses_failure_line_with_logcat_prefix() {
+        let line = "08-10 10:22:16.394 27868 27868 W frust   : frust_shell_common::devtools: \
+                    frust-devtools: service did not start: Connection refused (os error 111)";
+        assert_eq!(
+            parse_failure_line(line),
+            Some("Connection refused (os error 111)")
+        );
+    }
+
+    #[test]
+    fn failure_line_absent_or_empty_is_none() {
+        assert_eq!(parse_failure_line("some unrelated log line"), None);
+        assert_eq!(parse_failure_line(FAILURE_PREFIX), None);
     }
 
     #[test]

@@ -263,7 +263,10 @@ pub fn start(app_name: impl Into<String>, wake: Option<Box<dyn Fn() + Send + Syn
         Ok(handle) => {
             let _ = SERVICE.set(handle);
         }
-        Err(err) => log::warn!("frust-devtools: service did not start: {err}"),
+        Err(err) => log::warn!(
+            "{}",
+            frust_devtools_protocol::format_failure_line(&err.to_string())
+        ),
     }
 }
 

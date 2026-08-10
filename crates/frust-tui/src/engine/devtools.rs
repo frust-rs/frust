@@ -233,6 +233,13 @@ pub struct DevtoolsState {
     /// relaunch) announces a fresh port/token, and the newest announcement is
     /// the live one.
     pub discovered: Option<Discovery>,
+    /// The reason from the most recent "service did not start" line, if the
+    /// app logged one (a bind refused by the OS — e.g. a per-app network
+    /// permission being off — a runtime that would not build, …). Turns the
+    /// otherwise-eternal "waiting for a discovery line…" screen into the
+    /// concrete cause. Cleared by a later successful discovery line, since a
+    /// relaunch that binds supersedes an earlier failure.
+    pub start_error: Option<String>,
     /// The bridge's connection state.
     pub conn: ConnState,
     /// Which tab the §B12 tab strip has selected.
@@ -285,8 +292,17 @@ impl DevtoolsState {
     /// port/token) — the caller then opens (or replaces) the connection.
     pub fn ingest_line(&mut self, plain: &str) -> bool {
         let Some(found) = frust_devtools_protocol::parse_discovery_line(plain) else {
+            // Not a discovery line — but it may be the app reporting that its
+            // service could not start. Record the reason so the Discovering
+            // screen can explain the silence instead of waiting forever. This
+            // never triggers a connect (there is no port), so it returns false.
+            if let Some(reason) = frust_devtools_protocol::parse_failure_line(plain) {
+                self.start_error = Some(reason.to_string());
+            }
             return false;
         };
+        // A live bind supersedes any earlier failure this session logged.
+        self.start_error = None;
         if self.discovered.as_ref() == Some(&found) {
             return false;
         }
@@ -1689,6 +1705,33 @@ mod tests {
         let second = state.discovered.clone().unwrap();
         assert_eq!(second.port, 60000);
         assert_eq!(second.token.as_deref(), Some("beef"));
+    }
+
+    #[test]
+    fn a_service_start_failure_line_is_captured_and_cleared_by_a_later_bind() {
+        let mut state = debug_state();
+        // An ordinary line is neither discovery nor failure.
+        assert!(!state.ingest_line("app: booting up"));
+        assert!(state.start_error.is_none());
+
+        // The app reports its service could not start — captured, no connect.
+        assert!(!state.ingest_line(
+            "08-10 10:22:16.394 27868 27868 W frust: frust_shell_common::devtools: \
+             frust-devtools: service did not start: Connection refused (os error 111)"
+        ));
+        assert_eq!(
+            state.start_error.as_deref(),
+            Some("Connection refused (os error 111)")
+        );
+        assert!(
+            !state.wants_connect(),
+            "a failure is not a port to connect to"
+        );
+
+        // A later successful bind supersedes the failure.
+        assert!(state.ingest_line("frust-devtools listening on 38171 token abcd"));
+        assert!(state.start_error.is_none());
+        assert!(state.wants_connect());
     }
 
     #[test]

@@ -75,11 +75,22 @@ pub fn render(
             render_tab_body(frame, rows[1], session, theme, mouse);
         }
         DevtoolsPhase::Discovering => {
-            empty_state(
-                frame,
-                rows[1],
-                theme,
-                EmptyState {
+            // If the app logged that its service could not start, show that
+            // reason instead of an eternal "waiting…" — a bind refused by the
+            // OS (e.g. a per-app network permission turned off) is otherwise
+            // silent from here.
+            let empty = match &session.devtools.start_error {
+                Some(reason) => EmptyState {
+                    glyph: "⚠".to_string(),
+                    glyph_color: theme.warn(),
+                    headline: "The app's devtools service failed to start".to_string(),
+                    headline_muted: false,
+                    detail: vec![
+                        reason.clone(),
+                        "check the app has network access, then relaunch".to_string(),
+                    ],
+                },
+                None => EmptyState {
                     glyph: spinner_char(animation_frame).to_string(),
                     glyph_color: theme.accent(),
                     headline: "Waiting for a devtools discovery line…".to_string(),
@@ -89,7 +100,8 @@ pub fn render(
                         "the instant a debug/profile build logs it".to_string(),
                     ],
                 },
-            );
+            };
+            empty_state(frame, rows[1], theme, empty);
         }
         DevtoolsPhase::Connecting => {
             empty_state(
