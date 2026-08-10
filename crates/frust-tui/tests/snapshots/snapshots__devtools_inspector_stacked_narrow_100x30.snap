@@ -1,0 +1,34 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: "render_to_string(100, 30, &state)"
+---
+⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
+━━━━━━━━                                                                                            
+                                                                                                    
+ PROJECTS                │huddle:  1 ▶ desktop                                                      
+  ▸ huddle               │ [1] Performance  [2] System  [3] Inspector  [4] Network        ● service 
+                         │                              ━━━━━━━━━━━━━                               
+ DEVICES ↻ r             │ ▾ ▦ FlexWidget                                           x0 y0 w390 h844 
+   none found            │   ▾ ▣ PaddingWidget                                                      
+                         │       T TextWidget “Hello”                                               
+ SESSIONS                │     ▸ ▦ FlexWidget (2 children)                                          
+   huddle                │   ▾ ≡ ListViewWidget                                                     
+   ▸ ▶ desktop           │       · ButtonWidget                                                     
+                         │       · ButtonWidget                                                     
+ ACTIONS                 │                                                                          
+   New project · n       │                                                                          
+   Add plugin · a        │                                                                          
+   Doctor · d            │                                                                          
+   Build · b             │                                                                          
+   Clean · c             │                                                                          
+                         │──────────────────────────────────────────────────────────────────────────
+                         │FlexWidget #1                                                             
+                         │━━━━━━━━━━━━━                                                             
+                         │bounds   x0 y0 w390 h844                                                  
+                         │type     frust_widgets::flex::FlexWidget                                  
+                         │──────────────────────────────────────────────────────────────────────────
+                         │axis     Vertical                                                         
+                         │                                                                          
+                         │                                                                          
+                         │ devtools: inspector │ →← expand · r refresh · Esc back          [mouse ✓]
+● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]

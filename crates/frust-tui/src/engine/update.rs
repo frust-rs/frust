@@ -14,7 +14,7 @@ use super::bootstrap::BootstrapWizard;
 use super::build_launcher::{BuildLauncher, BuildSpec};
 use super::context_menu::ContextMenu;
 use super::create_wizard::{CreateWizard, WizardAdvance};
-use super::devtools::ConnState;
+use super::devtools::{ConnState, DevtoolsPhase, DevtoolsTab, InspectorTab};
 use super::message::{ContextTarget, DragKind, Message};
 use super::run_config::{DeviceRow, RunConfig};
 use super::session_view::SessionView;
@@ -125,6 +125,23 @@ pub enum Effect {
     /// a reconnect is about to replace it), removing any `adb forward` it
     /// allocated.
     DevtoolsDisconnect(SessionId),
+    /// Pull a fresh `widget_tree` snapshot for one session's Inspector tab —
+    /// the runner hands it to that session's bridge thread, which serves it
+    /// between frame-pump windows and reports back as
+    /// [`Message::DevtoolsInspector`].
+    DevtoolsFetchTree {
+        /// The session whose bridge serves the request.
+        session: SessionId,
+    },
+    /// Pull one node's `widget_props` for the same tab — §B12's second,
+    /// per-selection call, served and reported exactly like
+    /// [`Effect::DevtoolsFetchTree`].
+    DevtoolsFetchProps {
+        /// The session whose bridge serves the request.
+        session: SessionId,
+        /// The widget-tree node id to describe.
+        id: u64,
+    },
 }
 
 /// Everything the bridge needs to reach one session's devtools service —
@@ -962,7 +979,12 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                 .devtools
                 .open
                 .then(|| devtools_connect(state, idx))
-                .flatten();
+                .flatten()
+                // Re-opening onto a retained connection connects nothing, so
+                // an Inspector tab left selected gets its snapshot here
+                // instead (the two are mutually exclusive: a fresh connect
+                // leaves the phase `Connecting`, which pulls nothing).
+                .or_else(|| devtools_inspector_entry(&mut state.sessions[idx]));
             Outcome {
                 redraw: true,
                 effect,
@@ -978,11 +1000,11 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             session.devtools.open = false;
             Outcome::redraw()
         }
-        Message::DevtoolsTab(index) => with_active(state, |s| {
-            s.devtools.select_tab(index);
+        Message::DevtoolsTab(index) => with_active_devtools_tab(state, |d| {
+            d.select_tab(index);
         }),
-        Message::DevtoolsTabCycle(delta) => with_active(state, |s| {
-            s.devtools.cycle_tab(delta);
+        Message::DevtoolsTabCycle(delta) => with_active_devtools_tab(state, |d| {
+            d.cycle_tab(delta);
         }),
         Message::DevtoolsRetry => {
             let Some(idx) = state.active_session else {
@@ -1007,10 +1029,17 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             };
             let is_active = state.active_session == Some(idx);
             let changed = state.sessions[idx].devtools.apply(event);
+            // A handshake completing is the other moment the Inspector can
+            // pull its first snapshot: the tab may have been selected (and
+            // shown empty) all through the connect.
+            let effect = devtools_inspector_entry(&mut state.sessions[idx]);
             // Only the visible session's DevTools surface can be dirtied by a
             // report; a background session's ring keeps filling silently
             // (the dirty-frame skip).
-            Outcome::dirty(changed && is_active && state.sessions[idx].devtools.open)
+            Outcome {
+                redraw: changed && is_active && state.sessions[idx].devtools.open,
+                effect,
+            }
         }
 
         // ── Performance tab (workbook §B12) ──────────────────────────────────
@@ -1028,6 +1057,53 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         Message::DevtoolsPerfFocusCycle => with_active(state, |s| {
             s.devtools.performance.cycle_focus();
         }),
+
+        // ── Inspector tab (workbook §B12) ────────────────────────────────────
+        Message::DevtoolsInspectorSelect(delta) => with_inspector(state, |i| i.select(delta)),
+        Message::DevtoolsInspectorSelectRow(index) => {
+            with_inspector(state, |i| i.select_row(index))
+        }
+        Message::DevtoolsInspectorExpand => with_inspector(state, InspectorTab::expand),
+        Message::DevtoolsInspectorCollapse => with_inspector(state, InspectorTab::collapse),
+        Message::DevtoolsInspectorToggleNode(id) => with_inspector(state, |i| i.toggle_node(id)),
+        Message::DevtoolsInspectorFocusCycle => with_active(state, |s| {
+            s.devtools.inspector.cycle_focus();
+        }),
+        Message::DevtoolsInspectorRefresh => {
+            let Some(session) = state.active_session_mut() else {
+                return Outcome::idle();
+            };
+            // `r` only means "refresh" where there is a service to ask; on
+            // the failed screen the same key is the retry (§B12's mutually
+            // exclusive contexts), routed as `Message::DevtoolsRetry`.
+            if session.devtools.phase() != DevtoolsPhase::Connected
+                || !session.devtools.inspector.begin_tree_fetch()
+            {
+                return Outcome::idle();
+            }
+            Outcome {
+                redraw: true,
+                effect: Some(Effect::DevtoolsFetchTree {
+                    session: session.id,
+                }),
+            }
+        }
+        Message::DevtoolsInspector(id, event) => {
+            let Some(idx) = state.session_index(id) else {
+                return Outcome::idle();
+            };
+            let is_active = state.active_session == Some(idx);
+            let session = &mut state.sessions[idx];
+            let changed = session.devtools.inspector.apply(event);
+            // A fresh snapshot drops the (now stale) props cache, so whatever
+            // the reconciled selection landed on needs its own pull — the
+            // same second call a selection move makes.
+            let effect = devtools_props_fetch(session);
+            Outcome {
+                redraw: changed && is_active && session.devtools.open,
+                effect,
+            }
+        }
 
         // ── Responsive breakpoints ──────────────────────────────────────────
         Message::ToggleSidebarOverlay => {
@@ -1635,6 +1711,71 @@ fn devtools_perf_window_len(session: &SessionView) -> usize {
     window.len()
 }
 
+/// [`with_active`] for the DevTools tab-selection arms: apply `f` to the
+/// active session's [`crate::engine::DevtoolsState`], then let the newly
+/// selected tab claim its own first fetch (only the Inspector has one).
+fn with_active_devtools_tab(
+    state: &mut AppState,
+    f: impl FnOnce(&mut crate::engine::DevtoolsState),
+) -> Outcome {
+    let Some(session) = state.active_session_mut() else {
+        return Outcome::idle();
+    };
+    f(&mut session.devtools);
+    Outcome {
+        redraw: true,
+        effect: devtools_inspector_entry(session),
+    }
+}
+
+/// Apply `f` to the active session's Inspector tab and pair it with §B12's
+/// per-selection `widget_props` pull: any transition that can move the
+/// selection (a move, a row click, an expand/collapse that re-anchors it)
+/// requests the newly-selected node's props unless they are already cached or
+/// in flight. `f` reports whether the visible state changed.
+fn with_inspector(state: &mut AppState, f: impl FnOnce(&mut InspectorTab) -> bool) -> Outcome {
+    let Some(session) = state.active_session_mut() else {
+        return Outcome::idle();
+    };
+    let changed = f(&mut session.devtools.inspector);
+    let effect = devtools_props_fetch(session);
+    Outcome {
+        redraw: changed || effect.is_some(),
+        effect,
+    }
+}
+
+/// The `widget_props` pull the current Inspector selection needs, if any —
+/// gated on a live connection, since a request has nowhere to go otherwise.
+fn devtools_props_fetch(session: &mut SessionView) -> Option<Effect> {
+    if session.devtools.phase() != DevtoolsPhase::Connected {
+        return None;
+    }
+    let id = session.devtools.inspector.begin_props_fetch()?;
+    Some(Effect::DevtoolsFetchProps {
+        session: session.id,
+        id,
+    })
+}
+
+/// The automatic first `widget_tree` pull: entering the Inspector tab (by
+/// key, pill click, or re-opening DevTools onto it) with no snapshot yet and
+/// a live connection fires exactly one — [`InspectorTab::wants_tree`] is
+/// false forever after, so re-entering the tab never re-pulls. `r` is the
+/// explicit refresh.
+fn devtools_inspector_entry(session: &mut SessionView) -> Option<Effect> {
+    if session.devtools.active_tab != DevtoolsTab::Inspector
+        || session.devtools.phase() != DevtoolsPhase::Connected
+        || !session.devtools.inspector.wants_tree()
+    {
+        return None;
+    }
+    session.devtools.inspector.begin_tree_fetch();
+    Some(Effect::DevtoolsFetchTree {
+        session: session.id,
+    })
+}
+
 fn with_active(state: &mut AppState, f: impl FnOnce(&mut SessionView)) -> Outcome {
     match state.active_session_mut() {
         Some(s) => {
@@ -1669,7 +1810,7 @@ fn with_active_filtered(
 mod tests {
     use super::*;
     use crate::engine::devtools::{
-        ConnEvent, DevtoolsLaunch, DevtoolsPhase, DevtoolsTab, PerfFocus,
+        ConnEvent, DevtoolsLaunch, DevtoolsPhase, DevtoolsTab, InspectorEvent, PerfFocus,
     };
     use crate::engine::message::RegionId;
     use crate::engine::session_view::Scroll;
@@ -3649,6 +3790,219 @@ mod tests {
         ] {
             let out = update(&mut st, msg.clone());
             assert!(!out.redraw, "{msg:?} should be a no-op");
+        }
+    }
+
+    // ── Inspector tab (workbook §B12) ────────────────────────────────────────
+
+    fn widget_node(
+        id: u64,
+        type_name: &str,
+        children: Vec<frust_devtools_protocol::WidgetNode>,
+    ) -> frust_devtools_protocol::WidgetNode {
+        frust_devtools_protocol::WidgetNode {
+            id,
+            type_name: type_name.to_string(),
+            debug_label: None,
+            bounds: None,
+            children,
+        }
+    }
+
+    /// `Column #1 > [Padding #2 > Text #3, Text #4]`.
+    fn widget_tree() -> frust_devtools_protocol::WidgetTreeDump {
+        frust_devtools_protocol::WidgetTreeDump {
+            roots: vec![widget_node(
+                1,
+                "frust_widgets::flex::FlexWidget",
+                vec![
+                    widget_node(
+                        2,
+                        "frust_widgets::padding::PaddingWidget",
+                        vec![widget_node(
+                            3,
+                            "frust_widgets::text::TextWidget",
+                            Vec::new(),
+                        )],
+                    ),
+                    widget_node(4, "frust_widgets::text::TextWidget", Vec::new()),
+                ],
+            )],
+        }
+    }
+
+    /// A connected DevTools session sitting on the Inspector tab, with the
+    /// automatic first pull already answered.
+    fn inspector_workbench() -> (AppState, SessionId) {
+        let (mut st, id) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        update(
+            &mut st,
+            Message::DevtoolsConn(
+                id,
+                ConnEvent::Connected {
+                    app_name: "huddle".to_string(),
+                    caps: Vec::new(),
+                },
+            ),
+        );
+        let out = update(&mut st, Message::DevtoolsTab(2));
+        assert_eq!(
+            out.effect,
+            Some(Effect::DevtoolsFetchTree { session: id }),
+            "entering the Inspector tab pulls its first snapshot"
+        );
+        update(
+            &mut st,
+            Message::DevtoolsInspector(id, InspectorEvent::TreeArrived(widget_tree())),
+        );
+        (st, id)
+    }
+
+    #[test]
+    fn entering_the_inspector_tab_pulls_one_snapshot_and_never_a_second() {
+        let (mut st, id) = inspector_workbench();
+        assert_eq!(
+            st.active_session().unwrap().devtools.inspector.rows().len(),
+            4,
+            "Column > [Padding > Text, Text] — the whole tree is inside the \
+             default expansion depth"
+        );
+
+        // Leaving and re-entering the tab does not re-pull — `r` is the
+        // explicit refresh.
+        update(&mut st, Message::DevtoolsTab(0));
+        let out = update(&mut st, Message::DevtoolsTab(2));
+        assert_eq!(out.effect, None);
+
+        let out = update(&mut st, Message::DevtoolsInspectorRefresh);
+        assert_eq!(out.effect, Some(Effect::DevtoolsFetchTree { session: id }));
+        // …and a second `r` while that pull is in flight is a no-op.
+        assert_eq!(
+            update(&mut st, Message::DevtoolsInspectorRefresh).effect,
+            None
+        );
+    }
+
+    #[test]
+    fn a_handshake_landing_on_the_inspector_tab_pulls_the_first_snapshot() {
+        let (mut st, id) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        update(&mut st, Message::DevtoolsTab(2));
+        // Nothing to pull while the connection is still coming up.
+        assert_eq!(
+            update(&mut st, Message::DevtoolsInspectorRefresh).effect,
+            None
+        );
+
+        let out = update(
+            &mut st,
+            Message::DevtoolsConn(
+                id,
+                ConnEvent::Connected {
+                    app_name: "huddle".to_string(),
+                    caps: Vec::new(),
+                },
+            ),
+        );
+        assert_eq!(out.effect, Some(Effect::DevtoolsFetchTree { session: id }));
+    }
+
+    #[test]
+    fn moving_the_selection_requests_the_new_nodes_props_exactly_once() {
+        let (mut st, id) = inspector_workbench();
+        // The snapshot's own arrival asked for the root's props.
+        let out = update(
+            &mut st,
+            Message::DevtoolsInspector(id, InspectorEvent::TreeArrived(widget_tree())),
+        );
+        assert_eq!(
+            out.effect,
+            Some(Effect::DevtoolsFetchProps { session: id, id: 1 })
+        );
+        update(
+            &mut st,
+            Message::DevtoolsInspector(
+                id,
+                InspectorEvent::PropsArrived(
+                    1,
+                    frust_devtools_protocol::WidgetProps {
+                        id: 1,
+                        entries: vec![("axis".to_string(), "Vertical".to_string())],
+                    },
+                ),
+            ),
+        );
+
+        // Down onto Padding #2: a fresh pull.
+        let out = update(&mut st, Message::DevtoolsInspectorSelect(1));
+        assert!(out.redraw);
+        assert_eq!(
+            out.effect,
+            Some(Effect::DevtoolsFetchProps { session: id, id: 2 })
+        );
+        // Straight back up onto the cached root: no pull at all.
+        let out = update(&mut st, Message::DevtoolsInspectorSelect(-1));
+        assert_eq!(out.effect, None, "the root's props are already cached");
+        assert_eq!(
+            st.active_session()
+                .unwrap()
+                .devtools
+                .inspector
+                .selected_props()
+                .map(|p| p.id),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn expand_and_collapse_route_to_the_active_sessions_tree() {
+        let (mut st, id) = inspector_workbench();
+        // Collapse the root: only it stays visible.
+        update(&mut st, Message::DevtoolsInspectorCollapse);
+        assert_eq!(
+            st.active_session().unwrap().devtools.inspector.rows().len(),
+            1
+        );
+        update(&mut st, Message::DevtoolsInspectorExpand);
+        assert_eq!(
+            st.active_session().unwrap().devtools.inspector.rows().len(),
+            4
+        );
+        // The `▸`/`▾` click affordance addresses a node by id: collapsing
+        // Padding #2 hides only its own child.
+        update(&mut st, Message::DevtoolsInspectorToggleNode(2));
+        assert_eq!(
+            st.active_session().unwrap().devtools.inspector.rows().len(),
+            3
+        );
+
+        // A failure from the bridge surfaces verbatim and frees the pull.
+        update(
+            &mut st,
+            Message::DevtoolsInspector(id, InspectorEvent::Failed("connection closed".to_string())),
+        );
+        assert_eq!(
+            st.active_session().unwrap().devtools.inspector.error(),
+            Some("connection closed")
+        );
+    }
+
+    #[test]
+    fn inspector_messages_are_noops_with_no_active_session() {
+        let mut st = welcome();
+        for msg in [
+            Message::DevtoolsInspectorSelect(1),
+            Message::DevtoolsInspectorSelectRow(0),
+            Message::DevtoolsInspectorExpand,
+            Message::DevtoolsInspectorCollapse,
+            Message::DevtoolsInspectorToggleNode(1),
+            Message::DevtoolsInspectorFocusCycle,
+            Message::DevtoolsInspectorRefresh,
+        ] {
+            let out = update(&mut st, msg.clone());
+            assert!(!out.redraw, "{msg:?} should be a no-op");
+            assert_eq!(out.effect, None, "{msg:?} should request nothing");
         }
     }
 

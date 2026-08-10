@@ -35,6 +35,22 @@
 //! ([`adb_forward_remove`]), whether the connection ended cleanly or not.
 //! Desktop (and the iOS simulator) connect straight to `127.0.0.1:port`.
 //!
+//! # On-demand requests (the Inspector tab)
+//!
+//! Beside the frame-stats subscription, the thread serves *request/response*
+//! pulls the Inspector tab asks for: [`DevtoolsBridge::fetch_tree`] and
+//! [`DevtoolsBridge::fetch_props`] post a command down a per-connection
+//! channel, and the pump serves whatever is queued at the top of every window
+//! ([`serve_commands`]) using the same blocking [`DevtoolsClient`], reporting
+//! results as [`InspectorEvent`]s. No extra thread is spawned per request:
+//! that would be an unbounded fan-out driven by keystrokes, and the client's
+//! reader thread keeps buffering frame stats meanwhile. The cost is that a
+//! slow `widget_tree` round trip pauses frame *forwarding* for its duration
+//! (bounded by [`REQUEST_TIMEOUT`]) — the samples themselves are not lost,
+//! they land in the client's mailbox and forward on the next window. A pull
+//! that fails is reported and the connection keeps running: an error for one
+//! node id is not a dead connection.
+//!
 //! # Lifetime
 //!
 //! A connection lives until it is explicitly disconnected (session end, or a
@@ -65,7 +81,7 @@ use frust_drive::devtools_client::{DevtoolsClient, adb_forward_ephemeral, adb_fo
 use frust_drive::process::ProcessRunner;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::engine::{ConnEvent, DevtoolsTarget, Message};
+use crate::engine::{ConnEvent, DevtoolsTarget, InspectorEvent, Message};
 
 use super::session::SessionId;
 
@@ -103,9 +119,28 @@ pub struct DevtoolsBridge {
 struct Conn {
     /// Set to ask the thread to wind down at its next window tick.
     stop: Arc<AtomicBool>,
+    /// On-demand Inspector pulls, served between frame windows. Unbounded,
+    /// but the engine only ever has one tree pull and one props pull in
+    /// flight per session ([`crate::engine::InspectorTab`]'s gating), so the
+    /// queue is bounded by that in practice.
+    commands: mpsc::Sender<BridgeCommand>,
     /// Joined on disconnect/drop so no thread — and no `adb` forward —
     /// outlives the bridge.
     worker: Option<JoinHandle<()>>,
+}
+
+/// One on-demand request for a bridge thread to serve.
+///
+/// There is no `Shutdown` variant: teardown is [`Conn::stop`]'s job (checked
+/// every window and joined by [`DevtoolsBridge::disconnect`]), and a second
+/// teardown path with different timing would be a way for the two to
+/// disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BridgeCommand {
+    /// Pull the whole widget tree (`widget_tree`).
+    FetchTree,
+    /// Pull one node's props (`widget_props`).
+    FetchProps(u64),
 }
 
 impl DevtoolsBridge {
@@ -130,12 +165,13 @@ impl DevtoolsBridge {
 
         let stop = Arc::new(AtomicBool::new(false));
         let runner = Arc::clone(&self.runner);
+        let (commands, command_rx) = mpsc::channel::<BridgeCommand>();
         let worker = {
             let stop = Arc::clone(&stop);
             let tx = tx.clone();
             thread::Builder::new()
                 .name(format!("frust-tui-devtools-{}", session.0))
-                .spawn(move || run_bridge(target, runner, stop, tx))
+                .spawn(move || run_bridge(target, runner, stop, command_rx, tx))
         };
         match worker {
             Ok(worker) => {
@@ -143,6 +179,7 @@ impl DevtoolsBridge {
                     session,
                     Conn {
                         stop,
+                        commands,
                         worker: Some(worker),
                     },
                 );
@@ -156,6 +193,38 @@ impl DevtoolsBridge {
                     ConnEvent::Failed(format!("could not start the devtools bridge thread: {err}")),
                 ));
             }
+        }
+    }
+
+    /// Ask `session`'s bridge for a fresh `widget_tree` snapshot; the result
+    /// comes back as [`Message::DevtoolsInspector`].
+    pub fn fetch_tree(&self, session: SessionId, tx: &UnboundedSender<Message>) {
+        self.request(session, BridgeCommand::FetchTree, tx);
+    }
+
+    /// Ask `session`'s bridge for one node's `widget_props`, reported the same
+    /// way as [`Self::fetch_tree`].
+    pub fn fetch_props(&self, session: SessionId, id: u64, tx: &UnboundedSender<Message>) {
+        self.request(session, BridgeCommand::FetchProps(id), tx);
+    }
+
+    /// Queue one command for `session`'s thread. A session with no live
+    /// bridge (never connected, or its thread already wound down) reports an
+    /// [`InspectorEvent::Failed`] instead of dropping the request silently —
+    /// the engine is holding an in-flight flag for it, and a request that
+    /// never answers would wedge that tab.
+    fn request(&self, session: SessionId, command: BridgeCommand, tx: &UnboundedSender<Message>) {
+        let delivered = self
+            .conns
+            .get(&session)
+            .is_some_and(|conn| conn.commands.send(command).is_ok());
+        if !delivered {
+            let _ = tx.send(Message::DevtoolsInspector(
+                session,
+                InspectorEvent::Failed(
+                    "the devtools connection for this session is no longer open".to_string(),
+                ),
+            ));
         }
     }
 
@@ -198,6 +267,7 @@ fn run_bridge(
     target: DevtoolsTarget,
     runner: Arc<dyn ProcessRunner + Send + Sync>,
     stop: Arc<AtomicBool>,
+    commands: mpsc::Receiver<BridgeCommand>,
     tx: UnboundedSender<Message>,
 ) {
     let session = target.session;
@@ -220,7 +290,14 @@ fn run_bridge(
         .unwrap_or(target.port);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], local_port));
-    let result = connect_and_pump(addr, target.token.as_deref(), session, &stop, &tx);
+    let result = connect_and_pump(
+        addr,
+        target.token.as_deref(),
+        session,
+        &stop,
+        &commands,
+        &tx,
+    );
 
     if let Some(forward) = forward {
         // Best-effort: the connection is over either way, and a failure to
@@ -243,6 +320,7 @@ fn connect_and_pump(
     token: Option<&str>,
     session: SessionId,
     stop: &AtomicBool,
+    commands: &mpsc::Receiver<BridgeCommand>,
     tx: &UnboundedSender<Message>,
 ) -> Result<()> {
     // A bounded reachability probe first. `DevtoolsClient::connect` uses the
@@ -276,14 +354,17 @@ fn connect_and_pump(
     let frames = client
         .subscribe_frame_stats()
         .context("subscribing to devtools frame stats")?;
-    pump_frames(&frames, session, stop, tx)
+    pump_frames(&client, &frames, commands, session, stop, tx)
 }
 
-/// Forward coalesced frame-stats batches until `stop` is set (`Ok`), the
-/// engine drops its receiver (`Ok` — nothing left to report to), or the
-/// connection closes (`Err`, which surfaces §B12's failed screen).
+/// Forward coalesced frame-stats batches — serving any queued on-demand
+/// request first — until `stop` is set (`Ok`), the engine drops its receiver
+/// (`Ok` — nothing left to report to), or the connection closes (`Err`, which
+/// surfaces §B12's failed screen).
 fn pump_frames(
+    client: &DevtoolsClient,
     frames: &mpsc::Receiver<FrameStats>,
+    commands: &mpsc::Receiver<BridgeCommand>,
     session: SessionId,
     stop: &AtomicBool,
     tx: &UnboundedSender<Message>,
@@ -291,6 +372,13 @@ fn pump_frames(
     let mut batch: Vec<FrameStats> = Vec::new();
     loop {
         if stop.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        // Served at the top of every iteration rather than only on the
+        // window's timeout branch: an app publishing faster than
+        // `COALESCE_WINDOW` never reaches that branch, and a request must not
+        // wait on a busy app to go idle.
+        if !serve_commands(client, commands, session, tx) {
             return Ok(());
         }
         match frames.recv_timeout(COALESCE_WINDOW) {
@@ -333,16 +421,73 @@ fn report(tx: &UnboundedSender<Message>, session: SessionId, event: ConnEvent) -
     tx.send(Message::DevtoolsConn(session, event)).is_ok()
 }
 
+/// [`report`] for the Inspector's own request/response channel.
+fn report_inspector(
+    tx: &UnboundedSender<Message>,
+    session: SessionId,
+    event: InspectorEvent,
+) -> bool {
+    tx.send(Message::DevtoolsInspector(session, event)).is_ok()
+}
+
+/// Serve every request queued right now (never blocking on an empty queue).
+/// Returns whether the engine is still listening.
+fn serve_commands(
+    client: &DevtoolsClient,
+    commands: &mpsc::Receiver<BridgeCommand>,
+    session: SessionId,
+    tx: &UnboundedSender<Message>,
+) -> bool {
+    loop {
+        match commands.try_recv() {
+            Ok(command) => {
+                if !serve_command(client, command, session, tx) {
+                    return false;
+                }
+            }
+            // Empty: nothing to do this window. Disconnected: the bridge
+            // dropped this connection's sender, which only happens on
+            // teardown — the `stop` flag the loop already checks is the
+            // authority on winding down, so this just stops serving.
+            Err(_) => return true,
+        }
+    }
+}
+
+/// Serve one request over the blocking client. A rejection (a vanished node
+/// id, an unauthorized connection) is reported as
+/// [`InspectorEvent::Failed`] and the pump carries on — it says nothing about
+/// the connection's health, so it must not tear it down.
+fn serve_command(
+    client: &DevtoolsClient,
+    command: BridgeCommand,
+    session: SessionId,
+    tx: &UnboundedSender<Message>,
+) -> bool {
+    let event = match command {
+        BridgeCommand::FetchTree => match client.widget_tree() {
+            Ok(dump) => InspectorEvent::TreeArrived(dump),
+            Err(err) => InspectorEvent::Failed(format!("{err:#}")),
+        },
+        BridgeCommand::FetchProps(id) => match client.widget_props(id) {
+            Ok(props) => InspectorEvent::PropsArrived(id, props),
+            Err(err) => InspectorEvent::Failed(format!("{err:#}")),
+        },
+    };
+    report_inspector(tx, session, event)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use frust_devtools_protocol::{
         Capability, HandshakeInfo, Incoming, Method, Notification, PROTOCOL_VERSION, Response,
-        RpcError, decode_line, encode_line, serde_json,
+        RpcError, WidgetNode, WidgetProps, WidgetTreeDump, decode_line, encode_line, serde_json,
     };
     use frust_drive::process::FakeProcessRunner;
     use std::io::{BufRead, BufReader, Write};
     use std::net::{TcpListener, TcpStream};
+    use std::sync::Mutex;
     use std::time::Instant;
     use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
@@ -370,10 +515,12 @@ mod tests {
 
     /// A hand-rolled NDJSON devtools server: accepts one connection, answers
     /// `handshake` (rejecting a wrong/missing token exactly as the real
-    /// service does) and `frame_stats_subscribe`, then pushes `frame_count`
-    /// `frame_stats` notifications. Deliberately *not* `frust-devtools` — the
-    /// tooling charter keeps the framework-side service out of this crate's
-    /// graph, so the wire contract is exercised against a canned peer.
+    /// service does), `frame_stats_subscribe` (after which it pushes
+    /// `frame_count` `frame_stats` notifications *from its own thread*, so
+    /// requests keep being served while frames flow), `widget_tree` and
+    /// `widget_props`. Deliberately *not* `frust-devtools` — the tooling
+    /// charter keeps the framework-side service out of this crate's graph, so
+    /// the wire contract is exercised against a canned peer.
     fn spawn_canned_server(frame_count: u64) -> (SocketAddr, thread::JoinHandle<()>) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind canned devtools server");
         let addr = listener.local_addr().expect("canned server addr");
@@ -401,7 +548,12 @@ mod tests {
     /// not).
     fn serve_canned(stream: TcpStream, frame_count: u64) -> bool {
         let mut served = false;
-        let mut write = stream.try_clone().expect("clone canned server stream");
+        // Shared because the frame pusher below writes from its own thread:
+        // two writers interleaving mid-line would corrupt the NDJSON stream.
+        let write = Arc::new(Mutex::new(
+            stream.try_clone().expect("clone canned server stream"),
+        ));
+        let mut pusher: Option<thread::JoinHandle<()>> = None;
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
         while reader.read_line(&mut line).unwrap_or(0) > 0 {
@@ -427,7 +579,7 @@ mod tests {
                             app_name: "huddle".to_string(),
                             frust_version: "0.1.0".to_string(),
                             protocol_version: PROTOCOL_VERSION,
-                            capabilities: vec![Capability::FrameStats],
+                            capabilities: vec![Capability::FrameStats, Capability::WidgetTree],
                         })
                         .expect("encode handshake result"),
                     )
@@ -437,35 +589,86 @@ mod tests {
                         RpcError::unauthorized("a valid devtools token is required"),
                     )
                 };
-                if write_line(&mut write, &encode_line(&response)).is_err() {
-                    return served;
+                if write_line(&write, &encode_line(&response)).is_err() {
+                    break;
                 }
                 if token != Some(TOKEN) {
-                    return served;
+                    break;
                 }
             } else if method == Method::FrameStatsSubscribe.as_str() {
                 let response = Response::success(request.id, serde_json::json!({ "ok": true }));
-                if write_line(&mut write, &encode_line(&response)).is_err() {
-                    return served;
+                if write_line(&write, &encode_line(&response)).is_err() {
+                    break;
                 }
-                for n in 0..frame_count {
-                    let note = Notification::new(
-                        Method::FrameStats.as_str(),
-                        serde_json::to_value(frame(n)).expect("encode frame stats"),
-                    );
-                    if write_line(&mut write, &encode_line(&note)).is_err() {
-                        return served;
+                let write = Arc::clone(&write);
+                pusher = Some(thread::spawn(move || {
+                    for n in 0..frame_count {
+                        let note = Notification::new(
+                            Method::FrameStats.as_str(),
+                            serde_json::to_value(frame(n)).expect("encode frame stats"),
+                        );
+                        if write_line(&write, &encode_line(&note)).is_err() {
+                            return;
+                        }
+                        // Spread the pushes across more than one coalescing
+                        // window so the batching path is genuinely exercised.
+                        thread::sleep(Duration::from_millis(20));
                     }
-                    // Spread the pushes across more than one coalescing
-                    // window so the batching path is genuinely exercised.
-                    thread::sleep(Duration::from_millis(20));
+                }));
+            } else if method == Method::WidgetTree.as_str() {
+                let response = Response::success(
+                    request.id,
+                    serde_json::to_value(canned_tree()).expect("encode widget tree"),
+                );
+                if write_line(&write, &encode_line(&response)).is_err() {
+                    break;
+                }
+            } else if method == Method::WidgetProps.as_str() {
+                let id = request
+                    .params
+                    .get("id")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let response = Response::success(
+                    request.id,
+                    serde_json::to_value(WidgetProps {
+                        id,
+                        entries: vec![("axis".to_string(), "Vertical".to_string())],
+                    })
+                    .expect("encode widget props"),
+                );
+                if write_line(&write, &encode_line(&response)).is_err() {
+                    break;
                 }
             }
+        }
+        if let Some(pusher) = pusher {
+            let _ = pusher.join();
         }
         served
     }
 
-    fn write_line(stream: &mut TcpStream, line: &str) -> std::io::Result<()> {
+    /// The canned server's fixed two-node tree: `Column #1 > Text #2`.
+    fn canned_tree() -> WidgetTreeDump {
+        WidgetTreeDump {
+            roots: vec![WidgetNode {
+                id: 1,
+                type_name: "frust_widgets::flex::FlexWidget".to_string(),
+                debug_label: None,
+                bounds: None,
+                children: vec![WidgetNode {
+                    id: 2,
+                    type_name: "frust_widgets::text::TextWidget".to_string(),
+                    debug_label: Some("greeting".to_string()),
+                    bounds: None,
+                    children: Vec::new(),
+                }],
+            }],
+        }
+    }
+
+    fn write_line(stream: &Mutex<TcpStream>, line: &str) -> std::io::Result<()> {
+        let mut stream = stream.lock().unwrap_or_else(|p| p.into_inner());
         stream.write_all(line.as_bytes())?;
         stream.write_all(b"\n")?;
         stream.flush()
@@ -514,7 +717,11 @@ mod tests {
         };
         assert_eq!(got_session, session);
         assert_eq!(app_name, "huddle");
-        assert_eq!(caps, vec![Capability::FrameStats]);
+        assert_eq!(
+            caps,
+            vec![Capability::FrameStats, Capability::WidgetTree],
+            "the declared capability set is forwarded verbatim"
+        );
 
         let frames = wait_for(&mut rx, |msg| {
             matches!(msg, Message::DevtoolsConn(_, ConnEvent::Frames(_)))
@@ -557,6 +764,88 @@ mod tests {
         );
         drop(bridge);
         let _ = server.join();
+    }
+
+    #[test]
+    fn on_demand_pulls_are_served_between_frame_windows() {
+        // Enough frames to still be flowing after both pulls have been served
+        // (~20ms apart), so the interleaving is real rather than incidental.
+        let (addr, server) = spawn_canned_server(200);
+        let (tx, mut rx) = unbounded_channel();
+        let mut bridge = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let session = SessionId(11);
+        bridge.connect(target(session, addr, Some(TOKEN)), tx.clone());
+        wait_for(&mut rx, |msg| {
+            matches!(msg, Message::DevtoolsConn(_, ConnEvent::Connected { .. }))
+        })
+        .expect("a Connected report");
+
+        bridge.fetch_tree(session, &tx);
+        let tree = wait_for(&mut rx, |msg| {
+            matches!(
+                msg,
+                Message::DevtoolsInspector(_, InspectorEvent::TreeArrived(_))
+            )
+        })
+        .expect("a TreeArrived report");
+        let Message::DevtoolsInspector(got_session, InspectorEvent::TreeArrived(dump)) = tree
+        else {
+            unreachable!("filtered above")
+        };
+        assert_eq!(got_session, session);
+        assert_eq!(dump.roots.len(), 1);
+        assert_eq!(
+            dump.roots[0].children[0].debug_label.as_deref(),
+            Some("greeting")
+        );
+
+        bridge.fetch_props(session, 2, &tx);
+        let props = wait_for(&mut rx, |msg| {
+            matches!(
+                msg,
+                Message::DevtoolsInspector(_, InspectorEvent::PropsArrived(..))
+            )
+        })
+        .expect("a PropsArrived report");
+        let Message::DevtoolsInspector(_, InspectorEvent::PropsArrived(id, props)) = props else {
+            unreachable!("filtered above")
+        };
+        assert_eq!(id, 2);
+        assert_eq!(props.id, 2);
+        assert!(!props.entries.is_empty());
+
+        // The frame pump survived both round trips: a batch still lands after
+        // them.
+        assert!(
+            wait_for(&mut rx, |msg| matches!(
+                msg,
+                Message::DevtoolsConn(_, ConnEvent::Frames(_))
+            ))
+            .is_some(),
+            "frame stats keep flowing around an on-demand pull"
+        );
+
+        bridge.disconnect(session);
+        drop(bridge);
+        let _ = server.join();
+    }
+
+    #[test]
+    fn a_pull_for_a_session_with_no_bridge_reports_a_failure() {
+        let (tx, mut rx) = unbounded_channel();
+        let bridge = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        // Nothing was ever connected for this session: the request cannot be
+        // served, and must say so rather than leave the tab's in-flight flag
+        // set forever.
+        bridge.fetch_tree(SessionId(42), &tx);
+        let failed = wait_for(&mut rx, |msg| {
+            matches!(
+                msg,
+                Message::DevtoolsInspector(_, InspectorEvent::Failed(_))
+            )
+        })
+        .expect("a Failed report");
+        assert!(matches!(failed, Message::DevtoolsInspector(s, _) if s == SessionId(42)));
     }
 
     #[test]

@@ -280,6 +280,10 @@ fn apply_effect(
         // so a slow or unreachable service never stalls this loop.
         Some(Effect::DevtoolsConnect(target)) => devtools.connect(target, tx.clone()),
         Some(Effect::DevtoolsDisconnect(session)) => devtools.disconnect(session),
+        // Inspector pulls only *queue* here: the bridge thread serves them
+        // between frame windows over its own blocking client.
+        Some(Effect::DevtoolsFetchTree { session }) => devtools.fetch_tree(session, tx),
+        Some(Effect::DevtoolsFetchProps { session, id }) => devtools.fetch_props(session, id, tx),
         Some(Effect::SetMouseCapture(on)) => set_mouse_capture(on),
         Some(Effect::SaveSidebarWidth(width)) => crate::engine::save_sidebar_width(width),
         None => {}
@@ -1114,6 +1118,17 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
 /// scrub session's only way out would also blow away the pinned frame in the
 /// same keystroke.
 ///
+/// **`Tab` is per-tab-scoped**: it cycles the active tab's own panes where
+/// that tab has any (Performance's chart↔breakdown, Inspector's tree↔props)
+/// and otherwise keeps its workbench meaning of switching session tabs — one
+/// `on_<tab>` gate each, so a third tab claiming `Tab` adds a gate rather
+/// than rewriting the arm.
+///
+/// **`r` means refresh only on a connected Inspector**, and retry only on the
+/// failed screen — §B12's "mutually exclusive contexts, no live collision".
+/// The two live in different [`DevtoolsPhase`] arms below, so neither can
+/// shadow the other.
+///
 /// The [`DevtoolsPhase`] match is exhaustive: a new screen has to decide what
 /// its keys do rather than silently inheriting another screen's.
 fn translate_devtools_key(
@@ -1124,6 +1139,8 @@ fn translate_devtools_key(
     use crate::engine::{DevtoolsPhase, DevtoolsTab};
 
     let on_performance = devtools.active_tab == DevtoolsTab::Performance;
+    let on_inspector = devtools.active_tab == DevtoolsTab::Inspector;
+    let connected = matches!(devtools.phase(), DevtoolsPhase::Connected);
 
     match code {
         KeyCode::Char('q') => return vec![Message::Quit],
@@ -1134,8 +1151,11 @@ fn translate_devtools_key(
             }
             return vec![Message::DevtoolsClose];
         }
-        KeyCode::Tab if matches!(devtools.phase(), DevtoolsPhase::Connected) && on_performance => {
+        KeyCode::Tab if connected && on_performance => {
             return vec![Message::DevtoolsPerfFocusCycle];
+        }
+        KeyCode::Tab if connected && on_inspector => {
+            return vec![Message::DevtoolsInspectorFocusCycle];
         }
         KeyCode::Tab => return vec![Message::NextTab],
         KeyCode::BackTab => return vec![Message::PrevTab],
@@ -1153,6 +1173,18 @@ fn translate_devtools_key(
             // any other tab.
             KeyCode::Left if on_performance => vec![Message::DevtoolsPerfScrub(-1)],
             KeyCode::Right if on_performance => vec![Message::DevtoolsPerfScrub(1)],
+            // The Inspector tree: move, expand/collapse, re-pull.
+            KeyCode::Up | KeyCode::Char('k') if on_inspector => {
+                vec![Message::DevtoolsInspectorSelect(-1)]
+            }
+            KeyCode::Down | KeyCode::Char('j') if on_inspector => {
+                vec![Message::DevtoolsInspectorSelect(1)]
+            }
+            KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') if on_inspector => {
+                vec![Message::DevtoolsInspectorExpand]
+            }
+            KeyCode::Left if on_inspector => vec![Message::DevtoolsInspectorCollapse],
+            KeyCode::Char('r') if on_inspector => vec![Message::DevtoolsInspectorRefresh],
             _ => vec![],
         },
         // `r` retries only where a retry is offered: a live session whose
@@ -2087,6 +2119,139 @@ mod tests {
         assert_eq!(
             translate_event(key(KeyCode::Tab), &state, &regions),
             vec![Message::NextTab]
+        );
+    }
+
+    /// §B12's Inspector key row, driven end to end through the real
+    /// translate → `update` path: `j`/`k` move the selection, `Enter`
+    /// expands, `Tab` flips tree↔props, and `r` re-pulls the tree as an
+    /// effect (rather than colliding with the failed screen's retry).
+    #[test]
+    fn inspector_keys_move_expand_flip_focus_and_refresh() {
+        use crate::engine::{ConnEvent, InspectorEvent, InspectorFocus, update};
+        use frust_devtools_protocol::{WidgetNode, WidgetTreeDump};
+
+        let regions = MouseRegions::new();
+        let mut state = devtools_state();
+        update(&mut state, Message::DevtoolsToggle);
+        update(
+            &mut state,
+            Message::DevtoolsConn(
+                SessionId(0),
+                ConnEvent::Connected {
+                    app_name: "huddle".to_string(),
+                    caps: Vec::new(),
+                },
+            ),
+        );
+        // `3` selects the Inspector, which pulls its first snapshot.
+        let msgs = translate_event(key(KeyCode::Char('3')), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsTab(2)]);
+        let out = update(&mut state, msgs[0].clone());
+        assert_eq!(
+            out.effect,
+            Some(Effect::DevtoolsFetchTree {
+                session: SessionId(0)
+            })
+        );
+
+        let leaf = |id: u64| WidgetNode {
+            id,
+            type_name: "frust_widgets::text::TextWidget".to_string(),
+            debug_label: None,
+            bounds: None,
+            children: Vec::new(),
+        };
+        update(
+            &mut state,
+            Message::DevtoolsInspector(
+                SessionId(0),
+                InspectorEvent::TreeArrived(WidgetTreeDump {
+                    roots: vec![WidgetNode {
+                        id: 1,
+                        type_name: "frust_widgets::flex::FlexWidget".to_string(),
+                        debug_label: None,
+                        bounds: None,
+                        children: vec![
+                            WidgetNode {
+                                id: 2,
+                                type_name: "frust_widgets::padding::PaddingWidget".to_string(),
+                                debug_label: None,
+                                bounds: None,
+                                children: vec![leaf(3)],
+                            },
+                            leaf(4),
+                        ],
+                    }],
+                }),
+            ),
+        );
+
+        // `j`/`k` move within the flattened rows.
+        let msgs = translate_event(key(KeyCode::Char('j')), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsInspectorSelect(1)]);
+        update(&mut state, msgs[0].clone());
+        assert_eq!(
+            state
+                .active_session()
+                .unwrap()
+                .devtools
+                .inspector
+                .selected_id(),
+            Some(2)
+        );
+        let msgs = translate_event(key(KeyCode::Char('k')), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsInspectorSelect(-1)]);
+        update(&mut state, msgs[0].clone());
+
+        // `←` collapses the (selected) root, `Enter` — like `→`/`Space` —
+        // re-expands it.
+        let msgs = translate_event(key(KeyCode::Left), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsInspectorCollapse]);
+        update(&mut state, msgs[0].clone());
+        assert_eq!(
+            state
+                .active_session()
+                .unwrap()
+                .devtools
+                .inspector
+                .rows()
+                .len(),
+            1
+        );
+        let msgs = translate_event(key(KeyCode::Enter), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsInspectorExpand]);
+        update(&mut state, msgs[0].clone());
+        assert_eq!(
+            state
+                .active_session()
+                .unwrap()
+                .devtools
+                .inspector
+                .rows()
+                .len(),
+            4
+        );
+
+        // `Tab` is the Inspector's own tree↔props flip here, not a session
+        // tab switch.
+        let msgs = translate_event(key(KeyCode::Tab), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsInspectorFocusCycle]);
+        update(&mut state, msgs[0].clone());
+        assert_eq!(
+            state.active_session().unwrap().devtools.inspector.focus,
+            InspectorFocus::Props
+        );
+
+        // `r` on a connected Inspector re-pulls the tree.
+        let msgs = translate_event(key(KeyCode::Char('r')), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsInspectorRefresh]);
+        let out = update(&mut state, msgs[0].clone());
+        assert_eq!(
+            out.effect,
+            Some(Effect::DevtoolsFetchTree {
+                session: SessionId(0)
+            })
         );
     }
 

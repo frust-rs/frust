@@ -13,7 +13,7 @@ use frust_drive::doctor::DoctorReport;
 use frust_drive::plugin::AddReport;
 
 use super::build_launcher::BuildFocus;
-use super::devtools::{ConnEvent, DevtoolsLaunch};
+use super::devtools::{ConnEvent, DevtoolsLaunch, InspectorEvent};
 use super::doctor::DoctorCheck;
 use super::logstyle::LevelFilter;
 use super::run_config::RunFocus;
@@ -185,6 +185,13 @@ pub enum RegionId {
     /// [`super::perf_window`] result); click selects that frame (keyboard
     /// parity: `←`/`→` scrubbing to it).
     DevtoolsPerfColumn(usize),
+    /// An Inspector-tab tree row (0-based index into
+    /// [`super::InspectorTab::rows`]); click selects it (keyboard parity:
+    /// `↑↓`/`j`/`k`).
+    DevtoolsInspectorRow(usize),
+    /// An Inspector-tab row's `▸`/`▾` affordance (the same row index); click
+    /// expands/collapses that node (keyboard parity: `→`/`←`).
+    DevtoolsInspectorTwisty(usize),
 }
 
 /// The kind of an in-progress drag, identifying which draggable chrome the
@@ -231,7 +238,12 @@ pub enum ContextTarget {
 }
 
 /// A TEA message: the only way `AppState` ever changes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` but not `Eq`: [`Message::DevtoolsInspector`] carries the
+/// wire's widget bounds, which are `f64` (see
+/// [`super::InspectorRow::bounds`]). Every comparison this crate makes is a
+/// `==`/`assert_eq!`, which `PartialEq` alone satisfies.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Message {
     /// Quit requested (`q` / `Ctrl+Q`). Sets `should_quit`; the loop exits.
     Quit,
@@ -677,6 +689,36 @@ pub enum Message {
     /// Cycle the Performance tab's pane focus between the chart and the
     /// breakdown bar (`Tab`, only while the Performance tab is active).
     DevtoolsPerfFocusCycle,
+
+    // ── Inspector tab (workbook §B12) ───────────────────────────────────────
+    /// Move the Inspector tree selection `delta` *visible* rows (`↑`/`↓`,
+    /// `j`/`k`, ±1), clamped to the flattened row list. Moving onto a node
+    /// whose props are neither cached nor in flight also emits
+    /// [`super::Effect::DevtoolsFetchProps`] — §B12's per-selection call.
+    DevtoolsInspectorSelect(isize),
+    /// Select an Inspector tree row directly by its visible index (a row
+    /// click), clamped — same props-fetch behavior as
+    /// [`Message::DevtoolsInspectorSelect`].
+    DevtoolsInspectorSelectRow(usize),
+    /// Expand the selected Inspector node (`→`/`Enter`/`Space`); a no-op on a
+    /// leaf or an already-open node.
+    DevtoolsInspectorExpand,
+    /// Collapse the selected Inspector node (`←`); a no-op on an
+    /// already-collapsed node.
+    DevtoolsInspectorCollapse,
+    /// Toggle one Inspector node by id — the `▸`/`▾` click affordance.
+    DevtoolsInspectorToggleNode(u64),
+    /// Cycle the Inspector tab's pane focus between the tree and the props
+    /// pane (`Tab`, only while the Inspector tab is active).
+    DevtoolsInspectorFocusCycle,
+    /// Pull a fresh `widget_tree` snapshot for the active session (`r` on the
+    /// Inspector tab) — routed to the runner as
+    /// [`super::Effect::DevtoolsFetchTree`]. A no-op while a pull is already
+    /// in flight, or when the connection isn't up.
+    DevtoolsInspectorRefresh,
+    /// A report from the session's devtools bridge thread answering an
+    /// on-demand Inspector request (`widget_tree` / `widget_props`).
+    DevtoolsInspector(SessionId, InspectorEvent),
 
     // ── Perf sparkline panel ──────────────────────────────────────────────────
     /// Toggle the active session's perf sparkline panel (`t`) — a no-op with

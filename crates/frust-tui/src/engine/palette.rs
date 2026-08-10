@@ -47,7 +47,9 @@ impl Palette {
 /// One palette command: a display title, a short keyhint, the **existing**
 /// [`Message`] it emits, and its enabled/disabled-with-reason gate. A disabled
 /// command still shows (muted, with its reason) but can't be executed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` only, following [`Message`]'s own relaxation.
+#[derive(Debug, Clone, PartialEq)]
 pub struct PaletteCommand {
     /// The row label.
     pub title: &'static str,
@@ -79,6 +81,13 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
         .active_session()
         .is_some_and(|s| !s.state.is_terminal());
     let has_projects = !state.projects.is_empty();
+    // The Inspector's own refresh only means anything with its tab open on a
+    // live connection (§B12) — everywhere else `r` is a different command.
+    let inspector_live = state.active_session().is_some_and(|s| {
+        s.devtools.open
+            && s.devtools.active_tab == super::devtools::DevtoolsTab::Inspector
+            && s.devtools.phase() == super::devtools::DevtoolsPhase::Connected
+    });
 
     let gated = |title, hint, message, enabled, reason: &'static str| PaletteCommand {
         title,
@@ -194,6 +203,16 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             Message::DevtoolsToggle,
             has_session,
             "no active session",
+        ),
+        // §B12's Inspector `r`. The palette is the one place this command is
+        // reachable from outside the tab itself, so its gate names the exact
+        // context it needs rather than the looser "no active session".
+        gated(
+            "Refresh widget tree",
+            "r",
+            Message::DevtoolsInspectorRefresh,
+            inspector_live,
+            "open DevTools' Inspector tab first",
         ),
         always("Quit", "q", Message::Quit),
     ]

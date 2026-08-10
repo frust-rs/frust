@@ -16,8 +16,8 @@ use frust_drive::plugin::{AddItem, AddOutcome, AddReport};
 use frust_tui::engine::{
     AddPluginDialog, AddPluginStep, AppState, BootstrapState, BootstrapWizard, BuildLauncher,
     ConnEvent, ContextTarget, CreateWizard, DeviceRow, DevtoolsLaunch, DoctorCheck, DoctorState,
-    LevelFilter, Message, Palette, PerfSource, RegionId, RunConfig, RunFocus, Screen, Scroll,
-    SessionView, ToastKind, WizardStep, perf_window, update,
+    InspectorEvent, LevelFilter, Message, Palette, PerfSource, RegionId, RunConfig, RunFocus,
+    Screen, Scroll, SessionView, ToastKind, WizardStep, perf_window, update,
 };
 use frust_tui::supervise::{PhaseLabel, SessionEvent, SessionEventKind, SessionId, SessionState};
 use frust_tui::ui::mouse::{MouseCtx, MouseRegions};
@@ -1246,6 +1246,225 @@ fn devtools_performance_chart_column_click_selects_the_frame() {
             .performance
             .selected_frame,
         Some(5)
+    );
+}
+
+// ── Inspector tab (workbook §B12) ─────────────────────────────────────────────
+
+fn widget_node(
+    id: u64,
+    type_name: &str,
+    label: Option<&str>,
+    bounds: Option<(f64, f64, f64, f64)>,
+    children: Vec<frust_devtools_protocol::WidgetNode>,
+) -> frust_devtools_protocol::WidgetNode {
+    frust_devtools_protocol::WidgetNode {
+        id,
+        type_name: type_name.to_string(),
+        debug_label: label.map(str::to_string),
+        bounds: bounds.map(|(x, y, width, height)| frust_devtools_protocol::RectPx {
+            x,
+            y,
+            width,
+            height,
+        }),
+        children,
+    }
+}
+
+/// §B12's own mockup tree, in our widget vocabulary: a Column of a Padding
+/// (Text + a collapsed Row) plus a collapsed ListView.
+fn inspector_tree() -> frust_devtools_protocol::WidgetTreeDump {
+    frust_devtools_protocol::WidgetTreeDump {
+        roots: vec![widget_node(
+            1,
+            "frust_widgets::flex::FlexWidget",
+            None,
+            Some((0.0, 0.0, 390.0, 844.0)),
+            vec![
+                widget_node(
+                    2,
+                    "frust_widgets::padding::PaddingWidget",
+                    None,
+                    Some((12.0, 44.0, 360.0, 220.0)),
+                    vec![
+                        widget_node(
+                            3,
+                            "frust_widgets::text::TextWidget",
+                            Some("Hello"),
+                            Some((24.0, 56.0, 120.0, 24.0)),
+                            Vec::new(),
+                        ),
+                        widget_node(
+                            4,
+                            "frust_widgets::flex::FlexWidget",
+                            None,
+                            Some((24.0, 88.0, 336.0, 160.0)),
+                            vec![
+                                widget_node(
+                                    5,
+                                    "frust_widgets::sized::SizedBoxWidget",
+                                    None,
+                                    None,
+                                    Vec::new(),
+                                ),
+                                widget_node(
+                                    6,
+                                    "frust_widgets::text::TextWidget",
+                                    Some("World"),
+                                    Some((200.0, 88.0, 96.0, 24.0)),
+                                    Vec::new(),
+                                ),
+                            ],
+                        ),
+                    ],
+                ),
+                widget_node(
+                    7,
+                    "frust_widgets::list_view::ListViewWidget",
+                    None,
+                    Some((0.0, 280.0, 390.0, 500.0)),
+                    vec![
+                        widget_node(8, "frust_widgets::button::ButtonWidget", None, None, vec![]),
+                        widget_node(9, "frust_widgets::button::ButtonWidget", None, None, vec![]),
+                    ],
+                ),
+            ],
+        )],
+    }
+}
+
+/// A connected session sitting on the Inspector tab with `tree` loaded.
+fn inspector_state(tree: Option<frust_devtools_protocol::WidgetTreeDump>) -> AppState {
+    let mut state = devtools_state(
+        frust_drive::build_info::BuildMode::Debug,
+        &["app: booting up", DEVTOOLS_DISCOVERY],
+    );
+    update(
+        &mut state,
+        Message::DevtoolsConn(
+            SessionId(0),
+            ConnEvent::Connected {
+                app_name: "huddle".to_string(),
+                caps: Vec::new(),
+            },
+        ),
+    );
+    update(&mut state, Message::DevtoolsTab(2));
+    if let Some(tree) = tree {
+        update(
+            &mut state,
+            Message::DevtoolsInspector(SessionId(0), InspectorEvent::TreeArrived(tree)),
+        );
+    }
+    state
+}
+
+/// The wide layout (§B12's ≥100-col split): the tree with an expanded/
+/// collapsed mix, a selected row showing its bounds, and the props pane with
+/// real entries beside it.
+#[test]
+fn devtools_inspector_tree_and_props_140x30() {
+    let mut state = inspector_state(Some(inspector_tree()));
+    // Select the Padding node (§B12's own mockup selection) and answer its
+    // props pull.
+    update(&mut state, Message::DevtoolsInspectorSelect(1));
+    update(
+        &mut state,
+        Message::DevtoolsInspector(
+            SessionId(0),
+            InspectorEvent::PropsArrived(
+                2,
+                frust_devtools_protocol::WidgetProps {
+                    id: 2,
+                    entries: vec![
+                        ("padding".to_string(), "EdgeInsets(12,12,12,12)".to_string()),
+                        ("child".to_string(), "Row (#4)".to_string()),
+                    ],
+                },
+            ),
+        ),
+    );
+    insta::assert_snapshot!(render_to_string(140, 30, &state));
+}
+
+/// The narrow fallback: under the split breakpoint the props pane stacks
+/// under the tree instead of splitting right.
+#[test]
+fn devtools_inspector_stacked_narrow_100x30() {
+    let mut state = inspector_state(Some(inspector_tree()));
+    update(
+        &mut state,
+        Message::DevtoolsInspector(
+            SessionId(0),
+            InspectorEvent::PropsArrived(
+                1,
+                frust_devtools_protocol::WidgetProps {
+                    id: 1,
+                    entries: vec![("axis".to_string(), "Vertical".to_string())],
+                },
+            ),
+        ),
+    );
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+/// The tree is in, the selection's props are not: the pane says so rather
+/// than showing an empty list that reads as "this node has no props".
+#[test]
+fn devtools_inspector_props_loading_140x30() {
+    let state = inspector_state(Some(inspector_tree()));
+    insta::assert_snapshot!(render_to_string(140, 30, &state));
+}
+
+/// The pull failed: the reason shows verbatim, with `r` named as the retry.
+#[test]
+fn devtools_inspector_fetch_failed_140x30() {
+    let mut state = inspector_state(None);
+    update(
+        &mut state,
+        Message::DevtoolsInspector(
+            SessionId(0),
+            InspectorEvent::Failed("the devtools connection closed".to_string()),
+        ),
+    );
+    insta::assert_snapshot!(render_to_string(140, 30, &state));
+}
+
+/// The tab's two mouse affordances (§B12's Part-B parity rule): a row click
+/// selects that node, and its `▸`/`▾` click toggles it.
+#[test]
+fn devtools_inspector_rows_select_and_twisties_toggle() {
+    let mut state = inspector_state(Some(inspector_tree()));
+    let regions = render_regions(140, 30, &state);
+
+    // Row 3 is the collapsed Row node (Column, Padding, Text, Row, …).
+    let msg = click_message_for(&regions, RegionId::DevtoolsInspectorRow(3));
+    assert_eq!(msg, Some(Message::DevtoolsInspectorSelectRow(3)));
+    update(&mut state, msg.unwrap());
+    let inspector = &state.active_session().unwrap().devtools.inspector;
+    assert_eq!(inspector.selected_id(), Some(4));
+    assert!(!inspector.rows()[3].expanded);
+
+    // Its twisty expands it, in place, without moving the selection.
+    let regions = render_regions(140, 30, &state);
+    let msg = click_message_for(&regions, RegionId::DevtoolsInspectorTwisty(3));
+    assert_eq!(msg, Some(Message::DevtoolsInspectorToggleNode(4)));
+    update(&mut state, msg.unwrap());
+    let inspector = &state.active_session().unwrap().devtools.inspector;
+    assert!(inspector.rows()[3].expanded);
+    assert_eq!(inspector.selected_id(), Some(4));
+    assert_eq!(
+        inspector.rows().iter().map(|r| r.id).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
+        "the Row's children are now visible"
+    );
+
+    // A leaf registers no twisty at all.
+    assert_eq!(
+        click_message_for(&regions, RegionId::DevtoolsInspectorTwisty(2)),
+        None,
+        "the Text leaf has no expand affordance"
     );
 }
 

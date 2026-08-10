@@ -5,25 +5,25 @@ expression: "render_to_string(100, 30, &state)"
 ⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
 ━━━━━━━━                                                                                            
                                                                                                     
- PROJECTS                │                                                                          
-  ▸ huddle               ╭ Keyboard Shortcuts ────────────────────────────╮                         
-                         │                                                │▓▓                       
- DEVICES ↻ r             │  r       Run on device(s)…                     │▓▓                       
-   none found            │  x       Stop session                          │▓▓b here.                
-                         │  b       Build…                                │▓▓                       
- SESSIONS                │  c       Clean…                                │▓▓                       
-   none running          │  d       Doctor                                │▓▓                       
-                         │  i       Toolchain setup…                      │▓▓                       
- ACTIONS                 │  n       New project…                          │▓▓                       
-   New project · n       │  a       Add plugin…                           │▓▓                       
-   Add plugin · a        │  ^O      Switch project…                       │▓▓                       
-   Doctor · d            │  R       Refresh devices                       │▓▓                       
-   Build · b             │  ⌥m      Toggle mouse capture                  │▓▓                       
-   Clean · c             │  f       Toggle follow-tail                    │▓▓                       
-                         │  /       Search logs…                          │▓▓                       
+ PROJECTS                ╭ Keyboard Shortcuts ────────────────────────────╮                         
+  ▸ huddle               │                                                │▓▓                       
+                         │  r       Run on device(s)…                     │▓▓                       
+ DEVICES ↻ r             │  x       Stop session                          │▓▓                       
+   none found            │  b       Build…                                │▓▓b here.                
+                         │  c       Clean…                                │▓▓                       
+ SESSIONS                │  d       Doctor                                │▓▓                       
+   none running          │  i       Toolchain setup…                      │▓▓                       
+                         │  n       New project…                          │▓▓                       
+ ACTIONS                 │  a       Add plugin…                           │▓▓                       
+   New project · n       │  ^O      Switch project…                       │▓▓                       
+   Add plugin · a        │  R       Refresh devices                       │▓▓                       
+   Doctor · d            │  ⌥m      Toggle mouse capture                  │▓▓                       
+   Build · b             │  f       Toggle follow-tail                    │▓▓                       
+   Clean · c             │  /       Search logs…                          │▓▓                       
                          │  l       Cycle log level filter                │▓▓                       
                          │  z       Toggle nearest backtrace fold         │▓▓                       
                          │  d       DevTools                              │▓▓                       
+                         │  r       Refresh widget tree                   │▓▓                       
                          │  q       Quit                                  │▓▓                       
                          │                                                │▓▓                       
                          │  Esc close                                     │▓▓                       

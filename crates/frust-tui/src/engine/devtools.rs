@@ -13,16 +13,22 @@
 //! # Extension points (the per-tab payload slots)
 //!
 //! [`DevtoolsState`] deliberately holds only the state the chrome itself
-//! needs plus [`DevtoolsState::frames`] (Performance's ring) and
+//! needs plus [`DevtoolsState::frames`] (Performance's ring),
 //! [`DevtoolsState::performance`] (Performance's own scrub/focus state — see
-//! [`PerformanceTab`]). The remaining three tabs each add their own payload
-//! slot here — a System metrics/CPU sample, an Inspector widget-tree
-//! snapshot + selection, a Network counter ring — fed by new [`ConnEvent`]
-//! variants the bridge forwards. Adding a slot is additive: nothing outside
-//! this module reads the ring or the connection state except through the
-//! accessors below and [`DevtoolsState::phase`], whose five values are the
-//! §B12 screen set and are matched exhaustively by the render and
-//! key-routing layers.
+//! [`PerformanceTab`]) and [`DevtoolsState::inspector`] (the widget-tree
+//! snapshot + selection — see [`InspectorTab`]). The remaining two tabs each
+//! add their own payload slot here — a System metrics/CPU sample, a Network
+//! counter ring — fed by new bridge reports. Adding a slot is additive:
+//! nothing outside this module reads the ring or the connection state except
+//! through the accessors below and [`DevtoolsState::phase`], whose five
+//! values are the §B12 screen set and are matched exhaustively by the render
+//! and key-routing layers.
+//!
+//! The Inspector's payload arrives on its own report channel
+//! ([`InspectorEvent`], carried by `super::Message::DevtoolsInspector`)
+//! rather than as a [`ConnEvent`] variant: those are the *connection's* own
+//! state plus its one subscription, while a widget tree/props pull is an
+//! on-demand request/response the tab drives.
 //!
 //! Performance can also draw from a *second* source when there is no live
 //! connection: [`perf_window`] folds [`super::PerfPanel`]'s
@@ -31,9 +37,11 @@
 //! truth table — see that function's doc for exactly what a log-fallback
 //! frame can and can't show.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
-use frust_devtools_protocol::{Capability, Discovery, FrameStats};
+use frust_devtools_protocol::{
+    Capability, Discovery, FrameStats, RectPx, WidgetNode, WidgetProps, WidgetTreeDump,
+};
 use frust_drive::build_info::BuildMode;
 
 use super::perf::PerfPanel;
@@ -206,8 +214,12 @@ pub enum ConnEvent {
 
 /// One session's DevTools state: the §B12 mode's open/closed flag, what is
 /// known about the service, the connection, the selected tab, and the
-/// Performance ring.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// per-tab payload slots.
+///
+/// Not `Eq` (unlike the connection types above): the Inspector's payload
+/// carries the wire's own `RectPx` bounds, which are `f64` — an equality
+/// marker no float can honor.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct DevtoolsState {
     /// Whether this session's tab is showing DevTools instead of its log
     /// (`d` toggles it; per session, so switching session tabs never forces
@@ -230,6 +242,10 @@ pub struct DevtoolsState {
     /// The Performance tab's own interaction state (scrub selection, pane
     /// focus) — see [`PerformanceTab`].
     pub performance: PerformanceTab,
+    /// The Inspector tab's own state (the widget-tree snapshot, its
+    /// expansion/selection, and the selected node's props) — see
+    /// [`InspectorTab`].
+    pub inspector: InspectorTab,
 }
 
 impl DevtoolsState {
@@ -706,6 +722,429 @@ pub fn perf_stats(window: &[PerfFrame]) -> Option<PerfStats> {
     })
 }
 
+// ── Inspector tab (workbook §B12) ───────────────────────────────────────────
+
+/// How deep a freshly-arrived *first* snapshot is expanded: every node at
+/// depth `0..=1`, so the roots and their immediate children are open and the
+/// grandchildren show as collapsed `▸` rows. Deeper levels stay closed — a
+/// real app's tree is hundreds of nodes, and §B12's mockup opens exactly two
+/// levels. A later snapshot never re-seeds: the user's own expansion wins
+/// (see [`InspectorTab::apply`]'s reconciliation).
+pub const INSPECTOR_AUTO_EXPAND_DEPTH: usize = 1;
+
+/// Which pane of the Inspector tab has keyboard focus (`Tab` flips between
+/// them, exactly like [`PerfFocus`] on the Performance tab).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InspectorFocus {
+    /// The widget tree — `↑↓`/`j`/`k` move the selection here, `→`/`←`
+    /// expand/collapse.
+    #[default]
+    Tree,
+    /// The selected node's props pane.
+    Props,
+}
+
+impl InspectorFocus {
+    /// The other pane.
+    pub fn toggle(self) -> Self {
+        match self {
+            InspectorFocus::Tree => InspectorFocus::Props,
+            InspectorFocus::Props => InspectorFocus::Tree,
+        }
+    }
+}
+
+/// One *visible* row of the flattened widget tree — the shape the render
+/// layer draws directly, with no second walk of the nested snapshot.
+///
+/// A row is produced only for a node whose every ancestor is expanded, so the
+/// row list is exactly what is on screen (before scrolling) and every index
+/// the engine clamps against is a visible index.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InspectorRow {
+    /// The node's protocol id — stable per widget for as long as it lives,
+    /// which is what makes expansion/selection survive a refresh.
+    pub id: u64,
+    /// Nesting depth (`0` for a root), the render layer's indent unit.
+    pub depth: usize,
+    /// The wire's `type_name`, verbatim (module path included). The render
+    /// layer shortens it for the tree and shows it in full in the props pane.
+    pub type_name: String,
+    /// The node's `debug_label`, when the app set one.
+    pub debug_label: Option<String>,
+    /// The node's own layout rect, when the wire carried one (the field is
+    /// optional — an unlaid-out node has none).
+    pub bounds: Option<RectPx>,
+    /// How many children the node has (`0` = a leaf, which has no `▸`/`▾`
+    /// affordance at all).
+    pub child_count: usize,
+    /// Whether this node is currently expanded (always `false` for a leaf).
+    pub expanded: bool,
+}
+
+impl InspectorRow {
+    /// Whether the row has an expand/collapse affordance.
+    pub fn has_children(&self) -> bool {
+        self.child_count > 0
+    }
+}
+
+/// What the bridge reports back for one on-demand Inspector request
+/// ([`super::Effect::DevtoolsFetchTree`] / [`super::Effect::DevtoolsFetchProps`]),
+/// carried on `super::Message::DevtoolsInspector`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InspectorEvent {
+    /// A `widget_tree` pull landed.
+    TreeArrived(WidgetTreeDump),
+    /// A `widget_props` pull landed for the node it names.
+    PropsArrived(u64, WidgetProps),
+    /// A pull failed (the request errored, or there was no live bridge to
+    /// serve it). Deliberately un-attributed: the failure text is what §B12
+    /// shows, and clearing *both* in-flight flags is what keeps `r` able to
+    /// retry regardless of which pull died.
+    Failed(String),
+}
+
+/// The Inspector tab's whole state: the last `widget_tree` snapshot, the
+/// flattened visible rows derived from it, the expansion set, the selection,
+/// pane focus, and the single-entry props cache for the selected node.
+///
+/// # Reconciliation across a refresh
+///
+/// `frust-core`'s inspect ids are stable per widget for as long as that
+/// widget lives, so a fresh snapshot is reconciled *by id*: the expansion set
+/// keeps every id still present (and drops the rest, so a long-lived session
+/// can't accumulate ids for widgets that are gone), and the selection returns
+/// to the row carrying the previously-selected id. If that id vanished (the
+/// widget was torn down between pulls) the selection falls back to the same
+/// *position* in the new row list, clamped — the nearest still-visible row —
+/// rather than jumping to the top.
+///
+/// # Cost
+///
+/// Flattening is `O(visible rows)` and runs only when the tree or the
+/// expansion set changes — never per frame. A moving selection re-flattens
+/// nothing.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct InspectorTab {
+    /// The last snapshot's roots (nested, exactly as the wire sent them).
+    roots: Vec<WidgetNode>,
+    /// The flattened visible rows derived from `roots` + `expanded`.
+    rows: Vec<InspectorRow>,
+    /// Ids of the currently-expanded nodes.
+    expanded: BTreeSet<u64>,
+    /// The selected row (an index into `rows`, always clamped in range).
+    selected: usize,
+    /// Which pane `Tab` moves between.
+    pub focus: InspectorFocus,
+    /// The props of *one* node — §B12's per-selection pull, not a bulk
+    /// pre-fetch. Kept keyed by its own `WidgetProps::id`, so a response for
+    /// a stale selection is recognizable rather than silently displayed.
+    props: Option<WidgetProps>,
+    /// Whether a `widget_tree` pull is in flight.
+    tree_pending: bool,
+    /// The node a `widget_props` pull is in flight for, if any.
+    props_pending: Option<u64>,
+    /// The last failure text, cleared by the next successful pull.
+    error: Option<String>,
+    /// Whether a snapshot has *ever* arrived (distinguishes "empty tree" from
+    /// "nothing pulled yet", and gates the one-shot default expansion).
+    loaded: bool,
+}
+
+impl InspectorTab {
+    /// The visible rows, in render order.
+    pub fn rows(&self) -> &[InspectorRow] {
+        &self.rows
+    }
+
+    /// The selected row's index (`0` when there are no rows).
+    pub fn selected_index(&self) -> usize {
+        self.selected
+    }
+
+    /// The selected row, or `None` when the tree is empty.
+    pub fn selected_row(&self) -> Option<&InspectorRow> {
+        self.rows.get(self.selected)
+    }
+
+    /// The selected node's id, or `None` when the tree is empty.
+    pub fn selected_id(&self) -> Option<u64> {
+        self.selected_row().map(|row| row.id)
+    }
+
+    /// Whether a snapshot has ever arrived (an *empty* tree is still loaded).
+    pub fn is_loaded(&self) -> bool {
+        self.loaded
+    }
+
+    /// Whether a `widget_tree` pull is in flight.
+    pub fn is_tree_pending(&self) -> bool {
+        self.tree_pending
+    }
+
+    /// Whether a `widget_props` pull is in flight for the current selection.
+    pub fn is_props_pending(&self) -> bool {
+        self.props_pending.is_some() && self.props_pending == self.selected_id()
+    }
+
+    /// The cached props *for the current selection*, or `None` when none have
+    /// arrived for it yet (a cache entry for another node never shows).
+    pub fn selected_props(&self) -> Option<&WidgetProps> {
+        let id = self.selected_id()?;
+        self.props.as_ref().filter(|props| props.id == id)
+    }
+
+    /// The last failure text, if the most recent pull failed.
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// Whether an automatic first pull is warranted: entering the Inspector
+    /// tab with nothing loaded and nothing already in flight (see
+    /// `super::update`'s tab-entry arm — it fires once per tab entry, not per
+    /// frame).
+    pub fn wants_tree(&self) -> bool {
+        !self.loaded && !self.tree_pending
+    }
+
+    /// Mark a `widget_tree` pull as started (`r`, or the automatic first
+    /// pull). Returns whether one should actually be issued — a second `r`
+    /// while a pull is already in flight is a no-op rather than a duplicate
+    /// request.
+    pub fn begin_tree_fetch(&mut self) -> bool {
+        if self.tree_pending {
+            return false;
+        }
+        self.tree_pending = true;
+        self.error = None;
+        true
+    }
+
+    /// Mark a `widget_props` pull as started for the current selection,
+    /// returning the id to request — §B12's second, on-demand call, fired
+    /// when the selection moves onto a node whose props are neither cached
+    /// nor already in flight. `None` means nothing needs requesting.
+    pub fn begin_props_fetch(&mut self) -> Option<u64> {
+        let id = self.selected_id()?;
+        if self.props.as_ref().is_some_and(|props| props.id == id) {
+            return None;
+        }
+        if self.props_pending == Some(id) {
+            return None;
+        }
+        self.props_pending = Some(id);
+        Some(id)
+    }
+
+    /// `Tab`: flip the focused pane. Always a change (two values).
+    pub fn cycle_focus(&mut self) -> bool {
+        self.focus = self.focus.toggle();
+        true
+    }
+
+    /// `↑`/`↓`/`j`/`k`: move the selection `delta` visible rows, clamped to
+    /// the row list (never wraps — a tree's ends are meaningful).
+    pub fn select(&mut self, delta: isize) -> bool {
+        if self.rows.is_empty() {
+            let changed = self.selected != 0;
+            self.selected = 0;
+            return changed;
+        }
+        let next = (self.selected as isize + delta).clamp(0, self.rows.len() as isize - 1) as usize;
+        let changed = next != self.selected;
+        self.selected = next;
+        changed
+    }
+
+    /// Select a visible row directly by index (a row click), clamped.
+    pub fn select_row(&mut self, index: usize) -> bool {
+        if self.rows.is_empty() {
+            return false;
+        }
+        let clamped = index.min(self.rows.len() - 1);
+        let changed = clamped != self.selected;
+        self.selected = clamped;
+        changed
+    }
+
+    /// `→`/`Enter`/`Space`: expand the selected node. A leaf (or an
+    /// already-open node) is a no-op.
+    pub fn expand(&mut self) -> bool {
+        let Some(row) = self.rows.get(self.selected) else {
+            return false;
+        };
+        if !row.has_children() || row.expanded {
+            return false;
+        }
+        let id = row.id;
+        self.expanded.insert(id);
+        self.reflatten_anchored(None);
+        true
+    }
+
+    /// `←`: collapse the selected node. An already-collapsed node (or a leaf)
+    /// is a no-op — v1 does not walk to the parent, which §B12 doesn't ask
+    /// for.
+    pub fn collapse(&mut self) -> bool {
+        let Some(row) = self.rows.get(self.selected) else {
+            return false;
+        };
+        if !row.expanded {
+            return false;
+        }
+        let id = row.id;
+        self.expanded.remove(&id);
+        self.reflatten_anchored(Some(id));
+        true
+    }
+
+    /// Toggle one node by id (the `▸`/`▾` click affordance — keyboard parity:
+    /// `→`/`←` on the selected row). Collapsing a node that contains the
+    /// selection moves the selection onto that node rather than losing it.
+    pub fn toggle_node(&mut self, id: u64) -> bool {
+        let Some(row) = self.rows.iter().find(|row| row.id == id) else {
+            return false;
+        };
+        if !row.has_children() {
+            return false;
+        }
+        if row.expanded {
+            self.expanded.remove(&id);
+        } else {
+            self.expanded.insert(id);
+        }
+        self.reflatten_anchored(Some(id));
+        true
+    }
+
+    /// Apply one bridge report. Returns whether the visible state changed.
+    pub fn apply(&mut self, event: InspectorEvent) -> bool {
+        match event {
+            InspectorEvent::TreeArrived(dump) => {
+                self.tree_pending = false;
+                self.error = None;
+                self.roots = dump.roots;
+                if self.loaded {
+                    // Keep the user's expansion, minus ids that are gone.
+                    let live = self.live_ids();
+                    self.expanded.retain(|id| live.contains(id));
+                } else {
+                    self.expanded.clear();
+                    seed_expansion(&self.roots, 0, &mut self.expanded);
+                    self.loaded = true;
+                }
+                // A refreshed node's props are a snapshot of the *previous*
+                // pull — drop them so the selection's props are re-requested
+                // (§B12: "refetched on every selection", and `r` is a fresh
+                // look at everything).
+                self.props = None;
+                self.props_pending = None;
+                self.reflatten_anchored(None);
+                true
+            }
+            InspectorEvent::PropsArrived(id, props) => {
+                let cleared = self.props_pending == Some(id);
+                if cleared {
+                    self.props_pending = None;
+                }
+                // A response for a selection that has already moved on is
+                // dropped rather than cached: the cache is single-entry and
+                // must always describe what the props pane is showing.
+                let stored = self.selected_id() == Some(id);
+                if stored {
+                    self.props = Some(props);
+                }
+                cleared || stored
+            }
+            InspectorEvent::Failed(error) => {
+                self.tree_pending = false;
+                self.props_pending = None;
+                let next = Some(error);
+                let changed = self.error != next;
+                self.error = next;
+                changed
+            }
+        }
+    }
+
+    /// Every id in the current snapshot.
+    fn live_ids(&self) -> BTreeSet<u64> {
+        let mut ids = BTreeSet::new();
+        collect_ids(&self.roots, &mut ids);
+        ids
+    }
+
+    /// The visible index of `id`, if it has a row.
+    fn row_index(&self, id: u64) -> Option<usize> {
+        self.rows.iter().position(|row| row.id == id)
+    }
+
+    /// Re-derive [`Self::rows`] and restore the selection: onto the same node
+    /// where its id survived, else onto `fallback_id` (the node whose
+    /// collapse hid it), else onto the same position clamped into the new
+    /// list.
+    fn reflatten_anchored(&mut self, fallback_id: Option<u64>) {
+        let anchor = self.selected_id();
+        let position = self.selected;
+        self.rows.clear();
+        flatten(&self.roots, 0, &self.expanded, &mut self.rows);
+        self.selected = anchor
+            .and_then(|id| self.row_index(id))
+            .or_else(|| fallback_id.and_then(|id| self.row_index(id)))
+            .unwrap_or_else(|| position.min(self.rows.len().saturating_sub(1)));
+    }
+}
+
+/// Walk `nodes` into visible rows, descending only through expanded nodes.
+/// Recursive, like the wire shape itself — a widget tree is UI-sized (tens to
+/// low hundreds of levels at the absolute worst), so no explicit stack is
+/// warranted.
+fn flatten(
+    nodes: &[WidgetNode],
+    depth: usize,
+    expanded: &BTreeSet<u64>,
+    rows: &mut Vec<InspectorRow>,
+) {
+    for node in nodes {
+        let open = expanded.contains(&node.id) && !node.children.is_empty();
+        rows.push(InspectorRow {
+            id: node.id,
+            depth,
+            type_name: node.type_name.clone(),
+            debug_label: node.debug_label.clone(),
+            bounds: node.bounds,
+            child_count: node.children.len(),
+            expanded: open,
+        });
+        if open {
+            flatten(&node.children, depth + 1, expanded, rows);
+        }
+    }
+}
+
+/// Seed the one-shot default expansion: every node with children down to
+/// [`INSPECTOR_AUTO_EXPAND_DEPTH`].
+fn seed_expansion(nodes: &[WidgetNode], depth: usize, expanded: &mut BTreeSet<u64>) {
+    if depth > INSPECTOR_AUTO_EXPAND_DEPTH {
+        return;
+    }
+    for node in nodes {
+        if !node.children.is_empty() {
+            expanded.insert(node.id);
+        }
+        seed_expansion(&node.children, depth + 1, expanded);
+    }
+}
+
+/// Collect every id in a snapshot (expansion pruning).
+fn collect_ids(nodes: &[WidgetNode], ids: &mut BTreeSet<u64>) {
+    for node in nodes {
+        ids.insert(node.id);
+        collect_ids(&node.children, ids);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1068,5 +1507,291 @@ mod tests {
             perf_window(&ConnState::Idle, &VecDeque::new(), &PerfPanel::default());
         assert_eq!(source, PerfSource::NoData);
         assert!(window.is_empty());
+    }
+
+    // ── Inspector tab ────────────────────────────────────────────────────
+
+    fn node(id: u64, type_name: &str, children: Vec<WidgetNode>) -> WidgetNode {
+        WidgetNode {
+            id,
+            type_name: type_name.to_string(),
+            debug_label: None,
+            bounds: Some(RectPx {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 20.0,
+            }),
+            children,
+        }
+    }
+
+    /// ```text
+    /// 1 Column                (d0, expanded by default)
+    ///   2 Padding             (d1, expanded by default)
+    ///     3 Text              (d2)
+    ///     4 Row               (d2, collapsed — past the default depth)
+    ///       5 Text            (d3, hidden)
+    ///   6 ListView            (d1, expanded by default)
+    ///     7 Text              (d2)
+    /// ```
+    fn tree() -> WidgetTreeDump {
+        WidgetTreeDump {
+            roots: vec![node(
+                1,
+                "frust_widgets::flex::FlexWidget",
+                vec![
+                    node(
+                        2,
+                        "frust_widgets::padding::PaddingWidget",
+                        vec![
+                            node(3, "frust_widgets::text::TextWidget", Vec::new()),
+                            node(
+                                4,
+                                "frust_widgets::flex::FlexWidget",
+                                vec![node(5, "frust_widgets::text::TextWidget", Vec::new())],
+                            ),
+                        ],
+                    ),
+                    node(
+                        6,
+                        "frust_widgets::list_view::ListViewWidget",
+                        vec![node(7, "frust_widgets::text::TextWidget", Vec::new())],
+                    ),
+                ],
+            )],
+        }
+    }
+
+    fn loaded_inspector() -> InspectorTab {
+        let mut inspector = InspectorTab::default();
+        assert!(inspector.apply(InspectorEvent::TreeArrived(tree())));
+        inspector
+    }
+
+    fn visible_ids(inspector: &InspectorTab) -> Vec<u64> {
+        inspector.rows().iter().map(|row| row.id).collect()
+    }
+
+    #[test]
+    fn a_first_snapshot_expands_the_roots_and_one_level_below_them() {
+        let inspector = loaded_inspector();
+        assert!(inspector.is_loaded());
+        // Depth 0 (1) and depth 1 (2, 6) are expanded; 4's children stay
+        // hidden because 4 sits at depth 2.
+        assert_eq!(visible_ids(&inspector), vec![1, 2, 3, 4, 6, 7]);
+        assert_eq!(inspector.rows()[0].depth, 0);
+        assert_eq!(inspector.rows()[2].depth, 2);
+        assert!(
+            inspector.rows()[3].has_children(),
+            "the Row node has a child"
+        );
+        assert!(!inspector.rows()[3].expanded);
+        assert_eq!(inspector.selected_index(), 0);
+    }
+
+    #[test]
+    fn expand_and_collapse_re_flatten_the_visible_rows() {
+        let mut inspector = loaded_inspector();
+        // Select the collapsed Row (id 4) and open it.
+        assert!(inspector.select(3));
+        assert_eq!(inspector.selected_id(), Some(4));
+        assert!(inspector.expand());
+        assert_eq!(visible_ids(&inspector), vec![1, 2, 3, 4, 5, 6, 7]);
+        assert!(!inspector.expand(), "already expanded");
+
+        assert!(inspector.collapse());
+        assert_eq!(visible_ids(&inspector), vec![1, 2, 3, 4, 6, 7]);
+        assert!(!inspector.collapse(), "already collapsed");
+        assert_eq!(inspector.selected_id(), Some(4), "selection stays put");
+
+        // A leaf has no affordance at all.
+        assert!(inspector.select_row(2));
+        assert!(!inspector.expand());
+        assert!(!inspector.collapse());
+    }
+
+    #[test]
+    fn collapsing_an_ancestor_moves_the_selection_onto_it() {
+        let mut inspector = loaded_inspector();
+        assert!(inspector.select_row(2)); // the Text at depth 2
+        assert_eq!(inspector.selected_id(), Some(3));
+        // Collapsing its parent hides it — the selection lands on the parent
+        // rather than on whatever row inherits its index.
+        assert!(inspector.toggle_node(2));
+        assert_eq!(visible_ids(&inspector), vec![1, 2, 6, 7]);
+        assert_eq!(inspector.selected_id(), Some(2));
+    }
+
+    #[test]
+    fn selection_clamps_at_both_ends_and_on_an_empty_tree() {
+        let mut inspector = loaded_inspector();
+        assert!(!inspector.select(-1), "already at the top");
+        assert!(inspector.select(99));
+        assert_eq!(inspector.selected_index(), 5, "clamped to the last row");
+        assert!(!inspector.select(1));
+        assert!(inspector.select_row(0));
+        assert!(inspector.select_row(99), "a click past the end clamps too");
+        assert_eq!(inspector.selected_index(), 5);
+
+        let mut empty = InspectorTab::default();
+        assert!(!empty.select(1));
+        assert!(!empty.select_row(3));
+        assert_eq!(empty.selected_id(), None);
+    }
+
+    #[test]
+    fn a_refresh_preserves_expansion_and_selection_by_id() {
+        let mut inspector = loaded_inspector();
+        inspector.select_row(3); // the Row (id 4)
+        inspector.expand(); // open it, beyond the default depth
+        inspector.select_row(4); // its child Text (id 5)
+        assert_eq!(inspector.selected_id(), Some(5));
+
+        // The same tree pulled again: ids persist, so both the user's extra
+        // expansion and the selection come back.
+        assert!(inspector.apply(InspectorEvent::TreeArrived(tree())));
+        assert_eq!(visible_ids(&inspector), vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(inspector.selected_id(), Some(5));
+    }
+
+    #[test]
+    fn a_refresh_that_loses_the_selected_id_falls_back_to_the_nearest_row() {
+        let mut inspector = loaded_inspector();
+        inspector.select_row(3); // id 4
+        assert_eq!(inspector.selected_id(), Some(4));
+
+        // A snapshot without ids 4/5 at all (that subtree was torn down).
+        let shrunk = WidgetTreeDump {
+            roots: vec![node(
+                1,
+                "frust_widgets::flex::FlexWidget",
+                vec![node(
+                    2,
+                    "frust_widgets::padding::PaddingWidget",
+                    vec![node(3, "frust_widgets::text::TextWidget", Vec::new())],
+                )],
+            )],
+        };
+        inspector.apply(InspectorEvent::TreeArrived(shrunk));
+        assert_eq!(visible_ids(&inspector), vec![1, 2, 3]);
+        assert_eq!(
+            inspector.selected_index(),
+            2,
+            "the old position, clamped into the shorter list"
+        );
+        // The vanished ids are pruned from the expansion set too, so a
+        // long-lived session can't accumulate them.
+        inspector.apply(InspectorEvent::TreeArrived(tree()));
+        assert_eq!(
+            visible_ids(&inspector),
+            vec![1, 2, 3, 4, 6],
+            "id 4's earlier expansion did not survive its absence"
+        );
+    }
+
+    #[test]
+    fn props_are_fetched_once_per_selection_and_cached() {
+        let mut inspector = loaded_inspector();
+        // The tree pull cleared any cache, so the first selection needs props.
+        assert_eq!(inspector.begin_props_fetch(), Some(1));
+        assert!(inspector.is_props_pending());
+        assert_eq!(
+            inspector.begin_props_fetch(),
+            None,
+            "already in flight for this node"
+        );
+
+        let props = WidgetProps {
+            id: 1,
+            entries: vec![("axis".to_string(), "Vertical".to_string())],
+        };
+        assert!(inspector.apply(InspectorEvent::PropsArrived(1, props)));
+        assert!(!inspector.is_props_pending());
+        assert_eq!(inspector.selected_props().map(|p| p.id), Some(1));
+        assert_eq!(
+            inspector.begin_props_fetch(),
+            None,
+            "already cached for this node"
+        );
+
+        // Moving the selection invalidates the cache and asks for the new one.
+        inspector.select(1);
+        assert_eq!(inspector.selected_props(), None);
+        assert_eq!(inspector.begin_props_fetch(), Some(2));
+    }
+
+    #[test]
+    fn a_props_response_for_a_stale_selection_is_dropped() {
+        let mut inspector = loaded_inspector();
+        inspector.begin_props_fetch(); // for id 1
+        inspector.select(1); // the user moved on to id 2
+
+        let stale = WidgetProps {
+            id: 1,
+            entries: vec![("axis".to_string(), "Vertical".to_string())],
+        };
+        inspector.apply(InspectorEvent::PropsArrived(1, stale));
+        assert_eq!(
+            inspector.selected_props(),
+            None,
+            "id 1's props never show under id 2"
+        );
+        // …and the current selection is still requestable.
+        assert_eq!(inspector.begin_props_fetch(), Some(2));
+    }
+
+    #[test]
+    fn tree_fetches_are_gated_on_one_in_flight_pull() {
+        let mut inspector = InspectorTab::default();
+        assert!(inspector.wants_tree(), "nothing loaded yet");
+        assert!(inspector.begin_tree_fetch());
+        assert!(inspector.is_tree_pending());
+        assert!(!inspector.wants_tree(), "a pull is already in flight");
+        assert!(!inspector.begin_tree_fetch(), "no duplicate request");
+
+        inspector.apply(InspectorEvent::TreeArrived(tree()));
+        assert!(!inspector.is_tree_pending());
+        assert!(!inspector.wants_tree(), "the tab has its snapshot");
+        // `r` still re-pulls on demand.
+        assert!(inspector.begin_tree_fetch());
+    }
+
+    #[test]
+    fn a_failed_pull_records_the_reason_and_frees_both_in_flight_flags() {
+        let mut inspector = InspectorTab::default();
+        inspector.begin_tree_fetch();
+        assert!(inspector.apply(InspectorEvent::Failed("connection closed".to_string())));
+        assert_eq!(inspector.error(), Some("connection closed"));
+        assert!(!inspector.is_tree_pending());
+        assert!(
+            !inspector.apply(InspectorEvent::Failed("connection closed".to_string())),
+            "the same failure again is not a visible change"
+        );
+        // Retrying clears it.
+        assert!(inspector.begin_tree_fetch());
+        assert_eq!(inspector.error(), None);
+    }
+
+    #[test]
+    fn focus_cycles_between_the_tree_and_the_props_pane() {
+        let mut inspector = InspectorTab::default();
+        assert_eq!(inspector.focus, InspectorFocus::Tree);
+        assert!(inspector.cycle_focus());
+        assert_eq!(inspector.focus, InspectorFocus::Props);
+        assert!(inspector.cycle_focus());
+        assert_eq!(inspector.focus, InspectorFocus::Tree);
+    }
+
+    #[test]
+    fn an_empty_snapshot_is_loaded_with_no_rows() {
+        let mut inspector = InspectorTab::default();
+        inspector.apply(InspectorEvent::TreeArrived(WidgetTreeDump {
+            roots: Vec::new(),
+        }));
+        assert!(inspector.is_loaded());
+        assert!(inspector.rows().is_empty());
+        assert_eq!(inspector.selected_id(), None);
+        assert_eq!(inspector.begin_props_fetch(), None);
     }
 }

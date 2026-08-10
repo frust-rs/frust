@@ -8,12 +8,13 @@
 //! [`DevtoolsPhase`], derived once in the engine and matched exhaustively
 //! here — a sixth screen cannot be added without this dispatch handling it.
 //!
-//! The four tab *bodies* are placeholders: Performance/System/Inspector/
-//! Network each land with their own module beside this one, reading the
-//! payload slots [`crate::engine::DevtoolsState`] grows for them. Everything
-//! outside those bodies — the strip, the empty states, the status row, the
-//! keyboard/mouse parity — is settled here.
+//! The tab *bodies* live beside this module: [`performance`] and
+//! [`inspector`] render for real, System/Network are still placeholders
+//! naming what will live there. Everything outside those bodies — the strip,
+//! the empty states, the status row, the keyboard/mouse parity — is settled
+//! here.
 
+pub mod inspector;
 pub mod performance;
 
 use ratatui::Frame;
@@ -239,11 +240,10 @@ fn render_tab_strip(
     }
 }
 
-/// The active tab's body. Performance renders for real
-/// ([`performance::render`]); the other three tabs' content arrives with
-/// their own tasks — until then a low-key placeholder naming what will live
-/// there, so the chrome, the routing, and the connection are reviewable on
-/// their own.
+/// The active tab's body. Performance and Inspector render for real; the
+/// other two tabs' content arrives with their own tasks — until then a
+/// low-key placeholder naming what will live there, so the chrome, the
+/// routing, and the connection are reviewable on their own.
 fn render_tab_body(
     frame: &mut Frame,
     area: Rect,
@@ -252,14 +252,20 @@ fn render_tab_body(
     mouse: &mut MouseCtx,
 ) {
     let tab = session.devtools.active_tab;
-    if tab == DevtoolsTab::Performance {
-        performance::render(frame, area, session, theme, mouse);
-        return;
+    match tab {
+        DevtoolsTab::Performance => {
+            performance::render(frame, area, session, theme, mouse);
+            return;
+        }
+        DevtoolsTab::Inspector => {
+            inspector::render(frame, area, session, theme, mouse);
+            return;
+        }
+        DevtoolsTab::System | DevtoolsTab::Network => {}
     }
     let detail = match tab {
-        DevtoolsTab::Performance => unreachable!("handled above"),
+        DevtoolsTab::Performance | DevtoolsTab::Inspector => unreachable!("handled above"),
         DevtoolsTab::System => "CPU, RSS, thermal, and uptime",
-        DevtoolsTab::Inspector => "the widget tree and the selected node's props",
         DevtoolsTab::Network => "process-level rx/tx byte counters",
     };
     let samples = session.devtools.frames.len();
@@ -439,13 +445,42 @@ fn render_status(
         DevtoolsPhase::Failed => ("devtools: failed".to_string(), theme.error()),
     };
     let retryable = matches!(phase, DevtoolsPhase::Failed) && !session.state.is_terminal();
-    let hint = match phase {
-        DevtoolsPhase::Connected => "[1234][ ] tabs · Esc back to log",
-        _ if retryable => "r retry · Esc back to log",
-        _ => "Esc back to log",
+    // Longest keyhint first, then progressively shorter ones — the graduated
+    // degrade the log status row's filter chip established, so a narrow pane
+    // drops detail instead of colliding with the mouse indicator. Every
+    // screen but the Inspector has one hint short enough to always fit.
+    let hints: &[&str] = match phase {
+        // The connected hint is per-tab where a tab claims keys of its own
+        // (§B12 draws each tab's own footer); the rest show the strip-level
+        // keys they all share.
+        DevtoolsPhase::Connected => match session.devtools.active_tab {
+            DevtoolsTab::Inspector => &[
+                "↑↓/jk move · →/Enter expand · ← collapse · Tab tree↔props · r refresh · Esc back",
+                "↑↓ move · →← expand · Tab panes · r refresh · Esc back",
+                "→← expand · r refresh · Esc back",
+            ],
+            DevtoolsTab::Performance | DevtoolsTab::System | DevtoolsTab::Network => {
+                &["[1234][ ] tabs · Esc back to log"]
+            }
+        },
+        _ if retryable => &["r retry · Esc back to log"],
+        _ => &["Esc back to log"],
     };
 
     let label_width = label.chars().count() as u16;
+    let indicator = crate::ui::mouse_indicator(state);
+    // ` ` + label + ` │ ` + hint, with the right-aligned indicator's columns
+    // reserved (it paints over this row afterwards).
+    let available = area
+        .width
+        .saturating_sub(label_width + 4 + indicator.chars().count() as u16);
+    let hint = hints
+        .iter()
+        .find(|hint| hint.chars().count() as u16 <= available)
+        .or_else(|| hints.last())
+        .copied()
+        .unwrap_or_default();
+
     let spans = vec![
         Span::styled(" ".to_string(), Style::default()),
         Span::styled(label, Style::default().fg(label_color)),
@@ -457,12 +492,9 @@ fn render_status(
         area,
     );
     frame.render_widget(
-        Paragraph::new(Line::styled(
-            crate::ui::mouse_indicator(state),
-            Style::default().fg(theme.muted()),
-        ))
-        .alignment(Alignment::Right)
-        .style(Style::default().bg(theme.surface())),
+        Paragraph::new(Line::styled(indicator, Style::default().fg(theme.muted())))
+            .alignment(Alignment::Right)
+            .style(Style::default().bg(theme.surface())),
         area,
     );
 
