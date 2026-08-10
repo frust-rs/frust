@@ -18,6 +18,10 @@ anyhow.workspace = true
 # minijinja, include_dir, ctrlc, thiserror) followed their modules there.
 frust-drive = { path = "../frust-drive" }
 frust-tui = { path = "../frust-tui" }
+# `frust mcp` hands off entirely to frust-mcp's own async runtime entry
+# point, exactly as `frust tui` hands off to frust-tui above — frust-mcp
+# constructs its own internals (transport, handler, Ctrl-C wiring).
+frust-mcp = { path = "../frust-mcp" }
 # Tokio runtime for executing `frust tui`'s async entry point; rt-multi-thread required for Runtime::new().
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 # Targeted exception, direct precedent `ctrlc` (frust-drive's Cargo.toml):

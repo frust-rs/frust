@@ -5,6 +5,7 @@ pub mod clean;
 pub mod create;
 pub mod devices;
 pub mod doctor;
+pub mod mcp;
 pub mod run;
 pub mod tui;
 
@@ -78,5 +79,6 @@ pub fn dispatch(command: Command, cli: &Cli) -> Result<u8> {
             let cwd = std::env::current_dir().context("reading current directory")?;
             build::run_in(&runner, &cwd, target)
         }
+        Command::Mcp { port, project } => mcp::run(port, project),
     }
 }

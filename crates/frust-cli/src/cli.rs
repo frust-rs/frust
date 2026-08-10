@@ -1,5 +1,7 @@
 //! Top-level clap parser, modeled on `flutter_tools`' command surface.
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 use crate::build_args::BuildArgs;
@@ -130,6 +132,24 @@ pub enum Command {
     Build {
         #[command(subcommand)]
         target: BuildTarget,
+    },
+    /// Serve the MCP (Model Context Protocol) Streamable HTTP endpoint
+    /// AI agents use to drive/diagnose Frust apps — bound to `127.0.0.1`
+    /// only, never a non-loopback interface. Runs until Ctrl-C, printing
+    /// the endpoint line (`frust-mcp listening on http://127.0.0.1:<PORT>/mcp`)
+    /// once listening.
+    Mcp {
+        /// TCP port to listen on (default 4848). `--port 0` lets the OS
+        /// pick an ephemeral port — the actual bound port is printed on
+        /// the endpoint line once the server is listening.
+        #[arg(long, value_name = "PORT")]
+        port: Option<u16>,
+
+        /// Frust project root the server's tools operate against; defaults
+        /// to the current directory. Must exist, but a `frust.toml` is NOT
+        /// required to start the server.
+        #[arg(long, value_name = "PATH")]
+        project: Option<PathBuf>,
     },
 }
 
@@ -594,5 +614,29 @@ mod tests {
     fn parses_tui() {
         let cli = Cli::parse_from(["frust", "tui"]);
         assert!(matches!(cli.command, Some(Command::Tui)));
+    }
+
+    #[test]
+    fn parses_mcp_with_defaults() {
+        let cli = Cli::parse_from(["frust", "mcp"]);
+        match cli.command.unwrap() {
+            Command::Mcp { port, project } => {
+                assert_eq!(port, None);
+                assert_eq!(project, None);
+            }
+            other => panic!("expected Mcp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_mcp_with_port_and_project() {
+        let cli = Cli::parse_from(["frust", "mcp", "--port", "0", "--project", "/tmp/x"]);
+        match cli.command.unwrap() {
+            Command::Mcp { port, project } => {
+                assert_eq!(port, Some(0));
+                assert_eq!(project, Some(PathBuf::from("/tmp/x")));
+            }
+            other => panic!("expected Mcp, got {other:?}"),
+        }
     }
 }

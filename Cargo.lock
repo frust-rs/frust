@@ -1884,6 +1884,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "frust-drive",
+ "frust-mcp",
  "frust-tui",
  "notify",
  "tokio",
