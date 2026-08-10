@@ -1991,6 +1991,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "frust-devtools-protocol",
+ "frust-drive",
  "log",
  "rmcp",
  "serde",

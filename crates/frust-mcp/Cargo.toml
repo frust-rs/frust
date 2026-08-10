@@ -9,8 +9,8 @@ license.workspace = true
 # this task's scope) provides the `frust mcp` entry point over
 # `frust_mcp::run`. Charter (docs/ARCHITECTURE.md's Tooling isolation rule,
 # widened to this crate): frust-mcp depends on `frust-drive`/
-# `frust-devtools-protocol` (once the engine/tool-family tasks wire them in)
-# plus rmcp/axum/tokio/tokio-util/base64/serde/serde_json/log only — never
+# `frust-devtools-protocol` (wired in by the session engine) plus
+# rmcp/axum/tokio/tokio-util/base64/serde/serde_json/log only — never
 # `frust-devtools`, never a framework crate, not even as a dev-dependency.
 [lib]
 name = "frust_mcp"
@@ -28,6 +28,17 @@ path = "src/lib.rs"
 rmcp = { workspace = true }
 # The HTTP layer rmcp's `StreamableHttpService` nests into.
 axum = { workspace = true }
+# The session engine's whole substance: process spawning through the injected
+# `ProcessRunner`, the desktop/Android/iOS run pipelines, device discovery,
+# the blocking devtools client + `adb forward` helpers, and the metrics
+# sampler. Sync/blocking by charter, so every call from async code goes
+# through `tokio::task::spawn_blocking` (see `engine`'s module doc).
+frust-drive = { path = "../frust-drive" }
+# The sanctioned wire-protocol leaf — `parse_discovery_line`/
+# `parse_failure_line` for log scanning plus the `FrameStats`/`Capability`/
+# `HandshakeInfo` types the engine retains. NEVER `frust-devtools` itself
+# (`docs/ARCHITECTURE.md`'s tooling-isolation charter).
+frust-devtools-protocol = { path = "../frust-devtools-protocol" }
 anyhow = { workspace = true }
 serde = { workspace = true }
 log = { workspace = true }
@@ -53,3 +64,7 @@ tokio = { workspace = true, features = [
 serde_json = { workspace = true }
 # The smoke test's raw-HTTP round trip reads/writes a `TcpStream` directly.
 tokio = { workspace = true, features = ["io-util"] }
+# Enables `frust-drive`'s `test-util` feature (its scripted
+# `FakeProcessRunner`) for this crate's tests only — the same shape
+# `frust-tui` uses, so an engine lifecycle test never shells out for real.
+frust-drive = { path = "../frust-drive", features = ["test-util"] }

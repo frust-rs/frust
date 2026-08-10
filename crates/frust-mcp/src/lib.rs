@@ -11,19 +11,24 @@
 //! # }
 //! ```
 //!
-//! Today this is a skeleton crate: the only tool is `ping`
-//! (`{"ok": true}` structured content), proving the rmcp tool-router
-//! plumbing works end to end. Session control (backed by `frust-drive`) and
-//! the DevTools diagnosis / app-driving tool families land in later work,
+//! The crate is in two halves. [`engine`] is the session engine: it launches
+//! and supervises real app sessions through `frust-drive`, and owns their
+//! logs, devtools connections, frame stats, and metrics. The MCP tool layer
+//! (today only `ping`) sits on top of it and is still being filled in — the
+//! DevTools diagnosis and app-driving tool families land in later work,
 //! behind the same [`McpConfig`]/[`run`] seam.
+
+pub mod engine;
 
 mod config;
 mod handler;
 mod server;
 
 pub use config::{DEFAULT_MCP_PORT, McpConfig};
+pub use engine::SessionEngine;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -43,7 +48,7 @@ pub async fn run(config: McpConfig) -> anyhow::Result<()> {
             ctrl_c_cancel.cancel();
         }
     });
-    server::serve(config, None, cancel).await
+    serve_with_engine(config, None, cancel).await
 }
 
 /// Test/embedding seam: run with a caller-owned [`CancellationToken`] (so
@@ -56,5 +61,23 @@ pub async fn run_with_ready(
     ready: oneshot::Sender<SocketAddr>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    server::serve(config, Some(ready), cancel).await
+    serve_with_engine(config, Some(ready), cancel).await
+}
+
+/// Serves with a live [`SessionEngine`] for the server's whole lifetime, and
+/// tears every session it launched down on the way out.
+///
+/// The shutdown runs whether the server stopped cleanly or errored: a
+/// cancelled MCP server must not leave orphaned preview windows, running
+/// device apps, or `adb forward`s behind. The tool layer takes its own clone
+/// of this same `Arc`.
+async fn serve_with_engine(
+    config: McpConfig,
+    ready: Option<oneshot::Sender<SocketAddr>>,
+    cancel: CancellationToken,
+) -> anyhow::Result<()> {
+    let engine = Arc::new(SessionEngine::new(config.project_root.clone()));
+    let result = server::serve(config, ready, cancel).await;
+    engine.shutdown().await;
+    result
 }
