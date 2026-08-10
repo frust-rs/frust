@@ -1013,6 +1013,22 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             Outcome::dirty(changed && is_active && state.sessions[idx].devtools.open)
         }
 
+        // ── Performance tab (workbook §B12) ──────────────────────────────────
+        Message::DevtoolsPerfScrub(delta) => with_active(state, |s| {
+            let window_len = devtools_perf_window_len(s);
+            s.devtools.performance.scrub(delta, window_len);
+        }),
+        Message::DevtoolsPerfSelectFrame(index) => with_active(state, |s| {
+            let window_len = devtools_perf_window_len(s);
+            s.devtools.performance.select(index, window_len);
+        }),
+        Message::DevtoolsPerfClearSelection => with_active(state, |s| {
+            s.devtools.performance.clear_selection();
+        }),
+        Message::DevtoolsPerfFocusCycle => with_active(state, |s| {
+            s.devtools.performance.cycle_focus();
+        }),
+
         // ── Responsive breakpoints ──────────────────────────────────────────
         Message::ToggleSidebarOverlay => {
             state.sidebar_overlay_open = !state.sidebar_overlay_open;
@@ -1605,6 +1621,20 @@ fn cycle_tab(state: &mut AppState, delta: isize) -> Outcome {
 }
 
 /// Apply `f` to the active session (if any) and redraw; idle when none.
+/// The Performance tab's current scrub-able window length — whichever
+/// source [`crate::engine::perf_window`] currently picks for `session`,
+/// capped at [`crate::engine::PERF_WINDOW`]. Shared by the scrub/select
+/// handlers above so a clamp is always computed against the data actually on
+/// screen, not a stale figure.
+fn devtools_perf_window_len(session: &SessionView) -> usize {
+    let (_, window) = crate::engine::perf_window(
+        &session.devtools.conn,
+        &session.devtools.frames,
+        &session.perf,
+    );
+    window.len()
+}
+
 fn with_active(state: &mut AppState, f: impl FnOnce(&mut SessionView)) -> Outcome {
     match state.active_session_mut() {
         Some(s) => {
@@ -1638,7 +1668,9 @@ fn with_active_filtered(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::devtools::{ConnEvent, DevtoolsLaunch, DevtoolsPhase, DevtoolsTab};
+    use crate::engine::devtools::{
+        ConnEvent, DevtoolsLaunch, DevtoolsPhase, DevtoolsTab, PerfFocus,
+    };
     use crate::engine::message::RegionId;
     use crate::engine::session_view::Scroll;
     use crate::engine::state::Screen;
@@ -3514,6 +3546,109 @@ mod tests {
             acquire_us: 600,
             submit_us: 1_000,
             skipped: false,
+        }
+    }
+
+    // ── Performance tab (workbook §B12) ──────────────────────────────────────
+
+    #[test]
+    fn scrub_and_select_route_through_the_active_sessions_live_ring() {
+        let (mut st, id) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        let frames = (0..30).map(frame_stats).collect();
+        update(
+            &mut st,
+            Message::DevtoolsConn(id, ConnEvent::Frames(frames)),
+        );
+
+        let out = update(&mut st, Message::DevtoolsPerfScrub(0));
+        assert!(out.redraw);
+        assert_eq!(
+            st.active_session()
+                .unwrap()
+                .devtools
+                .performance
+                .selected_frame,
+            Some(29),
+            "the first scrub starts at the tail of the 30-frame window"
+        );
+
+        update(&mut st, Message::DevtoolsPerfScrub(-1));
+        assert_eq!(
+            st.active_session()
+                .unwrap()
+                .devtools
+                .performance
+                .selected_frame,
+            Some(28)
+        );
+
+        update(&mut st, Message::DevtoolsPerfSelectFrame(0));
+        assert_eq!(
+            st.active_session()
+                .unwrap()
+                .devtools
+                .performance
+                .selected_frame,
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn focus_cycle_toggles_chart_and_breakdown() {
+        let (mut st, _) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        assert_eq!(
+            st.active_session().unwrap().devtools.performance.focus,
+            PerfFocus::Chart
+        );
+        let out = update(&mut st, Message::DevtoolsPerfFocusCycle);
+        assert!(out.redraw);
+        assert_eq!(
+            st.active_session().unwrap().devtools.performance.focus,
+            PerfFocus::Breakdown
+        );
+    }
+
+    #[test]
+    fn clear_selection_drops_back_to_the_live_tail() {
+        let (mut st, id) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        let frames = (0..5).map(frame_stats).collect();
+        update(
+            &mut st,
+            Message::DevtoolsConn(id, ConnEvent::Frames(frames)),
+        );
+        update(&mut st, Message::DevtoolsPerfScrub(0));
+        assert!(
+            st.active_session()
+                .unwrap()
+                .devtools
+                .performance
+                .has_selection()
+        );
+
+        update(&mut st, Message::DevtoolsPerfClearSelection);
+        assert!(
+            !st.active_session()
+                .unwrap()
+                .devtools
+                .performance
+                .has_selection()
+        );
+    }
+
+    #[test]
+    fn performance_messages_are_noops_with_no_active_session() {
+        let mut st = welcome();
+        for msg in [
+            Message::DevtoolsPerfScrub(1),
+            Message::DevtoolsPerfSelectFrame(0),
+            Message::DevtoolsPerfClearSelection,
+            Message::DevtoolsPerfFocusCycle,
+        ] {
+            let out = update(&mut st, msg.clone());
+            assert!(!out.redraw, "{msg:?} should be a no-op");
         }
     }
 

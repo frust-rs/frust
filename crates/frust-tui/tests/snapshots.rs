@@ -16,8 +16,8 @@ use frust_drive::plugin::{AddItem, AddOutcome, AddReport};
 use frust_tui::engine::{
     AddPluginDialog, AddPluginStep, AppState, BootstrapState, BootstrapWizard, BuildLauncher,
     ConnEvent, ContextTarget, CreateWizard, DeviceRow, DevtoolsLaunch, DoctorCheck, DoctorState,
-    LevelFilter, Message, Palette, RegionId, RunConfig, RunFocus, Screen, Scroll, SessionView,
-    ToastKind, WizardStep, update,
+    LevelFilter, Message, Palette, PerfSource, RegionId, RunConfig, RunFocus, Screen, Scroll,
+    SessionView, ToastKind, WizardStep, perf_window, update,
 };
 use frust_tui::supervise::{PhaseLabel, SessionEvent, SessionEventKind, SessionId, SessionState};
 use frust_tui::ui::mouse::{MouseCtx, MouseRegions};
@@ -1094,6 +1094,158 @@ fn devtools_registers_a_click_region_per_affordance() {
         click_message_for(&regions, RegionId::DevtoolsRetry),
         Some(Message::DevtoolsRetry),
         "the failed screen offers a Retry button"
+    );
+}
+
+// ── Performance tab (workbook §B12) ────────────────────────────────────────────
+
+/// A deterministic `FrameStats` fixture — every field a fixed, distinguishable
+/// value so the chip math (fps/percentiles/jank) is stable across runs.
+fn perf_frame_stats(n: u64, total_us: u64, skipped: bool) -> frust_devtools_protocol::FrameStats {
+    frust_devtools_protocol::FrameStats {
+        n,
+        total_us,
+        rebuild_us: total_us / 2,
+        layout_us: total_us / 4,
+        paint_us: total_us / 8,
+        encode_us: total_us / 16,
+        acquire_us: total_us / 32,
+        submit_us: total_us
+            - (total_us / 2 + total_us / 4 + total_us / 8 + total_us / 16 + total_us / 32),
+        skipped,
+    }
+}
+
+/// Live service source, connected, with a real ring: mostly-uniform frames,
+/// one skip, and one jank spike, with a frame explicitly scrubbed to.
+#[test]
+fn devtools_performance_live_data_with_selection_100x30() {
+    let mut state = devtools_state(
+        frust_drive::build_info::BuildMode::Debug,
+        &["app: booting up", DEVTOOLS_DISCOVERY],
+    );
+    update(
+        &mut state,
+        Message::DevtoolsConn(
+            SessionId(0),
+            ConnEvent::Connected {
+                app_name: "huddle".to_string(),
+                caps: Vec::new(),
+            },
+        ),
+    );
+    let mut frames: Vec<_> = (0..20)
+        .map(|n| perf_frame_stats(n, 16_000, false))
+        .collect();
+    frames[10] = perf_frame_stats(10, 60_000, false); // a jank spike
+    frames[15] = perf_frame_stats(15, 0, true); // a skipped frame
+    update(
+        &mut state,
+        Message::DevtoolsConn(SessionId(0), ConnEvent::Frames(frames)),
+    );
+    update(&mut state, Message::DevtoolsPerfScrub(0));
+    update(&mut state, Message::DevtoolsPerfScrub(-3));
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+/// No live connection, but the log-fallback parser has ingested raw frames.
+///
+/// **Renders `performance::render` directly rather than through
+/// `ui::render`'s top-level dispatch**: [`select_perf_source`] correctly
+/// prefers `Service` the instant `ConnState` is `Connected` (even with an
+/// as-yet-empty ring — see that function's doc), and the DevTools chrome
+/// only shows the tab strip/body at all while `DevtoolsPhase::Connected`
+/// (a 1:1 mirror of `ConnState::Connected`, see `DevtoolsState::phase`). So
+/// with today's connection-state model there is no way to be both
+/// on-screen-Connected and source-LogFallback at once — the log-fallback
+/// path is real and engine-tested (`crate::engine::devtools`'s
+/// `perf_window_falls_back_to_the_log_panel_with_no_connection`), but not
+/// yet reachable through a live session's actual screen transitions. This
+/// snapshot proves the render layer draws it correctly regardless, calling
+/// the tab body the same way `ui::views::devtools::mod` would once such a
+/// state exists to route it here.
+#[test]
+fn devtools_performance_log_fallback_100x30() {
+    use frust_tui::ui::mouse::{MouseCtx, MouseRegions};
+    use frust_tui::ui::theme::{ColorDepth, Theme};
+    use frust_tui::ui::views::devtools::performance;
+
+    let mut sess = SessionView::with_devtools(
+        SessionId(0),
+        PathBuf::from("/tmp/huddle"),
+        "desktop",
+        DevtoolsLaunch::from_launch(frust_drive::build_info::BuildMode::Debug, None),
+    );
+    sess.state = SessionState::Running;
+    for i in 0..12u64 {
+        sess.push_line_at(
+            format!(
+                "frust-perf raw n={i} total_us={} rebuild_us=0 layout_us=0 paint_us=0 \
+                 encode_us=0 present_us=0 skipped=0",
+                12_000 + i * 100
+            ),
+            format!("12:00:{:02}", i),
+        );
+    }
+    // No connection was ever attempted (`ConnState::Idle`, the default) —
+    // the source truth table's "not connected, log panel non-empty" row.
+    let (source, window) = perf_window(&sess.devtools.conn, &sess.devtools.frames, &sess.perf);
+    assert_eq!(source, PerfSource::LogFallback);
+    assert_eq!(window.len(), 12);
+
+    let backend = TestBackend::new(100, 10);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let theme = Theme::frust_dark_at(ColorDepth::TrueColor);
+    let mut regions = MouseRegions::new();
+    terminal
+        .draw(|frame| {
+            let mut ctx = MouseCtx::new(&mut regions);
+            let area = frame.area();
+            performance::render(frame, area, &sess, &theme, &mut ctx);
+        })
+        .expect("draw");
+    insta::assert_snapshot!(buffer_to_string(terminal.backend().buffer()));
+}
+
+/// A chart-column click selects that frame — the one Performance-tab mouse
+/// affordance (§B12: everything else is keyboard-only).
+#[test]
+fn devtools_performance_chart_column_click_selects_the_frame() {
+    let mut state = devtools_state(
+        frust_drive::build_info::BuildMode::Debug,
+        &["app: booting up", DEVTOOLS_DISCOVERY],
+    );
+    update(
+        &mut state,
+        Message::DevtoolsConn(
+            SessionId(0),
+            ConnEvent::Connected {
+                app_name: "huddle".to_string(),
+                caps: Vec::new(),
+            },
+        ),
+    );
+    let frames = (0..20)
+        .map(|n| perf_frame_stats(n, 16_000, false))
+        .collect();
+    update(
+        &mut state,
+        Message::DevtoolsConn(SessionId(0), ConnEvent::Frames(frames)),
+    );
+    let regions = render_regions(100, 30, &state);
+    let msg = click_message_for(&regions, RegionId::DevtoolsPerfColumn(5));
+    assert_eq!(msg, Some(Message::DevtoolsPerfSelectFrame(5)));
+
+    let out = update(&mut state, msg.unwrap());
+    assert!(out.redraw);
+    assert_eq!(
+        state
+            .active_session()
+            .unwrap()
+            .devtools
+            .performance
+            .selected_frame,
+        Some(5)
     );
 }
 

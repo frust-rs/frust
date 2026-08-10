@@ -14,6 +14,8 @@
 //! outside those bodies — the strip, the empty states, the status row, the
 //! keyboard/mouse parity — is settled here.
 
+pub mod performance;
+
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -21,7 +23,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use crate::engine::{
-    AppState, ConnState, DevtoolsPhase, DevtoolsTab, Message, RegionId, SessionView,
+    AppState, ConnState, DevtoolsPhase, DevtoolsTab, Message, PerfSource, RegionId, SessionView,
+    perf_window,
 };
 use crate::ui::anim::spinner_char;
 use crate::ui::mouse::MouseCtx;
@@ -65,7 +68,7 @@ pub fn render(
     match phase {
         DevtoolsPhase::Connected => {
             render_tab_strip(frame, rows[0], session, theme, mouse);
-            render_tab_body(frame, rows[1], session, theme);
+            render_tab_body(frame, rows[1], session, theme, mouse);
         }
         DevtoolsPhase::Discovering => {
             empty_state(
@@ -189,12 +192,20 @@ fn render_tab_strip(
         Rect::new(area.x, area.y, area.width, 1),
     );
 
-    // The service badge sits at the right of the strip — the live
-    // subscription indicator §B12 gives the Performance tab.
-    let badge = Line::from(Span::styled(
-        "● service ",
-        Style::default().fg(theme.success()),
-    ));
+    // The service/log-fallback badge sits at the right of the strip — §B12's
+    // Performance-tab indicator, driven off the same source truth table the
+    // tab body draws from (`perf_window`'s first return value).
+    let (source, _) = perf_window(
+        &session.devtools.conn,
+        &session.devtools.frames,
+        &session.perf,
+    );
+    let (badge_text, badge_color) = match source {
+        PerfSource::Service => ("● service ", theme.success()),
+        PerfSource::LogFallback => ("◐ log fallback ", theme.warn()),
+        PerfSource::NoData => ("○ no data ", theme.muted()),
+    };
+    let badge = Line::from(Span::styled(badge_text, Style::default().fg(badge_color)));
     frame.render_widget(
         Paragraph::new(badge).alignment(Alignment::Right),
         Rect::new(area.x, area.y, area.width, 1),
@@ -228,13 +239,25 @@ fn render_tab_strip(
     }
 }
 
-/// The active tab's body. Each tab's real content arrives with its own task;
-/// until then a low-key placeholder naming what will live here, so the
-/// chrome, the routing, and the connection are reviewable on their own.
-fn render_tab_body(frame: &mut Frame, area: Rect, session: &SessionView, theme: &Theme) {
+/// The active tab's body. Performance renders for real
+/// ([`performance::render`]); the other three tabs' content arrives with
+/// their own tasks — until then a low-key placeholder naming what will live
+/// there, so the chrome, the routing, and the connection are reviewable on
+/// their own.
+fn render_tab_body(
+    frame: &mut Frame,
+    area: Rect,
+    session: &SessionView,
+    theme: &Theme,
+    mouse: &mut MouseCtx,
+) {
     let tab = session.devtools.active_tab;
+    if tab == DevtoolsTab::Performance {
+        performance::render(frame, area, session, theme, mouse);
+        return;
+    }
     let detail = match tab {
-        DevtoolsTab::Performance => "frame timing, the 120-frame ring, and the per-frame breakdown",
+        DevtoolsTab::Performance => unreachable!("handled above"),
         DevtoolsTab::System => "CPU, RSS, thermal, and uptime",
         DevtoolsTab::Inspector => "the widget tree and the selected node's props",
         DevtoolsTab::Network => "process-level rx/tx byte counters",

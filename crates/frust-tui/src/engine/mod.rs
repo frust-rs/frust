@@ -34,7 +34,9 @@ pub use build_launcher::{ArtifactKind, BuildFocus, BuildLauncher, BuildSpec, Bui
 pub use context_menu::{ContextMenu, MenuEntry};
 pub use create_wizard::{ArchCard, CreateWizard, WizardAdvance, WizardStep};
 pub use devtools::{
-    ConnEvent, ConnState, DevtoolsLaunch, DevtoolsPhase, DevtoolsState, DevtoolsTab, FRAME_RING_CAP,
+    ConnEvent, ConnState, DevtoolsLaunch, DevtoolsPhase, DevtoolsState, DevtoolsTab,
+    FRAME_RING_CAP, PERF_WINDOW, PerfFocus, PerfFrame, PerfPhases, PerfSource, PerfStats,
+    PerformanceTab, perf_stats, perf_window, select_perf_source,
 };
 pub use doctor::{DoctorCheck, DoctorState};
 pub use logstyle::{

@@ -8,14 +8,14 @@ expression: "render_to_string(100, 30, &state)"
  PROJECTS                │huddle:  1 ▶ desktop                                                      
   ▸ huddle               │ [1] Performance  [2] System  [3] Inspector  [4] Network        ● service 
                          │ ━━━━━━━━━━━━━━━                                                          
- DEVICES ↻ r             │  waiting for the first frame…                                            
-   none found            │                                                                          
-                         │                                                                          
- SESSIONS                │                                                                          
-   huddle                │                                                                          
-   ▸ ▶ desktop           │                                                                          
-                         │                                                                          
- ACTIONS                 │                                                                          
+ DEVICES ↻ r             │ Frame Timing  FPS 54.6 · p50 16.0ms · p95 16.0ms · p99 60.0ms · jank 1 (5
+   none found            │          █                                                               
+                         │          █                                                               
+ SESSIONS                │▆▆▆▆▆▆▆▆▆▆█▆▆▆▆▁▆▆▆▆                                                      
+   huddle                │ 0└────────────────────────────────────20-frame ring · frame #16 selected 
+   ▸ ▶ desktop           │ Frame #16 · total 16.0ms                                                 
+                         │ ████████████████████████████████████████████████████████████████████████ 
+ ACTIONS                 │ rebuild 8.0ms 50%  layout 4.0ms 25%  paint 2.0ms 12%  encode 1.0ms 6%  ac
    New project · n       │                                                                          
    Add plugin · a        │                                                                          
    Doctor · d            │                                                                          

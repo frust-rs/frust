@@ -978,7 +978,10 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
     // the session-level keys below (`r`/`b`/`x`/`/`/`f`/`z`/`l`) are out of
     // scope inside it, so it defines its own small map from a clean slate.
     // The global chords above (`Ctrl+Q`, `⌥m`, `Ctrl+C`, `Ctrl+P`, `?`) and
-    // session-tab switching (`Tab`/`Shift+Tab`) deliberately still apply.
+    // session-tab switching (`Tab`/`Shift+Tab`) deliberately still apply —
+    // except `Tab` on the connected Performance tab, which `Message`s its
+    // own chart↔breakdown focus cycle instead (see
+    // `translate_devtools_key`'s doc).
     if let Some(devtools) = state.active_session().map(|s| &s.devtools)
         && devtools.open
     {
@@ -1093,13 +1096,23 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
 }
 
 /// Translate one key press while the active session tab is showing DevTools
-/// (workbook §B12's own key table, binding): `d`/`Esc` return to the log,
+/// (workbook §B12's own key table, binding): `d` always returns to the log,
 /// `1`–`4` jump to a tab and `[`/`]` cycle them (connected only — there is no
 /// strip to move through otherwise), `r` retries a failed connection, and
-/// `Tab`/`Shift+Tab` still switch session tabs (a tab keeps its own
-/// log/DevTools state, so leaving and coming back lands right where you were).
-/// Every row has a mouse equivalent: a tab pill, the Retry button, and the
-/// status row's back affordance.
+/// `Tab`/`Shift+Tab` still switch session tabs everywhere except the
+/// Performance tab, where `Tab` instead cycles its own chart↔breakdown focus
+/// (§B12's Performance-tab row) — a tab keeps its own log/DevTools state, so
+/// leaving and coming back lands right where you were. Every row has a mouse
+/// equivalent: a tab pill, the Retry button, a chart column, and the status
+/// row's back affordance.
+///
+/// **`Esc` is two-stage inside the Performance tab, one beyond what §B12
+/// draws**: with a frame scrubbed, the first `Esc` only drops back to the
+/// live tail ([`Message::DevtoolsPerfClearSelection`]); a second `Esc` (or
+/// the first, with nothing selected) leaves DevTools
+/// ([`Message::DevtoolsClose`]) same as every other screen. Without this, a
+/// scrub session's only way out would also blow away the pinned frame in the
+/// same keystroke.
 ///
 /// The [`DevtoolsPhase`] match is exhaustive: a new screen has to decide what
 /// its keys do rather than silently inheriting another screen's.
@@ -1108,11 +1121,22 @@ fn translate_devtools_key(
     state: &AppState,
     devtools: &DevtoolsState,
 ) -> Vec<Message> {
-    use crate::engine::DevtoolsPhase;
+    use crate::engine::{DevtoolsPhase, DevtoolsTab};
+
+    let on_performance = devtools.active_tab == DevtoolsTab::Performance;
 
     match code {
         KeyCode::Char('q') => return vec![Message::Quit],
-        KeyCode::Esc | KeyCode::Char('d') => return vec![Message::DevtoolsClose],
+        KeyCode::Char('d') => return vec![Message::DevtoolsClose],
+        KeyCode::Esc => {
+            if on_performance && devtools.performance.has_selection() {
+                return vec![Message::DevtoolsPerfClearSelection];
+            }
+            return vec![Message::DevtoolsClose];
+        }
+        KeyCode::Tab if matches!(devtools.phase(), DevtoolsPhase::Connected) && on_performance => {
+            return vec![Message::DevtoolsPerfFocusCycle];
+        }
         KeyCode::Tab => return vec![Message::NextTab],
         KeyCode::BackTab => return vec![Message::PrevTab],
         _ => {}
@@ -1124,6 +1148,11 @@ fn translate_devtools_key(
             }
             KeyCode::Char(']') => vec![Message::DevtoolsTabCycle(1)],
             KeyCode::Char('[') => vec![Message::DevtoolsTabCycle(-1)],
+            // `←`/`→` scrub the Performance chart's selection across its
+            // 120-frame window (§B12's Performance-tab row); meaningless on
+            // any other tab.
+            KeyCode::Left if on_performance => vec![Message::DevtoolsPerfScrub(-1)],
+            KeyCode::Right if on_performance => vec![Message::DevtoolsPerfScrub(1)],
             _ => vec![],
         },
         // `r` retries only where a retry is offered: a live session whose
@@ -1944,6 +1973,120 @@ mod tests {
         assert_eq!(
             translate_event(key(KeyCode::Char('f')), &state, &regions),
             vec![Message::ToggleFollow]
+        );
+    }
+
+    /// The Performance tab's own key table: `Tab` cycles chart↔breakdown
+    /// instead of switching session tabs, `←`/`→` scrub, and `Esc` is
+    /// two-stage — clears the selection first, only then leaves DevTools.
+    #[test]
+    fn performance_tab_owns_tab_and_arrows_and_esc_is_two_stage() {
+        use crate::engine::{ConnEvent, DevtoolsTab, PerfFocus, update};
+        let regions = MouseRegions::new();
+        let mut state = devtools_state();
+        update(&mut state, Message::DevtoolsToggle);
+        update(
+            &mut state,
+            Message::DevtoolsConn(
+                SessionId(0),
+                ConnEvent::Connected {
+                    app_name: "huddle".to_string(),
+                    caps: Vec::new(),
+                },
+            ),
+        );
+        assert_eq!(
+            state.active_session().unwrap().devtools.active_tab,
+            DevtoolsTab::Performance,
+            "Performance is the default tab"
+        );
+        // A non-empty ring, so there is something to scrub.
+        let frames = (0..10u64)
+            .map(|n| frust_devtools_protocol::FrameStats {
+                n,
+                total_us: 16_000,
+                rebuild_us: 8_000,
+                layout_us: 3_000,
+                paint_us: 2_000,
+                encode_us: 1_400,
+                acquire_us: 600,
+                submit_us: 1_000,
+                skipped: false,
+            })
+            .collect();
+        update(
+            &mut state,
+            Message::DevtoolsConn(SessionId(0), ConnEvent::Frames(frames)),
+        );
+
+        // `Tab` cycles focus rather than switching session tabs.
+        let msgs = translate_event(key(KeyCode::Tab), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsPerfFocusCycle]);
+        update(&mut state, msgs[0].clone());
+        assert_eq!(
+            state.active_session().unwrap().devtools.performance.focus,
+            PerfFocus::Breakdown
+        );
+
+        // `←`/`→` scrub.
+        let msgs = translate_event(key(KeyCode::Left), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsPerfScrub(-1)]);
+        let msgs = translate_event(key(KeyCode::Right), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsPerfScrub(1)]);
+        update(&mut state, Message::DevtoolsPerfScrub(0));
+        assert!(
+            state
+                .active_session()
+                .unwrap()
+                .devtools
+                .performance
+                .has_selection()
+        );
+
+        // First `Esc` only clears the selection, staying in DevTools.
+        let msgs = translate_event(key(KeyCode::Esc), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsPerfClearSelection]);
+        update(&mut state, msgs[0].clone());
+        assert!(state.active_session().unwrap().devtools.open);
+        assert!(
+            !state
+                .active_session()
+                .unwrap()
+                .devtools
+                .performance
+                .has_selection()
+        );
+
+        // Second `Esc`, with nothing selected, leaves DevTools like every
+        // other screen.
+        let msgs = translate_event(key(KeyCode::Esc), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsClose]);
+        update(&mut state, msgs[0].clone());
+        assert!(!state.active_session().unwrap().devtools.open);
+    }
+
+    /// Off the Performance tab, `Tab` still switches session tabs — the
+    /// override above is scoped to the one tab that owns the key.
+    #[test]
+    fn tab_still_switches_session_tabs_off_the_performance_tab() {
+        use crate::engine::{ConnEvent, update};
+        let regions = MouseRegions::new();
+        let mut state = devtools_state();
+        update(&mut state, Message::DevtoolsToggle);
+        update(
+            &mut state,
+            Message::DevtoolsConn(
+                SessionId(0),
+                ConnEvent::Connected {
+                    app_name: "huddle".to_string(),
+                    caps: Vec::new(),
+                },
+            ),
+        );
+        update(&mut state, Message::DevtoolsTab(1)); // System
+        assert_eq!(
+            translate_event(key(KeyCode::Tab), &state, &regions),
+            vec![Message::NextTab]
         );
     }
 

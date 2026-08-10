@@ -181,6 +181,10 @@ pub enum RegionId {
     /// The DevTools status row's "back to log" affordance (keyboard parity:
     /// `Esc` / `d`).
     DevtoolsBack,
+    /// A Performance-tab chart column (0-based index into the current
+    /// [`super::perf_window`] result); click selects that frame (keyboard
+    /// parity: `←`/`→` scrubbing to it).
+    DevtoolsPerfColumn(usize),
 }
 
 /// The kind of an in-progress drag, identifying which draggable chrome the
@@ -657,6 +661,22 @@ pub enum Message {
     /// ([`crate::supervise::DevtoolsBridge`]) — connection state changes and
     /// coalesced frame-stats batches.
     DevtoolsConn(SessionId, ConnEvent),
+
+    // ── Performance tab (workbook §B12) ─────────────────────────────────────
+    /// Move the scrubbed selection `delta` frames across the current
+    /// Performance window (`←`/`→`, ±1), clamped to its bounds. A no-op with
+    /// no active session.
+    DevtoolsPerfScrub(isize),
+    /// Select a Performance window frame directly by its 0-based index (a
+    /// chart-column click).
+    DevtoolsPerfSelectFrame(usize),
+    /// Clear the Performance tab's scrubbed selection, back to the live tail
+    /// — `Esc`'s first stage while a frame is selected (the second `Esc`,
+    /// with nothing selected, falls through to [`Message::DevtoolsClose`]).
+    DevtoolsPerfClearSelection,
+    /// Cycle the Performance tab's pane focus between the chart and the
+    /// breakdown bar (`Tab`, only while the Performance tab is active).
+    DevtoolsPerfFocusCycle,
 
     // ── Perf sparkline panel ──────────────────────────────────────────────────
     /// Toggle the active session's perf sparkline panel (`t`) — a no-op with

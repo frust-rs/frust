@@ -13,19 +13,30 @@
 //! # Extension points (the per-tab payload slots)
 //!
 //! [`DevtoolsState`] deliberately holds only the state the chrome itself
-//! needs plus [`DevtoolsState::frames`] (Performance's ring). The remaining
-//! three tabs each add their own payload slot here — a System metrics/CPU
-//! sample, an Inspector widget-tree snapshot + selection, a Network counter
-//! ring — fed by new [`ConnEvent`] variants the bridge forwards. Adding a
-//! slot is additive: nothing outside this module reads the ring or the
-//! connection state except through the accessors below and
-//! [`DevtoolsState::phase`], whose five values are the §B12 screen set and
-//! are matched exhaustively by the render and key-routing layers.
+//! needs plus [`DevtoolsState::frames`] (Performance's ring) and
+//! [`DevtoolsState::performance`] (Performance's own scrub/focus state — see
+//! [`PerformanceTab`]). The remaining three tabs each add their own payload
+//! slot here — a System metrics/CPU sample, an Inspector widget-tree
+//! snapshot + selection, a Network counter ring — fed by new [`ConnEvent`]
+//! variants the bridge forwards. Adding a slot is additive: nothing outside
+//! this module reads the ring or the connection state except through the
+//! accessors below and [`DevtoolsState::phase`], whose five values are the
+//! §B12 screen set and are matched exhaustively by the render and
+//! key-routing layers.
+//!
+//! Performance can also draw from a *second* source when there is no live
+//! connection: [`perf_window`] folds [`super::PerfPanel`]'s
+//! already-ingested `frust-perf raw` log lines into the same [`PerfFrame`]
+//! shape the live ring produces, selected by the pure [`select_perf_source`]
+//! truth table — see that function's doc for exactly what a log-fallback
+//! frame can and can't show.
 
 use std::collections::VecDeque;
 
 use frust_devtools_protocol::{Capability, Discovery, FrameStats};
 use frust_drive::build_info::BuildMode;
+
+use super::perf::PerfPanel;
 
 /// How many frame-stats samples a session retains. Comfortably more than the
 /// 120-frame window §B12's Performance chart scrubs, so a scrub back through
@@ -216,6 +227,9 @@ pub struct DevtoolsState {
     /// The frame-stats ring, oldest first, capped at [`FRAME_RING_CAP`]
     /// (drop-oldest). The Performance tab draws its window from the tail.
     pub frames: VecDeque<FrameStats>,
+    /// The Performance tab's own interaction state (scrub selection, pane
+    /// focus) — see [`PerformanceTab`].
+    pub performance: PerformanceTab,
 }
 
 impl DevtoolsState {
@@ -348,6 +362,348 @@ impl DevtoolsState {
             false
         }
     }
+}
+
+// ── Performance tab (workbook §B12) ─────────────────────────────────────────
+
+/// How many of the ring's newest frames the Performance chart scrubs —
+/// §B12's "120-frame ring". Strictly smaller than [`FRAME_RING_CAP`], which
+/// retains extra history behind the drawn window.
+pub const PERF_WINDOW: usize = 120;
+
+/// Which pane of the Performance tab has keyboard focus (`Tab` cycles
+/// between them). Two values today; [`Self::toggle`] is a plain flip rather
+/// than [`DevtoolsTab::cycle`]'s wrapping-`n`-way shape since a third pane
+/// isn't on the table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PerfFocus {
+    /// The frame-time chart — `←`/`→` scrub the selection here.
+    #[default]
+    Chart,
+    /// The selected frame's per-phase breakdown bar.
+    Breakdown,
+}
+
+impl PerfFocus {
+    /// The other pane.
+    pub fn toggle(self) -> Self {
+        match self {
+            PerfFocus::Chart => PerfFocus::Breakdown,
+            PerfFocus::Breakdown => PerfFocus::Chart,
+        }
+    }
+}
+
+/// The Performance tab's own interaction state: which pane has focus, and
+/// which ring frame (if any) is pinned for inspection. `selected_frame` is a
+/// 0-based index into whatever window [`perf_window`] currently returns
+/// (oldest first) — `None` means "follow the live tail", the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PerformanceTab {
+    /// Which pane `Tab` moves between.
+    pub focus: PerfFocus,
+    /// The scrubbed-to frame, or `None` to track the newest.
+    pub selected_frame: Option<usize>,
+}
+
+impl PerformanceTab {
+    /// `Tab`: flip the focused pane. Always a change (two values, always
+    /// flips).
+    pub fn cycle_focus(&mut self) -> bool {
+        self.focus = self.focus.toggle();
+        true
+    }
+
+    /// `←`/`→`: move the selection one frame at a time across a
+    /// `window_len`-frame window, clamped to its bounds. With nothing
+    /// selected yet, the first press starts scrubbing from the tail (the
+    /// newest frame) rather than jumping straight to an edge — the same
+    /// "step off live" shape a video player's scrub bar takes. An empty
+    /// window has nothing to select.
+    pub fn scrub(&mut self, delta: isize, window_len: usize) -> bool {
+        if window_len == 0 {
+            let changed = self.selected_frame.is_some();
+            self.selected_frame = None;
+            return changed;
+        }
+        let current = self.selected_frame.unwrap_or(window_len - 1);
+        let next = (current as isize + delta).clamp(0, window_len as isize - 1) as usize;
+        let changed = self.selected_frame != Some(next);
+        self.selected_frame = Some(next);
+        changed
+    }
+
+    /// Select a specific window index directly (a chart-column click),
+    /// clamped into range. A no-op on an empty window.
+    pub fn select(&mut self, index: usize, window_len: usize) -> bool {
+        if window_len == 0 {
+            return false;
+        }
+        let clamped = index.min(window_len - 1);
+        let changed = self.selected_frame != Some(clamped);
+        self.selected_frame = Some(clamped);
+        changed
+    }
+
+    /// `Esc`'s first stage inside the Performance tab: drop back to the live
+    /// tail without leaving DevTools. `crate::runner`'s key router only
+    /// reaches for this while a frame is actually selected — a second `Esc`
+    /// with nothing selected falls through to `Message::DevtoolsClose`.
+    pub fn clear_selection(&mut self) -> bool {
+        let changed = self.selected_frame.is_some();
+        self.selected_frame = None;
+        changed
+    }
+
+    /// Whether a frame is currently pinned — the two-stage `Esc` gate.
+    pub fn has_selection(&self) -> bool {
+        self.selected_frame.is_some()
+    }
+}
+
+/// One frame-phase breakdown, in the wire's own field order (`FrameStats`'
+/// `rebuild_us`/`layout_us`/`paint_us`/`encode_us`/`acquire_us`/
+/// `submit_us`) — the exact left-to-right order the breakdown bar draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PerfPhases {
+    pub rebuild_us: u64,
+    pub layout_us: u64,
+    pub paint_us: u64,
+    pub encode_us: u64,
+    pub acquire_us: u64,
+    pub submit_us: u64,
+}
+
+impl PerfPhases {
+    /// The sum of every phase — not necessarily equal to the frame's
+    /// `total_us` (the wire's `total_us` covers the whole frame, including
+    /// any gap between phases), but the right denominator for *this bar's*
+    /// own percentages so its segments always sum to (about) 100%.
+    pub fn phase_total_us(&self) -> u64 {
+        self.rebuild_us
+            + self.layout_us
+            + self.paint_us
+            + self.encode_us
+            + self.acquire_us
+            + self.submit_us
+    }
+
+    /// `(label, microseconds, percent of [`Self::phase_total_us`])` for each
+    /// phase, in wire order — what the breakdown bar's segments and legend
+    /// draw directly.
+    pub fn segments(&self) -> [(&'static str, u64, f64); 6] {
+        let total = (self.phase_total_us().max(1)) as f64;
+        let pct = |us: u64| us as f64 / total * 100.0;
+        [
+            ("rebuild", self.rebuild_us, pct(self.rebuild_us)),
+            ("layout", self.layout_us, pct(self.layout_us)),
+            ("paint", self.paint_us, pct(self.paint_us)),
+            ("encode", self.encode_us, pct(self.encode_us)),
+            ("acquire", self.acquire_us, pct(self.acquire_us)),
+            ("submit", self.submit_us, pct(self.submit_us)),
+        ]
+    }
+}
+
+/// One Performance-chart point, independent of whether it came off the live
+/// devtools ring or the log-fallback parser — the shared shape the render
+/// layer draws regardless of [`PerfSource`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PerfFrame {
+    /// A display counter: the live ring's real `FrameStats::n`, or (in
+    /// log-fallback) a synthesized 1-based position in the retained sample
+    /// window — see [`PerfFrame::phases`]'s doc for why the fallback source
+    /// can't recover the real one.
+    pub n: u64,
+    /// Whole-frame duration, microseconds.
+    pub total_us: u64,
+    /// Whether the frame-gate skipped this frame — drawn as a dim column
+    /// rather than a height. Always `false` in log-fallback (see the doc
+    /// below): [`PerfPanel`]'s ring doesn't retain it.
+    pub skipped: bool,
+    /// The per-phase split, when the source has one. `None` in log-fallback
+    /// mode — **a §B12 detail not implemented as drawn**: [`PerfPanel`]'s
+    /// ring keeps only each raw line's `total_us` (all it needs for its own
+    /// sparkline), discarding `rebuild_us`/`layout_us`/…/`skipped` at
+    /// ingest, so a fallback frame has no phase split or skip flag to show.
+    /// The breakdown pane renders an explicit "not available in log
+    /// fallback" note for this case rather than fabricating a split.
+    pub phases: Option<PerfPhases>,
+}
+
+impl PerfFrame {
+    fn from_stats(stats: &FrameStats) -> Self {
+        Self {
+            n: stats.n,
+            total_us: stats.total_us,
+            skipped: stats.skipped,
+            phases: Some(PerfPhases {
+                rebuild_us: stats.rebuild_us,
+                layout_us: stats.layout_us,
+                paint_us: stats.paint_us,
+                encode_us: stats.encode_us,
+                acquire_us: stats.acquire_us,
+                submit_us: stats.submit_us,
+            }),
+        }
+    }
+}
+
+/// Which data source is behind the Performance tab's chart right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PerfSource {
+    /// The live devtools frame-stats ring ([`DevtoolsState::frames`]) — full
+    /// per-phase fidelity.
+    Service,
+    /// No live connection right now; drawing from `frust-perf raw` lines
+    /// already parsed out of the session's log by [`PerfPanel`] — totals
+    /// only (see [`PerfFrame::phases`]'s doc).
+    LogFallback,
+    /// Neither source has produced a sample yet.
+    NoData,
+}
+
+/// Pure truth table selecting [`PerfSource`] from three cheap-to-read facts:
+/// whether the bridge is presently `Connected`, whether the live ring is
+/// empty, and whether the log-fallback parser has ingested any raw samples.
+///
+/// - **`connected` always wins**, even with an as-yet-empty ring (a fresh
+///   connection that hasn't streamed its first frame yet) — it is the more
+///   truthful badge, and the chart will fill in on the next batch.
+/// - Otherwise, a non-empty [`PerfPanel`] wins the fallback slot — the badge
+///   flips to `log fallback` per §B12's Performance-tab note.
+/// - Otherwise, a *previously* connected ring's leftover samples still draw
+///   (labeled `Service`, since the data itself came off the wire rather than
+///   a log line) instead of being hidden the moment the connection drops.
+/// - Only with nothing at all does this return `NoData`.
+pub fn select_perf_source(connected: bool, ring_empty: bool, perf_panel_empty: bool) -> PerfSource {
+    if connected {
+        PerfSource::Service
+    } else if !perf_panel_empty {
+        PerfSource::LogFallback
+    } else if !ring_empty {
+        PerfSource::Service
+    } else {
+        PerfSource::NoData
+    }
+}
+
+/// Build the Performance tab's drawable window: which source is live right
+/// now, and up to [`PERF_WINDOW`] frames of it (oldest first), mapped into
+/// the shared [`PerfFrame`] shape — "the protocol doc requires it, so the
+/// chart never needs two renderers" (§B12).
+pub fn perf_window(
+    conn: &ConnState,
+    frames: &VecDeque<FrameStats>,
+    perf_panel: &PerfPanel,
+) -> (PerfSource, Vec<PerfFrame>) {
+    let connected = matches!(conn, ConnState::Connected { .. });
+    let source = select_perf_source(
+        connected,
+        frames.is_empty(),
+        perf_panel.samples().len() == 0,
+    );
+    let window = match source {
+        PerfSource::Service => {
+            let start = frames.len().saturating_sub(PERF_WINDOW);
+            frames
+                .iter()
+                .skip(start)
+                .map(PerfFrame::from_stats)
+                .collect()
+        }
+        PerfSource::LogFallback => {
+            let samples: Vec<u64> = perf_panel.samples().collect();
+            let start = samples.len().saturating_sub(PERF_WINDOW);
+            samples[start..]
+                .iter()
+                .enumerate()
+                .map(|(i, &total_us)| PerfFrame {
+                    n: (start + i + 1) as u64,
+                    total_us,
+                    skipped: false,
+                    phases: None,
+                })
+                .collect()
+        }
+        PerfSource::NoData => Vec::new(),
+    };
+    (source, window)
+}
+
+/// FPS/percentile/jank summary over one [`perf_window`] result — the
+/// Performance tab's chip row. `None` when the window has no non-skipped
+/// frame to measure (an empty window, or a window of skips only).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PerfStats {
+    /// Frames per second, derived from the window's mean frame time —
+    /// `1_000_000 / mean(total_us)`, equivalent to `frame_count /
+    /// total_elapsed_seconds` over the same window (no wall-clock
+    /// timestamps are on the wire, only per-frame durations).
+    pub fps: f64,
+    pub p50_us: u64,
+    pub p95_us: u64,
+    pub p99_us: u64,
+    /// Frames whose `total_us` exceeds [`JANK_MEDIAN_MULTIPLIER`]× the
+    /// window's own median (`p50_us`) — skipped frames are never counted
+    /// (they're already flagged distinctly as a dim column, a different
+    /// failure mode than a slow-but-rendered frame).
+    pub jank_count: usize,
+    /// `jank_count` as a percentage of the window's non-skipped frame count.
+    pub jank_pct: f64,
+    /// The absolute threshold `jank_count` was measured against
+    /// (`p50_us` × [`JANK_MEDIAN_MULTIPLIER`]) — exposed so the chart can
+    /// color a bar consistently with the chip's own count rather than a
+    /// second, independently-computed threshold.
+    pub jank_threshold_us: u64,
+}
+
+/// Jank threshold, as a multiple of the window's median frame time —
+/// §B12 doesn't pin an exact definition (only the chip's rendered example),
+/// so this is an author-chosen threshold, not a spec.
+const JANK_MEDIAN_MULTIPLIER: f64 = 1.5;
+
+/// Nearest-rank percentile over an ascending-sorted slice (`p` in `0.0..=100.0`).
+fn percentile_us(sorted_asc: &[u64], p: f64) -> u64 {
+    if sorted_asc.is_empty() {
+        return 0;
+    }
+    let idx = ((p / 100.0) * (sorted_asc.len() as f64 - 1.0)).round() as usize;
+    sorted_asc[idx.min(sorted_asc.len() - 1)]
+}
+
+/// Compute [`PerfStats`] over `window` (as returned by [`perf_window`]).
+pub fn perf_stats(window: &[PerfFrame]) -> Option<PerfStats> {
+    let mut totals: Vec<u64> = window
+        .iter()
+        .filter(|f| !f.skipped)
+        .map(|f| f.total_us)
+        .collect();
+    if totals.is_empty() {
+        return None;
+    }
+    totals.sort_unstable();
+    let p50_us = percentile_us(&totals, 50.0);
+    let p95_us = percentile_us(&totals, 95.0);
+    let p99_us = percentile_us(&totals, 99.0);
+    let jank_threshold = (p50_us as f64 * JANK_MEDIAN_MULTIPLIER) as u64;
+    let jank_count = totals.iter().filter(|&&us| us > jank_threshold).count();
+    let jank_pct = jank_count as f64 / totals.len() as f64 * 100.0;
+    let mean_us: f64 = totals.iter().sum::<u64>() as f64 / totals.len() as f64;
+    let fps = if mean_us > 0.0 {
+        1_000_000.0 / mean_us
+    } else {
+        0.0
+    };
+    Some(PerfStats {
+        fps,
+        p50_us,
+        p95_us,
+        p99_us,
+        jank_count,
+        jank_pct,
+        jank_threshold_us: jank_threshold,
+    })
 }
 
 #[cfg(test)]
@@ -492,5 +848,225 @@ mod tests {
         assert_eq!(state.active_tab, DevtoolsTab::Performance, "wraps forward");
         assert!(state.cycle_tab(-1));
         assert_eq!(state.active_tab, DevtoolsTab::Network, "wraps backward");
+    }
+
+    // ── Performance tab ──────────────────────────────────────────────────
+
+    #[test]
+    fn focus_cycle_flips_between_the_two_panes() {
+        let mut perf = PerformanceTab::default();
+        assert_eq!(perf.focus, PerfFocus::Chart);
+        assert!(perf.cycle_focus());
+        assert_eq!(perf.focus, PerfFocus::Breakdown);
+        assert!(perf.cycle_focus());
+        assert_eq!(perf.focus, PerfFocus::Chart);
+    }
+
+    #[test]
+    fn scrub_starts_from_the_tail_and_clamps_at_both_ends() {
+        let mut perf = PerformanceTab::default();
+        assert_eq!(perf.selected_frame, None);
+
+        // First press starts at the tail (index `window_len - 1`), not at 0.
+        assert!(perf.scrub(0, 10));
+        assert_eq!(perf.selected_frame, Some(9));
+
+        assert!(perf.scrub(-1, 10));
+        assert_eq!(perf.selected_frame, Some(8));
+        assert!(perf.scrub(1, 10));
+        assert_eq!(perf.selected_frame, Some(9));
+
+        // Clamped at the newest end — repeated Right never overflows.
+        assert!(!perf.scrub(1, 10), "already at the newest frame");
+        assert_eq!(perf.selected_frame, Some(9));
+
+        // Clamped at the oldest end.
+        for _ in 0..20 {
+            perf.scrub(-1, 10);
+        }
+        assert_eq!(perf.selected_frame, Some(0));
+        assert!(!perf.scrub(-1, 10), "already at the oldest frame");
+    }
+
+    #[test]
+    fn scrub_on_an_empty_window_clears_any_selection() {
+        let mut perf = PerformanceTab {
+            selected_frame: Some(3),
+            ..Default::default()
+        };
+        assert!(perf.scrub(1, 0));
+        assert_eq!(perf.selected_frame, None);
+    }
+
+    #[test]
+    fn select_clamps_into_range_and_reports_change() {
+        let mut perf = PerformanceTab::default();
+        assert!(perf.select(4, 10));
+        assert_eq!(perf.selected_frame, Some(4));
+        assert!(!perf.select(4, 10), "re-selecting the same frame");
+        assert!(perf.select(50, 10), "out-of-range clamps to the last index");
+        assert_eq!(perf.selected_frame, Some(9));
+        assert!(!perf.select(0, 0), "an empty window has nothing to select");
+    }
+
+    #[test]
+    fn clear_selection_is_the_esc_first_stage() {
+        let mut perf = PerformanceTab {
+            selected_frame: Some(2),
+            ..Default::default()
+        };
+        assert!(perf.has_selection());
+        assert!(perf.clear_selection());
+        assert!(!perf.has_selection());
+        assert!(
+            !perf.clear_selection(),
+            "clearing an already-clear selection is not a change"
+        );
+    }
+
+    fn phased_frame(n: u64, total_us: u64, skipped: bool) -> PerfFrame {
+        PerfFrame {
+            n,
+            total_us,
+            skipped,
+            phases: Some(PerfPhases {
+                rebuild_us: total_us / 2,
+                layout_us: total_us / 4,
+                paint_us: total_us / 4,
+                encode_us: 0,
+                acquire_us: 0,
+                submit_us: 0,
+            }),
+        }
+    }
+
+    #[test]
+    fn perf_phases_segments_sum_to_the_phase_total_in_wire_order() {
+        let phases = PerfPhases {
+            rebuild_us: 8_200,
+            layout_us: 3_000,
+            paint_us: 2_100,
+            encode_us: 1_400,
+            acquire_us: 600,
+            submit_us: 1_000,
+        };
+        let segments = phases.segments();
+        assert_eq!(
+            segments.map(|(label, _, _)| label),
+            ["rebuild", "layout", "paint", "encode", "acquire", "submit"]
+        );
+        let pct_sum: f64 = segments.iter().map(|(_, _, pct)| pct).sum();
+        assert!(
+            (pct_sum - 100.0).abs() < 0.01,
+            "segment percentages sum to ~100%: {pct_sum}"
+        );
+    }
+
+    #[test]
+    fn perf_stats_on_a_known_fixture_computes_percentiles_fps_and_jank() {
+        // 8 non-skipped frames at 16ms plus one 40ms spike (> 1.5x median),
+        // and one skipped frame that must not pollute any of the math.
+        let mut window: Vec<PerfFrame> = (0..8).map(|n| phased_frame(n, 16_000, false)).collect();
+        window.push(phased_frame(8, 40_000, false));
+        window.push(phased_frame(9, 999_000, true)); // skipped: excluded entirely
+
+        let stats = perf_stats(&window).expect("non-empty window");
+        assert_eq!(stats.p50_us, 16_000);
+        assert_eq!(stats.p99_us, 40_000);
+        assert_eq!(
+            stats.jank_count, 1,
+            "only the 40ms frame exceeds 1.5x the 16ms median"
+        );
+        assert!((stats.jank_pct - (100.0 / 9.0)).abs() < 0.01);
+        // fps = 1e6 / mean(total_us); mean = (8*16_000 + 40_000) / 9.
+        let expected_mean = (8.0 * 16_000.0 + 40_000.0) / 9.0;
+        assert!((stats.fps - 1_000_000.0 / expected_mean).abs() < 0.01);
+    }
+
+    #[test]
+    fn perf_stats_on_all_skipped_frames_is_none() {
+        let window = vec![phased_frame(0, 16_000, true), phased_frame(1, 16_000, true)];
+        assert_eq!(perf_stats(&window), None);
+    }
+
+    #[test]
+    fn perf_stats_on_an_empty_window_is_none() {
+        assert_eq!(perf_stats(&[]), None);
+    }
+
+    #[test]
+    fn select_perf_source_truth_table() {
+        use PerfSource::*;
+        // (connected, ring_empty, perf_panel_empty) -> expected
+        let cases = [
+            (true, true, true, Service),
+            (true, true, false, Service),
+            (true, false, true, Service),
+            (true, false, false, Service),
+            (false, true, false, LogFallback),
+            (false, false, false, LogFallback),
+            (false, false, true, Service),
+            (false, true, true, NoData),
+        ];
+        for (connected, ring_empty, perf_empty, expected) in cases {
+            assert_eq!(
+                select_perf_source(connected, ring_empty, perf_empty),
+                expected,
+                "connected={connected} ring_empty={ring_empty} perf_empty={perf_empty}"
+            );
+        }
+    }
+
+    #[test]
+    fn perf_window_service_source_is_capped_at_the_120_frame_window() {
+        let mut frames = VecDeque::new();
+        for n in 0..(PERF_WINDOW as u64 + 30) {
+            frames.push_back(frame(n));
+        }
+        let conn = ConnState::Connected {
+            app_name: "huddle".to_string(),
+            caps: Vec::new(),
+        };
+        let (source, window) = perf_window(&conn, &frames, &PerfPanel::default());
+        assert_eq!(source, PerfSource::Service);
+        assert_eq!(window.len(), PERF_WINDOW);
+        assert_eq!(window.first().unwrap().n, 30);
+        assert_eq!(window.last().unwrap().n, PERF_WINDOW as u64 + 29);
+        assert!(window[0].phases.is_some());
+    }
+
+    #[test]
+    fn perf_window_falls_back_to_the_log_panel_with_no_connection() {
+        let mut panel = PerfPanel::default();
+        for i in 0..5u64 {
+            panel.ingest(&format!(
+                "frust-perf raw n={i} total_us={} rebuild_us=0 layout_us=0 paint_us=0 \
+                 encode_us=0 present_us=0 skipped=0",
+                1_000 + i
+            ));
+        }
+        let (source, window) = perf_window(
+            &ConnState::Failed {
+                error: "refused".to_string(),
+            },
+            &VecDeque::new(),
+            &panel,
+        );
+        assert_eq!(source, PerfSource::LogFallback);
+        assert_eq!(window.len(), 5);
+        assert_eq!(window[0].total_us, 1_000);
+        assert_eq!(window[4].total_us, 1_004);
+        assert!(
+            window.iter().all(|f| f.phases.is_none() && !f.skipped),
+            "log-fallback frames carry totals only"
+        );
+    }
+
+    #[test]
+    fn perf_window_with_neither_source_is_empty() {
+        let (source, window) =
+            perf_window(&ConnState::Idle, &VecDeque::new(), &PerfPanel::default());
+        assert_eq!(source, PerfSource::NoData);
+        assert!(window.is_empty());
     }
 }
