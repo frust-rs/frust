@@ -1130,7 +1130,9 @@ root cause is `devtools-screenshot-not-supported-v1`.
 
 **Observed**: `frust-mcp` binds `127.0.0.1` only and relies on rmcp's default Host-header guard
 against DNS rebinding, but the MCP protocol layer itself has no login, token, or capability check
-— any local process that can reach the port can list, launch, drive, and stop app sessions.
+— any local process that can reach the port can list, launch, drive, and stop sessions of the
+server's configured project. There is no per-call project override: that argument was removed
+after review, so a session can never be pointed at an arbitrary filesystem path.
 
 **Applies to**: every `frust-mcp` session, on every platform.
 
@@ -1140,7 +1142,8 @@ still protects the app-side service itself. Server-side auth (e.g. a bearer toke
 follow-up, not a v1 requirement.
 
 **Evidence**: `crates/frust-mcp/src/config.rs`'s `McpConfig` doc comment (bind address is never
-configurable); `crates/frust-mcp/src/server.rs`'s module doc (Host-header guard, no other auth).
+configurable); `crates/frust-mcp/src/server.rs`'s module doc (Host-header guard, no other auth);
+`crates/frust-mcp/src/engine.rs`'s `run_app` doc comment (no per-call project override).
 
 ---
 
