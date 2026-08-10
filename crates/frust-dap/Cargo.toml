@@ -35,12 +35,14 @@ thiserror = { workspace = true }
 # The workspace `tokio` pin is `default-features = false`; enable exactly
 # what this crate needs: rt-multi-thread (the stdio DAP server's own
 # runtime), io-util (`AsyncBufReadExt`/`AsyncReadExt`/`AsyncWriteExt` the
-# codec runs over), net (a later task's session-log streaming), sync (channel
-# plumbing between the codec loop and a session), macros (`#[tokio::test]`),
-# time (timeouts).
+# codec runs over), io-std (`tokio::io::stdin`/`stdout` — the stdio
+# transport's own pipes), net (the loopback TCP transport's listener), sync
+# (the outgoing response/event channel between the session and its writer
+# task), macros (`#[tokio::test]`), time (the handshake/teardown timeouts).
 tokio = { workspace = true, features = [
     "rt-multi-thread",
     "io-util",
+    "io-std",
     "net",
     "sync",
     "macros",
