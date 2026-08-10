@@ -21,9 +21,20 @@
 //!   primitives, matching the drive's own threading idioms rather than
 //!   wrapping them in a second async layer.
 //!
-//! The state readers ([`SessionEngine::sessions`], [`SessionEngine::logs`],
-//! …) are the exception: they take a short, non-blocking lock and are safe to
+//! This engine is therefore **sync itself** — it is the blocking side of that
+//! seam, not a wrapper around it. [`list_devices`](SessionEngine::list_devices),
+//! [`stop_app`](SessionEngine::stop_app), and
+//! [`restart_app`](SessionEngine::restart_app) block for as long as the device
+//! takes, and an async caller reaches them through `spawn_blocking` (the tool
+//! layer does exactly that, per [`crate::backend`]). The state readers
+//! ([`sessions`](SessionEngine::sessions), [`logs`](SessionEngine::logs), …)
+//! are the exception: they take a short, non-blocking lock and are safe to
 //! call directly from async code.
+//!
+//! [`shutdown`](SessionEngine::shutdown) is the one `async` method left, and
+//! deliberately so: it belongs to the *server's* lifetime rather than to any
+//! tool, and it owns the `spawn_blocking` its own sweep and detached-teardown
+//! join need.
 //!
 //! # What the engine cannot know
 //!
@@ -55,6 +66,7 @@ use frust_drive::devtools_client::{DevtoolsClient, adb_forward_remove};
 use frust_drive::ios_run::simctl;
 use frust_drive::process::{ProcessRunner, RealProcessRunner};
 
+use crate::backend::SessionBackend;
 use session::Session;
 
 /// Retained log lines per session, drop-oldest — the same bound and the same
@@ -163,14 +175,12 @@ impl SessionEngine {
     /// produced (a missing SDK, an unauthorized device) — `frust-drive`
     /// aggregates independent discoverers and never lets one failing
     /// discoverer blank the list.
-    pub async fn list_devices(&self) -> (Vec<Device>, Vec<String>) {
-        let runner = Arc::clone(&self.runner);
-        tokio::task::spawn_blocking(move || {
-            let discoverers = default_discoverers();
-            discover_all(runner.as_ref(), &discoverers)
-        })
-        .await
-        .unwrap_or_else(|err| (Vec::new(), vec![format!("device discovery failed: {err}")]))
+    ///
+    /// **Blocks** (it shells out to `adb`/`xcrun`): call it from
+    /// [`tokio::task::spawn_blocking`].
+    pub fn list_devices(&self) -> (Vec<Device>, Vec<String>) {
+        let discoverers = default_discoverers();
+        discover_all(self.runner.as_ref(), &discoverers)
     }
 
     /// Launches `target` in `mode` and returns its session id **immediately**
@@ -237,27 +247,30 @@ impl SessionEngine {
     }
 
     /// Stops the session: kills its process, removes any `adb forward`,
-    /// closes the devtools connection, and joins its threads — all off the
-    /// async runtime, since every step of it can block.
-    pub async fn stop_app(&self, id: SessionId) -> Result<()> {
+    /// closes the devtools connection, and joins its threads.
+    ///
+    /// **Blocks** through every one of those steps: call it from
+    /// [`tokio::task::spawn_blocking`], never on a runtime worker.
+    pub fn stop_app(&self, id: SessionId) -> Result<()> {
         let session = self.session_arc(id)?;
-        let runner = Arc::clone(&self.runner);
-        tokio::task::spawn_blocking(move || teardown(&session, runner.as_ref()))
-            .await
-            .context("the session teardown task failed")
+        teardown(&session, self.runner.as_ref());
+        Ok(())
     }
 
     /// Stops the session and launches a new one with the same target and
     /// mode (always at the engine's configured project root), returning the
     /// new session's id. The old id keeps reporting its final (stopped)
     /// state.
-    pub async fn restart_app(&self, id: SessionId) -> Result<SessionId> {
+    ///
+    /// **Blocks** for the stop half, exactly as [`stop_app`](Self::stop_app)
+    /// does.
+    pub fn restart_app(&self, id: SessionId) -> Result<SessionId> {
         let session = self.session_arc(id)?;
         let target = session.target.clone();
         let mode = session.mode;
         drop(session);
 
-        self.stop_app(id).await?;
+        self.stop_app(id)?;
         Ok(self.run_app(target, mode))
     }
 
@@ -398,6 +411,55 @@ impl SessionEngine {
     fn session_arc(&self, id: SessionId) -> Result<Arc<Session>> {
         self.lookup(id)
             .with_context(|| format!("no such session: {id}"))
+    }
+}
+
+/// The reference [`SessionBackend`]: every method forwards to the inherent one
+/// above, which is why the trait's method set was chosen to match. The tool
+/// layer sees only this impl — nothing in `tools/` names [`SessionEngine`].
+impl SessionBackend for SessionEngine {
+    fn list_devices(&self) -> (Vec<Device>, Vec<String>) {
+        SessionEngine::list_devices(self)
+    }
+
+    fn sessions(&self) -> Vec<SessionSnapshot> {
+        SessionEngine::sessions(self)
+    }
+
+    fn session(&self, id: SessionId) -> Option<SessionSnapshot> {
+        SessionEngine::session(self, id)
+    }
+
+    fn run_app(&self, target: RunTarget, mode: BuildMode) -> SessionId {
+        SessionEngine::run_app(self, target, mode)
+    }
+
+    fn stop_app(&self, id: SessionId) -> Result<()> {
+        SessionEngine::stop_app(self, id)
+    }
+
+    fn restart_app(&self, id: SessionId) -> Result<SessionId> {
+        SessionEngine::restart_app(self, id)
+    }
+
+    fn logs(&self, id: SessionId, tail: Option<usize>) -> Option<Vec<String>> {
+        SessionEngine::logs(self, id, tail)
+    }
+
+    fn frame_ring(&self, id: SessionId) -> Option<Vec<FrameStats>> {
+        SessionEngine::frame_ring(self, id)
+    }
+
+    fn latest_metrics(&self, id: SessionId) -> Option<LatestMetrics> {
+        SessionEngine::latest_metrics(self, id)
+    }
+
+    fn devtools_client(&self, id: SessionId) -> Option<Arc<DevtoolsClient>> {
+        SessionEngine::devtools_client(self, id)
+    }
+
+    fn runner(&self) -> Arc<dyn ProcessRunner + Send + Sync> {
+        SessionEngine::runner(self)
     }
 }
 
@@ -700,6 +762,27 @@ mod tests {
             "{:?}",
             recorder.runs()
         );
+    }
+
+    /// The engine reaches the tool layer only as an `Arc<dyn SessionBackend>`,
+    /// so the coercion itself is a contract: the trait must stay object-safe,
+    /// and this engine must keep satisfying it. Pinned here rather than left to
+    /// whichever call site happens to compile.
+    #[test]
+    fn the_engine_drives_through_the_backend_trait_object() {
+        let backend: Arc<dyn SessionBackend> = Arc::new(SessionEngine::with_runner(
+            TEST_PROJECT_ROOT,
+            Arc::new(FakeProcessRunner::new()),
+        ));
+
+        assert!(backend.sessions().is_empty());
+        assert!(backend.session(SessionId(1)).is_none());
+        assert!(backend.logs(SessionId(1), None).is_none());
+        assert!(backend.frame_ring(SessionId(1)).is_none());
+        assert!(backend.latest_metrics(SessionId(1)).is_none());
+        assert!(backend.devtools_client(SessionId(1)).is_none());
+        assert!(backend.stop_app(SessionId(1)).is_err());
+        assert!(backend.restart_app(SessionId(1)).is_err());
     }
 
     /// Retention evicts the oldest *terminal* sessions past the cap and never

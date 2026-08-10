@@ -15,7 +15,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::handler::McpHandler;
-use crate::{McpConfig, SessionEngine};
+use crate::{McpConfig, SharedBackend};
 
 /// HTTP path the MCP endpoint is served under
 /// (clients connect to `http://127.0.0.1:<port>/mcp`).
@@ -28,12 +28,12 @@ const MCP_HTTP_PATH: &str = "/mcp";
 /// since `McpConfig` itself never carries a resolved port back out (needed
 /// when `config.port == 0`, an OS-assigned port).
 ///
-/// `engine` is shared by every MCP session the transport creates: the
+/// `backend` is shared by every MCP session the transport creates: the
 /// factory below clones the `Arc` into each handler, so all of them drive
 /// the same supervised apps.
 pub(crate) async fn serve(
     config: McpConfig,
-    engine: Arc<SessionEngine>,
+    backend: SharedBackend,
     ready: Option<oneshot::Sender<SocketAddr>>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -47,7 +47,7 @@ pub(crate) async fn serve(
     let transport_config =
         StreamableHttpServerConfig::default().with_cancellation_token(cancel.child_token());
     let service = StreamableHttpService::new(
-        move || Ok::<_, std::io::Error>(McpHandler::new(Arc::clone(&engine))),
+        move || Ok::<_, std::io::Error>(McpHandler::new(Arc::clone(&backend))),
         Arc::new(LocalSessionManager::default()),
         transport_config,
     );

@@ -2,8 +2,10 @@
 //!
 //! The streamable-HTTP transport's service factory (`server.rs`) constructs
 //! one [`McpHandler`] per MCP session, each holding a clone of the one
-//! process-wide `Arc<SessionEngine>` — MCP sessions are connections, not
-//! app sessions, and every one of them drives the same supervised apps.
+//! process-wide [`SharedBackend`] — MCP sessions are connections, not app
+//! sessions, and every one of them drives the same supervised apps. The
+//! backend is held as `Arc<dyn SessionBackend>`, never as a concrete engine:
+//! nothing from here down names what is actually supervising the apps.
 //!
 //! Dispatch here is deliberately thin: each `#[tool]` body parses nothing,
 //! decides nothing, and forwards straight into [`crate::tools`], where the
@@ -13,8 +15,6 @@
 //! description here is the only documentation an agent gets, so each one
 //! states what the tool does, what it defaults to, and what it costs.
 
-use std::sync::Arc;
-
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerInfo};
@@ -22,7 +22,7 @@ use rmcp::schemars::{self, JsonSchema};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use serde::Serialize;
 
-use crate::engine::SessionEngine;
+use crate::SharedBackend;
 use crate::tools::{ToolError, ToolResult, diagnosis, driving, session};
 
 const SERVER_INSTRUCTIONS: &str = "Control and diagnosis for frust apps, over the MCP \
@@ -46,19 +46,19 @@ pub(crate) struct PingResult {
     sessions: usize,
 }
 
-/// MCP server handler: the tool router plus the shared session engine every
-/// tool acts through.
+/// MCP server handler: the tool router plus the shared backend every tool
+/// acts through.
 #[derive(Clone)]
 pub(crate) struct McpHandler {
-    engine: Arc<SessionEngine>,
+    backend: SharedBackend,
     tool_router: ToolRouter<Self>,
 }
 
 #[tool_router]
 impl McpHandler {
-    pub(crate) fn new(engine: Arc<SessionEngine>) -> Self {
+    pub(crate) fn new(backend: SharedBackend) -> Self {
         Self {
-            engine,
+            backend,
             tool_router: Self::tool_router(),
         }
     }
@@ -69,7 +69,7 @@ impl McpHandler {
     async fn ping(&self) -> Json<PingResult> {
         Json(PingResult {
             ok: true,
-            sessions: self.engine.sessions().len(),
+            sessions: self.backend.sessions().len(),
         })
     }
 
@@ -79,14 +79,14 @@ impl McpHandler {
         description = "List the devices run_app can target (Android devices/emulators and iOS Simulators), plus any non-fatal discovery notes such as a missing SDK or an unauthorized device. \"desktop\" is always a valid target and is not listed. Shells out to adb/xcrun, so it takes a moment."
     )]
     async fn list_devices(&self) -> ToolResult<session::ListDevicesResult> {
-        session::list_devices(&self.engine).await
+        session::list_devices(&self.backend).await
     }
 
     #[tool(
         description = "List every app session this server has launched, running or finished: its target, build mode, lifecycle state, devtools connection and declared capabilities, log/frame counts, and (for a failed launch) the error. Poll this after run_app until state is devtools_connected."
     )]
     async fn list_sessions(&self) -> ToolResult<session::ListSessionsResult> {
-        session::list_sessions(&self.engine)
+        session::list_sessions(&self.backend)
     }
 
     #[tool(
@@ -96,7 +96,7 @@ impl McpHandler {
         &self,
         Parameters(args): Parameters<session::RunAppArgs>,
     ) -> ToolResult<session::RunAppResult> {
-        session::run_app(&self.engine, args).await
+        session::run_app(&self.backend, args).await
     }
 
     #[tool(
@@ -106,7 +106,7 @@ impl McpHandler {
         &self,
         Parameters(args): Parameters<session::SessionArgs>,
     ) -> ToolResult<session::StopAppResult> {
-        session::stop_app(&self.engine, args).await
+        session::stop_app(&self.backend, args).await
     }
 
     #[tool(
@@ -116,7 +116,7 @@ impl McpHandler {
         &self,
         Parameters(args): Parameters<session::SessionArgs>,
     ) -> ToolResult<session::RestartAppResult> {
-        session::restart_app(&self.engine, args).await
+        session::restart_app(&self.backend, args).await
     }
 
     #[tool(
@@ -126,7 +126,7 @@ impl McpHandler {
         &self,
         Parameters(args): Parameters<session::AppLogsArgs>,
     ) -> ToolResult<session::AppLogsResult> {
-        session::app_logs(&self.engine, args)
+        session::app_logs(&self.backend, args)
     }
 
     // ── Driving family ──────────────────────────────────────────────────
@@ -138,7 +138,7 @@ impl McpHandler {
         &self,
         Parameters(args): Parameters<driving::FindWidgetsArgs>,
     ) -> ToolResult<driving::FindWidgetsResult> {
-        driving::find_widgets(&self.engine, args).await
+        driving::find_widgets(&self.backend, args).await
     }
 
     #[tool(
@@ -148,7 +148,7 @@ impl McpHandler {
         &self,
         Parameters(args): Parameters<driving::TapArgs>,
     ) -> ToolResult<driving::TapResult> {
-        driving::tap(&self.engine, args).await
+        driving::tap(&self.backend, args).await
     }
 
     #[tool(
@@ -158,7 +158,7 @@ impl McpHandler {
         &self,
         Parameters(args): Parameters<driving::ScrollArgs>,
     ) -> ToolResult<driving::ScrollResult> {
-        driving::scroll(&self.engine, args).await
+        driving::scroll(&self.backend, args).await
     }
 
     #[tool(
@@ -168,7 +168,7 @@ impl McpHandler {
         &self,
         Parameters(args): Parameters<driving::EnterTextArgs>,
     ) -> ToolResult<driving::EnterTextResult> {
-        driving::enter_text(&self.engine, args).await
+        driving::enter_text(&self.backend, args).await
     }
 
     #[tool(
@@ -178,7 +178,7 @@ impl McpHandler {
         &self,
         Parameters(args): Parameters<driving::WidgetPropsArgs>,
     ) -> ToolResult<driving::WidgetPropsResult> {
-        driving::widget_props(&self.engine, args).await
+        driving::widget_props(&self.backend, args).await
     }
 
     // ── Diagnosis family ────────────────────────────────────────────────
@@ -190,7 +190,7 @@ impl McpHandler {
         &self,
         Parameters(args): Parameters<diagnosis::WidgetTreeArgs>,
     ) -> ToolResult<diagnosis::WidgetTreeResult> {
-        diagnosis::widget_tree(&self.engine, args).await
+        diagnosis::widget_tree(&self.backend, args).await
     }
 
     #[tool(
@@ -200,7 +200,7 @@ impl McpHandler {
         &self,
         Parameters(args): Parameters<session::SessionArgs>,
     ) -> ToolResult<diagnosis::PerformanceResult> {
-        diagnosis::performance(&self.engine, args)
+        diagnosis::performance(&self.backend, args)
     }
 
     #[tool(
@@ -210,7 +210,7 @@ impl McpHandler {
         &self,
         Parameters(args): Parameters<session::SessionArgs>,
     ) -> ToolResult<diagnosis::MetricsResult> {
-        diagnosis::metrics(&self.engine, args).await
+        diagnosis::metrics(&self.backend, args).await
     }
 
     #[tool(
@@ -220,7 +220,7 @@ impl McpHandler {
         &self,
         Parameters(args): Parameters<session::SessionArgs>,
     ) -> Result<CallToolResult, Json<ToolError>> {
-        diagnosis::screenshot(&self.engine, args).await
+        diagnosis::screenshot(&self.backend, args).await
     }
 }
 

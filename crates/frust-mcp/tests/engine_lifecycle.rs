@@ -57,7 +57,7 @@ async fn desktop_session_connects_devtools_then_stops_cleanly() {
     // must render that honestly rather than as a zeroed reading.
     assert!(!snapshot.metrics_sampling);
 
-    engine.stop_app(id).await.expect("stop_app");
+    engine.stop_app(id).expect("stop_app");
     let stopped = engine
         .session(id)
         .expect("the session outlives its process");
@@ -88,7 +88,7 @@ async fn devtools_failure_line_surfaces_verbatim() {
     assert_eq!(snapshot.state, SessionState::Running);
     assert!(snapshot.devtools_handshake.is_none());
 
-    engine.stop_app(id).await.expect("stop_app");
+    engine.stop_app(id).expect("stop_app");
 }
 
 /// Every line the session emits is retained, and `logs` hands back the most
@@ -114,7 +114,7 @@ async fn log_ring_retains_lines_and_serves_a_tail() {
         ]
     );
 
-    engine.stop_app(id).await.expect("stop_app");
+    engine.stop_app(id).expect("stop_app");
 }
 
 /// A frame-stats notification pushed by the fixture lands in the session's
@@ -135,7 +135,7 @@ async fn frame_stats_notifications_land_in_the_session_ring() {
         vec![fixture_frame()]
     );
 
-    engine.stop_app(id).await.expect("stop_app");
+    engine.stop_app(id).expect("stop_app");
     drop(engine);
     fixture.join();
 }
@@ -237,7 +237,7 @@ async fn restart_replaces_the_session_with_an_identical_spec() {
     let first = engine.run_app(RunTarget::Desktop, BuildMode::Debug);
     await_snapshot(&engine, first, |s| s.state == SessionState::Running).await;
 
-    let second = engine.restart_app(first).await.expect("restart_app");
+    let second = engine.restart_app(first).expect("restart_app");
     assert_ne!(first, second);
     let restarted = await_snapshot(&engine, second, |s| s.state == SessionState::Running).await;
     assert_eq!(restarted.mode, BuildMode::Debug);
@@ -262,6 +262,6 @@ async fn unknown_session_ids_are_refused_cleanly() {
     assert!(engine.frame_ring(unknown).is_none());
     assert!(engine.latest_metrics(unknown).is_none());
     assert!(engine.devtools_client(unknown).is_none());
-    assert!(engine.stop_app(unknown).await.is_err());
-    assert!(engine.restart_app(unknown).await.is_err());
+    assert!(engine.stop_app(unknown).is_err());
+    assert!(engine.restart_app(unknown).is_err());
 }

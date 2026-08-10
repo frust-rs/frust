@@ -22,7 +22,7 @@ use rmcp::schemars::{self, JsonSchema};
 use serde::{Deserialize, Serialize};
 
 use super::{Point, ToolError, ToolResult, WidgetMatch, resolve_session, with_devtools};
-use crate::engine::SessionEngine;
+use crate::backend::SharedBackend;
 
 /// Default cap on how many matches `find_widgets` returns — a full tree is
 /// unbounded and an agent picking a target reads the first handful.
@@ -163,14 +163,14 @@ pub(crate) struct PropertyDto {
 // ── Tools ───────────────────────────────────────────────────────────────────
 
 pub(crate) async fn find_widgets(
-    engine: &SessionEngine,
+    backend: &SharedBackend,
     args: FindWidgetsArgs,
 ) -> ToolResult<FindWidgetsResult> {
-    let snapshot = match resolve_session(engine, args.session_id) {
+    let snapshot = match resolve_session(backend, args.session_id) {
         Ok(snapshot) => snapshot,
         Err(err) => return Err(Json(err)),
     };
-    let dump = match with_devtools(engine, &snapshot, "widget_tree", |client| {
+    let dump = match with_devtools(backend, &snapshot, "widget_tree", |client| {
         client.widget_tree()
     })
     .await
@@ -191,8 +191,8 @@ pub(crate) async fn find_widgets(
     }))
 }
 
-pub(crate) async fn tap(engine: &SessionEngine, args: TapArgs) -> ToolResult<TapResult> {
-    let snapshot = match resolve_session(engine, args.session_id) {
+pub(crate) async fn tap(backend: &SharedBackend, args: TapArgs) -> ToolResult<TapResult> {
+    let snapshot = match resolve_session(backend, args.session_id) {
         Ok(snapshot) => snapshot,
         Err(err) => return Err(Json(err)),
     };
@@ -224,7 +224,7 @@ pub(crate) async fn tap(engine: &SessionEngine, args: TapArgs) -> ToolResult<Tap
     let (point, widget) = match point {
         Target::Point(point) => (point, None),
         Target::Query(query) => {
-            let dump = match with_devtools(engine, &snapshot, "widget_tree", |client| {
+            let dump = match with_devtools(backend, &snapshot, "widget_tree", |client| {
                 client.widget_tree()
             })
             .await
@@ -243,7 +243,7 @@ pub(crate) async fn tap(engine: &SessionEngine, args: TapArgs) -> ToolResult<Tap
     };
 
     let (x, y) = (point.x, point.y);
-    if let Err(err) = with_devtools(engine, &snapshot, "tap", move |client| {
+    if let Err(err) = with_devtools(backend, &snapshot, "tap", move |client| {
         client.tap(x, y).map(|_| ())
     })
     .await
@@ -257,13 +257,13 @@ pub(crate) async fn tap(engine: &SessionEngine, args: TapArgs) -> ToolResult<Tap
     }))
 }
 
-pub(crate) async fn scroll(engine: &SessionEngine, args: ScrollArgs) -> ToolResult<ScrollResult> {
-    let snapshot = match resolve_session(engine, args.session_id) {
+pub(crate) async fn scroll(backend: &SharedBackend, args: ScrollArgs) -> ToolResult<ScrollResult> {
+    let snapshot = match resolve_session(backend, args.session_id) {
         Ok(snapshot) => snapshot,
         Err(err) => return Err(Json(err)),
     };
     let ScrollArgs { x, y, dx, dy, .. } = args;
-    if let Err(err) = with_devtools(engine, &snapshot, "scroll", move |client| {
+    if let Err(err) = with_devtools(backend, &snapshot, "scroll", move |client| {
         client.scroll(x, y, dx, dy).map(|_| ())
     })
     .await
@@ -279,16 +279,16 @@ pub(crate) async fn scroll(engine: &SessionEngine, args: ScrollArgs) -> ToolResu
 }
 
 pub(crate) async fn enter_text(
-    engine: &SessionEngine,
+    backend: &SharedBackend,
     args: EnterTextArgs,
 ) -> ToolResult<EnterTextResult> {
-    let snapshot = match resolve_session(engine, args.session_id) {
+    let snapshot = match resolve_session(backend, args.session_id) {
         Ok(snapshot) => snapshot,
         Err(err) => return Err(Json(err)),
     };
     let characters = args.text.chars().count();
     let text = args.text;
-    if let Err(err) = with_devtools(engine, &snapshot, "enter_text", move |client| {
+    if let Err(err) = with_devtools(backend, &snapshot, "enter_text", move |client| {
         client.text(text).map(|_| ())
     })
     .await
@@ -302,15 +302,15 @@ pub(crate) async fn enter_text(
 }
 
 pub(crate) async fn widget_props(
-    engine: &SessionEngine,
+    backend: &SharedBackend,
     args: WidgetPropsArgs,
 ) -> ToolResult<WidgetPropsResult> {
-    let snapshot = match resolve_session(engine, args.session_id) {
+    let snapshot = match resolve_session(backend, args.session_id) {
         Ok(snapshot) => snapshot,
         Err(err) => return Err(Json(err)),
     };
     let id = args.id;
-    let props = match with_devtools(engine, &snapshot, "widget_props", move |client| {
+    let props = match with_devtools(backend, &snapshot, "widget_props", move |client| {
         client.widget_props(id)
     })
     .await

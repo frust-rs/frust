@@ -119,7 +119,7 @@ async fn a_stop_racing_the_launch_still_kills_the_process() {
     // Deliberately no state await between the two: this is the window where
     // the launch thread may not have spawned anything yet.
     let id = engine.run_app(RunTarget::Desktop, BuildMode::Debug);
-    engine.stop_app(id).await.expect("stop_app");
+    engine.stop_app(id).expect("stop_app");
 
     // The desktop pipeline has no cancel check, so the process is spawned
     // regardless of who won — and must not survive the stop.
@@ -149,7 +149,7 @@ async fn a_stop_after_the_stream_is_live_kills_it_too() {
         .recv_timeout(DEADLINE)
         .expect("the desktop launch spawns its process");
 
-    engine.stop_app(id).await.expect("stop_app");
+    engine.stop_app(id).expect("stop_app");
     assert_stream_killed(lines);
 }
 

@@ -17,7 +17,12 @@
 //! (`tools`, surfaced through the rmcp handler) sits on top of it in three
 //! families — session lifecycle, app driving, and diagnosis — and is the
 //! whole agent-facing surface.
+//!
+//! The two halves meet at [`backend::SessionBackend`], not at the engine type:
+//! the tools drive an `Arc<dyn SessionBackend>`, of which [`SessionEngine`] is
+//! this crate's own (and the server's default) implementation.
 
+pub mod backend;
 pub mod engine;
 
 mod config;
@@ -25,6 +30,7 @@ mod handler;
 mod server;
 mod tools;
 
+pub use backend::{SessionBackend, SharedBackend};
 pub use config::{DEFAULT_MCP_PORT, McpConfig};
 pub use engine::SessionEngine;
 
@@ -88,15 +94,20 @@ pub async fn run_with_engine(
 ///
 /// The shutdown runs whether the server stopped cleanly or errored: a
 /// cancelled MCP server must not leave orphaned preview windows, running
-/// device apps, or `adb forward`s behind. The tool layer takes its own clone
-/// of this same `Arc`.
+/// device apps, or `adb forward`s behind. `shutdown` is deliberately *not* a
+/// [`SessionBackend`] method — it belongs to the server's lifetime, not to any
+/// tool — so this is the one place that keeps the concrete engine while the
+/// tool layer below it sees only the trait.
 async fn serve_with_engine(
     config: McpConfig,
     engine: Arc<SessionEngine>,
     ready: Option<oneshot::Sender<SocketAddr>>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    let result = server::serve(config, Arc::clone(&engine), ready, cancel).await;
+    // One allocation, two views of it: everything below sees the trait, this
+    // function keeps the engine for the `shutdown` the trait does not carry.
+    let backend: SharedBackend = engine.clone();
+    let result = server::serve(config, backend, ready, cancel).await;
     engine.shutdown().await;
     result
 }

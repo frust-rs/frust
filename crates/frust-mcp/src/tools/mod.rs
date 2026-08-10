@@ -1,4 +1,4 @@
-//! The MCP tool layer over [`crate::engine::SessionEngine`].
+//! The MCP tool layer over [`crate::backend::SessionBackend`].
 //!
 //! Three families, one module each: [`session`] (device/session lifecycle and
 //! logs), [`driving`] (find/tap/scroll/type against the running app), and
@@ -29,10 +29,14 @@
 //!
 //! # Blocking calls
 //!
-//! `frust-drive`'s devtools client and process runner are both sync and
-//! unbounded in the worst case (a device that stopped answering). Every call
-//! into either goes through [`tokio::task::spawn_blocking`] — see
-//! [`with_devtools`] and `diagnosis`'s adb fallback.
+//! This layer is where the async/blocking bridge lives. [`SessionBackend`] is
+//! a sync trait (see [`crate::backend`]'s rationale), `frust-drive`'s devtools
+//! client and process runner are sync too, and all three are unbounded in the
+//! worst case (a device that stopped answering). Every call into one goes
+//! through [`tokio::task::spawn_blocking`], with the [`SharedBackend`] cloned
+//! into the closure — see [`with_devtools`], `session`'s device/lifecycle
+//! tools, and `diagnosis`'s adb fallback. The cheap readers (`sessions`,
+//! `logs`, `frame_ring`, …) take a short lock and are called directly.
 
 pub(crate) mod diagnosis;
 pub(crate) mod driving;
@@ -46,7 +50,8 @@ use rmcp::handler::server::wrapper::Json;
 use rmcp::schemars::{self, JsonSchema};
 use serde::Serialize;
 
-use crate::engine::{SessionEngine, SessionId, SessionSnapshot, SessionState};
+use crate::backend::SharedBackend;
+use crate::engine::{SessionId, SessionSnapshot, SessionState};
 
 /// What every tool in this layer returns: a typed success payload, or an
 /// in-band [`ToolError`] (see the module doc's two-error-channels note).
@@ -203,12 +208,12 @@ pub(crate) fn session_ref(snapshot: &SessionSnapshot) -> SessionRef {
 /// sessions are running" about three dead ones would keep driving a corpse.
 /// A dead session is never counted as running.
 pub(crate) fn resolve_session(
-    engine: &SessionEngine,
+    backend: &SharedBackend,
     requested: Option<u64>,
 ) -> Result<SessionSnapshot, ToolError> {
-    let all = engine.sessions();
+    let all = backend.sessions();
     if let Some(id) = requested {
-        return engine.session(SessionId(id)).ok_or_else(|| {
+        return backend.session(SessionId(id)).ok_or_else(|| {
             ToolError::new(format!(
                 "no such session: {id}. Call list_sessions for the ids that exist, \
                  or run_app to start one."
@@ -269,7 +274,7 @@ pub(crate) fn no_devtools_error(snapshot: &SessionSnapshot) -> ToolError {
 ///
 /// `what` names the operation for the message (`"widget_tree"`, `"tap"`, …).
 pub(crate) async fn with_devtools<T, F>(
-    engine: &SessionEngine,
+    backend: &SharedBackend,
     snapshot: &SessionSnapshot,
     what: &'static str,
     call: F,
@@ -278,7 +283,7 @@ where
     F: FnOnce(&DevtoolsClient) -> anyhow::Result<T> + Send + 'static,
     T: Send + 'static,
 {
-    let Some(client) = engine.devtools_client(snapshot.id) else {
+    let Some(client) = backend.devtools_client(snapshot.id) else {
         return Err(no_devtools_error(snapshot));
     };
     devtools_call(client, what, call).await
@@ -333,7 +338,13 @@ pub(crate) fn round2(value: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::SessionEngine;
     use frust_devtools_protocol::RectPx;
+
+    /// The reference backend, behind the trait object every tool sees.
+    fn backend() -> SharedBackend {
+        Arc::new(SessionEngine::new("/tmp/frust-mcp-tools-test"))
+    }
 
     fn node(id: u64, bounds: Option<RectPx>) -> WidgetNode {
         WidgetNode {
@@ -384,18 +395,16 @@ mod tests {
         assert_eq!(us_to_ms(0), 0.0);
     }
 
-    #[tokio::test]
-    async fn resolving_a_session_with_none_running_names_the_next_step() {
-        let engine = SessionEngine::new("/tmp/frust-mcp-tools-test");
-        let err = resolve_session(&engine, None).expect_err("no sessions exist");
+    #[test]
+    fn resolving_a_session_with_none_running_names_the_next_step() {
+        let err = resolve_session(&backend(), None).expect_err("no sessions exist");
         assert!(err.error.contains("run_app"), "unhelpful: {}", err.error);
         assert!(err.sessions.is_empty());
     }
 
-    #[tokio::test]
-    async fn resolving_an_unknown_id_lists_what_exists() {
-        let engine = SessionEngine::new("/tmp/frust-mcp-tools-test");
-        let err = resolve_session(&engine, Some(42)).expect_err("id 42 does not exist");
+    #[test]
+    fn resolving_an_unknown_id_lists_what_exists() {
+        let err = resolve_session(&backend(), Some(42)).expect_err("id 42 does not exist");
         assert!(err.error.contains("no such session: 42"));
     }
 }

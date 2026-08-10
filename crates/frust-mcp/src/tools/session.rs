@@ -1,11 +1,17 @@
 //! Session-family tools: what can be run, what is running, starting and
 //! stopping it, and reading back its output.
 //!
-//! Every one of these is a thin mapping over [`crate::engine::SessionEngine`]
-//! — the engine owns the supervision, this module owns the wire shape (the
-//! engine's types are plain Rust and carry no serde/schema derives, on
-//! purpose: several of them are `frust-drive`'s).
+//! Every one of these is a thin mapping over
+//! [`crate::backend::SessionBackend`] — the backend owns the supervision,
+//! this module owns the wire shape (the backend's types are plain Rust and
+//! carry no serde/schema derives, on purpose: several of them are
+//! `frust-drive`'s).
+//!
+//! The three **blocking** backend calls — `list_devices`, `stop_app`,
+//! `restart_app` — are issued from [`tokio::task::spawn_blocking`] here, since
+//! each of them waits on a device that may never answer.
 
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use frust_devtools_protocol::Capability;
@@ -16,7 +22,8 @@ use rmcp::schemars::{self, JsonSchema};
 use serde::{Deserialize, Serialize};
 
 use super::{ToolError, ToolResult, resolve_session, session_ref, state_name};
-use crate::engine::{RunTarget, SessionEngine, SessionSnapshot, SessionState};
+use crate::backend::SharedBackend;
+use crate::engine::{RunTarget, SessionSnapshot, SessionState};
 
 /// Default number of log lines `app_logs` returns.
 const DEFAULT_LOG_LIMIT: usize = 100;
@@ -181,32 +188,32 @@ pub(crate) struct AppLogsArgs {
 
 // ── Tools ───────────────────────────────────────────────────────────────────
 
-pub(crate) async fn list_devices(engine: &SessionEngine) -> ToolResult<ListDevicesResult> {
-    let (devices, notes) = engine.list_devices().await;
+pub(crate) async fn list_devices(backend: &SharedBackend) -> ToolResult<ListDevicesResult> {
+    let (devices, notes) = discover_devices(backend).await;
     Ok(Json(ListDevicesResult {
         devices: devices.iter().map(device_dto).collect(),
         notes,
     }))
 }
 
-pub(crate) fn list_sessions(engine: &SessionEngine) -> ToolResult<ListSessionsResult> {
+pub(crate) fn list_sessions(backend: &SharedBackend) -> ToolResult<ListSessionsResult> {
     Ok(Json(ListSessionsResult {
-        sessions: engine.sessions().iter().map(session_dto).collect(),
+        sessions: backend.sessions().iter().map(session_dto).collect(),
     }))
 }
 
-pub(crate) async fn run_app(engine: &SessionEngine, args: RunAppArgs) -> ToolResult<RunAppResult> {
+pub(crate) async fn run_app(backend: &SharedBackend, args: RunAppArgs) -> ToolResult<RunAppResult> {
     let mode = match parse_mode(args.mode.as_deref()) {
         Ok(mode) => mode,
         Err(err) => return Err(Json(err)),
     };
-    let target = match resolve_target(engine, &args.target).await {
+    let target = match resolve_target(backend, &args.target).await {
         Ok(target) => target,
         Err(err) => return Err(Json(err)),
     };
 
-    let id = engine.run_app(target, mode);
-    let Some(snapshot) = engine.session(id) else {
+    let id = backend.run_app(target, mode);
+    let Some(snapshot) = backend.session(id) else {
         return Err(Json(ToolError::new(
             "the session vanished immediately after launch — this is a bug in frust-mcp",
         )));
@@ -222,44 +229,60 @@ pub(crate) async fn run_app(engine: &SessionEngine, args: RunAppArgs) -> ToolRes
 }
 
 pub(crate) async fn stop_app(
-    engine: &SessionEngine,
+    backend: &SharedBackend,
     args: SessionArgs,
 ) -> ToolResult<StopAppResult> {
-    let snapshot = match resolve_session(engine, args.session_id) {
+    let snapshot = match resolve_session(backend, args.session_id) {
         Ok(snapshot) => snapshot,
         Err(err) => return Err(Json(err)),
     };
-    if let Err(err) = engine.stop_app(snapshot.id).await {
-        return Err(Json(ToolError::new(format!(
-            "stopping session {} failed: {err:#}",
-            snapshot.id
-        ))));
+    let id = snapshot.id;
+    let stopping = Arc::clone(backend);
+    let stopped = tokio::task::spawn_blocking(move || stopping.stop_app(id)).await;
+    match stopped {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            return Err(Json(ToolError::new(format!(
+                "stopping session {id} failed: {err:#}"
+            ))));
+        }
+        Err(err) => {
+            return Err(Json(ToolError::new(format!(
+                "the stop task for session {id} failed: {err}"
+            ))));
+        }
     }
-    let stopped = engine.session(snapshot.id).unwrap_or(snapshot);
+    let stopped = backend.session(id).unwrap_or(snapshot);
     Ok(Json(StopAppResult {
         session: session_dto(&stopped),
     }))
 }
 
 pub(crate) async fn restart_app(
-    engine: &SessionEngine,
+    backend: &SharedBackend,
     args: SessionArgs,
 ) -> ToolResult<RestartAppResult> {
-    let snapshot = match resolve_session(engine, args.session_id) {
+    let snapshot = match resolve_session(backend, args.session_id) {
         Ok(snapshot) => snapshot,
         Err(err) => return Err(Json(err)),
     };
-    let new_id = match engine.restart_app(snapshot.id).await {
-        Ok(id) => id,
+    let id = snapshot.id;
+    let restarting = Arc::clone(backend);
+    let new_id = match tokio::task::spawn_blocking(move || restarting.restart_app(id)).await {
+        Ok(Ok(new_id)) => new_id,
+        Ok(Err(err)) => {
+            return Err(Json(ToolError::new(format!(
+                "restarting session {id} failed: {err:#}"
+            ))));
+        }
         Err(err) => {
             return Err(Json(ToolError::new(format!(
-                "restarting session {} failed: {err:#}",
-                snapshot.id
+                "the restart task for session {id} failed: {err}"
             ))));
         }
     };
-    let previous = engine.session(snapshot.id).unwrap_or(snapshot);
-    let Some(session) = engine.session(new_id) else {
+    let previous = backend.session(id).unwrap_or(snapshot);
+    let Some(session) = backend.session(new_id) else {
         return Err(Json(ToolError::new(
             "the restarted session vanished immediately after launch — this is a bug in frust-mcp",
         )));
@@ -270,12 +293,12 @@ pub(crate) async fn restart_app(
     }))
 }
 
-pub(crate) fn app_logs(engine: &SessionEngine, args: AppLogsArgs) -> ToolResult<AppLogsResult> {
-    let snapshot = match resolve_session(engine, args.session_id) {
+pub(crate) fn app_logs(backend: &SharedBackend, args: AppLogsArgs) -> ToolResult<AppLogsResult> {
+    let snapshot = match resolve_session(backend, args.session_id) {
         Ok(snapshot) => snapshot,
         Err(err) => return Err(Json(err)),
     };
-    let Some(lines) = engine.logs(snapshot.id, None) else {
+    let Some(lines) = backend.logs(snapshot.id, None) else {
         return Err(Json(
             ToolError::new(format!("no such session: {}", snapshot.id))
                 .with_sessions(vec![session_ref(&snapshot)]),
@@ -298,6 +321,17 @@ pub(crate) fn app_logs(engine: &SessionEngine, args: AppLogsArgs) -> ToolResult<
 }
 
 // ── Mapping ─────────────────────────────────────────────────────────────────
+
+/// Discovery, off the runtime: it shells out to `adb`/`xcrun`, either of
+/// which an unresponsive device can stall without bound. A task that fails
+/// outright is reported as a discovery *note* rather than a tool error —
+/// `desktop` is still a valid target with no device list at all.
+async fn discover_devices(backend: &SharedBackend) -> (Vec<Device>, Vec<String>) {
+    let backend = Arc::clone(backend);
+    tokio::task::spawn_blocking(move || backend.list_devices())
+        .await
+        .unwrap_or_else(|err| (Vec::new(), vec![format!("device discovery failed: {err}")]))
+}
 
 /// Filters `lines` by an optional substring and level, then keeps the most
 /// recent `limit`. Returns the tail plus how many matched in total, so a
@@ -372,11 +406,11 @@ fn parse_mode(mode: Option<&str>) -> Result<BuildMode, ToolError> {
 /// Maps `target` onto a [`RunTarget`]: the literal `desktop`, or a device
 /// matched by exact id first, then by unique case-insensitive substring of
 /// its id or name.
-async fn resolve_target(engine: &SessionEngine, target: &str) -> Result<RunTarget, ToolError> {
+async fn resolve_target(backend: &SharedBackend, target: &str) -> Result<RunTarget, ToolError> {
     if target.eq_ignore_ascii_case("desktop") {
         return Ok(RunTarget::Desktop);
     }
-    let (devices, notes) = engine.list_devices().await;
+    let (devices, notes) = discover_devices(backend).await;
     let exact: Vec<&Device> = devices.iter().filter(|d| d.id == target).collect();
     let matches: Vec<&Device> = if exact.is_empty() {
         let needle = target.to_lowercase();

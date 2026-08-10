@@ -25,7 +25,8 @@ use serde::{Deserialize, Serialize};
 
 use super::session::SessionArgs;
 use super::{Rect, ToolError, ToolResult, devtools_call, resolve_session, round2, us_to_ms};
-use crate::engine::{SessionEngine, SessionSnapshot};
+use crate::backend::SharedBackend;
+use crate::engine::SessionSnapshot;
 
 /// Default depth `widget_tree` descends below each root.
 const DEFAULT_TREE_DEPTH: usize = 12;
@@ -208,14 +209,14 @@ pub(crate) struct ScreenshotMeta {
 // ── Tools ───────────────────────────────────────────────────────────────────
 
 pub(crate) async fn widget_tree(
-    engine: &SessionEngine,
+    backend: &SharedBackend,
     args: WidgetTreeArgs,
 ) -> ToolResult<WidgetTreeResult> {
-    let snapshot = match resolve_session(engine, args.session_id) {
+    let snapshot = match resolve_session(backend, args.session_id) {
         Ok(snapshot) => snapshot,
         Err(err) => return Err(Json(err)),
     };
-    let dump = match super::with_devtools(engine, &snapshot, "widget_tree", |client| {
+    let dump = match super::with_devtools(backend, &snapshot, "widget_tree", |client| {
         client.widget_tree()
     })
     .await
@@ -235,14 +236,14 @@ pub(crate) async fn widget_tree(
 }
 
 pub(crate) fn performance(
-    engine: &SessionEngine,
+    backend: &SharedBackend,
     args: SessionArgs,
 ) -> ToolResult<PerformanceResult> {
-    let snapshot = match resolve_session(engine, args.session_id) {
+    let snapshot = match resolve_session(backend, args.session_id) {
         Ok(snapshot) => snapshot,
         Err(err) => return Err(Json(err)),
     };
-    let frames = engine.frame_ring(snapshot.id).unwrap_or_default();
+    let frames = backend.frame_ring(snapshot.id).unwrap_or_default();
     let stats = aggregate_frames(&frames);
     let note = stats.is_none().then(|| {
         no_stats_note(
@@ -261,14 +262,14 @@ pub(crate) fn performance(
 }
 
 pub(crate) async fn metrics(
-    engine: &SessionEngine,
+    backend: &SharedBackend,
     args: SessionArgs,
 ) -> ToolResult<MetricsResult> {
-    let snapshot = match resolve_session(engine, args.session_id) {
+    let snapshot = match resolve_session(backend, args.session_id) {
         Ok(snapshot) => snapshot,
         Err(err) => return Err(Json(err)),
     };
-    let latest = engine.latest_metrics(snapshot.id).unwrap_or_default();
+    let latest = backend.latest_metrics(snapshot.id).unwrap_or_default();
     let sampled = latest.cpu.is_some()
         || latest.mem.is_some()
         || latest.net.is_some()
@@ -290,7 +291,7 @@ pub(crate) async fn metrics(
             .collect(),
     };
 
-    let service = match super::with_devtools(engine, &snapshot, "metrics_snapshot", |client| {
+    let service = match super::with_devtools(backend, &snapshot, "metrics_snapshot", |client| {
         client.metrics_snapshot()
     })
     .await
@@ -320,17 +321,17 @@ pub(crate) async fn metrics(
 /// declared the capability, else an Android `screencap` over `adb`, else a
 /// refusal that says why.
 pub(crate) async fn screenshot(
-    engine: &SessionEngine,
+    backend: &SharedBackend,
     args: SessionArgs,
 ) -> Result<CallToolResult, Json<ToolError>> {
-    let snapshot = resolve_session(engine, args.session_id).map_err(Json)?;
+    let snapshot = resolve_session(backend, args.session_id).map_err(Json)?;
 
     let declares_screenshot = snapshot
         .devtools_capabilities()
         .is_some_and(|caps| caps.contains(&Capability::Screenshot));
 
     let (source, png_base64) = if declares_screenshot {
-        let Some(client) = engine.devtools_client(snapshot.id) else {
+        let Some(client) = backend.devtools_client(snapshot.id) else {
             return Err(Json(super::no_devtools_error(&snapshot)));
         };
         let result = devtools_call(client, "screenshot", |client| client.screenshot())
@@ -338,7 +339,7 @@ pub(crate) async fn screenshot(
             .map_err(Json)?;
         ("service", result.png_base64)
     } else if let Some(serial) = snapshot.target.android_serial() {
-        let runner = engine.runner();
+        let runner = backend.runner();
         let serial = serial.to_string();
         let captured =
             tokio::task::spawn_blocking(move || adb_screencap_base64(runner.as_ref(), &serial))
