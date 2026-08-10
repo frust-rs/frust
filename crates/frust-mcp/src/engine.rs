@@ -49,7 +49,9 @@ mod metrics;
 mod ring;
 mod session;
 
-pub use session::{LatestMetrics, RunTarget, SessionId, SessionSnapshot, SessionState};
+pub use session::{
+    LatestMetrics, LogSubscription, RunTarget, SessionId, SessionSnapshot, SessionState,
+};
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -74,6 +76,16 @@ use session::Session;
 /// this deep is already far more than an agent reads back, and the cap is
 /// what keeps a long-lived session's memory flat.
 pub const LOG_RING_CAP: usize = 10_000;
+
+/// How many log lines a [`LogSubscription`]'s channel holds before the
+/// session's own ingest starts dropping them.
+///
+/// Generous on purpose — a subscriber only has to keep up on average, not
+/// line for line — but **bounded**, because the alternative is an ingest that
+/// either blocks the session's drain thread on a consumer it does not control
+/// or grows a queue without limit. Overflow is reported in band (see
+/// [`LogSubscription`]), never silently.
+pub const LOG_SUBSCRIPTION_CAP: usize = 4096;
 
 /// Retained frame-stats samples per session, drop-oldest. Ten seconds of
 /// 60fps: enough for the performance tool to aggregate a meaningful window
@@ -342,6 +354,24 @@ impl SessionEngine {
         self.lookup(id).map(|session| session.logs(tail))
     }
 
+    /// Streams the session's log lines as they arrive — the push seam a
+    /// consumer that must not miss output (a DAP adapter forwarding it to an
+    /// editor) uses instead of re-polling [`logs`](Self::logs) and diffing.
+    ///
+    /// The feed opens with the session's retained lines and continues live,
+    /// with no gap and no duplicate across the boundary: the seed is taken and
+    /// the feed registered inside the same critical section a log ingest holds
+    /// (see [`LogSubscription`] for the full contract — bounded channel,
+    /// in-band loss markers, redacted lines, close on session end).
+    ///
+    /// **One subscriber per session.** A second call replaces the first, whose
+    /// receiver then observes a closed channel.
+    ///
+    /// `None` for an unknown session id.
+    pub fn subscribe_logs(&self, id: SessionId) -> Option<LogSubscription> {
+        self.lookup(id).map(|session| session.subscribe_logs())
+    }
+
     /// The session's retained frame-stats samples, oldest first.
     pub fn frame_ring(&self, id: SessionId) -> Option<Vec<FrameStats>> {
         self.lookup(id).map(|session| session.frames())
@@ -537,6 +567,10 @@ fn teardown(session: &Arc<Session>, runner: &dyn ProcessRunner) {
     join_bounded(std::mem::take(&mut resources.threads));
     session.clear_metrics_sampling();
     session.set_state_if_live(SessionState::Exited { success: false });
+    // Nothing will ever be ingested for this session again, so the log
+    // subscription ends here — explicitly, because a session that was already
+    // terminal never passes through the state transition that closes it.
+    session.close_log_subscription();
 }
 
 /// Joins `threads`, giving up (and detaching) after [`TEARDOWN_DEADLINE`].

@@ -7,11 +7,15 @@
 //! A [`Session`] holds exactly three independent locks and they are **never**
 //! nested:
 //!
-//! - `data` — everything a [`SessionSnapshot`] reports, plus the two rings.
-//!   Every mutation notifies the paired `Condvar`, which is what
-//!   [`Session::wait_for`] blocks on, so a caller waiting for "connected" or
-//!   "N frames arrived" waits on a condition the engine itself produces
-//!   rather than polling a clock.
+//! - `data` — everything a [`SessionSnapshot`] reports, plus the two rings
+//!   and the log subscription's sending half. Every mutation notifies the
+//!   paired `Condvar`, which is what [`Session::wait_for`] blocks on, so a
+//!   caller waiting for "connected" or "N frames arrived" waits on a
+//!   condition the engine itself produces rather than polling a clock. The
+//!   subscription lives here and nowhere else *because* the log ring does:
+//!   seeding a new subscriber and registering its feed happen in the same
+//!   critical section as an ingest, which is what makes the seam gapless
+//!   (see [`Session::subscribe_logs`]).
 //! - `resources` — the teardown-only handles. Held for a short take/insert
 //!   only; **never** held while joining a thread, since a session thread may
 //!   itself be waiting to lock it. It is also the lock that orders
@@ -26,6 +30,9 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{
+    self, Receiver, RecvError, RecvTimeoutError, SyncSender, TryRecvError, TrySendError,
+};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
@@ -38,7 +45,7 @@ use frust_drive::metrics::{CpuSample, MemSample, MetricsSample, NetSample, Therm
 use frust_drive::process::StreamHandle;
 
 use super::ring::Ring;
-use super::{FRAME_RING_CAP, LOG_RING_CAP};
+use super::{FRAME_RING_CAP, LOG_RING_CAP, LOG_SUBSCRIPTION_CAP};
 
 /// Engine-assigned handle for one supervised session. Opaque and monotonic —
 /// never reused within a process, so a stale id from an agent always resolves
@@ -202,6 +209,127 @@ impl SessionSnapshot {
     }
 }
 
+/// The one shape a lost-line marker takes on a log subscription: a line the
+/// subscriber reads in band, so loss is always explicit and never silent.
+fn dropped_marker(count: u64, reason: &str) -> String {
+    format!("[frust] {count} log line(s) dropped ({reason})")
+}
+
+/// Lines lost because the subscriber was not reading fast enough.
+const SLOW_CONSUMER: &str = "slow consumer";
+
+/// Lines lost at subscribe time: the session's retained backlog was deeper
+/// than the subscription channel, so only its newest lines could be seeded.
+const OLDER_THAN_BUFFER: &str = "backlog older than the subscription buffer";
+
+/// A live push feed of one session's log lines, handed out by
+/// [`SessionEngine::subscribe_logs`](crate::engine::SessionEngine::subscribe_logs).
+///
+/// **Seeded, then live.** The feed opens with the session's retained log tail
+/// and continues with every line ingested afterwards — the seed is taken and
+/// the feed registered inside a single critical section, so no line is
+/// dropped or repeated at the boundary.
+///
+/// **Redacted, like the ring.** The subscription is fed where lines enter the
+/// log ring, i.e. after the devtools handshake token has been redacted out; a
+/// subscriber can never observe that token.
+///
+/// **Bounded, never blocking.** The channel holds
+/// [`LOG_SUBSCRIPTION_CAP`](crate::engine::LOG_SUBSCRIPTION_CAP) lines and the
+/// session thread only ever offers into it, so a subscriber that stops reading
+/// slows nothing down. It loses lines instead, and is told: the next line the
+/// channel accepts is preceded by one
+/// `[frust] <N> log line(s) dropped (slow consumer)` marker.
+///
+/// **Ends with the session.** Once the session is torn down (or ends on its
+/// own, or a later `subscribe_logs` call replaces this one), the sending half
+/// is dropped: the receiver hands back everything still buffered and then
+/// reports a disconnect.
+pub struct LogSubscription {
+    lines: Receiver<String>,
+}
+
+impl LogSubscription {
+    /// Blocks until the next line arrives, or the feed ends.
+    pub fn recv(&self) -> Result<String, RecvError> {
+        self.lines.recv()
+    }
+
+    /// Blocks for at most `timeout` waiting for the next line.
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<String, RecvTimeoutError> {
+        self.lines.recv_timeout(timeout)
+    }
+
+    /// The next line if one is already buffered, never blocking.
+    pub fn try_recv(&self) -> Result<String, TryRecvError> {
+        self.lines.try_recv()
+    }
+
+    /// The underlying receiver, for a caller that wants to select/iterate over
+    /// it directly.
+    pub fn into_receiver(self) -> Receiver<String> {
+        self.lines
+    }
+}
+
+/// The session's own half of a [`LogSubscription`]: the bounded sender plus
+/// the count of lines the subscriber was too slow to take.
+///
+/// Held under the `data` lock and driven only from an ingest, so every send is
+/// a `try_send` — a blocking send here would park the session's launch/drain
+/// thread on whatever an agent's DAP client is doing.
+struct LogFeed {
+    lines: SyncSender<String>,
+    /// Lines dropped since the last marker the subscriber actually received.
+    dropped: u64,
+}
+
+impl LogFeed {
+    fn new(lines: SyncSender<String>) -> Self {
+        Self { lines, dropped: 0 }
+    }
+
+    /// Offers `line` to the subscriber. Returns `false` once the receiver is
+    /// gone — the caller then clears the slot, so a dropped subscriber costs
+    /// the session thread one failed send and nothing more.
+    ///
+    /// A backlog of dropped lines is announced *before* the line that finally
+    /// fits, so the marker lands in the reader's stream at the point the loss
+    /// actually happened.
+    fn offer(&mut self, line: &str) -> bool {
+        if self.dropped > 0 {
+            match self
+                .lines
+                .try_send(dropped_marker(self.dropped, SLOW_CONSUMER))
+            {
+                Ok(()) => self.dropped = 0,
+                // Still full: the marker's own count grows by this line too.
+                Err(TrySendError::Full(_)) => {
+                    self.dropped = self.dropped.saturating_add(1);
+                    return true;
+                }
+                Err(TrySendError::Disconnected(_)) => return false,
+            }
+        }
+        match self.lines.try_send(line.to_string()) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => {
+                self.dropped = self.dropped.saturating_add(1);
+                true
+            }
+            Err(TrySendError::Disconnected(_)) => false,
+        }
+    }
+
+    /// Announces, as the feed's very first line, a backlog too deep to seed.
+    /// Only ever called on an empty channel, so it cannot itself be lost.
+    fn note_backlog_skipped(&mut self, skipped: u64) {
+        let _ = self
+            .lines
+            .try_send(dropped_marker(skipped, OLDER_THAN_BUFFER));
+    }
+}
+
 /// Everything behind the session's `data` lock — see the module doc.
 struct SessionData {
     state: SessionState,
@@ -216,6 +344,9 @@ struct SessionData {
     discovered: Option<Discovery>,
     metrics_sampling: bool,
     logs: Ring<String>,
+    /// The registered log subscriber, if any — at most one per session (a new
+    /// [`Session::subscribe_logs`] replaces it).
+    log_feed: Option<LogFeed>,
     frames: Ring<FrameStats>,
     cpu: Option<CpuSample>,
     mem: Option<MemSample>,
@@ -277,6 +408,7 @@ impl Session {
                 discovered: None,
                 metrics_sampling: false,
                 logs: Ring::new(LOG_RING_CAP),
+                log_feed: None,
                 frames: Ring::new(FRAME_RING_CAP),
                 cpu: None,
                 mem: None,
@@ -394,16 +526,84 @@ impl Session {
     /// Records the state only while the session is still live — a session
     /// already torn down (or already terminal) keeps the state it ended with,
     /// so a late thread cannot resurrect it.
+    ///
+    /// Reaching a terminal state also ends any log subscription: no further
+    /// line will ever be ingested, so the subscriber is owed a closed channel
+    /// rather than a feed that stays open until the session is evicted.
     pub(crate) fn set_state_if_live(&self, state: SessionState) {
         self.with_data(|data| {
             if !data.state.is_terminal() {
                 data.state = state;
+                if data.state.is_terminal() {
+                    data.log_feed = None;
+                }
             }
         });
     }
 
+    /// Retains one log line and offers it to the subscriber, if any.
+    ///
+    /// The offer is inside the ring's own critical section deliberately: it is
+    /// what makes [`subscribe_logs`](Self::subscribe_logs)'s seed and this
+    /// live feed meet exactly, with no line dropped or repeated at the seam.
+    /// The offer never blocks (see [`LogFeed`]), so a subscriber cannot stall
+    /// the session's launch/drain thread.
     pub(crate) fn push_log(&self, line: String) {
-        self.with_data(|data| data.logs.push(line));
+        self.with_data(|data| {
+            if let Some(feed) = data.log_feed.as_mut()
+                && !feed.offer(&line)
+            {
+                // The subscriber is gone; the slot is cleared so the next
+                // ingest does not retry a dead channel.
+                data.log_feed = None;
+            }
+            data.logs.push(line);
+        });
+    }
+
+    /// Opens a [`LogSubscription`] over this session, replacing any previous
+    /// one (whose receiver then sees the channel close).
+    ///
+    /// Seeded with the retained log tail and registered for live delivery in
+    /// **one** `data` critical section, which is the whole point: an ingest
+    /// can only run before the seed is taken or after the feed is registered,
+    /// never between the two.
+    ///
+    /// A backlog deeper than the channel is seeded with its newest lines and
+    /// preceded by one marker naming what was skipped — the same in-band,
+    /// never-silent loss contract the overflow path uses.
+    pub(crate) fn subscribe_logs(&self) -> LogSubscription {
+        let (sender, lines) = mpsc::sync_channel(LOG_SUBSCRIPTION_CAP);
+        self.with_data(|data| {
+            let mut feed = LogFeed::new(sender);
+            let held = data.logs.len();
+            let seed = if held > LOG_SUBSCRIPTION_CAP {
+                // One slot goes to the marker, so the seed is the newest
+                // `cap - 1` lines and the channel opens exactly full.
+                let kept = LOG_SUBSCRIPTION_CAP - 1;
+                feed.note_backlog_skipped((held - kept) as u64);
+                data.logs.tail(Some(kept))
+            } else {
+                data.logs.tail(None)
+            };
+            for line in seed {
+                feed.offer(&line);
+            }
+            // A session that has already ended ingests nothing more: the
+            // subscriber keeps the seed it just got and sees the channel close
+            // straight away, rather than a feed that never speaks again.
+            if !data.state.is_terminal() {
+                data.log_feed = Some(feed);
+            }
+        });
+        LogSubscription { lines }
+    }
+
+    /// Ends any log subscription — teardown, where the session may already
+    /// have been terminal (and so never passed through the state transition
+    /// that closes the feed on its own).
+    pub(crate) fn close_log_subscription(&self) {
+        self.with_data(|data| data.log_feed = None);
     }
 
     pub(crate) fn push_frame(&self, frame: FrameStats) {
