@@ -182,10 +182,12 @@ pub enum RegionId {
     /// The DevTools status row's "back to log" affordance (keyboard parity:
     /// `Esc` / `d`).
     DevtoolsBack,
-    /// A Performance-tab chart column (0-based index into the current
-    /// [`super::perf_window`] result); click selects that frame (keyboard
-    /// parity: `←`/`→` scrubbing to it).
-    DevtoolsPerfColumn(usize),
+    /// A Performance-tab chart column, identified by the frame that column
+    /// drew ([`super::PerfFrame::n`], captured at render time — *not* its
+    /// position in the window, which the next frame batch would re-point at
+    /// another frame); click selects that frame (keyboard parity: `←`/`→`
+    /// scrubbing to it).
+    DevtoolsPerfColumn(u64),
     /// An Inspector-tab tree row (0-based index into
     /// [`super::InspectorTab::rows`]); click selects it (keyboard parity:
     /// `↑↓`/`j`/`k`).
@@ -680,13 +682,16 @@ pub enum Message {
     DevtoolsMetrics(SessionId, Vec<MetricsSample>),
 
     // ── Performance tab (workbook §B12) ─────────────────────────────────────
-    /// Move the scrubbed selection `delta` frames across the current
-    /// Performance window (`←`/`→`, ±1), clamped to its bounds. A no-op with
-    /// no active session.
+    /// Move the pinned frame `delta` frames along the current Performance
+    /// window (`←`/`→`, ±1) — to the adjacent *retained* frame, clamped at
+    /// both ends. A no-op with no active session.
     DevtoolsPerfScrub(isize),
-    /// Select a Performance window frame directly by its 0-based index (a
-    /// chart-column click).
-    DevtoolsPerfSelectFrame(usize),
+    /// Pin a Performance-window frame directly by its own
+    /// [`super::PerfFrame::n`] (a chart-column click, carrying the `n` the
+    /// clicked column drew). A frame that has left the window since the click
+    /// was registered pins nothing — see
+    /// [`super::PerformanceTab::select_frame`].
+    DevtoolsPerfSelectFrame(u64),
     /// Clear the Performance tab's scrubbed selection, back to the live tail
     /// — `Esc`'s first stage while a frame is selected (the second `Esc`,
     /// with nothing selected, falls through to [`Message::DevtoolsClose`]).

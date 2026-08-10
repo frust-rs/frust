@@ -14,7 +14,7 @@ use super::bootstrap::BootstrapWizard;
 use super::build_launcher::{BuildLauncher, BuildSpec};
 use super::context_menu::ContextMenu;
 use super::create_wizard::{CreateWizard, WizardAdvance};
-use super::devtools::{ConnState, DevtoolsPhase, DevtoolsTab, InspectorTab};
+use super::devtools::{ConnEvent, ConnState, DevtoolsPhase, DevtoolsTab, InspectorTab, PerfFrame};
 use super::message::{ContextTarget, DragKind, Message};
 use super::run_config::{DeviceRow, RunConfig};
 use super::session_view::SessionView;
@@ -1024,7 +1024,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                     // snapshot here instead (the two are mutually
                     // exclusive: a fresh connect leaves the phase
                     // `Connecting`, which pulls nothing).
-                    None => effects.extend(devtools_inspector_entry(&mut state.sessions[idx])),
+                    None => effects.extend(devtools_inspector_enter(&mut state.sessions[idx])),
                 }
                 effects.extend(metrics_start(state, idx));
                 batch(effects)
@@ -1074,11 +1074,22 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                 return Outcome::idle();
             };
             let is_active = state.active_session == Some(idx);
-            let changed = state.sessions[idx].devtools.apply(event);
             // A handshake completing is the other moment the Inspector can
             // pull its first snapshot: the tab may have been selected (and
-            // shown empty) all through the connect.
-            let effect = devtools_inspector_entry(&mut state.sessions[idx]);
+            // shown empty) all through the connect. A *frame batch* is not —
+            // it carries no connection-state change, and running the entry
+            // check on every batch is what let a failing pull re-fire at
+            // frame-batch rate (the `wants_tree` latch is the second half of
+            // that fix).
+            let handshake = matches!(event, ConnEvent::Connected { .. });
+            let mut changed = state.sessions[idx].devtools.apply(event);
+            // The drawn window just slid: a pinned frame that has aged out of
+            // it drops back to the live tail rather than being re-pointed at
+            // whatever frame took its place.
+            changed |= devtools_perf_retain_selection(&mut state.sessions[idx]);
+            let effect = handshake
+                .then(|| devtools_inspector_entry(&mut state.sessions[idx]))
+                .flatten();
             // Only the visible session's DevTools surface can be dirtied by a
             // report; a background session's ring keeps filling silently
             // (the dirty-frame skip).
@@ -1104,12 +1115,12 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
 
         // ── Performance tab (workbook §B12) ──────────────────────────────────
         Message::DevtoolsPerfScrub(delta) => with_active(state, |s| {
-            let window_len = devtools_perf_window_len(s);
-            s.devtools.performance.scrub(delta, window_len);
+            let window = devtools_perf_window(s);
+            s.devtools.performance.scrub(delta, &window);
         }),
-        Message::DevtoolsPerfSelectFrame(index) => with_active(state, |s| {
-            let window_len = devtools_perf_window_len(s);
-            s.devtools.performance.select(index, window_len);
+        Message::DevtoolsPerfSelectFrame(n) => with_active(state, |s| {
+            let window = devtools_perf_window(s);
+            s.devtools.performance.select_frame(n, &window);
         }),
         Message::DevtoolsPerfClearSelection => with_active(state, |s| {
             s.devtools.performance.clear_selection();
@@ -1815,19 +1826,29 @@ fn cycle_tab(state: &mut AppState, delta: isize) -> Outcome {
     }
 }
 
-/// Apply `f` to the active session (if any) and redraw; idle when none.
-/// The Performance tab's current scrub-able window length — whichever
-/// source [`crate::engine::perf_window`] currently picks for `session`,
-/// capped at [`crate::engine::PERF_WINDOW`]. Shared by the scrub/select
-/// handlers above so a clamp is always computed against the data actually on
-/// screen, not a stale figure.
-fn devtools_perf_window_len(session: &SessionView) -> usize {
+/// The Performance tab's current scrub-able window — whichever source
+/// [`crate::engine::perf_window`] picks for `session`, capped at
+/// [`crate::engine::PERF_WINDOW`]. Shared by the scrub/select handlers above
+/// so a pin is always resolved against the data actually on screen, not a
+/// stale figure.
+fn devtools_perf_window(session: &SessionView) -> Vec<PerfFrame> {
     let (_, window) = crate::engine::perf_window(
         &session.devtools.conn,
         &session.devtools.frames,
         &session.perf,
     );
-    window.len()
+    window
+}
+
+/// Drop a pinned Performance frame that has aged out of the drawn window
+/// (see [`crate::engine::PerformanceTab::retain_in_window`]). Cheap in the
+/// common case: an un-pinned tab never builds the window at all.
+fn devtools_perf_retain_selection(session: &mut SessionView) -> bool {
+    if !session.devtools.performance.has_selection() {
+        return false;
+    }
+    let window = devtools_perf_window(session);
+    session.devtools.performance.retain_in_window(&window)
 }
 
 /// [`with_active`] for the DevTools tab-selection arms: apply `f` to the
@@ -1843,7 +1864,7 @@ fn with_active_devtools_tab(
     f(&mut session.devtools);
     Outcome {
         redraw: true,
-        effect: devtools_inspector_entry(session),
+        effect: devtools_inspector_enter(session),
     }
 }
 
@@ -1877,11 +1898,26 @@ fn devtools_props_fetch(session: &mut SessionView) -> Option<Effect> {
     })
 }
 
-/// The automatic first `widget_tree` pull: entering the Inspector tab (by
-/// key, pill click, or re-opening DevTools onto it) with no snapshot yet and
-/// a live connection fires exactly one — [`InspectorTab::wants_tree`] is
-/// false forever after, so re-entering the tab never re-pulls. `r` is the
-/// explicit refresh.
+/// A deliberate *entry* into the Inspector tab (`3`, `[`/`]`, a tab-pill
+/// click, or re-opening DevTools onto it): re-arm the once-only automatic
+/// pull, then take it. Re-arming is what lets an entry retry after an earlier
+/// automatic pull failed — the entry is a user action, bounded by input rate,
+/// unlike the message-driven check in the `DevtoolsConn` arm. Re-arming a tab
+/// that already has a snapshot changes nothing
+/// ([`InspectorTab::wants_tree`] stays false on `loaded`).
+fn devtools_inspector_enter(session: &mut SessionView) -> Option<Effect> {
+    if session.devtools.active_tab == DevtoolsTab::Inspector {
+        session.devtools.inspector.rearm_auto_pull();
+    }
+    devtools_inspector_entry(session)
+}
+
+/// The automatic first `widget_tree` pull: an Inspector tab with no snapshot
+/// yet, a live connection, and no automatic attempt already spent fires
+/// exactly one ([`InspectorTab::wants_tree`]'s latch). A *failed* pull does
+/// not re-open that latch — only [`devtools_inspector_enter`] or the explicit
+/// `r` refresh re-triggers one — so a persistently failing pull cannot storm
+/// the bridge from the message path that calls this.
 fn devtools_inspector_entry(session: &mut SessionView) -> Option<Effect> {
     if session.devtools.active_tab != DevtoolsTab::Inspector
         || session.devtools.phase() != DevtoolsPhase::Connected
@@ -3824,33 +3860,126 @@ mod tests {
         let out = update(&mut st, Message::DevtoolsPerfScrub(0));
         assert!(out.redraw);
         assert_eq!(
-            st.active_session()
-                .unwrap()
-                .devtools
-                .performance
-                .selected_frame,
+            pinned_n(&st),
             Some(29),
             "the first scrub starts at the tail of the 30-frame window"
         );
 
         update(&mut st, Message::DevtoolsPerfScrub(-1));
-        assert_eq!(
-            st.active_session()
-                .unwrap()
-                .devtools
-                .performance
-                .selected_frame,
-            Some(28)
-        );
+        assert_eq!(pinned_n(&st), Some(28));
 
         update(&mut st, Message::DevtoolsPerfSelectFrame(0));
+        assert_eq!(pinned_n(&st), Some(0));
+    }
+
+    /// The active session's pinned Performance frame (`FrameStats::n`).
+    fn pinned_n(state: &AppState) -> Option<u64> {
+        state
+            .active_session()
+            .unwrap()
+            .devtools
+            .performance
+            .selected_n
+    }
+
+    /// What the Performance tab would actually *render* as the pinned frame:
+    /// the pin resolved against the window on screen, exactly as
+    /// `ui::views::devtools::performance` does it. The header/breakdown read
+    /// this, so it is the assertion that catches a pin whose identity walks.
+    fn rendered_pin_n(state: &AppState) -> Option<u64> {
+        let session = state.active_session().unwrap();
+        let window = devtools_perf_window(session);
+        let index = session.devtools.performance.resolve(&window)?;
+        Some(window[index].n)
+    }
+
+    #[test]
+    fn a_pinned_frame_survives_later_frame_batches_unchanged() {
+        let (mut st, id) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        // Enough frames that the drawn window is already *sliding* (it only
+        // starts to once the ring passes `PERF_WINDOW`) — the condition the
+        // walk needs.
+        let win = crate::engine::PERF_WINDOW as u64;
+        let frames = (0..win + 10).map(frame_stats).collect();
+        update(
+            &mut st,
+            Message::DevtoolsConn(id, ConnEvent::Frames(frames)),
+        );
+        // Scrub back off the tail onto a specific frame and hold it.
+        update(&mut st, Message::DevtoolsPerfScrub(0));
+        update(&mut st, Message::DevtoolsPerfScrub(-29));
+        let pinned = win + 10 - 1 - 29;
+        assert_eq!(pinned_n(&st), Some(pinned));
+        assert_eq!(rendered_pin_n(&st), Some(pinned));
+
+        // Ten more frames arrive, each sliding the window by one. The pin
+        // must still name the same frame — a positional pin would name a
+        // frame ten later by the end of this loop, so the header and
+        // breakdown would have walked off the spike with no key pressed.
+        for n in (win + 10)..(win + 20) {
+            update(
+                &mut st,
+                Message::DevtoolsConn(id, ConnEvent::Frames(vec![frame_stats(n)])),
+            );
+            assert_eq!(pinned_n(&st), Some(pinned), "after frame {n}");
+            assert_eq!(
+                rendered_pin_n(&st),
+                Some(pinned),
+                "the header/breakdown still show frame #{pinned} after frame {n}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pin_that_slides_out_of_the_window_drops_back_to_live() {
+        let (mut st, id) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        let frames = (0..30).map(frame_stats).collect();
+        update(
+            &mut st,
+            Message::DevtoolsConn(id, ConnEvent::Frames(frames)),
+        );
+        update(&mut st, Message::DevtoolsPerfSelectFrame(0));
+        assert_eq!(pinned_n(&st), Some(0));
+
+        // Push the window (`PERF_WINDOW` frames) past frame 0 entirely.
+        let batch: Vec<_> = (30..(30 + crate::engine::PERF_WINDOW as u64))
+            .map(frame_stats)
+            .collect();
+        update(&mut st, Message::DevtoolsConn(id, ConnEvent::Frames(batch)));
         assert_eq!(
-            st.active_session()
-                .unwrap()
-                .devtools
-                .performance
-                .selected_frame,
-            Some(0)
+            pinned_n(&st),
+            None,
+            "the pinned frame's data is gone from the window — back to live"
+        );
+    }
+
+    #[test]
+    fn a_chart_click_naming_a_departed_frame_pins_nothing() {
+        let (mut st, id) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        let frames = (0..30).map(frame_stats).collect();
+        update(
+            &mut st,
+            Message::DevtoolsConn(id, ConnEvent::Frames(frames)),
+        );
+        update(&mut st, Message::DevtoolsPerfSelectFrame(25));
+
+        // 100 more frames: the window is now frames 10..=129, so the pin
+        // (25) is still retained but frame 0 has left.
+        let batch: Vec<_> = (30..130).map(frame_stats).collect();
+        update(&mut st, Message::DevtoolsConn(id, ConnEvent::Frames(batch)));
+        assert_eq!(pinned_n(&st), Some(25));
+
+        // A click registered against a column drawing frame 0, consumed
+        // after the window moved past it (message-level: the payload is the
+        // frame itself, so the race is decidable here).
+        update(&mut st, Message::DevtoolsPerfSelectFrame(0));
+        assert_eq!(
+            pinned_n(&st),
+            Some(25),
+            "a stale click pins nothing rather than whatever slid into that column"
         );
     }
 
@@ -4024,6 +4153,92 @@ mod tests {
                 },
             ),
         );
+        assert_eq!(out.effect, Some(Effect::DevtoolsFetchTree { session: id }));
+    }
+
+    /// A connected session on the Inspector tab whose first automatic pull
+    /// has *failed* — the storm precondition.
+    fn failed_first_pull() -> (AppState, SessionId) {
+        let (mut st, id) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        update(
+            &mut st,
+            Message::DevtoolsConn(
+                id,
+                ConnEvent::Connected {
+                    app_name: "huddle".to_string(),
+                    caps: Vec::new(),
+                },
+            ),
+        );
+        let out = update(&mut st, Message::DevtoolsTab(2));
+        assert_eq!(out.effect, Some(Effect::DevtoolsFetchTree { session: id }));
+        update(
+            &mut st,
+            Message::DevtoolsInspector(id, InspectorEvent::Failed("request timed out".to_string())),
+        );
+        (st, id)
+    }
+
+    #[test]
+    fn a_failed_inspector_pull_is_never_re_fired_by_arriving_frame_batches() {
+        let (mut st, id) = failed_first_pull();
+
+        // Frame-stats batches keep arriving at the bridge's coalescing rate
+        // while the Inspector sits open on a failed pull. Not one of them
+        // may re-issue the request: pre-fix, every batch re-ran the tab-entry
+        // check, whose gate had re-opened the moment the failure cleared
+        // `tree_pending` — an unbounded request storm, each attempt blocking
+        // the bridge pump for a request timeout.
+        for n in 0..64 {
+            let out = update(
+                &mut st,
+                Message::DevtoolsConn(id, ConnEvent::Frames(vec![frame_stats(n)])),
+            );
+            assert_eq!(out.effect, None, "frame batch {n} re-fired the pull");
+        }
+        // A repeated connection report is not a loophole either.
+        for _ in 0..4 {
+            let out = update(
+                &mut st,
+                Message::DevtoolsConn(
+                    id,
+                    ConnEvent::Connected {
+                        app_name: "huddle".to_string(),
+                        caps: Vec::new(),
+                    },
+                ),
+            );
+            assert_eq!(out.effect, None);
+        }
+    }
+
+    #[test]
+    fn an_explicit_refresh_or_a_tab_re_entry_retries_a_failed_pull() {
+        let (mut st, id) = failed_first_pull();
+
+        // `r` is the explicit re-trigger.
+        let out = update(&mut st, Message::DevtoolsInspectorRefresh);
+        assert_eq!(out.effect, Some(Effect::DevtoolsFetchTree { session: id }));
+        update(
+            &mut st,
+            Message::DevtoolsInspector(id, InspectorEvent::Failed("request timed out".to_string())),
+        );
+
+        // So is leaving and re-entering the tab — one attempt per entry,
+        // bounded by the user's own keypresses.
+        update(&mut st, Message::DevtoolsTab(0));
+        let out = update(&mut st, Message::DevtoolsTab(2));
+        assert_eq!(out.effect, Some(Effect::DevtoolsFetchTree { session: id }));
+        update(
+            &mut st,
+            Message::DevtoolsInspector(id, InspectorEvent::Failed("request timed out".to_string())),
+        );
+
+        // Closing and re-opening DevTools onto the tab is the third entry
+        // route (§B12's re-open onto a retained connection).
+        update(&mut st, Message::DevtoolsClose);
+        let out = update(&mut st, Message::DevtoolsToggle);
         assert_eq!(out.effect, Some(Effect::DevtoolsFetchTree { session: id }));
     }
 

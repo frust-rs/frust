@@ -66,13 +66,14 @@ pub fn render(
         return;
     }
 
-    let selected_idx = session
-        .devtools
-        .performance
-        .selected_frame
-        .unwrap_or(window.len() - 1);
-    let is_live = session.devtools.performance.selected_frame.is_none();
-    let selected = window[selected_idx.min(window.len() - 1)];
+    // The pin is a frame identity, resolved to a position against *this*
+    // frame's window (see `PerformanceTab::resolve`): an unresolvable pin
+    // (its frame aged out between the engine's own retention pass and this
+    // draw) reads as live rather than as some other frame.
+    let resolved = session.devtools.performance.resolve(&window);
+    let is_live = resolved.is_none();
+    let selected_idx = resolved.unwrap_or(window.len() - 1);
+    let selected = window[selected_idx];
     let stats = perf_stats(&window);
 
     let rows = Layout::default()
@@ -238,13 +239,16 @@ fn render_chart(
 
     frame.render_widget(Sparkline::default().data(bars).max(max_us), area);
 
-    for (i, _) in visible.iter().enumerate() {
-        let abs_index = offset + i;
+    // Each column's region carries the frame *it drew* (`PerfFrame::n`), not
+    // its position: the click is consumed a frame or more later, by which
+    // time the window may have slid, and a positional payload would then
+    // select whichever frame had moved into that column.
+    for (i, f) in visible.iter().enumerate() {
         let x = area.x + i as u16;
         mouse.click(
             Rect::new(x, area.y, 1, area.height),
-            RegionId::DevtoolsPerfColumn(abs_index),
-            Message::DevtoolsPerfSelectFrame(abs_index),
+            RegionId::DevtoolsPerfColumn(f.n),
+            Message::DevtoolsPerfSelectFrame(f.n),
         );
     }
 }

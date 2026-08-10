@@ -1334,6 +1334,8 @@ fn devtools_performance_chart_column_click_selects_the_frame() {
         Message::DevtoolsConn(SessionId(0), ConnEvent::Frames(frames)),
     );
     let regions = render_regions(100, 30, &state);
+    // The region is keyed by the frame the column drew, not its position —
+    // so the message it produces names that frame directly.
     let msg = click_message_for(&regions, RegionId::DevtoolsPerfColumn(5));
     assert_eq!(msg, Some(Message::DevtoolsPerfSelectFrame(5)));
 
@@ -1345,7 +1347,26 @@ fn devtools_performance_chart_column_click_selects_the_frame() {
             .unwrap()
             .devtools
             .performance
-            .selected_frame,
+            .selected_n,
+        Some(5)
+    );
+
+    // Ten more frames slide the window under the pin: it keeps naming frame
+    // #5 rather than following the column it was clicked in.
+    let more = (20..30)
+        .map(|n| perf_frame_stats(n, 16_000, false))
+        .collect();
+    update(
+        &mut state,
+        Message::DevtoolsConn(SessionId(0), ConnEvent::Frames(more)),
+    );
+    assert_eq!(
+        state
+            .active_session()
+            .unwrap()
+            .devtools
+            .performance
+            .selected_n,
         Some(5)
     );
 }

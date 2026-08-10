@@ -419,15 +419,35 @@ impl PerfFocus {
 }
 
 /// The Performance tab's own interaction state: which pane has focus, and
-/// which ring frame (if any) is pinned for inspection. `selected_frame` is a
-/// 0-based index into whatever window [`perf_window`] currently returns
-/// (oldest first) — `None` means "follow the live tail", the default.
+/// which frame (if any) is pinned for inspection.
+///
+/// # Why the pin is a frame identity, not a window index
+///
+/// The drawn window ([`perf_window`]) is a *sliding* view of the newest
+/// [`PERF_WINDOW`] samples: every arriving frame shifts every position in it
+/// by one. A pin stored as a position would therefore name a different frame
+/// after each batch — the header and breakdown would walk off the spike the
+/// user pinned with no key pressed, which is exactly what holding a jank
+/// frame still is for. So the pin is the frame's own `FrameStats::n`
+/// ([`PerfFrame::n`]), resolved back to a position at read time
+/// ([`Self::resolve`]); it stays glued to its frame as the window slides, and
+/// falls back to the live tail only when that frame ages out of the window
+/// entirely ([`Self::retain_in_window`]).
+///
+/// **Log-fallback caveat**: in [`PerfSource::LogFallback`] the `n` a frame
+/// carries is *synthesized* from its position in [`PerfPanel`]'s own ring
+/// (the raw-line parser keeps only totals — see [`PerfFrame::n`]'s doc), so
+/// once that ring is full the identity a fallback frame reports is positional
+/// after all. Pinning is only as stable as the source's own numbering; the
+/// live service source (the one §B12's scrub is about) carries the real
+/// frame counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PerformanceTab {
     /// Which pane `Tab` moves between.
     pub focus: PerfFocus,
-    /// The scrubbed-to frame, or `None` to track the newest.
-    pub selected_frame: Option<usize>,
+    /// The pinned frame's own [`PerfFrame::n`], or `None` to track the
+    /// newest (the default "follow the live tail").
+    pub selected_n: Option<u64>,
 }
 
 impl PerformanceTab {
@@ -438,35 +458,63 @@ impl PerformanceTab {
         true
     }
 
-    /// `←`/`→`: move the selection one frame at a time across a
-    /// `window_len`-frame window, clamped to its bounds. With nothing
-    /// selected yet, the first press starts scrubbing from the tail (the
-    /// newest frame) rather than jumping straight to an edge — the same
-    /// "step off live" shape a video player's scrub bar takes. An empty
-    /// window has nothing to select.
-    pub fn scrub(&mut self, delta: isize, window_len: usize) -> bool {
-        if window_len == 0 {
-            let changed = self.selected_frame.is_some();
-            self.selected_frame = None;
-            return changed;
+    /// The pinned frame's 0-based position in `window`, or `None` when
+    /// nothing is pinned *or* the pinned frame is no longer in the window.
+    /// The render layer treats `None` as "live tail" — the same thing an
+    /// un-pinned tab shows.
+    pub fn resolve(&self, window: &[PerfFrame]) -> Option<usize> {
+        let n = self.selected_n?;
+        window.iter().position(|frame| frame.n == n)
+    }
+
+    /// `←`/`→`: move the pin one frame at a time along `window` (oldest
+    /// first), clamped to its bounds — the *adjacent retained frame*, by
+    /// identity, not a position that would later drift. With nothing pinned
+    /// yet, the first press starts scrubbing from the tail (the newest frame)
+    /// rather than jumping straight to an edge — the same "step off live"
+    /// shape a video player's scrub bar takes. An empty window has nothing to
+    /// pin.
+    pub fn scrub(&mut self, delta: isize, window: &[PerfFrame]) -> bool {
+        if window.is_empty() {
+            return self.clear_selection();
         }
-        let current = self.selected_frame.unwrap_or(window_len - 1);
-        let next = (current as isize + delta).clamp(0, window_len as isize - 1) as usize;
-        let changed = self.selected_frame != Some(next);
-        self.selected_frame = Some(next);
+        let current = self.resolve(window).unwrap_or(window.len() - 1);
+        let next = (current as isize + delta).clamp(0, window.len() as isize - 1) as usize;
+        let n = window[next].n;
+        let changed = self.selected_n != Some(n);
+        self.selected_n = Some(n);
         changed
     }
 
-    /// Select a specific window index directly (a chart-column click),
-    /// clamped into range. A no-op on an empty window.
-    pub fn select(&mut self, index: usize, window_len: usize) -> bool {
-        if window_len == 0 {
+    /// Pin the frame a chart column named (a column click), by the `n` that
+    /// column carried *at render time*. A frame that has since left the
+    /// window is not pinned at all: dropping the stale click is what makes
+    /// the click race-free, where a positional payload would silently pin
+    /// whichever frame had slid into that column since.
+    pub fn select_frame(&mut self, n: u64, window: &[PerfFrame]) -> bool {
+        if !window.iter().any(|frame| frame.n == n) {
             return false;
         }
-        let clamped = index.min(window_len - 1);
-        let changed = self.selected_frame != Some(clamped);
-        self.selected_frame = Some(clamped);
+        let changed = self.selected_n != Some(n);
+        self.selected_n = Some(n);
         changed
+    }
+
+    /// The window slid: if the pinned frame has fallen out of it, drop back
+    /// to the live tail. Returns whether the pin was actually cleared.
+    ///
+    /// Clearing (rather than clamping onto the oldest retained column) is the
+    /// deliberate choice: the pinned frame's data is genuinely gone from the
+    /// window, and clamping would re-introduce the very walking-identity
+    /// defect this type exists to avoid — the "oldest column" names a new
+    /// frame on every batch. Falling back to live is one discrete transition
+    /// the axis row already labels (`live (frame #N)`).
+    pub fn retain_in_window(&mut self, window: &[PerfFrame]) -> bool {
+        if self.selected_n.is_none() || self.resolve(window).is_some() {
+            return false;
+        }
+        self.selected_n = None;
+        true
     }
 
     /// `Esc`'s first stage inside the Performance tab: drop back to the live
@@ -474,14 +522,14 @@ impl PerformanceTab {
     /// reaches for this while a frame is actually selected — a second `Esc`
     /// with nothing selected falls through to `Message::DevtoolsClose`.
     pub fn clear_selection(&mut self) -> bool {
-        let changed = self.selected_frame.is_some();
-        self.selected_frame = None;
+        let changed = self.selected_n.is_some();
+        self.selected_n = None;
         changed
     }
 
     /// Whether a frame is currently pinned — the two-stage `Esc` gate.
     pub fn has_selection(&self) -> bool {
-        self.selected_frame.is_some()
+        self.selected_n.is_some()
     }
 }
 
@@ -1246,6 +1294,15 @@ pub struct InspectorTab {
     /// Whether a snapshot has *ever* arrived (distinguishes "empty tree" from
     /// "nothing pulled yet", and gates the one-shot default expansion).
     loaded: bool,
+    /// Whether an automatic pull has already been *attempted* since the last
+    /// deliberate re-trigger — the latch that keeps [`Self::wants_tree`] from
+    /// re-opening after a failure. Set by [`Self::begin_tree_fetch`], and
+    /// **not** cleared by [`InspectorEvent::Failed`]: a failed pull leaves
+    /// `tree_pending` false and `loaded` false, so without this latch every
+    /// subsequent automatic check would re-fire the same failing request
+    /// (see [`Self::wants_tree`]'s doc for the storm this prevents). Cleared
+    /// only by [`Self::rearm_auto_pull`].
+    auto_pull_attempted: bool,
 }
 
 impl InspectorTab {
@@ -1296,23 +1353,51 @@ impl InspectorTab {
         self.error.as_deref()
     }
 
-    /// Whether an automatic first pull is warranted: entering the Inspector
-    /// tab with nothing loaded and nothing already in flight (see
-    /// `super::update`'s tab-entry arm — it fires once per tab entry, not per
-    /// frame).
+    /// Whether an **automatic** pull is warranted: nothing loaded, nothing
+    /// already in flight, and no automatic attempt made since the last
+    /// deliberate re-trigger.
+    ///
+    /// That third clause is the once-only latch. A pull that fails clears
+    /// `tree_pending` and never sets `loaded`, so the first two clauses alone
+    /// re-open the gate forever — and `super::update`'s automatic call sites
+    /// are message-driven, so a persistently failing pull would be re-issued
+    /// at whatever rate those messages arrive (a frame-stats batch rate, in
+    /// the worst case), each attempt blocking the bridge pump for a request
+    /// timeout and flickering the pane. With the latch, a failed automatic
+    /// pull is attempted exactly once and then waits for a deliberate
+    /// re-trigger: `r` (an explicit refresh, which goes through
+    /// [`Self::begin_tree_fetch`] directly and never consults this gate), or
+    /// re-entering the Inspector tab ([`Self::rearm_auto_pull`]).
     pub fn wants_tree(&self) -> bool {
-        !self.loaded && !self.tree_pending
+        !self.loaded && !self.tree_pending && !self.auto_pull_attempted
     }
 
-    /// Mark a `widget_tree` pull as started (`r`, or the automatic first
-    /// pull). Returns whether one should actually be issued — a second `r`
-    /// while a pull is already in flight is a no-op rather than a duplicate
-    /// request.
+    /// Re-arm the automatic pull: a *deliberate* user action — entering the
+    /// Inspector tab (`3`, `[`/`]`, a tab-pill click, or re-opening DevTools
+    /// onto it) — is allowed one fresh automatic attempt even after an
+    /// earlier one failed, because the entry itself is the intent to look.
+    /// Bounded by user input rate, unlike the message-driven checks
+    /// [`Self::wants_tree`]'s latch exists to stop.
+    ///
+    /// A no-op once a snapshot has loaded (`wants_tree` stays false on
+    /// `loaded`), so re-entering a healthy tab still never re-pulls.
+    pub fn rearm_auto_pull(&mut self) {
+        self.auto_pull_attempted = false;
+    }
+
+    /// Mark a `widget_tree` pull as started (`r`, or an automatic pull).
+    /// Returns whether one should actually be issued — a second `r` while a
+    /// pull is already in flight is a no-op rather than a duplicate request.
+    ///
+    /// Latches [`Self::wants_tree`] shut either way: every attempt counts as
+    /// the automatic one, so a failure cannot re-open the automatic gate
+    /// behind the user's back.
     pub fn begin_tree_fetch(&mut self) -> bool {
         if self.tree_pending {
             return false;
         }
         self.tree_pending = true;
+        self.auto_pull_attempted = true;
         self.error = None;
         true
     }
@@ -1950,57 +2035,136 @@ mod tests {
         assert_eq!(perf.focus, PerfFocus::Chart);
     }
 
+    /// A window of `len` frames whose identities start at `first_n` — the
+    /// sliding-window fixture: `window(100, 10)` and `window(105, 10)` are
+    /// "the same chart, five frames later".
+    fn window(first_n: u64, len: u64) -> Vec<PerfFrame> {
+        (first_n..first_n + len)
+            .map(|n| phased_frame(n, 16_000, false))
+            .collect()
+    }
+
     #[test]
     fn scrub_starts_from_the_tail_and_clamps_at_both_ends() {
+        let w = window(100, 10);
         let mut perf = PerformanceTab::default();
-        assert_eq!(perf.selected_frame, None);
+        assert_eq!(perf.selected_n, None);
 
-        // First press starts at the tail (index `window_len - 1`), not at 0.
-        assert!(perf.scrub(0, 10));
-        assert_eq!(perf.selected_frame, Some(9));
+        // First press starts at the tail (the newest frame), not the oldest.
+        assert!(perf.scrub(0, &w));
+        assert_eq!(perf.selected_n, Some(109));
 
-        assert!(perf.scrub(-1, 10));
-        assert_eq!(perf.selected_frame, Some(8));
-        assert!(perf.scrub(1, 10));
-        assert_eq!(perf.selected_frame, Some(9));
+        assert!(perf.scrub(-1, &w));
+        assert_eq!(perf.selected_n, Some(108));
+        assert!(perf.scrub(1, &w));
+        assert_eq!(perf.selected_n, Some(109));
 
         // Clamped at the newest end — repeated Right never overflows.
-        assert!(!perf.scrub(1, 10), "already at the newest frame");
-        assert_eq!(perf.selected_frame, Some(9));
+        assert!(!perf.scrub(1, &w), "already at the newest frame");
+        assert_eq!(perf.selected_n, Some(109));
 
         // Clamped at the oldest end.
         for _ in 0..20 {
-            perf.scrub(-1, 10);
+            perf.scrub(-1, &w);
         }
-        assert_eq!(perf.selected_frame, Some(0));
-        assert!(!perf.scrub(-1, 10), "already at the oldest frame");
+        assert_eq!(perf.selected_n, Some(100));
+        assert!(!perf.scrub(-1, &w), "already at the oldest frame");
     }
 
     #[test]
     fn scrub_on_an_empty_window_clears_any_selection() {
         let mut perf = PerformanceTab {
-            selected_frame: Some(3),
+            selected_n: Some(3),
             ..Default::default()
         };
-        assert!(perf.scrub(1, 0));
-        assert_eq!(perf.selected_frame, None);
+        assert!(perf.scrub(1, &[]));
+        assert_eq!(perf.selected_n, None);
     }
 
     #[test]
-    fn select_clamps_into_range_and_reports_change() {
+    fn a_pinned_frame_keeps_its_identity_as_the_window_slides() {
+        // The exact walk scenario: pin one frame, then let five more arrive.
         let mut perf = PerformanceTab::default();
-        assert!(perf.select(4, 10));
-        assert_eq!(perf.selected_frame, Some(4));
-        assert!(!perf.select(4, 10), "re-selecting the same frame");
-        assert!(perf.select(50, 10), "out-of-range clamps to the last index");
-        assert_eq!(perf.selected_frame, Some(9));
-        assert!(!perf.select(0, 0), "an empty window has nothing to select");
+        let before = window(100, 10);
+        assert!(perf.select_frame(108, &before));
+        assert_eq!(perf.resolve(&before), Some(8));
+
+        for shift in 1..=5u64 {
+            let after = window(100 + shift, 10);
+            assert!(
+                !perf.retain_in_window(&after),
+                "frame 108 is still retained after {shift} more frames"
+            );
+            assert_eq!(perf.selected_n, Some(108), "the pin never changes frame");
+            assert_eq!(
+                perf.resolve(&after),
+                Some(8 - shift as usize),
+                "it only moves *left* as the window slides under it"
+            );
+        }
+    }
+
+    #[test]
+    fn scrub_steps_to_the_adjacent_retained_frame_by_identity() {
+        let mut perf = PerformanceTab::default();
+        let before = window(100, 10);
+        assert!(perf.select_frame(105, &before));
+
+        // Three more frames arrive: the pin is still 105, and one step left
+        // lands on 104 — the adjacent *frame*, not "one column left of where
+        // 105 used to be" (which would now be 107's column).
+        let after = window(103, 10);
+        assert!(perf.scrub(-1, &after));
+        assert_eq!(perf.selected_n, Some(104));
+        assert!(perf.scrub(1, &after));
+        assert_eq!(perf.selected_n, Some(105));
+    }
+
+    #[test]
+    fn a_pin_that_falls_out_of_the_window_drops_back_to_the_live_tail() {
+        let mut perf = PerformanceTab::default();
+        let before = window(100, 10);
+        assert!(perf.select_frame(101, &before));
+
+        // Frame 101 is gone from the window entirely: clear rather than
+        // clamp onto the oldest column (which would name a fresh frame on
+        // every batch — the walk this type exists to prevent).
+        let after = window(110, 10);
+        assert!(perf.retain_in_window(&after));
+        assert_eq!(perf.selected_n, None);
+        assert!(!perf.has_selection());
+        assert_eq!(perf.resolve(&after), None, "reads as the live tail");
+        assert!(
+            !perf.retain_in_window(&after),
+            "nothing pinned is nothing to drop"
+        );
+    }
+
+    #[test]
+    fn a_click_naming_a_frame_that_has_left_the_window_pins_nothing() {
+        let mut perf = PerformanceTab::default();
+        let before = window(100, 10);
+        assert!(perf.select_frame(104, &before));
+        assert!(
+            !perf.select_frame(104, &before),
+            "re-pinning the same frame"
+        );
+
+        // The click was registered against a column drawing frame 100; by
+        // the time it is consumed the window has moved past it. The payload
+        // is the frame's own identity, so this is recognizably stale rather
+        // than silently pinning whatever slid into that column.
+        let after = window(110, 10);
+        assert!(!perf.select_frame(100, &after));
+        assert_eq!(perf.selected_n, Some(104), "the old pin is left alone");
+        assert!(perf.select_frame(115, &after));
+        assert_eq!(perf.selected_n, Some(115));
     }
 
     #[test]
     fn clear_selection_is_the_esc_first_stage() {
         let mut perf = PerformanceTab {
-            selected_frame: Some(2),
+            selected_n: Some(2),
             ..Default::default()
         };
         assert!(perf.has_selection());
@@ -2420,6 +2584,53 @@ mod tests {
         // Retrying clears it.
         assert!(inspector.begin_tree_fetch());
         assert_eq!(inspector.error(), None);
+    }
+
+    #[test]
+    fn a_failed_pull_does_not_re_arm_the_automatic_one() {
+        let mut inspector = InspectorTab::default();
+        assert!(inspector.wants_tree());
+        inspector.begin_tree_fetch();
+        inspector.apply(InspectorEvent::Failed("connection closed".to_string()));
+
+        // The failure freed `tree_pending` and never set `loaded`, so only
+        // the attempted-once latch stands between a failing service and an
+        // unbounded automatic-retry storm.
+        assert!(!inspector.is_tree_pending());
+        assert!(!inspector.is_loaded());
+        assert!(
+            !inspector.wants_tree(),
+            "the automatic pull is spent until something deliberate re-arms it"
+        );
+        for _ in 0..50 {
+            assert!(!inspector.wants_tree());
+        }
+
+        // `r` is an explicit refresh — it never consults the gate.
+        assert!(inspector.begin_tree_fetch());
+        inspector.apply(InspectorEvent::Failed("connection closed".to_string()));
+        assert!(!inspector.wants_tree(), "and re-latches on its way through");
+    }
+
+    #[test]
+    fn re_entering_the_tab_re_arms_one_more_automatic_attempt() {
+        let mut inspector = InspectorTab::default();
+        inspector.begin_tree_fetch();
+        inspector.apply(InspectorEvent::Failed("connection closed".to_string()));
+        assert!(!inspector.wants_tree());
+
+        inspector.rearm_auto_pull();
+        assert!(
+            inspector.wants_tree(),
+            "a tab entry is a user action, so it gets one fresh attempt"
+        );
+        inspector.begin_tree_fetch();
+        inspector.apply(InspectorEvent::TreeArrived(tree()));
+
+        // Once a snapshot has landed, re-arming changes nothing: `loaded`
+        // keeps the automatic pull shut for good.
+        inspector.rearm_auto_pull();
+        assert!(!inspector.wants_tree());
     }
 
     #[test]
