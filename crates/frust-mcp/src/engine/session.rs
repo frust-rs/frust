@@ -14,7 +14,12 @@
 //!   rather than polling a clock.
 //! - `resources` — the teardown-only handles. Held for a short take/insert
 //!   only; **never** held while joining a thread, since a session thread may
-//!   itself be waiting to lock it.
+//!   itself be waiting to lock it. It is also the lock that orders
+//!   registration against teardown: every registrar re-reads the stop flag
+//!   *inside* this critical section, and teardown sets that flag strictly
+//!   before it takes the lock, so a handle is either stored (and torn down)
+//!   or handed straight back to its registrar (see
+//!   [`Session::set_stream`]).
 //! - `devtools` — the connected client. Callers clone the `Arc` out and drop
 //!   the lock before issuing a (blocking, timeout-bounded) request.
 
@@ -510,29 +515,52 @@ impl Session {
         self.with_data(|data| data.metrics_sampling = false);
     }
 
-    pub(crate) fn set_stream(&self, stream: StreamHandle) {
-        self.resources
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .stream = Some(stream);
+    /// Registers the app's output stream for teardown to kill — **unless the
+    /// session is already stopping**, in which case the handle comes straight
+    /// back as `Some(stream)` and the caller owns it: nothing would ever kill
+    /// a handle stored after teardown emptied the set, and a `cargo run` /
+    /// `adb logcat` child left behind that way has no second kill path.
+    ///
+    /// The check is inside the `resources` critical section and teardown
+    /// requests the stop strictly *before* taking the same lock, so the two
+    /// are totally ordered — there is no window in which both sides believe
+    /// the other owns the handle.
+    #[must_use = "a returned stream was not stored — the caller must kill it"]
+    pub(crate) fn set_stream(&self, stream: StreamHandle) -> Option<StreamHandle> {
+        let mut resources = self.resources.lock().unwrap_or_else(|p| p.into_inner());
+        if self.stopping() {
+            return Some(stream);
+        }
+        resources.stream = Some(stream);
+        None
     }
 
-    pub(crate) fn set_forward(&self, serial: String, local_port: u16) {
-        self.resources
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .forward = Some((serial, local_port));
+    /// Registers an allocated `adb forward` for teardown to remove, with the
+    /// same hand-it-back contract as [`set_stream`](Self::set_stream): a
+    /// `Some((serial, local_port))` return means the forward was **not**
+    /// stored and the caller must remove it itself, or the host keeps the
+    /// mapping for the rest of the server's life.
+    #[must_use = "a returned forward was not stored — the caller must remove it"]
+    pub(crate) fn set_forward(&self, serial: String, local_port: u16) -> Option<(String, u16)> {
+        let mut resources = self.resources.lock().unwrap_or_else(|p| p.into_inner());
+        if self.stopping() {
+            return Some((serial, local_port));
+        }
+        resources.forward = Some((serial, local_port));
+        None
     }
 
-    /// Registers a session thread for teardown to join. A thread spawned
-    /// *after* teardown took the list would never be joined, which is why
-    /// every spawn site checks [`stopping`](Self::stopping) first.
+    /// Registers a session thread for teardown to join, or — once teardown has
+    /// begun — **detaches** it: a thread registered after teardown took the
+    /// list would never be joined anyway, and it already sees the stop flag,
+    /// so it winds down on its own and touches nothing but its own session.
     pub(crate) fn add_thread(&self, handle: JoinHandle<()>) {
-        self.resources
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .threads
-            .push(handle);
+        let mut resources = self.resources.lock().unwrap_or_else(|p| p.into_inner());
+        if self.stopping() {
+            drop(handle);
+            return;
+        }
+        resources.threads.push(handle);
     }
 
     /// Waits for the app's output stream to be reaped and reports whether it
@@ -546,8 +574,95 @@ impl Session {
     /// caller can kill/join them with **no** session lock held (the
     /// adb-join-under-a-lock freeze this engine inherits as a lesson from
     /// `frust-tui`'s supervisor).
+    ///
+    /// **Call [`request_stop`](Self::request_stop) first.** The stop flag is
+    /// what makes the emptied set stay empty: every registrar re-checks it
+    /// under this same lock, so anything registered from here on is handed
+    /// back to its own registrar rather than silently landing in a set nobody
+    /// will ever tear down.
     pub(crate) fn take_resources(&self) -> Resources {
         let mut resources = self.resources.lock().unwrap_or_else(|p| p.into_inner());
         std::mem::take(&mut *resources)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use frust_drive::process::{FakeProcessRunner, ProcessRunner};
+
+    use super::*;
+
+    /// The scripted invocation the fake runner hands a hanging stream back for.
+    const FAKE_STREAM_KEY: &str = "app --run";
+
+    fn session() -> Session {
+        Session::new(
+            SessionId(1),
+            RunTarget::Desktop,
+            BuildMode::Debug,
+            PathBuf::from("/tmp/frust-mcp-session-test"),
+        )
+    }
+
+    /// A live handle over a scripted process that never exits on its own —
+    /// exactly what a late registration would otherwise leak.
+    fn hanging_stream() -> StreamHandle {
+        let runner =
+            FakeProcessRunner::new().with_hanging_stream(FAKE_STREAM_KEY, Vec::<String>::new());
+        runner
+            .spawn_streaming("app", &["--run"], None, &[])
+            .expect("the scripted stream spawns")
+    }
+
+    #[test]
+    fn a_stream_registered_before_teardown_is_taken_by_it() {
+        let session = session();
+        assert!(session.set_stream(hanging_stream()).is_none());
+        let mut resources = session.take_resources();
+        let mut stream = resources.stream.take().expect("teardown owns the stream");
+        stream.kill();
+    }
+
+    #[test]
+    fn a_stream_registered_after_teardown_comes_back_to_its_registrar() {
+        let session = session();
+        session.request_stop();
+        let mut orphaned = session
+            .set_stream(hanging_stream())
+            .expect("a stopped session refuses to store a stream");
+        // Nothing landed in the set teardown already emptied…
+        assert!(session.take_resources().stream.is_none());
+        // …so the caller is the only one who can end the process, and can.
+        orphaned.kill();
+        assert!(!orphaned.wait());
+    }
+
+    #[test]
+    fn a_forward_registered_after_teardown_comes_back_to_its_registrar() {
+        let session = session();
+        assert!(
+            session
+                .set_forward("emulator-5554".to_string(), 41_234)
+                .is_none()
+        );
+        session.request_stop();
+        let _ = session.take_resources();
+
+        assert_eq!(
+            session.set_forward("emulator-5554".to_string(), 41_235),
+            Some(("emulator-5554".to_string(), 41_235))
+        );
+        assert!(session.take_resources().forward.is_none());
+    }
+
+    #[test]
+    fn a_thread_registered_after_teardown_is_detached_not_queued() {
+        let session = session();
+        session.request_stop();
+        session.add_thread(std::thread::spawn(|| {}));
+        assert!(
+            session.take_resources().threads.is_empty(),
+            "a thread queued after teardown would never be joined"
+        );
     }
 }

@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use frust_devtools_protocol::Discovery;
-use frust_drive::devtools_client::{DevtoolsClient, adb_forward_ephemeral};
+use frust_drive::devtools_client::{DevtoolsClient, adb_forward_ephemeral, adb_forward_remove};
 
 use super::Runner;
 use super::session::Session;
@@ -78,7 +78,15 @@ fn connect(
                         discovery.port
                     )
                 })?;
-            session.set_forward(serial.to_string(), local_port);
+            if let Some((serial, local_port)) = session.set_forward(serial.to_string(), local_port)
+            {
+                // Teardown already removed whatever forwards it knew about, so
+                // this one is ours to clean up: an `adb forward` nobody removes
+                // outlives the session on the host for good. Best-effort — a
+                // device that has gone away takes its forwards with it.
+                let _ = adb_forward_remove(runner.as_ref(), &serial, local_port);
+                return Ok(None);
+            }
             local_port
         }
         None => discovery.port,
@@ -127,5 +135,94 @@ fn pump_frames(session: &Session, client: &DevtoolsClient) {
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use frust_drive::build_info::BuildMode;
+    use frust_drive::devices::{Device, Kind, Platform};
+    use frust_drive::process::{FakeProcessRunner, Output};
+
+    use super::super::session::{RunTarget, SessionId};
+    use super::super::test_support::RecordingRunner;
+    use super::*;
+
+    const SERIAL: &str = "emulator-5554";
+    const DEVICE_PORT: u16 = 9_999;
+    const HOST_PORT: u16 = 41_234;
+
+    fn android_session() -> Arc<Session> {
+        let device = Device {
+            id: SERIAL.to_string(),
+            name: "Android Emulator".to_string(),
+            platform: Platform::Android,
+            kind: Kind::Emulator,
+            os_version: None,
+            connection_state: None,
+        };
+        Arc::new(Session::new(
+            SessionId(1),
+            RunTarget::Android(device),
+            BuildMode::Debug,
+            PathBuf::from("/tmp/frust-mcp-devtools-test"),
+        ))
+    }
+
+    fn adb_runner() -> Arc<RecordingRunner> {
+        Arc::new(RecordingRunner::new(
+            FakeProcessRunner::new()
+                .with(
+                    format!("adb -s {SERIAL} forward tcp:0 tcp:{DEVICE_PORT}"),
+                    Output {
+                        success: true,
+                        stdout: format!("{HOST_PORT}\n"),
+                        stderr: String::new(),
+                    },
+                )
+                .with(
+                    format!("adb -s {SERIAL} forward --remove"),
+                    Output {
+                        success: true,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    },
+                ),
+        ))
+    }
+
+    /// A forward allocated after teardown has already swept the session is
+    /// removed by the thread that allocated it — otherwise the host keeps an
+    /// `adb forward` mapping nothing will ever take down.
+    #[test]
+    fn a_forward_allocated_after_teardown_is_removed_by_its_own_thread() {
+        let session = android_session();
+        let recorder = adb_runner();
+        let runner: Runner = Arc::clone(&recorder) as Runner;
+
+        // The stop lands while this thread is between "adb forward returned a
+        // port" and "the session recorded it".
+        session.request_stop();
+        let _ = session.take_resources();
+
+        let discovery = Discovery {
+            port: DEVICE_PORT,
+            token: None,
+        };
+        let connected = connect(&session, &runner, &discovery).expect("connect reports cleanly");
+
+        assert!(
+            connected.is_none(),
+            "a stopped session must not connect its devtools client"
+        );
+        assert!(
+            recorder
+                .runs()
+                .contains(&format!("adb -s {SERIAL} forward --remove tcp:{HOST_PORT}")),
+            "the orphaned forward was never removed: {:?}",
+            recorder.runs()
+        );
     }
 }

@@ -42,7 +42,7 @@ pub use session::{LatestMetrics, RunTarget, SessionId, SessionSnapshot, SessionS
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -79,6 +79,12 @@ const TEARDOWN_DEADLINE: Duration = Duration::from_secs(5);
 /// The shared process runner every session's threads shell out through.
 type Runner = Arc<dyn ProcessRunner + Send + Sync>;
 
+/// What a session launched after [`SessionEngine::shutdown`] reports as its
+/// failure reason — a refusal an agent can read, rather than a session that
+/// silently outlives the server that was supposed to own it.
+const SHUTTING_DOWN: &str =
+    "the server is shutting down; no new session was started. Restart the server to run an app.";
+
 /// Owns every supervised app session.
 ///
 /// Wrap in an `Arc` and share it — one engine per server process, read and
@@ -93,6 +99,11 @@ pub struct SessionEngine {
     project_root: PathBuf,
     sessions: Mutex<BTreeMap<SessionId, Arc<Session>>>,
     next_id: AtomicU64,
+    /// Set by [`shutdown`](SessionEngine::shutdown) *before* it snapshots the
+    /// session map, so a `run_app` racing a Ctrl-C is either refused outright
+    /// or torn down by the loser of the race — never left running past the
+    /// sweep that was meant to end it.
+    closed: AtomicBool,
 }
 
 impl SessionEngine {
@@ -111,6 +122,7 @@ impl SessionEngine {
             project_root: project_root.into(),
             sessions: Mutex::new(BTreeMap::new()),
             next_id: AtomicU64::new(1),
+            closed: AtomicBool::new(false),
         }
     }
 
@@ -152,6 +164,10 @@ impl SessionEngine {
     /// anyway. Await progress with [`wait_for`](Self::wait_for).
     ///
     /// `project_root` overrides the engine's own default for this session.
+    ///
+    /// After [`shutdown`](Self::shutdown) it launches nothing: the returned
+    /// session is already [`SessionState::Failed`], carrying the refusal
+    /// reason the tool layer reports in band.
     pub fn run_app(
         &self,
         target: RunTarget,
@@ -161,13 +177,33 @@ impl SessionEngine {
         let root = project_root.unwrap_or_else(|| self.project_root.clone());
         let id = SessionId(self.next_id.fetch_add(1, Ordering::Relaxed));
         let session = Arc::new(Session::new(id, target, mode, root));
-        self.sessions
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(id, Arc::clone(&session));
 
+        if self.closed.load(Ordering::SeqCst) {
+            // Nothing spawned, so there is nothing to tear down — but the
+            // session is still recorded, because a caller that got an id back
+            // must be able to read why it never ran.
+            session.request_stop();
+            session.set_state_if_live(SessionState::Failed {
+                reason: SHUTTING_DOWN.to_string(),
+            });
+            self.insert(id, session);
+            return id;
+        }
+
+        // Register the launch thread *before* the session becomes reachable:
+        // teardown can only find a session that is in the map, and by the time
+        // it can, the thread it must join is already queued. The id is not
+        // observable until this returns, so the reorder changes nothing else.
         let handle = launch::spawn(Arc::clone(&session), Arc::clone(&self.runner));
         session.add_thread(handle);
+        self.insert(id, Arc::clone(&session));
+
+        if self.closed.load(Ordering::SeqCst) {
+            // A `shutdown` snapshotted the map before this insert landed, so
+            // its sweep will never see this session: tear it down here instead
+            // of leaving a launch running past the server that owns it.
+            self.tear_down_detached(session);
+        }
         id
     }
 
@@ -199,7 +235,12 @@ impl SessionEngine {
     /// Tears every session down. Wired into [`crate::run`]'s cancellation, so
     /// a Ctrl-C on the MCP server does not leave orphaned preview windows or
     /// `adb forward`s behind.
+    ///
+    /// Closes the engine to new launches first, so a `run_app` racing this
+    /// sweep is refused (or, if it already inserted its session, torn down by
+    /// `run_app` itself) rather than starting an app nothing will ever stop.
     pub async fn shutdown(&self) {
+        self.closed.store(true, Ordering::SeqCst);
         let sessions: Vec<Arc<Session>> = self
             .sessions
             .lock()
@@ -279,6 +320,24 @@ impl SessionEngine {
             .ok()
     }
 
+    fn insert(&self, id: SessionId, session: Arc<Session>) {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(id, session);
+    }
+
+    /// Tears `session` down on a thread of its own — the late half of the
+    /// shutdown race. Detached because [`run_app`](Self::run_app) is sync and
+    /// reached from a runtime worker, while teardown blocks throughout (a
+    /// kill, an `adb` call, a bounded join); the thread touches nothing but
+    /// this one session.
+    fn tear_down_detached(&self, session: Arc<Session>) {
+        session.request_stop();
+        let runner = Arc::clone(&self.runner);
+        thread::spawn(move || teardown(&session, runner.as_ref()));
+    }
+
     fn lookup(&self, id: SessionId) -> Option<Arc<Session>> {
         self.sessions
             .lock()
@@ -354,4 +413,91 @@ fn join_bounded(threads: Vec<JoinHandle<()>>) {
         let _ = done_tx.send(());
     });
     let _ = done_rx.recv_timeout(TEARDOWN_DEADLINE);
+}
+
+/// The one process fake this module's own unit tests share — sibling modules
+/// reach it as `super::test_support`.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::Mutex;
+
+    use frust_drive::process::{
+        FakeProcessRunner, LineReceiver, Output, ProcessRunner, StreamHandle,
+    };
+
+    use super::*;
+
+    /// Wraps a scripted [`FakeProcessRunner`], recording every one-shot
+    /// invocation it is asked to make and a clone of every spawned stream's
+    /// line receiver.
+    ///
+    /// Those two records are how a test asserts cleanup without a real
+    /// process: an issued `adb forward --remove` shows up in
+    /// [`runs`](Self::runs), and a *killed* process shows up as a closed line
+    /// buffer — a scripted hanging stream closes its buffer only once
+    /// `StreamHandle::kill` has run.
+    pub(crate) struct RecordingRunner {
+        inner: FakeProcessRunner,
+        runs: Mutex<Vec<String>>,
+        spawned: Mutex<Vec<LineReceiver>>,
+    }
+
+    impl RecordingRunner {
+        pub(crate) fn new(inner: FakeProcessRunner) -> Self {
+            Self {
+                inner,
+                runs: Mutex::new(Vec::new()),
+                spawned: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// Every one-shot invocation so far, as `"<cmd> <args…>"`.
+        pub(crate) fn runs(&self) -> Vec<String> {
+            self.runs.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        }
+
+        /// A receiver over each spawned stream, in spawn order.
+        pub(crate) fn spawned(&self) -> Vec<LineReceiver> {
+            self.spawned
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+        }
+    }
+
+    impl ProcessRunner for RecordingRunner {
+        fn run(&self, cmd: &str, args: &[&str]) -> Result<Output> {
+            self.runs
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(format!("{cmd} {}", args.join(" ")));
+            self.inner.run(cmd, args)
+        }
+
+        fn run_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: Option<&Path>,
+            env: &[(&str, &str)],
+            on_line: &mut dyn FnMut(&str),
+        ) -> Result<Output> {
+            self.inner.run_streaming(cmd, args, cwd, env, on_line)
+        }
+
+        fn spawn_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: Option<&Path>,
+            env: &[(&str, &str)],
+        ) -> Result<StreamHandle> {
+            let handle = self.inner.spawn_streaming(cmd, args, cwd, env)?;
+            self.spawned
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(handle.lines.clone());
+            Ok(handle)
+        }
+    }
 }

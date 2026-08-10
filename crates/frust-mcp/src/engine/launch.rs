@@ -80,8 +80,10 @@ fn run(session: Arc<Session>, runner: Runner) {
 
 /// Drives the target's run pipeline to a live stream, storing the
 /// [`frust_drive::process::StreamHandle`] on the session and returning a
-/// receiver over its lines. `Ok(None)` means the pipeline was cancelled
-/// before the app started.
+/// receiver over its lines. `Ok(None)` means the session never reached a
+/// stream this thread owns: either the pipeline observed the cancel flag
+/// before the app started, or a stop overtook the spawn and the just-spawned
+/// process was killed here.
 fn start(session: &Arc<Session>, runner: &Runner) -> Result<Option<LineReceiver>> {
     // Flavor/defines/build-name are not part of this engine's launch surface
     // yet — a session runs the mode's plain funnel, which is what selects the
@@ -130,7 +132,16 @@ fn start(session: &Arc<Session>, runner: &Runner) -> Result<Option<LineReceiver>
         return Ok(None);
     };
     let lines = handle.lines.clone();
-    session.set_stream(handle);
+    if let Some(mut orphaned) = session.set_stream(handle) {
+        // A stop landed while this launch was still building/spawning: the
+        // session's resource set is already torn down, so nothing else will
+        // ever reap what we just spawned. Kill it here — both calls are
+        // idempotent and block only until the reader thread reaps the child —
+        // and report the launch as cancelled.
+        orphaned.kill();
+        orphaned.wait();
+        return Ok(None);
+    }
     Ok(Some(lines))
 }
 
@@ -189,7 +200,58 @@ fn parse_launch_marker(line: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use frust_drive::build_info::BuildMode;
+    use frust_drive::process::{FakeProcessRunner, TryRecvError};
+
+    use super::super::session::SessionId;
+    use super::super::test_support::RecordingRunner;
     use super::*;
+
+    /// The exact invocation `frust_drive::desktop_run` resolves a Debug
+    /// desktop session to — the key the scripted stream is registered under.
+    /// A drift in the drive's mode→args funnel fails the spawn (and this
+    /// test) loudly rather than silently launching nothing.
+    const DEBUG_DESKTOP_INVOCATION: &str =
+        "cargo run --features frust/perf-trace --features frust/devtools";
+
+    /// A launch that loses the race to teardown must kill the process it just
+    /// spawned: the session's resource set is already gone, so nothing else
+    /// ever would.
+    #[test]
+    fn a_launch_that_loses_to_teardown_kills_what_it_spawned() {
+        let session = Arc::new(Session::new(
+            SessionId(1),
+            RunTarget::Desktop,
+            BuildMode::Debug,
+            PathBuf::from("/tmp/frust-mcp-launch-test"),
+        ));
+        let recorder = Arc::new(RecordingRunner::new(
+            FakeProcessRunner::new()
+                .with_hanging_stream(DEBUG_DESKTOP_INVOCATION, Vec::<String>::new()),
+        ));
+        let runner: Runner = Arc::clone(&recorder) as Runner;
+
+        // The whole teardown ran while this launch was still spawning.
+        session.request_stop();
+        let _ = session.take_resources();
+
+        let started = start(&session, &runner).expect("the desktop launch spawns");
+        assert!(
+            started.is_none(),
+            "a launch whose stream was never stored must not report a live stream"
+        );
+
+        let lines = recorder.spawned();
+        let [stream] = lines.as_slice() else {
+            panic!("expected exactly one spawned process, got {}", lines.len());
+        };
+        // A scripted hanging stream closes its buffer only after `kill`, so a
+        // disconnected receiver here *is* the kill — and `start` already
+        // waited for it, hence no blocking read.
+        assert_eq!(stream.try_recv(), Err(TryRecvError::Disconnected));
+    }
 
     #[test]
     fn pid_marker_parses_the_drive_line_verbatim() {
