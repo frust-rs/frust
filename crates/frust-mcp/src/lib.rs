@@ -13,16 +13,17 @@
 //!
 //! The crate is in two halves. [`engine`] is the session engine: it launches
 //! and supervises real app sessions through `frust-drive`, and owns their
-//! logs, devtools connections, frame stats, and metrics. The MCP tool layer
-//! (today only `ping`) sits on top of it and is still being filled in — the
-//! DevTools diagnosis and app-driving tool families land in later work,
-//! behind the same [`McpConfig`]/[`run`] seam.
+//! logs, devtools connections, frame stats, and metrics. The tool layer
+//! (`tools`, surfaced through the rmcp handler) sits on top of it in three
+//! families — session lifecycle, app driving, and diagnosis — and is the
+//! whole agent-facing surface.
 
 pub mod engine;
 
 mod config;
 mod handler;
 mod server;
+mod tools;
 
 pub use config::{DEFAULT_MCP_PORT, McpConfig};
 pub use engine::SessionEngine;
@@ -48,7 +49,8 @@ pub async fn run(config: McpConfig) -> anyhow::Result<()> {
             ctrl_c_cancel.cancel();
         }
     });
-    serve_with_engine(config, None, cancel).await
+    let engine = Arc::new(SessionEngine::new(config.project_root.clone()));
+    serve_with_engine(config, engine, None, cancel).await
 }
 
 /// Test/embedding seam: run with a caller-owned [`CancellationToken`] (so
@@ -61,7 +63,24 @@ pub async fn run_with_ready(
     ready: oneshot::Sender<SocketAddr>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    serve_with_engine(config, Some(ready), cancel).await
+    let engine = Arc::new(SessionEngine::new(config.project_root.clone()));
+    serve_with_engine(config, engine, Some(ready), cancel).await
+}
+
+/// Test/embedding seam: [`run_with_ready`] against a caller-built engine.
+///
+/// The engine is what a test scripts (`SessionEngine::with_runner` over a
+/// `FakeProcessRunner`), so the tool layer can be driven end to end over a
+/// real MCP connection without ever launching a real app. The caller keeps
+/// its own `Arc`, and every MCP session the server creates shares this one.
+#[doc(hidden)]
+pub async fn run_with_engine(
+    config: McpConfig,
+    engine: Arc<SessionEngine>,
+    ready: oneshot::Sender<SocketAddr>,
+    cancel: CancellationToken,
+) -> anyhow::Result<()> {
+    serve_with_engine(config, engine, Some(ready), cancel).await
 }
 
 /// Serves with a live [`SessionEngine`] for the server's whole lifetime, and
@@ -73,11 +92,11 @@ pub async fn run_with_ready(
 /// of this same `Arc`.
 async fn serve_with_engine(
     config: McpConfig,
+    engine: Arc<SessionEngine>,
     ready: Option<oneshot::Sender<SocketAddr>>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    let engine = Arc::new(SessionEngine::new(config.project_root.clone()));
-    let result = server::serve(config, ready, cancel).await;
+    let result = server::serve(config, Arc::clone(&engine), ready, cancel).await;
     engine.shutdown().await;
     result
 }

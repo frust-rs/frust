@@ -119,6 +119,16 @@ impl SessionEngine {
         &self.project_root
     }
 
+    /// The shared process runner every session shells out through — the seam
+    /// a tool needing its own one-shot invocation (the `screenshot` tool's
+    /// `adb exec-out screencap` fallback) borrows rather than reaching for
+    /// `std::process::Command` (`docs/CODE_STANDARDS.md`'s `ProcessRunner`
+    /// anti-pattern). Every call through it **blocks**, so issue it from
+    /// [`tokio::task::spawn_blocking`], exactly as this engine does.
+    pub fn runner(&self) -> Arc<dyn ProcessRunner + Send + Sync> {
+        Arc::clone(&self.runner)
+    }
+
     /// Every discoverable device, plus the non-fatal notes discovery
     /// produced (a missing SDK, an unauthorized device) — `frust-drive`
     /// aggregates independent discoverers and never lets one failing
