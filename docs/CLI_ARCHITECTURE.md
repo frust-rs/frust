@@ -2,20 +2,24 @@
 
 ## Overview
 
-CLI is the standalone `frust` command-line tool, the drive library behind it, and the MCP server
-that exposes the same driving/diagnosis surface to AI agents. `frust-cli` ships the single `frust`
-binary, which is also the TUI's front door: bare `frust` in an interactive terminal opens the TUI
-workbench, and the explicit `tui` subcommand does the same; `mcp` is a third subcommand, handing off
-to `frust-mcp` the same way. `frust-cli` is a thin `clap` front-end with exactly one subcommand
-handler per command; `frust-drive` is the framework-free library doing the actual work —
-scaffolding new Frust projects, validating the local toolchain, discovering devices, and driving
-the Android/iOS run/build/clean pipelines. `frust-drive` has no `clap` dependency so it can be
-shared as-is with `frust-tui` and `frust-mcp`; none of the three depends on any framework crate —
-this unit drives Frust apps, it does not consume the framework.
+CLI is the standalone `frust` command-line tool, the drive library behind it, and the MCP tooling
+crate that exposes the same driving/diagnosis surface to AI agents. `frust-cli` ships the single
+`frust` binary, which is also the TUI's front door: bare `frust` in an interactive terminal opens
+the TUI workbench, and the explicit `tui` subcommand does the same. `frust-cli` is a thin `clap`
+front-end with exactly one subcommand handler per command; `frust-drive` is the framework-free
+library doing the actual work — scaffolding new Frust projects, validating the local toolchain,
+discovering devices, and driving the Android/iOS run/build/clean pipelines. `frust-drive` has no
+`clap` dependency so it can be shared as-is with `frust-tui` and `frust-mcp`; none of the three
+depends on any framework crate — this unit drives Frust apps, it does not consume the framework.
 
-`frust-mcp` is an MCP (Model Context Protocol) server: a headless session engine over `frust-drive`
-plus 16 tools (session lifecycle, driving, diagnosis) exposed over the Streamable HTTP transport, so
-an AI agent can launch, inspect, and drive a Frust app the way `frust-tui` lets a human do it.
+`frust-mcp` is an MCP (Model Context Protocol) tooling crate: a session-supervision seam
+(`SessionBackend`) plus 16 tools (session lifecycle, driving, diagnosis) exposed over the
+Streamable HTTP transport, so an AI agent can launch, inspect, and drive a Frust app. `frust-cli`
+carries no dependency on it and has no `mcp` subcommand — `frust-mcp` has no headless/CI entry
+point in this unit. Its sole consumer is `frust-tui`, which embeds an MCP server over its own
+sessions (see [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)); `SessionEngine`, this crate's own
+`SessionBackend` implementation, is retained as the reference/test backend the crate's own test
+suite drives.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how CLI relates to the other units.
 
@@ -32,15 +36,17 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how CLI relates to the other units.
 | `frust-drive::build_info` | The debug/profile/release + flavor funnel shared by run and build; `BuildMode::cargo_features()` also selects the `frust/perf-trace`+`frust/devtools` cargo-feature pair for Debug/Profile (see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)) |
 | `frust-drive::devtools_client` | Blocking NDJSON client for the devtools wire protocol (`widget_tree`/`widget_props`/`metrics_snapshot`/`screenshot`/`tap`/`scroll`/`text`/frame-stats subscription) plus `adb forward` helpers for Android — the tool-side half of [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md) |
 | `frust-drive::metrics` | Pure `/proc`/`/sys`/`adb` parsers plus a `MetricsSampler` background-thread stream, feeding `frust-tui`'s DevTools System/Network tabs and `frust-mcp`'s `metrics` tool (Linux desktop + Android only in v1, no build-feature gate). Honest about scope: network counters are namespace-wide (desktop) or device-wide (Android), never per-process — see [LIMITATIONS.md](LIMITATIONS.md) |
-| `frust-drive` Android/iOS pipelines | The four platform pipelines: compile → install → launch/stream |
+| `frust-drive` Android/iOS pipelines | The four platform pipelines: compile → install → launch/stream; the iOS pipelines' `spawn_session`/`spawn_physical_session` return the launched bundle id (`IosLaunch`) so a caller can address that exact app later (e.g. `frust-mcp`'s iOS-Simulator teardown, below) without re-deriving it |
 | `frust-drive::desktop_run` | The desktop `cargo run` launch plan (mode → cargo-args mapping) as a standalone, reusable value builder; `frust-mcp` spawns desktop sessions through it. `frust-tui` has its own equivalent logic and has not converged onto this module yet |
 | `frust-drive::plugin` | Static plugin registry plus the idempotent project-mutation engine that applies it |
 | `frust-drive::interrupt` | The process-wide SIGINT/SIGTERM/SIGHUP + panic-hook owner; scrubs registered secret files before the process dies |
 | `frust-mcp::config` | `McpConfig` — port (`DEFAULT_MCP_PORT` 4848; `0` lets the OS assign an ephemeral one); bind address is hard-coded to `127.0.0.1`, never configurable |
-| `frust-mcp::server` | Binds `rmcp`'s `StreamableHttpService` at `/mcp` behind an `axum` router, with a `LocalSessionManager` for MCP session state and rmcp's built-in `allowed_hosts` Host-header guard left at its loopback-only default. Shuts down on a `CancellationToken`; prints the one endpoint line (`frust-mcp listening on http://127.0.0.1:<PORT>/mcp`) once listening |
-| `frust-mcp::handler` | `McpHandler` — the `ToolRouter`/`#[tool]` registrations for all 16 tools. Dispatch is thin: each tool body forwards straight into `tools`, so tool logic is unit-tested without the rmcp stack |
-| `frust-mcp::engine` | `SessionEngine` — launches and supervises app sessions (desktop/Android/iOS Simulator) headlessly; `run_app` returns a `SessionId` immediately, with a launch that can't even spawn landing as `SessionState::Failed` (a device launch's failure otherwise arrives minutes later). Retains a 10,000-line log ring and a 600-sample frame-stats ring per session. Connects the in-app devtools service the same way `frust-drive::devtools_client`'s callers do: discovery-line parsing, `adb_forward_ephemeral`, handshake token. System-metrics sampling is Android-only (`StreamHandle` exposes no pid on desktop/iOS, so `SessionState::Exited` also carries a success flag rather than a real exit code). Teardown joins a session's threads with a bounded 5s wait, then detaches rather than blocking a stop request behind an uninterruptible build — the same lesson `frust-tui`'s own teardown carries |
-| `frust-mcp::tools` | The agent-facing surface, in three families over `engine`: session (`list_devices`/`list_sessions`/`run_app`/`stop_app`/`restart_app`/`app_logs`), driving (`find_widgets`/`tap`/`scroll`/`enter_text`/`widget_props`), diagnosis (`widget_tree`/`performance`/`metrics`/`screenshot`) — plus `ping`. A tool taking `session_id` resolves it: explicit id, else the sole live session, else the sole session that ever ran, else an ambiguity error listing candidates. `find_widgets` and a query-targeted `tap` fetch the widget tree exactly once and filter/resolve locally, never polling the app to "settle" a query. `screenshot` tries the app's own devtools capability first, falls back to `adb screencap` on Android, and refuses outright on desktop/iOS Simulator. `performance`/`metrics` report "unavailable" with a reason, never a zeroed reading, when there is nothing to report. Failures come back as in-band `ToolError`s (with candidate/session lists for disambiguation), not protocol errors |
+| `frust-mcp::backend` | `SessionBackend` — the sync trait (11 methods) the tool layer drives via `Arc<dyn SessionBackend>` (`SharedBackend`). Sync by charter: no `async-trait`, so the async/blocking bridge (`spawn_blocking`) lives in the tool layer, not the trait. `SessionEngine` is this crate's own implementation; an embedder (`frust-tui`) supplies its own instead |
+| `frust-mcp::clients` | `ClientRegistry`/`ClientEntry`/`ClientGuard` — an RAII-tracked count of connected MCP clients (opaque id, connect time) for `serve_embedded`'s caller to read. A guard's `Drop` is the only disconnect signal available (rmcp exposes none), so a client that vanishes without a clean teardown lingers in the registry until the server stops |
+| `frust-mcp::server` | Binds `rmcp`'s `StreamableHttpService` at `/mcp` behind an `axum` router, with a `LocalSessionManager` for MCP session state and rmcp's built-in `allowed_hosts` Host-header guard left at its loopback-only default. `serve` builds a fresh backend/registry and runs until cancelled; `serve_embedded(backend, registry, bind_port, ready, cancel)` is the runtime-toggled entry point an embedder starts and stops repeatedly against its own long-lived `ClientRegistry`. Prints the one endpoint line (`frust-mcp listening on http://127.0.0.1:<PORT>/mcp`) once listening |
+| `frust-mcp::handler` | `McpHandler` — the `ToolRouter`/`#[tool]` registrations for all 16 tools, holding an `Arc<dyn SessionBackend>` rather than a concrete engine. Dispatch is thin: each tool body forwards straight into `tools`, so tool logic is unit-tested without the rmcp stack |
+| `frust-mcp::engine` | `SessionEngine` — launches and supervises app sessions (desktop/Android/iOS Simulator) headlessly; `run_app` returns a `SessionId` immediately, with a launch that can't even spawn landing as `SessionState::Failed` (a device launch's failure otherwise arrives minutes later). Retains a 10,000-line log ring (with the devtools handshake token redacted before it ever enters the ring — see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)) and a 600-sample frame-stats ring per session, plus up to `TERMINAL_SESSION_CAP` (32) terminal sessions' worth of history — oldest-terminal eviction on insert, a live session is never evicted. Connects the in-app devtools service the same way `frust-drive::devtools_client`'s callers do: discovery-line parsing, `adb_forward_ephemeral`, handshake token. System-metrics sampling is Android-only (`StreamHandle` exposes no pid on desktop/iOS, so `SessionState::Exited` also carries a success flag rather than a real exit code). Teardown joins a session's threads with a bounded 5s wait, then detaches; `shutdown()` itself now joins every detached teardown before returning, so a stop is provably complete rather than possibly still killing in the background. iOS-Simulator teardown issues `simctl terminate <udid> <bundle_id>`, mirroring the Android `am force-stop` — the same lesson `frust-tui`'s own teardown carries |
+| `frust-mcp::tools` | The agent-facing surface, in three families over the backend: session (`list_devices`/`list_sessions`/`run_app`/`stop_app`/`restart_app`/`app_logs`), driving (`find_widgets`/`tap`/`scroll`/`enter_text`/`widget_props`), diagnosis (`widget_tree`/`performance`/`metrics`/`screenshot`) — plus `ping`. A tool taking `session_id` resolves it: explicit id, else the sole live session, else the sole session that ever ran, else an ambiguity error — reported differently for the two cases (several *live* sessions want a `session_id`; several *ended* ones mean nothing is running at all), since a dead session is never counted as running. `find_widgets` and a query-targeted `tap` fetch the widget tree exactly once and filter/resolve locally, never polling the app to "settle" a query. `screenshot` tries the app's own devtools capability first, falls back to `adb screencap` on Android, and refuses outright on desktop/iOS Simulator. `performance`/`metrics` report "unavailable" with a reason, never a zeroed reading, when there is nothing to report. Failures come back as in-band `ToolError`s (with candidate/session lists for disambiguation), not protocol errors |
 
 ## Layer Dependencies
 
@@ -51,20 +57,24 @@ the same library without pulling in a CLI parser or the render/widget stack. The
 exception is `frust-devtools-protocol` (the dependency-free wire-protocol leaf `devtools_client`
 speaks) — never `frust-devtools` itself, which stays framework-side (see
 [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)). `frust-cli`'s `tui` subcommand hands off
-entirely to `frust-tui`, whose own dependency is on `frust-drive` alone (see
-[TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)); `frust-cli`'s `mcp` subcommand hands off the same way
-to `frust-mcp` (a thin `Runtime::new` + `block_on` shim over `frust_mcp::run`).
+entirely to `frust-tui`, whose dependency set is `frust-drive` + `frust-devtools-protocol` +
+`frust-mcp` (see [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)). `frust-cli` itself has no `mcp`
+subcommand and no dependency on `frust-mcp` — MCP was a headless server reachable from the CLI in
+an earlier design; that entry point is gone, and the crate's only consumer now is `frust-tui`,
+which embeds it (see [LIMITATIONS.md](LIMITATIONS.md) for the no-headless/CI-MCP consequence).
 
-`frust-mcp` is this unit's third front-end. It is async, unlike `frust-drive`, and owns its own
-tokio runtime (like `frust-tui`); every call it makes into `frust-drive` goes through
-`tokio::task::spawn_blocking`, never a runtime worker directly. Its own dependency surface is
-`frust-drive` + `frust-devtools-protocol` (the same sanctioned leaf) plus
-`rmcp`/`axum`/`tokio`/`tokio-util`/`base64`/`serde`/`log` — never `frust-devtools`, never a
-framework crate, not even as a dev-dependency (the tooling-isolation rule this widens is
-[ARCHITECTURE.md](ARCHITECTURE.md)'s). Trust model: bound to `127.0.0.1` only, guarded by rmcp's
-default Host-header check, with **no MCP-level authentication** — any local process can connect and
-drive apps through it, a deliberate v1 stance ported from fdemon-pro (the devtools handshake token
-still protects the app-side service itself; see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)).
+`frust-mcp` is this unit's third tool surface, no longer reachable through `frust-cli` directly. It
+is async, unlike `frust-drive`, and owns no runtime of its own — `serve`/`serve_embedded` run on
+whatever runtime the caller (a standalone binary, or `frust-tui`'s own runtime) drives them from;
+every call it makes into `frust-drive` goes through `tokio::task::spawn_blocking`, never a runtime
+worker directly. Its own dependency surface is `frust-drive` + `frust-devtools-protocol` (the same
+sanctioned leaf) plus `rmcp`/`axum`/`tokio`/`tokio-util`/`base64`/`serde`/`log` — never
+`frust-devtools`, never a framework crate, not even as a dev-dependency (the tooling-isolation rule
+this widens is [ARCHITECTURE.md](ARCHITECTURE.md)'s). Trust model: bound to `127.0.0.1` only,
+guarded by rmcp's default Host-header check, with **no MCP-level authentication** — any local
+process that can reach the port can connect and drive apps through it, a deliberate v1 stance
+ported from fdemon-pro (the devtools handshake token still protects the app-side service itself;
+see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)).
 
 Within `frust-drive`, `anyhow` sits at the CLI/pipeline-core boundary while library-contract errors
 use `thiserror` enums; `serde`/`serde_json`/`toml`/`toml_edit` handle manifest and build-report
@@ -129,10 +139,9 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   can't verify. `key.properties` + the four `ANDROID_*` variables remain as a fallback for a hand-run
   `./gradlew` (e.g. from Android Studio) — that path carries no Frust promise.
 - `tui` (explicit subcommand, or the bare-`frust` default above): `Command::Tui` hands off entirely
-  to `frust-tui`'s own async runtime (see [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)).
-- `mcp`: `Command::Mcp { port, project }` builds an `McpConfig` (defaulting `port` to 4848,
-  `project` to the current directory) and hands off to `frust_mcp::run` over a `Runtime::new` +
-  `block_on` shim — the same shape as `tui`'s handoff, but for `frust-mcp`'s own async runtime.
+  to `frust-tui`'s own async runtime (see [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)), which may in
+  turn start `frust_mcp::serve_embedded` over its own sessions — the only path an MCP client reaches
+  a Frust app through in this unit (see [LIMITATIONS.md](LIMITATIONS.md)).
 - `plugin add`: `frust-drive::plugin::add_plugin` looks up a `PluginSpec` and applies its
   `Contribution`s as idempotent, format-preserving edits to a generated project (see
   [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md) for the plugins this distributes).

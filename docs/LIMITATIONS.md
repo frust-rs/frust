@@ -1162,3 +1162,92 @@ wiring (devtools connect, log parsing) rather than the launch pipeline itself.
 
 **Evidence**: `crates/frust-mcp` test suite (`engine_lifecycle`, `tool_families`, `http_smoke`)
 exercises desktop and Android targets only, via `FakeProcessRunner`.
+
+---
+
+### `mcp-no-headless-entry-point` — the MCP server has no headless/CI entry point
+
+**Observed**: `frust-cli`'s `mcp` subcommand (and its `frust-drive`→`frust-mcp` dependency) was
+removed; `frust_mcp::run`/`serve_embedded` remain library-only entry points, with `frust-tui`'s
+embedded server as their only caller in this repo. Reaching an MCP server therefore means starting
+an interactive `frust-tui` session and toggling its server on — there is no way to run one headless,
+so CI or a remote/headless automation pipeline cannot attach an MCP agent to a Frust app.
+
+**Applies to**: any workflow wanting MCP access to a Frust app outside an interactive `frust-tui`
+session.
+
+**Why accepted**: the v1 design chose one session world — the workbench is the single source of
+truth for what is running, and a second headless engine driving the same project would either
+diverge from it or race it. A standalone headless mode is a named follow-up, not a v1 requirement.
+
+**Evidence**: `crates/frust-cli/src/commands/mod.rs` and `Cargo.toml` carry no `mcp` command or
+`frust-mcp` dependency; `crates/frust-mcp/src/lib.rs`'s `run`/`serve_embedded` are `pub` with no
+binary consumer in this repo besides `crates/frust-tui/src/runner.rs`.
+
+---
+
+### `mcp-embedded-client-registry-coarse` — connected-MCP-client tracking is coarse and can go stale
+
+**Observed**: `frust-mcp`'s `ClientRegistry` (the TUI's MCP panel, §B13, reads it live) tracks only
+a count, a mint-order opaque `id`, and a connect time per session — no client name, version, or
+capabilities. Disconnection has exactly one signal: the per-session `ClientGuard`'s `Drop`, fired
+when rmcp tears the session down. The Streamable-HTTP transport exposes nothing lower-level to
+build a better signal from, so a client that vanishes without a clean teardown (a killed process, a
+network drop rmcp doesn't notice) leaves its entry — and the panel showing it as connected — until
+the server itself stops.
+
+**Applies to**: `frust-mcp`'s `ClientRegistry` in both `serve` and `serve_embedded` modes; the TUI's
+MCP panel client list.
+
+**Why accepted**: matches fdemon-pro's own client-tracking precedent for the same transport.
+Per-client name/version display is a named follow-up, gated on confirming rmcp actually exposes an
+`Implementation` the registry could read.
+
+**Evidence**: `crates/frust-mcp/src/clients.rs` module doc ("the guard's Drop is consequently the
+*only* disconnect signal this crate has... a documented limitation, not a bug to chase here");
+`crates/frust-tui/src/ui/views/mcp/mod.rs`.
+
+---
+
+### `mcp-embedded-devtools-unavailable` — embedded-mode driving/diagnosis tools needing a devtools client are always refused
+
+**Observed**: `frust-tui`'s `TuiSessionBackend` (the embedded server's `SessionBackend`) always
+reports a session's `devtools_client` as absent — the devtools socket lives inside
+`supervise::DevtoolsBridge`'s own thread inside the workbench, with no shareable handle to give an
+MCP tool call. Every driving tool (`tap`/`scroll`/`enter_text`) and every diagnosis tool needing a
+live devtools request (`widget_tree`/`widget_props`/`find_widgets`; `screenshot`'s devtools-first
+path) returns a typed in-band refusal rather than attempting the call. Tools reading data the
+workbench already retains (`app_logs`, `list_sessions`, `run_app`/`stop_app`/`restart_app`,
+`performance`, `metrics`) are unaffected.
+
+**Applies to**: every MCP session run through `frust-tui`'s embedded server — not the standalone
+`SessionEngine` backend, which owns its devtools connection directly.
+
+**Why accepted**: handing the tool layer a foreign thread's socket would need its own lock/hop
+protocol, or a second connection to the same app's devtools service; neither exists yet, and an
+honest refusal is the interim contract rather than a silent no-op or an invented reading.
+
+**Evidence**: `crates/frust-tui/src/supervise/mcp_backend.rs` module doc ("What this backend
+deliberately cannot do", `DEVTOOLS_OWNED_BY_WORKBENCH`); `crates/frust-tui/tests/mcp_embedded.rs`'s
+`devtools_backed_tools_report_the_embedded_mode_refusal` test.
+
+---
+
+### `mcp-embedded-fast-rebind-can-fail` — toggling the embedded MCP server off then on quickly can transiently fail
+
+**Observed**: stopping the embedded server cancels its `CancellationToken` and immediately clears
+`AppState::mcp`, but the listener's actual close is asynchronous — it completes only when the
+server task's own stopped report arrives. Toggling the server back on before that report lands can
+race a bind against a socket the OS has not yet released, failing with a visible bind error
+surfaced through `AppState::mcp_error`. A second toggle after the failure succeeds normally.
+
+**Applies to**: `frust-tui`'s embedded MCP server, which always rebinds the same fixed port
+(`DEFAULT_MCP_PORT`, 4848) rather than an ephemeral one.
+
+**Why accepted**: blocking the toggle until the stop is provably complete would turn an otherwise
+immediate action into a wait; the failure is visible and immediately retryable, so the workbench
+favors responsiveness over a masked wait.
+
+**Evidence**: `crates/frust-tui/src/engine/mod.rs`'s `Engine::stop_mcp` doc comment ("A caller that
+must know the port is free again... waits for that message"); `crates/frust-tui/src/engine/update.rs`'s
+`Message::McpStopped` handling (`mcp_error` retention).

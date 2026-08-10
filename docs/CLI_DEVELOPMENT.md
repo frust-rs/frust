@@ -42,22 +42,22 @@ LAW; re-run the row's tripwire after touching it, and never run a blind `cargo u
 | `rmcp 1.7` minor (`frust-mcp`-only; resolves 1.8.0) | `frust-mcp`'s MCP Streamable-HTTP server. `default-features = false` trims rmcp's client/reqwest/auth/elicitation surface this tool-only, loopback-bound server never uses; `server` + `transport-streamable-http-server` are the transport it runs, `macros` pulls in the `#[tool_router]`/`#[tool]`/`#[tool_handler]` attribute macros the tools are built from | `cargo test -p frust-mcp` |
 | `axum 0.8` (`frust-mcp`-only) | The HTTP layer rmcp's `StreamableHttpService` nests into | `cargo test -p frust-mcp` |
 | `base64 0.22` (`frust-mcp`-only) | Encodes/decodes screenshot payloads in MCP tool results | `cargo test -p frust-mcp` |
-| `tokio-util 0.7` (`frust-mcp`-only) | The `CancellationToken` graceful-shutdown seam wired to Ctrl-C | `cargo test -p frust-mcp` |
+| `tokio-util 0.7` (`frust-mcp`; also `frust-tui`, see [TUI_DEVELOPMENT.md](TUI_DEVELOPMENT.md)) | The `CancellationToken` graceful-shutdown seam, wired to Ctrl-C in `frust-mcp` and to the workbench's start/stop toggle in `frust-tui` | `cargo test -p frust-mcp` && `cargo test -p frust-tui` |
 
 `frust-drive` also shares `frust-tui`'s `toml_edit` pin — see
 [TUI_DEVELOPMENT.md](TUI_DEVELOPMENT.md).
 
-## `frust mcp`
+## `frust-mcp`
 
-`frust mcp` runs `frust-mcp`'s Streamable HTTP server (the `mcp` subcommand is a thin
-`Runtime::new` + `block_on` shim over `frust_mcp::run`, mirroring `commands::tui`). `--port`
-defaults to 4848 (`--port 0` picks an OS-assigned ephemeral port); `--project` defaults to the
-current directory and must exist, but needs no `frust.toml`. Once listening it prints one line —
-`frust-mcp listening on http://127.0.0.1:<PORT>/mcp` — and serves until Ctrl-C.
+`frust-mcp` has no `frust-cli` subcommand and no standalone binary — `frust_mcp::run` (the
+Ctrl-C-driven, fixed-config entry point) and `serve_embedded` (the runtime-toggled one
+`frust-tui` uses) are both library entry points only. Reaching an MCP server means starting
+`frust-tui` and toggling its embedded server on (see [LIMITATIONS.md](LIMITATIONS.md) for what
+that means for headless/CI use).
 
-`frust-mcp`'s integration tests (`http_smoke`, `engine_lifecycle`, `tool_families`) each bind an
-ephemeral loopback port (`--port 0` / a hand-rolled NDJSON fixture server), relevant in a
-network-restricted sandbox that blocks even loopback binds.
+`frust-mcp`'s integration tests (`http_smoke`, `engine_lifecycle`, `tool_families`,
+`mcp_embed_lifecycle`) each bind an ephemeral loopback port (`--port 0` / a hand-rolled NDJSON
+fixture server), relevant in a network-restricted sandbox that blocks even loopback binds.
 
 ## See Also
 

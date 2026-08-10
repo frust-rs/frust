@@ -5,9 +5,12 @@
 TUI is `frust-tui`, a mouse-first `ratatui` TEA (The Elm Architecture) terminal workbench for
 driving Frust app projects — scaffold/build/run/doctor/clean as supervised sessions across
 desktop/Android/iOS. It is a library with no binary of its own, consumed by `frust-cli` (bare
-`frust` in an interactive terminal, or the explicit `tui` subcommand); it is built only on
-`frust-drive`, with zero dependency on any framework rendering crate, mirroring `frust-cli`'s
-tooling-isolation charter.
+`frust` in an interactive terminal, or the explicit `tui` subcommand); it depends on
+`frust-drive` + `frust-devtools-protocol` + `frust-mcp`, with zero dependency on any framework
+rendering crate, mirroring `frust-cli`'s tooling-isolation charter (see
+[ARCHITECTURE.md](ARCHITECTURE.md)'s Cross-Unit Layer Dependencies — tooling may depend on the
+`frust-mcp` tooling crate). The workbench can embed an MCP server over its own sessions, letting an
+AI agent drive them the same way a human does through the terminal.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how TUI relates to the other units.
 
@@ -16,28 +19,57 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how TUI relates to the other units.
 | Module | Responsibility |
 |--------|-----------------|
 | `engine` | Pure TEA core: `AppState` model, `Message` enum, `update()` pure transition returning `Outcome`/`Effect`; terminal-free and unit-testable without a TTY. `engine::logstyle` classifies each log line once at push into per-line metadata (level, source, panic-fold role) consumed only by rendering. `SessionView` (`visible_indices`/`bottom_pos`) owns the visible-sequence/scroll-anchor math, computed once and consumed as-is by both scroll input and rendering. `engine::devtools` holds each session's DevTools view-model (`DevtoolsState`: five-phase connection, active tab, per-tab sub-state) as plain data + pure transitions mirroring what the bridges below report |
-| `supervise` | Session-supervision layer over `frust-drive`: drives per-session build/run lifecycles and bridges process output into engine messages. `supervise::progress` is a pure, side-effect-free build-phase-label extractor over streamed output lines, called from the drain path. `supervise::devtools_bridge`/`supervise::metrics_bridge` are DevTools' impure half, one thread per session each: the former owns a blocking devtools-protocol connection (token handshake, coalesced frame-stats, on-demand widget-tree/props pulls, `adb forward` on Android — see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)); the latter is a local `frust-drive::metrics` sampler with no build-feature gate, started once a session's Android identity resolves rather than once a discovery line lands |
-| `ui` | Render-only layer: paints `AppState` into `ratatui` frames and registers this frame's clickable/hoverable regions; never mutates engine state. `ui::views::sessions` renders the log pane from the engine's `SessionView` visible-sequence rather than re-deriving line membership. `ui::anim` holds pure animation primitives (braille spinner, shimmer sweep) themed via `Theme`. `ui::views::devtools` renders the DevTools chrome: the four-tab strip and its five connection-state screens (workbook §B12) |
+| `supervise` | Session-supervision layer over `frust-drive`: drives per-session build/run lifecycles and bridges process output into engine messages. `supervise::progress` is a pure, side-effect-free build-phase-label extractor over streamed output lines, called from the drain path. `supervise::devtools_bridge`/`supervise::metrics_bridge` are DevTools' impure half, one thread per session each: the former owns a blocking devtools-protocol connection (token handshake, coalesced frame-stats, on-demand widget-tree/props pulls, `adb forward` on Android — see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)); the latter is a local `frust-drive::metrics` sampler with no build-feature gate, started once a session's Android identity resolves rather than once a discovery line lands. `supervise::mcp_backend` implements `frust-mcp`'s `SessionBackend` over this same supervise layer — see Embedded MCP Surface below |
+| `ui` | Render-only layer: paints `AppState` into `ratatui` frames and registers this frame's clickable/hoverable regions; never mutates engine state. `ui::views::sessions` renders the log pane from the engine's `SessionView` visible-sequence rather than re-deriving line membership. `ui::anim` holds pure animation primitives (braille spinner, shimmer sweep) themed via `Theme`. `ui::views::devtools` renders the DevTools chrome: the four-tab strip and its five connection-state screens (workbook §B12). `ui::views::mcp` renders the MCP panel: server status, the connected-client list, and a start/stop action (workbook §B13) |
 | `runner` | Terminal lifecycle owner: `run()` first refuses a non-interactive terminal (stdin and stdout must both be TTYs) with a clean error, then owns raw-mode/panic-hook setup and the async event loop translating raw input into `Message`s and enacting `Effect`s |
 | `lib.rs` | Public entry point (`run()`), reached only through `frust-cli` — no standalone binary |
 
 ## Layer Dependencies
 
-`frust-drive` is TUI's sole framework-adjacent dependency, supplying process running/streaming,
-device discovery, the doctor report, the Android/iOS build/run pipelines, and the plugin registry
-(see [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)). `ratatui` renders the terminal UI, `crossterm`
-reads raw input and mouse events, and `ansi-to-tui` renders ANSI-coded log output. `tokio` and
-`futures-util` drive the async event loop, channels, and stream combinators; `toml_edit` gives
-format-preserving persistence for the recent-projects store; `anyhow`/`thiserror` cover error
-handling.
+`frust-drive` supplies process running/streaming, device discovery, the doctor report, the
+Android/iOS build/run pipelines, and the plugin registry (see
+[CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)). `frust-mcp` is TUI's second tooling-crate dependency:
+its `SessionBackend` trait and `serve_embedded` entry point are what the embedded MCP server (below)
+is built from — a tooling-to-tooling crossing, not a framework one, sanctioned by
+[ARCHITECTURE.md](ARCHITECTURE.md)'s Cross-Unit Layer Dependencies. `ratatui` renders the terminal
+UI, `crossterm` reads raw input and mouse events, and `ansi-to-tui` renders ANSI-coded log output.
+`tokio` and `futures-util` drive the async event loop, channels, and stream combinators (`tokio`'s
+`net` feature is enabled for the embedded server's own loopback listener); `tokio-util` supplies the
+`CancellationToken` the server shuts down on; `toml_edit` gives format-preserving persistence for
+the recent-projects store; `anyhow`/`thiserror` cover error handling.
 
 Internally, TUI enforces a strict TEA layering as a hard contract rather than convention: `engine`
 is pure and terminal-free; `ui` only renders and registers mouse regions and never mutates state;
 `runner` is the sole place raw events become `Message`s and `Effect`s get enacted. `update()` pushes
 all impure work — I/O, spawning, clipboard access — out to the runner as `Effect`s rather than
-performing it inline. The TUI's `Theme` is its own brand palette, entirely independent of the
+performing it inline. The one deliberate exception: a `Message::Mcp` (an embedded MCP server's
+question, carrying its own reply channel) is intercepted by `runner` **before** it reaches
+`update()` and served directly against the live `Supervisor` — `update()`'s own `Mcp` arm is a
+documented no-op, since answering needs supervisor/launch-record state the pure core cannot reach.
+The TUI's `Theme` is its own brand palette, entirely independent of the
 framework's `frust-theme` (see [WIDGETS_ARCHITECTURE.md](WIDGETS_ARCHITECTURE.md)) — TUI paints
 itself, not a Frust app.
+
+## Embedded MCP Surface
+
+`supervise::mcp_backend::TuiSessionBackend` implements `frust-mcp`'s `SessionBackend` over the
+workbench's own `Supervisor` — one session world, two front ends: an MCP agent drives the exact
+sessions the user sees, not a second headless engine. Each trait method posts an `McpCommand` onto
+the engine's channel and blocks on a reply the runner sends back (a bounded 5s deadline degrades to
+a typed `WorkbenchUnreachable` error rather than hanging an agent). Shapes with no honest workbench
+equivalent are reported as explicit absences, never invented values: a session's `devtools_client`
+is always `None` (the connection lives inside `DevtoolsBridge`'s own thread, so driving/inspection
+tools get a typed refusal — the workbench owns that socket); ad-hoc and physical-iOS sessions are
+omitted from the MCP session list (no `RunTarget` variant fits them); net metrics stay `None`.
+
+`AppState::mcp` holds the running server's handle (`None` = stopped); `mcp_panel_open`/`mcp_error`
+back the MCP panel (§B13) and its retained failure reason. `Engine::start_mcp`/`stop_mcp` bind or
+cancel a `frust_mcp::serve_embedded` task against a `ClientRegistry`; `Effect::StartMcpServer`/
+`StopMcpServer` are how `update()` requests that (the handle is a live resource the pure core
+cannot construct). The MCP panel and the sidebar ACTIONS row (`M` toggles the server; `m` opens the
+panel; `s` inside the panel toggles it) read the connected-client list live off the registry at
+render time — nothing messages the engine when a client connects or disconnects — so
+`AppState::animating()` keeps the redraw tick alive while the panel is open.
 
 ## Data Flow
 
@@ -91,3 +123,5 @@ itself, not a Frust app.
 | `PhaseLabel` | A parsed, displayable build/install/launch phase (`supervise::progress`); `None` when the streamed output doesn't match a recognized shape |
 | `LogLevel` / `LineMeta` / `LevelFilter` | Per-line log classification (`engine::logstyle`) — level/source/fold-role metadata computed once at push, and the filter narrowing the visible line sequence |
 | `DevtoolsState` | Per-session DevTools view-model (`engine::devtools`): five-phase connection (`ConnState`), active tab, and each tab's own sub-state — `PerformanceTab` (frame focus/scrub), `InspectorTab` (tree/selection), `MetricsState`/`SamplingState`/`MetricsIdentity` (System/Network's sampler status and rings) |
+| `TuiSessionBackend` | `supervise::mcp_backend`'s `frust_mcp::SessionBackend` implementation over the workbench's own `Supervisor` — the embedded MCP server's one seam into the workbench |
+| `McpServerHandle` / `McpStatus` | The running embedded server's cancel/registry handle (`AppState::mcp`), and the status (`Stopped`/`Starting`/`Listening{port, clients}`) it and the panel read; a `Stopped` status paired with `AppState::mcp_error` is the panel's failed state |

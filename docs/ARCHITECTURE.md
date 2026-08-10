@@ -23,7 +23,7 @@ its own spoke — read this to orient, then follow one link.
 | PLUGINS | `frust-plugin`, `plugins/shared-preferences`, `plugins/secure-storage`, `plugins/camera`, `plugins/clipboard`, `plugins/haptics`, `plugins/iap`, `plugins/clean-signals-frust`, `plugins/database` | Shared Android platform-handle substrate; six OS-capability plugins behind a shared conformance suite; facade-tier glue for an external clean-architecture core; a pure-Rust embedded-SQL plugin | [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md) |
 | NATIVE_WIDGETS | `frust-native-widgets` (`plugins/native-widgets`) | A platform plugin rendering real OS controls plus plugin-authored native view hierarchies, driven through exactly one generic factory/listener per platform; its **theme ladder** folds `Theme` into control props every frame (diff-gated) and degrades bundled fonts to the platform system font when unavailable | [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md) |
 | CLI | `frust-cli`, `frust-drive`, `frust-mcp` | Thin clap front-end plus the framework-free drive library: scaffolds projects, validates toolchain, discovers devices, drives Android/iOS run/build/clean pipelines; `frust-mcp` exposes the same driving/diagnosis surface to AI agents over an MCP Streamable HTTP server | [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md) |
-| TUI | `frust-tui` | Mouse-first ratatui TEA terminal workbench supervising `frust-drive` sessions (scaffold/build/run/doctor/clean) | [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md) |
+| TUI | `frust-tui` | Mouse-first ratatui TEA terminal workbench supervising `frust-drive` sessions (scaffold/build/run/doctor/clean); can embed an `frust-mcp` server so an AI agent drives the same sessions | [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md) |
 | DEVTOOLS | `frust-devtools-protocol`, `frust-devtools` | Sanctioned dependency-free wire-protocol leaf plus the in-app loopback debug service (widget-tree inspection, frame stats, input injection) a shell hosts for `frust-drive`/`frust-tui` | [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md) |
 
 ## Examples
@@ -56,7 +56,12 @@ only (S1–S8, D1–D2 per `benchmarks/PROTOCOL.md`), not a framework showcase.
   framework crate EXCEPT the `frust-devtools-protocol` leaf (`serde`/`serde_json` only); otherwise
   they only shell out to `cargo`/platform toolchains. `frust-mcp` is a fourth tooling front-end
   under this rule (an MCP server for AI agents, not `frust-devtools` — never a dev-dependency on it
-  either). `frust-devtools` (the framework-side debug service a shell hosts) is the mirror rule: it
+  either). Tooling MAY depend on the `frust-mcp` tooling crate itself — `frust-tui`'s dependency set
+  is now `frust-drive` + `frust-devtools-protocol` + `frust-mcp`, embedding the MCP server inside the
+  workbench (see [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)) — since that crossing stays entirely
+  within tooling and drags in no framework crate either. `frust-cli` itself does not depend on
+  `frust-mcp` and has no `mcp` subcommand: MCP is reachable only through a running `frust-tui`.
+  `frust-devtools` (the framework-side debug service a shell hosts) is the mirror rule: it
   depends on no framework or tooling crate either — the two sides of the devtools wire meet only at
   the protocol leaf. See [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md).
 - **Facade/plugin boundary** — the `frust` facade never depends on or re-exports a plugin. Plugins

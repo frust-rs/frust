@@ -16,7 +16,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how DEVTOOLS relates to the other uni
 
 | Module | Responsibility |
 |--------|-----------------|
-| `frust-devtools-protocol` | NDJSON JSON-RPC 2.0 wire types: `Request`/`Response`/`Notification`/`Incoming`, the typed v1 `Method` set with per-method param/result structs, `encode_line`/`decode_line` framing, `HandshakeParams`/`RpcError::UNAUTHORIZED`, and `format_discovery_line`/`parse_discovery_line -> Discovery` — the single source of truth for the discovery-line and handshake-token contract both sides use |
+| `frust-devtools-protocol` | NDJSON JSON-RPC 2.0 wire types: `Request`/`Response`/`Notification`/`Incoming`, the typed v1 `Method` set with per-method param/result structs, `encode_line`/`decode_line` framing, `HandshakeParams`/`RpcError::UNAUTHORIZED`, and `format_discovery_line`/`parse_discovery_line -> Discovery` — the single source of truth for the discovery-line and handshake-token contract both sides use. `redact_discovery_token(line) -> Cow<str>` masks a discovery line's token (borrowing, no allocation, when there is none to redact) for any caller that must retain the line itself rather than just the parsed `Discovery` |
 | `frust-devtools::backend` | `DevtoolsBackend` trait a shell implements (`widget_tree`, `widget_props`, `metrics_snapshot`, `inject_tap`/`inject_scroll`/`inject_text`, `screenshot` defaulting to `NotSupported`), plus `AppInfo` and `BackendError` |
 | `frust-devtools::service` | `Service::start`/`ServiceHandle`: binds `127.0.0.1:0`, owns a small internal current-thread tokio runtime, logs the discovery line (with token), and exposes `publish_frame_stats` (bounded, drop-oldest, never blocks the caller) |
 | `frust-devtools::token` | Mints the per-process handshake token: `/dev/urandom`-backed, with a documented non-cryptographic fallback when it can't be read |
@@ -78,7 +78,12 @@ loopback bind returns `ECONNREFUSED`, with `INTERNET` still granted and no SELin
   device access additionally routes through
   `frust-drive`'s `adb_forward_ephemeral`/`adb_forward_remove` (Android) to map a device-loopback
   port to a host-loopback one; iOS physical-device forwarding is not implemented in v1 (simulator
-  and desktop connect directly over localhost) — see [LIMITATIONS.md](LIMITATIONS.md).
+  and desktop connect directly over localhost) — see [LIMITATIONS.md](LIMITATIONS.md). A caller
+  that retains a captured discovery line rather than just the parsed `Discovery` — `frust-mcp`'s
+  session log ring is the one today — redacts it with `redact_discovery_token` first, so the
+  handshake token can never be read back out of stored logs (see
+  [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)'s `frust-mcp::engine` row). `frust-tui`'s own log view
+  does not yet apply the same redaction.
 - **Request/response.** A client connects over TCP, sends one NDJSON `Request` per line; the
   service decodes it, dispatches to the typed `Method`, and calls the corresponding
   `DevtoolsBackend` method on a dedicated backend thread (one call at a time, in arrival order),
@@ -110,7 +115,7 @@ loopback bind returns `ECONNREFUSED`, with `INTERNET` still granted and no SELin
 | Type | Purpose |
 |------|---------|
 | `Method` / `Request` / `Response` / `Notification` / `Incoming` | The typed v1 NDJSON JSON-RPC message set and framing discriminator (`frust-devtools-protocol`) |
-| `Discovery` / `HandshakeParams` / `RpcError::UNAUTHORIZED` | Auth wire types: the parsed discovery line (port + optional token), the client's handshake token, and the rejection code for any method sent before a valid token (`frust-devtools-protocol`) |
+| `Discovery` / `HandshakeParams` / `RpcError::UNAUTHORIZED` | Auth wire types: the parsed discovery line (port + optional token), the client's handshake token, and the rejection code for any method sent before a valid token (`frust-devtools-protocol`); `redact_discovery_token` masks the token in a retained raw line without needing to parse it |
 | `WidgetTreeDump` / `WidgetNode` / `WidgetProps` | The wire shape of an inspected widget tree and one widget's props |
 | `DevtoolsBackend` | The trait a shell implements to answer every devtools request; the seam decoupling the service from `frust-core` |
 | `Service` / `ServiceHandle` / `ServiceConfig` | The framework-side server: start/stop, `publish_frame_stats`, its 1s backend-call timeout, and (`ServiceConfig::require_token`, `ServiceHandle::token()`) the per-process auth token |
