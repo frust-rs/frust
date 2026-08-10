@@ -55,9 +55,11 @@ pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 /// Maximum allowed length for a single DAP header line (bytes).
 ///
 /// DAP headers are simple key-value pairs (e.g., `Content-Length: 42\r\n`),
-/// so 4 KB is extremely generous. This limit prevents unbounded heap growth
-/// from a malicious or malformed client that sends a header line without a
-/// newline terminator.
+/// so 4 KB is extremely generous. Each header-line read is bounded to this
+/// many bytes via `AsyncReadExt::take`, so a malicious or malformed client
+/// that sends a header line without a newline terminator can never cause
+/// more than this many bytes to be buffered before the cap is detected and
+/// the connection is rejected.
 const MAX_HEADER_LINE_LENGTH: usize = 4096;
 
 /// Read a single DAP message from the given async reader.
@@ -80,12 +82,18 @@ where
     // ── 1. Read headers line-by-line until blank line ─────────────────────
     loop {
         let mut line = String::new();
-        let bytes_read = reader.read_line(&mut line).await?;
+        let bytes_read = (&mut *reader)
+            .take(MAX_HEADER_LINE_LENGTH as u64)
+            .read_line(&mut line)
+            .await?;
 
-        if bytes_read > MAX_HEADER_LINE_LENGTH {
+        // `take` starves the inner reader at the cap, so `read_line` can
+        // never read more than MAX_HEADER_LINE_LENGTH bytes. If the cap was
+        // reached without a trailing '\n', the line was truncated by the
+        // cap rather than legitimately terminated — reject it as oversized.
+        if bytes_read == MAX_HEADER_LINE_LENGTH && !line.ends_with('\n') {
             return Err(CodecError::protocol(format!(
-                "DAP: header line exceeds maximum allowed length of {} bytes (got {})",
-                MAX_HEADER_LINE_LENGTH, bytes_read
+                "DAP: header line exceeds maximum allowed length of {MAX_HEADER_LINE_LENGTH} bytes"
             )));
         }
 
@@ -411,6 +419,28 @@ mod tests {
         let result = read_message(&mut reader).await;
 
         assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("header line exceeds maximum"),
+            "Expected header-line-too-long error, got: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_message_newline_free_header_does_not_grow_unbounded() {
+        // A header line with no newline terminator at all, well beyond
+        // MAX_HEADER_LINE_LENGTH (>=64 KiB), must be rejected without the
+        // reader growing the line buffer past the cap. This regression test
+        // targets the unbounded-growth bug specifically: the previous
+        // implementation used a plain `read_line` and only checked the
+        // length *after* the full line (including all 64 KiB+) had already
+        // been read into memory.
+        let data = vec![b'9'; 64 * 1024];
+        let mut reader = BufReader::new(data.as_slice());
+        let result = read_message(&mut reader).await;
+
+        assert!(result.is_err(), "Unterminated 64KB header must be rejected");
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("header line exceeds maximum"),
