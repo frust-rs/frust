@@ -1,0 +1,48 @@
+[package]
+name = "frust-dap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# A library only, no standalone binary — a later task's `frust-cli` `dap`
+# subcommand (outside this task's scope) is the process entry point. Charter
+# (docs/ARCHITECTURE.md's Tooling isolation rule, widened to this crate):
+# frust-dap depends on `frust-drive`/`frust-mcp`/`frust-devtools-protocol`
+# plus tokio/serde/serde_json/log/thiserror only — never a framework crate,
+# not even as a dev-dependency.
+[lib]
+name = "frust_dap"
+path = "src/lib.rs"
+
+[dependencies]
+# The session-supervision seam a later task's DAP session drives (device
+# discovery, the desktop/Android/iOS run pipelines) — the same library
+# `frust-mcp`/`frust-tui` build on.
+frust-drive = { path = "../frust-drive" }
+# `SessionBackend`/`SessionEngine` — a later task's DAP session reuses the
+# same backend seam an MCP client drives, rather than re-implementing session
+# supervision a third time.
+frust-mcp = { path = "../frust-mcp" }
+# The sanctioned wire-protocol leaf a later task's log/output plumbing
+# speaks — NEVER `frust-devtools` itself (docs/ARCHITECTURE.md's
+# tooling-isolation charter).
+frust-devtools-protocol = { path = "../frust-devtools-protocol" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+# The workspace `tokio` pin is `default-features = false`; enable exactly
+# what this crate needs: rt-multi-thread (the stdio DAP server's own
+# runtime), io-util (`AsyncBufReadExt`/`AsyncReadExt`/`AsyncWriteExt` the
+# codec runs over), net (a later task's session-log streaming), sync (channel
+# plumbing between the codec loop and a session), macros (`#[tokio::test]`),
+# time (timeouts).
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+    "io-util",
+    "net",
+    "sync",
+    "macros",
+    "time",
+] }
