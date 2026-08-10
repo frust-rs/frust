@@ -557,6 +557,63 @@ async fn the_toggle_starts_and_stops_a_real_server() {
     );
 }
 
+/// A stop immediately followed by a start — the real shape of the race the
+/// server's generation tag closes.
+///
+/// `stop_mcp` drops the old server's handle at once while its task is still
+/// inside graceful shutdown, so its `McpStopped` arrives *after* the new
+/// server is installed. Applying it would clear the new handle — and with it
+/// the only `CancellationToken` that can stop that server, since dropping a
+/// token does not cancel it — leaving an orphaned listener for the life of
+/// the process. Here the new server survives its predecessor's report and is
+/// still stoppable afterwards, which is the property that was broken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_during_the_previous_servers_shutdown_survives_its_stop_report() {
+    let mut engine = Engine::new(AppState::default());
+    let mut rx = engine.take_receiver();
+    let backend: SharedBackend = Arc::new(TuiSessionBackend::new(
+        engine.sender(),
+        Arc::new(FakeProcessRunner::new()),
+    ));
+
+    assert!(engine.start_mcp(Arc::clone(&backend), 0));
+    pump_until_listening(&mut engine, &mut rx).await;
+
+    // The window: the first server's task has reported nothing yet.
+    assert!(engine.stop_mcp());
+    assert!(engine.start_mcp(Arc::clone(&backend), 0));
+
+    // Drain until the *old* server's stop report has been delivered to
+    // `update` and the new one has bound — in either order, so the test never
+    // depends on which task wins.
+    let deadline = Instant::now() + DEADLINE;
+    let mut old_report_seen = false;
+    let port = loop {
+        let msg = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .expect("the old server never reported that it stopped, or the new one never bound")
+            .expect("the engine channel closed");
+        old_report_seen |= matches!(msg, Message::McpStopped(..));
+        engine.handle(msg);
+        if let McpStatus::Listening { port, .. } = engine.mcp_status()
+            && old_report_seen
+        {
+            break port;
+        }
+    };
+
+    // The new server is still installed, listening, and — the part that was
+    // broken — still stoppable.
+    assert!(engine.stop_mcp(), "the new server's handle survived");
+    pump_until_stopped(&mut engine, &mut rx).await;
+    assert_eq!(engine.mcp_status(), McpStatus::Stopped);
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    assert!(
+        TcpStream::connect_timeout(&addr, DEADLINE).is_err(),
+        "the new server was actually cancelled, not orphaned on {addr}"
+    );
+}
+
 /// Drains the engine channel (the loop's job) until the server reports the
 /// port it bound.
 async fn pump_until_listening(
@@ -587,7 +644,7 @@ async fn pump_until_stopped(
             .await
             .expect("the server never reported that it stopped")
             .expect("the engine channel closed");
-        let stopped = matches!(msg, Message::McpStopped(_));
+        let stopped = matches!(msg, Message::McpStopped(..));
         engine.handle(msg);
         if stopped {
             return;

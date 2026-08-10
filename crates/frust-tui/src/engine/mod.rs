@@ -87,6 +87,9 @@ pub struct Engine {
     pub state: AppState,
     tx: UnboundedSender<Message>,
     rx: Option<UnboundedReceiver<Message>>,
+    /// The tag the next [`Self::start_mcp`] stamps its server and that
+    /// server's reports with (see [`McpServerHandle::generation`]).
+    next_mcp_generation: u64,
 }
 
 impl Engine {
@@ -97,6 +100,7 @@ impl Engine {
             state,
             tx,
             rx: Some(rx),
+            next_mcp_generation: 0,
         }
     }
 
@@ -131,10 +135,17 @@ impl Engine {
     /// reports about itself — the port it bound, the fact that it stopped —
     /// comes back as an ordinary [`Message`] and *is* applied through
     /// `update`.
+    ///
+    /// Each start mints a fresh **generation** and stamps it on the handle and
+    /// on both of the server's reports, so a previous server still winding
+    /// down cannot have its late report applied to this one (see
+    /// [`McpServerHandle::generation`]).
     pub fn start_mcp(&mut self, backend: SharedBackend, port: u16) -> bool {
         if self.state.mcp.is_some() {
             return false;
         }
+        let generation = self.next_mcp_generation;
+        self.next_mcp_generation += 1;
         let cancel = CancellationToken::new();
         let registry = ClientRegistry::new();
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -152,7 +163,7 @@ impl Engine {
         let listening_tx = self.tx.clone();
         tokio::spawn(async move {
             if let Ok(addr) = ready_rx.await {
-                let _ = listening_tx.send(Message::McpListening(addr.port()));
+                let _ = listening_tx.send(Message::McpListening(generation, addr.port()));
             }
         });
         let stopped_tx = self.tx.clone();
@@ -162,10 +173,10 @@ impl Engine {
                 Ok(Err(err)) => Some(format!("{err:#}")),
                 Err(err) => Some(format!("the MCP server task failed: {err}")),
             };
-            let _ = stopped_tx.send(Message::McpStopped(error));
+            let _ = stopped_tx.send(Message::McpStopped(generation, error));
         });
 
-        self.state.mcp = Some(McpServerHandle::starting(cancel, registry));
+        self.state.mcp = Some(McpServerHandle::starting(generation, cancel, registry));
         true
     }
 
@@ -174,9 +185,10 @@ impl Engine {
     ///
     /// The handle is dropped here and the cancellation is what actually
     /// closes the listener — the server's own [`Message::McpStopped`] follows
-    /// once its task has wound down, and finds nothing left to clear. A
-    /// caller that must know the port is free again (a restart on the *same*
-    /// fixed port) waits for that message.
+    /// once its task has wound down, and finds nothing left to clear (or a
+    /// *newer* server it does not name, which its generation tag makes it
+    /// leave alone). A caller that must know the port is free again (a
+    /// restart on the *same* fixed port) waits for that message.
     pub fn stop_mcp(&mut self) -> bool {
         match self.state.mcp.take() {
             Some(handle) => {

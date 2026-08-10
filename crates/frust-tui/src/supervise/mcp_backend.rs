@@ -328,6 +328,15 @@ impl McpSessionRecords {
 /// handle: both clones name the same server.
 #[derive(Clone)]
 pub struct McpServerHandle {
+    /// Which server instance this is (`Engine`'s monotonic counter). A
+    /// stopping server's tasks outlive the handle — axum's graceful shutdown
+    /// runs on after `stop_mcp` has dropped it — so their late reports carry
+    /// this number and `update` ignores any that does not name the
+    /// *currently installed* server. Without it, a stop report from the
+    /// previous server would clear a newly started one's handle, and since
+    /// dropping a `CancellationToken` does **not** cancel it, that server
+    /// would go on listening with nothing left able to stop it.
+    generation: u64,
     /// What stops the server (`frust_mcp::serve_embedded`'s shutdown seam).
     cancel: tokio_util::sync::CancellationToken,
     /// The connected-client registry the server registers each MCP session
@@ -340,16 +349,26 @@ pub struct McpServerHandle {
 
 impl McpServerHandle {
     /// A handle for a server that has been spawned but has not reported its
-    /// bound address yet.
+    /// bound address yet, tagged with the `generation`
+    /// [`crate::engine::Engine::start_mcp`] minted for it.
     pub(crate) fn starting(
+        generation: u64,
         cancel: tokio_util::sync::CancellationToken,
         registry: frust_mcp::ClientRegistry,
     ) -> Self {
         Self {
+            generation,
             cancel,
             registry,
             bound_port: None,
         }
+    }
+
+    /// Which server instance this handle names — the tag every report from
+    /// that instance carries, so a superseded server's late report can be
+    /// told apart from the running one's.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Record the port the listener actually bound. Returns whether this
@@ -388,6 +407,7 @@ impl std::fmt::Debug for McpServerHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // `ClientRegistry` is not `Debug`; the live count is the useful part.
         f.debug_struct("McpServerHandle")
+            .field("generation", &self.generation)
             .field("bound_port", &self.bound_port)
             .field("clients", &self.registry.count())
             .finish()

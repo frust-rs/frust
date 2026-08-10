@@ -763,15 +763,25 @@ pub enum Message {
     /// needs the `Supervisor` the pure core deliberately cannot reach; see
     /// [`crate::supervise::serve_command`].
     Mcp(McpCommand),
-    /// The embedded MCP server's listener is up on this port — the answer to
-    /// `start_mcp`'s `ready` signal (the OS-assigned port when it was started
-    /// on `0`).
-    McpListening(u16),
-    /// The embedded MCP server task returned: cleanly (`None`) or with the
-    /// rendered error that ended it (`Some`). Clears the server handle from
-    /// the model; a stop the user asked for has already cleared it, so this
-    /// is then a no-op.
-    McpStopped(Option<String>),
+    /// The embedded MCP server of this generation has its listener up on this
+    /// port — the answer to `start_mcp`'s `ready` signal (the OS-assigned port
+    /// when it was started on `0`).
+    ///
+    /// Applied only when the generation names the server currently installed
+    /// on [`super::AppState::mcp`]; a report from a superseded one is dropped
+    /// rather than stamping its port onto its successor.
+    McpListening(u64, u16),
+    /// The embedded MCP server of this generation returned: cleanly (`None`)
+    /// or with the rendered error that ended it (`Some`).
+    ///
+    /// Clears the server handle from the model — but **only** when the
+    /// generation names the handle installed there. A stop the user asked for
+    /// has already cleared it (so this is a no-op), and a start that happened
+    /// while the old server was still winding down installed a handle this
+    /// report does not name (so it must not clear it: dropping a
+    /// `CancellationToken` does not cancel it, and the new server would be
+    /// left listening with nothing able to stop it).
+    McpStopped(u64, Option<String>),
     /// Start the embedded MCP server, or stop the running one (`M`, the
     /// sidebar ACTIONS "MCP" row, the panel's Start/Stop button, or the
     /// palette) — workbook §B13. Routed to the runner as

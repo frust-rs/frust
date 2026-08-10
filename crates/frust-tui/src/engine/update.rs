@@ -1222,27 +1222,47 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         // exactly the "the workbench did not answer" signal the backend
         // reports as a typed error (`crate::supervise::EmbeddedError`).
         Message::Mcp(_) => Outcome::idle(),
-        Message::McpListening(port) => match state.mcp.as_mut() {
-            Some(handle) => Outcome::dirty(handle.set_bound_port(port)),
-            // The server was stopped between spawning and binding; its own
-            // shutdown follows.
-            None => Outcome::idle(),
+        // Both reports below are gated on the generation naming the server
+        // *currently installed* on the model. A stopping server's tasks
+        // outlive `stop_mcp`'s handle drop (graceful shutdown runs on), so a
+        // start in that window leaves two servers reporting; applying the
+        // older one's report to the newer one's handle would stamp it with
+        // the wrong port, or — far worse — clear it, and since dropping a
+        // `CancellationToken` does not cancel it, that server would be left
+        // listening with nothing able to stop it.
+        Message::McpListening(generation, port) => match state.mcp.as_mut() {
+            Some(handle) if handle.generation() == generation => {
+                Outcome::dirty(handle.set_bound_port(port))
+            }
+            // The server was stopped between spawning and binding (its own
+            // shutdown follows), or has already been superseded.
+            Some(_) | None => Outcome::idle(),
         },
-        Message::McpStopped(error) => {
-            let was_running = state.mcp.take().is_some();
-            match error {
-                Some(error) => {
-                    // Two surfaces, deliberately: the toast catches the eye of
-                    // someone looking elsewhere, and `mcp_error` keeps the
-                    // reason on the sidebar row / panel afterwards, so a
-                    // failed start never reads as a silent no-op (§B13).
-                    state
-                        .toasts
-                        .push(ToastKind::Error, format!("MCP server stopped: {error}"));
-                    state.mcp_error = Some(error);
-                    Outcome::redraw()
+        Message::McpStopped(generation, error) => {
+            match state.mcp.as_ref().map(|handle| handle.generation()) {
+                // A superseded server winding down: the handle here is
+                // somebody else's, and neither clearing it nor reporting its
+                // predecessor's fate would be true of the running server.
+                Some(installed) if installed != generation => Outcome::idle(),
+                installed => {
+                    let was_running = installed.is_some();
+                    state.mcp = None;
+                    match error {
+                        Some(error) => {
+                            // Two surfaces, deliberately: the toast catches the
+                            // eye of someone looking elsewhere, and `mcp_error`
+                            // keeps the reason on the sidebar row / panel
+                            // afterwards, so a failed start never reads as a
+                            // silent no-op (§B13).
+                            state
+                                .toasts
+                                .push(ToastKind::Error, format!("MCP server stopped: {error}"));
+                            state.mcp_error = Some(error);
+                            Outcome::redraw()
+                        }
+                        None => Outcome::dirty(was_running),
+                    }
                 }
-                None => Outcome::dirty(was_running),
             }
         }
         Message::ToggleMcpServer => {
@@ -4462,10 +4482,12 @@ mod tests {
 
     // ── Embedded MCP server ───────────────────────────────────────────────────
 
-    /// A handle for a server that was "started" without spawning anything —
-    /// enough to exercise the two reports the server sends back.
-    fn mcp_handle() -> crate::supervise::McpServerHandle {
+    /// A handle for a server of `generation` that was "started" without
+    /// spawning anything — enough to exercise the two reports the server
+    /// sends back.
+    fn mcp_handle(generation: u64) -> crate::supervise::McpServerHandle {
         crate::supervise::McpServerHandle::starting(
+            generation,
             tokio_util::sync::CancellationToken::new(),
             frust_mcp::ClientRegistry::new(),
         )
@@ -4474,10 +4496,10 @@ mod tests {
     #[test]
     fn the_bound_port_report_promotes_starting_to_listening() {
         let mut st = welcome();
-        st.mcp = Some(mcp_handle());
+        st.mcp = Some(mcp_handle(0));
         assert_eq!(st.mcp_status(), crate::supervise::McpStatus::Starting);
 
-        let out = update(&mut st, Message::McpListening(4848));
+        let out = update(&mut st, Message::McpListening(0, 4848));
         assert!(out.redraw);
         assert_eq!(
             st.mcp_status(),
@@ -4487,22 +4509,22 @@ mod tests {
             }
         );
         // The same report again changes nothing.
-        assert!(!update(&mut st, Message::McpListening(4848)).redraw);
+        assert!(!update(&mut st, Message::McpListening(0, 4848)).redraw);
     }
 
     #[test]
     fn a_stopped_server_clears_the_handle_and_an_error_toasts() {
         let mut st = welcome();
-        st.mcp = Some(mcp_handle());
-        let out = update(&mut st, Message::McpStopped(None));
+        st.mcp = Some(mcp_handle(0));
+        let out = update(&mut st, Message::McpStopped(0, None));
         assert!(out.redraw);
         assert_eq!(st.mcp_status(), crate::supervise::McpStatus::Stopped);
         assert!(st.toasts.items.is_empty(), "a clean stop is not an error");
 
-        st.mcp = Some(mcp_handle());
+        st.mcp = Some(mcp_handle(1));
         update(
             &mut st,
-            Message::McpStopped(Some("address already in use".to_string())),
+            Message::McpStopped(1, Some("address already in use".to_string())),
         );
         assert_eq!(st.mcp_status(), crate::supervise::McpStatus::Stopped);
         assert_eq!(st.toasts.items.len(), 1);
@@ -4527,10 +4549,71 @@ mod tests {
             "the pure core never builds the live server handle itself"
         );
 
-        st.mcp = Some(mcp_handle());
+        st.mcp = Some(mcp_handle(0));
         let out = update(&mut st, Message::ToggleMcpServer);
         assert!(out.redraw);
         assert_eq!(out.effect, Some(Effect::StopMcpServer));
+    }
+
+    /// The race the generation tag exists for (review defect B): the user
+    /// stops server A and immediately starts B, while A is still inside
+    /// graceful shutdown. A's late reports name a generation the model no
+    /// longer holds and must not touch B — clearing B's handle would drop its
+    /// only `CancellationToken`, and dropping one does **not** cancel it, so
+    /// B would be left listening with nothing able to stop it and every later
+    /// start failing on the address.
+    #[test]
+    fn a_superseded_servers_late_reports_never_touch_its_successor() {
+        let mut st = welcome();
+        // A (generation 0) was stopped — `stop_mcp` took its handle — and B
+        // (generation 1) was started in the window before A's task wound down.
+        st.mcp = Some(mcp_handle(1));
+        update(&mut st, Message::McpListening(1, 4848));
+
+        // A's stale bound-port report does not restamp B's port…
+        let out = update(&mut st, Message::McpListening(0, 9999));
+        assert!(!out.redraw);
+        assert_eq!(
+            st.mcp_status(),
+            crate::supervise::McpStatus::Listening {
+                port: 4848,
+                clients: 0
+            }
+        );
+
+        // …and A's stale stop report leaves B installed, listening, and
+        // stoppable, with no error surfaced against it.
+        let out = update(&mut st, Message::McpStopped(0, None));
+        assert!(!out.redraw);
+        let out = update(
+            &mut st,
+            Message::McpStopped(0, Some("address already in use".to_string())),
+        );
+        assert!(!out.redraw);
+        assert_eq!(
+            st.mcp_status(),
+            crate::supervise::McpStatus::Listening {
+                port: 4848,
+                clients: 0
+            }
+        );
+        assert!(st.toasts.items.is_empty());
+        assert_eq!(st.mcp_error, None);
+        assert_eq!(
+            st.mcp.as_ref().map(|handle| handle.generation()),
+            Some(1),
+            "B's own handle — the one carrying its cancellation token — is still installed"
+        );
+        // Which is what keeps B stoppable: the toggle still reaches it, and
+        // the handle the runner would cancel is B's.
+        assert_eq!(
+            update(&mut st, Message::ToggleMcpServer).effect,
+            Some(Effect::StopMcpServer)
+        );
+
+        // B's *own* stop report, by contrast, is applied.
+        assert!(update(&mut st, Message::McpStopped(1, None)).redraw);
+        assert_eq!(st.mcp_status(), crate::supervise::McpStatus::Stopped);
     }
 
     /// A failed start stays visible until the next attempt — and the next
@@ -4539,8 +4622,8 @@ mod tests {
     #[test]
     fn requesting_a_start_clears_the_previous_failure_reason() {
         let mut st = welcome();
-        st.mcp = Some(mcp_handle());
-        update(&mut st, Message::McpStopped(Some("boom".to_string())));
+        st.mcp = Some(mcp_handle(0));
+        update(&mut st, Message::McpStopped(0, Some("boom".to_string())));
         assert_eq!(st.mcp_error.as_deref(), Some("boom"));
 
         update(&mut st, Message::ToggleMcpServer);
@@ -4567,7 +4650,7 @@ mod tests {
     #[test]
     fn closing_the_panel_leaves_the_server_running() {
         let mut st = welcome();
-        st.mcp = Some(mcp_handle());
+        st.mcp = Some(mcp_handle(0));
         st.mcp_panel_open = true;
         let out = update(&mut st, Message::CloseMcpPanel);
         assert!(out.effect.is_none());
