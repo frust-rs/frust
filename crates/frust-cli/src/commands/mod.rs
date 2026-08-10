@@ -3,6 +3,7 @@
 pub mod build;
 pub mod clean;
 pub mod create;
+pub mod dap;
 pub mod devices;
 pub mod doctor;
 pub mod run;
@@ -31,6 +32,10 @@ use frust_drive::process::RealProcessRunner;
 pub fn dispatch(command: Command, cli: &Cli) -> Result<u8> {
     let verbose = cli.verbose > 0;
     let runner = RealProcessRunner;
+    // The DAP handler needs Arc<dyn ProcessRunner + Send + Sync>; construct
+    // it from the same RealProcessRunner type here (the sole construction site).
+    let dap_runner = std::sync::Arc::new(RealProcessRunner)
+        as std::sync::Arc<dyn frust_drive::process::ProcessRunner + Send + Sync>;
     match command {
         Command::Doctor => doctor::run_in(&runner, verbose),
         Command::Devices => devices::run_in(&runner, verbose),
@@ -61,6 +66,7 @@ pub fn dispatch(command: Command, cli: &Cli) -> Result<u8> {
             let cwd = std::env::current_dir().context("reading current directory")?;
             clean::run_in(&runner, &cwd)
         }
+        Command::Dap { port } => dap::run_in(dap_runner, port),
         Command::Tui => tui::run(),
         Command::Run {
             build,

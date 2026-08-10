@@ -93,6 +93,14 @@ pub enum Command {
     Devices,
     /// Remove build outputs (cargo target dirs + Gradle/Xcode build dirs).
     Clean,
+    /// Debug Adapter Protocol server for IDE integration; stdio by default,
+    /// --port for TCP on 127.0.0.1.
+    Dap {
+        /// Bind to a TCP port on loopback instead of using stdio.
+        /// When absent, the server uses stdin/stdout for the DAP wire.
+        #[arg(long, value_name = "PORT")]
+        port: Option<u16>,
+    },
     /// Launch the TUI workbench: an advanced interactive interface for
     /// managing Frust projects.
     Tui,
@@ -594,5 +602,27 @@ mod tests {
     fn parses_tui() {
         let cli = Cli::parse_from(["frust", "tui"]);
         assert!(matches!(cli.command, Some(Command::Tui)));
+    }
+
+    #[test]
+    fn parses_dap_without_port_defaults_to_none() {
+        let cli = Cli::parse_from(["frust", "dap"]);
+        match cli.command.unwrap() {
+            Command::Dap { port } => {
+                assert_eq!(port, None);
+            }
+            other => panic!("expected Dap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_dap_with_port() {
+        let cli = Cli::parse_from(["frust", "dap", "--port", "4849"]);
+        match cli.command.unwrap() {
+            Command::Dap { port } => {
+                assert_eq!(port, Some(4849));
+            }
+            other => panic!("expected Dap, got {other:?}"),
+        }
     }
 }
