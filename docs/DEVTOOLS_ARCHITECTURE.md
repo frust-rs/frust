@@ -79,11 +79,12 @@ loopback bind returns `ECONNREFUSED`, with `INTERNET` still granted and no SELin
   `frust-drive`'s `adb_forward_ephemeral`/`adb_forward_remove` (Android) to map a device-loopback
   port to a host-loopback one; iOS physical-device forwarding is not implemented in v1 (simulator
   and desktop connect directly over localhost) — see [LIMITATIONS.md](LIMITATIONS.md). A caller
-  that retains a captured discovery line rather than just the parsed `Discovery` — `frust-mcp`'s
-  session log ring is the one today — redacts it with `redact_discovery_token` first, so the
-  handshake token can never be read back out of stored logs (see
-  [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)'s `frust-mcp::engine` row). `frust-tui`'s own log view
-  does not yet apply the same redaction.
+  that retains a captured discovery line rather than just the parsed `Discovery` redacts it with
+  `redact_discovery_token` first, so the handshake token can never be read back out of stored logs:
+  `frust-mcp::engine`'s session log ring (see [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)) and
+  `frust-tui`'s own `SessionView::push_line_at` (see [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md))
+  both redact at the ring's push edge, so a stored line — surfaced verbatim by the log view or by
+  MCP's `app_logs` tool alike — never carries the token past that point.
 - **Request/response.** A client connects over TCP, sends one NDJSON `Request` per line; the
   service decodes it, dispatches to the typed `Method`, and calls the corresponding
   `DevtoolsBackend` method on a dedicated backend thread (one call at a time, in arrival order),

@@ -19,7 +19,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how TUI relates to the other units.
 | Module | Responsibility |
 |--------|-----------------|
 | `engine` | Pure TEA core: `AppState` model, `Message` enum, `update()` pure transition returning `Outcome`/`Effect`; terminal-free and unit-testable without a TTY. `engine::logstyle` classifies each log line once at push into per-line metadata (level, source, panic-fold role) consumed only by rendering. `SessionView` (`visible_indices`/`bottom_pos`) owns the visible-sequence/scroll-anchor math, computed once and consumed as-is by both scroll input and rendering. `engine::devtools` holds each session's DevTools view-model (`DevtoolsState`: five-phase connection, active tab, per-tab sub-state) as plain data + pure transitions mirroring what the bridges below report |
-| `supervise` | Session-supervision layer over `frust-drive`: drives per-session build/run lifecycles and bridges process output into engine messages. `supervise::progress` is a pure, side-effect-free build-phase-label extractor over streamed output lines, called from the drain path. `supervise::devtools_bridge`/`supervise::metrics_bridge` are DevTools' impure half, one thread per session each: the former owns a blocking devtools-protocol connection (token handshake, coalesced frame-stats, on-demand widget-tree/props pulls, `adb forward` on Android — see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)); the latter is a local `frust-drive::metrics` sampler with no build-feature gate, started once a session's Android identity resolves rather than once a discovery line lands. `supervise::mcp_backend` implements `frust-mcp`'s `SessionBackend` over this same supervise layer — see Embedded MCP Surface below |
+| `supervise` | Session-supervision layer over `frust-drive`: drives per-session build/run lifecycles and bridges process output into engine messages. `supervise::progress` is a pure, side-effect-free build-phase-label extractor over streamed output lines, called from the drain path. `supervise::devtools_bridge`/`supervise::metrics_bridge` are DevTools' impure half, one thread per session each: the former owns a blocking devtools-protocol connection (token handshake, coalesced frame-stats, on-demand widget-tree/props pulls, `adb forward` on Android — see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)); the latter is a local `frust-drive::metrics` sampler with no build-feature gate, started once a session's Android identity resolves rather than once a discovery line lands. A device session's `stop` additionally dispatches a best-effort OS-level app termination (`adb shell am force-stop` / `simctl terminate`) on a tracked detached thread the supervisor bounded-joins from `stop_all`/`Drop` — shared by the user's stop keypress and MCP's `stop_app`/`restart_app`. `supervise::mcp_backend` implements `frust-mcp`'s `SessionBackend` over this same supervise layer — see Embedded MCP Surface below |
 | `ui` | Render-only layer: paints `AppState` into `ratatui` frames and registers this frame's clickable/hoverable regions; never mutates engine state. `ui::views::sessions` renders the log pane from the engine's `SessionView` visible-sequence rather than re-deriving line membership. `ui::anim` holds pure animation primitives (braille spinner, shimmer sweep) themed via `Theme`. `ui::views::devtools` renders the DevTools chrome: the four-tab strip and its five connection-state screens (workbook §B12). `ui::views::mcp` renders the MCP panel: server status, the connected-client list, and a start/stop action (workbook §B13) |
 | `runner` | Terminal lifecycle owner: `run()` first refuses a non-interactive terminal (stdin and stdout must both be TTYs) with a clean error, then owns raw-mode/panic-hook setup and the async event loop translating raw input into `Message`s and enacting `Effect`s |
 | `lib.rs` | Public entry point (`run()`), reached only through `frust-cli` — no standalone binary |
@@ -61,15 +61,25 @@ equivalent are reported as explicit absences, never invented values: a session's
 is always `None` (the connection lives inside `DevtoolsBridge`'s own thread, so driving/inspection
 tools get a typed refusal — the workbench owns that socket); ad-hoc and physical-iOS sessions are
 omitted from the MCP session list (no `RunTarget` variant fits them); net metrics stay `None`.
+MCP-launched session records are bounded at `MCP_RECORD_CAP` (mirroring `frust-mcp`'s own
+`TERMINAL_SESSION_CAP`, 32), oldest-terminal evicted first and a live session never evicted;
+`run_app`/`restart_app` refuse once the cap of live MCP sessions is reached with a typed
+`EmbeddedError::TooManySessions`, before any bookkeeping runs, so a refusal can never itself grow
+`AppState::sessions` (see [LIMITATIONS.md](LIMITATIONS.md)).
 
 `AppState::mcp` holds the running server's handle (`None` = stopped); `mcp_panel_open`/`mcp_error`
 back the MCP panel (§B13) and its retained failure reason. `Engine::start_mcp`/`stop_mcp` bind or
 cancel a `frust_mcp::serve_embedded` task against a `ClientRegistry`; `Effect::StartMcpServer`/
 `StopMcpServer` are how `update()` requests that (the handle is a live resource the pure core
-cannot construct). The MCP panel and the sidebar ACTIONS row (`M` toggles the server; `m` opens the
-panel; `s` inside the panel toggles it) read the connected-client list live off the registry at
-render time — nothing messages the engine when a client connects or disconnects — so
-`AppState::animating()` keeps the redraw tick alive while the panel is open.
+cannot construct). Each `start_mcp` mints a monotonic **generation**, stamped on the handle and on
+both of the server's reports (`McpListening`/`McpStopped`); `update()` applies a report only when
+its generation names the currently-installed server, since a stopping server's task outlives the
+handle drop (dropping its `CancellationToken` does not itself cancel an already-scheduled task) and
+an ungated late report could otherwise clobber a successor. The MCP panel and the sidebar ACTIONS
+row (`M` toggles the server; `m` opens the panel; `s` inside the panel toggles it) read the
+connected-client list live off the registry at render time — nothing messages the engine when a
+client connects or disconnects — so `AppState::animating()` keeps the redraw tick alive while the
+panel is open.
 
 ## Data Flow
 
@@ -103,7 +113,10 @@ render time — nothing messages the engine when a client connects or disconnect
   session (see [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md) and
   [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)).
 - DevTools: a discovery line captured at `SessionView::push_line` drives `engine::devtools`'s
-  five-phase connection through a connect `Effect`; `supervise::DevtoolsBridge` performs the token
+  five-phase connection through a connect `Effect`; the ring copy of that line is stored with its
+  handshake token redacted (`SessionView::push_line_at`), so neither the log view nor MCP's
+  `app_logs` tool can read it back out (see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)).
+  `supervise::DevtoolsBridge` performs the token
   handshake, coalesces frame stats, and serves on-demand widget-tree/props pulls, reporting back as
   `ConnEvent`s the engine mirrors into ring/tab state for `ui::views::devtools` to render.
   `supervise::MetricsBridge` runs in parallel (Android sessions only in v1), feeding the System/
@@ -124,4 +137,4 @@ render time — nothing messages the engine when a client connects or disconnect
 | `LogLevel` / `LineMeta` / `LevelFilter` | Per-line log classification (`engine::logstyle`) — level/source/fold-role metadata computed once at push, and the filter narrowing the visible line sequence |
 | `DevtoolsState` | Per-session DevTools view-model (`engine::devtools`): five-phase connection (`ConnState`), active tab, and each tab's own sub-state — `PerformanceTab` (frame focus/scrub), `InspectorTab` (tree/selection), `MetricsState`/`SamplingState`/`MetricsIdentity` (System/Network's sampler status and rings) |
 | `TuiSessionBackend` | `supervise::mcp_backend`'s `frust_mcp::SessionBackend` implementation over the workbench's own `Supervisor` — the embedded MCP server's one seam into the workbench |
-| `McpServerHandle` / `McpStatus` | The running embedded server's cancel/registry handle (`AppState::mcp`), and the status (`Stopped`/`Starting`/`Listening{port, clients}`) it and the panel read; a `Stopped` status paired with `AppState::mcp_error` is the panel's failed state |
+| `McpServerHandle` / `McpStatus` | The running embedded server's cancel/registry handle (`AppState::mcp`), carrying the generation its `McpListening`/`McpStopped` reports are gated against, and the status (`Stopped`/`Starting`/`Listening{port, clients}`) it and the panel read; a `Stopped` status paired with `AppState::mcp_error` is the panel's failed state |

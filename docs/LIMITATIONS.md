@@ -1225,7 +1225,11 @@ workbench already retains (`app_logs`, `list_sessions`, `run_app`/`stop_app`/`re
 
 **Why accepted**: handing the tool layer a foreign thread's socket would need its own lock/hop
 protocol, or a second connection to the same app's devtools service; neither exists yet, and an
-honest refusal is the interim contract rather than a silent no-op or an invented reading.
+honest refusal is the interim contract rather than a silent no-op or an invented reading. Session
+snapshots still report `devtools_port` deliberately (an agent may want it for its own tooling) —
+this is safe because the retained log ring redacts the discovery line's handshake token at the push
+edge (`SessionView::push_line_at`), so the token needed to actually use that port is unobtainable
+via `app_logs`; only the port number itself is exposed.
 
 **Evidence**: `crates/frust-tui/src/supervise/mcp_backend.rs` module doc ("What this backend
 deliberately cannot do", `DEVTOOLS_OWNED_BY_WORKBENCH`); `crates/frust-tui/tests/mcp_embedded.rs`'s
@@ -1251,3 +1255,80 @@ favors responsiveness over a masked wait.
 **Evidence**: `crates/frust-tui/src/engine/mod.rs`'s `Engine::stop_mcp` doc comment ("A caller that
 must know the port is free again... waits for that message"); `crates/frust-tui/src/engine/update.rs`'s
 `Message::McpStopped` handling (`mcp_error` retention).
+
+---
+
+### `tui-device-stop-app-termination-residual` — a device session's OS-level app termination is best-effort and physical-iOS-absent
+
+**Observed**: stopping a device session's stream (the user's stop keypress, or MCP's `stop_app`/
+`restart_app`) also dispatches a best-effort OS-level app termination on a tracked detached thread
+— `adb shell am force-stop <package>` on Android, `xcrun simctl terminate <udid> <bundle_id>` on an
+iOS Simulator. A physical iOS device has no termination call at all: `TerminationTarget` has no
+variant for it (`devicectl` app termination is not implemented), so its stop remains stream-only —
+the workbench's own view of the session goes to `Killed`/`Exited`, but the app itself is left
+running on the device until the user closes it by hand.
+
+**Applies to**: `frust-tui`'s `Supervisor` for every device session; physical-iOS sessions
+specifically for the missing termination call.
+
+**Why accepted**: `am force-stop`/`simctl terminate` cover the two platforms with a straightforward
+CLI termination path; `devicectl`'s physical-device app-termination surface is a separate,
+unresearched integration and a physical iOS device was already the workbench's least-verified
+target (see `devtools-ios-physical-forward-deferred`). The termination call is best-effort by design
+on every platform it exists for — a device that has gone away or an app that already exited are
+normal outcomes of a stop, not failures to report.
+
+**Evidence**: `crates/frust-tui/src/supervise/supervisor.rs`'s `TerminationTarget` enum and module
+doc ("Stopping the app" section); `stopping_an_android_session_force_stops_the_app`,
+`stopping_an_ios_simulator_session_terminates_the_app` tests in the same file.
+
+---
+
+### `mcp-stop-app-termination-in-flight` — `stop_app`/`restart_app` can return before the app is actually gone
+
+**Observed**: `SessionBackend::stop_app`/`restart_app`'s "Blocking" describes how long the *call*
+takes to return, not what has finished when it does. Both `frust-mcp`'s own `SessionEngine` and
+`frust-tui`'s embedded `TuiSessionBackend` may reply once the session reaches its terminal state
+while the best-effort OS-level app termination (`am force-stop`/`simctl terminate`) is still running
+on its own thread. An agent that immediately re-queries device state (outside Frust's own tooling)
+could observe the app as still present for a short window after the tool call returns.
+
+**Applies to**: every `stop_app`/`restart_app` call through either `SessionBackend` implementation.
+
+**Why accepted**: this is request semantics, not a race to fix — the session itself is reliably
+terminal by the time the call returns (what every in-repo tool and the TUI's own UI rely on); only
+the underlying device app's teardown is decoupled, and coupling it would mean blocking the caller on
+an unbounded `adb`/`simctl` call for no benefit `frust-mcp`'s own tools need today.
+
+**Evidence**: `crates/frust-mcp/src/backend.rs`'s `SessionBackend::stop_app`/`restart_app` doc
+comments ("Blocking' describes how long the call may take, not what has finished when it returns").
+
+---
+
+### `tui-mcp-sessions-tab-uncapped` — `AppState::sessions` (session tabs) has no eviction and grows for the process lifetime
+
+**Observed**: `frust-tui`'s `AppState::sessions` map — one entry per session tab — has no close or
+eviction mechanism of any kind; every session the workbench has ever launched, human-driven or
+MCP-driven, keeps a tab entry for the rest of the process's life. MCP-driven growth is bounded one
+layer down: `supervise::mcp_backend::McpSessionRecords` caps its own retained launch records at
+`MCP_RECORD_CAP` (oldest-terminal evicted first, live never evicted) and `run_app`/`restart_app`
+refuse once that cap of live MCP sessions is reached — but the *tab* an evicted record backed is
+never itself removed, so it survives in the UI as an un-restartable ghost: `restart_app` on its id
+reports `EmbeddedError::NoSuchSession`, diverging from `frust-mcp`'s own reference `SessionEngine`,
+which evicts its terminal-session record and its tab-equivalent state together. The human-driven
+insert path — every session a user launches from the workbench's own UI — has no cap at all; only
+the MCP-driven path is bounded, because only an unattended agent can plausibly launch sessions for
+hours unattended.
+
+**Applies to**: `frust-tui`'s `AppState::sessions` for the whole session lifetime; the MCP-launched
+subset's *record* (not tab) is capped as described above.
+
+**Why accepted**: no tab-close mechanism exists in the workbench to build an eviction policy on top
+of (closing a tab a user might still want to scroll back through is a UX decision, not a memory-
+safety one); the unbounded growth is real but slow enough in the human-driven case (bounded by how
+many sessions a person opens in one sitting) that the records-layer cap on the actually-unattended
+MCP path was judged the fix that matters for v1.
+
+**Evidence**: `crates/frust-tui/src/supervise/mcp_backend.rs` module doc ("What this backend
+deliberately cannot do" — "An evicted MCP record's tab still exists"); `McpSessionRecords::
+retain_bounded`; `run_app_refuses_bookkeeping_free_once_the_cap_of_live_sessions_is_reached` test.
