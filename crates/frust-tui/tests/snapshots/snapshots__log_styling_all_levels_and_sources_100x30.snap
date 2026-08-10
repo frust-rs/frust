@@ -1,0 +1,34 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: "render_to_string(100, 30, &log_styling_state())"
+---
+⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
+━━━━━━━━                                                                                            
+                                                                                                    
+ PROJECTS                │huddle:  1 ◌ desktop                                                      
+  ▸ huddle               │ E 12:04:22 [gradle] FAILURE: Build failed with an exception.             
+                         │ E 12:04:24 [logcat] E/ActivityThread( 1234): Failed to find provider info
+ DEVICES ↻ r             │   12:04:25 [app]    Session ready, listening on :5037                    
+   none found            │ D 12:04:26 [app]    2026-08-09T12:04:26Z DEBUG frust_tui: poll: 0 pending
+                         │   12:04:27 [frust]  frust-perf raw n=1 total_us=100 rebuild_us=10 layout_
+ SESSIONS                │   12:04:28 [app]    connected to ws://127.0.0.1:9229                     
+   huddle                │                                                                          
+   ▸ ◌ desktop           │                                                                          
+                         │                                                                          
+ ACTIONS                 │                                                                          
+   New project · n       │                                                                          
+   Add plugin · a        │                                                                          
+   Doctor · d            │                                                                          
+   Build · b             │                                                                          
+   Clean · c             │                                                                          
+   MCP off · M           │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │● follow  ·  wrap:off     x stop · f follow · w wrap · / search · l filter
+● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]

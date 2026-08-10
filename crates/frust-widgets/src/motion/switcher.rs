@@ -443,6 +443,8 @@ impl<P: TransitionPattern + Clone + 'static> Widget for PatternSwitcherWidget<P>
         // is mid-removal and is not reported.
         self.child.semantics_child(ctx);
     }
+
+    crate::authoring::visit_children!(exiting, child);
 }
 
 #[cfg(test)]

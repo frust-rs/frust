@@ -922,3 +922,418 @@ against this class drop the handle on any `transaction` error and reopen (README
 **Evidence**: `plugins/database/src/lib.rs` `RollbackGuard::drop` (best-effort
 `ROLLBACK`), the qualified poison-policy doc on `lock_conn`, README §4a's closing
 caveat; flagged by phase-review round 1 (`workflow/reviews/db-plugin/REVIEW.md`).
+
+### `tui-shimmer-ansi16-degrade` — the §B10 phase-line shimmer degrades to flat+BOLD at Ansi16
+
+**Observed**: `themed_shimmer_spans` (`crates/frust-tui/src/ui/anim/shimmer.rs`) sweeps a
+real color ramp at TrueColor (a live RGB lerp) and at Xterm256 (`Theme::SHIMMER_RAMP_X256`,
+a fixed 5-entry palette-index table bucketed per character), but at `ColorDepth::Ansi16`
+there are only the theme's two named ANSI colors to choose from — too coarse a palette for
+a convincing color sweep between them. The head-tracking motion still plays: characters
+near the sweep head get `Modifier::BOLD` against a flat `theme.muted()` foreground
+everywhere else, rather than any color change.
+
+**Applies to**: any Ansi16-depth terminal (`ColorDepth::detect()`'s conservative floor for
+an unrecognized `$TERM`, `TERM=dumb`, or no `TERM` at all) rendering the build/install
+phase-line shimmer (workbook §B10).
+
+**Why accepted**: Ansi16 has no intermediate hues between the theme's muted and accent
+tokens to sweep through — a real color ramp needs a palette this depth doesn't have.
+BOLD-only motion is still a visible, cheap sweep at any depth, and keeps the degrade
+decision inside `themed_shimmer_spans` itself (dispatched on `theme.depth()`) rather than
+pushed out to call sites.
+
+**Evidence**: `crates/frust-tui/src/ui/anim/shimmer.rs`'s `themed_shimmer_spans`/
+`shimmer_spans_flat_bold`; `crates/frust-tui/src/ui/theme.rs`'s `ColorDepth`/
+`ThemeColor::resolve`; flagged as review Major M4 (shimmer color-depth degrade), fixed in
+the same round with this documented residual.
+
+---
+
+### `devtools-ios-physical-forward-deferred` — the devtools client can't reach a physical iOS device
+
+**Observed**: `frust-drive`'s devtools client connects directly over localhost (desktop, and
+iOS Simulator, which shares the host's loopback) and forwards through `adb` for a physical
+Android device. There is no equivalent for a physical iOS device — no forwarding helper
+exists, so a client cannot reach the in-app debug service on one.
+
+**Applies to**: `frust drive`/`frust-tui` devtools sessions targeting a physical iOS device.
+Desktop and both simulators/emulators are unaffected.
+
+**Why accepted**: physical-iOS forwarding needs `usbmuxd` (or an equivalent) and a Mac to
+build/verify against, neither available on this build host. Deferred by plan decision
+rather than discovered as a gap; the natural v2 step once a Mac session is available.
+
+**Evidence**: `workflow/plans/features/frust-tui-devex/PLAN.md`'s Non-Goals and Risks
+sections (iOS physical-device forwarding via usbmuxd).
+
+---
+
+### `devtools-screenshot-not-supported-v1` — the devtools `screenshot` method is unimplemented
+
+**Observed**: the protocol declares a `screenshot` method (`Capability::Screenshot`,
+result `{ png_base64 }`), but `DevtoolsBackend::screenshot`'s default — which every shell's
+backend implementation inherits — returns `BackendError::NotSupported`, which the wire
+reports as `RpcError::NOT_SUPPORTED`.
+
+**Applies to**: every shell in v1; no backend overrides the default.
+
+**Why accepted**: v1 scoped the wire shape for a future capability without shipping the
+capture path; the method and capability flag exist precisely so a client can detect support
+per-app rather than guessing, once a backend does implement it.
+
+**Evidence**: `crates/frust-devtools/src/backend.rs`'s `DevtoolsBackend::screenshot` default;
+`crates/frust-devtools-protocol/src/method.rs`'s `screenshot` doc comment.
+
+---
+
+### `devtools-e2e-component-only` — no test binds the real drive client to the real service in one process
+
+**Observed**: the drive-client↔real-service path is component-tested from both directions — the
+real `DevtoolsClient` against a hand-rolled canned wire server (`frust-drive`), and the real
+`Service` against a hand-rolled NDJSON client (`frust-devtools`'s `loopback.rs`) — but no test
+exercises the real client and the real service together in one process. Adding one would need a
+direct dev-dependency from `frust-drive` (tooling) onto `frust-devtools` (framework) or vice versa,
+which breaches the tooling/framework isolation charter (see DEVTOOLS_ARCHITECTURE.md's Layer
+Dependencies): the two sides may meet only at the protocol leaf.
+
+**Applies to**: the devtools wire protocol end to end; each side's contract is covered, but never
+the pair.
+
+**Why accepted**: the charter this would breach is load-bearing (it is what keeps a tooling crate
+from dragging `tokio` into the framework graph, and vice versa), so a same-process integration test
+is structurally out of reach from either crate alone. Phase 3's TUI integration exercises the real
+client against a real app's real service as an ordinary consumer (a separate binary, not a
+dev-dependency), and is the closure path for this gap.
+
+**Evidence**: `crates/frust-drive/src/devtools_client.rs`'s hand-rolled fake-server tests;
+`crates/frust-devtools/tests/loopback.rs`'s hand-rolled fake-client test; DEVTOOLS_ARCHITECTURE.md's
+tooling/framework isolation charter.
+
+---
+
+### `devtools-token-entropy-windows-fallback` — Windows devtools tokens come from the non-CSPRNG fallback
+
+**Observed**: the devtools handshake token's strong-entropy path reads `/dev/urandom`, which does
+not exist on Windows; `os_random_bytes` is `#[cfg(unix)]`, so every Windows debug/profile session
+mints its token from the documented fallback (a composition of OS-seeded `RandomState` SipHash
+outputs, wall clock, monotonic instant, pid, and a stack address) — 128 bits an unprivileged
+co-resident peer cannot practically enumerate, but not a CSPRNG.
+
+**Applies to**: the Windows desktop shell only; Linux, Android, macOS, and iOS all take the
+kernel-CSPRNG path.
+
+**Why accepted**: `frust-devtools` carries no CSPRNG dependency budget (protocol + tokio + log;
+pins are law) and no Windows host exists in the current verify environment to validate a
+`BCryptGenRandom` FFI path. The fallback still gates the listener behind an unguessable-in-practice
+secret; the exposure window is debug/profile developer builds on the developer's own machine. A
+`BCryptGenRandom`-based source (via `std::os::windows` FFI, no new crate) is the named follow-up
+when a Windows verification host is available.
+
+**Evidence**: `crates/frust-devtools/src/token.rs` (`os_random_bytes` cfg gate + module doc);
+review finding recorded in `workflow/reviews/frust-tui-devex-phase2/REVIEW-round1.md`.
+
+---
+
+### `tui-devtools-desktop-metrics-unavailable` — system-metrics sampling never starts on desktop or iOS
+
+**Observed**: `frust-tui`'s DevTools System/Network tabs, and `frust-mcp`'s `metrics` tool, sample
+process metrics for Android sessions only. `frust-drive::process::StreamHandle` never exposes a
+spawned child's pid, and extending it is out of scope for either feature, so a desktop or iOS
+session's identity (`MetricsIdentity` in `frust-tui`; `Session::metrics_sampling` in `frust-mcp`)
+never resolves past "not Android" — `frust-tui`'s tabs render a permanent "sampling unavailable"
+state, and `frust-mcp`'s `metrics` tool reports `system.available: false` with a reason, never a
+zeroed reading, for the life of the session.
+
+**Applies to**: desktop and iOS sessions in the DevTools System/Network tabs and in `frust-mcp`
+sessions. Android sessions are unaffected — their identity resolves from lines the session's own
+log already carries (`Launching {pkg}…` / `Streaming logs (pid {pid})`).
+
+**Why accepted**: threading a pid out of `StreamHandle` is a `frust-drive` process-plumbing change
+unrelated to the System/Network tabs feature itself; deferred as a named follow-up rather than
+folded in here.
+
+**Evidence**: `crates/frust-tui/src/engine/devtools.rs`'s `MetricsIdentity` doc (desktop honesty
+note); `crates/frust-mcp/src/engine/metrics.rs`'s module doc ("Android only, and why");
+`workflow/plans/features/frust-tui-devex/phase3/TASKS.md`'s p3-06 completion note
+("desktop/iOS sampling unavailable — pid not exposed").
+
+---
+
+### `metrics-macos-desktop-unimplemented` — `frust-drive::metrics`'s desktop collector is Linux-only
+
+**Observed**: the desktop metrics collector reads `/proc`/`/sys` directly and only compiles a real
+implementation for Linux; on macOS and Windows every fetch returns `MetricsError::Unsupported` at
+runtime rather than failing to build.
+
+**Applies to**: macOS and Windows desktop sessions. Linux desktop (the dev/CI platform) and Android
+are both fully supported.
+
+**Why accepted**: a deliberate no-new-dependency decision for this feature — `sysinfo` was the
+plan's original option and was dropped to keep `frust-drive` free of the added dependency;
+a native macOS source (e.g. `host_statistics`/IOKit) is deferred rather than pursued in this phase.
+
+**Evidence**: `crates/frust-drive/src/metrics/desktop.rs`'s module doc ("Linux-only... the macOS
+gap is tracked as a `docs/LIMITATIONS.md` entry"); `workflow/plans/features/frust-tui-devex/phase3/TASKS.md`'s
+conductor decision ("No sysinfo dep... macOS metrics deferred to LIMITATIONS").
+
+---
+
+### `devtools-android-per-app-network-toggle` — the in-app service silently fails to bind when an app's network access is off
+
+**Observed**: on Android (notably MIUI/HyperOS and other vendor skins with a per-app network
+toggle), if an app's "network access" is disabled in App info, its uid is firewalled at the kernel
+(eBPF owner-match) level. Every socket operation — **including a `127.0.0.1` loopback bind** —
+returns `ECONNREFUSED (os error 111)`, so the devtools `Service::start` fails and no discovery
+line is ever logged. The manifest's `INTERNET` permission still reads as *granted*: the vendor
+toggle is a separate runtime layer that overrides it, and there is **no SELinux denial** to point
+at. The symptom in the workbench is DevTools sitting on "waiting for a discovery line…" forever.
+
+**Applies to**: any Android device whose per-app network access has been turned off for the app
+under inspection; independent of build flavor and of the granted `INTERNET` permission.
+
+**Why accepted**: it is a device/OS policy, not something the framework can or should override —
+an app that the user has firewalled must stay firewalled. The service already logs the failure
+(`frust-devtools: service did not start: <reason>`), and the TUI now surfaces that reason on the
+DevTools screen (see below) instead of an eternal wait. The fix is operational: enable the app's
+network access, then relaunch.
+
+**Evidence**: reproduced on a Xiaomi 12 (2026-08-10) — `Service::start` returned `ECONNREFUSED`
+and a bare `toybox nc` loopback listener as the app's uid failed identically while a shell-uid
+listener succeeded, with no `avc: denied` for any socket/bind class; enabling network access made
+the discovery line appear immediately. Surfacing path: `frust-devtools-protocol`'s
+`FAILURE_PREFIX`/`parse_failure_line`, `frust-shell-common::devtools::start`'s failure log, and
+`frust-tui`'s `DevtoolsState::start_error` (rendered on the Discovering screen).
+
+---
+
+### `mcp-screenshot-desktop-unsupported-v1` — the `screenshot` MCP tool has no desktop or iOS Simulator path
+
+**Observed**: `frust-mcp`'s `screenshot` tool tries the app's own devtools `screenshot` capability
+first, falls back to `adb screencap` for an Android session, and otherwise returns a clear
+in-band refusal. No shell backend declares `Capability::Screenshot` yet (see
+`devtools-screenshot-not-supported-v1`), so today the devtools path never fires and desktop/iOS
+Simulator sessions have no fallback at all — only Android sessions can be screenshotted.
+
+**Applies to**: `frust-mcp`'s `screenshot` tool for desktop and iOS Simulator sessions.
+
+**Why accepted**: the root cause (`devtools-screenshot-not-supported-v1`) is out of scope for this
+crate; the tool is written to pick up the devtools capability automatically once a backend
+implements it, with no MCP-side change needed.
+
+**Evidence**: `crates/frust-mcp/src/tools/diagnosis.rs`'s `screenshot` decision chain; the shared
+root cause is `devtools-screenshot-not-supported-v1`.
+
+---
+
+### `mcp-server-unauthenticated-v1` — the MCP server has no authentication beyond the loopback bind
+
+**Observed**: `frust-mcp` binds `127.0.0.1` only and relies on rmcp's default Host-header guard
+against DNS rebinding, but the MCP protocol layer itself has no login, token, or capability check
+— any local process that can reach the port can list, launch, drive, and stop sessions of the
+server's configured project. There is no per-call project override: that argument was removed
+after review, so a session can never be pointed at an arbitrary filesystem path.
+
+**Applies to**: every `frust-mcp` session, on every platform.
+
+**Why accepted**: a deliberate v1 stance ported from fdemon-pro, matched to the threat model of a
+loopback developer tool: the bind is not reachable off-host, and the devtools handshake token
+still protects the app-side service itself. Server-side auth (e.g. a bearer token) is a named
+follow-up, not a v1 requirement.
+
+**Evidence**: `crates/frust-mcp/src/config.rs`'s `McpConfig` doc comment (bind address is never
+configurable); `crates/frust-mcp/src/server.rs`'s module doc (Host-header guard, no other auth);
+`crates/frust-mcp/src/engine.rs`'s `run_app` doc comment (no per-call project override).
+
+---
+
+### `mcp-ios-simulator-unverified` — `frust-mcp` iOS Simulator sessions are compile-clean but unexercised
+
+**Observed**: `frust-mcp`'s session engine and tool layer share the same iOS Simulator run pipeline
+`frust-drive` already ships, but no device/Simulator run of an MCP-launched iOS session has been
+performed this phase — only desktop and Android sessions are exercised by the crate's own tests
+and manual runs.
+
+**Applies to**: `frust-mcp` sessions with `target` resolving to an iOS Simulator udid.
+
+**Why accepted**: no Mac was available this phase; the code path is shared with `frust-drive`'s
+already-verified iOS pipeline, so the residual risk is scoped to the MCP session engine's own
+wiring (devtools connect, log parsing) rather than the launch pipeline itself.
+
+**Evidence**: `crates/frust-mcp` test suite (`engine_lifecycle`, `tool_families`, `http_smoke`)
+exercises desktop and Android targets only, via `FakeProcessRunner`.
+
+---
+
+### `mcp-no-headless-entry-point` — the MCP server has no headless/CI entry point
+
+**Observed**: `frust-cli`'s `mcp` subcommand (and its `frust-drive`→`frust-mcp` dependency) was
+removed; `frust_mcp::run`/`serve_embedded` remain library-only entry points, with `frust-tui`'s
+embedded server as their only caller in this repo. Reaching an MCP server therefore means starting
+an interactive `frust-tui` session and toggling its server on — there is no way to run one headless,
+so CI or a remote/headless automation pipeline cannot attach an MCP agent to a Frust app.
+
+**Applies to**: any workflow wanting MCP access to a Frust app outside an interactive `frust-tui`
+session.
+
+**Why accepted**: the v1 design chose one session world — the workbench is the single source of
+truth for what is running, and a second headless engine driving the same project would either
+diverge from it or race it. A standalone headless mode is a named follow-up, not a v1 requirement.
+
+**Evidence**: `crates/frust-cli/src/commands/mod.rs` and `Cargo.toml` carry no `mcp` command or
+`frust-mcp` dependency; `crates/frust-mcp/src/lib.rs`'s `run`/`serve_embedded` are `pub` with no
+binary consumer in this repo besides `crates/frust-tui/src/runner.rs`.
+
+---
+
+### `mcp-embedded-client-registry-coarse` — connected-MCP-client tracking is coarse and can go stale
+
+**Observed**: `frust-mcp`'s `ClientRegistry` (the TUI's MCP panel, §B13, reads it live) tracks only
+a count, a mint-order opaque `id`, and a connect time per session — no client name, version, or
+capabilities. Disconnection has exactly one signal: the per-session `ClientGuard`'s `Drop`, fired
+when rmcp tears the session down. The Streamable-HTTP transport exposes nothing lower-level to
+build a better signal from, so a client that vanishes without a clean teardown (a killed process, a
+network drop rmcp doesn't notice) leaves its entry — and the panel showing it as connected — until
+the server itself stops.
+
+**Applies to**: `frust-mcp`'s `ClientRegistry` in both `serve` and `serve_embedded` modes; the TUI's
+MCP panel client list.
+
+**Why accepted**: matches fdemon-pro's own client-tracking precedent for the same transport.
+Per-client name/version display is a named follow-up, gated on confirming rmcp actually exposes an
+`Implementation` the registry could read.
+
+**Evidence**: `crates/frust-mcp/src/clients.rs` module doc ("the guard's Drop is consequently the
+*only* disconnect signal this crate has... a documented limitation, not a bug to chase here");
+`crates/frust-tui/src/ui/views/mcp/mod.rs`.
+
+---
+
+### `mcp-embedded-devtools-unavailable` — embedded-mode driving/diagnosis tools needing a devtools client are always refused
+
+**Observed**: `frust-tui`'s `TuiSessionBackend` (the embedded server's `SessionBackend`) always
+reports a session's `devtools_client` as absent — the devtools socket lives inside
+`supervise::DevtoolsBridge`'s own thread inside the workbench, with no shareable handle to give an
+MCP tool call. Every driving tool (`tap`/`scroll`/`enter_text`) and every diagnosis tool needing a
+live devtools request (`widget_tree`/`widget_props`/`find_widgets`; `screenshot`'s devtools-first
+path) returns a typed in-band refusal rather than attempting the call. Tools reading data the
+workbench already retains (`app_logs`, `list_sessions`, `run_app`/`stop_app`/`restart_app`,
+`performance`, `metrics`) are unaffected.
+
+**Applies to**: every MCP session run through `frust-tui`'s embedded server — not the standalone
+`SessionEngine` backend, which owns its devtools connection directly.
+
+**Why accepted**: handing the tool layer a foreign thread's socket would need its own lock/hop
+protocol, or a second connection to the same app's devtools service; neither exists yet, and an
+honest refusal is the interim contract rather than a silent no-op or an invented reading. Session
+snapshots still report `devtools_port` deliberately (an agent may want it for its own tooling) —
+this is safe because the retained log ring redacts the discovery line's handshake token at the push
+edge (`SessionView::push_line_at`), so the token needed to actually use that port is unobtainable
+via `app_logs`; only the port number itself is exposed.
+
+**Evidence**: `crates/frust-tui/src/supervise/mcp_backend.rs` module doc ("What this backend
+deliberately cannot do", `DEVTOOLS_OWNED_BY_WORKBENCH`); `crates/frust-tui/tests/mcp_embedded.rs`'s
+`devtools_backed_tools_report_the_embedded_mode_refusal` test.
+
+---
+
+### `mcp-embedded-fast-rebind-can-fail` — toggling the embedded MCP server off then on quickly can transiently fail
+
+**Observed**: stopping the embedded server cancels its `CancellationToken` and immediately clears
+`AppState::mcp`, but the listener's actual close is asynchronous — it completes only when the
+server task's own stopped report arrives. Toggling the server back on before that report lands can
+race a bind against a socket the OS has not yet released, failing with a visible bind error
+surfaced through `AppState::mcp_error`. A second toggle after the failure succeeds normally.
+
+**Applies to**: `frust-tui`'s embedded MCP server, which always rebinds the same fixed port
+(`DEFAULT_MCP_PORT`, 4848) rather than an ephemeral one.
+
+**Why accepted**: blocking the toggle until the stop is provably complete would turn an otherwise
+immediate action into a wait; the failure is visible and immediately retryable, so the workbench
+favors responsiveness over a masked wait.
+
+**Evidence**: `crates/frust-tui/src/engine/mod.rs`'s `Engine::stop_mcp` doc comment ("A caller that
+must know the port is free again... waits for that message"); `crates/frust-tui/src/engine/update.rs`'s
+`Message::McpStopped` handling (`mcp_error` retention).
+
+---
+
+### `tui-device-stop-app-termination-residual` — a device session's OS-level app termination is best-effort and physical-iOS-absent
+
+**Observed**: stopping a device session's stream (the user's stop keypress, or MCP's `stop_app`/
+`restart_app`) also dispatches a best-effort OS-level app termination on a tracked detached thread
+— `adb shell am force-stop <package>` on Android, `xcrun simctl terminate <udid> <bundle_id>` on an
+iOS Simulator. A physical iOS device has no termination call at all: `TerminationTarget` has no
+variant for it (`devicectl` app termination is not implemented), so its stop remains stream-only —
+the workbench's own view of the session goes to `Killed`/`Exited`, but the app itself is left
+running on the device until the user closes it by hand.
+
+**Applies to**: `frust-tui`'s `Supervisor` for every device session; physical-iOS sessions
+specifically for the missing termination call.
+
+**Why accepted**: `am force-stop`/`simctl terminate` cover the two platforms with a straightforward
+CLI termination path; `devicectl`'s physical-device app-termination surface is a separate,
+unresearched integration and a physical iOS device was already the workbench's least-verified
+target (see `devtools-ios-physical-forward-deferred`). The termination call is best-effort by design
+on every platform it exists for — a device that has gone away or an app that already exited are
+normal outcomes of a stop, not failures to report.
+
+**Evidence**: `crates/frust-tui/src/supervise/supervisor.rs`'s `TerminationTarget` enum and module
+doc ("Stopping the app" section); `stopping_an_android_session_force_stops_the_app`,
+`stopping_an_ios_simulator_session_terminates_the_app` tests in the same file.
+
+---
+
+### `mcp-stop-app-termination-in-flight` — `stop_app`/`restart_app` can return before the app is actually gone
+
+**Observed**: `SessionBackend::stop_app`/`restart_app`'s "Blocking" describes how long the *call*
+takes to return, not what has finished when it does. Both `frust-mcp`'s own `SessionEngine` and
+`frust-tui`'s embedded `TuiSessionBackend` may reply once the session reaches its terminal state
+while the best-effort OS-level app termination (`am force-stop`/`simctl terminate`) is still running
+on its own thread. An agent that immediately re-queries device state (outside Frust's own tooling)
+could observe the app as still present for a short window after the tool call returns.
+
+**Applies to**: every `stop_app`/`restart_app` call through either `SessionBackend` implementation.
+
+**Why accepted**: this is request semantics, not a race to fix. On `frust-mcp`'s own
+`SessionEngine` the session is terminal by the time the call returns (its teardown is synchronous);
+on the embedded `TuiSessionBackend` **neither** the session's terminal state **nor** the OS-level
+termination is complete when the call returns — the stop request has merely been posted, the kill
+issued best-effort, and the session's terminal state follows asynchronously through the workbench's
+normal event path (`serve_command`'s own doc: a `stop_app` is a *request*). A `stop_app` reply's
+snapshot can therefore still read `running`; an agent needing the terminal state must poll
+`list_sessions`. Coupling either side would mean blocking the caller (or the workbench event loop)
+on an unbounded `adb`/`simctl` call for no benefit `frust-mcp`'s own tools need today.
+
+**Evidence**: `crates/frust-mcp/src/backend.rs`'s `SessionBackend::stop_app`/`restart_app` doc
+comments ("Blocking' describes how long the call may take, not what has finished when it returns").
+
+---
+
+### `tui-mcp-sessions-tab-uncapped` — `AppState::sessions` (session tabs) has no eviction and grows for the process lifetime
+
+**Observed**: `frust-tui`'s `AppState::sessions` map — one entry per session tab — has no close or
+eviction mechanism of any kind; every session the workbench has ever launched, human-driven or
+MCP-driven, keeps a tab entry for the rest of the process's life. MCP-driven growth is bounded one
+layer down: `supervise::mcp_backend::McpSessionRecords` caps its own retained launch records at
+`MCP_RECORD_CAP` (oldest-terminal evicted first, live never evicted) and `run_app`/`restart_app`
+refuse once that cap of live MCP sessions is reached — but the *tab* an evicted record backed is
+never itself removed, so it survives in the UI as an un-restartable ghost: `restart_app` on its id
+reports `EmbeddedError::NoSuchSession`, diverging from `frust-mcp`'s own reference `SessionEngine`,
+which evicts its terminal-session record and its tab-equivalent state together. The human-driven
+insert path — every session a user launches from the workbench's own UI — has no cap at all; only
+the MCP-driven path is bounded, because only an unattended agent can plausibly launch sessions for
+hours unattended.
+
+**Applies to**: `frust-tui`'s `AppState::sessions` for the whole session lifetime; the MCP-launched
+subset's *record* (not tab) is capped as described above.
+
+**Why accepted**: no tab-close mechanism exists in the workbench to build an eviction policy on top
+of (closing a tab a user might still want to scroll back through is a UX decision, not a memory-
+safety one); the unbounded growth is real but slow enough in the human-driven case (bounded by how
+many sessions a person opens in one sitting) that the records-layer cap on the actually-unattended
+MCP path was judged the fix that matters for v1.
+
+**Evidence**: `crates/frust-tui/src/supervise/mcp_backend.rs` module doc ("What this backend
+deliberately cannot do" — "An evicted MCP record's tab still exists"); `McpSessionRecords::
+retain_bounded`; `run_app_refuses_bookkeeping_free_once_the_cap_of_live_sessions_is_reached` test.

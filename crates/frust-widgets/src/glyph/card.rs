@@ -88,6 +88,12 @@ struct Slot {
     pod: Option<ChildPod>,
 }
 
+impl crate::authoring::VisitPods for Slot {
+    fn visit_pods(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+        crate::authoring::VisitPods::visit_pods(&self.pod, visitor);
+    }
+}
+
 impl Slot {
     /// Reconcile this slot against the `(prev, next)` optional child views.
     fn rebuild<State: 'static>(
@@ -284,6 +290,8 @@ impl<State: 'static> Widget for GlyphCardWidget<State> {
             },
         );
     }
+
+    crate::authoring::visit_children!(title, desc, footer);
 }
 
 #[cfg(test)]

@@ -606,6 +606,8 @@ impl Widget for CupertinoButtonWidget {
             node.add_action(Action::Click);
         });
     }
+
+    crate::authoring::visit_children!(label);
 }
 
 #[cfg(test)]

@@ -1,0 +1,34 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: "render_to_string(100, 30, &state)"
+---
+⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
+━━━━━━━━                                                                                            
+                                                                                                    
+ PROJECTS                │huddle:  1 ▶ desktop                                                      
+  ▸ huddle               │ [1] Performance  [2] System  [3] Inspector  [4] Network        ● service 
+                         │                                             ━━━━━━━━━━━                  
+ DEVICES ↻ r             │ desktop  ⚠ sampling unavailable — pid not exposed                        
+   none found            │ RX     19.5 KB/s                                                         
+                         │█                                                                         
+ SESSIONS                │█                                                                         
+   huddle                │ TX     4.9 KB/s                                                          
+   ▸ ▶ desktop           │█                                                                         
+                         │█                                                                         
+ ACTIONS                 │ totals since start   rx 19.5 KB   tx 4.9 KB                              
+   New project · n       │ ⚠ Namespace-wide counters (/proc/net/dev) — every process sharing this   
+   Add plugin · a        │   network namespace, not just this session. Process-level, not           
+   Doctor · d            │   request-level: request-level logging requires app-side                 
+   Build · b             │   instrumentation.                                                       
+   Clean · c             │                                                                          
+   MCP off · M           │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │ devtools: network │ [1234][ ] tabs · Esc back to log            [mouse ✓]
+● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]

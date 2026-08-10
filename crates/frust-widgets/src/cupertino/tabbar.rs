@@ -445,6 +445,8 @@ impl Widget for TabItemWidget {
             node.set_selected(self.selected);
         });
     }
+
+    crate::authoring::visit_children!(icon, label);
 }
 
 /// Synthesize a [`PointerPhase::Cancel`] into a still-armed item pod (mirrors
@@ -842,6 +844,8 @@ impl Widget for CupertinoTabBarWidget {
             },
         );
     }
+
+    crate::authoring::visit_children!(items);
 }
 
 #[cfg(test)]

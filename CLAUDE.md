@@ -18,6 +18,7 @@ the index; follow a link below rather than reading source cold.
 | NATIVE_WIDGETS — native-control plugin | [docs/NATIVE_WIDGETS_ARCHITECTURE.md](docs/NATIVE_WIDGETS_ARCHITECTURE.md) |
 | CLI — `frust` command + drive library | [docs/CLI_ARCHITECTURE.md](docs/CLI_ARCHITECTURE.md) |
 | TUI — terminal workbench | [docs/TUI_ARCHITECTURE.md](docs/TUI_ARCHITECTURE.md) |
+| DEVTOOLS — wire protocol + in-app debug service | [docs/DEVTOOLS_ARCHITECTURE.md](docs/DEVTOOLS_ARCHITECTURE.md) |
 | Coding conventions (shared across units) | [docs/CODE_STANDARDS.md](docs/CODE_STANDARDS.md) |
 | Build, run, test, environment | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) |
 | Test tiers and gates | [docs/TESTING.md](docs/TESTING.md) |

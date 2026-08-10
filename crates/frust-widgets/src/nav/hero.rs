@@ -125,4 +125,6 @@ impl Widget for HeroWidget {
         // Transparent wrapper: forward to the single child.
         self.child.semantics_child(ctx);
     }
+
+    crate::authoring::visit_children!(child);
 }

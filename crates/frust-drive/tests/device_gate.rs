@@ -57,7 +57,7 @@ fn oneplus9_spawn_session_streams_and_kills() {
     // Drive the exact streaming seam the supervisor uses: build → install →
     // launch (phase lines via the callback), returning the killable logcat
     // stream.
-    let mut handle = android_run::spawn_session(
+    let launch = android_run::spawn_session(
         &RealProcessRunner,
         &root,
         &device,
@@ -70,6 +70,7 @@ fn oneplus9_spawn_session_streams_and_kills() {
     )
     .expect("spawn_session pipeline error")
     .expect("pipeline cancelled unexpectedly");
+    let mut handle = launch.stream;
 
     // Collect a handful of logcat lines (or time out) to prove the stream is
     // live, then kill and confirm the stream tears down promptly.

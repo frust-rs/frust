@@ -428,6 +428,8 @@ impl Widget for CupertinoNavBarWidget {
             },
         );
     }
+
+    crate::authoring::visit_children!(interactive, title);
 }
 
 #[cfg(test)]

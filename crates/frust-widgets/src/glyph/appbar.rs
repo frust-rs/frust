@@ -1058,6 +1058,8 @@ impl Widget for AppBarWidget {
     fn semantics(&self, ctx: &mut SemanticsCtx) {
         self.semantics_impl(ctx);
     }
+
+    crate::authoring::visit_children!(interactive, meta);
 }
 
 impl AppBarWidget {

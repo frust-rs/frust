@@ -15,7 +15,8 @@ use super::palette::Palette;
 use super::run_config::{DeviceRow, RunConfig};
 use super::session_view::SessionView;
 use super::toast::Toasts;
-use crate::supervise::SessionId;
+use crate::supervise::{McpServerHandle, McpStatus, SessionId, SessionState};
+use frust_mcp::ClientEntry;
 
 /// Bounded-walk depth cap for [`detect`]/[`find_projects`]: `dir` itself is
 /// depth 0, its children depth 1, its grandchildren depth 2 — nothing past
@@ -175,12 +176,6 @@ pub struct AppState {
     /// captures keyboard nav and suppresses the base layer's mouse regions like
     /// a modal, but renders as a small popup over the (still-visible) workbench.
     pub context_menu: Option<ContextMenu>,
-    /// The follow-tail state a freshly-registered session tab starts in
-    /// (persisted via `tui.toml` settings) — updated whenever the user toggles follow-tail
-    /// on the active session (`Message::ToggleFollow`), so it always reflects
-    /// the most recently chosen preference. Loaded from `tui.toml` at startup
-    /// (see [`super::persist::load_settings`]); `true` by default.
-    pub follow_tail_default: bool,
     /// Whether the sidebar renders as a toggleable floating overlay instead
     /// of its normal inline column — the narrow-terminal responsive
     /// breakpoint. Meaningless (ignored) above
@@ -189,6 +184,32 @@ pub struct AppState {
     pub sidebar_overlay_open: bool,
     /// The keyboard/help overlay (`?`), when open.
     pub help_open: bool,
+    /// A monotonically advancing frame counter, incremented once per
+    /// [`super::message::Message::Tick`] while [`Self::animating`] is `true`
+    /// (the runner only delivers ticks then — see `crate::runner`). Pure
+    /// animation math (`crate::ui::anim`) derives from this: `spinner_char`
+    /// wants the raw counter divided by its cadence constant, `shimmer_phase`
+    /// wants it directly. Wraps via `wrapping_add`, which every consumer's
+    /// modulo math already tolerates.
+    pub animation_frame: u64,
+    /// The embedded MCP server, while one is running (`None` = stopped).
+    ///
+    /// The one field holding a live resource handle rather than a value:
+    /// [`super::Engine::start_mcp`]/[`super::Engine::stop_mcp`] own its
+    /// lifetime, and the pure `update` only records the server's own
+    /// asynchronous reports (bound port, stopped) against it. Read it through
+    /// [`Self::mcp_status`], never directly.
+    pub mcp: Option<McpServerHandle>,
+    /// Whether the MCP panel is open (`m`, or the palette) — workbook §B13's
+    /// server state + connected-client list. While `true` it captures input
+    /// and suppresses background mouse regions like the other modals.
+    pub mcp_panel_open: bool,
+    /// Why the embedded MCP server last stopped unexpectedly (a bind failure,
+    /// or a server task that ended with an error), retained so the sidebar
+    /// row and the panel can *show* the reason rather than leaving a failed
+    /// start looking like a silent no-op. Cleared when the next start is
+    /// requested.
+    pub mcp_error: Option<String>,
 }
 
 impl AppState {
@@ -216,7 +237,6 @@ impl AppState {
         let settings = super::persist::load_settings();
         state.sidebar_width = settings.sidebar_width;
         state.mouse_capture = settings.mouse_capture;
-        state.follow_tail_default = settings.follow_tail_default;
         state
     }
 
@@ -262,18 +282,59 @@ impl AppState {
             mouse_capture: true,
             active_drag: None,
             context_menu: None,
-            follow_tail_default: true,
             sidebar_overlay_open: false,
             help_open: false,
+            animation_frame: 0,
+            mcp: None,
+            mcp_panel_open: false,
+            mcp_error: None,
         }
     }
 
-    /// Whether the loop must keep processing the frame tick (to age toasts) and
-    /// redraw on change. `true` while any toast is live so its TTL counts down
-    /// off the tick loop (no ambient timer); `false` otherwise, restoring the
-    /// dirty-frame skip on an idle workbench.
+    /// Whether the loop must keep processing the frame tick (to age toasts
+    /// and advance `animation_frame`) and redraw on change. `true` while any
+    /// toast is live (its TTL counts down off the tick loop, no ambient
+    /// timer) OR any session is in a **transient** build/install phase (the
+    /// tab spinner has something to advance); `false` otherwise, restoring
+    /// the dirty-frame skip on an idle workbench. A session streaming stably
+    /// (`SessionState::Running`) does NOT count — only the pre-`Running`
+    /// phases the tab spinner covers do, so a long-lived running session
+    /// never pins the tick interval on indefinitely.
+    ///
+    /// The open MCP panel counts too, for the same reason and with the same
+    /// bound: its client list is read live off the registry at render time
+    /// (nothing messages the engine when a client connects), so it needs the
+    /// tick to stay current — but only *while the panel is open*, never for
+    /// the whole life of a running server.
     pub fn animating(&self) -> bool {
         !self.toasts.items.is_empty()
+            || self.mcp_panel_open
+            || self.sessions.iter().any(|s| is_transient(&s.state))
+    }
+
+    /// What the embedded MCP server is doing — the single read the UI (and
+    /// anything else) should take, rather than reaching into
+    /// [`Self::mcp`] itself.
+    pub fn mcp_status(&self) -> McpStatus {
+        match &self.mcp {
+            Some(handle) => handle.status(),
+            None => McpStatus::Stopped,
+        }
+    }
+
+    /// Every MCP client connected to the embedded server right now, oldest
+    /// first — the MCP panel's row source (workbook §B13). Empty while no
+    /// server is running, which is the fact rather than a placeholder: a
+    /// stopped server has no registry to read.
+    ///
+    /// Read live off the registry each call (the server's own threads
+    /// register/unregister there), so two calls in one frame can legitimately
+    /// disagree — take one snapshot per render, as the panel does.
+    pub fn mcp_clients(&self) -> Vec<ClientEntry> {
+        match &self.mcp {
+            Some(handle) => handle.clients(),
+            None => Vec::new(),
+        }
     }
 
     /// The active session's view-model, if a tab is selected.
@@ -387,11 +448,27 @@ impl Default for AppState {
             mouse_capture: true,
             active_drag: None,
             context_menu: None,
-            follow_tail_default: true,
             sidebar_overlay_open: false,
             help_open: false,
+            animation_frame: 0,
+            mcp: None,
+            mcp_panel_open: false,
+            mcp_error: None,
         }
     }
+}
+
+/// Whether `state` is a transient (pre-`Running`) phase — the tab spinner
+/// has something to advance. `Running` (streaming stably) and the terminal
+/// states (`Exited`/`Killed`) are deliberately excluded: a session parked in
+/// either would otherwise pin [`AppState::animating`] `true` forever, keeping
+/// the tick interval (and its ~20 fps redraw budget) alive indefinitely for
+/// no visible benefit.
+pub(crate) fn is_transient(state: &SessionState) -> bool {
+    matches!(
+        state,
+        SessionState::Configuring | SessionState::Building | SessionState::Installing
+    )
 }
 
 /// Bounded depth-2 walk from `root` for `frust.toml` project markers: `root`
@@ -539,5 +616,78 @@ mod tests {
         assert_eq!(state.projects, vec![bubblebench.clone(), huddle]);
         assert_eq!(state.project_root, Some(bubblebench));
         let _ = fs::remove_dir_all(&root);
+    }
+
+    // ── animating() ─────────────────────────────────────────────────────────
+
+    fn session_with_state(state: SessionState) -> SessionView {
+        let mut view = SessionView::new(SessionId(0), PathBuf::from("/tmp/proj"), "desktop");
+        view.state = state;
+        view
+    }
+
+    #[test]
+    fn animating_false_with_no_sessions_and_no_toasts() {
+        let state = AppState::default();
+        assert!(state.sessions.is_empty());
+        assert!(!state.animating());
+    }
+
+    #[test]
+    fn animating_true_while_a_session_is_building() {
+        let mut state = AppState::default();
+        state
+            .sessions
+            .push(session_with_state(SessionState::Building));
+        assert!(state.animating());
+    }
+
+    #[test]
+    fn animating_true_while_a_session_is_configuring_or_installing() {
+        for s in [SessionState::Configuring, SessionState::Installing] {
+            let mut state = AppState::default();
+            state.sessions.push(session_with_state(s.clone()));
+            assert!(state.animating(), "{s:?} should count as transient");
+        }
+    }
+
+    #[test]
+    fn animating_false_when_all_sessions_are_streaming() {
+        let mut state = AppState::default();
+        state
+            .sessions
+            .push(session_with_state(SessionState::Running));
+        assert!(!state.animating());
+    }
+
+    #[test]
+    fn animating_false_when_sessions_are_terminal() {
+        let mut state = AppState::default();
+        state
+            .sessions
+            .push(session_with_state(SessionState::Exited(true)));
+        state
+            .sessions
+            .push(session_with_state(SessionState::Killed));
+        assert!(!state.animating());
+    }
+
+    #[test]
+    fn animating_true_when_toasts_live_even_with_no_sessions() {
+        let mut state = AppState::default();
+        state.toasts.push(crate::engine::ToastKind::Info, "hi");
+        assert!(state.animating());
+    }
+
+    #[test]
+    fn animating_true_when_one_session_builds_among_others_streaming() {
+        let mut state = AppState::default();
+        state
+            .sessions
+            .push(session_with_state(SessionState::Running));
+        state
+            .sessions
+            .push(session_with_state(SessionState::Building));
+        assert!(state.animating(), "one transient session is enough");
     }
 }

@@ -18,6 +18,11 @@
 //!   view-held `Rc<dyn Fn(&mut State)>` into the [`ErasedCallback`]/
 //!   [`ErasedArgCallback`] adapter a non-generic widget holds, so the retained
 //!   widget never becomes generic over the application-state type.
+//! - **Child visitation**: [`visit_children!`] over [`VisitPods`], writing a
+//!   container's [`Widget::visit_children`] body from its child fields — the
+//!   read-only seam that lets tooling walk into a container's retained subtree
+//!   (`frust-core`'s `WidgetTree::inspect`). One line per container; a leaf
+//!   needs nothing.
 //! - **Themed text roles**: [`ThemeTextColor`] (re-exported here) and
 //!   [`TextView::themed_role`](crate::TextView::themed_role) — how a widget labels
 //!   a child [`text`](crate::text) run with the themed color role it should
@@ -114,6 +119,9 @@
 //!         // subtree drops out of the accessibility tree.
 //!         self.child.semantics_child(ctx);
 //!     }
+//!
+//!     // The read-only tooling seam: publish every pod this widget owns.
+//!     frust_widgets::authoring::visit_children!(child);
 //! }
 //! # fn main() {}
 //! ```
@@ -123,8 +131,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use frust_core::{
-    AnyView, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent, PointerButton,
-    PointerEvent, PointerPhase, View, Widget,
+    AnyView, BuildCtx, ChangeFlags, EventCtx, EventResult, InputEvent, PointerButton, PointerEvent,
+    PointerPhase, View, Widget,
 };
 use kurbo::Point;
 
@@ -712,6 +720,94 @@ fn rebuild_children_keyed<State: 'static, C>(
     flags
 }
 
+/// A field shape a container can hold children in, visitable in declaration
+/// order — the traversal half of the [`visit_children!`] seam.
+///
+/// Implemented for [`ChildPod`] and, generically, for `Option<T>`/`Vec<T>`/
+/// `[T]` over anything visitable, so the three shapes containers actually use
+/// (`child: ChildPod`, `icon: Option<ChildPod>`, `children: Vec<ChildPod>`) are
+/// covered by one impl each. A container holding pods inside its own row/slot
+/// struct implements this for that struct and stays on the same seam.
+pub trait VisitPods {
+    /// Hand each pod this value holds to `visitor`, in declaration order.
+    fn visit_pods(&self, visitor: &mut dyn FnMut(&ChildPod));
+}
+
+impl VisitPods for ChildPod {
+    fn visit_pods(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+        visitor(self);
+    }
+}
+
+impl<T: VisitPods> VisitPods for Option<T> {
+    fn visit_pods(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+        if let Some(inner) = self {
+            inner.visit_pods(visitor);
+        }
+    }
+}
+
+impl<T: VisitPods> VisitPods for [T] {
+    fn visit_pods(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+        for item in self {
+            item.visit_pods(visitor);
+        }
+    }
+}
+
+impl<T: VisitPods> VisitPods for Vec<T> {
+    fn visit_pods(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+        self.as_slice().visit_pods(visitor);
+    }
+}
+
+/// Implement [`Widget::visit_children`](frust_core::Widget::visit_children) for
+/// the container whose `impl Widget` block this is written in, forwarding the
+/// named fields in the order given.
+///
+/// The read-only introspection seam that makes a container's retained subtree
+/// enumerable (`frust-core`'s `WidgetTree::inspect` is the consumer). One line
+/// per container, so the traversal lives here rather than being re-hand-written
+/// per widget:
+///
+/// ```
+/// # use frust_core::{BoxConstraints, ChildPod, LayoutCtx, PaintCtx, PaintScene, Widget};
+/// # use kurbo::Size;
+/// use frust_widgets::authoring::visit_children;
+///
+/// struct RowWidget {
+///     leading: Option<ChildPod>,
+///     children: Vec<ChildPod>,
+/// }
+///
+/// impl Widget for RowWidget {
+///     # fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size { bc.max() }
+///     # fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+///     // ...layout/paint/event/semantics as usual...
+///     visit_children!(leading, children);
+/// }
+/// ```
+///
+/// Each field's type only has to implement [`VisitPods`] — `ChildPod`,
+/// `Option<_>`, `Vec<_>`, or a container's own row struct. A widget whose
+/// children are reached some other way (a slot list behind an enum, a
+/// transition's stashed page) writes the method by hand instead; the contract is
+/// the same either way — visit every pod you own, in paint order, and nothing
+/// else.
+#[macro_export]
+macro_rules! visit_children {
+    ($($field:ident),* $(,)?) => {
+        fn visit_children(&self, visitor: &mut dyn FnMut(&$crate::authoring::ChildPod)) {
+            $( $crate::authoring::VisitPods::visit_pods(&self.$field, visitor); )*
+        }
+    };
+}
+
+pub use crate::visit_children;
+/// Re-exported so the [`visit_children!`] expansion can name the type without
+/// the call site importing it.
+pub use frust_core::ChildPod;
+
 /// Whether `event` is the phase that auto-releases a recorded capture
 /// (`Up`/`Cancel`) — shared by [`route_event`]/[`route_event_single`].
 fn releases_capture(event: &InputEvent) -> bool {
@@ -941,6 +1037,17 @@ mod authoring_surface_tests {
 
         // The shared press-overlay opacity.
         let _pressed: f32 = crate::authoring::PRESSED_OPACITY;
+
+        // Child visitation: the trait, its three shape impls, and the macro
+        // that writes the `Widget::visit_children` body from them.
+        let _visit: fn(&ChildPod, &mut dyn FnMut(&ChildPod)) =
+            <ChildPod as crate::authoring::VisitPods>::visit_pods;
+        let _visit_opt: fn(&Option<ChildPod>, &mut dyn FnMut(&ChildPod)) =
+            <Option<ChildPod> as crate::authoring::VisitPods>::visit_pods;
+        let _visit_vec: fn(&Vec<ChildPod>, &mut dyn FnMut(&ChildPod)) =
+            <Vec<ChildPod> as crate::authoring::VisitPods>::visit_pods;
+        // The macro's own reachability is proven by its doc example, which
+        // rustdoc compiles as a genuinely external crate.
     }
 }
 

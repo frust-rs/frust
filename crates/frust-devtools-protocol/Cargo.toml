@@ -1,0 +1,14 @@
+[package]
+name = "frust-devtools-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# Leaf-crate charter (docs/ARCHITECTURE.md's Tooling isolation rule): this is
+# the ONE sanctioned crossing between the in-app debug service and the
+# frust-drive/frust-tui tooling side. serde + serde_json ONLY — no tokio, no
+# other frust-* crate, no framework crate, ever.
+serde = { workspace = true }
+serde_json = { workspace = true }

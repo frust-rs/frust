@@ -760,6 +760,8 @@ impl Widget for GlyphSheetWidget {
             },
         );
     }
+
+    crate::authoring::visit_children!(content);
 }
 
 #[cfg(test)]

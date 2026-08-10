@@ -5,11 +5,12 @@
 //!
 //! # Background
 //!
-//! `frust_widgets::authoring` promotes 13 items (`build_child`/
+//! `frust_widgets::authoring` promotes 15 items (`build_child`/
 //! `rebuild_child`/`teardown_child`/`rebuild_children`, `route_event`/
 //! `route_event_single`, `erase_callback`/`erase_callback_arg`,
 //! `ErasedCallback`/`ErasedArgCallback`/`TypedArgCallback`, `ThemeTextColor`,
-//! `PRESSED_OPACITY`) into a real, documented public API — the seam a design
+//! `PRESSED_OPACITY`, `VisitPods`/`visit_children!`) into a real, documented
+//! public API — the seam a design
 //! system authored *outside* this crate is proven sufficient against, by the
 //! fact that the three built-in catalogs themselves consume exactly that
 //! surface (`docs/ARCHITECTURE.md`'s `frust-widgets` row). There is no longer
@@ -30,7 +31,7 @@
 //! # What this checks
 //!
 //! 1. No file under `crates/frust-widgets/src/{glyph,material,cupertino}/`
-//!    spells any of the 13 promoted items as a bare `crate::<item>` — only
+//!    spells any of the 15 promoted items as a bare `crate::<item>` — only
 //!    `crate::authoring::<item>` is allowed.
 //! 2. No such file spells `ThemeTextColor` via the private-`text`-module
 //!    bypass path `crate::text::ThemeTextColor` — `crate::authoring::
@@ -114,7 +115,7 @@ fn is_comment_only(line: &str) -> bool {
     line.trim_start().starts_with("//")
 }
 
-/// The 13 items `frust_widgets::authoring` promoted to a real public API —
+/// The 15 items `frust_widgets::authoring` promoted to a real public API —
 /// see the module docs. A catalog file may reference each ONLY as
 /// `crate::authoring::<item>`; a bare `crate::<item>` is exactly what the
 /// removed `pub(crate) use authoring::*;` crate-root glob used to silently
@@ -133,6 +134,8 @@ const PROMOTED_ITEMS: &[&str] = &[
     "TypedArgCallback",
     "ThemeTextColor",
     "PRESSED_OPACITY",
+    "VisitPods",
+    "visit_children",
 ];
 
 /// True if `line` contains `crate::<needle>` as a genuine identifier

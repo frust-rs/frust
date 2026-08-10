@@ -353,6 +353,8 @@ impl Widget for ToastWidget {
             node.set_label(self.message_text.as_str());
         });
     }
+
+    crate::authoring::visit_children!(message);
 }
 
 // ---------------------------------------------------------------------
@@ -428,6 +430,12 @@ struct ActiveToast {
     /// `Instant::now()` — `docs/CODE_STANDARDS.md`).
     hold_elapsed: Duration,
     last_time: Option<FrameTime>,
+}
+
+impl crate::authoring::VisitPods for ActiveToast {
+    fn visit_pods(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+        visitor(&self.child);
+    }
 }
 
 /// Where [`ToastHostWidget`] positions the active toast within the host's
@@ -788,6 +796,8 @@ impl Widget for ToastHostWidget {
             active.child.semantics_child(ctx);
         }
     }
+
+    crate::authoring::visit_children!(active);
 }
 
 #[cfg(test)]

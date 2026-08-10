@@ -180,6 +180,8 @@ impl Widget for SafeAreaWidget {
         // Transparent inset wrapper, mirroring Padding: forward to the child.
         self.child.semantics_child(ctx);
     }
+
+    crate::authoring::visit_children!(child);
 }
 
 #[cfg(test)]

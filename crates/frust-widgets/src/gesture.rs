@@ -528,6 +528,8 @@ impl Widget for GestureDetectorWidget {
         // Transparent gesture-recognizer wrapper: forward to the single child.
         self.child.semantics_child(ctx);
     }
+
+    crate::authoring::visit_children!(child);
 }
 
 #[cfg(test)]

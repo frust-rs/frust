@@ -112,6 +112,13 @@ pub(crate) enum ShellUserEvent {
     /// failed). Surfaced back so `run_desktop` returns it as `Err`, mirroring the
     /// inline path's fatal handling.
     RenderFatal(anyhow::Error),
+    /// The devtools service queued a request that needs UI-thread state (a
+    /// widget-tree snapshot, an injected event). This shell idles under
+    /// [`ControlFlow::Wait`], so the queue is drained on the loop turn this
+    /// event produces — the desktop half of `frust_shell_common::devtools`'s
+    /// UI-thread hop.
+    #[cfg(feature = "devtools")]
+    Devtools,
 }
 
 impl From<AccessibilityEvent> for ShellUserEvent {
@@ -161,6 +168,25 @@ where
         let _ = proxy.send_event(ShellUserEvent::SignalsDirty);
     });
     let runtime = ReactiveRuntime::init(waker);
+
+    // Devtools, compiled in only under this crate's `devtools` feature. Started
+    // here because both of its prerequisites first exist at this point: the
+    // stderr logger installed above (the discovery line must reach a
+    // developer's terminal) and an `EventLoopProxy` to wake the `Wait` loop
+    // with when a backend request needs the UI thread. Never load-bearing — a
+    // bind failure or `FRUST_DEVTOOLS=0` just means no devtools this run.
+    #[cfg(feature = "devtools")]
+    {
+        let devtools_proxy = event_loop.create_proxy();
+        frust_shell_common::devtools::start(
+            frust_shell_common::devtools::app_name_from_process(),
+            Some(Box::new(move || {
+                // Fails only once the loop has closed (a shutdown race) — the
+                // same benign case the frame waker above ignores.
+                let _ = devtools_proxy.send_event(ShellUserEvent::Devtools);
+            })),
+        );
+    }
 
     // Pick the frame executor once at startup from the `FRUST_NO_RENDER_THREAD`
     // kill switch. The split path spawns a dedicated render
@@ -896,6 +922,32 @@ fn build_tree_update(update: &SemanticsUpdate) -> TreeUpdate {
     }
 }
 
+/// The devtools UI-thread view of this shell (see
+/// `frust_shell_common::devtools`): read the retained tree, and deliver a
+/// synthetic event through the shell's ordinary [`ShellHandler::dispatch`] —
+/// the same helper every winit event goes through, so an injected tap is
+/// hit-tested, IME-synced and redraw-scheduled exactly like a real one.
+#[cfg(feature = "devtools")]
+impl<State, Logic, V> frust_shell_common::devtools::DevtoolsUi for ShellHandler<State, Logic, V>
+where
+    State: 'static,
+    V: View<State>,
+    Logic: FnMut(&mut State) -> V + 'static,
+{
+    fn inspect(&self) -> Vec<frust_core::InspectNode> {
+        self.root.inspect()
+    }
+
+    fn dispatch(&mut self, event: InputEvent) {
+        // No window yet (an injection racing startup): dropping the event is
+        // the honest answer — there is nothing laid out to hit-test against,
+        // and `dispatch` needs the window for the IME re-sync and the redraw.
+        if let Some(window) = self.window.clone() {
+            ShellHandler::dispatch(self, &window, event);
+        }
+    }
+}
+
 impl<State, Logic, V> ApplicationHandler<ShellUserEvent> for ShellHandler<State, Logic, V>
 where
     State: 'static,
@@ -946,6 +998,12 @@ where
                 self.fatal = Some(err);
                 event_loop.exit();
             }
+            // The devtools UI-thread hop: answer every queued request here, on
+            // the thread that owns the tree. Injected events go through
+            // `DevtoolsUi::dispatch` → this shell's own `dispatch`, i.e. the
+            // identical path a real winit event takes.
+            #[cfg(feature = "devtools")]
+            ShellUserEvent::Devtools => frust_shell_common::devtools::pump(self),
         }
     }
 

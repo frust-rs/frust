@@ -15,7 +15,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how WIDGETS relates to the other unit
 
 | Module | Responsibility |
 |--------|-----------------|
-| `frust-widgets::authoring` | Public container/callback toolkit every widget in the crate builds from, instead of touching `frust-core` primitives directly — reachable by app code as `frust::authoring` (the facade's re-export, CORE unit); the toolkit itself is unchanged |
+| `frust-widgets::authoring` | Public container/callback toolkit every widget in the crate builds from, instead of touching `frust-core` primitives directly — reachable by app code as `frust::authoring` (the facade's re-export, CORE unit); also carries the `VisitPods` trait / `visit_children!` macro, the crate's introspection seam (see *Data Flow*) |
 | `frust-widgets` (baseline) | Baseline layout containers and interactive leaf widgets (text, forms, gestures, scrolling, a virtualized `ListView`) |
 | `frust-widgets::material` | Material 3 (+Expressive) widget catalog (plus a deprecated `list_view` compatibility shim — `ListView` itself lives in the baseline set, see *Virtualized ListView* below) |
 | `frust-widgets::cupertino` | iOS-styled widget catalog painting from `Theme.glass`, degrading to opaque fill when unsupported |
@@ -54,6 +54,12 @@ module; an app can disable all three to build its own design system on the same 
   time.
 - Container plumbing: every container and interactive widget is built through the shared public
   authoring toolkit rather than touching `frust-core` primitives directly.
+- Introspection flow: a container implements `Widget::visit_children` (CORE unit) via the
+  authoring toolkit's `VisitPods` trait and `visit_children!` macro — one line naming its
+  `ChildPod`-holding fields — so `WidgetTree::inspect`/`RenderRoot::inspect()` can enumerate its
+  children; a hand-rolled child list (a row/slot struct behind an enum) implements `VisitPods`
+  by hand instead and stays on the same seam. Both the baseline set and all three catalogs use it;
+  see WIDGETS_CODE_STANDARDS.md for the authoring convention this obliges.
 - Design-system layering: the three feature-gated catalogs sit above the baseline set and the
   authoring seam, each consuming a matching `frust-theme` token module.
 - Glass/Cupertino chrome flow: Cupertino chrome widgets paint from `frust-theme`'s glass recipes
@@ -120,7 +126,7 @@ module; an app can disable all three to build its own design system on the same 
 |------|---------|
 | `Theme` / `DesignLanguage` / `ThemeBuilder` | `frust-theme`'s aggregate design-token bundle, tagged by baseline (Material3/Cupertino/Glyph), plus a fluent editor |
 | `ColorScheme`, `TypeScale`, `ShapeScale`, `Elevation`, `MotionScheme`, `GlassScale`, `StatusPalette`, `GlyphInk` | Individual token-group types composed into `Theme` |
-| authoring module (`build_child`/`rebuild_child`/`teardown_child`/`rebuild_children`, `route_event`) | The sanctioned seam for authoring any widget against `frust-core` |
+| authoring module (`build_child`/`rebuild_child`/`teardown_child`/`rebuild_children`, `route_event`, `VisitPods`/`visit_children!`) | The sanctioned seam for authoring any widget against `frust-core`, including child-introspection |
 | `Navigator` / `Router` / `hero()` | Page-stack and declarative routing plus shared-element transitions |
 | `ButtonStyle`, `ScrollInfo`, `IconData`/`IconSource`, `ImageSource`/`ImageFit` | Small per-widget config/state types shared across the baseline widget set |
 | `ListView` / `ListViewWidget` | Baseline virtualized list: windowed rebuild-time materialization, positional or keyed (`ChildKey`) row identity, optional variable extents, refresh/overscroll parity with `ScrollView` |

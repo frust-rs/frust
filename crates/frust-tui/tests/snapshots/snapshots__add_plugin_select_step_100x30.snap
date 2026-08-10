@@ -1,6 +1,5 @@
 ---
 source: crates/frust-tui/tests/snapshots.rs
-assertion_line: 390
 expression: "render_to_string(100, 30, &add_plugin_state(AddPluginStep::Select, false, 0))"
 ---
 ⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
@@ -21,7 +20,7 @@ expression: "render_to_string(100, 30, &add_plugin_state(AddPluginStep::Select, 
    Doctor · d     │    ( ) clipboard                                             │▓▓                
    Build · b      │        Synchronous plain-text clipboard access (ClipboardMa  │▓▓                
    Clean · c      │    ( ) haptics                                               │▓▓                
-                  │        Minimal haptic feedback (selection tick, impact, suc  │▓▓                
+   MCP off · M    │        Minimal haptic feedback (selection tick, impact, suc  │▓▓                
                   │    ( ) iap                                                   │▓▓                
                   │        In-app purchases and subscriptions over Play Billing  │▓▓                
                   │    ( ) database                                              │▓▓                

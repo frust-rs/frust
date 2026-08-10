@@ -19,22 +19,26 @@ use crossterm::event::{
     MouseButton as CtMouseButton, MouseEventKind,
 };
 use frust_drive::android_build::{self, AndroidArtifact};
-use frust_drive::devices::{default_discoverers, discover_all};
+use frust_drive::devices::{Platform, default_discoverers, discover_all};
 use frust_drive::doctor::{self, DoctorCtx, RealEnv};
 use frust_drive::ios_build::{self, IosArtifact};
 use frust_drive::process::{ProcessRunner, RealProcessRunner};
 use frust_drive::scaffold::{self, TemplateContext};
+use frust_mcp::SharedBackend;
 use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::engine::{
     ActiveModal, AddPluginDialog, AddPluginStep, AppState, BootstrapNode, BootstrapWizard,
-    BuildFocus, BuildSpec, BuildTargetSpec, DoctorCheck, Effect, Engine, Message, RegionId,
-    RunFocus, Screen, WizardStep,
+    BuildFocus, BuildSpec, BuildTargetSpec, DevtoolsLaunch, DevtoolsState, DoctorCheck, Effect,
+    Engine, Message, RegionId, RunFocus, Screen, WizardStep,
 };
+use crate::supervise::mcp_backend::MAX_ADHOC_SESSION_ID;
 use crate::supervise::{
-    DeviceTarget, SessionEvent, SessionEventKind, SessionId, SessionSpec, SessionState, Supervisor,
+    DeviceTarget, DevtoolsBridge, McpServeCtx, McpSessionRecords, MetricsBridge, SessionEvent,
+    SessionEventKind, SessionId, SessionSpec, SessionState, Supervisor, Teardown,
+    TuiSessionBackend, serve_command,
 };
 use crate::ui::mouse::MouseRegions;
 use crate::ui::theme::Theme;
@@ -44,8 +48,10 @@ use crate::ui::theme::Theme;
 /// auto-dismiss aging is the only thing that does today).
 const TICK: Duration = Duration::from_millis(50);
 
-/// Lines a `PageUp`/`PageDown` scrolls the log view. A fixed step (the event
-/// translator has no viewport height); a comfortable page on typical panes.
+/// Visible lines a `PageUp`/`PageDown` scrolls the log view (drawn rows, not
+/// raw log indices — see `SessionView::visible_indices`). A fixed step (the
+/// event translator has no viewport height); a comfortable page on typical
+/// panes.
 const PAGE_LINES: u64 = 10;
 
 /// Pure check: the TUI requires interactive stdin AND stdout. Testable without
@@ -104,6 +110,17 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     // wires the channel and the kill/copy effect path every start call rides.
     // On return the supervisor's `Drop` stops+joins every session.
     let (mut supervisor, mut session_rx) = Supervisor::new(Arc::new(RealProcessRunner));
+    // The DevTools bridges (workbook §B12): one connection thread per session
+    // that has opened DevTools, reporting into the same engine channel. On
+    // return its `Drop` stops every thread and waits them out against one
+    // bounded deadline (see `spawn_teardown`), so a torn-down bridge removes
+    // the `adb` forwards it allocated without ever hanging the exit.
+    let mut devtools = DevtoolsBridge::new(Arc::new(RealProcessRunner));
+    // The metrics-sampling bridges (workbook §B12's System/Network tabs):
+    // one sampler thread per session whose Android identity has resolved
+    // and whose DevTools has been opened, reporting into the same engine
+    // channel. On return its `Drop` stops every thread the same bounded way.
+    let mut metrics = MetricsBridge::new(Arc::new(RealProcessRunner));
     // A cloneable handle background tasks (device discovery, session
     // registration) post `Message`s back through.
     let msg_tx = engine.sender();
@@ -112,10 +129,17 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     let mut tick = tokio::time::interval(TICK);
     let mut needs_redraw = true;
     // Ids for ad-hoc (build/clean) sessions that never go through
-    // `Supervisor::start`, minted downward from `u64::MAX` so they can never
-    // collide with `Supervisor`'s own upward-counting ids for the life of one
-    // run — see `apply_effect`'s `LaunchBuild`/`RunClean` enactment.
-    let mut next_adhoc_id: u64 = u64::MAX;
+    // `Supervisor::start`, minted downward from `MAX_ADHOC_SESSION_ID` so they
+    // can never collide with `Supervisor`'s own upward-counting ids for the
+    // life of one run — see `apply_effect`'s `LaunchBuild`/`RunClean`
+    // enactment. `u64::MAX` itself is reserved (`UNRESOLVED_SESSION`), so an
+    // MCP `run_app` that finds no workbench left to answer it can name an id
+    // no session will ever hold.
+    let mut next_adhoc_id: u64 = MAX_ADHOC_SESSION_ID;
+    // What each MCP-describable session was launched from — the backing store
+    // for the embedded server's snapshots and its `restart_app`. Empty (and
+    // untouched) while no MCP server is running.
+    let mut mcp_records = McpSessionRecords::new();
 
     // Kick an initial device discovery + doctor preflight so the panel/chip
     // populate on open (the doctor run is the titlebar chip's cached
@@ -153,7 +177,18 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                         for msg in translate_event(event, &engine.state, &regions) {
                             let out = engine.handle(msg);
                             needs_redraw |= out.redraw;
-                            apply_effect(out.effect, &mut supervisor, &msg_tx, &mut next_adhoc_id);
+                            apply_effect(
+                                out.effect,
+                                &mut EffectCtx {
+                                    engine: &mut engine,
+                                    supervisor: &mut supervisor,
+                                    devtools: &mut devtools,
+                                    metrics: &mut metrics,
+                                    tx: &msg_tx,
+                                    next_adhoc_id: &mut next_adhoc_id,
+                                    records: &mut mcp_records,
+                                },
+                            );
                         }
                     }
                     // A read error (rare) is logged and ignored — the loop
@@ -163,14 +198,51 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                 }
             }
             Some(msg) = rx.recv() => {
-                let out = engine.handle(msg);
-                needs_redraw |= out.redraw;
-                apply_effect(out.effect, &mut supervisor, &msg_tx, &mut next_adhoc_id);
+                // An embedded MCP server's command is served here rather than
+                // in `update`: answering it needs the `Supervisor` and the
+                // launch records the pure core deliberately cannot reach.
+                // Nothing it changes bypasses the model — a launch registers
+                // itself with `RegisterSession` like every other one.
+                if let Message::Mcp(command) = msg {
+                    serve_command(command, &mut McpServeCtx {
+                        state: &engine.state,
+                        supervisor: &mut supervisor,
+                        records: &mut mcp_records,
+                        tx: &msg_tx,
+                        next_adhoc_id: &mut next_adhoc_id,
+                    });
+                } else {
+                    let out = engine.handle(msg);
+                    needs_redraw |= out.redraw;
+                    apply_effect(
+                        out.effect,
+                        &mut EffectCtx {
+                            engine: &mut engine,
+                            supervisor: &mut supervisor,
+                            devtools: &mut devtools,
+                            metrics: &mut metrics,
+                            tx: &msg_tx,
+                            next_adhoc_id: &mut next_adhoc_id,
+                            records: &mut mcp_records,
+                        },
+                    );
+                }
             }
             Some(ev) = session_rx.recv() => {
                 let out = engine.handle(Message::Session(ev));
                 needs_redraw |= out.redraw;
-                apply_effect(out.effect, &mut supervisor, &msg_tx, &mut next_adhoc_id);
+                apply_effect(
+                    out.effect,
+                    &mut EffectCtx {
+                        engine: &mut engine,
+                        supervisor: &mut supervisor,
+                        devtools: &mut devtools,
+                        metrics: &mut metrics,
+                        tx: &msg_tx,
+                        next_adhoc_id: &mut next_adhoc_id,
+                        records: &mut mcp_records,
+                    },
+                );
             }
             _ = tick.tick() => {
                 // Only touch the model while something is animating (a live
@@ -180,30 +252,73 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                 if engine.state.animating() {
                     let out = engine.handle(Message::Tick);
                     needs_redraw |= out.redraw;
-                    apply_effect(out.effect, &mut supervisor, &msg_tx, &mut next_adhoc_id);
+                    apply_effect(
+                        out.effect,
+                        &mut EffectCtx {
+                            engine: &mut engine,
+                            supervisor: &mut supervisor,
+                            devtools: &mut devtools,
+                            metrics: &mut metrics,
+                            tx: &msg_tx,
+                            next_adhoc_id: &mut next_adhoc_id,
+                            records: &mut mcp_records,
+                        },
+                    );
                 }
             }
         }
     }
 
+    // Quit: cancel an embedded MCP server if one is running, so its listener
+    // closes here rather than only when the runtime is torn down. A no-op
+    // while nothing has started one.
+    engine.stop_mcp();
+
     Ok(())
+}
+
+/// Everything enacting one [`Effect`] needs from [`run_loop`]'s scope —
+/// bundled the same way [`McpServeCtx`] bundles the MCP-command path's
+/// handles, and constructed fresh at each call site so the borrows live no
+/// longer than the enactment itself.
+struct EffectCtx<'a> {
+    /// The engine — needed only by the two MCP-server effects, which own a
+    /// live server handle rather than a value (see
+    /// [`crate::engine::Engine::start_mcp`]).
+    engine: &'a mut Engine,
+    /// The session supervisor (launch/stop).
+    supervisor: &'a mut Supervisor,
+    /// The per-session DevTools connection threads.
+    devtools: &'a mut DevtoolsBridge,
+    /// The per-session metrics sampler threads.
+    metrics: &'a mut MetricsBridge,
+    /// The engine channel every off-thread task reports back through.
+    tx: &'a UnboundedSender<Message>,
+    /// The ad-hoc session-id counter (see [`run_loop`]).
+    next_adhoc_id: &'a mut u64,
+    /// The MCP launch records a started session is recorded in.
+    records: &'a mut McpSessionRecords,
 }
 
 /// Enact an engine-requested [`Effect`] — the runner owns the side effects the
 /// pure engine can't perform: killing a session through the supervisor, writing
 /// the system clipboard, discovering devices off-thread, and launching
 /// sessions.
-fn apply_effect(
-    effect: Option<Effect>,
-    supervisor: &mut Supervisor,
-    tx: &UnboundedSender<Message>,
-    next_adhoc_id: &mut u64,
-) {
+fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
+    let EffectCtx {
+        engine,
+        supervisor,
+        devtools,
+        metrics,
+        tx,
+        next_adhoc_id,
+        records,
+    } = ctx;
     match effect {
         Some(Effect::StopSession(id)) => supervisor.stop(id),
         Some(Effect::Copy(text)) => copy_to_clipboard(&text),
         Some(Effect::RefreshDevices) => spawn_device_discovery(tx.clone()),
-        Some(Effect::LaunchSessions(specs)) => launch_sessions(specs, supervisor, tx),
+        Some(Effect::LaunchSessions(specs)) => launch_sessions(specs, supervisor, tx, records),
         Some(Effect::RecordRecentProject(path)) => crate::engine::record_recent_project(&path),
         Some(Effect::ProbeCleanSignals) => {
             // Neither the create wizard's arch cards nor the Add Plugin
@@ -242,10 +357,86 @@ fn apply_effect(
             id,
             features,
         }) => spawn_add_plugin(project_root, id, features, tx.clone()),
+        // The bridge only *spawns* and *signals* here: the `adb forward`, the
+        // TCP connect, the handshake and the frame-stats pump all run on its
+        // own thread, and a teardown's wait is handed to `spawn_teardown`
+        // below — so a slow, unreachable, or wedged service never stalls this
+        // loop.
+        Some(Effect::DevtoolsConnect(target)) => {
+            spawn_teardown(devtools.connect(target, tx.clone()));
+        }
+        Some(Effect::DevtoolsDisconnect(session)) => spawn_teardown(devtools.disconnect(session)),
+        // Inspector pulls only *queue* here: the bridge thread serves them
+        // between frame windows over its own blocking client.
+        Some(Effect::DevtoolsFetchTree { session }) => devtools.fetch_tree(session, tx),
+        Some(Effect::DevtoolsFetchProps { session, id }) => devtools.fetch_props(session, id, tx),
+        // Metrics sampling has the same shape — and the sharper teardown
+        // hazard, since its `adb` probes are unbounded (see `spawn_teardown`).
+        Some(Effect::MetricsStart(target)) => spawn_teardown(metrics.start(target, tx.clone())),
+        Some(Effect::MetricsStop(session)) => spawn_teardown(metrics.stop(session)),
+        // The embedded MCP server (workbook §B13). Only the runner can start
+        // one: the backend it serves is built over *this* loop's supervisor,
+        // and the server itself is spawned on the runtime this loop runs on.
+        // Everything the server then reports (its bound port, a bind failure)
+        // travels back as an ordinary `Message`.
+        Some(Effect::StartMcpServer) => {
+            let backend: SharedBackend = Arc::new(TuiSessionBackend::new(
+                tx.clone(),
+                Arc::new(RealProcessRunner),
+            ));
+            engine.start_mcp(backend, crate::engine::DEFAULT_MCP_PORT);
+        }
+        Some(Effect::StopMcpServer) => {
+            engine.stop_mcp();
+        }
+        Some(Effect::Batch(effects)) => {
+            for effect in effects {
+                apply_effect(
+                    Some(effect),
+                    &mut EffectCtx {
+                        engine,
+                        supervisor,
+                        devtools,
+                        metrics,
+                        tx,
+                        next_adhoc_id,
+                        records,
+                    },
+                );
+            }
+        }
         Some(Effect::SetMouseCapture(on)) => set_mouse_capture(on),
         Some(Effect::SaveSidebarWidth(width)) => crate::engine::save_sidebar_width(width),
-        Some(Effect::SaveFollowTailDefault(on)) => crate::engine::save_follow_tail_default(on),
         None => {}
+    }
+}
+
+/// Wait out a stopped DevTools bridge thread off the event loop.
+///
+/// Both bridges hand a signalled (and, for devtools, already muted) thread
+/// back as a [`Teardown`] instead of joining it, because a bridge thread can
+/// be parked in a call this side cannot bound — an `adb` probe against an
+/// unresponsive device has no wall-clock timeout at all. Waiting for one here
+/// would freeze the whole workbench: no repaint, no input, not even quit, on
+/// a path every Android session's terminal transition takes. So the wait goes
+/// to `spawn_blocking`, the same pool the other blocking effects in
+/// `apply_effect` use (`LaunchSessions`, `RunDoctor`, the ad-hoc build/clean
+/// sessions), and degrades to a lagging background task instead.
+///
+/// Only the *waiting* is deferred: each bridge's own bookkeeping already
+/// happened synchronously above, in effect order, so two effects for the same
+/// session can never be reordered by the blocking pool.
+///
+/// **Quit.** On the way out of [`run_loop`] each bridge's `Drop` signals every
+/// remaining thread and then waits *inline* against one shared deadline —
+/// there is no loop left to protect, and a torn-down bridge must not leave an
+/// `adb forward` behind if it can help it. Any teardown still parked in the
+/// blocking pool is waited out the same bounded way by the runtime's own
+/// shutdown. So quitting with a wedged device costs a bounded pause (a
+/// fraction of a second), never a hang.
+fn spawn_teardown(teardown: Option<Teardown>) {
+    if let Some(teardown) = teardown {
+        tokio::task::spawn_blocking(move || teardown.wait());
     }
 }
 
@@ -341,6 +532,9 @@ fn launch_bootstrap_fix_session(
         id,
         project_root: root,
         target_label: format!("fix: {label}"),
+        // A toolchain fix runs `rustup`/`cargo`, not the app — there is no
+        // devtools service to reach.
+        devtools: DevtoolsLaunch::unavailable(),
     });
     tokio::task::spawn_blocking(move || {
         let _ = tx.send(session_state(id, SessionState::Building));
@@ -383,6 +577,8 @@ fn launch_build_session(spec: BuildSpec, id: SessionId, tx: UnboundedSender<Mess
         id,
         project_root: spec.project_root.clone(),
         target_label: format!("build {}", build_target_label(&spec.target)),
+        // A build session produces an artifact; nothing is running to inspect.
+        devtools: DevtoolsLaunch::unavailable(),
     });
     tokio::task::spawn_blocking(move || {
         let _ = tx.send(session_state(id, SessionState::Building));
@@ -488,6 +684,8 @@ fn launch_clean_session(project_root: PathBuf, id: SessionId, tx: UnboundedSende
         id,
         project_root: project_root.clone(),
         target_label: "clean".to_string(),
+        // A clean session removes build output; nothing is running to inspect.
+        devtools: DevtoolsLaunch::unavailable(),
     });
     tokio::task::spawn_blocking(move || {
         let _ = tx.send(session_state(id, SessionState::Building));
@@ -684,6 +882,7 @@ fn launch_sessions(
     specs: Vec<SessionSpec>,
     supervisor: &mut Supervisor,
     tx: &UnboundedSender<Message>,
+    records: &mut McpSessionRecords,
 ) {
     for spec in specs {
         match supervisor.start(&spec) {
@@ -692,11 +891,31 @@ fn launch_sessions(
                     id,
                     project_root: spec.project_root.clone(),
                     target_label: target_label(&spec.target),
+                    devtools: devtools_launch(&spec),
                 });
+                // Record the launch even with no MCP server running: an agent
+                // that connects later must see the sessions the *user*
+                // started, not only its own (one session world), and nothing
+                // can reconstruct a spec after the fact.
+                records.insert(id, spec);
             }
             Err(err) => eprintln!("frust-tui: failed to start session: {err:#}"),
         }
     }
+}
+
+/// What a launched app session's own config says about reaching its devtools
+/// service (workbook §B12): the build mode decides whether the listener is
+/// even compiled in, and an Android target additionally needs its `adb`
+/// serial so the bridge can forward the device-loopback port to the host.
+fn devtools_launch(spec: &SessionSpec) -> DevtoolsLaunch {
+    let android_serial = match &spec.target {
+        DeviceTarget::Device(device) if device.platform == Platform::Android => {
+            Some(device.id.clone())
+        }
+        DeviceTarget::Device(_) | DeviceTarget::Desktop => None,
+    };
+    DevtoolsLaunch::from_launch(spec.build.mode, android_serial)
 }
 
 /// The short tab label for a launch target (`desktop`, or the device name).
@@ -860,6 +1079,7 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
             // Modal exclusivity — see `crate::ui::render`'s
             // workbench-modal dispatch, which shares this same priority order.
             ActiveModal::DoctorPanel => translate_doctor_key(code),
+            ActiveModal::McpPanel => translate_mcp_key(code),
             ActiveModal::BuildLauncher(launcher) => translate_build_key(code, mods, launcher),
             ActiveModal::CleanConfirm(_) => translate_clean_confirm_key(code),
             ActiveModal::HelpOverlay => translate_help_key(code),
@@ -913,6 +1133,22 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
     if ctrl && matches!(code, KeyCode::Char('o')) && workbench {
         return vec![Message::ToggleProjectSwitcher];
     }
+    // DevTools mode owns the whole normal-mode key namespace for the active
+    // session tab while it is open (workbook §B12's full-screen namespace
+    // swap, the same shape the doctor panel's own key map takes over with):
+    // the session-level keys below (`r`/`b`/`x`/`/`/`f`/`z`/`l`) are out of
+    // scope inside it, so it defines its own small map from a clean slate.
+    // The global chords above (`Ctrl+Q`, `⌥m`, `Ctrl+C`, `Ctrl+P`, `?`) and
+    // session-tab switching (`Tab`/`Shift+Tab`) deliberately still apply —
+    // except `Tab` on the connected Performance tab, which `Message`s its
+    // own chart↔breakdown focus cycle instead (see
+    // `translate_devtools_key`'s doc).
+    if let Some(devtools) = state.active_session().map(|s| &s.devtools)
+        && devtools.open
+    {
+        return translate_devtools_key(code, state, devtools);
+    }
+
     // Keyboard focus heuristic (this crate has no true focus system yet): with no
     // session open the devices panel owns the arrows/Space/Enter; once a
     // session is running the log view owns them (devices stay mouse- and
@@ -931,6 +1167,15 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         // sidebar "Add plugin" action / the palette). Gated on an open project
         // in `update` (a warn toast surfaces the reason on the welcome screen).
         KeyCode::Char('a') => vec![Message::OpenAddPlugin],
+
+        // `m` opens the MCP panel and `M` starts/stops the embedded MCP
+        // server, from either screen (workbook §B13) — the server hosts the
+        // *workbench*, not one project, so neither is workbench-gated. Mouse
+        // parity: the sidebar ACTIONS "MCP" row toggles it, the palette's
+        // "MCP server…" row opens the panel. `Alt+m` (mouse capture) is
+        // matched far above, so the two never collide.
+        KeyCode::Char('m') => vec![Message::OpenMcpPanel],
+        KeyCode::Char('M') => vec![Message::ToggleMcpServer],
 
         // `:` opens the command palette from either screen (the `Ctrl+P`
         // shorthand above).
@@ -956,8 +1201,12 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         KeyCode::Char(' ') if devices_focused => vec![Message::ToggleDeviceSelect],
         KeyCode::Up if devices_focused => vec![Message::DeviceCursorUp],
         KeyCode::Down if devices_focused => vec![Message::DeviceCursorDown],
-        // `d` opens the doctor panel; `b` opens the build launcher (mouse
-        // parity: the titlebar chip / sidebar ACTIONS "Doctor"/"Build" rows).
+        // `d` opens DevTools for the active session tab (workbook §B12) and,
+        // with no session open, the doctor panel — the two contexts never
+        // collide, and the doctor panel additionally stays on the sidebar
+        // ACTIONS row and in the palette. `b` opens the build launcher
+        // (mouse parity: the sidebar "Build" row).
+        KeyCode::Char('d') if has_active_session => vec![Message::DevtoolsToggle],
         KeyCode::Char('d') if workbench => vec![Message::OpenDoctorPanel],
         KeyCode::Char('b') if workbench => vec![Message::OpenBuildLauncher],
         // `c` copies a build session's artifact path(s) when one is active
@@ -987,6 +1236,14 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         KeyCode::Char('/') if has_active_session => vec![Message::SearchOpen],
         KeyCode::Char('f') if has_active_session => vec![Message::ToggleFollow],
         KeyCode::Char('w') if has_active_session => vec![Message::ToggleWrap],
+        // `l`/`L` cycle the log status bar's level-filter chip forward/back
+        // (workbook §B11 proposed `f`/`Shift+f`, but `f` is already
+        // `ToggleFollow` — `l`/`L` is the free key chosen instead); `z`
+        // toggles the nearest panic/backtrace block's fold state (mouse
+        // parity: a click on its `▶ n frames…` row).
+        KeyCode::Char('l') if has_active_session => vec![Message::CycleLevelFilter(1)],
+        KeyCode::Char('L') if has_active_session => vec![Message::CycleLevelFilter(-1)],
+        KeyCode::Char('z') if has_active_session => vec![Message::ToggleNearestFold],
         KeyCode::Char('v') if has_active_session => vec![Message::SelectionBegin],
         KeyCode::Char('y') if has_active_session => vec![Message::CopySelection],
         KeyCode::Up if has_active_session && shift => vec![Message::SelectionExtendUp(1)],
@@ -1005,6 +1262,115 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
             vec![Message::SelectionClear]
         }
         _ => vec![],
+    }
+}
+
+/// Translate one key press while the active session tab is showing DevTools
+/// (workbook §B12's own key table, binding): `d` always returns to the log,
+/// `1`–`4` jump to a tab and `[`/`]` cycle them (connected only — there is no
+/// strip to move through otherwise), `r` retries a failed connection, and
+/// `Tab`/`Shift+Tab` still switch session tabs everywhere except the
+/// Performance tab, where `Tab` instead cycles its own chart↔breakdown focus
+/// (§B12's Performance-tab row) — a tab keeps its own log/DevTools state, so
+/// leaving and coming back lands right where you were. Every row has a mouse
+/// equivalent: a tab pill, the Retry button, a chart column, and the status
+/// row's back affordance.
+///
+/// **`Esc` is two-stage inside the Performance tab, one beyond what §B12
+/// draws**: with a frame scrubbed, the first `Esc` only drops back to the
+/// live tail ([`Message::DevtoolsPerfClearSelection`]); a second `Esc` (or
+/// the first, with nothing selected) leaves DevTools
+/// ([`Message::DevtoolsClose`]) same as every other screen. Without this, a
+/// scrub session's only way out would also blow away the pinned frame in the
+/// same keystroke.
+///
+/// **`Tab` is per-tab-scoped**: it cycles the active tab's own panes where
+/// that tab has any (Performance's chart↔breakdown, Inspector's tree↔props)
+/// and otherwise keeps its workbench meaning of switching session tabs — one
+/// `on_<tab>` gate each, so a third tab claiming `Tab` adds a gate rather
+/// than rewriting the arm.
+///
+/// **`r` means refresh only on a connected Inspector**, and retry only on the
+/// failed screen — §B12's "mutually exclusive contexts, no live collision".
+/// The two live in different [`DevtoolsPhase`] arms below, so neither can
+/// shadow the other.
+///
+/// The [`DevtoolsPhase`] match is exhaustive: a new screen has to decide what
+/// its keys do rather than silently inheriting another screen's.
+fn translate_devtools_key(
+    code: KeyCode,
+    state: &AppState,
+    devtools: &DevtoolsState,
+) -> Vec<Message> {
+    use crate::engine::{DevtoolsPhase, DevtoolsTab};
+
+    let on_performance = devtools.active_tab == DevtoolsTab::Performance;
+    let on_inspector = devtools.active_tab == DevtoolsTab::Inspector;
+    let connected = matches!(devtools.phase(), DevtoolsPhase::Connected);
+
+    match code {
+        KeyCode::Char('q') => return vec![Message::Quit],
+        KeyCode::Char('d') => return vec![Message::DevtoolsClose],
+        KeyCode::Esc => {
+            if on_performance && devtools.performance.has_selection() {
+                return vec![Message::DevtoolsPerfClearSelection];
+            }
+            return vec![Message::DevtoolsClose];
+        }
+        KeyCode::Tab if connected && on_performance => {
+            return vec![Message::DevtoolsPerfFocusCycle];
+        }
+        KeyCode::Tab if connected && on_inspector => {
+            return vec![Message::DevtoolsInspectorFocusCycle];
+        }
+        KeyCode::Tab => return vec![Message::NextTab],
+        KeyCode::BackTab => return vec![Message::PrevTab],
+        _ => {}
+    }
+    match devtools.phase() {
+        DevtoolsPhase::Connected => match code {
+            KeyCode::Char(c @ '1'..='4') => {
+                vec![Message::DevtoolsTab(c as usize - '1' as usize)]
+            }
+            KeyCode::Char(']') => vec![Message::DevtoolsTabCycle(1)],
+            KeyCode::Char('[') => vec![Message::DevtoolsTabCycle(-1)],
+            // `←`/`→` scrub the Performance chart's selection across its
+            // 120-frame window (§B12's Performance-tab row); meaningless on
+            // any other tab.
+            KeyCode::Left if on_performance => vec![Message::DevtoolsPerfScrub(-1)],
+            KeyCode::Right if on_performance => vec![Message::DevtoolsPerfScrub(1)],
+            // The Inspector tree: move, expand/collapse, re-pull.
+            KeyCode::Up | KeyCode::Char('k') if on_inspector => {
+                vec![Message::DevtoolsInspectorSelect(-1)]
+            }
+            KeyCode::Down | KeyCode::Char('j') if on_inspector => {
+                vec![Message::DevtoolsInspectorSelect(1)]
+            }
+            KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') if on_inspector => {
+                vec![Message::DevtoolsInspectorExpand]
+            }
+            KeyCode::Left if on_inspector => vec![Message::DevtoolsInspectorCollapse],
+            KeyCode::Char('r') if on_inspector => vec![Message::DevtoolsInspectorRefresh],
+            _ => vec![],
+        },
+        // `r` retries only where a retry is offered: a live session whose
+        // connection failed. A session that has already ended has no service
+        // left to reach, and the failed screen drops its Retry button to match.
+        DevtoolsPhase::Failed => match code {
+            KeyCode::Char('r')
+                if state
+                    .active_session()
+                    .is_some_and(|s| !s.state.is_terminal()) =>
+            {
+                vec![Message::DevtoolsRetry]
+            }
+            _ => vec![],
+        },
+        // Passive screens: they resolve on their own (or, for a release
+        // build, never) — nothing to drive from here.
+        DevtoolsPhase::Discovering | DevtoolsPhase::Connecting | DevtoolsPhase::Unavailable => {
+            vec![]
+        }
     }
 }
 
@@ -1095,6 +1461,18 @@ fn translate_doctor_key(code: KeyCode) -> Vec<Message> {
     match code {
         KeyCode::Esc => vec![Message::CloseDoctorPanel],
         KeyCode::Char('r') => vec![Message::RunDoctor],
+        _ => vec![],
+    }
+}
+
+/// Translate one key press while the MCP panel is open (workbook §B13):
+/// `s` starts or stops the embedded server without leaving the panel, and
+/// `Esc`/`m` close it — closing the panel is never a stop. Mouse parity: the
+/// panel's own Start/Stop and Close buttons.
+fn translate_mcp_key(code: KeyCode) -> Vec<Message> {
+    match code {
+        KeyCode::Esc | KeyCode::Char('m') => vec![Message::CloseMcpPanel],
+        KeyCode::Char('s') => vec![Message::ToggleMcpServer],
         _ => vec![],
     }
 }
@@ -1697,6 +2075,465 @@ mod tests {
             translate_event(key(KeyCode::Char('t')), &workbench, &regions),
             Vec::<Message>::new(),
             "no active session — no-op"
+        );
+    }
+
+    // ── DevTools mode key routing (workbook §B12) ─────────────────────────────
+
+    /// A workbench with one running, devtools-capable desktop session that
+    /// has already announced its service.
+    fn devtools_state() -> AppState {
+        use crate::engine::SessionView;
+        let mut session = SessionView::with_devtools(
+            SessionId(0),
+            PathBuf::from("/tmp/huddle"),
+            "desktop",
+            DevtoolsLaunch::from_launch(frust_drive::build_info::BuildMode::Debug, None),
+        );
+        session.state = SessionState::Running;
+        session.push_line_at(
+            "frust-devtools listening on 53214 token cafe".to_string(),
+            "12:00:00",
+        );
+        AppState {
+            screen: Screen::Workbench,
+            project_root: Some(PathBuf::from("/tmp/huddle")),
+            projects: vec![PathBuf::from("/tmp/huddle")],
+            sessions: vec![session],
+            active_session: Some(0),
+            ..Default::default()
+        }
+    }
+
+    /// The §B12 entry/exit round trip driven purely by keys through the real
+    /// translate → `update` path: `d` opens DevTools (connecting, because a
+    /// discovery line already landed), `2` switches to the System tab once
+    /// connected, and `Esc` returns to the log view.
+    #[test]
+    fn d_opens_devtools_digits_switch_tabs_and_esc_returns_to_the_log() {
+        use crate::engine::{ConnEvent, DevtoolsPhase, DevtoolsTab, update};
+        let regions = MouseRegions::new();
+        let mut state = devtools_state();
+
+        let msgs = translate_event(key(KeyCode::Char('d')), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsToggle]);
+        let out = update(&mut state, msgs[0].clone());
+        assert!(state.active_session().unwrap().devtools.open);
+        assert!(
+            matches!(out.effect, Some(Effect::DevtoolsConnect(_))),
+            "opening connects against the already-announced service"
+        );
+
+        // While connecting, the tab keys have no strip to move through.
+        assert_eq!(
+            translate_event(key(KeyCode::Char('2')), &state, &regions),
+            Vec::<Message>::new()
+        );
+
+        update(
+            &mut state,
+            Message::DevtoolsConn(
+                SessionId(0),
+                ConnEvent::Connected {
+                    app_name: "huddle".to_string(),
+                    caps: Vec::new(),
+                },
+            ),
+        );
+        assert_eq!(
+            state.active_session().unwrap().devtools.phase(),
+            DevtoolsPhase::Connected
+        );
+
+        let msgs = translate_event(key(KeyCode::Char('2')), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsTab(1)]);
+        update(&mut state, msgs[0].clone());
+        assert_eq!(
+            state.active_session().unwrap().devtools.active_tab,
+            DevtoolsTab::System
+        );
+        let msgs = translate_event(key(KeyCode::Char(']')), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsTabCycle(1)]);
+
+        // The session-view key namespace is swapped while DevTools is open:
+        // the log-view keys below it are out of scope, not silently reused.
+        for swallowed in ['f', 'w', 'z', 'l', '/'] {
+            assert_eq!(
+                translate_event(key(KeyCode::Char(swallowed)), &state, &regions),
+                Vec::<Message>::new(),
+                "`{swallowed}` belongs to the log view, not DevTools"
+            );
+        }
+        // Session-tab switching and the global chords still work.
+        assert_eq!(
+            translate_event(key(KeyCode::Tab), &state, &regions),
+            vec![Message::NextTab]
+        );
+        assert_eq!(
+            translate_event(key(KeyCode::Char('q')), &state, &regions),
+            vec![Message::Quit]
+        );
+
+        let msgs = translate_event(key(KeyCode::Esc), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsClose]);
+        update(&mut state, msgs[0].clone());
+        assert!(!state.active_session().unwrap().devtools.open);
+        // Back in the log view, `d` is the entry key again and `f` is the
+        // log view's own follow toggle once more.
+        assert_eq!(
+            translate_event(key(KeyCode::Char('f')), &state, &regions),
+            vec![Message::ToggleFollow]
+        );
+    }
+
+    /// The Performance tab's own key table: `Tab` cycles chart↔breakdown
+    /// instead of switching session tabs, `←`/`→` scrub, and `Esc` is
+    /// two-stage — clears the selection first, only then leaves DevTools.
+    #[test]
+    fn performance_tab_owns_tab_and_arrows_and_esc_is_two_stage() {
+        use crate::engine::{ConnEvent, DevtoolsTab, PerfFocus, update};
+        let regions = MouseRegions::new();
+        let mut state = devtools_state();
+        update(&mut state, Message::DevtoolsToggle);
+        update(
+            &mut state,
+            Message::DevtoolsConn(
+                SessionId(0),
+                ConnEvent::Connected {
+                    app_name: "huddle".to_string(),
+                    caps: Vec::new(),
+                },
+            ),
+        );
+        assert_eq!(
+            state.active_session().unwrap().devtools.active_tab,
+            DevtoolsTab::Performance,
+            "Performance is the default tab"
+        );
+        // A non-empty ring, so there is something to scrub.
+        let frames = (0..10u64)
+            .map(|n| frust_devtools_protocol::FrameStats {
+                n,
+                total_us: 16_000,
+                rebuild_us: 8_000,
+                layout_us: 3_000,
+                paint_us: 2_000,
+                encode_us: 1_400,
+                acquire_us: 600,
+                submit_us: 1_000,
+                skipped: false,
+            })
+            .collect();
+        update(
+            &mut state,
+            Message::DevtoolsConn(SessionId(0), ConnEvent::Frames(frames)),
+        );
+
+        // `Tab` cycles focus rather than switching session tabs.
+        let msgs = translate_event(key(KeyCode::Tab), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsPerfFocusCycle]);
+        update(&mut state, msgs[0].clone());
+        assert_eq!(
+            state.active_session().unwrap().devtools.performance.focus,
+            PerfFocus::Breakdown
+        );
+
+        // `←`/`→` scrub.
+        let msgs = translate_event(key(KeyCode::Left), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsPerfScrub(-1)]);
+        let msgs = translate_event(key(KeyCode::Right), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsPerfScrub(1)]);
+        update(&mut state, Message::DevtoolsPerfScrub(0));
+        assert!(
+            state
+                .active_session()
+                .unwrap()
+                .devtools
+                .performance
+                .has_selection()
+        );
+
+        // First `Esc` only clears the selection, staying in DevTools.
+        let msgs = translate_event(key(KeyCode::Esc), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsPerfClearSelection]);
+        update(&mut state, msgs[0].clone());
+        assert!(state.active_session().unwrap().devtools.open);
+        assert!(
+            !state
+                .active_session()
+                .unwrap()
+                .devtools
+                .performance
+                .has_selection()
+        );
+
+        // Second `Esc`, with nothing selected, leaves DevTools like every
+        // other screen.
+        let msgs = translate_event(key(KeyCode::Esc), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsClose]);
+        update(&mut state, msgs[0].clone());
+        assert!(!state.active_session().unwrap().devtools.open);
+    }
+
+    /// Off the Performance tab, `Tab` still switches session tabs — the
+    /// override above is scoped to the one tab that owns the key.
+    #[test]
+    fn tab_still_switches_session_tabs_off_the_performance_tab() {
+        use crate::engine::{ConnEvent, update};
+        let regions = MouseRegions::new();
+        let mut state = devtools_state();
+        update(&mut state, Message::DevtoolsToggle);
+        update(
+            &mut state,
+            Message::DevtoolsConn(
+                SessionId(0),
+                ConnEvent::Connected {
+                    app_name: "huddle".to_string(),
+                    caps: Vec::new(),
+                },
+            ),
+        );
+        update(&mut state, Message::DevtoolsTab(1)); // System
+        assert_eq!(
+            translate_event(key(KeyCode::Tab), &state, &regions),
+            vec![Message::NextTab]
+        );
+    }
+
+    /// §B12's Inspector key row, driven end to end through the real
+    /// translate → `update` path: `j`/`k` move the selection, `Enter`
+    /// expands, `Tab` flips tree↔props, and `r` re-pulls the tree as an
+    /// effect (rather than colliding with the failed screen's retry).
+    #[test]
+    fn inspector_keys_move_expand_flip_focus_and_refresh() {
+        use crate::engine::{ConnEvent, InspectorEvent, InspectorFocus, update};
+        use frust_devtools_protocol::{WidgetNode, WidgetTreeDump};
+
+        let regions = MouseRegions::new();
+        let mut state = devtools_state();
+        update(&mut state, Message::DevtoolsToggle);
+        update(
+            &mut state,
+            Message::DevtoolsConn(
+                SessionId(0),
+                ConnEvent::Connected {
+                    app_name: "huddle".to_string(),
+                    caps: Vec::new(),
+                },
+            ),
+        );
+        // `3` selects the Inspector, which pulls its first snapshot.
+        let msgs = translate_event(key(KeyCode::Char('3')), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsTab(2)]);
+        let out = update(&mut state, msgs[0].clone());
+        assert_eq!(
+            out.effect,
+            Some(Effect::DevtoolsFetchTree {
+                session: SessionId(0)
+            })
+        );
+
+        let leaf = |id: u64| WidgetNode {
+            id,
+            type_name: "frust_widgets::text::TextWidget".to_string(),
+            debug_label: None,
+            bounds: None,
+            children: Vec::new(),
+        };
+        update(
+            &mut state,
+            Message::DevtoolsInspector(
+                SessionId(0),
+                InspectorEvent::TreeArrived(WidgetTreeDump {
+                    roots: vec![WidgetNode {
+                        id: 1,
+                        type_name: "frust_widgets::flex::FlexWidget".to_string(),
+                        debug_label: None,
+                        bounds: None,
+                        children: vec![
+                            WidgetNode {
+                                id: 2,
+                                type_name: "frust_widgets::padding::PaddingWidget".to_string(),
+                                debug_label: None,
+                                bounds: None,
+                                children: vec![leaf(3)],
+                            },
+                            leaf(4),
+                        ],
+                    }],
+                }),
+            ),
+        );
+
+        // `j`/`k` move within the flattened rows.
+        let msgs = translate_event(key(KeyCode::Char('j')), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsInspectorSelect(1)]);
+        update(&mut state, msgs[0].clone());
+        assert_eq!(
+            state
+                .active_session()
+                .unwrap()
+                .devtools
+                .inspector
+                .selected_id(),
+            Some(2)
+        );
+        let msgs = translate_event(key(KeyCode::Char('k')), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsInspectorSelect(-1)]);
+        update(&mut state, msgs[0].clone());
+
+        // `←` collapses the (selected) root, `Enter` — like `→`/`Space` —
+        // re-expands it.
+        let msgs = translate_event(key(KeyCode::Left), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsInspectorCollapse]);
+        update(&mut state, msgs[0].clone());
+        assert_eq!(
+            state
+                .active_session()
+                .unwrap()
+                .devtools
+                .inspector
+                .rows()
+                .len(),
+            1
+        );
+        let msgs = translate_event(key(KeyCode::Enter), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsInspectorExpand]);
+        update(&mut state, msgs[0].clone());
+        assert_eq!(
+            state
+                .active_session()
+                .unwrap()
+                .devtools
+                .inspector
+                .rows()
+                .len(),
+            4
+        );
+
+        // `Tab` is the Inspector's own tree↔props flip here, not a session
+        // tab switch.
+        let msgs = translate_event(key(KeyCode::Tab), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsInspectorFocusCycle]);
+        update(&mut state, msgs[0].clone());
+        assert_eq!(
+            state.active_session().unwrap().devtools.inspector.focus,
+            InspectorFocus::Props
+        );
+
+        // `r` on a connected Inspector re-pulls the tree.
+        let msgs = translate_event(key(KeyCode::Char('r')), &state, &regions);
+        assert_eq!(msgs, vec![Message::DevtoolsInspectorRefresh]);
+        let out = update(&mut state, msgs[0].clone());
+        assert_eq!(
+            out.effect,
+            Some(Effect::DevtoolsFetchTree {
+                session: SessionId(0)
+            })
+        );
+    }
+
+    #[test]
+    fn r_retries_only_on_the_failed_screen_of_a_live_session() {
+        use crate::engine::{ConnEvent, update};
+        let regions = MouseRegions::new();
+        let mut state = devtools_state();
+        update(&mut state, Message::DevtoolsToggle);
+        update(
+            &mut state,
+            Message::DevtoolsConn(
+                SessionId(0),
+                ConnEvent::Failed("connection refused".to_string()),
+            ),
+        );
+        assert_eq!(
+            translate_event(key(KeyCode::Char('r')), &state, &regions),
+            vec![Message::DevtoolsRetry]
+        );
+
+        // A session that has already ended offers no retry — there is no
+        // service left to reach (the button is dropped from the screen too).
+        state.sessions[0].state = SessionState::Exited(true);
+        assert_eq!(
+            translate_event(key(KeyCode::Char('r')), &state, &regions),
+            Vec::<Message>::new()
+        );
+    }
+
+    #[test]
+    fn d_still_opens_the_doctor_panel_with_no_session_open() {
+        let regions = MouseRegions::new();
+        let workbench = AppState {
+            screen: Screen::Workbench,
+            ..Default::default()
+        };
+        assert_eq!(
+            translate_event(key(KeyCode::Char('d')), &workbench, &regions),
+            vec![Message::OpenDoctorPanel],
+            "the doctor panel keeps `d` in the context DevTools cannot claim"
+        );
+    }
+
+    // ── Embedded MCP server (workbook §B13) ──────────────────────────────
+
+    #[test]
+    fn m_opens_the_mcp_panel_and_shift_m_toggles_the_server() {
+        let regions = MouseRegions::new();
+        for state in [
+            AppState::default(), // welcome
+            AppState {
+                screen: Screen::Workbench,
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                translate_event(key(KeyCode::Char('m')), &state, &regions),
+                vec![Message::OpenMcpPanel]
+            );
+            assert_eq!(
+                translate_event(key(KeyCode::Char('M')), &state, &regions),
+                vec![Message::ToggleMcpServer]
+            );
+        }
+    }
+
+    /// `Alt+m` is matched before any plain letter, so the capture toggle and
+    /// the MCP keys cannot collide (§B13's no-overload claim).
+    #[test]
+    fn alt_m_still_toggles_mouse_capture() {
+        let regions = MouseRegions::new();
+        let state = AppState::default();
+        let ev = Event::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT));
+        assert_eq!(
+            translate_event(ev, &state, &regions),
+            vec![Message::ToggleMouseCapture]
+        );
+    }
+
+    #[test]
+    fn the_open_mcp_panel_owns_s_and_closes_on_esc_or_m() {
+        let regions = MouseRegions::new();
+        let state = AppState {
+            screen: Screen::Workbench,
+            mcp_panel_open: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            translate_event(key(KeyCode::Char('s')), &state, &regions),
+            vec![Message::ToggleMcpServer],
+            "`s` starts/stops without leaving the panel"
+        );
+        for code in [KeyCode::Esc, KeyCode::Char('m')] {
+            assert_eq!(
+                translate_event(key(code), &state, &regions),
+                vec![Message::CloseMcpPanel]
+            );
+        }
+        // The workbench's own `s` (sidebar overlay) is out of scope while the
+        // panel is up — the modal captures the namespace.
+        assert_eq!(
+            translate_event(key(KeyCode::Char('b')), &state, &regions),
+            Vec::<Message>::new()
         );
     }
 }

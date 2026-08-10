@@ -79,6 +79,13 @@ anti-patterns, interaction semantics, semantics, testing, comment conventions �
   explicit `Timing::Duration`/`Timing::Spring` (`Timing::ThemeDefault` falls back to the M3
   default, 300ms + `Curve::Emphasized`); `reduce_motion` collapses it only programmatically,
   and an interactive edge-swipe pop calls it like every preset.
+- **A new container implements `Widget::visit_children` via `authoring::visit_children!`,
+  never by hand-writing an empty override.** The default (`Widget::visit_children`'s no-op) makes
+  a container that skips this invisible to `WidgetTree::inspect`/devtools — its children exist in
+  the retained tree but never show up in an inspector. Name every `ChildPod`-holding field to the
+  macro (`visit_children!(leading, children)`); a field shape behind its own row/slot struct
+  implements the toolkit's `VisitPods` trait for that struct instead and stays on the same seam
+  (see WIDGETS_ARCHITECTURE.md's Data Flow).
 - **A design system installs itself via `set_default_theme` + `register_app_fonts` from an
   `app!` `setup` block — never `Component::init` (no kept ordering contract) or
   `set_app_theme` (pins brightness, breaking platform dark/light following).**

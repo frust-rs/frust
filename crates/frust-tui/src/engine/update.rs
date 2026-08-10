@@ -14,9 +14,10 @@ use super::bootstrap::BootstrapWizard;
 use super::build_launcher::{BuildLauncher, BuildSpec};
 use super::context_menu::ContextMenu;
 use super::create_wizard::{CreateWizard, WizardAdvance};
+use super::devtools::{ConnEvent, ConnState, DevtoolsPhase, DevtoolsTab, InspectorTab, PerfFrame};
 use super::message::{ContextTarget, DragKind, Message};
 use super::run_config::{DeviceRow, RunConfig};
-use super::session_view::{Scroll, SessionView};
+use super::session_view::SessionView;
 use super::state::{AppState, Screen};
 use super::toast::ToastKind;
 use crate::supervise::{DeviceTarget, SessionEvent, SessionEventKind, SessionId, SessionSpec};
@@ -102,9 +103,6 @@ pub enum Effect {
     /// just-completed `SidebarSplitter` drag (settings persistence,
     /// fulfilling `DragEnd`'s previously-deferred note).
     SaveSidebarWidth(u16),
-    /// Persist the follow-tail default — the runner's enactment of a
-    /// follow-tail toggle on the active session (settings persistence).
-    SaveFollowTailDefault(bool),
     /// Apply a registry plugin's contributions to `project_root` off-thread via
     /// [`frust_drive::plugin::add_plugin`], posting
     /// [`Message::AddPluginSucceeded`]/[`Message::AddPluginFailed`] back — the
@@ -117,6 +115,98 @@ pub enum Effect {
         /// The checked optional-feature ids.
         features: Vec<String>,
     },
+    /// Open (or replace) the devtools connection for one session: the runner
+    /// hands this to [`crate::supervise::DevtoolsBridge`], which does the
+    /// `adb forward` (Android), the TCP connect, the token handshake, and the
+    /// frame-stats subscription on its own thread — never on the event loop.
+    /// Progress comes back as [`Message::DevtoolsConn`].
+    DevtoolsConnect(DevtoolsTarget),
+    /// Tear the devtools connection for one session down (session ended, or
+    /// a reconnect is about to replace it), removing any `adb forward` it
+    /// allocated.
+    DevtoolsDisconnect(SessionId),
+    /// Pull a fresh `widget_tree` snapshot for one session's Inspector tab —
+    /// the runner hands it to that session's bridge thread, which serves it
+    /// between frame-pump windows and reports back as
+    /// [`Message::DevtoolsInspector`].
+    DevtoolsFetchTree {
+        /// The session whose bridge serves the request.
+        session: SessionId,
+    },
+    /// Pull one node's `widget_props` for the same tab — §B12's second,
+    /// per-selection call, served and reported exactly like
+    /// [`Effect::DevtoolsFetchTree`].
+    DevtoolsFetchProps {
+        /// The session whose bridge serves the request.
+        session: SessionId,
+        /// The widget-tree node id to describe.
+        id: u64,
+    },
+    /// Start a session's System/Network metrics sampler (workbook §B12) —
+    /// the runner hands this to [`crate::supervise::MetricsBridge`], which
+    /// spawns `frust_drive::metrics::MetricsSampler` on its own thread and
+    /// drains it into coalesced [`Message::DevtoolsMetrics`] batches. Only
+    /// ever emitted for an Android session whose identity has resolved (see
+    /// [`super::MetricsIdentity`]'s doc for why desktop/iOS never reach
+    /// this).
+    MetricsStart(MetricsTarget),
+    /// Stop a session's metrics sampler (the session ended) — see
+    /// `crate::supervise::metrics_bridge`'s retention note (mirrors
+    /// [`Effect::DevtoolsDisconnect`]'s session-end-only teardown).
+    MetricsStop(SessionId),
+    /// Start the embedded MCP server (workbook §B13) — the runner builds the
+    /// [`crate::supervise::TuiSessionBackend`] over its own supervisor and
+    /// calls [`super::Engine::start_mcp`], because the server handle is a
+    /// live resource the pure core cannot construct. Everything the server
+    /// then reports about itself (the bound port, a bind failure) arrives
+    /// back as an ordinary [`Message`].
+    StartMcpServer,
+    /// Stop the embedded MCP server — the runner's
+    /// [`super::Engine::stop_mcp`]. A no-op when none is running.
+    StopMcpServer,
+    /// Enact every effect in order — the escape hatch for a transition that
+    /// must kick off more than one independent side effect at once (opening
+    /// DevTools can both (re)open its frame-stats connection *and* start
+    /// metrics sampling in the same keypress). Every other transition still
+    /// returns at most one effect; see [`batch`].
+    Batch(Vec<Effect>),
+}
+
+/// Everything a session's metrics sampler needs to reach the running app's
+/// OS process — resolved by the pure engine from its Android identity
+/// ([`super::MetricsIdentity`]), enacted by the runner
+/// ([`crate::supervise::MetricsBridge`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetricsTarget {
+    /// The session whose sampler this is (and whose `DevtoolsMetrics`
+    /// messages it reports through).
+    pub session: SessionId,
+    /// The `adb` serial the sampler shells out against.
+    pub serial: String,
+    /// The running app's pid on that device.
+    pub pid: String,
+    /// The running app's package — Android's `dumpsys meminfo` probe is
+    /// keyed by package, not pid.
+    pub pkg: String,
+}
+
+/// Everything the bridge needs to reach one session's devtools service —
+/// resolved by the pure engine from the session's discovery line and its
+/// launch metadata, enacted by the runner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DevtoolsTarget {
+    /// The session whose bridge this is (and whose `DevtoolsConn` messages
+    /// it reports through).
+    pub session: SessionId,
+    /// The port the app announced. On Android this is a *device* port, which
+    /// the bridge maps to a host one with `adb forward`.
+    pub port: u16,
+    /// The handshake token from the same discovery line (`None` for a
+    /// service running with auth off, or a build predating the token).
+    pub token: Option<String>,
+    /// The `adb` serial when the session runs on an Android device — see
+    /// [`super::DevtoolsLaunch::android_serial`].
+    pub android_serial: Option<String>,
 }
 
 /// What the loop must do after a transition.
@@ -171,11 +261,27 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             // No point drawing a frame we're about to tear down.
             Outcome::idle()
         }
-        // A tick ages the toast stack (the only animated state); it dirties a
-        // frame only when a toast actually expires (its content is otherwise
-        // static). With no live toast `animating()` is false and the runner
-        // never delivers a tick here — the dirty-frame skip.
-        Message::Tick => Outcome::dirty(state.toasts.tick()),
+        // A tick ages the toast stack and advances `animation_frame`, the
+        // clock every `crate::ui::anim` helper (spinner/shimmer) reads. It
+        // dirties a frame when a toast actually expires OR any session is
+        // still in a transient build/install phase (the tab spinner has a
+        // new frame to paint even though nothing else about the session
+        // changed). With no live toast and no transient session,
+        // `animating()` is false and the runner never delivers a tick here —
+        // the dirty-frame skip.
+        Message::Tick => {
+            state.animation_frame = state.animation_frame.wrapping_add(1);
+            let toast_expired = state.toasts.tick();
+            let session_animating = state
+                .sessions
+                .iter()
+                .any(|s| super::state::is_transient(&s.state));
+            // The open MCP panel repaints on every tick: its client list is
+            // read live off the registry at render time, so nothing else
+            // would ever dirty the frame when a client connects or drops
+            // (see `AppState::animating`).
+            Outcome::dirty(toast_expired || session_animating || state.mcp_panel_open)
+        }
         Message::Resize(_, _) => Outcome::redraw(),
         Message::HoverChanged(next) => {
             let hover_changed = state.hover != next;
@@ -219,17 +325,17 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             id,
             project_root,
             target_label,
+            devtools,
         } => {
             if state.session_index(id).is_some() {
                 return Outcome::idle();
             }
-            let mut view = SessionView::new(id, project_root, target_label);
-            // Honor the persisted follow-tail default: an empty log has
-            // nothing to anchor to yet, so `Anchored(0)` simply starts the
-            // view "not following" until the first line arrives.
-            if !state.follow_tail_default {
-                view.scroll = Scroll::Anchored(0);
-            }
+            // Every session starts following its own tail; there is no
+            // persisted global default. `Scroll::Anchored` must always name
+            // an existing absolute line index, and a freshly registered
+            // session has no lines yet — so `Follow` is the only valid
+            // starting state.
+            let view = SessionView::with_devtools(id, project_root, target_label, devtools);
             state.sessions.push(view);
             // Auto-select the first session that appears.
             if state.active_session.is_none() {
@@ -256,23 +362,14 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                 return Outcome::idle();
             };
             session.toggle_follow();
-            // The most recently chosen follow state becomes the default a
-            // future session tab starts in (settings persistence) —
-            // "last used" rather than a separate, undiscoverable preference
-            // toggle.
-            let now_following = session.is_following();
-            state.follow_tail_default = now_following;
-            Outcome {
-                redraw: true,
-                effect: Some(Effect::SaveFollowTailDefault(now_following)),
-            }
+            Outcome::redraw()
         }
         Message::ToggleWrap => {
             state.wrap = !state.wrap;
             Outcome::redraw()
         }
-        Message::LogScrollUp(n) => with_active(state, |s| s.scroll_up(n)),
-        Message::LogScrollDown(n) => with_active(state, |s| s.scroll_down(n)),
+        Message::LogScrollUp(n) => with_active_filtered(state, |s, f| s.scroll_up(n, f)),
+        Message::LogScrollDown(n) => with_active_filtered(state, |s, f| s.scroll_down(n, f)),
         Message::LogScrollToTop => with_active(state, |s| s.scroll_to_top()),
         Message::LogScrollToBottom => with_active(state, |s| s.scroll_to_bottom()),
 
@@ -324,6 +421,14 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         Message::SelectionExtendUp(n) => with_active(state, |s| s.extend_selection_up(n)),
         Message::SelectionExtendDown(n) => with_active(state, |s| s.extend_selection_down(n)),
         Message::SelectionClear => with_active(state, |s| s.clear_selection()),
+        Message::ToggleFold(block_start) => with_active(state, |s| {
+            s.toggle_fold(block_start);
+        }),
+        Message::ToggleNearestFold => with_active(state, |s| {
+            s.toggle_nearest_fold();
+        }),
+        Message::CycleLevelFilter(delta) => with_active(state, |s| s.cycle_level_filter(delta)),
+        Message::SetLevelFilter(filter) => with_active(state, |s| s.set_level_filter(filter)),
         Message::CopySelection => match state.active_session().and_then(|s| s.selected_text()) {
             Some(text) => {
                 state
@@ -854,8 +959,9 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                 track_height,
             }) => {
                 let frac = track_fraction(y, track_top, track_height);
+                let filter = state.search.filter.clone();
                 match state.active_session_mut() {
-                    Some(s) => Outcome::dirty(s.scroll_to_fraction(frac)),
+                    Some(s) => Outcome::dirty(s.scroll_to_fraction(frac, filter.as_deref())),
                     None => Outcome::idle(),
                 }
             }
@@ -911,6 +1017,179 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         // ── Perf sparkline panel ────────────────────────────────────────────
         Message::TogglePerfPanel => with_active(state, |s| s.perf.toggle()),
 
+        // ── DevTools mode (workbook §B12) ────────────────────────────────────
+        Message::DevtoolsToggle => {
+            let Some(idx) = state.active_session else {
+                return Outcome::idle();
+            };
+            state.sessions[idx].devtools.open = !state.sessions[idx].devtools.open;
+            // Opening is the trigger for the first connect: the discovery
+            // line may have scrolled past long before the user asked to look.
+            // It is also the trigger for the metrics sampler — cheap either
+            // way, so it starts on open regardless of which tab is active
+            // rather than waiting for a first System/Network visit (see
+            // `metrics_start`'s doc).
+            let effect = if state.sessions[idx].devtools.open {
+                let mut effects = Vec::new();
+                match devtools_connect(state, idx) {
+                    Some(effect) => effects.push(effect),
+                    // Re-opening onto a retained connection connects
+                    // nothing, so an Inspector tab left selected gets its
+                    // snapshot here instead (the two are mutually
+                    // exclusive: a fresh connect leaves the phase
+                    // `Connecting`, which pulls nothing).
+                    None => effects.extend(devtools_inspector_enter(&mut state.sessions[idx])),
+                }
+                effects.extend(metrics_start(state, idx));
+                batch(effects)
+            } else {
+                None
+            };
+            Outcome {
+                redraw: true,
+                effect,
+            }
+        }
+        Message::DevtoolsClose => {
+            let Some(session) = state.active_session_mut() else {
+                return Outcome::idle();
+            };
+            if !session.devtools.open {
+                return Outcome::idle();
+            }
+            session.devtools.open = false;
+            Outcome::redraw()
+        }
+        Message::DevtoolsTab(index) => with_active_devtools_tab(state, |d| {
+            d.select_tab(index);
+        }),
+        Message::DevtoolsTabCycle(delta) => with_active_devtools_tab(state, |d| {
+            d.cycle_tab(delta);
+        }),
+        Message::DevtoolsRetry => {
+            let Some(idx) = state.active_session else {
+                return Outcome::idle();
+            };
+            // A terminal session's service died with the process — retrying
+            // would just re-fail against a port nobody is listening on.
+            if state.sessions[idx].state.is_terminal() {
+                return Outcome::idle();
+            }
+            match devtools_connect(state, idx) {
+                Some(effect) => Outcome {
+                    redraw: true,
+                    effect: Some(effect),
+                },
+                None => Outcome::idle(),
+            }
+        }
+        Message::DevtoolsConn(id, event) => {
+            let Some(idx) = state.session_index(id) else {
+                return Outcome::idle();
+            };
+            let is_active = state.active_session == Some(idx);
+            // A handshake completing is the other moment the Inspector can
+            // pull its first snapshot: the tab may have been selected (and
+            // shown empty) all through the connect. A *frame batch* is not —
+            // it carries no connection-state change, and running the entry
+            // check on every batch is what let a failing pull re-fire at
+            // frame-batch rate (the `wants_tree` latch is the second half of
+            // that fix).
+            let handshake = matches!(event, ConnEvent::Connected { .. });
+            let mut changed = state.sessions[idx].devtools.apply(event);
+            // The drawn window just slid: a pinned frame that has aged out of
+            // it drops back to the live tail rather than being re-pointed at
+            // whatever frame took its place.
+            changed |= devtools_perf_retain_selection(&mut state.sessions[idx]);
+            let effect = handshake
+                .then(|| devtools_inspector_entry(&mut state.sessions[idx]))
+                .flatten();
+            // Only the visible session's DevTools surface can be dirtied by a
+            // report; a background session's ring keeps filling silently
+            // (the dirty-frame skip).
+            Outcome {
+                redraw: changed && is_active && state.sessions[idx].devtools.open,
+                effect,
+            }
+        }
+        Message::DevtoolsMetrics(id, samples) => {
+            let Some(idx) = state.session_index(id) else {
+                return Outcome::idle();
+            };
+            let is_active = state.active_session == Some(idx);
+            let mut changed = false;
+            for sample in samples {
+                changed |= state.sessions[idx].devtools.metrics.apply(sample);
+            }
+            // Same dirty-frame-skip gating as `DevtoolsConn`'s frame
+            // batches: only the visible, DevTools-open session's System/
+            // Network surface is worth a repaint.
+            Outcome::dirty(changed && is_active && state.sessions[idx].devtools.open)
+        }
+
+        // ── Performance tab (workbook §B12) ──────────────────────────────────
+        Message::DevtoolsPerfScrub(delta) => with_active(state, |s| {
+            let window = devtools_perf_window(s);
+            s.devtools.performance.scrub(delta, &window);
+        }),
+        Message::DevtoolsPerfSelectFrame(n) => with_active(state, |s| {
+            let window = devtools_perf_window(s);
+            s.devtools.performance.select_frame(n, &window);
+        }),
+        Message::DevtoolsPerfClearSelection => with_active(state, |s| {
+            s.devtools.performance.clear_selection();
+        }),
+        Message::DevtoolsPerfFocusCycle => with_active(state, |s| {
+            s.devtools.performance.cycle_focus();
+        }),
+
+        // ── Inspector tab (workbook §B12) ────────────────────────────────────
+        Message::DevtoolsInspectorSelect(delta) => with_inspector(state, |i| i.select(delta)),
+        Message::DevtoolsInspectorSelectRow(index) => {
+            with_inspector(state, |i| i.select_row(index))
+        }
+        Message::DevtoolsInspectorExpand => with_inspector(state, InspectorTab::expand),
+        Message::DevtoolsInspectorCollapse => with_inspector(state, InspectorTab::collapse),
+        Message::DevtoolsInspectorToggleNode(id) => with_inspector(state, |i| i.toggle_node(id)),
+        Message::DevtoolsInspectorFocusCycle => with_active(state, |s| {
+            s.devtools.inspector.cycle_focus();
+        }),
+        Message::DevtoolsInspectorRefresh => {
+            let Some(session) = state.active_session_mut() else {
+                return Outcome::idle();
+            };
+            // `r` only means "refresh" where there is a service to ask; on
+            // the failed screen the same key is the retry (§B12's mutually
+            // exclusive contexts), routed as `Message::DevtoolsRetry`.
+            if session.devtools.phase() != DevtoolsPhase::Connected
+                || !session.devtools.inspector.begin_tree_fetch()
+            {
+                return Outcome::idle();
+            }
+            Outcome {
+                redraw: true,
+                effect: Some(Effect::DevtoolsFetchTree {
+                    session: session.id,
+                }),
+            }
+        }
+        Message::DevtoolsInspector(id, event) => {
+            let Some(idx) = state.session_index(id) else {
+                return Outcome::idle();
+            };
+            let is_active = state.active_session == Some(idx);
+            let session = &mut state.sessions[idx];
+            let changed = session.devtools.inspector.apply(event);
+            // A fresh snapshot drops the (now stale) props cache, so whatever
+            // the reconciled selection landed on needs its own pull — the
+            // same second call a selection move makes.
+            let effect = devtools_props_fetch(session);
+            Outcome {
+                redraw: changed && is_active && session.devtools.open,
+                effect,
+            }
+        }
+
         // ── Responsive breakpoints ──────────────────────────────────────────
         Message::ToggleSidebarOverlay => {
             state.sidebar_overlay_open = !state.sidebar_overlay_open;
@@ -929,6 +1208,93 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         Message::CloseHelpOverlay => {
             if state.help_open {
                 state.help_open = false;
+                Outcome::redraw()
+            } else {
+                Outcome::idle()
+            }
+        }
+
+        // ── Embedded MCP server ──────────────────────────────────────────────
+        // The command itself is served by `crate::runner`, which holds the
+        // `Supervisor` this pure core cannot reach — it never arrives here in
+        // a wired workbench. Reaching this arm therefore means nothing is
+        // serving MCP: dropping the command drops its reply channel, which is
+        // exactly the "the workbench did not answer" signal the backend
+        // reports as a typed error (`crate::supervise::EmbeddedError`).
+        Message::Mcp(_) => Outcome::idle(),
+        // Both reports below are gated on the generation naming the server
+        // *currently installed* on the model. A stopping server's tasks
+        // outlive `stop_mcp`'s handle drop (graceful shutdown runs on), so a
+        // start in that window leaves two servers reporting; applying the
+        // older one's report to the newer one's handle would stamp it with
+        // the wrong port, or — far worse — clear it, and since dropping a
+        // `CancellationToken` does not cancel it, that server would be left
+        // listening with nothing able to stop it.
+        Message::McpListening(generation, port) => match state.mcp.as_mut() {
+            Some(handle) if handle.generation() == generation => {
+                Outcome::dirty(handle.set_bound_port(port))
+            }
+            // The server was stopped between spawning and binding (its own
+            // shutdown follows), or has already been superseded.
+            Some(_) | None => Outcome::idle(),
+        },
+        Message::McpStopped(generation, error) => {
+            match state.mcp.as_ref().map(|handle| handle.generation()) {
+                // A superseded server winding down: the handle here is
+                // somebody else's, and neither clearing it nor reporting its
+                // predecessor's fate would be true of the running server.
+                Some(installed) if installed != generation => Outcome::idle(),
+                installed => {
+                    let was_running = installed.is_some();
+                    state.mcp = None;
+                    match error {
+                        Some(error) => {
+                            // Two surfaces, deliberately: the toast catches the
+                            // eye of someone looking elsewhere, and `mcp_error`
+                            // keeps the reason on the sidebar row / panel
+                            // afterwards, so a failed start never reads as a
+                            // silent no-op (§B13).
+                            state
+                                .toasts
+                                .push(ToastKind::Error, format!("MCP server stopped: {error}"));
+                            state.mcp_error = Some(error);
+                            Outcome::redraw()
+                        }
+                        None => Outcome::dirty(was_running),
+                    }
+                }
+            }
+        }
+        Message::ToggleMcpServer => {
+            if state.mcp.is_some() {
+                // The handle is dropped by the runner's `stop_mcp`, not here:
+                // cancelling a live server is exactly the impure work the
+                // pure core pushes out as an effect.
+                Outcome {
+                    redraw: true,
+                    effect: Some(Effect::StopMcpServer),
+                }
+            } else {
+                // A retry clears the previous failure first, so the panel
+                // shows "starting…" rather than the stale reason beside it.
+                state.mcp_error = None;
+                Outcome {
+                    redraw: true,
+                    effect: Some(Effect::StartMcpServer),
+                }
+            }
+        }
+        Message::OpenMcpPanel => {
+            if state.mcp_panel_open {
+                Outcome::idle()
+            } else {
+                state.mcp_panel_open = true;
+                Outcome::redraw()
+            }
+        }
+        Message::CloseMcpPanel => {
+            if state.mcp_panel_open {
+                state.mcp_panel_open = false;
                 Outcome::redraw()
             } else {
                 Outcome::idle()
@@ -1347,8 +1713,12 @@ fn fix_copy_text(fix: &frust_drive::doctor::FixCommand) -> String {
 /// Redraw policy honors the dirty-frame skip: a **line batch** for a
 /// background (non-active) session is buffered without a repaint; a batch for
 /// the *active* followed session, and *any* state change (the sidebar/tab
-/// status glyph) or a new drop count, redraw. An event for an unknown id is
-/// dropped (the session must be registered first — see
+/// status glyph) or a new drop count, redraw. A **phase label**
+/// (`crate::supervise::progress`, workbook §B10's transient status line)
+/// mirrors the drop-count gating — dirty only on the active tab and only when
+/// the label actually changed, never an unconditional redraw, so a
+/// backgrounded session's build chatter doesn't force a repaint. An event for
+/// an unknown id is dropped (the session must be registered first — see
 /// [`Message::RegisterSession`]).
 fn on_session_event(state: &mut AppState, ev: SessionEvent) -> Outcome {
     let Some(idx) = state.session_index(ev.id) else {
@@ -1357,20 +1727,53 @@ fn on_session_event(state: &mut AppState, ev: SessionEvent) -> Outcome {
     let is_active = state.active_session == Some(idx);
     // A toast to raise once the session borrow ends (a terminal transition).
     let mut toast: Option<(ToastKind, String)> = None;
+    // Deferred devtools work, likewise: a fresh discovery line to act on, or
+    // a connection to tear down because the session itself ended.
+    let mut discovered = false;
+    let mut session_ended = false;
+    // Same shape, for the System/Network metrics sampler: its Android
+    // identity just resolved (pkg+pid both known), or the session ending
+    // means a running sampler has to stop.
+    let mut metrics_ready = false;
+    let mut metrics_ended = false;
     let outcome = {
         let session = &mut state.sessions[idx];
         match ev.kind {
             SessionEventKind::Lines(lines) => {
                 let following = session.is_following();
                 for line in lines {
-                    session.push_line(line);
+                    // Every line is scanned for a devtools discovery
+                    // announcement (workbook §B12) and, independently, for
+                    // the drive's own `Launching {pkg}…`/`Streaming logs
+                    // (pid …)` lines the metrics sampler's Android identity
+                    // resolves from.
+                    metrics_ready |= session.devtools.metrics.ingest_line(&line);
+                    discovered |= session.push_line(line);
                 }
-                Outcome::dirty(is_active && following)
+                // A discovery line changes what the DevTools surface shows
+                // even when the log view itself is frozen off the tail.
+                Outcome::dirty(is_active && (following || discovered))
             }
             SessionEventKind::State(s) => {
                 session.state = s;
+                if session.state.is_terminal() {
+                    session_ended = session.devtools.on_session_end();
+                    metrics_ended = session.devtools.metrics.on_session_end();
+                }
+                // Clear a stale phase label the moment the state leaves the
+                // transient (`Building`/`Installing`) window — the sole
+                // clearing point (`crate::supervise::progress`'s module
+                // docs), independent of `Phase` event arrival order.
+                if !super::state::is_transient(&session.state) {
+                    session.current_phase = None;
+                }
                 toast = terminal_toast(session);
                 Outcome::redraw()
+            }
+            SessionEventKind::Phase(p) => {
+                let changed = session.current_phase.as_ref() != Some(&p);
+                session.current_phase = Some(p);
+                Outcome::dirty(is_active && changed)
             }
             SessionEventKind::Dropped(n) => {
                 // The supervisor's bounded-channel overflow counter (cumulative,
@@ -1386,7 +1789,104 @@ fn on_session_event(state: &mut AppState, ev: SessionEvent) -> Outcome {
     if let Some((kind, text)) = toast {
         state.toasts.push(kind, text);
     }
-    outcome
+    // Connection retention (workbook §B12): once DevTools has been opened for
+    // a session the connection is kept for the session's whole life — the
+    // frame ring keeps filling behind a hidden tab, which is what makes
+    // re-opening DevTools instant instead of a fresh handshake. It is closed
+    // in exactly two places: the session ending (below) and an explicit
+    // reconnect replacing it. The metrics sampler mirrors the same
+    // retention policy (`crate::supervise::metrics_bridge`'s module doc):
+    // once started it runs for the session's whole life too, stopping only
+    // here. `session_ended`/`discovered` and `metrics_ended`/`metrics_ready`
+    // are each set by exactly one of the match arms above (`State` vs.
+    // `Lines`), so at most one pair is ever non-trivial per call.
+    let mut effects = Vec::new();
+    if session_ended {
+        effects.push(Effect::DevtoolsDisconnect(ev.id));
+    }
+    if metrics_ended {
+        effects.push(Effect::MetricsStop(ev.id));
+    }
+    if discovered {
+        effects.extend(on_devtools_discovery(state, idx));
+    }
+    if metrics_ready {
+        effects.extend(metrics_start(state, idx));
+    }
+    let effect = batch(effects);
+    Outcome {
+        redraw: outcome.redraw || effect.is_some(),
+        effect: outcome.effect.or(effect),
+    }
+}
+
+/// A fresh devtools discovery line landed for the session at `idx`. While
+/// DevTools is open for that session, (re)open the connection: a
+/// re-announcement means the app restarted, so whatever the bridge is holding
+/// points at a dead port and must be replaced rather than kept.
+fn on_devtools_discovery(state: &mut AppState, idx: usize) -> Option<Effect> {
+    if !state.sessions.get(idx)?.devtools.open {
+        return None;
+    }
+    state.sessions[idx].devtools.conn = ConnState::Idle;
+    devtools_connect(state, idx)
+}
+
+/// Start a devtools connection for the session at `idx` when one is warranted
+/// — its build can host the service, a discovery line has landed, and nothing
+/// is already connected or in flight. Marks the state `Connecting` and hands
+/// the runner the target to reach; returns `None` (and changes nothing) when
+/// a connect isn't warranted.
+fn devtools_connect(state: &mut AppState, idx: usize) -> Option<Effect> {
+    let session = state.sessions.get_mut(idx)?;
+    if !session.devtools.wants_connect() {
+        return None;
+    }
+    let discovery = session.devtools.discovered.clone()?;
+    session.devtools.begin_connect();
+    Some(Effect::DevtoolsConnect(DevtoolsTarget {
+        session: session.id,
+        port: discovery.port,
+        token: discovery.token,
+        android_serial: session.devtools.launch.android_serial.clone(),
+    }))
+}
+
+/// Start the System/Network metrics sampler for the session at `idx` when
+/// warranted: DevTools is open for it, its Android identity has resolved,
+/// and nothing is already running (see [`super::MetricsState::wants_start`]).
+/// Fires on DevTools open (regardless of which tab is showing — cheap, and
+/// it means switching to System/Network later never pays a cold start) and,
+/// symmetrically, the moment a still-open session's identity resolves from
+/// its own log lines (see `on_session_event`'s `Lines` arm). Marks the
+/// state `On` and hands the runner the target to reach; `None` (no state
+/// change) when a start isn't warranted right now.
+fn metrics_start(state: &mut AppState, idx: usize) -> Option<Effect> {
+    let session = state.sessions.get_mut(idx)?;
+    if !session.devtools.open || !session.devtools.metrics.wants_start() {
+        return None;
+    }
+    let (serial, pid, pkg) = session.devtools.metrics.target()?;
+    session.devtools.metrics.begin_sampling();
+    Some(Effect::MetricsStart(MetricsTarget {
+        session: session.id,
+        serial,
+        pid,
+        pkg,
+    }))
+}
+
+/// Fold a transition's independent effects into `Outcome::effect`'s single
+/// slot: zero effects is `None`, exactly one collapses to that effect
+/// directly (so every existing single-effect call site/assertion is
+/// unaffected), and two or more become one [`Effect::Batch`] the runner
+/// unpacks in order.
+fn batch(mut effects: Vec<Effect>) -> Option<Effect> {
+    match effects.len() {
+        0 => None,
+        1 => effects.pop(),
+        _ => Some(Effect::Batch(effects)),
+    }
 }
 
 /// The toast (if any) for a session that just reached a terminal state: a
@@ -1427,7 +1927,111 @@ fn cycle_tab(state: &mut AppState, delta: isize) -> Outcome {
     }
 }
 
-/// Apply `f` to the active session (if any) and redraw; idle when none.
+/// The Performance tab's current scrub-able window — whichever source
+/// [`crate::engine::perf_window`] picks for `session`, capped at
+/// [`crate::engine::PERF_WINDOW`]. Shared by the scrub/select handlers above
+/// so a pin is always resolved against the data actually on screen, not a
+/// stale figure.
+fn devtools_perf_window(session: &SessionView) -> Vec<PerfFrame> {
+    let (_, window) = crate::engine::perf_window(
+        &session.devtools.conn,
+        &session.devtools.frames,
+        &session.perf,
+    );
+    window
+}
+
+/// Drop a pinned Performance frame that has aged out of the drawn window
+/// (see [`crate::engine::PerformanceTab::retain_in_window`]). Cheap in the
+/// common case: an un-pinned tab never builds the window at all.
+fn devtools_perf_retain_selection(session: &mut SessionView) -> bool {
+    if !session.devtools.performance.has_selection() {
+        return false;
+    }
+    let window = devtools_perf_window(session);
+    session.devtools.performance.retain_in_window(&window)
+}
+
+/// [`with_active`] for the DevTools tab-selection arms: apply `f` to the
+/// active session's [`crate::engine::DevtoolsState`], then let the newly
+/// selected tab claim its own first fetch (only the Inspector has one).
+fn with_active_devtools_tab(
+    state: &mut AppState,
+    f: impl FnOnce(&mut crate::engine::DevtoolsState),
+) -> Outcome {
+    let Some(session) = state.active_session_mut() else {
+        return Outcome::idle();
+    };
+    f(&mut session.devtools);
+    Outcome {
+        redraw: true,
+        effect: devtools_inspector_enter(session),
+    }
+}
+
+/// Apply `f` to the active session's Inspector tab and pair it with §B12's
+/// per-selection `widget_props` pull: any transition that can move the
+/// selection (a move, a row click, an expand/collapse that re-anchors it)
+/// requests the newly-selected node's props unless they are already cached or
+/// in flight. `f` reports whether the visible state changed.
+fn with_inspector(state: &mut AppState, f: impl FnOnce(&mut InspectorTab) -> bool) -> Outcome {
+    let Some(session) = state.active_session_mut() else {
+        return Outcome::idle();
+    };
+    let changed = f(&mut session.devtools.inspector);
+    let effect = devtools_props_fetch(session);
+    Outcome {
+        redraw: changed || effect.is_some(),
+        effect,
+    }
+}
+
+/// The `widget_props` pull the current Inspector selection needs, if any —
+/// gated on a live connection, since a request has nowhere to go otherwise.
+fn devtools_props_fetch(session: &mut SessionView) -> Option<Effect> {
+    if session.devtools.phase() != DevtoolsPhase::Connected {
+        return None;
+    }
+    let id = session.devtools.inspector.begin_props_fetch()?;
+    Some(Effect::DevtoolsFetchProps {
+        session: session.id,
+        id,
+    })
+}
+
+/// A deliberate *entry* into the Inspector tab (`3`, `[`/`]`, a tab-pill
+/// click, or re-opening DevTools onto it): re-arm the once-only automatic
+/// pull, then take it. Re-arming is what lets an entry retry after an earlier
+/// automatic pull failed — the entry is a user action, bounded by input rate,
+/// unlike the message-driven check in the `DevtoolsConn` arm. Re-arming a tab
+/// that already has a snapshot changes nothing
+/// ([`InspectorTab::wants_tree`] stays false on `loaded`).
+fn devtools_inspector_enter(session: &mut SessionView) -> Option<Effect> {
+    if session.devtools.active_tab == DevtoolsTab::Inspector {
+        session.devtools.inspector.rearm_auto_pull();
+    }
+    devtools_inspector_entry(session)
+}
+
+/// The automatic first `widget_tree` pull: an Inspector tab with no snapshot
+/// yet, a live connection, and no automatic attempt already spent fires
+/// exactly one ([`InspectorTab::wants_tree`]'s latch). A *failed* pull does
+/// not re-open that latch — only [`devtools_inspector_enter`] or the explicit
+/// `r` refresh re-triggers one — so a persistently failing pull cannot storm
+/// the bridge from the message path that calls this.
+fn devtools_inspector_entry(session: &mut SessionView) -> Option<Effect> {
+    if session.devtools.active_tab != DevtoolsTab::Inspector
+        || session.devtools.phase() != DevtoolsPhase::Connected
+        || !session.devtools.inspector.wants_tree()
+    {
+        return None;
+    }
+    session.devtools.inspector.begin_tree_fetch();
+    Some(Effect::DevtoolsFetchTree {
+        session: session.id,
+    })
+}
+
 fn with_active(state: &mut AppState, f: impl FnOnce(&mut SessionView)) -> Outcome {
     match state.active_session_mut() {
         Some(s) => {
@@ -1438,9 +2042,32 @@ fn with_active(state: &mut AppState, f: impl FnOnce(&mut SessionView)) -> Outcom
     }
 }
 
+/// [`with_active`] for the log-scroll arms, which also need the committed
+/// free-text search filter: it is *global* state (`AppState::search`), not
+/// per-session, so the session's own visible-sequence math
+/// ([`SessionView::visible_indices`]) can only see it when routing passes it
+/// in. Cloned (rather than borrowed) because the session borrow is mutable —
+/// one short query string per scroll event.
+fn with_active_filtered(
+    state: &mut AppState,
+    f: impl FnOnce(&mut SessionView, Option<&str>),
+) -> Outcome {
+    let filter = state.search.filter.clone();
+    match state.active_session_mut() {
+        Some(s) => {
+            f(s, filter.as_deref());
+            Outcome::redraw()
+        }
+        None => Outcome::idle(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::devtools::{
+        ConnEvent, DevtoolsLaunch, DevtoolsPhase, DevtoolsTab, InspectorEvent, PerfFocus,
+    };
     use crate::engine::message::RegionId;
     use crate::engine::session_view::Scroll;
     use crate::engine::state::Screen;
@@ -1464,6 +2091,44 @@ mod tests {
         let mut s = welcome();
         let out = update(&mut s, Message::Tick);
         assert!(!out.redraw, "no animation → tick skips the draw");
+    }
+
+    #[test]
+    fn tick_always_advances_animation_frame() {
+        let mut s = welcome();
+        assert_eq!(s.animation_frame, 0);
+        update(&mut s, Message::Tick);
+        assert_eq!(s.animation_frame, 1);
+        update(&mut s, Message::Tick);
+        assert_eq!(s.animation_frame, 2);
+    }
+
+    #[test]
+    fn tick_redraws_while_a_session_is_transient() {
+        let mut s = welcome();
+        let id = register(&mut s, 1, "/tmp/proj", "desktop");
+        assert_eq!(
+            s.session_index(id).map(|i| &s.sessions[i].state),
+            Some(&SessionState::Configuring)
+        );
+        let out = update(&mut s, Message::Tick);
+        assert!(
+            out.redraw,
+            "a transient session gives the tick spinner something to paint"
+        );
+    }
+
+    #[test]
+    fn tick_skips_redraw_once_session_is_running() {
+        let mut s = welcome();
+        let id = register(&mut s, 1, "/tmp/proj", "desktop");
+        let idx = s.session_index(id).unwrap();
+        s.sessions[idx].state = SessionState::Running;
+        let out = update(&mut s, Message::Tick);
+        assert!(
+            !out.redraw,
+            "a stably-streaming session is not transient → dirty-frame skip"
+        );
     }
 
     #[test]
@@ -1512,6 +2177,18 @@ mod tests {
     // ── Session wiring ──────────────────────────────────────────────────────
 
     fn register(state: &mut AppState, id: u64, project: &str, label: &str) -> SessionId {
+        register_with(state, id, project, label, DevtoolsLaunch::unavailable())
+    }
+
+    /// [`register`] for a real app session — `launch` decides whether it
+    /// could host a devtools service (workbook §B12).
+    fn register_with(
+        state: &mut AppState,
+        id: u64,
+        project: &str,
+        label: &str,
+        launch: DevtoolsLaunch,
+    ) -> SessionId {
         let id = SessionId(id);
         update(
             state,
@@ -1519,6 +2196,7 @@ mod tests {
                 id,
                 project_root: PathBuf::from(project),
                 target_label: label.to_string(),
+                devtools: launch,
             },
         );
         id
@@ -1544,6 +2222,7 @@ mod tests {
                 id: a,
                 project_root: PathBuf::from("/tmp/huddle"),
                 target_label: "desktop".into(),
+                devtools: DevtoolsLaunch::unavailable(),
             },
         );
         assert!(!out.redraw);
@@ -1579,6 +2258,128 @@ mod tests {
         );
         assert!(out.redraw);
         assert_eq!(st.sessions[0].state, SessionState::Running);
+    }
+
+    // ── Build-phase progress (workbook §B10) ────────────────────────────────
+
+    fn phase_event(id: SessionId, phase: crate::supervise::PhaseLabel) -> Message {
+        Message::Session(SessionEvent {
+            id,
+            kind: SessionEventKind::Phase(phase),
+        })
+    }
+
+    fn compiling(crate_name: &str) -> crate::supervise::PhaseLabel {
+        crate::supervise::PhaseLabel::Compiling {
+            crate_name: crate_name.to_string(),
+            progress: None,
+        }
+    }
+
+    #[test]
+    fn a_phase_event_on_the_active_session_redraws_and_stores_the_label() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        st.sessions[0].state = SessionState::Building;
+        let out = update(&mut st, phase_event(a, compiling("frust-core")));
+        assert!(out.redraw);
+        assert_eq!(
+            st.active_session().unwrap().current_phase,
+            Some(compiling("frust-core"))
+        );
+    }
+
+    /// The redraw-gating half of criterion 4: a phase update for a
+    /// *background* session neither redraws nor is dropped — it's stored, so
+    /// switching to that tab later shows the latest label, but the frame
+    /// stays clean while it's not on screen (mirrors
+    /// `active_session_line_redraws_background_line_does_not`).
+    #[test]
+    fn a_phase_event_on_a_background_session_is_buffered_without_a_redraw() {
+        let mut st = welcome();
+        register(&mut st, 0, "/tmp/a", "desktop");
+        let b = register(&mut st, 1, "/tmp/b", "desktop");
+        st.sessions[1].state = SessionState::Building;
+        assert_eq!(st.active_session, Some(0));
+        let out = update(&mut st, phase_event(b, compiling("frust-widgets")));
+        assert!(
+            !out.redraw,
+            "a background session's phase update must not force a redraw"
+        );
+        assert_eq!(
+            st.sessions[1].current_phase,
+            Some(compiling("frust-widgets")),
+            "the label is still retained for when that tab becomes active"
+        );
+    }
+
+    /// A repeated identical phase (the same crate re-reported, or a
+    /// duplicate delivery) never re-dirties the active tab — only an actual
+    /// change does, the same "changed, not merely present" gate `Dropped`
+    /// uses.
+    #[test]
+    fn an_unchanged_phase_on_the_active_session_does_not_redraw() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        st.sessions[0].state = SessionState::Building;
+        assert!(update(&mut st, phase_event(a, compiling("frust-core"))).redraw);
+        let out = update(&mut st, phase_event(a, compiling("frust-core")));
+        assert!(
+            !out.redraw,
+            "an identical phase must not re-dirty the frame"
+        );
+    }
+
+    /// The clearing invariant: a `State` event that leaves the transient
+    /// window wipes any phase label the session was carrying, regardless of
+    /// whether a matching `Phase(None)`-shaped clear was ever sent (there is
+    /// no such variant — `State` is the sole clearing point, see
+    /// `crate::supervise::progress`'s module docs).
+    #[test]
+    fn a_state_transition_to_running_clears_a_stale_phase_label() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        st.sessions[0].state = SessionState::Building;
+        update(&mut st, phase_event(a, compiling("frust-core")));
+        assert!(st.active_session().unwrap().current_phase.is_some());
+
+        update(
+            &mut st,
+            Message::Session(SessionEvent {
+                id: a,
+                kind: SessionEventKind::State(SessionState::Running),
+            }),
+        );
+        assert_eq!(
+            st.active_session().unwrap().current_phase,
+            None,
+            "reaching Running must clear any phase label the tab was showing"
+        );
+    }
+
+    /// Same clearing invariant on the failure path: a `Building` session's
+    /// phase label is wiped the moment the state reports `Exited(false)`
+    /// (workbook §B10's failed row — spinner stopped, no lingering shimmer
+    /// text from the build that just failed).
+    #[test]
+    fn a_failed_build_clears_its_phase_label_too() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        st.sessions[0].state = SessionState::Building;
+        update(&mut st, phase_event(a, compiling("frust-core")));
+
+        update(
+            &mut st,
+            Message::Session(SessionEvent {
+                id: a,
+                kind: SessionEventKind::State(SessionState::Exited(false)),
+            }),
+        );
+        assert_eq!(st.active_session().unwrap().current_phase, None);
+        assert_eq!(
+            st.active_session().unwrap().state,
+            SessionState::Exited(false)
+        );
     }
 
     #[test]
@@ -1628,6 +2429,27 @@ mod tests {
         ));
         update(&mut st, Message::ToggleFollow);
         // toggle from Anchored -> Follow
+        assert!(st.active_session().unwrap().is_following());
+    }
+
+    #[test]
+    fn scroll_routing_carries_the_committed_search_filter() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        for l in ["keep 0", "drop", "keep 1", "drop", "keep 2"] {
+            update(&mut st, line(a, l));
+        }
+        // The free-text filter is global (`AppState::search`), so only the
+        // routing here can hand it to the session's visible-sequence math —
+        // without it a step would land on a hidden line.
+        update(&mut st, Message::SearchOpen);
+        for c in "keep".chars() {
+            update(&mut st, Message::SearchInput(c));
+        }
+        update(&mut st, Message::SearchCommit);
+        update(&mut st, Message::LogScrollUp(1));
+        assert_eq!(st.active_session().unwrap().scroll, Scroll::Anchored(2));
+        update(&mut st, Message::LogScrollDown(1));
         assert!(st.active_session().unwrap().is_following());
     }
 
@@ -1856,6 +2678,7 @@ mod tests {
                     id: SessionId(i as u64),
                     project_root: spec.project_root.clone(),
                     target_label: label,
+                    devtools: DevtoolsLaunch::unavailable(),
                 },
             );
         }
@@ -2758,32 +3581,70 @@ mod tests {
     }
 
     #[test]
-    fn toggling_follow_updates_the_default_and_requests_the_save_effect() {
+    fn toggling_follow_is_purely_per_session_and_requests_no_persistence_effect() {
         let mut st = welcome();
         register(&mut st, 0, "/tmp/a", "desktop");
-        assert!(st.follow_tail_default);
         assert!(st.active_session().unwrap().is_following());
         let out = update(&mut st, Message::ToggleFollow);
         assert!(!st.active_session().unwrap().is_following());
-        assert!(!st.follow_tail_default, "the default follows the toggle");
-        assert_eq!(out.effect, Some(Effect::SaveFollowTailDefault(false)));
+        assert_eq!(
+            out.effect, None,
+            "follow-tail is in-memory, per-session state now — there is no \
+             persisted global default to save"
+        );
 
         let out = update(&mut st, Message::ToggleFollow);
         assert!(st.active_session().unwrap().is_following());
-        assert!(st.follow_tail_default);
-        assert_eq!(out.effect, Some(Effect::SaveFollowTailDefault(true)));
+        assert_eq!(out.effect, None);
     }
 
     #[test]
-    fn a_freshly_registered_session_honors_a_false_follow_tail_default() {
+    fn toggling_follow_on_one_session_does_not_affect_another() {
         let mut st = welcome();
-        st.follow_tail_default = false;
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        register(&mut st, 1, "/tmp/b", "desktop");
+        let a_idx = st.session_index(a).unwrap();
+        // `a` is active first (auto-selected on register); disengage its follow.
+        update(&mut st, Message::ToggleFollow);
+        assert!(!st.sessions[a_idx].is_following());
+
+        // Switch to the second session — untouched, still following.
+        update(&mut st, Message::SelectTab(1));
+        assert!(
+            st.active_session().unwrap().is_following(),
+            "session b was never toggled"
+        );
+        assert!(
+            !st.sessions[a_idx].is_following(),
+            "toggling the now-inactive session b must not re-engage a's follow"
+        );
+    }
+
+    #[test]
+    fn a_freshly_registered_session_always_starts_following() {
+        let mut st = welcome();
         register(&mut st, 0, "/tmp/a", "desktop");
         assert!(
-            !st.active_session().unwrap().is_following(),
-            "a new session tab starts anchored, not following, per the \
-             persisted default"
+            st.active_session().unwrap().is_following(),
+            "every session starts following its own tail — there is no \
+             persisted global default to seed a different starting state"
         );
+    }
+
+    #[test]
+    fn a_freshly_registered_session_tracks_the_tail_as_lines_arrive() {
+        let mut st = welcome();
+        let a = register(&mut st, 0, "/tmp/a", "desktop");
+        for i in 0..500 {
+            update(&mut st, line(a, &format!("line {i}")));
+        }
+        let session = st.active_session().unwrap();
+        assert!(
+            session.is_following(),
+            "a session that was never scrolled stays in Follow, tracking the \
+             tail as lines arrive rather than freezing at the first line"
+        );
+        assert_eq!(session.log.end_index(), 500);
     }
 
     // ── Perf sparkline panel ─────────────────────────────────────────────────
@@ -2803,6 +3664,781 @@ mod tests {
         let mut st = welcome();
         let out = update(&mut st, Message::TogglePerfPanel);
         assert!(!out.redraw);
+    }
+
+    // ── DevTools mode (workbook §B12) ────────────────────────────────────────
+
+    const DISCOVERY: &str = "frust-devtools listening on 53214 token cafe";
+
+    fn debug_launch() -> DevtoolsLaunch {
+        DevtoolsLaunch::from_launch(frust_drive::build_info::BuildMode::Debug, None)
+    }
+
+    /// A workbench with one running, devtools-capable desktop session.
+    fn devtools_workbench() -> (AppState, SessionId) {
+        let mut st = workbench_with_project();
+        let id = register_with(&mut st, 0, "/tmp/huddle", "desktop", debug_launch());
+        update(&mut st, state_event(id, SessionState::Running));
+        (st, id)
+    }
+
+    fn state_event(id: SessionId, state: SessionState) -> Message {
+        Message::Session(SessionEvent {
+            id,
+            kind: SessionEventKind::State(state),
+        })
+    }
+
+    fn connect_target(effect: Option<Effect>) -> DevtoolsTarget {
+        match effect {
+            Some(Effect::DevtoolsConnect(target)) => target,
+            other => panic!("expected a DevtoolsConnect effect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn toggling_devtools_before_any_discovery_opens_the_mode_without_connecting() {
+        let (mut st, _) = devtools_workbench();
+        let out = update(&mut st, Message::DevtoolsToggle);
+        assert!(out.redraw);
+        assert!(st.active_session().unwrap().devtools.open);
+        assert_eq!(out.effect, None, "nothing discovered yet to connect to");
+        assert_eq!(
+            st.active_session().unwrap().devtools.phase(),
+            DevtoolsPhase::Discovering
+        );
+
+        // Toggling back off leaves the mode closed, no effect either way.
+        let out = update(&mut st, Message::DevtoolsToggle);
+        assert!(out.redraw);
+        assert!(!st.active_session().unwrap().devtools.open);
+        assert_eq!(out.effect, None);
+    }
+
+    #[test]
+    fn a_discovery_line_while_devtools_is_open_starts_the_connection() {
+        let (mut st, id) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        let out = update(&mut st, line(id, DISCOVERY));
+        let target = connect_target(out.effect);
+        assert_eq!(target.session, id);
+        assert_eq!(target.port, 53214);
+        assert_eq!(target.token.as_deref(), Some("cafe"));
+        assert_eq!(target.android_serial, None);
+        assert_eq!(
+            st.active_session().unwrap().devtools.phase(),
+            DevtoolsPhase::Connecting
+        );
+
+        // A re-announcement (the app restarted within the session) replaces
+        // the connection rather than being ignored — latest wins.
+        let out = update(
+            &mut st,
+            line(id, "frust-devtools listening on 60001 token beef"),
+        );
+        let target = connect_target(out.effect);
+        assert_eq!(target.port, 60001);
+        assert_eq!(target.token.as_deref(), Some("beef"));
+    }
+
+    #[test]
+    fn a_discovery_line_is_recorded_but_not_connected_while_devtools_is_closed() {
+        let (mut st, id) = devtools_workbench();
+        let out = update(&mut st, line(id, DISCOVERY));
+        assert_eq!(out.effect, None, "nobody is looking yet");
+        assert!(st.active_session().unwrap().devtools.discovered.is_some());
+
+        // Opening is what connects, using the line that already scrolled past.
+        let out = update(&mut st, Message::DevtoolsToggle);
+        assert_eq!(connect_target(out.effect).port, 53214);
+    }
+
+    #[test]
+    fn an_android_session_carries_its_serial_into_the_connect_target() {
+        let mut st = workbench_with_project();
+        let launch = DevtoolsLaunch::from_launch(
+            frust_drive::build_info::BuildMode::Profile,
+            Some("emulator-5554".to_string()),
+        );
+        let id = register_with(&mut st, 0, "/tmp/huddle", "Pixel 8", launch);
+        update(&mut st, line(id, DISCOVERY));
+        let out = update(&mut st, Message::DevtoolsToggle);
+        assert_eq!(
+            connect_target(out.effect).android_serial.as_deref(),
+            Some("emulator-5554")
+        );
+    }
+
+    #[test]
+    fn a_release_session_never_connects_and_shows_the_unavailable_screen() {
+        let mut st = workbench_with_project();
+        let launch = DevtoolsLaunch::from_launch(frust_drive::build_info::BuildMode::Release, None);
+        let id = register_with(&mut st, 0, "/tmp/huddle", "desktop", launch);
+        update(&mut st, line(id, DISCOVERY));
+        let out = update(&mut st, Message::DevtoolsToggle);
+        assert_eq!(out.effect, None);
+        assert_eq!(
+            st.active_session().unwrap().devtools.phase(),
+            DevtoolsPhase::Unavailable
+        );
+    }
+
+    #[test]
+    fn tabs_switch_by_index_and_cycle() {
+        let (mut st, _) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        let out = update(&mut st, Message::DevtoolsTab(1));
+        assert!(out.redraw);
+        assert_eq!(
+            st.active_session().unwrap().devtools.active_tab,
+            DevtoolsTab::System
+        );
+        update(&mut st, Message::DevtoolsTabCycle(1));
+        assert_eq!(
+            st.active_session().unwrap().devtools.active_tab,
+            DevtoolsTab::Inspector
+        );
+        update(&mut st, Message::DevtoolsTabCycle(-2));
+        assert_eq!(
+            st.active_session().unwrap().devtools.active_tab,
+            DevtoolsTab::Performance
+        );
+        // Wrapping backward from the first tab lands on the last.
+        update(&mut st, Message::DevtoolsTabCycle(-1));
+        assert_eq!(
+            st.active_session().unwrap().devtools.active_tab,
+            DevtoolsTab::Network
+        );
+    }
+
+    #[test]
+    fn conn_events_drive_the_state_and_only_dirty_a_visible_surface() {
+        let (mut st, id) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        update(&mut st, line(id, DISCOVERY));
+
+        let out = update(
+            &mut st,
+            Message::DevtoolsConn(
+                id,
+                ConnEvent::Connected {
+                    app_name: "huddle".to_string(),
+                    caps: Vec::new(),
+                },
+            ),
+        );
+        assert!(out.redraw);
+        assert_eq!(
+            st.active_session().unwrap().devtools.phase(),
+            DevtoolsPhase::Connected
+        );
+
+        // With the mode closed again, a background report keeps filling the
+        // ring but never dirties a frame (the dirty-frame skip).
+        update(&mut st, Message::DevtoolsClose);
+        let out = update(
+            &mut st,
+            Message::DevtoolsConn(id, ConnEvent::Frames(vec![frame_stats(1)])),
+        );
+        assert!(!out.redraw);
+        assert_eq!(st.active_session().unwrap().devtools.frames.len(), 1);
+    }
+
+    #[test]
+    fn the_frame_ring_caps_at_its_bound_across_batches() {
+        let (mut st, id) = devtools_workbench();
+        // Batches sized like the bridge's coalescing window forwards them.
+        for batch in 0..10u64 {
+            let frames = (0..40).map(|i| frame_stats(batch * 40 + i)).collect();
+            update(
+                &mut st,
+                Message::DevtoolsConn(id, ConnEvent::Frames(frames)),
+            );
+        }
+        let ring = &st.active_session().unwrap().devtools.frames;
+        assert_eq!(ring.len(), crate::engine::FRAME_RING_CAP);
+        assert_eq!(
+            ring.back().unwrap().n,
+            399,
+            "the newest sample is always retained"
+        );
+    }
+
+    #[test]
+    fn retry_reconnects_from_the_failed_state_but_not_after_the_session_ended() {
+        let (mut st, id) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        update(&mut st, line(id, DISCOVERY));
+        update(
+            &mut st,
+            Message::DevtoolsConn(id, ConnEvent::Failed("connection refused".into())),
+        );
+        assert_eq!(
+            st.active_session().unwrap().devtools.phase(),
+            DevtoolsPhase::Failed
+        );
+
+        let out = update(&mut st, Message::DevtoolsRetry);
+        assert_eq!(connect_target(out.effect).port, 53214);
+        assert_eq!(
+            st.active_session().unwrap().devtools.phase(),
+            DevtoolsPhase::Connecting
+        );
+
+        // Once the session itself has ended there is no service left to reach.
+        update(&mut st, state_event(id, SessionState::Exited(true)));
+        let out = update(&mut st, Message::DevtoolsRetry);
+        assert_eq!(out.effect, None);
+    }
+
+    #[test]
+    fn a_session_ending_tears_its_devtools_connection_down() {
+        let (mut st, id) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        update(&mut st, line(id, DISCOVERY));
+        update(
+            &mut st,
+            Message::DevtoolsConn(
+                id,
+                ConnEvent::Connected {
+                    app_name: "huddle".to_string(),
+                    caps: Vec::new(),
+                },
+            ),
+        );
+
+        let out = update(&mut st, state_event(id, SessionState::Exited(true)));
+        assert_eq!(out.effect, Some(Effect::DevtoolsDisconnect(id)));
+        assert_eq!(
+            st.active_session().unwrap().devtools.phase(),
+            DevtoolsPhase::Failed,
+            "the service went with the process"
+        );
+    }
+
+    #[test]
+    fn devtools_messages_are_noops_with_no_active_session() {
+        let mut st = welcome();
+        for msg in [
+            Message::DevtoolsToggle,
+            Message::DevtoolsClose,
+            Message::DevtoolsTab(2),
+            Message::DevtoolsTabCycle(1),
+            Message::DevtoolsRetry,
+        ] {
+            let out = update(&mut st, msg.clone());
+            assert!(!out.redraw, "{msg:?} should be a no-op");
+            assert_eq!(out.effect, None);
+        }
+    }
+
+    fn frame_stats(n: u64) -> frust_devtools_protocol::FrameStats {
+        frust_devtools_protocol::FrameStats {
+            n,
+            total_us: 16_000,
+            rebuild_us: 8_000,
+            layout_us: 3_000,
+            paint_us: 2_000,
+            encode_us: 1_400,
+            acquire_us: 600,
+            submit_us: 1_000,
+            skipped: false,
+        }
+    }
+
+    // ── Performance tab (workbook §B12) ──────────────────────────────────────
+
+    #[test]
+    fn scrub_and_select_route_through_the_active_sessions_live_ring() {
+        let (mut st, id) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        let frames = (0..30).map(frame_stats).collect();
+        update(
+            &mut st,
+            Message::DevtoolsConn(id, ConnEvent::Frames(frames)),
+        );
+
+        let out = update(&mut st, Message::DevtoolsPerfScrub(0));
+        assert!(out.redraw);
+        assert_eq!(
+            pinned_n(&st),
+            Some(29),
+            "the first scrub starts at the tail of the 30-frame window"
+        );
+
+        update(&mut st, Message::DevtoolsPerfScrub(-1));
+        assert_eq!(pinned_n(&st), Some(28));
+
+        update(&mut st, Message::DevtoolsPerfSelectFrame(0));
+        assert_eq!(pinned_n(&st), Some(0));
+    }
+
+    /// The active session's pinned Performance frame (`FrameStats::n`).
+    fn pinned_n(state: &AppState) -> Option<u64> {
+        state
+            .active_session()
+            .unwrap()
+            .devtools
+            .performance
+            .selected_n
+    }
+
+    /// What the Performance tab would actually *render* as the pinned frame:
+    /// the pin resolved against the window on screen, exactly as
+    /// `ui::views::devtools::performance` does it. The header/breakdown read
+    /// this, so it is the assertion that catches a pin whose identity walks.
+    fn rendered_pin_n(state: &AppState) -> Option<u64> {
+        let session = state.active_session().unwrap();
+        let window = devtools_perf_window(session);
+        let index = session.devtools.performance.resolve(&window)?;
+        Some(window[index].n)
+    }
+
+    #[test]
+    fn a_pinned_frame_survives_later_frame_batches_unchanged() {
+        let (mut st, id) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        // Enough frames that the drawn window is already *sliding* (it only
+        // starts to once the ring passes `PERF_WINDOW`) — the condition the
+        // walk needs.
+        let win = crate::engine::PERF_WINDOW as u64;
+        let frames = (0..win + 10).map(frame_stats).collect();
+        update(
+            &mut st,
+            Message::DevtoolsConn(id, ConnEvent::Frames(frames)),
+        );
+        // Scrub back off the tail onto a specific frame and hold it.
+        update(&mut st, Message::DevtoolsPerfScrub(0));
+        update(&mut st, Message::DevtoolsPerfScrub(-29));
+        let pinned = win + 10 - 1 - 29;
+        assert_eq!(pinned_n(&st), Some(pinned));
+        assert_eq!(rendered_pin_n(&st), Some(pinned));
+
+        // Ten more frames arrive, each sliding the window by one. The pin
+        // must still name the same frame — a positional pin would name a
+        // frame ten later by the end of this loop, so the header and
+        // breakdown would have walked off the spike with no key pressed.
+        for n in (win + 10)..(win + 20) {
+            update(
+                &mut st,
+                Message::DevtoolsConn(id, ConnEvent::Frames(vec![frame_stats(n)])),
+            );
+            assert_eq!(pinned_n(&st), Some(pinned), "after frame {n}");
+            assert_eq!(
+                rendered_pin_n(&st),
+                Some(pinned),
+                "the header/breakdown still show frame #{pinned} after frame {n}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pin_that_slides_out_of_the_window_drops_back_to_live() {
+        let (mut st, id) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        let frames = (0..30).map(frame_stats).collect();
+        update(
+            &mut st,
+            Message::DevtoolsConn(id, ConnEvent::Frames(frames)),
+        );
+        update(&mut st, Message::DevtoolsPerfSelectFrame(0));
+        assert_eq!(pinned_n(&st), Some(0));
+
+        // Push the window (`PERF_WINDOW` frames) past frame 0 entirely.
+        let batch: Vec<_> = (30..(30 + crate::engine::PERF_WINDOW as u64))
+            .map(frame_stats)
+            .collect();
+        update(&mut st, Message::DevtoolsConn(id, ConnEvent::Frames(batch)));
+        assert_eq!(
+            pinned_n(&st),
+            None,
+            "the pinned frame's data is gone from the window — back to live"
+        );
+    }
+
+    #[test]
+    fn a_chart_click_naming_a_departed_frame_pins_nothing() {
+        let (mut st, id) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        let frames = (0..30).map(frame_stats).collect();
+        update(
+            &mut st,
+            Message::DevtoolsConn(id, ConnEvent::Frames(frames)),
+        );
+        update(&mut st, Message::DevtoolsPerfSelectFrame(25));
+
+        // 100 more frames: the window is now frames 10..=129, so the pin
+        // (25) is still retained but frame 0 has left.
+        let batch: Vec<_> = (30..130).map(frame_stats).collect();
+        update(&mut st, Message::DevtoolsConn(id, ConnEvent::Frames(batch)));
+        assert_eq!(pinned_n(&st), Some(25));
+
+        // A click registered against a column drawing frame 0, consumed
+        // after the window moved past it (message-level: the payload is the
+        // frame itself, so the race is decidable here).
+        update(&mut st, Message::DevtoolsPerfSelectFrame(0));
+        assert_eq!(
+            pinned_n(&st),
+            Some(25),
+            "a stale click pins nothing rather than whatever slid into that column"
+        );
+    }
+
+    #[test]
+    fn focus_cycle_toggles_chart_and_breakdown() {
+        let (mut st, _) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        assert_eq!(
+            st.active_session().unwrap().devtools.performance.focus,
+            PerfFocus::Chart
+        );
+        let out = update(&mut st, Message::DevtoolsPerfFocusCycle);
+        assert!(out.redraw);
+        assert_eq!(
+            st.active_session().unwrap().devtools.performance.focus,
+            PerfFocus::Breakdown
+        );
+    }
+
+    #[test]
+    fn clear_selection_drops_back_to_the_live_tail() {
+        let (mut st, id) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        let frames = (0..5).map(frame_stats).collect();
+        update(
+            &mut st,
+            Message::DevtoolsConn(id, ConnEvent::Frames(frames)),
+        );
+        update(&mut st, Message::DevtoolsPerfScrub(0));
+        assert!(
+            st.active_session()
+                .unwrap()
+                .devtools
+                .performance
+                .has_selection()
+        );
+
+        update(&mut st, Message::DevtoolsPerfClearSelection);
+        assert!(
+            !st.active_session()
+                .unwrap()
+                .devtools
+                .performance
+                .has_selection()
+        );
+    }
+
+    #[test]
+    fn performance_messages_are_noops_with_no_active_session() {
+        let mut st = welcome();
+        for msg in [
+            Message::DevtoolsPerfScrub(1),
+            Message::DevtoolsPerfSelectFrame(0),
+            Message::DevtoolsPerfClearSelection,
+            Message::DevtoolsPerfFocusCycle,
+        ] {
+            let out = update(&mut st, msg.clone());
+            assert!(!out.redraw, "{msg:?} should be a no-op");
+        }
+    }
+
+    // ── Inspector tab (workbook §B12) ────────────────────────────────────────
+
+    fn widget_node(
+        id: u64,
+        type_name: &str,
+        children: Vec<frust_devtools_protocol::WidgetNode>,
+    ) -> frust_devtools_protocol::WidgetNode {
+        frust_devtools_protocol::WidgetNode {
+            id,
+            type_name: type_name.to_string(),
+            debug_label: None,
+            bounds: None,
+            children,
+        }
+    }
+
+    /// `Column #1 > [Padding #2 > Text #3, Text #4]`.
+    fn widget_tree() -> frust_devtools_protocol::WidgetTreeDump {
+        frust_devtools_protocol::WidgetTreeDump {
+            roots: vec![widget_node(
+                1,
+                "frust_widgets::flex::FlexWidget",
+                vec![
+                    widget_node(
+                        2,
+                        "frust_widgets::padding::PaddingWidget",
+                        vec![widget_node(
+                            3,
+                            "frust_widgets::text::TextWidget",
+                            Vec::new(),
+                        )],
+                    ),
+                    widget_node(4, "frust_widgets::text::TextWidget", Vec::new()),
+                ],
+            )],
+        }
+    }
+
+    /// A connected DevTools session sitting on the Inspector tab, with the
+    /// automatic first pull already answered.
+    fn inspector_workbench() -> (AppState, SessionId) {
+        let (mut st, id) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        update(
+            &mut st,
+            Message::DevtoolsConn(
+                id,
+                ConnEvent::Connected {
+                    app_name: "huddle".to_string(),
+                    caps: Vec::new(),
+                },
+            ),
+        );
+        let out = update(&mut st, Message::DevtoolsTab(2));
+        assert_eq!(
+            out.effect,
+            Some(Effect::DevtoolsFetchTree { session: id }),
+            "entering the Inspector tab pulls its first snapshot"
+        );
+        update(
+            &mut st,
+            Message::DevtoolsInspector(id, InspectorEvent::TreeArrived(widget_tree())),
+        );
+        (st, id)
+    }
+
+    #[test]
+    fn entering_the_inspector_tab_pulls_one_snapshot_and_never_a_second() {
+        let (mut st, id) = inspector_workbench();
+        assert_eq!(
+            st.active_session().unwrap().devtools.inspector.rows().len(),
+            4,
+            "Column > [Padding > Text, Text] — the whole tree is inside the \
+             default expansion depth"
+        );
+
+        // Leaving and re-entering the tab does not re-pull — `r` is the
+        // explicit refresh.
+        update(&mut st, Message::DevtoolsTab(0));
+        let out = update(&mut st, Message::DevtoolsTab(2));
+        assert_eq!(out.effect, None);
+
+        let out = update(&mut st, Message::DevtoolsInspectorRefresh);
+        assert_eq!(out.effect, Some(Effect::DevtoolsFetchTree { session: id }));
+        // …and a second `r` while that pull is in flight is a no-op.
+        assert_eq!(
+            update(&mut st, Message::DevtoolsInspectorRefresh).effect,
+            None
+        );
+    }
+
+    #[test]
+    fn a_handshake_landing_on_the_inspector_tab_pulls_the_first_snapshot() {
+        let (mut st, id) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        update(&mut st, Message::DevtoolsTab(2));
+        // Nothing to pull while the connection is still coming up.
+        assert_eq!(
+            update(&mut st, Message::DevtoolsInspectorRefresh).effect,
+            None
+        );
+
+        let out = update(
+            &mut st,
+            Message::DevtoolsConn(
+                id,
+                ConnEvent::Connected {
+                    app_name: "huddle".to_string(),
+                    caps: Vec::new(),
+                },
+            ),
+        );
+        assert_eq!(out.effect, Some(Effect::DevtoolsFetchTree { session: id }));
+    }
+
+    /// A connected session on the Inspector tab whose first automatic pull
+    /// has *failed* — the storm precondition.
+    fn failed_first_pull() -> (AppState, SessionId) {
+        let (mut st, id) = devtools_workbench();
+        update(&mut st, Message::DevtoolsToggle);
+        update(
+            &mut st,
+            Message::DevtoolsConn(
+                id,
+                ConnEvent::Connected {
+                    app_name: "huddle".to_string(),
+                    caps: Vec::new(),
+                },
+            ),
+        );
+        let out = update(&mut st, Message::DevtoolsTab(2));
+        assert_eq!(out.effect, Some(Effect::DevtoolsFetchTree { session: id }));
+        update(
+            &mut st,
+            Message::DevtoolsInspector(id, InspectorEvent::Failed("request timed out".to_string())),
+        );
+        (st, id)
+    }
+
+    #[test]
+    fn a_failed_inspector_pull_is_never_re_fired_by_arriving_frame_batches() {
+        let (mut st, id) = failed_first_pull();
+
+        // Frame-stats batches keep arriving at the bridge's coalescing rate
+        // while the Inspector sits open on a failed pull. Not one of them
+        // may re-issue the request: pre-fix, every batch re-ran the tab-entry
+        // check, whose gate had re-opened the moment the failure cleared
+        // `tree_pending` — an unbounded request storm, each attempt blocking
+        // the bridge pump for a request timeout.
+        for n in 0..64 {
+            let out = update(
+                &mut st,
+                Message::DevtoolsConn(id, ConnEvent::Frames(vec![frame_stats(n)])),
+            );
+            assert_eq!(out.effect, None, "frame batch {n} re-fired the pull");
+        }
+        // A repeated connection report is not a loophole either.
+        for _ in 0..4 {
+            let out = update(
+                &mut st,
+                Message::DevtoolsConn(
+                    id,
+                    ConnEvent::Connected {
+                        app_name: "huddle".to_string(),
+                        caps: Vec::new(),
+                    },
+                ),
+            );
+            assert_eq!(out.effect, None);
+        }
+    }
+
+    #[test]
+    fn an_explicit_refresh_or_a_tab_re_entry_retries_a_failed_pull() {
+        let (mut st, id) = failed_first_pull();
+
+        // `r` is the explicit re-trigger.
+        let out = update(&mut st, Message::DevtoolsInspectorRefresh);
+        assert_eq!(out.effect, Some(Effect::DevtoolsFetchTree { session: id }));
+        update(
+            &mut st,
+            Message::DevtoolsInspector(id, InspectorEvent::Failed("request timed out".to_string())),
+        );
+
+        // So is leaving and re-entering the tab — one attempt per entry,
+        // bounded by the user's own keypresses.
+        update(&mut st, Message::DevtoolsTab(0));
+        let out = update(&mut st, Message::DevtoolsTab(2));
+        assert_eq!(out.effect, Some(Effect::DevtoolsFetchTree { session: id }));
+        update(
+            &mut st,
+            Message::DevtoolsInspector(id, InspectorEvent::Failed("request timed out".to_string())),
+        );
+
+        // Closing and re-opening DevTools onto the tab is the third entry
+        // route (§B12's re-open onto a retained connection).
+        update(&mut st, Message::DevtoolsClose);
+        let out = update(&mut st, Message::DevtoolsToggle);
+        assert_eq!(out.effect, Some(Effect::DevtoolsFetchTree { session: id }));
+    }
+
+    #[test]
+    fn moving_the_selection_requests_the_new_nodes_props_exactly_once() {
+        let (mut st, id) = inspector_workbench();
+        // The snapshot's own arrival asked for the root's props.
+        let out = update(
+            &mut st,
+            Message::DevtoolsInspector(id, InspectorEvent::TreeArrived(widget_tree())),
+        );
+        assert_eq!(
+            out.effect,
+            Some(Effect::DevtoolsFetchProps { session: id, id: 1 })
+        );
+        update(
+            &mut st,
+            Message::DevtoolsInspector(
+                id,
+                InspectorEvent::PropsArrived(
+                    1,
+                    frust_devtools_protocol::WidgetProps {
+                        id: 1,
+                        entries: vec![("axis".to_string(), "Vertical".to_string())],
+                    },
+                ),
+            ),
+        );
+
+        // Down onto Padding #2: a fresh pull.
+        let out = update(&mut st, Message::DevtoolsInspectorSelect(1));
+        assert!(out.redraw);
+        assert_eq!(
+            out.effect,
+            Some(Effect::DevtoolsFetchProps { session: id, id: 2 })
+        );
+        // Straight back up onto the cached root: no pull at all.
+        let out = update(&mut st, Message::DevtoolsInspectorSelect(-1));
+        assert_eq!(out.effect, None, "the root's props are already cached");
+        assert_eq!(
+            st.active_session()
+                .unwrap()
+                .devtools
+                .inspector
+                .selected_props()
+                .map(|p| p.id),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn expand_and_collapse_route_to_the_active_sessions_tree() {
+        let (mut st, id) = inspector_workbench();
+        // Collapse the root: only it stays visible.
+        update(&mut st, Message::DevtoolsInspectorCollapse);
+        assert_eq!(
+            st.active_session().unwrap().devtools.inspector.rows().len(),
+            1
+        );
+        update(&mut st, Message::DevtoolsInspectorExpand);
+        assert_eq!(
+            st.active_session().unwrap().devtools.inspector.rows().len(),
+            4
+        );
+        // The `▸`/`▾` click affordance addresses a node by id: collapsing
+        // Padding #2 hides only its own child.
+        update(&mut st, Message::DevtoolsInspectorToggleNode(2));
+        assert_eq!(
+            st.active_session().unwrap().devtools.inspector.rows().len(),
+            3
+        );
+
+        // A failure from the bridge surfaces verbatim and frees the pull.
+        update(
+            &mut st,
+            Message::DevtoolsInspector(id, InspectorEvent::Failed("connection closed".to_string())),
+        );
+        assert_eq!(
+            st.active_session().unwrap().devtools.inspector.error(),
+            Some("connection closed")
+        );
+    }
+
+    #[test]
+    fn inspector_messages_are_noops_with_no_active_session() {
+        let mut st = welcome();
+        for msg in [
+            Message::DevtoolsInspectorSelect(1),
+            Message::DevtoolsInspectorSelectRow(0),
+            Message::DevtoolsInspectorExpand,
+            Message::DevtoolsInspectorCollapse,
+            Message::DevtoolsInspectorToggleNode(1),
+            Message::DevtoolsInspectorFocusCycle,
+            Message::DevtoolsInspectorRefresh,
+        ] {
+            let out = update(&mut st, msg.clone());
+            assert!(!out.redraw, "{msg:?} should be a no-op");
+            assert_eq!(out.effect, None, "{msg:?} should request nothing");
+        }
     }
 
     // ── Responsive breakpoints ───────────────────────────────────────────────
@@ -2842,5 +4478,231 @@ mod tests {
         update(&mut st, Message::OpenHelpOverlay);
         let out = update(&mut st, Message::OpenHelpOverlay);
         assert!(!out.redraw);
+    }
+
+    // ── Embedded MCP server ───────────────────────────────────────────────────
+
+    /// A handle for a server of `generation` that was "started" without
+    /// spawning anything — enough to exercise the two reports the server
+    /// sends back.
+    fn mcp_handle(generation: u64) -> crate::supervise::McpServerHandle {
+        crate::supervise::McpServerHandle::starting(
+            generation,
+            tokio_util::sync::CancellationToken::new(),
+            frust_mcp::ClientRegistry::new(),
+        )
+    }
+
+    #[test]
+    fn the_bound_port_report_promotes_starting_to_listening() {
+        let mut st = welcome();
+        st.mcp = Some(mcp_handle(0));
+        assert_eq!(st.mcp_status(), crate::supervise::McpStatus::Starting);
+
+        let out = update(&mut st, Message::McpListening(0, 4848));
+        assert!(out.redraw);
+        assert_eq!(
+            st.mcp_status(),
+            crate::supervise::McpStatus::Listening {
+                port: 4848,
+                clients: 0
+            }
+        );
+        // The same report again changes nothing.
+        assert!(!update(&mut st, Message::McpListening(0, 4848)).redraw);
+    }
+
+    #[test]
+    fn a_stopped_server_clears_the_handle_and_an_error_toasts() {
+        let mut st = welcome();
+        st.mcp = Some(mcp_handle(0));
+        let out = update(&mut st, Message::McpStopped(0, None));
+        assert!(out.redraw);
+        assert_eq!(st.mcp_status(), crate::supervise::McpStatus::Stopped);
+        assert!(st.toasts.items.is_empty(), "a clean stop is not an error");
+
+        st.mcp = Some(mcp_handle(1));
+        update(
+            &mut st,
+            Message::McpStopped(1, Some("address already in use".to_string())),
+        );
+        assert_eq!(st.mcp_status(), crate::supervise::McpStatus::Stopped);
+        assert_eq!(st.toasts.items.len(), 1);
+        assert!(st.toasts.items[0].text.contains("address already in use"));
+        assert_eq!(
+            st.mcp_error.as_deref(),
+            Some("address already in use"),
+            "the reason is retained for the sidebar row / panel, not just toasted"
+        );
+    }
+
+    /// The §B13 toggle: one message, two directions, each pushed out as the
+    /// effect only the runner can enact.
+    #[test]
+    fn the_toggle_starts_a_stopped_server_and_stops_a_running_one() {
+        let mut st = welcome();
+        let out = update(&mut st, Message::ToggleMcpServer);
+        assert!(out.redraw);
+        assert_eq!(out.effect, Some(Effect::StartMcpServer));
+        assert!(
+            st.mcp.is_none(),
+            "the pure core never builds the live server handle itself"
+        );
+
+        st.mcp = Some(mcp_handle(0));
+        let out = update(&mut st, Message::ToggleMcpServer);
+        assert!(out.redraw);
+        assert_eq!(out.effect, Some(Effect::StopMcpServer));
+    }
+
+    /// The race the generation tag exists for: the user
+    /// stops server A and immediately starts B, while A is still inside
+    /// graceful shutdown. A's late reports name a generation the model no
+    /// longer holds and must not touch B — clearing B's handle would drop its
+    /// only `CancellationToken`, and dropping one does **not** cancel it, so
+    /// B would be left listening with nothing able to stop it and every later
+    /// start failing on the address.
+    #[test]
+    fn a_superseded_servers_late_reports_never_touch_its_successor() {
+        let mut st = welcome();
+        // A (generation 0) was stopped — `stop_mcp` took its handle — and B
+        // (generation 1) was started in the window before A's task wound down.
+        st.mcp = Some(mcp_handle(1));
+        update(&mut st, Message::McpListening(1, 4848));
+
+        // A's stale bound-port report does not restamp B's port…
+        let out = update(&mut st, Message::McpListening(0, 9999));
+        assert!(!out.redraw);
+        assert_eq!(
+            st.mcp_status(),
+            crate::supervise::McpStatus::Listening {
+                port: 4848,
+                clients: 0
+            }
+        );
+
+        // …and A's stale stop report leaves B installed, listening, and
+        // stoppable, with no error surfaced against it.
+        let out = update(&mut st, Message::McpStopped(0, None));
+        assert!(!out.redraw);
+        let out = update(
+            &mut st,
+            Message::McpStopped(0, Some("address already in use".to_string())),
+        );
+        assert!(!out.redraw);
+        assert_eq!(
+            st.mcp_status(),
+            crate::supervise::McpStatus::Listening {
+                port: 4848,
+                clients: 0
+            }
+        );
+        assert!(st.toasts.items.is_empty());
+        assert_eq!(st.mcp_error, None);
+        assert_eq!(
+            st.mcp.as_ref().map(|handle| handle.generation()),
+            Some(1),
+            "B's own handle — the one carrying its cancellation token — is still installed"
+        );
+        // Which is what keeps B stoppable: the toggle still reaches it, and
+        // the handle the runner would cancel is B's.
+        assert_eq!(
+            update(&mut st, Message::ToggleMcpServer).effect,
+            Some(Effect::StopMcpServer)
+        );
+
+        // B's *own* stop report, by contrast, is applied.
+        assert!(update(&mut st, Message::McpStopped(1, None)).redraw);
+        assert_eq!(st.mcp_status(), crate::supervise::McpStatus::Stopped);
+    }
+
+    /// A failed start stays visible until the next attempt — and the next
+    /// attempt clears it, so a retry never renders "starting…" beside the
+    /// previous run's reason.
+    #[test]
+    fn requesting_a_start_clears_the_previous_failure_reason() {
+        let mut st = welcome();
+        st.mcp = Some(mcp_handle(0));
+        update(&mut st, Message::McpStopped(0, Some("boom".to_string())));
+        assert_eq!(st.mcp_error.as_deref(), Some("boom"));
+
+        update(&mut st, Message::ToggleMcpServer);
+        assert_eq!(st.mcp_error, None);
+    }
+
+    #[test]
+    fn the_mcp_panel_opens_and_closes_idempotently() {
+        let mut st = welcome();
+        assert!(update(&mut st, Message::OpenMcpPanel).redraw);
+        assert!(st.mcp_panel_open);
+        assert!(matches!(
+            st.active_modal(),
+            Some(super::super::ActiveModal::McpPanel)
+        ));
+        assert!(!update(&mut st, Message::OpenMcpPanel).redraw);
+
+        assert!(update(&mut st, Message::CloseMcpPanel).redraw);
+        assert!(!st.mcp_panel_open);
+        assert!(!update(&mut st, Message::CloseMcpPanel).redraw);
+    }
+
+    /// Closing the panel is never a stop: the server outlives the view of it.
+    #[test]
+    fn closing_the_panel_leaves_the_server_running() {
+        let mut st = welcome();
+        st.mcp = Some(mcp_handle(0));
+        st.mcp_panel_open = true;
+        let out = update(&mut st, Message::CloseMcpPanel);
+        assert!(out.effect.is_none());
+        assert_eq!(st.mcp_status(), crate::supervise::McpStatus::Starting);
+    }
+
+    /// The open panel reads its client list live off the registry, so the
+    /// tick is what keeps it current — the one thing that dirties a frame
+    /// with no session running and no toast alive.
+    #[test]
+    fn the_open_mcp_panel_keeps_the_frame_ticking() {
+        let mut st = welcome();
+        assert!(!st.animating());
+        assert!(!update(&mut st, Message::Tick).redraw);
+
+        st.mcp_panel_open = true;
+        assert!(st.animating());
+        assert!(update(&mut st, Message::Tick).redraw);
+    }
+
+    /// An MCP command reaching the pure core (nothing is serving it) drops
+    /// its reply channel rather than answering — the backend reports that as
+    /// a typed error, never as a fabricated value.
+    #[test]
+    fn an_mcp_command_is_a_noop_in_the_pure_core() {
+        let mut st = welcome();
+        let (backend_tx, mut backend_rx) = tokio::sync::mpsc::unbounded_channel();
+        let backend = crate::supervise::TuiSessionBackend::new(
+            backend_tx,
+            std::sync::Arc::new(frust_drive::process::FakeProcessRunner::new()),
+        );
+        let asking = std::thread::spawn(move || {
+            use frust_mcp::SessionBackend;
+            backend.sessions()
+        });
+
+        let command = loop {
+            match backend_rx.try_recv() {
+                Ok(Message::Mcp(command)) => break command,
+                Ok(_) => {}
+                Err(_) => std::thread::yield_now(),
+            }
+        };
+        let out = update(&mut st, Message::Mcp(command));
+        assert!(!out.redraw);
+        assert!(out.effect.is_none());
+        assert!(
+            asking
+                .join()
+                .expect("the asking thread panicked")
+                .is_empty(),
+            "an unserved command yields nothing, never an invented session"
+        );
     }
 }

@@ -650,6 +650,8 @@ impl<State: 'static> Widget for CupertinoAlertDialogWidget<State> {
             },
         );
     }
+
+    crate::authoring::visit_children!(title, message, actions);
 }
 
 #[cfg(test)]

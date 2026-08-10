@@ -155,6 +155,8 @@ impl Widget for SizedBoxWidget {
             pod.semantics_child(ctx);
         }
     }
+
+    crate::authoring::visit_children!(child);
 }
 
 #[cfg(test)]

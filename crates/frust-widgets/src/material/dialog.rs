@@ -636,6 +636,8 @@ impl Widget for DialogWidget {
             },
         );
     }
+
+    crate::authoring::visit_children!(title, body, actions);
 }
 
 #[cfg(test)]

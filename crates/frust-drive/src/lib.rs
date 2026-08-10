@@ -15,7 +15,12 @@ pub mod android_id;
 pub mod android_run;
 pub mod build_info;
 pub mod cargo_manifest;
+/// The desktop `cargo run` launch plan shared by any front-end previewing a
+/// Frust project on the host (`frust-tui`'s own desktop session builder is
+/// not converged onto this module yet — see the module doc).
+pub mod desktop_run;
 pub mod devices;
+pub mod devtools_client;
 pub mod doctor;
 /// Process-wide termination handling (the single SIGINT/SIGTERM/SIGHUP owner
 /// and the secret-file scrub it runs). Internal: it is machinery the pipelines
@@ -25,6 +30,12 @@ pub mod ios_build;
 pub mod ios_id;
 pub mod ios_run;
 pub mod manifest;
+/// Streamable system-metrics collectors (per-process CPU/RSS/thermal,
+/// coarse network counters), sampled tool-side via `/proc`+`/sys` on desktop
+/// Linux or `adb` on Android — distinct from `devtools_client`'s in-app wire
+/// protocol, this reads OS-level process/host stats a running app never
+/// reports itself.
+pub mod metrics;
 pub mod plugin;
 pub mod process;
 pub mod scaffold;

@@ -52,6 +52,9 @@ pub enum ActiveModal<'a> {
     ProjectSwitcher,
     /// The doctor panel (`state.doctor_panel_open`).
     DoctorPanel,
+    /// The MCP panel (`state.mcp_panel_open`, `m`) — the embedded MCP
+    /// server's state plus its connected-client list (workbook §B13).
+    McpPanel,
     /// The build-launcher modal (`state.build_launcher`).
     BuildLauncher(&'a BuildLauncher),
     /// The clean-confirm dialog (`state.clean_confirm`), carrying the target
@@ -82,6 +85,8 @@ impl AppState {
             Some(ActiveModal::ProjectSwitcher)
         } else if self.doctor_panel_open {
             Some(ActiveModal::DoctorPanel)
+        } else if self.mcp_panel_open {
+            Some(ActiveModal::McpPanel)
         } else if let Some(launcher) = &self.build_launcher {
             Some(ActiveModal::BuildLauncher(launcher))
         } else {

@@ -12,7 +12,9 @@ mod bootstrap;
 mod build_launcher;
 mod context_menu;
 mod create_wizard;
+mod devtools;
 mod doctor;
+mod logstyle;
 mod message;
 mod modal;
 pub mod palette;
@@ -31,27 +33,47 @@ pub use bootstrap::{BootstrapNode, BootstrapState, BootstrapWizard};
 pub use build_launcher::{ArtifactKind, BuildFocus, BuildLauncher, BuildSpec, BuildTargetSpec};
 pub use context_menu::{ContextMenu, MenuEntry};
 pub use create_wizard::{ArchCard, CreateWizard, WizardAdvance, WizardStep};
+pub use devtools::{
+    ConnEvent, ConnState, CpuPoint, DevtoolsLaunch, DevtoolsPhase, DevtoolsState, DevtoolsTab,
+    FRAME_RING_CAP, INSPECTOR_AUTO_EXPAND_DEPTH, InspectorEvent, InspectorFocus, InspectorRow,
+    InspectorTab, METRICS_RING_CAP, MetricsIdentity, MetricsState, NetRatePoint, NetTotals,
+    PERF_WINDOW, PerfFocus, PerfFrame, PerfPhases, PerfSource, PerfStats, PerformanceTab, RssPoint,
+    SamplingState, ThermalPoint, network_honesty_note, perf_stats, perf_window, select_perf_source,
+};
 pub use doctor::{DoctorCheck, DoctorState};
+pub use logstyle::{
+    LEVEL_FILTER_SEGMENTS, LevelFilter, LineMeta, LineRole, LogLevel, LogSource, PanicBlock,
+    SOURCE_TAG_WIDTH, classify_level, classify_source, hms_at,
+};
 pub use message::{ContextTarget, DragKind, Message, RegionId};
 pub use modal::ActiveModal;
 pub use palette::{Palette, PaletteCommand};
 pub use perf::{FrameSummary, PerfLine, PerfPanel, RawFrame, StartupSummary, parse_perf_line};
 pub use persist::{
     Settings, load_recent_projects, load_settings, merge_recent_and_detected,
-    record_recent_project, save_follow_tail_default, save_mouse_capture, save_sidebar_width,
+    record_recent_project, save_mouse_capture, save_sidebar_width,
 };
 pub use run_config::{DeviceRow, RunConfig, RunFocus, RunTarget};
-pub use session_view::{
-    LineSelection, LogBuffer, LogLevel, Scroll, SessionView, detect_level, line_matches, strip_ansi,
-};
+pub use session_view::{LineSelection, LogBuffer, Scroll, SessionView, line_matches, strip_ansi};
 pub use state::{
     AppState, SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, Screen, SearchState,
     clamp_sidebar_width,
 };
 pub use toast::{Toast, ToastKind, Toasts};
-pub use update::{Effect, Outcome, update};
+pub use update::{DevtoolsTarget, Effect, MetricsTarget, Outcome, update};
 
+use frust_mcp::{ClientRegistry, SharedBackend};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
+
+use crate::supervise::{McpServerHandle, McpStatus};
+
+/// The port the embedded MCP server binds when the workbench starts one —
+/// `frust-mcp`'s own default, so an agent configured for Frust's conventional
+/// MCP address finds the embedded server there. `0` lets the OS assign an
+/// ephemeral port instead (what the tests use).
+pub const DEFAULT_MCP_PORT: u16 = frust_mcp::DEFAULT_MCP_PORT;
 
 /// Owns the model and the single mpsc channel every asynchronous producer
 /// (session supervisors, preflight tasks) sends into.
@@ -65,6 +87,9 @@ pub struct Engine {
     pub state: AppState,
     tx: UnboundedSender<Message>,
     rx: Option<UnboundedReceiver<Message>>,
+    /// The tag the next [`Self::start_mcp`] stamps its server and that
+    /// server's reports with (see [`McpServerHandle::generation`]).
+    next_mcp_generation: u64,
 }
 
 impl Engine {
@@ -75,6 +100,7 @@ impl Engine {
             state,
             tx,
             rx: Some(rx),
+            next_mcp_generation: 0,
         }
     }
 
@@ -94,6 +120,89 @@ impl Engine {
     /// The single mutation point: apply one message to the model.
     pub fn handle(&mut self, msg: Message) -> Outcome {
         update(&mut self.state, msg)
+    }
+
+    /// Start an embedded MCP server over `backend`, bound to
+    /// `127.0.0.1:port` (`0` = OS-assigned).
+    ///
+    /// Returns `false` — and starts nothing — when one is already running.
+    /// The server is spawned on the **current** tokio runtime, so this must
+    /// be called from inside it (the workbench's event loop always is).
+    ///
+    /// This and [`Self::stop_mcp`] are the only two mutations that do not go
+    /// through [`Self::handle`]: the server handle is a live resource, not a
+    /// value the pure [`update`] could construct. Everything the server then
+    /// reports about itself — the port it bound, the fact that it stopped —
+    /// comes back as an ordinary [`Message`] and *is* applied through
+    /// `update`.
+    ///
+    /// Each start mints a fresh **generation** and stamps it on the handle and
+    /// on both of the server's reports, so a previous server still winding
+    /// down cannot have its late report applied to this one (see
+    /// [`McpServerHandle::generation`]).
+    pub fn start_mcp(&mut self, backend: SharedBackend, port: u16) -> bool {
+        if self.state.mcp.is_some() {
+            return false;
+        }
+        let generation = self.next_mcp_generation;
+        self.next_mcp_generation += 1;
+        let cancel = CancellationToken::new();
+        let registry = ClientRegistry::new();
+        let (ready_tx, ready_rx) = oneshot::channel();
+
+        let serving = tokio::spawn(frust_mcp::serve_embedded(
+            backend,
+            registry.clone(),
+            port,
+            Some(ready_tx),
+            cancel.clone(),
+        ));
+        // Two tasks rather than one: the ready signal has to be observed
+        // *while* the server runs, and the server future only resolves once
+        // it has stopped.
+        let listening_tx = self.tx.clone();
+        tokio::spawn(async move {
+            if let Ok(addr) = ready_rx.await {
+                let _ = listening_tx.send(Message::McpListening(generation, addr.port()));
+            }
+        });
+        let stopped_tx = self.tx.clone();
+        tokio::spawn(async move {
+            let error = match serving.await {
+                Ok(Ok(())) => None,
+                Ok(Err(err)) => Some(format!("{err:#}")),
+                Err(err) => Some(format!("the MCP server task failed: {err}")),
+            };
+            let _ = stopped_tx.send(Message::McpStopped(generation, error));
+        });
+
+        self.state.mcp = Some(McpServerHandle::starting(generation, cancel, registry));
+        true
+    }
+
+    /// Stop the embedded MCP server, if one is running; returns whether there
+    /// was one.
+    ///
+    /// The handle is dropped here and the cancellation is what actually
+    /// closes the listener — the server's own [`Message::McpStopped`] follows
+    /// once its task has wound down, and finds nothing left to clear (or a
+    /// *newer* server it does not name, which its generation tag makes it
+    /// leave alone). A caller that must know the port is free again (a
+    /// restart on the *same* fixed port) waits for that message.
+    pub fn stop_mcp(&mut self) -> bool {
+        match self.state.mcp.take() {
+            Some(handle) => {
+                handle.cancel();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// What the embedded MCP server is doing — [`AppState::mcp_status`],
+    /// reachable from an `Engine` handle.
+    pub fn mcp_status(&self) -> McpStatus {
+        self.state.mcp_status()
     }
 }
 

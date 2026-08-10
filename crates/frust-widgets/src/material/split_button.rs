@@ -448,6 +448,8 @@ impl Widget for SplitButtonWidget {
             },
         );
     }
+
+    crate::authoring::visit_children!(label);
 }
 
 #[cfg(test)]

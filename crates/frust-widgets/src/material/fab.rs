@@ -581,6 +581,8 @@ impl Widget for FabWidget {
             node.add_action(Action::Click);
         });
     }
+
+    crate::authoring::visit_children!(icon, visible_label);
 }
 
 #[cfg(test)]

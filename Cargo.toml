@@ -346,6 +346,27 @@ turso = { version = "=0.7.2", default-features = false }
 reactive_graph = "0.2"
 any_spawner = "0.3"
 tokio = { version = "1", default-features = false }
+# frust-mcp: rmcp Streamable-HTTP MCP server, bound to loopback only
+# (docs/CLI_ARCHITECTURE.md's frust-mcp section). `default-features = false`
+# trims rmcp's client/reqwest/auth/elicitation surface this tool-only server
+# never uses; `server` + `transport-streamable-http-server` are the
+# transport it runs; `macros` pulls in the `#[tool_router]`/`#[tool]`/
+# `#[tool_handler]` attribute macros the crate's tools are built from.
+# Pinned to the 1.7 minor per the Version-Pin Policy; the lockfile resolves
+# 1.8.0. Tripwire: `cargo test -p frust-mcp`.
+rmcp = { version = "1.7", default-features = false, features = [
+    "server",
+    "transport-streamable-http-server",
+    "macros",
+] }
+# frust-mcp's HTTP layer — the transport rmcp's `StreamableHttpService`
+# nests into.
+axum = "0.8"
+# frust-mcp: binary-payload encoding (e.g. devtools screenshots, a later
+# tool family) for MCP tool results.
+base64 = "0.22"
+# frust-mcp: the `CancellationToken` graceful-shutdown seam wired to ctrl-c.
+tokio-util = "0.7"
 # intra-workspace
 frust-core = { path = "crates/frust-core" }
 frust-scene = { path = "crates/frust-scene" }

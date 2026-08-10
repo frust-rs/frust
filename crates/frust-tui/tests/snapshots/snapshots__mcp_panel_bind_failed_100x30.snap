@@ -1,0 +1,25 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: "render_mcp_panel(100, 30, &McpStatus::Stopped, &[],\nSome(\"binding 127.0.0.1:4848 failed: Address already in use (os error 98)\"),)"
+---
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                     ╭ MCP server ────────────────────────────────────────────╮                     
+                     │                                                        │▓▓                   
+                     │  ✗ the MCP server stopped                              │▓▓                   
+                     │  binding 127.0.0.1:4848 failed: Address already in     │▓▓                   
+                     │  use (os error 98)                                     │▓▓                   
+                     │                                                        │▓▓                   
+                     │  no clients connected                                  │▓▓                   
+                     │                                                        │▓▓                   
+                     │   Start     Close                                      │▓▓                   
+                     │  s start · Esc close                                   │▓▓                   
+                     ╰────────────────────────────────────────────────────────╯▓▓                   
+                       ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓

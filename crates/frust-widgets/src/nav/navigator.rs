@@ -1315,6 +1315,20 @@ impl EdgeSwipe {
     }
 }
 
+impl<State: 'static> crate::authoring::VisitPods for PageEntry<State> {
+    fn visit_pods(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+        visitor(&self.pod);
+    }
+}
+
+impl<State: 'static> crate::authoring::VisitPods for ActiveTransition<State> {
+    fn visit_pods(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+        // Only the stashed (removed-but-still-animating) page: a transition's
+        // other participants are still in `pages`.
+        crate::authoring::VisitPods::visit_pods(&self.stashed, visitor);
+    }
+}
+
 /// The retained widget for a [`NavigatorView`]: owns the page stack and applies
 /// the [`NavigatorController`]'s queued ops at rebuild. See the [module docs](self).
 pub struct NavigatorWidget<State: 'static> {
@@ -3053,6 +3067,11 @@ impl<State: 'static> Widget for NavigatorWidget<State> {
             self.pages[i].pod.semantics_child(ctx);
         }
     }
+
+    // Every RETAINED page, not just the ones input or semantics reach:
+    // an inspector's job is to show what the tree holds, including a
+    // covered page and the stashed page of a running transition.
+    crate::authoring::visit_children!(pages, transition);
 }
 
 /// The cleared/inactive IME surface the navigator publishes after a page switch so

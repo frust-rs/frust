@@ -18,6 +18,20 @@ path = "src/lib.rs"
 # detection and session supervision consume the same pipelines the `frust`
 # CLI does.
 frust-drive = { path = "../frust-drive" }
+# The devtools wire types the DevTools mode speaks (`Discovery`, `FrameStats`,
+# `Capability`) — the protocol leaf is the one sanctioned crossing of the
+# tooling-isolation charter (docs/DEVTOOLS_ARCHITECTURE.md): it depends on
+# `serde`/`serde_json` only, so pulling it in never drags the framework side's
+# graph along. `frust-devtools` itself (the framework-side service) stays out
+# of this crate's graph entirely.
+frust-devtools-protocol = { path = "../frust-devtools-protocol" }
+# The embedded MCP server: `frust_mcp::serve_embedded` plus the
+# `SessionBackend` seam `supervise::mcp_backend` implements over this
+# workbench's own sessions, so an agent drives the SAME sessions the user
+# sees. Tooling→tooling only (both crates are under the same
+# tooling-isolation charter — docs/ARCHITECTURE.md); it drags in no framework
+# crate.
+frust-mcp = { path = "../frust-mcp" }
 anyhow.workspace = true
 # `thiserror` backs the supervisor's matched `LaunchError` (CODE_STANDARDS'
 # "errors callers match on" rule); already a workspace dependency.
@@ -35,12 +49,21 @@ toml_edit.workspace = true
 # The workspace `tokio` pin is `default-features = false`; the TUI crate enables
 # exactly the features its async event loop needs (nothing reaches the
 # framework's `tokio` usage).
+# `net` is for the embedded MCP server: `frust_mcp::serve_embedded` binds its
+# loopback `TcpListener` on *this* crate's runtime, so the feature the code
+# path needs is declared here rather than inherited from another member's
+# unification.
 tokio = { workspace = true, features = [
     "rt-multi-thread",
     "macros",
+    "net",
     "time",
     "sync",
 ] }
+# The embedded MCP server's cancellation seam (`CancellationToken`), the same
+# handle `frust_mcp::serve_embedded` shuts down on. Pin lives in the root
+# manifest (Version-Pin Policy).
+tokio-util.workspace = true
 # `StreamExt::next` for the crossterm `EventStream` in the `select!` loop.
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 

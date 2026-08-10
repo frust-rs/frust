@@ -271,6 +271,20 @@ pub trait AppTree {
     fn take_retired_platform_views(&mut self) -> Vec<u64> {
         Vec::new()
     }
+
+    /// A read-only, pre-order snapshot of the retained tree (delegates to
+    /// [`RenderRoot::inspect`]) — the one thing the devtools
+    /// [`DevtoolsUi`](crate::devtools::DevtoolsUi) hop needs from a mobile
+    /// shell, whose handle owns its tree only as a `Box<dyn AppTree>`.
+    ///
+    /// Gated on the `devtools` feature: with devtools compiled out there is no
+    /// caller, and the seam should not exist. Defaulted to an empty `Vec`
+    /// like the getters above, so an [`AppTree`] impl outside this crate still
+    /// compiles; the concrete tree overrides it.
+    #[cfg(feature = "devtools")]
+    fn inspect(&self) -> Vec<frust_core::InspectNode> {
+        Vec::new()
+    }
 }
 
 /// Concrete [`AppTree`] holding one app's state, logic and retained root.
@@ -383,6 +397,11 @@ where
 
     fn take_retired_platform_views(&mut self) -> Vec<u64> {
         self.root.take_retired_platform_views()
+    }
+
+    #[cfg(feature = "devtools")]
+    fn inspect(&self) -> Vec<frust_core::InspectNode> {
+        self.root.inspect()
     }
 }
 

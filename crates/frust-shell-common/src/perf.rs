@@ -438,6 +438,16 @@ impl FrameStats {
     /// `skipped=1`) so a harness can compute honest frame pacing across the
     /// mobile frame gate.
     pub fn record(&mut self, passes: FramePasses) {
+        // Devtools frame stats fan out BEFORE the perf switch below: a devtools
+        // client subscribing to them is its own opt-in, independent of
+        // `FRUST_TRACE`. This is also the one site every shell's frame pipeline
+        // already funnels through — desktop, Android and iOS, inline and
+        // render-thread-split alike — so the publish has no per-shell copy to
+        // drift. Non-blocking, and one relaxed atomic load with no service
+        // running (see `crate::devtools::publish_frame`).
+        #[cfg(feature = "devtools")]
+        crate::devtools::publish_frame(&passes);
+
         if !self.enabled {
             return;
         }

@@ -380,6 +380,13 @@ struct FabMenuItemPod {
     on_select: crate::authoring::ErasedCallback,
 }
 
+impl crate::authoring::VisitPods for FabMenuItemPod {
+    fn visit_pods(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+        visitor(&self.icon);
+        visitor(&self.label);
+    }
+}
+
 /// The retained widget for a [`FabMenuView`]. See the [module docs](self).
 pub struct FabMenuWidget {
     icon: ChildPod,
@@ -796,6 +803,8 @@ impl Widget for FabMenuWidget {
             });
         }
     }
+
+    crate::authoring::visit_children!(items, icon);
 }
 
 #[cfg(test)]

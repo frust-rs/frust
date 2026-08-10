@@ -1,0 +1,34 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: "render_to_string(100, 30, &panic_backtrace_state())"
+---
+⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
+━━━━━━━━                                                                                            
+                                                                                                    
+ PROJECTS                │huddle:  1 ◌ desktop                                                      
+  ▸ huddle               │ E 12:05:02 [app]    thread 'main' panicked at src/main.rs:42:9:          
+                         │                     called `Option::unwrap()` on a `None` value          
+ DEVICES ↻ r             │                     ▶ 2 frames… (RUST_BACKTRACE=1) — click or z to expand
+   none found            │   12:05:03 [app]    app: recovering                                      
+                         │                                                                          
+ SESSIONS                │                                                                          
+   huddle                │                                                                          
+   ▸ ◌ desktop           │                                                                          
+                         │                                                                          
+ ACTIONS                 │                                                                          
+   New project · n       │                                                                          
+   Add plugin · a        │                                                                          
+   Doctor · d            │                                                                          
+   Build · b             │                                                                          
+   Clean · c             │                                                                          
+   MCP off · M           │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │● follow  ·  wrap:off       x stop · f follow · w wrap · / search · z fold
+● 1 running  │  r run · b build · d doctor · ⌘ palette · ? help                            [mouse ✓]

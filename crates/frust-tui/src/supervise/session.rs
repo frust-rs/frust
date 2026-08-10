@@ -78,6 +78,17 @@ impl SessionSpec {
         for arg in self.build.mode.cargo_profile_arg() {
             args.push((*arg).to_string());
         }
+        // Thread the mode's cargo features (`frust/perf-trace` +
+        // `frust/devtools` for debug/profile, none for release) exactly like
+        // the CLI's desktop fallback and the device pipelines do —
+        // `BuildMode::cargo_features` is the single mode→feature source.
+        // Without these the spawned preview compiles the devtools service and
+        // perf instrumentation OUT, so the workbench's DevTools mode would
+        // wait forever for a discovery line that can never be printed.
+        for feature in self.build.mode.cargo_features() {
+            args.push("--features".to_string());
+            args.push((*feature).to_string());
+        }
 
         // Every `--define KEY=VALUE` becomes an env var for the spawned
         // preview, matching on-device behavior. Sorted by key so the derived
@@ -245,6 +256,14 @@ pub enum SessionEventKind {
     /// can show that a session's log is missing lines the consumer couldn't
     /// keep up with.
     Dropped(u64),
+    /// A newly parsed build/install/launch phase label
+    /// (`super::progress::phase_from_output_line`), latest-wins across a
+    /// batch (see `super::supervisor::feed_lines`) — only ever sent while
+    /// the session is still `Building`/`Installing`. The engine is the one
+    /// that clears a session's displayed label once a later [`State`](Self::State)
+    /// event reports a non-transient state; this event never carries a
+    /// clearing `None` itself (see `super::progress`'s module docs).
+    Phase(super::progress::PhaseLabel),
 }
 
 /// Tolerant, forward-only inference of a lifecycle phase from one streamed
@@ -310,7 +329,16 @@ mod tests {
         };
         let plan = spec.launch_plan().unwrap();
         assert_eq!(plan.program, "cargo");
-        assert_eq!(plan.args, vec!["run".to_string()]);
+        assert_eq!(
+            plan.args,
+            vec![
+                "run".to_string(),
+                "--features".to_string(),
+                "frust/perf-trace".to_string(),
+                "--features".to_string(),
+                "frust/devtools".to_string(),
+            ]
+        );
         assert_eq!(plan.cwd, PathBuf::from("/tmp/app"));
         assert!(plan.env.is_empty());
     }
@@ -323,7 +351,15 @@ mod tests {
             build: build(BuildMode::Release),
         };
         let plan = spec.launch_plan().unwrap();
-        assert_eq!(plan.args, vec!["run".to_string(), "--release".to_string()]);
+        assert_eq!(
+            plan.args,
+            vec![
+                "run".to_string(),
+                "--release".to_string(),
+                "--features".to_string(),
+                "lean".to_string(),
+            ]
+        );
     }
 
     #[test]

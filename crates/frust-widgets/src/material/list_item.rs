@@ -495,6 +495,8 @@ impl Widget for ListItemWidget {
             },
         );
     }
+
+    crate::authoring::visit_children!(children);
 }
 
 #[cfg(test)]

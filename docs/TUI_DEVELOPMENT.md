@@ -14,6 +14,20 @@ LAW; re-run the row's tripwire after touching it, and never run a blind `cargo u
 |---|---|---|
 | `ratatui 0.30` / `crossterm 0.29` / `ansi-to-tui 8.0.1` minor | `frust-tui`'s render/terminal/log stack, pre-1.0 churn expected | `cargo test -p frust-tui` |
 | `toml_edit 0.25` minor (shared with the CLI unit's `frust-drive`, see [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md)) | `frust-tui`'s config persistence and `frust-drive::plugin`'s format-preserving Cargo.toml/manifest edits | `cargo test -p frust-tui` && `cargo test -p frust-drive` |
+| `tokio-util 0.7` (shared with the CLI unit's `frust-mcp`, see [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md)) | The embedded MCP server's `CancellationToken`, the same handle `frust_mcp::serve_embedded` shuts down on | `cargo test -p frust-tui` && `cargo test -p frust-mcp` |
+
+`frust-tui`'s own `tokio` feature set gained `net` (a feature add, not a version bump) so the
+embedded MCP server's loopback `TcpListener` binds on this crate's own runtime rather than
+depending on another workspace member's feature unification.
+
+## Testing the embedded MCP server
+
+`crates/frust-tui/tests/mcp_embedded.rs` drives the embedded server end to end against a real
+workbench event loop — a real Streamable-HTTP client against a real `frust_mcp::serve_embedded`,
+observed through the same `AppState` the workbench renders, over a scripted `FakeProcessRunner`
+(no process is ever really spawned). It runs under the standard `cargo test -p frust-tui` gate,
+with no `#[ignore]`. Every wait is on a produced signal (a ready port, an HTTP response, an engine
+message, or a bounded yield-until-condition poll) rather than a sleep.
 
 ## See Also
 

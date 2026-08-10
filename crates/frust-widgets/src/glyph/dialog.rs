@@ -1080,6 +1080,8 @@ impl Widget for GlyphDialogWidget {
             },
         );
     }
+
+    crate::authoring::visit_children!(title, body, actions);
 }
 
 #[cfg(test)]

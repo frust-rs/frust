@@ -10,11 +10,15 @@ use std::path::PathBuf;
 
 use frust_drive::devices::Device;
 use frust_drive::doctor::DoctorReport;
+use frust_drive::metrics::MetricsSample;
 use frust_drive::plugin::AddReport;
 
 use super::build_launcher::BuildFocus;
+use super::devtools::{ConnEvent, DevtoolsLaunch, InspectorEvent};
 use super::doctor::DoctorCheck;
+use super::logstyle::LevelFilter;
 use super::run_config::RunFocus;
+use crate::supervise::mcp_backend::McpCommand;
 use crate::supervise::{SessionEvent, SessionId};
 
 /// A semantic id for a per-frame mouse region.
@@ -156,6 +160,49 @@ pub enum RegionId {
     /// The keyboard/help overlay — a click anywhere in the panel
     /// closes it (mouse parity for `Esc`).
     HelpClose,
+    /// A panic/backtrace block's `▶ n frames…` fold affordance row (the
+    /// block's identity: the absolute index of its panic-header line); click
+    /// toggles its collapsed state.
+    LogFoldToggle(u64),
+    /// A segment of the log status bar's level-filter chip (its full-pill
+    /// form); click jumps the active session straight to it.
+    LevelFilterSegment(LevelFilter),
+    /// The level-filter chip's degraded (compact/minimal) single-token form
+    /// — a narrow terminal collapses the segmented pill into one region;
+    /// click cycles the filter (`Message::CycleLevelFilter(1)`, same as the
+    /// `l` key) rather than jumping to a specific segment, since there's no
+    /// room to show every segment to jump to (see
+    /// `ui::views::sessions::render_log_status`'s graduated chip degrade).
+    LevelFilterChip,
+    /// A DevTools tab pill (0-based index into
+    /// [`super::DevtoolsTab::ALL`]); click selects that tab (keyboard parity:
+    /// `1`–`4`).
+    DevtoolsTabPill(usize),
+    /// The DevTools failed-state Retry button (keyboard parity: `r`).
+    DevtoolsRetry,
+    /// The DevTools status row's "back to log" affordance (keyboard parity:
+    /// `Esc` / `d`).
+    DevtoolsBack,
+    /// A Performance-tab chart column, identified by the frame that column
+    /// drew ([`super::PerfFrame::n`], captured at render time — *not* its
+    /// position in the window, which the next frame batch would re-point at
+    /// another frame); click selects that frame (keyboard parity: `←`/`→`
+    /// scrubbing to it).
+    DevtoolsPerfColumn(u64),
+    /// An Inspector-tab tree row (0-based index into
+    /// [`super::InspectorTab::rows`]); click selects it (keyboard parity:
+    /// `↑↓`/`j`/`k`).
+    DevtoolsInspectorRow(usize),
+    /// An Inspector-tab row's `▸`/`▾` affordance (the same row index); click
+    /// expands/collapses that node (keyboard parity: `→`/`←`).
+    DevtoolsInspectorTwisty(usize),
+    /// The sidebar ACTIONS "MCP" row (workbook §B13); click starts the
+    /// embedded MCP server, or stops the running one (keyboard parity: `M`).
+    McpToggle,
+    /// The MCP panel's Start/Stop button (keyboard parity: `s`).
+    McpPanelToggleServer,
+    /// The MCP panel's Close button (keyboard parity: `Esc` / `m`).
+    McpPanelClose,
 }
 
 /// The kind of an in-progress drag, identifying which draggable chrome the
@@ -202,7 +249,12 @@ pub enum ContextTarget {
 }
 
 /// A TEA message: the only way `AppState` ever changes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` but not `Eq`: [`Message::DevtoolsInspector`] carries the
+/// wire's widget bounds, which are `f64` (see
+/// [`super::InspectorRow::bounds`]). Every comparison this crate makes is a
+/// `==`/`assert_eq!`, which `PartialEq` alone satisfies.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Message {
     /// Quit requested (`q` / `Ctrl+Q`). Sets `should_quit`; the loop exits.
     Quit,
@@ -276,6 +328,12 @@ pub enum Message {
         project_root: PathBuf,
         /// A short target label (`desktop`, or a device name).
         target_label: String,
+        /// What the session's launch config says about reaching a devtools
+        /// service (workbook §B12) — carried here because only the launcher
+        /// knows the build mode and (for Android) the device serial. An
+        /// ad-hoc build/clean/toolchain session passes
+        /// [`DevtoolsLaunch::unavailable`].
+        devtools: DevtoolsLaunch,
     },
     /// Select the next / previous session tab (`Tab` / `Shift+Tab`).
     NextTab,
@@ -290,9 +348,12 @@ pub enum Message {
     ToggleFollow,
     /// Toggle soft-wrap on the log view (`w`).
     ToggleWrap,
-    /// Scroll the active log view up / down by `n` lines (wheel / arrows).
+    /// Scroll the active log view up / down by `n` *visible* lines (wheel /
+    /// arrows) — steps through what the view actually draws (filters applied,
+    /// a collapsed panic block counting as one), never raw line indices; see
+    /// [`super::SessionView::visible_indices`].
     LogScrollUp(u64),
-    /// Scroll the active log view down by `n` lines.
+    /// Scroll the active log view down by `n` visible lines.
     LogScrollDown(u64),
     /// Jump the active log view to the oldest retained line (`Home`).
     LogScrollToTop,
@@ -319,6 +380,19 @@ pub enum Message {
     /// Copy the current selection to the clipboard (`y`) — routed to the runner
     /// as an [`super::Effect::Copy`].
     CopySelection,
+    /// Toggle a panic/backtrace block's fold state by its id (the block's
+    /// panic-header absolute line index) — a click on its `▶ n frames…`
+    /// affordance row.
+    ToggleFold(u64),
+    /// Toggle the fold state of whichever panic block is nearest the active
+    /// session's current scroll position (`z`) — the keyboard-only path
+    /// (workbook §B11's backtrace-fold affordance).
+    ToggleNearestFold,
+    /// Step the active session's level filter `delta` positions (`l`/`L`).
+    CycleLevelFilter(isize),
+    /// Jump the active session's level filter directly to `filter` (a
+    /// filter-chip segment click).
+    SetLevelFilter(LevelFilter),
 
     // ── Devices panel + run-config modal ─────────────────────────────────────
     /// Refresh the device list (`r` from the panel with no modal, or the
@@ -588,6 +662,82 @@ pub enum Message {
     /// no discovered devices.
     RunOnAllDevices,
 
+    // ── DevTools mode (workbook §B12) ─────────────────────────────────────────
+    /// Toggle the active session tab between its log view and DevTools (`d`).
+    /// Per session — a tab keeps its own log/DevTools state, so switching
+    /// tabs never forces you out of DevTools where you opened it. A no-op
+    /// with no active session.
+    DevtoolsToggle,
+    /// Leave DevTools for the active session, back to its log view (`Esc`, or
+    /// the status row's back affordance). A no-op when it isn't open.
+    DevtoolsClose,
+    /// Select a DevTools tab by 0-based index (`1`–`4`, or a tab-pill click).
+    DevtoolsTab(usize),
+    /// Step the DevTools tab selection `delta` positions, wrapping (`[`/`]`).
+    DevtoolsTabCycle(isize),
+    /// Retry a failed devtools connection for the active session (`r` on the
+    /// failed screen, or its Retry button) — routed to the runner as
+    /// [`super::Effect::DevtoolsConnect`]. A no-op once the session itself
+    /// has ended (there is no service left to reach).
+    DevtoolsRetry,
+    /// A report from the session's devtools bridge thread
+    /// ([`crate::supervise::DevtoolsBridge`]) — connection state changes and
+    /// coalesced frame-stats batches.
+    DevtoolsConn(SessionId, ConnEvent),
+    /// A coalesced batch of System/Network metrics samples from the
+    /// session's sampler thread ([`crate::supervise::MetricsBridge`]),
+    /// oldest first — applied to [`super::DevtoolsState::metrics`].
+    DevtoolsMetrics(SessionId, Vec<MetricsSample>),
+
+    // ── Performance tab (workbook §B12) ─────────────────────────────────────
+    /// Move the pinned frame `delta` frames along the current Performance
+    /// window (`←`/`→`, ±1) — to the adjacent *retained* frame, clamped at
+    /// both ends. A no-op with no active session.
+    DevtoolsPerfScrub(isize),
+    /// Pin a Performance-window frame directly by its own
+    /// [`super::PerfFrame::n`] (a chart-column click, carrying the `n` the
+    /// clicked column drew). A frame that has left the window since the click
+    /// was registered pins nothing — see
+    /// [`super::PerformanceTab::select_frame`].
+    DevtoolsPerfSelectFrame(u64),
+    /// Clear the Performance tab's scrubbed selection, back to the live tail
+    /// — `Esc`'s first stage while a frame is selected (the second `Esc`,
+    /// with nothing selected, falls through to [`Message::DevtoolsClose`]).
+    DevtoolsPerfClearSelection,
+    /// Cycle the Performance tab's pane focus between the chart and the
+    /// breakdown bar (`Tab`, only while the Performance tab is active).
+    DevtoolsPerfFocusCycle,
+
+    // ── Inspector tab (workbook §B12) ───────────────────────────────────────
+    /// Move the Inspector tree selection `delta` *visible* rows (`↑`/`↓`,
+    /// `j`/`k`, ±1), clamped to the flattened row list. Moving onto a node
+    /// whose props are neither cached nor in flight also emits
+    /// [`super::Effect::DevtoolsFetchProps`] — §B12's per-selection call.
+    DevtoolsInspectorSelect(isize),
+    /// Select an Inspector tree row directly by its visible index (a row
+    /// click), clamped — same props-fetch behavior as
+    /// [`Message::DevtoolsInspectorSelect`].
+    DevtoolsInspectorSelectRow(usize),
+    /// Expand the selected Inspector node (`→`/`Enter`/`Space`); a no-op on a
+    /// leaf or an already-open node.
+    DevtoolsInspectorExpand,
+    /// Collapse the selected Inspector node (`←`); a no-op on an
+    /// already-collapsed node.
+    DevtoolsInspectorCollapse,
+    /// Toggle one Inspector node by id — the `▸`/`▾` click affordance.
+    DevtoolsInspectorToggleNode(u64),
+    /// Cycle the Inspector tab's pane focus between the tree and the props
+    /// pane (`Tab`, only while the Inspector tab is active).
+    DevtoolsInspectorFocusCycle,
+    /// Pull a fresh `widget_tree` snapshot for the active session (`r` on the
+    /// Inspector tab) — routed to the runner as
+    /// [`super::Effect::DevtoolsFetchTree`]. A no-op while a pull is already
+    /// in flight, or when the connection isn't up.
+    DevtoolsInspectorRefresh,
+    /// A report from the session's devtools bridge thread answering an
+    /// on-demand Inspector request (`widget_tree` / `widget_props`).
+    DevtoolsInspector(SessionId, InspectorEvent),
+
     // ── Perf sparkline panel ──────────────────────────────────────────────────
     /// Toggle the active session's perf sparkline panel (`t`) — a no-op with
     /// no active session.
@@ -605,4 +755,43 @@ pub enum Message {
     OpenHelpOverlay,
     /// Close the help overlay (`Esc` / `?` again).
     CloseHelpOverlay,
+
+    // ── Embedded MCP server ───────────────────────────────────────────────────
+    /// A question (or lifecycle request) from an embedded MCP server's
+    /// [`crate::supervise::TuiSessionBackend`], carrying its own reply
+    /// channel. **Served by `crate::runner`, not by [`super::update`]** — it
+    /// needs the `Supervisor` the pure core deliberately cannot reach; see
+    /// [`crate::supervise::serve_command`].
+    Mcp(McpCommand),
+    /// The embedded MCP server of this generation has its listener up on this
+    /// port — the answer to `start_mcp`'s `ready` signal (the OS-assigned port
+    /// when it was started on `0`).
+    ///
+    /// Applied only when the generation names the server currently installed
+    /// on [`super::AppState::mcp`]; a report from a superseded one is dropped
+    /// rather than stamping its port onto its successor.
+    McpListening(u64, u16),
+    /// The embedded MCP server of this generation returned: cleanly (`None`)
+    /// or with the rendered error that ended it (`Some`).
+    ///
+    /// Clears the server handle from the model — but **only** when the
+    /// generation names the handle installed there. A stop the user asked for
+    /// has already cleared it (so this is a no-op), and a start that happened
+    /// while the old server was still winding down installed a handle this
+    /// report does not name (so it must not clear it: dropping a
+    /// `CancellationToken` does not cancel it, and the new server would be
+    /// left listening with nothing able to stop it).
+    McpStopped(u64, Option<String>),
+    /// Start the embedded MCP server, or stop the running one (`M`, the
+    /// sidebar ACTIONS "MCP" row, the panel's Start/Stop button, or the
+    /// palette) — workbook §B13. Routed to the runner as
+    /// [`super::Effect::StartMcpServer`]/[`super::Effect::StopMcpServer`],
+    /// since the server handle is a live resource the pure core cannot build.
+    ToggleMcpServer,
+    /// Open the MCP panel — the server's state plus its connected-client list
+    /// (`m`, or the palette).
+    OpenMcpPanel,
+    /// Close the MCP panel (`Esc` / `m` / its Close button). The server keeps
+    /// running: closing the panel is not a stop.
+    CloseMcpPanel,
 }

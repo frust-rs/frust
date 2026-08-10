@@ -95,6 +95,8 @@ impl Widget for StackWidget {
             pod.semantics_child(ctx);
         }
     }
+
+    crate::authoring::visit_children!(children);
 }
 
 #[cfg(test)]

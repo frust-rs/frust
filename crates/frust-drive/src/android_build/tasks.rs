@@ -229,8 +229,8 @@ mod tests {
             vec![
                 "-Pfrust.targetPlatforms=arm64-v8a,x86_64".to_string(),
                 "-Pfrust.splitPerAbi=true".to_string(),
-                // debug selects `frust/perf-trace`, base64-encoded.
-                "-Pfrust.cargoFeatures=ZnJ1c3QvcGVyZi10cmFjZQ==".to_string(),
+                // debug selects `frust/perf-trace,frust/devtools`, base64-encoded.
+                "-Pfrust.cargoFeatures=ZnJ1c3QvcGVyZi10cmFjZSxmcnVzdC9kZXZ0b29scw==".to_string(),
             ]
         );
     }
@@ -246,7 +246,7 @@ mod tests {
             props,
             vec![
                 "-Pfrust.targetPlatforms=arm64-v8a,armeabi-v7a,x86_64".to_string(),
-                "-Pfrust.cargoFeatures=ZnJ1c3QvcGVyZi10cmFjZQ==".to_string(),
+                "-Pfrust.cargoFeatures=ZnJ1c3QvcGVyZi10cmFjZSxmcnVzdC9kZXZ0b29scw==".to_string(),
             ]
         );
     }
@@ -275,20 +275,24 @@ mod tests {
     }
 
     #[test]
-    fn gradle_properties_debug_and_profile_carry_perf_trace_feature() {
+    fn gradle_properties_debug_and_profile_carry_perf_trace_and_devtools_features() {
         let target = apk(&["arm64-v8a"], false);
         for mode in [BuildMode::Debug, BuildMode::Profile] {
             let props = gradle_properties(&target, &HashMap::new(), mode.cargo_features());
-            // base64("frust/perf-trace")
+            // base64("frust/perf-trace,frust/devtools") — the whole CSV rides
+            // one prop, so the encoding covers both features at once.
             assert!(
-                props.contains(&"-Pfrust.cargoFeatures=ZnJ1c3QvcGVyZi10cmFjZQ==".to_string()),
+                props.contains(
+                    &"-Pfrust.cargoFeatures=ZnJ1c3QvcGVyZi10cmFjZSxmcnVzdC9kZXZ0b29scw=="
+                        .to_string()
+                ),
                 "mode {mode:?}: {props:?}"
             );
         }
     }
 
     #[test]
-    fn gradle_properties_release_carries_lean_not_perf_trace() {
+    fn gradle_properties_release_carries_lean_not_perf_trace_or_devtools() {
         let target = apk(&["arm64-v8a"], false);
         let props = gradle_properties(
             &target,
@@ -299,11 +303,11 @@ mod tests {
             .iter()
             .find(|p| p.starts_with("-Pfrust.cargoFeatures="))
             .expect("cargoFeatures prop present");
-        // base64("lean") — the log ceiling, NOT perf-trace.
+        // base64("lean") — the log ceiling, NOT perf-trace and NOT devtools.
         assert_eq!(feature_prop, "-Pfrust.cargoFeatures=bGVhbg==");
         assert_ne!(
             feature_prop,
-            "-Pfrust.cargoFeatures=ZnJ1c3QvcGVyZi10cmFjZQ=="
+            "-Pfrust.cargoFeatures=ZnJ1c3QvcGVyZi10cmFjZSxmcnVzdC9kZXZ0b29scw=="
         );
     }
 
