@@ -3,6 +3,7 @@
 mod build_args;
 mod cli;
 mod commands;
+mod logger;
 
 use clap::{CommandFactory, Parser};
 use cli::{Cli, Command};

@@ -1886,6 +1886,7 @@ dependencies = [
  "frust-dap",
  "frust-drive",
  "frust-tui",
+ "log",
  "notify",
  "tokio",
 ]

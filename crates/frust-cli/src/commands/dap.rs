@@ -20,10 +20,14 @@ use std::sync::Arc;
 /// - `Some(port)` → TCP loopback listener (one session per connection)
 ///
 /// Stdout is reserved for the DAP protocol in stdio mode and must not be
-/// written to by anything in this handler. All diagnostics go to stderr via
-/// the logger, which this handler does not install (it relies on the caller
-/// to configure logging if desired).
+/// written to by anything in this handler. All diagnostics go to stderr:
+/// this handler installs `crate::logger`'s stderr-only sink before starting
+/// the server, so `frust-dap`'s `log::warn!`/`log::error!` call sites reach a
+/// human instead of being silently discarded. Default level `Warn`; set
+/// `FRUST_LOG` (e.g. `info`, `debug`) to raise it.
 pub fn run_in(runner: Arc<dyn ProcessRunner + Send + Sync>, port: Option<u16>) -> Result<u8> {
+    crate::logger::init_once();
+
     let mode = match port {
         Some(p) => TransportMode::Tcp { port: p },
         None => TransportMode::Stdio,

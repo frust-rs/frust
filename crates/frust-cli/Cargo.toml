@@ -19,6 +19,10 @@ anyhow.workspace = true
 frust-drive = { path = "../frust-drive" }
 frust-dap = { path = "../frust-dap" }
 frust-tui = { path = "../frust-tui" }
+# The stderr sink `commands::dap` installs (`crate::logger`) — `frust-dap`
+# routes its diagnostics through `log::`, so this crate needs a `log::Log`
+# backend of its own to surface them (see `crates/frust-cli/src/logger.rs`).
+log.workspace = true
 # Tokio runtime for executing `frust tui`'s async entry point; rt-multi-thread required for Runtime::new().
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 # Targeted exception, direct precedent `ctrlc` (frust-drive's Cargo.toml):

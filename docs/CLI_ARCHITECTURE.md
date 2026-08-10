@@ -178,7 +178,9 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md) for the plugins this distributes).
 - `dap`: `Command::Dap { port }` → `commands::dap` (prints nothing to stdout, ever; the dispatcher
   wraps the single `RealProcessRunner` in an `Arc`, construction site still singular) →
-  `frust_dap::run_blocking`, which serves stdio or loopback TCP to completion.
+  `frust_dap::run_blocking`, which serves stdio or loopback TCP to completion. `commands::dap::run_in`
+  installs `frust-cli`'s own stderr-only `log::Log` sink (`crate::logger`, default `Warn`, `FRUST_LOG`
+  overridable) first, so `frust-dap`'s `log::` diagnostics reach a human instead of being discarded.
 
 ## Key Types
 
