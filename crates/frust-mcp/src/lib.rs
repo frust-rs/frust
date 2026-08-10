@@ -45,10 +45,11 @@ use tokio_util::sync::CancellationToken;
 
 /// Run the MCP server until interrupted (Ctrl-C) or bind fails.
 ///
-/// Binds `127.0.0.1:config.port`, prints the one endpoint line
-/// (`frust-mcp listening on http://127.0.0.1:<port>/mcp`) once listening,
-/// and serves until a Ctrl-C signal cancels it — at which point it shuts
-/// down gracefully and returns `Ok(())`.
+/// Binds `127.0.0.1:config.port`, logs the one endpoint line
+/// (`frust-mcp listening on http://127.0.0.1:<port>/mcp`) once listening
+/// (via `log::info!`, a no-op without a logger initialized), and serves until
+/// a Ctrl-C signal cancels it — at which point it shuts down gracefully and
+/// returns `Ok(())`.
 pub async fn run(config: McpConfig) -> anyhow::Result<()> {
     let cancel = CancellationToken::new();
     let ctrl_c_cancel = cancel.clone();

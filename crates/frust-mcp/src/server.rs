@@ -84,7 +84,7 @@ pub async fn serve_embedded(
     );
     let router = axum::Router::new().nest_service(MCP_HTTP_PATH, service);
 
-    println!("frust-mcp listening on http://{addr}{MCP_HTTP_PATH}");
+    log::info!("frust-mcp listening on http://{addr}{MCP_HTTP_PATH}");
     if let Some(ready) = ready {
         // The test/embedding caller may already have given up (e.g. the
         // smoke test's deadline fired) — a dropped receiver is not a server
