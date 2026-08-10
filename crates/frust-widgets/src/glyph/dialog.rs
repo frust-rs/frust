@@ -134,6 +134,13 @@ const ACTION_GAP: f64 = 10.0;
 const MIN_WIDTH: f64 = 300.0;
 /// Maximum dialog panel width, in logical px.
 const MAX_WIDTH: f64 = 480.0;
+/// Breathing margin kept between the panel and the window's horizontal edges,
+/// in logical px per side (an original, hand-picked value — Glyph's roomy
+/// gutter family, slightly wider than the panel's own 20px `DIALOG_PADDING`).
+/// On any window narrower than `MAX_WIDTH + 2 * SCREEN_MARGIN` this margin,
+/// not `MAX_WIDTH`, is what bounds the panel — every phone falls in that
+/// range, so without it the panel goes full-bleed edge-to-edge.
+const SCREEN_MARGIN: f64 = 24.0;
 
 /// Unthemed-fallback panel corner radius — Glyph's `--radius-lg` (14px). A theme
 /// resolves this from `shape.large`.
@@ -829,7 +836,7 @@ impl Widget for GlyphDialogWidget {
         let area_w = finite_or_zero(bc.max().width);
         let area_h = finite_or_zero(bc.max().height);
 
-        let panel_max_w = area_w.min(MAX_WIDTH);
+        let panel_max_w = (area_w - 2.0 * SCREEN_MARGIN).clamp(0.0, MAX_WIDTH);
         let content_max_w = (panel_max_w - 2.0 * DIALOG_PADDING).max(0.0);
         let child_bc = BoxConstraints::loose(Size::new(content_max_w, f64::INFINITY));
 
@@ -859,7 +866,11 @@ impl Widget for GlyphDialogWidget {
             content_w = content_w.max(actions_w);
         }
 
-        let lower = MIN_WIDTH.min(area_w);
+        // The margin wins over MIN_WIDTH's own floor: on a window narrower than
+        // `MIN_WIDTH + 2 * SCREEN_MARGIN`, MIN_WIDTH would sit above panel_max_w
+        // and invert this clamp, so the lower bound shrinks to panel_max_w
+        // instead of pushing the panel back out to full bleed.
+        let lower = MIN_WIDTH.min(panel_max_w);
         let panel_w = (content_w + 2.0 * DIALOG_PADDING).clamp(lower, panel_max_w);
 
         let mut y = DIALOG_PADDING;
@@ -1872,6 +1883,80 @@ mod tests {
             "the focused content field received the keystroke instead of it being \
              swallowed by the dialog's own Key handling"
         );
+    }
+
+    // -- Screen margin on narrow windows ---------------------------------
+
+    #[test]
+    fn narrow_window_keeps_a_screen_margin_on_both_sides_even_with_stretching_content() {
+        // A `CrossAxisAlignment::Stretch`-style content view that always wants
+        // the full available width — bc.constrain clamps it down to
+        // content_max_w, so this exercises the same path a stretched field
+        // column would.
+        let view: GlyphDialogView<()> =
+            glyph_dialog()
+                .title("Hi")
+                .content(tap_action(10_000.0, 20.0, |_s: &mut ()| {}));
+        let mut w = build(&view);
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        let area = Size::new(393.0, 800.0);
+        w.layout(&mut lctx, &BoxConstraints::tight(area));
+
+        assert_eq!(w.panel.width(), area.width - 2.0 * SCREEN_MARGIN);
+        assert_eq!(w.panel.x0, SCREEN_MARGIN, "margin on the leading edge");
+        assert_eq!(
+            area.width - (w.panel.x0 + w.panel.width()),
+            SCREEN_MARGIN,
+            "margin on the trailing edge"
+        );
+    }
+
+    #[test]
+    fn window_narrower_than_min_width_plus_margins_still_gets_the_margin() {
+        // 320 is narrower than MIN_WIDTH (300) + 2 * SCREEN_MARGIN (48) — the
+        // margin must win over MIN_WIDTH's own floor rather than inverting the
+        // lower/upper clamp back out to full bleed.
+        let view: GlyphDialogView<()> = glyph_dialog().title("Hi");
+        let mut w = build(&view);
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        let area = Size::new(320.0, 600.0);
+        w.layout(&mut lctx, &BoxConstraints::tight(area));
+
+        assert_eq!(w.panel.width(), 272.0);
+        assert_eq!(w.panel.x0, SCREEN_MARGIN);
+    }
+
+    #[test]
+    fn pathologically_tiny_window_does_not_panic_and_stays_non_negative() {
+        let view: GlyphDialogView<()> = glyph_dialog().title("Hi");
+        let mut w = build(&view);
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        let area = Size::new(30.0, 60.0);
+        w.layout(&mut lctx, &BoxConstraints::tight(area));
+
+        assert!(w.panel.width() >= 0.0);
+        assert!(w.panel.x0 >= 0.0);
+    }
+
+    #[test]
+    fn wide_window_still_caps_at_max_width_unaffected_by_the_margin() {
+        // area_w (600) exceeds MAX_WIDTH + 2 * SCREEN_MARGIN (528): the panel
+        // caps at MAX_WIDTH exactly as it did before the margin was added.
+        let view: GlyphDialogView<()> =
+            glyph_dialog()
+                .title("Hi")
+                .content(tap_action(10_000.0, 20.0, |_s: &mut ()| {}));
+        let mut w = build(&view);
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        let area = Size::new(600.0, 800.0);
+        w.layout(&mut lctx, &BoxConstraints::tight(area));
+
+        assert_eq!(w.panel.width(), MAX_WIDTH);
+        assert_eq!(w.panel.x0, (area.width - MAX_WIDTH) / 2.0);
     }
 
     #[test]
