@@ -15,6 +15,8 @@
 //! description here is the only documentation an agent gets, so each one
 //! states what the tool does, what it defaults to, and what it costs.
 
+use std::sync::Arc;
+
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerInfo};
@@ -23,6 +25,7 @@ use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use serde::Serialize;
 
 use crate::SharedBackend;
+use crate::clients::ClientGuard;
 use crate::tools::{ToolError, ToolResult, diagnosis, driving, session};
 
 const SERVER_INSTRUCTIONS: &str = "Control and diagnosis for frust apps, over the MCP \
@@ -52,6 +55,12 @@ pub(crate) struct PingResult {
 pub(crate) struct McpHandler {
     backend: SharedBackend,
     tool_router: ToolRouter<Self>,
+    /// Per-session client registration; `None` until the service factory
+    /// calls [`McpHandler::with_client_guard`], `Some` for every handler
+    /// produced for a live MCP session. `Arc`-wrapped so cloning the
+    /// handler (rmcp does this per request, not per session) never
+    /// double-registers or double-drops the one guard a session owns.
+    client_guard: Option<Arc<ClientGuard>>,
 }
 
 #[tool_router]
@@ -60,7 +69,15 @@ impl McpHandler {
         Self {
             backend,
             tool_router: Self::tool_router(),
+            client_guard: None,
         }
+    }
+
+    /// Attaches the per-session client registration — called once, by the
+    /// service factory, right after `new` (`server.rs`'s `serve_embedded`).
+    pub(crate) fn with_client_guard(mut self, guard: ClientGuard) -> Self {
+        self.client_guard = Some(Arc::new(guard));
+        self
     }
 
     #[tool(

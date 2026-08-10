@@ -25,14 +25,17 @@
 pub mod backend;
 pub mod engine;
 
+mod clients;
 mod config;
 mod handler;
 mod server;
 mod tools;
 
 pub use backend::{SessionBackend, SharedBackend};
+pub use clients::{ClientEntry, ClientRegistry};
 pub use config::{DEFAULT_MCP_PORT, McpConfig};
 pub use engine::SessionEngine;
+pub use server::serve_embedded;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
