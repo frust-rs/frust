@@ -54,7 +54,7 @@ pub use serde_json;
 pub use codec::{DecodeError, decode_line, encode_line};
 pub use discovery::{
     DISCOVERY_PREFIX, Discovery, FAILURE_PREFIX, format_discovery_line, format_failure_line,
-    parse_discovery_line, parse_failure_line,
+    parse_discovery_line, parse_failure_line, redact_discovery_token,
 };
 pub use messages::{
     AckResult, Capability, FrameStats, HandshakeInfo, HandshakeParams, InputScrollParams,
