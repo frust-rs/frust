@@ -41,6 +41,11 @@ frust-drive = { path = "../frust-drive" }
 frust-devtools-protocol = { path = "../frust-devtools-protocol" }
 anyhow = { workspace = true }
 serde = { workspace = true }
+# `SessionBackend::fetch_widget_tree` speaks `serde_json::Value`: the backend
+# seam an embedder implements must not require naming rmcp's re-export of it.
+# Already in this crate's charter list, and already in the graph (rmcp and
+# `frust-drive` both carry it) — no new package enters `Cargo.lock`.
+serde_json = { workspace = true }
 log = { workspace = true }
 # The `screenshot` tool's payload check: decode the base64 PNG (from the
 # devtools service, or encoded on-device by `adb exec-out … | base64`) far
@@ -66,7 +71,6 @@ tokio = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 # The smoke test's raw-HTTP round trip reads/writes a `TcpStream` directly.
 tokio = { workspace = true, features = ["io-util"] }
 # Enables `frust-drive`'s `test-util` feature (its scripted
