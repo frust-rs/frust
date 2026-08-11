@@ -10,7 +10,10 @@
 //! passed to [`crate::serve_embedded`] — the same one its own UI (and any MCP
 //! client) drives. This adapter therefore *supervises* no sessions of its own:
 //! it launches one into the host's world, watches it, and stops it again. The
-//! project root is the host's too, injected at construction; a client's
+//! project root is the host's too, and is **asked of the backend at launch
+//! time** rather than remembered here: the host's open project can change
+//! while this server runs, and the one thing worse than naming no directory is
+//! naming a directory nothing builds from. A client's own
 //! `launchArguments.projectRoot` is never honored (see [`resolve`]).
 //!
 //! ## One app per connection
@@ -66,6 +69,15 @@ const APP_THREAD_ID: i64 = 1;
 const NO_SESSION: &str =
     "no app has been launched on this connection; send a 'launch' request first.";
 
+/// What a `launch` answers when the host has no open project to build in.
+///
+/// The host refuses to *start* a server with no project at all; this is the
+/// other half — a project closed (or switched away to none) while the server
+/// was already up. Refusing is the only honest answer: this adapter builds
+/// from the host's project and has no root of its own to fall back on.
+const NO_PROJECT: &str = "no project is open in the workbench — open one there and send 'launch' again; \
+     every debug launch builds from the workbench's own project root.";
+
 /// A `terminated` event that is sent at most once per connection.
 ///
 /// Three paths can reach it — the app exiting on its own, a `terminate`
@@ -97,10 +109,6 @@ struct Launched {
 pub struct OrchestrationAdapter {
     events: EventSender,
     backend: SharedBackend,
-    /// The one directory a session ever builds from — the host's project,
-    /// injected at construction. A client's own `projectRoot` is never
-    /// honored; see [`client_root_note`].
-    project_root: PathBuf,
     /// This connection's entry in the host's client registry, dropped with the
     /// adapter. `None` for an adapter built outside [`crate::serve_embedded`]
     /// (a test driving one directly), which has no registry to appear in.
@@ -115,12 +123,11 @@ pub struct OrchestrationAdapter {
 
 impl OrchestrationAdapter {
     /// A fresh adapter for one DAP connection, driving `backend` and building
-    /// only from `project_root`.
-    pub fn new(events: EventSender, backend: SharedBackend, project_root: PathBuf) -> Self {
+    /// only from the project that backend reports at launch time.
+    pub fn new(events: EventSender, backend: SharedBackend) -> Self {
         Self {
             events,
             backend,
-            project_root,
             client: None,
             launched: None,
             ever_launched: false,
@@ -163,11 +170,16 @@ impl OrchestrationAdapter {
             None => LaunchArguments::default(),
         };
 
-        let ignored_note = client_root_note(args.project_root.as_deref(), &self.project_root);
         let mode = match parse_mode(args.mode.as_deref()) {
             Ok(mode) => mode,
             Err(message) => return AdapterResponse::failure(message),
         };
+        // Once, here — the directory this launch builds in, and therefore the
+        // one both the ignored-root note and the banner below must name.
+        let Some(project_root) = self.project_root().await else {
+            return AdapterResponse::failure(NO_PROJECT);
+        };
+        let ignored_note = client_root_note(args.project_root.as_deref(), &project_root);
         let target = match resolve_target(&self.backend, args.device.as_deref()).await {
             Ok(target) => target,
             Err(message) => return AdapterResponse::failure(message),
@@ -187,7 +199,7 @@ impl OrchestrationAdapter {
                     "Launching {} in {} mode from {}\n",
                     target.label(),
                     mode_name(mode),
-                    self.project_root.display()
+                    project_root.display()
                 ),
             )
             .await;
@@ -225,6 +237,23 @@ impl OrchestrationAdapter {
         self.ever_launched = true;
         self.launched = Some(Launched { session, pumps });
         AdapterResponse::ok()
+    }
+
+    /// The directory the backend would build in right now, or `None` when it
+    /// has no project open (or could not answer at all).
+    ///
+    /// Asked once per launch and never stored: the host's project is the
+    /// host's to change, and a remembered copy is exactly how a banner comes
+    /// to name a directory the build never touched.
+    async fn project_root(&self) -> Option<PathBuf> {
+        let backend = Arc::clone(&self.backend);
+        match tokio::task::spawn_blocking(move || backend.project_root()).await {
+            Ok(root) => root,
+            Err(error) => {
+                log::warn!("DAP: the project-root lookup failed: {error}");
+                None
+            }
+        }
     }
 
     /// `frustRestart` — stop the app and launch it again, same target and mode.
@@ -487,6 +516,11 @@ mod tests {
     /// runner.
     const TEST_PROJECT_ROOT: &str = "/tmp/frust-dap-adapter-test";
 
+    /// A second root, sharing no prefix with [`TEST_PROJECT_ROOT`]: what a
+    /// backend reports when the host is on a *different* project from the one
+    /// a client names.
+    const OTHER_PROJECT_ROOT: &str = "/tmp/frust-dap-adapter-elsewhere";
+
     /// A failure deadline, never a pacing device.
     const DEADLINE: Duration = Duration::from_secs(10);
 
@@ -611,13 +645,7 @@ mod tests {
     ) {
         let cancel = CancellationToken::new();
         let (client, handle) = spawn_session_with(
-            move |events| {
-                OrchestrationAdapter::new(
-                    events,
-                    Arc::clone(&backend) as SharedBackend,
-                    PathBuf::from(TEST_PROJECT_ROOT),
-                )
-            },
+            move |events| OrchestrationAdapter::new(events, Arc::clone(&backend) as SharedBackend),
             cancel.clone(),
         );
         (client, cancel, handle)
@@ -752,6 +780,44 @@ mod tests {
             !more.iter().any(|event| event.event == "terminated"),
             "terminated is reported once per connection: {more:?}"
         );
+        join(handle).await;
+    }
+
+    /// Both the ignored-`projectRoot` note and the banner name the root the
+    /// **backend** reports at launch time.
+    ///
+    /// The backend here is on a different project from the one the client's
+    /// launch configuration names, which is the shape a host whose project
+    /// changed under a running server presents: the note must compare against
+    /// (and the banner must print) the directory this launch actually builds
+    /// in, never the client's request and never a root remembered from when
+    /// the connection opened.
+    #[tokio::test]
+    async fn the_ignored_root_note_and_the_banner_name_the_backends_own_root() {
+        let backend = Arc::new(SessionEngine::with_runner(
+            OTHER_PROJECT_ROOT,
+            hanging_desktop_runner(&["running"]),
+        ));
+        let (mut client, handle) = spawn_adapter_session_with_backend(backend);
+        client.initialize().await;
+
+        // The configuration names TEST_PROJECT_ROOT; the backend is elsewhere.
+        client.request(2, "launch", launch_arguments()).await;
+        let (response, before) = client.next_response().await;
+        assert!(response.success, "{:?}", response.message);
+
+        let console: String = before.iter().filter_map(output_text).collect();
+        assert!(
+            console.contains("Ignoring") && console.contains(TEST_PROJECT_ROOT),
+            "the client's ignored root must be echoed back: {console}"
+        );
+        assert!(
+            console.contains(&format!("from {OTHER_PROJECT_ROOT}")),
+            "the banner must name the root the backend reports: {console}"
+        );
+
+        client.request(3, "disconnect", None).await;
+        let _ = client.next_response().await;
         join(handle).await;
     }
 

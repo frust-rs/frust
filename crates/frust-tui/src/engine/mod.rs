@@ -228,14 +228,19 @@ impl Engine {
     ///
     /// [`Self::start_mcp`]'s counterpart in every respect — same
     /// live-resource ownership, same generation minting, same two watcher
-    /// tasks, same current-runtime requirement — with one addition: the
-    /// server needs a **project root**, and the workbench's is the only one it
-    /// will ever build from (a DAP client's own `projectRoot` is refused,
-    /// since the listener is unauthenticated loopback — see
-    /// `frust_dap::serve_embedded`). With no project open there is nothing to
-    /// root a server at, so nothing is started and the reason is retained on
+    /// tasks, same current-runtime requirement — with one addition: every
+    /// debug launch builds from the workbench's **own** project (a DAP
+    /// client's own `projectRoot` is refused, since the listener is
+    /// unauthenticated loopback — see `frust_dap::serve_embedded`). Which
+    /// project that is, is not decided here: the server reads it back off
+    /// `backend` at each launch, so a project switched while it runs is the
+    /// project the next launch builds — and names — with no restart.
+    ///
+    /// The check below is therefore about *starting* rather than about
+    /// pinning: with no project open at all there is nothing a launch could
+    /// build, so nothing is started and the reason is retained on
     /// [`AppState::dap_error`] for the UI to show, rather than a server
-    /// binding a port it could never serve a launch from.
+    /// binding a port whose every launch would refuse.
     ///
     /// Returns `false` — and starts nothing — when one is already running, or
     /// when no project is open.
@@ -243,14 +248,14 @@ impl Engine {
         if self.state.dap.is_some() {
             return false;
         }
-        let Some(project_root) = self.state.project_root.clone() else {
+        if self.state.project_root.is_none() {
             self.state.dap_error = Some(
                 "no project is open in the workbench — open one before starting the DAP server, \
                  since every debug launch builds from the workbench's own project root"
                     .to_string(),
             );
             return false;
-        };
+        }
         let generation = self.next_dap_generation;
         self.next_dap_generation += 1;
         let cancel = CancellationToken::new();
@@ -260,7 +265,6 @@ impl Engine {
         let serving = tokio::spawn(frust_dap::serve_embedded(
             backend,
             registry.clone(),
-            project_root,
             port,
             Some(ready_tx),
             cancel.clone(),

@@ -1,16 +1,17 @@
 //! The seam the MCP tool layer drives.
 //!
 //! [`SessionBackend`] is everything a consumer needs from whatever is
-//! supervising app sessions: thirteen methods, no more — the eleven `tools/`
-//! drives, plus two an orchestration consumer (`frust-dap`) needs and the
+//! supervising app sessions: fourteen methods, no more — the eleven `tools/`
+//! drives, plus three an orchestration consumer (`frust-dap`) needs and the
 //! tool layer does not. [`crate::SessionEngine`] is this crate's own
 //! implementation (and the one the server wires up), but the tools never name
 //! it — they hold an `Arc<dyn SessionBackend>`, so an embedder that already
 //! owns running sessions can hand its own supervisor in instead.
 //!
-//! The last two carry **default implementations that refuse**, so a backend
-//! predating them still compiles and still answers honestly: no event feed,
-//! and a typed "does not serve widget trees" error rather than an empty tree.
+//! The last three carry **default implementations that refuse**, so a backend
+//! predating them still compiles and still answers honestly: no event feed, a
+//! typed "does not serve widget trees" error rather than an empty tree, and no
+//! project root rather than a guessed one.
 //!
 //! # Why the trait is sync
 //!
@@ -32,6 +33,7 @@
 //! issued from `spawn_blocking`; the rest take a short lock and are safe to
 //! call directly from async code.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -139,6 +141,28 @@ pub trait SessionBackend: Send + Sync {
         }))
     }
 
+    /// The directory a [`run_app`](Self::run_app) issued **now** would build
+    /// from — the backend's own project, answered at the moment it is asked.
+    ///
+    /// Read, never cached: a backend whose project can change under it (a
+    /// workbench whose user switches projects) answers with the one the next
+    /// launch will actually use, so a consumer that *displays* or *compares*
+    /// the root — `frust-dap`'s launch banner and its ignored-`projectRoot`
+    /// note — never names a directory nothing builds from. `None` means there
+    /// is no project to build in at all, which a consumer must treat as a
+    /// refusal rather than substituting a root of its own.
+    ///
+    /// Cheap in this crate's own engine (a field read). An embedder answering
+    /// from its own event loop takes a short, bounded round trip instead — the
+    /// same shape as [`session`](Self::session) — so a caller inside a runtime
+    /// should issue it the way it issues every other backend call.
+    ///
+    /// **Defaults to `None`**: a backend that never told anyone where it
+    /// builds says so, rather than having a root inferred for it.
+    fn project_root(&self) -> Option<PathBuf> {
+        None
+    }
+
     /// The shared process runner, for a tool needing its own one-shot
     /// invocation (`screenshot`'s `adb exec-out screencap` fallback) rather
     /// than reaching for `std::process::Command` (`docs/CODE_STANDARDS.md`'s
@@ -153,10 +177,10 @@ mod tests {
     use super::*;
 
     /// A backend implementing only the eleven required methods — the shape of
-    /// an embedder's own supervisor written before the last two existed. It is
-    /// here to pin that such a backend still *compiles*, and that the two
-    /// defaults refuse honestly rather than answering with an empty feed or an
-    /// empty tree.
+    /// an embedder's own supervisor written before the last three existed. It
+    /// is here to pin that such a backend still *compiles*, and that the three
+    /// defaults refuse honestly rather than answering with an empty feed, an
+    /// empty tree, or a guessed project root.
     struct MinimalBackend;
 
     impl SessionBackend for MinimalBackend {
@@ -206,10 +230,14 @@ mod tests {
     }
 
     #[test]
-    fn a_backend_that_implements_neither_default_refuses_both() {
+    fn a_backend_that_implements_no_default_refuses_all_three() {
         let backend: SharedBackend = Arc::new(MinimalBackend);
 
         assert!(backend.subscribe_session_events(SessionId(1)).is_none());
+        assert!(
+            backend.project_root().is_none(),
+            "a backend that names no project must not have one inferred for it"
+        );
 
         let err = backend
             .fetch_widget_tree(SessionId(1))

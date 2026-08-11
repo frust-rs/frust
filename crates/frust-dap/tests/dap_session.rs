@@ -154,11 +154,10 @@ fn output_text(event: &DapEvent) -> Option<&str> {
 }
 
 /// A session over a duplex pair, driving a real [`OrchestrationAdapter`]
-/// against `backend`, rooted at `project_root` — the two things
-/// `frust_dap::serve_embedded` injects per connection.
+/// against `backend` — the one thing `frust_dap::serve_embedded` hands each
+/// connection, and the thing a launch reads its project root back off.
 fn spawn_session_with_backend(
     backend: SharedBackend,
-    project_root: PathBuf,
 ) -> (TestClient, JoinHandle<std::result::Result<(), CodecError>>) {
     let (server_reader, client_writer) = tokio::io::duplex(DUPLEX_BUFFER);
     let (client_reader, server_writer) = tokio::io::duplex(DUPLEX_BUFFER);
@@ -167,7 +166,7 @@ fn spawn_session_with_backend(
         run_session(
             server_reader,
             server_writer,
-            move |events: EventSender| OrchestrationAdapter::new(events, backend, project_root),
+            move |events: EventSender| OrchestrationAdapter::new(events, backend),
             tokio_util::sync::CancellationToken::new(),
         )
         .await
@@ -213,7 +212,7 @@ async fn a_headless_client_drives_a_full_session_over_a_duplex_pair() {
     let engine = Arc::new(SessionEngine::with_runner(project_root.clone(), runner));
     let backend: SharedBackend = Arc::clone(&engine) as SharedBackend;
 
-    let (mut client, handle) = spawn_session_with_backend(backend, project_root.clone());
+    let (mut client, handle) = spawn_session_with_backend(backend);
 
     // ── 1. initialize -> response (capabilities), then initialized event ──
     let init_response = client.initialize().await;
@@ -379,8 +378,7 @@ async fn an_app_that_exits_on_its_own_reports_its_last_output_then_exited_then_t
     ));
     let engine = Arc::new(SessionEngine::with_runner(project_root.clone(), runner));
 
-    let (mut client, handle) =
-        spawn_session_with_backend(Arc::clone(&engine) as SharedBackend, project_root.clone());
+    let (mut client, handle) = spawn_session_with_backend(Arc::clone(&engine) as SharedBackend);
     client.initialize().await;
 
     client

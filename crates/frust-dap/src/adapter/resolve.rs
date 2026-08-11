@@ -25,7 +25,9 @@ const DESKTOP: &str = "desktop";
 /// The `console` note for a client that asked to build somewhere else, or
 /// `None` when it asked for nothing or for the root the server already uses.
 ///
-/// The project root is the **host's**, injected at embed time, and a client's
+/// `server_root` is the **host's** project, read off its backend as this
+/// launch starts (never a remembered copy — the host's open project can change
+/// under a running server), and a client's
 /// `launchArguments.projectRoot` is never honored: the listener is
 /// unauthenticated loopback, and a client-chosen build directory is arbitrary
 /// local code execution — `cargo` runs `build.rs`, proc macros, and a

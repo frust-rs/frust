@@ -349,6 +349,17 @@ pub enum McpCommand {
         /// describe).
         reply: Reply<Option<SessionEventFeed>>,
     },
+    /// Where a launch issued right now would build: the workbench's currently
+    /// open project, or `None` when none is open.
+    ///
+    /// Asked per launch rather than remembered by the consumer — the user can
+    /// switch projects at any time, and a DAP client is told (and builds in)
+    /// the project the workbench is on when it launches, not the one it was on
+    /// when the server started.
+    ProjectRoot {
+        /// Where the answer goes.
+        reply: Reply<Option<std::path::PathBuf>>,
+    },
     /// Pull one `widget_tree` dump for a session, through the **workbench's
     /// own** devtools connection.
     ///
@@ -729,6 +740,15 @@ impl SessionBackend for TuiSessionBackend {
         }
     }
 
+    fn project_root(&self) -> Option<std::path::PathBuf> {
+        // Read live, every time: the user can switch projects while a server
+        // is running, and the answer must be the project the *next* launch
+        // builds in. An unreachable workbench has no open project to name.
+        self.ask(|reply| McpCommand::ProjectRoot { reply })
+            .ok()
+            .flatten()
+    }
+
     fn runner(&self) -> Arc<dyn ProcessRunner + Send + Sync> {
         Arc::clone(&self.runner)
     }
@@ -812,6 +832,7 @@ pub fn serve_command(cmd: McpCommand, ctx: &mut McpServeCtx<'_>) {
         McpCommand::SubscribeSessionEvents { id, reply } => {
             reply.send(subscribe_session_events(ctx, id));
         }
+        McpCommand::ProjectRoot { reply } => reply.send(ctx.state.project_root.clone()),
         McpCommand::WidgetTree { id, reply } => serve_widget_tree(ctx, id, reply),
     }
 }

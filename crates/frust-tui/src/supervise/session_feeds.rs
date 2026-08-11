@@ -2,7 +2,7 @@
 //! needs: live session-event subscriptions, and in-flight widget-tree pulls.
 //!
 //! Both exist for the same reason. `frust-mcp`'s `SessionBackend` is sync and
-//! answer-shaped, but two of its thirteen methods cannot be answered from one
+//! answer-shaped, but two of its fourteen methods cannot be answered from one
 //! read of `AppState`:
 //!
 //! - [`SessionBackend::subscribe_session_events`](frust_mcp::SessionBackend::subscribe_session_events)

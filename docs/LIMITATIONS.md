@@ -1391,8 +1391,9 @@ login, token, or capability check at the DAP protocol layer — any local proces
 port can drive the host workbench's own session world (launch, `frustRestart`, stop) through it,
 exactly the same reach a running `frust-tui` gives its embedded MCP server. It **cannot**, however,
 choose the build directory: a client's `launch.projectRoot` is always ignored — every session
-launches from the **host's** injected project root regardless of what a connection asks for, and an
-ignored request is echoed back, sanitized, as a Debug Console note rather than silently dropped. So
+launches from the workbench's currently open project (read live from the host's backend at launch
+time; a client-supplied `projectRoot` is never honored), and an ignored request is echoed back,
+sanitized, as a Debug Console note rather than silently dropped. So
 the reach is driving sessions against the host's own open project, not running `cargo` — and
 therefore arbitrary `build.rs`/proc-macro/`.cargo` runner code — from an attacker-chosen directory.
 
@@ -1406,8 +1407,9 @@ confinement above is not part of that follow-up — it ships now, so an unauthen
 escalate a session into arbitrary local code execution from a directory of its choosing.
 
 **Evidence**: `crates/frust-dap/src/server/embedded.rs`'s `serve_embedded` doc comment (loopback
-bind, `project_root` is the host's and is never overridden by a client); `crates/frust-dap/src/adapter/mod.rs`'s
-`OrchestrationAdapter::launch` (`client_root_note`, sanitized echo of an ignored `projectRoot`).
+bind, the project root is read live from the host's backend and is never overridden by a client);
+`crates/frust-dap/src/adapter/mod.rs`'s `OrchestrationAdapter::launch` (`client_root_note`,
+sanitized echo of an ignored `projectRoot`).
 
 ---
 

@@ -1,16 +1,16 @@
 //! The embedded entry point: a DAP server inside its host.
 //!
 //! [`serve_embedded`] is the whole public surface a host needs. It owns no
-//! runtime, no session supervisor, and no project of its own — the host passes
-//! all three in — which is what makes a DAP client and the host's own UI drive
-//! *the same* app sessions rather than two worlds that happen to look alike.
+//! runtime, no session supervisor, and no project of its own — the host owns
+//! all three, and the backend it passes in answers for the last two — which is
+//! what makes a DAP client and the host's own UI drive *the same* app sessions
+//! rather than two worlds that happen to look alike.
 //!
 //! It is the direct counterpart of `frust_mcp::serve_embedded`, down to the
 //! argument order and the registry's guard discipline: a host that already
 //! starts and stops the MCP server on a [`CancellationToken`] starts and stops
 //! this one the same way.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use frust_mcp::SharedBackend;
@@ -27,14 +27,17 @@ use crate::clients::DapClientRegistry;
 /// - `backend` is shared by every connection this call accepts, and with
 ///   whatever else the host drives it from (its UI, an MCP client): a `launch`
 ///   here produces a session the host sees, and a stop there is an exit this
-///   server reports.
-/// - `project_root` is the **host's** project directory, and the only one a
-///   session ever builds from. A client's own `launchArguments.projectRoot` is
-///   never honored — the listener is unauthenticated loopback, and a
-///   client-chosen build directory is arbitrary local code execution
-///   (`cargo` runs `build.rs`, proc macros, and a `.cargo/config.toml`
-///   `[target.*.runner]` out of it). A client that asks for a different one
-///   is told, in its Debug Console, which directory was used instead.
+///   server reports. It also answers **where** a launch builds: the project
+///   root is read from it live, per launch (`SessionBackend::project_root`),
+///   so a host that switches project while this server runs launches — and
+///   reports — from the project it is actually on, and a host with no project
+///   open has its launches refused rather than sent somewhere stale. A
+///   client's own `launchArguments.projectRoot` is never honored — the
+///   listener is unauthenticated loopback, and a client-chosen build directory
+///   is arbitrary local code execution (`cargo` runs `build.rs`, proc macros,
+///   and a `.cargo/config.toml` `[target.*.runner]` out of it). A client that
+///   asks for a different one is told, in its Debug Console, which directory
+///   was used instead.
 /// - `bind_port` of `0` asks the OS for an ephemeral port; `ready`, when
 ///   given, is notified with the resolved port once the listener is up.
 /// - `cancel` stops the accept loop *and* every live session: each is spawned
@@ -57,26 +60,17 @@ use crate::clients::DapClientRegistry;
 pub async fn serve_embedded(
     backend: SharedBackend,
     registry: DapClientRegistry,
-    project_root: PathBuf,
     bind_port: u16,
     ready: Option<oneshot::Sender<u16>>,
     cancel: CancellationToken,
 ) -> Result<(), ServerError> {
-    // Both are cloned once per connection by the factory below; the `Arc`
-    // keeps that from copying the path for every editor that attaches.
-    let project_root = Arc::new(project_root);
-
-    log::debug!(
-        "frust-dap: embedding a DAP server rooted at {}",
-        project_root.display()
-    );
+    log::debug!("frust-dap: embedding a DAP server over the host's session backend");
 
     serve_tcp(
         bind_port,
         move |events| {
             let guard = registry.register();
-            OrchestrationAdapter::new(events, Arc::clone(&backend), PathBuf::clone(&project_root))
-                .with_client_guard(guard)
+            OrchestrationAdapter::new(events, Arc::clone(&backend)).with_client_guard(guard)
         },
         ready,
         cancel,
@@ -121,7 +115,6 @@ mod tests {
         let server = tokio::spawn(serve_embedded(
             backend(),
             registry.clone(),
-            PathBuf::from("/tmp/frust-dap-embedded-test"),
             0,
             Some(ready_tx),
             cancel.clone(),
@@ -193,7 +186,6 @@ mod tests {
         let result = serve_embedded(
             backend(),
             DapClientRegistry::new(),
-            PathBuf::from("/tmp/frust-dap-embedded-test"),
             port,
             None,
             CancellationToken::new(),

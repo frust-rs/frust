@@ -536,6 +536,12 @@ impl SessionBackend for SessionEngine {
         SessionEngine::fetch_widget_tree(self, id)
     }
 
+    fn project_root(&self) -> Option<PathBuf> {
+        // Fixed for this engine's whole life, so every launch builds from it —
+        // an embedder whose project can change answers a fresh one each time.
+        Some(SessionEngine::project_root(self).to_path_buf())
+    }
+
     fn runner(&self) -> Arc<dyn ProcessRunner + Send + Sync> {
         SessionEngine::runner(self)
     }
