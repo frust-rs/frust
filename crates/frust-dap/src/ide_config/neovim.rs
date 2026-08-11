@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::vscode::{VSCodeGenerator, detect_workspace_root};
+use super::vscode::{self, VSCodeGenerator};
 use super::{IdeConfigGenerator, Result};
 
 /// Generates DAP config for Neovim's nvim-dap plugin.
@@ -64,14 +64,28 @@ table.insert(dap.configurations.rust, {{
 
     /// Write `.nvim-dap.lua` to the workspace root.
     ///
-    /// Best-effort: errors are logged as warnings but do not propagate. The
-    /// file is always overwritten (frust-owned).
+    /// Best-effort: errors (including a
+    /// [`guard_workspace_root`](vscode::guard_workspace_root) containment
+    /// violation — review Major E's defense-in-depth) are logged as warnings
+    /// but do not propagate. The file is always overwritten (frust-owned).
     ///
-    /// Placed at the workspace root (detected via [`detect_workspace_root`])
-    /// so Neovim finds it when opened at the same directory VS Code would be
-    /// opened at.
+    /// Placed at the workspace root (detected via
+    /// [`vscode::detect_workspace_root`]) so Neovim finds it when opened at
+    /// the same directory VS Code would be opened at.
     pub fn write_nvim_dap_lua(&self, port: u16, project_root: &Path) {
-        let workspace_root = detect_workspace_root(project_root);
+        self.write_nvim_dap_lua_with(port, project_root, &vscode::RealEnv);
+    }
+
+    /// Testable core of [`write_nvim_dap_lua`](Self::write_nvim_dap_lua),
+    /// taking an injected [`vscode::EnvLookup`] so the `$HOME`-boundary tests
+    /// can exercise it without mutating the real process environment (same
+    /// seam `vscode`'s own tests use).
+    fn write_nvim_dap_lua_with(&self, port: u16, project_root: &Path, env: &dyn vscode::EnvLookup) {
+        let workspace_root = vscode::detect_workspace_root_with(project_root, env);
+        if let Err(e) = vscode::guard_workspace_root_with(&workspace_root, project_root, env) {
+            log::warn!("refusing to write .nvim-dap.lua: {e}");
+            return;
+        }
         let path = workspace_root.join(".nvim-dap.lua");
         let content = self.generate_lua_snippet(port);
         match std::fs::write(&path, content) {
@@ -338,5 +352,57 @@ mod tests {
         // Non-existent parent directory triggers a write error — should log
         // a warning and return, not panic.
         generator.write_nvim_dap_lua(4711, Path::new("/nonexistent/deep/path"));
+    }
+
+    // ── write_nvim_dap_lua: $HOME boundary (review Major E, item e) ──
+
+    /// In-memory [`vscode::EnvLookup`] fixture — same shape as
+    /// `vscode::tests::FakeEnv`, kept local since that one is private to
+    /// `vscode`'s own test module.
+    struct FakeEnv(std::collections::HashMap<&'static str, String>);
+
+    impl FakeEnv {
+        fn new() -> Self {
+            Self(std::collections::HashMap::new())
+        }
+
+        fn set(mut self, key: &'static str, value: impl Into<String>) -> Self {
+            self.0.insert(key, value.into());
+            self
+        }
+    }
+
+    impl vscode::EnvLookup for FakeEnv {
+        fn get(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+    }
+
+    #[test]
+    fn test_neovim_post_write_target_obeys_home_boundary() {
+        // Layout: <tmp-home>/dev/myapp/.git  <tmp-home>/.vscode
+        // Mirrors vscode's own boundary test (b): the .nvim-dap.lua target
+        // must land at myapp (the project's own .git wins), never climb past
+        // <tmp-home> to <tmp-home>/.vscode.
+        let home = unique_temp_dir("neovim-home-boundary");
+        let project = home.join("dev").join("myapp");
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::create_dir_all(home.join(".vscode")).unwrap();
+
+        let env = FakeEnv::new().set("HOME", home.canonicalize().unwrap().to_string_lossy());
+        let generator = NeovimGenerator;
+        generator.write_nvim_dap_lua_with(4711, &project, &env);
+
+        let project_lua = project.canonicalize().unwrap().join(".nvim-dap.lua");
+        assert!(
+            project_lua.exists(),
+            ".nvim-dap.lua should be written at the project's own root"
+        );
+
+        let home_lua = home.canonicalize().unwrap().join(".nvim-dap.lua");
+        assert!(
+            !home_lua.exists(),
+            ".nvim-dap.lua must never be written at $HOME"
+        );
     }
 }
