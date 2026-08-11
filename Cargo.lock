@@ -1883,10 +1883,8 @@ dependencies = [
  "anyhow",
  "clap",
  "ctrlc",
- "frust-dap",
  "frust-drive",
  "frust-tui",
- "log",
  "notify",
  "tokio",
 ]

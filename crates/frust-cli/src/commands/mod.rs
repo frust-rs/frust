@@ -3,7 +3,6 @@
 pub mod build;
 pub mod clean;
 pub mod create;
-pub mod dap;
 pub mod devices;
 pub mod doctor;
 pub mod run;
@@ -63,7 +62,6 @@ pub fn dispatch(command: Command, cli: &Cli) -> Result<u8> {
             let cwd = std::env::current_dir().context("reading current directory")?;
             clean::run_in(&*runner, &cwd)
         }
-        Command::Dap { port } => dap::run_in(runner.clone(), port),
         Command::Tui => tui::run(),
         Command::Run {
             build,
