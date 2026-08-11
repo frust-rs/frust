@@ -23,6 +23,7 @@
 //! knows the protocol, the adapter knows what a Frust app is.
 
 pub mod adapter;
+pub mod ide_config;
 pub mod protocol;
 pub mod server;
 pub mod service;
