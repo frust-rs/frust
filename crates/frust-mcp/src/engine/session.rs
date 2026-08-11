@@ -391,6 +391,31 @@ pub struct SessionEventFeed {
 }
 
 impl SessionEventFeed {
+    /// Opens a feed plus the [`SessionEventSink`] that drives it, for a
+    /// [`SessionBackend`](crate::backend::SessionBackend) implemented
+    /// **outside this crate**.
+    ///
+    /// [`SessionEngine`](crate::SessionEngine) never calls this — it owns
+    /// [`EventFeed`] directly, under its own session lock. It exists because
+    /// the delivery contract above (bounded log budget, in-band loss markers,
+    /// a reserved slot the [`SessionEvent::Exited`] can always be delivered
+    /// in) is the *feed's* contract, not the engine's: an embedder that
+    /// re-implemented it would be re-implementing exactly the part a consumer
+    /// depends on. Handing out the sending half instead keeps one
+    /// implementation of it.
+    ///
+    /// The caller owns the seeding and the ending, in the same order this
+    /// crate's own subscribe does: optionally
+    /// [`note_backlog_skipped`](SessionEventSink::note_backlog_skipped), then
+    /// one [`offer`](SessionEventSink::offer) per retained line, then live
+    /// offers, then exactly one [`finish`](SessionEventSink::finish).
+    pub fn channel() -> (SessionEventSink, SessionEventFeed) {
+        let (sender, events) = mpsc::sync_channel(LOG_SUBSCRIPTION_CAP + EVENT_FEED_RESERVED);
+        let inflight = Arc::new(AtomicUsize::new(0));
+        let sink = SessionEventSink(EventFeed::new(sender, Arc::clone(&inflight)));
+        (sink, SessionEventFeed { events, inflight })
+    }
+
     /// Blocks until the next event arrives, or the feed ends.
     pub fn recv(&self) -> Result<SessionEvent, RecvError> {
         self.took(self.events.recv())
@@ -417,6 +442,50 @@ impl SessionEventFeed {
             self.inflight.fetch_sub(1, Ordering::Relaxed);
         }
         received
+    }
+}
+
+/// The sending half of a [`SessionEventFeed`] opened with
+/// [`SessionEventFeed::channel`] — what an out-of-crate backend pushes a
+/// session's lines and its ending into.
+///
+/// A thin wrapper over the same [`EventFeed`]
+/// [`SessionEngine`](crate::SessionEngine) drives, so an embedder gets the
+/// feed's whole delivery contract (bounded log budget, in-band loss markers,
+/// the reserved exit slot) rather than a bare channel it would have to
+/// re-implement that contract on top of.
+///
+/// Dropping it without [`finish`](Self::finish) closes the feed *without* an
+/// [`SessionEvent::Exited`]: the consumer sees a disconnect, which is the
+/// honest report for a host that went away mid-session (rather than a
+/// fabricated exit status). A host that knows the session ended calls
+/// `finish`.
+pub struct SessionEventSink(EventFeed);
+
+impl SessionEventSink {
+    /// Offers one log line, returning `false` once the consumer's half is
+    /// gone (the caller then drops this sink rather than retrying a dead
+    /// channel).
+    ///
+    /// Never blocks: past the log budget the line is counted and reported
+    /// in band by the next successful offer, exactly as the engine's own
+    /// ingest path behaves.
+    pub fn offer(&mut self, line: &str) -> bool {
+        self.0.offer(line)
+    }
+
+    /// Announces, as the feed's first event, a seed backlog too deep to send
+    /// — `skipped` lines the consumer will never see.
+    pub fn note_backlog_skipped(&mut self, skipped: u64) {
+        self.0.note_backlog_skipped(skipped);
+    }
+
+    /// Closes the feed with the session's terminal `state`, preceded by a
+    /// marker for anything the consumer missed. Consumes the sink: the
+    /// disconnect the consumer sees after the [`SessionEvent::Exited`] is
+    /// this returning.
+    pub fn finish(self, state: SessionState) {
+        self.0.finish(state);
     }
 }
 

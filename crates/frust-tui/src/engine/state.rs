@@ -15,7 +15,10 @@ use super::palette::Palette;
 use super::run_config::{DeviceRow, RunConfig};
 use super::session_view::SessionView;
 use super::toast::Toasts;
-use crate::supervise::{McpServerHandle, McpStatus, SessionId, SessionState};
+use crate::supervise::{
+    DapServerHandle, DapStatus, McpServerHandle, McpStatus, SessionId, SessionState,
+};
+use frust_dap::DapClientEntry;
 use frust_mcp::ClientEntry;
 
 /// Bounded-walk depth cap for [`detect`]/[`find_projects`]: `dir` itself is
@@ -210,6 +213,18 @@ pub struct AppState {
     /// start looking like a silent no-op. Cleared when the next start is
     /// requested.
     pub mcp_error: Option<String>,
+    /// The embedded DAP server, while one is running (`None` = stopped) —
+    /// [`Self::mcp`]'s exact counterpart, with the same live-resource
+    /// ownership rule: [`super::Engine::start_dap`]/`stop_dap` own its
+    /// lifetime, and the pure `update` only records the server's own
+    /// asynchronous reports against it. Read it through [`Self::dap_status`],
+    /// never directly.
+    pub dap: Option<DapServerHandle>,
+    /// Why the embedded DAP server last stopped unexpectedly (a bind failure,
+    /// or a server task that ended with an error), retained so a failed start
+    /// never reads as a silent no-op. Cleared when the next start is
+    /// requested.
+    pub dap_error: Option<String>,
 }
 
 impl AppState {
@@ -288,6 +303,8 @@ impl AppState {
             mcp: None,
             mcp_panel_open: false,
             mcp_error: None,
+            dap: None,
+            dap_error: None,
         }
     }
 
@@ -332,6 +349,30 @@ impl AppState {
     /// disagree — take one snapshot per render, as the panel does.
     pub fn mcp_clients(&self) -> Vec<ClientEntry> {
         match &self.mcp {
+            Some(handle) => handle.clients(),
+            None => Vec::new(),
+        }
+    }
+
+    /// What the embedded DAP server is doing — [`Self::mcp_status`]'s
+    /// counterpart, and the single read anything else should take rather than
+    /// reaching into [`Self::dap`] itself.
+    pub fn dap_status(&self) -> DapStatus {
+        match &self.dap {
+            Some(handle) => handle.status(),
+            None => DapStatus::Stopped,
+        }
+    }
+
+    /// Every editor attached to the embedded DAP server right now, oldest
+    /// first. Empty while no server is running — the fact, not a placeholder.
+    ///
+    /// Read live off the registry each call (the server's own tasks
+    /// register/unregister there), so two calls in one frame can legitimately
+    /// disagree — take one snapshot per render, as
+    /// [`Self::mcp_clients`]'s consumers do.
+    pub fn dap_clients(&self) -> Vec<DapClientEntry> {
+        match &self.dap {
             Some(handle) => handle.clients(),
             None => Vec::new(),
         }
@@ -454,6 +495,8 @@ impl Default for AppState {
             mcp: None,
             mcp_panel_open: false,
             mcp_error: None,
+            dap: None,
+            dap_error: None,
         }
     }
 }

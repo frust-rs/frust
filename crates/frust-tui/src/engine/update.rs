@@ -164,6 +164,20 @@ pub enum Effect {
     /// Stop the embedded MCP server — the runner's
     /// [`super::Engine::stop_mcp`]. A no-op when none is running.
     StopMcpServer,
+    /// Start the embedded DAP server on `port` (`0` = OS-assigned) — the
+    /// runner's [`super::Engine::start_dap`], over the **same**
+    /// [`crate::supervise::TuiSessionBackend`] the MCP server is handed, so an
+    /// editor and an agent drive one session world. The same live-resource
+    /// reasoning as [`Effect::StartMcpServer`]: only the runner can build the
+    /// handle.
+    StartDapServer {
+        /// The loopback port to bind (`frust_dap::DEFAULT_DAP_PORT` unless a
+        /// caller says otherwise).
+        port: u16,
+    },
+    /// Stop the embedded DAP server — the runner's
+    /// [`super::Engine::stop_dap`]. A no-op when none is running.
+    StopDapServer,
     /// Enact every effect in order — the escape hatch for a transition that
     /// must kick off more than one independent side effect at once (opening
     /// DevTools can both (re)open its frame-stats connection *and* start
@@ -1298,6 +1312,35 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                 Outcome::redraw()
             } else {
                 Outcome::idle()
+            }
+        }
+
+        // The embedded DAP server's two reports, gated on the generation
+        // naming the server *currently installed* — the identical race, and
+        // the identical consequence of losing it, as the MCP pair above.
+        Message::DapListening(generation, port) => match state.dap.as_mut() {
+            Some(handle) if handle.generation() == generation => {
+                Outcome::dirty(handle.set_bound_port(port))
+            }
+            Some(_) | None => Outcome::idle(),
+        },
+        Message::DapStopped(generation, error) => {
+            match state.dap.as_ref().map(|handle| handle.generation()) {
+                Some(installed) if installed != generation => Outcome::idle(),
+                installed => {
+                    let was_running = installed.is_some();
+                    state.dap = None;
+                    match error {
+                        Some(error) => {
+                            state
+                                .toasts
+                                .push(ToastKind::Error, format!("DAP server stopped: {error}"));
+                            state.dap_error = Some(error);
+                            Outcome::redraw()
+                        }
+                        None => Outcome::dirty(was_running),
+                    }
+                }
             }
         }
     }
@@ -4628,6 +4671,88 @@ mod tests {
 
         update(&mut st, Message::ToggleMcpServer);
         assert_eq!(st.mcp_error, None);
+    }
+
+    // ── Embedded DAP server ───────────────────────────────────────────────────
+
+    /// A handle for a DAP server of `generation` that was "started" without
+    /// spawning anything — enough to exercise the two reports it sends back.
+    fn dap_handle(generation: u64) -> crate::supervise::DapServerHandle {
+        crate::supervise::DapServerHandle::starting(
+            generation,
+            tokio_util::sync::CancellationToken::new(),
+            frust_dap::DapClientRegistry::new(),
+        )
+    }
+
+    #[test]
+    fn the_dap_bound_port_report_promotes_starting_to_listening() {
+        let mut st = welcome();
+        st.dap = Some(dap_handle(0));
+        assert_eq!(st.dap_status(), crate::supervise::DapStatus::Starting);
+
+        let out = update(&mut st, Message::DapListening(0, 4849));
+        assert!(out.redraw);
+        assert_eq!(
+            st.dap_status(),
+            crate::supervise::DapStatus::Listening {
+                port: 4849,
+                clients: 0
+            }
+        );
+        assert!(!update(&mut st, Message::DapListening(0, 4849)).redraw);
+    }
+
+    /// The same generation gate as the MCP pair, and for the same reason: a
+    /// superseded server's late report must neither restamp nor clear its
+    /// successor's handle.
+    #[test]
+    fn a_superseded_dap_servers_late_reports_never_touch_its_successor() {
+        let mut st = welcome();
+        st.dap = Some(dap_handle(1));
+        update(&mut st, Message::DapListening(1, 4849));
+
+        let out = update(&mut st, Message::DapListening(0, 9999));
+        assert!(!out.redraw);
+        assert_eq!(
+            st.dap_status(),
+            crate::supervise::DapStatus::Listening {
+                port: 4849,
+                clients: 0
+            }
+        );
+
+        let out = update(&mut st, Message::DapStopped(0, Some("boom".to_string())));
+        assert!(!out.redraw);
+        assert_eq!(
+            st.dap.as_ref().map(|handle| handle.generation()),
+            Some(1),
+            "B's own handle — the one carrying its cancellation token — is still installed"
+        );
+        assert!(st.toasts.items.is_empty());
+        assert_eq!(st.dap_error, None);
+
+        // B's *own* stop report, by contrast, is applied.
+        assert!(update(&mut st, Message::DapStopped(1, None)).redraw);
+        assert_eq!(st.dap_status(), crate::supervise::DapStatus::Stopped);
+    }
+
+    #[test]
+    fn a_failed_dap_server_toasts_and_retains_its_reason() {
+        let mut st = welcome();
+        st.dap = Some(dap_handle(0));
+        update(
+            &mut st,
+            Message::DapStopped(0, Some("address already in use".to_string())),
+        );
+        assert_eq!(st.dap_status(), crate::supervise::DapStatus::Stopped);
+        assert_eq!(st.toasts.items.len(), 1);
+        assert!(st.toasts.items[0].text.contains("address already in use"));
+        assert_eq!(
+            st.dap_error.as_deref(),
+            Some("address already in use"),
+            "the reason is retained for the UI, not just toasted"
+        );
     }
 
     #[test]

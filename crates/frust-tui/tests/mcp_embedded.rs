@@ -35,8 +35,9 @@ use frust_drive::process::{FakeProcessRunner, ProcessRunner};
 use frust_mcp::{ClientRegistry, SharedBackend};
 use frust_tui::engine::{AppState, Effect, Engine, Message, Screen};
 use frust_tui::supervise::{
-    McpServeCtx, McpSessionRecords, McpStatus, SessionState, Supervisor, TuiSessionBackend,
-    mcp_backend::MAX_ADHOC_SESSION_ID, serve_command,
+    DevtoolsBridge, McpServeCtx, McpSessionRecords, McpStatus, PendingWidgetTrees, SessionState,
+    SessionSubscribers, Supervisor, TuiSessionBackend, mcp_backend::MAX_ADHOC_SESSION_ID,
+    serve_command,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
@@ -166,9 +167,13 @@ async fn run_workbench(
     mirror: Arc<Mutex<Vec<MirroredSession>>>,
 ) {
     let mut rx = engine.take_receiver();
+    let bridge_runner = Arc::clone(&runner);
     let (mut supervisor, mut session_rx) = Supervisor::new(runner);
     let mut records = McpSessionRecords::new();
     let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+    let mut subscribers = SessionSubscribers::new();
+    let mut pending_trees = PendingWidgetTrees::new();
+    let mut devtools = DevtoolsBridge::new(Arc::clone(&bridge_runner));
 
     while !engine.state.should_quit {
         tokio::select! {
@@ -180,6 +185,9 @@ async fn run_workbench(
                         records: &mut records,
                         tx: &engine.sender(),
                         next_adhoc_id: &mut next_adhoc_id,
+                        subscribers: &mut subscribers,
+                        devtools: &mut devtools,
+                        pending_trees: &mut pending_trees,
                     });
                 } else {
                     engine.handle(msg);

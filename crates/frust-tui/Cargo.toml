@@ -32,6 +32,12 @@ frust-devtools-protocol = { path = "../frust-devtools-protocol" }
 # tooling-isolation charter — docs/ARCHITECTURE.md); it drags in no framework
 # crate.
 frust-mcp = { path = "../frust-mcp" }
+# The embedded DAP server: `frust_dap::serve_embedded` over the *same*
+# `TuiSessionBackend` the MCP server is handed, so an IDE debugging through
+# DAP, an agent through MCP, and the user in the terminal all drive one
+# session world. The second tooling→tooling crossing (docs/ARCHITECTURE.md);
+# `frust-dap` itself depends on `frust-mcp` and no framework crate.
+frust-dap = { path = "../frust-dap" }
 anyhow.workspace = true
 # `thiserror` backs the supervisor's matched `LaunchError` (CODE_STANDARDS'
 # "errors callers match on" rule); already a workspace dependency.

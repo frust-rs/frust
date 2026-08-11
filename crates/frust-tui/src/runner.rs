@@ -32,13 +32,13 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::engine::{
     ActiveModal, AddPluginDialog, AddPluginStep, AppState, BootstrapNode, BootstrapWizard,
     BuildFocus, BuildSpec, BuildTargetSpec, DevtoolsLaunch, DevtoolsState, DoctorCheck, Effect,
-    Engine, Message, RegionId, RunFocus, Screen, WizardStep,
+    Engine, Message, Outcome, RegionId, RunFocus, Screen, WizardStep,
 };
 use crate::supervise::mcp_backend::MAX_ADHOC_SESSION_ID;
 use crate::supervise::{
-    DeviceTarget, DevtoolsBridge, McpServeCtx, McpSessionRecords, MetricsBridge, SessionEvent,
-    SessionEventKind, SessionId, SessionSpec, SessionState, Supervisor, Teardown,
-    TuiSessionBackend, serve_command,
+    DeviceTarget, DevtoolsBridge, McpServeCtx, McpSessionRecords, MetricsBridge,
+    PendingWidgetTrees, SessionEvent, SessionEventKind, SessionId, SessionSpec, SessionState,
+    SessionSubscribers, Supervisor, Teardown, TuiSessionBackend, mcp_session_state, serve_command,
 };
 use crate::ui::mouse::MouseRegions;
 use crate::ui::theme::Theme;
@@ -140,6 +140,21 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     // for the embedded server's snapshots and its `restart_app`. Empty (and
     // untouched) while no MCP server is running.
     let mut mcp_records = McpSessionRecords::new();
+    // The embedded servers' two deferred-answer registries (see
+    // `crate::supervise::session_feeds`): the open session-event feeds a DAP
+    // client's output/exit pumps read, and the widget-tree pulls waiting on a
+    // devtools-bridge report. Both are dropped when this loop returns, which
+    // is what closes a DAP client's feeds instead of leaving them waiting on a
+    // workbench that is gone.
+    let mut subscribers = SessionSubscribers::new();
+    let mut pending_trees = PendingWidgetTrees::new();
+    // ONE backend, shared by both embedded servers. That sharing is the point:
+    // a session an agent launched over MCP is the same session an editor sees
+    // over DAP, and both are the tabs the user is looking at.
+    let backend: SharedBackend = Arc::new(TuiSessionBackend::new(
+        msg_tx.clone(),
+        Arc::new(RealProcessRunner),
+    ));
 
     // Kick an initial device discovery + doctor preflight so the panel/chip
     // populate on open (the doctor run is the titlebar chip's cached
@@ -175,7 +190,11 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                 match maybe_event {
                     Some(Ok(event)) => {
                         for msg in translate_event(event, &engine.state, &regions) {
-                            let out = engine.handle(msg);
+                            let out = dispatch(&mut engine, msg, &mut FeedCtx {
+                                subscribers: &mut subscribers,
+                                pending_trees: &mut pending_trees,
+                                records: &mcp_records,
+                            });
                             needs_redraw |= out.redraw;
                             apply_effect(
                                 out.effect,
@@ -187,6 +206,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                                     tx: &msg_tx,
                                     next_adhoc_id: &mut next_adhoc_id,
                                     records: &mut mcp_records,
+                                    backend: &backend,
                                 },
                             );
                         }
@@ -210,9 +230,16 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                         records: &mut mcp_records,
                         tx: &msg_tx,
                         next_adhoc_id: &mut next_adhoc_id,
+                        subscribers: &mut subscribers,
+                        devtools: &mut devtools,
+                        pending_trees: &mut pending_trees,
                     });
                 } else {
-                    let out = engine.handle(msg);
+                    let out = dispatch(&mut engine, msg, &mut FeedCtx {
+                        subscribers: &mut subscribers,
+                        pending_trees: &mut pending_trees,
+                        records: &mcp_records,
+                    });
                     needs_redraw |= out.redraw;
                     apply_effect(
                         out.effect,
@@ -224,12 +251,17 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                             tx: &msg_tx,
                             next_adhoc_id: &mut next_adhoc_id,
                             records: &mut mcp_records,
+                            backend: &backend,
                         },
                     );
                 }
             }
             Some(ev) = session_rx.recv() => {
-                let out = engine.handle(Message::Session(ev));
+                let out = dispatch(&mut engine, Message::Session(ev), &mut FeedCtx {
+                    subscribers: &mut subscribers,
+                    pending_trees: &mut pending_trees,
+                    records: &mcp_records,
+                });
                 needs_redraw |= out.redraw;
                 apply_effect(
                     out.effect,
@@ -241,6 +273,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                         tx: &msg_tx,
                         next_adhoc_id: &mut next_adhoc_id,
                         records: &mut mcp_records,
+                        backend: &backend,
                     },
                 );
             }
@@ -262,6 +295,7 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
                             tx: &msg_tx,
                             next_adhoc_id: &mut next_adhoc_id,
                             records: &mut mcp_records,
+                            backend: &backend,
                         },
                     );
                 }
@@ -269,12 +303,81 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
         }
     }
 
-    // Quit: cancel an embedded MCP server if one is running, so its listener
-    // closes here rather than only when the runtime is torn down. A no-op
-    // while nothing has started one.
+    // Quit: cancel whichever embedded servers are running, so their listeners
+    // close here rather than only when the runtime is torn down. Both are
+    // no-ops while nothing has started one.
     engine.stop_mcp();
+    engine.stop_dap();
 
     Ok(())
+}
+
+/// Everything the deferred-answer registries need around one `update` call —
+/// see [`crate::supervise::session_feeds`] for why the fan-out lives here
+/// rather than inside the pure transition.
+struct FeedCtx<'a> {
+    /// The open session-event feeds.
+    subscribers: &'a mut SessionSubscribers,
+    /// The widget-tree pulls waiting on a bridge report.
+    pending_trees: &'a mut PendingWidgetTrees,
+    /// The launch records a session's `frust-mcp` terminal state is derived
+    /// from — read-only here.
+    records: &'a McpSessionRecords,
+}
+
+/// Apply one message, feeding the deferred-answer registries around it.
+///
+/// Two messages are more than a state transition to an embedded server:
+///
+/// - `Message::Session` may append log lines or end the session, both of
+///   which a [`SessionEventFeed`](frust_mcp::engine::SessionEventFeed)
+///   subscriber is owed. The cursor is taken **before** `update` runs and the
+///   delta replayed **after**, so what a subscriber receives is exactly what
+///   the model retained — already token-redacted by
+///   `SessionView::push_line_at`, with no second redaction path to keep in
+///   step.
+/// - `Message::DevtoolsInspector` may be the answer to a `widget_tree` pull a
+///   backend caller is blocked on. It is read, never consumed: the Inspector
+///   tab still gets it through `update` exactly as before.
+///
+/// Every other message goes straight through.
+fn dispatch(engine: &mut Engine, msg: Message, feeds: &mut FeedCtx<'_>) -> Outcome {
+    match &msg {
+        Message::DevtoolsInspector(session, event) => {
+            feeds.pending_trees.resolve(*session, event);
+            engine.handle(msg)
+        }
+        Message::Session(event) => {
+            let session = event.id;
+            let cursor = SessionSubscribers::cursor(&engine.state, session);
+            let out = engine.handle(msg);
+            if let Some(cursor) = cursor {
+                let records = feeds.records;
+                feeds.subscribers.replay(&engine.state, cursor, |view| {
+                    mcp_session_state(records, view)
+                });
+                if !cursor.was_terminal && session_is_terminal(engine, session) {
+                    // The bridge is torn down with the session, so a pull
+                    // queued on it may never be served; the waiter is told
+                    // rather than left to time out.
+                    feeds
+                        .pending_trees
+                        .refuse(session, "the session ended before its widget tree arrived");
+                }
+            }
+            out
+        }
+        _ => engine.handle(msg),
+    }
+}
+
+/// Whether the workbench currently holds `session` in a terminal state.
+fn session_is_terminal(engine: &Engine, session: SessionId) -> bool {
+    engine
+        .state
+        .sessions
+        .iter()
+        .any(|view| view.id == session && view.state.is_terminal())
 }
 
 /// Everything enacting one [`Effect`] needs from [`run_loop`]'s scope —
@@ -298,6 +401,10 @@ struct EffectCtx<'a> {
     next_adhoc_id: &'a mut u64,
     /// The MCP launch records a started session is recorded in.
     records: &'a mut McpSessionRecords,
+    /// The one [`TuiSessionBackend`] both embedded servers are started over —
+    /// built once per run, so an MCP agent and a DAP client drive the same
+    /// session world rather than two backends over the same supervisor.
+    backend: &'a SharedBackend,
 }
 
 /// Enact an engine-requested [`Effect`] — the runner owns the side effects the
@@ -313,6 +420,7 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
         tx,
         next_adhoc_id,
         records,
+        backend,
     } = ctx;
     match effect {
         Some(Effect::StopSession(id)) => supervisor.stop(id),
@@ -380,14 +488,20 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
         // Everything the server then reports (its bound port, a bind failure)
         // travels back as an ordinary `Message`.
         Some(Effect::StartMcpServer) => {
-            let backend: SharedBackend = Arc::new(TuiSessionBackend::new(
-                tx.clone(),
-                Arc::new(RealProcessRunner),
-            ));
-            engine.start_mcp(backend, crate::engine::DEFAULT_MCP_PORT);
+            engine.start_mcp(Arc::clone(backend), crate::engine::DEFAULT_MCP_PORT);
         }
         Some(Effect::StopMcpServer) => {
             engine.stop_mcp();
+        }
+        // The embedded DAP server (the same shape, one crate over): the
+        // backend is the *same* one the MCP server gets, and the project root
+        // is the workbench's own — a DAP client never chooses one (see
+        // `frust_dap::serve_embedded`).
+        Some(Effect::StartDapServer { port }) => {
+            engine.start_dap(Arc::clone(backend), port);
+        }
+        Some(Effect::StopDapServer) => {
+            engine.stop_dap();
         }
         Some(Effect::Batch(effects)) => {
             for effect in effects {
@@ -401,6 +515,7 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
                         tx,
                         next_adhoc_id,
                         records,
+                        backend,
                     },
                 );
             }
@@ -1664,6 +1779,72 @@ fn disable_mouse_capture() -> io::Result<()> {
 mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, MouseEvent};
+    use frust_mcp::engine::{SessionEvent as McpSessionEvent, SessionState as McpSessionState};
+
+    /// The runner's own half of the session-event feed: `dispatch` is what
+    /// turns an applied `Message::Session` into the lines and the ending a
+    /// subscriber is owed. Driving it here rather than only through
+    /// `SessionSubscribers` is the point — this is the wiring that would
+    /// silently stop feeding a DAP client if a future refactor routed a
+    /// session message around it.
+    #[tokio::test]
+    async fn dispatch_feeds_a_subscriber_the_lines_and_the_exit_a_session_produces() {
+        let mut engine = Engine::new(AppState::default());
+        let mut subscribers = SessionSubscribers::new();
+        let mut pending_trees = PendingWidgetTrees::new();
+        let records = McpSessionRecords::new();
+
+        engine.handle(Message::RegisterSession {
+            id: SessionId(0),
+            project_root: std::path::PathBuf::from("/tmp/frust-tui-dispatch"),
+            target_label: "desktop".to_string(),
+            devtools: DevtoolsLaunch::unavailable(),
+        });
+        let view = engine
+            .state
+            .sessions
+            .first()
+            .expect("the session registered");
+        let feed = subscribers.subscribe(view, None);
+
+        let mut feeds = FeedCtx {
+            subscribers: &mut subscribers,
+            pending_trees: &mut pending_trees,
+            records: &records,
+        };
+        dispatch(
+            &mut engine,
+            Message::Session(SessionEvent {
+                id: SessionId(0),
+                kind: SessionEventKind::Lines(vec!["hello".to_string()]),
+            }),
+            &mut feeds,
+        );
+        assert_eq!(
+            feed.try_recv(),
+            Ok(McpSessionEvent::Log("hello".to_string())),
+            "a line batch reaches the feed through the runner, not only through the model"
+        );
+
+        dispatch(
+            &mut engine,
+            Message::Session(SessionEvent {
+                id: SessionId(0),
+                kind: SessionEventKind::State(SessionState::Exited(true)),
+            }),
+            &mut feeds,
+        );
+        assert_eq!(
+            feed.try_recv(),
+            Ok(McpSessionEvent::Exited {
+                state: McpSessionState::Exited { success: true }
+            })
+        );
+        assert!(
+            feed.try_recv().is_err(),
+            "and the feed closes rather than going quiet"
+        );
+    }
 
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))

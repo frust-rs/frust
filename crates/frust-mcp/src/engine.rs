@@ -50,8 +50,8 @@ mod ring;
 mod session;
 
 pub use session::{
-    LatestMetrics, LogSubscription, RunTarget, SessionEvent, SessionEventFeed, SessionId,
-    SessionSnapshot, SessionState,
+    LatestMetrics, LogSubscription, RunTarget, SessionEvent, SessionEventFeed, SessionEventSink,
+    SessionId, SessionSnapshot, SessionState,
 };
 
 use std::collections::BTreeMap;

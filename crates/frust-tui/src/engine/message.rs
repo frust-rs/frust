@@ -794,4 +794,21 @@ pub enum Message {
     /// Close the MCP panel (`Esc` / `m` / its Close button). The server keeps
     /// running: closing the panel is not a stop.
     CloseMcpPanel,
+
+    // ── Embedded DAP server ───────────────────────────────────────────────────
+    /// The embedded DAP server of this generation has its listener up on this
+    /// port — the answer to `start_dap`'s `ready` signal (the OS-assigned port
+    /// when it was started on `0`).
+    ///
+    /// Generation-gated exactly like [`Self::McpListening`], and for exactly
+    /// the same reason.
+    DapListening(u64, u16),
+    /// The embedded DAP server of this generation returned: cleanly (`None`)
+    /// or with the rendered error that ended it (`Some`).
+    ///
+    /// Generation-gated exactly like [`Self::McpStopped`]: a superseded
+    /// server's late report must not clear its successor's handle, since
+    /// dropping a `CancellationToken` does not cancel it and that successor
+    /// would be left listening with nothing able to stop it.
+    DapStopped(u64, Option<String>),
 }

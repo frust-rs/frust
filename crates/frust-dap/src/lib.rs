@@ -49,3 +49,16 @@ pub use protocol::types::{
 pub use server::{
     AdapterResponse, DapAdapter, EventSender, ServerError, run_session, serve_embedded, serve_tcp,
 };
+
+/// The loopback port a host binds [`serve_embedded`] to unless told otherwise.
+///
+/// A **fixed** default rather than `0` (an OS-assigned ephemeral port) on
+/// purpose: the whole point of the embed is that an editor's launch
+/// configuration can name the port ahead of time and keep working across
+/// workbench restarts, which an ephemeral port makes impossible. `0` stays
+/// available for a caller that genuinely wants one (the tests do).
+///
+/// Unregistered with IANA and outside the ephemeral range Linux hands out by
+/// default (32768–60999), so a normal desktop session will not have something
+/// else sitting on it.
+pub const DEFAULT_DAP_PORT: u16 = 4849;

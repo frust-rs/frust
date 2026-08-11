@@ -20,6 +20,13 @@
 //!   [`TuiSessionBackend`] answering `frust-mcp`'s `SessionBackend` over
 //!   these same sessions, so an agent and the user share one session world
 //!   rather than each running the app once.
+//! - [`session_feeds`] holds that seam's two *deferred-answer* registries —
+//!   the open [`SessionSubscribers`] feeds a DAP client's output/exit pumps
+//!   read, and the [`PendingWidgetTrees`] a `widget_tree` pull is answered
+//!   from once the devtools bridge reports back.
+//! - [`dap_server`] is the embedded **DAP** server's handle/status pair
+//!   ([`DapServerHandle`]/[`DapStatus`]), the exact counterpart of
+//!   `mcp_backend`'s [`McpServerHandle`]/[`McpStatus`].
 //! - [`metrics_bridge`] is the third moving part — [`MetricsBridge`] owns
 //!   one System/Network metrics-sampling thread per session (workbook
 //!   §B12's System/Network tabs), a sibling to `devtools_bridge` rather than
@@ -40,21 +47,24 @@
 //! detaches on expiry — see [`Teardown`] for why an unbounded join here is a
 //! whole-TUI freeze.
 
+mod dap_server;
 mod devtools_bridge;
 pub mod mcp_backend;
 mod metrics_bridge;
 mod progress;
 mod session;
+pub mod session_feeds;
 mod supervisor;
 
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+pub use dap_server::{DapServerHandle, DapStatus};
 pub use devtools_bridge::DevtoolsBridge;
 pub use mcp_backend::{
     EmbeddedError, McpCommand, McpServeCtx, McpServerHandle, McpSessionRecords, McpStatus,
-    TuiSessionBackend, serve_command,
+    TreeRefusal, TuiSessionBackend, mcp_session_state, serve_command,
 };
 pub use metrics_bridge::MetricsBridge;
 pub use progress::{PhaseLabel, phase_from_output_line};
@@ -62,6 +72,7 @@ pub use session::{
     DevicePlan, DeviceTarget, LaunchError, LaunchPlan, SessionEvent, SessionEventKind, SessionId,
     SessionSpec, SessionState,
 };
+pub use session_feeds::{PendingWidgetTrees, SessionCursor, SessionSubscribers};
 pub use supervisor::Supervisor;
 
 /// How long a [`Teardown`] waits for its signalled thread before detaching it.

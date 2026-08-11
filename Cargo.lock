@@ -2235,6 +2235,7 @@ dependencies = [
  "ansi-to-tui",
  "anyhow",
  "crossterm",
+ "frust-dap",
  "frust-devtools-protocol",
  "frust-drive",
  "frust-mcp",
