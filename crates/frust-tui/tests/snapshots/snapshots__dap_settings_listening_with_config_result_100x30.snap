@@ -1,0 +1,26 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: "render_dap_settings(100, 30, &settings, &DapStatus::Listening\n{ port: 4849, clients: 1, }, 1, None,)"
+---
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                  ╭ DAP server ──────────────────────────────────────────────────╮                  
+                  │                                                              │▓▓                
+                  │    Server    127.0.0.1:4849 (1 attached)   Stop              │▓▓                
+                  │    Port      4849                                            │▓▓                
+                  │    [x] auto-start in an IDE terminal                         │▓▓                
+                  │    [x] auto-configure the IDE on start                       │▓▓                
+                  │    IDE       ‹ VS Code ›                                     │▓▓                
+                  │   Generate IDE config now     Close                          │▓▓                
+                  │                                                              │▓▓                
+                  │  VS Code: created /tmp/huddle/.vscode/launch.json            │▓▓                
+                  │  Tab move · Space toggle · s start/stop · g gen · Esc close  │▓▓                
+                  ╰──────────────────────────────────────────────────────────────╯▓▓                
+                    ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓

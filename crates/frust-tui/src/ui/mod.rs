@@ -220,6 +220,30 @@ fn render_modal(
                 mouse,
             );
         }
+        // The DAP settings dialog reaches over either top-level screen for the
+        // same reason the MCP panel does: the embedded server hosts the
+        // *workbench*, and its preferences are readable with no project open.
+        ActiveModal::DapSettings(settings) => {
+            let mut suppressed = MouseCtx::suppressed();
+            match state.screen {
+                Screen::Welcome => render_welcome(frame, area, state, theme, &mut suppressed),
+                Screen::Workbench => {
+                    views::workbench::render(frame, area, state, theme, &mut suppressed)
+                }
+            }
+            views::dap_settings::render(
+                frame,
+                area,
+                settings,
+                &state.dap_status(),
+                // One registry snapshot per frame, like the MCP panel's client
+                // list: the count is read live off a running server.
+                state.dap_clients().len(),
+                state.dap_error.as_deref(),
+                theme,
+                mouse,
+            );
+        }
         ActiveModal::BuildLauncher(launcher) => {
             let mut suppressed = MouseCtx::suppressed();
             views::workbench::render(frame, area, state, theme, &mut suppressed);

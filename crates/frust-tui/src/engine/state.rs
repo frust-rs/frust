@@ -9,13 +9,17 @@ use super::bootstrap::{BootstrapState, BootstrapWizard};
 use super::build_launcher::BuildLauncher;
 use super::context_menu::ContextMenu;
 use super::create_wizard::CreateWizard;
+use super::dap_settings::DapSettings;
 use super::doctor::DoctorState;
 use super::message::{DragKind, RegionId};
 use super::palette::Palette;
 use super::run_config::{DeviceRow, RunConfig};
 use super::session_view::SessionView;
 use super::toast::Toasts;
-use crate::supervise::{McpServerHandle, McpStatus, SessionId, SessionState};
+use crate::supervise::{
+    DapServerHandle, DapStatus, McpServerHandle, McpStatus, SessionId, SessionState,
+};
+use frust_dap::DapClientEntry;
 use frust_mcp::ClientEntry;
 
 /// Bounded-walk depth cap for [`detect`]/[`find_projects`]: `dir` itself is
@@ -210,6 +214,27 @@ pub struct AppState {
     /// start looking like a silent no-op. Cleared when the next start is
     /// requested.
     pub mcp_error: Option<String>,
+    /// The embedded DAP server, while one is running (`None` = stopped) —
+    /// [`Self::mcp`]'s exact counterpart, with the same live-resource
+    /// ownership rule: [`super::Engine::start_dap`]/`stop_dap` own its
+    /// lifetime, and the pure `update` only records the server's own
+    /// asynchronous reports against it. Read it through [`Self::dap_status`],
+    /// never directly.
+    pub dap: Option<DapServerHandle>,
+    /// Why the embedded DAP server last stopped unexpectedly (a bind failure,
+    /// or a server task that ended with an error), retained so a failed start
+    /// never reads as a silent no-op. Cleared when the next start is
+    /// requested.
+    pub dap_error: Option<String>,
+    /// The workbench's DAP preferences (the persisted `[dap]` table) plus the
+    /// settings dialog's edit state. Present regardless of whether the dialog
+    /// is open: startup auto-start and the auto-configure that follows a
+    /// `DapListening` report both read it.
+    pub dap_settings: DapSettings,
+    /// Whether the DAP settings dialog is open (`D`, the sidebar ACTIONS "DAP"
+    /// row, or the palette). While `true` it captures input and suppresses
+    /// background mouse regions like the other modals.
+    pub dap_settings_open: bool,
 }
 
 impl AppState {
@@ -237,6 +262,15 @@ impl AppState {
         let settings = super::persist::load_settings();
         state.sidebar_width = settings.sidebar_width;
         state.mouse_capture = settings.mouse_capture;
+        // The DAP preferences and the IDE this process is hosted by: both are
+        // read exactly once, here. Detection sniffs the environment the
+        // workbench was launched into, which cannot change under a running
+        // process, so re-sniffing per frame (or per transition) would only
+        // move an impure read into the pure core.
+        state.dap_settings = DapSettings::from_prefs(
+            super::persist::load_dap_prefs(),
+            frust_dap::ide_config::detect_parent_ide(),
+        );
         state
     }
 
@@ -288,6 +322,10 @@ impl AppState {
             mcp: None,
             mcp_panel_open: false,
             mcp_error: None,
+            dap: None,
+            dap_error: None,
+            dap_settings: DapSettings::default(),
+            dap_settings_open: false,
         }
     }
 
@@ -305,10 +343,13 @@ impl AppState {
     /// bound: its client list is read live off the registry at render time
     /// (nothing messages the engine when a client connects), so it needs the
     /// tick to stay current — but only *while the panel is open*, never for
-    /// the whole life of a running server.
+    /// the whole life of a running server. The open DAP settings dialog counts
+    /// for exactly the same reason (its attached-editor count is the same kind
+    /// of live registry read).
     pub fn animating(&self) -> bool {
         !self.toasts.items.is_empty()
             || self.mcp_panel_open
+            || self.dap_settings_open
             || self.sessions.iter().any(|s| is_transient(&s.state))
     }
 
@@ -332,6 +373,30 @@ impl AppState {
     /// disagree — take one snapshot per render, as the panel does.
     pub fn mcp_clients(&self) -> Vec<ClientEntry> {
         match &self.mcp {
+            Some(handle) => handle.clients(),
+            None => Vec::new(),
+        }
+    }
+
+    /// What the embedded DAP server is doing — [`Self::mcp_status`]'s
+    /// counterpart, and the single read anything else should take rather than
+    /// reaching into [`Self::dap`] itself.
+    pub fn dap_status(&self) -> DapStatus {
+        match &self.dap {
+            Some(handle) => handle.status(),
+            None => DapStatus::Stopped,
+        }
+    }
+
+    /// Every editor attached to the embedded DAP server right now, oldest
+    /// first. Empty while no server is running — the fact, not a placeholder.
+    ///
+    /// Read live off the registry each call (the server's own tasks
+    /// register/unregister there), so two calls in one frame can legitimately
+    /// disagree — take one snapshot per render, as
+    /// [`Self::mcp_clients`]'s consumers do.
+    pub fn dap_clients(&self) -> Vec<DapClientEntry> {
+        match &self.dap {
             Some(handle) => handle.clients(),
             None => Vec::new(),
         }
@@ -454,6 +519,10 @@ impl Default for AppState {
             mcp: None,
             mcp_panel_open: false,
             mcp_error: None,
+            dap: None,
+            dap_error: None,
+            dap_settings: DapSettings::default(),
+            dap_settings_open: false,
         }
     }
 }

@@ -1,9 +1,9 @@
 # Frust - CLI Development
 
 Template/scaffold development and version pins owned by the CLI unit (`frust-cli`,
-`frust-drive`, `frust-mcp`). Shared prerequisites, build/run commands, the standard verify gate, and the
-version-pin *policy* live in [DEVELOPMENT.md](DEVELOPMENT.md); the unit's design lives in
-[CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md).
+`frust-drive`, `frust-mcp`, `frust-dap`). Shared prerequisites, build/run commands, the standard
+verify gate, and the version-pin *policy* live in [DEVELOPMENT.md](DEVELOPMENT.md); the unit's
+design lives in [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md).
 
 ## Template development
 
@@ -42,7 +42,7 @@ LAW; re-run the row's tripwire after touching it, and never run a blind `cargo u
 | `rmcp 1.7` minor (`frust-mcp`-only; resolves 1.8.0) | `frust-mcp`'s MCP Streamable-HTTP server. `default-features = false` trims rmcp's client/reqwest/auth/elicitation surface this tool-only, loopback-bound server never uses; `server` + `transport-streamable-http-server` are the transport it runs, `macros` pulls in the `#[tool_router]`/`#[tool]`/`#[tool_handler]` attribute macros the tools are built from | `cargo test -p frust-mcp` |
 | `axum 0.8` (`frust-mcp`-only) | The HTTP layer rmcp's `StreamableHttpService` nests into | `cargo test -p frust-mcp` |
 | `base64 0.22` (`frust-mcp`-only) | Encodes/decodes screenshot payloads in MCP tool results | `cargo test -p frust-mcp` |
-| `tokio-util 0.7` (`frust-mcp`; also `frust-tui`, see [TUI_DEVELOPMENT.md](TUI_DEVELOPMENT.md)) | The `CancellationToken` graceful-shutdown seam, wired to Ctrl-C in `frust-mcp` and to the workbench's start/stop toggle in `frust-tui` | `cargo test -p frust-mcp` && `cargo test -p frust-tui` |
+| `tokio-util 0.7` (`frust-mcp`/`frust-dap`; also `frust-tui`, see [TUI_DEVELOPMENT.md](TUI_DEVELOPMENT.md)) | The `CancellationToken` graceful-shutdown seam, wired to Ctrl-C in `frust-mcp`'s standalone `run` and to the workbench's start/stop toggle for both embedded servers in `frust-tui` | `cargo test -p frust-mcp` && `cargo test -p frust-dap` && `cargo test -p frust-tui` |
 
 `frust-drive` also shares `frust-tui`'s `toml_edit` pin — see
 [TUI_DEVELOPMENT.md](TUI_DEVELOPMENT.md).
@@ -58,6 +58,30 @@ that means for headless/CI use).
 `frust-mcp`'s integration tests (`http_smoke`, `engine_lifecycle`, `tool_families`,
 `mcp_embed_lifecycle`) each bind an ephemeral loopback port (`--port 0` / a hand-rolled NDJSON
 fixture server), relevant in a network-restricted sandbox that blocks even loopback binds.
+
+## `frust-dap`
+
+`frust-dap` has no `frust-cli` subcommand and no standalone binary — like `frust-mcp`,
+`frust_dap::serve_embedded` is a library entry point only, and its sole host is `frust-tui`'s DAP
+settings dialog (see [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)'s Embedded DAP Surface). There is
+no headless/CI way to reach a DAP server independent of the TUI.
+
+Verify with the standard `-p frust-dap` forms: `cargo test -p frust-dap`,
+`cargo clippy -p frust-dap --all-targets -- -D warnings`, `cargo fmt --check`. Its dev-dependency on
+`frust-drive`'s `test-util` feature (the scripted `FakeProcessRunner`) is a feature toggle on a
+dependency the crate already has — no new package enters `Cargo.lock`. Its embedded-server tests
+bind ephemeral loopback ports, the same sandbox caveat as `frust-mcp`'s above.
+
+`editors/vscode-frust` is a plain-JavaScript, unpublished VS Code extension (no TypeScript, no
+bundler, no npm dependency) registering debug type `frust`. It never spawns a process: its
+`DebugAdapterDescriptorFactory` returns a `vscode.DebugAdapterServer`, connecting to whatever port
+a launch config's `debugServer` names, falling back to the `frust.dapPort` workspace setting and
+then the `frust-dap` default (4849) — attach-by-port against the TUI's own embedded server, always.
+`frust-dap`'s launch-config generation (the DAP settings dialog's `g`, or the auto-configure flow on
+server start) writes a matching `.vscode/launch.json` entry through
+`frust_dap::ide_config::vscode`, so a project the TUI has configured needs no manual `launch.json`
+edit — only the extension itself installed (`npx @vscode/vsce package` → a local `.vsix`, run by
+hand, not by any workspace gate — Node.js is not required to build or test the Rust workspace).
 
 ## See Also
 

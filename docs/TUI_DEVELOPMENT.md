@@ -14,11 +14,17 @@ LAW; re-run the row's tripwire after touching it, and never run a blind `cargo u
 |---|---|---|
 | `ratatui 0.30` / `crossterm 0.29` / `ansi-to-tui 8.0.1` minor | `frust-tui`'s render/terminal/log stack, pre-1.0 churn expected | `cargo test -p frust-tui` |
 | `toml_edit 0.25` minor (shared with the CLI unit's `frust-drive`, see [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md)) | `frust-tui`'s config persistence and `frust-drive::plugin`'s format-preserving Cargo.toml/manifest edits | `cargo test -p frust-tui` && `cargo test -p frust-drive` |
-| `tokio-util 0.7` (shared with the CLI unit's `frust-mcp`, see [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md)) | The embedded MCP server's `CancellationToken`, the same handle `frust_mcp::serve_embedded` shuts down on | `cargo test -p frust-tui` && `cargo test -p frust-mcp` |
+| `tokio-util 0.7` (shared with the CLI unit's `frust-mcp`/`frust-dap`, see [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md)) | The `CancellationToken` both embedded servers shut down on — `frust_mcp::serve_embedded`'s and `frust_dap::serve_embedded`'s | `cargo test -p frust-tui` && `cargo test -p frust-mcp` && `cargo test -p frust-dap` |
 
-`frust-tui`'s own `tokio` feature set gained `net` (a feature add, not a version bump) so the
-embedded MCP server's loopback `TcpListener` binds on this crate's own runtime rather than
-depending on another workspace member's feature unification.
+`frust-tui`'s own `tokio` feature set gained `net` (a feature add, not a version bump) so both
+embedded servers' loopback `TcpListener`s bind on this crate's own runtime rather than depending on
+another workspace member's feature unification.
+
+The DAP settings dialog's preferences persist in the same `~/.config/frust/tui.toml` the
+recent-projects store uses, under a `[dap]` table (`enabled`, `auto_start_in_ide`,
+`auto_configure_ide`, `port`, `ide_override`) loaded through the same format-preserving `toml_edit`
+path — see [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)'s Embedded DAP Surface for what each key
+does.
 
 ## Testing the embedded MCP server
 

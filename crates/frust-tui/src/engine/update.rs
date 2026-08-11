@@ -14,6 +14,7 @@ use super::bootstrap::BootstrapWizard;
 use super::build_launcher::{BuildLauncher, BuildSpec};
 use super::context_menu::ContextMenu;
 use super::create_wizard::{CreateWizard, WizardAdvance};
+use super::dap_settings::{DapFocus, DapIdeReport, DapSetting, IdeConfigRequest};
 use super::devtools::{ConnEvent, ConnState, DevtoolsPhase, DevtoolsTab, InspectorTab, PerfFrame};
 use super::message::{ContextTarget, DragKind, Message};
 use super::run_config::{DeviceRow, RunConfig};
@@ -164,6 +165,30 @@ pub enum Effect {
     /// Stop the embedded MCP server — the runner's
     /// [`super::Engine::stop_mcp`]. A no-op when none is running.
     StopMcpServer,
+    /// Start the embedded DAP server on `port` (`0` = OS-assigned) — the
+    /// runner's [`super::Engine::start_dap`], over the **same**
+    /// [`crate::supervise::TuiSessionBackend`] the MCP server is handed, so an
+    /// editor and an agent drive one session world. The same live-resource
+    /// reasoning as [`Effect::StartMcpServer`]: only the runner can build the
+    /// handle.
+    StartDapServer {
+        /// The loopback port to bind (`frust_dap::DEFAULT_DAP_PORT` unless a
+        /// caller says otherwise).
+        port: u16,
+    },
+    /// Stop the embedded DAP server — the runner's
+    /// [`super::Engine::stop_dap`]. A no-op when none is running.
+    StopDapServer,
+    /// Write one just-changed `[dap]` preference to `~/.config/frust/tui.toml`
+    /// (`crate::engine::save_dap_setting`) — the same
+    /// "the pure core decides, the runner writes" split as
+    /// [`Effect::SaveSidebarWidth`].
+    SaveDapSetting(super::dap_settings::DapSetting),
+    /// Generate (or refresh) an IDE's DAP client config off-thread
+    /// (`frust_dap::ide_config::generate_ide_config` reads and writes real
+    /// files, so it never runs on the transition path), reporting the outcome
+    /// back as [`Message::DapIdeConfig`].
+    GenerateIdeConfig(super::dap_settings::IdeConfigRequest),
     /// Enact every effect in order — the escape hatch for a transition that
     /// must kick off more than one independent side effect at once (opening
     /// DevTools can both (re)open its frame-stats connection *and* start
@@ -279,8 +304,14 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             // The open MCP panel repaints on every tick: its client list is
             // read live off the registry at render time, so nothing else
             // would ever dirty the frame when a client connects or drops
-            // (see `AppState::animating`).
-            Outcome::dirty(toast_expired || session_animating || state.mcp_panel_open)
+            // (see `AppState::animating`). The DAP settings dialog shows the
+            // same kind of live count and follows the same rule.
+            Outcome::dirty(
+                toast_expired
+                    || session_animating
+                    || state.mcp_panel_open
+                    || state.dap_settings_open,
+            )
         }
         Message::Resize(_, _) => Outcome::redraw(),
         Message::HoverChanged(next) => {
@@ -1300,7 +1331,296 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                 Outcome::idle()
             }
         }
+
+        // The embedded DAP server's two reports, gated on the generation
+        // naming the server *currently installed* — the identical race, and
+        // the identical consequence of losing it, as the MCP pair above.
+        //
+        // A fresh listener is additionally where auto-configuration happens:
+        // the editor's launch config must name the port that was *actually*
+        // bound (a server started on `0` learns its port here and nowhere
+        // else), so the generation request rides this report rather than the
+        // start that preceded it.
+        Message::DapListening(generation, port) => {
+            let names_installed = state
+                .dap
+                .as_ref()
+                .is_some_and(|handle| handle.generation() == generation);
+            if !names_installed {
+                // Stopped between spawning and binding, or already superseded.
+                return Outcome::idle();
+            }
+            let changed = state
+                .dap
+                .as_mut()
+                .is_some_and(|handle| handle.set_bound_port(port));
+            // Gated on `changed`, so auto-configuration runs once per bind:
+            // a repeat report for a port already recorded is the same server
+            // saying the same thing, not a second listener to reconfigure for.
+            if changed && state.dap_settings.auto_configure_ide {
+                let out = request_ide_config(state, port);
+                Outcome {
+                    redraw: changed || out.redraw,
+                    effect: out.effect,
+                }
+            } else {
+                Outcome::dirty(changed)
+            }
+        }
+        Message::DapStopped(generation, error) => {
+            match state.dap.as_ref().map(|handle| handle.generation()) {
+                Some(installed) if installed != generation => Outcome::idle(),
+                installed => {
+                    let was_running = installed.is_some();
+                    state.dap = None;
+                    match error {
+                        Some(error) => {
+                            state
+                                .toasts
+                                .push(ToastKind::Error, format!("DAP server stopped: {error}"));
+                            state.dap_error = Some(error);
+                            Outcome::redraw()
+                        }
+                        None => Outcome::dirty(was_running),
+                    }
+                }
+            }
+        }
+
+        // ── DAP settings dialog + the preferences behind it ──────────────────
+        Message::ToggleDapServer => {
+            if state.dap.is_some() {
+                // The handle is dropped by the runner's `stop_dap`, never
+                // here — the same live-resource split as the MCP toggle.
+                Outcome {
+                    redraw: true,
+                    effect: Some(Effect::StopDapServer),
+                }
+            } else {
+                state.dap_error = None;
+                // Starting is one of the two answers to the first-run notice,
+                // so the notice has served its purpose either way.
+                state.dap_settings.intro_port = None;
+                Outcome {
+                    redraw: true,
+                    effect: Some(Effect::StartDapServer {
+                        port: state.dap_settings.port,
+                    }),
+                }
+            }
+        }
+        Message::DapAutoStart => {
+            let settings = &state.dap_settings;
+            let wanted = super::dap_settings::should_auto_start(
+                settings.enabled,
+                settings.auto_start_in_ide,
+                settings.detected_ide,
+            );
+            if !wanted || state.dap.is_some() {
+                Outcome::idle()
+            } else if settings.intro_seen {
+                // Every launch after the first: exactly the silent auto-start
+                // the preferences ask for.
+                Outcome::effect(Effect::StartDapServer {
+                    port: settings.port,
+                })
+            } else {
+                // The first auto-start this install would ever have performed:
+                // say what it is about to open before opening it. The server
+                // is *not* started here — only the dialog's own Start action
+                // does that on this one run. The notice is spent immediately
+                // (persisted before anything else can happen), so quitting
+                // without acting never brings it back.
+                let port = settings.port;
+                update(state, Message::OpenDapSettings);
+                state.dap_settings.intro_seen = true;
+                state.dap_settings.intro_port = Some(port);
+                Outcome {
+                    redraw: true,
+                    effect: Some(Effect::SaveDapSetting(DapSetting::IntroSeen(true))),
+                }
+            }
+        }
+        Message::OpenDapSettings => {
+            if state.dap_settings_open {
+                Outcome::idle()
+            } else {
+                state.dap_settings.reopen();
+                state.dap_settings_open = true;
+                Outcome::redraw()
+            }
+        }
+        Message::CloseDapSettings => {
+            if state.dap_settings_open {
+                state.dap_settings_open = false;
+                // Dismissing is the other answer to the first-run notice.
+                state.dap_settings.intro_port = None;
+                // Closing commits whatever is in the port field, so a typed
+                // value never quietly evaporates (and an invalid one never
+                // quietly sticks — see `commit_dap_port`).
+                let effect = commit_dap_port(state);
+                Outcome {
+                    redraw: true,
+                    effect,
+                }
+            } else {
+                Outcome::idle()
+            }
+        }
+        Message::DapSettingsFocusNext => {
+            state.dap_settings.focus_next();
+            Outcome::redraw()
+        }
+        Message::DapSettingsFocusPrev => {
+            state.dap_settings.focus_prev();
+            Outcome::redraw()
+        }
+        Message::DapSettingsFocus(focus) => {
+            let changed = state.dap_settings.focus != focus;
+            state.dap_settings.focus = focus;
+            Outcome::dirty(changed)
+        }
+        Message::DapSettingsInput(c) => {
+            state.dap_settings.input_char(c);
+            Outcome::redraw()
+        }
+        Message::DapSettingsBackspace => {
+            state.dap_settings.backspace();
+            Outcome::redraw()
+        }
+        Message::DapSettingsActivate => match state.dap_settings.focus {
+            DapFocus::Server => update(state, Message::ToggleDapServer),
+            DapFocus::Port => {
+                let effect = commit_dap_port(state);
+                Outcome {
+                    redraw: true,
+                    effect,
+                }
+            }
+            DapFocus::AutoStart => update(state, Message::DapSettingsToggleAutoStart),
+            DapFocus::AutoConfigure => update(state, Message::DapSettingsToggleAutoConfigure),
+            DapFocus::Ide => update(state, Message::DapSettingsCycleIde(1)),
+            DapFocus::Generate => update(state, Message::DapSettingsGenerate),
+        },
+        Message::DapSettingsCycleIde(delta) => {
+            state.dap_settings.cycle_ide(delta);
+            state.dap_settings.focus = DapFocus::Ide;
+            Outcome {
+                redraw: true,
+                effect: Some(Effect::SaveDapSetting(DapSetting::IdeOverride(
+                    state.dap_settings.ide_override,
+                ))),
+            }
+        }
+        Message::DapSettingsToggleAutoStart => {
+            let on = !state.dap_settings.auto_start_in_ide;
+            state.dap_settings.auto_start_in_ide = on;
+            state.dap_settings.focus = DapFocus::AutoStart;
+            Outcome {
+                redraw: true,
+                effect: Some(Effect::SaveDapSetting(DapSetting::AutoStartInIde(on))),
+            }
+        }
+        Message::DapSettingsToggleAutoConfigure => {
+            let on = !state.dap_settings.auto_configure_ide;
+            state.dap_settings.auto_configure_ide = on;
+            state.dap_settings.focus = DapFocus::AutoConfigure;
+            Outcome {
+                redraw: true,
+                effect: Some(Effect::SaveDapSetting(DapSetting::AutoConfigureIde(on))),
+            }
+        }
+        Message::DapSettingsGenerate => {
+            // A running listener's *bound* port is what an editor must be
+            // pointed at; the configured port is only a proposal until then.
+            let port = match state.dap_status() {
+                crate::supervise::DapStatus::Listening { port, .. } => port,
+                _ => state.dap_settings.port,
+            };
+            request_ide_config(state, port)
+        }
+        Message::DapIdeConfig(report) => {
+            let kind = if report.is_failure() {
+                ToastKind::Error
+            } else {
+                ToastKind::Info
+            };
+            state
+                .toasts
+                .push(kind, format!("DAP · {}", report.summary()));
+            state.dap_settings.last_ide_config = Some(report);
+            Outcome::redraw()
+        }
     }
+}
+
+/// Commit the DAP settings dialog's port field, returning the persistence
+/// effect a real change earns.
+///
+/// A rejected value is surfaced as a warn toast rather than silently dropped
+/// (the field itself is restored to the port still in effect), and a change
+/// made while a server is listening says so instead of restarting it —
+/// a port change applies to the *next* start, never to the running listener.
+fn commit_dap_port(state: &mut AppState) -> Option<Effect> {
+    match state.dap_settings.commit_port() {
+        super::dap_settings::PortCommit::Changed(port) => {
+            if let crate::supervise::DapStatus::Listening { port: bound, .. } = state.dap_status()
+                && bound != port
+            {
+                state.toasts.push(
+                    ToastKind::Info,
+                    format!("DAP port {port} takes effect on the next start"),
+                );
+            }
+            Some(Effect::SaveDapSetting(DapSetting::Port(port)))
+        }
+        super::dap_settings::PortCommit::Rejected(text) => {
+            state.toasts.push(
+                ToastKind::Warn,
+                format!(
+                    "'{text}' is not a valid port — keeping {}",
+                    state.dap_settings.port
+                ),
+            );
+            None
+        }
+        super::dap_settings::PortCommit::Unchanged => None,
+    }
+}
+
+/// Request an IDE DAP-config generation for `port`, or record why there is
+/// nothing to generate.
+///
+/// The generation itself reads and writes real files, so it can only be an
+/// [`Effect`] — but every *refusal* is decided here, in the pure core, and
+/// stored where the dialog shows it: an absent IDE, an IDE with no DAP config
+/// format at all, and a workbench with no project open are each reported
+/// rather than silently doing nothing.
+fn request_ide_config(state: &mut AppState, port: u16) -> Outcome {
+    fn report(state: &mut AppState, report: DapIdeReport) -> Outcome {
+        state.dap_settings.last_ide_config = Some(report);
+        Outcome::redraw()
+    }
+
+    let Some(ide) = state.dap_settings.effective_ide() else {
+        return report(state, DapIdeReport::NoIde);
+    };
+    if !ide.supports_dap_config() {
+        return report(state, DapIdeReport::Unsupported(ide));
+    }
+    let Some(project_root) = state.project_root.clone() else {
+        return report(
+            state,
+            DapIdeReport::Failed(
+                "no project open — there is nothing to write a launch config into".to_string(),
+            ),
+        );
+    };
+    Outcome::effect(Effect::GenerateIdeConfig(IdeConfigRequest {
+        ide,
+        port,
+        project_root,
+    }))
 }
 
 /// The scrollbar-track fraction (`0.0`..=`1.0`, top→bottom) for a pointer at
@@ -4628,6 +4948,501 @@ mod tests {
 
         update(&mut st, Message::ToggleMcpServer);
         assert_eq!(st.mcp_error, None);
+    }
+
+    // ── Embedded DAP server ───────────────────────────────────────────────────
+
+    /// A handle for a DAP server of `generation` that was "started" without
+    /// spawning anything — enough to exercise the two reports it sends back.
+    fn dap_handle(generation: u64) -> crate::supervise::DapServerHandle {
+        crate::supervise::DapServerHandle::starting(
+            generation,
+            tokio_util::sync::CancellationToken::new(),
+            frust_dap::DapClientRegistry::new(),
+        )
+    }
+
+    #[test]
+    fn the_dap_bound_port_report_promotes_starting_to_listening() {
+        let mut st = welcome();
+        st.dap = Some(dap_handle(0));
+        assert_eq!(st.dap_status(), crate::supervise::DapStatus::Starting);
+
+        let out = update(&mut st, Message::DapListening(0, 4849));
+        assert!(out.redraw);
+        assert_eq!(
+            st.dap_status(),
+            crate::supervise::DapStatus::Listening {
+                port: 4849,
+                clients: 0
+            }
+        );
+        assert!(!update(&mut st, Message::DapListening(0, 4849)).redraw);
+    }
+
+    /// The same generation gate as the MCP pair, and for the same reason: a
+    /// superseded server's late report must neither restamp nor clear its
+    /// successor's handle.
+    #[test]
+    fn a_superseded_dap_servers_late_reports_never_touch_its_successor() {
+        let mut st = welcome();
+        st.dap = Some(dap_handle(1));
+        update(&mut st, Message::DapListening(1, 4849));
+
+        let out = update(&mut st, Message::DapListening(0, 9999));
+        assert!(!out.redraw);
+        assert_eq!(
+            st.dap_status(),
+            crate::supervise::DapStatus::Listening {
+                port: 4849,
+                clients: 0
+            }
+        );
+
+        let out = update(&mut st, Message::DapStopped(0, Some("boom".to_string())));
+        assert!(!out.redraw);
+        assert_eq!(
+            st.dap.as_ref().map(|handle| handle.generation()),
+            Some(1),
+            "B's own handle — the one carrying its cancellation token — is still installed"
+        );
+        assert!(st.toasts.items.is_empty());
+        assert_eq!(st.dap_error, None);
+
+        // B's *own* stop report, by contrast, is applied.
+        assert!(update(&mut st, Message::DapStopped(1, None)).redraw);
+        assert_eq!(st.dap_status(), crate::supervise::DapStatus::Stopped);
+    }
+
+    #[test]
+    fn a_failed_dap_server_toasts_and_retains_its_reason() {
+        let mut st = welcome();
+        st.dap = Some(dap_handle(0));
+        update(
+            &mut st,
+            Message::DapStopped(0, Some("address already in use".to_string())),
+        );
+        assert_eq!(st.dap_status(), crate::supervise::DapStatus::Stopped);
+        assert_eq!(st.toasts.items.len(), 1);
+        assert!(st.toasts.items[0].text.contains("address already in use"));
+        assert_eq!(
+            st.dap_error.as_deref(),
+            Some("address already in use"),
+            "the reason is retained for the UI, not just toasted"
+        );
+    }
+
+    // ── DAP settings dialog ───────────────────────────────────────────────────
+
+    /// A workbench with a project open and a known detected IDE — the shape
+    /// every generation path below needs.
+    fn dap_workbench(detected: Option<frust_dap::ide_config::ParentIde>) -> AppState {
+        let mut st = workbench_with_project();
+        st.dap_settings.detected_ide = detected;
+        st
+    }
+
+    #[test]
+    fn the_dap_dialog_opens_reset_and_closes_committing_the_port() {
+        let mut st = dap_workbench(None);
+        assert!(update(&mut st, Message::OpenDapSettings).redraw);
+        assert!(st.dap_settings_open);
+        assert!(matches!(
+            st.active_modal(),
+            Some(crate::engine::ActiveModal::DapSettings(_))
+        ));
+        assert!(
+            !update(&mut st, Message::OpenDapSettings).redraw,
+            "re-opening an open dialog is a no-op"
+        );
+
+        // Type a new port and close: the edit is committed and persisted on
+        // the way out rather than evaporating.
+        update(&mut st, Message::DapSettingsFocus(DapFocus::Port));
+        for _ in 0..5 {
+            update(&mut st, Message::DapSettingsBackspace);
+        }
+        for c in "5005".chars() {
+            update(&mut st, Message::DapSettingsInput(c));
+        }
+        let out = update(&mut st, Message::CloseDapSettings);
+        assert!(!st.dap_settings_open);
+        assert_eq!(st.dap_settings.port, 5005);
+        assert_eq!(
+            out.effect,
+            Some(Effect::SaveDapSetting(DapSetting::Port(5005)))
+        );
+        assert!(
+            !update(&mut st, Message::CloseDapSettings).redraw,
+            "closing a closed dialog is a no-op"
+        );
+    }
+
+    #[test]
+    fn a_rejected_port_keeps_the_committed_one_and_warns_instead_of_persisting() {
+        let mut st = dap_workbench(None);
+        update(&mut st, Message::OpenDapSettings);
+        update(&mut st, Message::DapSettingsFocus(DapFocus::Port));
+        for c in "abc".chars() {
+            update(&mut st, Message::DapSettingsInput(c));
+        }
+        let out = update(&mut st, Message::DapSettingsActivate);
+        assert_eq!(out.effect, None, "nothing invalid is ever persisted");
+        assert_eq!(st.dap_settings.port, crate::engine::DEFAULT_DAP_PORT);
+        assert_eq!(st.dap_settings.port_input, "4849");
+        assert_eq!(st.toasts.items.len(), 1);
+        assert!(st.toasts.items[0].text.contains("not a valid port"));
+    }
+
+    /// Each control's activation produces the effect that control means —
+    /// the dialog's whole contract with the runner.
+    #[test]
+    fn activating_each_control_produces_its_own_effect() {
+        let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::VSCode));
+        update(&mut st, Message::OpenDapSettings);
+
+        // Server (focus starts here): start, then stop.
+        assert_eq!(st.dap_settings.focus, DapFocus::Server);
+        let out = update(&mut st, Message::DapSettingsActivate);
+        assert_eq!(
+            out.effect,
+            Some(Effect::StartDapServer {
+                port: crate::engine::DEFAULT_DAP_PORT
+            })
+        );
+        st.dap = Some(dap_handle(0));
+        let out = update(&mut st, Message::DapSettingsActivate);
+        assert_eq!(out.effect, Some(Effect::StopDapServer));
+        st.dap = None;
+
+        // Checkboxes persist immediately, each its own key.
+        update(&mut st, Message::DapSettingsFocus(DapFocus::AutoStart));
+        let out = update(&mut st, Message::DapSettingsActivate);
+        assert!(!st.dap_settings.auto_start_in_ide);
+        assert_eq!(
+            out.effect,
+            Some(Effect::SaveDapSetting(DapSetting::AutoStartInIde(false)))
+        );
+        update(&mut st, Message::DapSettingsFocus(DapFocus::AutoConfigure));
+        let out = update(&mut st, Message::DapSettingsActivate);
+        assert!(!st.dap_settings.auto_configure_ide);
+        assert_eq!(
+            out.effect,
+            Some(Effect::SaveDapSetting(DapSetting::AutoConfigureIde(false)))
+        );
+
+        // The IDE selector cycles off `detected` onto the first override.
+        update(&mut st, Message::DapSettingsFocus(DapFocus::Ide));
+        let out = update(&mut st, Message::DapSettingsActivate);
+        assert_eq!(
+            st.dap_settings.ide_override,
+            Some(crate::engine::IDE_OVERRIDES[0])
+        );
+        assert_eq!(
+            out.effect,
+            Some(Effect::SaveDapSetting(DapSetting::IdeOverride(Some(
+                crate::engine::IDE_OVERRIDES[0]
+            ))))
+        );
+
+        // Generate asks the runner for the file I/O, never doing it here.
+        update(&mut st, Message::DapSettingsFocus(DapFocus::Generate));
+        let out = update(&mut st, Message::DapSettingsActivate);
+        assert_eq!(
+            out.effect,
+            Some(Effect::GenerateIdeConfig(crate::engine::IdeConfigRequest {
+                ide: crate::engine::IDE_OVERRIDES[0],
+                port: crate::engine::DEFAULT_DAP_PORT,
+                project_root: PathBuf::from("/tmp/huddle"),
+            }))
+        );
+    }
+
+    #[test]
+    fn focus_walks_the_dialog_in_both_directions() {
+        let mut st = dap_workbench(None);
+        update(&mut st, Message::OpenDapSettings);
+        assert_eq!(st.dap_settings.focus, DapFocus::Server);
+        update(&mut st, Message::DapSettingsFocusNext);
+        assert_eq!(st.dap_settings.focus, DapFocus::Port);
+        update(&mut st, Message::DapSettingsFocusPrev);
+        assert_eq!(st.dap_settings.focus, DapFocus::Server);
+        update(&mut st, Message::DapSettingsFocusPrev);
+        assert_eq!(st.dap_settings.focus, DapFocus::Generate);
+    }
+
+    /// The auto-start decision, driven entirely through injected state: no
+    /// process environment is read or mutated here.
+    ///
+    /// `intro_seen` is set deliberately on every case: this is the
+    /// already-acknowledged install, where auto-start is the silent start it
+    /// has always been. The first-run gate has its own tests below.
+    #[test]
+    fn the_startup_auto_start_truth_table_produces_the_start_effect() {
+        let ide = Some(frust_dap::ide_config::ParentIde::VSCode);
+        let cases = [
+            // (enabled, auto_start_in_ide, detected, starts?)
+            (true, false, None, true),
+            (false, true, ide, true),
+            (false, true, None, false),
+            (false, false, ide, false),
+            (false, false, None, false),
+        ];
+        for (enabled, auto, detected, starts) in cases {
+            let mut st = dap_workbench(detected);
+            st.dap_settings.enabled = enabled;
+            st.dap_settings.auto_start_in_ide = auto;
+            st.dap_settings.port = 5005;
+            st.dap_settings.intro_seen = true;
+            let out = update(&mut st, Message::DapAutoStart);
+            let expected = starts.then_some(Effect::StartDapServer { port: 5005 });
+            assert_eq!(
+                out.effect, expected,
+                "enabled={enabled} auto={auto} detected={detected:?}"
+            );
+            assert!(
+                !st.dap_settings_open,
+                "an acknowledged install never re-opens the dialog"
+            );
+            assert_eq!(st.dap_settings.intro_port, None);
+        }
+    }
+
+    #[test]
+    fn auto_start_never_starts_a_second_server_over_a_running_one() {
+        let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::VSCode));
+        st.dap_settings.intro_seen = true;
+        st.dap = Some(dap_handle(0));
+        assert_eq!(update(&mut st, Message::DapAutoStart).effect, None);
+    }
+
+    /// The first auto-start on a fresh install opens the dialog with the
+    /// notice and starts *nothing* — the whole point of the gate is that no
+    /// listener binds until the user says so on this one run.
+    #[test]
+    fn the_first_ever_auto_start_shows_the_notice_instead_of_binding_a_listener() {
+        let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::VSCode));
+        st.dap_settings.port = 5005;
+        assert!(!st.dap_settings.intro_seen, "a fresh install");
+
+        let out = update(&mut st, Message::DapAutoStart);
+        assert!(out.redraw);
+        assert_eq!(
+            out.effect,
+            Some(Effect::SaveDapSetting(DapSetting::IntroSeen(true))),
+            "the notice is spent immediately, so quitting does not bring it back"
+        );
+        assert!(
+            st.dap_settings_open,
+            "the dialog is how the notice is shown"
+        );
+        assert_eq!(st.dap_settings.intro_port, Some(5005));
+        assert!(st.dap_settings.intro_seen);
+        assert!(
+            st.dap_settings.intro_notice().unwrap().contains("5005"),
+            "the notice names the port that would have been bound"
+        );
+        assert!(st.dap.is_none(), "nothing was started");
+
+        // The user answers by starting it: the notice is done, and this is
+        // the only start on this run.
+        let out = update(&mut st, Message::DapSettingsActivate);
+        assert_eq!(out.effect, Some(Effect::StartDapServer { port: 5005 }));
+        assert_eq!(st.dap_settings.intro_port, None);
+        assert_eq!(st.dap_settings.intro_notice(), None);
+    }
+
+    /// Dismissing the dialog is the other answer: still no listener, and the
+    /// notice is gone for good.
+    #[test]
+    fn dismissing_the_first_run_notice_starts_nothing_and_never_repeats_it() {
+        let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::VSCode));
+        update(&mut st, Message::DapAutoStart);
+        update(&mut st, Message::CloseDapSettings);
+        assert!(!st.dap_settings_open);
+        assert_eq!(st.dap_settings.intro_port, None);
+
+        // A second `DapAutoStart` (the next launch, with `intro_seen` reloaded
+        // from disk) is the silent start the preferences ask for.
+        let out = update(&mut st, Message::DapAutoStart);
+        assert_eq!(
+            out.effect,
+            Some(Effect::StartDapServer {
+                port: crate::engine::DEFAULT_DAP_PORT
+            })
+        );
+        assert!(!st.dap_settings_open, "and no second notice");
+    }
+
+    /// The gate spends `intro_seen` only when it actually fires: a launch
+    /// outside an IDE, with auto-start wanted by nobody, leaves the notice
+    /// unspent for the first launch *inside* one.
+    #[test]
+    fn a_launch_that_would_not_auto_start_never_spends_the_notice() {
+        let mut st = dap_workbench(None);
+        st.dap_settings.enabled = false;
+        st.dap_settings.auto_start_in_ide = false;
+
+        let out = update(&mut st, Message::DapAutoStart);
+        assert_eq!(out.effect, None);
+        assert!(!out.redraw);
+        assert!(!st.dap_settings_open);
+        assert!(!st.dap_settings.intro_seen, "unspent");
+        assert_eq!(st.dap_settings.intro_port, None);
+
+        // Now the same install, launched inside an IDE terminal: the notice
+        // is still there to be shown.
+        st.dap_settings.auto_start_in_ide = true;
+        st.dap_settings.detected_ide = Some(frust_dap::ide_config::ParentIde::VSCode);
+        let out = update(&mut st, Message::DapAutoStart);
+        assert_eq!(
+            out.effect,
+            Some(Effect::SaveDapSetting(DapSetting::IntroSeen(true)))
+        );
+        assert!(st.dap_settings_open);
+    }
+
+    /// The auto-configure path end to end at the message level: the bound
+    /// port (not the configured one) is what the editor is pointed at, and
+    /// the outcome the runner reports back is retained for the dialog.
+    #[test]
+    fn a_fresh_listener_requests_ide_config_and_stores_the_reported_outcome() {
+        let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::VSCode));
+        st.dap = Some(dap_handle(0));
+        // Started on `0`: the OS-assigned port is only known here.
+        let out = update(&mut st, Message::DapListening(0, 41_234));
+        assert_eq!(
+            out.effect,
+            Some(Effect::GenerateIdeConfig(crate::engine::IdeConfigRequest {
+                ide: frust_dap::ide_config::ParentIde::VSCode,
+                port: 41_234,
+                project_root: PathBuf::from("/tmp/huddle"),
+            })),
+            "the config must name the port actually bound"
+        );
+
+        let result = frust_dap::ide_config::IdeConfigResult {
+            path: PathBuf::from("/tmp/huddle/.vscode/launch.json"),
+            action: frust_dap::ide_config::ConfigAction::Created,
+        };
+        let report = crate::engine::DapIdeReport::Written {
+            ide: frust_dap::ide_config::ParentIde::VSCode,
+            result,
+        };
+        let out = update(&mut st, Message::DapIdeConfig(report.clone()));
+        assert!(out.redraw);
+        assert_eq!(st.dap_settings.last_ide_config, Some(report));
+        assert_eq!(st.toasts.items.len(), 1);
+        assert!(st.toasts.items[0].text.contains("created"));
+    }
+
+    #[test]
+    fn a_failed_generation_is_retained_and_surfaced_as_an_error() {
+        let mut st = dap_workbench(None);
+        let report = crate::engine::DapIdeReport::Failed("permission denied".to_string());
+        update(&mut st, Message::DapIdeConfig(report.clone()));
+        assert_eq!(st.dap_settings.last_ide_config, Some(report));
+        assert_eq!(st.toasts.items[0].kind, ToastKind::Error);
+    }
+
+    #[test]
+    fn auto_configure_off_leaves_a_fresh_listener_alone() {
+        let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::VSCode));
+        st.dap_settings.auto_configure_ide = false;
+        st.dap = Some(dap_handle(0));
+        let out = update(&mut st, Message::DapListening(0, 4849));
+        assert!(out.redraw, "the port still promotes the handle");
+        assert_eq!(out.effect, None);
+        assert_eq!(st.dap_settings.last_ide_config, None);
+    }
+
+    /// Every refusal is decided in the pure core and *reported*, never a
+    /// silent no-op: no IDE, an IDE with no DAP config format, and no project.
+    #[test]
+    fn generation_refusals_are_reported_rather_than_requested() {
+        let mut st = dap_workbench(None);
+        let out = update(&mut st, Message::DapSettingsGenerate);
+        assert_eq!(out.effect, None);
+        assert_eq!(
+            st.dap_settings.last_ide_config,
+            Some(crate::engine::DapIdeReport::NoIde)
+        );
+
+        let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::IntelliJ));
+        let out = update(&mut st, Message::DapSettingsGenerate);
+        assert_eq!(out.effect, None);
+        assert_eq!(
+            st.dap_settings.last_ide_config,
+            Some(crate::engine::DapIdeReport::Unsupported(
+                frust_dap::ide_config::ParentIde::IntelliJ
+            ))
+        );
+
+        let mut st = welcome(); // no project open
+        st.dap_settings.detected_ide = Some(frust_dap::ide_config::ParentIde::VSCode);
+        let out = update(&mut st, Message::DapSettingsGenerate);
+        assert_eq!(out.effect, None);
+        assert!(matches!(
+            st.dap_settings.last_ide_config,
+            Some(crate::engine::DapIdeReport::Failed(ref why)) if why.contains("no project open")
+        ));
+    }
+
+    /// A "generate now" while the server is listening points the editor at the
+    /// live port, not at a configured one it isn't using.
+    #[test]
+    fn generate_now_prefers_the_listening_port_over_the_configured_one() {
+        let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::Zed));
+        st.dap_settings.port = 5005;
+        st.dap = Some(dap_handle(0));
+        update(&mut st, Message::DapListening(0, 41_234));
+        st.dap_settings.last_ide_config = None;
+        let out = update(&mut st, Message::DapSettingsGenerate);
+        assert_eq!(
+            out.effect,
+            Some(Effect::GenerateIdeConfig(crate::engine::IdeConfigRequest {
+                ide: frust_dap::ide_config::ParentIde::Zed,
+                port: 41_234,
+                project_root: PathBuf::from("/tmp/huddle"),
+            }))
+        );
+    }
+
+    /// A port changed under a running server applies to the next start —
+    /// never a surprise restart, and the dialog says so.
+    #[test]
+    fn a_port_change_under_a_listening_server_only_says_so() {
+        let mut st = dap_workbench(None);
+        st.dap = Some(dap_handle(0));
+        update(&mut st, Message::DapListening(0, 4849));
+        update(&mut st, Message::OpenDapSettings);
+        update(&mut st, Message::DapSettingsFocus(DapFocus::Port));
+        for _ in 0..5 {
+            update(&mut st, Message::DapSettingsBackspace);
+        }
+        for c in "5005".chars() {
+            update(&mut st, Message::DapSettingsInput(c));
+        }
+        let out = update(&mut st, Message::DapSettingsActivate);
+        assert_eq!(
+            out.effect,
+            Some(Effect::SaveDapSetting(DapSetting::Port(5005))),
+            "the change is persisted, and nothing restarts the server"
+        );
+        assert_eq!(
+            st.dap_status(),
+            crate::supervise::DapStatus::Listening {
+                port: 4849,
+                clients: 0
+            }
+        );
+        assert!(
+            st.toasts
+                .items
+                .iter()
+                .any(|t| t.text.contains("takes effect on the next start"))
+        );
+        assert!(st.dap_settings.port_awaits_restart(Some(4849)));
     }
 
     #[test]

@@ -49,7 +49,10 @@ mod metrics;
 mod ring;
 mod session;
 
-pub use session::{LatestMetrics, RunTarget, SessionId, SessionSnapshot, SessionState};
+pub use session::{
+    LatestMetrics, LogSubscription, RunTarget, SessionEvent, SessionEventFeed, SessionEventSink,
+    SessionId, SessionSnapshot, SessionState,
+};
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -74,6 +77,16 @@ use session::Session;
 /// this deep is already far more than an agent reads back, and the cap is
 /// what keeps a long-lived session's memory flat.
 pub const LOG_RING_CAP: usize = 10_000;
+
+/// How many log lines a [`LogSubscription`]'s channel holds before the
+/// session's own ingest starts dropping them.
+///
+/// Generous on purpose — a subscriber only has to keep up on average, not
+/// line for line — but **bounded**, because the alternative is an ingest that
+/// either blocks the session's drain thread on a consumer it does not control
+/// or grows a queue without limit. Overflow is reported in band (see
+/// [`LogSubscription`]), never silently.
+pub const LOG_SUBSCRIPTION_CAP: usize = 4096;
 
 /// Retained frame-stats samples per session, drop-oldest. Ten seconds of
 /// 60fps: enough for the performance tool to aggregate a meaningful window
@@ -195,7 +208,12 @@ impl SessionEngine {
     /// [`project_root`](Self::project_root) — there is no per-call override
     /// (a client-suppliable build directory would let any caller run
     /// `cargo`, and therefore arbitrary `build.rs`/proc-macro code, anywhere
-    /// readable).
+    /// readable). `frust-dap` builds a *fresh* engine per `launch` from the
+    /// request's `projectRoot`, so it confines that client-chosen root to its
+    /// stdio transport (where the client spawned the process); its
+    /// unauthenticated TCP transport ignores the client root and launches from
+    /// the server's cwd (see `docs/LIMITATIONS.md`
+    /// `dap-tcp-unauthenticated-v1`).
     ///
     /// After [`shutdown`](Self::shutdown) it launches nothing: the returned
     /// session is already [`SessionState::Failed`], carrying the refusal
@@ -342,6 +360,58 @@ impl SessionEngine {
         self.lookup(id).map(|session| session.logs(tail))
     }
 
+    /// Streams the session's log lines as they arrive — the push seam a
+    /// consumer that must not miss output (a DAP adapter forwarding it to an
+    /// editor) uses instead of re-polling [`logs`](Self::logs) and diffing.
+    ///
+    /// The feed opens with the session's retained lines and continues live,
+    /// with no gap and no duplicate across the boundary: the seed is taken and
+    /// the feed registered inside the same critical section a log ingest holds
+    /// (see [`LogSubscription`] for the full contract — bounded channel,
+    /// in-band loss markers, redacted lines, close on session end).
+    ///
+    /// **One subscriber per session.** A second call replaces the first, whose
+    /// receiver then observes a closed channel.
+    ///
+    /// `None` for an unknown session id.
+    pub fn subscribe_logs(&self, id: SessionId) -> Option<LogSubscription> {
+        self.lookup(id).map(|session| session.subscribe_logs())
+    }
+
+    /// Streams the session's log lines **and its end** as they happen — the
+    /// [`subscribe_logs`](Self::subscribe_logs) feed plus the terminal
+    /// [`SessionEvent::Exited`], so a sync consumer needs neither a second
+    /// (async) [`wait_for`](Self::wait_for) nor a poll to learn the app died.
+    ///
+    /// Same gapless seed-then-live contract, same in-band loss markers, same
+    /// one-subscriber-per-session rule (see [`SessionEventFeed`]). An
+    /// already-terminal session hands back its retained lines followed
+    /// immediately by its `Exited`.
+    ///
+    /// `None` for an unknown session id.
+    pub fn subscribe_session_events(&self, id: SessionId) -> Option<SessionEventFeed> {
+        self.lookup(id).map(|session| session.subscribe_events())
+    }
+
+    /// One widget-tree dump from the session's devtools service, as the raw
+    /// JSON of `frust_devtools_protocol::WidgetTreeDump`.
+    ///
+    /// **Blocks** (it is a request/response round trip over the devtools
+    /// connection, bounded only by that connection's own per-request timeout):
+    /// call it from [`tokio::task::spawn_blocking`].
+    ///
+    /// The error is the devtools client's own, unwrapped — so
+    /// `frust_drive::devtools_client::is_not_supported`/`is_unauthorized`
+    /// still classify it — plus this engine's own "not connected" refusal for
+    /// a session with no client.
+    pub fn fetch_widget_tree(&self, id: SessionId) -> Result<serde_json::Value> {
+        let client = self.devtools_client(id).with_context(|| {
+            format!("session {id} is not connected to a devtools service; no widget tree to read")
+        })?;
+        let dump = client.widget_tree()?;
+        serde_json::to_value(&dump).context("serializing the widget tree")
+    }
+
     /// The session's retained frame-stats samples, oldest first.
     pub fn frame_ring(&self, id: SessionId) -> Option<Vec<FrameStats>> {
         self.lookup(id).map(|session| session.frames())
@@ -458,6 +528,20 @@ impl SessionBackend for SessionEngine {
         SessionEngine::devtools_client(self, id)
     }
 
+    fn subscribe_session_events(&self, id: SessionId) -> Option<SessionEventFeed> {
+        SessionEngine::subscribe_session_events(self, id)
+    }
+
+    fn fetch_widget_tree(&self, id: SessionId) -> Result<serde_json::Value> {
+        SessionEngine::fetch_widget_tree(self, id)
+    }
+
+    fn project_root(&self) -> Option<PathBuf> {
+        // Fixed for this engine's whole life, so every launch builds from it —
+        // an embedder whose project can change answers a fresh one each time.
+        Some(SessionEngine::project_root(self).to_path_buf())
+    }
+
     fn runner(&self) -> Arc<dyn ProcessRunner + Send + Sync> {
         SessionEngine::runner(self)
     }
@@ -537,6 +621,10 @@ fn teardown(session: &Arc<Session>, runner: &dyn ProcessRunner) {
     join_bounded(std::mem::take(&mut resources.threads));
     session.clear_metrics_sampling();
     session.set_state_if_live(SessionState::Exited { success: false });
+    // Nothing will ever be ingested for this session again, so the log
+    // subscription ends here — explicitly, because a session that was already
+    // terminal never passes through the state transition that closes it.
+    session.close_log_subscription();
 }
 
 /// Joins `threads`, giving up (and detaching) after [`TEARDOWN_DEADLINE`].
@@ -672,6 +760,18 @@ mod tests {
         ))
     }
 
+    /// Registers a hand-built session in the engine's own map — what
+    /// `run_app` does minus the launch, so a feed test drives the seam rather
+    /// than a scripted build pipeline.
+    fn insert(engine: &SessionEngine, session: Arc<Session>) {
+        let mut sessions = engine.sessions.lock().unwrap_or_else(|p| p.into_inner());
+        insert_retaining(&mut sessions, session.id, session);
+    }
+
+    fn engine() -> SessionEngine {
+        SessionEngine::with_runner(TEST_PROJECT_ROOT, Arc::new(FakeProcessRunner::new()))
+    }
+
     fn simulator() -> Device {
         Device {
             id: "AAAA-BBBB".to_string(),
@@ -783,6 +883,163 @@ mod tests {
         assert!(backend.devtools_client(SessionId(1)).is_none());
         assert!(backend.stop_app(SessionId(1)).is_err());
         assert!(backend.restart_app(SessionId(1)).is_err());
+    }
+
+    /// The whole point of the event feed in one pass: the lines already
+    /// retained, then the ones ingested after subscribing, then the session's
+    /// end — and nothing after it.
+    #[test]
+    fn a_session_event_feed_delivers_the_backlog_then_live_lines_then_the_exit() {
+        let engine = engine();
+        let session = session(1, RunTarget::Desktop);
+        session.push_log("before subscribing".to_string());
+        insert(&engine, Arc::clone(&session));
+
+        let feed = engine
+            .subscribe_session_events(SessionId(1))
+            .expect("the session exists");
+        session.push_log("after subscribing".to_string());
+        session.set_state_if_live(SessionState::Exited { success: true });
+
+        assert_eq!(
+            feed.recv().expect("the seeded line"),
+            SessionEvent::Log("before subscribing".to_string())
+        );
+        assert_eq!(
+            feed.recv().expect("the live line"),
+            SessionEvent::Log("after subscribing".to_string())
+        );
+        assert_eq!(
+            feed.recv().expect("the exit"),
+            SessionEvent::Exited {
+                state: SessionState::Exited { success: true },
+            }
+        );
+        assert!(
+            feed.recv().is_err(),
+            "the feed must end with the exit, not stay open"
+        );
+        assert!(engine.subscribe_session_events(SessionId(9)).is_none());
+    }
+
+    /// A session that ended before anyone subscribed still owes the
+    /// subscriber an ending — otherwise a consumer waits forever on an app
+    /// that is already gone.
+    #[test]
+    fn subscribing_to_an_already_ended_session_hands_back_its_exit_at_once() {
+        let engine = engine();
+        let session = session(1, RunTarget::Desktop);
+        session.push_log("it crashed".to_string());
+        session.set_state_if_live(SessionState::Failed {
+            reason: "the build failed".to_string(),
+        });
+        insert(&engine, Arc::clone(&session));
+
+        let feed = engine
+            .subscribe_session_events(SessionId(1))
+            .expect("a terminal session is still readable");
+        assert_eq!(
+            feed.recv().expect("the retained line"),
+            SessionEvent::Log("it crashed".to_string())
+        );
+        assert_eq!(
+            feed.recv().expect("the exit"),
+            SessionEvent::Exited {
+                state: SessionState::Failed {
+                    reason: "the build failed".to_string(),
+                },
+            }
+        );
+        assert!(feed.recv().is_err());
+    }
+
+    /// Loss is reported in band and never silently: a consumer that stops
+    /// reading gets a `[frust] <N> event(s) dropped` marker at the point the
+    /// loss happened, ahead of the next line that fits.
+    #[test]
+    fn a_slow_consumer_is_told_how_many_events_it_missed() {
+        let engine = engine();
+        let session = session(1, RunTarget::Desktop);
+        insert(&engine, Arc::clone(&session));
+        let feed = engine
+            .subscribe_session_events(SessionId(1))
+            .expect("the session exists");
+
+        let overflow = 5;
+        for index in 0..(LOG_SUBSCRIPTION_CAP + overflow) {
+            session.push_log(format!("line {index}"));
+        }
+        for index in 0..LOG_SUBSCRIPTION_CAP {
+            assert_eq!(
+                feed.try_recv().expect("a buffered line"),
+                SessionEvent::Log(format!("line {index}")),
+            );
+        }
+        // The marker rides ahead of the next line the channel accepts.
+        session.push_log("caught up".to_string());
+        assert_eq!(
+            feed.try_recv().expect("the loss marker"),
+            SessionEvent::Log(format!(
+                "[frust] {overflow} event(s) dropped (slow consumer)"
+            ))
+        );
+        assert_eq!(
+            feed.try_recv().expect("the line after the marker"),
+            SessionEvent::Log("caught up".to_string())
+        );
+    }
+
+    /// The exit is the one event that may never be lost to overflow, so the
+    /// feed holds slots back for it: a consumer that read *nothing* at all
+    /// still finds the marker and the exit at the end of what it buffered.
+    #[test]
+    fn an_overflowing_feed_still_delivers_the_exit_it_owes() {
+        let engine = engine();
+        let session = session(1, RunTarget::Desktop);
+        insert(&engine, Arc::clone(&session));
+        let feed = engine
+            .subscribe_session_events(SessionId(1))
+            .expect("the session exists");
+
+        for index in 0..(LOG_SUBSCRIPTION_CAP * 2) {
+            session.push_log(format!("line {index}"));
+        }
+        session.set_state_if_live(SessionState::Exited { success: false });
+
+        let mut events = Vec::new();
+        while let Ok(event) = feed.try_recv() {
+            events.push(event);
+        }
+        assert_eq!(
+            events.last(),
+            Some(&SessionEvent::Exited {
+                state: SessionState::Exited { success: false },
+            }),
+            "the exit must survive an overflowing feed"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                SessionEvent::Log(line) if line.contains("event(s) dropped")
+            )),
+            "a feed that dropped lines must say so in band"
+        );
+    }
+
+    /// Without a devtools connection there is no tree to read, and the engine
+    /// says which session it means rather than answering with an empty one.
+    #[test]
+    fn fetching_a_widget_tree_without_a_devtools_connection_is_an_error() {
+        let engine = engine();
+        insert(&engine, session(1, RunTarget::Desktop));
+
+        let err = engine
+            .fetch_widget_tree(SessionId(1))
+            .expect_err("nothing is connected");
+        assert!(
+            format!("{err:#}").contains("session 1 is not connected"),
+            "unhelpful: {err:#}"
+        );
     }
 
     /// Retention evicts the oldest *terminal* sessions past the cap and never

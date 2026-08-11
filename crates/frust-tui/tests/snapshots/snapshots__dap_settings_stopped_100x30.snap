@@ -1,0 +1,34 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: "render_to_string(100, 30, &state)"
+---
+⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
+━━━━━━━━                                                                                            
+                                                                                                    
+ PROJECTS                │                                                                          
+  ▸ huddle               │  Dashboard                                                               
+                         │  ━━━━━━━━━━                                                              
+ DEVICES ↻ r             │                                                                          
+   none found            │  No session running — start a run to open a log tab here.                
+                         │                                                                          
+ SESSIONS         ╭ DAP server ──────────────────────────────────────────────────╮                  
+   none running   │                                                              │▓▓                
+                  │  ▸ Server    not running   Start                             │▓▓                
+ ACTIONS          │    Port      4849                                            │▓▓                
+   New project · n│    [x] auto-start in an IDE terminal                         │▓▓                
+   Add plugin · a │    [x] auto-configure the IDE on start                       │▓▓                
+   Doctor · d     │    IDE       ‹ detected: none ›                              │▓▓                
+   Build · b      │   Generate IDE config now     Close                          │▓▓                
+   Clean · c      │                                                              │▓▓                
+   MCP off · M    │  start it to debug this project from your editor             │▓▓                
+   DAP off · D    │  Tab move · Space toggle · s start/stop · g gen · Esc close  │▓▓                
+                  ╰──────────────────────────────────────────────────────────────╯▓▓                
+                    ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+                         │                                                                          
+● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]

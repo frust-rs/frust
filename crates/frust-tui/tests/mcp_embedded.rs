@@ -35,8 +35,9 @@ use frust_drive::process::{FakeProcessRunner, ProcessRunner};
 use frust_mcp::{ClientRegistry, SharedBackend};
 use frust_tui::engine::{AppState, Effect, Engine, Message, Screen};
 use frust_tui::supervise::{
-    McpServeCtx, McpSessionRecords, McpStatus, SessionState, Supervisor, TuiSessionBackend,
-    mcp_backend::MAX_ADHOC_SESSION_ID, serve_command,
+    DevtoolsBridge, McpServeCtx, McpSessionRecords, McpStatus, PendingWidgetTrees, SessionState,
+    SessionSubscribers, Supervisor, TuiSessionBackend, mcp_backend::MAX_ADHOC_SESSION_ID,
+    serve_command,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
@@ -81,10 +82,19 @@ struct Workbench {
 
 impl Workbench {
     fn start(project_root: PathBuf, runner: Arc<dyn ProcessRunner + Send + Sync>) -> Self {
+        Self::start_with_projects(vec![project_root], runner)
+    }
+
+    /// A workbench that knows several projects and is opened on the first —
+    /// what a test switching between them needs.
+    fn start_with_projects(
+        projects: Vec<PathBuf>,
+        runner: Arc<dyn ProcessRunner + Send + Sync>,
+    ) -> Self {
         let state = AppState {
             screen: Screen::Workbench,
-            project_root: Some(project_root.clone()),
-            projects: vec![project_root],
+            project_root: projects.first().cloned(),
+            projects,
             ..AppState::default()
         };
 
@@ -166,9 +176,13 @@ async fn run_workbench(
     mirror: Arc<Mutex<Vec<MirroredSession>>>,
 ) {
     let mut rx = engine.take_receiver();
+    let bridge_runner = Arc::clone(&runner);
     let (mut supervisor, mut session_rx) = Supervisor::new(runner);
     let mut records = McpSessionRecords::new();
     let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
+    let mut subscribers = SessionSubscribers::new();
+    let mut pending_trees = PendingWidgetTrees::new();
+    let mut devtools = DevtoolsBridge::new(Arc::clone(&bridge_runner));
 
     while !engine.state.should_quit {
         tokio::select! {
@@ -180,6 +194,9 @@ async fn run_workbench(
                         records: &mut records,
                         tx: &engine.sender(),
                         next_adhoc_id: &mut next_adhoc_id,
+                        subscribers: &mut subscribers,
+                        devtools: &mut devtools,
+                        pending_trees: &mut pending_trees,
                     });
                 } else {
                     engine.handle(msg);
@@ -428,6 +445,53 @@ async fn an_agent_drives_the_workbenchs_own_sessions() {
 
     client.disconnect().await;
     cancel.cancel();
+}
+
+/// `SessionBackend::project_root` answers with the project the workbench is
+/// on **now**, not the one it was on when a consumer first asked.
+///
+/// The embedded DAP server reads this seam once per launch — for the directory
+/// it builds in, for the launch banner, and for the ignored-`projectRoot`
+/// note — so a user switching project mid-session must move all three, with no
+/// server restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_backend_reports_the_project_the_workbench_is_on_right_now() {
+    let first = PathBuf::from("/tmp/frust-tui-backend-root-first");
+    let second = PathBuf::from("/tmp/frust-tui-backend-root-second");
+    let workbench = Workbench::start_with_projects(
+        vec![first.clone(), second.clone()],
+        Arc::new(FakeProcessRunner::new()),
+    );
+    let backend = workbench.backend();
+
+    // Read from a thread that is not the event loop's, exactly as a real
+    // backend call arrives.
+    let reader = Arc::clone(&backend);
+    let root = tokio::task::spawn_blocking(move || reader.project_root())
+        .await
+        .expect("the project-root read panicked");
+    assert_eq!(
+        root.as_deref(),
+        Some(first.as_path()),
+        "the open project is what a launch would build in"
+    );
+
+    // The user switches project. The switch travels the same channel as the
+    // next read, ahead of it, so the read that follows sees the new project.
+    workbench
+        .tx
+        .send(Message::SwitchProject(1))
+        .expect("the workbench loop is alive");
+    let reader = Arc::clone(&backend);
+    let root = tokio::task::spawn_blocking(move || reader.project_root())
+        .await
+        .expect("the project-root read panicked");
+    assert_eq!(
+        root.as_deref(),
+        Some(second.as_path()),
+        "a switched project must be reported live — a cached root names a \
+         directory nothing builds from"
+    );
 }
 
 /// A tool needing the app's devtools connection is refused with the

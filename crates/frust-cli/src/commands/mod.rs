@@ -30,10 +30,11 @@ use frust_drive::process::RealProcessRunner;
 /// read the `command` parameter, never `cli.command`.
 pub fn dispatch(command: Command, cli: &Cli) -> Result<u8> {
     let verbose = cli.verbose > 0;
-    let runner = RealProcessRunner;
+    let runner: std::sync::Arc<dyn frust_drive::process::ProcessRunner + Send + Sync> =
+        std::sync::Arc::new(RealProcessRunner);
     match command {
-        Command::Doctor => doctor::run_in(&runner, verbose),
-        Command::Devices => devices::run_in(&runner, verbose),
+        Command::Doctor => doctor::run_in(&*runner, verbose),
+        Command::Devices => devices::run_in(&*runner, verbose),
         Command::Create {
             dir,
             org,
@@ -59,7 +60,7 @@ pub fn dispatch(command: Command, cli: &Cli) -> Result<u8> {
         }),
         Command::Clean => {
             let cwd = std::env::current_dir().context("reading current directory")?;
-            clean::run_in(&runner, &cwd)
+            clean::run_in(&*runner, &cwd)
         }
         Command::Tui => tui::run(),
         Command::Run {
@@ -67,7 +68,7 @@ pub fn dispatch(command: Command, cli: &Cli) -> Result<u8> {
             render_tier,
             watch,
         } => run::run_in(
-            &runner,
+            &*runner,
             build,
             cli.device_id.clone(),
             render_tier,
@@ -76,7 +77,7 @@ pub fn dispatch(command: Command, cli: &Cli) -> Result<u8> {
         ),
         Command::Build { target } => {
             let cwd = std::env::current_dir().context("reading current directory")?;
-            build::run_in(&runner, &cwd, target)
+            build::run_in(&*runner, &cwd, target)
         }
     }
 }

@@ -1915,6 +1915,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-dap"
+version = "0.1.0"
+dependencies = [
+ "frust-drive",
+ "frust-mcp",
+ "log",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "frust-database"
 version = "0.1.0"
 dependencies = [
@@ -2221,6 +2235,7 @@ dependencies = [
  "ansi-to-tui",
  "anyhow",
  "crossterm",
+ "frust-dap",
  "frust-devtools-protocol",
  "frust-drive",
  "frust-mcp",

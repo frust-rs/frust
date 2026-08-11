@@ -1337,3 +1337,372 @@ MCP path was judged the fix that matters for v1.
 **Evidence**: `crates/frust-tui/src/supervise/mcp_backend.rs` module doc ("What this backend
 deliberately cannot do" — "An evicted MCP record's tab still exists"); `McpSessionRecords::
 retain_bounded`; `run_app_refuses_bookkeeping_free_once_the_cap_of_live_sessions_is_reached` test.
+
+---
+
+### `dap-no-stepping-v1` — `frust-dap` has no breakpoints, stack, or variable inspection
+
+**Observed**: `frust-dap`'s DAP surface is launch orchestration only —
+`initialize`/`launch`/`configurationDone`/`threads`/`disconnect`/`terminate` plus the
+`frustRestart`/`frustWidgetTree` custom requests. There is no `setBreakpoints`, `continue`,
+`next`/`stepIn`/`stepOut`, `stackTrace`, `scopes`, or `variables` — `threads` answers a single
+static thread only so a client's UI has something to show, not because stepping is supported on it.
+
+**Applies to**: every `frust-dap` session, on every platform.
+
+**Why accepted**: ruling D6 — stepping is deliberately delegated to native lldb tooling (Xcode's
+debugger for iOS, Android Studio/`lldb.sh` for Android, a desktop `lldb`/`gdb` attach) rather than
+reimplemented on top of the launch-orchestration engine, which has no breakpoint/stack/variable
+model to build one on. `frust-dap` orchestrates build/deploy/launch/logs; a real debugger attaches
+to the running process for anything past that.
+
+**Evidence**: `crates/frust-dap/src/adapter/mod.rs`'s `threads`/dispatch surface (no
+breakpoint/stack/variable request handling); frust-dap feature plan ruling D6.
+
+---
+
+### `dap-launch-only-no-attach-v1` — `frust-dap` cannot attach to an already-running app
+
+**Observed**: `frust-dap`'s only entry into a session is its own `launch` request, which calls
+`SessionBackend::run_app` on the **host's** shared backend and always starts a brand-new session —
+even though that backend is the same one already supervising every app the host's own UI has
+launched, `launch` never adopts one of those existing sessions. There is no `attach` request, and no
+way to hand a connection an already-running `SessionId` (one the user started by hand, or another
+DAP/MCP client started) to debug it in place.
+
+**Applies to**: every `frust-dap` connection; a client must always `launch` a fresh app through it,
+never attach to one already running in the host.
+
+**Why accepted**: v1 scope — one app per connection is the whole orchestration-v1 contract (ruling
+D6's launch-only surface), and `attach` needs a session-picker UX this adapter does not have (the
+backend exposes `sessions()`, but nothing in the DAP protocol surface here resolves a client's
+choice into one). Not attempted this round.
+
+**Evidence**: `crates/frust-dap/src/adapter/mod.rs`'s request dispatch (no `attach` handling) and
+`OrchestrationAdapter::launch` (always calls `backend.run_app`, never reuses an existing
+`SessionId`).
+
+---
+
+### `dap-tcp-unauthenticated-v1` — the embedded DAP server has no authentication beyond the loopback bind
+
+**Observed**: `frust_dap::serve_embedded`'s loopback listener binds `127.0.0.1` only and has no
+login, token, or capability check at the DAP protocol layer — any local process that can reach the
+port can drive the host workbench's own session world (launch, `frustRestart`, stop) through it,
+exactly the same reach a running `frust-tui` gives its embedded MCP server. It **cannot**, however,
+choose the build directory: a client's `launch.projectRoot` is always ignored — every session
+launches from the workbench's currently open project (read live from the host's backend at launch
+time; a client-supplied `projectRoot` is never honored), and an ignored request is echoed back,
+sanitized, as a Debug Console note rather than silently dropped. So
+the reach is driving sessions against the host's own open project, not running `cargo` — and
+therefore arbitrary `build.rs`/proc-macro/`.cargo` runner code — from an attacker-chosen directory.
+
+**Exposure asymmetry with the embedded MCP server**: the reach is the same once connected, but the
+*likelihood of a listener existing at all* is not, and this entry would be misleading without
+saying so. The MCP server has **no auto-start path** — it binds only when a human toggles it (`M`,
+the panel's `s`, or the palette). The DAP server does auto-start: `[dap].auto_start_in_ide` and
+`auto_configure_ide` both default **on** (fdemon parity, a deliberate product decision), and the
+IDE detection they gate on reads inherited environment variables (`TERM_PROGRAM`,
+`VSCODE_IPC_HOOK_CLI`, `ZED_TERM`, `TERMINAL_EMULATOR`, `NVIM`, `INSIDE_EMACS`, `HELIX_RUNTIME`) —
+which every subshell, `tmux` pane, and nested shell started from an IDE terminal inherits, so a
+workbench launched well away from the editor still counts as "inside an IDE". The **first** such
+auto-start on an install is therefore gated: instead of binding, it opens the DAP settings dialog
+with a one-time notice naming the port, and a listener starts on that run only if the user asks it
+to (`[dap].intro_seen` records that the notice was spent, whether or not they acted). Every launch
+after that binds silently, as the defaults ask — the acknowledgment is one-time, not per-launch —
+and auto-start can be turned off in the same dialog (or `[dap].auto_start_in_ide = false` in
+`~/.config/frust/tui.toml`). A successful bind additionally rewrites the detected IDE's DAP launch
+config while `auto_configure_ide` is on.
+
+**Applies to**: every `frust-dap` connection, on every platform — there is no other transport (the
+stdio mode this entry once covered was removed; the server is embedded-only now).
+
+**Why accepted**: the same v1 stance as `frust-mcp`'s (see `mcp-server-unauthenticated-v1` above),
+matched to the same threat model — a loopback developer tool not reachable off-host. Server-side
+auth is a named follow-up, not a v1 requirement, for either embedded server. The `project_root`
+confinement above is not part of that follow-up — it ships now, so an unauthenticated client cannot
+escalate a session into arbitrary local code execution from a directory of its choosing. The
+first-run notice is **disclosure, not authentication**: it makes the auto-start visible once, it
+does not stop a local process from connecting. The remedy that would actually close the asymmetry
+is a per-server token — minted on each start and written into the generated IDE config, so a client
+must present what the editor was handed — which stays a named follow-up alongside MCP's.
+
+**Evidence**: `crates/frust-dap/src/server/embedded.rs`'s `serve_embedded` doc comment (loopback
+bind, the project root is read live from the host's backend and is never overridden by a client);
+`crates/frust-dap/src/adapter/mod.rs`'s `OrchestrationAdapter::launch` (`client_root_note`,
+sanitized echo of an ignored `projectRoot`); `crates/frust-tui/src/engine/update.rs`'s
+`Message::DapAutoStart` arm and `crates/frust-tui/src/engine/dap_settings.rs`'s
+`DapSettings::intro_port` (the one-time gate and its lifecycle).
+
+---
+
+### `dap-exited-success-flag-only` — a DAP `exited` event carries 0/1, never a real process exit code
+
+**Observed**: `frust-dap`'s `exited` event body always carries `0` or `1` — `frust_mcp::engine`'s
+`SessionState::Exited` is a success flag, not a real exit code (`StreamHandle` exposes none on any
+platform), so there is no underlying value to report faithfully.
+
+**Applies to**: every `frust-dap` session's `exited` event, on every platform.
+
+**Why accepted**: the underlying engine has never captured a real exit code (desktop/Android/iOS
+Simulator sessions alike) — `frust-dap` reports the same fidelity the engine has always had, rather
+than inventing a code that would not mean anything. A client relying on `exited`'s code for
+anything beyond success/failure will be misled.
+
+**Evidence**: `crates/frust-dap/src/adapter/pump.rs`'s `EXIT_OK`/`EXIT_FAILED` doc comments;
+`frust_mcp::engine::SessionState::Exited` (no exit-code field).
+
+---
+
+### `dap-log-subscription-may-drop-lines` — a slow DAP client can lose output lines under back-pressure
+
+**Observed**: `SessionBackend::subscribe_session_events` is a bounded (`LOG_SUBSCRIPTION_CAP`,
+4096-line) channel; a client that reads `output` events slower than the app produces lines causes
+`frust-dap`'s log pump to back up and the feed to drop the oldest lines once full. Loss is never
+silent: an in-band `[frust] <N> log line(s) dropped (…)` line is delivered as its own `output` event
+before the gap. This is the *feed's own* loss marker — see `dap-supervisor-drop-not-marked` below
+for a distinct, upstream loss the feed cannot see at all when the host is `frust-tui`.
+
+**Applies to**: any `frust-dap` session whose client (or the DAP wire itself) cannot keep up with
+the app's log rate; unreachable in ordinary interactive use.
+
+**Why accepted**: the alternative is an unbounded buffer (a memory-growth hazard) or blocking the
+app's own log-ingest thread on a slow client (a hang hazard) — neither acceptable for a debug
+server. A marked drop is the same trade-off every implementer of `subscribe_session_events` makes
+(`frust-mcp`'s own reference `SessionEngine`, and `frust-tui`'s embedded backend, both bound at the
+same cap).
+
+**Evidence**: `crates/frust-mcp/src/backend.rs`'s `subscribe_session_events` doc comment (bounded,
+in-band loss markers); `crates/frust-dap/src/adapter/pump.rs`'s log pump (`read_feed`/
+`forward_events`).
+
+---
+
+### `dap-resolution-helpers-mirrored-from-mcp` — device/mode resolution is duplicated, not shared, between `frust-mcp` and `frust-dap`
+
+**Observed**: `frust_mcp::tools`'s device-matching, mode-parsing, and devtools-error-message
+helpers are a private module — `frust-dap`'s `adapter/resolve.rs` mirrors their behavior (exact-id
+match, then unique case-insensitive substring of id/name; the physical-iOS refusal; the
+not-connected/not-supported/unauthorized wording) rather than importing them, since they are not
+part of `frust-mcp`'s public API.
+
+**Applies to**: `frust-dap`'s `launch`'s `device`/`mode` resolution and its `frustWidgetTree`
+not-connected error wording; a future change to `frust-mcp`'s private resolution logic will not
+propagate to `frust-dap` automatically.
+
+**Why accepted**: exporting the helpers would widen `frust-mcp`'s public surface for a single
+internal consumer; mirroring was judged the smaller footprint for v1, with the drift risk recorded
+here so a future `frust-mcp` resolution change is checked against `frust-dap` too.
+
+**Evidence**: `crates/frust-dap/src/adapter/resolve.rs` (mirrored device/mode matching, doc comments
+naming the source) and `crates/frust-dap/src/adapter/mod.rs`'s `widget_tree_failure_message`
+(mirrored not-connected/unauthorized phrasing); `crates/frust-mcp/src/tools/session.rs` and
+`crates/frust-mcp/src/tools/mod.rs` (the private originals).
+
+---
+
+### `dap-vscode-extension-unverified` — `editors/vscode-frust` has not been runtime-tested in a VS Code host
+
+**Observed**: `editors/vscode-frust` is verified only statically — `node --check` on
+`extension.js` and `JSON.parse` on `package.json` — never launched inside an actual VS Code
+extension host against a real embedded `frust-tui` DAP server. The extension itself never spawns a
+process: its `DebugAdapterDescriptorFactory` returns a `vscode.DebugAdapterServer` pointed at a
+launch config's `debugServer`, falling back to the `frust.dapPort` setting and then port 4849 — a
+pure attach-by-port connection to whatever `frust-tui` instance is already listening. It is also
+unpublished: install is `npx @vscode/vsce package` → `code --install-extension`, never the
+Marketplace.
+
+**Applies to**: anyone using the extension for the first time; the DAP server it connects to
+(`crates/frust-dap`, embedded in `frust-tui`) is itself covered by `cargo test -p frust-dap`'s and
+`cargo test -p frust-tui`'s own tests, so this entry is about the editor-integration layer
+specifically — whether VS Code's debug UI actually drives a session end to end through the
+descriptor factory and the generated `launch.json`.
+
+**Why accepted**: no VS Code host is available in this environment; the extension's own contract
+(connect via `DebugAdapterServer`, resolve `projectRoot` from the workspace folder if the launch
+config omits it) is small enough that static verification plus the crate's own tests give
+reasonable confidence, but the end-to-end path is unexercised.
+
+**Evidence**: `editors/vscode-frust/extension.js` (`FrustDebugAdapterDescriptorFactory`, never
+spawns); `editors/vscode-frust/README.md`; frust-dap feature plan task 03's completion summary
+(devbox `node --check`/`JSON.parse` only, no VS Code host run).
+
+---
+
+### `dap-ios-simulator-untested-pending-mac` — `frust-dap` iOS Simulator launches are unverified
+
+**Observed**: `frust-dap`'s `launch` calls `SessionBackend::run_app` on whatever backend its host
+supplies — in production, `frust-tui`'s `TuiSessionBackend`, which shares `frust-drive`'s iOS
+Simulator run pipeline the same way `frust-mcp`'s own `SessionEngine` does (see
+`mcp-ios-simulator-unverified` above) — but no Mac has been available to run a `frust-dap`-embedded
+iOS Simulator session end to end through either host; only desktop targets are exercised by the
+crate's own tests, which drive the adapter over a test `SessionEngine` rather than the TUI.
+
+**Applies to**: `frust-dap` sessions with `device` resolving to an iOS Simulator udid — the
+standing gap every iOS path in this repo carries pending Mac device access.
+
+**Why accepted**: same cause and same mitigation as `mcp-ios-simulator-unverified` — the underlying
+launch pipeline is `frust-drive`-verified; the residual risk is scoped to `frust-dap`'s own adapter
+wiring (log pump, exit watch, `frustWidgetTree`) on that platform, and to `frust-tui`'s own embed
+wiring around it.
+
+**Evidence**: `crates/frust-dap` test suite (desktop targets only, via `FakeProcessRunner`, driven
+against a test `frust_mcp::SessionEngine` rather than `frust-tui`'s own backend); see
+`mcp-ios-simulator-unverified` above for the shared pipeline's own status.
+
+---
+
+### `dap-helix-config-skipped` — Helix never gets a generated DAP config
+
+**Observed**: `frust_dap::ide_config::generate_ide_config` for `ParentIde::Helix` always returns
+`ConfigAction::Skipped` with a fixed reason, without writing anything, regardless of `port` or
+`project_root`. Helix's own `[language.debugger]` config only knows how to **spawn** a debug-adapter
+binary via `port-arg` — it has no pure attach/TCP-connection form that could point at a DAP server
+already running (`frust-dap`'s only shape, since there is no standalone `frust dap` process to
+spawn).
+
+**Applies to**: any workbench where the detected or overridden IDE is Helix; the DAP settings
+dialog's `g` (Generate) action and the auto-configure-on-listen flow both report the skip rather
+than a written file.
+
+**Why accepted**: fdemon-pro (the ported source this module follows) worked around the identical gap
+by spawning a *second*, separate adapter-binary process — a workaround `frust-dap` cannot reuse,
+since it has no per-session spawnable binary of its own. Generating a config that could never
+actually connect was rejected in favor of honestly reporting nothing was written.
+
+**Evidence**: `crates/frust-dap/src/ide_config/helix.rs`'s module doc and `SKIP_REASON`;
+`crates/frust-dap/src/ide_config/mod.rs`'s `generate_ide_config` Helix arm.
+
+---
+
+### `dap-zed-adapter-unverified` — the generated Zed DAP config names an unverified adapter
+
+**Observed**: `crates/frust-dap/src/ide_config/zed.rs`'s `ZedGenerator` names the debug adapter as
+`"CodeLLDB"` in the generated `.zed/debug.json` entry — a best-effort choice (mirroring
+fdemon-pro's own analogous workaround of naming Go's `"Delve"` adapter for a non-Go TCP peer), never
+verified against a real Zed release. Whether Zed's debug panel accepts a `CodeLLDB` entry pointed at
+a non-lldb TCP peer, or validates the adapter/language pairing in a way that would reject it, is
+unconfirmed.
+
+**Applies to**: any workbench where the detected or overridden IDE is Zed and a DAP config is
+generated for it.
+
+**Why accepted**: Zed ships no native Frust (or Dart/Flutter-family) adapter to name honestly;
+`CodeLLDB` is the closest generic match for a Rust project's debug panel. Verifying needs a real Zed
+instance, unavailable this round — do not surface this adapter name in user-facing docs until it is.
+
+**Evidence**: `crates/frust-dap/src/ide_config/zed.rs`'s `ZED_ADAPTER` doc comment.
+
+---
+
+### `dap-ide-config-normalizes-launchjson` — the first VS Code `launch.json` merge destroys comments and hand formatting
+
+**Observed**: `VSCodeGenerator::merge_config` (`crates/frust-dap/src/ide_config/vscode.rs`) parses an
+existing `.vscode/launch.json` as JSONC (`ide_config::merge::clean_jsonc` strips every `//`/`/* */`
+comment and trailing comma) and reprints the whole document via `to_pretty_json`
+(`serde_json::to_string_pretty` over the parsed value tree). Every non-frust entry's *data* survives
+the merge — the doc comment's "preserve all non-frust entries" promise holds semantically — but a
+hand-authored file's comments and formatting do not: they are gone after the very first real merge,
+replaced by frust's own 2-space-indent reprint. `run_generator`'s skip-on-unchanged check
+(`crates/frust-dap/src/ide_config/mod.rs`) only compares the merged, reprinted output against what's
+already on disk — it protects a file already in frust's canonical (comment-free, reprinted) form from
+a redundant rewrite, it does not prevent the destructive first rewrite of a file that still carries a
+user's comments/formatting.
+
+**Applies to**: any project whose `.vscode/launch.json` predates frust-dap and carries hand-written
+comments or formatting, the moment its DAP server (re)binds with `[dap].auto_configure_ide` on (the
+default — see `dap-tcp-unauthenticated-v1` above) and detects VS Code/VS Code Insiders/Cursor as the
+parent IDE. This fires automatically, not on an explicit user action: the first bind after that file
+exists silently reprints it.
+
+**Why accepted**: a byte-preserving surgical splice (find the frust entry's byte span inside the
+original text and edit only that span, leaving everything else untouched) is the real fix, but was
+judged disproportionate for this round — hand-rolling JSONC span-splicing is real parser-writing risk
+for a config-generation feature, and no byte-preserving JSON/JSONC crate is pinned in this workspace
+(pins are LAW, `docs/DEVELOPMENT.md`'s Version-Pin Policy). `toml_edit` is the precedent for exactly
+this shape on the TOML side (`docs/TUI_DEVELOPMENT.md`'s pin row), but it has no JSONC-editing
+equivalent pinned here. The chosen remedy for this round is honest disclosure — this entry, plus the
+doc-comment corrections on `merge_config`/`run_generator`/`post_write` — rather than a bigger,
+unreviewed parser change.
+
+**Evidence**: `crates/frust-dap/src/ide_config/vscode.rs`'s `VSCodeGenerator::merge_config` (clean →
+parse → reprint) and its module doc; `crates/frust-dap/src/ide_config/merge.rs`'s `clean_jsonc`
+(comment/trailing-comma stripping) and `to_pretty_json` (`serde_json::to_string_pretty` reprint);
+`crates/frust-dap/src/ide_config/mod.rs`'s `run_generator` (byte-equality skip check against the
+reprinted output only).
+
+---
+
+### `tui-widget-tree-refusal-code-loss` — an embedded `widget_tree` failure loses its original error code
+
+**Observed**: `TuiSessionBackend::fetch_widget_tree` classifies a pull failure into
+`TreeRefusal::Unavailable` (a typed `NOT_SUPPORTED`) or `TreeRefusal::Failed(String)` — and the
+latter is built from `supervise::DevtoolsBridge`'s already-stringified error
+(`engine::InspectorEvent::Failed`), so the *original* devtools error code (e.g. `unauthorized`) is
+not recoverable by the time it reaches the trait method. A pull that failed because the app's
+devtools token went stale arrives as plain prose rather than the classified error a caller reading
+`devtools_client` directly would get — both `frust-mcp`'s `widget_tree` tool and `frust-dap`'s
+`frustWidgetTree` request see the narrowed version when the host is `frust-tui`'s embedded backend.
+
+**Applies to**: `fetch_widget_tree` calls served through `frust-tui`'s embedded `TuiSessionBackend`
+only — the standalone `frust_mcp::SessionEngine` backend returns the original typed
+`DevtoolsRpcError` and is unaffected.
+
+**Why accepted**: the bridge's own event channel (`InspectorEvent`) is string-typed by the time it
+crosses from `DevtoolsBridge`'s thread into engine state — reclassifying it would mean carrying a
+richer error type across that channel, a larger change than reading it back out again. The source
+itself records this as "a real narrowing, recorded rather than papered over by guessing a code back
+from the text," not an oversight.
+
+**Evidence**: `crates/frust-tui/src/supervise/mcp_backend.rs`'s `TreeRefusal::Failed` doc comment.
+
+---
+
+### `dap-supervisor-drop-not-marked` — a supervisor-level line drop is invisible to a DAP client's feed
+
+**Observed**: `frust-tui`'s `Supervisor` reports its own bounded-channel overflow (a build/run
+process producing lines faster than the workbench's internal channel can carry) as
+`SessionEventKind::Dropped(n)`, a cumulative, drop-newest counter. `engine::update` stores it only
+on `SessionView::dropped` for the UI to display — it is never appended to the session's own log
+store as a line. `supervise::session_feeds::SessionSubscribers::deliver_lines` (what feeds a DAP
+client's `SessionEventFeed`) replays only lines actually present in that log store, so a client
+attached over `frust-dap` has no way to learn the supervisor itself silently dropped `n` lines
+upstream — only the *feed's own* overflow (a separate, already-marked case; see
+`dap-log-subscription-may-drop-lines` above) is reported in band.
+
+**Applies to**: any `frust-dap` session whose host is `frust-tui` and whose supervisor-level output
+channel overflows; unreachable in ordinary interactive use (the same rarity as the feed's own
+overflow), and distinct from — upstream of — that overflow.
+
+**Why accepted**: not an evaluated v1 stance; recorded as a gap found while verifying `frust-dap`'s
+embedded-feed contract for this doc pass, not fixed here. Closing it needs either synthesizing a log
+line for the drop count (extra plumbing `SessionView` does not otherwise need) or extending
+`SessionEvent` with a marker variant `SessionSubscribers` replays alongside real lines — both larger
+than a doc-verification pass.
+
+**Evidence**: `crates/frust-tui/src/supervise/supervisor.rs`'s `SessionEventKind::Dropped`;
+`crates/frust-tui/src/engine/update.rs`'s `SessionEventKind::Dropped(n)` arm (updates
+`session.dropped` only); `crates/frust-tui/src/supervise/session_feeds.rs`'s `deliver_lines` (reads
+only `view.log`).
+
+---
+
+### `tui-dap-enabled-file-only` — `[dap].enabled` has no dialog control
+
+**Observed**: `engine::persist::DapPrefs::enabled` ("start the server on every launch, IDE or not")
+is fully read and written through `tui.toml`'s `[dap]` table, but the DAP settings dialog exposes no
+control for it — only `auto_start_in_ide`, `auto_configure_ide`, `port`, and `ide_override` are
+editable from the dialog (`engine::dap_settings::DapFocus` has no variant for it). A user who wants
+the server always on, not just when a parent IDE is detected, must hand-edit the config file.
+
+**Applies to**: the DAP settings dialog only; `enabled` is otherwise fully functional — loaded at
+startup and consulted in the `enabled || (auto_start_in_ide && detected)` auto-start check.
+
+**Why accepted**: documented as deliberate in the source itself — `enabled` targets an
+always-on user already comfortable editing `tui.toml` directly, while the dialog's own
+`auto_start_in_ide`/`auto_configure_ide` pair covers the common IDE-detected case a dialog control
+would otherwise duplicate.
+
+**Evidence**: `crates/frust-tui/src/engine/persist.rs`'s `save_dap_enabled` doc comment ("The
+dialog exposes no control for it"); `crates/frust-tui/src/engine/dap_settings.rs`'s `DapFocus`
+(no `Enabled` variant).

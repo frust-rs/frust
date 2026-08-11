@@ -16,6 +16,7 @@ expression: "render_to_string(80, 24, &state)"
                │  R       Refresh devices                       │▓▓             
                │  m       MCP server…                           │▓▓             
                │  M       Start/stop MCP server                 │▓▓             
+               │  D       DAP server…                           │▓▓             
                │  ⌥m      Toggle mouse capture                  │▓▓             
                │  f       Toggle follow-tail                    │▓▓             
                │  /       Search logs…                          │▓▓             
@@ -24,5 +25,4 @@ expression: "render_to_string(80, 24, &state)"
                │  d       DevTools                              │▓▓             
                │  r       Refresh widget tree                   │▓▓             
                │  q       Quit                                  │▓▓             
-               │                                                │▓▓             
 ? help · ⌘ pale╰────────────────────────────────────────────────╯▓▓    [mouse ✓]

@@ -67,20 +67,22 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use frust_devtools_protocol::FrameStats;
+use frust_devtools_protocol::{FrameStats, Method, RpcError, serde_json};
 use frust_drive::build_info::{BuildInfo, BuildMode};
 use frust_drive::devices::{Device, Kind, Platform, default_discoverers, discover_all};
-use frust_drive::devtools_client::DevtoolsClient;
+use frust_drive::devtools_client::{DevtoolsClient, DevtoolsRpcError};
 use frust_drive::process::ProcessRunner;
 use frust_mcp::SessionBackend;
 use frust_mcp::engine::{
-    LatestMetrics, RunTarget, SessionId as McpSessionId, SessionSnapshot,
+    LatestMetrics, RunTarget, SessionEventFeed, SessionId as McpSessionId, SessionSnapshot,
     SessionState as McpSessionState, TERMINAL_SESSION_CAP,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
+use super::session_feeds::{PendingWidgetTrees, SessionSubscribers};
 use super::{
-    DeviceTarget, SessionEvent, SessionEventKind, SessionId, SessionSpec, SessionState, Supervisor,
+    DeviceTarget, DevtoolsBridge, SessionEvent, SessionEventKind, SessionId, SessionSpec,
+    SessionState, Supervisor,
 };
 use crate::engine::{AppState, ConnState, DevtoolsLaunch, Message, SamplingState, SessionView};
 
@@ -162,6 +164,50 @@ pub enum EmbeddedError {
     },
 }
 
+/// Why a `widget_tree` pull could not be answered with a tree.
+///
+/// Two shapes, because a consumer classifies them differently
+/// (`frust_drive::devtools_client::is_not_supported` is what `frust-dap`'s
+/// adapter branches on): [`Self::Unavailable`] means *this backend has no
+/// tree to give for this session* — the same answer
+/// [`SessionBackend::fetch_widget_tree`]'s own default refusal gives — while
+/// [`Self::Failed`] means the pull was attempted and the devtools side
+/// rejected or dropped it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TreeRefusal {
+    /// No such session, or no devtools connection to pull through. Rendered
+    /// as a `DevtoolsRpcError` carrying
+    /// [`RpcError::NOT_SUPPORTED`](frust_devtools_protocol::RpcError::NOT_SUPPORTED),
+    /// so a caller's existing not-supported check classifies it exactly like
+    /// an app that declared no `widget_tree` capability.
+    Unavailable(String),
+    /// The pull itself failed — the bridge's own error text.
+    ///
+    /// The bridge renders every devtools failure to a `String` before it
+    /// reaches the engine ([`crate::engine::InspectorEvent::Failed`]), so the
+    /// original error's *code* is not recoverable here: an `unauthorized`
+    /// pull arrives as prose, and a caller sees a plain failure rather than a
+    /// classified one. That is a real narrowing, recorded rather than papered
+    /// over by guessing a code back from the text.
+    Failed(String),
+}
+
+impl TreeRefusal {
+    /// Render the refusal as the error the trait method returns.
+    fn into_error(self, id: McpSessionId) -> anyhow::Error {
+        match self {
+            Self::Unavailable(message) => anyhow::Error::new(DevtoolsRpcError {
+                method: Method::WidgetTree.to_string(),
+                code: RpcError::NOT_SUPPORTED,
+                message,
+            }),
+            Self::Failed(message) => {
+                anyhow::anyhow!("the widget-tree pull for session {id} failed: {message}")
+            }
+        }
+    }
+}
+
 // ── The reply channel a command carries ─────────────────────────────────────
 
 /// The one-shot answer channel an [`McpCommand`] carries back to the blocking
@@ -181,7 +227,7 @@ pub struct Reply<T>(Arc<Mutex<Option<SyncSender<T>>>>);
 
 impl<T> Reply<T> {
     /// A reply handle plus the receiver its answer arrives on.
-    fn channel() -> (Self, Receiver<T>) {
+    pub(crate) fn channel() -> (Self, Receiver<T>) {
         // Capacity 1: the answer is sent exactly once and never blocks the
         // event loop, whether or not the caller is still waiting.
         let (tx, rx) = sync_channel(1);
@@ -288,6 +334,44 @@ pub enum McpCommand {
         id: McpSessionId,
         /// Where the new session's id (or the refusal) goes.
         reply: Reply<Result<McpSessionId, EmbeddedError>>,
+    },
+    /// Open a live feed of a session's log lines and its end — what a DAP
+    /// client's output/exit pumps read instead of re-polling
+    /// [`McpCommand::Logs`] and diffing.
+    ///
+    /// The workbench answers with the receiving half and keeps the sending
+    /// half in [`SessionSubscribers`], which `crate::runner` feeds from every
+    /// session transition thereafter.
+    SubscribeSessionEvents {
+        /// The session to follow.
+        id: McpSessionId,
+        /// Where the feed goes (`None` for a session this backend cannot
+        /// describe).
+        reply: Reply<Option<SessionEventFeed>>,
+    },
+    /// Where a launch issued right now would build: the workbench's currently
+    /// open project, or `None` when none is open.
+    ///
+    /// Asked per launch rather than remembered by the consumer — the user can
+    /// switch projects at any time, and a DAP client is told (and builds in)
+    /// the project the workbench is on when it launches, not the one it was on
+    /// when the server started.
+    ProjectRoot {
+        /// Where the answer goes.
+        reply: Reply<Option<std::path::PathBuf>>,
+    },
+    /// Pull one `widget_tree` dump for a session, through the **workbench's
+    /// own** devtools connection.
+    ///
+    /// Answered from the bridge's completion path rather than inline (see
+    /// [`PendingWidgetTrees`]): the caller is blocked on
+    /// [`REPLY_DEADLINE`] meanwhile, and the bridge's own request timeout is
+    /// shorter, so a live pull lands inside the caller's wait.
+    WidgetTree {
+        /// The session whose tree to pull.
+        id: McpSessionId,
+        /// Where the tree (or the typed refusal) goes.
+        reply: Reply<Result<serde_json::Value, TreeRefusal>>,
     },
 }
 
@@ -636,6 +720,35 @@ impl SessionBackend for TuiSessionBackend {
         None
     }
 
+    fn subscribe_session_events(&self, id: McpSessionId) -> Option<SessionEventFeed> {
+        // An unreachable workbench yields `None` — the same answer an unknown
+        // id gets, and the honest one: there is no session world left to
+        // follow.
+        self.ask(|reply| McpCommand::SubscribeSessionEvents { id, reply })
+            .ok()
+            .flatten()
+    }
+
+    fn fetch_widget_tree(&self, id: McpSessionId) -> anyhow::Result<serde_json::Value> {
+        // Unlike `devtools_client`, this *is* answerable in embedded mode: the
+        // workbench cannot lend out its socket, but it can pull through it and
+        // hand back the result (see `PendingWidgetTrees`).
+        match self.ask(|reply| McpCommand::WidgetTree { id, reply }) {
+            Ok(Ok(tree)) => Ok(tree),
+            Ok(Err(refusal)) => Err(refusal.into_error(id)),
+            Err(unreachable) => Err(anyhow::Error::new(unreachable)),
+        }
+    }
+
+    fn project_root(&self) -> Option<std::path::PathBuf> {
+        // Read live, every time: the user can switch projects while a server
+        // is running, and the answer must be the project the *next* launch
+        // builds in. An unreachable workbench has no open project to name.
+        self.ask(|reply| McpCommand::ProjectRoot { reply })
+            .ok()
+            .flatten()
+    }
+
     fn runner(&self) -> Arc<dyn ProcessRunner + Send + Sync> {
         Arc::clone(&self.runner)
     }
@@ -662,6 +775,14 @@ pub struct McpServeCtx<'a> {
     /// The runner's ad-hoc id counter (see [`MAX_ADHOC_SESSION_ID`]), used
     /// only for a launch that failed to start.
     pub next_adhoc_id: &'a mut u64,
+    /// The open session-event feeds a
+    /// [`McpCommand::SubscribeSessionEvents`] registers into.
+    pub subscribers: &'a mut SessionSubscribers,
+    /// The per-session devtools connection threads — the only way to reach a
+    /// running app's `widget_tree` from here.
+    pub devtools: &'a mut DevtoolsBridge,
+    /// The widget-tree pulls waiting on a bridge report.
+    pub pending_trees: &'a mut PendingWidgetTrees,
 }
 
 /// Serve one command from the event loop and answer its [`Reply`].
@@ -708,6 +829,85 @@ pub fn serve_command(cmd: McpCommand, ctx: &mut McpServeCtx<'_>) {
             reply.send(Ok(()));
         }
         McpCommand::RestartApp { id, reply } => reply.send(restart_app(ctx, id)),
+        McpCommand::SubscribeSessionEvents { id, reply } => {
+            reply.send(subscribe_session_events(ctx, id));
+        }
+        McpCommand::ProjectRoot { reply } => reply.send(ctx.state.project_root.clone()),
+        McpCommand::WidgetTree { id, reply } => serve_widget_tree(ctx, id, reply),
+    }
+}
+
+/// Open a live feed over one session.
+///
+/// `None` for a session this backend cannot describe at all — the same
+/// omission [`snapshots`] makes, so a consumer never gets a feed for an id
+/// `list_sessions` never showed it.
+///
+/// A session that has **already** ended is handed its retained lines followed
+/// immediately by its `Exited`, rather than being registered for a transition
+/// that will never come again — the rule that keeps a late subscriber from
+/// waiting forever on a dead app.
+fn subscribe_session_events(
+    ctx: &mut McpServeCtx<'_>,
+    id: McpSessionId,
+) -> Option<SessionEventFeed> {
+    let view = mcp_view(ctx.state, ctx.records, id)?;
+    let record = ctx.records.get(view.id)?;
+    let state = session_state(view, record);
+    let terminal = state.is_terminal().then_some(state);
+    Some(ctx.subscribers.subscribe(view, terminal))
+}
+
+/// Ask the workbench's own devtools connection for a fresh `widget_tree`.
+///
+/// Nothing is answered inline: the pull runs on the session's
+/// [`DevtoolsBridge`] thread and its result comes back as a
+/// [`Message::DevtoolsInspector`], which `crate::runner` routes into
+/// [`PendingWidgetTrees::resolve`]. The caller is blocked on
+/// [`REPLY_DEADLINE`] throughout, and the bridge's own per-request timeout is
+/// shorter than that, so a connected session answers inside the wait — with a
+/// **freshly pulled** tree, never a cached one.
+///
+/// The two refusals are answered immediately, because neither can improve by
+/// waiting: an id this backend cannot describe, and a session whose devtools
+/// connection is not up.
+fn serve_widget_tree(
+    ctx: &mut McpServeCtx<'_>,
+    id: McpSessionId,
+    reply: Reply<Result<serde_json::Value, TreeRefusal>>,
+) {
+    let Some(view) = mcp_view(ctx.state, ctx.records, id) else {
+        reply.send(Err(TreeRefusal::Unavailable(format!(
+            "no such session in the workbench: {id}"
+        ))));
+        return;
+    };
+    if !matches!(view.devtools.conn, ConnState::Connected { .. }) {
+        reply.send(Err(TreeRefusal::Unavailable(no_devtools_reason(view))));
+        return;
+    }
+    let session = view.id;
+    ctx.pending_trees.push(session, reply);
+    ctx.devtools.fetch_tree(session, ctx.tx);
+}
+
+/// Why session `view` has no widget tree to give right now — the workbench's
+/// own connection state, phrased for a consumer that is not looking at the
+/// terminal.
+fn no_devtools_reason(view: &SessionView) -> String {
+    let detail = match &view.devtools.conn {
+        ConnState::Connected { .. } => None,
+        ConnState::Failed { error } => Some(error.clone()),
+        ConnState::Idle | ConnState::Connecting => view.devtools.start_error.clone(),
+    };
+    let base = format!(
+        "session {} has no devtools connection in the workbench, so there is no widget tree \
+         to read; run the app with devtools enabled and let it announce its service",
+        view.id.0
+    );
+    match detail {
+        Some(detail) => format!("{base}. The workbench reports: {detail}"),
+        None => base,
     }
 }
 
@@ -986,6 +1186,25 @@ fn session_state(view: &SessionView, record: &SessionRecord) -> McpSessionState 
             reason: reason.clone(),
         };
     }
+    live_session_state(view)
+}
+
+/// [`session_state`] against the launch records rather than one record —
+/// what `crate::runner` closes a session-event feed with when a session
+/// reaches a terminal state.
+///
+/// A session with no record at all (an ad-hoc build/clean/toolchain tab) still
+/// has an honest lifecycle state; it just has no recorded launch failure to
+/// override it with.
+pub fn mcp_session_state(records: &McpSessionRecords, view: &SessionView) -> McpSessionState {
+    match records.get(view.id) {
+        Some(record) => session_state(view, record),
+        None => live_session_state(view),
+    }
+}
+
+/// The lifecycle mapping proper, with no launch-record override applied.
+fn live_session_state(view: &SessionView) -> McpSessionState {
     match &view.state {
         SessionState::Configuring | SessionState::Building | SessionState::Installing => {
             McpSessionState::Launching
@@ -1087,6 +1306,7 @@ mod tests {
     use super::*;
     use frust_drive::devices::Device;
     use frust_drive::process::FakeProcessRunner;
+    use frust_mcp::engine::SessionEvent as McpSessionEvent;
     use std::path::PathBuf;
     use tokio::sync::mpsc::unbounded_channel;
 
@@ -1305,6 +1525,9 @@ mod tests {
     fn restarting_a_session_that_never_launched_is_refused_as_unsupported() {
         let (tx, _rx) = unbounded_channel();
         let (mut supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let mut subscribers = SessionSubscribers::new();
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut pending_trees = PendingWidgetTrees::new();
         let mut records = McpSessionRecords::new();
         records.insert_failed(
             SessionId(0),
@@ -1319,6 +1542,9 @@ mod tests {
             records: &mut records,
             tx: &tx,
             next_adhoc_id: &mut next_adhoc_id,
+            subscribers: &mut subscribers,
+            devtools: &mut devtools,
+            pending_trees: &mut pending_trees,
         };
 
         assert_eq!(
@@ -1430,6 +1656,9 @@ mod tests {
     fn run_app_refuses_bookkeeping_free_once_the_cap_of_live_sessions_is_reached() {
         let (tx, mut rx) = unbounded_channel();
         let (mut supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let mut subscribers = SessionSubscribers::new();
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut pending_trees = PendingWidgetTrees::new();
         let mut records = McpSessionRecords::new();
         let mut views = Vec::new();
         for seq in 0..MCP_RECORD_CAP as u64 {
@@ -1450,6 +1679,9 @@ mod tests {
             records: &mut records,
             tx: &tx,
             next_adhoc_id: &mut next_adhoc_id,
+            subscribers: &mut subscribers,
+            devtools: &mut devtools,
+            pending_trees: &mut pending_trees,
         };
 
         let result = run_app(&mut ctx, DeviceTarget::Desktop, BuildMode::Debug);
@@ -1479,6 +1711,9 @@ mod tests {
     fn restart_app_excludes_the_target_session_from_its_own_cap_check() {
         let (tx, _rx) = unbounded_channel();
         let (mut supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let mut subscribers = SessionSubscribers::new();
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut pending_trees = PendingWidgetTrees::new();
         let mut records = McpSessionRecords::new();
         let mut views = Vec::new();
         for seq in 0..MCP_RECORD_CAP as u64 {
@@ -1499,6 +1734,9 @@ mod tests {
             records: &mut records,
             tx: &tx,
             next_adhoc_id: &mut next_adhoc_id,
+            subscribers: &mut subscribers,
+            devtools: &mut devtools,
+            pending_trees: &mut pending_trees,
         };
 
         // Restarting one of the cap's own live sessions is a 1-for-1 swap —
@@ -1534,6 +1772,9 @@ mod tests {
 
         let (tx, _rx) = unbounded_channel();
         let (mut supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+        let mut subscribers = SessionSubscribers::new();
+        let mut devtools = DevtoolsBridge::new(Arc::new(FakeProcessRunner::new()));
+        let mut pending_trees = PendingWidgetTrees::new();
         let mut next_adhoc_id = MAX_ADHOC_SESSION_ID;
         let mut ctx = McpServeCtx {
             state: &state,
@@ -1541,6 +1782,9 @@ mod tests {
             records: &mut records,
             tx: &tx,
             next_adhoc_id: &mut next_adhoc_id,
+            subscribers: &mut subscribers,
+            devtools: &mut devtools,
+            pending_trees: &mut pending_trees,
         };
 
         assert_eq!(
@@ -1548,6 +1792,278 @@ mod tests {
             Err(EmbeddedError::NoSuchSession(0)),
             "an evicted record's tab may still exist in `state`, but restart_app \
              reports the same typed refusal a truly unknown id gets"
+        );
+    }
+
+    // ── The two deferred-answer commands ────────────────────────────────────
+
+    /// Everything `serve_command` needs, owned by the caller so a test can
+    /// keep driving the same registries across several commands — the shape
+    /// `crate::runner`'s loop holds for the workbench's whole life.
+    struct Harness {
+        supervisor: Supervisor,
+        records: McpSessionRecords,
+        tx: UnboundedSender<Message>,
+        _rx: tokio::sync::mpsc::UnboundedReceiver<Message>,
+        next_adhoc_id: u64,
+        subscribers: SessionSubscribers,
+        devtools: DevtoolsBridge,
+        pending_trees: PendingWidgetTrees,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let (tx, _rx) = unbounded_channel();
+            let (supervisor, _events) = Supervisor::new(Arc::new(FakeProcessRunner::new()));
+            // The supervisor's own event receiver is dropped: no session is
+            // ever really started through this harness.
+            Self {
+                supervisor,
+                records: McpSessionRecords::new(),
+                tx,
+                _rx,
+                next_adhoc_id: MAX_ADHOC_SESSION_ID,
+                subscribers: SessionSubscribers::new(),
+                devtools: DevtoolsBridge::new(Arc::new(FakeProcessRunner::new())),
+                pending_trees: PendingWidgetTrees::new(),
+            }
+        }
+
+        fn serve(&mut self, state: &AppState, cmd: McpCommand) {
+            serve_command(
+                cmd,
+                &mut McpServeCtx {
+                    state,
+                    supervisor: &mut self.supervisor,
+                    records: &mut self.records,
+                    tx: &self.tx,
+                    next_adhoc_id: &mut self.next_adhoc_id,
+                    subscribers: &mut self.subscribers,
+                    devtools: &mut self.devtools,
+                    pending_trees: &mut self.pending_trees,
+                },
+            );
+        }
+    }
+
+    /// A generous failure deadline for a reply that is sent synchronously —
+    /// never a pacing device.
+    const REPLY: Duration = Duration::from_secs(5);
+
+    /// The whole `subscribe_session_events` contract over the workbench, in
+    /// the order a DAP client's output pump sees it: the retained lines it
+    /// missed, then every line the session produces afterwards, then the
+    /// session's end — and then nothing, because the feed closes.
+    #[test]
+    fn a_session_event_subscription_is_seeded_then_fed_live_then_closed_by_the_exit() {
+        let mut harness = Harness::new();
+        harness
+            .records
+            .insert(SessionId(0), spec(DeviceTarget::Desktop));
+        let mut view = view(0);
+        view.state = SessionState::Running;
+        view.push_line_at("already retained".to_string(), "00:00:00");
+        let mut state = state_with(view);
+
+        let (reply, rx) = Reply::channel();
+        harness.serve(
+            &state,
+            McpCommand::SubscribeSessionEvents {
+                id: McpSessionId(0),
+                reply,
+            },
+        );
+        let feed = rx
+            .recv_timeout(REPLY)
+            .expect("the workbench answered")
+            .expect("a describable session gets a feed");
+        assert_eq!(
+            feed.recv_timeout(REPLY),
+            Ok(McpSessionEvent::Log("already retained".to_string())),
+            "the seed is the retained ring, exactly as the log pane holds it"
+        );
+
+        // Live delivery, driven the way `crate::runner::dispatch` drives it:
+        // cursor before the transition, replay after.
+        let cursor = SessionSubscribers::cursor(&state, SessionId(0)).expect("the view exists");
+        state.sessions[0].push_line_at("live".to_string(), "00:00:01");
+        let records = &harness.records;
+        harness
+            .subscribers
+            .replay(&state, cursor, |view| mcp_session_state(records, view));
+        assert_eq!(
+            feed.recv_timeout(REPLY),
+            Ok(McpSessionEvent::Log("live".to_string()))
+        );
+
+        // …and the ending.
+        let cursor = SessionSubscribers::cursor(&state, SessionId(0)).expect("the view exists");
+        state.sessions[0].state = SessionState::Exited(true);
+        let records = &harness.records;
+        harness
+            .subscribers
+            .replay(&state, cursor, |view| mcp_session_state(records, view));
+        assert_eq!(
+            feed.recv_timeout(REPLY),
+            Ok(McpSessionEvent::Exited {
+                state: McpSessionState::Exited { success: true }
+            })
+        );
+        assert!(
+            feed.recv_timeout(REPLY).is_err(),
+            "the feed closes after the exit it owes — a pump reading it stops, \
+             rather than blocking on a session that is over"
+        );
+    }
+
+    /// A discovery line is redacted on its way into the ring, and the feed is
+    /// fed *from* the ring — so a DAP client's Debug Console can no more read
+    /// a devtools handshake token back than the log pane can.
+    #[test]
+    fn a_feed_never_carries_the_devtools_handshake_token() {
+        let mut harness = Harness::new();
+        harness
+            .records
+            .insert(SessionId(0), spec(DeviceTarget::Desktop));
+        let mut view = view(0);
+        view.state = SessionState::Running;
+        let mut state = state_with(view);
+
+        let (reply, rx) = Reply::channel();
+        harness.serve(
+            &state,
+            McpCommand::SubscribeSessionEvents {
+                id: McpSessionId(0),
+                reply,
+            },
+        );
+        let feed = rx.recv_timeout(REPLY).expect("answered").expect("a feed");
+
+        let cursor = SessionSubscribers::cursor(&state, SessionId(0)).expect("the view exists");
+        state.sessions[0].push_line_at(
+            "frust-devtools listening on 53214 token cafe1234".to_string(),
+            "00:00:00",
+        );
+        let records = &harness.records;
+        harness
+            .subscribers
+            .replay(&state, cursor, |view| mcp_session_state(records, view));
+
+        let McpSessionEvent::Log(line) = feed.recv_timeout(REPLY).expect("the line arrived") else {
+            panic!("expected a log line");
+        };
+        assert!(
+            !line.contains("cafe1234"),
+            "the feed must carry the redacted ring copy: {line}"
+        );
+        assert!(line.contains("<redacted>"), "unexpected line: {line}");
+    }
+
+    /// A session this backend cannot describe has no feed — the same omission
+    /// `list_sessions` makes, so a consumer never follows an id it was never
+    /// shown.
+    #[test]
+    fn subscribing_to_an_undescribable_session_yields_no_feed() {
+        let mut harness = Harness::new();
+        let state = state_with(view(7));
+        let (reply, rx) = Reply::channel();
+        harness.serve(
+            &state,
+            McpCommand::SubscribeSessionEvents {
+                id: McpSessionId(7),
+                reply,
+            },
+        );
+        assert!(
+            rx.recv_timeout(REPLY).expect("answered").is_none(),
+            "an ad-hoc tab is not an MCP session, so there is nothing to follow"
+        );
+    }
+
+    /// The widget-tree refusal with no devtools connection: answered
+    /// immediately (waiting could not improve it) and typed in the devtools
+    /// layer's own vocabulary, so a consumer's `is_not_supported` check
+    /// classifies it exactly like an app that declared no `widget_tree`
+    /// capability.
+    #[test]
+    fn a_widget_tree_pull_without_a_devtools_connection_is_refused_as_not_supported() {
+        let mut harness = Harness::new();
+        harness
+            .records
+            .insert(SessionId(0), spec(DeviceTarget::Desktop));
+        let mut view = view(0);
+        view.state = SessionState::Running;
+        let state = state_with(view);
+
+        let (reply, rx) = Reply::channel();
+        harness.serve(
+            &state,
+            McpCommand::WidgetTree {
+                id: McpSessionId(0),
+                reply,
+            },
+        );
+        let refusal = rx
+            .recv_timeout(REPLY)
+            .expect("answered without waiting for a bridge that will never report")
+            .expect_err("no connection, no tree");
+        let TreeRefusal::Unavailable(reason) = &refusal else {
+            panic!("expected an Unavailable refusal, got {refusal:?}");
+        };
+        assert!(
+            reason.contains("no devtools connection"),
+            "unhelpful refusal: {reason}"
+        );
+        assert!(
+            harness.pending_trees.is_empty(),
+            "an immediate refusal must not leave a waiter behind"
+        );
+
+        let error = refusal.into_error(McpSessionId(0));
+        assert!(
+            frust_drive::devtools_client::is_not_supported(&error),
+            "the refusal must classify as not-supported: {error:#}"
+        );
+    }
+
+    /// An id the backend cannot describe at all gets the same typed family,
+    /// naming the session rather than implying the app merely has not
+    /// connected yet.
+    #[test]
+    fn a_widget_tree_pull_for_an_unknown_session_is_refused_too() {
+        let mut harness = Harness::new();
+        let state = state_with(view(7));
+        let (reply, rx) = Reply::channel();
+        harness.serve(
+            &state,
+            McpCommand::WidgetTree {
+                id: McpSessionId(7),
+                reply,
+            },
+        );
+        let refusal = rx
+            .recv_timeout(REPLY)
+            .expect("answered")
+            .expect_err("no tree");
+        assert_eq!(
+            refusal,
+            TreeRefusal::Unavailable("no such session in the workbench: 7".to_string())
+        );
+    }
+
+    /// A backend with no workbench listening degrades the two new methods the
+    /// same honest way the older ones degrade: an absent feed, and a typed
+    /// error rather than a hang.
+    #[test]
+    fn the_deferred_methods_degrade_honestly_with_no_workbench_listening() {
+        let backend = backend();
+        assert!(backend.subscribe_session_events(McpSessionId(0)).is_none());
+        let error = backend
+            .fetch_widget_tree(McpSessionId(0))
+            .expect_err("nothing is serving");
+        assert!(
+            format!("{error:#}").contains("did not answer"),
+            "unexpected error: {error:#}"
         );
     }
 }
