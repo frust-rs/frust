@@ -4,52 +4,56 @@
 //! past `initialize` to: build → deploy → launch → logs-as-`output`-events →
 //! stop, plus the two custom requests (`frustRestart`, `frustWidgetTree`).
 //!
+//! ## The backend is the host's, not the adapter's
+//!
+//! Every operation goes through the `frust_mcp::SessionBackend` the host
+//! passed to [`crate::serve_embedded`] — the same one its own UI (and any MCP
+//! client) drives. This adapter therefore *supervises* no sessions of its own:
+//! it launches one into the host's world, watches it, and stops it again. The
+//! project root is the host's too, injected at construction; a client's
+//! `launchArguments.projectRoot` is never honored (see [`resolve`]).
+//!
 //! ## One app per connection
 //!
-//! A DAP connection is a debug session, and a debug session is one app. The
-//! engine is built **at launch time** (its project root is a launch argument,
-//! not a server-wide setting) and a second `launch` on the same connection is
-//! refused: relaunching is `frustRestart`, and a second app is a second debug
-//! session.
+//! A DAP connection is a debug session, and a debug session is one app. A
+//! second `launch` on the same connection is refused: relaunching is
+//! `frustRestart`, and a second app is a second debug session.
 //!
-//! ## Sync engine, async adapter
+//! ## Sync backend, async adapter
 //!
-//! `frust_mcp::engine::SessionEngine` is sync by charter
-//! (`docs/CLI_ARCHITECTURE.md`) — an `adb` call against an unresponsive device
-//! has no wall-clock bound. Every engine call therefore goes through
-//! [`tokio::task::spawn_blocking`], the same rule `frust-mcp`'s tool layer
-//! follows, with one documented exception: the non-blocking state readers
-//! (`session`, `devtools_client`) take a short lock and are read directly.
+//! `SessionBackend` is sync by charter (`frust_mcp::backend`'s module doc) —
+//! an `adb` call against an unresponsive device has no wall-clock bound. Every
+//! backend call therefore goes through [`tokio::task::spawn_blocking`], the
+//! same rule `frust-mcp`'s tool layer follows, with one documented exception:
+//! the non-blocking state reader `session` takes a short lock and is read
+//! directly.
 //!
-//! ## Teardown
+//! ## Teardown stops the app, not the world
 //!
 //! `disconnect`/`terminate` (and the session's own `on_disconnect` hook, which
-//! fires on every exit path) run one idempotent teardown: stop the session,
-//! then `SessionEngine::shutdown`, which joins every detached teardown before
-//! returning. That join is the point — a stop that returns while the app is
-//! still being killed is not a stop.
+//! fires on every exit path) run one idempotent teardown: stop the session
+//! *this connection launched*, and nothing else. An editor closing its debug
+//! session must not take the host's other sessions — or the host — down with
+//! it, so there is no backend shutdown here; the host owns that lifetime.
 
 mod pump;
 mod resolve;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use frust_drive::build_info::BuildMode;
-use frust_drive::process::ProcessRunner;
-use frust_mcp::SessionEngine;
+use frust_mcp::SharedBackend;
 use frust_mcp::engine::{SessionId, SessionSnapshot, SessionState};
 
 use self::pump::Pumps;
-use self::resolve::{ResolvedRoot, mode_name, parse_mode, resolve_project_root, resolve_target};
-use crate::protocol::types::{Capabilities, LaunchArguments, Thread, ThreadsResponseBody};
+use self::resolve::{client_root_note, mode_name, parse_mode, resolve_target};
+use crate::clients::DapClientGuard;
+use crate::protocol::types::{
+    Capabilities, InitializeRequestArguments, LaunchArguments, Thread, ThreadsResponseBody,
+};
 use crate::server::{AdapterResponse, DapAdapter, EventSender};
-use crate::transport::TransportMode;
-
-/// The process runner every session shells out through — the seam a test
-/// injects `frust_drive::process::FakeProcessRunner` at, and the one
-/// `frust-cli` builds exactly once.
-pub type Runner = Arc<dyn ProcessRunner + Send + Sync>;
 
 /// The single static thread `threads` answers with.
 ///
@@ -85,26 +89,22 @@ impl TerminatedOnce {
 
 /// The app this connection launched, and the tasks watching it.
 struct Launched {
-    engine: Arc<SessionEngine>,
     session: SessionId,
     pumps: Pumps,
 }
 
-/// The [`DapAdapter`] driving a `frust_mcp::engine::SessionEngine`.
+/// The [`DapAdapter`] driving the host's `frust_mcp::SessionBackend`.
 pub struct OrchestrationAdapter {
     events: EventSender,
-    runner: Runner,
-    /// The transport this connection is served over. It gates whether a
-    /// client-supplied `projectRoot` is honored: stdio (the client spawned this
-    /// process) honors it; the unauthenticated loopback TCP transport ignores
-    /// it and launches from the server's own cwd — see
-    /// [`resolve_project_root`] and `docs/LIMITATIONS.md`
-    /// `dap-tcp-unauthenticated-v1`.
-    transport: TransportMode,
-    /// A caller-supplied engine, for tests that must observe the engine the
-    /// adapter drives. `None` in production: the engine is built at launch
-    /// time, from the launch request's own project root.
-    injected: Option<Arc<SessionEngine>>,
+    backend: SharedBackend,
+    /// The one directory a session ever builds from — the host's project,
+    /// injected at construction. A client's own `projectRoot` is never
+    /// honored; see [`client_root_note`].
+    project_root: PathBuf,
+    /// This connection's entry in the host's client registry, dropped with the
+    /// adapter. `None` for an adapter built outside [`crate::serve_embedded`]
+    /// (a test driving one directly), which has no registry to appear in.
+    client: Option<DapClientGuard>,
     launched: Option<Launched>,
     /// Whether `launch` has ever been answered successfully. Distinct from
     /// `launched.is_some()`, which teardown clears: a connection that has
@@ -114,54 +114,34 @@ pub struct OrchestrationAdapter {
 }
 
 impl OrchestrationAdapter {
-    /// A fresh adapter for one DAP connection served over `transport`.
-    ///
-    /// No engine is built here: the project root it would need arrives with
-    /// the `launch` request. `transport` decides whether that request's
-    /// `projectRoot` is honored (stdio) or ignored for security (TCP).
-    pub fn new(events: EventSender, runner: Runner, transport: TransportMode) -> Self {
+    /// A fresh adapter for one DAP connection, driving `backend` and building
+    /// only from `project_root`.
+    pub fn new(events: EventSender, backend: SharedBackend, project_root: PathBuf) -> Self {
         Self {
             events,
-            runner,
-            transport,
-            injected: None,
+            backend,
+            project_root,
+            client: None,
             launched: None,
             ever_launched: false,
             terminated: TerminatedOnce::default(),
         }
     }
 
-    /// Test seam: an adapter that launches into `engine` rather than building
-    /// one per launch request.
-    ///
-    /// The caller keeps its `Arc`, which is what lets a test assert on the
-    /// engine the adapter actually drove (that the app was stopped, that the
-    /// engine was shut down). A `launch` request's `projectRoot` is ignored on
-    /// this path — the engine already has one, and it is not overridable by
-    /// design.
-    #[doc(hidden)]
-    pub fn with_engine(events: EventSender, engine: Arc<SessionEngine>) -> Self {
-        Self {
-            events,
-            runner: engine.runner(),
-            // The injected engine already carries its own root, and this path
-            // ignores `projectRoot` entirely — so the transport is immaterial
-            // here; stdio is the honest default (the client owns the process).
-            transport: TransportMode::Stdio,
-            injected: Some(engine),
-            launched: None,
-            ever_launched: false,
-            terminated: TerminatedOnce::default(),
-        }
+    /// Attaches this connection's registry entry, so dropping the adapter
+    /// deregisters the client.
+    pub(crate) fn with_client_guard(mut self, guard: DapClientGuard) -> Self {
+        self.client = Some(guard);
+        self
     }
 
     /// `launch` — resolve the configuration, start the session, arm the pumps.
     ///
-    /// Answers as soon as the engine hands back a session id, which it does
-    /// immediately: the build/install/launch chain runs on the session's own
-    /// thread and reports through `output` events. A launch that cannot even
-    /// spawn lands as `SessionState::Failed`, which the exit watch surfaces as
-    /// an `output` line plus `exited(1)` and `terminated`.
+    /// Answers as soon as the backend hands back a session id, which it does
+    /// immediately: the build/install/launch chain runs elsewhere and reports
+    /// through `output` events. A launch that cannot even spawn lands as
+    /// `SessionState::Failed`, which the event pump surfaces as an `output`
+    /// line plus `exited(1)` and `terminated`.
     async fn launch(&mut self, arguments: Option<serde_json::Value>) -> AdapterResponse {
         if self.ever_launched {
             return AdapterResponse::failure(
@@ -183,32 +163,18 @@ impl OrchestrationAdapter {
             None => LaunchArguments::default(),
         };
 
-        let ResolvedRoot {
-            root: project_root,
-            ignored_note,
-        } = match resolve_project_root(args.project_root.as_deref(), self.transport) {
-            Ok(resolved) => resolved,
-            Err(message) => return AdapterResponse::failure(message),
-        };
+        let ignored_note = client_root_note(args.project_root.as_deref(), &self.project_root);
         let mode = match parse_mode(args.mode.as_deref()) {
             Ok(mode) => mode,
             Err(message) => return AdapterResponse::failure(message),
         };
-
-        let engine = match &self.injected {
-            Some(engine) => Arc::clone(engine),
-            None => Arc::new(SessionEngine::with_runner(
-                project_root.clone(),
-                Arc::clone(&self.runner),
-            )),
-        };
-        let target = match resolve_target(&engine, args.device.as_deref()).await {
+        let target = match resolve_target(&self.backend, args.device.as_deref()).await {
             Ok(target) => target,
             Err(message) => return AdapterResponse::failure(message),
         };
 
-        // A TCP client's ignored `projectRoot` is surfaced before the banner,
-        // so the security-relevant deviation reads first and the banner that
+        // An ignored client `projectRoot` is surfaced before the banner, so
+        // the security-relevant deviation reads first and the banner that
         // follows names the directory the build actually used.
         if let Some(note) = &ignored_note {
             let _ = self.events.output("console", note).await;
@@ -221,11 +187,7 @@ impl OrchestrationAdapter {
                     "Launching {} in {} mode from {}\n",
                     target.label(),
                     mode_name(mode),
-                    // The engine's own root, not the requested one: they are
-                    // the same everywhere but the test seam, and a banner that
-                    // names a directory the build did not use is worse than no
-                    // banner at all.
-                    engine.project_root().display()
+                    self.project_root.display()
                 ),
             )
             .await;
@@ -243,7 +205,7 @@ impl OrchestrationAdapter {
                 .await;
         }
 
-        let launching = Arc::clone(&engine);
+        let launching = Arc::clone(&self.backend);
         let launch_target = target.clone();
         let session =
             match tokio::task::spawn_blocking(move || launching.run_app(launch_target, mode)).await
@@ -255,17 +217,13 @@ impl OrchestrationAdapter {
             };
 
         let pumps = Pumps::spawn(
-            Arc::clone(&engine),
+            Arc::clone(&self.backend),
             session,
             self.events.clone(),
             self.terminated.clone(),
         );
         self.ever_launched = true;
-        self.launched = Some(Launched {
-            engine,
-            session,
-            pumps,
-        });
+        self.launched = Some(Launched { session, pumps });
         AdapterResponse::ok()
     }
 
@@ -275,6 +233,7 @@ impl OrchestrationAdapter {
     async fn restart(&mut self) -> AdapterResponse {
         let events = self.events.clone();
         let terminated = self.terminated.clone();
+        let backend = Arc::clone(&self.backend);
         let Some(launched) = self.launched.as_mut() else {
             return AdapterResponse::failure(NO_SESSION);
         };
@@ -284,7 +243,7 @@ impl OrchestrationAdapter {
         // first is what keeps that from being reported as the app exiting.
         launched.pumps.silence();
 
-        let restarting = Arc::clone(&launched.engine);
+        let restarting = Arc::clone(&backend);
         let session =
             match tokio::task::spawn_blocking(move || restarting.restart_app(previous)).await {
                 Ok(Ok(session)) => session,
@@ -300,12 +259,7 @@ impl OrchestrationAdapter {
                 }
             };
 
-        let pumps = Pumps::spawn(
-            Arc::clone(&launched.engine),
-            session,
-            events.clone(),
-            terminated,
-        );
+        let pumps = Pumps::spawn(backend, session, events.clone(), terminated);
         let stale = std::mem::replace(&mut launched.pumps, pumps);
         stale.stop();
         launched.session = session;
@@ -321,66 +275,68 @@ impl OrchestrationAdapter {
 
     /// `frustWidgetTree` — one widget-tree dump from the app's devtools
     /// service, as the response body.
+    ///
+    /// Asked of the **backend**, not of a devtools client resolved here: the
+    /// host may own that connection itself (its own UI reads the same tree
+    /// through it), in which case there is no client for this adapter to
+    /// resolve and a pre-check on one would refuse a request the backend can
+    /// answer perfectly well. A backend that serves no trees at all refuses in
+    /// the devtools layer's own vocabulary, so the classification below reads
+    /// it exactly like an app that declared no `widget_tree` capability.
     async fn widget_tree(&self) -> AdapterResponse {
         let Some(launched) = self.launched.as_ref() else {
             return AdapterResponse::failure(NO_SESSION);
         };
         let session = launched.session;
 
-        // A state reader, not a device call: it takes the session lock and
-        // returns, so it needs no blocking task of its own.
-        let Some(client) = launched.engine.devtools_client(session) else {
-            return AdapterResponse::failure(no_devtools_message(
-                session,
-                launched.engine.session(session).as_ref(),
-            ));
-        };
-
-        match tokio::task::spawn_blocking(move || client.widget_tree()).await {
-            Ok(Ok(dump)) => match serde_json::to_value(&dump) {
-                Ok(body) => AdapterResponse::success(Some(body)),
-                Err(error) => AdapterResponse::failure(format!(
-                    "the app's widget tree could not be serialized: {error}"
-                )),
-            },
-            Ok(Err(error)) => AdapterResponse::failure(devtools_failure_message(
+        let backend = Arc::clone(&self.backend);
+        match tokio::task::spawn_blocking(move || backend.fetch_widget_tree(session)).await {
+            Ok(Ok(body)) => AdapterResponse::success(Some(body)),
+            Ok(Err(error)) => AdapterResponse::failure(widget_tree_failure_message(
                 frust_drive::devtools_client::is_not_supported(&error),
                 frust_drive::devtools_client::is_unauthorized(&error),
                 &format!("{error:#}"),
+                session,
+                // A state reader, not a device call: it takes the session lock
+                // and returns, so it needs no blocking task of its own.
+                self.backend.session(session).as_ref(),
             )),
             Err(error) => AdapterResponse::failure(format!("the widget_tree task failed: {error}")),
         }
     }
 
-    /// Stops the app and shuts the engine down. Idempotent: the second call
-    /// has nothing to take and returns immediately.
+    /// Stops the app this connection launched. Idempotent: the second call has
+    /// nothing to take and returns immediately.
+    ///
+    /// The backend itself is untouched — it is the host's, it outlives every
+    /// DAP client, and its other sessions are none of this connection's
+    /// business.
     async fn tear_down(&mut self) {
         let Some(launched) = self.launched.take() else {
             return;
         };
-        let Launched {
-            engine,
-            session,
-            pumps,
-        } = launched;
+        let Launched { session, pumps } = launched;
         // Nothing this teardown causes is news to the client — it asked.
         pumps.stop();
 
-        let stopping = Arc::clone(&engine);
+        let stopping = Arc::clone(&self.backend);
         match tokio::task::spawn_blocking(move || stopping.stop_app(session)).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => log::warn!("DAP: stopping session {session} failed: {error:#}"),
             Err(error) => log::warn!("DAP: the stop task for session {session} failed: {error}"),
         }
-        // `shutdown` joins every detached teardown before returning, which is
-        // what makes "the app is stopped" true rather than merely requested.
-        engine.shutdown().await;
     }
 }
 
 impl DapAdapter for OrchestrationAdapter {
     fn capabilities(&self) -> Capabilities {
         Capabilities::frust_defaults()
+    }
+
+    fn on_initialize(&mut self, client: &InitializeRequestArguments) {
+        if let Some(guard) = &self.client {
+            guard.identify(client);
+        }
     }
 
     async fn handle_request(
@@ -434,45 +390,53 @@ fn threads_response() -> AdapterResponse {
     }
 }
 
-/// Why `frustWidgetTree` cannot run, phrased for a developer reading the
-/// Debug Console — the same shape `frust-mcp`'s tool layer reports, since it
-/// is the same gap with the same fixes.
-fn no_devtools_message(session: SessionId, snapshot: Option<&SessionSnapshot>) -> String {
-    let Some(snapshot) = snapshot else {
-        return format!("session {session} is no longer known to this adapter.");
-    };
-    let detail = match (&snapshot.state, &snapshot.devtools_error) {
-        (SessionState::Failed { reason }, _) => format!(" The launch failed: {reason}"),
-        (_, Some(reason)) => format!(" The app reported: {reason}"),
-        _ => String::new(),
-    };
-    format!(
-        "session {session} is not connected to a devtools service (state: {}).{detail} \
-         'frustWidgetTree' needs a debug or profile build with the devtools service running; \
-         check the Debug Console for the discovery line.",
-        state_name(&snapshot.state)
-    )
-}
-
-/// A devtools request failure, keeping the two rejections a developer must
-/// treat differently distinguishable.
+/// Why `frustWidgetTree` failed, phrased for a developer reading the Debug
+/// Console — keeping the two rejections a developer must treat differently
+/// distinguishable, and naming the session's own state for everything else.
 ///
 /// Takes the two classifications and the rendered chain rather than the error
 /// itself: `anyhow` is not a dependency of this crate — the error value
-/// arrives type-inferred from `frust-drive`'s API and is never named here — so
+/// arrives type-inferred from the backend's API and is never named here — so
 /// classification happens at the one call site that holds it.
-fn devtools_failure_message(not_supported: bool, unauthorized: bool, rendered: &str) -> String {
+fn widget_tree_failure_message(
+    not_supported: bool,
+    unauthorized: bool,
+    rendered: &str,
+    session: SessionId,
+    snapshot: Option<&SessionSnapshot>,
+) -> String {
     if not_supported {
-        return "the app's devtools service does not support 'widget_tree' — it declared no \
-                matching capability at handshake."
-            .to_owned();
+        return format!(
+            "'widget_tree' is not supported for session {session} — the app declared no matching \
+             capability at handshake, or this workbench does not serve widget trees at all. \
+             ({rendered})"
+        );
     }
     if unauthorized {
         return "the app's devtools service rejected 'widget_tree' as unauthorized — the \
                 connection's token is stale. Send 'frustRestart' to reconnect."
             .to_owned();
     }
-    format!("widget_tree failed: {rendered}")
+    format!(
+        "widget_tree failed for session {session}: {rendered}.{} 'frustWidgetTree' needs a debug \
+         or profile build with the devtools service running; check the Debug Console for the \
+         discovery line.",
+        session_detail(snapshot)
+    )
+}
+
+/// What the session itself has to say about why it could not answer — its
+/// state, plus the launch or devtools failure it recorded, if any.
+fn session_detail(snapshot: Option<&SessionSnapshot>) -> String {
+    let Some(snapshot) = snapshot else {
+        return " The session is no longer known to this workbench.".to_owned();
+    };
+    let detail = match (&snapshot.state, &snapshot.devtools_error) {
+        (SessionState::Failed { reason }, _) => format!(" The launch failed: {reason}."),
+        (_, Some(reason)) => format!(" The app reported: {reason}."),
+        _ => String::new(),
+    };
+    format!(" (session state: {}){detail}", state_name(&snapshot.state))
 }
 
 /// The short name a [`SessionState`] reports as, matching what `frust-mcp`
@@ -496,7 +460,8 @@ mod tests {
     use std::time::Duration;
 
     use frust_drive::build_info::BuildMode;
-    use frust_drive::process::FakeProcessRunner;
+    use frust_drive::process::{FakeProcessRunner, ProcessRunner};
+    use frust_mcp::SessionEngine;
     use frust_mcp::engine::RunTarget;
     use tokio::io::{BufReader, DuplexStream};
     use tokio::task::JoinHandle;
@@ -506,6 +471,10 @@ mod tests {
     use crate::protocol::codec::{CodecError, read_message, write_message};
     use crate::protocol::types::{DapEvent, DapMessage, DapRequest, DapResponse};
     use crate::server::run_session;
+
+    /// The process runner a test backend shells out through — always a
+    /// scripted [`FakeProcessRunner`] here, so nothing ever runs for real.
+    type Runner = Arc<dyn ProcessRunner + Send + Sync>;
 
     /// The exact invocation `frust_drive::desktop_run` resolves a Debug
     /// desktop session to — the key the scripted stream is registered under, so
@@ -608,31 +577,33 @@ mod tests {
             .flatten()
     }
 
+    /// The reference [`frust_mcp::SessionBackend`] a test drives the adapter
+    /// over: a real [`SessionEngine`] on a scripted runner, exactly as an
+    /// embedding host would hand its own supervisor in.
+    fn backend_with(runner: Runner) -> Arc<SessionEngine> {
+        Arc::new(SessionEngine::with_runner(TEST_PROJECT_ROOT, runner))
+    }
+
     /// A session over a duplex pair, driving a real [`OrchestrationAdapter`]
     /// against a scripted runner.
     fn spawn_adapter_session(
         runner: Runner,
     ) -> (TestClient, JoinHandle<std::result::Result<(), CodecError>>) {
-        spawn_session_with(
-            move |events| {
-                OrchestrationAdapter::new(events, Arc::clone(&runner), TransportMode::Stdio)
-            },
-            CancellationToken::new(),
-        )
+        spawn_adapter_session_with_backend(backend_with(runner))
     }
 
-    /// The same, against a caller-owned engine the test can assert on.
-    fn spawn_adapter_session_with_engine(
-        engine: Arc<SessionEngine>,
+    /// The same, against a caller-owned backend the test can assert on.
+    fn spawn_adapter_session_with_backend(
+        backend: Arc<SessionEngine>,
     ) -> (TestClient, JoinHandle<std::result::Result<(), CodecError>>) {
-        let (client, _cancel, handle) = spawn_adapter_session_with_engine_and_cancel(engine);
+        let (client, _cancel, handle) = spawn_adapter_session_with_backend_and_cancel(backend);
         (client, handle)
     }
 
-    /// [`spawn_adapter_session_with_engine`], but also handing back the
-    /// session's [`CancellationToken`] for the shutdown-signal path.
-    fn spawn_adapter_session_with_engine_and_cancel(
-        engine: Arc<SessionEngine>,
+    /// [`spawn_adapter_session_with_backend`], but also handing back the
+    /// session's [`CancellationToken`] for the host-shutdown path.
+    fn spawn_adapter_session_with_backend_and_cancel(
+        backend: Arc<SessionEngine>,
     ) -> (
         TestClient,
         CancellationToken,
@@ -640,7 +611,13 @@ mod tests {
     ) {
         let cancel = CancellationToken::new();
         let (client, handle) = spawn_session_with(
-            move |events| OrchestrationAdapter::with_engine(events, Arc::clone(&engine)),
+            move |events| {
+                OrchestrationAdapter::new(
+                    events,
+                    Arc::clone(&backend) as SharedBackend,
+                    PathBuf::from(TEST_PROJECT_ROOT),
+                )
+            },
             cancel.clone(),
         );
         (client, cancel, handle)
@@ -838,22 +815,21 @@ mod tests {
 
     // ── Teardown ────────────────────────────────────────────────────────────
 
-    /// The teardown promise: by the time the session has ended, the launched
-    /// app is *stopped*, not scheduled to stop.
+    /// The teardown promise, both halves: by the time the session has ended
+    /// the launched app is *stopped* (not scheduled to stop) and the backend
+    /// is **still usable**.
     ///
-    /// Both halves are asserted on the engine the adapter actually drove: the
-    /// session is terminal (the engine records that only after
-    /// `StreamHandle::kill`, the `wait` that reaps the child, and a bounded
-    /// join of the session's threads — for a device target the same teardown
-    /// issues `am force-stop`/`simctl terminate` first), and the engine itself
-    /// is closed, which only `SessionEngine::shutdown` does.
+    /// The first half is asserted on the backend the adapter actually drove —
+    /// the engine records a terminal state only after `StreamHandle::kill`,
+    /// the `wait` that reaps the child, and a bounded join of the session's
+    /// threads (for a device target the same teardown issues `am
+    /// force-stop`/`simctl terminate` first). The second is the embed
+    /// contract: the backend belongs to the host, so an editor closing its
+    /// debug session must not shut the workbench's session world down with it.
     #[tokio::test]
-    async fn disconnect_stops_the_app_and_shuts_the_engine_down() {
-        let engine = Arc::new(SessionEngine::with_runner(
-            TEST_PROJECT_ROOT,
-            hanging_desktop_runner(&["running"]),
-        ));
-        let (mut client, handle) = spawn_adapter_session_with_engine(Arc::clone(&engine));
+    async fn disconnect_stops_the_app_and_leaves_the_backend_alive() {
+        let backend = backend_with(hanging_desktop_runner(&["running"]));
+        let (mut client, handle) = spawn_adapter_session_with_backend(Arc::clone(&backend));
         client.initialize().await;
 
         client.request(2, "launch", launch_arguments()).await;
@@ -867,7 +843,7 @@ mod tests {
         assert!(disconnect.success);
         join(handle).await;
 
-        let sessions = engine.sessions();
+        let sessions = backend.sessions();
         let [session] = sessions.as_slice() else {
             panic!("expected exactly one session, got {}", sessions.len());
         };
@@ -877,45 +853,44 @@ mod tests {
             session.state
         );
 
-        // A shut-down engine refuses new launches — the difference between
-        // "the app was stopped" and "the engine was also torn down".
-        let probe = engine.run_app(RunTarget::Desktop, BuildMode::Debug);
+        // A shut-down engine would refuse this; the host's world survives its
+        // DAP client.
+        let probe = backend.run_app(RunTarget::Desktop, BuildMode::Debug);
         assert!(
-            matches!(
-                engine.session(probe).map(|s| s.state),
+            !matches!(
+                backend.session(probe).map(|s| s.state),
                 Some(SessionState::Failed { .. })
             ),
-            "the engine was not shut down: {:?}",
-            engine.session(probe).map(|s| s.state)
+            "the DAP teardown shut the host's backend down: {:?}",
+            backend.session(probe).map(|s| s.state)
         );
+        backend.shutdown().await;
     }
 
-    /// The signal-driven equivalent of the disconnect teardown: a shutdown
-    /// signal (Ctrl-C/SIGTERM) fires the session's cancellation token, and by
-    /// the time the session ends the launched app is *stopped* and the engine
-    /// is shut down — the same guarantee, reached without any client request.
+    /// The host-driven equivalent of the disconnect teardown: the embedder
+    /// cancels the server, which fires the session's cancellation token, and
+    /// by the time the session ends the launched app is *stopped* — the same
+    /// guarantee, reached without any client request, and again without taking
+    /// the backend with it.
     #[tokio::test]
-    async fn cancellation_stops_the_app_and_shuts_the_engine_down() {
-        let engine = Arc::new(SessionEngine::with_runner(
-            TEST_PROJECT_ROOT,
-            hanging_desktop_runner(&["running"]),
-        ));
+    async fn cancellation_stops_the_app_and_leaves_the_backend_alive() {
+        let backend = backend_with(hanging_desktop_runner(&["running"]));
         let (mut client, cancel, handle) =
-            spawn_adapter_session_with_engine_and_cancel(Arc::clone(&engine));
+            spawn_adapter_session_with_backend_and_cancel(Arc::clone(&backend));
         client.initialize().await;
 
         client.request(2, "launch", launch_arguments()).await;
         let (response, _) = client.next_response().await;
         assert!(response.success, "{:?}", response.message);
-        // Real output means the process is provably live before the signal.
+        // Real output means the process is provably live before the cancel.
         client.wait_for_output("running").await;
 
-        // No disconnect/terminate request — just the signal token, exactly what
-        // `run_blocking`'s Ctrl-C/SIGTERM listener fires.
+        // No disconnect/terminate request — just the token the host stops the
+        // embedded server with.
         cancel.cancel();
         join(handle).await;
 
-        let sessions = engine.sessions();
+        let sessions = backend.sessions();
         let [session] = sessions.as_slice() else {
             panic!("expected exactly one session, got {}", sessions.len());
         };
@@ -925,28 +900,24 @@ mod tests {
             session.state
         );
 
-        // A shut-down engine refuses new launches — proof the teardown ran the
-        // engine shutdown, not merely the app stop.
-        let probe = engine.run_app(RunTarget::Desktop, BuildMode::Debug);
+        let probe = backend.run_app(RunTarget::Desktop, BuildMode::Debug);
         assert!(
-            matches!(
-                engine.session(probe).map(|s| s.state),
+            !matches!(
+                backend.session(probe).map(|s| s.state),
                 Some(SessionState::Failed { .. })
             ),
-            "the engine was not shut down on cancellation: {:?}",
-            engine.session(probe).map(|s| s.state)
+            "a cancelled DAP server shut the host's backend down: {:?}",
+            backend.session(probe).map(|s| s.state)
         );
+        backend.shutdown().await;
     }
 
     /// A `terminate` stops the app and reports `terminated`; the `disconnect`
     /// that follows it must not report a second one.
     #[tokio::test]
     async fn terminate_then_disconnect_reports_terminated_exactly_once() {
-        let engine = Arc::new(SessionEngine::with_runner(
-            TEST_PROJECT_ROOT,
-            hanging_desktop_runner(&["running"]),
-        ));
-        let (mut client, handle) = spawn_adapter_session_with_engine(Arc::clone(&engine));
+        let backend = backend_with(hanging_desktop_runner(&["running"]));
+        let (mut client, handle) = spawn_adapter_session_with_backend(Arc::clone(&backend));
         client.initialize().await;
 
         client.request(2, "launch", launch_arguments()).await;
@@ -966,7 +937,7 @@ mod tests {
             "terminate reports that the app ended: {events:?}"
         );
         assert!(
-            engine
+            backend
                 .sessions()
                 .iter()
                 .all(|session| session.state.is_terminal()),
@@ -1000,6 +971,10 @@ mod tests {
         assert!(!response.success, "no devtools service is connected");
         let message = response.message.unwrap_or_default();
         assert!(message.contains("devtools"), "unhelpful: {message}");
+        assert!(
+            message.contains("session state: running"),
+            "the refusal must name what the session was doing: {message}"
+        );
         assert!(
             message.contains("debug or profile build"),
             "the message must say what would fix it: {message}"
@@ -1045,11 +1020,8 @@ mod tests {
     /// reporting the stop half as the app exiting.
     #[tokio::test]
     async fn frust_restart_rolls_the_session_and_keeps_streaming() {
-        let engine = Arc::new(SessionEngine::with_runner(
-            TEST_PROJECT_ROOT,
-            hanging_desktop_runner(&["running"]),
-        ));
-        let (mut client, handle) = spawn_adapter_session_with_engine(Arc::clone(&engine));
+        let backend = backend_with(hanging_desktop_runner(&["running"]));
+        let (mut client, handle) = spawn_adapter_session_with_backend(Arc::clone(&backend));
         client.initialize().await;
 
         client.request(2, "launch", launch_arguments()).await;
@@ -1074,7 +1046,7 @@ mod tests {
                 .any(|event| event.event == "exited" || event.event == "terminated"),
             "a restart's own stop must not be reported as the app exiting: {events:?}"
         );
-        assert_eq!(engine.sessions().len(), 2, "the old session is retained");
+        assert_eq!(backend.sessions().len(), 2, "the old session is retained");
 
         client.request(4, "disconnect", None).await;
         let _ = client.next_response().await;
@@ -1131,18 +1103,35 @@ mod tests {
 
     // ── Message shaping ─────────────────────────────────────────────────────
 
+    /// The typed refusals stay distinguishable — including a backend that
+    /// serves no widget trees at all, which arrives as the devtools layer's
+    /// own `NOT_SUPPORTED` and must therefore read like one.
     #[test]
-    fn a_devtools_failure_keeps_the_two_rejections_distinguishable() {
-        assert!(devtools_failure_message(true, false, "ignored").contains("declared no matching"));
-        assert!(devtools_failure_message(false, true, "ignored").contains("frustRestart"));
-        let plain = devtools_failure_message(false, false, "connection reset");
+    fn a_widget_tree_failure_keeps_the_two_rejections_distinguishable() {
+        let unsupported =
+            widget_tree_failure_message(true, false, "not supported", SessionId(7), None);
+        assert!(
+            unsupported.contains("no matching capability"),
+            "{unsupported}"
+        );
+        assert!(
+            unsupported.contains("does not serve widget trees"),
+            "{unsupported}"
+        );
+
+        let unauthorized = widget_tree_failure_message(false, true, "ignored", SessionId(7), None);
+        assert!(unauthorized.contains("frustRestart"), "{unauthorized}");
+
+        let plain =
+            widget_tree_failure_message(false, false, "connection reset", SessionId(7), None);
         assert!(plain.contains("connection reset"), "{plain}");
+        assert!(plain.contains("session 7"), "{plain}");
     }
 
     #[test]
-    fn the_no_devtools_message_names_the_state_and_the_apps_own_reason() {
-        let message = no_devtools_message(SessionId(7), None);
-        assert!(message.contains("session 7"), "{message}");
+    fn a_widget_tree_failure_names_the_state_and_the_apps_own_reason() {
+        let unknown = widget_tree_failure_message(false, false, "boom", SessionId(7), None);
+        assert!(unknown.contains("no longer known"), "{unknown}");
 
         let mut snapshot = SessionSnapshot {
             id: SessionId(7),
@@ -1163,17 +1152,19 @@ mod tests {
             dropped_frames: 0,
             metrics_sampling: false,
         };
-        let message = no_devtools_message(SessionId(7), Some(&snapshot));
-        assert!(message.contains("state: running"), "{message}");
+        let message =
+            widget_tree_failure_message(false, false, "boom", SessionId(7), Some(&snapshot));
+        assert!(message.contains("session state: running"), "{message}");
         assert!(message.contains("address in use"), "{message}");
 
         // A failed launch reports the launch failure instead — it is the
-        // reason there is nothing to connect to.
+        // reason there was nothing to read a tree from.
         snapshot.state = SessionState::Failed {
             reason: "gradle exited 1".to_string(),
         };
-        let message = no_devtools_message(SessionId(7), Some(&snapshot));
-        assert!(message.contains("state: failed"), "{message}");
+        let message =
+            widget_tree_failure_message(false, false, "boom", SessionId(7), Some(&snapshot));
+        assert!(message.contains("session state: failed"), "{message}");
         assert!(message.contains("gradle exited 1"), "{message}");
     }
 }

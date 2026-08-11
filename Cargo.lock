@@ -1918,7 +1918,6 @@ dependencies = [
 name = "frust-dap"
 version = "0.1.0"
 dependencies = [
- "frust-devtools-protocol",
  "frust-drive",
  "frust-mcp",
  "log",

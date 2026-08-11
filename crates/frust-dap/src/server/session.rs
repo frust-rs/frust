@@ -144,6 +144,16 @@ pub trait DapAdapter: Send + 'static {
     /// `initialize` — an adapter never answers that request itself.
     fn capabilities(&self) -> Capabilities;
 
+    /// Note who the client said it is, from the `initialize` arguments.
+    ///
+    /// Called at most once per connection, before the `initialize` response
+    /// goes out, and only when those arguments parse — a client that sends
+    /// none still completes the handshake, and an adapter that does not care
+    /// who is on the other end keeps the default no-op. Sync on purpose: the
+    /// one implementer records the identity in a registry (a lock, not I/O),
+    /// and an `async` hook here would sit in the handshake's critical path.
+    fn on_initialize(&mut self, _client: &InitializeRequestArguments) {}
+
     /// Handle one post-handshake request.
     ///
     /// `command` is the raw DAP command name (including custom `frust*`
@@ -443,6 +453,7 @@ impl<A: DapAdapter> Session<A> {
                 client.client_name.as_deref().unwrap_or("<unnamed>"),
                 client.client_id.as_deref().unwrap_or("<none>"),
             );
+            self.adapter.on_initialize(&client);
         }
 
         self.state = SessionState::Initialized;

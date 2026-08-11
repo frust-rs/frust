@@ -5,54 +5,47 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-# A library only, no standalone binary — a later task's `frust-cli` `dap`
-# subcommand (outside this task's scope) is the process entry point. Charter
+# A library only, and an *embedded* one: the DAP server runs inside its host
+# (`frust-tui`), on the host's runtime and over the host's session backend —
+# there is no process entry point of its own. Charter
 # (docs/ARCHITECTURE.md's Tooling isolation rule, widened to this crate):
-# frust-dap depends on `frust-drive`/`frust-mcp`/`frust-devtools-protocol`
-# plus tokio/serde/serde_json/log/thiserror only — never a framework crate,
-# not even as a dev-dependency.
+# frust-dap depends on `frust-drive`/`frust-mcp` plus
+# tokio/serde/serde_json/log/thiserror only — never a framework crate, not
+# even as a dev-dependency.
 [lib]
 name = "frust_dap"
 path = "src/lib.rs"
 
 [dependencies]
-# The session-supervision seam a later task's DAP session drives (device
-# discovery, the desktop/Android/iOS run pipelines) — the same library
-# `frust-mcp`/`frust-tui` build on.
+# The device/build vocabulary a launch resolves into (`Device`, `BuildMode`,
+# the devtools-error classifiers) — the same library `frust-mcp`/`frust-tui`
+# build on.
 frust-drive = { path = "../frust-drive" }
-# `SessionBackend`/`SessionEngine` — a later task's DAP session reuses the
-# same backend seam an MCP client drives, rather than re-implementing session
-# supervision a third time.
+# `SessionBackend` — the seam the embedded DAP server drives, so a DAP client
+# and an MCP client supervise the *same* sessions rather than each owning a
+# world of their own.
 frust-mcp = { path = "../frust-mcp" }
-# The sanctioned wire-protocol leaf a later task's log/output plumbing
-# speaks — NEVER `frust-devtools` itself (docs/ARCHITECTURE.md's
-# tooling-isolation charter).
-frust-devtools-protocol = { path = "../frust-devtools-protocol" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
-# The `CancellationToken` that carries a Ctrl-C/SIGTERM from `run_blocking`
-# into every live session's read loop, so a signal drives the same
-# `on_disconnect` teardown a clean disconnect does. Already the same
-# workspace-pinned `0.7` `frust-mcp` wires its graceful shutdown through — no
-# new external package or version enters the graph.
+# The `CancellationToken` the embedder stops the server with: it breaks every
+# live session's read loop into the same `on_disconnect` teardown a clean
+# disconnect runs. Already the same workspace-pinned `0.7` `frust-mcp` wires
+# its graceful shutdown through — no new external package enters the graph.
 tokio-util = { workspace = true }
 # The workspace `tokio` pin is `default-features = false`; enable exactly
-# what this crate needs: rt-multi-thread (the stdio DAP server's own
-# runtime), io-util (`AsyncBufReadExt`/`AsyncReadExt`/`AsyncWriteExt` the
-# codec runs over), io-std (`tokio::io::stdin`/`stdout` — the stdio
-# transport's own pipes), net (the loopback TCP transport's listener), sync
-# (the outgoing response/event channel between the session and its writer
-# task), signal (`ctrl_c`/SIGTERM in `run_blocking`'s shutdown listener),
-# macros (`#[tokio::test]`), time (the handshake/teardown timeouts).
+# what this crate needs: rt (`spawn`/`spawn_blocking`/`JoinSet` — the runtime
+# itself belongs to the embedder, so `rt-multi-thread` is not among them),
+# io-util (`AsyncBufReadExt`/`AsyncReadExt`/`AsyncWriteExt` the codec runs
+# over), net (the loopback TCP listener), sync (the outgoing response/event
+# channel between the session and its writer task), macros
+# (`#[tokio::test]`, `select!`), time (the handshake/teardown timeouts).
 tokio = { workspace = true, features = [
-    "rt-multi-thread",
+    "rt",
     "io-util",
-    "io-std",
     "net",
     "sync",
-    "signal",
     "macros",
     "time",
 ] }

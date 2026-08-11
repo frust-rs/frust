@@ -2,15 +2,13 @@
 //!
 //! Drives a full session through the real codec + [`run_session`] state
 //! machine + [`OrchestrationAdapter`] stack over a `tokio::io::duplex` pair —
-//! the same shape a stdio-connected editor drives, minus the process
-//! boundary. The engine underneath is backed by
-//! `frust_drive::process::FakeProcessRunner` (via the `#[doc(hidden)]`
-//! `OrchestrationAdapter::with_engine` test seam — mirroring
-//! `crates/frust-dap/src/adapter/mod.rs`'s own tests, since driving the
-//! engine from an integration-test context needs the same seam those tests
-//! already use), so nothing here shells out for real.
+//! the same shape an attached editor drives, minus the socket. The backend
+//! underneath is a real `frust_mcp::SessionEngine` (the reference
+//! `SessionBackend`) over `frust_drive::process::FakeProcessRunner`, so
+//! nothing here shells out for real: exactly the seam an embedding host fills
+//! with its own supervisor.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -18,7 +16,7 @@ use std::time::Duration;
 use frust_dap::codec::{CodecError, read_message, write_message};
 use frust_dap::{
     Capabilities, DapEvent, DapMessage, DapRequest, DapResponse, EventSender, OrchestrationAdapter,
-    run_session,
+    SharedBackend, run_session,
 };
 use frust_drive::build_info::BuildMode;
 use frust_drive::process::FakeProcessRunner;
@@ -156,9 +154,11 @@ fn output_text(event: &DapEvent) -> Option<&str> {
 }
 
 /// A session over a duplex pair, driving a real [`OrchestrationAdapter`]
-/// against `engine`.
-fn spawn_session_with_engine(
-    engine: Arc<SessionEngine>,
+/// against `backend`, rooted at `project_root` — the two things
+/// `frust_dap::serve_embedded` injects per connection.
+fn spawn_session_with_backend(
+    backend: SharedBackend,
+    project_root: PathBuf,
 ) -> (TestClient, JoinHandle<std::result::Result<(), CodecError>>) {
     let (server_reader, client_writer) = tokio::io::duplex(DUPLEX_BUFFER);
     let (client_reader, server_writer) = tokio::io::duplex(DUPLEX_BUFFER);
@@ -167,7 +167,7 @@ fn spawn_session_with_engine(
         run_session(
             server_reader,
             server_writer,
-            move |events: EventSender| OrchestrationAdapter::with_engine(events, engine),
+            move |events: EventSender| OrchestrationAdapter::new(events, backend, project_root),
             tokio_util::sync::CancellationToken::new(),
         )
         .await
@@ -190,9 +190,11 @@ async fn join(handle: JoinHandle<std::result::Result<(), CodecError>>) {
         .expect("session I/O");
 }
 
-fn launch_arguments(project_root: &Path) -> Option<serde_json::Value> {
+/// A `launch.json`-shaped configuration — including a `projectRoot` the server
+/// will *not* honor, since the embedding host owns that decision.
+fn launch_arguments(project_root: &str) -> Option<serde_json::Value> {
     Some(serde_json::json!({
-        "projectRoot": project_root.to_string_lossy(),
+        "projectRoot": project_root,
         "device": "desktop",
         "mode": "debug",
     }))
@@ -200,17 +202,18 @@ fn launch_arguments(project_root: &Path) -> Option<serde_json::Value> {
 
 /// The full lifecycle script: `initialize` -> `launch` -> `threads` -> an
 /// unknown command -> `disconnect`, asserting on the wire messages at every
-/// step and on the engine's own teardown state at the end.
+/// step and on the backend's own state at the end.
 #[tokio::test]
-async fn a_headless_client_drives_a_full_session_over_stdio_shaped_duplex() {
+async fn a_headless_client_drives_a_full_session_over_a_duplex_pair() {
     let project_root = tempdir_fixture("full-session");
     let runner = Arc::new(FakeProcessRunner::new().with_hanging_stream(
         DEBUG_DESKTOP_INVOCATION,
         vec!["booting the app", "ready for input"],
     ));
     let engine = Arc::new(SessionEngine::with_runner(project_root.clone(), runner));
+    let backend: SharedBackend = Arc::clone(&engine) as SharedBackend;
 
-    let (mut client, handle) = spawn_session_with_engine(Arc::clone(&engine));
+    let (mut client, handle) = spawn_session_with_backend(backend, project_root.clone());
 
     // ── 1. initialize -> response (capabilities), then initialized event ──
     let init_response = client.initialize().await;
@@ -226,10 +229,11 @@ async fn a_headless_client_drives_a_full_session_over_stdio_shaped_duplex() {
     let expected_caps = serde_json::to_value(Capabilities::frust_defaults()).unwrap();
     assert_eq!(body, expected_caps);
 
-    // ── 2. launch -> success response; output events carry the fake app's
+    // ── 2. launch -> success response; the client's own projectRoot is
+    //        refused in the console, and output events carry the fake app's
     //        lines ─────────────────────────────────────────────────────────
     client
-        .request(2, "launch", launch_arguments(&project_root))
+        .request(2, "launch", launch_arguments("/home/attacker/evil"))
         .await;
     let (launch_response, before) = client.next_response().await;
     assert!(
@@ -244,6 +248,17 @@ async fn a_headless_client_drives_a_full_session_over_stdio_shaped_duplex() {
             .iter()
             .any(|event| output_text(event).is_some_and(|t| t.contains("Launching desktop"))),
         "the launch banner must precede the response: {before:?}"
+    );
+    let ignored = before
+        .iter()
+        .filter_map(output_text)
+        .find(|text| text.contains("Ignoring"))
+        .expect("the ignored client projectRoot is surfaced in the console");
+    assert!(ignored.contains("/home/attacker/evil"), "{ignored}");
+    assert!(
+        before.iter().any(|event| output_text(event)
+            .is_some_and(|t| t.contains(&project_root.display().to_string()))),
+        "the banner names the host's root, the one the build used: {before:?}"
     );
 
     let events = client.wait_for_output("ready for input").await;
@@ -297,8 +312,7 @@ async fn a_headless_client_drives_a_full_session_over_stdio_shaped_duplex() {
         "the session must still be alive after the unknown command"
     );
 
-    // ── 5. disconnect -> response; engine teardown is complete; stream ends
-    //        cleanly ───────────────────────────────────────────────────────
+    // ── 5. disconnect -> response; the app is stopped; stream ends cleanly ─
     client.request(6, "disconnect", None).await;
     let (disconnect_response, _) = client.next_response().await;
     assert!(disconnect_response.success);
@@ -314,9 +328,10 @@ async fn a_headless_client_drives_a_full_session_over_stdio_shaped_duplex() {
 
     join(handle).await;
 
-    // The engine-level teardown proof: the launched session is terminal, and
-    // the engine itself refuses new work — not merely "the app was told to
-    // stop".
+    // The teardown proof, both halves: the launched app is stopped — not
+    // merely told to stop — and the host's backend is still open for business,
+    // because a DAP client leaving must not take the workbench's session world
+    // with it.
     let sessions = engine.sessions();
     let [session] = sessions.as_slice() else {
         panic!("expected exactly one session, got {}", sessions.len());
@@ -329,11 +344,11 @@ async fn a_headless_client_drives_a_full_session_over_stdio_shaped_duplex() {
 
     let probe = engine.run_app(RunTarget::Desktop, BuildMode::Debug);
     assert!(
-        matches!(
+        !matches!(
             engine.session(probe).map(|s| s.state),
             Some(SessionState::Failed { .. })
         ),
-        "a shut-down engine must refuse new launches: {:?}",
+        "the DAP teardown shut the host's backend down: {:?}",
         engine.session(probe).map(|s| s.state)
     );
 
@@ -347,4 +362,83 @@ async fn a_headless_client_drives_a_full_session_over_stdio_shaped_duplex() {
         trailing.is_none(),
         "expected EOF after disconnect, got {trailing:?}"
     );
+
+    engine.shutdown().await;
+}
+
+/// The app ending on its own is reported over the wire — the event feed's
+/// terminal `Exited`, not a poll of session state — as the app's last lines,
+/// then `exited`, then `terminated`, in that order.
+#[tokio::test]
+async fn an_app_that_exits_on_its_own_reports_its_last_output_then_exited_then_terminated() {
+    let project_root = tempdir_fixture("app-exit");
+    let runner = Arc::new(FakeProcessRunner::new().with_stream(
+        DEBUG_DESKTOP_INVOCATION,
+        vec!["working", "all done"],
+        true,
+    ));
+    let engine = Arc::new(SessionEngine::with_runner(project_root.clone(), runner));
+
+    let (mut client, handle) =
+        spawn_session_with_backend(Arc::clone(&engine) as SharedBackend, project_root.clone());
+    client.initialize().await;
+
+    client
+        .request(
+            2,
+            "launch",
+            launch_arguments(&project_root.display().to_string()),
+        )
+        .await;
+    let (launch, _) = client.next_response().await;
+    assert!(launch.success, "{:?}", launch.message);
+
+    // Collect everything up to `terminated`: the ordering is the assertion.
+    let mut seen: Vec<DapEvent> = Vec::new();
+    loop {
+        match client.next().await {
+            DapMessage::Event(event) => {
+                let done = event.event == "terminated";
+                seen.push(event);
+                if done {
+                    break;
+                }
+            }
+            other => panic!("expected an event, got {other:?}"),
+        }
+    }
+
+    let index = |name: &str| {
+        seen.iter()
+            .position(|event| event.event == name)
+            .unwrap_or_else(|| panic!("no {name} event in {seen:?}"))
+    };
+    let last_output = seen
+        .iter()
+        .position(|event| output_text(event).is_some_and(|t| t.contains("all done")))
+        .expect("the app's last line reached the client");
+    assert!(
+        last_output < index("exited"),
+        "the app's final output must land before its exit: {seen:?}"
+    );
+    assert!(
+        index("exited") < index("terminated"),
+        "exited precedes terminated: {seen:?}"
+    );
+    assert_eq!(
+        seen[index("exited")].body.as_ref().expect("exited body")["exitCode"],
+        0,
+        "a successful run exits 0"
+    );
+
+    client.request(3, "disconnect", None).await;
+    let (disconnect, more) = client.next_response().await;
+    assert!(disconnect.success);
+    assert!(
+        !more.iter().any(|event| event.event == "terminated"),
+        "terminated is reported once per connection: {more:?}"
+    );
+    join(handle).await;
+
+    engine.shutdown().await;
 }

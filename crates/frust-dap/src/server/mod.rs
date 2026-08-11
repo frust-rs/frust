@@ -1,8 +1,9 @@
 //! # DAP server entry points
 //!
-//! [`serve`] runs the DAP server in whichever [`TransportMode`] it is given:
-//! one session over stdin/stdout, or a loopback TCP listener serving one
-//! session per accepted connection.
+//! [`serve_tcp`] is the transport: a loopback TCP listener serving one session
+//! per accepted connection, over adapters its caller's factory builds.
+//! [`serve_embedded`] is the entry point a host actually calls — it wires that
+//! listener to the host's own session backend.
 //!
 //! ## Per-connection, not per-server, state
 //!
@@ -13,11 +14,13 @@
 //!
 //! ## Trust model
 //!
-//! The TCP transport binds `127.0.0.1` and nothing else — the address is not
+//! The listener binds `127.0.0.1` and nothing else — the address is not
 //! configurable and there is no DAP-level authentication, the same deliberate
 //! loopback-only stance `frust-mcp` takes. Any local process that can reach
-//! the port can drive a build/launch through it.
+//! the port can drive a build/launch through it, which is why the project root
+//! is the *host's*, never the client's (see [`crate::adapter`]).
 
+pub mod embedded;
 pub mod session;
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -30,12 +33,11 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::protocol::codec::CodecError;
-use crate::transport::TransportMode;
-use crate::transport::stdio::run_stdio_session;
 
+pub use embedded::serve_embedded;
 pub use session::{AdapterResponse, DapAdapter, EventSender, run_session};
 
-/// The only address the TCP transport ever binds: loopback, `127.0.0.1`.
+/// The only address this server ever binds: loopback, `127.0.0.1`.
 ///
 /// Hard-coded rather than configurable, mirroring `frust-mcp`'s
 /// `McpConfig`: a DAP session can build, install, and launch code on a device,
@@ -57,11 +59,12 @@ const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 /// How long the accept loop waits for its live sessions to tear down after a
 /// shutdown signal before it abandons the stragglers and returns.
 ///
-/// A cancelled session's teardown stops the app and joins the engine's own
-/// detached teardown (itself bounded, ~5s). This window sits just past that so
-/// a healthy stop completes in full, while a wedged one still cannot hold the
-/// process open — any session still running when it elapses is dropped (which
-/// aborts it), and `run_blocking`'s runtime grace is the final backstop.
+/// A cancelled session's teardown stops the app it launched, which the backend
+/// may itself carry out asynchronously (`SessionBackend::stop_app` is a
+/// request, not a completion). This window sits past a healthy stop's
+/// round trip so the common case completes in full, while a wedged one still
+/// cannot hold the *host* open — any session still running when it elapses is
+/// dropped, which aborts it.
 const SESSION_DRAIN_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Failures a DAP server start can report.
@@ -80,34 +83,6 @@ pub enum ServerError {
     Session(#[from] CodecError),
 }
 
-/// Run the DAP server on the given transport until it ends.
-///
-/// `make_adapter` is invoked once per connection with that connection's
-/// [`EventSender`]. Stdio mode returns when its single session ends; TCP mode
-/// runs until the process is stopped (or the listener fails to bind).
-///
-/// `cancel` is the shutdown signal `run_blocking` fires on Ctrl-C/SIGTERM: it
-/// breaks the read loop of every live session into that session's own
-/// `on_disconnect` teardown, so no launched app is left orphaned when the
-/// process is asked to stop.
-pub async fn serve<A, F>(
-    mode: TransportMode,
-    make_adapter: F,
-    cancel: CancellationToken,
-) -> Result<(), ServerError>
-where
-    A: DapAdapter,
-    F: Fn(EventSender) -> A + Send + Sync + 'static,
-{
-    match mode {
-        TransportMode::Stdio => {
-            run_stdio_session(make_adapter, cancel).await?;
-            Ok(())
-        }
-        TransportMode::Tcp { port } => serve_tcp(port, make_adapter, None, cancel).await,
-    }
-}
-
 /// Accept DAP clients on `127.0.0.1:<port>`, one session per connection.
 ///
 /// `port: 0` asks the OS for an ephemeral port. `ready`, when given, is
@@ -116,7 +91,7 @@ where
 /// visible in the log line.
 ///
 /// Returns on a bind failure, or once `cancel` fires and the live sessions have
-/// drained: the accept loop otherwise runs until the process is stopped.
+/// drained: the accept loop otherwise runs until its host stops it.
 ///
 /// On cancellation the loop stops accepting and gives every live session a
 /// bounded window ([`SESSION_DRAIN_TIMEOUT`]) to run teardown — each session

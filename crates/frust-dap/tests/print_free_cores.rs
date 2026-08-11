@@ -1,11 +1,14 @@
-//! Print-free-cores conformance scan (wire-corruption tripwire).
+//! Print-free-cores conformance scan (display-corruption tripwire).
 //!
-//! Regression protection: in stdio mode, `frust-dap`'s `stdout` *is* the DAP
-//! wire — a `Content-Length`-framed JSON message stream to the client. A
-//! stray `println!`/`print!` anywhere in this crate corrupts that stream;
-//! `eprintln!`/`eprint!` corrupt a client's captured stderr diagnostics
-//! instead. Every diagnostic goes through `log` (see `crates/frust-dap/src/lib.rs`'s
-//! crate-level doc comment).
+//! Regression protection: `frust-dap` is a library embedded in a host that
+//! owns the terminal — the workbench runs a full-screen raw-mode UI, and
+//! stdout/stderr are *its* display, not this crate's. A stray
+//! `println!`/`print!`/`eprintln!`/`eprint!` anywhere in here paints over that
+//! UI (or, in a host that redirects them, vanishes silently). Stdout stopped
+//! being a DAP wire when the stdio transport went away, and the requirement
+//! did not soften with it. Every diagnostic goes through `log` (see
+//! `crates/frust-dap/src/lib.rs`'s crate-level doc comment), which the host
+//! routes where it chooses.
 //!
 //! Zero allowlist, unlike `frust-drive`'s (which carves out its CLI-entry
 //! points) — `frust-dap` has no CLI entry of its own to carve out; every
@@ -49,9 +52,9 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The print macros that corrupt the stdio DAP wire (or a client's captured
-/// stderr diagnostics). `println!`/`eprintln!` are caught by `"println!"`
-/// (eprintln! ends in it); `print!`/`eprint!` by `"print!"`.
+/// The print macros that corrupt the host's terminal display.
+/// `println!`/`eprintln!` are caught by `"println!"` (eprintln! ends in it);
+/// `print!`/`eprint!` by `"print!"`.
 const PRINT_NEEDLES: &[&str] = &["println!", "print!"];
 
 /// True if `line` contains any [`PRINT_NEEDLES`] token.
@@ -112,7 +115,7 @@ fn production_indices(lines: &[&str]) -> Vec<usize> {
 }
 
 #[test]
-fn dap_server_is_print_free_for_stdio_wire_safety() {
+fn dap_server_is_print_free_for_its_hosts_display_safety() {
     let mut failures = Vec::new();
 
     for path in rust_files(&src_dir()) {
@@ -127,8 +130,9 @@ fn dap_server_is_print_free_for_stdio_wire_safety() {
             }
             let func = enclosing_fn(&lines, i).unwrap_or_else(|| "<module scope>".to_string());
             failures.push(format!(
-                "{relp}:{}: `println!`/`print!` inside fn `{func}` — frust-dap's stdout is the \
-                 stdio DAP wire and must log via `log::info!`/`log::warn!`/etc. instead. Line: {}",
+                "{relp}:{}: `println!`/`print!` inside fn `{func}` — frust-dap runs inside a host \
+                 that owns the terminal and must log via `log::info!`/`log::warn!`/etc. \
+                 instead. Line: {}",
                 i + 1,
                 lines[i].trim()
             ));

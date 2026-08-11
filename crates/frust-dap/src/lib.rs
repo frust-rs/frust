@@ -1,43 +1,51 @@
-//! Debug Adapter Protocol (DAP) server for Frust.
+//! Debug Adapter Protocol (DAP) server for Frust, **embedded in its host**.
 //!
-//! **Print-free, always.** In stdio mode `stdout` *is* the DAP wire — a
-//! `Content-Length`-framed JSON message stream to the client. A stray
-//! `println!`/`print!`/`eprintln!`/`eprint!` anywhere in this crate corrupts
-//! that stream (or, on stderr, a client's captured diagnostics). Every
-//! diagnostic goes through `log` instead.
+//! There is no `frust dap` process: [`serve_embedded`] runs a loopback DAP
+//! listener on the host's tokio runtime, over the host's own
+//! `frust_mcp::SessionBackend` and project root. An editor attaching to it and
+//! the host's own UI therefore drive the *same* app sessions — one world, two
+//! front ends — and stopping a debug session stops that session's app, never
+//! the host.
+//!
+//! **Print-free, always.** This crate runs inside a workbench that owns the
+//! terminal (raw mode, a full-screen UI): a stray
+//! `println!`/`print!`/`eprintln!`/`eprint!` anywhere in it corrupts that
+//! host's display, and there is no stdout of its own to write to. Every
+//! diagnostic goes through `log` instead, which the host routes where it
+//! chooses.
 //!
 //! ## Layers
 //!
 //! - [`protocol`] — wire types and the Content-Length codec.
-//! - [`transport`] — which pipe the server speaks over ([`TransportMode`]).
-//! - [`server`] — the accept/serve entry points and the per-connection
-//!   session state machine that owns the DAP lifecycle.
+//! - [`clients`] — [`DapClientRegistry`], the connected-client view a host
+//!   renders.
+//! - [`server`] — [`serve_embedded`] and the loopback accept loop, plus the
+//!   per-connection session state machine that owns the DAP lifecycle.
 //! - [`adapter`] — [`OrchestrationAdapter`], which turns DAP requests into
-//!   `frust_mcp::engine::SessionEngine` operations (build → deploy → launch →
-//!   logs → stop) and the app's log lines into `output` events.
-//! - [`service`] — [`run_blocking`], the one entry point a front-end calls: it
-//!   owns the tokio runtime so the CLI stays sync and thin.
+//!   `SessionBackend` operations (build → deploy → launch → logs → stop) and
+//!   the app's log lines into `output` events.
+//! - [`ide_config`] — generating and merging the client-side launch
+//!   configuration an editor needs to attach.
 //!
 //! The session hands everything past `initialize` to a [`DapAdapter`], built
 //! per connection from an [`EventSender`]. That is the whole seam: the session
 //! knows the protocol, the adapter knows what a Frust app is.
 
 pub mod adapter;
+pub mod clients;
 pub mod ide_config;
 pub mod protocol;
+mod sanitize;
 pub mod server;
-pub mod service;
-pub mod transport;
 
-pub use adapter::{OrchestrationAdapter, Runner};
+pub use adapter::OrchestrationAdapter;
+pub use clients::{DapClientEntry, DapClientRegistry};
+pub use frust_mcp::SharedBackend;
 pub use protocol::codec::{self, CodecError, Result};
 pub use protocol::types::{
     Capabilities, DapEvent, DapMessage, DapRequest, DapResponse, ExitedEventBody,
     InitializeRequestArguments, LaunchArguments, OutputEventBody, Thread, ThreadsResponseBody,
 };
 pub use server::{
-    AdapterResponse, DapAdapter, EventSender, ServerError, run_session, serve, serve_tcp,
+    AdapterResponse, DapAdapter, EventSender, ServerError, run_session, serve_embedded, serve_tcp,
 };
-pub use service::{DapConfig, ServiceError, run_blocking};
-pub use transport::TransportMode;
-pub use transport::stdio::run_stdio_session;
