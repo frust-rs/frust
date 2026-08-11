@@ -15,6 +15,7 @@ use super::add_plugin::AddPluginDialog;
 use super::bootstrap::BootstrapWizard;
 use super::build_launcher::BuildLauncher;
 use super::create_wizard::CreateWizard;
+use super::dap_settings::DapSettings;
 use super::palette::Palette;
 use super::run_config::RunConfig;
 use super::state::AppState;
@@ -55,6 +56,12 @@ pub enum ActiveModal<'a> {
     /// The MCP panel (`state.mcp_panel_open`, `m`) — the embedded MCP
     /// server's state plus its connected-client list (workbook §B13).
     McpPanel,
+    /// The DAP settings dialog (`state.dap_settings_open`, `D`) — the embedded
+    /// DAP server's state plus the persisted `[dap]` preferences it runs on.
+    /// Unlike the modals above it borrows state that outlives the dialog (the
+    /// preferences are loaded at startup and consulted whether or not anyone
+    /// opens this).
+    DapSettings(&'a DapSettings),
     /// The build-launcher modal (`state.build_launcher`).
     BuildLauncher(&'a BuildLauncher),
     /// The clean-confirm dialog (`state.clean_confirm`), carrying the target
@@ -87,6 +94,8 @@ impl AppState {
             Some(ActiveModal::DoctorPanel)
         } else if self.mcp_panel_open {
             Some(ActiveModal::McpPanel)
+        } else if self.dap_settings_open {
+            Some(ActiveModal::DapSettings(&self.dap_settings))
         } else if let Some(launcher) = &self.build_launcher {
             Some(ActiveModal::BuildLauncher(launcher))
         } else {

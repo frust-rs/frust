@@ -10,18 +10,20 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Position;
 
+use frust_dap::ide_config::{ConfigAction, IdeConfigResult, ParentIde};
 use frust_drive::devices::{Device, Kind, Platform};
 use frust_drive::doctor::{Area, Component, ComponentStatus, DoctorReport, FixCommand, Status};
 use frust_drive::plugin::{AddItem, AddOutcome, AddReport};
 use frust_mcp::ClientEntry;
 use frust_tui::engine::{
     AddPluginDialog, AddPluginStep, AppState, BootstrapState, BootstrapWizard, BuildLauncher,
-    ConnEvent, ContextTarget, CreateWizard, DeviceRow, DevtoolsLaunch, DoctorCheck, DoctorState,
-    Effect, InspectorEvent, LevelFilter, Message, Palette, PerfSource, RegionId, RunConfig,
-    RunFocus, Screen, Scroll, SessionView, ToastKind, WizardStep, perf_window, update,
+    ConnEvent, ContextTarget, CreateWizard, DapFocus, DapIdeReport, DapSettings, DeviceRow,
+    DevtoolsLaunch, DoctorCheck, DoctorState, Effect, InspectorEvent, LevelFilter, Message,
+    Palette, PerfSource, RegionId, RunConfig, RunFocus, Screen, Scroll, SessionView, ToastKind,
+    WizardStep, perf_window, update,
 };
 use frust_tui::supervise::{
-    McpStatus, PhaseLabel, SessionEvent, SessionEventKind, SessionId, SessionState,
+    DapStatus, McpStatus, PhaseLabel, SessionEvent, SessionEventKind, SessionId, SessionState,
 };
 use frust_tui::ui::mouse::{MouseCtx, MouseRegions};
 use frust_tui::ui::theme::{ColorDepth, Theme};
@@ -2223,4 +2225,182 @@ fn clicking_the_sidebar_row_requests_a_server_start() {
     let out = update(&mut state, message);
     assert_eq!(out.effect, Some(Effect::StartMcpServer));
     assert!(state.mcp.is_none());
+}
+
+// ── DAP settings dialog ───────────────────────────────────────────────────────
+
+/// Render the DAP settings dialog over an empty frame with an explicit server
+/// state.
+///
+/// Like the MCP panel's helper, the view takes its values rather than reading
+/// `AppState`, which is what lets a test drive a server state no external
+/// caller could build: a `DapServerHandle` is minted only by
+/// `Engine::start_dap`.
+fn render_dap_settings(
+    w: u16,
+    h: u16,
+    settings: &DapSettings,
+    status: &DapStatus,
+    clients: usize,
+    error: Option<&str>,
+) -> String {
+    let backend = TestBackend::new(w, h);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let theme = Theme::frust_dark_at(ColorDepth::TrueColor);
+    let mut regions = MouseRegions::new();
+    terminal
+        .draw(|frame| {
+            let mut ctx = MouseCtx::new(&mut regions);
+            let area = frame.area();
+            frust_tui::ui::views::dap_settings::render(
+                frame, area, settings, status, clients, error, &theme, &mut ctx,
+            );
+        })
+        .expect("draw");
+    buffer_to_string(terminal.backend().buffer())
+}
+
+/// The dialog as the sidebar row opens it: nothing started, defaults loaded,
+/// reached through the normal render path (so the sidebar row shows too).
+#[test]
+fn dap_settings_stopped_100x30() {
+    let state = AppState {
+        dap_settings_open: true,
+        ..workbench_state()
+    };
+    insta::assert_snapshot!(render_to_string(100, 30, &state));
+}
+
+/// Listening with an editor attached, an explicit IDE override, and the config
+/// it just wrote — the whole status area at once.
+#[test]
+fn dap_settings_listening_with_config_result_100x30() {
+    let settings = DapSettings {
+        ide_override: Some(ParentIde::VSCode),
+        focus: DapFocus::Generate,
+        last_ide_config: Some(DapIdeReport::Written {
+            ide: ParentIde::VSCode,
+            result: IdeConfigResult {
+                path: PathBuf::from("/tmp/huddle/.vscode/launch.json"),
+                action: ConfigAction::Created,
+            },
+        }),
+        ..DapSettings::default()
+    };
+    insta::assert_snapshot!(render_dap_settings(
+        100,
+        30,
+        &settings,
+        &DapStatus::Listening {
+            port: 4849,
+            clients: 1,
+        },
+        1,
+        None,
+    ));
+}
+
+/// A port edited while a server is listening on another one: the dialog says
+/// the change waits for a restart rather than restarting anything.
+#[test]
+fn dap_settings_port_awaiting_restart_100x30() {
+    let settings = DapSettings {
+        port: 5005,
+        port_input: "5005".to_string(),
+        focus: DapFocus::Port,
+        ..DapSettings::default()
+    };
+    insta::assert_snapshot!(render_dap_settings(
+        100,
+        30,
+        &settings,
+        &DapStatus::Listening {
+            port: 4849,
+            clients: 0,
+        },
+        0,
+        None,
+    ));
+}
+
+/// A refused bind plus a failed generation: both retained reasons show, and
+/// neither reads as a silent no-op.
+#[test]
+fn dap_settings_failed_100x30() {
+    let settings = DapSettings {
+        last_ide_config: Some(DapIdeReport::Failed(
+            "`/tmp/huddle/.vscode/launch.json`: Permission denied (os error 13)".to_string(),
+        )),
+        ..DapSettings::default()
+    };
+    insta::assert_snapshot!(render_dap_settings(
+        100,
+        30,
+        &settings,
+        &DapStatus::Stopped,
+        0,
+        Some("binding 127.0.0.1:4849 failed: Address already in use (os error 98)"),
+    ));
+}
+
+/// Mouse parity: the sidebar row opens the dialog, and every control inside it
+/// carries the message its keyboard equivalent sends — each located by
+/// hit-testing the frame the way the event loop does.
+#[test]
+fn dap_affordances_are_clickable_and_carry_their_messages() {
+    let regions = render_regions(100, 30, &workbench_state());
+    assert_eq!(
+        click_message_for(&regions, RegionId::DapAction),
+        Some(Message::OpenDapSettings),
+        "the sidebar ACTIONS DAP row opens the settings dialog"
+    );
+
+    let state = AppState {
+        dap_settings_open: true,
+        ..workbench_state()
+    };
+    let regions = render_regions(100, 30, &state);
+    for (id, expected) in [
+        (RegionId::DapSettingsToggleServer, Message::ToggleDapServer),
+        (
+            RegionId::DapSettingsPortRow,
+            Message::DapSettingsFocus(DapFocus::Port),
+        ),
+        (
+            RegionId::DapSettingsAutoStartRow,
+            Message::DapSettingsToggleAutoStart,
+        ),
+        (
+            RegionId::DapSettingsAutoConfigureRow,
+            Message::DapSettingsToggleAutoConfigure,
+        ),
+        (RegionId::DapSettingsIdeRow, Message::DapSettingsCycleIde(1)),
+        (RegionId::DapSettingsGenerate, Message::DapSettingsGenerate),
+        (RegionId::DapSettingsClose, Message::CloseDapSettings),
+    ] {
+        assert_eq!(
+            click_message_for(&regions, id),
+            Some(expected),
+            "{id:?} must carry its keyboard equivalent's message"
+        );
+    }
+    assert_eq!(
+        click_message_for(&regions, RegionId::DapAction),
+        None,
+        "the workbench beneath an open dialog is suppressed"
+    );
+}
+
+/// The click the sidebar row registers opens exactly the modal the `D` key
+/// does — one dialog, two ways in.
+#[test]
+fn clicking_the_sidebar_dap_row_opens_the_dialog() {
+    let regions = render_regions(100, 30, &workbench_state());
+    let message = click_message_for(&regions, RegionId::DapAction).expect("row is on screen");
+
+    let mut state = workbench_state();
+    let out = update(&mut state, message);
+    assert!(out.redraw);
+    assert!(state.dap_settings_open);
+    assert!(state.dap.is_none(), "opening the dialog starts nothing");
 }

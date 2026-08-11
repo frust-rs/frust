@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 
 use crate::engine::{AppState, ContextTarget, DeviceRow, DoctorState, DragKind, Message, RegionId};
-use crate::supervise::McpStatus;
+use crate::supervise::{DapStatus, McpStatus};
 use crate::ui::layout::{Shell, sidebar_main_at};
 use crate::ui::mouse::MouseCtx;
 use crate::ui::theme::Theme;
@@ -297,6 +297,8 @@ fn render_sidebar(
     lines.push(item("Clean · c"));
     let mcp_row = lines.len();
     lines.push(mcp_line(state, theme));
+    let dap_row = lines.len();
+    lines.push(dap_line(state, theme));
     frame.render_widget(Paragraph::new(lines), inner);
 
     // Register the interactive regions now that row indices are known (a row
@@ -341,6 +343,12 @@ fn render_sidebar(
     if let Some(rect) = row_rect(mcp_row) {
         mouse.click(rect, RegionId::McpToggle, Message::ToggleMcpServer);
     }
+    // The DAP row *opens the dialog* rather than toggling the server: unlike
+    // MCP, the switch is not the whole surface — when the server starts by
+    // itself, and what it writes into the editor's config, live there too.
+    if let Some(rect) = row_rect(dap_row) {
+        mouse.click(rect, RegionId::DapAction, Message::OpenDapSettings);
+    }
 }
 
 /// The sidebar ACTIONS "MCP" row: the label, the server's current state, and
@@ -358,6 +366,37 @@ fn mcp_line(state: &AppState, theme: &Theme) -> Line<'static> {
         Span::styled(text, Style::default().fg(color)),
         Span::styled(" · M", Style::default().fg(theme.muted())),
     ])
+}
+
+/// The sidebar ACTIONS "DAP" row: the label, the embedded debug-adapter
+/// server's current state, and the `D` keyhint. The state token carries the
+/// color the same way the MCP row's does — but this row is a *readout plus a
+/// way in*, not the switch: clicking it opens the settings dialog, where the
+/// switch lives beside the preferences that can flip it without being asked.
+fn dap_line(state: &AppState, theme: &Theme) -> Line<'static> {
+    let (text, color) = dap_state_token(&state.dap_status(), state.dap_error.is_some(), theme);
+    Line::from(vec![
+        Span::styled("  DAP ", Style::default().fg(theme.muted())),
+        Span::styled(text, Style::default().fg(color)),
+        Span::styled(" · D", Style::default().fg(theme.muted())),
+    ])
+}
+
+/// The DAP row's state token + its color — the same four states the MCP row
+/// shows, and `failed` is derived the same way (a *stopped* server carrying a
+/// retained reason).
+fn dap_state_token(
+    status: &DapStatus,
+    failed: bool,
+    theme: &Theme,
+) -> (String, ratatui::style::Color) {
+    match status {
+        DapStatus::Stopped if failed => ("failed".to_string(), theme.error()),
+        DapStatus::Stopped => ("off".to_string(), theme.muted()),
+        DapStatus::Starting => ("start…".to_string(), theme.warn()),
+        DapStatus::Listening { port, clients: 0 } => (format!(":{port}"), theme.success()),
+        DapStatus::Listening { port, clients } => (format!(":{port} ({clients})"), theme.success()),
+    }
 }
 
 /// The MCP row's state token + its color — the four §B13 states. `failed` is
@@ -641,6 +680,76 @@ mod tests {
             let (token, _) = mcp_state_token(&status, failed, &theme);
             // The row is `"  MCP " + token + " · M"` (see `mcp_line`).
             let width = "  MCP ".chars().count() + token.chars().count() + " · M".chars().count();
+            assert!(
+                width <= inner_width,
+                "`{token}` row is {width} cols, sidebar inner is {inner_width}"
+            );
+        }
+    }
+
+    /// The DAP row is a readout (the switch lives in the dialog behind it),
+    /// but it reads its states exactly the way the MCP row does — the two sit
+    /// next to each other, so a reader must not have to learn two vocabularies.
+    #[test]
+    fn the_dap_row_reads_its_states_the_same_way_the_mcp_row_does() {
+        let theme = Theme::frust_dark();
+        let dap = |status: &DapStatus, failed: bool| dap_state_token(status, failed, &theme).0;
+        let mcp = |status: &McpStatus, failed: bool| mcp_state_token(status, failed, &theme).0;
+
+        assert_eq!(
+            dap(&DapStatus::Stopped, false),
+            mcp(&McpStatus::Stopped, false)
+        );
+        assert_eq!(
+            dap(&DapStatus::Stopped, true),
+            mcp(&McpStatus::Stopped, true)
+        );
+        assert_eq!(
+            dap(&DapStatus::Starting, false),
+            mcp(&McpStatus::Starting, false)
+        );
+        assert_eq!(
+            dap(
+                &DapStatus::Listening {
+                    port: 4849,
+                    clients: 0
+                },
+                false
+            ),
+            ":4849"
+        );
+        assert_eq!(
+            dap(
+                &DapStatus::Listening {
+                    port: 4849,
+                    clients: 2
+                },
+                false
+            ),
+            ":4849 (2)"
+        );
+    }
+
+    /// …and fits the default sidebar in every state, for the same reason.
+    #[test]
+    fn the_dap_row_fits_the_default_sidebar_width() {
+        let theme = Theme::frust_dark();
+        let inner_width = (crate::engine::SIDEBAR_DEFAULT_WIDTH - 3) as usize;
+        for (status, failed) in [
+            (DapStatus::Stopped, false),
+            (DapStatus::Stopped, true),
+            (DapStatus::Starting, false),
+            (
+                DapStatus::Listening {
+                    port: 65535,
+                    clients: 12,
+                },
+                false,
+            ),
+        ] {
+            let (token, _) = dap_state_token(&status, failed, &theme);
+            // The row is `"  DAP " + token + " · D"` (see `dap_line`).
+            let width = "  DAP ".chars().count() + token.chars().count() + " · D".chars().count();
             assert!(
                 width <= inner_width,
                 "`{token}` row is {width} cols, sidebar inner is {inner_width}"

@@ -168,6 +168,12 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
         // state, including "not running".
         always("MCP server…", "m", Message::OpenMcpPanel),
         always("Start/stop MCP server", "M", Message::ToggleMcpServer),
+        // The DAP pair. The dialog is the whole surface (server switch,
+        // preferences, IDE config), so `D` opens it rather than toggling; the
+        // toggle stays reachable from here (and from inside the dialog, `s`)
+        // without claiming a second top-level key.
+        always("DAP server…", "D", Message::OpenDapSettings),
+        always("Start/stop DAP server", "", Message::ToggleDapServer),
         always("Toggle mouse capture", "⌥m", Message::ToggleMouseCapture),
         gated(
             "Toggle follow-tail",

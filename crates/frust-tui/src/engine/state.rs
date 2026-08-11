@@ -9,6 +9,7 @@ use super::bootstrap::{BootstrapState, BootstrapWizard};
 use super::build_launcher::BuildLauncher;
 use super::context_menu::ContextMenu;
 use super::create_wizard::CreateWizard;
+use super::dap_settings::DapSettings;
 use super::doctor::DoctorState;
 use super::message::{DragKind, RegionId};
 use super::palette::Palette;
@@ -225,6 +226,15 @@ pub struct AppState {
     /// never reads as a silent no-op. Cleared when the next start is
     /// requested.
     pub dap_error: Option<String>,
+    /// The workbench's DAP preferences (the persisted `[dap]` table) plus the
+    /// settings dialog's edit state. Present regardless of whether the dialog
+    /// is open: startup auto-start and the auto-configure that follows a
+    /// `DapListening` report both read it.
+    pub dap_settings: DapSettings,
+    /// Whether the DAP settings dialog is open (`D`, the sidebar ACTIONS "DAP"
+    /// row, or the palette). While `true` it captures input and suppresses
+    /// background mouse regions like the other modals.
+    pub dap_settings_open: bool,
 }
 
 impl AppState {
@@ -252,6 +262,15 @@ impl AppState {
         let settings = super::persist::load_settings();
         state.sidebar_width = settings.sidebar_width;
         state.mouse_capture = settings.mouse_capture;
+        // The DAP preferences and the IDE this process is hosted by: both are
+        // read exactly once, here. Detection sniffs the environment the
+        // workbench was launched into, which cannot change under a running
+        // process, so re-sniffing per frame (or per transition) would only
+        // move an impure read into the pure core.
+        state.dap_settings = DapSettings::from_prefs(
+            super::persist::load_dap_prefs(),
+            frust_dap::ide_config::detect_parent_ide(),
+        );
         state
     }
 
@@ -305,6 +324,8 @@ impl AppState {
             mcp_error: None,
             dap: None,
             dap_error: None,
+            dap_settings: DapSettings::default(),
+            dap_settings_open: false,
         }
     }
 
@@ -322,10 +343,13 @@ impl AppState {
     /// bound: its client list is read live off the registry at render time
     /// (nothing messages the engine when a client connects), so it needs the
     /// tick to stay current — but only *while the panel is open*, never for
-    /// the whole life of a running server.
+    /// the whole life of a running server. The open DAP settings dialog counts
+    /// for exactly the same reason (its attached-editor count is the same kind
+    /// of live registry read).
     pub fn animating(&self) -> bool {
         !self.toasts.items.is_empty()
             || self.mcp_panel_open
+            || self.dap_settings_open
             || self.sessions.iter().any(|s| is_transient(&s.state))
     }
 
@@ -497,6 +521,8 @@ impl Default for AppState {
             mcp_error: None,
             dap: None,
             dap_error: None,
+            dap_settings: DapSettings::default(),
+            dap_settings_open: false,
         }
     }
 }

@@ -12,6 +12,7 @@ mod bootstrap;
 mod build_launcher;
 mod context_menu;
 mod create_wizard;
+mod dap_settings;
 mod devtools;
 mod doctor;
 mod logstyle;
@@ -33,6 +34,10 @@ pub use bootstrap::{BootstrapNode, BootstrapState, BootstrapWizard};
 pub use build_launcher::{ArtifactKind, BuildFocus, BuildLauncher, BuildSpec, BuildTargetSpec};
 pub use context_menu::{ContextMenu, MenuEntry};
 pub use create_wizard::{ArchCard, CreateWizard, WizardAdvance, WizardStep};
+pub use dap_settings::{
+    DapFocus, DapIdeReport, DapSetting, DapSettings, IDE_OVERRIDES, IdeConfigRequest, PortCommit,
+    persisted_ide_name, should_auto_start,
+};
 pub use devtools::{
     ConnEvent, ConnState, CpuPoint, DevtoolsLaunch, DevtoolsPhase, DevtoolsState, DevtoolsTab,
     FRAME_RING_CAP, INSPECTOR_AUTO_EXPAND_DEPTH, InspectorEvent, InspectorFocus, InspectorRow,
@@ -50,8 +55,9 @@ pub use modal::ActiveModal;
 pub use palette::{Palette, PaletteCommand};
 pub use perf::{FrameSummary, PerfLine, PerfPanel, RawFrame, StartupSummary, parse_perf_line};
 pub use persist::{
-    Settings, load_recent_projects, load_settings, merge_recent_and_detected,
-    record_recent_project, save_mouse_capture, save_sidebar_width,
+    DapPrefs, Settings, load_dap_prefs, load_recent_projects, load_settings,
+    merge_recent_and_detected, record_recent_project, save_dap_enabled, save_dap_setting,
+    save_mouse_capture, save_sidebar_width,
 };
 pub use run_config::{DeviceRow, RunConfig, RunFocus, RunTarget};
 pub use session_view::{LineSelection, LogBuffer, Scroll, SessionView, line_matches, strip_ansi};

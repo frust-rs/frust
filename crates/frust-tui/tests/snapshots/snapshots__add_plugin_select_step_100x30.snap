@@ -21,7 +21,7 @@ expression: "render_to_string(100, 30, &add_plugin_state(AddPluginStep::Select, 
    Build · b      │        Synchronous plain-text clipboard access (ClipboardMa  │▓▓                
    Clean · c      │    ( ) haptics                                               │▓▓                
    MCP off · M    │        Minimal haptic feedback (selection tick, impact, suc  │▓▓                
-                  │    ( ) iap                                                   │▓▓                
+   DAP off · D    │    ( ) iap                                                   │▓▓                
                   │        In-app purchases and subscriptions over Play Billing  │▓▓                
                   │    ( ) database                                              │▓▓                
                   │        Embedded SQL database (SQLite via rusqlite; engine-a  │▓▓                

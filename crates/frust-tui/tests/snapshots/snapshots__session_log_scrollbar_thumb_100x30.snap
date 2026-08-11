@@ -22,7 +22,7 @@ expression: "render_to_string(100, 30, &state)"
    Build · b             │   12:00:49 [app]    line 49                                              
    Clean · c             │   12:00:50 [app]    line 50                                              
    MCP off · M           │   12:00:51 [app]    line 51                                              
-                         │   12:00:52 [app]    line 52                                              
+   DAP off · D           │   12:00:52 [app]    line 52                                              
                          │   12:00:53 [app]    line 53                                              
                          │   12:00:54 [app]    line 54                                              
                          │   12:00:55 [app]    line 55                                              

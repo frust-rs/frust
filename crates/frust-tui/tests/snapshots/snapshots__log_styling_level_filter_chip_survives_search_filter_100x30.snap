@@ -22,7 +22,7 @@ expression: text
    Build · b             │                                                                          
    Clean · c             │                                                                          
    MCP off · M           │                                                                          
-                         │                                                                          
+   DAP off · D           │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          

@@ -165,6 +165,10 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     // rollup and the bootstrap wizard, and drives the fresh-machine auto-open
     // when the core toolchain is missing.
     let _ = msg_tx.send(Message::RunBootstrapReport);
+    // Offer the DAP server the chance to start itself. The *decision* (the
+    // persisted `enabled`/`auto_start_in_ide` pair against the IDE detected
+    // when the model was built) stays in the pure core — this only asks.
+    let _ = msg_tx.send(Message::DapAutoStart);
     // Record whichever project came up active at startup (cwd-detected, or
     // the persisted most-recently-opened one — see `AppState::new`) as the
     // most-recently-opened, so opening the TUI itself counts as a "use" for
@@ -503,6 +507,13 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
         Some(Effect::StopDapServer) => {
             engine.stop_dap();
         }
+        Some(Effect::SaveDapSetting(setting)) => crate::engine::save_dap_setting(setting),
+        // IDE-config generation reads and writes real files under the project
+        // root, so it goes to the blocking pool like every other filesystem
+        // effect here and reports back as an ordinary `Message`.
+        Some(Effect::GenerateIdeConfig(request)) => {
+            spawn_ide_config_generation(request, tx.clone());
+        }
         Some(Effect::Batch(effects)) => {
             for effect in effects {
                 apply_effect(
@@ -524,6 +535,37 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
         Some(Effect::SaveSidebarWidth(width)) => crate::engine::save_sidebar_width(width),
         None => {}
     }
+}
+
+/// Write (or refresh) an IDE's DAP client config off the UI thread, posting
+/// the outcome back as [`Message::DapIdeConfig`].
+///
+/// `generate_ide_config` merges into whatever the editor already has on disk,
+/// so it reads, parses, creates directories and writes — none of which belongs
+/// on the event loop. Every ending is reported: a written/updated/skipped
+/// file, the IDE that has no DAP config format at all (`Ok(None)`, which only
+/// the JetBrains pair reaches here — the pure core refuses the others before
+/// asking for this effect), and a failure, which is retained and shown rather
+/// than dropped.
+fn spawn_ide_config_generation(
+    request: crate::engine::IdeConfigRequest,
+    tx: UnboundedSender<Message>,
+) {
+    tokio::task::spawn_blocking(move || {
+        let report = match frust_dap::ide_config::generate_ide_config(
+            Some(request.ide),
+            request.port,
+            &request.project_root,
+        ) {
+            Ok(Some(result)) => crate::engine::DapIdeReport::Written {
+                ide: request.ide,
+                result,
+            },
+            Ok(None) => crate::engine::DapIdeReport::Unsupported(request.ide),
+            Err(e) => crate::engine::DapIdeReport::Failed(e.to_string()),
+        };
+        let _ = tx.send(Message::DapIdeConfig(report));
+    });
 }
 
 /// Wait out a stopped DevTools bridge thread off the event loop.
@@ -1195,6 +1237,7 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
             // workbench-modal dispatch, which shares this same priority order.
             ActiveModal::DoctorPanel => translate_doctor_key(code),
             ActiveModal::McpPanel => translate_mcp_key(code),
+            ActiveModal::DapSettings(settings) => translate_dap_settings_key(code, settings.focus),
             ActiveModal::BuildLauncher(launcher) => translate_build_key(code, mods, launcher),
             ActiveModal::CleanConfirm(_) => translate_clean_confirm_key(code),
             ActiveModal::HelpOverlay => translate_help_key(code),
@@ -1291,6 +1334,15 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         // matched far above, so the two never collide.
         KeyCode::Char('m') => vec![Message::OpenMcpPanel],
         KeyCode::Char('M') => vec![Message::ToggleMcpServer],
+
+        // `D` opens the DAP settings dialog from either screen — the embedded
+        // debug adapter serves the *workbench*, like MCP, so it isn't
+        // workbench-gated either. `d` is already taken twice over (DevTools
+        // with a session open, the doctor panel without one), so the dialog
+        // takes the shifted key and the server toggle lives inside it (`s`)
+        // rather than claiming a second top-level binding. Mouse parity: the
+        // sidebar ACTIONS "DAP" row; the palette carries both rows.
+        KeyCode::Char('D') => vec![Message::OpenDapSettings],
 
         // `:` opens the command palette from either screen (the `Ctrl+P`
         // shorthand above).
@@ -1588,6 +1640,38 @@ fn translate_mcp_key(code: KeyCode) -> Vec<Message> {
     match code {
         KeyCode::Esc | KeyCode::Char('m') => vec![Message::CloseMcpPanel],
         KeyCode::Char('s') => vec![Message::ToggleMcpServer],
+        _ => vec![],
+    }
+}
+
+/// Translate one key press while the DAP settings dialog is open.
+///
+/// `Tab`/`↓`/`↑` walk the controls, `Enter`/`Space` activate the focused one,
+/// `←`/`→` cycle the IDE selector from anywhere (moving focus there, exactly
+/// as the run-config modal's mode selector does), `s` starts/stops the server
+/// (the MCP panel's own key), `g` generates the IDE config, and `Esc`/`D`
+/// close — closing is never a stop. Mouse parity: every row and both action
+/// buttons register a click region.
+///
+/// Typed characters reach the port field **only while it has focus**, so the
+/// `s`/`g` shortcuts are never swallowed by a text field the user isn't in —
+/// and a port field the user *is* in never turns `s` into a server toggle.
+fn translate_dap_settings_key(code: KeyCode, focus: crate::engine::DapFocus) -> Vec<Message> {
+    use crate::engine::DapFocus;
+    match code {
+        KeyCode::Esc => vec![Message::CloseDapSettings],
+        KeyCode::Tab | KeyCode::Down => vec![Message::DapSettingsFocusNext],
+        KeyCode::BackTab | KeyCode::Up => vec![Message::DapSettingsFocusPrev],
+        KeyCode::Left => vec![Message::DapSettingsCycleIde(-1)],
+        KeyCode::Right => vec![Message::DapSettingsCycleIde(1)],
+        // `Space` activates rather than typing: a space is never part of a
+        // port, so the checkbox meaning wins even inside the field.
+        KeyCode::Enter | KeyCode::Char(' ') => vec![Message::DapSettingsActivate],
+        KeyCode::Backspace => vec![Message::DapSettingsBackspace],
+        KeyCode::Char(c) if focus == DapFocus::Port => vec![Message::DapSettingsInput(c)],
+        KeyCode::Char('D') => vec![Message::CloseDapSettings],
+        KeyCode::Char('s') => vec![Message::ToggleDapServer],
+        KeyCode::Char('g') => vec![Message::DapSettingsGenerate],
         _ => vec![],
     }
 }
@@ -2715,6 +2799,71 @@ mod tests {
         assert_eq!(
             translate_event(key(KeyCode::Char('b')), &state, &regions),
             Vec::<Message>::new()
+        );
+    }
+
+    /// `D` is the DAP settings dialog's key from either top-level screen —
+    /// the shifted key, because `d` is already DevTools (with a session) and
+    /// the doctor panel (without one).
+    #[test]
+    fn shift_d_opens_the_dap_settings_dialog_from_either_screen() {
+        let regions = MouseRegions::new();
+        for screen in [Screen::Welcome, Screen::Workbench] {
+            let state = AppState {
+                screen,
+                ..Default::default()
+            };
+            assert_eq!(
+                translate_event(key(KeyCode::Char('D')), &state, &regions),
+                vec![Message::OpenDapSettings],
+                "{screen:?}"
+            );
+        }
+    }
+
+    /// The dialog's own key map, including the one context-sensitive rule:
+    /// a character reaches the port field only while that field has focus, so
+    /// `s`/`g`/`D` stay shortcuts everywhere else.
+    #[test]
+    fn the_dap_dialog_key_map_routes_shortcuts_and_typing_by_focus() {
+        use crate::engine::DapFocus;
+        let state = AppState {
+            dap_settings_open: true,
+            ..Default::default()
+        };
+        let regions = MouseRegions::new();
+        for (code, expected) in [
+            (KeyCode::Esc, Message::CloseDapSettings),
+            (KeyCode::Char('D'), Message::CloseDapSettings),
+            (KeyCode::Tab, Message::DapSettingsFocusNext),
+            (KeyCode::BackTab, Message::DapSettingsFocusPrev),
+            (KeyCode::Right, Message::DapSettingsCycleIde(1)),
+            (KeyCode::Left, Message::DapSettingsCycleIde(-1)),
+            (KeyCode::Enter, Message::DapSettingsActivate),
+            (KeyCode::Char(' '), Message::DapSettingsActivate),
+            (KeyCode::Char('s'), Message::ToggleDapServer),
+            (KeyCode::Char('g'), Message::DapSettingsGenerate),
+        ] {
+            assert_eq!(
+                translate_event(key(code), &state, &regions),
+                vec![expected],
+                "{code:?} with the server action focused"
+            );
+        }
+
+        let mut state = state;
+        state.dap_settings.focus = DapFocus::Port;
+        for c in ['s', 'g', 'D', '4'] {
+            assert_eq!(
+                translate_event(key(KeyCode::Char(c)), &state, &regions),
+                vec![Message::DapSettingsInput(c)],
+                "`{c}` must type into a focused port field, not fire a shortcut"
+            );
+        }
+        // …and the navigation keys still navigate out of it.
+        assert_eq!(
+            translate_event(key(KeyCode::Esc), &state, &regions),
+            vec![Message::CloseDapSettings]
         );
     }
 }

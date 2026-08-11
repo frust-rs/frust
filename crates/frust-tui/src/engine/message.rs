@@ -14,6 +14,7 @@ use frust_drive::metrics::MetricsSample;
 use frust_drive::plugin::AddReport;
 
 use super::build_launcher::BuildFocus;
+use super::dap_settings::{DapFocus, DapIdeReport};
 use super::devtools::{ConnEvent, DevtoolsLaunch, InspectorEvent};
 use super::doctor::DoctorCheck;
 use super::logstyle::LevelFilter;
@@ -203,6 +204,27 @@ pub enum RegionId {
     McpPanelToggleServer,
     /// The MCP panel's Close button (keyboard parity: `Esc` / `m`).
     McpPanelClose,
+    /// The sidebar ACTIONS "DAP" row; click opens the DAP settings dialog
+    /// (keyboard parity: `D`). Unlike the MCP row this *opens* rather than
+    /// toggles — the server switch lives inside the dialog, beside the
+    /// preferences that decide when it starts by itself.
+    DapAction,
+    /// The DAP settings dialog's Start/Stop server action (keyboard parity:
+    /// `s`, or `Enter` with the action focused).
+    DapSettingsToggleServer,
+    /// The DAP settings dialog's port field; click focuses it.
+    DapSettingsPortRow,
+    /// The DAP settings dialog's "auto-start in an IDE terminal" checkbox.
+    DapSettingsAutoStartRow,
+    /// The DAP settings dialog's "auto-configure the IDE" checkbox.
+    DapSettingsAutoConfigureRow,
+    /// The DAP settings dialog's IDE selector; click cycles it.
+    DapSettingsIdeRow,
+    /// The DAP settings dialog's "Generate IDE config now" action (keyboard
+    /// parity: `g`, or `Enter` with the action focused).
+    DapSettingsGenerate,
+    /// The DAP settings dialog's Close button (keyboard parity: `Esc` / `D`).
+    DapSettingsClose,
 }
 
 /// The kind of an in-progress drag, identifying which draggable chrome the
@@ -811,4 +833,49 @@ pub enum Message {
     /// dropping a `CancellationToken` does not cancel it and that successor
     /// would be left listening with nothing able to stop it.
     DapStopped(u64, Option<String>),
+    /// Start the embedded DAP server, or stop the running one (`s` in the
+    /// settings dialog, its Start/Stop button, or the palette) — the exact
+    /// counterpart of [`Self::ToggleMcpServer`], routed to the runner as
+    /// [`super::Effect::StartDapServer`]/[`super::Effect::StopDapServer`].
+    ToggleDapServer,
+    /// Decide, at startup, whether to start the DAP server without being
+    /// asked: `enabled`, or `auto_start_in_ide` with an IDE detected (see
+    /// [`super::should_auto_start`]). Sent once by `crate::runner` after the
+    /// model is built, so the decision itself stays in the pure core.
+    DapAutoStart,
+    /// Open the DAP settings dialog (`D`, the sidebar ACTIONS "DAP" row, or
+    /// the palette).
+    OpenDapSettings,
+    /// Close the DAP settings dialog (`Esc` / `D` / its Close button),
+    /// committing any pending port edit on the way out. The server keeps
+    /// running: closing the dialog is not a stop.
+    CloseDapSettings,
+    /// Move dialog focus to the next / previous control (`Tab` / `↓`, `↑`).
+    DapSettingsFocusNext,
+    /// Move dialog focus to the previous control.
+    DapSettingsFocusPrev,
+    /// Move dialog focus to a specific control (mouse click parity).
+    DapSettingsFocus(DapFocus),
+    /// Type a character into the dialog's port field.
+    DapSettingsInput(char),
+    /// Delete the last character of the dialog's port field.
+    DapSettingsBackspace,
+    /// Activate the focused control (`Enter`/`Space`): toggle the server or a
+    /// checkbox, commit the port, cycle the IDE, or generate the config.
+    DapSettingsActivate,
+    /// Cycle the dialog's IDE selector by `delta` (`←`/`→`, or a click on the
+    /// row).
+    DapSettingsCycleIde(isize),
+    /// Toggle the "auto-start in an IDE terminal" preference (checkbox click,
+    /// or `Space`/`Enter` on it) — persisted immediately.
+    DapSettingsToggleAutoStart,
+    /// Toggle the "auto-configure the IDE" preference — persisted immediately.
+    DapSettingsToggleAutoConfigure,
+    /// Generate (or refresh) the IDE's DAP client config now (`g`, or the
+    /// dialog's action) — the same path the automatic post-`DapListening`
+    /// generation takes.
+    DapSettingsGenerate,
+    /// An IDE-config generation finished (or was refused before it started):
+    /// its outcome, retained for the dialog's status area.
+    DapIdeConfig(DapIdeReport),
 }
