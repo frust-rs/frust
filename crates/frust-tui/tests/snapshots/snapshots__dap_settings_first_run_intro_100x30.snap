@@ -1,0 +1,28 @@
+---
+source: crates/frust-tui/tests/snapshots.rs
+expression: "render_dap_settings(100, 30, &settings, &DapStatus::Stopped, 0, None,)"
+---
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                  ╭ DAP server ──────────────────────────────────────────────────╮                  
+                  │                                                              │▓▓                
+                  │  frust detected an IDE terminal — auto-start would open the  │▓▓                
+                  │  DAP listener on port 4849. Press s to start now;            │▓▓                
+                  │  auto-start stays on for future launches.                    │▓▓                
+                  │                                                              │▓▓                
+                  │  ▸ Server    not running   Start                             │▓▓                
+                  │    Port      4849                                            │▓▓                
+                  │    [x] auto-start in an IDE terminal                         │▓▓                
+                  │    [x] auto-configure the IDE on start                       │▓▓                
+                  │    IDE       ‹ detected: none ›                              │▓▓                
+                  │   Generate IDE config now     Close                          │▓▓                
+                  │                                                              │▓▓                
+                  │  start it to debug this project from your editor             │▓▓                
+                  │  Tab move · Space toggle · s start/stop · g gen · Esc close  │▓▓                
+                  ╰──────────────────────────────────────────────────────────────╯▓▓                
+                    ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓

@@ -112,14 +112,24 @@ reports against a stopping server's late arrival, and the client registry
 `ActiveModal::DapSettings` (key `D`; `s` inside the dialog toggles the server, `g` generates the
 IDE config, `Esc` closes) is backed by `engine::dap_settings::DapSettings` — loaded once at
 startup from the persisted `[dap]` table (`enabled`, `auto_start_in_ide`, `auto_configure_ide`,
-`port`, `ide_override`) in `~/.config/frust/tui.toml`, not created and dropped with the dialog, so
-two effects fire whether or not anyone ever opens it: at startup, `Message::DapAutoStart` starts
-the server when `enabled || (auto_start_in_ide && a parent IDE is detected)`; on every
-`DapListening` report whose bound port actually changed, `auto_configure_ide` (default on) writes
-the detected/overridden IDE's DAP launch config via `frust_dap::ide_config` — an implicit,
-config-file-writing side effect of a successful server start, not only something the dialog's `g`
-triggers by hand. `start_dap` refuses (a retained reason, no server started) when no project is
-open in the workbench, since a debug launch needs a directory to build from.
+`port`, `ide_override`, `intro_seen`) in `~/.config/frust/tui.toml`, not created and dropped with
+the dialog, so two effects fire whether or not anyone ever opens it: at startup,
+`Message::DapAutoStart` starts the server when
+`enabled || (auto_start_in_ide && a parent IDE is detected)`; on every `DapListening` report whose
+bound port actually changed, `auto_configure_ide` (default on) writes the detected/overridden IDE's
+DAP launch config via `frust_dap::ide_config` — an implicit, config-file-writing side effect of a
+successful server start, not only something the dialog's `g` triggers by hand. That auto-start is
+**gated once per install**: the first `DapAutoStart` that would otherwise have bound silently
+instead opens this dialog carrying a one-time notice (`DapSettings::intro_port`/`intro_notice`)
+naming the port, starts nothing itself, and persists `intro_seen = true` immediately — so the
+notice is spent even if the user quits without acting, and on that run only the dialog's own Start
+action binds a listener. Every later launch is the silent auto-start the defaults ask for.
+`intro_seen` is burned only when the gate actually fires, so an install whose early launches are
+outside an IDE still gets the notice on its first launch inside one (see
+[LIMITATIONS.md](LIMITATIONS.md)'s `dap-tcp-unauthenticated-v1` for why this asymmetry with MCP —
+which has no auto-start path at all — is disclosed rather than removed). `start_dap` refuses (a
+retained reason, no server started) when no project is open in the workbench, since a debug launch
+needs a directory to build from.
 
 ## Data Flow
 
@@ -181,4 +191,4 @@ open in the workbench, since a debug launch needs a directory to build from.
 | `McpServerHandle` / `McpStatus` | The running embedded server's cancel/registry handle (`AppState::mcp`), carrying the generation its `McpListening`/`McpStopped` reports are gated against, and the status (`Stopped`/`Starting`/`Listening{port, clients}`) it and the panel read; a `Stopped` status paired with `AppState::mcp_error` is the panel's failed state |
 | `DapServerHandle` / `DapStatus` | The DAP server's own cancel/registry handle (`AppState::dap`) and status, shaped identically to `McpServerHandle`/`McpStatus` — same generation-gating discipline, same `Stopped`/`Starting`/`Listening{port, clients}` shape |
 | `SessionSubscribers` / `PendingWidgetTrees` | `supervise::session_feeds`'s two deferred-answer registries backing `TuiSessionBackend`'s DAP-only methods: live `SessionEventFeed` senders replayed from each session transition, and in-flight `frustWidgetTree` pulls awaiting the devtools bridge's own reply |
-| `DapSettings` / `DapFocus` / `DapPrefs` | The DAP settings dialog's model (`engine::dap_settings`) and its persisted backing (`engine::persist`'s `[dap]` table: `enabled`/`auto_start_in_ide`/`auto_configure_ide`/`port`/`ide_override`) — loaded once at startup, consulted for auto-start and auto-configure whether or not the dialog is ever opened |
+| `DapSettings` / `DapFocus` / `DapPrefs` | The DAP settings dialog's model (`engine::dap_settings`) and its persisted backing (`engine::persist`'s `[dap]` table: `enabled`/`auto_start_in_ide`/`auto_configure_ide`/`port`/`ide_override`/`intro_seen`) — loaded once at startup, consulted for auto-start and auto-configure whether or not the dialog is ever opened; `intro_seen` is the one-time first-run auto-start notice's spent flag |

@@ -148,6 +148,9 @@ pub enum DapSetting {
     Port(u16),
     /// `ide_override` (`None` clears the key back to "use the detected IDE").
     IdeOverride(Option<ParentIde>),
+    /// `intro_seen` — the first-run listener notice has been shown once and
+    /// must never be shown again (see [`DapSettings::intro_port`]).
+    IntroSeen(bool),
 }
 
 /// The workbench's DAP preferences and the settings dialog's edit state.
@@ -175,6 +178,24 @@ pub struct DapSettings {
     /// The IDE detected from the environment at startup (one read, at
     /// [`AppState::new`](super::AppState::new)) — never re-sniffed per frame.
     pub detected_ide: Option<ParentIde>,
+    /// Whether the one-time first-run notice below has already been shown on
+    /// this machine (persisted as `[dap].intro_seen`).
+    pub intro_seen: bool,
+    /// The port a first-ever auto-start was about to bind, set only while the
+    /// one-time notice is on screen (`None` the rest of the time).
+    ///
+    /// Lifecycle — deliberately narrow:
+    /// - **Set** exactly once, by the first `Message::DapAutoStart` that would
+    ///   otherwise have started a listener silently; the same transition opens
+    ///   the dialog and persists `intro_seen = true`, so quitting without
+    ///   acting still spends the notice.
+    /// - **Cleared** when the dialog closes or the server starts — it is a
+    ///   first-run greeting, not a retained status line.
+    /// - **Never re-set.** `intro_seen` is burned only when the gate actually
+    ///   fires, so a user whose first launches are outside an IDE still gets
+    ///   the notice on their first launch *inside* one rather than having
+    ///   spent it on a run that was never going to bind anything.
+    pub intro_port: Option<u16>,
     /// Which control has focus while the dialog is open.
     pub focus: DapFocus,
     /// The most recent IDE-config generation outcome, retained (including a
@@ -200,6 +221,8 @@ impl DapSettings {
             port_input: prefs.port.to_string(),
             ide_override: prefs.ide_override,
             detected_ide,
+            intro_seen: prefs.intro_seen,
+            intro_port: None,
             focus: DapFocus::Server,
             last_ide_config: None,
         }
@@ -208,9 +231,32 @@ impl DapSettings {
     /// Reset the dialog's transient edit state (focus at the top, the port
     /// field re-primed from the committed port) — what opening it does, so a
     /// previously-abandoned edit never greets the next opener.
+    ///
+    /// The first-run notice is transient state too: an ordinary open clears
+    /// it, and the auto-start gate sets it *after* opening.
     pub fn reopen(&mut self) {
         self.focus = DapFocus::Server;
         self.port_input = self.port.to_string();
+        self.intro_port = None;
+    }
+
+    /// The one-time first-run notice, when it is showing: what auto-start was
+    /// about to do, and what the two ways out of it are.
+    ///
+    /// A configured port of `0` is OS-assigned, so it is named as such rather
+    /// than printed as a port nothing will ever listen on.
+    pub fn intro_notice(&self) -> Option<String> {
+        let port = self.intro_port?;
+        let where_ = if port == 0 {
+            "an OS-assigned port".to_string()
+        } else {
+            format!("port {port}")
+        };
+        Some(format!(
+            "frust detected an IDE terminal — auto-start would open the DAP \
+             listener on {where_}. Press s to start now; auto-start stays on \
+             for future launches."
+        ))
     }
 
     /// Move focus to the next control (wrapping).
@@ -551,13 +597,38 @@ mod tests {
     }
 
     #[test]
-    fn reopening_the_dialog_drops_an_abandoned_port_edit() {
+    fn reopening_the_dialog_drops_an_abandoned_port_edit_and_a_stale_notice() {
         let mut s = settings();
         s.focus = DapFocus::Generate;
         s.port_input = "nonsense".to_string();
+        s.intro_port = Some(4849);
         s.reopen();
         assert_eq!(s.focus, DapFocus::Server);
         assert_eq!(s.port_input, s.port.to_string());
+        assert_eq!(s.intro_port, None);
+    }
+
+    /// The first-run notice exists only while a port is pending, names that
+    /// port, and never claims a port for an OS-assigned bind.
+    #[test]
+    fn the_first_run_notice_shows_only_while_pending_and_names_the_port() {
+        let mut s = settings();
+        assert!(!s.intro_seen, "a fresh install has not seen the notice");
+        assert_eq!(s.intro_notice(), None);
+
+        s.intro_port = Some(4849);
+        let notice = s.intro_notice().expect("a pending notice");
+        assert!(notice.contains("IDE terminal"));
+        assert!(notice.contains("port 4849"));
+        assert!(notice.contains("Press s"));
+
+        s.intro_port = Some(0);
+        assert!(
+            s.intro_notice()
+                .expect("a pending notice")
+                .contains("an OS-assigned port"),
+            "port 0 is not a port anything listens on"
+        );
     }
 
     #[test]

@@ -842,6 +842,12 @@ pub enum Message {
     /// asked: `enabled`, or `auto_start_in_ide` with an IDE detected (see
     /// [`super::should_auto_start`]). Sent once by `crate::runner` after the
     /// model is built, so the decision itself stays in the pure core.
+    ///
+    /// The *first* such start on an install opens the settings dialog with a
+    /// one-time notice instead of binding a listener, and burns
+    /// `[dap].intro_seen` (see
+    /// [`super::DapSettings::intro_port`]); every launch after that starts
+    /// silently.
     DapAutoStart,
     /// Open the DAP settings dialog (`D`, the sidebar ACTIONS "DAP" row, or
     /// the palette).

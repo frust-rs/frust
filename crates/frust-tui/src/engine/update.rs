@@ -1398,6 +1398,9 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                 }
             } else {
                 state.dap_error = None;
+                // Starting is one of the two answers to the first-run notice,
+                // so the notice has served its purpose either way.
+                state.dap_settings.intro_port = None;
                 Outcome {
                     redraw: true,
                     effect: Some(Effect::StartDapServer {
@@ -1413,12 +1416,29 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                 settings.auto_start_in_ide,
                 settings.detected_ide,
             );
-            if wanted && state.dap.is_none() {
+            if !wanted || state.dap.is_some() {
+                Outcome::idle()
+            } else if settings.intro_seen {
+                // Every launch after the first: exactly the silent auto-start
+                // the preferences ask for.
                 Outcome::effect(Effect::StartDapServer {
                     port: settings.port,
                 })
             } else {
-                Outcome::idle()
+                // The first auto-start this install would ever have performed:
+                // say what it is about to open before opening it. The server
+                // is *not* started here — only the dialog's own Start action
+                // does that on this one run. The notice is spent immediately
+                // (persisted before anything else can happen), so quitting
+                // without acting never brings it back.
+                let port = settings.port;
+                update(state, Message::OpenDapSettings);
+                state.dap_settings.intro_seen = true;
+                state.dap_settings.intro_port = Some(port);
+                Outcome {
+                    redraw: true,
+                    effect: Some(Effect::SaveDapSetting(DapSetting::IntroSeen(true))),
+                }
             }
         }
         Message::OpenDapSettings => {
@@ -1433,6 +1453,8 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         Message::CloseDapSettings => {
             if state.dap_settings_open {
                 state.dap_settings_open = false;
+                // Dismissing is the other answer to the first-run notice.
+                state.dap_settings.intro_port = None;
                 // Closing commits whatever is in the port field, so a typed
                 // value never quietly evaporates (and an invalid one never
                 // quietly sticks — see `commit_dap_port`).
@@ -5151,6 +5173,10 @@ mod tests {
 
     /// The auto-start decision, driven entirely through injected state: no
     /// process environment is read or mutated here.
+    ///
+    /// `intro_seen` is set deliberately on every case: this is the
+    /// already-acknowledged install, where auto-start is the silent start it
+    /// has always been. The first-run gate has its own tests below.
     #[test]
     fn the_startup_auto_start_truth_table_produces_the_start_effect() {
         let ide = Some(frust_dap::ide_config::ParentIde::VSCode);
@@ -5167,20 +5193,113 @@ mod tests {
             st.dap_settings.enabled = enabled;
             st.dap_settings.auto_start_in_ide = auto;
             st.dap_settings.port = 5005;
+            st.dap_settings.intro_seen = true;
             let out = update(&mut st, Message::DapAutoStart);
             let expected = starts.then_some(Effect::StartDapServer { port: 5005 });
             assert_eq!(
                 out.effect, expected,
                 "enabled={enabled} auto={auto} detected={detected:?}"
             );
+            assert!(
+                !st.dap_settings_open,
+                "an acknowledged install never re-opens the dialog"
+            );
+            assert_eq!(st.dap_settings.intro_port, None);
         }
     }
 
     #[test]
     fn auto_start_never_starts_a_second_server_over_a_running_one() {
         let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::VSCode));
+        st.dap_settings.intro_seen = true;
         st.dap = Some(dap_handle(0));
         assert_eq!(update(&mut st, Message::DapAutoStart).effect, None);
+    }
+
+    /// The first auto-start on a fresh install opens the dialog with the
+    /// notice and starts *nothing* — the whole point of the gate is that no
+    /// listener binds until the user says so on this one run.
+    #[test]
+    fn the_first_ever_auto_start_shows_the_notice_instead_of_binding_a_listener() {
+        let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::VSCode));
+        st.dap_settings.port = 5005;
+        assert!(!st.dap_settings.intro_seen, "a fresh install");
+
+        let out = update(&mut st, Message::DapAutoStart);
+        assert!(out.redraw);
+        assert_eq!(
+            out.effect,
+            Some(Effect::SaveDapSetting(DapSetting::IntroSeen(true))),
+            "the notice is spent immediately, so quitting does not bring it back"
+        );
+        assert!(
+            st.dap_settings_open,
+            "the dialog is how the notice is shown"
+        );
+        assert_eq!(st.dap_settings.intro_port, Some(5005));
+        assert!(st.dap_settings.intro_seen);
+        assert!(
+            st.dap_settings.intro_notice().unwrap().contains("5005"),
+            "the notice names the port that would have been bound"
+        );
+        assert!(st.dap.is_none(), "nothing was started");
+
+        // The user answers by starting it: the notice is done, and this is
+        // the only start on this run.
+        let out = update(&mut st, Message::DapSettingsActivate);
+        assert_eq!(out.effect, Some(Effect::StartDapServer { port: 5005 }));
+        assert_eq!(st.dap_settings.intro_port, None);
+        assert_eq!(st.dap_settings.intro_notice(), None);
+    }
+
+    /// Dismissing the dialog is the other answer: still no listener, and the
+    /// notice is gone for good.
+    #[test]
+    fn dismissing_the_first_run_notice_starts_nothing_and_never_repeats_it() {
+        let mut st = dap_workbench(Some(frust_dap::ide_config::ParentIde::VSCode));
+        update(&mut st, Message::DapAutoStart);
+        update(&mut st, Message::CloseDapSettings);
+        assert!(!st.dap_settings_open);
+        assert_eq!(st.dap_settings.intro_port, None);
+
+        // A second `DapAutoStart` (the next launch, with `intro_seen` reloaded
+        // from disk) is the silent start the preferences ask for.
+        let out = update(&mut st, Message::DapAutoStart);
+        assert_eq!(
+            out.effect,
+            Some(Effect::StartDapServer {
+                port: crate::engine::DEFAULT_DAP_PORT
+            })
+        );
+        assert!(!st.dap_settings_open, "and no second notice");
+    }
+
+    /// The gate spends `intro_seen` only when it actually fires: a launch
+    /// outside an IDE, with auto-start wanted by nobody, leaves the notice
+    /// unspent for the first launch *inside* one.
+    #[test]
+    fn a_launch_that_would_not_auto_start_never_spends_the_notice() {
+        let mut st = dap_workbench(None);
+        st.dap_settings.enabled = false;
+        st.dap_settings.auto_start_in_ide = false;
+
+        let out = update(&mut st, Message::DapAutoStart);
+        assert_eq!(out.effect, None);
+        assert!(!out.redraw);
+        assert!(!st.dap_settings_open);
+        assert!(!st.dap_settings.intro_seen, "unspent");
+        assert_eq!(st.dap_settings.intro_port, None);
+
+        // Now the same install, launched inside an IDE terminal: the notice
+        // is still there to be shown.
+        st.dap_settings.auto_start_in_ide = true;
+        st.dap_settings.detected_ide = Some(frust_dap::ide_config::ParentIde::VSCode);
+        let out = update(&mut st, Message::DapAutoStart);
+        assert_eq!(
+            out.effect,
+            Some(Effect::SaveDapSetting(DapSetting::IntroSeen(true)))
+        );
+        assert!(st.dap_settings_open);
     }
 
     /// The auto-configure path end to end at the message level: the bound

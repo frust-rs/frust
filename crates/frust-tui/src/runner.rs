@@ -167,7 +167,9 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     let _ = msg_tx.send(Message::RunBootstrapReport);
     // Offer the DAP server the chance to start itself. The *decision* (the
     // persisted `enabled`/`auto_start_in_ide` pair against the IDE detected
-    // when the model was built) stays in the pure core — this only asks.
+    // when the model was built, and whether this install has yet been told
+    // once that auto-start opens a listener) stays in the pure core — this
+    // only asks.
     let _ = msg_tx.send(Message::DapAutoStart);
     // Record whichever project came up active at startup (cwd-detected, or
     // the persisted most-recently-opened one — see `AppState::new`) as the

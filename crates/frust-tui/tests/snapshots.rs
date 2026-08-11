@@ -2300,6 +2300,25 @@ fn dap_settings_listening_with_config_result_100x30() {
     ));
 }
 
+/// The one-time first-run notice: the dialog the startup auto-start gate opens
+/// on a fresh install instead of binding a listener silently — the notice above
+/// every control, and the server still stopped.
+#[test]
+fn dap_settings_first_run_intro_100x30() {
+    let settings = DapSettings {
+        intro_port: Some(4849),
+        ..DapSettings::default()
+    };
+    insta::assert_snapshot!(render_dap_settings(
+        100,
+        30,
+        &settings,
+        &DapStatus::Stopped,
+        0,
+        None,
+    ));
+}
+
 /// A port edited while a server is listening on another one: the dialog says
 /// the change waits for a restart rather than restarting anything.
 #[test]

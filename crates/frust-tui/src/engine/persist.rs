@@ -323,6 +323,11 @@ pub struct DapPrefs {
     /// `frust_dap::ide_config::parse_ide_name`. An unrecognised name in the
     /// file is ignored (falls back to detection) rather than failing the load.
     pub ide_override: Option<ParentIde>,
+    /// Whether the one-time "an auto-start would open a DAP listener" notice
+    /// has already been shown (`false` on a fresh install). Burned exactly
+    /// once, by the first auto-start that would actually have fired — see
+    /// [`super::DapSettings::intro_port`].
+    pub intro_seen: bool,
 }
 
 impl Default for DapPrefs {
@@ -333,6 +338,7 @@ impl Default for DapPrefs {
             auto_configure_ide: true,
             port: frust_dap::DEFAULT_DAP_PORT,
             ide_override: None,
+            intro_seen: false,
         }
     }
 }
@@ -380,6 +386,7 @@ fn dap_prefs_from_doc(doc: &DocumentMut) -> DapPrefs {
             .and_then(|t| t.get("ide_override"))
             .and_then(Item::as_str)
             .and_then(|name| parse_ide_name(name).ok()),
+        intro_seen: flag("intro_seen", default.intro_seen),
     }
 }
 
@@ -407,6 +414,9 @@ fn save_dap_setting_with(env: &dyn EnvLookup, setting: DapSetting) {
         DapSetting::IdeOverride(ide) => {
             let name = ide.and_then(persisted_ide_name);
             save_in_table(env, "dap", "ide_override", name.map(Value::from));
+        }
+        DapSetting::IntroSeen(seen) => {
+            save_in_table(env, "dap", "intro_seen", Some(Value::from(seen)));
         }
     }
 }
@@ -669,6 +679,7 @@ mod tests {
         save_dap_setting_with(&env, DapSetting::AutoConfigureIde(false));
         save_dap_setting_with(&env, DapSetting::Port(5005));
         save_dap_setting_with(&env, DapSetting::IdeOverride(Some(ParentIde::Zed)));
+        save_dap_setting_with(&env, DapSetting::IntroSeen(true));
         assert_eq!(
             load_dap_prefs_with(&env),
             DapPrefs {
@@ -677,6 +688,7 @@ mod tests {
                 auto_configure_ide: false,
                 port: 5005,
                 ide_override: Some(ParentIde::Zed),
+                intro_seen: true,
             }
         );
         let _ = fs::remove_dir_all(&home);
@@ -773,7 +785,32 @@ mod tests {
                 ide_override: None,
                 auto_configure_ide: false,
                 auto_start_in_ide: true,
+                intro_seen: DapPrefs::default().intro_seen,
             }
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// A `tui.toml` predating the first-run notice has no `intro_seen` key at
+    /// all: it must load as "not yet seen", so an existing install gets the
+    /// notice on its next in-IDE auto-start rather than skipping it.
+    #[test]
+    fn a_dap_table_without_intro_seen_loads_as_not_yet_seen() {
+        let home = unique_temp_home();
+        let config = home.join(".config").join("frust");
+        fs::create_dir_all(&config).unwrap();
+        fs::write(config.join("tui.toml"), "[dap]\nport = 5005\n").unwrap();
+        let env = FakeEnv::home(&home);
+        let prefs = load_dap_prefs_with(&env);
+        assert_eq!(prefs.port, 5005);
+        assert!(!prefs.intro_seen);
+
+        save_dap_setting_with(&env, DapSetting::IntroSeen(true));
+        assert!(load_dap_prefs_with(&env).intro_seen);
+        assert_eq!(
+            load_dap_prefs_with(&env).port,
+            5005,
+            "burning the notice must not disturb the other keys"
         );
         let _ = fs::remove_dir_all(&home);
     }

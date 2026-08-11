@@ -1397,6 +1397,23 @@ sanitized, as a Debug Console note rather than silently dropped. So
 the reach is driving sessions against the host's own open project, not running `cargo` — and
 therefore arbitrary `build.rs`/proc-macro/`.cargo` runner code — from an attacker-chosen directory.
 
+**Exposure asymmetry with the embedded MCP server**: the reach is the same once connected, but the
+*likelihood of a listener existing at all* is not, and this entry would be misleading without
+saying so. The MCP server has **no auto-start path** — it binds only when a human toggles it (`M`,
+the panel's `s`, or the palette). The DAP server does auto-start: `[dap].auto_start_in_ide` and
+`auto_configure_ide` both default **on** (fdemon parity, a deliberate product decision), and the
+IDE detection they gate on reads inherited environment variables (`TERM_PROGRAM`,
+`VSCODE_IPC_HOOK_CLI`, `ZED_TERM`, `TERMINAL_EMULATOR`, `NVIM`, `INSIDE_EMACS`, `HELIX_RUNTIME`) —
+which every subshell, `tmux` pane, and nested shell started from an IDE terminal inherits, so a
+workbench launched well away from the editor still counts as "inside an IDE". The **first** such
+auto-start on an install is therefore gated: instead of binding, it opens the DAP settings dialog
+with a one-time notice naming the port, and a listener starts on that run only if the user asks it
+to (`[dap].intro_seen` records that the notice was spent, whether or not they acted). Every launch
+after that binds silently, as the defaults ask — the acknowledgment is one-time, not per-launch —
+and auto-start can be turned off in the same dialog (or `[dap].auto_start_in_ide = false` in
+`~/.config/frust/tui.toml`). A successful bind additionally rewrites the detected IDE's DAP launch
+config while `auto_configure_ide` is on.
+
 **Applies to**: every `frust-dap` connection, on every platform — there is no other transport (the
 stdio mode this entry once covered was removed; the server is embedded-only now).
 
@@ -1404,12 +1421,18 @@ stdio mode this entry once covered was removed; the server is embedded-only now)
 matched to the same threat model — a loopback developer tool not reachable off-host. Server-side
 auth is a named follow-up, not a v1 requirement, for either embedded server. The `project_root`
 confinement above is not part of that follow-up — it ships now, so an unauthenticated client cannot
-escalate a session into arbitrary local code execution from a directory of its choosing.
+escalate a session into arbitrary local code execution from a directory of its choosing. The
+first-run notice is **disclosure, not authentication**: it makes the auto-start visible once, it
+does not stop a local process from connecting. The remedy that would actually close the asymmetry
+is a per-server token — minted on each start and written into the generated IDE config, so a client
+must present what the editor was handed — which stays a named follow-up alongside MCP's.
 
 **Evidence**: `crates/frust-dap/src/server/embedded.rs`'s `serve_embedded` doc comment (loopback
 bind, the project root is read live from the host's backend and is never overridden by a client);
 `crates/frust-dap/src/adapter/mod.rs`'s `OrchestrationAdapter::launch` (`client_root_note`,
-sanitized echo of an ignored `projectRoot`).
+sanitized echo of an ignored `projectRoot`); `crates/frust-tui/src/engine/update.rs`'s
+`Message::DapAutoStart` arm and `crates/frust-tui/src/engine/dap_settings.rs`'s
+`DapSettings::intro_port` (the one-time gate and its lifecycle).
 
 ---
 

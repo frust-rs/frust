@@ -53,10 +53,17 @@ pub fn render(
     mouse: &mut MouseCtx,
 ) {
     let status_lines = status_block(settings, status, error, theme);
-    // server + port + 2 checkboxes + ide + generate/close (6), a blank, the
-    // status block, and the keyhint row — inside 2 borders and 1 row of top
-    // padding.
-    let inner_rows = 6 + 1 + status_lines.len() as u16 + 1;
+    let intro_lines = intro_block(settings, theme);
+    // the one-time first-run notice and its trailing blank (only while it is
+    // showing), then server + port + 2 checkboxes + ide + generate/close (6),
+    // a blank, the status block, and the keyhint row — inside 2 borders and 1
+    // row of top padding.
+    let intro_rows = if intro_lines.is_empty() {
+        0
+    } else {
+        intro_lines.len() as u16 + 1
+    };
+    let inner_rows = intro_rows + 6 + 1 + status_lines.len() as u16 + 1;
     let height = (inner_rows + 3).min(area.height);
     let box_ = centered(area, MODAL_WIDTH, height);
     frame.render_widget(Clear, box_);
@@ -77,6 +84,18 @@ pub fn render(
 
     let row_rect = |y: u16| Rect::new(inner.x, y, inner.width, 1);
     let mut y = inner.y;
+
+    // ── First-run notice (only on the launch the gate fires) ─────────────
+    if !intro_lines.is_empty() {
+        for line in intro_lines {
+            if y >= inner.bottom() {
+                return;
+            }
+            frame.render_widget(Paragraph::new(line), row_rect(y));
+            y += 1;
+        }
+        y += 1; // blank, separating the notice from the controls
+    }
 
     // ── Server state + Start/Stop action ─────────────────────────────────
     if y < inner.bottom() {
@@ -392,6 +411,50 @@ fn status_block(
     lines
 }
 
+/// The one-time first-run notice, wrapped to the dialog's text width, or no
+/// lines at all when there is nothing pending
+/// ([`DapSettings::intro_notice`] is `None` on every launch but the one the
+/// auto-start gate fires on).
+///
+/// Warn-colored and above every control, because it is the one thing in this
+/// dialog the user did not ask to see.
+fn intro_block(settings: &DapSettings, theme: &Theme) -> Vec<Line<'static>> {
+    let Some(notice) = settings.intro_notice() else {
+        return Vec::new();
+    };
+    wrap_words(&notice, (MODAL_WIDTH - 6) as usize)
+        .into_iter()
+        .map(|line| Line::styled(line, Style::default().fg(theme.warn())))
+        .collect()
+}
+
+/// Break `text` into lines of at most `width` columns on word boundaries. A
+/// single word longer than `width` is left over-long rather than split
+/// mid-word — the notice has no such word, and a hard split would read worse
+/// than a wrap that runs one column wide.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let extra = if current.is_empty() {
+            word.chars().count()
+        } else {
+            word.chars().count() + 1
+        };
+        if !current.is_empty() && current.chars().count() + extra > width {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
 /// Clip `text` to `width` columns with an ellipsis — a generated config path
 /// can be longer than the dialog, and a wrapped path is harder to read than a
 /// clipped one.
@@ -486,6 +549,38 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(text_of(&lines[0]).contains("Address already in use"));
         assert!(text_of(&lines[1]).contains("VS Code: created"));
+    }
+
+    /// The notice is drawn only while one is pending, and every wrapped line
+    /// fits the dialog's text width.
+    #[test]
+    fn the_first_run_notice_block_appears_only_while_pending_and_fits_the_dialog() {
+        let theme = theme();
+        let mut settings = DapSettings::default();
+        assert!(intro_block(&settings, &theme).is_empty());
+
+        settings.intro_port = Some(4849);
+        let lines = intro_block(&settings, &theme);
+        assert!(lines.len() > 1, "the notice wraps rather than overflowing");
+        for line in &lines {
+            assert!(
+                text_of(line).chars().count() <= (MODAL_WIDTH - 6) as usize,
+                "{:?} is wider than the dialog",
+                text_of(line)
+            );
+        }
+        let joined = lines.iter().map(text_of).collect::<Vec<_>>().join(" ");
+        assert_eq!(joined, settings.intro_notice().unwrap());
+    }
+
+    #[test]
+    fn wrapping_breaks_on_words_and_leaves_an_over_long_word_whole() {
+        assert_eq!(wrap_words("a bb ccc", 5), vec!["a bb", "ccc"]);
+        assert_eq!(wrap_words("", 5), Vec::<String>::new());
+        assert_eq!(
+            wrap_words("tiny enormouslylongword", 6),
+            vec!["tiny", "enormouslylongword"]
+        );
     }
 
     #[test]
