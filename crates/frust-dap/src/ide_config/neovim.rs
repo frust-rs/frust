@@ -29,8 +29,10 @@ impl NeovimGenerator {
     ///
     /// The snippet configures nvim-dap with a `frust` adapter that connects
     /// to the given `port` and appends a `rust` configuration. No `cwd` is
-    /// set on the configuration entry — the frust DAP server always launches
-    /// from its own process's project root (see `vscode`'s module doc).
+    /// set on the configuration entry — every launch builds from the
+    /// workbench's currently open project, read live from the host's backend
+    /// at launch time, and a client-supplied `projectRoot` is never honored
+    /// (see `vscode`'s module doc).
     pub fn generate_lua_snippet(&self, port: u16) -> String {
         format!(
             r#"-- Frust DAP configuration for Neovim (auto-generated)

@@ -149,6 +149,14 @@ impl OrchestrationAdapter {
     /// through `output` events. A launch that cannot even spawn lands as
     /// `SessionState::Failed`, which the event pump surfaces as an `output`
     /// line plus `exited(1)` and `terminated`.
+    ///
+    /// The project root is read once, *after* device resolution and
+    /// immediately before the launch call — so a host switching projects
+    /// during the (unbounded) device-discovery window cannot leave the note
+    /// and banner naming a directory the build never touched. The only
+    /// residual window is the engine's own: a switch between this read and the
+    /// backend's `run_app` reading its root, which is inherent to a root the
+    /// host may change at any moment and is not closable from here.
     async fn launch(&mut self, arguments: Option<serde_json::Value>) -> AdapterResponse {
         if self.ever_launched {
             return AdapterResponse::failure(
@@ -174,16 +182,19 @@ impl OrchestrationAdapter {
             Ok(mode) => mode,
             Err(message) => return AdapterResponse::failure(message),
         };
-        // Once, here — the directory this launch builds in, and therefore the
-        // one both the ignored-root note and the banner below must name.
-        let Some(project_root) = self.project_root().await else {
-            return AdapterResponse::failure(NO_PROJECT);
-        };
-        let ignored_note = client_root_note(args.project_root.as_deref(), &project_root);
         let target = match resolve_target(&self.backend, args.device.as_deref()).await {
             Ok(target) => target,
             Err(message) => return AdapterResponse::failure(message),
         };
+        // Once, here — the directory this launch builds in, and therefore the
+        // one both the ignored-root note and the banner below must name. Read
+        // *after* device resolution (whose discovery has no wall-clock bound)
+        // and immediately before the launch below, so what is announced is the
+        // freshest value the build itself could read.
+        let Some(project_root) = self.project_root().await else {
+            return AdapterResponse::failure(NO_PROJECT);
+        };
+        let ignored_note = client_root_note(args.project_root.as_deref(), &project_root);
 
         // An ignored client `projectRoot` is surfaced before the banner, so
         // the security-relevant deviation reads first and the banner that
