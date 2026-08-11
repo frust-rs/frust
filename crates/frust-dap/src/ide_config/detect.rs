@@ -1,5 +1,7 @@
-//! Parent-IDE detection: recognizing which terminal/editor `frust dap` is
-//! running under, so a DAP client config can be generated automatically.
+//! Parent-IDE detection: recognizing which terminal/editor is hosting the
+//! embedded DAP server (there is no standalone `frust dap` process — see
+//! `docs/CLI_ARCHITECTURE.md`'s `frust-dap` row), so a DAP client config can
+//! be generated automatically.
 //!
 //! Ported from fdemon-pro's `config::{types, settings}` `ParentIde`/
 //! `detect_parent_ide`/`should_auto_start_dap` shapes (fdemon is Ed's own
@@ -10,8 +12,8 @@
 
 use std::path::PathBuf;
 
-/// A detected parent IDE/editor hosting the terminal `frust dap` was
-/// launched from.
+/// A detected parent IDE/editor hosting the terminal the embedded DAP
+/// server was started from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParentIde {
     VSCode,
@@ -156,7 +158,7 @@ fn detect_parent_ide_with(env: &dyn EnvLookup) -> Option<ParentIde> {
     None
 }
 
-/// Whether `frust dap` should auto-start its server at startup.
+/// Whether the embedded DAP server should auto-start at startup.
 ///
 /// Decision tree (fdemon-pro's `should_auto_start_dap`, `enabled`/
 /// `auto_start_in_ide` standing in for its `settings.dap.{enabled,

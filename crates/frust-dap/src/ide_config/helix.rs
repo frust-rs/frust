@@ -8,10 +8,11 @@
 //! having Helix spawn a *second* `fdemon --dap-port <PORT>` instance — a
 //! wholly separate process from any already-running session.
 //!
-//! `frust dap` has nothing equivalent to spawn: there is no standalone
-//! `frust dap --port <PORT>`-as-adapter-binary story here (the DAP server is
-//! `frust dap` itself, already running, not a per-debug-session child
-//! process), so the fdemon workaround does not carry over. Rather than
+//! frust-dap has nothing equivalent to spawn: there is no standalone,
+//! spawnable `frust dap`-as-adapter-binary process at all — the DAP server
+//! is `frust-tui`'s embedded, already-running listener (see
+//! `docs/CLI_ARCHITECTURE.md`'s `frust-dap` row), not a per-debug-session
+//! child process — so the fdemon workaround does not carry over. Rather than
 //! generate a config that can never work, [`super::generate_ide_config`]
 //! reports [`super::ConfigAction::Skipped`] for Helix without writing
 //! anything — see [`SKIP_REASON`].

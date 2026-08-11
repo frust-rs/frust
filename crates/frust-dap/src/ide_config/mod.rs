@@ -148,13 +148,23 @@ pub trait IdeConfigGenerator {
     /// - Find an existing frust entry (by marker) and update it
     /// - Append a new entry if no frust entry exists
     /// - Preserve all non-frust entries unchanged
+    ///
+    /// **"Preserve" is semantic, not byte-for-byte.** An implementation
+    /// reading a commented/hand-formatted format (VS Code's JSONC
+    /// `launch.json`, via [`vscode`]) parses the existing file into a value
+    /// tree and reprints the whole document — every other entry's *data*
+    /// survives, but comments and original formatting do not. See
+    /// `docs/LIMITATIONS.md`'s `dap-ide-config-normalizes-launchjson`.
     fn merge_config(&self, existing: &str, port: u16, project_root: &Path) -> Result<String>;
 
     /// Optional post-generation hook for secondary file writes.
     ///
-    /// Called by [`run_generator`] after both fresh creation and merging, so
-    /// secondary artifacts (e.g. Neovim's `.nvim-dap.lua`) are always kept in
-    /// sync with the primary config file.
+    /// Called by [`run_generator`] after fresh creation, after merging, and
+    /// even when the primary write is skipped as unchanged — "unchanged"
+    /// describes only the primary file, so a secondary artifact (e.g.
+    /// Neovim's `.nvim-dap.lua`) can still be missing or stale and must stay
+    /// kept in sync regardless of whether the primary file was rewritten
+    /// this run.
     ///
     /// The default implementation is a no-op.
     fn post_write(&self, _port: u16, _project_root: &Path) -> Result<()> {
@@ -180,10 +190,14 @@ pub trait IdeConfigGenerator {
 /// 2. If the file already exists, read it and call [`IdeConfigGenerator::merge_config`].
 /// 3. If the file does not exist, call [`IdeConfigGenerator::generate`] for fresh content.
 /// 4. If the merged content is byte-identical to what's on disk, skip the
-///    write entirely (mtime untouched) and report [`ConfigAction::Skipped`].
-/// 5. Ensure the parent directory exists (`create_dir_all`).
+///    primary write (mtime untouched) and report [`ConfigAction::Skipped`] —
+///    but step 7 still runs before returning: "unchanged" describes only the
+///    primary file, and [`IdeConfigGenerator::post_write`]'s own secondary
+///    artifact can still be missing or stale.
+/// 5. Otherwise, ensure the parent directory exists (`create_dir_all`).
 /// 6. Write the content and return an [`IdeConfigResult`].
-/// 7. Call [`IdeConfigGenerator::post_write`] for any secondary file writes.
+/// 7. Call [`IdeConfigGenerator::post_write`] for any secondary file writes —
+///    on every path above, including the skip path in step 4.
 fn run_generator(
     generator: &dyn IdeConfigGenerator,
     port: u16,
@@ -201,6 +215,11 @@ fn run_generator(
                 generator.ide_name(),
                 config_path.display(),
             );
+            // The primary file needs no rewrite, but a secondary artifact
+            // (e.g. Neovim's .nvim-dap.lua) is not covered by that
+            // unchanged-ness check at all — it can be missing or stale, so
+            // post_write still runs before returning (see its trait doc).
+            generator.post_write(port, project_root)?;
             return Ok(Some(IdeConfigResult {
                 path: config_path,
                 action: ConfigAction::Skipped("content unchanged".to_string()),
@@ -506,6 +525,50 @@ mod tests {
         assert_eq!(
             mtime_before, mtime_after,
             "file mtime should not change when content is unchanged"
+        );
+    }
+
+    /// Verifies `run_generator`'s skip path still runs `post_write`: when the
+    /// primary `launch.json` is unchanged (`Skipped`) but the secondary
+    /// `.nvim-dap.lua` has been deleted out from under it, the next call
+    /// recreates the secondary file even though the primary write is
+    /// skipped.
+    #[test]
+    fn test_run_generator_skip_still_recreates_deleted_secondary_artifact() {
+        let dir = unique_temp_dir("run-generator-skip-recreates-secondary");
+
+        // First call: creates both launch.json and .nvim-dap.lua.
+        let result1 = run_generator(&neovim::NeovimGenerator, 4711, &dir)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result1.action, ConfigAction::Created));
+        let lua_path = dir.canonicalize().unwrap().join(".nvim-dap.lua");
+        assert!(
+            lua_path.exists(),
+            ".nvim-dap.lua should exist after Created"
+        );
+
+        // Simulate the secondary artifact going missing (deleted by the user,
+        // or never having existed on an older run) without touching the
+        // primary file.
+        std::fs::remove_file(&lua_path).unwrap();
+        assert!(!lua_path.exists());
+
+        // Second call with the same port: primary content is unchanged, so
+        // this reports Skipped — but post_write must still have run and
+        // recreated the secondary artifact.
+        let result2 = run_generator(&neovim::NeovimGenerator, 4711, &dir)
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(result2.action, ConfigAction::Skipped(_)),
+            "expected Skipped, got {:?}",
+            result2.action
+        );
+        assert!(
+            lua_path.exists(),
+            ".nvim-dap.lua should have been recreated by post_write even though \
+             the primary launch.json write was skipped"
         );
     }
 }

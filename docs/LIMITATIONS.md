@@ -1595,6 +1595,44 @@ instance, unavailable this round — do not surface this adapter name in user-fa
 
 ---
 
+### `dap-ide-config-normalizes-launchjson` — the first VS Code `launch.json` merge destroys comments and hand formatting
+
+**Observed**: `VSCodeGenerator::merge_config` (`crates/frust-dap/src/ide_config/vscode.rs`) parses an
+existing `.vscode/launch.json` as JSONC (`ide_config::merge::clean_jsonc` strips every `//`/`/* */`
+comment and trailing comma) and reprints the whole document via `to_pretty_json`
+(`serde_json::to_string_pretty` over the parsed value tree). Every non-frust entry's *data* survives
+the merge — the doc comment's "preserve all non-frust entries" promise holds semantically — but a
+hand-authored file's comments and formatting do not: they are gone after the very first real merge,
+replaced by frust's own 2-space-indent reprint. `run_generator`'s skip-on-unchanged check
+(`crates/frust-dap/src/ide_config/mod.rs`) only compares the merged, reprinted output against what's
+already on disk — it protects a file already in frust's canonical (comment-free, reprinted) form from
+a redundant rewrite, it does not prevent the destructive first rewrite of a file that still carries a
+user's comments/formatting.
+
+**Applies to**: any project whose `.vscode/launch.json` predates frust-dap and carries hand-written
+comments or formatting, the moment its DAP server (re)binds with `[dap].auto_configure_ide` on (the
+default — see `dap-tcp-unauthenticated-v1` above) and detects VS Code/VS Code Insiders/Cursor as the
+parent IDE. This fires automatically, not on an explicit user action: the first bind after that file
+exists silently reprints it.
+
+**Why accepted**: a byte-preserving surgical splice (find the frust entry's byte span inside the
+original text and edit only that span, leaving everything else untouched) is the real fix, but was
+judged disproportionate for this round — hand-rolling JSONC span-splicing is real parser-writing risk
+for a config-generation feature, and no byte-preserving JSON/JSONC crate is pinned in this workspace
+(pins are LAW, `docs/DEVELOPMENT.md`'s Version-Pin Policy). `toml_edit` is the precedent for exactly
+this shape on the TOML side (`docs/TUI_DEVELOPMENT.md`'s pin row), but it has no JSONC-editing
+equivalent pinned here. The chosen remedy for this round is honest disclosure — this entry, plus the
+doc-comment corrections on `merge_config`/`run_generator`/`post_write` — rather than a bigger,
+unreviewed parser change.
+
+**Evidence**: `crates/frust-dap/src/ide_config/vscode.rs`'s `VSCodeGenerator::merge_config` (clean →
+parse → reprint) and its module doc; `crates/frust-dap/src/ide_config/merge.rs`'s `clean_jsonc`
+(comment/trailing-comma stripping) and `to_pretty_json` (`serde_json::to_string_pretty` reprint);
+`crates/frust-dap/src/ide_config/mod.rs`'s `run_generator` (byte-equality skip check against the
+reprinted output only).
+
+---
+
 ### `tui-widget-tree-refusal-code-loss` — an embedded `widget_tree` failure loses its original error code
 
 **Observed**: `TuiSessionBackend::fetch_widget_tree` classifies a pull failure into

@@ -41,7 +41,8 @@ impl NeovimGenerator {
 -- Option 2: Use load_launchjs() to read .vscode/launch.json:
 --   require('dap.ext.vscode').load_launchjs()
 --
--- Option 2 is recommended -- `frust dap` auto-generates .vscode/launch.json
+-- Option 2 is recommended -- frust's embedded DAP server auto-generates
+-- .vscode/launch.json (there is no standalone `frust dap` process)
 
 local dap = require('dap')
 

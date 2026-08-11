@@ -1,16 +1,24 @@
 //! VS Code DAP configuration generator.
 //!
 //! Generates or merges a `.vscode/launch.json` entry so that VS Code, VS Code
-//! Insiders, and Cursor can connect to `frust dap`'s server via the
-//! `debugServer` field (a VS Code-internal mechanism that redirects the debug
-//! adapter transport to an already-running TCP server, rather than spawning
-//! one). `request` is `"launch"`, not `"attach"` — the frust DAP server is
-//! launch-based (`docs/CLI_ARCHITECTURE.md`'s `frust-dap` row), and there is
-//! no separate "already running app" for VS Code to attach to. The entry
+//! Insiders, and Cursor can connect to the embedded DAP server (there is no
+//! standalone `frust dap` process — see `docs/CLI_ARCHITECTURE.md`'s
+//! `frust-dap` row) via the `debugServer` field (a VS Code-internal mechanism
+//! that redirects the debug adapter transport to an already-running TCP
+//! server, rather than spawning one). `request` is `"launch"`, not
+//! `"attach"` — the frust DAP server is launch-based, and there is no
+//! separate "already running app" for VS Code to attach to. The entry
 //! carries no `cwd`/`projectRoot` field: the server always launches from its
 //! own process's project root by design (`docs/LIMITATIONS.md`'s
 //! `dap-tcp-unauthenticated-v1` — on TCP that is the server's cwd, not the
 //! client's), so there is nothing for VS Code to tell it.
+//!
+//! **The merge is semantic, not byte-preserving.** [`VSCodeGenerator::merge_config`]
+//! parses the existing file as JSONC ([`super::merge::clean_jsonc`]) and
+//! reprints the whole document ([`super::merge::to_pretty_json`]) — every
+//! non-frust entry's *data* survives, but comments and hand formatting in a
+//! pre-existing, hand-authored `launch.json` do not survive the first merge.
+//! See `docs/LIMITATIONS.md`'s `dap-ide-config-normalizes-launchjson`.
 
 use std::path::{Path, PathBuf};
 
