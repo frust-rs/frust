@@ -65,9 +65,12 @@ only (S1–S8, D1–D2 per `benchmarks/PROTOCOL.md`), not a framework showcase.
   `frust-mcp`'s `SessionBackend` trait — not `SessionEngine` — so a DAP client and the workbench's
   own UI supervise the same sessions rather than each owning a world of their own (see
   [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)) — both crossings stay entirely within tooling and drag
-  in no framework crate. `frust-cli` itself has **no dependency at all**, direct or transitive, on
-  `frust-mcp` or `frust-dap` — no `mcp` subcommand, no `dap` subcommand; an MCP or DAP client
-  reaches a session only through a running `frust-tui`. `frust-devtools` (the framework-side debug
+  in no framework crate. `frust-cli` itself has **no direct dependency** on `frust-mcp` or
+  `frust-dap` — no `mcp` subcommand, no `dap` subcommand — but both enter its graph
+  **transitively** through `frust-tui`, which `frust-cli` depends on directly and calls
+  in-process (not as a subprocess) for `frust tui` and bare `frust`; `frust-tui` remains the sole
+  embedding boundary — an MCP or DAP client reaches a session only through a running `frust-tui`.
+  `frust-devtools` (the framework-side debug
   service a shell hosts) is the mirror rule: it depends on no framework or tooling crate either —
   the two sides of the devtools wire meet only at the protocol leaf. See
   [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md).
