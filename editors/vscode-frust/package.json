@@ -1,7 +1,7 @@
 {
   "name": "vscode-frust",
   "displayName": "Frust",
-  "description": "Debug adapter registration for Frust apps: launches `frust dap` over stdio.",
+  "description": "Debug adapter registration for Frust apps: connects to the embedded frust TUI DAP server.",
   "version": "0.1.0",
   "publisher": "f0x-it",
   "private": true,
@@ -19,10 +19,10 @@
     "configuration": {
       "title": "Frust",
       "properties": {
-        "frust.dapPath": {
-          "type": "string",
-          "default": "",
-          "description": "Path to the `frust` executable used to launch the debug adapter (`frust dap`). Empty resolves `frust` from PATH."
+        "frust.dapPort": {
+          "type": "number",
+          "default": 4849,
+          "description": "Port that the embedded frust TUI DAP server listens on. Configure via the TUI's DAP settings dialog."
         }
       }
     },
@@ -62,21 +62,19 @@
           {
             "type": "frust",
             "request": "launch",
-            "name": "Launch Frust app",
-            "projectRoot": "${workspaceFolder}",
-            "mode": "debug"
+            "name": "Frust (TUI DAP)",
+            "debugServer": 4849
           }
         ],
         "configurationSnippets": [
           {
-            "label": "Frust: Launch",
-            "description": "Launch a Frust app via the `frust dap` debug adapter.",
+            "label": "Frust (TUI DAP)",
+            "description": "Connect to the embedded frust TUI DAP server.",
             "body": {
               "type": "frust",
               "request": "launch",
-              "name": "Launch Frust app",
-              "projectRoot": "^\"\\${workspaceFolder}\"",
-              "mode": "debug"
+              "name": "Frust (TUI DAP)",
+              "debugServer": 4849
             }
           }
         ]

@@ -3,28 +3,22 @@
 const vscode = require('vscode');
 
 /**
- * Resolves the `frust` executable to invoke for the debug adapter.
- *
- * Honors the `frust.dapPath` user/workspace setting when set; otherwise falls back to the
- * literal `frust`, resolved from PATH by the OS at spawn time.
- *
- * @returns {string}
- */
-function resolveDapPath() {
-  const configured = vscode.workspace.getConfiguration('frust').get('dapPath');
-  if (typeof configured === 'string' && configured.trim().length > 0) {
-    return configured;
-  }
-  return 'frust';
-}
-
-/**
  * @implements {vscode.DebugAdapterDescriptorFactory}
  */
 class FrustDebugAdapterDescriptorFactory {
   // eslint-disable-next-line no-unused-vars
   createDebugAdapterDescriptor(session, executable) {
-    return new vscode.DebugAdapterExecutable(resolveDapPath(), ['dap']);
+    // Resolve port from launch config's debugServer, workspace setting, or default
+    let port = 4849; // default
+    if (session.configuration && typeof session.configuration.debugServer === 'number') {
+      port = session.configuration.debugServer;
+    } else {
+      const configured = vscode.workspace.getConfiguration('frust').get('dapPort');
+      if (typeof configured === 'number') {
+        port = configured;
+      }
+    }
+    return new vscode.DebugAdapterServer(port);
   }
 }
 
