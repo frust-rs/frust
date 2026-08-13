@@ -11,10 +11,11 @@
 //! deliberately **not** [`NavigatorController::push_transparent_for_result`]
 //! (`material::dialog`'s). The page below stays visible under the scrim, the
 //! navigator's modal contract makes it modal, and [`show_glyph_sheet`] wraps the
-//! push, wiring dismissal to `controller.pop()`; nav is consumed read-only.
-//! Enforcing "at most one dialog/sheet/overlay at a time" stays the app's (or
-//! the navigator's) concern — this widget does not police it, like
-//! [`crate::glyph::dialog`].
+//! push, wiring dismissal to `controller.pop()` **composed with** any
+//! [`on_close`](GlyphSheetView::on_close) the caller set (see *Programmatic
+//! close* below); nav is consumed read-only. Enforcing "at most one
+//! dialog/sheet/overlay at a time" stays the app's (or the navigator's) concern
+//! — this widget does not police it, like [`crate::glyph::dialog`].
 //!
 //! # Enter/exit staging — the scrim fades, the panel slides (independently)
 //!
@@ -90,8 +91,9 @@
 //!
 //! [`GlyphSheetView::dismissable`] (default `true`) is the single barrier flag
 //! gating the scrim tap, the handle drag, `Escape`, and an Android back press
-//! together — `false` disables all four (only an app-driven `controller.pop()`
-//! still closes it) and [`show_glyph_sheet`] pushes with
+//! together — `false` disables all four (only the app itself still closes it,
+//! through [`GlyphSheetHandle`] below or a bare `controller.pop()`) and
+//! [`show_glyph_sheet`] pushes with
 //! [`BackPolicy::Veto`](crate::nav::navigator::BackPolicy::Veto). `true` pushes
 //! [`BackPolicy::DismissAnimated`](crate::nav::navigator::BackPolicy::DismissAnimated):
 //! `show_glyph_sheet` hands the widget the shared dismiss-signal cell
@@ -99,6 +101,40 @@
 //! widget's `paint` pass compares it against the last-seen value and calls
 //! [`begin_exit`](GlyphSheetWidget::begin_exit) — the identical staged exit a
 //! scrim tap/drag/`Escape` drives (mirrors dialog's `observe_dismiss_signal`).
+//!
+//! # Programmatic close — [`GlyphSheetHandle`], the same staged exit
+//!
+//! [`show_glyph_sheet`] returns a cheap cloneable [`GlyphSheetHandle`], and
+//! [`close`](GlyphSheetHandle::close) bumps that very same dismiss-signal cell.
+//! So an app-driven close (a picker row that closes on selection) plays the
+//! **identical** scrim-fade + panel-slide exit and pops on completion — where a
+//! bare `controller.pop()` tears the page, and with it this widget, down
+//! mid-motion, so the sheet just vanishes. The cell is wired for *every* pushed
+//! sheet, `dismissable` or not; only the navigator's `BackPolicy` differs.
+//!
+//! Exactly-once by construction: a repeat close, or a close landing while a
+//! drag/scrim/`Escape`/back exit is already in flight, is absorbed by
+//! `begin_exit`'s idempotence and the terminal `Dismissed` phase — one exit, one
+//! pop. A close requested before the pushed page has painted once is honoured
+//! too: the widget starts at generation 0 rather than at the cell's current
+//! value, so the bump is still observed on its first paint.
+//!
+//! **A programmatic close ignores
+//! [`dismissable(false)`](GlyphSheetView::dismissable).** That flag is a barrier
+//! against the *user* — scrim, drag, `Escape`, back — while a close through the
+//! handle is the app's own act, the same act `controller.pop()` already was; a
+//! sheet the app cannot close is a stuck app, not a strict one.
+//!
+//! # `on_close` composition: the pop is enqueued first
+//!
+//! [`show_glyph_sheet`] composes rather than replaces: if the built view already
+//! carries an [`on_close`](GlyphSheetView::on_close), the wired callback runs
+//! `controller.pop()` **first** and the caller's callback second, each exactly
+//! once, on the one exit completion. That order is load-bearing — both run
+//! inside the same paint, so any navigator op the caller's callback issues
+//! (pushing a confirmation dialog as the sheet leaves) queues *behind* the
+//! sheet's own pop and is applied after it; caller-first would pop the very page
+//! the callback just pushed.
 //!
 //! # Interaction with `overlay_host`
 //!
@@ -296,9 +332,10 @@ pub struct GlyphSheetView<State: 'static> {
     content: AnyView<State>,
     on_close: Option<OnClose>,
     dismissable: bool,
-    /// The shared back-press dismiss-signal cell (the `DismissAnimated` seam)
-    /// — wired internally by [`show_glyph_sheet`], never part of the public
-    /// builder surface (see the [module docs](self)).
+    /// The shared dismiss-signal cell (the `DismissAnimated` back-press seam,
+    /// and [`GlyphSheetHandle`]'s programmatic close) — wired internally by
+    /// [`show_glyph_sheet`], never part of the public builder surface (see the
+    /// [module docs](self)).
     dismiss_signal: Option<Rc<Cell<u64>>>,
 }
 
@@ -324,43 +361,86 @@ pub fn GlyphSheet<State: 'static, V: View<State>>(content: V) -> GlyphSheetView<
 impl<State: 'static> GlyphSheetView<State> {
     /// Whether this sheet can be dismissed by the user at all — the scrim
     /// tap, the handle drag, `Escape`, and an Android back press (default
-    /// `true`; see the [module docs](self)). `false` disables all four; only
-    /// an app-driven `controller.pop()` still closes it.
+    /// `true`; see the [module docs](self)). `false` disables all four; the
+    /// app still closes it itself, through [`GlyphSheetHandle::close`] (staged)
+    /// or a bare `controller.pop()` (immediate).
     pub fn dismissable(mut self, dismissable: bool) -> Self {
         self.dismissable = dismissable;
         self
     }
 
     /// Set the state-free close callback — invoked once, from paint, when the
-    /// exit animation completes after a scrim tap/handle drag/Escape cancel.
-    /// [`show_glyph_sheet`] wires this to `controller.pop()` automatically.
+    /// exit animation completes after any dismissal (a scrim tap, handle drag,
+    /// `Escape`, back press, or [`GlyphSheetHandle::close`]).
+    /// [`show_glyph_sheet`] *composes* `controller.pop()` with this rather than
+    /// replacing it: the pop is enqueued first, then this callback runs (see
+    /// the [module docs](self)'s "`on_close` composition").
     pub fn on_close<F: Fn() + 'static>(mut self, on_close: F) -> Self {
         self.on_close = Some(Rc::new(on_close));
         self
     }
 }
 
+/// A programmatic close handle for one sheet pushed by [`show_glyph_sheet`] —
+/// the app-side seam onto the widget's own staged exit (see the
+/// [module docs](self)'s "Programmatic close").
+///
+/// Cheap and cloneable (one `Rc` cell, no `State` parameter, so a sheet body
+/// can pass it around freely). Every clone drives the same sheet, and closing
+/// it more than once — or while a user dismissal is already exiting — still
+/// yields exactly one exit and one pop.
+#[derive(Clone, Debug)]
+pub struct GlyphSheetHandle {
+    /// The pushed page's dismiss-signal cell: the identical generation counter
+    /// [`NavigatorController::request_back`] bumps, observed by the widget's
+    /// `paint` (see [`GlyphSheetWidget`]'s `dismiss_signal` field).
+    signal: Rc<Cell<u64>>,
+}
+
+impl GlyphSheetHandle {
+    /// Close the sheet the way the user's own gestures close it: begin the
+    /// staged exit (scrim fade + panel slide over `durations.fast`) and pop the
+    /// page when it completes — never an immediate pop.
+    ///
+    /// Idempotent, and inert once the sheet is exiting or gone. Closes a
+    /// [`dismissable(false)`](GlyphSheetView::dismissable) sheet too: that flag
+    /// gates *user* dismissal, and this is the app's own act (see the
+    /// [module docs](self)).
+    pub fn close(&self) {
+        self.signal.set(self.signal.get().wrapping_add(1));
+    }
+}
+
 /// Push `build`'s sheet as a transparent navigator page (the page below stays
-/// visible under the scrim), and register `on_result` for the value the sheet
-/// pops with. The scrim tap/handle drag/Escape cancel is wired to
-/// `controller.pop()` (an empty [`PopResult`]).
+/// visible under the scrim), register `on_result` for the value the sheet pops
+/// with, and return the sheet's [`GlyphSheetHandle`] for a programmatic close.
+///
+/// The scrim tap/handle drag/Escape cancel is wired to `controller.pop()` (an
+/// empty [`PopResult`]) **composed** with any
+/// [`on_close`](GlyphSheetView::on_close) `build`'s view already carries: on
+/// the one exit completion the pop is enqueued first, then the caller's
+/// callback runs, each exactly once (see the [module docs](self)'s "`on_close`
+/// composition").
 ///
 /// The sheet is pushed with [`TransitionSpec::NONE`] — the navigator supplies
 /// the modal contract, the widget supplies its own scrim-fade + panel-slide
 /// staging (see the [module docs](self)).
 ///
 /// ```ignore
-/// show_glyph_sheet(
+/// let sheet = show_glyph_sheet(
 ///     &state.nav,
 ///     || glyph_sheet(pane_picker_rows()),
 ///     |state: &mut State, result: PopResult| { /* ... */ },
 /// );
+/// // …later, from a row that acts and dismisses:
+/// sheet.close();
 /// ```
 pub fn show_glyph_sheet<State, B, R>(
     controller: &NavigatorController<State>,
     build: B,
     on_result: R,
-) where
+) -> GlyphSheetHandle
+where
     State: 'static,
     B: Fn() -> GlyphSheetView<State> + 'static,
     R: Fn(&mut State, PopResult) + 'static,
@@ -372,7 +452,11 @@ pub fn show_glyph_sheet<State, B, R>(
     // though `build` is re-invoked on every later navigator rebuild to diff
     // the page's content.
     let dismissable = build().dismissable;
-    let signal = dismissable.then(|| Rc::new(Cell::new(0u64)));
+    // One cell, two writers: the navigator's back press (only under
+    // `DismissAnimated`) and the returned handle. The widget always gets it —
+    // a non-dismissable sheet still owes the app a staged close — but the
+    // navigator only gets it when a back press may legitimately dismiss.
+    let signal = Rc::new(Cell::new(0u64));
     let widget_signal = signal.clone();
     let mut options = PushOptions::transparent()
         .transition(TransitionSpec::NONE)
@@ -382,18 +466,28 @@ pub fn show_glyph_sheet<State, B, R>(
             BackPolicy::Veto
         })
         .on_result(on_result);
-    if let Some(sig) = &signal {
-        options = options.dismiss_signal(sig.clone());
+    if dismissable {
+        options = options.dismiss_signal(signal.clone());
     }
     controller.push_with_options(
         move || {
             let ctrl = close_ctrl.clone();
-            let mut view = build().on_close(move || ctrl.pop());
-            view.dismiss_signal = widget_signal.clone();
+            let mut view = build();
+            // Compose, never clobber: the caller's own `on_close` survives the
+            // wiring, and runs after the pop it is composed with.
+            let caller_close = view.on_close.take();
+            let mut view = view.on_close(move || {
+                ctrl.pop();
+                if let Some(on_close) = &caller_close {
+                    on_close();
+                }
+            });
+            view.dismiss_signal = Some(widget_signal.clone());
             any::<State, _>(view)
         },
         options,
     );
+    GlyphSheetHandle { signal }
 }
 
 /// The sheet's enter/exit lifecycle phase (mirrors
@@ -404,7 +498,8 @@ enum Phase {
     Enter,
     /// Fully shown, at rest.
     Shown,
-    /// Animating out after a scrim/handle-drag/Escape cancel.
+    /// Animating out after a scrim/handle-drag/Escape/back cancel or a
+    /// [`GlyphSheetHandle::close`].
     Exit,
     /// Exit complete; the close callback has fired and the page will be popped.
     Dismissed,
@@ -415,11 +510,16 @@ pub struct GlyphSheetWidget {
     content: ChildPod,
     on_close: Option<OnClose>,
     dismissable: bool,
-    /// The shared back-press dismiss-signal cell (the `DismissAnimated`
-    /// seam) — see [`observe_dismiss_signal`](Self::observe_dismiss_signal).
+    /// The shared dismiss-signal cell — the one channel carrying **both** an
+    /// Android back press (the `DismissAnimated` seam) and a
+    /// [`GlyphSheetHandle::close`]; see
+    /// [`observe_dismiss_signal`](Self::observe_dismiss_signal).
     dismiss_signal: Option<Rc<Cell<u64>>>,
-    /// The last generation observed from `dismiss_signal` (0 with no signal
-    /// wired, or a `Veto`/non-dismissable sheet).
+    /// The last generation observed from `dismiss_signal`. Starts at 0, never
+    /// at the cell's build-time value: [`show_glyph_sheet`] mints the cell
+    /// fresh per push, so a non-zero generation when this widget builds is a
+    /// close requested before the page mounted — swallowing it would strand a
+    /// sheet the app has already closed on screen.
     last_seen_dismiss: u64,
     /// The bottom-anchored panel rect **at rest** (fully shown), in the
     /// widget's own local coordinate space — used both to lay the panel out
@@ -457,7 +557,7 @@ impl<State: 'static> View<State> for GlyphSheetView<State> {
             on_close: self.on_close.clone(),
             dismissable: self.dismissable,
             dismiss_signal: self.dismiss_signal.clone(),
-            last_seen_dismiss: self.dismiss_signal.as_ref().map(|s| s.get()).unwrap_or(0),
+            last_seen_dismiss: 0,
             panel: Rect::ZERO,
             handle_target: Rect::ZERO,
             phase: Phase::Enter,
@@ -498,10 +598,12 @@ impl<State: 'static> View<State> for GlyphSheetView<State> {
 
 impl GlyphSheetWidget {
     /// Begin the exit animation (a scrim tap/handle drag/Escape cancel).
-    /// Idempotent: only an `Enter`/`Shown` sheet can start exiting. **Every**
-    /// dismiss path (scrim, handle, `Escape`, back) funnels through this one
-    /// function — see the [module docs](self)'s drag-to-dismiss note on why
-    /// that matters for the scrim-fade requirement.
+    /// Idempotent: only an `Enter`/`Shown` sheet can start exiting, so a
+    /// second request mid-exit — or after `Dismissed` — is a no-op. **Every**
+    /// close path (scrim, handle, `Escape`, back, and
+    /// [`GlyphSheetHandle::close`]) funnels through this one function — see
+    /// the [module docs](self)'s drag-to-dismiss note on why that matters for
+    /// the scrim-fade requirement.
     fn begin_exit(&mut self) {
         if matches!(self.phase, Phase::Enter | Phase::Shown) {
             self.phase = Phase::Exit;
@@ -509,11 +611,17 @@ impl GlyphSheetWidget {
         }
     }
 
-    /// Observe the shared back-press dismiss-signal cell (see the
-    /// `dismiss_signal` field docs) and begin the exit staging exactly once
-    /// per bump (mirrors `crate::glyph::dialog::observe_dismiss_signal`). A
-    /// back request flags `PAINT`, so this always runs before the next frame
-    /// is shown.
+    /// Observe the shared dismiss-signal cell (see the `dismiss_signal` field
+    /// docs) and begin the exit staging exactly once per bump — whether the
+    /// bump came from a back press or from [`GlyphSheetHandle::close`]
+    /// (mirrors `crate::glyph::dialog::observe_dismiss_signal`). A back request
+    /// flags `PAINT`, so this always runs before the next frame is shown;
+    /// a handle close rides the app's own rebuild.
+    ///
+    /// Deliberately **not** gated on `dismissable`: the navigator only routes a
+    /// back press here for a dismissable sheet in the first place (a
+    /// non-dismissable one pushes [`BackPolicy::Veto`]), so the only writer
+    /// left is the app's own handle, which closes either kind.
     fn observe_dismiss_signal(&mut self) {
         if let Some(signal) = &self.dismiss_signal {
             let current = signal.get();
@@ -1266,5 +1374,336 @@ mod tests {
 
     fn leaf_any_widget(w: f64, h: f64) -> impl View<(), Element = crate::test_support::LeafWidget> {
         crate::test_support::leaf(w, h)
+    }
+
+    // -- Programmatic close: `GlyphSheetHandle` over a live navigator --------
+
+    /// The nav-driven fixture's state: one entry per pop result the navigator
+    /// delivered — exactly one per pushed page, however that page went away,
+    /// which is what makes it the pop counter these tests assert on.
+    #[derive(Default)]
+    struct NavState {
+        results: usize,
+    }
+
+    /// A fixed-size leaf over `NavState` (the crate fixture's `Leaf` is
+    /// `View<()>`-only) — the root page and the sheet's content both.
+    struct Fixed {
+        size: Size,
+    }
+    struct FixedWidget {
+        size: Size,
+    }
+    fn fixed(width: f64, height: f64) -> Fixed {
+        Fixed {
+            size: Size::new(width, height),
+        }
+    }
+    impl View<NavState> for Fixed {
+        type Element = FixedWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> FixedWidget {
+            FixedWidget { size: self.size }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut FixedWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+    impl Widget for FixedWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(self.size)
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            scene.fill_rect(ctx.origin(), ctx.size(), Color::BLACK);
+        }
+    }
+
+    fn area() -> Size {
+        Size::new(400.0, 600.0)
+    }
+
+    /// Frame time by which a sheet's 220ms enter has settled to `Phase::Shown`.
+    const ENTER_SETTLED_MS: f64 = 400.0;
+
+    /// A navigator hosting one root page, driven through a real [`RenderRoot`]
+    /// — the only harness that can observe an actual *pop*, which is the whole
+    /// point of a programmatic close (the widget-level tests above see the
+    /// phase machine, never the navigator).
+    /// The harness's app logic: the one navigator, rebuilt each pass.
+    type NavApp = Box<dyn FnMut(&mut NavState) -> NavigatorView<NavState>>;
+
+    struct Harness {
+        root: RenderRoot<NavState, NavigatorView<NavState>>,
+        app: NavApp,
+        state: NavState,
+        tcx: TextContext,
+    }
+
+    impl Harness {
+        fn new(controller: &NavigatorController<NavState>) -> Self {
+            let ctrl = controller.clone();
+            let mut harness = Harness {
+                root: RenderRoot::new(),
+                app: Box::new(move |_: &mut NavState| {
+                    navigator(&ctrl, || core_any::<NavState, _>(fixed(400.0, 600.0)))
+                }),
+                state: NavState::default(),
+                tcx: TextContext::new(),
+            };
+            harness.rebuild();
+            harness
+        }
+
+        /// Rebuild — applying any queued navigator op, in queue order — and
+        /// lay out.
+        fn rebuild(&mut self) {
+            self.root.rebuild(&mut self.app, &mut self.state);
+            self.root
+                .layout_with_text(area(), &mut self.tcx as &mut dyn Any);
+        }
+
+        fn paint(&mut self, ms: f64) {
+            self.paint_recorded(ms);
+        }
+
+        fn paint_recorded(&mut self, ms: f64) -> Recorder {
+            let mut rec = Recorder::default();
+            self.root.paint(&mut rec, ft_ms(ms));
+            rec
+        }
+
+        fn event(&mut self, event: &InputEvent) {
+            self.root.event(&mut self.state, event);
+        }
+
+        /// Mount the pushed sheet and settle its enter animation.
+        fn open(&mut self) {
+            self.rebuild();
+            self.paint(0.0);
+            self.paint(ENTER_SETTLED_MS);
+        }
+
+        /// Apply whatever the completed exit enqueued, and flush the pop
+        /// result (the navigator's own broadcast drain).
+        fn flush(&mut self) {
+            self.rebuild();
+            self.event(&ev(PointerPhase::Move, 5.0, 5.0));
+        }
+    }
+
+    /// Whether `rec` caught the sheet's scrim mid-fade — the discriminator for
+    /// "a staged exit is in flight": a settled scrim sits at exactly
+    /// `SCRIM_ALPHA`, and the root page's own full-area fill is opaque.
+    fn scrim_is_mid_fade(rec: &Recorder) -> bool {
+        rec.rects.iter().any(|(_, size, color)| {
+            *size == area() && color.components[3] > 0.0 && color.components[3] < SCRIM_ALPHA
+        })
+    }
+
+    fn open_sheet(controller: &NavigatorController<NavState>) -> (Harness, GlyphSheetHandle) {
+        let mut harness = Harness::new(controller);
+        let handle = show_glyph_sheet(
+            controller,
+            || glyph_sheet(fixed(300.0, 200.0)),
+            |state: &mut NavState, _result: PopResult| state.results += 1,
+        );
+        harness.open();
+        (harness, handle)
+    }
+
+    #[test]
+    fn handle_close_plays_the_staged_exit_and_pops_on_completion() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let (mut h, sheet) = open_sheet(&controller);
+        assert_eq!(controller.depth(), 2, "the sheet page is up");
+
+        sheet.close();
+
+        // The first paint after the close observes it and seeds the exit; the
+        // next one is mid-motion, and that motion is the widget's own — a
+        // scrim mid-fade (strictly between transparent and its full alpha)
+        // under a downward panel translate, exactly what a drag/scrim/Escape
+        // dismissal paints.
+        h.paint(ENTER_SETTLED_MS);
+        let rec = h.paint_recorded(ENTER_SETTLED_MS + 75.0);
+        h.rebuild();
+        assert_eq!(controller.depth(), 2, "the sheet is exiting, not unmounted");
+        assert_eq!(h.state.results, 0, "the pop waits for the exit to finish");
+        assert!(scrim_is_mid_fade(&rec), "the scrim is mid-fade");
+        assert!(
+            rec.transforms.iter().any(|t| {
+                let c = t.as_coeffs();
+                c[5] > 0.0 && (c[0], c[3]) == (1.0, 1.0)
+            }),
+            "the panel is mid-slide under a pure downward translate"
+        );
+
+        // Past the 150ms exit: `on_close` fires from paint and the next
+        // rebuild applies the pop it enqueued.
+        h.paint(ENTER_SETTLED_MS + 200.0);
+        h.flush();
+        assert_eq!(controller.depth(), 1, "the completed exit popped the page");
+        assert_eq!(h.state.results, 1, "exactly one pop");
+    }
+
+    #[test]
+    fn repeat_closes_and_a_close_mid_exit_still_pop_exactly_once() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let mut h = Harness::new(&controller);
+        let closes = Rc::new(Cell::new(0u32));
+        let counter = closes.clone();
+        let sheet = show_glyph_sheet(
+            &controller,
+            move || {
+                let counter = counter.clone();
+                glyph_sheet(fixed(300.0, 200.0)).on_close(move || counter.set(counter.get() + 1))
+            },
+            |state: &mut NavState, _result: PopResult| state.results += 1,
+        );
+        h.open();
+
+        sheet.close();
+        sheet.close(); // two bumps before a paint: one observed change
+        h.paint(ENTER_SETTLED_MS);
+        sheet.close(); // mid-exit: absorbed by `begin_exit`'s phase guard
+        h.paint(ENTER_SETTLED_MS + 100.0);
+        h.paint(ENTER_SETTLED_MS + 200.0); // exit complete
+        sheet.close(); // past `Dismissed`: absorbed too
+        h.paint(ENTER_SETTLED_MS + 300.0);
+        h.flush();
+
+        assert_eq!(closes.get(), 1, "one close callback — so one pop");
+        assert_eq!(h.state.results, 1);
+        assert_eq!(controller.depth(), 1);
+    }
+
+    #[test]
+    fn a_close_during_a_drag_exit_is_absorbed_into_the_one_pop() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let (mut h, sheet) = open_sheet(&controller);
+
+        // Drag the handle past the dismiss threshold: the panel is
+        // 44 + 200 = 244px tall at the bottom of the 600px area, so its strip
+        // starts at y = 356 and the threshold is 122px.
+        let handle_y = area().height - (HANDLE_TOUCH_TARGET + 200.0) + 10.0;
+        h.event(&ev(PointerPhase::Down, 200.0, handle_y));
+        h.event(&ev(PointerPhase::Up, 200.0, handle_y + 150.0));
+        h.paint(ENTER_SETTLED_MS); // seeds the drag's own exit
+        let rec = h.paint_recorded(ENTER_SETTLED_MS + 75.0);
+        assert!(
+            scrim_is_mid_fade(&rec),
+            "the drag's staged exit is genuinely in flight"
+        );
+
+        sheet.close(); // the app closes a sheet the user is already dismissing
+        h.paint(ENTER_SETTLED_MS + 200.0);
+        h.flush();
+
+        assert_eq!(controller.depth(), 1);
+        assert_eq!(h.state.results, 1, "one exit, one pop");
+    }
+
+    #[test]
+    fn the_callers_on_close_composes_with_the_pop_and_runs_after_it() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let mut h = Harness::new(&controller);
+        let calls = Rc::new(Cell::new(0u32));
+        let counter = calls.clone();
+        let push_ctrl = controller.clone();
+        let sheet = show_glyph_sheet(
+            &controller,
+            move || {
+                let counter = counter.clone();
+                let ctrl = push_ctrl.clone();
+                // The callback issues a navigator op of its own — the exact
+                // shape the composition order exists for.
+                glyph_sheet(fixed(300.0, 200.0)).on_close(move || {
+                    counter.set(counter.get() + 1);
+                    ctrl.push(|| core_any::<NavState, _>(fixed(400.0, 600.0)));
+                })
+            },
+            |state: &mut NavState, _result: PopResult| state.results += 1,
+        );
+        h.open();
+
+        sheet.close();
+        h.paint(ENTER_SETTLED_MS);
+        h.paint(ENTER_SETTLED_MS + 200.0);
+        h.flush();
+
+        assert_eq!(calls.get(), 1, "the caller's `on_close` ran exactly once");
+        assert_eq!(
+            h.state.results, 1,
+            "…and the wired pop ran too, once — the sheet's own page is gone \
+             (caller-first would have queued the push ahead of the pop, so the \
+             pop would have taken the pushed page and left the sheet up)"
+        );
+        assert_eq!(
+            controller.depth(),
+            2,
+            "pop first, callback second: the page the callback pushed survives"
+        );
+    }
+
+    #[test]
+    fn a_non_dismissable_sheet_vetoes_back_but_still_closes_programmatically() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let mut h = Harness::new(&controller);
+        let sheet = show_glyph_sheet(
+            &controller,
+            || glyph_sheet(fixed(300.0, 200.0)).dismissable(false),
+            |state: &mut NavState, _result: PopResult| state.results += 1,
+        );
+        h.open();
+
+        // The barrier still holds against the user: `BackPolicy::Veto` never
+        // reaches the dismiss signal, so no exit begins.
+        controller.request_back();
+        h.rebuild();
+        h.paint(500.0);
+        h.paint(900.0);
+        h.flush();
+        assert_eq!(
+            controller.depth(),
+            2,
+            "a back press leaves a non-dismissable sheet up"
+        );
+        assert_eq!(h.state.results, 0);
+
+        // The app's own close is not the user's gesture — it closes, staged.
+        sheet.close();
+        h.paint(1000.0);
+        h.rebuild();
+        assert_eq!(controller.depth(), 2, "the exit plays before the pop");
+        h.paint(1200.0);
+        h.flush();
+        assert_eq!(controller.depth(), 1);
+        assert_eq!(h.state.results, 1);
+    }
+
+    #[test]
+    fn a_close_before_the_sheet_first_paints_is_still_honoured() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let mut h = Harness::new(&controller);
+        let sheet = show_glyph_sheet(
+            &controller,
+            || glyph_sheet(fixed(300.0, 200.0)),
+            |state: &mut NavState, _result: PopResult| state.results += 1,
+        );
+        // Closed before the queued push has even been applied: the widget must
+        // start at generation 0 and observe the bump on its first paint.
+        sheet.close();
+        h.rebuild();
+        h.paint(0.0);
+        h.paint(100.0);
+        h.paint(300.0);
+        h.flush();
+
+        assert_eq!(controller.depth(), 1, "the sheet closed itself out");
+        assert_eq!(h.state.results, 1);
     }
 }
