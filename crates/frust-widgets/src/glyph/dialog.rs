@@ -71,6 +71,31 @@
 //! only a key it declines (Escape, which a text field doesn't handle) falls
 //! through to the dismiss check.
 //!
+//! **Blur without dismiss:** a `Down` that reaches neither an action nor the
+//! slot — dead panel space: the padding, the title, the gaps — while the slot
+//! *did* hold the session ends that session: the dialog publishes an inactive
+//! IME surface, which the root reads as a full `release_focus_session`, so the
+//! field blurs and the platform keyboard retracts. The dialog itself stays open
+//! and stays focused (the barrier consumes the Down, and the same dispatch's
+//! focus claim re-applies after the release — `RenderRoot::event`'s documented
+//! ordering), so `Escape` keeps working afterwards. Tapping dialog chrome is
+//! how a user dismisses the keyboard without answering the dialog.
+//!
+//! # Keyboard avoidance
+//!
+//! The panel centers in the **keyboard-free band**, not the whole window:
+//! `WindowInsets::view_insets` (the fully-obscured edges — in practice the IME;
+//! system bars live in `view_padding`) is read from [`LayoutCtx`] every layout
+//! pass and shrinks the band the panel centers in, so an open keyboard slides
+//! the panel up and its action row stays reachable. Insets are already a layout
+//! input — a shell's `set_insets` flags LAYOUT — so the retraction re-centers
+//! the panel by the same path, with no widget-side state.
+//!
+//! The panel's *height* is deliberately not clamped to the band: a panel taller
+//! than the free space pins to the top and overflows downward, exactly the
+//! documented overflow degrade an oversized content slot already has (above) —
+//! wrap tall content in your own scroller.
+//!
 //! # `dismissable(bool)` + back-dismiss
 //!
 //! [`GlyphDialogView::dismissable`] (default `true`) is the single barrier flag
@@ -102,9 +127,9 @@ use std::time::Duration;
 
 use frust_core::accesskit::Role;
 use frust_core::{
-    AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Curve, EventCtx, EventResult,
-    FrameTime, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, PointerPhase,
-    SemanticsCtx, View, Widget, any,
+    AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Curve, EditingState, EventCtx,
+    EventResult, FrameTime, ImeState, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx, PaintScene,
+    PointerPhase, SemanticsCtx, View, Widget, any,
 };
 use frust_text::{FontFamily, FontWeight, GenericSlot, LineHeight};
 use frust_theme::Theme;
@@ -185,6 +210,31 @@ const EXIT_CURVE: Curve = Curve::Cubic(0.4, 0.0, 1.0, 1.0);
 /// `reduce_motion`'s collapsed crossfade duration (mirrors
 /// `nav::transition::REDUCE_MOTION_DURATION`).
 const REDUCE_MOTION_DURATION: Duration = Duration::from_millis(120);
+
+/// The cleared/inactive IME surface published when a Down on dead panel space
+/// ends the body slot's session, so the platform keyboard retracts (mirrors
+/// `nav::navigator`'s and `motion::switcher`'s identical local helpers).
+///
+/// `active: false` is what makes this a **session release** rather than a
+/// surface refresh: `RenderRoot::event` reads the inactive flag as "this
+/// session is over" and takes the full release (focus flag *and* stored
+/// surface), before it applies the same dispatch's focus claim. The remaining
+/// fields are the empty/no-selection form — no shell reads them for an inactive
+/// surface — spelled out so the value is a valid, self-describing `ImeState`.
+fn cleared_ime_state() -> ImeState {
+    ImeState {
+        active: false,
+        editing: EditingState {
+            text: String::new(),
+            selection_base: -1,
+            selection_extent: -1,
+            composing_base: -1,
+            composing_extent: -1,
+        },
+        caret: None,
+        content_type: Default::default(),
+    }
+}
 
 /// Replace `color`'s alpha channel with `alpha`.
 fn with_alpha(color: Color, alpha: f32) -> Color {
@@ -836,6 +886,20 @@ impl Widget for GlyphDialogWidget {
         let area_w = finite_or_zero(bc.max().width);
         let area_h = finite_or_zero(bc.max().height);
 
+        // The keyboard-free band the panel centers inside (see the [module
+        // docs](self)'s "Keyboard avoidance" section). `view_insets` is the
+        // *fully-obscured* edge set — in practice the IME, never the system
+        // bars, which live in `view_padding` (`frust_core::WindowInsets`) — so
+        // the vertical band shrinks exactly by the open keyboard. Read fresh
+        // every layout pass, the same way `SafeArea`/`glyph::appbar` read
+        // theirs: a shell's `set_insets` flags LAYOUT itself, so the panel
+        // re-centers on the keyboard's way up *and* its way down with no
+        // widget-side state and no animation of our own.
+        let view_insets = ctx.window_insets().view_insets;
+        let free_top = view_insets.top.clamp(0.0, area_h);
+        let free_bottom = (area_h - view_insets.bottom).clamp(free_top, area_h);
+        let free_h = free_bottom - free_top;
+
         let panel_max_w = (area_w - 2.0 * SCREEN_MARGIN).clamp(0.0, MAX_WIDTH);
         let content_max_w = (panel_max_w - 2.0 * DIALOG_PADDING).max(0.0);
         let child_bc = BoxConstraints::loose(Size::new(content_max_w, f64::INFINITY));
@@ -899,7 +963,15 @@ impl Widget for GlyphDialogWidget {
         let panel_h = y;
 
         let panel_x = ((area_w - panel_w) / 2.0).max(0.0);
-        let panel_y = ((area_h - panel_h) / 2.0).max(0.0);
+        // Centered in the keyboard-free band, not the whole window — with no
+        // insets pushed the band *is* the window and this is the previous
+        // `(area_h - panel_h) / 2.0` exactly. A panel taller than the band
+        // pins to the top (the `max(0.0)`) and overflows downward, which is
+        // the same documented overflow degrade an oversized content slot
+        // already has (the [module docs](self)'s "Body/content slot"): the
+        // panel is never clipped or auto-scrolled, so its own height is
+        // deliberately NOT clamped to the band.
+        let panel_y = (free_top + (free_h - panel_h) / 2.0).max(0.0);
         self.panel = Rect::new(panel_x, panel_y, panel_x + panel_w, panel_y + panel_h);
 
         if let Some(p) = self.title.as_mut() {
@@ -983,15 +1055,27 @@ impl Widget for GlyphDialogWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        // Claim focus on every Down. Load-bearing: the root treats a Down
-        // that bubbles no claim as a blur (`release_focus_session` drops
+        // Claim focus on every Down. Load-bearing TWICE over: the root treats a
+        // Down that bubbles no claim as a blur (`release_focus_session` drops
         // focus + IME state), so the re-claim is what keeps the session alive
-        // while this dialog is up. Re-claiming while already focused is a
-        // change-guarded no-op (no generation bump) — do not add a
-        // claim-once guard, it kills the session on the second tap.
-        if matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Down) {
+        // while this dialog is up; and the claim is also the dialog's *own* key
+        // chain — `Key`/`Ime` are focus-routed, never hit-tested, so a dialog
+        // whose pod is not focused never sees `Escape` at all. Re-claiming while
+        // already focused is a change-guarded no-op (no generation bump) — do
+        // not add a claim-once guard, it kills the session on the second tap.
+        let pointer_down = matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Down);
+        if pointer_down {
             ctx.request_focus();
         }
+        // Whether the body/content slot owned the live focus/IME session on the
+        // way *into* this Down. Snapshotted here because the routing below
+        // blurs the slot's own recorded flag (`route_event_single`'s
+        // blur-on-outside-tap) before the Down arm could ask. Composed with
+        // `ctx.has_focus()`, never the slot flag alone, per CODE_STANDARDS'
+        // focus rule: a stale flag under an already-blurred ancestor must not
+        // let this dialog release somebody else's session.
+        let content_held_session =
+            pointer_down && ctx.has_focus() && self.body.as_ref().is_some_and(|p| p.is_focused());
         // An action already capturing (or freshly hit) consumes the event first.
         if crate::authoring::route_event(&mut self.actions, ctx, event) == EventResult::Handled {
             return EventResult::Handled;
@@ -1024,6 +1108,27 @@ impl Widget for GlyphDialogWidget {
             PointerPhase::Down => {
                 self.scrim_captured = true;
                 self.scrim_down_outside = !self.panel.contains(p.position);
+                // Dead panel space (padding, the title, the gaps): this Down
+                // reached neither an action nor the body/content slot, yet the
+                // slot held the live session — so it is a blur *inside* the
+                // dialog. End that session explicitly with an inactive publish
+                // (the same primitive the navigator's post-pop
+                // `cleared_ime_state` and `PatternSwitcher` use; the root reads
+                // an inactive surface as a full `release_focus_session`, and
+                // does so *before* it applies this dispatch's own focus claim —
+                // `RenderRoot::event`'s documented ordering). Net effect: the
+                // field blurs and the keyboard retracts, while the dialog keeps
+                // both its focus link (so `Escape` still routes) and its panel
+                // (a dead-space tap is not a dismiss — the barrier below still
+                // consumes the Down, so nothing reaches the page underneath).
+                //
+                // The scrim is deliberately excluded (`!scrim_down_outside`):
+                // outside-Down behavior is unchanged, and a scrim tap that
+                // actually dismisses already ends the session through the
+                // navigator's own pop path.
+                if content_held_session && !self.scrim_down_outside {
+                    ctx.publish_ime_state(cleared_ime_state());
+                }
                 ctx.capture_pointer();
                 EventResult::Handled
             }
@@ -1090,7 +1195,8 @@ mod tests {
     use crate::nav::navigator::{NavigatorView, navigator};
     use crate::textinput::text_input;
     use frust_core::{
-        BuildCtx, KeyEvent, Modifiers, PointerButton, PointerEvent, RenderRoot, any as core_any,
+        BuildCtx, KeyEvent, Modifiers, PointerButton, PointerEvent, RenderRoot, WindowEdgeInsets,
+        WindowInsets, any as core_any,
     };
     use frust_text::TextContext;
     use std::any::Any;
@@ -1961,6 +2067,411 @@ mod tests {
         assert_eq!(w.panel.x0, (area.width - MAX_WIDTH) / 2.0);
     }
 
+    // -- Keyboard avoidance: the panel centers in the free band ----------
+
+    /// The retained dialog at the root of `root`'s tree (mirrors
+    /// `safe_area`'s `safe_area_widget` helper).
+    fn dialog_widget<S: 'static>(root: &RenderRoot<S, GlyphDialogView<S>>) -> &GlyphDialogWidget {
+        let id = root.root_id().expect("root built");
+        (root.tree().pod(id).expect("root pod").widget() as &dyn Any)
+            .downcast_ref::<GlyphDialogWidget>()
+            .expect("the root is a GlyphDialogWidget")
+    }
+
+    /// A keyboard-only inset push: `view_insets.bottom` (never `view_padding` —
+    /// system bars are not the IME, see `frust_core::WindowInsets`).
+    fn ime_insets(bottom: f64) -> WindowInsets {
+        WindowInsets::new(
+            WindowEdgeInsets::ZERO,
+            WindowEdgeInsets::new(0.0, 0.0, 0.0, bottom),
+        )
+    }
+
+    /// Title + a fixed-size action: `20 + 20 (title) + 20 (gap) + 36 + 20`.
+    const TITLED_ACTION_PANEL_H: f64 = 116.0;
+
+    fn titled_action_dialog(_s: &mut ()) -> GlyphDialogView<()> {
+        glyph_dialog()
+            .title("Confirm")
+            .action(tap_action(80.0, 36.0, |_s: &mut ()| {}))
+    }
+
+    #[test]
+    fn keyboard_inset_centers_the_panel_in_the_free_area() {
+        // A short display (iPhone-SE-class) with a 300px keyboard up: centering
+        // in the FULL window would push the action row under the keyboard,
+        // which is exactly the device report this pins.
+        let area = Size::new(375.0, 667.0);
+        let ime = 300.0;
+        let free_bottom = area.height - ime;
+
+        let mut root: RenderRoot<(), GlyphDialogView<()>> = RenderRoot::new();
+        let mut state = ();
+        let mut tcx = TextContext::new();
+        root.rebuild(&mut titled_action_dialog, &mut state);
+        root.set_insets(ime_insets(ime));
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        let w = dialog_widget(&root);
+        assert_eq!(w.panel.height(), TITLED_ACTION_PANEL_H);
+        assert_eq!(
+            w.panel.y0,
+            (free_bottom - TITLED_ACTION_PANEL_H) / 2.0,
+            "the panel centers in the keyboard-free band, not the window"
+        );
+        assert!(
+            w.panel.y1 <= free_bottom,
+            "the whole panel clears the keyboard ({} vs {free_bottom})",
+            w.panel.y1
+        );
+        // The action row — the button the device report could not reach — sits
+        // above the keyboard line, unlike the pre-fix centered position.
+        let action = w.actions.first().expect("one action");
+        assert!(
+            action.origin().y + action.size().height <= free_bottom,
+            "the action row is visible above the keyboard"
+        );
+        assert!(
+            (area.height - TITLED_ACTION_PANEL_H) / 2.0 + TITLED_ACTION_PANEL_H > free_bottom,
+            "sanity: the old full-window centering really did overlap the keyboard"
+        );
+    }
+
+    #[test]
+    fn keyboard_retraction_recenters_the_panel() {
+        // Same input, reverse direction: insets are a layout input, so dropping
+        // them back to zero re-centers the panel with no widget-side state.
+        let area = Size::new(375.0, 667.0);
+        let mut root: RenderRoot<(), GlyphDialogView<()>> = RenderRoot::new();
+        let mut state = ();
+        let mut tcx = TextContext::new();
+        root.rebuild(&mut titled_action_dialog, &mut state);
+
+        root.set_insets(ime_insets(300.0));
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        let raised_y = dialog_widget(&root).panel.y0;
+
+        root.set_insets(WindowInsets::default());
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        let settled_y = dialog_widget(&root).panel.y0;
+
+        assert_eq!(
+            settled_y,
+            (area.height - TITLED_ACTION_PANEL_H) / 2.0,
+            "with the keyboard gone the band is the window again"
+        );
+        assert!(settled_y > raised_y, "the panel moved back down");
+    }
+
+    #[test]
+    fn panel_taller_than_the_free_area_pins_to_the_top() {
+        // The documented degrade: the panel's own height is never clamped to
+        // the band (no clipping, no auto-scrolling), so an oversized panel pins
+        // to the top and overflows downward rather than sliding off the top.
+        fn logic(_s: &mut ()) -> GlyphDialogView<()> {
+            glyph_dialog()
+                .title("Tall")
+                .content(tap_action(200.0, 500.0, |_s: &mut ()| {}))
+        }
+        let mut root: RenderRoot<(), GlyphDialogView<()>> = RenderRoot::new();
+        let mut state = ();
+        let mut tcx = TextContext::new();
+        root.rebuild(&mut logic, &mut state);
+        root.set_insets(ime_insets(400.0));
+        root.layout_with_text(Size::new(375.0, 667.0), &mut tcx as &mut dyn Any);
+
+        let w = dialog_widget(&root);
+        assert_eq!(w.panel.y0, 0.0, "pinned to the top, never negative");
+        assert!(
+            w.panel.height() > 667.0 - 400.0,
+            "sanity: taller than the band"
+        );
+    }
+
+    #[test]
+    fn keyboard_inset_leaves_the_screen_margin_and_max_width_alone() {
+        // The full-bleed fix (`SCREEN_MARGIN`) is untouched by the vertical
+        // band: a narrow window with a keyboard up still gets its per-side
+        // margin, and the panel width is unchanged by the inset.
+        fn logic(_s: &mut ()) -> GlyphDialogView<()> {
+            glyph_dialog()
+                .title("Hi")
+                .content(tap_action(10_000.0, 20.0, |_s: &mut ()| {}))
+        }
+        let area = Size::new(393.0, 800.0);
+        let mut root: RenderRoot<(), GlyphDialogView<()>> = RenderRoot::new();
+        let mut state = ();
+        let mut tcx = TextContext::new();
+        root.rebuild(&mut logic, &mut state);
+        root.set_insets(ime_insets(336.0));
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        let w = dialog_widget(&root);
+        assert_eq!(w.panel.width(), area.width - 2.0 * SCREEN_MARGIN);
+        assert_eq!(w.panel.x0, SCREEN_MARGIN);
+        assert!(
+            w.panel.y1 <= area.height - 336.0,
+            "still clears the keyboard"
+        );
+    }
+
+    // -- Dead-space blur: the field's session ends, the dialog does not --
+
+    #[derive(Default)]
+    struct FieldState {
+        text: String,
+    }
+
+    fn field_dialog(s: &mut FieldState) -> GlyphDialogView<FieldState> {
+        glyph_dialog()
+            .title("New token")
+            .content(core_any::<FieldState, _>(text_input(
+                s.text.clone(),
+                |s: &mut FieldState, v| s.text = v,
+            )))
+            .action(tap_action(80.0, 36.0, |_s: &mut FieldState| {}))
+    }
+
+    /// A mounted dialog whose content field holds the live focus/IME session,
+    /// plus the geometry the blur tests aim at.
+    struct FieldFixture {
+        root: RenderRoot<FieldState, GlyphDialogView<FieldState>>,
+        state: FieldState,
+        /// Dead panel space: inside the panel's padding, on no child.
+        dead: Point,
+        /// The center of the action button.
+        action: Point,
+    }
+
+    fn focused_field_dialog(area: Size) -> FieldFixture {
+        let mut root: RenderRoot<FieldState, GlyphDialogView<FieldState>> = RenderRoot::new();
+        let mut state = FieldState::default();
+        let mut tcx = TextContext::new();
+        root.rebuild(&mut field_dialog, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        root.paint(&mut Recorder::default(), ft_ms(0.0));
+        root.paint(&mut Recorder::default(), ft_ms(400.0)); // settled: Shown
+
+        let (field, dead, action) = {
+            let w = dialog_widget(&root);
+            let f = w.body.as_ref().expect("the content field is built");
+            let a = w.actions.first().expect("one action");
+            (
+                Point::new(
+                    f.origin().x + f.size().width / 2.0,
+                    f.origin().y + f.size().height / 2.0,
+                ),
+                // Inside the panel, inside DIALOG_PADDING: no child lives here.
+                Point::new(w.panel.x0 + 2.0, w.panel.y0 + 2.0),
+                Point::new(
+                    a.origin().x + a.size().width / 2.0,
+                    a.origin().y + a.size().height / 2.0,
+                ),
+            )
+        };
+
+        // Focus the field: a Down claims, and the field publishes its surface.
+        root.event(&mut state, &ev(PointerPhase::Down, field.x, field.y));
+        root.event(&mut state, &ev(PointerPhase::Up, field.x, field.y));
+        assert!(
+            root.ime_state().is_some(),
+            "precondition: the field owns a live IME session"
+        );
+        assert!(root.is_focus_active());
+
+        FieldFixture {
+            root,
+            state,
+            dead,
+            action,
+        }
+    }
+
+    #[test]
+    fn dead_space_down_ends_the_field_session_and_keeps_the_dialog_open() {
+        let area = Size::new(375.0, 667.0);
+        let mut f = focused_field_dialog(area);
+
+        f.root
+            .event(&mut f.state, &ev(PointerPhase::Down, f.dead.x, f.dead.y));
+
+        assert!(
+            f.root.ime_state().is_none(),
+            "a Down on dead panel space ends the field's IME session — the keyboard retracts"
+        );
+        let w = dialog_widget(&f.root);
+        assert!(
+            !w.body.as_ref().expect("field").is_focused(),
+            "the field lost the recorded focus path (it blurred)"
+        );
+        assert_ne!(w.phase, Phase::Exit, "the dialog is not dismissing");
+        assert_ne!(w.phase, Phase::Dismissed);
+
+        // ...and it stays cleared: the blurred field must not republish its
+        // surface on the next painted frame.
+        f.root
+            .event(&mut f.state, &ev(PointerPhase::Up, f.dead.x, f.dead.y));
+        f.root.paint(&mut Recorder::default(), ft_ms(500.0));
+        assert!(
+            f.root.ime_state().is_none(),
+            "no resurrection on the next paint"
+        );
+        assert_eq!(
+            dialog_widget(&f.root).phase,
+            Phase::Shown,
+            "the dialog is still open after the blur"
+        );
+    }
+
+    #[test]
+    fn escape_still_dismisses_after_a_dead_space_down() {
+        // The other half of the contract: ending the field's *IME* session must
+        // not sever the dialog's own key chain. `Key` events are focus-routed
+        // and never hit-tested, so a dialog that stopped claiming focus on a
+        // dead-space Down would silently lose Escape.
+        let area = Size::new(375.0, 667.0);
+        let mut f = focused_field_dialog(area);
+
+        f.root
+            .event(&mut f.state, &ev(PointerPhase::Down, f.dead.x, f.dead.y));
+        f.root
+            .event(&mut f.state, &ev(PointerPhase::Up, f.dead.x, f.dead.y));
+        assert!(
+            f.root.is_focus_active(),
+            "the dialog keeps the focus link the same dispatch's claim re-applied"
+        );
+
+        f.root.event(&mut f.state, &escape_event());
+        assert_eq!(
+            dialog_widget(&f.root).phase,
+            Phase::Exit,
+            "Escape still reaches the dialog after a dead-space blur"
+        );
+    }
+
+    #[test]
+    fn action_down_leaves_the_field_session_intact() {
+        // No pre-blur regression: tapping an action while the field is focused
+        // activates it with the session untouched (the action row is an
+        // interactive region, not dead space).
+        let area = Size::new(375.0, 667.0);
+        let mut f = focused_field_dialog(area);
+        let before = f.root.focus_ime_generation();
+
+        f.root.event(
+            &mut f.state,
+            &ev(PointerPhase::Down, f.action.x, f.action.y),
+        );
+        assert!(
+            f.root.ime_state().is_some(),
+            "an action Down never ends the field's session"
+        );
+        assert_eq!(
+            f.root.focus_ime_generation(),
+            before,
+            "and fires no focus/IME edge at all"
+        );
+        f.root
+            .event(&mut f.state, &ev(PointerPhase::Up, f.action.x, f.action.y));
+        assert_eq!(dialog_widget(&f.root).phase, Phase::Shown);
+    }
+
+    #[test]
+    fn dead_space_down_with_no_focused_content_moves_nothing() {
+        // The release is gated on the slot actually holding the session: a
+        // dialog whose content was never focused must not publish a clear (it
+        // would release a session owned somewhere else entirely).
+        let area = Size::new(375.0, 667.0);
+        let mut root: RenderRoot<FieldState, GlyphDialogView<FieldState>> = RenderRoot::new();
+        let mut state = FieldState::default();
+        let mut tcx = TextContext::new();
+        root.rebuild(&mut field_dialog, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        root.paint(&mut Recorder::default(), ft_ms(0.0));
+        root.paint(&mut Recorder::default(), ft_ms(400.0));
+
+        let dead = {
+            let w = dialog_widget(&root);
+            Point::new(w.panel.x0 + 2.0, w.panel.y0 + 2.0)
+        };
+        let before = root.focus_ime_generation();
+        root.event(&mut state, &ev(PointerPhase::Down, dead.x, dead.y));
+
+        assert!(root.ime_state().is_none());
+        assert_eq!(
+            root.focus_ime_generation(),
+            before + 1,
+            "exactly one edge: the dialog's own first focus claim, no spurious release"
+        );
+        assert!(root.is_focus_active());
+    }
+
+    #[test]
+    fn dead_space_down_ends_the_session_with_the_dialog_pushed_on_a_navigator() {
+        // The shipped shape: pushed through `show_glyph_dialog`, so the
+        // dialog's `EventCtx::has_focus()` comes from its page pod's recorded
+        // flag rather than the root's seed. Geometry is computed from the
+        // constants (mirroring `action_pops_with_a_value_via_navigator`) since
+        // the widget is not reachable under the navigator.
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let mut root: RenderRoot<NavState, NavigatorView<NavState>> = RenderRoot::new();
+        let mut app = app_page(&controller);
+        let mut state = NavState::default();
+        let area = Size::new(375.0, 667.0);
+
+        root.rebuild(&mut app, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        let (field_w, field_h) = (200.0, 40.0);
+        show_glyph_dialog(
+            &controller,
+            move || {
+                glyph_dialog()
+                    .title("Confirm")
+                    .content(focus_field(field_w, field_h))
+            },
+            |state: &mut NavState, result: PopResult| state.results.push(result.take::<bool>()),
+        );
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        root.paint(&mut Recorder::default(), ft_ms(0.0));
+        root.paint(&mut Recorder::default(), ft_ms(400.0)); // settled: Shown
+
+        // Title (20) + gap + the field, inside the padding; MIN_WIDTH wide.
+        let panel_h = 2.0 * DIALOG_PADDING + TITLE_LINE_HEIGHT as f64 + TITLE_BODY_GAP + field_h;
+        let panel_x = (area.width - MIN_WIDTH) / 2.0;
+        let panel_y = (area.height - panel_h) / 2.0;
+        let field = Point::new(
+            panel_x + DIALOG_PADDING + field_w / 2.0,
+            panel_y + DIALOG_PADDING + TITLE_LINE_HEIGHT as f64 + TITLE_BODY_GAP + field_h / 2.0,
+        );
+        let dead = Point::new(panel_x + 2.0, panel_y + 2.0);
+
+        root.event(&mut state, &ev(PointerPhase::Down, field.x, field.y));
+        root.event(&mut state, &ev(PointerPhase::Up, field.x, field.y));
+        assert!(
+            root.ime_state().is_some(),
+            "precondition: the field owns a live IME session"
+        );
+
+        root.event(&mut state, &ev(PointerPhase::Down, dead.x, dead.y));
+        root.event(&mut state, &ev(PointerPhase::Up, dead.x, dead.y));
+        assert!(
+            root.ime_state().is_none(),
+            "the dead-space Down ended the session under the navigator too"
+        );
+        assert_eq!(controller.depth(), 2, "the dialog page is still pushed");
+
+        // Drive frames: nothing pops, nothing resurrects the surface.
+        root.paint(&mut Recorder::default(), ft_ms(500.0));
+        root.paint(&mut Recorder::default(), ft_ms(800.0));
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(controller.depth(), 2, "a dead-space tap is not a dismiss");
+        assert!(state.results.is_empty());
+        assert!(root.ime_state().is_none());
+    }
+
     #[test]
     fn semantics_forwards_the_content_subtree() {
         fn logic(_s: &mut ()) -> GlyphDialogView<()> {
@@ -2059,6 +2570,65 @@ mod tests {
         core_any::<State, _>(TapView {
             size: Size::new(w, h),
             on_tap: Rc::new(on_tap),
+        })
+    }
+
+    // A fixed-size stand-in for a focused text field: claims focus and
+    // publishes an ACTIVE IME surface on `Down`, exactly like `TextInput`'s
+    // focus path, but with deterministic geometry (no text shaping) so a
+    // navigator-hosted panel's dead space can be computed from the constants.
+    struct FocusFieldView<State: 'static> {
+        size: Size,
+        _state: std::marker::PhantomData<State>,
+    }
+    struct FocusFieldWidget {
+        size: Size,
+    }
+    impl<State: 'static> View<State> for FocusFieldView<State> {
+        type Element = FocusFieldWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> FocusFieldWidget {
+            FocusFieldWidget { size: self.size }
+        }
+        fn rebuild(
+            &self,
+            _p: &Self,
+            _e: &mut FocusFieldWidget,
+            _c: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+    impl Widget for FocusFieldWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(self.size)
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            let InputEvent::Pointer(p) = event else {
+                return EventResult::Ignored;
+            };
+            if p.phase == PointerPhase::Down {
+                ctx.request_focus();
+                ctx.publish_ime_state(ImeState {
+                    active: true,
+                    editing: EditingState {
+                        text: "hi".to_string(),
+                        selection_base: 2,
+                        selection_extent: 2,
+                        composing_base: -1,
+                        composing_extent: -1,
+                    },
+                    caret: Some(Rect::new(0.0, 0.0, 1.0, 12.0)),
+                    content_type: Default::default(),
+                });
+            }
+            EventResult::Handled
+        }
+    }
+    fn focus_field<State: 'static>(w: f64, h: f64) -> AnyView<State> {
+        core_any::<State, _>(FocusFieldView {
+            size: Size::new(w, h),
+            _state: std::marker::PhantomData,
         })
     }
 }
