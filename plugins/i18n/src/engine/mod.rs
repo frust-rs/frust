@@ -269,6 +269,55 @@ impl Engine {
     }
 }
 
+/// The message-resolution seam the `locales!` macro's generated typed-key
+/// functions call through: one generated body serves both a raw
+/// [`Engine`]-plus-chain pairing ([`Engine::with_chain`]) and the
+/// `frust-api` reactive handle — whose implementation reads its locale
+/// signal before delegating, so a typed-key call inside a tracked build
+/// subscribes to locale switches exactly like a dynamic `t()` call.
+pub trait Resolve {
+    /// Formats `key` (a message id, optionally suffixed `.attribute`) with
+    /// `args`.
+    ///
+    /// # Errors
+    ///
+    /// The same contract as [`Engine::resolve`].
+    fn resolve_message(
+        &self,
+        key: &str,
+        args: Option<&FluentArgs<'_>>,
+    ) -> Result<String, I18nError>;
+}
+
+/// An [`Engine`] borrowed together with a resolved locale chain — the
+/// featureless [`Resolve`] implementor for callers without the `frust-api`
+/// reactive handle (headless services, tests).
+pub struct ChainResolver<'a> {
+    engine: &'a Engine,
+    chain: &'a [Locale],
+}
+
+impl Engine {
+    /// Pairs this engine with a resolved `chain` as a [`Resolve`]
+    /// implementor.
+    pub fn with_chain<'a>(&'a self, chain: &'a [Locale]) -> ChainResolver<'a> {
+        ChainResolver {
+            engine: self,
+            chain,
+        }
+    }
+}
+
+impl Resolve for ChainResolver<'_> {
+    fn resolve_message(
+        &self,
+        key: &str,
+        args: Option<&FluentArgs<'_>>,
+    ) -> Result<String, I18nError> {
+        self.engine.resolve(self.chain, key, args)
+    }
+}
+
 // Hand-written for the same reason as `LocaleSet`'s: a built bundle holds
 // boxed functions and a memoizer, neither of which is `Debug`.
 impl std::fmt::Debug for Engine {

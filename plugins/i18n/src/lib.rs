@@ -65,7 +65,7 @@ pub mod fmt;
 mod reactive;
 
 pub use detect::system_locales;
-pub use engine::{Engine, FluentFunction, LocaleSet};
+pub use engine::{ChainResolver, Engine, FluentFunction, LocaleSet, Resolve};
 pub use error::I18nError;
 pub use frust_i18n_macros::locales;
 pub use locale::Locale;
