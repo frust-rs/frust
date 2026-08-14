@@ -39,7 +39,6 @@ mod desktop;
 /// parseable at all — a genuinely empty result, not merely a tag or two
 /// that individually failed to parse (those are skipped silently; see
 /// [`parse_tags`]).
-#[allow(dead_code)] // not yet wired into `engine`; a later task calls this from there
 pub fn system_locales() -> Result<Vec<Locale>, I18nError> {
     #[cfg(target_os = "android")]
     let raw = android::raw_locale_tags()?;
