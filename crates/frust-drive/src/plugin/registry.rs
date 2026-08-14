@@ -324,6 +324,46 @@ const DATABASE: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+/// `i18n`'s base contributions — a Cargo dependency, a starter locale file,
+/// and a macro invocation to load the locale bundles at compile time.
+///
+/// [`Contribution::ScaffoldFile`] must come **first** (the starter locale file
+/// is created before the [`Contribution::AppCrateMacro`] invocation references
+/// it; though the macro is a no-op stub today, the ordering is established for
+/// when it implements a real directory walk). [`Contribution::CargoDep`] adds
+/// the dependency. [`Contribution::AppCrateMacro`] invokes the compile-time
+/// `frust_i18n::locales!` macro, which validates and loads the bundle
+/// directory — the entry point into the plugin's API.
+///
+/// No Android manifest permission, plist key, Gradle module, or Swift package
+/// is needed: this is a pure-Rust plugin with no OS-side integration (see
+/// `plugins/i18n/README.md`).
+const I18N_BASE: &[Contribution] = &[
+    Contribution::ScaffoldFile {
+        rel_path: "locales/en/main.ftl",
+        contents: "# English locale — add sibling directories (de/, fr/, ...) with the same file names.\n\
+                   # Syntax: https://projectfluent.org/fluent/guide/\n\
+                   hello = Hello, { $name }!\n",
+        comment: "Starter English Fluent locale file",
+    },
+    Contribution::CargoDep { name: "frust-i18n" },
+    Contribution::AppCrateMacro {
+        invocation: "frust_i18n::locales!(\"locales\");",
+        cfg: None,
+        comment: "Load and compile Fluent locale bundles (see plugins/i18n/README.md).",
+    },
+];
+
+const I18N: PluginSpec = PluginSpec {
+    id: "i18n",
+    summary: "Fluent Project-based internationalization/localization: locale-aware message \
+              resolution and system-locale detection.",
+    crate_dir: "i18n",
+    base: I18N_BASE,
+    optional_features: &[],
+    requires_sibling: None,
+};
+
 /// The v1 static plugin registry (Vec-factory convention). A caller (the CLI
 /// or the TUI Add Plugin dialog) enumerates this to drive selection without
 /// hardcoding plugin ids.
@@ -338,6 +378,7 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         HAPTICS,
         IAP,
         DATABASE,
+        I18N,
     ]
 }
 
@@ -357,7 +398,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_nine_v1_plugins() {
+    fn registry_lists_the_ten_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -371,6 +412,7 @@ mod tests {
                 "haptics",
                 "iap",
                 "database",
+                "i18n",
             ]
         );
     }
@@ -1110,6 +1152,121 @@ mod tests {
         let after_first = snapshot_tree(&root);
         let second = add_plugin(&root, "database", &["engine-turso"]).unwrap();
         assert_eq!(second.items.len(), 2);
+        assert!(
+            second
+                .items
+                .iter()
+                .all(|i| i.outcome == AddOutcome::AlreadyPresent),
+            "{second:?}"
+        );
+        assert_eq!(
+            after_first,
+            snapshot_tree(&root),
+            "a second apply must leave a byte-identical tree"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The `i18n` entry's base contributions, exactly [`I18N_BASE`]'s own list
+    /// — a starter Fluent locale file, a Cargo dependency, and a macro
+    /// invocation, no more and no fewer, in application order (scaffolded file
+    /// first, then the dependency, then the macro), and no optional features /
+    /// sibling requirement.
+    #[test]
+    fn i18n_base_contributions_match_the_final_accounting() {
+        let spec = find_plugin("i18n").unwrap();
+        assert_eq!(spec.crate_dir, "i18n");
+        assert!(spec.optional_features.is_empty());
+        assert_eq!(spec.requires_sibling, None);
+
+        assert_eq!(spec.base.len(), 3);
+        assert!(matches!(
+            spec.base[0],
+            Contribution::ScaffoldFile {
+                rel_path: "locales/en/main.ftl",
+                ..
+            }
+        ));
+        assert!(matches!(
+            spec.base[1],
+            Contribution::CargoDep { name: "frust-i18n" }
+        ));
+        assert!(matches!(
+            spec.base[2],
+            Contribution::AppCrateMacro {
+                invocation: "frust_i18n::locales!(\"locales\");",
+                cfg: None,
+                ..
+            }
+        ));
+    }
+
+    /// The `i18n` plugin end to end: a fresh scaffold, `add_plugin(..,
+    /// "i18n", ..)` applied twice. The first apply reports three items
+    /// (`Applied`: ScaffoldFile, CargoDep, AppCrateMacro), and the app gains
+    /// the starter `locales/en/main.ftl` file, the Cargo dependency, and the
+    /// macro invocation. The second apply must report every item
+    /// `AlreadyPresent` and leave a byte-identical tree — the idempotence
+    /// contract.
+    ///
+    /// This is the registry's first exercise of [`Contribution::ScaffoldFile`]
+    /// end to end, and the first pure-Rust plugin after `database` to add an
+    /// `AppCrateMacro` without OS-side machinery.
+    #[test]
+    fn i18n_add_plugin_applies_every_contribution_and_reapply_is_idempotent() {
+        let root = scaffold_project("i18n-idempotence");
+
+        let first = add_plugin(&root, "i18n", &[]).unwrap();
+        assert_eq!(first.plugin_id, "i18n");
+        assert_eq!(first.items.len(), 3, "{first:?}");
+        assert!(
+            first.items.iter().all(|i| i.outcome == AddOutcome::Applied),
+            "{first:?}"
+        );
+
+        // The Cargo dependency, starter locale file, and macro invocation all
+        // actually landed.
+        let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert!(cargo.contains("frust-i18n"), "{cargo}");
+        let locale_file = fs::read_to_string(root.join("locales/en/main.ftl")).unwrap();
+        assert!(
+            locale_file.contains("hello = Hello, { $name }!"),
+            "{locale_file}"
+        );
+        let lib_rs = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+        assert!(
+            lib_rs.contains("frust_i18n::locales!(\"locales\");"),
+            "{lib_rs}"
+        );
+
+        // No Android manifest permission, iOS plist key, Gradle module, or
+        // Swift package — the absences this pure-Rust plugin's own registry
+        // entry states (`I18N_BASE`'s doc comment).
+        let manifest =
+            fs::read_to_string(root.join("android/app/src/main/AndroidManifest.xml")).unwrap();
+        assert!(
+            !manifest.contains("i18n"),
+            "i18n must add no manifest permission"
+        );
+        let plist = fs::read_to_string(root.join("ios/Runner/Info.plist")).unwrap();
+        assert!(!plist.contains("i18n"), "i18n must add no plist key");
+        let settings = fs::read_to_string(root.join("android/settings.gradle.kts")).unwrap();
+        assert!(
+            !settings.contains("i18n"),
+            "i18n must add no Gradle module include"
+        );
+        let pbxproj =
+            fs::read_to_string(root.join("ios/Runner.xcodeproj/project.pbxproj")).unwrap();
+        assert!(
+            !pbxproj.contains("Frusti18n"),
+            "i18n must add no Swift package reference"
+        );
+        assert_pbxproj_well_formed(&pbxproj);
+
+        let after_first = snapshot_tree(&root);
+        let second = add_plugin(&root, "i18n", &[]).unwrap();
+        assert_eq!(second.items.len(), 3);
         assert!(
             second
                 .items
