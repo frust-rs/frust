@@ -48,11 +48,12 @@
 //! [`detect`] — system-locale detection ([`system_locales`]: ordered
 //! preference list, re-queried per call). [`engine`] — Fluent bundle
 //! loading/negotiation/resolution ([`Engine`]/[`LocaleSet`]). [`fmt`]
-//! (feature `formatting`) — ICU4X formatting (stub; a later task fills it
-//! in). [`reactive`] (feature `frust-api`) — signal-driven locale binding
-//! for a `frust` app (stub; a later task fills it in). The `locales!`
-//! compile-time bundle loader lives in the sibling `frust-i18n-macros`
-//! crate, re-exported here.
+//! (feature `formatting`) — ICU4X-backed decimal/percent/currency/date/time
+//! formatting plus the `NUMBER`/`DATETIME` Fluent functions. [`reactive`]
+//! (feature `frust-api`) — the [`I18n`] signal-driven locale handle and its
+//! `provide_i18n`/`use_i18n` context hooks. The `locales!` compile-time
+//! bundle loader lives in the sibling `frust-i18n-macros` crate,
+//! re-exported here.
 
 mod detect;
 mod engine;
@@ -71,7 +72,7 @@ pub use frust_i18n_macros::locales;
 pub use locale::Locale;
 
 #[cfg(feature = "frust-api")]
-pub use reactive::active_locale;
+pub use reactive::{I18n, active_locale, expect_i18n, provide_i18n, use_i18n};
 
 /// Builds a [`fluent_bundle::FluentArgs`] from `key => value` pairs —
 /// shorthand for the more verbose `FluentArgs::new()` plus repeated

@@ -74,7 +74,6 @@ impl I18n {
     /// call this where a reactive `Owner` is ambient (app setup, or a root
     /// `Component::init`) — the signal it creates is registered against
     /// whichever owner is current so it can be disposed with it.
-    #[allow(dead_code)] // not yet wired into lib.rs's public re-export; a later pass adds `pub use reactive::I18n` (see this task's completion summary)
     pub fn new(set: LocaleSet, requested: &[Locale]) -> Result<Self, I18nError> {
         Ok(Self::from_engine(Engine::new(set)?, requested))
     }
@@ -84,7 +83,6 @@ impl I18n {
     /// re-negotiating the same bundle set without re-parsing any FTL).
     ///
     /// Same ambient-owner contract as [`I18n::new`].
-    #[allow(dead_code)] // not yet wired into lib.rs's public re-export; a later pass adds `pub use reactive::I18n` (see this task's completion summary)
     pub fn from_engine(engine: Engine, requested: &[Locale]) -> Self {
         let (active, chain) = negotiate_active(&engine, requested);
         Self {
@@ -110,7 +108,6 @@ impl I18n {
     ///
     /// The write goes through the normal `RwSignal::set` → tracked-scope →
     /// `FrameWaker` path — no direct wake call here (see the module doc).
-    #[allow(dead_code)] // not yet wired into lib.rs's public re-export; a later pass adds `pub use reactive::I18n` (see this task's completion summary)
     pub fn set_locale(&self, requested: Locale) {
         let (active, chain) =
             negotiate_active(&self.inner.engine, std::slice::from_ref(&requested));
@@ -120,7 +117,6 @@ impl I18n {
 
     /// Formats `key` with no arguments — shorthand for
     /// [`I18n::t_args`]`(key, None)`.
-    #[allow(dead_code)] // not yet wired into lib.rs's public re-export; a later pass adds `pub use reactive::I18n` (see this task's completion summary)
     pub fn t(&self, key: &str) -> String {
         self.t_args(key, None)
     }
@@ -132,7 +128,6 @@ impl I18n {
     /// Delegates to [`Resolve::resolve_message`], which reads the locale
     /// signal first — so a caller inside a tracked rebuild still subscribes
     /// on a miss.
-    #[allow(dead_code)] // not yet wired into lib.rs's public re-export; a later pass adds `pub use reactive::I18n` (see this task's completion summary)
     pub fn t_args(&self, key: &str, args: Option<&FluentArgs<'_>>) -> String {
         match self.resolve_message(key, args) {
             Ok(text) => text,
@@ -167,7 +162,6 @@ impl Resolve for I18n {
 /// [`Engine::negotiate`] never returns an empty chain (the fallback closes
 /// it), so `active` always exists; the `unwrap_or_else` arm is defensive,
 /// not a path exercised in practice.
-#[allow(dead_code)] // only called from I18n::new/from_engine/set_locale, themselves not yet wired into lib.rs's public re-export
 fn negotiate_active(engine: &Engine, requested: &[Locale]) -> (Locale, Vec<Locale>) {
     let chain = engine.negotiate(requested);
     let active = chain
@@ -183,7 +177,6 @@ fn negotiate_active(engine: &Engine, requested: &[Locale]) -> (Locale, Vec<Local
 /// or a root `Component::init` so every descendant can [`use_i18n`]/
 /// [`expect_i18n`] it. `I18n` is cheap to clone (see its own doc), so a
 /// consumer gets its own handle rather than a shared reference.
-#[allow(dead_code)] // not yet wired into lib.rs's public re-export; a later pass adds `pub use reactive::provide_i18n` (see this task's completion summary)
 pub fn provide_i18n(i18n: I18n) {
     provide_context(i18n);
 }
@@ -206,7 +199,6 @@ pub fn use_i18n() -> Option<I18n> {
 /// Panics with `"expect_i18n: no I18n handle is provided in context; call
 /// provide_i18n in an ancestor component first"` — the same contract as
 /// `clean-signals-frust`'s `expect_controller`.
-#[allow(dead_code)] // not yet wired into lib.rs's public re-export; a later pass adds `pub use reactive::expect_i18n` (see this task's completion summary)
 pub fn expect_i18n() -> I18n {
     use_i18n().expect(
         "expect_i18n: no I18n handle is provided in context; call provide_i18n in an ancestor \
