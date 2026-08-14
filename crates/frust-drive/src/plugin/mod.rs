@@ -195,6 +195,30 @@ pub enum Contribution {
         /// The cargo feature to enable, e.g. `"turso"`.
         feature: &'static str,
     },
+    /// Creates a file at `rel_path` (relative to the project root) with
+    /// exact `contents`, if it doesn't already exist — parent directories
+    /// are created as needed.
+    ///
+    /// Every other variant above edits an existing project file at an
+    /// anchor; this is the one that creates a file that might not exist
+    /// yet. The idempotency guard is **presence alone**, never a content
+    /// comparison: an existing file — even one whose contents differ from
+    /// `contents`, because the user hand-edited it (a locale string, for
+    /// instance) — is left untouched and reports
+    /// [`AddOutcome::AlreadyPresent`]. `rel_path` must be a relative path
+    /// with no `..` component ([`PluginAddError::UnsafeScaffoldPath`]) —
+    /// checked defensively even though every registry entry is a static,
+    /// trusted string, matching this module's existing defensive tone.
+    ScaffoldFile {
+        /// The path to create, relative to the project root, e.g.
+        /// `"locales/en/main.ftl"`.
+        rel_path: &'static str,
+        /// The exact contents written when the file is absent.
+        contents: &'static str,
+        /// A short human-readable explanation for a selection/report UI —
+        /// not written into the file itself.
+        comment: &'static str,
+    },
 }
 
 impl Contribution {
@@ -218,6 +242,9 @@ impl Contribution {
             }
             Contribution::CargoFeature { name, feature } => {
                 format!("Cargo.toml dependency `{name}` feature `{feature}`")
+            }
+            Contribution::ScaffoldFile { rel_path, .. } => {
+                format!("scaffolded file `{rel_path}`")
             }
         }
     }
@@ -325,4 +352,10 @@ pub enum PluginAddError {
     /// apply first (in the same or an earlier `add_plugin` call).
     #[error("no `[dependencies].{name}` entry to enable feature `{feature}` on")]
     NoSuchCargoDep { name: String, feature: String },
+    /// A [`Contribution::ScaffoldFile`]'s `rel_path` is not a safe relative
+    /// path — absolute, or containing a `..` component. Registry entries
+    /// are static, trusted strings, but the check stays defensive rather
+    /// than assuming that forever.
+    #[error("scaffold file path `{0}` must be a relative path with no `..` component")]
+    UnsafeScaffoldPath(String),
 }
