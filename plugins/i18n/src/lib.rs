@@ -99,4 +99,5 @@ macro_rules! args {
 #[doc(hidden)]
 pub mod __private {
     pub use fluent_bundle;
+    pub use log;
 }
