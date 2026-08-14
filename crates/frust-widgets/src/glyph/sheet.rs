@@ -39,9 +39,9 @@
 //!
 //! Enter runs over `durations.base` (220ms, spatial easing), exit over the
 //! faster `durations.fast` (150ms, exit easing) — "exits always faster than
-//! entrances" (dialog's rule too). A dismiss gesture (scrim tap, handle drag
-//! past threshold, `Escape`, or an Android back press) does **not** pop
-//! immediately: it flips the widget into its exit phase via
+//! entrances" (dialog's rule too). A dismiss gesture (scrim tap, a handle drag
+//! released past the threshold or flicked down, `Escape`, or an Android back
+//! press) does **not** pop immediately: it flips the widget into its exit via
 //! [`begin_exit`](GlyphSheetWidget::begin_exit), and only on completion does the
 //! app-supplied close callback fire — from paint, which is sound because
 //! [`NavigatorController::pop`] merely enqueues an op applied on the next
@@ -57,15 +57,57 @@
 //! the navigator's `on_result` instead, delivered with `&mut State` after the
 //! pop.
 //!
-//! # Drag-to-dismiss — routed through the staged exit
+//! # Drag-to-dismiss — the panel follows the finger, then rides the staged exit
 //!
 //! A bottom sheet, unlike a centered dialog, is a strongly drag-affording shape,
-//! so this module offers a threshold-simple handle drag: a press starting in the
-//! top 44px handle strip that releases more than half the panel's height lower
-//! calls [`begin_exit`](GlyphSheetWidget::begin_exit), never an immediate pop,
-//! so a drag-dismiss plays the identical scrim-fade + panel-slide exit. It does
-//! **not** follow the finger frame-by-frame (no interactive held/settle
-//! transform), same as [`crate::material::sheet`].
+//! so the top 44px handle strip is a genuinely **interactive** drag target: a
+//! press there captures the pointer and the panel tracks the finger frame by
+//! frame (`dy = position.y − the drag's origin`, clamped to `[0, panel height]`
+//! — it follows the finger *down* only, never above rest), with the scrim
+//! fading on the very same progress the exit staging uses (`alpha = SCRIM_ALPHA
+//! · (1 − offset_frac)`), so a half-dragged panel sits under a half-lit scrim.
+//!
+//! On release the sheet dismisses when **either**
+//!
+//! * the panel sits at or past [`DRAG_DISMISS_FRACTION`] of its own height, **or**
+//! * the release is a downward flick — a release velocity at or over
+//!   [`FLICK_DISMISS_VELOCITY`] logical px/s, so a short fast swipe closes even a
+//!   tall sheet
+//!
+//! and otherwise **springs back to rest** (over `durations.fast` with the
+//! decelerating `effects` easing — see [`resolve_settle`]), input live
+//! throughout. A `Cancel` takes that same spring-back.
+//!
+//! A dismissal enters [`begin_exit`](GlyphSheetWidget::begin_exit) **from the
+//! panel's current offset**, never from rest, so nothing ever flashes back up
+//! before sliding out: the exit driver's own `0 → 1` progress is remapped onto
+//! `offset_at_release → 1`. That applies to every path, not just the drag — a
+//! [`GlyphSheetHandle::close`] mid-enter now exits from wherever the entering
+//! panel had reached.
+//!
+//! Release velocity is sampled the way every other draggable widget in the crate
+//! samples it (`crate::scroll::ScrollWidget`'s idiom): a
+//! [`VelocityTracker`] fed from `paint`'s frame clock, because an event pass
+//! carries no clock of its own.
+//!
+//! **The drag never fights the enter/exit staging.** A handle `Down` starts a
+//! drag only in `Phase::Shown`; during `Enter`/`Exit` the phase machine owns the
+//! panel's offset, so the press falls through to the modal-barrier arm instead
+//! (swallowed — a press *inside* the panel dismisses nothing). In the other
+//! direction, a [`GlyphSheetHandle::close`] landing mid-drag wins at once and
+//! exits from the finger's current offset; the drag's own release is then
+//! absorbed, since `begin_exit` is idempotent and a spring-back only ever starts
+//! from `Shown`.
+//!
+//! **Frame discipline** (idle-heat): paint requests another frame while a
+//! tracking drag is in flight, while any of the three drivers (enter, exit,
+//! spring-back) runs, and for one frame past `Dismissed` — and requests nothing
+//! at rest. A `Move` additionally requests a redraw from the event pass, the
+//! same event-driven repaint `ScrollWidget`'s drag uses.
+//!
+//! Hit-testing stays on the panel's **rest** rect throughout (the `panel` /
+//! `handle_target` fields), exactly the contract the enter/exit staging already
+//! had: the offset is a paint-time transform, not a layout change.
 //!
 //! # Content
 //!
@@ -91,7 +133,14 @@
 //!
 //! [`GlyphSheetView::dismissable`] (default `true`) is the single barrier flag
 //! gating the scrim tap, the handle drag, `Escape`, and an Android back press
-//! together — `false` disables all four (only the app itself still closes it,
+//! together. **A non-dismissable sheet's panel is simply immovable: the handle
+//! drag does not track the finger and does not rubber-band.** The press is still
+//! captured and swallowed (it must not fall through to the content or the page
+//! under the modal), but nothing moves and nothing springs back — the honest
+//! signal that this sheet has no dismiss gesture, where a rubber-band that
+//! always snaps back would advertise one that does not exist.
+//!
+//! `false` disables all four dismiss gestures (only the app itself still closes it,
 //! through [`GlyphSheetHandle`] below or a bare `controller.pop()`) and
 //! [`show_glyph_sheet`] pushes with
 //! [`BackPolicy::Veto`](crate::nav::navigator::BackPolicy::Veto). `true` pushes
@@ -153,7 +202,7 @@ use frust_core::accesskit::Role;
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Curve, EventCtx, EventResult,
     FrameTime, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, PointerPhase,
-    SemanticsCtx, View, Widget, any,
+    SemanticsCtx, VelocityTracker, View, Widget, any,
 };
 use frust_theme::Theme;
 use kurbo::{Affine, Point, Rect, RoundedRect, RoundedRectRadii, Shape, Size};
@@ -177,11 +226,27 @@ const HANDLE_WIDTH: f64 = 32.0;
 /// Drag-handle visual indicator height, in logical px (thinner than M3's
 /// 4dp — Glyph's hairline aesthetic).
 const HANDLE_HEIGHT: f64 = 3.0;
-/// Fraction of the panel's own height a handle-drag must exceed to dismiss —
-/// the same community-approximate half-height heuristic
-/// [`crate::material::sheet`] uses (no single published constant exists for
-/// this).
+/// Fraction of the panel's own height the finger must have dragged it to (or
+/// past) for a release to dismiss.
+///
+/// **Community-approximate**: no design spec publishes a bottom-sheet dismiss
+/// distance. Half the panel is where the reference implementations converge
+/// (Flutter's `BottomSheet` gates on the same half-panel progress, and
+/// [`crate::material::sheet`] already carries this heuristic) — and half stays
+/// the right ask now that the panel visibly follows the finger: the user
+/// watches themselves cross it, where before they committed blind.
 const DRAG_DISMISS_FRACTION: f64 = 0.5;
+/// Downward release speed, in logical px/s, at or above which a handle drag
+/// dismisses however short it was.
+///
+/// **Community-approximate**: no spec publishes a flick cutoff either; ~700
+/// px/s is the value the reference bottom-sheet implementations use (Flutter's
+/// `_minFlingVelocity`), and it sits an order of magnitude above
+/// [`frust_core::FLING_STOP`] (30 px/s, "this scroll has stopped"), which is the
+/// property that matters: a deliberate flick clears it, a drifting release does
+/// not. Device-independent by construction — events arrive in a
+/// density-independent space, so this is logical px/s on every screen.
+const FLICK_DISMISS_VELOCITY: f64 = 700.0;
 
 /// Unthemed-fallback panel top-corner radius. A theme resolves this from
 /// `shape.large` — the same token [`crate::glyph::dialog`]'s panel uses (14px),
@@ -226,6 +291,12 @@ const ENTER_CURVE: Curve = Curve::Cubic(0.34, 1.35, 0.64, 1.0);
 const EXIT_DURATION: Duration = Duration::from_millis(150);
 /// Exit easing fallback (Glyph `exit` accelerate-out cubic).
 const EXIT_CURVE: Curve = Curve::Cubic(0.4, 0.0, 1.0, 1.0);
+/// Spring-back easing fallback (Glyph `effects` decelerate cubic). Deliberately
+/// **not** [`EXIT_CURVE`]: an accelerate-out curve run backwards would have the
+/// panel creep away from the finger and then slam into rest, where a
+/// decelerating one eases into it — which is what a released, undismissed sheet
+/// should feel like. A theme resolves this from `motion.easing.effects`.
+const SETTLE_CURVE: Curve = Curve::Cubic(0.16, 1.0, 0.3, 1.0);
 /// `reduce_motion`'s collapsed crossfade duration (mirrors
 /// `nav::transition::REDUCE_MOTION_DURATION`).
 const REDUCE_MOTION_DURATION: Duration = Duration::from_millis(120);
@@ -261,6 +332,24 @@ fn resolve_timings(theme: Option<&Theme>) -> (Timing, Timing) {
             Timing::Duration(ENTER_DURATION, ENTER_CURVE),
             Timing::Duration(EXIT_DURATION, EXIT_CURVE),
         ),
+    }
+}
+
+/// The [`Timing`] a below-threshold release (or a `Cancel`) springs the panel
+/// back to rest on: the exit's own `durations.fast` — a spring-back is a
+/// correction, not a journey — but the decelerating `effects` easing rather than
+/// the `exit` accelerate-out one (see [`SETTLE_CURVE`]). Collapses to the same
+/// linear crossfade everything else does under `reduce_motion`.
+fn resolve_settle(theme: Option<&Theme>) -> Timing {
+    if theme.map(|t| t.motion.reduce_motion).unwrap_or(false) {
+        return Timing::Duration(REDUCE_MOTION_DURATION, Curve::Linear);
+    }
+    match theme {
+        Some(t) => Timing::Duration(
+            Duration::from_secs_f64(t.motion.durations.fast / 1000.0),
+            t.motion.easing.effects,
+        ),
+        None => Timing::Duration(EXIT_DURATION, SETTLE_CURVE),
     }
 }
 
@@ -532,14 +621,57 @@ pub struct GlyphSheetWidget {
     /// coords, at rest).
     handle_target: Rect,
     phase: Phase,
-    /// The enter/exit progress driver — lazily built on the first paint that
-    /// sees the phase (rebuild has no theme to resolve a [`Timing`] from).
+    /// The current animation's progress driver — enter, exit, *or* spring-back,
+    /// whichever the phase plus [`settle_from`](Self::settle_from) says is
+    /// running (the three are mutually exclusive, so they share one slot).
+    /// Lazily built on the first paint that sees it, because rebuild has no
+    /// theme to resolve a [`Timing`] from; cleared by whatever supersedes it.
     driver: Option<TransitionDriver>,
     /// A handle drag is in flight (the sheet captured the pointer on a `Down`
     /// in the handle strip).
     drag_active: bool,
-    /// The `Down` y the drag distance is measured from.
+    /// The y the drag's offset is measured from — the `Down` y, less however far
+    /// the panel was already offset when the finger landed (grabbing a panel
+    /// mid-spring-back must not teleport it to rest).
     drag_start_y: f64,
+    /// The latest pointer y of the in-flight drag; the panel's live offset is
+    /// `drag_y − drag_start_y`, clamped (see
+    /// [`drag_offset_frac`](Self::drag_offset_frac)).
+    drag_y: f64,
+    /// Whether the in-flight drag moves the panel at all — `false` for a
+    /// [`dismissable(false)`](GlyphSheetView::dismissable) sheet, whose panel is
+    /// immovable but whose handle press is still swallowed (see the
+    /// [module docs](self)).
+    drag_tracks: bool,
+    /// Release-velocity samples for the flick-to-dismiss test, timed by
+    /// [`last_frame_time`](Self::last_frame_time) — `crate::scroll`'s idiom.
+    tracker: VelocityTracker,
+    /// The most recent `paint` frame time, reused as the event-pass timestamp
+    /// for [`tracker`](Self::tracker): an event pass carries no clock of its own
+    /// (again `crate::scroll`'s idiom, and its precedent for the same problem).
+    last_frame_time: FrameTime,
+    /// The panel offset fraction the in-flight exit started from — `0.0` for
+    /// every dismissal off a resting sheet, the finger's own offset for a drag
+    /// or flick release, so an exit never flashes the panel back to rest before
+    /// sliding it out.
+    exit_from: f64,
+    /// The offset fraction an in-flight spring-back started from (`None` when
+    /// the panel is not springing back). Deliberately **not** a [`Phase`]: the
+    /// sheet stays `Shown` for the whole spring-back, which is what keeps
+    /// [`begin_exit`](Self::begin_exit)'s `Enter | Shown` guard — and every
+    /// phase assertion anywhere else — true of a sheet the user is still
+    /// touching.
+    settle_from: Option<f64>,
+    /// The [`Timing`] a spring-back runs on, re-resolved from the active theme
+    /// on every paint (the only pass with a theme in reach) and read from there
+    /// by [`advance`](Self::advance), which — like the event pass that starts a
+    /// spring-back — has none. Starts at the unthemed fallback, so a direct
+    /// `advance` in a test drives exactly the motion an unthemed app paints.
+    settle_timing: Timing,
+    /// The panel's offset fraction as of the last [`advance`](Self::advance):
+    /// where a dismissal picks the exit up from (see
+    /// [`current_offset_frac`](Self::current_offset_frac)).
+    offset_frac: f64,
     /// A scrim/panel-background press is in flight (the modal barrier
     /// captured the pointer).
     scrim_captured: bool,
@@ -564,6 +696,16 @@ impl<State: 'static> View<State> for GlyphSheetView<State> {
             driver: None,
             drag_active: false,
             drag_start_y: 0.0,
+            drag_y: 0.0,
+            drag_tracks: false,
+            tracker: VelocityTracker::new(),
+            last_frame_time: FrameTime::ZERO,
+            exit_from: 0.0,
+            settle_from: None,
+            settle_timing: Timing::Duration(EXIT_DURATION, SETTLE_CURVE),
+            // A freshly built sheet has not painted yet: it sits fully
+            // off-screen below, exactly where its enter starts.
+            offset_frac: 1.0,
             scrim_captured: false,
             scrim_down_outside: false,
         }
@@ -597,7 +739,11 @@ impl<State: 'static> View<State> for GlyphSheetView<State> {
 }
 
 impl GlyphSheetWidget {
-    /// Begin the exit animation (a scrim tap/handle drag/Escape cancel).
+    /// Begin the exit animation (a scrim tap/handle drag/Escape cancel), from
+    /// wherever the panel currently sits — mid-drag, mid-spring-back or
+    /// mid-enter, never snapped back to rest first (see
+    /// [`current_offset_frac`](Self::current_offset_frac)).
+    ///
     /// Idempotent: only an `Enter`/`Shown` sheet can start exiting, so a
     /// second request mid-exit — or after `Dismissed` — is a no-op. **Every**
     /// close path (scrim, handle, `Escape`, back, and
@@ -605,10 +751,74 @@ impl GlyphSheetWidget {
     /// the [module docs](self)'s drag-to-dismiss note on why that matters for
     /// the scrim-fade requirement.
     fn begin_exit(&mut self) {
+        self.begin_exit_from(self.current_offset_frac());
+    }
+
+    /// [`begin_exit`](Self::begin_exit) from an explicit offset fraction, for
+    /// the one caller that knows the panel's position a frame ahead of paint:
+    /// the release itself, which has the finger's final y in hand.
+    fn begin_exit_from(&mut self, from: f64) {
         if matches!(self.phase, Phase::Enter | Phase::Shown) {
             self.phase = Phase::Exit;
+            self.exit_from = from.clamp(0.0, 1.0);
+            self.offset_frac = self.exit_from;
             self.driver = None;
+            // A spring-back loses to a dismissal. An in-flight *drag* is left
+            // alone deliberately: it keeps swallowing its own pointer stream
+            // until the Up/Cancel (dropping the capture mid-gesture would leak
+            // the rest of it into the content), and its release can no longer
+            // do anything — `begin_exit` is idempotent and a spring-back only
+            // starts from `Shown`.
+            self.settle_from = None;
         }
+    }
+
+    /// Start the spring-back to rest from offset fraction `from` — a
+    /// below-threshold release, or a `Cancel`. Only from `Shown`: a sheet that
+    /// is already exiting (a [`GlyphSheetHandle::close`] that landed mid-drag)
+    /// must never be pulled back up.
+    fn start_settle(&mut self, from: f64) {
+        if self.phase != Phase::Shown || from <= 0.0 {
+            return;
+        }
+        self.settle_from = Some(from.clamp(0.0, 1.0));
+        self.offset_frac = from;
+        self.driver = None;
+    }
+
+    /// The in-flight drag's panel offset as a fraction of the panel's own
+    /// height: the distance from the drag origin, clamped to `[0, 1]` — the
+    /// panel follows the finger *down* only, and no further than fully
+    /// off-screen. `0` when the drag does not track the finger at all (a
+    /// [`dismissable(false)`](GlyphSheetView::dismissable) sheet's immovable
+    /// panel).
+    fn drag_offset_frac(&self) -> f64 {
+        let panel_h = self.panel.height();
+        if !self.drag_tracks || panel_h <= 0.0 {
+            return 0.0;
+        }
+        ((self.drag_y - self.drag_start_y) / panel_h).clamp(0.0, 1.0)
+    }
+
+    /// Where the panel is *right now* as an offset fraction: the finger's own
+    /// position while a drag tracks it, otherwise the last value
+    /// [`advance`](Self::advance) painted (enter, spring-back and exit all
+    /// record theirs). This is what a dismissal starts its exit from, so no
+    /// close path — gesture, key, back, or handle — ever snaps the panel back to
+    /// rest before sliding it out.
+    fn current_offset_frac(&self) -> f64 {
+        if self.drag_active && self.phase == Phase::Shown {
+            self.drag_offset_frac()
+        } else {
+            self.offset_frac
+        }
+    }
+
+    /// The last painted frame time in milliseconds — the event pass's only
+    /// clock, and so the timestamp source for the drag's
+    /// [`tracker`](Self::tracker) (mirrors `crate::scroll`'s `event_time_ms`).
+    fn event_time_ms(&self) -> f64 {
+        self.last_frame_time.as_secs_f64() * 1000.0
     }
 
     /// Observe the shared dismiss-signal cell (see the `dismiss_signal` field
@@ -636,11 +846,15 @@ impl GlyphSheetWidget {
     /// `(offset_frac, scrim_frac, animating)`: `offset_frac` is how far the
     /// panel sits below its rest position, as a fraction of its own height
     /// (`0.0` = at rest, `1.0` = fully off-screen below); `scrim_frac` is the
-    /// scrim's own independent fade fraction. Factored out of `paint` so the
+    /// scrim's fade fraction, which is `1 − offset_frac` on **every** path —
+    /// enter, drag, spring-back and exit alike — so the barrier's weight always
+    /// reads how far the panel has travelled. (The scrim still fades
+    /// *independently of the panel's transform*: it is painted before it, and
+    /// never moves. See the [module docs](self).) Factored out of `paint` so the
     /// full timeline is drivable with synthetic [`FrameTime`]s in a unit test
     /// (mirrors `crate::glyph::dialog::GlyphDialogWidget::advance`).
     fn advance(&mut self, now: FrameTime, enter: Timing, exit: Timing) -> (f64, f32, bool) {
-        match self.phase {
+        let (offset, animating) = match self.phase {
             Phase::Enter => {
                 let adv = self
                     .driver
@@ -650,10 +864,9 @@ impl GlyphSheetWidget {
                     self.phase = Phase::Shown;
                     self.driver = None;
                 }
-                let p = adv.value.clamp(0.0, 1.0);
-                (1.0 - p, p as f32, !adv.done)
+                (1.0 - adv.value.clamp(0.0, 1.0), !adv.done)
             }
-            Phase::Shown => (0.0, 1.0, false),
+            Phase::Shown => self.advance_shown(now),
             Phase::Exit => {
                 let adv = self
                     .driver
@@ -667,10 +880,43 @@ impl GlyphSheetWidget {
                         on_close();
                     }
                 }
-                (q, (1.0 - q) as f32, !adv.done)
+                // The driver's `0 → 1` remapped onto `exit_from → 1`: a drag
+                // release resumes from where the finger left the panel instead
+                // of snapping back to rest first.
+                (self.exit_from + (1.0 - self.exit_from) * q, !adv.done)
             }
-            Phase::Dismissed => (1.0, 0.0, false),
+            Phase::Dismissed => (1.0, false),
+        };
+        self.offset_frac = offset;
+        (offset, (1.0 - offset) as f32, animating)
+    }
+
+    /// The `Shown`-phase offset: a live handle drag tracks the finger, a
+    /// released-below-threshold (or cancelled) drag springs back to rest, and an
+    /// untouched sheet just sits there. Split out of [`advance`](Self::advance)
+    /// to keep its four phase arms one-glance readable.
+    fn advance_shown(&mut self, now: FrameTime) -> (f64, bool) {
+        if self.drag_active {
+            // A tracking drag keeps the frame pump open for as long as the
+            // finger is down — a bounded, user-driven interval — so a coalesced
+            // or batched move stream still paints every frame. A non-tracking
+            // one (immovable panel) asks for nothing.
+            return (self.drag_offset_frac(), self.drag_tracks);
         }
+        let Some(from) = self.settle_from else {
+            return (0.0, false);
+        };
+        let timing = self.settle_timing;
+        let adv = self
+            .driver
+            .get_or_insert_with(|| make_driver(timing).0)
+            .advance(now);
+        if adv.done {
+            self.settle_from = None;
+            self.driver = None;
+            return (0.0, false);
+        }
+        (from * (1.0 - adv.value.clamp(0.0, 1.0)), true)
     }
 }
 
@@ -696,9 +942,17 @@ impl Widget for GlyphSheetWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        // Record the shared frame clock first: the between-frames event pass
+        // carries none of its own, and the drag's velocity tracker times its
+        // samples by this (`crate::scroll`'s idiom, same reason).
+        self.last_frame_time = ctx.frame_time();
         self.observe_dismiss_signal();
         let theme = Theme::from_paint_ctx(ctx);
         let (enter, exit) = resolve_timings(theme);
+        // Re-resolved every paint like every other themed value here, and
+        // stashed because neither `advance` nor the event pass that starts a
+        // spring-back can reach a theme.
+        self.settle_timing = resolve_settle(theme);
         let (offset_frac, scrim_frac, animating) = self.advance(ctx.frame_time(), enter, exit);
 
         // Scrim fills the whole area (the modal barrier) — its own fade,
@@ -753,14 +1007,39 @@ impl Widget for GlyphSheetWidget {
         self.content.paint_child(ctx, scene);
         scene.pop_transform();
 
-        // Keep frames coming while animating, and for one frame past
-        // Dismissed so the rebuild that applies the pop actually runs.
+        // Keep frames coming while anything is moving — a tracking drag or any
+        // of the three drivers — and for one frame past Dismissed so the
+        // rebuild that applies the pop actually runs. At rest: nothing
+        // (idle-heat discipline).
         if animating || self.phase == Phase::Dismissed {
             ctx.request_frame();
         }
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        let t = self.event_time_ms();
+        self.event_at(ctx, event, t)
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        ctx.push_container(
+            Role::Dialog,
+            |node| node.set_modal(),
+            |ctx| {
+                self.content.semantics_child(ctx);
+            },
+        );
+    }
+
+    crate::authoring::visit_children!(content);
+}
+
+impl GlyphSheetWidget {
+    /// The event body, parameterised on an explicit timestamp so the drag's
+    /// velocity math is deterministic in tests; [`Widget::event`] supplies the
+    /// real one (the last painted frame's clock — an event pass has none).
+    /// Mirrors `crate::scroll`'s identical seam, for the identical reason.
+    fn event_at(&mut self, ctx: &mut EventCtx, event: &InputEvent, t_ms: f64) -> EventResult {
         // 0. A broadcast is not user input, so it belongs to neither the drag nor
         //    the scrim arm below: forward it to the content unconditionally and
         //    consume nothing, so a deferred callback queued inside the sheet still
@@ -775,18 +1054,40 @@ impl Widget for GlyphSheetWidget {
                 return EventResult::Handled;
             };
             return match p.phase {
-                PointerPhase::Move => EventResult::Handled,
+                PointerPhase::Move => {
+                    self.drag_y = p.position.y;
+                    self.tracker.record(t_ms, p.position.y);
+                    // The panel moved under the finger: repaint from the event
+                    // that moved it, the same event-driven redraw
+                    // `crate::scroll`'s drag uses.
+                    ctx.request_redraw();
+                    EventResult::Handled
+                }
                 PointerPhase::Up => {
-                    let dy = p.position.y - self.drag_start_y;
-                    let threshold = self.panel.height() * DRAG_DISMISS_FRACTION;
-                    if self.dismissable && dy > threshold {
-                        self.begin_exit();
-                    }
+                    self.drag_y = p.position.y;
+                    self.tracker.record(t_ms, p.position.y);
+                    let offset = self.drag_offset_frac();
+                    // Positive = downward (y grows down), so the sign check is
+                    // the threshold itself.
+                    let flicked_down = self.tracker.velocity() >= FLICK_DISMISS_VELOCITY;
                     self.drag_active = false;
+                    if self.dismissable && self.drag_tracks {
+                        if offset >= DRAG_DISMISS_FRACTION || flicked_down {
+                            self.begin_exit_from(offset);
+                        } else {
+                            self.start_settle(offset);
+                        }
+                    }
+                    ctx.request_redraw();
                     EventResult::Handled
                 }
                 PointerPhase::Cancel => {
+                    // A cancelled drag dismisses nothing, however far it got:
+                    // the platform took the gesture, the user did not release it.
+                    let offset = self.drag_offset_frac();
                     self.drag_active = false;
+                    self.start_settle(offset);
+                    ctx.request_redraw();
                     EventResult::Handled
                 }
                 PointerPhase::Down => EventResult::Handled,
@@ -839,9 +1140,25 @@ impl Widget for GlyphSheetWidget {
                 // change-guarded no-op (no generation bump) — do not add a
                 // claim-once guard, it kills the session on the second tap.
                 ctx.request_focus();
-                if self.handle_target.contains(p.position) {
+                // A drag starts only from `Shown`: during Enter/Exit the phase
+                // machine owns the panel's offset and a drag would fight it, so
+                // the press falls through to the barrier arm below instead —
+                // which swallows it (an inside-panel press dismisses nothing).
+                if self.phase == Phase::Shown && self.handle_target.contains(p.position) {
+                    // Seed the origin from where the panel actually *is*, so
+                    // grabbing one mid-spring-back does not teleport it to rest;
+                    // for the ordinary grab-at-rest this is just the `Down` y.
+                    let live = self.current_offset_frac() * self.panel.height();
                     self.drag_active = true;
-                    self.drag_start_y = p.position.y;
+                    self.drag_tracks = self.dismissable;
+                    self.drag_start_y = p.position.y - live;
+                    self.drag_y = p.position.y;
+                    // The finger now owns the panel: drop any spring-back and
+                    // its driver rather than letting the two drive it at once.
+                    self.settle_from = None;
+                    self.driver = None;
+                    self.tracker.clear();
+                    self.tracker.record(t_ms, p.position.y);
                     ctx.capture_pointer();
                     return EventResult::Handled;
                 }
@@ -858,18 +1175,6 @@ impl Widget for GlyphSheetWidget {
             _ => crate::authoring::route_event_single(&mut self.content, ctx, event),
         }
     }
-
-    fn semantics(&self, ctx: &mut SemanticsCtx) {
-        ctx.push_container(
-            Role::Dialog,
-            |node| node.set_modal(),
-            |ctx| {
-                self.content.semantics_child(ctx);
-            },
-        );
-    }
-
-    crate::authoring::visit_children!(content);
 }
 
 #[cfg(test)]
@@ -1683,6 +1988,345 @@ mod tests {
         h.flush();
         assert_eq!(controller.depth(), 1);
         assert_eq!(h.state.results, 1);
+    }
+
+    // -- Interactive drag: the panel follows the finger ----------------------
+
+    /// The panel height every drag test reasons in: the 44px handle strip plus
+    /// the 200px content leaf. At the bottom of the 600px [`area`] its strip
+    /// therefore starts at `y = 356`, and [`DRAG_DISMISS_FRACTION`] of it is
+    /// 122px of travel.
+    const PANEL_H: f64 = HANDLE_TOUCH_TARGET + 200.0;
+
+    /// A laid-out sheet with its enter played out — the resting state every drag
+    /// starts from.
+    fn shown(view: &GlyphSheetView<()>) -> GlyphSheetWidget {
+        let (enter, exit) = resolve_timings(None);
+        let mut w = laid_out(view, area());
+        w.advance(ft_ms(0.0), enter, exit);
+        w.advance(ft_ms(ENTER_SETTLED_MS), enter, exit);
+        assert_eq!(w.phase, Phase::Shown, "the sheet settled shown");
+        w
+    }
+
+    /// Paint at `ms`, returning `(the panel's painted downward translation in
+    /// px, the painted scrim alpha, whether another frame was requested)`.
+    fn painted(w: &mut GlyphSheetWidget, ms: f64) -> (f64, f32, bool) {
+        let mut rec = Recorder::default();
+        let mut pctx = PaintCtx::for_test(Point::ZERO, area(), ft_ms(ms));
+        w.paint(&mut pctx, &mut rec);
+        (
+            rec.transforms[0].as_coeffs()[5],
+            rec.rects[0].2.components[3],
+            pctx.needs_frame(),
+        )
+    }
+
+    /// Dispatch one pointer event at an explicit event-pass timestamp — the seam
+    /// `Widget::event` fills in from the last painted frame clock.
+    fn drag_event(w: &mut GlyphSheetWidget, phase: PointerPhase, y: f64, t_ms: f64) -> EventResult {
+        let state_any: &mut dyn Any = &mut ();
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, area());
+        w.event_at(&mut ctx, &ev(phase, 200.0, y), t_ms)
+    }
+
+    /// The sheet panel's painted downward translation, out of a whole-tree
+    /// [`Harness`] recording (its own slide is the only transform a settled
+    /// navigator pushes).
+    fn panel_translate(rec: &Recorder) -> f64 {
+        let mut pure: Vec<f64> = rec
+            .transforms
+            .iter()
+            .map(|t| t.as_coeffs())
+            .filter(|c| (c[0], c[3]) == (1.0, 1.0))
+            .map(|c| c[5])
+            .collect();
+        assert_eq!(pure.len(), 1, "one pure translate — the panel's own slide");
+        pure.pop().unwrap()
+    }
+
+    #[test]
+    fn a_handle_drag_moves_the_panel_under_the_finger_and_dims_the_scrim_with_it() {
+        let view: GlyphSheetView<()> = glyph_sheet(leaf_any(300.0, 200.0));
+        let mut w = shown(&view);
+        let handle_y = w.panel.y0 + 10.0;
+
+        // At rest: no offset, full scrim, and no frame asked for.
+        let (ty, alpha, frame) = painted(&mut w, ENTER_SETTLED_MS);
+        assert_eq!(ty, 0.0);
+        assert!((alpha - SCRIM_ALPHA).abs() < 1e-6);
+        assert!(!frame, "a resting sheet requests no frames");
+
+        drag_event(&mut w, PointerPhase::Down, handle_y, ENTER_SETTLED_MS);
+        drag_event(
+            &mut w,
+            PointerPhase::Move,
+            handle_y + 60.0,
+            ENTER_SETTLED_MS + 16.0,
+        );
+
+        let (ty, alpha, frame) = painted(&mut w, ENTER_SETTLED_MS + 16.0);
+        assert!(
+            (ty - 60.0).abs() < 1e-6,
+            "the panel tracks the finger 1:1, got {ty}"
+        );
+        let expected = SCRIM_ALPHA * (1.0 - 60.0 / PANEL_H) as f32;
+        assert!(
+            (alpha - expected).abs() < 1e-6,
+            "the scrim dims on the drag's own progress: {alpha} vs {expected}"
+        );
+        assert!(frame, "a live drag keeps the frame pump open");
+        assert_eq!(w.phase, Phase::Shown, "dragging is not a phase");
+
+        // Dragging back *up* past the origin never lifts the panel above rest.
+        drag_event(
+            &mut w,
+            PointerPhase::Move,
+            handle_y - 200.0,
+            ENTER_SETTLED_MS + 32.0,
+        );
+        let (ty, alpha, _) = painted(&mut w, ENTER_SETTLED_MS + 32.0);
+        assert_eq!(ty, 0.0, "clamped at rest");
+        assert!((alpha - SCRIM_ALPHA).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_release_past_the_threshold_exits_from_the_dragged_offset_and_pops_once() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let (mut h, _sheet) = open_sheet(&controller);
+        let handle_y = area().height - PANEL_H + 10.0;
+
+        // 150px of the 244px panel — past the threshold — but taken slowly
+        // (a paint at 600ms prunes the tracker's window), so the *distance*
+        // path is what dismisses here, not the flick path.
+        h.event(&ev(PointerPhase::Down, 200.0, handle_y));
+        h.paint(ENTER_SETTLED_MS + 16.0);
+        h.event(&ev(PointerPhase::Move, 200.0, handle_y + 150.0));
+        let mid = h.paint_recorded(ENTER_SETTLED_MS + 200.0);
+        assert!(
+            (panel_translate(&mid) - 150.0).abs() < 1e-6,
+            "the panel followed the finger before the release"
+        );
+        h.event(&ev(PointerPhase::Up, 200.0, handle_y + 150.0));
+
+        // The exit's first painted frame picks up exactly where the finger left
+        // the panel — it never snaps back to rest and re-plays from there.
+        let seed = h.paint_recorded(ENTER_SETTLED_MS + 216.0);
+        let ty = panel_translate(&seed);
+        assert!(
+            (ty - 150.0).abs() < 1e-6,
+            "the exit starts from the dragged offset, got {ty}"
+        );
+        let onward = h.paint_recorded(ENTER_SETTLED_MS + 291.0);
+        assert!(
+            panel_translate(&onward) > 150.0,
+            "…and only ever continues downward from it"
+        );
+        assert_eq!(controller.depth(), 2, "still mounted, still exiting");
+
+        h.paint(ENTER_SETTLED_MS + 600.0);
+        h.flush();
+        assert_eq!(controller.depth(), 1, "the completed exit popped the page");
+        assert_eq!(h.state.results, 1, "exactly one pop");
+    }
+
+    #[test]
+    fn a_downward_flick_dismisses_a_drag_that_never_reached_the_threshold() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let (mut h, _sheet) = open_sheet(&controller);
+        let handle_y = area().height - PANEL_H + 10.0;
+
+        // 60px — a quarter of the panel, well under the half-panel threshold —
+        // but covered across two 16ms frames: ~1875 px/s, past
+        // FLICK_DISMISS_VELOCITY.
+        h.event(&ev(PointerPhase::Down, 200.0, handle_y));
+        h.paint(ENTER_SETTLED_MS + 16.0);
+        h.event(&ev(PointerPhase::Move, 200.0, handle_y + 30.0));
+        h.paint(ENTER_SETTLED_MS + 32.0);
+        h.event(&ev(PointerPhase::Move, 200.0, handle_y + 60.0));
+        h.event(&ev(PointerPhase::Up, 200.0, handle_y + 60.0));
+
+        let seed = h.paint_recorded(ENTER_SETTLED_MS + 48.0);
+        assert!(
+            (panel_translate(&seed) - 60.0).abs() < 1e-6,
+            "a flicked dismissal also resumes from the finger's offset"
+        );
+        h.paint(ENTER_SETTLED_MS + 400.0);
+        h.flush();
+        assert_eq!(
+            controller.depth(),
+            1,
+            "the flick dismissed a quarter-dragged sheet"
+        );
+        assert_eq!(h.state.results, 1);
+    }
+
+    #[test]
+    fn a_slow_release_below_the_threshold_springs_back_and_leaves_the_sheet_usable() {
+        let view: GlyphSheetView<()> = glyph_sheet(leaf_any(300.0, 200.0));
+        let mut w = shown(&view);
+        let handle_y = w.panel.y0 + 10.0;
+
+        // The same 60px the flick above dismisses on — but spread over 200ms
+        // (300 px/s), so neither the distance nor the velocity path fires.
+        drag_event(&mut w, PointerPhase::Down, handle_y, 400.0);
+        drag_event(&mut w, PointerPhase::Move, handle_y + 60.0, 600.0);
+        let (ty, _, _) = painted(&mut w, 600.0);
+        assert!((ty - 60.0).abs() < 1e-6);
+        drag_event(&mut w, PointerPhase::Up, handle_y + 60.0, 600.0);
+        assert_eq!(w.phase, Phase::Shown, "no dismissal");
+        let from = w.settle_from.expect("a spring-back is in flight instead");
+        assert!(
+            (from - 60.0 / PANEL_H).abs() < 1e-9,
+            "…starting from the released offset"
+        );
+
+        let (seed, _, frame) = painted(&mut w, 600.0);
+        assert!(
+            (seed - 60.0).abs() < 1e-6,
+            "the spring-back starts where the finger let go, got {seed}"
+        );
+        assert!(frame);
+        let (partway, _, frame) = painted(&mut w, 675.0);
+        assert!(
+            partway > 0.0 && partway < 60.0,
+            "partway home, got {partway}"
+        );
+        assert!(frame);
+        // Past the 150ms spring-back: home, and asking for nothing again.
+        let (home, alpha, frame) = painted(&mut w, 800.0);
+        assert_eq!(home, 0.0, "back at rest");
+        assert!(
+            (alpha - SCRIM_ALPHA).abs() < 1e-6,
+            "the scrim came back with it"
+        );
+        assert!(!frame, "a settled sheet stops requesting frames");
+        assert_eq!(w.settle_from, None);
+
+        // The sheet is fully live throughout: a second, decisive drag dismisses.
+        drag_event(&mut w, PointerPhase::Down, handle_y, 800.0);
+        drag_event(&mut w, PointerPhase::Move, handle_y + 150.0, 1000.0);
+        drag_event(&mut w, PointerPhase::Up, handle_y + 150.0, 1000.0);
+        assert_eq!(w.phase, Phase::Exit, "a later drag still dismisses");
+    }
+
+    #[test]
+    fn a_cancelled_drag_springs_back_and_never_dismisses() {
+        let view: GlyphSheetView<()> = glyph_sheet(leaf_any(300.0, 200.0));
+        let mut w = shown(&view);
+        let handle_y = w.panel.y0 + 10.0;
+
+        // Past the dismiss threshold *and* fast: a release here would exit. A
+        // Cancel is the platform stealing the gesture, not the user letting go.
+        drag_event(&mut w, PointerPhase::Down, handle_y, 400.0);
+        drag_event(&mut w, PointerPhase::Move, handle_y + 150.0, 416.0);
+        drag_event(&mut w, PointerPhase::Cancel, handle_y + 150.0, 416.0);
+        assert_eq!(w.phase, Phase::Shown, "a cancel dismisses nothing");
+        assert!(w.settle_from.is_some(), "…it springs back instead");
+        assert!(!w.drag_active);
+
+        painted(&mut w, 416.0);
+        let (home, _, frame) = painted(&mut w, 700.0);
+        assert_eq!(home, 0.0, "back at rest");
+        assert!(!frame);
+    }
+
+    #[test]
+    fn a_non_dismissable_sheets_panel_is_immovable_but_still_swallows_the_press() {
+        let view: GlyphSheetView<()> = glyph_sheet(leaf_any(300.0, 200.0)).dismissable(false);
+        let mut w = shown(&view);
+        let handle_y = w.panel.y0 + 10.0;
+
+        assert_eq!(
+            drag_event(&mut w, PointerPhase::Down, handle_y, 400.0),
+            EventResult::Handled,
+            "the press is swallowed — it must not reach content or the page below"
+        );
+        assert!(w.drag_active, "the gesture is owned…");
+        assert!(!w.drag_tracks, "…but it moves nothing");
+        drag_event(&mut w, PointerPhase::Move, handle_y + 150.0, 416.0);
+
+        let (ty, alpha, frame) = painted(&mut w, 416.0);
+        assert_eq!(
+            ty, 0.0,
+            "the panel does not budge, and does not rubber-band"
+        );
+        assert!(
+            (alpha - SCRIM_ALPHA).abs() < 1e-6,
+            "so the scrim does not move either"
+        );
+        assert!(!frame, "an immovable panel asks for no frames");
+
+        drag_event(&mut w, PointerPhase::Up, handle_y + 150.0, 432.0);
+        assert_eq!(w.phase, Phase::Shown, "no dismissal, past-threshold or not");
+        assert_eq!(w.settle_from, None, "and nothing to spring back");
+    }
+
+    #[test]
+    fn a_close_mid_drag_wins_and_exits_from_where_the_finger_had_the_panel() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let (mut h, sheet) = open_sheet(&controller);
+        let handle_y = area().height - PANEL_H + 10.0;
+
+        h.event(&ev(PointerPhase::Down, 200.0, handle_y));
+        h.event(&ev(PointerPhase::Move, 200.0, handle_y + 100.0));
+        let dragging = h.paint_recorded(ENTER_SETTLED_MS + 16.0);
+        assert!((panel_translate(&dragging) - 100.0).abs() < 1e-6);
+
+        // The app closes the sheet out from under the finger.
+        sheet.close();
+        let seed = h.paint_recorded(ENTER_SETTLED_MS + 32.0);
+        assert!(
+            (panel_translate(&seed) - 100.0).abs() < 1e-6,
+            "the exit picks the panel up at the finger's offset"
+        );
+
+        // The abandoned drag's own release can no longer do anything.
+        h.event(&ev(PointerPhase::Up, 200.0, handle_y + 100.0));
+        h.paint(ENTER_SETTLED_MS + 400.0);
+        h.flush();
+        assert_eq!(controller.depth(), 1);
+        assert_eq!(h.state.results, 1, "one exit, one pop");
+    }
+
+    #[test]
+    fn a_handle_press_during_the_enter_never_becomes_a_drag() {
+        let view: GlyphSheetView<()> = glyph_sheet(leaf_any(300.0, 200.0));
+        let (enter, exit) = resolve_timings(None);
+        let mut w = laid_out(&view, area());
+        w.advance(ft_ms(0.0), enter, exit);
+        w.advance(ft_ms(60.0), enter, exit);
+        assert_eq!(w.phase, Phase::Enter, "mid-enter");
+
+        let handle_y = w.panel.y0 + 10.0;
+        drag_event(&mut w, PointerPhase::Down, handle_y, 60.0);
+        assert!(
+            !w.drag_active,
+            "the phase machine owns the panel mid-enter — no drag to fight it"
+        );
+        // The press fell through to the modal barrier, which dismisses nothing
+        // from *inside* the panel.
+        drag_event(&mut w, PointerPhase::Up, handle_y + 150.0, 76.0);
+        assert_eq!(w.phase, Phase::Enter, "no dismissal");
+        let (_, _, animating) = w.advance(ft_ms(120.0), enter, exit);
+        assert!(animating, "…and the enter itself is undisturbed");
+    }
+
+    #[test]
+    fn a_dismissal_mid_enter_exits_from_the_partly_entered_offset() {
+        let view: GlyphSheetView<()> = glyph_sheet(leaf_any(300.0, 200.0));
+        let (enter, exit) = resolve_timings(None);
+        let mut w = laid_out(&view, area());
+        w.advance(ft_ms(0.0), enter, exit);
+        let (mid, _, _) = w.advance(ft_ms(60.0), enter, exit);
+        assert!(mid > 0.0 && mid < 1.0, "partway in, got {mid}");
+
+        w.begin_exit();
+        let (seed, _, _) = w.advance(ft_ms(60.0), enter, exit);
+        assert!(
+            (seed - mid).abs() < 1e-9,
+            "the exit resumes from the entering panel's own offset, not from rest"
+        );
     }
 
     #[test]
