@@ -4,7 +4,11 @@ resolver = "2"
 # doesn't cover `plugins/`) — a platform plugin (frust-plugin + FFI crates
 # only, no frust-* framework deps), unlike the excluded facade-tier
 # plugins/clean-signals-frust below, which stays out of the root graph.
-members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/iap", "plugins/database"]
+# plugins/i18n/macros is the tier's first nested crate (a proc-macro sibling
+# of plugins/i18n, the `locales!` compile-time Fluent-bundle loader) — listed
+# explicitly like every other `plugins/*` member above; no glob in this list
+# reaches two directory levels deep.
+members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/iap", "plugins/database", "plugins/i18n", "plugins/i18n/macros"]
 # examples/no-catalogs is the catalog-free build's compile guard: unlike
 # every example excluded below, it is INCLUDED on purpose — a package-scoped
 # `cargo build -p no-catalogs`/`cargo check -p no-catalogs` compiles `frust
@@ -341,6 +345,67 @@ rusqlite = { version = "=0.40.1", default-features = false, features = [
 # (`cargo test -p frust-database --features engine-turso`), plus `cargo check
 # -p frust-database` to confirm the default (sqlite-only) build stays clean.
 turso = { version = "=0.7.2", default-features = false }
+# frust-i18n's Fluent Project message-bundle engine (`plugins/i18n`) —
+# parses/resolves `.ftl` message files per requested locale. A direct
+# dependency: `fluent-templates` is deliberately NOT used (plan D6) — this
+# crate owns bundle construction/caching itself rather than delegating to
+# that crate's `Loader` abstraction. Pinned to minor per the Version-Pin
+# Policy (a pre-1.0 public surface); the tripwire is `cargo test -p
+# frust-i18n`.
+fluent-bundle = "0.16"
+# frust-i18n's locale negotiation (`fluent_langneg::negotiate_languages`),
+# resolving a requested locale list against this crate's compiled-in
+# available locales. Pinned to minor per the Version-Pin Policy.
+fluent-langneg = "0.13"
+# frust-i18n's/frust-i18n-macros' BCP-47 Unicode Language Identifier type —
+# `frust_i18n::Locale` wraps `unic_langid::LanguageIdentifier`, and the
+# macros crate's own `locales!` implementation validates each discovered
+# locale-directory name against the same parser. Pinned to minor per the
+# Version-Pin Policy.
+unic-langid = "0.9"
+# frust-i18n-macros' compile-time `.ftl` syntax check for the `locales!`
+# macro — parses each discovered locale directory's Fluent files at macro
+# expansion time so a malformed message fails the build, not runtime.
+# Pinned to minor per the Version-Pin Policy, matching `fluent-bundle`
+# above (same upstream `fluent-rs` repo, same pre-1.0 churn risk).
+fluent-syntax = "0.12"
+# frust-i18n-macros' minimal proc-macro toolchain (`locales!`) — no special
+# version-pin rationale beyond "current major", unlike the exact/minor pins
+# elsewhere in this list.
+proc-macro2 = "1"
+quote = "1"
+syn = "2"
+# frust-i18n's optional `formatting` feature (`icu_decimal`/`icu_datetime`/
+# `icu_plurals`/`icu_experimental`) — ICU4X locale-aware number/date/plural
+# formatting, layered underneath Fluent's own argument-substitution hooks.
+# Pinned to the 2.2.x line this lockfile already resolves for
+# `icu_collator`/`icu_locale`/`icu_normalizer`/`icu_properties`/
+# `icu_segmenter` (pulled transitively by `frust-text`'s shaping stack), so
+# no duplicate ICU4X major enters the graph — verified via a scratch
+# resolve: `icu_experimental =0.5.0` itself requires exactly this 2.2.0 line
+# for `icu_decimal`/`icu_datetime`/`icu_plurals`, so the unpinned `"2.2"`
+# caret below on those three converges on the same versions rather than
+# floating past them. The tripwire is `cargo tree -p frust-i18n --features
+# formatting -d` (no duplicate icu_* majors) plus `cargo test -p
+# frust-i18n --features formatting`.
+icu_decimal = "2.2"
+icu_datetime = "2.2"
+icu_plurals = "2.2"
+# Exact-pinned per the Version-Pin Policy: an explicitly experimental,
+# pre-1.0 ICU4X crate (its own crate doc: "all code in this crate is
+# unstable"). 0.5.0 is the release whose own dependency line still resolves
+# to this workspace's already-present ICU4X 2.2.x components — 0.6.0 would
+# pull 2.3.x instead, a duplicate-major risk against the icu_collator/
+# icu_normalizer/icu_properties/icu_segmenter versions already resolved
+# above.
+icu_experimental = "=0.5.0"
+# frust-i18n's desktop (macOS/Linux/Windows) system-locale detection — see
+# `plugins/i18n/Cargo.toml`'s own comment for how this arm and the Apple
+# (`objc2`/`objc2-foundation`) arm above both reach macOS, and which one its
+# real backend is expected to route through there. Exact-pinned per the
+# Version-Pin Policy: a small, young surface with no minor-version
+# API-stability track record yet.
+sys-locale = "=0.3.2"
 # reactive stack (frust-reactive) — do not add reactive_graph's `effects`
 # feature anywhere (see docs/DEVELOPMENT.md's Version-Pin Policy)
 reactive_graph = "0.2"
