@@ -1,0 +1,6 @@
+error: `locales!`: malformed Fluent syntax in `fixtures/malformed/en/broken.ftl`
+         fixtures/malformed/en/broken.ftl:3:2: Expected a token starting with "="
+ --> tests/macro/malformed_ftl.rs:3:22
+  |
+3 | frust_i18n::locales!("fixtures/malformed");
+  |                      ^^^^^^^^^^^^^^^^^^^^

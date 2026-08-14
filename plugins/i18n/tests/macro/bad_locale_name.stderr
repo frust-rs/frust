@@ -1,0 +1,5 @@
+error: `locales!`: `fixtures/bad-locale-name/en_US.UTF-8` is not a BCP-47 locale identifier: Parser error: Invalid subtag — every directory directly under `fixtures/bad-locale-name` names one locale (`en`, `en-US`, `zh-Hans-CN`)
+ --> tests/macro/bad_locale_name.rs:4:22
+  |
+4 | frust_i18n::locales!("fixtures/bad-locale-name");
+  |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^

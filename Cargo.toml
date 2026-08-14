@@ -375,6 +375,13 @@ fluent-syntax = "0.12"
 proc-macro2 = "1"
 quote = "1"
 syn = "2"
+# frust-i18n's dev-only compile-fail harness for `locales!`'s diagnostics —
+# the only way to assert that a malformed `.ftl` (or a non-BCP-47 locale
+# directory, or a typo'd generated key) actually fails compilation with the
+# message it promises. Dev-dependency of `frust-i18n` alone, so it never
+# reaches a shipped dependency graph; "current major" like the proc-macro
+# toolchain above.
+trybuild = "1"
 # frust-i18n's optional `formatting` feature (`icu_decimal`/`icu_datetime`/
 # `icu_plurals`/`icu_experimental`) — ICU4X locale-aware number/date/plural
 # formatting, layered underneath Fluent's own argument-substitution hooks.

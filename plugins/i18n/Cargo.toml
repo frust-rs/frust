@@ -65,6 +65,14 @@ icu_datetime = { workspace = true, optional = true }
 icu_plurals = { workspace = true, optional = true }
 icu_experimental = { workspace = true, optional = true }
 
+[dev-dependencies]
+# Compile-fail/compile-pass harness for the `locales!` macro's diagnostics
+# (`tests/macro_diagnostics.rs`) — the only way to assert that a malformed
+# `.ftl`, a non-BCP-47 locale directory, or a typo'd generated key actually
+# *fails compilation* with the message it promises. Dev-only: never shipped,
+# never counted against this crate's `--no-default-features` charter line.
+trybuild = { workspace = true }
+
 [features]
 default = ["frust-api", "formatting"]
 frust-api = ["dep:frust"]
