@@ -48,7 +48,10 @@ use crate::{I18nError, Locale};
 
 pub use bundles::FluentFunction;
 
-use bundles::LocaleBundle;
+// Not re-exported: a caller's factory returns the public `FluentFunction`,
+// and `with_locale_function` takes it as an `impl Fn`, so the stored
+// `Arc<dyn …>` shape stays an implementation detail.
+use bundles::{LocaleBundle, LocaleFluentFunction};
 
 /// The registered message set an [`Engine`] is built from: the FTL sources
 /// of every shipped locale plus the fallback locale, isolation, and function
@@ -62,6 +65,7 @@ pub struct LocaleSet {
     use_isolating: bool,
     entries: Vec<LocaleEntry>,
     functions: Vec<(&'static str, FluentFunction)>,
+    locale_functions: Vec<(&'static str, LocaleFluentFunction)>,
 }
 
 /// One locale's registered sources.
@@ -82,6 +86,7 @@ impl LocaleSet {
             use_isolating: true,
             entries: Vec::new(),
             functions: Vec::new(),
+            locale_functions: Vec::new(),
         }
     }
 
@@ -120,9 +125,12 @@ impl LocaleSet {
     /// Registers a Fluent function (`{ NUMBER($n) }`) into every locale's
     /// bundle.
     ///
-    /// The registration seam a formatting layer plugs `NUMBER`/`DATETIME`
-    /// into; locale-aware behavior comes from the bundle the function runs
-    /// in, not from the function's own captures.
+    /// One closure serves every bundle, so the function itself is
+    /// locale-agnostic: anything locale-aware it does has to come from the
+    /// bundle it runs in (`fluent-bundle`'s own plural memoizer) rather than
+    /// from its captures. A function that needs the locale *by value* —
+    /// an ICU4X formatter keyed by it, say — registers through
+    /// [`with_locale_function`](Self::with_locale_function) instead.
     pub fn with_function(
         mut self,
         name: &'static str,
@@ -132,6 +140,28 @@ impl LocaleSet {
         + 'static,
     ) -> Self {
         self.functions.push((name, Arc::new(function)));
+        self
+    }
+
+    /// Registers a Fluent function built *per locale*: `factory` is called
+    /// once per registered locale during [`Engine::new`], and the function it
+    /// returns is installed into that locale's bundle alone.
+    ///
+    /// This is [`with_function`](Self::with_function)'s locale-aware sibling,
+    /// and the seam [`crate::fmt`]'s ICU-backed `NUMBER`/`DATETIME` register
+    /// through — a formatter is keyed by locale, which a single shared
+    /// closure cannot recover from the bundle it happens to be running in.
+    ///
+    /// Registration order across the two is: every [`with_function`](Self::with_function)
+    /// registration first, then every per-locale one. A name registered twice
+    /// (by either route) fails [`Engine::new`] with [`I18nError::Format`],
+    /// since `fluent-bundle` refuses to overwrite a function id.
+    pub fn with_locale_function(
+        mut self,
+        name: &'static str,
+        factory: impl Fn(&Locale) -> FluentFunction + Send + Sync + 'static,
+    ) -> Self {
+        self.locale_functions.push((name, Arc::new(factory)));
         self
     }
 
@@ -163,6 +193,7 @@ impl std::fmt::Debug for LocaleSet {
                     .functions
                     .iter()
                     .map(|(name, _)| *name)
+                    .chain(self.locale_functions.iter().map(|(name, _)| *name))
                     .collect::<Vec<_>>(),
             )
             .finish()
@@ -199,12 +230,18 @@ impl Engine {
         let mut bundles = Vec::with_capacity(set.entries.len());
         let mut available = Vec::with_capacity(set.entries.len());
         for entry in &set.entries {
-            let bundle = bundles::build(
-                &entry.locale,
-                &entry.files,
-                set.use_isolating,
-                &set.functions,
-            )?;
+            // Shared registrations first, then this locale's own — cloning a
+            // registration clones an `Arc`, so the per-locale list costs one
+            // pointer per function, not a rebuilt closure.
+            let mut functions = set.functions.clone();
+            functions.extend(
+                set.locale_functions
+                    .iter()
+                    .map(|(name, factory)| (*name, factory(&entry.locale))),
+            );
+
+            let bundle =
+                bundles::build(&entry.locale, &entry.files, set.use_isolating, &functions)?;
             available.push(lang_id(&entry.locale));
             bundles.push(LocaleBundle {
                 locale: entry.locale.clone(),

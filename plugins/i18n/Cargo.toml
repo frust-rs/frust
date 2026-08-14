@@ -64,6 +64,21 @@ icu_decimal = { workspace = true, optional = true }
 icu_datetime = { workspace = true, optional = true }
 icu_plurals = { workspace = true, optional = true }
 icu_experimental = { workspace = true, optional = true }
+# The two ICU4X support crates `src/fmt` cannot reach through the four
+# components above, both already in the lockfile at the versions the
+# components themselves resolve (see the root `Cargo.toml`'s own comments):
+# `icu_locale_core` owns the `LanguageIdentifier` every `*Preferences` bag is
+# built from (`src/fmt/bridge.rs`'s target type), and `tinystr` owns the
+# `TinyAsciiStr<3>` inside `icu_experimental`'s `CurrencyCode` newtype
+# (`src/fmt/currency.rs`). Both ride the same `formatting` gate as the
+# components — nothing outside `src/fmt` names either.
+icu_locale_core = { workspace = true, optional = true }
+tinystr = { workspace = true, optional = true }
+# Named for its `sync` feature alone (see the root `Cargo.toml`): without it
+# an ICU4X `DataPayload` holds an `Rc` and no built formatter is `Send +
+# Sync`, so `src/fmt/bridge.rs`'s process-wide cache would not compile. No
+# code in this crate names an `icu_provider` type.
+icu_provider = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Compile-fail/compile-pass harness for the `locales!` macro's diagnostics
@@ -76,7 +91,15 @@ trybuild = { workspace = true }
 [features]
 default = ["frust-api", "formatting"]
 frust-api = ["dep:frust"]
-formatting = ["dep:icu_decimal", "dep:icu_datetime", "dep:icu_plurals", "dep:icu_experimental"]
+formatting = [
+    "dep:icu_decimal",
+    "dep:icu_datetime",
+    "dep:icu_plurals",
+    "dep:icu_experimental",
+    "dep:icu_locale_core",
+    "dep:tinystr",
+    "dep:icu_provider",
+]
 
 # Android: unlike `frust-clipboard`/`frust-haptics`/`frust-camera` (which
 # declare `frust-plugin` unconditionally since it's inert off Android and

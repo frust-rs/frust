@@ -24,6 +24,12 @@
 //! `add_builtins()` (which registers a `NUMBER`) is deliberately **not**
 //! called here: it would occupy that id and make a later, ICU-backed
 //! registration fail as an override.
+//!
+//! The slice is per *locale*, not per engine: [`Engine::new`](super::Engine::new)
+//! hands each bundle the shared registrations plus whatever
+//! [`LocaleSet::with_locale_function`](super::LocaleSet::with_locale_function)'s
+//! factories produced for that locale ([`LocaleFluentFunction`]), which is how
+//! `crate::fmt`'s ICU-backed functions carry a per-locale formatter.
 
 use std::fmt::Display;
 use std::sync::Arc;
@@ -46,6 +52,15 @@ pub type Bundle = FluentBundle<Arc<FluentResource>>;
 /// moving a single boxed value.
 pub type FluentFunction =
     Arc<dyn for<'a> Fn(&[FluentValue<'a>], &FluentArgs<'_>) -> FluentValue<'a> + Send + Sync>;
+
+/// Builds one locale's [`FluentFunction`] — the registration shape a
+/// locale-*aware* function takes, since one shared closure cannot recover the
+/// bundle's locale from the call.
+///
+/// Invoked once per registered locale inside [`Engine::new`](super::Engine::new)
+/// (never per format call), so the formatter a factory captures is built at
+/// engine-construction time like everything else in a bundle.
+pub type LocaleFluentFunction = Arc<dyn Fn(&Locale) -> FluentFunction + Send + Sync>;
 
 /// A registered locale paired with the bundle holding its messages.
 pub struct LocaleBundle {

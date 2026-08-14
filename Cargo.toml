@@ -406,6 +406,37 @@ icu_plurals = "2.2"
 # icu_normalizer/icu_properties/icu_segmenter versions already resolved
 # above.
 icu_experimental = "=0.5.0"
+# The locale type every ICU4X formatter's `*Preferences` bag is built from
+# (`DecimalFormatterPreferences: From<&icu_locale_core::LanguageIdentifier>`),
+# and `frust-i18n`'s `fmt::bridge` route out of `unic_langid`. None of the
+# four ICU4X crates above re-exports it (they re-export only the `-u-nu`/
+# `-u-ca`/`-u-hc` keyword enums), so a crate constructing a locale-aware
+# formatter must name it directly. Already resolved in this lockfile at
+# 2.3.0 via `icu_provider`, so declaring it changes no resolution; pinned to
+# minor per the Version-Pin Policy, and to the SAME line the transitive
+# resolve already picked — a 2.2 pin here would fork the graph. Tripwire:
+# `cargo tree -p frust-i18n --features formatting -d`.
+icu_locale_core = "2.3"
+# `icu_experimental::dimension::currency::CurrencyCode` is a newtype over
+# `tinystr::TinyAsciiStr<3>` with no string constructor of its own, so a
+# caller building one has to name `tinystr`. Same shape as the row above:
+# already in this lockfile at 0.8.4 through the whole ICU4X stack, so the
+# declaration adds no crate and moves no version. Pinned to minor per the
+# Version-Pin Policy; it retires together with `icu_experimental` when the
+# currency component graduates. Tripwire: `cargo test -p frust-i18n
+# --features formatting`.
+tinystr = "0.8"
+# Declared for ONE feature, not for its API: `icu_provider`'s `sync` swaps
+# the `Rc` inside every ICU4X `DataPayload` for an `Arc`, which is what makes
+# a built formatter `Send + Sync` and therefore cacheable in `frust-i18n`'s
+# process-wide formatter cache (`src/fmt/bridge.rs`). None of the four
+# components above exposes that switch, and no crate here names an
+# `icu_provider` type. Feature unification means the swap reaches the ICU4X
+# crates `frust-text`'s shaping stack pulls in as well — an `Arc` in place of
+# an `Rc` on a data payload, no API change either way — and only in a build
+# that compiles `frust-i18n`'s `formatting` feature at all. Same version line
+# and same tripwire as the two rows above.
+icu_provider = { version = "2.3", default-features = false, features = ["sync"] }
 # frust-i18n's desktop (macOS/Linux/Windows) system-locale detection — see
 # `plugins/i18n/Cargo.toml`'s own comment for how this arm and the Apple
 # (`objc2`/`objc2-foundation`) arm above both reach macOS, and which one its
