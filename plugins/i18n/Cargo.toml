@@ -146,3 +146,15 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # `sys-locale`, not the apple arm" per this crate's own design note.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 sys-locale = { workspace = true }
+
+# Dev-only: `src/reactive.rs`'s headless tests (its own `#[cfg(test)] mod
+# tests`, plus `tests/reactive.rs`) need an ambient reactive `Owner` and, for
+# the signal-write → wake test, a live `ReactiveRuntime`/`TrackedScope`/
+# `FrameWaker` — none of which `frust`'s flat facade re-exports (deliberately:
+# those are framework-internal wiring, not app API). A direct `frust-reactive`
+# dev-dependency is the sanctioned route, matching `clean-signals-frust`'s own
+# precedent for the identical reason (`docs/PLUGINS_CODE_STANDARDS.md`'s
+# Plugin Conventions charter: production code stays on `frust::{...}` only —
+# see `src/reactive.rs`'s module doc).
+[dev-dependencies]
+frust-reactive = { workspace = true }

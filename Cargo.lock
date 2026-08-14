@@ -2058,6 +2058,7 @@ dependencies = [
  "frust",
  "frust-i18n-macros",
  "frust-plugin",
+ "frust-reactive",
  "icu_datetime",
  "icu_decimal",
  "icu_experimental",
