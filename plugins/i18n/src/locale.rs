@@ -32,6 +32,13 @@ impl Locale {
     pub fn region(&self) -> Option<Region> {
         self.0.region
     }
+
+    /// The underlying `unic_langid` identifier — the lossless route back for
+    /// negotiation and ICU bridging (carries locale variants the subtag
+    /// accessors above do not expose).
+    pub(crate) fn as_lang_id(&self) -> &LanguageIdentifier {
+        &self.0
+    }
 }
 
 impl FromStr for Locale {

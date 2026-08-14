@@ -45,13 +45,14 @@
 //! [`error`] — [`I18nError`], the crate's one public error enum, every
 //! variant a later task needs pre-planted (see that module's own doc).
 //! [`locale`] — [`Locale`], the `unic_langid`-backed BCP-47 locale newtype.
-//! [`detect`] — system-locale detection (stub; a later task fills it in).
-//! [`engine`] — Fluent bundle loading/negotiation/resolution (stub; a later
-//! task fills it in). [`fmt`] (feature `formatting`) — ICU4X formatting
-//! (stub; a later task fills it in). [`reactive`] (feature `frust-api`) —
-//! signal-driven locale binding for a `frust` app (stub; a later task fills
-//! it in). The `locales!` compile-time bundle loader lives in the sibling
-//! `frust-i18n-macros` crate, re-exported here.
+//! [`detect`] — system-locale detection ([`system_locales`]: ordered
+//! preference list, re-queried per call). [`engine`] — Fluent bundle
+//! loading/negotiation/resolution ([`Engine`]/[`LocaleSet`]). [`fmt`]
+//! (feature `formatting`) — ICU4X formatting (stub; a later task fills it
+//! in). [`reactive`] (feature `frust-api`) — signal-driven locale binding
+//! for a `frust` app (stub; a later task fills it in). The `locales!`
+//! compile-time bundle loader lives in the sibling `frust-i18n-macros`
+//! crate, re-exported here.
 
 mod detect;
 mod engine;
@@ -63,6 +64,8 @@ pub mod fmt;
 #[cfg(feature = "frust-api")]
 mod reactive;
 
+pub use detect::system_locales;
+pub use engine::{Engine, FluentFunction, LocaleSet};
 pub use error::I18nError;
 pub use frust_i18n_macros::locales;
 pub use locale::Locale;

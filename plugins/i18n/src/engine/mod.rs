@@ -35,11 +35,6 @@
 //! [`negotiate`] ranks requested against available locales, and [`resolve`]
 //! walks the resulting chain.
 
-// Nothing in this module is reachable from the crate root yet: `lib.rs`
-// declares `mod engine;` privately and re-exports none of it, so rustc sees
-// every public item here as dead until the facade seam lands.
-#![allow(dead_code)]
-
 mod bundles;
 mod negotiate;
 mod resolve;
@@ -300,9 +295,7 @@ impl std::fmt::Debug for Engine {
 /// canonical form cannot fail, and the arm that would only run if it did
 /// rebuilds from subtags (dropping variants) rather than panicking.
 fn lang_id(locale: &Locale) -> LanguageIdentifier {
-    locale.to_string().parse().unwrap_or_else(|_| {
-        LanguageIdentifier::from_parts(locale.language(), locale.script(), locale.region(), &[])
-    })
+    locale.as_lang_id().clone()
 }
 
 #[cfg(test)]
