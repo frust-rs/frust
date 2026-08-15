@@ -1,4 +1,4 @@
-//! The static plugin registry (v1) — nine entries mirroring `plugins/`:
+//! The static plugin registry (v1) — ten entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
@@ -21,8 +21,12 @@
 //! inside a module manifest; see `HAPTICS_BASE`'s doc comment), `iap`
 //! (dependency, the plugin's own Android library module, and its own iOS
 //! Swift package — no plist key and no app-crate macro; see `IAP_BASE`'s doc
-//! comment for why), and `database` (dependency only — pure-Rust plugin, no
-//! OS-side integration).
+//! comment for why), `database` (dependency only — pure-Rust plugin, no
+//! OS-side integration), and `i18n` (dependency, a seeded starter
+//! `locales/en/main.ftl` — the first registry entry to use
+//! [`Contribution::ScaffoldFile`] — and the `frust_i18n::locales!` app-crate
+//! macro invocation; see `I18N_BASE`'s doc comment for the ordering
+//! constraint between the two).
 
 use super::{Contribution, FeatureSpec, PluginSpec};
 

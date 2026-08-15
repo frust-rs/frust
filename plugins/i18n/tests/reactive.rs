@@ -2,13 +2,10 @@
 //! driven from outside the crate — the shape
 //! `plugins/clean-signals-frust/tests/glue.rs` uses for its own hook tests.
 //!
-//! **Scope note.** `src/reactive.rs`'s new public surface (`I18n`,
-//! `provide_i18n`, `use_i18n`, `expect_i18n`) is not yet re-exported from
-//! `frust_i18n`'s crate root — `lib.rs` currently only carries `pub use
-//! reactive::active_locale;`, frozen for this task pending a later wiring
-//! pass (see this task's completion summary for the intended re-export
-//! line). Rust's module privacy means an external `tests/*.rs` file can only
-//! name a crate's *public path* surface, so the richer construct/resolve/
+//! **Scope note.** This file was authored while `src/reactive.rs`'s public
+//! surface (`I18n`, `provide_i18n`, `use_i18n`, `expect_i18n`) was not yet
+//! re-exported from the crate root (that wiring has since landed in
+//! `lib.rs`), so the richer construct/resolve/
 //! `set_locale`/re-resolve, negotiation-at-construction, missing-key-softens,
 //! and signal-wakes-a-tracked-scope scenarios are covered as in-crate
 //! `#[cfg(test)] mod tests` inside `src/reactive.rs` instead — this crate's
