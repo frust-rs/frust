@@ -12,7 +12,7 @@ template work, and the version-pin rows each unit owns live in its spoke:
 |------|-------------------|-------|
 | CORE | [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md) | `reactive_graph`/`any_spawner`/`tokio`, `clean-signals`, `accesskit` pins |
 | RENDER | [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) | `vello`/`wgpu`, `image`, `vello_cpu` pins |
-| SHELLS | [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) | deep-link and safe-area/keyboard/back manual tests |
+| SHELLS | [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) | deep-link and safe-area/keyboard/back manual tests; `muda`, `windows-sys` pins |
 | PLUGINS | [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) | shared-preferences, secure-storage, camera, and IAP manual tests; `ndk-context`, `objc2*`, CameraX, OpenIAP, `keyring-core`, `arboard` pins |
 | CLI | [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) | template development; `notify` pin |
 | TUI | [TUI_DEVELOPMENT.md](TUI_DEVELOPMENT.md) | `ratatui`/`crossterm`/`ansi-to-tui`, `toml_edit` pins |
@@ -307,7 +307,32 @@ cargo check --target aarch64-apple-ios-sim -p frust-native-widgets --features de
 
 # Same --all-targets rationale as Android above:
 cargo check --all-targets --target aarch64-apple-ios-sim  -p frust-shell-ios -p frust-iap
+
+# Windows compile gate (cross-check; host-side if mingw-w64 + the rustup
+# target are installed, else the containerized recipe below): the shell+
+# facade graph must compile, AND the other two per-OS shells must compile
+# inert off-target (the frust-shell-android precedent, extended to desktop).
+cargo check --target x86_64-pc-windows-gnu \
+  -p frust -p frust-shell-windows -p frust-shell-macos -p frust-shell-linux
+
+# macOS compile gate (cross-check; proven feasible from a non-macOS host —
+# objc2/muda are pure Rust, no Apple SDK needed for a type-check). Same
+# inert-off-target coverage of the other two shells as the Windows gate.
+cargo check --target aarch64-apple-darwin \
+  -p frust -p frust-shell-macos -p frust-shell-windows -p frust-shell-linux
+
+# Linux: the standard `cargo check --workspace` gate at the top of this
+# section is native and green on a Linux host. On a macOS host, run it
+# inside the same containerized recipe below instead — a bare Mac host fails
+# by construction (`yeslogic-fontconfig-sys` needs a pkg-config sysroot).
 ```
+
+**Containerized recipe** for the two cross-checks above on a host without mingw-w64
+(e.g. devbox): `docker run --rm -v "$PWD":/src -w /src rust:1-bookworm bash -c
+'apt-get update && apt-get install -y gcc-mingw-w64-x86-64 && rustup target add
+x86_64-pc-windows-gnu aarch64-apple-darwin && <the two cargo check commands above>'`.
+Proven both ways: host-side (mingw-w64 + `rustup target add x86_64-pc-windows-gnu`)
+and via this container recipe.
 
 The iOS compile gate above is also the only check of the `accesskit_ios` adapter today —
 uncompiled on any host in this repo's history. Screen-reader verification
@@ -399,6 +424,7 @@ owns them:
 | `vello`/`wgpu`, `image`, `vello_cpu` | [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) |
 | `reactive_graph`/`any_spawner`/`tokio`, `clean-signals`, `accesskit` + adapters | [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md) |
 | `ndk-context`, `objc2*` (Foundation/Security/LocalAuthentication/UIKit/QuartzCore/CoreText/CoreFoundation), `androidx.camera`, `openiap-google`/`OpenIAP`, `keyring-core`, `arboard`, `fluent-rs`, `icu` (2.2/2.3), `icu_experimental`, `sys-locale` | [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) |
+| `muda`, `windows-sys` (desktop shells' native menu-bar/Win32 bindings; `objc2-app-kit` rides the objc2 pin family above) | [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) |
 | `notify`, `rmcp`, `axum`, `base64`, `tokio-util` | [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) |
 | `ratatui`/`crossterm`/`ansi-to-tui`, `toml_edit` | [TUI_DEVELOPMENT.md](TUI_DEVELOPMENT.md) |
 

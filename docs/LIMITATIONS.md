@@ -1860,3 +1860,113 @@ does not become conditional).
 **Evidence**: `plugins/i18n/README.md` §10 (size measurement procedure and figures);
 `plugins/i18n/Cargo.toml`'s default feature list and the `formatting` feature's own
 dependencies; review R2-M1 and R2-M6 (workflow/reviews/i18n-plugin/REVIEW-r2.md).
+
+---
+
+### `desktop-shells-runtime-unverified` — the three per-OS desktop shells are compile-gated only, never launched
+
+**Observed**: Phase A's `frust-shell-macos`/`-windows`/`-linux` (menu bar, lifecycle, window
+icon/identity) were built and integrated from a headless Linux host — proven only via cross-target
+`cargo check` (Windows: `x86_64-pc-windows-gnu`; macOS: `aarch64-apple-darwin`, both host-side
+where the toolchain exists and via a containerized `rust:1-bookworm` + `mingw-w64` recipe; Linux:
+native `cargo check --workspace` here). No window was ever opened on any of the three. Owed:
+**macOS** — menu bar with correct app name, ⌘Q, Hide/Show All, close-then-Dock-click reopen
+(Ed's MacBook pass). **Windows** — titlebar+taskbar icon, `AppUserModelID` grouping, dark
+titlebar following the app theme, the native menu bar, and accelerators (Ed's Windows 11 PC
+pass). **Linux** — Wayland `app_id`/X11 `WM_CLASS` pairing and the window icon (a non-headless
+Linux session; rides Phase B's `.desktop` milestone).
+
+**Applies to**: any app built with a Phase A desktop shell on macOS, Windows, or Linux, until the
+matching device pass runs.
+
+**Why accepted**: PLAN.md's Edge Cases documented this verification asymmetry before the phase
+started (only Linux hardware was on hand); the cross-target compile gates are the strongest proof
+achievable without the device, and every native API call site was additionally read against its
+vendored source (muda 0.19.3, winit 0.30.13, windows-sys 0.61.2, objc2/objc2-app-kit 0.3.x) rather
+than guessed.
+
+**Evidence**: desktop-shells Phase A tasks 02/03/04/05/06 completion summaries (Risks/Limitations
+sections); `workflow/plans/features/desktop-shells/phase-a/TASKS.md` Build State (Wave 3
+integration-verify cross-target matrix).
+
+---
+
+### `desktop-windows-accelerator-compile-only` — the Windows menu-accelerator path is the riskiest compile-only claim
+
+**Observed**: `frust-shell-windows`'s keyboard-accelerator wiring
+(`EventLoopBuilderExtWindows::with_msg_hook` installing a closure that calls
+`TranslateAcceleratorW` against the menu's published `HACCEL`) is verified only by reading the
+vendored winit/windows-sys source — never run on Windows.
+
+**Applies to**: any `MenuSpec` item declaring an `accelerator` string on Windows.
+
+**Why accepted**: designed to degrade, not break. The hook holds an `Rc<Cell<isize>>` HACCEL slot
+that starts at `0` and is cleared on drop; while it is `0` (before menu install, after a refused
+install, or after the menu is dropped) the hook returns `false` for every message and winit's
+normal `TranslateMessage`/`DispatchMessageW` path runs exactly as if no hook existed — the failure
+mode is a working menu bar with no keyboard shortcuts, never a broken message loop.
+
+**Evidence**: desktop-shells Phase A task 04 completion summary (Notable Decisions #3,
+Risks/Limitations #1–#2).
+
+---
+
+### `desktop-macos-reopen-gap-already-active` — Dock-click reopen does not re-show an already-active hidden window
+
+**Observed**: winit 0.30 owns `NSApplication`'s delegate and panics if replaced, so
+`applicationShouldHandleReopen:` is unreachable; `frust-shell-macos` instead observes
+`NSApplicationDidBecomeActiveNotification`. AppKit does not post that notification when the app is
+already active — only on a genuine activation transition — so a Dock click on an already-active
+app whose window is hidden does not re-show it. A `MenuSpec` app-item activated while the window is
+hidden also stays queued (bounded at 64, oldest dropped with a warning) until some other event
+produces a frame.
+
+**Applies to**: macOS apps that hide (rather than close) their window and rely on Dock-click to
+bring it back.
+
+**Why accepted**: no public reopen hook exists in winit 0.30; the notification observer is the best
+available substitute. Flagged by the implementor for reviewer confirmation; not yet closed by a
+review round.
+
+**Evidence**: desktop-shells Phase A task 03 completion summary (Notable Decisions #3,
+Risks/Limitations #3); `workflow/plans/features/desktop-shells/phase-a/TASKS.md` Notes
+(review-watch item #2).
+
+---
+
+### `desktop-macos-quit-skips-executor-drop` — ⌘Q/menu Quit bypasses the frame executor's shutdown `Drop`
+
+**Observed**: `frust-shell-macos` leaves Quit on muda's predefined AppKit `terminate:` action (both
+⌘Q and the menu item) because it must work while the window is hidden, when no frames are being
+produced to service a pumped quit request. On that route winit dispatches `LoopExiting`, but
+`run_app` never returns — so the frame executor's `Drop` (render-thread join, final present,
+best-effort pipeline-cache persist) never runs. A window-close request under the default policy
+(`CloseAction::Exit`) is unaffected and does take the full executor-drop shutdown.
+
+**Applies to**: macOS apps quitting via ⌘Q or the app menu's Quit item.
+
+**Why accepted**: the skipped pipeline-cache persist is a documented no-op on macOS already (Metal
+has no `PIPELINE_CACHE`, per `frust-shell-desktop`'s own `cache` module docs), so nothing
+observable is lost; nothing in the crate calls `std::process::exit`. Flagged by the implementor for
+reviewer confirmation; not yet closed by a review round.
+
+**Evidence**: desktop-shells Phase A task 03 completion summary (Notable Decisions #2);
+`workflow/plans/features/desktop-shells/phase-a/TASKS.md` Notes (review-watch item #1).
+
+---
+
+### `desktop-single-window` — desktop shells support exactly one window
+
+**Observed**: `frust-shell-macos`/`-windows`/`-linux` and the shared `frust-shell-desktop` core
+create and manage a single `winit::window::Window`; there is no multi-window API at the facade or
+any per-OS shell.
+
+**Applies to**: every desktop shell, on every OS.
+
+**Why accepted**: matches the pre-existing desktop preview's scope ("like today"); a deliberate
+Phase A non-goal, not a defect — revisit only if a future winit brings first-class multi-window
+support worth exposing through `DesktopConfig`.
+
+**Evidence**: `workflow/plans/features/desktop-shells/PLAN.md` § Edge Cases & Risks (menus/deep
+links/lifecycle scope list: "multi-window stays out of scope (single window, like today —
+LIMITATIONS entry)").
