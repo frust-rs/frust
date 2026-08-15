@@ -331,10 +331,11 @@ const DATABASE: PluginSpec = PluginSpec {
 /// `i18n`'s base contributions — a Cargo dependency, a starter locale file,
 /// and a macro invocation to load the locale bundles at compile time.
 ///
-/// [`Contribution::ScaffoldFile`] must come **first** (the starter locale file
+/// [`Contribution::ScaffoldFile`] must come **first**: the starter locale file
 /// is created before the [`Contribution::AppCrateMacro`] invocation references
-/// it; though the macro is a no-op stub today, the ordering is established for
-/// when it implements a real directory walk). [`Contribution::CargoDep`] adds
+/// it, and the macro's expansion really does walk the `locales/` directory at
+/// compile time — a missing fallback tree is a compile error, so the seeded
+/// file is what keeps a freshly-wired scaffold building. [`Contribution::CargoDep`] adds
 /// the dependency. [`Contribution::AppCrateMacro`] invokes the compile-time
 /// `frust_i18n::locales!` macro, which validates and loads the bundle
 /// directory — the entry point into the plugin's API.
