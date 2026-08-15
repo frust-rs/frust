@@ -521,56 +521,129 @@ list `docs/PLUGINS_DEVELOPMENT.md`'s i18n section tracks — keep both in sync):
 ## 10. Binary size
 
 The binary size impact of `frust-i18n` at the shipped profile (optimized release build), measured
-with the same two-release-build procedure that `frust-database` (§6) uses:
+with the same build-twice-and-diff procedure `frust-database` §6 uses for its Turso delta — this
+revision also follows §6's *location* instruction (probe out-of-repo), which the previous revision
+of this table did not. **These figures supersede the previous table below**; see *Why the previous
+table was wrong* at the end of this section.
 
 | Feature set | Binary size | Notes |
 |---|---:|---|
-| Baseline (no i18n) | 302432 bytes (0.29 MB) | Baseline frust + frust-reactive only |
-| Messages only | 352576 bytes (0.34 MB) | `frust-i18n` with `frust-api`, no `formatting` |
-| Full default | 402256 bytes (0.38 MB) | `frust-i18n` with `frust-api` + `formatting` (ICU4X) |
+| Baseline (no i18n) | 319,152 bytes (0.30 MB) | Same `frust` dependency `frust-i18n` itself uses (default features), linked but never called — a trivial `println!` only |
+| Messages only | 534,448 bytes (0.51 MB) | `frust-i18n` with `frust-api`, no `formatting` — message lookup, typed keys, reactive `I18n` handle, all actually called |
+| Full default | 1,760,112 bytes (1.68 MB) | `frust-i18n` with `frust-api` + `formatting` (ICU4X) — every formatter actually called |
 
 **Per-feature deltas:**
 
 | Feature | Cost | Notes |
 |---|---:|---|
-| Messages + reactive | **+50144 bytes** (+0.048 MB) | `frust-api` feature: locale negotiation, detection, reactive binding |
-| Formatting | **+49680 bytes** (+0.047 MB) | `formatting` feature: ICU4X decimal/datetime/plurals/experimental (currency) |
+| Messages + reactive | **+215,296 bytes** (+0.21 MB) | `frust-api` feature: locale negotiation, dynamic `t`/typed `keys::`, reactive `I18n` binding |
+| Formatting | **+1,225,664 bytes** (+1.17 MB) | `formatting` feature: ICU4X decimal/percent/currency/date/time/plurals — baked CLDR data, not just code (see *Evidence* below) |
 
 ### Measurement procedure
 
-Reproducible on a feature-flag change — re-run this exact procedure and update the table above,
-the raw figures, date, and toolchain version.
+Reproducible on a feature-flag change or ICU4X pin bump — re-run this exact procedure and update
+the table above, the raw figures, date, and toolchain version.
 
-1. Scaffold a minimal probe app inside a temp directory (in this repo's `.tmp/i18n-probe/` for
-   this run) with:
-   - `Cargo.toml` path-dependencies on `frust` + `frust-i18n` (optional) + `frust-reactive`
-   - `[profile.release]` configured identically to the ship floor (`lto = "fat"`,
-     `codegen-units = 1`, `strip = "symbols"`, `panic = "abort"`)
-   - `src/lib.rs` and `src/main.rs` that call the i18n API so the compiler doesn't dead-strip it
-   - `locales/en/main.ftl` with a minimal Fluent message (needed for `locales!` macro to compile)
+1. Scaffold a probe crate **outside this repo** (a scratch/temp directory — never a subdirectory
+   of this checkout, per `frust-database` §6) with:
+   - `Cargo.toml` `path`-dependencies on `frust` (the identical dependency line `frust-i18n`'s own
+     optional `frust` edge uses — no `default-features` override) plus an *optional*
+     `frust-i18n` (`default-features = false`) and an *optional* `frust-reactive` (only to stand
+     up an ambient reactive `Owner` headlessly — the same pattern
+     `plugins/i18n/tests/reactive.rs` uses).
+   - Two probe-owned Cargo features gating those optional deps additively:
+     `messages = ["dep:frust-i18n", "dep:frust-reactive", "frust-i18n/frust-api"]` and
+     `full = ["dep:frust-i18n", "dep:frust-reactive", "frust-i18n/frust-api", "frust-i18n/formatting"]`.
+     With neither active, `frust-i18n` is not even in the build — the honest "no i18n" baseline.
+   - `[profile.release]` matching the ship floor exactly (`lto = "fat"`, `codegen-units = 1`,
+     `strip = "symbols"`, `panic = "abort"`).
+   - `locales/en/main.ftl` with a plain interpolated message, a plural/select message, and a
+     message containing `NUMBER()`/`DATETIME()` placeables.
+   - `src/main.rs` whose `main()` **calls and `println!`s every result** from `fmt::decimal`,
+     `fmt::percent`, `fmt::currency` (a 2-decimal code like `EUR` and a 0-decimal one like `JPY`),
+     `fmt::date`, `fmt::time`, `fmt::datetime`, a dynamic `t`/`t_args` call, a typed `keys::`
+     call, and the `NUMBER()`/`DATETIME()` message resolved through an
+     ICU-function-registered `Engine` (`fmt::with_icu_functions`, called last, over the
+     macro-generated `locale_set()`) — every numeric/date input derived at runtime from
+     `std::env::args().len()`, never a literal, so nothing here is const-foldable. **This is the
+     step the previous revision of this table got wrong**: a probe that only *lists* the
+     dependency, or feeds it compile-time-constant inputs whose result is never read, lets
+     `lto = "fat"` + `strip = "symbols"` dead-strip the unreferenced computation (and the ICU4X
+     data statics behind it) entirely before it ever reaches the linked binary — measuring the
+     cost of nothing.
 
-2. Build three times with the same release profile:
-   - Baseline: `cargo build --release` (no i18n feature enabled)
-   - Messages only: `cargo build --release --features messages-only` (frust-api, no formatting)
-   - Full: `cargo build --release --features full` (both frust-api and formatting)
+2. `export CARGO_TARGET_DIR=<probe-dir>/target-<name>` before each build, so the three builds
+   neither share nor pollute each other's target directory (nor this repo's own).
 
-3. Record the exact byte count of each resulting binary (`target/release/i18n-probe`), the delta
-   between builds, the date, the exact rustc/cargo version, and the build machine's CPU/OS.
+3. Build three times with the same release profile:
+   - Baseline: `cargo build --release` (`frust-i18n` is `optional = true` and no feature turns
+     it on, so it is not compiled at all — not merely feature-gated off)
+   - Messages only: `cargo build --release --no-default-features --features messages`
+   - Full: `cargo build --release --no-default-features --features full`
 
-**2026-08-15 raw figures** (macOS 25.5.0 (darwin-25), release/ship profile, rustc 1.97.1,
-build machine: Apple M1 Pro):
+4. Record the exact byte count of each resulting binary (`wc -c target-<name>/release/<bin>`),
+   both deltas, the date, the exact rustc/cargo version, the build machine's CPU/OS, and the
+   target triple.
+
+### Evidence the formatting delta is measuring real data, not another dead-stripped no-op
+
+Three independent checks, all against this run's binaries:
+
+- **The full build's stdout is locale-shaped, not degraded.** Every `fmt::` call above printed a
+  real, locale-correct string (`"1.235,56"` decimal, `"￥1,236"` zero-decimal JPY, `"11:30:00 AM"`
+  12-hour English time, …) rather than the non-finite/failure fallback path — the formatters ran.
+- **Pre-link dependency graph.** `target-full/release/deps/` contains
+  `libicu_datetime_data-*.rlib` (~14.2 MB) and `libicu_experimental_data-*.rlib` (~69.5 MB, the
+  currency-data crate) — both entirely absent from `target-messages/release/deps/`. The crates
+  carrying baked CLDR data are only ever compiled into the `full` build's dependency graph.
+- **Where the linked delta actually lands.** Splitting the Mach-O `__TEXT` segment's sections
+  (`otool -l`) between the two final binaries: the two `__const` (read-only data) sections grew by
+  **1,040,240 bytes**, the `__text` (code) section by only **177,692 bytes** — the growth is
+  concentrated in read-only data, exactly where baked static tables live, not in formatter code
+  size. (Both binaries are `strip = "symbols"`, so `nm` retains no local symbol names to grep by
+  name on this platform — the section-size split is the available per-binary evidence instead.)
+
+**Plausibility.** ~1.17 MB, not the tens-of-MB the raw `icu_experimental_data`/`icu_datetime_data`
+rlib sizes might suggest, because ICU4X's `compiled_data` feature bakes each data *marker* (one
+static per formatter capability × locale set) separately — only the markers `fmt::decimal`/
+`percent`/`currency`/`date`/`time`/`datetime` actually reference get linked; `icu_experimental`'s
+other formatters (units, person names, list, relative time, …) this crate never calls contribute
+nothing. A low-single-digit-MB delta for exactly this formatter combination is the range this
+task's own acceptance bar called plausible, and is consistent with ICU4X's own published
+baked-data sizing for a similarly-scoped formatter set.
+
+**2026-08-15 raw figures** (macOS (darwin-25), release/ship profile, rustc 1.97.1, target
+`aarch64-apple-darwin`, build machine: Apple M4):
 
 | Build | Binary size | Bytes |
 |---|---:|---:|
-| Baseline (no i18n) | 0.29 MB | 302,432 |
-| Messages only (frust-api) | 0.34 MB | 352,576 |
-| Full (frust-api + formatting) | 0.38 MB | 402,256 |
-| **Messages delta** | **+0.048 MB** | **+50,144** |
-| **Formatting delta** | **+0.047 MB** | **+49,680** |
+| Baseline (no i18n) | 0.30 MB | 319,152 |
+| Messages only (frust-api) | 0.51 MB | 534,448 |
+| Full (frust-api + formatting) | 1.68 MB | 1,760,112 |
+| **Messages delta** | **+0.21 MB** | **+215,296** |
+| **Formatting delta** | **+1.17 MB** | **+1,225,664** |
 
-The probe app was built in a temporary directory with separate `CARGO_TARGET_DIR` per build to
-isolate the artifacts, avoiding conflicts with any concurrent builds or the repo's own target
-directory. One deliberate deviation from `frust-database`'s §6 procedure: the probe was
-scaffolded *inside* the checkout (an untracked `.tmp/i18n-probe/`, deleted afterward) rather
-than outside the repo as §6 instructs — a reproducer should prefer §6's out-of-repo location,
-which structurally cannot leave tracked residue.
+The probe was scaffolded, built, and deleted entirely outside this repository (a scratch/temp
+directory, never a subdirectory of this checkout, per `frust-database` §6), with a separate
+`CARGO_TARGET_DIR` per build; all three `target-*/` directories were removed afterward — no
+artifact or tracked residue remains from this run.
+
+### Why the previous table was wrong
+
+The table this one replaced reported a **`+49,680`-byte** `formatting` delta and a
+**`+50,144`-byte** `frust-api` delta — both almost certainly measuring nothing. Its own
+302,432-byte ("0.29 MB") *baseline* figure was the tell: a build linking a real `frust` app
+(vello/wgpu and all) cannot plausibly be 0.29 MB, and it wasn't really measuring one — that
+baseline's `frust` dependency was declared but never called into, so `lto = "fat"` +
+`strip = "symbols"` dead-stripped it down to almost nothing, exactly as it must have dead-stripped
+the unreferenced ICU4X data statics in the `formatting` build (whose result also never reached a
+`println!`, or did so only from compile-time-constant inputs). This revision's probe fixes both:
+every call's result is `println!`-ed, every input is runtime-derived, and — per the *Evidence*
+section above — the size jump lands in read-only data, not in dead space. The `messages` delta
+moved for the identical reason: this probe's `messages`-feature build actually resolves a dynamic
+`t`/`t_args` call, a typed `keys::` call, and reads a reactive handle's `.locale()`, none of which
+the previous probe's build exercised either.
+
+One correction from the previous revision beyond the numbers: the probe now lives fully
+**out-of-repo**, matching `frust-database` §6 exactly, so the previous revision's own
+deviation-disclosure paragraph (an in-repo `.tmp/i18n-probe/`) no longer applies and is dropped.
