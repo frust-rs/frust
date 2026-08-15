@@ -542,6 +542,9 @@ build machine: Apple M1 Pro):
 | **Messages delta** | **+0.048 MB** | **+50,144** |
 | **Formatting delta** | **+0.047 MB** | **+49,680** |
 
-The probe app was built in a temporary directory (`$WT/.tmp/i18n-probe/`) with separate
-`CARGO_TARGET_DIR` per build to isolate the artifacts, matching `frust-database`'s own §6
-procedure and avoiding conflicts with any concurrent builds or the repo's own target directory.
+The probe app was built in a temporary directory with separate `CARGO_TARGET_DIR` per build to
+isolate the artifacts, avoiding conflicts with any concurrent builds or the repo's own target
+directory. One deliberate deviation from `frust-database`'s §6 procedure: the probe was
+scaffolded *inside* the checkout (an untracked `.tmp/i18n-probe/`, deleted afterward) rather
+than outside the repo as §6 instructs — a reproducer should prefer §6's out-of-repo location,
+which structurally cannot leave tracked residue.
