@@ -280,10 +280,16 @@ cargo test -p frust-cli --test create_ios -- --ignored
 # and runs `build apk --release` via a real Gradle build — needs Android SDK/NDK; ~1 minute.
 cargo test -p frust-cli --test build_e2e -- --ignored
 
+# Macro-diagnostics compile-fail suite (frust-i18n): compiles a generated trybuild project
+# against this crate's full default dependency graph in its own target dir. Regenerate
+# expectations with `TRYBUILD=overwrite cargo test -p frust-i18n --no-default-features
+# --test macro_diagnostics -- --ignored`.
+cargo test -p frust-i18n --no-default-features --test macro_diagnostics -- --ignored
+
 # Android compile gate (no device needed): the whole facade graph must compile for Android.
 cargo check --target aarch64-linux-android \
   -p frust -p frust-plugin -p frust-shared-preferences -p frust-secure-storage \
-  -p frust-camera -p frust-native-widgets -p frust-clipboard -p frust-haptics -p frust-iap
+  -p frust-camera -p frust-native-widgets -p frust-clipboard -p frust-haptics -p frust-iap -p frust-i18n
 cargo check --target aarch64-linux-android -p frust-native-widgets --features demo-components
 
 # --all-targets additionally compiles cfg(test) — the plain checks above never do, so a
@@ -295,7 +301,7 @@ cargo check --all-targets --target aarch64-linux-android -p frust-shell-android 
 # must compile for the Simulator target (frust-secure-storage also gates the device target).
 cargo check --target aarch64-apple-ios-sim \
   -p frust -p frust-shared-preferences -p frust-secure-storage -p frust-camera \
-  -p frust-native-widgets -p frust-clipboard -p frust-haptics -p frust-iap
+  -p frust-native-widgets -p frust-clipboard -p frust-haptics -p frust-iap -p frust-i18n
 cargo check --target aarch64-apple-ios -p frust-secure-storage
 cargo check --target aarch64-apple-ios-sim -p frust-native-widgets --features demo-components
 
@@ -392,7 +398,7 @@ owns them:
 |------|-------|
 | `vello`/`wgpu`, `image`, `vello_cpu` | [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) |
 | `reactive_graph`/`any_spawner`/`tokio`, `clean-signals`, `accesskit` + adapters | [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md) |
-| `ndk-context`, `objc2*` (Foundation/Security/LocalAuthentication/UIKit/QuartzCore/CoreText/CoreFoundation), `androidx.camera`, `openiap-google`/`OpenIAP`, `keyring-core`, `arboard` | [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) |
+| `ndk-context`, `objc2*` (Foundation/Security/LocalAuthentication/UIKit/QuartzCore/CoreText/CoreFoundation), `androidx.camera`, `openiap-google`/`OpenIAP`, `keyring-core`, `arboard`, `fluent-rs`, `icu` (2.2/2.3), `icu_experimental`, `sys-locale` | [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) |
 | `notify`, `rmcp`, `axum`, `base64`, `tokio-util` | [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) |
 | `ratatui`/`crossterm`/`ansi-to-tui`, `toml_edit` | [TUI_DEVELOPMENT.md](TUI_DEVELOPMENT.md) |
 

@@ -4,7 +4,7 @@
 
 use std::fs;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Value};
 
@@ -149,6 +149,9 @@ fn apply_contribution(
         Contribution::CargoFeature { name, feature } => {
             apply_cargo_feature(doc, cargo_changed, name, feature)
         }
+        Contribution::ScaffoldFile {
+            rel_path, contents, ..
+        } => apply_scaffold_file(project_root, rel_path, contents),
     }
 }
 
@@ -350,6 +353,50 @@ fn apply_plist_entry(
     let out = insert_before_anchor(&src, "</dict>", &block, PLIST_REL)?;
     write_file(&path, PLIST_REL, &out)?;
     Ok(AddOutcome::Applied)
+}
+
+/// Create a file at `rel_path` (relative to the project root) with exact
+/// `contents` if it doesn't already exist ([`Contribution::ScaffoldFile`]).
+/// Parent directories are created as needed.
+///
+/// Idempotency guard: presence alone, never a content comparison — an
+/// existing file (even one the user has since hand-edited, e.g. their own
+/// locale strings) is left untouched and reports
+/// [`AddOutcome::AlreadyPresent`]. Never a blind overwrite
+/// (`docs/PLUGINS_CODE_STANDARDS.md`'s idempotency charter).
+fn apply_scaffold_file(
+    project_root: &Path,
+    rel_path: &str,
+    contents: &str,
+) -> Result<AddOutcome, PluginAddError> {
+    let safe_rel = safe_scaffold_rel_path(rel_path)?;
+    let path = project_root.join(safe_rel);
+    if path.exists() {
+        return Ok(AddOutcome::AlreadyPresent);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| PluginAddError::Io {
+            path: rel_path.to_string(),
+            message: e.to_string(),
+        })?;
+    }
+    write_file(&path, rel_path, contents)?;
+    Ok(AddOutcome::Applied)
+}
+
+/// Reject an absolute `rel_path` or one carrying a `..` component before it
+/// is ever joined onto `project_root`. Every [`Contribution::ScaffoldFile`]
+/// in the registry is a static, trusted string, but the check stays
+/// defensive rather than assuming that forever (see
+/// [`PluginAddError::UnsafeScaffoldPath`]).
+fn safe_scaffold_rel_path(rel_path: &str) -> Result<&Path, PluginAddError> {
+    let path = Path::new(rel_path);
+    let is_unsafe =
+        path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir));
+    if is_unsafe {
+        return Err(PluginAddError::UnsafeScaffoldPath(rel_path.to_string()));
+    }
+    Ok(path)
 }
 
 /// Wire a plugin's `com.android.library` module into the generated project:
@@ -1571,6 +1618,169 @@ mod tests {
         .unwrap();
         assert_eq!(outcome, AddOutcome::Applied);
         assert!(doc.to_string().contains("features = [\"biometric\"]"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // -----------------------------------------------------------------------
+    // `Contribution::ScaffoldFile`
+    //
+    // No registry entry carries this contribution yet (seeding
+    // `locales/en/main.ftl` is a later task) — driven directly through
+    // `apply_scaffold_file`/`apply_contribution`, the same not-yet-registered
+    // shape the `SwiftPackageRef` section below uses.
+    // -----------------------------------------------------------------------
+
+    const SCAFFOLD_REL: &str = "locales/en/main.ftl";
+    const SCAFFOLD_CONTENTS: &str = "hello = Hello, world!\n";
+
+    #[test]
+    fn scaffold_file_creates_with_exact_contents_when_absent() {
+        let root = scaffold_project("scaffold-file-absent");
+        assert!(!root.join(SCAFFOLD_REL).exists());
+
+        let outcome = apply_scaffold_file(&root, SCAFFOLD_REL, SCAFFOLD_CONTENTS).unwrap();
+        assert_eq!(outcome, AddOutcome::Applied);
+        assert_eq!(
+            fs::read_to_string(root.join(SCAFFOLD_REL)).unwrap(),
+            SCAFFOLD_CONTENTS
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// An existing file is never overwritten, even if its contents differ
+    /// from the registry's — the idempotency guard is presence alone (the
+    /// user may have hand-edited their own locale strings).
+    #[test]
+    fn scaffold_file_existing_file_with_different_contents_is_untouched() {
+        let root = scaffold_project("scaffold-file-present");
+        let path = root.join(SCAFFOLD_REL);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "hand-edited = true\n").unwrap();
+
+        let outcome = apply_scaffold_file(&root, SCAFFOLD_REL, SCAFFOLD_CONTENTS).unwrap();
+        assert_eq!(outcome, AddOutcome::AlreadyPresent);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "hand-edited = true\n",
+            "an existing file must never be overwritten"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scaffold_file_creates_nested_parent_directories() {
+        let root = scaffold_project("scaffold-file-nested");
+        const NESTED_REL: &str = "locales/fr/deep/nested/main.ftl";
+        assert!(!root.join("locales/fr").exists());
+
+        let outcome = apply_scaffold_file(&root, NESTED_REL, SCAFFOLD_CONTENTS).unwrap();
+        assert_eq!(outcome, AddOutcome::Applied);
+        assert_eq!(
+            fs::read_to_string(root.join(NESTED_REL)).unwrap(),
+            SCAFFOLD_CONTENTS
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scaffold_file_rejects_absolute_path() {
+        let root = scaffold_project("scaffold-file-absolute");
+        let err = apply_scaffold_file(&root, "/etc/passwd", SCAFFOLD_CONTENTS).unwrap_err();
+        assert!(
+            matches!(&err, PluginAddError::UnsafeScaffoldPath(p) if p == "/etc/passwd"),
+            "{err}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scaffold_file_rejects_leading_parent_dir_component() {
+        let root = scaffold_project("scaffold-file-parent-dir");
+        let err = apply_scaffold_file(&root, "../escape.txt", SCAFFOLD_CONTENTS).unwrap_err();
+        assert!(
+            matches!(&err, PluginAddError::UnsafeScaffoldPath(p) if p == "../escape.txt"),
+            "{err}"
+        );
+        assert!(
+            !root.parent().unwrap().join("escape.txt").exists(),
+            "must never write outside the project root"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A buried `..` (not just a leading one) is caught too.
+    #[test]
+    fn scaffold_file_rejects_embedded_parent_dir_component() {
+        let root = scaffold_project("scaffold-file-embedded-parent-dir");
+        let err =
+            apply_scaffold_file(&root, "locales/../../escape.txt", SCAFFOLD_CONTENTS).unwrap_err();
+        assert!(
+            matches!(&err, PluginAddError::UnsafeScaffoldPath(_)),
+            "{err}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `apply_contribution`'s dispatch match handles `ScaffoldFile` — driven
+    /// through the same per-contribution function `add_plugin`'s own loop
+    /// calls (the shape `cargo_feature_dispatches_through_apply_contribution`
+    /// above uses), asserting a second run is a no-op — the idempotency
+    /// contract `add_plugin` itself is built on.
+    #[test]
+    fn scaffold_file_dispatches_through_apply_contribution_and_reapply_is_idempotent() {
+        let root = scaffold_project("scaffold-file-dispatch");
+        let cargo_path = root.join(CARGO_TOML_REL);
+        let mut doc = fs::read_to_string(&cargo_path)
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        let mut changed = false;
+        let spec = find_plugin("secure-storage").unwrap();
+        const FRUST_PATH: &str = "/nonexistent/frust/checkout";
+        let contribution = Contribution::ScaffoldFile {
+            rel_path: SCAFFOLD_REL,
+            contents: SCAFFOLD_CONTENTS,
+            comment: "test-only scaffold file",
+        };
+
+        let first = apply_contribution(
+            &contribution,
+            &spec,
+            &root,
+            FRUST_PATH,
+            &mut doc,
+            &mut changed,
+        )
+        .unwrap();
+        assert_eq!(first, AddOutcome::Applied);
+        assert_eq!(
+            fs::read_to_string(root.join(SCAFFOLD_REL)).unwrap(),
+            SCAFFOLD_CONTENTS
+        );
+
+        let second = apply_contribution(
+            &contribution,
+            &spec,
+            &root,
+            FRUST_PATH,
+            &mut doc,
+            &mut changed,
+        )
+        .unwrap();
+        assert_eq!(
+            second,
+            AddOutcome::AlreadyPresent,
+            "re-running must be a no-op the second time"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(SCAFFOLD_REL)).unwrap(),
+            SCAFFOLD_CONTENTS,
+            "the second run must not rewrite the file"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }

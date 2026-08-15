@@ -182,6 +182,13 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
 - `plugin add`: `frust-drive::plugin::add_plugin` looks up a `PluginSpec` and applies its
   `Contribution`s as idempotent, format-preserving edits to a generated project (see
   [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md) for the plugins this distributes).
+  `Contribution::ScaffoldFile` is the registry's first file-*creating* contribution, rather than
+  an edit anchored inside an existing file: it writes the target file only when absent
+  (`Applied`), leaves an existing one untouched even if its contents differ (`AlreadyPresent`,
+  never a content comparison), and refuses an absolute or `..`-containing `rel_path`. `i18n`'s
+  entry is the first to use it — seeding a starter locale file — and its registry ordering puts
+  that `ScaffoldFile` before the plugin's `AppCrateMacro` invocation, since the macro's generated
+  code depends on the file it creates.
 
 ## Key Types
 

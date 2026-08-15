@@ -1,0 +1,13 @@
+error[E0425]: cannot find function `greting` in module `keys`
+ --> tests/macro/typo_key.rs:8:26
+  |
+3 | frust_i18n::locales!("fixtures/valid");
+  | -------------------------------------- similarly named function `greeting` defined here
+...
+8 |     println!("{}", keys::greting(&engine().with_chain(&chain), "Ada"));
+  |                          ^^^^^^^
+  |
+help: a function with a similar name exists
+  |
+8 |     println!("{}", keys::greeting(&engine().with_chain(&chain), "Ada"));
+  |                             +

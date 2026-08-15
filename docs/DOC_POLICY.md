@@ -26,7 +26,7 @@ tooling-isolation charter/verify-gate/pin policy with every unit rather than rea
 | `RENDER` | crates/frust-render, frust-text | A D |
 | `WIDGETS` | crates/frust-widgets, frust-theme | A C |
 | `SHELLS` | crates/frust-shell-{common,desktop,android,ios} | A D |
-| `PLUGINS` | crates/frust-plugin, plugins/{shared-preferences,secure-storage,camera,clipboard,haptics,iap,clean-signals-frust,database} | A D C |
+| `PLUGINS` | crates/frust-plugin, plugins/{shared-preferences,secure-storage,camera,clipboard,haptics,iap,clean-signals-frust,database,i18n} | A D C |
 | `NATIVE_WIDGETS` | plugins/native-widgets | A |
 | `CLI` | crates/frust-cli, frust-drive, frust-mcp, frust-dap | A D |
 | `TUI` | crates/frust-tui | A D C |
