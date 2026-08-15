@@ -30,8 +30,8 @@ use winit::window::{Icon, WindowAttributes};
 /// [`app_id`](DesktopConfig::app_id) and
 /// [`window_icon`](DesktopConfig::window_icon) — cloned out at construction
 /// time by [`LinuxExtensions::new`] rather than holding the whole config, so
-/// the facade (task 06) can build this once per run without keeping
-/// `DesktopConfig` alive alongside it.
+/// the facade can build this once per run without keeping `DesktopConfig`
+/// alive alongside it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LinuxExtensions {
     app_id: Option<String>,

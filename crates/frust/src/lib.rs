@@ -1046,6 +1046,47 @@ pub use frust_reactive::{DeepLink, DeepLinks, deep_links, push_deep_link};
 pub use frust_reactive::{
     BackPresses, back_presses, handles_back, push_back_press, set_handles_back,
 };
+
+/// The **menu-activation** read surface (`frust-reactive`'s process-wide menu
+/// source — see its module docs): a per-OS desktop shell drains its native menu
+/// queue once per frame and reports each activation, and app code observes it
+/// here. [`menu_events()`] returns the live [`MenuEvents`] handle whose `latest`
+/// signal carries a [`MenuEvent`] — the activated item's `id` exactly as the
+/// app wrote it in its [`MenuSpec`], plus a monotonic `sequence` so choosing
+/// the same item twice reads as two activations rather than one stale value.
+///
+/// ```no_run
+/// use frust::{AnyView, Component, Get, any, menu_events, text};
+///
+/// #[derive(Default)]
+/// struct MenuDemo;
+///
+/// impl Component for MenuDemo {
+///     type State = ();
+///
+///     fn init(&self) -> Self::State {}
+///
+///     fn build(&self, _state: &mut Self::State) -> AnyView<Self::State> {
+///         // A tracked read: this rebuild re-runs when an item is activated.
+///         let label = match menu_events().latest.get() {
+///             Some(event) => format!("chose {}", event.id),
+///             None => "nothing chosen yet".to_string(),
+///         };
+///         any(text(label))
+///     }
+/// }
+/// ```
+///
+/// Available on **every** target, unlike the [`MenuSpec`] vocabulary that
+/// describes the menu itself: a component reading menu events compiles on
+/// Android/iOS too (where nothing ever pushes one), so shared component code
+/// needs no `cfg` of its own.
+///
+/// Unlike [`push_deep_link`], the *push* side is deliberately **not**
+/// re-exported: a menu activation has exactly one producer — the per-OS shell
+/// that owns the platform menu — and nothing in an app simulates one the way
+/// `examples/navdemo` simulates a warm deep link.
+pub use frust_reactive::{MenuEvent, MenuEvents, menu_events};
 pub use reactive_graph::computed::Memo;
 pub use reactive_graph::signal::{ReadSignal, WriteSignal, signal};
 // The access traits the signal types' methods are defined through — without
@@ -1103,10 +1144,55 @@ pub use frust_shell_android::android_app;
 // are each `#[cfg(target_os = "ios")]`, so it is inert off-iOS.
 pub use frust_shell_ios::ios_app;
 
+/// The desktop app's identity and native-integration vocabulary, re-exported
+/// from the desktop core so app code never names a shell crate:
+/// [`DesktopConfig`] (the whole declaration — app name, reverse-DNS id, window
+/// icon, menu bar, last-window-close policy — handed to [`App::desktop`],
+/// [`run_desktop_config`] or [`app!`]'s `desktop = { .. }` argument),
+/// [`MenuSpec`]/[`MenuItemSpec`]/[`MenuRole`] (the platform-independent native
+/// menu tree a per-OS shell translates into an NSApp menu bar or an `HMENU`),
+/// [`DesktopIconData`] (decoded, tightly-packed RGBA8 — decoding a
+/// PNG/ICO/ICNS is the caller's job), and [`DEFAULT_APP_NAME`] (the window
+/// title a config that names nothing still gets).
+///
+/// `frust-shell-desktop`'s `IconData` is re-exported **renamed**: the facade
+/// already carries `frust-widgets`' [`IconData`], an in-UI vector icon, and the
+/// two are unrelated (one is a `BezPath` a widget paints, the other is the
+/// window/taskbar bitmap the OS shows). The `Desktop` prefix matches
+/// [`DesktopConfig`], whose `with_window_icon` is its only consumer.
+///
+/// ```no_run
+/// use frust::{DesktopConfig, MenuItemSpec, MenuRole, MenuSpec};
+///
+/// let file = MenuSpec::new()
+///     .with_item(MenuItemSpec::item("file.open", "Open…").with_accelerator("CmdOrCtrl+O"))
+///     .with_item(MenuItemSpec::separator())
+///     .with_item(MenuItemSpec::role(MenuRole::Quit));
+///
+/// let config = DesktopConfig::new()
+///     .with_app_name("Huddle")
+///     .with_app_id("dev.frust.huddle")
+///     .with_menu_spec(MenuSpec::new().with_item(MenuItemSpec::submenu("File", file)));
+/// # let _ = config;
+/// ```
+///
+/// **Desktop-only**, unlike the [`menu_events`] read side: these types are
+/// defined in `frust-shell-desktop`, which is not in a mobile build's
+/// dependency graph at all (see this crate's `Cargo.toml`). Code shared with a
+/// mobile target keeps a `DesktopConfig` behind its own
+/// `#[cfg(not(any(target_os = "android", target_os = "ios")))]` — or, more
+/// simply, writes it inline in [`app!`]'s `desktop = { .. }` argument, which
+/// the macro already emits only on the targets that have it.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub use frust_shell_desktop::{
+    DEFAULT_APP_NAME, DesktopConfig, IconData as DesktopIconData, MenuItemSpec, MenuRole, MenuSpec,
+};
+
 /// A Frust application: the app state plus the `app_logic` function that maps
 /// it to a view tree.
 ///
-/// Construct with [`App::new`] and start the event loop with [`App::run`].
+/// Construct with [`App::new`] and start the event loop with [`App::run`],
+/// optionally naming a desktop identity with [`App::desktop`] in between.
 ///
 /// The view type is intentionally *not* a parameter of this struct: capturing a
 /// free `fn app_logic(&mut State) -> impl View<State>`'s opaque return type into
@@ -1115,12 +1201,21 @@ pub use frust_shell_ios::ios_app;
 /// infers the view type freshly at the call site, so
 /// `App::new(state, app_logic).run()` compiles for both `impl View` and
 /// concrete-typed `app_logic`.
-// On Android the fields are consumed only by the desktop-gated `run`, so they
-// read as dead there; the app is driven through `android_app!`/JNI instead.
-#[cfg_attr(target_os = "android", allow(dead_code))]
+// On a mobile target the fields are consumed only by the desktop-gated `run`,
+// so they read as dead there; the app is driven through `android_app!`/JNI or
+// `ios_app!`/C-ABI instead.
+#[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
 pub struct App<State, Logic> {
     state: State,
     logic: Logic,
+    /// The desktop identity [`App::run`] hands the shell —
+    /// [`DesktopConfig::default()`] (today's zero-config preview window) unless
+    /// [`App::desktop`] replaced it.
+    ///
+    /// Absent on mobile rather than carried and ignored: the type itself lives
+    /// in the desktop core, which is not in a mobile build's graph at all.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    config: DesktopConfig,
 }
 
 impl<State, Logic> App<State, Logic> {
@@ -1129,27 +1224,128 @@ impl<State, Logic> App<State, Logic> {
     /// `logic` is a `FnMut(&mut State) -> impl View<State>` re-run each frame to
     /// produce the current view tree.
     pub fn new(state: State, logic: Logic) -> Self {
-        Self { state, logic }
+        Self {
+            state,
+            logic,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            config: DesktopConfig::default(),
+        }
     }
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 impl<State: 'static, Logic> App<State, Logic> {
-    /// Run the app in the desktop preview window until it is closed.
+    /// Give the app a desktop identity — name, reverse-DNS id, window icon,
+    /// native menu bar, last-window-close policy (see [`DesktopConfig`]).
+    ///
+    /// Optional: an app that never calls this runs with
+    /// [`DesktopConfig::default()`], which is the dev-preview window exactly as
+    /// it has always been. Each per-OS shell reads the fields it can act on and
+    /// ignores the rest (Linux has no native menu bar, macOS wants an
+    /// application icon rather than a window one, and so on).
+    ///
+    /// ```no_run
+    /// # struct AppState;
+    /// # fn app_logic(_: &mut AppState) -> impl frust::View<AppState> + use<> { frust::text("hi") }
+    /// frust::App::new(AppState, app_logic)
+    ///     .desktop(frust::DesktopConfig::new().with_app_name("Huddle"))
+    ///     .run()
+    ///     .unwrap();
+    /// ```
+    pub fn desktop(mut self, config: DesktopConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Run the app in the desktop window until it is closed.
     ///
     /// Blocks the calling thread on the platform event loop. Returns once the
     /// window closes, or an error if the window/GPU surface could not be
     /// created. The concrete view type `V` is inferred from `logic`.
     ///
     /// Desktop-only: on Android the app is driven by the JNI bridge that
-    /// [`android_app!`] generates, not by this preview loop.
+    /// [`android_app!`] generates and on iOS by the C-ABI entry points
+    /// [`ios_app!`] generates, not by this loop.
     pub fn run<V>(self) -> anyhow::Result<()>
     where
         V: View<State>,
         Logic: FnMut(&mut State) -> V + 'static,
     {
-        frust_shell_desktop::run_desktop(self.state, self.logic)
+        let Self {
+            state,
+            logic,
+            config,
+        } = self;
+        run_desktop_configured(state, logic, config)
     }
+}
+
+/// Start the shared desktop core with this target's native shell attached.
+///
+/// The extension is built *before* the config moves into the core: every per-OS
+/// constructor takes `&DesktopConfig` and clones out the fields it acts on
+/// (`app_id`, `window_icon`, `menu_spec`, the close policy), while the core
+/// itself takes ownership to title the window.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn run_desktop_configured<State, Logic, V>(
+    state: State,
+    logic: Logic,
+    config: DesktopConfig,
+) -> anyhow::Result<()>
+where
+    State: 'static,
+    V: View<State>,
+    Logic: FnMut(&mut State) -> V + 'static,
+{
+    let extensions = desktop_extensions(&config);
+    frust_shell_desktop::run_desktop_with(state, logic, config, extensions)
+}
+
+/// The per-OS shell selection: one arm per shell crate this crate's manifest
+/// gates in, under the identical `cfg` the dependency itself carries.
+///
+/// This function is the whole of the facade's platform knowledge on desktop —
+/// nothing else here names a per-OS shell crate.
+#[cfg(target_os = "macos")]
+fn desktop_extensions(
+    config: &DesktopConfig,
+) -> impl frust_shell_desktop::DesktopExtensions + use<> {
+    frust_shell_macos::MacosExtensions::new(config)
+}
+
+/// See the macOS arm above.
+#[cfg(target_os = "windows")]
+fn desktop_extensions(
+    config: &DesktopConfig,
+) -> impl frust_shell_desktop::DesktopExtensions + use<> {
+    frust_shell_windows::WindowsExtensions::new(config)
+}
+
+/// See the macOS arm above.
+#[cfg(target_os = "linux")]
+fn desktop_extensions(
+    config: &DesktopConfig,
+) -> impl frust_shell_desktop::DesktopExtensions + use<> {
+    frust_shell_linux::LinuxExtensions::new(config)
+}
+
+/// The fallback arm: a desktop target with no per-OS shell crate of its own (a
+/// BSD, say) runs the shared winit core with the whole-set no-op extension —
+/// window, input, theme and accessibility all work, and only the native
+/// identity/menu integration is absent. `config` is still threaded through, so
+/// such a host keeps its window title.
+#[cfg(not(any(
+    target_os = "android",
+    target_os = "ios",
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "linux"
+)))]
+fn desktop_extensions(
+    config: &DesktopConfig,
+) -> impl frust_shell_desktop::DesktopExtensions + use<> {
+    let _ = config;
+    frust_shell_desktop::NoExtensions
 }
 
 /// Run a root [`Component`] in the desktop preview shell until the window
@@ -1174,8 +1370,13 @@ impl<State: 'static, Logic> App<State, Logic> {
 /// each per-frame rebuild in the same owner.
 ///
 /// Desktop-only, matching [`App::run`]: on Android the app is driven by
-/// [`android_app!`]/JNI instead, not by this preview loop.
-#[cfg(not(target_os = "android"))]
+/// [`android_app!`]/JNI and on iOS by [`ios_app!`]'s C-ABI entry points
+/// instead, not by this loop.
+///
+/// Zero-config: the window is [`DesktopConfig::default()`]'s. Name the app, its
+/// icon or its menu bar with [`run_desktop_config`] (or [`app!`]'s
+/// `desktop = { .. }` argument) instead.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn run<C: Component>(root: C) -> anyhow::Result<()> {
     run_with_setup(root, || {})
 }
@@ -1185,27 +1386,75 @@ pub fn run<C: Component>(root: C) -> anyhow::Result<()> {
 ///
 /// `setup` runs on this (the UI) thread, after
 /// [`frust_reactive::ReactiveRuntime::init`] and under the runtime's root
-/// [`Owner`], and therefore *before* `frust_shell_desktop::run_desktop`
-/// constructs the shell — which is the one moment the shell reads
-/// [`set_default_theme`]'s slot and drains [`register_app_fonts`]' registry.
-/// That is exactly the placement `app!`'s Android/iOS arms get for free (both
-/// run the block inside the state factory `create_handle`/`ffi_glue::init`
-/// calls before building their `AppHandle`), so the ordering contract is
-/// identical on all three platforms.
+/// [`Owner`], and therefore *before* the desktop shell is constructed — which
+/// is the one moment the shell reads [`set_default_theme`]'s slot and drains
+/// [`register_app_fonts`]' registry. That is exactly the placement `app!`'s
+/// Android/iOS arms get for free (both run the block inside the state factory
+/// `create_handle`/`ffi_glue::init` calls before building their `AppHandle`),
+/// so the ordering contract is identical on all three platforms.
 ///
 /// A design-system plugin's installer (`frust::glyph_theme::install`, or a
 /// third-party equivalent) is the intended payload; app code normally reaches
 /// this through [`app!`] rather than calling it directly.
 ///
 /// Desktop-only, matching [`run`]/[`App::run`].
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn run_with_setup<C: Component>(root: C, setup: impl FnOnce()) -> anyhow::Result<()> {
+    run_with_setup_and_config(root, setup, DesktopConfig::default())
+}
+
+/// [`run`] with the app's desktop identity ([`DesktopConfig`]) — the
+/// no-setup half of the config-carrying pair, and the function
+/// [`app!`]'s `desktop = { .. }` argument routes through when no
+/// `setup = { .. }` block accompanies it.
+///
+/// ```no_run
+/// # use frust::{AnyView, Component, any, text};
+/// # #[derive(Default)]
+/// # struct MyApp;
+/// # impl Component for MyApp {
+/// #     type State = ();
+/// #     fn init(&self) -> Self::State {}
+/// #     fn build(&self, _state: &mut Self::State) -> AnyView<Self::State> { any(text("hi")) }
+/// # }
+/// frust::run_desktop_config(
+///     MyApp,
+///     frust::DesktopConfig::new()
+///         .with_app_name("Huddle")
+///         .with_app_id("dev.frust.huddle"),
+/// )
+/// .unwrap();
+/// ```
+///
+/// Desktop-only, matching [`run`]/[`App::run`].
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub fn run_desktop_config<C: Component>(root: C, config: DesktopConfig) -> anyhow::Result<()> {
+    run_with_setup_and_config(root, || {}, config)
+}
+
+/// [`run_with_setup`] and [`run_desktop_config`] at once: the single desktop
+/// entry point the other three delegate to, differing only in which of `setup`
+/// and `config` they default.
+///
+/// `setup` keeps the ordering contract [`run_with_setup`] documents; `config`
+/// reaches the shared desktop core and this target's native shell together (see
+/// [`App::desktop`]).
+///
+/// Desktop-only, matching [`run`]/[`App::run`].
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub fn run_with_setup_and_config<C: Component>(
+    root: C,
+    setup: impl FnOnce(),
+    config: DesktopConfig,
+) -> anyhow::Result<()> {
     let rt = frust_reactive::ReactiveRuntime::init(std::sync::Arc::new(|| {}));
     let state = rt.with_owner(|| {
         setup();
         root.init()
     });
-    App::new(state, move |state: &mut C::State| root.build(state)).run()
+    App::new(state, move |state: &mut C::State| root.build(state))
+        .desktop(config)
+        .run()
 }
 
 /// The canonical app entry point: one line binds a root
@@ -1241,10 +1490,18 @@ pub fn run_with_setup<C: Component>(root: C, setup: impl FnOnce()) -> anyhow::Re
 /// - **iOS**: `frust::ios_app!(...)`, invoked unconditionally — like a
 ///   direct `ios_app!` call, it self-gates: every symbol it emits is itself
 ///   `#[cfg(target_os = "ios")]`, so the invocation expands to nothing
-///   off-iOS.
-/// - **Every other target** (the desktop preview): a hidden
+///   off-iOS. Plus a `#[cfg(target_os = "ios")] __frust_main` **stub**: the
+///   generated `main.rs` calls `__frust_main()` under
+///   `#[cfg(not(target_os = "android"))]`, and Xcode builds that bin target,
+///   so the symbol must exist on iOS even though no desktop shell does. The
+///   stub explains itself on stderr and exits non-zero rather than silently
+///   doing nothing — a real iOS app is launched by its Xcode host through the
+///   C-ABI entry points above, never by running this binary.
+/// - **Every other target** (desktop): a hidden
 ///   `#[doc(hidden)] pub fn __frust_main()` that runs `Root` through
-///   [`run`], printing the error and exiting non-zero on failure. `app!`
+///   [`run`] (or, with a `desktop = { .. }` argument,
+///   [`run_with_setup_and_config`]), printing the error and exiting non-zero
+///   on failure. `app!`
 ///   never emits a `fn main` itself — a generated project splits `lib.rs`
 ///   (where `app!` is called) from `main.rs` (a one-line `fn main() {
 ///   <crate>::__frust_main() }`, scaffolded by `frust create` and never
@@ -1299,16 +1556,63 @@ pub fn run_with_setup<C: Component>(root: C, setup: impl FnOnce()) -> anyhow::Re
 /// mobile state factories expand to exactly what they always did, and the
 /// desktop arm's `run_with_setup(root, || {})` is literally what [`run`] itself
 /// is.
+///
+/// # `desktop = { .. }`: name the app on desktop
+///
+/// A second optional argument, alongside or instead of `setup`, is an
+/// expression evaluating to a [`DesktopConfig`] — the app's desktop identity
+/// (name, reverse-DNS id, window icon, native menu bar, close policy):
+///
+/// ```no_run
+/// # use frust::{AnyView, Component, any, text};
+/// # #[derive(Default)]
+/// # struct MyApp;
+/// # impl Component for MyApp {
+/// #     type State = ();
+/// #     fn init(&self) -> Self::State {}
+/// #     fn build(&self, _state: &mut Self::State) -> AnyView<Self::State> { any(text("hi")) }
+/// # }
+/// frust::app!(MyApp, desktop = {
+///     frust::DesktopConfig::new()
+///         .with_app_name("Huddle")
+///         .with_app_id("dev.frust.huddle")
+///         .with_menu_spec(
+///             frust::MenuSpec::new()
+///                 .with_item(frust::MenuItemSpec::role(frust::MenuRole::Quit)),
+///         )
+/// });
+/// # fn main() {}
+/// ```
+///
+/// The two may be combined in either order
+/// (`setup = { .. }, desktop = { .. }` or the reverse). The expression is
+/// emitted **only** into the desktop `__frust_main`, so it may name
+/// desktop-only types like [`DesktopConfig`] without any `cfg` of its own and
+/// the mobile arms never see it — an app whose menu/identity matters on desktop
+/// still compiles unchanged for Android and iOS. It is evaluated once, at
+/// startup: the macro passes it straight into the run call, so it runs
+/// *before* the `setup` block (which runs inside, under the reactive owner) and
+/// before the shell is constructed — a config expression must not depend on
+/// what `setup` installs.
+///
+/// Omitting it is exactly today's behavior:
+/// [`DesktopConfig::default()`]'s window, through the same
+/// [`run_with_setup`] call the pre-config macro emitted.
 #[macro_export]
 macro_rules! app {
-    // Internal single implementation, shared by both public forms below.
-    // `$($setup:block)?` is empty for the one-argument form, so the two mobile
-    // state factories expand byte-identically to the pre-setup macro and the
-    // desktop arm's `run_with_setup(root, || {})` is `run`'s own body. Listed
-    // FIRST because macro_rules cannot recover from a `$root:ty` fragment that
-    // fails to parse: were the public arms first, `@emit` would be fed to
-    // `:ty` and error out instead of falling through to this arm.
-    (@emit $root:ty, $($setup:block)?) => {
+    // Internal arms, shared by the public forms below. `$($setup:block)?` is
+    // empty for the one-argument form, so the two mobile state factories expand
+    // byte-identically to the pre-setup macro and the desktop arm's
+    // `run_with_setup(root, || {})` is `run`'s own body. Listed FIRST because
+    // macro_rules cannot recover from a `$root:ty` fragment that fails to parse:
+    // were the public arms first, `@emit` would be fed to `:ty` and error out
+    // instead of falling through to these arms.
+    //
+    // The mobile half is factored into `@emit_mobile` because it is identical
+    // for every public form — only the desktop `__frust_main` differs between
+    // `@emit` (zero-config) and `@emit_desktop` (config-carrying), and two
+    // hand-maintained copies of the JNI/C-ABI bindings would be free to drift.
+    (@emit_mobile $root:ty, $($setup:block)?) => {
         #[cfg(target_os = "android")]
         $crate::android_app!(
             <$root as $crate::Component>::State,
@@ -1338,7 +1642,30 @@ macro_rules! app {
             }
         );
 
-        #[cfg(not(target_os = "android"))]
+        // The iOS `__frust_main` stub. The generated `main.rs` calls
+        // `__frust_main()` under `#[cfg(not(target_os = "android"))]` and the
+        // Xcode phase builds that bin target, so the symbol must exist on iOS
+        // even though iOS has no desktop shell to start. It logs and exits
+        // non-zero rather than returning quietly: reaching it means something
+        // ran the binary directly instead of letting the Xcode host drive
+        // `ios_app!`'s C-ABI entry points, and a silent success would look like
+        // an app that started and vanished.
+        #[cfg(target_os = "ios")]
+        #[doc(hidden)]
+        pub fn __frust_main() {
+            eprintln!(
+                "frust: __frust_main is the desktop entry point and does nothing on iOS \
+                 — an iOS app is started by its Xcode host, which drives the C-ABI entry \
+                 points `frust::app!` generates."
+            );
+            ::std::process::exit(1);
+        }
+    };
+    // Zero-config desktop entry: byte-identical to the pre-config macro.
+    (@emit $root:ty, $($setup:block)?) => {
+        $crate::app!(@emit_mobile $root, $($setup)?);
+
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         #[doc(hidden)]
         pub fn __frust_main() {
             let __frust_setup = || { $($setup)? };
@@ -1351,11 +1678,42 @@ macro_rules! app {
             }
         }
     };
+    // Config-carrying desktop entry. `$config` is emitted only inside this
+    // `cfg`-gated function, so it may name desktop-only types (`DesktopConfig`
+    // and the menu vocabulary) while the mobile arms above stay untouched.
+    (@emit_desktop $root:ty, $config:expr, $($setup:block)?) => {
+        $crate::app!(@emit_mobile $root, $($setup)?);
+
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[doc(hidden)]
+        pub fn __frust_main() {
+            let __frust_setup = || { $($setup)? };
+            if let Err(e) = $crate::run_with_setup_and_config(
+                <$root as ::core::default::Default>::default(),
+                __frust_setup,
+                $config,
+            ) {
+                eprintln!("frust: {e:#}");
+                ::std::process::exit(1);
+            }
+        }
+    };
     ($root:ty $(,)?) => {
         $crate::app!(@emit $root,);
     };
     ($root:ty, setup = $setup:block $(,)?) => {
         $crate::app!(@emit $root, $setup);
+    };
+    ($root:ty, desktop = $config:expr $(,)?) => {
+        $crate::app!(@emit_desktop $root, $config,);
+    };
+    ($root:ty, setup = $setup:block, desktop = $config:expr $(,)?) => {
+        $crate::app!(@emit_desktop $root, $config, $setup);
+    };
+    // The same pair the other way round: an app author writing the identity
+    // first should not meet a macro error over argument order.
+    ($root:ty, desktop = $config:expr, setup = $setup:block $(,)?) => {
+        $crate::app!(@emit_desktop $root, $config, $setup);
     };
 }
 
@@ -1374,11 +1732,17 @@ macro_rules! app {
 /// **Exactly one `app!` invocation may be compiled per target** — a second one
 /// would stamp the same fixed JNI/C-ABI export names — so this fixture takes
 /// the *setup* form (the newer, ordering-critical arm, whose per-platform
-/// expansions differ) and [`macro_expansion_no_setup`] below carries the
-/// one-argument form on host only. The one-argument form's mobile expansion is
+/// expansions differ) and [`macro_expansion_no_setup`]/
+/// [`macro_expansion_desktop_config`] below carry the remaining forms on host
+/// only. The one-argument form's mobile expansion is
 /// unchanged from the pre-setup macro (`@emit $root,` emits no setup tokens)
 /// and every generated project plus `examples/huddle`/`examples/glyph-catalog`
 /// exercises it.
+///
+/// The rule binds *targets*, not modules: the host-only fixtures below invoke
+/// `app!` again, which is fine because on host the macro emits a plain
+/// `pub fn __frust_main` (one per module, no fixed export name) and the
+/// `android_app!`/`ios_app!` halves expand to nothing.
 ///
 /// The setup payload here is deliberately feature-independent
 /// ([`set_default_theme`] with the always-available M3 baseline rather than
@@ -1439,6 +1803,130 @@ mod macro_expansion_no_setup {
     }
 
     crate::app!(TestAppNoSetup);
+}
+
+/// Compile-only smoke of [`app!`]'s **`desktop = { .. }`** forms — all three of
+/// them (config alone, and combined with `setup` in either order), one per
+/// submodule because each expansion defines its own `__frust_main`.
+///
+/// Host-only, for two reasons: the one-invocation-per-target rule spelled out
+/// on [`macro_expansion`] above, and [`DesktopConfig`] itself, which is not in
+/// a mobile build's dependency graph at all — which is precisely the property
+/// these fixtures pin, since a `desktop = { .. }` expression must reach only
+/// the desktop `__frust_main` and never the mobile state factories.
+///
+/// The config payload exercises the full re-exported vocabulary
+/// ([`DesktopConfig`] + [`MenuSpec`]/[`MenuItemSpec`]/[`MenuRole`]) through the
+/// facade only, so a re-export dropped from `lib.rs` fails to compile here
+/// rather than in an app.
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+mod macro_expansion_desktop_config {
+    #[derive(Default)]
+    #[allow(dead_code)]
+    struct TestAppDesktop;
+
+    impl crate::Component for TestAppDesktop {
+        type State = u32;
+
+        fn init(&self) -> u32 {
+            0
+        }
+
+        fn build(&self, state: &mut u32) -> crate::AnyView<u32> {
+            *state += 1;
+            crate::any(crate::text(format!("{state}")))
+        }
+    }
+
+    /// The identity an app would write inline in its own `desktop = { .. }`
+    /// block, factored out so the three fixtures below differ only in the macro
+    /// arm they take.
+    // `#[allow(dead_code)]`: its only call sites are inside the `__frust_main`
+    // bodies `app!` generates, which nothing in a test binary ever calls — the
+    // point of these fixtures is that they *compile*.
+    #[allow(dead_code)]
+    fn fixture_config() -> crate::DesktopConfig {
+        crate::DesktopConfig::new()
+            .with_app_name("Fixture")
+            .with_app_id("dev.frust.fixture")
+            .with_menu_spec(
+                crate::MenuSpec::new().with_item(crate::MenuItemSpec::submenu(
+                    "File",
+                    crate::MenuSpec::new()
+                        .with_item(
+                            crate::MenuItemSpec::item("file.open", "Open…")
+                                .with_accelerator("CmdOrCtrl+O"),
+                        )
+                        .with_item(crate::MenuItemSpec::separator())
+                        .with_item(crate::MenuItemSpec::role(crate::MenuRole::Quit)),
+                )),
+            )
+    }
+
+    mod config_only {
+        crate::app!(super::TestAppDesktop, desktop = { super::fixture_config() });
+    }
+
+    mod setup_then_config {
+        crate::app!(
+            super::TestAppDesktop,
+            setup = {
+                crate::set_default_theme(crate::Theme::m3_baseline());
+            },
+            desktop = { super::fixture_config() }
+        );
+    }
+
+    mod config_then_setup {
+        crate::app!(
+            super::TestAppDesktop,
+            desktop = { super::fixture_config() },
+            setup = {
+                crate::set_default_theme(crate::Theme::m3_baseline());
+            }
+        );
+    }
+}
+
+/// The config-threading half of the desktop run path: [`App::desktop`] is what
+/// carries an app's [`DesktopConfig`] to the shell, and a zero-config
+/// [`App::new`] still carries [`DesktopConfig::default()`] — the window the
+/// preview has always opened.
+///
+/// Opening a window isn't testable headless, so this asserts against the value
+/// `run` would hand `run_desktop_with` rather than the window itself.
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+mod desktop_config_threading {
+    use crate::{App, DesktopConfig, View, text};
+
+    fn logic(_state: &mut ()) -> impl View<()> + use<> {
+        text("fixture")
+    }
+
+    #[test]
+    fn a_fresh_app_carries_the_zero_config_desktop_identity() {
+        let app = App::new((), logic);
+        assert_eq!(app.config, DesktopConfig::default());
+        assert_eq!(app.config.window_title(), crate::DEFAULT_APP_NAME);
+    }
+
+    #[test]
+    fn desktop_threads_the_app_name_into_the_config_the_run_path_receives() {
+        let app = App::new((), logic).desktop(DesktopConfig::new().with_app_name("Huddle"));
+        assert_eq!(app.config.app_name.as_deref(), Some("Huddle"));
+        // The title the shared core titles its window with (and the name the
+        // macOS shell builds its application menu around).
+        assert_eq!(app.config.window_title(), "Huddle");
+    }
+
+    #[test]
+    fn desktop_replaces_the_whole_config_rather_than_merging() {
+        let app = App::new((), logic)
+            .desktop(DesktopConfig::new().with_app_name("First"))
+            .desktop(DesktopConfig::new().with_app_id("dev.frust.second"));
+        assert_eq!(app.config.app_name, None);
+        assert_eq!(app.config.app_id.as_deref(), Some("dev.frust.second"));
+    }
 }
 
 /// Facade-level regression test: [`run`] runs a root
