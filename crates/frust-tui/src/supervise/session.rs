@@ -10,7 +10,8 @@
 
 use std::path::PathBuf;
 
-use frust_drive::build_info::{BuildInfo, BuildMode};
+use frust_drive::build_info::BuildInfo;
+use frust_drive::desktop_run;
 use frust_drive::devices::Device;
 
 /// A unique per-session identifier, handed out monotonically by a single
@@ -73,53 +74,22 @@ impl SessionSpec {
     }
 
     /// The `cargo run` desktop-preview plan for this spec.
+    ///
+    /// Resolved by `frust-drive`'s `desktop_run` — the workspace's single
+    /// desktop launch-plan construction site, shared with `frust run`'s
+    /// desktop fallback and `frust-mcp`'s session engine — and only reshaped
+    /// into the [`LaunchPlan`] the supervisor spawns. The workbench holds no
+    /// mode → cargo-args mapping of its own: a preview built without
+    /// `frust/devtools` compiled in would leave DevTools waiting forever for a
+    /// discovery line that can never be printed, and that decision belongs in
+    /// one place for every front-end.
     fn desktop_plan(&self) -> LaunchPlan {
-        let mut args = vec!["run".to_string()];
-        for arg in self.build.mode.cargo_profile_arg() {
-            args.push((*arg).to_string());
-        }
-        // Thread the mode's cargo features (`frust/perf-trace` +
-        // `frust/devtools` for debug/profile, none for release) exactly like
-        // the CLI's desktop fallback and the device pipelines do —
-        // `BuildMode::cargo_features` is the single mode→feature source.
-        // Without these the spawned preview compiles the devtools service and
-        // perf instrumentation OUT, so the workbench's DevTools mode would
-        // wait forever for a discovery line that can never be printed.
-        for feature in self.build.mode.cargo_features() {
-            args.push("--features".to_string());
-            args.push((*feature).to_string());
-        }
-
-        // Every `--define KEY=VALUE` becomes an env var for the spawned
-        // preview, matching on-device behavior. Sorted by key so the derived
-        // plan (and any test scripting it) is deterministic despite the
-        // defines living in a `HashMap`.
-        let mut env: Vec<(String, String)> = self
-            .build
-            .defines
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        // A gap this closes: the run-config modal builds
-        // `BuildInfo` directly (`RunConfig::build_info`) rather than through
-        // `BuildInfo::from_args`, which is what auto-injects
-        // `FRUST_TRACE=1` for a `--profile` build — bypassing that
-        // injection entirely. The supervisor owns the spawn env (this
-        // function), so it fills the same gap here: mirror
-        // `BuildInfo::from_args`'s "profile mode ⇒ FRUST_TRACE=1 unless the
-        // user already set it" rule, so the perf sparkline panel has data to
-        // parse on a desktop `--profile` run exactly like an Android/iOS one
-        // does.
-        if self.build.mode == BuildMode::Profile && !env.iter().any(|(k, _)| k == "FRUST_TRACE") {
-            env.push(("FRUST_TRACE".to_string(), "1".to_string()));
-        }
-        env.sort();
-
+        let plan = desktop_run::desktop_plan(&self.project_root, &self.build);
         LaunchPlan {
-            program: "cargo".to_string(),
-            args,
-            cwd: self.project_root.clone(),
-            env,
+            program: plan.program,
+            args: plan.args,
+            cwd: plan.cwd,
+            env: plan.env,
         }
     }
 }
