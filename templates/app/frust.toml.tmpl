@@ -3,10 +3,20 @@ name = "{{ project_name }}"
 org = "{{ org }}"
 description = "{{ description }}"
 
-# Desktop (macOS/Windows/Linux) shell identity, read by `frust build`/
-# `frust run`'s desktop pipeline and rendered into `macos/Info.plist`,
-# `windows/build.rs`'s resource block, and `linux/app.desktop` at scaffold
-# time. `icon` is the single source image the icon pipeline derives every
+# Desktop (macOS/Windows/Linux) shell identity. These values were rendered
+# into `macos/Info.plist`, `windows/build.rs`'s resource block and
+# `linux/app.desktop` at scaffold time; editing them here does NOT rewrite
+# those files. `frust build` copies each of them verbatim, so a hand edit
+# always wins. What `name`/`identifier` still drive at build time is the
+# NAMES the bundle is assembled under (the `.app` directory, the `.desktop`
+# file and its icon leaves, the generated `.icns`) plus the fallback
+# `Info.plist`/`app.desktop` generated for a project that ships neither.
+# Change an identity in both places: a build reports a disagreement rather
+# than reconciling it silently — an `Info.plist` `CFBundleExecutable` naming
+# a binary that isn't there fails the build, and identifier/`Exec=`/icon-name
+# drift comes back as a warning.
+#
+# `icon` is the single source image the icon pipeline derives every
 # platform's app icon from (`.icns`/`.ico`/`hicolor` PNGs) — point it at a
 # higher-resolution asset than the bundled demo logo before shipping.
 [desktop]
@@ -14,17 +24,20 @@ name = "{{ title_case_name }}"
 identifier = "{{ desktop_identifier }}"
 icon = "assets/logo.png"
 
-# macOS-only overrides. Uncomment to change the minimum supported macOS
-# version (default "{{ macos_minimum_system_version }}", matching
-# `macos/Info.plist`'s `LSMinimumSystemVersion`) or set a Developer-ID
-# signing identity for a notarizable release build.
+# macOS-only overrides. `signing-identity` sets the identity `frust build
+# macos` codesigns the assembled `.app` with. `minimum-system-version` feeds
+# a GENERATED `Info.plist` only — this project ships its own
+# `macos/Info.plist` (copied verbatim), so change
+# `LSMinimumSystemVersion` there.
 # [macos]
 # minimum-system-version = "{{ macos_minimum_system_version }}"
 # signing-identity = "Developer ID Application: Example Org (TEAMID1234)"
 
-# Windows-only overrides. Uncomment to change the FileVersion/ProductVersion
-# metadata `windows/build.rs` embeds into the compiled `.exe` (defaults to
-# "1.0.0.0"/"1.0.0" — see that file).
+# Windows-only overrides. The FileVersion/ProductVersion a compiled `.exe`
+# carries are set by this project's own `windows/build.rs` at app-build time
+# (defaults "1.0.0.0"/"1.0.0" — edit them there). `frust build` does not
+# apply the values below; it only reports that the `.exe`'s own build script
+# owns them.
 # [windows]
 # file-version = "1.0.0.0"
 # product-version = "1.0.0"

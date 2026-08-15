@@ -33,6 +33,24 @@
 //! `Info.plist`/`.desktop` generated from `frust.toml` instead of a failed
 //! build.
 //!
+//! **Winning verbatim means the two can disagree, so a copied file is read
+//! back and reconciled.** The executable, identifier and icon file *names* a
+//! build produces come from the resolved manifest, while a copied
+//! `Info.plist`/`app.desktop` names whatever it names — a rename in one place
+//! and not the other otherwise ships a `.app` whose `CFBundleExecutable` points
+//! at a file that isn't there, or a launcher entry with a dangling `Exec=`.
+//! Nothing is rewritten (that is the decision above): the disagreement is
+//! *reported*. One case is fatal — a `CFBundleExecutable` naming something
+//! other than the binary in `Contents/MacOS` cannot launch, is fully
+//! deterministic, and is therefore
+//! [`DesktopBuildError::ExecutableIdentityMismatch`]. Every other drift is a
+//! [`BundleNote`], because it degrades rather than breaks (a bundle keeps the
+//! plist's identifier, a `.desktop` `Exec=` may legitimately resolve through
+//! `PATH`). And a plist that cannot be *read back* at all — no `plutil`, a
+//! non-zero exit, unparseable output — is one [`BundleNote::PlistUnverified`],
+//! never a failure: tool trouble must not block a build (the same stance
+//! `ios_run::bundle_id` takes on the identical tool).
+//!
 //! **A missing or unusable icon never fails a build.** The bundle is assembled
 //! without one and the reason comes back as a [`BundleNote`] — a bundle with
 //! no icon still runs, and the scaffold's own placeholder logo is deliberately
@@ -179,6 +197,32 @@ pub enum BundleNote {
     /// `.exe` carries are compiled in by the project's own
     /// `windows/build.rs` — nothing this pipeline writes can override them.
     WindowsVersionOverridesNotApplied,
+    /// The project's own `macos/Info.plist` (copied verbatim) declares a
+    /// `CFBundleIdentifier` other than the one `frust.toml` resolves to. Not
+    /// fatal: the copied plist wins, so the `.app` is simply identified by the
+    /// value it names — but a `[macos] signing-identity`, a notarization
+    /// profile or a `defaults` domain keyed on the manifest value won't match.
+    IdentifierIdentityMismatch { plist: String, manifest: String },
+    /// A launcher file the project ships names an icon this run did not write
+    /// (`macos/Info.plist`'s `CFBundleIconFile`, `linux/app.desktop`'s
+    /// `Icon=`). Raised only when an icon really was generated — with the icon
+    /// steps skipped there is already a note saying so.
+    IconIdentityMismatch {
+        /// The file and key the declared name was read from.
+        declared_in: &'static str,
+        declared: String,
+        generated: String,
+    },
+    /// The project's own `linux/app.desktop` runs a program other than the
+    /// bundled executable. A note rather than a refusal: `Exec=` legitimately
+    /// varies (a bare name resolved through `PATH`, an installed absolute
+    /// path, trailing `%f`/`%u` placeholders), so only the leading token's file
+    /// name is compared and a difference is reported, not judged.
+    ExecIdentityMismatch { exec: String, binary: String },
+    /// The copied `macos/Info.plist` could not be read back, so its identity
+    /// keys were not checked against the manifest. Environmental, never a
+    /// build failure.
+    PlistUnverified { reason: String },
 }
 
 impl fmt::Display for BundleNote {
@@ -219,6 +263,31 @@ impl fmt::Display for BundleNote {
                 f,
                 "`[windows] file-version`/`product-version` are compiled in by the project's own \
                  windows/build.rs — edit that file to change them"
+            ),
+            BundleNote::IdentifierIdentityMismatch { plist, manifest } => write!(
+                f,
+                "`macos/Info.plist` declares CFBundleIdentifier '{plist}', but frust.toml \
+                 resolves '{manifest}' — the project's own plist is copied verbatim and wins; \
+                 the manifest value names generated files only"
+            ),
+            BundleNote::IconIdentityMismatch {
+                declared_in,
+                declared,
+                generated,
+            } => write!(
+                f,
+                "{declared_in} names '{declared}', but this build generated '{generated}' — \
+                 the bundled icon will not be found under the name the project declares"
+            ),
+            BundleNote::ExecIdentityMismatch { exec, binary } => write!(
+                f,
+                "`linux/app.desktop` has `Exec={exec}`, but this bundle's executable is \
+                 '{binary}' — the entry only launches if '{exec}' resolves on PATH"
+            ),
+            BundleNote::PlistUnverified { reason } => write!(
+                f,
+                "could not read the copied `macos/Info.plist` back ({reason}) — its \
+                 CFBundleExecutable/CFBundleIdentifier were not checked against frust.toml"
             ),
         }
     }
@@ -261,6 +330,13 @@ pub enum DesktopBuildError {
          deletes it recursively first, so a target outside `dist/` is never touched"
     )]
     UnsafeBundleDir { path: PathBuf, dist_root: PathBuf },
+    #[error(
+        "the project's own `macos/Info.plist` names `CFBundleExecutable` '{found}', but this \
+         build put '{expected}' in `Contents/MacOS` — the .app would not launch. That plist is \
+         copied verbatim (a hand edit always wins), so fix the key there, or rename the binary \
+         to match it"
+    )]
+    ExecutableIdentityMismatch { expected: String, found: String },
     #[error("spawning `cargo {args}`: {reason}")]
     CargoSpawn { args: String, reason: String },
     #[error("`cargo {args}` failed:\n{tail}")]
@@ -358,7 +434,7 @@ fn build_with_host(
 
     let mut report = match target {
         DesktopBundleTarget::Macos => {
-            macos::assemble(project_dir, info, &config, &binary, &mut notes)?
+            macos::assemble(runner, project_dir, info, &config, &binary, &mut notes)?
         }
         DesktopBundleTarget::Windows => {
             windows::assemble(project_dir, &config, &binary, prebuilt, &mut notes)?
@@ -754,6 +830,32 @@ mod tests {
         assert!(report.notes.contains(&BundleNote::IconNotConfigured));
     }
 
+    /// The plist a project of its own ships, in the shape the scaffolded
+    /// template renders it — the file this pipeline copies verbatim.
+    fn project_plist(executable: &str, identifier: &str, icon_file: &str) -> String {
+        format!(
+            "<plist version=\"1.0\"><dict>\n\
+             <key>CFBundleExecutable</key><string>{executable}</string>\n\
+             <key>CFBundleIdentifier</key><string>{identifier}</string>\n\
+             <key>CFBundleIconFile</key><string>{icon_file}</string>\n\
+             </dict></plist>",
+        )
+    }
+
+    /// Registers a `plutil -extract <key> raw …` answer. Keyed on the prefix
+    /// (the fake runner falls back to the longest registered prefix), so a
+    /// fixture's temp path doesn't have to be spelled out.
+    fn with_plutil(runner: FakeProcessRunner, key: &str, value: &str) -> FakeProcessRunner {
+        runner.with(
+            format!("plutil -extract {key} raw "),
+            Output {
+                success: true,
+                stdout: format!("{value}\n"),
+                stderr: String::new(),
+            },
+        )
+    }
+
     #[test]
     fn macos_assembly_copies_the_projects_info_plist_and_names_the_app_bundle() {
         let fixture = Fixture::new("macos-full")
@@ -762,10 +864,15 @@ mod tests {
             .binary("my_app")
             .file(
                 "macos/Info.plist",
-                "<plist><dict><key>CFBundleExecutable</key><string>my_app</string></dict></plist>",
+                &project_plist("my_app", "dev.f0x.my_app", "my_app"),
             );
+        // The plist agrees with the manifest, so the read-back records
+        // nothing — the negative half of the reconciliation tests below.
+        let runner = with_plutil(cargo_ok(), "CFBundleExecutable", "my_app");
+        let runner = with_plutil(runner, "CFBundleIdentifier", "dev.f0x.my_app");
+        let runner = with_plutil(runner, "CFBundleIconFile", "my_app");
 
-        let report = run(&cargo_ok(), &fixture, DesktopBundleTarget::Macos).unwrap();
+        let report = run(&runner, &fixture, DesktopBundleTarget::Macos).unwrap();
 
         assert_eq!(report.root, fixture.path("dist/macos/My App.app"));
         assert_eq!(
@@ -782,6 +889,182 @@ mod tests {
         assert!(plist.contains("CFBundleExecutable"), "{plist}");
         assert!(!report.notes.contains(&BundleNote::GeneratedInfoPlist));
         assert!(report.notes.contains(&BundleNote::Unsigned));
+        assert!(
+            !report.notes.iter().any(|note| matches!(
+                note,
+                BundleNote::IdentifierIdentityMismatch { .. }
+                    | BundleNote::IconIdentityMismatch { .. }
+                    | BundleNote::PlistUnverified { .. }
+            )),
+            "{:?}",
+            report.notes
+        );
+    }
+
+    /// The defect, end to end: the project's own plist (copied verbatim, as it
+    /// must be) names an executable this build didn't produce, so the `.app`
+    /// would not launch. The one identity disagreement that fails a build.
+    #[test]
+    fn a_copied_info_plist_naming_another_executable_fails_the_build() {
+        let fixture = Fixture::new("macos-exec-drift")
+            .default_manifest()
+            .binary("my_app")
+            .file(
+                "macos/Info.plist",
+                &project_plist("renamed_app", "dev.f0x.my_app", "my_app"),
+            );
+        let runner = with_plutil(cargo_ok(), "CFBundleExecutable", "renamed_app");
+
+        let err = run(&runner, &fixture, DesktopBundleTarget::Macos).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                DesktopBuildError::ExecutableIdentityMismatch { expected, found }
+                    if expected == "my_app" && found == "renamed_app"
+            ),
+            "{err}"
+        );
+    }
+
+    /// …while identifier and icon-name drift come back as notes on a bundle
+    /// that was still assembled.
+    #[test]
+    fn a_copied_info_plists_identifier_and_icon_drift_are_notes() {
+        let fixture = Fixture::new("macos-id-drift")
+            .default_manifest()
+            .icon(1024)
+            .binary("my_app")
+            .file(
+                "macos/Info.plist",
+                &project_plist("my_app", "com.example.other", "AppIcon"),
+            );
+        let runner = with_plutil(cargo_ok(), "CFBundleExecutable", "my_app");
+        let runner = with_plutil(runner, "CFBundleIdentifier", "com.example.other");
+        let runner = with_plutil(runner, "CFBundleIconFile", "AppIcon");
+
+        let report = run(&runner, &fixture, DesktopBundleTarget::Macos).unwrap();
+        assert!(
+            report
+                .notes
+                .contains(&BundleNote::IdentifierIdentityMismatch {
+                    plist: "com.example.other".to_string(),
+                    manifest: "dev.f0x.my_app".to_string(),
+                }),
+            "{:?}",
+            report.notes
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| matches!(note, BundleNote::IconIdentityMismatch { .. })),
+            "{:?}",
+            report.notes
+        );
+        assert!(report.executable.is_file());
+    }
+
+    /// Tool trouble never blocks a build: with no `plutil` to read the copied
+    /// plist back (the fake runner registers none), the bundle is assembled
+    /// and the unchecked identity is a single note.
+    #[test]
+    fn a_copied_info_plist_that_cannot_be_read_back_is_a_note_not_a_failure() {
+        let fixture = Fixture::new("macos-unverified")
+            .default_manifest()
+            .binary("my_app")
+            .file(
+                "macos/Info.plist",
+                &project_plist("my_app", "dev.f0x.my_app", "my_app"),
+            );
+
+        let report = run(&cargo_ok(), &fixture, DesktopBundleTarget::Macos).unwrap();
+        assert_eq!(
+            report
+                .notes
+                .iter()
+                .filter(|note| matches!(note, BundleNote::PlistUnverified { .. }))
+                .count(),
+            1,
+            "{:?}",
+            report.notes
+        );
+        assert!(report.executable.is_file());
+    }
+
+    /// A generated plist is written from the manifest by construction, so
+    /// there is nothing to reconcile and `plutil` is never run — proven by the
+    /// fake runner having no registration for it, which would otherwise
+    /// surface as a `PlistUnverified` note.
+    #[test]
+    fn a_generated_info_plist_is_never_read_back() {
+        let fixture = Fixture::new("macos-generated-skip")
+            .default_manifest()
+            .binary("my_app");
+        let report = run(&cargo_ok(), &fixture, DesktopBundleTarget::Macos).unwrap();
+        assert!(report.notes.contains(&BundleNote::GeneratedInfoPlist));
+        assert!(
+            !report
+                .notes
+                .iter()
+                .any(|note| matches!(note, BundleNote::PlistUnverified { .. })),
+            "{:?}",
+            report.notes
+        );
+    }
+
+    /// The Linux half of the same defect — and the difference in verdict: a
+    /// `.desktop` `Exec=` naming another program is a note, since it may
+    /// legitimately resolve through `PATH`.
+    #[test]
+    fn a_copied_desktop_entry_naming_another_program_is_a_note_not_a_failure() {
+        let fixture = Fixture::new("linux-exec-drift")
+            .default_manifest()
+            .icon(1024)
+            .binary("my_app")
+            .file(
+                "linux/app.desktop",
+                "[Desktop Entry]\nType=Application\nName=My App\nExec=renamed_app %f\n\
+                 Icon=com.example.other\nCategories=Utility;\nTerminal=false\n",
+            );
+
+        let report = run(&cargo_ok(), &fixture, DesktopBundleTarget::Linux).unwrap();
+        assert!(
+            report.notes.contains(&BundleNote::ExecIdentityMismatch {
+                exec: "renamed_app %f".to_string(),
+                binary: "my_app".to_string(),
+            }),
+            "{:?}",
+            report.notes
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| matches!(note, BundleNote::IconIdentityMismatch { .. })),
+            "{:?}",
+            report.notes
+        );
+        assert!(report.executable.is_file());
+    }
+
+    /// A generated desktop entry is written from the manifest by
+    /// construction — nothing to disagree with.
+    #[test]
+    fn a_generated_desktop_entry_is_never_reconciled() {
+        let fixture = Fixture::new("linux-generated-skip")
+            .default_manifest()
+            .icon(1024)
+            .binary("my_app");
+        let report = run(&cargo_ok(), &fixture, DesktopBundleTarget::Linux).unwrap();
+        assert!(report.notes.contains(&BundleNote::GeneratedDesktopEntry));
+        assert!(
+            !report.notes.iter().any(|note| matches!(
+                note,
+                BundleNote::ExecIdentityMismatch { .. } | BundleNote::IconIdentityMismatch { .. }
+            )),
+            "{:?}",
+            report.notes
+        );
     }
 
     #[test]

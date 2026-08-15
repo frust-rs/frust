@@ -36,9 +36,11 @@ fn embed_resources() {
 
     let mut resource = winresource::WindowsResource::new();
     resource.set_icon(icon_path.to_str().expect("windows/icon.ico is valid UTF-8"));
-    // Overridable via `[windows] file-version` / `[windows] product-version`
-    // in `frust.toml` once the manifest parser for this section lands —
-    // these are the scaffold's own defaults until then.
+    // These two lines are where the `.exe`'s FileVersion/ProductVersion come
+    // from: they are compiled in here, at app-build time. `frust.toml`'s
+    // `[windows] file-version`/`product-version` do NOT reach them — `frust
+    // build` reads that section only to report that this file owns the
+    // values — so edit them here.
     resource.set("FileVersion", "1.0.0.0");
     resource.set("ProductVersion", "1.0.0");
     if let Err(err) = resource.compile() {
