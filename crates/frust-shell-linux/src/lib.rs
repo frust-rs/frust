@@ -14,11 +14,14 @@
 //! [`LinuxExtensions`] behaves identically to
 //! [`NoExtensions`](frust_shell_desktop::extensions::NoExtensions) outside
 //! that one hook.
+//!
+//! Like every workspace member, this crate also compiles — inert — off its own
+//! target: the `winit` Wayland/X11 extension traits are reached only from
+//! `with_app_id`'s gated arm, so a macOS or Windows host still builds it (see
+//! that function's docs).
 
 use frust_shell_desktop::config::{DesktopConfig, IconData};
 use frust_shell_desktop::extensions::DesktopExtensions;
-use winit::platform::wayland::WindowAttributesExtWayland;
-use winit::platform::x11::WindowAttributesExtX11;
 use winit::window::{Icon, WindowAttributes};
 
 /// The Linux [`DesktopExtensions`] implementation.
@@ -55,14 +58,10 @@ impl DesktopExtensions for LinuxExtensions {
     /// Attaches the Wayland `app_id`/X11 `WM_CLASS` and the window icon, in
     /// that order.
     ///
-    /// Both `winit` extension traits are called unconditionally when
-    /// `app_id` is set — each backend reads only the attributes its own
-    /// platform understands, so calling the X11 setter on a Wayland session
-    /// (and vice versa) is inert rather than wrong. `general`/`instance` are
-    /// both set to the same `app_id`: this shell carries no separate
-    /// instance-name concept, and a duplicate `general`/`instance` pair is a
-    /// well-formed `WM_CLASS`. Unset `app_id` makes no call at all, leaving
-    /// winit's own default in place.
+    /// The `app_id` half goes through `with_app_id`, which carries the
+    /// platform gating; the icon half is plain cross-platform
+    /// `WindowAttributes` API and runs everywhere. Unset `app_id` makes no
+    /// call at all, leaving winit's own default in place.
     ///
     /// The icon is built with `winit::window::Icon::from_rgba`, which
     /// reaches X11's window icon; Wayland has no window-icon protocol and
@@ -76,10 +75,7 @@ impl DesktopExtensions for LinuxExtensions {
         let mut attributes = attributes;
 
         if let Some(app_id) = &self.app_id {
-            attributes =
-                WindowAttributesExtWayland::with_name(attributes, app_id.clone(), app_id.clone());
-            attributes =
-                WindowAttributesExtX11::with_name(attributes, app_id.clone(), app_id.clone());
+            attributes = with_app_id(attributes, app_id);
         }
 
         if let Some(icon_data) = &self.window_icon {
@@ -97,6 +93,60 @@ impl DesktopExtensions for LinuxExtensions {
 
         attributes
     }
+}
+
+/// Attaches `app_id` as both the Wayland `app_id` and the X11 `WM_CLASS`.
+///
+/// Both `winit` extension traits are called: each backend reads only the
+/// attributes its own platform understands, so calling the X11 setter on a
+/// Wayland session (and vice versa) is inert rather than wrong.
+/// `general`/`instance` are both set to the same `app_id` — this shell carries
+/// no separate instance-name concept, and a duplicate `general`/`instance`
+/// pair is a well-formed `WM_CLASS`.
+///
+/// # Where this arm compiles
+///
+/// `winit::platform::wayland`/`::x11` exist only where `winit`'s own build
+/// script defines `wayland_platform`/`x11_platform`: its `free_unix` alias
+/// (`unix`, minus Apple, Android and emscripten) with `redox` excluded, and its
+/// default `wayland`/`x11` features on (winit 0.30.13 `build.rs`). The `cfg`
+/// below mirrors that predicate rather than naming Linux alone, so this crate
+/// never reaches for a module `winit` did not compile — the inert-off-target
+/// rule every workspace member follows (`frust-shell-android`'s precedent):
+/// `cargo check/clippy --workspace` on a macOS or Windows host must build this
+/// crate too. Off those targets the `not`-arm below returns the attributes
+/// untouched — there is no window-manager identity concept there to attach one
+/// to.
+#[cfg(all(
+    unix,
+    not(target_os = "macos"),
+    not(target_os = "ios"),
+    not(target_os = "android"),
+    not(target_os = "emscripten"),
+    not(target_os = "redox")
+))]
+fn with_app_id(attributes: WindowAttributes, app_id: &str) -> WindowAttributes {
+    use winit::platform::wayland::WindowAttributesExtWayland;
+    use winit::platform::x11::WindowAttributesExtX11;
+
+    let attributes =
+        WindowAttributesExtWayland::with_name(attributes, app_id.to_string(), app_id.to_string());
+    WindowAttributesExtX11::with_name(attributes, app_id.to_string(), app_id.to_string())
+}
+
+/// The off-target arm: no Wayland/X11 identity to set, so the attributes pass
+/// through unchanged (see the gated arm above for why this crate compiles at
+/// all off free-unix hosts).
+#[cfg(not(all(
+    unix,
+    not(target_os = "macos"),
+    not(target_os = "ios"),
+    not(target_os = "android"),
+    not(target_os = "emscripten"),
+    not(target_os = "redox")
+)))]
+fn with_app_id(attributes: WindowAttributes, _app_id: &str) -> WindowAttributes {
+    attributes
 }
 
 #[cfg(test)]
@@ -139,6 +189,16 @@ mod tests {
         assert_eq!(result.title, attributes.title);
     }
 
+    // Only the hosts where `with_app_id`'s gated arm compiles can observe a
+    // `with_name` call at all (see that function's docs).
+    #[cfg(all(
+        unix,
+        not(target_os = "macos"),
+        not(target_os = "ios"),
+        not(target_os = "android"),
+        not(target_os = "emscripten"),
+        not(target_os = "redox")
+    ))]
     #[test]
     fn a_configured_app_id_lands_in_the_debug_output_of_both_backends() {
         let mut ext = LinuxExtensions {
@@ -156,6 +216,29 @@ mod tests {
             debug.contains("dev.frust.huddle"),
             "expected the app_id in the window-attributes debug output, got: {debug}"
         );
+    }
+
+    // The counterpart of the test above on every other host (the macOS and
+    // Windows dev hosts run this same workspace gate): the hook still runs and
+    // still hands its attributes back, it simply attaches no window-manager
+    // identity.
+    #[cfg(not(all(
+        unix,
+        not(target_os = "macos"),
+        not(target_os = "ios"),
+        not(target_os = "android"),
+        not(target_os = "emscripten"),
+        not(target_os = "redox")
+    )))]
+    #[test]
+    fn a_configured_app_id_passes_the_attributes_through_off_free_unix() {
+        let mut ext = LinuxExtensions {
+            app_id: Some("dev.frust.huddle".to_string()),
+            window_icon: None,
+        };
+        let attributes = WindowAttributes::default().with_title("Frust");
+        let result = ext.on_window_attributes(attributes.clone());
+        assert_eq!(result.title, attributes.title);
     }
 
     #[test]

@@ -140,8 +140,14 @@ impl Lifecycle {
         self.lock().window = Some(window);
     }
 
-    /// Whether this shell currently has the window hidden (test/diagnostic
-    /// accessor; the transitions below own the flag).
+    /// Whether this shell currently has the window hidden.
+    ///
+    /// Test-only: the transitions below own the flag and no shipping path
+    /// reads it back (both of them decide from the `Inner` they already hold),
+    /// so on a macOS build — where the module carries no `allow(dead_code)` —
+    /// an ungated accessor would be exactly the dead code that scoping is
+    /// meant to keep reportable.
+    #[cfg(test)]
     pub(crate) fn is_hidden(&self) -> bool {
         self.lock().hidden
     }
