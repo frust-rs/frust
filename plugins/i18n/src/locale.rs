@@ -39,6 +39,32 @@ impl Locale {
     pub(crate) fn as_lang_id(&self) -> &LanguageIdentifier {
         &self.0
     }
+
+    /// Composes `language` with `region`, with no script/variant subtags —
+    /// the crate-private seam behind `reactive::I18n::format_locale`'s
+    /// composition rule (graft a requested tag's REGION onto the message
+    /// locale's language, e.g. `en` + `TH` region → `en-TH`) and
+    /// `reactive::I18n::set_locale`'s region-retention rule (graft a
+    /// previously detected region onto a new region-less request, e.g.
+    /// `de-CH` retained + `set_locale("de")` → `de-CH` again). Both call
+    /// sites compose a *bare* language tag (the message locale, or a fresh
+    /// `set_locale` request with no region of its own), so dropping
+    /// script/variants here costs nothing in practice — never exposed
+    /// publicly, since a caller only ever reaches a composed locale through
+    /// those two methods, never by constructing one directly.
+    ///
+    /// `frust-api`-gated: `reactive` (its only caller) doesn't compile
+    /// without that feature — same gate, so `--no-default-features` never
+    /// sees this as unused dead code.
+    #[cfg(feature = "frust-api")]
+    pub(crate) fn compose_region(language: Language, region: Region) -> Self {
+        Locale(LanguageIdentifier::from_parts(
+            language,
+            None,
+            Some(region),
+            &[],
+        ))
+    }
 }
 
 impl FromStr for Locale {

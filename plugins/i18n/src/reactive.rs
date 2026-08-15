@@ -56,11 +56,14 @@ struct Inner {
     /// The raw locale list [`I18n::new`]/[`I18n::from_engine`] were given, or
     /// (after a [`I18n::set_locale`] call) the single locale most recently
     /// passed to it — **replaced**, not accumulated, same refresh discipline
-    /// as `chain`. `negotiate_active` collapses a regional request like
-    /// `en-GB` down to whatever bundle actually shipped (`en`); this is the
-    /// only place that untouched request tag survives, and it's what
-    /// [`I18n::format_locale`] recovers it from. Refreshed under the same
-    /// call that writes `locale`; read untracked.
+    /// as `chain`. That single entry may be [`I18n::set_locale`]'s own
+    /// region-retention composition, not the literal tag its caller passed
+    /// (see that method's doc). `negotiate_active` collapses a regional
+    /// request like `en-GB` down to whatever bundle actually shipped
+    /// (`en`); this is the only place that untouched/composed request tag
+    /// survives, and it's what [`I18n::format_locale`] composes a
+    /// formatting locale from. Refreshed under the same call that writes
+    /// `locale`; read untracked.
     requested: Mutex<Vec<Locale>>,
 }
 
@@ -130,21 +133,50 @@ impl I18n {
     ///
     /// [`I18n::locale`] is a *message* locale, constrained to whatever
     /// `.ftl` bundle negotiation actually landed on. Regional formatting has
-    /// no such constraint, so `format_locale` recovers the caller's raw
-    /// requested tag instead of the negotiated message locale:
+    /// no such constraint, so `format_locale` **composes** a formatting
+    /// locale rather than either reusing the message locale unmodified or
+    /// substituting the caller's raw request wholesale — the iOS convention
+    /// (app language stays fixed; only the user's region composes onto it),
+    /// not the message locale's own negotiation rule:
     ///
     /// 1. The best requested tag whose [`Locale::language`] matches the
-    ///    active message locale's language — e.g. requesting `en-GB` over an
-    ///    `[en]` bundle set negotiates a message locale of `en`, but
+    ///    active message locale's language, returned **verbatim** (region
+    ///    and script included) — e.g. requesting `en-GB` over an `[en]`
+    ///    bundle set negotiates a message locale of `en`, but
     ///    `format_locale` still returns `en-GB`.
-    /// 2. If no requested tag shares the message locale's language (the
-    ///    caller asked for a locale with zero message coverage), the first
-    ///    requested tag — still worth honoring for formatting; silently
-    ///    substituting the message locale here would overrule a real user
-    ///    preference with no upside.
-    /// 3. If nothing was requested at all (an empty list passed to
-    ///    [`I18n::new`]/[`I18n::from_engine`]), the active message locale —
-    ///    there is no other tag to recover.
+    /// 2. Otherwise, the message locale's own language with the **region**
+    ///    from the first requested tag that carries one (in requested-list
+    ///    order), composed together — e.g. requesting `th-TH` over an
+    ///    `[en]` bundle set negotiates a message locale of `en` (the app
+    ///    ships no Thai messages), and `format_locale` returns `en-TH`:
+    ///    English month/weekday names and numbering, Thai regional
+    ///    conventions where CLDR regionalizes them (grouping, currency
+    ///    defaults, first day of week — **and, surprisingly, the calendar
+    ///    system**: ICU4X's calendar default is keyed off the *region*, not
+    ///    the language, so `en-TH` still renders a Buddhist-era year
+    ///    (`"January 31, 2567 BE"`, not `"...2024"`) even though every
+    ///    month/weekday name is English — verified empirically, this crate's
+    ///    own `fmt::datetime` module doc's "`th` is Buddhist" framing is
+    ///    language-shaped prose for a region-driven fact). This branch
+    ///    **never** adopts a requested tag's *language* — an app with no
+    ///    Thai `.ftl` catalog must never render UI text the user can't read,
+    ///    so only the region crosses the boundary; the calendar-system
+    ///    surprise above is the one place that boundary still lets through
+    ///    something visibly non-Western, worth a caller's attention before
+    ///    shipping a date-heavy screen behind this branch. Every in-message
+    ///    `NUMBER()`/`DATETIME()` Fluent placeable formats at the *message*
+    ///    locale's own language, never `format_locale`'s composed region —
+    ///    see §4e of this crate's README for why, and `docs/LIMITATIONS.md`
+    ///    for the consequence.
+    /// 3. If no requested tag carries a region anywhere (including an empty
+    ///    requested list, e.g. nothing passed to [`I18n::new`]/
+    ///    [`I18n::from_engine`]), the active message locale unmodified —
+    ///    there is no region to compose in.
+    ///
+    /// [`I18n::set_locale`] retains a previously detected region across a
+    /// region-less switch (see its own doc), so this composition stays
+    /// stable across a plain-language `set_locale` call rather than
+    /// collapsing back to rule 3 on every switch.
     ///
     /// Pass this, not [`I18n::locale`], to every `frust_i18n::fmt::` call.
     ///
@@ -164,7 +196,10 @@ impl I18n {
             .find(|tag| tag.language() == active.language())
         {
             Some(tag) => tag.clone(),
-            None => requested.first().cloned().unwrap_or(active),
+            None => match requested.iter().find_map(Locale::region) {
+                Some(region) => Locale::compose_region(active.language(), region),
+                None => active,
+            },
         }
     }
 
@@ -172,10 +207,34 @@ impl I18n {
     ///
     /// Replaces (never accumulates) the requested-locale list
     /// [`I18n::format_locale`] reads — same refresh discipline as the
-    /// negotiated `chain`. The write goes through the normal `RwSignal::set`
-    /// → tracked-scope → `FrameWaker` path — no direct wake call here (see
-    /// the module doc).
+    /// negotiated `chain`. **Region retention:** when `requested` itself
+    /// carries no region, this retains the region from the first entry of
+    /// the *previous* requested list that had one (system-detected, or set
+    /// by an earlier call) and composes it onto `requested`'s language —
+    /// so a language-only switcher call (`set_locale("de")`) on a device
+    /// that originally detected `de-CH` keeps `format_locale()` at `de-CH`
+    /// rather than collapsing to bare `de`. Pass a region-qualified tag
+    /// (`set_locale("de-AT".parse()?)`) to replace the retained region
+    /// outright — a requested tag with its own region is never touched. The
+    /// write goes through the normal `RwSignal::set` → tracked-scope →
+    /// `FrameWaker` path — no direct wake call here (see the module doc).
     pub fn set_locale(&self, requested: Locale) {
+        let requested = if requested.region().is_none() {
+            let retained_region = self
+                .inner
+                .requested
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .find_map(Locale::region);
+            match retained_region {
+                Some(region) => Locale::compose_region(requested.language(), region),
+                None => requested,
+            }
+        } else {
+            requested
+        };
+
         let (active, chain) =
             negotiate_active(&self.inner.engine, std::slice::from_ref(&requested));
         *self.inner.chain.lock().unwrap_or_else(|e| e.into_inner()) = chain;
@@ -441,18 +500,32 @@ only-en = English only";
     }
 
     #[test]
-    fn format_locale_falls_back_to_the_first_requested_tag_with_no_language_match() {
+    fn format_locale_falls_back_to_the_message_locale_when_no_requested_tag_carries_a_region() {
         let _owner = ambient_owner();
         let i18n = I18n::new(build_set(), &[locale("de")]).expect("engine builds");
 
         // `fr` has no bundle at all, so the message locale negotiates down to
-        // the declared fallback (`en`) — `fr` shares no language with `en`,
-        // so `format_locale` still honors the caller's own request instead of
-        // silently substituting the message locale.
+        // the declared fallback (`en`) — `fr` shares no language with `en`
+        // *and* carries no region to compose onto it, so rule 3 fires:
+        // `format_locale` falls back to the message locale rather than
+        // adopting `fr`'s language wholesale (R1-M3's fix).
         i18n.set_locale(locale("fr"));
 
         assert_eq!(i18n.locale().to_string(), "en");
-        assert_eq!(i18n.format_locale().to_string(), "fr");
+        assert_eq!(i18n.format_locale().to_string(), "en");
+    }
+
+    #[test]
+    fn format_locale_composes_the_message_language_with_a_requested_regions_conventions() {
+        let _owner = ambient_owner();
+        let i18n = I18n::new(build_set(), &[locale("th-TH")]).expect("engine builds");
+
+        // `th` has no bundle at all, so the message locale negotiates down to
+        // the declared fallback (`en`) — `th` shares no language with `en`,
+        // but its `TH` region composes onto `en` rather than either
+        // adopting Thai wholesale or discarding the request entirely.
+        assert_eq!(i18n.locale().to_string(), "en");
+        assert_eq!(i18n.format_locale().to_string(), "en-TH");
     }
 
     #[test]
@@ -461,6 +534,80 @@ only-en = English only";
         let i18n = I18n::new(build_set(), &[]).expect("engine builds");
 
         assert_eq!(i18n.locale(), i18n.format_locale());
+    }
+
+    #[test]
+    fn set_locale_retains_the_previously_detected_region_across_a_bare_language_switch() {
+        let _owner = ambient_owner();
+        // Mirrors a Swiss German device: `system_locales()` detected `de-CH`.
+        let i18n = I18n::new(build_set(), &[locale("de-CH")]).expect("engine builds");
+        assert_eq!(i18n.format_locale().to_string(), "de-CH");
+
+        // The switcher passes a bare language tag, same as every documented
+        // caller (README §4c/§5, the playground's `SWITCHER_LOCALES`) — the
+        // `CH` region must survive this, not collapse back to bare `de`
+        // (R1-M2's pin).
+        i18n.set_locale(locale("de"));
+
+        assert_eq!(i18n.locale().to_string(), "de");
+        assert_eq!(i18n.format_locale().to_string(), "de-CH");
+    }
+
+    #[test]
+    fn set_locale_with_a_region_qualified_tag_replaces_any_previously_retained_region() {
+        let _owner = ambient_owner();
+        let i18n = I18n::new(build_set(), &[locale("de-CH")]).expect("engine builds");
+        assert_eq!(i18n.format_locale().to_string(), "de-CH");
+
+        // `fr-CA` already carries its own region, so retention never fires —
+        // the stored requested tag becomes exactly `fr-CA`, not `fr-CH`.
+        // `fr` has no bundle, so the message locale falls to `en`; `format_locale`
+        // then composes `en` with `fr-CA`'s own `CA` region (rule 2) — `en-CA`,
+        // never `en-CH`, proves the old region didn't leak through.
+        i18n.set_locale(locale("fr-CA"));
+
+        assert_eq!(i18n.locale().to_string(), "en");
+        assert_eq!(i18n.format_locale().to_string(), "en-CA");
+    }
+
+    /// R1-M3's rendered-output pin: `format_locale`'s rule-2 composition
+    /// must produce an ENGLISH month name (the message locale's language),
+    /// never Thai script, even though the composed formatting locale's
+    /// region is Thai. It does **not** pin a Gregorian year — verified
+    /// empirically, ICU4X's calendar default is region-driven, so `en-TH`
+    /// still renders a Buddhist-era year (`format_locale`'s own doc has the
+    /// full explanation); this test pins that surprise too, rather than the
+    /// Gregorian year an English-language reader would expect. Gated behind
+    /// `formatting` since it needs [`crate::fmt::date`].
+    #[cfg(feature = "formatting")]
+    #[test]
+    fn format_locale_th_th_composition_renders_english_month_names_not_thai() {
+        let _owner = ambient_owner();
+        let i18n = I18n::new(build_set(), &[locale("th-TH")]).expect("engine builds");
+
+        assert_eq!(i18n.locale().to_string(), "en");
+        assert_eq!(i18n.format_locale().to_string(), "en-TH");
+
+        let rendered = crate::fmt::date(
+            &i18n.format_locale(),
+            crate::fmt::CivilDate {
+                year: 2024,
+                month: 1,
+                day: 31,
+            },
+            crate::fmt::DateLength::Long,
+        )
+        .expect("formats");
+
+        assert!(
+            rendered.contains("January"),
+            "en-TH must render an English month name, never Thai script: {rendered}"
+        );
+        assert!(
+            !rendered.contains("2024") && rendered.contains("2567"),
+            "en-TH's calendar is region-driven, not language-driven: still Buddhist-era \
+             (2567 BE), not Gregorian 2024, despite the English month name — {rendered}"
+        );
     }
 
     /// The reactivity contract itself: a `set_locale` write wakes a live

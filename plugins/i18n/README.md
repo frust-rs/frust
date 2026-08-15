@@ -277,18 +277,46 @@ only ever be one of the locales your app actually shipped `.ftl` catalogs for (e
 because negotiation collapses a regional request like `en-GB` down to whatever bundle is
 available. ICU4X formatting (§4e) has no such constraint — it ships full CLDR data for every
 region regardless of which message bundles you compiled in. Use `.format_locale()` for every
-`fmt::` call instead: it recovers the best *requested* tag whose language matches the
-negotiated message locale (`en-GB` requested over an `en`-only bundle set still returns
-`en-GB`), falls back to the first requested tag if none share the message locale's language,
-and falls back to `.locale()` itself if nothing was requested at all:
+`fmt::` call instead — it **composes** a formatting locale rather than either reusing the
+message locale unmodified or adopting the caller's raw request wholesale (the iOS convention:
+app language stays fixed, only the user's region composes onto it):
+
+1. The best requested tag whose language matches the message locale, returned **verbatim**
+   (region and script included) — `en-GB` requested over an `en`-only bundle set still
+   returns `en-GB`.
+2. Otherwise, the message locale's own language with the **region** from the first requested
+   tag that carries one — `th-TH` requested over an `en`-only bundle set returns `en-TH`:
+   English month names and text, Thai regional conventions (grouping, currency defaults, week
+   start) where CLDR regionalizes them — **and, surprisingly, the calendar system**: ICU4X's
+   calendar default is keyed off the region, not the language, so `en-TH` still renders a
+   Buddhist-era year (`"January 31, 2567 BE"`, not `"...2024"`) even though every month/weekday
+   name is English (verified — see `I18n::format_locale`'s doc for the full explanation). This
+   branch never adopts a requested tag's *language* — an app with no Thai `.ftl` catalog must
+   never render UI text the user can't read, so only the region crosses the boundary, but the
+   calendar-system surprise above is worth knowing before shipping a date-heavy screen behind
+   this branch.
+3. If no requested tag carries a region anywhere (including nothing requested at all), the
+   message locale unmodified.
 
 ```rust
 let i18n = I18n::new(locale_set(), &["en-GB".parse()?])?;
 i18n.locale();          // "en" — the bundle set only ships `en`, never a region
-i18n.format_locale();   // "en-GB" — the request survives for CLDR formatting
+i18n.format_locale();   // "en-GB" — rule 1: the request's language matches, kept verbatim
+
+let i18n = I18n::new(locale_set(), &["th-TH".parse()?])?;
+i18n.locale();          // "en" — no Thai bundle, negotiation falls to the fallback locale
+i18n.format_locale();   // "en-TH" — rule 2: `th-TH`'s region composes onto `en`, never `th`
 ```
 
 `format_locale()` is a tracked read too — same `set_locale`-subscribes contract as `.locale()`.
+
+**Region retention across `set_locale`.** Every documented caller of `set_locale` (the
+switcher above, §5's persistence recipe) passes a bare language tag (`"de"`, not `"de-CH"`).
+When the new tag carries no region itself, `set_locale` retains the region from the
+*previous* requested list (system-detected, or set by an earlier call) and composes it onto
+the new language — so switching from a detected `de-CH` to `set_locale("de")` keeps
+`format_locale()` at `de-CH`, not bare `de`. Pass a region-qualified tag
+(`set_locale("de-AT".parse()?)`) to replace the retained region outright.
 
 ### 4d. Detection — `system_locales`
 
@@ -348,6 +376,19 @@ total = You owe { NUMBER($amount, style: "currency", currency: "USD") }
 placed = Order placed { DATETIME($when, dateStyle: "medium") }
 ```
 
+**In-message placeables format at the MESSAGE locale, not `format_locale()`.** This is the one
+exception to "pass `format_locale()`, never `locale()`" above: `with_icu_functions` builds each
+locale's `NUMBER`/`DATETIME` function once per registered bundle locale, at `Engine::new` time —
+`Engine` is immutable after that, so a `{ NUMBER($n) }`/`{ DATETIME($d) }` placeable inside an
+`.ftl` message always formats at whichever bundle locale resolved the message (`i18n.locale()`),
+for the life of the `Engine`; there is no way to route it through `format_locale()` instead
+short of rebuilding the whole engine on every `set_locale`. Under the composition rule above
+(§4c), that is the **same language** `format_locale()` would use — rule 1 keeps the message
+locale's language exactly, and rule 2 composes a region *onto* it — so the two only ever differ
+in region conventions (grouping, currency defaults, calendar), never in which language the text
+renders in. `docs/LIMITATIONS.md` records this as an accepted limitation, not a bug to work
+around per call site.
+
 Honored named options: `NUMBER`'s `style` (`decimal`/`percent`/`currency`) and `currency`;
 `DATETIME`'s `dateStyle`/`timeStyle`. Anything else (ECMA-402-style
 `minimumFractionDigits`, `useGrouping`, …) is ignored at `debug` log level, never a warning or
@@ -398,11 +439,18 @@ impl AppState {
 
     /// Call from a settings screen when the user picks a locale explicitly.
     fn set_locale(&self, locale: Locale) {
-        self.i18n.set_locale(locale.clone());
+        self.i18n.set_locale(locale);
         if let Some(prefs) = &self.prefs {
+            // Persist `format_locale()`, not the bare tag the switcher passed in:
+            // `set_locale` retains a previously detected region onto a region-less
+            // request (§4c), and `format_locale()` is where that composed tag
+            // reads back from. Persisting the raw parameter instead would throw
+            // the retained region away on the *next* relaunch — a Swiss German
+            // user who tapped "Deutsch" would restore to bare `de`, not `de-CH`,
+            // even though today's already-running session kept the region fine.
             // Best-effort: a save failure loses only the *next* launch's default,
             // never today's already-switched UI.
-            let _ = prefs.set_string(LOCALE_KEY, locale.to_string());
+            let _ = prefs.set_string(LOCALE_KEY, self.i18n.format_locale().to_string());
         }
     }
 }
@@ -413,6 +461,13 @@ own notes/draft persistence uses — a `None` preferences handle (an old scaffol
 that hasn't landed on this target yet) just means the choice doesn't survive this run, never a
 crash. `SharedPreferences`'s calls are plain synchronous reads/writes (no `spawn_blocking`
 needed) — see that crate's own doc for why.
+
+**Restoring a region-qualified tag on the next launch.** `AppState::new` above parses the
+saved string straight back into the single-entry `requested` list `I18n::new` negotiates
+against — since `set_locale` now persists `format_locale()` (a region-qualified tag whenever
+one was available, per §4c), that single entry already carries the region, so `format_locale()`
+right after construction reads back the same composed value the user left the app with, with
+no separate "restore, then call `set_locale` again" step needed.
 
 ---
 

@@ -178,6 +178,18 @@ impl Component for I18nDemoPage {
             any(text(crate::keys::theme_choice(&i18n, theme_choice)).size(12.0)),
             any(SizedBox(None, Some(SECTION_GAP))),
             section_heading("Typed keys"),
+            // R1-M1's fix: without this caption the page shows two
+            // differently-sourced dates with no explanation (`last-visit`'s
+            // in-message DATETIME, three lines below, vs. the formatting
+            // matrix's own date row further down) — see this module's doc
+            // and `I18n::format_locale`'s own doc for the full mechanism.
+            any(text(
+                "last-visit's { DATETIME() } placeable formats at the message locale \
+                 (Engine is immutable once built); the formatting matrix below uses \
+                 format_locale instead — the two can render differently-regioned dates.",
+            )
+            .size(10.0)
+            .color(muted)),
             any(text(crate::keys::hello(&i18n, "Ada")).size(12.0)),
             any(text(crate::keys::order_total(&i18n, 1234.5)).size(12.0)),
             any(text(crate::keys::last_visit(&i18n, "2024-01-31")).size(12.0)),
