@@ -2053,14 +2053,26 @@ a square configured icon**: an absent or non-square `[desktop] icon` surfaces as
 own typed refusal ("Could not find a square icon to use as AppImage icon") rather than a bundle
 with no icon (unlike a plain `frust build linux`, where a bad icon only downgrades to a
 `BundleNote`). **macOS `.dmg` identity/signing** — `PackagerConfig`'s `macos` block (Dmg-only) now
-passes the already-assembled bundle's `Contents/Info.plist` path, `[macos] signing-identity`, and
-the entitlements path (when `macos/app.entitlements` exists) into cargo-packager's own config;
-verified against the pinned `cargo-packager` 0.11.8 source that its `Dmg` arm's synthesized `.app`
-overlays every key from the named plist onto its own generated one and codesigns iff
-`signingIdentity` is set. What is still **owed to a MacBook pass**: the produced `.dmg`'s actual
-bundle identity and signature are unverified against a real build — the owed check is building a
-signed `.dmg` on real hardware, then running `codesign -dv` and a bundle-id inspection
-(`plutil`/`mdls`) against the `.app` cargo-packager synthesizes inside it. **codesign flags** —
+passes the already-assembled bundle's `Contents/Info.plist` path and the entitlements path (when
+`macos/app.entitlements` exists) into cargo-packager's own config; verified against the pinned
+`cargo-packager` 0.11.8 source that its `Dmg` arm's synthesized `.app` overlays every key from the
+named plist onto its own generated one. `signingIdentity` is forwarded only when `[macos]
+signing-identity` is Apple-issued (the same three prefixes `codesign` uses below); a non-Apple
+identity is suppressed instead, with a typed `InstallerNote::PackagerSigningSkipped` (rendered by
+the CLI as `Note (dmg): ...`) — cargo-packager's own codesign pass always adds `--timestamp`
+unconditionally (verified against the pinned source), which needs network access, so forwarding a
+local/self-signed identity would make `--installer dmg` depend on the network. Suppressing it keeps
+signing offline end-to-end; the `.dmg`'s inner `.app` ships unsigned, but the assembled bundle's own
+`codesign` pass (below) is unaffected. The `icons` entry for `.dmg` is likewise the assembled
+bundle's own generated `<binary_name>.icns`, not the source PNG every other format uses —
+cargo-packager copies an `.icns` input verbatim, keeping its file name, so the merged plist's
+`CFBundleIconFile` (which names the binary, not the display name) resolves; a bundle with no
+generated `.icns` gets no `icons` entry for `.dmg` at all. What is still **owed to a MacBook pass**:
+the produced `.dmg`'s actual bundle identity, signature, and icon are unverified against a real
+build — the owed check is building a signed `.dmg` on real hardware, then running `codesign -dv`
+and a bundle-id inspection (`plutil`/`mdls`) against the `.app` cargo-packager synthesizes inside
+it, and confirming that `.app` shows the project icon (not a generic or missing one) when mounted.
+**codesign flags** —
 whenever a `[macos] signing-identity` is configured, `desktop_build::macos::codesign` always passes
 `--options runtime` (Hardened Runtime; harmless for an ad-hoc signature, mandatory for notarization
 eligibility) and passes `--timestamp` only when the identity carries one of the three Apple-issued
@@ -2089,9 +2101,11 @@ account to exercise; automating it is a scoped future addition, not an oversight
 **Evidence**: desktop-shells Phase B task 05 (`05-installers-doctor`) and task 07
 (`07-cli-build-targets`) completion summaries (Testing Performed — real Linux smoke: genuine `.deb`
 verified via `file`, `.AppImage` failure tail); `crates/frust-drive/src/desktop_build/installer.rs`
-(`InstallerFormat::for_target`, `RpmNotSupported`, `PackagerMacosConfig`); desktop-shells Phase B fix
-round 1 (`workflow/plans/features/desktop-shells/phase-b/followups/phase-b-fix-1/TASKS.md`, G3/G4)
-for the codesign-flags policy and the `macos` config-block wiring, respectively;
+(`InstallerFormat::for_target`, `RpmNotSupported`, `PackagerMacosConfig`, `InstallerNote`,
+`generated_icns`); desktop-shells Phase B fix round 1
+(`workflow/plans/features/desktop-shells/phase-b/followups/phase-b-fix-1/TASKS.md`, G3/G4) for the
+codesign-flags policy and the `macos` config-block wiring, respectively; round 2 (same file, G6/G7)
+for the icon-name alignment and the non-Apple signing-identity suppression;
 `crates/frust-drive/src/desktop_build/macos.rs` (`codesign`,
 `APPLE_ISSUED_IDENTITY_PREFIXES`/`is_apple_issued_identity`, no notarization call site).
 
