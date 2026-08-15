@@ -1,0 +1,21 @@
+[package]
+name = "frust-shell-linux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# The DesktopExtensions trait this crate implements, plus the winit core it
+# plugs into. Unconditional (not target-gated): `frust-shell-desktop` itself
+# already compiles on every non-mobile host, and Linux has no native-menu
+# concept to gate behind a target table in the first place — the menu is
+# widget-drawn (see `DesktopConfig::menu_spec`'s docs).
+frust-shell-desktop = { workspace = true }
+winit = { workspace = true }
+log = { workspace = true }
+# Deliberately thin: no GTK, no new pins. This crate's hooks (Wayland
+# `app_id`/X11 `WM_CLASS` via `WindowAttributes::with_name`, a window icon)
+# reach only through `winit`'s own cross-platform API, so there is nothing
+# here for `muda`/GTK to do — unlike `frust-shell-macos`/`-windows`, this
+# crate has no `[target.'cfg(...)'.dependencies]` table at all.

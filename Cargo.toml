@@ -156,6 +156,27 @@ android_logger = "0.15"
 # transitively (via ndk/wgpu-hal/objc2), so adding this edge bumps no version.
 # Floats on 0.2 minor: a ubiquitous, stable platform-binding crate, no pin.
 libc = "0.2"
+# frust-shell-macos/-windows native menu-bar bindings — `muda` builds a
+# native NSMenu/HMENU tree from `DesktopConfig::menu_spec`
+# (`docs/ARCHITECTURE.md`'s SHELLS unit). Its own manifest gates its default
+# `gtk`/`libxdo` features behind a Linux/BSD-only target table internally
+# (verified against its published manifest), so declaring this pin adds no
+# GTK dependency to the macOS/Windows resolution the two consuming shells
+# actually target — `frust-shell-linux` deliberately never depends on it (see
+# its own Cargo.toml). Pinned to minor per the Version-Pin Policy; the
+# tripwire is `cargo tree -d` (no new duplicate beyond the pre-existing
+# `objc2-app-kit` residual noted by the `objc2-app-kit` row below).
+muda = "0.19"
+# frust-shell-windows's native Win32 bindings (window/menu/shell
+# integration). Pinned to the 0.61 minor: muda 0.19.3's own
+# `windows-sys = ">=0.60, <=0.61"` requirement resolves to 0.61.2 (verified
+# via a scratch `muda = "0.19"` dependency), matching the minor most of this
+# lockfile's other `windows-sys` consumers (`tokio`, `ctrlc`, `mio`, …) are
+# already on. No features declared at this workspace level — a consuming
+# shell selects its own feature list (`frust-shell-windows/Cargo.toml`'s
+# `Win32_UI_Shell`; a later task may extend that list in the SAME file
+# without touching this one). Pinned to minor per the Version-Pin Policy.
+windows-sys = "0.61"
 # plugin platform-handle storage (frust-plugin) — the
 # `(JavaVM, application Context)` slot the Android shell writes at
 # `nativeInitPlatform` and plugins read via `frust-plugin::android`.
@@ -178,6 +199,19 @@ ndk-context = "0.1"
 # --target aarch64-apple-ios -p frust-haptics`. No version change.
 objc2 = "0.6"
 objc2-foundation = "0.3"
+# frust-shell-macos's native menu-bar host — `muda`'s macOS backend depends
+# on this crate directly (`objc2-app-kit = "0.3.0"`, its manifest's exact
+# requirement), and `frust-shell-macos/Cargo.toml` names it too, for the
+# `NSApplication`/`NSMenu`/`NSWindow` calls a follow-on task adds. Same
+# plain-version-string shape as `objc2`/`objc2-foundation` above. Pinned to
+# minor per the Version-Pin Policy: this unifies with the pre-existing
+# `arboard`-resolved `objc2-app-kit 0.3.2` already in this lockfile rather
+# than adding a THIRD version — the lockfile's existing `objc2-app-kit 0.2.2`
+# (via `accesskit_macos`/`winit`) vs `0.3.2` (via `arboard`) duplication is a
+# known, pre-existing residual this pin does not widen (do not try to fix it
+# here — see `docs/DEVELOPMENT.md`'s Version-Pin Policy). The tripwire is
+# `cargo tree -d`: no NEW duplicate major/minor beyond that residual.
+objc2-app-kit = "0.3"
 # android emulator detection (frust-render) — target-gated; already a
 # transitive dep of wgpu-hal on Android, so promoting it to direct adds no
 # new crates/size (see frust-render/Cargo.toml)
@@ -506,6 +540,9 @@ frust-shell-desktop = { path = "crates/frust-shell-desktop" }
 frust-shell-common = { path = "crates/frust-shell-common" }
 frust-shell-android = { path = "crates/frust-shell-android" }
 frust-shell-ios = { path = "crates/frust-shell-ios" }
+frust-shell-macos = { path = "crates/frust-shell-macos" }
+frust-shell-windows = { path = "crates/frust-shell-windows" }
+frust-shell-linux = { path = "crates/frust-shell-linux" }
 frust = { path = "crates/frust" }
 
 # `[profile.dev]` per-package overrides for the render/shader-compile stack:

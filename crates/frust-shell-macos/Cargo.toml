@@ -1,0 +1,32 @@
+[package]
+name = "frust-shell-macos"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# The DesktopExtensions trait this crate implements, plus the winit core it
+# plugs into. Unconditional (not target-gated): `frust-shell-desktop` itself
+# already compiles on every non-mobile host (it is this repo's desktop dev
+# preview too), so there is nothing macOS-specific about depending on it.
+frust-shell-desktop = { workspace = true }
+# `MacosExtensions`'s hooks will report menu activations through
+# `frust_reactive::push_menu_event` once native menu handling lands (see
+# `DesktopExtensions::pump`'s docs) — carried now so that follow-on task
+# never touches this manifest.
+frust-reactive = { workspace = true }
+winit = { workspace = true }
+log = { workspace = true }
+
+# The AppKit-native half — a native menu bar (`muda`), and any other
+# NSApplication/NSWindow integration a follow-on task adds — only ever
+# compiles for a macOS target; on every other host this crate is (almost)
+# empty but the `MacosExtensions` stub above still compiles, so
+# `cargo check --workspace` stays green (the `frust-shell-android` inert-off-
+# target precedent — see its own Cargo.toml).
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = { workspace = true }
+objc2 = { workspace = true }
+objc2-app-kit = { workspace = true }
+objc2-foundation = { workspace = true }
