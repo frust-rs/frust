@@ -128,6 +128,13 @@ toml_edit = "0.25"
 clap = { version = "4.6", features = ["derive"] }
 minijinja = "2.21"
 include_dir = "0.7.4"
+# frust-drive's icon pipeline (`icons::generate_icns`) — PNG-to-.icns
+# packing, the same crate `cargo-bundle` uses for the identical job. Pinned
+# to minor per the Version-Pin Policy (pre-1.0); `cargo test -p frust-drive`
+# is the tripwire. `frust-drive/Cargo.toml`'s own comment records the
+# `default-features = false` + `pngio`-only feature trim (drops the default
+# `jp2io` JPEG-2000 codec this PNG-only pipeline never needs).
+icns = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"

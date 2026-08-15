@@ -22,6 +22,7 @@ pub mod desktop_run;
 pub mod devices;
 pub mod devtools_client;
 pub mod doctor;
+pub mod icons;
 /// Process-wide termination handling (the single SIGINT/SIGTERM/SIGHUP owner
 /// and the secret-file scrub it runs). Internal: it is machinery the pipelines
 /// arm, not a surface a front-end drives.

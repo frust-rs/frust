@@ -41,3 +41,19 @@ toml_edit.workspace = true
 # `--watch` handler group-kills its child on those two signals as well
 # (previously it orphaned the preview binary).
 ctrlc = { workspace = true, features = ["termination"] }
+# `icons` module: macOS `.icns` authoring (`cargo-bundle`'s own dependency for
+# the same job). `default-features = false` drops the crate's default `jp2io`
+# (a JPEG-2000 codec, `hayro-jpeg2000`, this module never needs — `icns`
+# always PNG-encodes on write regardless, per its own docs) — `pngio` is the
+# only feature this module's PNG-only pipeline actually exercises.
+icns = { version = "0.4", default-features = false, features = ["pngio"] }
+# `image`'s built-in ICO encoder/decoder (`icons::generate_ico`) rather than a
+# second, standalone `ico` crate — `image::codecs::ico::{IcoEncoder, IcoFrame}`
+# already PNG-encodes each entry and `IcoEncoder::encode_images` covers
+# multi-size authoring directly, so no extra crate enters the dependency
+# graph. This is an ADDITIVE feature on top of the workspace's existing exact
+# `image` pin (RENDER unit — see docs/RENDER_DEVELOPMENT.md's `image` row);
+# Cargo's resolver-2 feature unification is per build graph, not
+# workspace-wide, so `frust-widgets`' own `image` build (png+jpeg only) is
+# unaffected by this crate enabling `ico` too.
+image = { workspace = true, features = ["ico"] }
