@@ -15,6 +15,12 @@ frust-shell-desktop = { workspace = true }
 # `DesktopExtensions::pump`'s docs) — carried now so that follow-on task
 # never touches this manifest.
 frust-reactive = { workspace = true }
+# `DesktopExtensions::on_theme_brightness_changed` is typed in
+# `frust_theme::Brightness`, which `frust-shell-desktop` carries but does not
+# re-export — naming the hook's parameter type means naming this crate. Same
+# `{ workspace = true }` shape (and therefore the same `default-features =
+# false` glyph-fonts opt-out chain) as `frust-shell-desktop`'s own edge.
+frust-theme = { workspace = true }
 winit = { workspace = true }
 log = { workspace = true }
 
@@ -26,9 +32,15 @@ log = { workspace = true }
 # `frust-shell-android` inert-off-target precedent — see its own Cargo.toml).
 [target.'cfg(target_os = "windows")'.dependencies]
 muda = { workspace = true }
-# `Win32_UI_Shell` is this crate's own feature ask (AppUserModelID/taskbar
-# identity, see `DesktopConfig::app_id`'s docs); task 04 may extend this list
-# further as its own manifest change, per the Version-Pin Policy's "declare
-# no features at the workspace level" contract for this pin (see the root
-# Cargo.toml's `windows-sys` row).
-windows-sys = { workspace = true, features = ["Win32_UI_Shell"] }
+# This crate's own feature ask, kept to exactly what `win32_glue` calls (the
+# Version-Pin Policy's "declare no features at the workspace level" contract
+# for this pin — see the root Cargo.toml's `windows-sys` row):
+#   - `Win32_UI_Shell` — `SetCurrentProcessExplicitAppUserModelID` (taskbar
+#     identity/grouping from `DesktopConfig::app_id`).
+#   - `Win32_UI_WindowsAndMessaging` — `MSG`/`HACCEL`/`TranslateAcceleratorW`
+#     for the menu-accelerator message hook.
+# Both pull `Win32_Foundation` (`HWND`) transitively via `Win32_UI` -> `Win32`.
+windows-sys = { workspace = true, features = [
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }

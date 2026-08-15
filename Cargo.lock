@@ -2411,6 +2411,7 @@ version = "0.1.0"
 dependencies = [
  "frust-reactive",
  "frust-shell-desktop",
+ "frust-theme",
  "log",
  "muda",
  "windows-sys 0.61.2",
