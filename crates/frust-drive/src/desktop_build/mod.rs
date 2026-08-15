@@ -41,6 +41,7 @@
 mod bundle;
 mod cargo;
 mod config;
+mod installer;
 mod linux;
 mod macos;
 mod windows;
@@ -54,6 +55,10 @@ use crate::manifest;
 use crate::process::ProcessRunner;
 
 use self::config::DesktopConfig;
+
+pub use installer::{
+    CARGO_PACKAGER_PINNED, InstallerError, InstallerFormat, InstallerReport, build_installer,
+};
 
 /// The bundle `frust build macos|windows|linux` requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
