@@ -1777,32 +1777,37 @@ currency").
 
 ---
 
-### `i18n-inmessage-format-locale` — in-message `NUMBER()`/`DATETIME()` format at the message locale, not `format_locale`
+### `i18n-inmessage-format-locale` — in-message `NUMBER()`/`DATETIME()` format at the resolving bundle's locale
 
 **Observed**: in-message Fluent placeables like `{ DATETIME($when, dateStyle: "medium") }`
-format using the message locale, not the `format_locale`. For an `en-GB` user of an
-`en`-only app, in-message messages render `Jan 31, 2024` (US date order) rather than
-`31 Jan 2024` (UK date order). The direct `frust_i18n::fmt::date` API respects
-`format_locale` correctly — the same screen's direct formatting calls show the correct
-regional format — so the gap is placeables only.
+format using the locale of the bundle that resolved the message, not the `format_locale`.
+When a message is missing from the active bundle and resolved from a fallback, the
+placeable renders in the fallback's language conventions — e.g., an `en-GB` user of a
+partially-translated app with `de` (partial) + `en` (fallback) bundles sees German UI
+text with English month names inside (Jan instead of Dez) when hitting an untranslated
+key. For messages present in the active bundle, region-level conventions still diverge
+from `format_locale` — an `en-GB` user of an `en`-only app sees `Jan 31, 2024` (US date
+order) inside messages, but `31 Jan 2024` (UK date order) from direct `frust_i18n::fmt::date`
+calls.
 
-**Mechanism**: ICU Fluent functions (`NUMBER`/`DATETIME`) are registered once per
-bundle locale during `Engine::new` via `LocaleSet::with_locale_function`, and each
-closure captures its bundle locale by value. Since `Engine` is immutable after
-construction, every in-message placeable formats at the locale that locale was
-registered with — there is no resolve-time parameterization.
+**Mechanism**: ICU Fluent functions (`NUMBER`/`DATETIME`) are registered once per bundle
+locale during `Engine::new` via `LocaleSet::with_locale_function`, with each closure
+capturing its bundle's locale by value. `Engine::resolve` walks the negotiated chain
+and formats with whichever bundle first owns the key; the captured locale comes from that
+resolving bundle, not the active request locale. Since `Engine` is immutable after
+construction, every in-message placeable formats at the capturing locale — there is no
+resolve-time parameterization.
 
 **Applies to**: any app using `formatting` feature + in-message `NUMBER()`/`DATETIME()`
-placeables + a user whose regional preference (region code in the requested locale)
-differs from or exceeds the app's message-bundle language coverage. The gap is most
-visible when `format_locale` returns a regional variant of the message locale
-(e.g., `en-GB` when messages are `en`), or when the no-coverage rule applies and
-`format_locale` selects a regional tag the app has no messages for.
+placeables + (a) a user whose regional preference differs from the message-bundle language
+coverage (region-drift case), or (b) a partially-translated app where some active-locale
+keys only exist in a fallback bundle (fallback-language case). Both are normal with
+fallback-chain message resolution.
 
-**Residual gap**: region-level conventions (date order, grouping, calendar system,
-numbering system) inside FTL-embedded formatting only. The app-side direct formatters
-(`fmt::date`, `fmt::decimal`, etc.) and the message resolution path (`I18n::locale`,
-`I18n::t`) are unaffected.
+**Residual gap**: language-level conventions (month names, era names, calendar system)
+and region-level conventions (date order, grouping, currency defaults) inside FTL-embedded
+formatting only. The app-side direct formatters (`fmt::date`, `fmt::decimal`, etc.) and the
+message resolution path (`I18n::locale`, `I18n::t`) are unaffected.
 
 **Workaround**: format app-side via `frust_i18n::fmt::` (passing `I18n::format_locale`)
 and interpolate the formatted string into the message key, rather than embedding the
@@ -1815,7 +1820,43 @@ locale at resolve time rather than at engine construction. This would make in-me
 formatters locale-aware like the direct API, at the cost of per-call overhead and
 a more complex `Engine::resolve` contract. Deferred from v1 scope.
 
-**Evidence**: `plugins/i18n/src/engine/mod.rs`'s `LocaleSet::with_locale_function` doc
-and the `Engine` concurrency contract (`Engine` built once, bundles immutable);
-`plugins/i18n/src/fmt/fluent_fns.rs` (with_icu_functions closure captures locale at
-bundle-build time); review R1-M1 (workflow/reviews/i18n-plugin/REVIEW-r1.md).
+**Evidence**: `plugins/i18n/src/engine/resolve.rs`'s chain walk (lines 50-75, first owning
+bundle's `entry.bundle` is formatted); `plugins/i18n/src/fmt/fluent_fns.rs` (lines 77-88,
+`with_icu_functions` closure captures locale at bundle-build time); review R2-M4
+(workflow/reviews/i18n-plugin/REVIEW-r2.md).
+
+---
+
+### `i18n-formatting-default-cost` — `formatting` feature is default-on and costs ~1.09 MB per app binary
+
+**Observed**: `frust-i18n`'s `formatting` feature (ICU4X-backed `NUMBER()`/`DATETIME()`
+formatting in FTL messages and the direct API) is in the default feature list
+(`plugins/i18n/Cargo.toml`'s `default = ["frust-api", "formatting"]`). Building with the
+feature enabled bakes ~1,142,992 bytes (~1.09 MB) of CLDR data into every app binary
+(measured with `cargo-bloat` on a lean `frust-core`-only binary, stripping to the shared
+`base.dat` singleton and baked-in symbols; the figures survive release-binary measurement).
+
+**Mechanism**: the `formatting` feature depends on ICU4X's experimental CLDR data crates
+(`icu_datetime_data`, `icu_decimal_data`, `icu_currency_provider`, `icu_plurals_data`).
+Each data crate embeds CLDR tables as static initializers, which end up in the final binary.
+Unlike dynamic data loading (ICU4C's `.dat` file, unreachable from pure-Rust isolation),
+there is no opt-out once linked — only a compile-time feature disable.
+
+**Applies to**: every `frust-i18n` app that ships with default features enabled —
+entirely of app binaries using this crate (a mobile-first, default-enabled cost that
+affects every new user's first download).
+
+**Why accepted**: the feature's formatter quality (full CLDR support, ICU4X correctness
+guarantees over hand-rolled tables) was judged to outweigh the cost. The decision was
+re-confirmed after the original ~49 KB estimate was corrected to the honest +1.09 MB
+figure. Accepted by Ed 2026-08-15.
+
+**Opt-out**: `default-features = false` in `frust-i18n`'s dependency stanza (app's
+`Cargo.toml` or workspace root). Apps that skip the feature retain the direct API's
+`NUMBER()`/`DATETIME()` calls (subject to `i18n-inmessage-format-locale`'s constraints)
+but lose in-message formatting entirely and gain no binary savings (Fluent's own parser
+does not become conditional).
+
+**Evidence**: `plugins/i18n/README.md` §10 (size measurement procedure and figures);
+`plugins/i18n/Cargo.toml`'s default feature list and the `formatting` feature's own
+dependencies; review R2-M1 and R2-M6 (workflow/reviews/i18n-plugin/REVIEW-r2.md).
