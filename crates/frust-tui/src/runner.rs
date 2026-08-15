@@ -851,7 +851,13 @@ fn build_target_label(target: &BuildTargetSpec) -> &'static str {
 /// removes; duplicated by value here since `clean` has no `frust-drive`
 /// surface to call into (see `docs/ARCHITECTURE.md`'s Module Structure —
 /// `clean` lives entirely in `frust-cli`, unlike `doctor`/`build`).
-const CLEAN_REMOVED_DIRS: &[&str] = &["android/app/build", "android/.gradle", "build"];
+const CLEAN_REMOVED_DIRS: &[&str] = &[
+    "android/app/build",
+    "android/build",
+    "android/.gradle",
+    "build",
+    "dist",
+];
 
 /// Run `cargo clean` + remove the generated Android/iOS build directories for
 /// `project_root` off the UI thread, reporting progress the same way
