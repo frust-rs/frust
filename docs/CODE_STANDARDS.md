@@ -369,7 +369,11 @@ Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantic
   owner (running every `on_cleanup` registered under it since `init`) before dropping
   `State`. Register disposal (timers, controller/subscription teardown) with `on_cleanup`
   inside `init`/`build` — never hand-roll a `Drop` impl on `State`; `Drop` order across the
-  state/element/owner triple is not a contract, `on_cleanup` is.
+  state/element/owner triple is not a contract, `on_cleanup` is. That guarantee is itself
+  route-dependent: a process-exit shutdown (macOS AppKit `terminate:`) runs neither `on_cleanup`
+  nor `Drop` — see `docs/LIMITATIONS.md`'s `desktop-macos-quit-skips-executor-drop`. A plugin
+  handle that owns an OS resource (e.g. `frust-camera`'s `AppleSession`) must not assume
+  Drop-at-exit on macOS when held in app `State`.
 - **A `Cancel` arm still never touches state, even the component's own** — the
   Cancel-never-mutates-state rule above binds every handler a component hosts, including one
   reading `ComponentWidget`'s own `State` (a synthesized `Cancel` crossing a component

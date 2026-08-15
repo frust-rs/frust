@@ -1911,6 +1911,34 @@ Risks/Limitations #1–#2).
 
 ---
 
+### `desktop-windows-titlebar-theme-revert` — a Windows titlebar override can be silently reverted between app brightness changes
+
+**Observed**: winit 0.30.13's `Window::set_theme` never writes back its own `preferred_theme`
+field (a winit bug), so its `WM_SETTINGCHANGE` handler — which branches on that field being `None`
+to mean "no app override, follow the system" — treats an app-forced titlebar the same as an
+unthemed one and can silently re-apply the *system* theme over it, without necessarily firing
+`WindowEvent::ThemeChanged`. `frust-shell-windows`'s round-1 fix (`theme.rs`'s `TitlebarTheme`)
+removes the `applied == wanted` latch so every core-signaled brightness change re-issues
+`set_theme`, which closes the revert path between two *different* app-resolved brightnesses. It
+does not close a revert that happens *between* those changes — most notably while an app override
+is active: the core's override-wins rule holds `self.theme.brightness` steady across a platform
+`ThemeChanged`, so the edge-gate that drives `take_pending` may not re-fire at all while the
+mismatch persists.
+
+**Applies to**: `frust-shell-windows` apps using an OS-native (non-`with_theme`) titlebar with
+either the system-follow path or an app-forced brightness override, on any winit 0.30.13 build.
+
+**Why accepted**: no winit-level fix exists to consume (the bug is in winit, not fixable from this
+crate alone); a full fix needs shell-owned system-theme detection (e.g. polling the registry key
+winit itself would consult) rather than reacting to winit's event stream, which is deferred pending
+the Windows runtime gate (`desktop-shells-runtime-unverified`) that would let it be verified against
+a real WM_SETTINGCHANGE sequence.
+
+**Evidence**: `crates/frust-shell-windows/src/theme.rs` module docs ("The residual gap this round
+does not close"); desktop-shells Phase A fix-round-1 task F2.
+
+---
+
 ### `desktop-macos-reopen-gap-already-active` — Dock-click reopen does not re-show an already-active hidden window
 
 **Observed**: winit 0.30 owns `NSApplication`'s delegate and panics if replaced, so
@@ -1934,24 +1962,40 @@ Risks/Limitations #3); `workflow/plans/features/desktop-shells/phase-a/TASKS.md`
 
 ---
 
-### `desktop-macos-quit-skips-executor-drop` — ⌘Q/menu Quit bypasses the frame executor's shutdown `Drop`
+### `desktop-macos-quit-skips-executor-drop` — ⌘Q/menu Quit bypasses the whole `ShellHandler` `Drop` chain
 
 **Observed**: `frust-shell-macos` leaves Quit on muda's predefined AppKit `terminate:` action (both
 ⌘Q and the menu item) because it must work while the window is hidden, when no frames are being
 produced to service a pumped quit request. On that route winit dispatches `LoopExiting`, but
-`run_app` never returns — so the frame executor's `Drop` (render-thread join, final present,
-best-effort pipeline-cache persist) never runs. A window-close request under the default policy
-(`CloseAction::Exit`) is unaffected and does take the full executor-drop shutdown.
+`run_app` never returns — AppKit tears the process down itself instead of returning control to
+Rust, so none of `ShellHandler`'s locals unwind. That skips its entire `Drop` chain, not only the
+frame executor: app `State`, `RenderRoot`, `TextContext`, the accesskit adapter, `FrameExecutor`
+(render-thread join, final present, best-effort pipeline-cache persist), `MacosExtensions`' menu +
+observer, and anything else reachable from app `State` — including cleanup that would normally ride
+root-`Owner` disposal rather than a hand-rolled `Drop` (see
+[docs/CODE_STANDARDS.md](CODE_STANDARDS.md) § State & Reactivity Conventions). A window-close
+request under the default policy (`CloseAction::Exit`) is unaffected and does take the full
+drop-chain shutdown.
 
 **Applies to**: macOS apps quitting via ⌘Q or the app menu's Quit item.
 
-**Why accepted**: the skipped pipeline-cache persist is a documented no-op on macOS already (Metal
-has no `PIPELINE_CACHE`, per `frust-shell-desktop`'s own `cache` module docs), so nothing
-observable is lost; nothing in the crate calls `std::process::exit`. Flagged by the implementor for
-reviewer confirmation; not yet closed by a review round.
+**Why accepted**: scoped to the frame executor only — its skipped pipeline-cache persist is a
+documented no-op on macOS already (Metal has no `PIPELINE_CACHE`, per `frust-shell-desktop`'s own
+`cache` module docs), and nothing in the crate calls `std::process::exit`, so nothing observable is
+lost there specifically. That scoping does **not** extend to the rest of the skipped chain: an app
+holding an OS-resource-owning plugin handle in its `State` gets no chance to release it on this
+route. `frust-camera`'s `AppleSession` (shared by macOS and iOS; its `Drop` releases the capture
+device) is a real current instance of this, not a hypothetical one — a `CameraSession` reachable
+from app `State` on this quit route leaves the camera device unreleased by any Rust-side cleanup.
+Flagged by the implementor for reviewer confirmation; not yet closed by a review round. A later fix
+would route termination through `appkit_glue`'s `applicationShouldTerminate:`
+(`NSApplication.TerminateReply.terminateLater`, run the graceful shutdown, then `terminateNow`)
+instead of the current predefined action.
 
 **Evidence**: desktop-shells Phase A task 03 completion summary (Notable Decisions #2);
-`workflow/plans/features/desktop-shells/phase-a/TASKS.md` Notes (review-watch item #1).
+`workflow/plans/features/desktop-shells/phase-a/TASKS.md` Notes (review-watch item #1);
+`plugins/camera/src/apple.rs` (`AppleSession`'s `Drop`, module doc's macOS-shares-the-Apple-arm
+note).
 
 ---
 
