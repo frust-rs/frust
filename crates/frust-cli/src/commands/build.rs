@@ -261,6 +261,9 @@ fn print_installer_report(report: &InstallerReport) {
     for artifact in &report.artifacts {
         println!("Built ({}): {}", report.format, artifact.display());
     }
+    for note in &report.notes {
+        println!("Note ({}): {note}", report.format);
+    }
 }
 
 /// Maps `--target-platform`'s comma-separated `android-*` values to Gradle
