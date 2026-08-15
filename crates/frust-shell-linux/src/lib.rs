@@ -8,44 +8,169 @@
 //! is deliberately thin: a Wayland `app_id`/X11 `WM_CLASS`
 //! (`WindowAttributes::with_name`) and a window icon, both reachable through
 //! `winit`'s own cross-platform API rather than a GTK/X11 binding of its
-//! own (see `Cargo.toml`'s module doc). Every hook still resolves to
-//! [`DesktopExtensions`](frust_shell_desktop::extensions::DesktopExtensions)'s
-//! no-op default, so today [`LinuxExtensions`] behaves identically to
-//! [`NoExtensions`](frust_shell_desktop::extensions::NoExtensions) — a
-//! compilable skeleton a follow-on task fills in.
+//! own (see `Cargo.toml`'s module doc). Only
+//! [`on_window_attributes`](frust_shell_desktop::extensions::DesktopExtensions::on_window_attributes)
+//! is implemented — every other hook keeps the trait's no-op default, so
+//! [`LinuxExtensions`] behaves identically to
+//! [`NoExtensions`](frust_shell_desktop::extensions::NoExtensions) outside
+//! that one hook.
 
+use frust_shell_desktop::config::{DesktopConfig, IconData};
 use frust_shell_desktop::extensions::DesktopExtensions;
+use winit::platform::wayland::WindowAttributesExtWayland;
+use winit::platform::x11::WindowAttributesExtX11;
+use winit::window::{Icon, WindowAttributes};
 
 /// The Linux [`DesktopExtensions`] implementation.
 ///
-/// Carries no state yet — every hook is still the trait's no-op default (see
-/// the module docs). The `app_id`/`WM_CLASS` and window-icon attachment land
-/// in a follow-on task, which is expected to add fields here rather than
-/// replace this type.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct LinuxExtensions;
+/// Carries exactly the two [`DesktopConfig`] fields its one hook needs —
+/// [`app_id`](DesktopConfig::app_id) and
+/// [`window_icon`](DesktopConfig::window_icon) — cloned out at construction
+/// time by [`LinuxExtensions::new`] rather than holding the whole config, so
+/// the facade (task 06) can build this once per run without keeping
+/// `DesktopConfig` alive alongside it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinuxExtensions {
+    app_id: Option<String>,
+    window_icon: Option<IconData>,
+}
 
 impl LinuxExtensions {
-    /// A fresh, hook-free extension set — see the struct docs for what still
-    /// needs to land.
-    pub fn new() -> Self {
-        Self
+    /// Build the extension set from the parts of `config` this shell acts
+    /// on. `app_id` becomes the Wayland `app_id`/X11 `WM_CLASS`;
+    /// `window_icon` becomes the X11 window icon (Wayland has no window-icon
+    /// concept and ignores it by design — see
+    /// [`on_window_attributes`](DesktopExtensions::on_window_attributes)).
+    /// Neither field is consumed if `config` leaves it unset: the window is
+    /// built exactly as it would be with [`NoExtensions`](frust_shell_desktop::extensions::NoExtensions).
+    pub fn new(config: &DesktopConfig) -> Self {
+        Self {
+            app_id: config.app_id.clone(),
+            window_icon: config.window_icon.clone(),
+        }
     }
 }
 
-impl DesktopExtensions for LinuxExtensions {}
+impl DesktopExtensions for LinuxExtensions {
+    /// Attaches the Wayland `app_id`/X11 `WM_CLASS` and the window icon, in
+    /// that order.
+    ///
+    /// Both `winit` extension traits are called unconditionally when
+    /// `app_id` is set — each backend reads only the attributes its own
+    /// platform understands, so calling the X11 setter on a Wayland session
+    /// (and vice versa) is inert rather than wrong. `general`/`instance` are
+    /// both set to the same `app_id`: this shell carries no separate
+    /// instance-name concept, and a duplicate `general`/`instance` pair is a
+    /// well-formed `WM_CLASS`. Unset `app_id` makes no call at all, leaving
+    /// winit's own default in place.
+    ///
+    /// The icon is built with `winit::window::Icon::from_rgba`, which
+    /// reaches X11's window icon; Wayland has no window-icon protocol and
+    /// silently ignores `WindowAttributes::window_icon` (icons come from the
+    /// `.desktop` entry's `Icon=` key there instead — Phase B's job, not
+    /// this hook's). `IconData`'s own invariant
+    /// (`rgba.len() == width * height * 4`) means `from_rgba` failing here
+    /// would be a `winit` behavior change, not a data problem this crate
+    /// caused — logged and skipped rather than panicking.
+    fn on_window_attributes(&mut self, attributes: WindowAttributes) -> WindowAttributes {
+        let mut attributes = attributes;
+
+        if let Some(app_id) = &self.app_id {
+            attributes =
+                WindowAttributesExtWayland::with_name(attributes, app_id.clone(), app_id.clone());
+            attributes =
+                WindowAttributesExtX11::with_name(attributes, app_id.clone(), app_id.clone());
+        }
+
+        if let Some(icon_data) = &self.window_icon {
+            match Icon::from_rgba(
+                icon_data.rgba().to_vec(),
+                icon_data.width(),
+                icon_data.height(),
+            ) {
+                Ok(icon) => attributes = attributes.with_window_icon(Some(icon)),
+                Err(err) => {
+                    log::warn!("frust-shell-linux: failed to build window icon: {err}");
+                }
+            }
+        }
+
+        attributes
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn new_matches_default() {
-        assert_eq!(LinuxExtensions::new(), LinuxExtensions);
+    fn sample_icon() -> IconData {
+        // 1x1 opaque red pixel — smallest valid IconData.
+        IconData::from_rgba(vec![255, 0, 0, 255], 1, 1).expect("1x1 RGBA is valid")
     }
 
     #[test]
-    fn implements_desktop_extensions_with_every_hook_at_its_default() {
+    fn new_carries_nothing_from_an_unconfigured_config() {
+        let ext = LinuxExtensions::new(&DesktopConfig::default());
+        assert_eq!(ext, LinuxExtensions::default());
+    }
+
+    #[test]
+    fn new_carries_the_app_id_and_icon_out_of_the_config() {
+        let icon = sample_icon();
+        let config = DesktopConfig::new()
+            .with_app_id("dev.frust.huddle")
+            .with_window_icon(icon.clone());
+        let ext = LinuxExtensions::new(&config);
+        assert_eq!(ext.app_id.as_deref(), Some("dev.frust.huddle"));
+        assert_eq!(ext.window_icon, Some(icon));
+    }
+
+    #[test]
+    fn unset_app_id_and_icon_leave_the_attributes_untouched() {
+        let mut ext = LinuxExtensions::default();
+        let attributes = WindowAttributes::default().with_title("Frust");
+        let result = ext.on_window_attributes(attributes.clone());
+        // No app_id/icon means neither `with_name` call nor
+        // `with_window_icon` runs — the only observable slot from outside
+        // this crate, `window_icon`, stays exactly as the core set it
+        // (`winit::window::Icon` has no `PartialEq`, so `is_none` is the
+        // comparison available).
+        assert!(result.window_icon.is_none());
+        assert_eq!(result.title, attributes.title);
+    }
+
+    #[test]
+    fn a_configured_app_id_lands_in_the_debug_output_of_both_backends() {
+        let mut ext = LinuxExtensions {
+            app_id: Some("dev.frust.huddle".to_string()),
+            window_icon: None,
+        };
+        let result = ext.on_window_attributes(WindowAttributes::default());
+        // `platform_specific` is private to `winit`, so `Debug` is the only
+        // outside-the-crate way to observe that `with_name` actually landed
+        // — both `WindowAttributesExtWayland` and `WindowAttributesExtX11`
+        // write the same underlying `ApplicationName` on Linux, so one
+        // assertion covers both calls.
+        let debug = format!("{result:?}");
+        assert!(
+            debug.contains("dev.frust.huddle"),
+            "expected the app_id in the window-attributes debug output, got: {debug}"
+        );
+    }
+
+    #[test]
+    fn a_configured_icon_lands_in_the_window_icon_attribute() {
+        let icon = sample_icon();
+        let mut ext = LinuxExtensions {
+            app_id: None,
+            window_icon: Some(icon),
+        };
+        let result = ext.on_window_attributes(WindowAttributes::default());
+        assert!(result.window_icon.is_some());
+    }
+
+    #[test]
+    fn implements_desktop_extensions() {
         // A compile-time assertion as much as a runtime one: this only
         // builds if `LinuxExtensions` actually implements the trait.
         fn assert_impl<E: DesktopExtensions>() {}

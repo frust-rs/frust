@@ -14,8 +14,9 @@ license.workspace = true
 frust-shell-desktop = { workspace = true }
 winit = { workspace = true }
 log = { workspace = true }
-# Deliberately thin: no GTK, no new pins. This crate's hooks (Wayland
-# `app_id`/X11 `WM_CLASS` via `WindowAttributes::with_name`, a window icon)
-# reach only through `winit`'s own cross-platform API, so there is nothing
-# here for `muda`/GTK to do — unlike `frust-shell-macos`/`-windows`, this
-# crate has no `[target.'cfg(...)'.dependencies]` table at all.
+# Deliberately thin: no GTK, no new pins. This crate's one hook (Wayland
+# `app_id`/X11 `WM_CLASS` via `WindowAttributesExtWayland`/`WindowAttributesExtX11`
+# `with_name`, plus a window icon via `winit::window::Icon::from_rgba`) reaches
+# only through `winit`'s own cross-platform API, so there is nothing here for
+# `muda`/GTK to do — unlike `frust-shell-macos`/`-windows`, this crate has no
+# `[target.'cfg(...)'.dependencies]` table at all.
