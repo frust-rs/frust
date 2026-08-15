@@ -272,6 +272,24 @@ chain. `use_i18n()` returns `None` if nothing's been provided; `expect_i18n()` p
 named message instead; `active_locale()` is `use_i18n().map(|i| i.locale())` — a convenience
 for a rebuild that only needs the locale, not the whole handle.
 
+**Message locale vs. format locale.** `.locale()` is a negotiated *message* locale — it can
+only ever be one of the locales your app actually shipped `.ftl` catalogs for (e.g. `en`),
+because negotiation collapses a regional request like `en-GB` down to whatever bundle is
+available. ICU4X formatting (§4e) has no such constraint — it ships full CLDR data for every
+region regardless of which message bundles you compiled in. Use `.format_locale()` for every
+`fmt::` call instead: it recovers the best *requested* tag whose language matches the
+negotiated message locale (`en-GB` requested over an `en`-only bundle set still returns
+`en-GB`), falls back to the first requested tag if none share the message locale's language,
+and falls back to `.locale()` itself if nothing was requested at all:
+
+```rust
+let i18n = I18n::new(locale_set(), &["en-GB".parse()?])?;
+i18n.locale();          // "en" — the bundle set only ships `en`, never a region
+i18n.format_locale();   // "en-GB" — the request survives for CLDR formatting
+```
+
+`format_locale()` is a tracked read too — same `set_locale`-subscribes contract as `.locale()`.
+
 ### 4d. Detection — `system_locales`
 
 ```rust
@@ -300,6 +318,14 @@ fmt::decimal(&de, 1234.56);                                    // "1.234,56"
 fmt::percent(&en, 75.0);                                       // "75%"
 fmt::currency(&de, 9.99, "EUR")?;               // "9,99\u{a0}€" — U+00A0, CLDR's own space
 fmt::date(&de, CivilDate { year: 2024, month: 1, day: 31 }, DateLength::Medium)?; // "31.01.2024"
+```
+
+Pulling the locale from a live `I18n` handle (§4c) instead of a literal? Pass
+`i18n.format_locale()`, never `i18n.locale()` — `fmt::` calls want the caller's actual
+requested region, not the negotiated message locale:
+
+```rust
+fmt::decimal(&i18n.format_locale(), 1234.56);
 ```
 
 `decimal`/`percent` degrade to Rust's own rendering (with a log) rather than failing — a

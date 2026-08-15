@@ -53,6 +53,15 @@ struct Inner {
     /// the same call that writes `locale`; read untracked, since only the
     /// signal read above needs to subscribe a rebuild.
     chain: Mutex<Vec<Locale>>,
+    /// The raw locale list [`I18n::new`]/[`I18n::from_engine`] were given, or
+    /// (after a [`I18n::set_locale`] call) the single locale most recently
+    /// passed to it — **replaced**, not accumulated, same refresh discipline
+    /// as `chain`. `negotiate_active` collapses a regional request like
+    /// `en-GB` down to whatever bundle actually shipped (`en`); this is the
+    /// only place that untouched request tag survives, and it's what
+    /// [`I18n::format_locale`] recovers it from. Refreshed under the same
+    /// call that writes `locale`; read untracked.
+    requested: Mutex<Vec<Locale>>,
 }
 
 impl I18n {
@@ -90,11 +99,23 @@ impl I18n {
                 engine,
                 locale: RwSignal::new(active),
                 chain: Mutex::new(chain),
+                requested: Mutex::new(requested.to_vec()),
             }),
         }
     }
 
-    /// The active (negotiated) locale.
+    /// The active (negotiated) **message** locale.
+    ///
+    /// This is a *bundle* locale, not a *formatting* locale — it can only
+    /// ever be one of the `.ftl` catalogs this app actually shipped (`en`,
+    /// `de`, ...), because negotiation collapses a regional request like
+    /// `en-GB` down to whatever bundle is available (`en`), discarding the
+    /// requested region. That's the right locale for [`I18n::t`]/
+    /// [`I18n::t_args`], but the **wrong** one for `frust_i18n::fmt::` calls
+    /// — ICU4X ships full CLDR regional data regardless of which message
+    /// bundles this app compiled in, so a UK user of an `en`-only app should
+    /// still see UK-formatted numbers/dates. Use [`I18n::format_locale`] for
+    /// that; see its doc for the full distinction.
     ///
     /// A tracked read: calling this inside a live rebuild subscribes it to
     /// [`I18n::set_locale`] — the same `.get()` contract every other `frust`
@@ -104,14 +125,65 @@ impl I18n {
         self.inner.locale.get()
     }
 
+    /// The best locale to format numbers/dates/currency with — deliberately
+    /// **not** the same value as [`I18n::locale`].
+    ///
+    /// [`I18n::locale`] is a *message* locale, constrained to whatever
+    /// `.ftl` bundle negotiation actually landed on. Regional formatting has
+    /// no such constraint, so `format_locale` recovers the caller's raw
+    /// requested tag instead of the negotiated message locale:
+    ///
+    /// 1. The best requested tag whose [`Locale::language`] matches the
+    ///    active message locale's language — e.g. requesting `en-GB` over an
+    ///    `[en]` bundle set negotiates a message locale of `en`, but
+    ///    `format_locale` still returns `en-GB`.
+    /// 2. If no requested tag shares the message locale's language (the
+    ///    caller asked for a locale with zero message coverage), the first
+    ///    requested tag — still worth honoring for formatting; silently
+    ///    substituting the message locale here would overrule a real user
+    ///    preference with no upside.
+    /// 3. If nothing was requested at all (an empty list passed to
+    ///    [`I18n::new`]/[`I18n::from_engine`]), the active message locale —
+    ///    there is no other tag to recover.
+    ///
+    /// Pass this, not [`I18n::locale`], to every `frust_i18n::fmt::` call.
+    ///
+    /// A tracked read, same contract as [`I18n::locale`]: calling this
+    /// inside a live rebuild subscribes to [`I18n::set_locale`].
+    pub fn format_locale(&self) -> Locale {
+        // Track first: this is the subscription a later `set_locale` wakes —
+        // same discipline as `resolve_message`.
+        let active = self.locale();
+        let requested = self
+            .inner
+            .requested
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match requested
+            .iter()
+            .find(|tag| tag.language() == active.language())
+        {
+            Some(tag) => tag.clone(),
+            None => requested.first().cloned().unwrap_or(active),
+        }
+    }
+
     /// Re-negotiates against `requested` and writes the new active locale.
     ///
-    /// The write goes through the normal `RwSignal::set` → tracked-scope →
-    /// `FrameWaker` path — no direct wake call here (see the module doc).
+    /// Replaces (never accumulates) the requested-locale list
+    /// [`I18n::format_locale`] reads — same refresh discipline as the
+    /// negotiated `chain`. The write goes through the normal `RwSignal::set`
+    /// → tracked-scope → `FrameWaker` path — no direct wake call here (see
+    /// the module doc).
     pub fn set_locale(&self, requested: Locale) {
         let (active, chain) =
             negotiate_active(&self.inner.engine, std::slice::from_ref(&requested));
         *self.inner.chain.lock().unwrap_or_else(|e| e.into_inner()) = chain;
+        *self
+            .inner
+            .requested
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = vec![requested];
         self.inner.locale.set(active);
     }
 
@@ -340,6 +412,55 @@ only-en = English only";
     fn active_locale_is_none_absent_a_provider() {
         let _owner = ambient_owner();
         assert_eq!(active_locale(), None);
+    }
+
+    // `format_locale` matrix — pins the message-vs-format locale distinction
+    // `I18n::locale`/`I18n::format_locale`'s doc comments describe.
+
+    #[test]
+    fn format_locale_recovers_the_requested_region_over_a_language_only_bundle() {
+        let _owner = ambient_owner();
+        let i18n = I18n::new(build_set(), &[locale("en-GB")]).expect("engine builds");
+
+        assert_eq!(
+            i18n.locale().to_string(),
+            "en",
+            "the bundle set only ships `en`, never a region"
+        );
+        assert_eq!(i18n.format_locale().to_string(), "en-GB");
+    }
+
+    #[test]
+    fn format_locale_matches_the_requested_tag_sharing_the_message_locales_language() {
+        let _owner = ambient_owner();
+        let i18n =
+            I18n::new(build_set(), &[locale("de-CH"), locale("en-US")]).expect("engine builds");
+
+        assert_eq!(i18n.locale().to_string(), "de");
+        assert_eq!(i18n.format_locale().to_string(), "de-CH");
+    }
+
+    #[test]
+    fn format_locale_falls_back_to_the_first_requested_tag_with_no_language_match() {
+        let _owner = ambient_owner();
+        let i18n = I18n::new(build_set(), &[locale("de")]).expect("engine builds");
+
+        // `fr` has no bundle at all, so the message locale negotiates down to
+        // the declared fallback (`en`) — `fr` shares no language with `en`,
+        // so `format_locale` still honors the caller's own request instead of
+        // silently substituting the message locale.
+        i18n.set_locale(locale("fr"));
+
+        assert_eq!(i18n.locale().to_string(), "en");
+        assert_eq!(i18n.format_locale().to_string(), "fr");
+    }
+
+    #[test]
+    fn format_locale_equals_locale_with_nothing_requested() {
+        let _owner = ambient_owner();
+        let i18n = I18n::new(build_set(), &[]).expect("engine builds");
+
+        assert_eq!(i18n.locale(), i18n.format_locale());
     }
 
     /// The reactivity contract itself: a `set_locale` write wakes a live

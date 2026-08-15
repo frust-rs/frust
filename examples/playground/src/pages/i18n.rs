@@ -137,9 +137,16 @@ impl Component for I18nDemoPage {
         // `pages/responsive.rs`'s own module doc documents for
         // `WindowMetrics`.
         let i18n = resolve_i18n();
-        // Tracked read: subscribes this rebuild to `I18n::set_locale`, which
+        // Tracked reads: subscribe this rebuild to `I18n::set_locale`, which
         // is what makes every section below re-render on a language switch.
+        // `active` is the *message* locale (`crate::keys::*`/`i18n.t`); the
+        // formatting matrix below deliberately uses `format_locale` instead
+        // — see `I18n::locale`/`I18n::format_locale`'s own docs for why the
+        // two can differ (a device system locale of `en-GB` negotiates a
+        // message locale of `en` against this app's `en`-only bundle, but
+        // `format_locale` still reports `en-GB`).
         let active = i18n.locale();
+        let format_locale = i18n.format_locale();
 
         let plural_count = state.plural_count.get();
         let theme_choice = state.theme_choice.get();
@@ -158,7 +165,8 @@ impl Component for I18nDemoPage {
             any(text(system_locales_line()).size(11.0).color(muted)),
             any(SizedBox(None, Some(SECTION_GAP))),
             section_heading("Language"),
-            any(text(format!("Active: {active}")).size(12.0)),
+            any(text(format!("Message locale: {active}")).size(12.0)),
+            any(text(format!("Format locale: {format_locale}")).size(12.0)),
             switcher_row(&i18n, &active),
             any(SizedBox(None, Some(SECTION_GAP))),
             section_heading("Plural — cart-items"),
@@ -175,7 +183,7 @@ impl Component for I18nDemoPage {
             any(text(crate::keys::last_visit(&i18n, "2024-01-31")).size(12.0)),
             any(SizedBox(None, Some(SECTION_GAP))),
             section_heading("Formatting matrix (frust_i18n::fmt)"),
-            formatting_table(&active, muted),
+            formatting_table(&format_locale, muted),
             any(SizedBox(None, Some(BOTTOM_GAP))),
         ];
 
@@ -317,23 +325,26 @@ fn theme_choice_row(
 }
 
 /// The decimal/currency/date/time formatting matrix, rendered through the
-/// **direct** `frust_i18n::fmt` API (not FTL messages) for `locale` — every
-/// value is a fresh call, so switching languages re-renders locale-correct
-/// output rather than a hardcoded string.
-fn formatting_table(locale: &Locale, muted: Color) -> AnyView<I18nDemoPageState> {
-    let mut lines = vec![format!("decimal: {}", fmt::decimal(locale, 1234.56))];
+/// **direct** `frust_i18n::fmt` API (not FTL messages) for `format_locale`
+/// (`I18n::format_locale`, not `I18n::locale` — CLDR formatting coverage is
+/// unconstrained by which `.ftl` bundles this app shipped, so this must use
+/// the caller's actual requested region rather than the negotiated message
+/// locale) — every value is a fresh call, so switching languages re-renders
+/// locale-correct output rather than a hardcoded string.
+fn formatting_table(format_locale: &Locale, muted: Color) -> AnyView<I18nDemoPageState> {
+    let mut lines = vec![format!("decimal: {}", fmt::decimal(format_locale, 1234.56))];
 
     for code in CURRENCIES {
-        let rendered = fmt::currency(locale, 1234.56, code)
+        let rendered = fmt::currency(format_locale, 1234.56, code)
             .unwrap_or_else(|error| format!("<{code} error: {error}>"));
         lines.push(format!("currency {code}: {rendered}"));
     }
 
-    let date = fmt::date(locale, SAMPLE_DATE, DateLength::Medium)
+    let date = fmt::date(format_locale, SAMPLE_DATE, DateLength::Medium)
         .unwrap_or_else(|error| format!("<date error: {error}>"));
     lines.push(format!("date: {date}"));
 
-    let time = fmt::time(locale, SAMPLE_TIME, DateLength::Short)
+    let time = fmt::time(format_locale, SAMPLE_TIME, DateLength::Short)
         .unwrap_or_else(|error| format!("<time error: {error}>"));
     lines.push(format!("time: {time}"));
 
