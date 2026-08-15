@@ -321,7 +321,13 @@ pub(super) fn codesign(
 
 /// Whether `identity` starts with one of [`APPLE_ISSUED_IDENTITY_PREFIXES`] —
 /// the only identities `codesign --timestamp` is passed for.
-fn is_apple_issued_identity(identity: &str) -> bool {
+///
+/// Shared with [`super::installer`] rather than duplicated there: the
+/// `cargo-packager` config's `signingIdentity` decides whether *that* tool's
+/// own codesign pass runs, and that pass always passes `--timestamp` (its
+/// `codesign/macos.rs::sign` has no conditional), so the offline guarantee
+/// above only holds end-to-end if both sides answer this question the same way.
+pub(super) fn is_apple_issued_identity(identity: &str) -> bool {
     APPLE_ISSUED_IDENTITY_PREFIXES
         .iter()
         .any(|prefix| identity.starts_with(prefix))

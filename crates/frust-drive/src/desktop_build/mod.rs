@@ -89,7 +89,8 @@ use crate::process::ProcessRunner;
 use self::config::DesktopConfig;
 
 pub use installer::{
-    CARGO_PACKAGER_PINNED, InstallerError, InstallerFormat, InstallerReport, build_installer,
+    CARGO_PACKAGER_PINNED, InstallerError, InstallerFormat, InstallerNote, InstallerReport,
+    build_installer,
 };
 
 /// The project-relative directory every desktop build output lands under, and

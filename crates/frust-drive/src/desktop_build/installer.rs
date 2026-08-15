@@ -34,10 +34,42 @@
 //! `app::package`'s `create_info_plist` merges its keys — `CFBundleExecutable`
 //! included — over the synthesized one, per that function's source),
 //! `signing_identity`/`entitlements` feed `app::package`'s own independent
-//! codesign pass over the bundle it built. The top-level `icons` field is
-//! already shared with every format (`util::create_icns_file` reads it
-//! regardless of which arm calls it), so no macOS-specific icon wiring is
-//! needed beyond the block above.
+//! codesign pass over the bundle it built.
+//!
+//! **…which is why the `.dmg` arm's `icons` entry is the bundle's own
+//! `.icns`, not the project's source PNG.** `app::package` calls
+//! `util::create_icns_file` and then names the file it produced in the plist
+//! it synthesizes (`CFBundleIconFile`) — *before* merging our
+//! `info_plist_path` over it, so **our** `CFBundleIconFile` (the binary name,
+//! which is what [`super::macos::assemble`] names the generated `.icns`)
+//! wins. Fed a PNG, `create_icns_file` writes `<product_name>.icns` (its
+//! `dest_path.push(config.product_name)` + `set_extension("icns")`), i.e. the
+//! *display* name, and the merged key then points at a file that isn't there —
+//! a generic icon in the shipped `.dmg`. Fed a path that already ends in
+//! `.icns`, the same function takes an early-return branch that copies the
+//! file into `Contents/Resources` **under its own file name** (`out_dir.join(
+//! icon_path.file_name())`) — so passing the assembled bundle's
+//! `<binary_name>.icns` is what makes the merged key resolve. A bundle with no
+//! `.icns` (no `[desktop] icon`, or a source the icon pipeline rejected) gets
+//! no `icons` entry at all for `.dmg`: the raw PNG would only re-create the
+//! name mismatch, and the plist key then simply dangles exactly as it already
+//! does in the assembled bundle. Every other format keeps taking the source
+//! PNG, which is what `create_icns_file`'s siblings (`.deb`/AppImage/Windows)
+//! actually want.
+//!
+//! **Non-Apple signing identities are deliberately *not* wired into the
+//! packager config.** `cargo-packager`'s own `codesign/macos.rs::sign` pushes
+//! `--timestamp` unconditionally, and a secure timestamp needs Apple's
+//! timestamp service over the network — so handing it an ad-hoc/self-signed
+//! identity turns `--installer dmg` into a network-dependent (and typically
+//! failing) build, contradicting the offline guarantee
+//! [`super::macos::codesign`] keeps for exactly those identities. For an
+//! identity that isn't Apple-issued
+//! ([`super::macos::is_apple_issued_identity`], the same predicate the
+//! bundle's own `codesign` step uses), `signingIdentity` is left out and an
+//! [`InstallerNote::PackagerSigningSkipped`] says so: the `.app` inside the
+//! `.dmg` ships unsigned, the assembled bundle's own signature is untouched,
+//! and signing stays offline.
 //!
 //! **`.rpm` is a typed refusal, not a supported format.** `cargo-packager`
 //! 0.11 has no RPM backend at all (only `.deb`, AppImage, and pacman on
@@ -230,6 +262,34 @@ pub enum InstallerError {
     PackagerFailed { config: PathBuf, tail: String },
 }
 
+/// A non-fatal observation about an installer build, returned instead of
+/// printed so the CLI and the TUI can each render it their own way — the
+/// installer-side counterpart of [`super::BundleNote`]. Every note is also
+/// streamed through `on_line` as a `warning: …` line while the build runs, so
+/// a front-end that only echoes output still surfaces it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallerNote {
+    /// `[macos] signing-identity` names an identity Apple did not issue, so it
+    /// was **not** passed to `cargo-packager` — see this module's doc for the
+    /// `--timestamp`/offline reason.
+    PackagerSigningSkipped { identity: String },
+}
+
+impl fmt::Display for InstallerNote {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InstallerNote::PackagerSigningSkipped { identity } => write!(
+                f,
+                "`[macos] signing-identity` '{identity}' is not Apple-issued, so \
+                 cargo-packager's own signing was skipped (it always signs with \
+                 `--timestamp`, which needs Apple's timestamp service over the network) \
+                 — the .app inside the .dmg ships unsigned. The assembled bundle's own \
+                 codesign is unaffected, and signing stays offline"
+            ),
+        }
+    }
+}
+
 /// What a successful [`build_installer`] call produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallerReport {
@@ -243,6 +303,9 @@ pub struct InstallerReport {
     /// `packager.json` or `cargo-packager`'s own tool cache
     /// (`out_dir/.cargo-packager`, observed during the real smoke run).
     pub artifacts: Vec<PathBuf>,
+    /// Everything worth telling a human that is not a failure — see
+    /// [`InstallerNote`].
+    pub notes: Vec<InstallerNote>,
 }
 
 /// Builds `format`'s installer over `bundle` (a prior [`super::build`] call's
@@ -293,9 +356,25 @@ pub fn build_installer(
         .join(format.as_str());
     prepare_out_dir(&out_dir)?;
 
-    let packager_config = PackagerConfig::new(&config, info, bundle, format, &out_dir, project_dir);
+    let mut notes = Vec::new();
+    let packager_config = PackagerConfig::new(
+        &config,
+        info,
+        bundle,
+        format,
+        &out_dir,
+        project_dir,
+        &mut notes,
+    );
     let config_path = out_dir.join("packager.json");
     write_config(&config_path, &packager_config)?;
+
+    // Streamed *before* the packaging run, so the reason a `.dmg`'s inner app
+    // will come out unsigned is on screen ahead of the tool's own output
+    // rather than after it (the same `warning: ` shape the run pipelines use).
+    for note in &notes {
+        on_line(&format!("warning: {note}"));
+    }
 
     let config_arg = config_path.to_string_lossy().into_owned();
     let args = ["packager", "--config", config_arg.as_str()];
@@ -330,6 +409,7 @@ pub fn build_installer(
         format,
         out_dir,
         artifacts,
+        notes,
     })
 }
 
@@ -428,6 +508,12 @@ struct PackagerConfig {
     identifier: String,
     out_dir: String,
     binaries: Vec<PackagerBinary>,
+    /// The icon input, resolved per format (see this module's doc): the
+    /// assembled bundle's own `<binary_name>.icns` for `.dmg` — the only
+    /// spelling whose name survives into the synthesized bundle's
+    /// `CFBundleIconFile` — and the project's `[desktop] icon` source PNG for
+    /// every other format. Omitted entirely (never a JSON `null`) when there
+    /// is no such input.
     #[serde(skip_serializing_if = "Option::is_none")]
     icons: Option<Vec<String>>,
     formats: Vec<&'static str>,
@@ -463,14 +549,35 @@ struct PackagerMacosConfig {
     /// into the synthesized `.dmg` bundle.
     info_plist_path: String,
     /// `[macos] signing-identity`, resolved the same way
-    /// [`super::macos::codesign`] reads it. `None` leaves the synthesized
-    /// bundle unsigned, exactly like an unconfigured `frust build macos`.
+    /// [`super::macos::codesign`] reads it — but **only** when it names an
+    /// Apple-issued identity (see this module's doc for the `--timestamp`
+    /// reason a local one is suppressed). `None` leaves the synthesized bundle
+    /// unsigned, exactly like an unconfigured `frust build macos`.
     #[serde(skip_serializing_if = "Option::is_none")]
     signing_identity: Option<String>,
     /// `<project>/macos/app.entitlements`, only when the project actually
     /// ships one — the same existence gate [`super::macos::codesign`] applies.
     #[serde(skip_serializing_if = "Option::is_none")]
     entitlements: Option<String>,
+}
+
+/// The `.icns` this bundle's assembly really wrote, read off
+/// [`BundleReport::artifacts`] (the record of what was produced) rather than
+/// re-derived from the bundle layout — `Contents/Resources/<binary_name>.icns`
+/// is [`super::macos::assemble`]'s business, and an assembly that skipped the
+/// icon steps lists no such artifact, which is exactly the "no icon input"
+/// answer wanted here.
+fn generated_icns<'a>(bundle: &'a BundleReport, config: &DesktopConfig) -> Option<&'a Path> {
+    let expected = format!("{}.icns", config.binary_name);
+    bundle
+        .artifacts
+        .iter()
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == expected)
+        })
+        .map(PathBuf::as_path)
 }
 
 impl PackagerConfig {
@@ -481,12 +588,21 @@ impl PackagerConfig {
         format: InstallerFormat,
         out_dir: &Path,
         project_dir: &Path,
+        notes: &mut Vec<InstallerNote>,
     ) -> PackagerConfig {
-        let icons = config
-            .icon_source
-            .as_ref()
-            .filter(|source| source.is_file())
-            .map(|source| vec![source.to_string_lossy().into_owned()]);
+        let icons = match format {
+            // The bundle's own `.icns`, or nothing at all — never the source
+            // PNG, whose repacked name would not match the merged
+            // `CFBundleIconFile` (this module's doc).
+            InstallerFormat::Dmg => {
+                generated_icns(bundle, config).map(|icns| vec![icns.to_string_lossy().into_owned()])
+            }
+            _ => config
+                .icon_source
+                .as_ref()
+                .filter(|source| source.is_file())
+                .map(|source| vec![source.to_string_lossy().into_owned()]),
+        };
 
         let macos = (format == InstallerFormat::Dmg).then(|| PackagerMacosConfig {
             info_plist_path: bundle
@@ -495,7 +611,14 @@ impl PackagerConfig {
                 .join("Info.plist")
                 .to_string_lossy()
                 .into_owned(),
-            signing_identity: config.macos_signing_identity.clone(),
+            signing_identity: config.macos_signing_identity.clone().and_then(|identity| {
+                if super::macos::is_apple_issued_identity(&identity) {
+                    Some(identity)
+                } else {
+                    notes.push(InstallerNote::PackagerSigningSkipped { identity });
+                    None
+                }
+            }),
             entitlements: {
                 let path = project_dir.join("macos").join("app.entitlements");
                 path.is_file().then(|| path.to_string_lossy().into_owned())
@@ -578,9 +701,70 @@ mod tests {
             }
         }
 
+        /// The realistic macOS shape `super::macos::assemble` produces:
+        /// `Contents/{MacOS,Resources}` plus an `Info.plist` whose
+        /// `CFBundleIconFile` names the generated icon exactly the way the
+        /// generated plist does (the bare binary name, no extension), with
+        /// every written file listed in `artifacts`. `icon = false` is the
+        /// assembly whose icon steps were skipped or rejected: no `.icns`, and
+        /// no `CFBundleIconFile` key either.
+        fn macos_app(&self, binary_name: &str, icon: bool) -> BundleReport {
+            let root = DesktopBundleTarget::Macos
+                .dist_dir(&self.dir)
+                .join("My App.app");
+            let contents = root.join("Contents");
+            let resources = contents.join("Resources");
+            fs::create_dir_all(contents.join("MacOS")).unwrap();
+            fs::create_dir_all(&resources).unwrap();
+
+            let executable = contents.join("MacOS").join(binary_name);
+            fs::write(&executable, b"#!/bin/sh\ntrue\n").unwrap();
+            let mut artifacts = vec![executable.clone()];
+
+            let icon_key = if icon {
+                let icns = resources.join(format!("{binary_name}.icns"));
+                fs::write(&icns, b"not-really-an-icns").unwrap();
+                artifacts.push(icns);
+                format!("\t<key>CFBundleIconFile</key>\n\t<string>{binary_name}</string>\n")
+            } else {
+                String::new()
+            };
+
+            let plist = contents.join("Info.plist");
+            fs::write(
+                &plist,
+                format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                     <plist version=\"1.0\">\n<dict>\n\
+                     \t<key>CFBundleExecutable</key>\n\t<string>{binary_name}</string>\n\
+                     {icon_key}</dict>\n</plist>\n"
+                ),
+            )
+            .unwrap();
+            artifacts.push(plist);
+
+            BundleReport {
+                target: DesktopBundleTarget::Macos,
+                root,
+                executable,
+                artifacts,
+                notes: Vec::new(),
+            }
+        }
+
         fn path(&self, rel: &str) -> PathBuf {
             self.dir.join(rel)
         }
+    }
+
+    /// A `<key>K</key><string>V</string>` read out of a fixture plist — enough
+    /// for the one key these tests compare against, without pulling a plist
+    /// parser into `frust-drive` for a test.
+    fn plist_string(plist: &str, key: &str) -> Option<String> {
+        let after = plist.split_once(&format!("<key>{key}</key>"))?.1;
+        let open = after.find("<string>")? + "<string>".len();
+        let close = after[open..].find("</string>")? + open;
+        Some(after[open..close].to_string())
     }
 
     impl Drop for Fixture {
@@ -825,18 +1009,26 @@ mod tests {
                 bundle.executable.to_string_lossy().as_ref()
             );
             assert_eq!(parsed["binaries"][0]["main"], true);
-            assert_eq!(
-                parsed["icons"],
-                serde_json::json!([fixture.path("assets/icon.png").to_string_lossy()])
-            );
             // The `macos` identity block is Dmg-only — every other format's
-            // config carries no such key at all.
+            // config carries no such key at all — and so is the icon rule:
+            // `.dmg` takes the bundle's own `.icns` (this fixture bundle has
+            // none, so no `icons` key at all), every other format the source
+            // PNG.
             if format == InstallerFormat::Dmg {
+                assert!(
+                    parsed.get("icons").is_none(),
+                    "{target}/{format}: {written}"
+                );
                 assert!(
                     parsed.get("macos").is_some(),
                     "{target}/{format}: {written}"
                 );
             } else {
+                assert_eq!(
+                    parsed["icons"],
+                    serde_json::json!([fixture.path("assets/icon.png").to_string_lossy()]),
+                    "{target}/{format}: {written}"
+                );
                 assert!(
                     parsed.get("macos").is_none(),
                     "{target}/{format}: {written}"
@@ -878,15 +1070,24 @@ mod tests {
             },
         );
 
-        build_installer(
+        let mut lines = Vec::new();
+        let report = build_installer(
             &runner,
             &fixture.dir,
             &info(),
             &bundle,
             InstallerFormat::Dmg,
-            &mut |_| {},
+            &mut |line| lines.push(line.to_string()),
         )
         .unwrap();
+
+        // An Apple-issued identity is wired through unchanged: nothing to warn
+        // about, nothing to note.
+        assert!(report.notes.is_empty(), "{:?}", report.notes);
+        assert!(
+            !lines.iter().any(|l| l.starts_with("warning:")),
+            "{lines:?}"
+        );
 
         let written = fs::read_to_string(out_dir.join("packager.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
@@ -912,6 +1113,190 @@ mod tests {
                 .as_ref(),
             "{written}"
         );
+    }
+
+    /// The offline guarantee, kept end-to-end: an identity Apple did not issue
+    /// is never handed to `cargo-packager` (whose own codesign pass always
+    /// passes `--timestamp`), so `signingIdentity` is absent and a typed note
+    /// plus a `warning:` line say what that costs. The rest of the block —
+    /// plist path, entitlements — is unaffected.
+    #[test]
+    fn dmg_config_suppresses_a_non_apple_issued_signing_identity_with_a_note() {
+        let fixture = Fixture::new("dmg-adhoc-identity").manifest(
+            "[app]\nname = \"my_app\"\norg = \"dev.f0x\"\n\n\
+             [desktop]\nname = \"My App\"\nidentifier = \"dev.f0x.my_app\"\n\n\
+             [macos]\nsigning-identity = \"My Self Signed\"\n",
+        );
+        fs::create_dir_all(fixture.path("macos")).unwrap();
+        fs::write(
+            fixture.path("macos/app.entitlements"),
+            "<?xml version=\"1.0\"?><plist><dict/></plist>",
+        )
+        .unwrap();
+        let bundle = fixture.macos_app("my_app", true);
+        let out_dir = DesktopBundleTarget::Macos
+            .dist_dir(&fixture.dir)
+            .join("installer")
+            .join("dmg");
+        let config_arg = out_dir.join("packager.json").to_string_lossy().into_owned();
+        let runner = version_ok().with(
+            format!("cargo packager --config {config_arg}"),
+            Output {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+
+        let mut lines = Vec::new();
+        let report = build_installer(
+            &runner,
+            &fixture.dir,
+            &info(),
+            &bundle,
+            InstallerFormat::Dmg,
+            &mut |line| lines.push(line.to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.notes,
+            vec![InstallerNote::PackagerSigningSkipped {
+                identity: "My Self Signed".to_string(),
+            }]
+        );
+        let warning = lines
+            .iter()
+            .find(|l| l.starts_with("warning:"))
+            .unwrap_or_else(|| panic!("expected a warning line: {lines:?}"));
+        assert!(warning.contains("My Self Signed"), "{warning}");
+        assert!(warning.contains("ships unsigned"), "{warning}");
+        assert!(warning.contains("offline"), "{warning}");
+
+        let written = fs::read_to_string(out_dir.join("packager.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert!(
+            parsed["macos"].get("signingIdentity").is_none(),
+            "{written}"
+        );
+        assert!(parsed["macos"].get("infoPlistPath").is_some(), "{written}");
+        assert!(parsed["macos"].get("entitlements").is_some(), "{written}");
+    }
+
+    /// The icon defect this task fixes: the `.dmg` config names the *bundle's
+    /// own* `.icns`, whose file name `cargo-packager`'s `create_icns_file`
+    /// keeps verbatim — so the `CFBundleIconFile` its merged plist ends up with
+    /// (ours, since our keys overwrite its own) actually resolves. Asserted as
+    /// the agreement itself: the icons entry's file stem equals the plist's
+    /// `CFBundleIconFile` value.
+    #[test]
+    fn dmg_config_icons_entry_agrees_with_the_plists_icon_key() {
+        let fixture = Fixture::new("dmg-icns").manifest(
+            "[app]\nname = \"my_app\"\norg = \"dev.f0x\"\n\n\
+             [desktop]\nname = \"My App\"\nidentifier = \"dev.f0x.my_app\"\n\
+             icon = \"assets/icon.png\"\n",
+        );
+        fs::create_dir_all(fixture.path("assets")).unwrap();
+        fs::write(fixture.path("assets/icon.png"), b"not-really-a-png").unwrap();
+        let bundle = fixture.macos_app("my_app", true);
+        let out_dir = DesktopBundleTarget::Macos
+            .dist_dir(&fixture.dir)
+            .join("installer")
+            .join("dmg");
+        let config_arg = out_dir.join("packager.json").to_string_lossy().into_owned();
+        let runner = version_ok().with(
+            format!("cargo packager --config {config_arg}"),
+            Output {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+
+        build_installer(
+            &runner,
+            &fixture.dir,
+            &info(),
+            &bundle,
+            InstallerFormat::Dmg,
+            &mut |_| {},
+        )
+        .unwrap();
+
+        let written = fs::read_to_string(out_dir.join("packager.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
+        let icons = parsed["icons"].as_array().expect(&written);
+        assert_eq!(icons.len(), 1, "{written}");
+        let icon_path = PathBuf::from(icons[0].as_str().unwrap());
+        // Never the source PNG — the `.icns` the assembly wrote.
+        assert_eq!(icon_path.extension().unwrap(), "icns", "{written}");
+        assert_eq!(
+            icon_path,
+            bundle
+                .root
+                .join("Contents")
+                .join("Resources")
+                .join("my_app.icns"),
+            "{written}"
+        );
+
+        let plist = fs::read_to_string(PathBuf::from(
+            parsed["macos"]["infoPlistPath"].as_str().expect(&written),
+        ))
+        .unwrap();
+        let declared = plist_string(&plist, "CFBundleIconFile")
+            .unwrap_or_else(|| panic!("no CFBundleIconFile in the fixture plist:\n{plist}"));
+        // Apple accepts the name with or without the extension; the stems are
+        // what have to agree.
+        let declared_stem = declared.strip_suffix(".icns").unwrap_or(&declared);
+        assert_eq!(
+            icon_path.file_stem().unwrap().to_string_lossy(),
+            declared_stem,
+            "{written}"
+        );
+    }
+
+    /// The other half: an assembly whose icon steps were skipped or rejected
+    /// wrote no `.icns`, so the `.dmg` config carries no `icons` entry at all —
+    /// deliberately *not* the source PNG, which `create_icns_file` would repack
+    /// under the display name and leave the merged `CFBundleIconFile` dangling.
+    #[test]
+    fn dmg_config_omits_icons_when_the_bundle_has_no_icns() {
+        let fixture = Fixture::new("dmg-no-icns").manifest(
+            "[app]\nname = \"my_app\"\norg = \"dev.f0x\"\n\n\
+             [desktop]\nname = \"My App\"\nidentifier = \"dev.f0x.my_app\"\n\
+             icon = \"assets/icon.png\"\n",
+        );
+        fs::create_dir_all(fixture.path("assets")).unwrap();
+        fs::write(fixture.path("assets/icon.png"), b"not-really-a-png").unwrap();
+        let bundle = fixture.macos_app("my_app", false);
+        let out_dir = DesktopBundleTarget::Macos
+            .dist_dir(&fixture.dir)
+            .join("installer")
+            .join("dmg");
+        let config_arg = out_dir.join("packager.json").to_string_lossy().into_owned();
+        let runner = version_ok().with(
+            format!("cargo packager --config {config_arg}"),
+            Output {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+
+        build_installer(
+            &runner,
+            &fixture.dir,
+            &info(),
+            &bundle,
+            InstallerFormat::Dmg,
+            &mut |_| {},
+        )
+        .unwrap();
+
+        let written = fs::read_to_string(out_dir.join("packager.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert!(parsed.get("icons").is_none(), "{written}");
     }
 
     /// The negative half: no `[macos] signing-identity` and no
