@@ -1863,21 +1863,23 @@ dependencies; review R2-M1 and R2-M6 (workflow/reviews/i18n-plugin/REVIEW-r2.md)
 
 ---
 
-### `desktop-shells-runtime-unverified` — the three per-OS desktop shells are compile-gated only, never launched
+### `desktop-shells-runtime-unverified` — the Windows and Linux desktop shells are compile-gated only, never launched
 
 **Observed**: Phase A's `frust-shell-macos`/`-windows`/`-linux` (menu bar, lifecycle, window
 icon/identity) were built and integrated from a headless Linux host — proven only via cross-target
 `cargo check` (Windows: `x86_64-pc-windows-gnu`; macOS: `aarch64-apple-darwin`, both host-side
 where the toolchain exists and via a containerized `rust:1-bookworm` + `mingw-w64` recipe; Linux:
-native `cargo check --workspace` here). No window was ever opened on any of the three. Owed:
-**macOS** — menu bar with correct app name, ⌘Q, Hide/Show All, close-then-Dock-click reopen
-(Ed's MacBook pass). **Windows** — titlebar+taskbar icon, `AppUserModelID` grouping, dark
-titlebar following the app theme, the native menu bar, and accelerators (Ed's Windows 11 PC
+native `cargo check --workspace` here). **macOS** is no longer in this gap: the MacBook runtime
+gate (2026-08-15, `macbook-gate-r1`, 15/15 checks passed) launched real windows and verified the
+menu bar with the app-named items, ⌘Q via both the menu and the accelerator, Hide/Show All,
+close-then-Dock-click reopen from the inactive state, and the zero-config preview — all with no
+functional bugs found. Still owed: **Windows** — titlebar+taskbar icon, `AppUserModelID` grouping,
+dark titlebar following the app theme, the native menu bar, and accelerators (Ed's Windows 11 PC
 pass). **Linux** — Wayland `app_id`/X11 `WM_CLASS` pairing and the window icon (a non-headless
 Linux session; rides Phase B's `.desktop` milestone).
 
-**Applies to**: any app built with a Phase A desktop shell on macOS, Windows, or Linux, until the
-matching device pass runs.
+**Applies to**: any app built with a Phase A desktop shell on Windows or Linux, until the matching
+device pass runs.
 
 **Why accepted**: PLAN.md's Edge Cases documented this verification asymmetry before the phase
 started (only Linux hardware was on hand); the cross-target compile gates are the strongest proof
@@ -1887,7 +1889,9 @@ than guessed.
 
 **Evidence**: desktop-shells Phase A tasks 02/03/04/05/06 completion summaries (Risks/Limitations
 sections); `workflow/plans/features/desktop-shells/phase-a/TASKS.md` Build State (Wave 3
-integration-verify cross-target matrix).
+integration-verify cross-target matrix); macOS runtime verification —
+`workflow/plans/features/desktop-shells/phase-a/followups/macbook-gate-r1/TASKS.md` (gate table
+G4, G5, G9, G12, G15).
 
 ---
 
@@ -1953,12 +1957,15 @@ produces a frame.
 bring it back.
 
 **Why accepted**: no public reopen hook exists in winit 0.30; the notification observer is the best
-available substitute. Flagged by the implementor for reviewer confirmation; not yet closed by a
-review round.
+available substitute. Flagged by the implementor for reviewer confirmation, closed by the round-1
+review, and the gap's exact shape was then confirmed live on real hardware.
 
 **Evidence**: desktop-shells Phase A task 03 completion summary (Notable Decisions #3,
 Risks/Limitations #3); `workflow/plans/features/desktop-shells/phase-a/TASKS.md` Notes
-(review-watch item #2).
+(review-watch item #2). Runtime confirmation —
+`workflow/plans/features/desktop-shells/phase-a/followups/macbook-gate-r1/TASKS.md` G13: a
+Dock click on the already-active app with the window hidden did not re-show it (gap reproduced
+exactly); G12 confirms the inactive-path reopen works.
 
 ---
 
@@ -1987,15 +1994,41 @@ holding an OS-resource-owning plugin handle in its `State` gets no chance to rel
 route. `frust-camera`'s `AppleSession` (shared by macOS and iOS; its `Drop` releases the capture
 device) is a real current instance of this, not a hypothetical one — a `CameraSession` reachable
 from app `State` on this quit route leaves the camera device unreleased by any Rust-side cleanup.
-Flagged by the implementor for reviewer confirmation; not yet closed by a review round. A later fix
-would route termination through `appkit_glue`'s `applicationShouldTerminate:`
-(`NSApplication.TerminateReply.terminateLater`, run the graceful shutdown, then `terminateNow`)
-instead of the current predefined action.
+Flagged by the implementor for reviewer confirmation, closed by the round-1 review, and both
+routes were then observed live on real hardware. A later fix would route termination through
+`appkit_glue`'s `applicationShouldTerminate:` (`NSApplication.TerminateReply.terminateLater`, run
+the graceful shutdown, then `terminateNow`) instead of the current predefined action.
 
 **Evidence**: desktop-shells Phase A task 03 completion summary (Notable Decisions #2);
 `workflow/plans/features/desktop-shells/phase-a/TASKS.md` Notes (review-watch item #1);
 `plugins/camera/src/apple.rs` (`AppleSession`'s `Drop`, module doc's macOS-shares-the-Apple-arm
-note).
+note). Runtime confirmation —
+`workflow/plans/features/desktop-shells/phase-a/followups/macbook-gate-r1/TASKS.md` G9 and G14:
+the `terminate:` route (menu Quit and ⌘Q, including while the window was hidden) exits without
+`run` returning; G10 confirms the close-window route returns from `run` cleanly (exit code 0).
+
+---
+
+### `desktop-macos-app-menu-title-process-name` — the bold application-menu title shows the process name, not `DesktopConfig::app_name`, for unbundled binaries
+
+**Observed**: AppKit derives the bold application-menu *title* in the menu bar from the
+bundle/process name and ignores the installed `NSMenu` item's title for unbundled binaries. A
+`cargo run`-style dev binary named "Frust Gate" via `DesktopConfig` shows `frust-gate` (the
+process name) as the bold menu title, while every item label inside it (About/Hide/Quit Frust
+Gate) correctly carries the configured name. Verified live on the MacBook runtime gate
+(`macbook-gate-r1`, finding F-2).
+
+**Applies to**: unbundled macOS dev-preview launches (`cargo run` / `frust run` fallback) using a
+Phase A desktop shell.
+
+**Why accepted**: no public API sets the application-menu title for an unbundled process — it is
+sourced from the process/bundle name, not from any NSMenu item. The designed fix is Phase B's
+`.app` bundle assembly writing `CFBundleName`, which closes the gap for bundled runs; recorded as
+a Phase B acceptance rider.
+
+**Evidence**: `workflow/plans/features/desktop-shells/phase-a/followups/macbook-gate-r1/TASKS.md`
+gate table (G4, G5) and Findings (F-2); its Phase-B rider section (bundle-assembly acceptance
+criterion for `CFBundleName`).
 
 ---
 
