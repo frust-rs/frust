@@ -1774,3 +1774,48 @@ and `fmt/number.rs` (its `percent` formatter shares the same `icu_experimental` 
 **Evidence**: `plugins/i18n/src/fmt/currency.rs`'s module doc and `ZERO_DIGIT`/`THREE_DIGIT`
 tables; `plugins/i18n/src/fmt/number.rs`'s module doc ("percent rides `icu_experimental`, like
 currency").
+
+---
+
+### `i18n-inmessage-format-locale` — in-message `NUMBER()`/`DATETIME()` format at the message locale, not `format_locale`
+
+**Observed**: in-message Fluent placeables like `{ DATETIME($when, dateStyle: "medium") }`
+format using the message locale, not the `format_locale`. For an `en-GB` user of an
+`en`-only app, in-message messages render `Jan 31, 2024` (US date order) rather than
+`31 Jan 2024` (UK date order). The direct `frust_i18n::fmt::date` API respects
+`format_locale` correctly — the same screen's direct formatting calls show the correct
+regional format — so the gap is placeables only.
+
+**Mechanism**: ICU Fluent functions (`NUMBER`/`DATETIME`) are registered once per
+bundle locale during `Engine::new` via `LocaleSet::with_locale_function`, and each
+closure captures its bundle locale by value. Since `Engine` is immutable after
+construction, every in-message placeable formats at the locale that locale was
+registered with — there is no resolve-time parameterization.
+
+**Applies to**: any app using `formatting` feature + in-message `NUMBER()`/`DATETIME()`
+placeables + a user whose regional preference (region code in the requested locale)
+differs from or exceeds the app's message-bundle language coverage. The gap is most
+visible when `format_locale` returns a regional variant of the message locale
+(e.g., `en-GB` when messages are `en`), or when the no-coverage rule applies and
+`format_locale` selects a regional tag the app has no messages for.
+
+**Residual gap**: region-level conventions (date order, grouping, calendar system,
+numbering system) inside FTL-embedded formatting only. The app-side direct formatters
+(`fmt::date`, `fmt::decimal`, etc.) and the message resolution path (`I18n::locale`,
+`I18n::t`) are unaffected.
+
+**Workaround**: format app-side via `frust_i18n::fmt::` (passing `I18n::format_locale`)
+and interpolate the formatted string into the message key, rather than embedding the
+formatter call in the `.ftl` source. Example: resolve a message skeleton like
+`last-visit = Last visit: {$formatted_when}`, computing `formatted_when` from an
+app-side `fmt::date(i18n.format_locale(), ...)` call.
+
+**Revisit**: resolve-time locale parameterization — registering ICU functions per
+locale at resolve time rather than at engine construction. This would make in-message
+formatters locale-aware like the direct API, at the cost of per-call overhead and
+a more complex `Engine::resolve` contract. Deferred from v1 scope.
+
+**Evidence**: `plugins/i18n/src/engine/mod.rs`'s `LocaleSet::with_locale_function` doc
+and the `Engine` concurrency contract (`Engine` built once, bundles immutable);
+`plugins/i18n/src/fmt/fluent_fns.rs` (with_icu_functions closure captures locale at
+bundle-build time); review R1-M1 (workflow/reviews/i18n-plugin/REVIEW-r1.md).
