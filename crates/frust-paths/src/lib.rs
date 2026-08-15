@@ -12,14 +12,18 @@
 //!
 //! # Conventions preserved from those sites
 //!
-//! - **Data directory** ([`data_dir`]): Unix resolves `$XDG_DATA_HOME` if set
-//!   *and absolute*, else `$HOME/.local/share`. Windows resolves `%APPDATA%`.
+//! - **Data directory** ([`data_dir`]): iOS resolves
+//!   `$HOME/Library/Application Support` (`$HOME` is the sandbox container;
+//!   the XDG shape would hit the read-only container root — see
+//!   [`data_dir`]'s doc). Other Unix resolves `$XDG_DATA_HOME` if set *and
+//!   absolute*, else `$HOME/.local/share`. Windows resolves `%APPDATA%`.
 //!   Any other target, or an unresolvable environment (no `HOME`/`APPDATA`),
 //!   returns `None` — this crate never guesses a fallback that could
 //!   silently write into the process's current directory.
-//! - **Cache directory** ([`cache_dir`]): Unix resolves `$XDG_CACHE_HOME` if
-//!   set and absolute, else `$HOME/.cache`. Windows resolves
-//!   `%LOCALAPPDATA%`. Same `None`-on-unresolvable contract as `data_dir`.
+//! - **Cache directory** ([`cache_dir`]): iOS resolves `$HOME/Library/Caches`;
+//!   other Unix resolves `$XDG_CACHE_HOME` if set and absolute, else
+//!   `$HOME/.cache`. Windows resolves `%LOCALAPPDATA%`. Same
+//!   `None`-on-unresolvable contract as `data_dir`.
 //! - **Absolute-validation debug log**: a set-but-relative `XDG_DATA_HOME`/
 //!   `XDG_CACHE_HOME` is ignored per the XDG Base Directory spec, and that
 //!   ignoring is logged at `debug` (via the `log` crate) so a misconfigured
@@ -57,14 +61,24 @@ use std::path::{Path, PathBuf};
 
 /// Resolve the user's data directory.
 ///
-/// - Unix: `$XDG_DATA_HOME` if set and absolute, else `$HOME/.local/share`.
+/// - iOS: `$HOME/Library/Application Support` — `$HOME` is the app's own
+///   sandbox container, and `Library/` is one of its three writable roots;
+///   the XDG shape below would land on the container *root*, which the
+///   sandbox rejects with `EPERM` on the first `create_dir_all`. XDG vars
+///   are ignored here — they have no meaning inside an iOS sandbox.
+/// - Other Unix: `$XDG_DATA_HOME` if set and absolute, else
+///   `$HOME/.local/share`.
 /// - Windows: `%APPDATA%`.
 /// - Any other target: `None`.
 ///
 /// `None` when unresolvable (`HOME`/`APPDATA` unset) — never guesses a
 /// fallback that could write into the current directory.
 pub fn data_dir() -> Option<PathBuf> {
-    #[cfg(unix)]
+    #[cfg(target_os = "ios")]
+    {
+        ios_data_dir_from(std::env::var("HOME").ok().as_deref())
+    }
+    #[cfg(all(unix, not(target_os = "ios")))]
     {
         data_dir_from(
             std::env::var("XDG_DATA_HOME").ok().as_deref(),
@@ -83,14 +97,20 @@ pub fn data_dir() -> Option<PathBuf> {
 
 /// Resolve the user's cache directory.
 ///
-/// - Unix: `$XDG_CACHE_HOME` if set and absolute, else `$HOME/.cache`.
+/// - iOS: `$HOME/Library/Caches` — same sandbox-container reasoning as
+///   [`data_dir`]'s iOS arm; XDG vars are ignored.
+/// - Other Unix: `$XDG_CACHE_HOME` if set and absolute, else `$HOME/.cache`.
 /// - Windows: `%LOCALAPPDATA%`.
 /// - Any other target: `None`.
 ///
 /// `None` when unresolvable. Logs at `debug` (via the `log` crate) when a
 /// set-but-relative XDG var is ignored per the XDG Base Directory spec.
 pub fn cache_dir() -> Option<PathBuf> {
-    #[cfg(unix)]
+    #[cfg(target_os = "ios")]
+    {
+        ios_cache_dir_from(std::env::var("HOME").ok().as_deref())
+    }
+    #[cfg(all(unix, not(target_os = "ios")))]
     {
         cache_dir_from(
             std::env::var("XDG_CACHE_HOME").ok().as_deref(),
@@ -153,10 +173,34 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     rename_result
 }
 
+/// Env-parameterized body of [`data_dir`]'s iOS branch: `home` joined with
+/// `Library/Application Support`, `None` without a `HOME` — same
+/// no-guessing contract as every other arm.
+#[cfg(any(target_os = "ios", test))]
+fn ios_data_dir_from(home: Option<&str>) -> Option<PathBuf> {
+    home.map(|home| {
+        let mut p = PathBuf::from(home);
+        p.extend(["Library", "Application Support"]);
+        p
+    })
+}
+
+/// Env-parameterized body of [`cache_dir`]'s iOS branch: `home` joined
+/// with `Library/Caches`.
+#[cfg(any(target_os = "ios", test))]
+fn ios_cache_dir_from(home: Option<&str>) -> Option<PathBuf> {
+    home.map(|home| {
+        let mut p = PathBuf::from(home);
+        p.extend(["Library", "Caches"]);
+        p
+    })
+}
+
 /// Absolute-validated `xdg` (logged-and-ignored at `debug` if set but
 /// relative), else `home` joined with `suffix` — the shared shape behind
-/// both [`data_dir_from`]/[`cache_dir_from`] on Unix.
-#[cfg(unix)]
+/// both [`data_dir_from`]/[`cache_dir_from`] on non-iOS Unix (iOS resolves
+/// inside its sandbox container instead — see [`data_dir`]).
+#[cfg(all(unix, not(target_os = "ios")))]
 fn xdg_or_home(
     xdg: Option<&str>,
     xdg_var_name: &str,
@@ -180,13 +224,13 @@ fn xdg_or_home(
 /// Env-parameterized body of [`data_dir`]'s Unix branch — lets tests
 /// exercise the resolution logic against injected values without ever
 /// touching the real `HOME`/`XDG_DATA_HOME`.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "ios")))]
 fn data_dir_from(xdg_data_home: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
     xdg_or_home(xdg_data_home, "XDG_DATA_HOME", home, &[".local", "share"])
 }
 
 /// Env-parameterized body of [`cache_dir`]'s Unix branch.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "ios")))]
 fn cache_dir_from(xdg_cache_home: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
     xdg_or_home(xdg_cache_home, "XDG_CACHE_HOME", home, &[".cache"])
 }
@@ -206,6 +250,34 @@ fn cache_dir_from(localappdata: Option<&str>) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- ios_data_dir_from / ios_cache_dir_from --------------------------
+
+    #[test]
+    fn ios_data_dir_is_application_support_inside_the_container() {
+        assert_eq!(
+            ios_data_dir_from(Some("/private/var/mobile/Containers/Data/Application/ABC")),
+            Some(PathBuf::from(
+                "/private/var/mobile/Containers/Data/Application/ABC/Library/Application Support"
+            ))
+        );
+    }
+
+    #[test]
+    fn ios_cache_dir_is_library_caches_inside_the_container() {
+        assert_eq!(
+            ios_cache_dir_from(Some("/private/var/mobile/Containers/Data/Application/ABC")),
+            Some(PathBuf::from(
+                "/private/var/mobile/Containers/Data/Application/ABC/Library/Caches"
+            ))
+        );
+    }
+
+    #[test]
+    fn ios_dirs_are_none_without_a_home() {
+        assert_eq!(ios_data_dir_from(None), None);
+        assert_eq!(ios_cache_dir_from(None), None);
+    }
 
     // --- data_dir_from / cache_dir_from (Unix) ---------------------------
 
