@@ -1,63 +1,295 @@
 //! macOS desktop shell: the native AppKit half of `frust-shell-desktop`'s
-//! [`DesktopExtensions`](frust_shell_desktop::extensions::DesktopExtensions)
-//! seam.
+//! [`DesktopExtensions`] seam.
 //!
-//! [`MacosExtensions`] is this platform's implementation of the six-hook
-//! trait: a native menu bar built from `DesktopConfig::menu_spec` (via
-//! `muda`'s `NSMenu` bindings), Dock reopen semantics, hide-on-close instead
-//! of quit-on-close, and any other AppKit integration the cross-platform
-//! core in `frust-shell-desktop` does not — and must not — know about. Every
-//! hook still resolves to
-//! [`DesktopExtensions`](frust_shell_desktop::extensions::DesktopExtensions)'s
-//! no-op default, so today [`MacosExtensions`] behaves identically to
-//! [`NoExtensions`](frust_shell_desktop::extensions::NoExtensions) — a
-//! compilable skeleton a follow-on task fills in.
+//! [`MacosExtensions`] implements the platform behavior the cross-platform
+//! core in `frust-shell-desktop` does not — and must not — know about:
+//!
+//! - a **native menu bar** built from `DesktopConfig`: the standard,
+//!   app-named application menu (About/Hide/Hide Others/Show All/Quit) plus
+//!   the app's own `MenuSpec`, with activations reaching app code through
+//!   `frust_reactive::push_menu_event` on the same frame they arrive (the
+//!   `menu` module);
+//! - **quit and reopen semantics**: `quit_on_last_window_closed = false` hides
+//!   the window on a close request instead of exiting, and a Dock-click
+//!   re-activation brings it back (the `lifecycle` module);
+//! - the AppKit calls neither `winit` nor `muda` expose, confined to the
+//!   `appkit_glue` module — this crate's sanctioned-unsafe zone, in the shape
+//!   of `frust-shell-android`'s `jni_glue` and `frust-shell-ios`'s `ffi_glue`.
+//!
+//! # Shutdown
+//!
+//! Two quit routes exist, and they are not the same path:
+//!
+//! - **A window close that quits** (`quit_on_last_window_closed = true`, the
+//!   default) returns `CloseAction::Exit`, so the shared core exits its event
+//!   loop, `run_app` returns, and the frame executor drops — the render thread
+//!   joins after a final present and its best-effort pipeline-cache persist.
+//!   That is the desktop core's own clean-shutdown path, unchanged by this
+//!   crate.
+//! - **The standard Quit item and ⌘Q** are AppKit's own `terminate:`, because
+//!   they must work while this shell's window is hidden and no frame is being
+//!   produced — a Quit routed through the per-frame pump would do nothing in
+//!   exactly the state the macOS convention creates. `winit`'s application
+//!   delegate still turns AppKit's termination into a `LoopExiting` dispatch,
+//!   but the executor's `Drop` does not run on that route (the pipeline-cache
+//!   write it guards is a documented no-op on macOS anyway — Metal exposes no
+//!   pipeline cache; see `frust-shell-desktop`'s `cache` module).
+//!
+//! Neither route calls `std::process::exit`.
 //!
 //! # Inert off macOS
 //!
 //! This crate is a workspace member on every host: its AppKit bindings
-//! (`muda`, `objc2`, `objc2-app-kit`, `objc2-foundation`) are declared only
-//! in a `cfg(target_os = "macos")` dependency table (see `Cargo.toml`), so a
-//! non-macOS host — this repo's Linux dev/CI machine — builds none of them;
-//! [`MacosExtensions`] itself has no macOS-only field or import, so it
-//! compiles identically everywhere. This mirrors `frust-shell-android`'s
+//! (`muda`, `objc2`, `objc2-app-kit`, `objc2-foundation`) are declared only in
+//! a `cfg(target_os = "macos")` dependency table (see `Cargo.toml`), and every
+//! module that names them is `cfg`-gated to match. Off macOS the type still
+//! exists and every hook still compiles — the menu is never built, the AppKit
+//! observer is never installed (so nothing ever reports a reopen), and the
+//! close policy — plain `winit` — is the only part that still runs. Nothing
+//! installs this extension off macOS anyway; the point is that the workspace
+//! builds. This mirrors `frust-shell-android`'s
 //! inert-off-target shape (see its own crate docs).
 
-use frust_shell_desktop::extensions::DesktopExtensions;
+use std::sync::Arc;
 
-/// The macOS [`DesktopExtensions`] implementation.
+use frust_shell_desktop::config::{DEFAULT_APP_NAME, DesktopConfig, MenuSpec};
+use frust_shell_desktop::extensions::{CloseAction, DesktopExtensions};
+use winit::window::Window;
+
+#[cfg(target_os = "macos")]
+mod appkit_glue;
+// Both modules carry the halves only the AppKit path drives — the reopen
+// transition (whose caller is `appkit_glue`) and the menu construction and
+// activation queue (whose caller is `muda`'s handler). Off macOS those callers
+// do not compile, so their targets read as dead code on this repo's Linux
+// build host; the allow is scoped to that host, leaving real dead code on the
+// macOS build (the one that ships) still reported.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod lifecycle;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod menu;
+
+use lifecycle::{CloseDecision, Lifecycle};
+
+/// The macOS [`DesktopExtensions`] implementation — construct it from the same
+/// [`DesktopConfig`] handed to
+/// [`run_desktop_with`](frust_shell_desktop::run_desktop_with) and install it
+/// there (the `frust` facade does this on macOS targets).
 ///
-/// Carries no state yet — every hook is still the trait's no-op default (see
-/// the module docs). Native menu-bar installation, Dock reopen, and
-/// hide-on-close behavior land in a follow-on task, which is expected to add
-/// fields here (e.g. a retained `muda::Menu`) rather than replace this type.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct MacosExtensions;
+/// The configuration is read once, at construction: this type owns the
+/// resolved application-menu name and a copy of the app's `MenuSpec`, and
+/// builds the native menu when the window arrives.
+pub struct MacosExtensions {
+    /// The name the application menu is titled with (see
+    /// [`resolve_app_name`]).
+    app_name: String,
+    /// The app's own menu declaration, appended after the application menu.
+    menu_spec: Option<MenuSpec>,
+    /// Close/reopen policy plus the retained window, shared with the AppKit
+    /// activation observer (see [`lifecycle`]).
+    lifecycle: Arc<Lifecycle>,
+    /// Reused across frames so the per-frame drain allocates nothing.
+    drained: Vec<String>,
+    /// The installed menu bar. Retained because dropping it tears the native
+    /// menu down.
+    #[cfg(target_os = "macos")]
+    menu: Option<muda::Menu>,
+    /// The live reopen registration; dropping it unregisters.
+    #[cfg(target_os = "macos")]
+    activation: Option<appkit_glue::AppActivationObserver>,
+}
 
 impl MacosExtensions {
-    /// A fresh, hook-free extension set — see the struct docs for what still
-    /// needs to land.
-    pub fn new() -> Self {
-        Self
+    /// Build the macOS extension set for `config`.
+    pub fn new(config: &DesktopConfig) -> Self {
+        Self {
+            app_name: resolve_app_name(config.app_name.as_deref(), current_exe_stem().as_deref()),
+            menu_spec: config.menu_spec.clone(),
+            lifecycle: Arc::new(Lifecycle::new(config.quit_on_last_window_closed)),
+            drained: Vec::new(),
+            #[cfg(target_os = "macos")]
+            menu: None,
+            #[cfg(target_os = "macos")]
+            activation: None,
+        }
     }
 }
 
-impl DesktopExtensions for MacosExtensions {}
+impl DesktopExtensions for MacosExtensions {
+    fn on_window_created(&mut self, window: &Arc<Window>) {
+        // The one hook that receives the window: retain it for the hooks that
+        // need it later (hide-on-close, the reopen re-show) and as the redraw
+        // target a menu activation wakes.
+        self.lifecycle.set_window(window.clone());
+        let bridge = menu::bridge();
+        bridge.set_known_ids(menu::collect_app_item_ids(self.menu_spec.as_ref()));
+        bridge.set_waker(window.clone());
+
+        #[cfg(target_os = "macos")]
+        {
+            // Ordering matters: route activations into the queue before the
+            // menu that produces them exists.
+            menu::install_event_handler();
+            self.menu = menu::install_menu(&self.app_name, self.menu_spec.as_ref());
+            self.activation =
+                appkit_glue::AppActivationObserver::install(Arc::clone(&self.lifecycle));
+        }
+    }
+
+    fn pump(&mut self) {
+        // The per-OS half of the signal-poll seam: an activation drained here
+        // is visible to *this* frame's rebuild, since the core calls `pump` at
+        // the top of the redraw pass. `push_menu_event` is UI-thread-only,
+        // which is why the queue exists rather than a push from the platform
+        // callback itself (see the `menu` module docs).
+        menu::bridge().drain_into(&mut self.drained);
+        for id in self.drained.drain(..) {
+            frust_reactive::push_menu_event(id);
+        }
+    }
+
+    fn on_close_requested(&mut self) -> CloseAction {
+        match self.lifecycle.on_close_requested() {
+            CloseDecision::Quit => CloseAction::Exit,
+            CloseDecision::Hide => CloseAction::KeepRunning,
+        }
+    }
+}
+
+impl std::fmt::Debug for MacosExtensions {
+    /// Hand-written: `muda::Menu` implements no `Debug`, and the menu's
+    /// interesting state is whether one is installed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = f.debug_struct("MacosExtensions");
+        debug
+            .field("app_name", &self.app_name)
+            .field("menu_spec", &self.menu_spec)
+            .field("lifecycle", &self.lifecycle)
+            .field("pending_menu_events", &self.drained.len());
+        #[cfg(target_os = "macos")]
+        debug
+            .field("menu_installed", &self.menu.is_some())
+            .field("reopen_observer", &self.activation.is_some());
+        debug.finish()
+    }
+}
+
+/// The name the application menu is titled with: the configured
+/// `DesktopConfig::app_name`, else the running executable's file stem, else
+/// [`DEFAULT_APP_NAME`].
+///
+/// The executable stem is the middle fallback rather than `window_title()`'s
+/// because the two questions differ: an unnamed app should get the name macOS
+/// itself would show for an unbundled binary (`NSProcessInfo`'s process name
+/// is that same stem), not the window title's `Frust` placeholder — the
+/// application menu is where an app's name is most visible, and
+/// `DesktopConfig::app_name`'s docs keep the unset case distinguishable
+/// precisely so a shell can make this choice.
+fn resolve_app_name(app_name: Option<&str>, exe_stem: Option<&str>) -> String {
+    app_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .or_else(|| exe_stem.map(str::trim).filter(|stem| !stem.is_empty()))
+        .unwrap_or(DEFAULT_APP_NAME)
+        .to_string()
+}
+
+/// The running executable's file stem, or `None` when it cannot be resolved
+/// (an unreadable `/proc`, a deleted binary) — a diagnostic-only lookup, never
+/// a failure.
+fn current_exe_stem() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.file_stem()?.to_string_lossy().into_owned())
+}
 
 #[cfg(test)]
 mod tests {
+    use frust_shell_desktop::config::{MenuItemSpec, MenuRole};
+
     use super::*;
 
     #[test]
-    fn new_matches_default() {
-        assert_eq!(MacosExtensions::new(), MacosExtensions);
+    fn implements_desktop_extensions() {
+        // A compile-time assertion as much as a runtime one: this only builds
+        // if `MacosExtensions` actually implements the trait.
+        fn assert_impl<E: DesktopExtensions>() {}
+        assert_impl::<MacosExtensions>();
     }
 
     #[test]
-    fn implements_desktop_extensions_with_every_hook_at_its_default() {
-        // A compile-time assertion as much as a runtime one: this only
-        // builds if `MacosExtensions` actually implements the trait.
-        fn assert_impl<E: DesktopExtensions>() {}
-        assert_impl::<MacosExtensions>();
+    fn a_configured_app_name_titles_the_application_menu() {
+        assert_eq!(
+            resolve_app_name(Some("Huddle"), Some("huddle-dev")),
+            "Huddle"
+        );
+    }
+
+    #[test]
+    fn an_unnamed_app_falls_back_to_the_executable_stem_then_to_the_default() {
+        assert_eq!(resolve_app_name(None, Some("huddle-dev")), "huddle-dev");
+        assert_eq!(resolve_app_name(None, None), DEFAULT_APP_NAME);
+    }
+
+    #[test]
+    fn a_blank_name_is_treated_as_unset() {
+        // A menu titled with whitespace is indistinguishable from a broken
+        // menu bar on screen.
+        assert_eq!(
+            resolve_app_name(Some("   "), Some("huddle-dev")),
+            "huddle-dev"
+        );
+        assert_eq!(resolve_app_name(Some(""), None), DEFAULT_APP_NAME);
+        assert_eq!(resolve_app_name(None, Some("  ")), DEFAULT_APP_NAME);
+    }
+
+    #[test]
+    fn the_config_is_read_once_at_construction() {
+        let config =
+            DesktopConfig::new()
+                .with_app_name("Huddle")
+                .with_menu_spec(MenuSpec::new().with_item(MenuItemSpec::submenu(
+                    "File",
+                    MenuSpec::new().with_item(MenuItemSpec::item("file.open", "Open…")),
+                )));
+        let extensions = MacosExtensions::new(&config);
+
+        assert_eq!(extensions.app_name, "Huddle");
+        assert_eq!(extensions.menu_spec, config.menu_spec);
+        assert!(!extensions.lifecycle.is_hidden());
+    }
+
+    #[test]
+    fn the_default_config_keeps_the_historical_exit_on_close() {
+        // No window is retained in a host test, which is the other reason this
+        // exits — either way the zero-config behavior is preserved.
+        let mut extensions = MacosExtensions::new(&DesktopConfig::new());
+        assert_eq!(extensions.on_close_requested(), CloseAction::Exit);
+    }
+
+    #[test]
+    fn a_pump_with_nothing_queued_pushes_nothing() {
+        // `push_menu_event` needs a live reactive runtime; the point here is
+        // that an idle frame never reaches it.
+        let mut extensions = MacosExtensions::new(&DesktopConfig::new());
+        extensions.pump();
+        assert!(extensions.drained.is_empty());
+    }
+
+    #[test]
+    fn a_role_only_menu_declares_no_app_ids() {
+        let config =
+            DesktopConfig::new().with_menu_spec(MenuSpec::new().with_item(MenuItemSpec::submenu(
+                "App",
+                MenuSpec::new().with_item(MenuItemSpec::role(MenuRole::Quit)),
+            )));
+        let extensions = MacosExtensions::new(&config);
+        assert!(menu::collect_app_item_ids(extensions.menu_spec.as_ref()).is_empty());
+    }
+
+    #[test]
+    fn debug_reports_the_configured_state() {
+        let extensions = MacosExtensions::new(&DesktopConfig::new().with_app_name("Huddle"));
+        let rendered = format!("{extensions:?}");
+        assert!(rendered.contains("Huddle"), "{rendered}");
     }
 }

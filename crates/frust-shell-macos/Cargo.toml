@@ -11,22 +11,39 @@ license.workspace = true
 # already compiles on every non-mobile host (it is this repo's desktop dev
 # preview too), so there is nothing macOS-specific about depending on it.
 frust-shell-desktop = { workspace = true }
-# `MacosExtensions`'s hooks will report menu activations through
-# `frust_reactive::push_menu_event` once native menu handling lands (see
-# `DesktopExtensions::pump`'s docs) — carried now so that follow-on task
-# never touches this manifest.
+# `MacosExtensions::pump` reports menu activations through
+# `frust_reactive::push_menu_event` (see `DesktopExtensions::pump`'s docs).
 frust-reactive = { workspace = true }
 winit = { workspace = true }
 log = { workspace = true }
 
-# The AppKit-native half — a native menu bar (`muda`), and any other
-# NSApplication/NSWindow integration a follow-on task adds — only ever
-# compiles for a macOS target; on every other host this crate is (almost)
-# empty but the `MacosExtensions` stub above still compiles, so
-# `cargo check --workspace` stays green (the `frust-shell-android` inert-off-
-# target precedent — see its own Cargo.toml).
+# The AppKit-native half — the native menu bar (`muda`) and the app-activation
+# observer behind Dock-click reopen (`src/appkit_glue.rs`) — only ever compiles
+# for a macOS target; on every other host this crate builds none of it and
+# `MacosExtensions` still compiles, so `cargo check --workspace` stays green
+# (the `frust-shell-android` inert-off-target precedent — see its own
+# Cargo.toml).
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = { workspace = true }
+# `define_class!`/`msg_send!`/`MainThreadMarker` for the observer class.
 objc2 = { workspace = true }
-objc2-app-kit = { workspace = true }
+# `NSNotificationCenter`/`NSNotification`: the observer's registration and its
+# callback argument.
 objc2-foundation = { workspace = true }
+# Read for exactly one item — the `NSApplicationDidBecomeActiveNotification`
+# name AppKit posts on a re-activation (winit 0.30 surfaces no reopen event of
+# its own; see `src/appkit_glue.rs`). Hence the two-feature list rather than
+# this crate's (large) default set: `NSApplication` carries that static, and
+# `NSResponder` is the superclass gate its own module is declared behind.
+#
+# The version literal is repeated instead of `{ workspace = true }` because
+# Cargo forbids a member from overriding a workspace dependency's
+# `default-features` when the workspace entry doesn't set it — the same
+# restriction, and the same workaround, as `plugins/clipboard`'s `objc2-ui-kit`
+# row. The pin itself still lives in the root manifest's
+# `workspace.dependencies` (Version-Pin Policy); keep the two in step.
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSResponder",
+] }
