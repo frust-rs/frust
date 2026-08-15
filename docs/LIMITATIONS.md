@@ -2042,19 +2042,37 @@ verified for real on this host (`file` confirmed a genuine Debian binary package
 `.AppImage`** — the typed refusal path (`InstallerError::PackagerFailed`) was proven for real, but
 the format itself did not build on this host: `cargo-packager`'s vendored `linuxdeploy`'s `strip`
 step rejects a relocation section (`.relr.dyn`) this host's newer `binutils` emits — an
-upstream/environment tool mismatch, not a Frust defect. **macOS `.dmg`** — owed to a MacBook pass
-(unit-tested against `FakeProcessRunner` only). **Windows NSIS `.exe`/WiX `.msi`** — owed to the
-Windows 11 PC pass (same unit-test-only status). **`.rpm`** is not a supported output at all —
+upstream/environment tool mismatch, not a Frust defect. **macOS `.dmg`** — identity/signing config
+is now wired into `cargo-packager` (detailed below); runtime verification remains owed to a
+MacBook pass. **Windows NSIS `.exe`/WiX `.msi`** — owed to the Windows 11 PC pass (unit-tested
+against `FakeProcessRunner` only). **`.rpm`** is not a supported output at all —
 `cargo-packager` 0.11 builds only `.deb`/AppImage/pacman on Linux, so a requested `.rpm` is a typed
 `InstallerError::RpmNotSupported` refusal naming `tauri-bundler`'s documented `.rpm` path (or
 `alien` over the `.deb`) as the workaround, never a silent failure. Separately, **AppImage requires
 a square configured icon**: an absent or non-square `[desktop] icon` surfaces as `cargo-packager`'s
 own typed refusal ("Could not find a square icon to use as AppImage icon") rather than a bundle
 with no icon (unlike a plain `frust build linux`, where a bad icon only downgrades to a
-`BundleNote`). **Notarization** (Apple's separate `notarytool` submission + stapling, needed for a
-`.dmg` to run without a Gatekeeper warning on a machine that didn't build it) is documented only —
-`desktop_build::macos`'s `codesign` step signs when `[macos] signing-identity` is set, but no code
-path calls `notarytool`.
+`BundleNote`). **macOS `.dmg` identity/signing** — `PackagerConfig`'s `macos` block (Dmg-only) now
+passes the already-assembled bundle's `Contents/Info.plist` path, `[macos] signing-identity`, and
+the entitlements path (when `macos/app.entitlements` exists) into cargo-packager's own config;
+verified against the pinned `cargo-packager` 0.11.8 source that its `Dmg` arm's synthesized `.app`
+overlays every key from the named plist onto its own generated one and codesigns iff
+`signingIdentity` is set. What is still **owed to a MacBook pass**: the produced `.dmg`'s actual
+bundle identity and signature are unverified against a real build — the owed check is building a
+signed `.dmg` on real hardware, then running `codesign -dv` and a bundle-id inspection
+(`plutil`/`mdls`) against the `.app` cargo-packager synthesizes inside it. **codesign flags** —
+whenever a `[macos] signing-identity` is configured, `desktop_build::macos::codesign` always passes
+`--options runtime` (Hardened Runtime; harmless for an ad-hoc signature, mandatory for notarization
+eligibility) and passes `--timestamp` only when the identity carries one of the three Apple-issued
+prefixes (`Developer ID Application:`, `Apple Distribution:`, `3rd Party Mac Developer
+Application:`) — an ad-hoc/self-signed identity's codesign call therefore stays fully offline. This
+policy is unit-tested against `FakeProcessRunner` only; real-identity `--timestamp` behavior (Apple
+timestamp-server reachability, confirming an ad-hoc identity's call truly makes no network call) is
+unverified on hardware. **Notarization** (Apple's separate `notarytool` submission + stapling,
+needed for a `.dmg` to run without a Gatekeeper warning on a machine that didn't build it) is still
+documented only — Hardened Runtime and a live entitlements file mean its prerequisites are now met
+by construction whenever a build is signed, but no code path calls `notarytool`; notarization itself
+remains a manual step.
 
 **Applies to**: `frust build <os> --installer`, and any macOS `.dmg` distributed outside the
 building machine.
@@ -2071,8 +2089,11 @@ account to exercise; automating it is a scoped future addition, not an oversight
 **Evidence**: desktop-shells Phase B task 05 (`05-installers-doctor`) and task 07
 (`07-cli-build-targets`) completion summaries (Testing Performed — real Linux smoke: genuine `.deb`
 verified via `file`, `.AppImage` failure tail); `crates/frust-drive/src/desktop_build/installer.rs`
-(`InstallerFormat::for_target`, `RpmNotSupported`); `crates/frust-drive/src/desktop_build/macos.rs`
-(`codesign`, no notarization call site).
+(`InstallerFormat::for_target`, `RpmNotSupported`, `PackagerMacosConfig`); desktop-shells Phase B fix
+round 1 (`workflow/plans/features/desktop-shells/phase-b/followups/phase-b-fix-1/TASKS.md`, G3/G4)
+for the codesign-flags policy and the `macos` config-block wiring, respectively;
+`crates/frust-drive/src/desktop_build/macos.rs` (`codesign`,
+`APPLE_ISSUED_IDENTITY_PREFIXES`/`is_apple_issued_identity`, no notarization call site).
 
 ---
 
