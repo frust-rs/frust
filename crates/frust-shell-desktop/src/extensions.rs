@@ -132,10 +132,12 @@ pub trait DesktopExtensions {
     /// Called once per frame, at the top of the redraw pass — before the theme
     /// and font polls, and before the rebuild.
     ///
-    /// This is the per-OS half of the signal-poll seam idiom: a shell drains its
-    /// platform menu queue here and pushes each activation through
-    /// `frust_reactive::push_menu_event`, and the position guarantees an
-    /// activation drained on this frame is visible to *this* frame's rebuild
+    /// This is the per-OS half of the signal-poll seam idiom: a shell hands over
+    /// at most *one* queued activation per frame through
+    /// `frust_reactive::push_menu_event` (the seam is a single-slot signal, so a
+    /// batch pushed in one pass would coalesce to its last entry) and requests
+    /// another frame while more remain queued. The position guarantees the
+    /// activation delivered on this frame is visible to *this* frame's rebuild
     /// rather than waiting for the next one.
     fn pump(&mut self) {}
 
