@@ -144,31 +144,56 @@ impl DesktopConfig {
 /// fields (`rgba.len() == width * height * 4`), so the fields are private and
 /// [`IconData::from_rgba`] is the only way in — an inconsistent icon reaches a
 /// platform API as a buffer overrun, not a wrong picture.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` is hand-written rather than derived (see the manual `impl` below):
+/// a derived one would dump the whole pixel buffer, drowning a log line in
+/// thousands of byte values for even a small icon.
+#[derive(Clone, PartialEq, Eq)]
 pub struct IconData {
     rgba: Vec<u8>,
     width: u32,
     height: u32,
 }
 
+/// No real window/taskbar icon approaches this — winit's own `Icon::from_rgba`
+/// already limits a *Windows* icon to `u16::MAX` per side (65535), and macOS/
+/// Linux icons are conventionally well under 1024px. The cap forecloses an
+/// absurd `width`/`height` (however it arrived — a corrupt decode, a
+/// deliberately hostile input) from reaching a platform icon API at all, on
+/// top of [`from_rgba`](IconData::from_rgba)'s own overflow-safe size check.
+const MAX_ICON_SIDE: u32 = 4096;
+
 impl IconData {
     /// Wrap decoded RGBA8 pixels, or `None` when they do not describe a
-    /// `width × height` image (`rgba.len() != width * height * 4`, or either
-    /// dimension is zero).
+    /// `width × height` image: either dimension is zero or exceeds
+    /// [`MAX_ICON_SIDE`], or `rgba.len() != width * height * 4`.
     ///
     /// `Option` rather than a `<Type>Error` enum because there is exactly one
     /// failure mode and nothing to match on — and this crate carries no
     /// `thiserror` dependency to add one with (version pins are law). The
     /// caller that decoded the image is the one holding the context worth
     /// reporting.
+    ///
+    /// **Check order matters.** The dimension cap runs *before* the size
+    /// arithmetic below it, so a hostile `width`/`height` is rejected on a
+    /// cheap comparison rather than reaching the multiply (or, on a caller
+    /// that already allocated `rgba` to match, whatever cost that
+    /// allocation carried) at all.
     pub fn from_rgba(rgba: Vec<u8>, width: u32, height: u32) -> Option<Self> {
-        if width == 0 || height == 0 {
+        if width == 0 || height == 0 || width > MAX_ICON_SIDE || height > MAX_ICON_SIDE {
             return None;
         }
-        // u64 throughout: a 65536² icon would overflow u32 in this product long
-        // before any real image does, and a wrapped product would validate a
-        // buffer that is far too small.
-        let expected = u64::from(width) * u64::from(height) * 4;
+        // Checked, not `u64::from(..) * u64::from(..) * 4`: a u64 product of
+        // two u32s can't overflow, but a *third* factor can — width = height =
+        // 2^31 multiplies out to exactly 2^64, which wraps to 0 and would
+        // validate an empty buffer against a two-billion-pixel image. The
+        // `MAX_ICON_SIDE` cap above already forecloses this in practice, but
+        // the arithmetic stays checked regardless — a size invariant this
+        // load-bearing must not depend on a second, separate check staying in
+        // sync with it.
+        let expected = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|pixels| pixels.checked_mul(4))?;
         if rgba.len() as u64 != expected {
             return None;
         }
@@ -184,14 +209,26 @@ impl IconData {
         &self.rgba
     }
 
-    /// The image width in pixels (never zero).
+    /// The image width in pixels (never zero, never above [`MAX_ICON_SIDE`]).
     pub fn width(&self) -> u32 {
         self.width
     }
 
-    /// The image height in pixels (never zero).
+    /// The image height in pixels (never zero, never above [`MAX_ICON_SIDE`]).
     pub fn height(&self) -> u32 {
         self.height
+    }
+}
+
+impl std::fmt::Debug for IconData {
+    /// Prints `rgba.len()` rather than the buffer itself (see the type's doc
+    /// comment) — the pixel count is all a log line needs to say.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IconData")
+            .field("rgba_len", &self.rgba.len())
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish()
     }
 }
 
@@ -441,6 +478,37 @@ mod tests {
     fn icon_data_rejects_a_zero_dimension() {
         assert_eq!(IconData::from_rgba(Vec::new(), 0, 4), None);
         assert_eq!(IconData::from_rgba(Vec::new(), 4, 0), None);
+    }
+
+    #[test]
+    fn icon_data_rejects_a_size_product_that_overflows_u64() {
+        // width = height = 2^31: the naive `u64::from(w) * u64::from(h) * 4`
+        // multiplies out to exactly 2^64, which wraps to 0 and would validate
+        // an empty buffer against a two-billion-pixel image. The dimension cap
+        // rejects this long before the multiply would even run, but the
+        // checked arithmetic is what actually closes the overflow — assert
+        // `None`, not just "doesn't panic": a debug build already panics on
+        // unchecked overflow, so the real regression this guards is a release
+        // build silently wrapping to a validated `Some`.
+        assert_eq!(IconData::from_rgba(Vec::new(), 1 << 31, 1 << 31), None);
+    }
+
+    #[test]
+    fn icon_data_rejects_a_dimension_just_over_the_cap() {
+        assert_eq!(IconData::from_rgba(Vec::new(), MAX_ICON_SIDE + 1, 1), None);
+        assert_eq!(IconData::from_rgba(Vec::new(), 1, MAX_ICON_SIDE + 1), None);
+    }
+
+    #[test]
+    fn icon_data_accepts_the_max_allowed_dimension() {
+        // A real `MAX_ICON_SIDE`-square buffer (67MB) is wasteful to allocate
+        // just to prove the cap's boundary is inclusive — a `MAX_ICON_SIDE ×
+        // 1` strip already exercises the same `width == MAX_ICON_SIDE` cap
+        // comparison, at a 16KB buffer instead.
+        let icon = IconData::from_rgba(vec![0; MAX_ICON_SIDE as usize * 4], MAX_ICON_SIDE, 1)
+            .expect("MAX_ICON_SIDE is inclusive, not an exclusive bound");
+        assert_eq!(icon.width(), MAX_ICON_SIDE);
+        assert_eq!(icon.height(), 1);
     }
 
     // --- MenuSpec construction ---
