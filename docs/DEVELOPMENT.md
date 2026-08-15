@@ -425,7 +425,7 @@ owns them:
 | `reactive_graph`/`any_spawner`/`tokio`, `clean-signals`, `accesskit` + adapters | [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md) |
 | `ndk-context`, `objc2*` (Foundation/Security/LocalAuthentication/UIKit/QuartzCore/CoreText/CoreFoundation), `androidx.camera`, `openiap-google`/`OpenIAP`, `keyring-core`, `arboard`, `fluent-rs`, `icu` (2.2/2.3), `icu_experimental`, `sys-locale` | [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) |
 | `muda`, `windows-sys` (desktop shells' native menu-bar/Win32 bindings; `objc2-app-kit` rides the objc2 pin family above) | [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) |
-| `notify`, `rmcp`, `axum`, `base64`, `tokio-util` | [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) |
+| `notify`, `rmcp`, `axum`, `base64`, `tokio-util`, `icns` (+ `cargo-packager`/`winresource`, external-tool/template-side, not `[workspace.dependencies]`) | [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) |
 | `ratatui`/`crossterm`/`ansi-to-tui`, `toml_edit` | [TUI_DEVELOPMENT.md](TUI_DEVELOPMENT.md) |
 
 The rules below bind every pin, wherever its row lives:

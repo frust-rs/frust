@@ -39,15 +39,17 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how CLI relates to the other units.
 |--------|-----------------|
 | `frust-cli::commands` | One thin handler per subcommand; the sole construction site for the injected `RealProcessRunner` |
 | `frust-drive::process` | The `ProcessRunner` trait plus `RealProcessRunner`/`FakeProcessRunner` — the sole seam for shelling out |
-| `frust-drive::manifest` | The shared `frust.toml` reader (`[app]`/`[android]`/`[ios]`/`[signing]`), replacing the duplicate deserialisers the Android/iOS run pipelines used to each carry |
+| `frust-drive::manifest` | The shared `frust.toml` reader (`[app]`/`[android]`/`[ios]`/`[signing]`/`[desktop]`/`[macos]`/`[windows]`/`[linux]`), replacing the duplicate deserialisers the Android/iOS run pipelines used to each carry |
+| `frust-drive::icons` | PNG → `.icns`/`.ico`/hicolor-tree pipeline for `[desktop] icon`; a rejected or missing source degrades to a typed note, never a build failure (`desktop_build` consumes it) |
+| `frust-drive::desktop_build` | macOS/Windows/Linux bundle assembly (`DesktopBundleTarget`, host-locked) via `cargo build` + `ProcessRunner`, and its `installer` submodule (`cargo-packager` shell-out for `.dmg`/NSIS/WiX/`.deb`/`.AppImage`; `.rpm` is a typed refusal, not a supported format) |
 | `frust-drive::scaffold` | Manifest-driven template rendering that produces a new Frust project tree |
-| `frust-drive::doctor` | Pluggable environment validators plus a structured, non-blocking toolchain report |
+| `frust-drive::doctor` | Pluggable environment validators plus a structured, non-blocking toolchain report; `CargoPackagerValidator` checks the pinned `cargo-packager` version and is non-fatal (`Partial` at worst — only `frust build --installer` needs it) |
 | `frust-drive::devices` | Pluggable per-platform device discovery, aggregated non-fatally |
 | `frust-drive::build_info` | The debug/profile/release + flavor funnel shared by run and build; `BuildMode::cargo_features()` also selects the `frust/perf-trace`+`frust/devtools` cargo-feature pair for Debug/Profile (see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)) |
 | `frust-drive::devtools_client` | Blocking NDJSON client for the devtools wire protocol (`widget_tree`/`widget_props`/`metrics_snapshot`/`screenshot`/`tap`/`scroll`/`text`/frame-stats subscription) plus `adb forward` helpers for Android — the tool-side half of [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md) |
 | `frust-drive::metrics` | Pure `/proc`/`/sys`/`adb` parsers plus a `MetricsSampler` background-thread stream, feeding `frust-tui`'s DevTools System/Network tabs and `frust-mcp`'s `metrics` tool (Linux desktop + Android only in v1, no build-feature gate). Honest about scope: network counters are namespace-wide (desktop) or device-wide (Android), never per-process — see [LIMITATIONS.md](LIMITATIONS.md) |
 | `frust-drive` Android/iOS pipelines | The four platform pipelines: compile → install → launch/stream; `android_run::spawn_session` and the iOS pipelines' `spawn_session`/`spawn_physical_session` return the launched app's identity (`AndroidLaunch{stream, package}` / `IosLaunch`) so a caller can address that exact app later without re-deriving it — `frust-tui`'s `Supervisor` uses both to best-effort terminate the app on stop (see [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)), and `frust-mcp`'s iOS-Simulator teardown uses `IosLaunch` the same way |
-| `frust-drive::desktop_run` | The desktop `cargo run` launch plan (mode → cargo-args mapping) as a standalone, reusable value builder; `frust-mcp` spawns desktop sessions through it. `frust-tui` has its own equivalent logic and has not converged onto this module yet |
+| `frust-drive::desktop_run` | The workspace's single desktop-preview launch-plan construction site: `DesktopPlan` (program, argv, cwd, and child env together, since a `--profile` preview needs both `--features frust/perf-trace` and `FRUST_TRACE=1`). Consumed by `frust-cli run`'s desktop fallback, `frust-tui`'s supervisor (reshaped into its own `LaunchPlan`), and `frust-mcp`'s `spawn_desktop_session` — no front-end resolves its own invocation |
 | `frust-drive::plugin` | Static plugin registry plus the idempotent project-mutation engine that applies it |
 | `frust-drive::interrupt` | The process-wide SIGINT/SIGTERM/SIGHUP + panic-hook owner; scrubs registered secret files before the process dies |
 | `frust-mcp::config` | `McpConfig` — port (`DEFAULT_MCP_PORT` 4848; `0` lets the OS assign an ephemeral one); bind address is hard-coded to `127.0.0.1`, never configurable |
@@ -146,7 +148,14 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   `DeviceDiscovery` sets through the injected runner; the CLI renders the resulting report.
 - `run`/`build`: CLI args become a `BuildInfo`, which drives `frust-drive`'s Android/iOS pipelines
   (compile → install → launch/stream) through the same `ProcessRunner`; desktop falls back to a
-  `cargo run` passthrough with an optional `--watch` loop.
+  `cargo run` passthrough (via `desktop_run`) with an optional `--watch` loop.
+- `build macos|windows|linux`: `BuildTarget::{Macos, Windows, Linux}` each carry a shared
+  `BuildArgs` plus an `--installer` flag (release-default; no `--no-codesign` — signing is
+  `[macos] signing-identity`-driven). The handler calls `frust_drive::desktop_build::build`
+  directly; the host-lock refusal (`DesktopBuildError::HostMismatch`) happens inside that call,
+  before `frust.toml` is even read, so no separate CLI-side gate exists. `--installer` then calls
+  `build_installer` once per `InstallerFormat::for_target`, rendering each `BundleNote`/
+  `InstallerReport` line the same way `build_android`/`build_ios` render their own artifacts.
 - `build --release` (Android): `android_build::signing` resolves the four release-signing values
   (`storeFile`/`storePassword`/`keyAlias`/`keyPassword`) **once**, from the properties file named by
   `frust.toml`'s `[signing]` section (default `android/key.properties`, optionally key-prefixed) with
@@ -200,7 +209,9 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
 | `DeviceDiscovery` / `Device` | Device discovery abstraction and its result shape |
 | `TemplateContext` | Render/path substitution variables for `frust create`'s scaffold |
 | `PluginSpec` / `Contribution` | A plugin registry entry and the idempotent project edits it applies |
-| `Manifest` / `SigningSection` / `SigningEnv` | Parsed `frust.toml` shape (`[app]`/`[android]`/`[ios]`/`[signing]`/`[signing.env]`) shared by every pipeline that reads the manifest |
+| `Manifest` / `SigningSection` / `SigningEnv` | Parsed `frust.toml` shape (`[app]`/`[android]`/`[ios]`/`[signing]`/`[signing.env]`/`[desktop]`/`[macos]`/`[windows]`/`[linux]`) shared by every pipeline that reads the manifest |
+| `DesktopBundleTarget` / `BundleReport` / `BundleNote` / `DesktopBuildError` | The desktop bundle-assembly contract: host-locked target enum, the report of what was written plus non-fatal typed notes (icon/signing/generated-file observations), and the typed failure enum (host mismatch, manifest, compile, codesign) |
+| `InstallerFormat` / `InstallerReport` / `InstallerError` | `desktop_build::installer`'s format enum (`Dmg`/`NsisExe`/`WixMsi`/`Deb`/`AppImage`), its per-run artifact report, and its typed failures (tool missing/version mismatch, format-target mismatch, `.rpm` refusal, packager failure) |
 | `ResolvedSigning` / `GeneratedProperties` | The signing gate's one resolved-material value, and the owner-only generated-properties guard that writes/deletes it around a Gradle invocation |
 | `Cli` / `Command` | The `clap`-derived argument surface for the `frust` binary; `Cli::command` is an `Option<Command>` so bare `frust` (no subcommand) resolves via the TTY-gated default rather than a clap parse error |
 | `SessionBackend` (`frust-mcp`) | The fourteen-method sync trait both `frust-mcp`'s tools and `frust-dap`'s adapter drive via `Arc<dyn SessionBackend>` — an embedder's own supervisor implements it once, for both |

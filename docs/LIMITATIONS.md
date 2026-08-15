@@ -2022,13 +2022,57 @@ Gate) correctly carries the configured name. Verified live on the MacBook runtim
 Phase A desktop shell.
 
 **Why accepted**: no public API sets the application-menu title for an unbundled process — it is
-sourced from the process/bundle name, not from any NSMenu item. The designed fix is Phase B's
-`.app` bundle assembly writing `CFBundleName`, which closes the gap for bundled runs; recorded as
-a Phase B acceptance rider.
+sourced from the process/bundle name, not from any NSMenu item. Phase B's `.app` bundle assembly
+now ships and writes `CFBundleName` (from `DesktopConfig::display_name`) into every generated
+`Info.plist`, so a `frust build macos` bundle carries the fix and its bold menu title is
+**expected** to show the configured name correctly — not re-verified on hardware yet, since the
+MacBook runtime gate that found F-2 predates Phase B; owed to the next MacBook pass.
 
 **Evidence**: `workflow/plans/features/desktop-shells/phase-a/followups/macbook-gate-r1/TASKS.md`
-gate table (G4, G5) and Findings (F-2); its Phase-B rider section (bundle-assembly acceptance
-criterion for `CFBundleName`).
+gate table (G4, G5) and Findings (F-2); `crates/frust-drive/src/desktop_build/macos.rs`
+(`CFBundleName`/`CFBundleDisplayName` both set from the resolved display name).
+
+---
+
+### `desktop-installer-runtime-partial` — installer formats are runtime-verified only where hardware and host tooling allow
+
+**Observed**: `frust build <os> --installer` shells out to a pinned `cargo-packager` over an
+already-assembled bundle. Runtime status per format, this run: **Linux `.deb`** — built and
+verified for real on this host (`file` confirmed a genuine Debian binary package). **Linux
+`.AppImage`** — the typed refusal path (`InstallerError::PackagerFailed`) was proven for real, but
+the format itself did not build on this host: `cargo-packager`'s vendored `linuxdeploy`'s `strip`
+step rejects a relocation section (`.relr.dyn`) this host's newer `binutils` emits — an
+upstream/environment tool mismatch, not a Frust defect. **macOS `.dmg`** — owed to a MacBook pass
+(unit-tested against `FakeProcessRunner` only). **Windows NSIS `.exe`/WiX `.msi`** — owed to the
+Windows 11 PC pass (same unit-test-only status). **`.rpm`** is not a supported output at all —
+`cargo-packager` 0.11 builds only `.deb`/AppImage/pacman on Linux, so a requested `.rpm` is a typed
+`InstallerError::RpmNotSupported` refusal naming `tauri-bundler`'s documented `.rpm` path (or
+`alien` over the `.deb`) as the workaround, never a silent failure. Separately, **AppImage requires
+a square configured icon**: an absent or non-square `[desktop] icon` surfaces as `cargo-packager`'s
+own typed refusal ("Could not find a square icon to use as AppImage icon") rather than a bundle
+with no icon (unlike a plain `frust build linux`, where a bad icon only downgrades to a
+`BundleNote`). **Notarization** (Apple's separate `notarytool` submission + stapling, needed for a
+`.dmg` to run without a Gatekeeper warning on a machine that didn't build it) is documented only —
+`desktop_build::macos`'s `codesign` step signs when `[macos] signing-identity` is set, but no code
+path calls `notarytool`.
+
+**Applies to**: `frust build <os> --installer`, and any macOS `.dmg` distributed outside the
+building machine.
+
+**Why accepted**: matches Phase A's device-availability constraint carried into Phase B — this
+environment has Linux hardware only, so macOS/Windows installer assembly is proven by unit test
+against a faked process runner, the same asymmetry `desktop-shells-runtime-unverified` already
+accepts for the shells themselves. The Linux `.AppImage` gap is a host tool-version mismatch with a
+proven typed-error path, not an unverified code path — closing it needs either a host with an
+older/compatible `binutils` or an upstream `linuxdeploy` fix, neither of which this pipeline
+controls. Notarization needs a real Apple Developer session this environment has no MacBook or
+account to exercise; automating it is a scoped future addition, not an oversight.
+
+**Evidence**: desktop-shells Phase B task 05 (`05-installers-doctor`) and task 07
+(`07-cli-build-targets`) completion summaries (Testing Performed — real Linux smoke: genuine `.deb`
+verified via `file`, `.AppImage` failure tail); `crates/frust-drive/src/desktop_build/installer.rs`
+(`InstallerFormat::for_target`, `RpmNotSupported`); `crates/frust-drive/src/desktop_build/macos.rs`
+(`codesign`, no notarization call site).
 
 ---
 
