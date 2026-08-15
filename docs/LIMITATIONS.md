@@ -1706,3 +1706,71 @@ would otherwise duplicate.
 **Evidence**: `crates/frust-tui/src/engine/persist.rs`'s `save_dap_enabled` doc comment ("The
 dialog exposes no control for it"); `crates/frust-tui/src/engine/dap_settings.rs`'s `DapFocus`
 (no `Enabled` variant).
+
+---
+
+### `i18n-live-locale-change` — a system-language change while the app runs is not reactive
+
+**Observed**: `frust_i18n::system_locales()` re-queries the OS on every call, but nothing in
+the crate subscribes to a platform locale-change notification — a user who switches the
+system/app language while the app keeps running sees no automatic effect; `I18n`'s already-
+negotiated locale and chain stay exactly as they were until the app polls `system_locales()`
+again and calls `I18n::set_locale` itself. In practice Android recreates the launching
+`Activity` on a system-language change, which incidentally re-detects on relaunch — but no live
+in-process notification is delivered either way.
+
+**Applies to**: every platform. A shell-forwarded locale-change event (the seam an app could
+subscribe through instead of polling) is deferred, not shipped.
+
+**Why accepted**: v1 scope — detection is a deliberately uncached, re-query-on-demand read
+(`src/detect/mod.rs`'s module doc), and no platform event is plumbed through any shell yet. An
+app that wants to react to a live change polls `system_locales()` itself (e.g. on resume) and
+calls `I18n::set_locale`.
+
+**Evidence**: `plugins/i18n/src/detect/mod.rs`'s module doc; `plugins/i18n/README.md` §6's "Not
+reactive" note.
+
+---
+
+### `i18n-rtl-unverified` — Parley's intra-line bidi behavior with FSI/PDI marks is unverified
+
+**Observed**: this framework's widget layout is LTR, and nothing in it has been
+device-verified rendering right-to-left content. `LocaleSet`'s default bidi isolation wraps
+every interpolated placeable in FSI/PDI marks (`U+2068`/`U+2069`) specifically so an RTL
+argument cannot reorder the surrounding text — but how Parley's own intra-line bidi algorithm
+actually handles those marks alongside mixed-direction text has not been exercised on a
+device.
+
+**Applies to**: any message interpolating an RTL argument into an LTR (or mixed) message,
+pending the device gate the `i18n` manual test owes (`docs/PLUGINS_DEVELOPMENT.md`).
+
+**Why accepted**: no RTL locale or right-to-left CLDR data has shipped in this repo's locale
+sets yet; bidi layout was out of scope for this plugin's v1, which owns message resolution and
+formatting, not text layout.
+
+**Evidence**: `plugins/i18n/src/engine/mod.rs`'s `LocaleSet::with_isolating` doc; the pending
+`i18n` device gate in `docs/PLUGINS_DEVELOPMENT.md`.
+
+---
+
+### `i18n-currency-minor-units` — CLDR currency minor-unit digits are a table maintained in-crate
+
+**Observed**: `frust_i18n::fmt::currency`'s zero-decimal (`JPY`, ...) and three-decimal
+(`KWD`, ...) currency handling comes from two hand-maintained ISO-code tables
+(`plugins/i18n/src/fmt/currency.rs`'s `ZERO_DIGIT`/`THREE_DIGIT`) rather than from ICU4X
+itself — ICU4X 2.2's `icu_experimental` currency formatter exposes no CLDR `currencyData`
+minor-unit-digit lookup a caller can query.
+
+**Applies to**: `fmt::currency` on every platform; a currency ISO code CLDR reclassifies (a
+digit-count change, or a move into/out of either table) needs a manual update to keep
+rendering correct.
+
+**Why accepted**: `icu_experimental`'s own crate doc calls its whole surface unstable, and no
+minor-unit API exists yet to delegate to instead. The maintenance cost is bounded — both
+tables are short, CLDR's minor-unit exceptions change rarely — and is reassessed the day the
+currency component graduates out of `icu_experimental`, which touches both `fmt/currency.rs`
+and `fmt/number.rs` (its `percent` formatter shares the same `icu_experimental` exposure).
+
+**Evidence**: `plugins/i18n/src/fmt/currency.rs`'s module doc and `ZERO_DIGIT`/`THREE_DIGIT`
+tables; `plugins/i18n/src/fmt/number.rs`'s module doc ("percent rides `icu_experimental`, like
+currency").

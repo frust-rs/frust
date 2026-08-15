@@ -15,7 +15,12 @@ clean-architecture core into Frust's `Component`/reactive model; it is a standal
 excluded from the root Cargo graph pending a crates.io publication of its dependency. An eighth
 crate, `plugins/database` (`frust-database`), is the tier's first plugin with no OS integration
 at all: a synchronous embedded SQL API over a swappable engine seam — bundled SQLite via
-`rusqlite` by default, an optional Turso (Rust-native SQLite rewrite) engine.
+`rusqlite` by default, an optional Turso (Rust-native SQLite rewrite) engine. A ninth crate,
+`plugins/i18n` (`frust-i18n` plus its `frust-i18n-macros` companion — the tier's first
+proc-macro crate), is a Fluent Project + ICU4X internationalization plugin: compile-time Fluent
+bundle loading, locale-aware message resolution, system-locale detection, and (behind the
+`formatting` feature) ICU4X number/date/currency formatting — reaching no OS capability beyond
+a locale read.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other units.
 
@@ -32,6 +37,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other unit
 | `plugins/iap` | In-app purchases and subscriptions (products, purchases, restore, deep-link to subscription management) over Play Billing (`openiap-google`) or StoreKit 2 (`FrustIap` Swift glue), both speaking OpenIAP 3.0.1; desktop is a v1 deferral, not a capability gap |
 | `plugins/clean-signals-frust` | Facade-tier glue crate binding the `clean_signals` clean-architecture core into Frust's `Component`/reactive model |
 | `plugins/database` | Synchronous embedded SQL database (`Database`/`Value`/`Engine`) over a swappable-engine seam — bundled SQLite via `rusqlite` (default) or an optional Turso engine (`engine-turso`); no OS integration |
+| `plugins/i18n` | Fluent Project + ICU4X internationalization/localization: compile-time bundle loading (`locales!`, via the companion `frust-i18n-macros` proc-macro crate), locale-aware message resolution, system-locale detection, and (`formatting` feature) ICU4X number/date/currency formatting |
 
 ## Layer Dependencies
 
@@ -52,7 +58,19 @@ to bind a `clean_signals` controller into a `Component`'s reactive `Owner`. `dat
 neither `frust-plugin` nor any target-gated FFI crate — its own dependencies are `frust-paths` (data
 directory) and its two swappable SQLite engines, `rusqlite` (default, C via `cc`) and the optional
 pure-Rust `turso`; both reach storage through plain file IO, so the crate needs no platform-handle
-substrate at all.
+substrate at all. `i18n` is the second plugin (after `native-widgets`) built on the single-crate
+platform-plugin-plus-facade-glue shape (`docs/PLUGINS_CODE_STANDARDS.md`'s Plugin Conventions): a
+default-on `frust-api` feature gates its sole `frust` facade dependency, so `cargo check -p
+frust-i18n --no-default-features` mechanically re-verifies the platform-plugin charter line — no
+`frust` crate anywhere in the tree — the way every split plugin's two-crate boundary enforces
+structurally instead. Its platform track is `frust-plugin` plus `jni`, Android-target-gated rather
+than unconditional — a documented deviation from every Android-reaching plugin's norm above, since
+only its Android detection backend needs the platform handle — plus `objc2`/`objc2-foundation` on
+Apple and `sys-locale` on desktop (macOS routes through the `sys-locale` arm, not the Apple one).
+Its message engine depends on `fluent-bundle`/`fluent-langneg`/`unic-langid`; the `formatting`
+feature layers ICU4X's `icu_decimal`/`icu_datetime`/`icu_plurals`/`icu_experimental` plus their
+`icu_locale_core`/`tinystr`/`icu_provider` support crates underneath. Like `database`, it needs no
+`frust-paths` — it persists nothing itself.
 
 This is an architectural charter, not just current practice: a plugin depends on `frust-plugin`
 (plus `frust-paths` where needed) and FFI crates only if it reaches the OS through one, never
@@ -136,6 +154,22 @@ call (biometric prompts, camera permission/capture, every `iap` store round trip
   failing `COMMIT`, or a panicking closure, the last via a `Drop`-guard rollback; same-thread
   reentrancy is refused as a typed `Reentrant` error rather than deadlocking, while cross-thread
   contention still queues on the connection mutex.
+- `i18n`'s `locales!` proc macro (`frust-i18n-macros`) expands per invoking module into
+  `locale_set()`/`engine()`/typed `keys::` functions built over the `Resolve` seam every
+  resolver — `Engine::with_chain`, the reactive `I18n` handle — implements; every `.ftl` file is
+  parsed at macro-expansion time, so a malformed message is a compile error naming file/line
+  rather than a runtime miss.
+- `i18n`'s detection (`system_locales`) re-queries the OS on every call — no cache, no
+  platform-change event plumbing — so an app that wants to react to a live system-locale change
+  polls it itself (e.g. on resume) and re-negotiates through `I18n::set_locale`.
+- `i18n`'s reactive `I18n` handle holds the active locale in a tracked `RwSignal`; `set_locale`
+  re-negotiates and writes it, waking the shell through the normal signal-write → `FrameWaker`
+  path like any other app-state change — a coarse, whole-subscribed-tree rebuild, the same shape
+  `clean-signals-frust`'s `Component` builds take above.
+- `i18n`'s `formatting` feature registers ICU-backed `NUMBER`/`DATETIME` Fluent functions per
+  locale via `LocaleSet::with_locale_function` (one formatter factory call per registered
+  locale, keyed by it), reachable both directly (`fmt::decimal`/`currency`/`date`/`time`) and
+  from inside an `.ftl` message.
 
 ## Key Types
 
@@ -151,3 +185,7 @@ call (biometric prompts, camera permission/capture, every `iap` store round trip
 | `Iap` / `IapError` / `IapEvent` / `IapErrorCode` / `ListenerHandle` | In-app-purchase entry point (stateless, one store connection per process); its error enum (`Store` = a store refusal, `Platform` = a glue/boundary defect — Android tells them apart via a `synthetic` marker field the host JSON can never legitimately carry, iOS via the throw's type); the two purchase-outcome events (`PurchaseUpdated`/`PurchaseError`) delivered on the registered listener; the store-reported failure code carried inside a `PurchaseError`; the drop-to-unregister handle returned by `set_purchase_listener` |
 | `use_controller` / `provide_controller` / `expect_controller` / `use_failure_listener` / `async_view` / `use_interval` | `clean-signals-frust`'s public hooks bridging a `clean_signals` controller into a Frust `Component`'s reactive `Owner` |
 | `Database` / `Value` / `Engine` / `DatabaseError` | The embedded-SQL entry point (one serialized connection per handle, `Send + Sync`); the five-SQLite-storage-class param/result value; the compiled-engine selector (`Sqlite`/`Turso`, `#[non_exhaustive]`); the typed error enum (`Storage`, `Sql`, `AsyncContext`, `EngineUnavailable`, `Reentrant`) |
+| `I18n` / `Locale` / `I18nError` | The reactive locale handle (`frust-api`) pairing an `frust_i18n::Engine` with a tracked active-locale signal; the BCP-47 locale newtype; the crate's one public error enum |
+| `frust_i18n::Engine` / `LocaleSet` / `Resolve` | The immutable, `Send + Sync` Fluent bundle core and its builder; the message-resolution trait both `locales!`-generated typed-key functions and the reactive `I18n` handle implement |
+| `locales!` | `frust-i18n-macros`' compile-time proc macro loading a locale directory into `locale_set()`/`engine()`/typed `keys` |
+| `fmt` (`CivilDate` / `CivilTime` / `DateLength`) | ICU4X-backed decimal/percent/currency/date/time formatting entry points and their date/time value types (`formatting` feature) |

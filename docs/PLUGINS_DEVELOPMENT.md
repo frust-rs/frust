@@ -60,6 +60,25 @@ clean both platforms; a StoreKit-Testing smoke round trip needing no store accou
 store-account-gated purchase/finish flow once a Play listing or App Store Connect product
 exists) is that README's §6, not repeated here.
 
+## i18n manual test (desktop + Android + iOS)
+
+A device gate for `frust-i18n` (`plugins/i18n`), against an app depending on the plugin per
+`plugins/i18n/README.md` §2 — the full checklist (compile-time-validation failures, negotiation
++ fallback, persistence recipe) is that README's §9, not repeated here:
+
+- **Add Plugin dialog:** clean scaffold builds with zero hand edits, both platforms.
+- **playground i18n page:** the language switcher re-renders every section across en/de/ja; the
+  plural stepper resolves the correct CLDR category per locale (`ja` has no `[one]` arm); the
+  currency/date table renders locale-correct output; the system-locale readout matches the
+  device's actual setting.
+- **No visible tofu.** Interpolated text must render with **no visible tofu boxes** — the
+  default FSI/PDI bidi isolation marks (`U+2068`/`U+2069`) are invisible by design; a visible
+  box is a finding, not an accepted degrade ([LIMITATIONS.md](LIMITATIONS.md)'s
+  `i18n-rtl-unverified`). The escape hatch is `LocaleSet::with_isolating(false)` plus a new
+  [LIMITATIONS.md](LIMITATIONS.md) entry, never silently dropping isolation.
+
+Keep this checklist in sync with `plugins/i18n/README.md` §9.
+
 ## Version Pins
 
 The pins this unit owns, under [DEVELOPMENT.md](DEVELOPMENT.md)'s Version-Pin Policy (pins are
@@ -77,6 +96,11 @@ LAW; re-run the row's tripwire after touching it, and never run a blind `cargo u
 | `arboard =3.6.1` exact | `frust-clipboard`'s desktop (macOS/Linux/Windows) text-clipboard backend; `default-features = false` drops the default `image-data` feature; `wl-clipboard-rs`'s native-Wayland `wayland-data-control` feature is deliberately not enabled | `cargo check -p frust-clipboard` |
 | `rusqlite =0.40.1` exact, `default-features = false, features = ["bundled"]` | `frust-database`'s default (`engine-sqlite`) backend; `bundled` compiles SQLite `3.53.2` via `cc` — this crate's own conformance suite is the bump tripwire | `cargo test -p frust-database` |
 | `turso =0.7.2` exact, `default-features = false` | `frust-database`'s optional `engine-turso` backend (pre-1.0 rewrite); dropping the default `mimalloc`+`fts` features saves ~4 MB. Needs libclang on the host — [DEVELOPMENT.md](DEVELOPMENT.md)'s Prerequisites. `scripts/size-report.sh` is a whole-artifact snapshot, not a delta tool; `plugins/database/README.md` §6 documents the two-release-build procedure that produced the recorded size delta, reproducible on a pin bump | `cargo test -p frust-database --features engine-turso` |
+| `fluent-bundle 0.16` / `fluent-langneg 0.13` / `unic-langid 0.9` / `fluent-syntax 0.12` minor | `frust-i18n`'s Fluent Project message-bundle engine, locale negotiation, BCP-47 locale type, and (via `frust-i18n-macros`) the `locales!` macro's compile-time `.ftl` syntax check — all pre-1.0, same upstream `fluent-rs` repo, same churn risk | `cargo test -p frust-i18n` + `cargo check --target aarch64-linux-android -p frust-i18n && cargo check --target aarch64-apple-ios-sim -p frust-i18n` |
+| `icu_decimal`/`icu_datetime`/`icu_plurals 2.2` + `icu_locale_core 2.3` + `tinystr 0.8` + `icu_provider 2.3` (`sync` feature) minor | `frust-i18n`'s optional `formatting` feature — ICU4X number/date/plural formatting. MUST stay unified with the lockfile's parley-driven ICU4X line (`icu_collator`/`icu_normalizer`/`icu_properties`/`icu_segmenter`, pulled transitively by `frust-text`'s shaping stack) — never bumped independently of it, or a duplicate ICU4X major enters the graph. `icu_provider`'s `sync` feature swaps every ICU4X `DataPayload`'s `Rc` for an `Arc` globally (feature unification), an accepted swap that reaches parley's own transitive ICU4X crates in any `formatting` build too, not just this crate's | `cargo test -p frust-i18n` + `cargo check --target aarch64-linux-android -p frust-i18n && cargo check --target aarch64-apple-ios-sim -p frust-i18n`, plus `cargo tree -p frust-i18n --features formatting -d` (no duplicate `icu_*` majors) |
+| `icu_experimental =0.5.0` EXACT | `frust-i18n`'s currency + percent formatter surface (`fmt/currency.rs`, `fmt/number.rs`); an explicitly experimental, pre-1.0 ICU4X crate ("all code in this crate is unstable" per its own doc) that major-bumps every ICU4X release — 0.5.0 is the release whose own dependency line still resolves to this workspace's already-present 2.2.x ICU4X components. A currency-formatting dependency gets `clean-signals`-grade rigor: never bump without re-verifying the whole `icu_*` resolve | `cargo test -p frust-i18n` + `cargo check --target aarch64-linux-android -p frust-i18n && cargo check --target aarch64-apple-ios-sim -p frust-i18n` |
+| `sys-locale =0.3.2` exact | `frust-i18n`'s desktop (macOS/Linux/Windows) system-locale detection backend — a small, young surface with no minor-version API-stability track record yet | `cargo test -p frust-i18n` + `cargo check --target aarch64-linux-android -p frust-i18n && cargo check --target aarch64-apple-ios-sim -p frust-i18n` |
+| `trybuild 1` (dev-only) | `frust-i18n`'s dev-only compile-fail harness for the `locales!` macro's diagnostics (`tests/macro_diagnostics.rs`); never reaches a shipped dependency graph | `cargo test -p frust-i18n --no-default-features --test macro_diagnostics -- --ignored` (regenerate expectations with `TRYBUILD=overwrite`) |
 
 ## See Also
 

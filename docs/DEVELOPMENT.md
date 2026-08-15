@@ -280,6 +280,12 @@ cargo test -p frust-cli --test create_ios -- --ignored
 # and runs `build apk --release` via a real Gradle build — needs Android SDK/NDK; ~1 minute.
 cargo test -p frust-cli --test build_e2e -- --ignored
 
+# Macro-diagnostics compile-fail suite (frust-i18n): compiles a generated trybuild project
+# against this crate's full default dependency graph in its own target dir. Regenerate
+# expectations with `TRYBUILD=overwrite cargo test -p frust-i18n --no-default-features
+# --test macro_diagnostics -- --ignored`.
+cargo test -p frust-i18n --no-default-features --test macro_diagnostics -- --ignored
+
 # Android compile gate (no device needed): the whole facade graph must compile for Android.
 cargo check --target aarch64-linux-android \
   -p frust -p frust-plugin -p frust-shared-preferences -p frust-secure-storage \
