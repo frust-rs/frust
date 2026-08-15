@@ -3,6 +3,11 @@ name = "{{ project_name }}"
 version = "0.1.0"
 edition = "2024"
 publish = false
+# Windows-only resource embedding (taskbar/exe icon, FileVersion/
+# ProductVersion) — see `windows/build.rs`'s own doc comment for why this key
+# isn't itself platform-conditional (Cargo has no such thing) and stays a
+# no-op off Windows.
+build = "windows/build.rs"
 
 # `cdylib` is the shared library Android's `System.loadLibrary` loads (the JNI
 # bridge); `staticlib` is the archive the iOS Xcode target links (the C-ABI
@@ -71,6 +76,14 @@ frust-shared-preferences = { path = "{{ frust_path }}/../../plugins/shared-prefe
 # log lines while keeping warn/error crash diagnostics, and profile keeps its
 # `frust-perf` output.
 log = "0.4"
+
+# `windows/build.rs`'s resource embedder. `winres` (the older, commonly
+# referenced crate for this) was last published 2021-09-28 — stale — so this
+# uses the actively maintained `winresource` fork instead. A
+# `[target.'cfg(windows)']`-scoped table so it (and everything it pulls in)
+# never touches a macOS/Linux build.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
 
 [features]
 # Release-lean log ceiling — see the `log` dependency above for why this is a

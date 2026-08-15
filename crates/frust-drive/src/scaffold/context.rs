@@ -112,6 +112,14 @@ pub fn frust_path_from_project_subdir(frust_path: &str) -> String {
     }
 }
 
+/// Default `[macos] minimum-system-version` a freshly scaffolded project's
+/// `macos/Info.plist.tmpl` renders (`LSMinimumSystemVersion`). `frust.toml`'s
+/// `[macos]` stub ships commented out (see [`TemplateContext::render_vars`]'s
+/// doc), so there is no manifest value to read back at scaffold time; this is
+/// the same default the commented stub documents, kept as one constant so the
+/// two never drift.
+pub const DEFAULT_MACOS_MINIMUM_SYSTEM_VERSION: &str = "11.0";
+
 /// Values substituted into `.tmpl` file contents, and (a subset of) values
 /// usable as literal path-segment placeholders.
 #[derive(Debug, Clone)]
@@ -151,6 +159,11 @@ impl TemplateContext {
             ("frust_path", self.frust_path.clone()),
             ("android_identifier", self.android_identifier()),
             ("iosIdentifier", self.ios_identifier()),
+            ("desktop_identifier", self.desktop_identifier()),
+            (
+                "macos_minimum_system_version",
+                DEFAULT_MACOS_MINIMUM_SYSTEM_VERSION.to_string(),
+            ),
             (
                 "deeplink_scheme",
                 self.deeplink_scheme.clone().unwrap_or_default(),
@@ -203,6 +216,20 @@ impl TemplateContext {
     /// the iOS template has no identifier-named directories.
     pub fn ios_identifier(&self) -> String {
         crate::ios_id::derive(&self.org, &self.project_name)
+    }
+
+    /// Derives the desktop bundle identifier (macOS `CFBundleIdentifier`,
+    /// the Windows product identifier `windows/build.rs`'s resource block
+    /// documents, and the Linux desktop-entry `Icon`/id) shared by all three
+    /// desktop templates — see the `[desktop] identifier` key in
+    /// `frust.toml.tmpl`. Deliberately reuses [`crate::android_id::derive`]
+    /// rather than [`crate::ios_id::derive`]'s camelCase transform: unlike an
+    /// iOS bundle id, a desktop one is not App-Store-grammar-gated, so there
+    /// is no reason to mangle the project name away from its `snake_case`
+    /// form — this is the "matches the Android precedent" derivation the
+    /// desktop-templates task called for.
+    pub fn desktop_identifier(&self) -> String {
+        crate::android_id::derive(&self.org, &self.project_name)
     }
 
     /// Validates the derived iOS bundle identifier (a scaffold-time
@@ -468,6 +495,27 @@ mod tests {
     fn render_vars_include_ios_identifier() {
         let vars = test_context().render_vars();
         assert_eq!(vars.get("iosIdentifier").unwrap(), "dev.f0x.myApp");
+    }
+
+    #[test]
+    fn desktop_identifier_matches_android_derivation_not_ios_camel_case() {
+        // The whole point of reusing `android_id::derive`: unlike the iOS
+        // bundle id, the underscore in `my_app` survives verbatim.
+        let mut ctx = test_context();
+        ctx.project_name = "my_app".into();
+        assert_eq!(ctx.desktop_identifier(), "dev.f0x.my_app");
+        assert_eq!(ctx.desktop_identifier(), ctx.android_identifier());
+        assert_ne!(ctx.desktop_identifier(), ctx.ios_identifier());
+    }
+
+    #[test]
+    fn render_vars_include_desktop_identifier_and_macos_minimum_system_version() {
+        let vars = test_context().render_vars();
+        assert_eq!(vars.get("desktop_identifier").unwrap(), "dev.f0x.my_app");
+        assert_eq!(
+            vars.get("macos_minimum_system_version").unwrap(),
+            DEFAULT_MACOS_MINIMUM_SYSTEM_VERSION,
+        );
     }
 
     #[test]

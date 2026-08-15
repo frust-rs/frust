@@ -1,0 +1,47 @@
+// Windows resource embedding for {{ title_case_name }}: sets the compiled
+// `.exe`'s taskbar/file-explorer icon plus its FileVersion/ProductVersion
+// metadata. macOS and Linux have no equivalent — their icons come from
+// bundle metadata instead (`macos/Info.plist`'s `CFBundleIconFile`,
+// `linux/app.desktop`'s `Icon=` key), not from anything baked into the
+// binary itself.
+//
+// Cargo runs `build.rs` on every platform regardless of the
+// `[target.'cfg(windows)']`-gated build-dependency it uses (there is no way
+// to make the `build = "windows/build.rs"` key in `Cargo.toml` itself
+// platform-conditional), so this file must stay buildable everywhere even
+// though its body is a no-op off Windows.
+//
+// `windows/icon.ico` does NOT ship with this template — `frust build`'s icon
+// pipeline generates it from `[desktop] icon` (see `frust.toml`) ahead of a
+// Windows build. Building with plain `cargo build`/`cargo run` before that
+// pipeline has ever run is fine: the icon step degrades to a build-time
+// warning rather than a hard failure, so the binary still builds, just
+// without an embedded icon yet.
+
+fn main() {
+    #[cfg(windows)]
+    embed_resources();
+}
+
+#[cfg(windows)]
+fn embed_resources() {
+    let icon_path = std::path::Path::new("windows/icon.ico");
+    if !icon_path.exists() {
+        println!(
+            "cargo:warning=windows/icon.ico not found — run `frust build` to generate it from \
+             `[desktop] icon` before a Windows release; building without an embedded icon"
+        );
+        return;
+    }
+
+    let mut resource = winresource::WindowsResource::new();
+    resource.set_icon(icon_path.to_str().expect("windows/icon.ico is valid UTF-8"));
+    // Overridable via `[windows] file-version` / `[windows] product-version`
+    // in `frust.toml` once the manifest parser for this section lands —
+    // these are the scaffold's own defaults until then.
+    resource.set("FileVersion", "1.0.0.0");
+    resource.set("ProductVersion", "1.0.0");
+    if let Err(err) = resource.compile() {
+        println!("cargo:warning=failed to embed Windows resources: {err}");
+    }
+}

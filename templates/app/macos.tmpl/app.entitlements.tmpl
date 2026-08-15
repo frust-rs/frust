@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	Hardened Runtime entitlements for {{ title_case_name }}, applied when
+	codesigning with `[macos] signing-identity` (see `frust.toml`). Every
+	entitlement below is commented out: a fresh scaffold builds and runs
+	unsigned/ad-hoc-signed locally, which needs none of these, and asking
+	Apple's notarization service for one the app doesn't actually use is a
+	real review flag — uncomment only what the app needs.
+	-->
+
+	<!--
+	JIT / dynamically-generated executable code. `frust`'s vello/wgpu render
+	pipeline compiles shaders through Metal, not JIT'd Rust, so this is not
+	needed by the framework itself — only by an app embedding something that
+	genuinely requires it.
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	-->
+
+	<!--
+	Outbound network access (HTTP calls, a backend plugin). Needed the
+	moment the app talks to the network at all.
+	<key>com.apple.security.network.client</key>
+	<true/>
+	-->
+
+	<!--
+	Inbound network access (the app itself listens for connections). Rarely
+	needed by a client app.
+	<key>com.apple.security.network.server</key>
+	<true/>
+	-->
+
+	<!--
+	Disables the App Sandbox entirely. Sandboxed is the default (this key
+	absent, or explicitly `<false/>`) and the right starting point; only
+	uncomment this if the app needs filesystem/device access the sandbox
+	genuinely cannot express through a scoped entitlement.
+	<key>com.apple.security.app-sandbox</key>
+	<false/>
+	-->
+</dict>
+</plist>

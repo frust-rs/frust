@@ -3,6 +3,37 @@ name = "{{ project_name }}"
 org = "{{ org }}"
 description = "{{ description }}"
 
+# Desktop (macOS/Windows/Linux) shell identity, read by `frust build`/
+# `frust run`'s desktop pipeline and rendered into `macos/Info.plist`,
+# `windows/build.rs`'s resource block, and `linux/app.desktop` at scaffold
+# time. `icon` is the single source image the icon pipeline derives every
+# platform's app icon from (`.icns`/`.ico`/`hicolor` PNGs) — point it at a
+# higher-resolution asset than the bundled demo logo before shipping.
+[desktop]
+name = "{{ title_case_name }}"
+identifier = "{{ desktop_identifier }}"
+icon = "assets/logo.png"
+
+# macOS-only overrides. Uncomment to change the minimum supported macOS
+# version (default "{{ macos_minimum_system_version }}", matching
+# `macos/Info.plist`'s `LSMinimumSystemVersion`) or set a Developer-ID
+# signing identity for a notarizable release build.
+# [macos]
+# minimum-system-version = "{{ macos_minimum_system_version }}"
+# signing-identity = "Developer ID Application: Example Org (TEAMID1234)"
+
+# Windows-only overrides. Uncomment to change the FileVersion/ProductVersion
+# metadata `windows/build.rs` embeds into the compiled `.exe` (defaults to
+# "1.0.0.0"/"1.0.0" — see that file).
+# [windows]
+# file-version = "1.0.0.0"
+# product-version = "1.0.0"
+
+# Linux-only overrides. Uncomment to change the freedesktop `Categories=`
+# entry `linux/app.desktop` renders (default "Utility").
+# [linux]
+# categories = ["Utility"]
+
 {% if deeplink_scheme -%}
 # Deep-link scheme registered in the generated Android manifest / iOS
 # Info.plist. Informational here — Frust tooling doesn't parse

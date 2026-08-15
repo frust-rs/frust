@@ -1396,6 +1396,289 @@ mod tests {
         assert!(dest.join("assets/logo.png").exists());
         assert!(dest.join("android").is_dir());
         assert!(dest.join("ios").is_dir());
+        assert!(dest.join("macos").is_dir());
+        assert!(dest.join("windows").is_dir());
+        assert!(dest.join("linux").is_dir());
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn generate_produces_desktop_tree_dir_names_with_stripped_tmpl_suffix() {
+        let dest = unique_temp_dir("desktop-dir-suffix");
+        let ctx = test_context();
+
+        generate(&dest, &ctx, None, false, None).unwrap();
+
+        // `macos.tmpl/`, `windows.tmpl/`, `linux.tmpl/` -> `macos/`,
+        // `windows/`, `linux/`: the marker suffix on the source directory
+        // doesn't leak into the generated project, mirroring
+        // `android.tmpl/`/`ios.tmpl/`.
+        for (rendered, marker) in [
+            ("macos", "macos.tmpl"),
+            ("windows", "windows.tmpl"),
+            ("linux", "linux.tmpl"),
+        ] {
+            assert!(dest.join(rendered).is_dir(), "expected `{rendered}/`");
+            assert!(
+                !dest.join(marker).exists(),
+                "`{marker}/` marker suffix must not survive rendering"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn generate_produces_macos_info_plist_and_entitlements_with_substitutions() {
+        let dest = unique_temp_dir("macos-tree");
+        let ctx = test_context();
+
+        let written = generate(&dest, &ctx, None, false, None).unwrap();
+        for f in ["macos/Info.plist", "macos/app.entitlements"] {
+            assert!(
+                written.iter().any(|p| p == Path::new(f)),
+                "expected `{f}` in written paths: {written:?}"
+            );
+        }
+
+        let plist = fs::read_to_string(dest.join("macos/Info.plist")).unwrap();
+        assert!(
+            plist.contains(&format!("<string>{}</string>", ctx.title_case_name)),
+            "{plist}"
+        );
+        assert!(
+            plist.contains(&format!("<string>{}</string>", ctx.project_name)),
+            "{plist}"
+        );
+        assert!(
+            plist.contains(&format!("<string>{}</string>", ctx.desktop_identifier())),
+            "{plist}"
+        );
+        assert!(
+            plist.contains("<key>LSMinimumSystemVersion</key>\n\t<string>11.0</string>"),
+            "{plist}"
+        );
+        assert!(!plist.contains("{{"), "{plist}");
+
+        let entitlements = fs::read_to_string(dest.join("macos/app.entitlements")).unwrap();
+        assert!(
+            entitlements.contains(&ctx.title_case_name),
+            "{entitlements}"
+        );
+        assert!(!entitlements.contains("{{"), "{entitlements}");
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// With no `[deeplink]` config, the rendered macOS Info.plist has no
+    /// `CFBundleURLTypes` key, mirroring the iOS baseline test.
+    #[test]
+    fn generate_macos_info_plist_without_deeplink_omits_cfbundle_url_types() {
+        let dest = unique_temp_dir("macos-plist-no-deeplink");
+        let ctx = test_context();
+        assert!(ctx.deeplink_scheme.is_none());
+
+        generate(&dest, &ctx, None, false, None).unwrap();
+
+        let plist = fs::read_to_string(dest.join("macos/Info.plist")).unwrap();
+        assert!(!plist.contains("CFBundleURLTypes"), "{plist}");
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// A `[deeplink]` scheme renders a `CFBundleURLTypes` entry in the macOS
+    /// Info.plist too, not just the iOS one.
+    #[test]
+    fn generate_macos_info_plist_with_deeplink_renders_cfbundle_url_types() {
+        let dest = unique_temp_dir("macos-plist-with-deeplink");
+        let mut ctx = test_context();
+        ctx.deeplink_scheme = Some("myapp".into());
+
+        generate(&dest, &ctx, None, false, None).unwrap();
+
+        let plist = fs::read_to_string(dest.join("macos/Info.plist")).unwrap();
+        assert!(plist.contains("<key>CFBundleURLTypes</key>"), "{plist}");
+        assert!(plist.contains("<string>myapp</string>"), "{plist}");
+        assert!(
+            plist.contains(&format!("<string>{}</string>", ctx.desktop_identifier())),
+            "{plist}"
+        );
+        assert!(plist.trim_end().ends_with("</plist>"), "{plist}");
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn generate_produces_windows_build_rs_and_wires_cargo_toml() {
+        let dest = unique_temp_dir("windows-tree");
+        let ctx = test_context();
+
+        let written = generate(&dest, &ctx, None, false, None).unwrap();
+        assert!(
+            written.iter().any(|p| p == Path::new("windows/build.rs")),
+            "expected `windows/build.rs` in written paths: {written:?}"
+        );
+
+        let build_rs = fs::read_to_string(dest.join("windows/build.rs")).unwrap();
+        assert!(
+            build_rs.contains("winresource::WindowsResource::new()"),
+            "{build_rs}"
+        );
+        assert!(build_rs.contains("windows/icon.ico"), "{build_rs}");
+        assert!(build_rs.contains(&ctx.title_case_name), "{build_rs}");
+        assert!(!build_rs.contains("{{"), "{build_rs}");
+
+        // Cargo.toml wires the build script and the Windows-only
+        // build-dependency the script needs.
+        let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+        assert!(
+            cargo_toml.contains("build = \"windows/build.rs\""),
+            "{cargo_toml}"
+        );
+        assert!(
+            cargo_toml.contains("[target.'cfg(windows)'.build-dependencies]"),
+            "{cargo_toml}"
+        );
+        assert!(cargo_toml.contains("winresource = \"0.1\""), "{cargo_toml}");
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// Both `Cargo.toml.tmpl` variants (default and `--arch clean-signals`)
+    /// must carry the identical Windows build-script wiring — the
+    /// clean-signals-guardrail precedent (CLAUDE.md) applied to this task's
+    /// own addition.
+    #[test]
+    fn generate_wires_windows_build_script_identically_in_both_cargo_toml_variants() {
+        let ctx = test_context();
+
+        let default_dest = unique_temp_dir("windows-wiring-default");
+        generate(&default_dest, &ctx, None, false, None).unwrap();
+        let clean_signals_dest = unique_temp_dir("windows-wiring-clean-signals");
+        generate(
+            &clean_signals_dest,
+            &ctx,
+            None,
+            false,
+            Some("clean-signals"),
+        )
+        .unwrap();
+
+        for dest in [&default_dest, &clean_signals_dest] {
+            let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+            assert!(
+                cargo_toml.contains("build = \"windows/build.rs\""),
+                "{cargo_toml}"
+            );
+            assert!(
+                cargo_toml.contains("[target.'cfg(windows)'.build-dependencies]"),
+                "{cargo_toml}"
+            );
+            assert!(cargo_toml.contains("winresource = \"0.1\""), "{cargo_toml}");
+        }
+
+        let _ = fs::remove_dir_all(&default_dest);
+        let _ = fs::remove_dir_all(&clean_signals_dest);
+    }
+
+    #[test]
+    fn generate_produces_linux_desktop_entry_with_substitutions() {
+        let dest = unique_temp_dir("linux-tree");
+        let ctx = test_context();
+
+        let written = generate(&dest, &ctx, None, false, None).unwrap();
+        assert!(
+            written.iter().any(|p| p == Path::new("linux/app.desktop")),
+            "expected `linux/app.desktop` in written paths: {written:?}"
+        );
+
+        let desktop_entry = fs::read_to_string(dest.join("linux/app.desktop")).unwrap();
+        assert!(
+            desktop_entry.starts_with("[Desktop Entry]"),
+            "{desktop_entry}"
+        );
+        assert!(
+            desktop_entry.contains(&format!("Name={}", ctx.title_case_name)),
+            "{desktop_entry}"
+        );
+        assert!(
+            desktop_entry.contains(&format!("Exec={}", ctx.project_name)),
+            "{desktop_entry}"
+        );
+        assert!(
+            desktop_entry.contains(&format!("Icon={}", ctx.desktop_identifier())),
+            "{desktop_entry}"
+        );
+        assert!(
+            desktop_entry.contains("Categories=Utility;"),
+            "{desktop_entry}"
+        );
+        assert!(!desktop_entry.contains("{{"), "{desktop_entry}");
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn generate_frust_toml_includes_populated_desktop_section_and_commented_platform_stubs() {
+        let dest = unique_temp_dir("toml-desktop-section");
+        let ctx = test_context();
+
+        generate(&dest, &ctx, None, false, None).unwrap();
+
+        let toml = fs::read_to_string(dest.join("frust.toml")).unwrap();
+        assert!(toml.contains("[desktop]"), "{toml}");
+        assert!(
+            toml.contains(&format!("name = \"{}\"", ctx.title_case_name)),
+            "{toml}"
+        );
+        assert!(
+            toml.contains(&format!("identifier = \"{}\"", ctx.desktop_identifier())),
+            "{toml}"
+        );
+        assert!(toml.contains("icon = \"assets/logo.png\""), "{toml}");
+        // The per-platform stubs stay commented out by default.
+        assert!(toml.contains("# [macos]"), "{toml}");
+        assert!(toml.contains("# [windows]"), "{toml}");
+        assert!(toml.contains("# [linux]"), "{toml}");
+        assert!(!toml.contains("{{"), "{toml}");
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// Re-running `generate` with `overwrite` against its own prior output
+    /// reproduces every new desktop-template file byte-for-byte — the
+    /// idempotency half of the scaffold's contract (byte-identical output,
+    /// never a silent partial write).
+    #[test]
+    fn generate_desktop_templates_are_idempotent_under_overwrite() {
+        let dest = unique_temp_dir("desktop-idempotent");
+        let ctx = test_context();
+
+        generate(&dest, &ctx, None, false, None).unwrap();
+        let first: Vec<(PathBuf, String)> = [
+            "macos/Info.plist",
+            "macos/app.entitlements",
+            "windows/build.rs",
+            "linux/app.desktop",
+            "frust.toml",
+            "Cargo.toml",
+        ]
+        .iter()
+        .map(|f| (dest.join(f), fs::read_to_string(dest.join(f)).unwrap()))
+        .collect();
+
+        generate(&dest, &ctx, None, true, None).unwrap();
+
+        for (path, before) in first {
+            let after = fs::read_to_string(&path).unwrap();
+            assert_eq!(
+                before,
+                after,
+                "`{}` must render byte-identically on a repeat `--overwrite` generate",
+                path.display()
+            );
+        }
 
         let _ = fs::remove_dir_all(&dest);
     }
