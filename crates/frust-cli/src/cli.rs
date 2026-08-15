@@ -187,6 +187,51 @@ pub enum BuildTarget {
         #[arg(long = "export-method", value_name = "METHOD")]
         export_method: String,
     },
+    /// macOS `.app` bundle via `cargo build` (macOS host only — desktop
+    /// targets are host-locked, like every other desktop toolchain: a
+    /// `.app`/`.exe`/Linux bundle can only be assembled on that same OS).
+    /// Defaults to release mode, like every other `frust build` target. Code
+    /// signing is config-driven (`[macos] signing-identity` in
+    /// `frust.toml`), not a flag — there is no `--no-codesign` here, unlike
+    /// `build ios`.
+    Macos {
+        #[command(flatten)]
+        build: BuildArgs,
+
+        /// Also build the platform's installer set over the assembled
+        /// bundle — a `.dmg` on macOS — via a pinned `cargo-packager`
+        /// (`docs/CLI_DEVELOPMENT.md`'s Version Pins).
+        #[arg(long)]
+        installer: bool,
+    },
+    /// Windows `.exe` bundle via `cargo build` (Windows host only — see
+    /// `Macos`'s doc comment for the host-lock rule this shares). Defaults
+    /// to release mode, like every other `frust build` target.
+    Windows {
+        #[command(flatten)]
+        build: BuildArgs,
+
+        /// Also build the platform's installer set over the assembled
+        /// bundle — an NSIS `.exe` and a WiX `.msi` on Windows — via a
+        /// pinned `cargo-packager` (`docs/CLI_DEVELOPMENT.md`'s Version
+        /// Pins).
+        #[arg(long)]
+        installer: bool,
+    },
+    /// Linux bundle (binary + `.desktop` entry + hicolor icon tree) via
+    /// `cargo build` (Linux host only — see `Macos`'s doc comment for the
+    /// host-lock rule this shares). Defaults to release mode, like every
+    /// other `frust build` target.
+    Linux {
+        #[command(flatten)]
+        build: BuildArgs,
+
+        /// Also build the platform's installer set over the assembled
+        /// bundle — a `.deb` and an `.AppImage` on Linux — via a pinned
+        /// `cargo-packager` (`docs/CLI_DEVELOPMENT.md`'s Version Pins).
+        #[arg(long)]
+        installer: bool,
+    },
 }
 
 /// `frust run --render-tier` value (see `Command::Run`'s doc comment).
@@ -582,6 +627,76 @@ mod tests {
     fn build_ipa_requires_export_method() {
         let result = Cli::try_parse_from(["frust", "build", "ipa"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parses_build_macos_with_installer_flag() {
+        let cli = Cli::parse_from(["frust", "build", "macos", "--installer"]);
+        match cli.command.unwrap() {
+            Command::Build {
+                target: BuildTarget::Macos { installer, .. },
+            } => assert!(installer),
+            other => panic!("expected Build/Macos, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_build_macos_without_installer_defaults_to_false() {
+        let cli = Cli::parse_from(["frust", "build", "macos"]);
+        match cli.command.unwrap() {
+            Command::Build {
+                target: BuildTarget::Macos { installer, .. },
+            } => assert!(!installer),
+            other => panic!("expected Build/Macos, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_build_windows_with_full_flag_surface() {
+        let cli = Cli::parse_from([
+            "frust",
+            "build",
+            "windows",
+            "--installer",
+            "--build-name",
+            "1.2.3",
+        ]);
+        match cli.command.unwrap() {
+            Command::Build {
+                target: BuildTarget::Windows { build, installer },
+            } => {
+                assert!(installer);
+                assert_eq!(build.build_name.as_deref(), Some("1.2.3"));
+            }
+            other => panic!("expected Build/Windows, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_build_linux_with_installer_flag() {
+        let cli = Cli::parse_from(["frust", "build", "linux", "--installer"]);
+        match cli.command.unwrap() {
+            Command::Build {
+                target: BuildTarget::Linux { installer, .. },
+            } => assert!(installer),
+            other => panic!("expected Build/Linux, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_build_linux_without_flags_uses_build_arg_defaults() {
+        let cli = Cli::parse_from(["frust", "build", "linux"]);
+        match cli.command.unwrap() {
+            Command::Build {
+                target: BuildTarget::Linux { build, installer },
+            } => {
+                assert!(!installer);
+                assert!(!build.debug);
+                assert!(!build.profile);
+                assert!(!build.release);
+            }
+            other => panic!("expected Build/Linux, got {other:?}"),
+        }
     }
 
     #[test]

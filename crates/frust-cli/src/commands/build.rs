@@ -11,6 +11,9 @@ use crate::cli::BuildTarget;
 use frust_drive::android_build::{self, AndroidArtifact};
 use frust_drive::android_run;
 use frust_drive::build_info::{BuildInfo, BuildMode};
+use frust_drive::desktop_build::{
+    self, BundleReport, DesktopBundleTarget, InstallerFormat, InstallerReport,
+};
 use frust_drive::ios_build::{self, IosArtifact};
 use frust_drive::ios_run;
 use frust_drive::process::ProcessRunner;
@@ -101,6 +104,39 @@ pub fn run_in(runner: &dyn ProcessRunner, project_dir: &Path, target: BuildTarge
                 IosArtifact::Ipa { export_method },
             )
         }
+        BuildTarget::Macos { build, installer } => {
+            let info = BuildInfo::from_args(build.into_drive(), BuildMode::Release)
+                .map_err(|err| anyhow::anyhow!(err))?;
+            build_desktop(
+                runner,
+                project_dir,
+                &info,
+                DesktopBundleTarget::Macos,
+                installer,
+            )
+        }
+        BuildTarget::Windows { build, installer } => {
+            let info = BuildInfo::from_args(build.into_drive(), BuildMode::Release)
+                .map_err(|err| anyhow::anyhow!(err))?;
+            build_desktop(
+                runner,
+                project_dir,
+                &info,
+                DesktopBundleTarget::Windows,
+                installer,
+            )
+        }
+        BuildTarget::Linux { build, installer } => {
+            let info = BuildInfo::from_args(build.into_drive(), BuildMode::Release)
+                .map_err(|err| anyhow::anyhow!(err))?;
+            build_desktop(
+                runner,
+                project_dir,
+                &info,
+                DesktopBundleTarget::Linux,
+                installer,
+            )
+        }
     }
 }
 
@@ -159,9 +195,71 @@ fn build_ios(
     Ok(0)
 }
 
+/// Drives [`desktop_build::build`] (plus [`desktop_build::build_installer`]
+/// once per format for `target`, when `installer` is set) and renders the
+/// result. The host-lock check happens inside `desktop_build::build` itself,
+/// as the very first thing it does — before `frust.toml` is even read — so
+/// a foreign-host invocation is refused before any work, with the typed
+/// [`frust_drive::desktop_build::DesktopBuildError::HostMismatch`] message
+/// naming the required OS (the desktop mirror of `build ios`'s "macOS host
+/// only" refusal).
+fn build_desktop(
+    runner: &dyn ProcessRunner,
+    project_dir: &Path,
+    info: &BuildInfo,
+    target: DesktopBundleTarget,
+    installer: bool,
+) -> Result<u8> {
+    // Print-free drive core (see `build_android`/`build_ios` above); the CLI
+    // `println!`s each streamed line to keep its stdout verbatim.
+    let report = desktop_build::build(runner, project_dir, info, target, &mut |line| {
+        println!("{line}")
+    })?;
+    print_bundle_report(&report);
+
+    if installer {
+        for format in InstallerFormat::for_target(target) {
+            let installer_report = desktop_build::build_installer(
+                runner,
+                project_dir,
+                info,
+                &report,
+                *format,
+                &mut |line| println!("{line}"),
+            )?;
+            print_installer_report(&installer_report);
+        }
+    }
+
+    Ok(0)
+}
+
 fn print_artifacts(paths: &[std::path::PathBuf]) {
     for path in paths {
         println!("Built: {}", path.display());
+    }
+}
+
+fn print_bundle_report(report: &BundleReport) {
+    println!("Bundle: {}", report.root.display());
+    for artifact in &report.artifacts {
+        println!("Built: {}", artifact.display());
+    }
+    for note in &report.notes {
+        println!("Note: {note}");
+    }
+}
+
+fn print_installer_report(report: &InstallerReport) {
+    if report.artifacts.is_empty() {
+        println!(
+            "Installer ({}): no artifact found in {}",
+            report.format,
+            report.out_dir.display()
+        );
+    }
+    for artifact in &report.artifacts {
+        println!("Built ({}): {}", report.format, artifact.display());
     }
 }
 
@@ -208,7 +306,7 @@ fn validate_export_method(method: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::build_args::BuildArgs;
-    use frust_drive::process::FakeProcessRunner;
+    use frust_drive::process::{FakeProcessRunner, Output};
     use std::fs;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -430,6 +528,137 @@ mod tests {
         };
         let err = run_in(&runner, &dir, target).unwrap_err();
         assert!(err.to_string().contains("macOS host"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `BuildTarget::{Macos,Windows,Linux}` for this host's own target reach
+    /// the real `desktop_build::build` pipeline and default to release mode:
+    /// the fake runner only has the *release* cargo invocation registered
+    /// (`RELEASE_BUILD`, matching `desktop_build`'s own tests) — a debug
+    /// default would hit that invocation's `--features frust/perf-trace
+    /// --features frust/devtools` sibling instead, an unregistered call the
+    /// fake runner would reject outright. No `--debug`/`--profile`/`--release`
+    /// flag is passed, so a `BuildInfo` default other than
+    /// `BuildMode::Release` would fail this test.
+    const RELEASE_BUILD: &str = "cargo build --release --features lean";
+
+    fn desktop_target_for(host: DesktopBundleTarget) -> BuildTarget {
+        match host {
+            DesktopBundleTarget::Macos => BuildTarget::Macos {
+                build: BuildArgs::default(),
+                installer: false,
+            },
+            DesktopBundleTarget::Windows => BuildTarget::Windows {
+                build: BuildArgs::default(),
+                installer: false,
+            },
+            DesktopBundleTarget::Linux => BuildTarget::Linux {
+                build: BuildArgs::default(),
+                installer: false,
+            },
+        }
+    }
+
+    #[test]
+    fn build_desktop_target_matching_this_host_reaches_the_pipeline_and_defaults_to_release() {
+        let Some(host) = DesktopBundleTarget::host() else {
+            eprintln!("no desktop bundle target for this OS — skipping");
+            return;
+        };
+        let dir = unique_project_dir("desktop-own-host");
+        let runner = FakeProcessRunner::new().with(
+            RELEASE_BUILD,
+            Output {
+                success: true,
+                stdout: "    Finished `release` profile [optimized]".to_string(),
+                stderr: String::new(),
+            },
+        );
+        let err = run_in(&runner, &dir, desktop_target_for(host)).unwrap_err();
+        // A green compile with nothing at the expected binary path is
+        // `DesktopBuildError::BinaryNotFound` — proof the release
+        // invocation above was the one actually run.
+        assert!(err.to_string().contains("no `release`"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A desktop target foreign to this host is refused before any work —
+    /// the fake runner holds no registrations at all, so a `cargo`
+    /// invocation would itself be an "unregistered call" error; the actual
+    /// error is the typed host-lock message instead, proving the refusal
+    /// happens first.
+    #[test]
+    fn build_desktop_target_foreign_to_this_host_is_host_locked_before_any_work() {
+        let Some(host) = DesktopBundleTarget::host() else {
+            eprintln!("no desktop bundle target for this OS — skipping");
+            return;
+        };
+        let foreign = match host {
+            DesktopBundleTarget::Macos => DesktopBundleTarget::Windows,
+            DesktopBundleTarget::Windows => DesktopBundleTarget::Linux,
+            DesktopBundleTarget::Linux => DesktopBundleTarget::Macos,
+        };
+        let dir = unique_project_dir("desktop-foreign-host");
+        let runner = FakeProcessRunner::new();
+        let err = run_in(&runner, &dir, desktop_target_for(foreign)).unwrap_err();
+        assert!(err.to_string().contains("host-locked"), "{err}");
+        assert!(err.to_string().contains(foreign.as_str()), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `--installer` without `cargo-packager` on `PATH` surfaces the typed
+    /// tool-missing error, doctor hint included — after a real bundle
+    /// assembly (the fake runner's only registration is the release
+    /// compile), never a bundle-assembly failure masking it.
+    #[test]
+    fn build_installer_flag_surfaces_a_typed_tool_missing_error() {
+        let Some(host) = DesktopBundleTarget::host() else {
+            eprintln!("no desktop bundle target for this OS — skipping");
+            return;
+        };
+        let dir = unique_project_dir("desktop-installer-tool-missing");
+        let binary_name = if host == DesktopBundleTarget::Windows {
+            "myapp.exe"
+        } else {
+            "myapp"
+        };
+        fs::create_dir_all(dir.join("target/release")).unwrap();
+        fs::write(
+            dir.join("target/release").join(binary_name),
+            b"#!/bin/sh\ntrue\n",
+        )
+        .unwrap();
+
+        let runner = FakeProcessRunner::new()
+            .with(
+                RELEASE_BUILD,
+                Output {
+                    success: true,
+                    stdout: "    Finished `release` profile [optimized]".to_string(),
+                    stderr: String::new(),
+                },
+            )
+            .missing("cargo packager --version");
+
+        let target = match host {
+            DesktopBundleTarget::Macos => BuildTarget::Macos {
+                build: BuildArgs::default(),
+                installer: true,
+            },
+            DesktopBundleTarget::Windows => BuildTarget::Windows {
+                build: BuildArgs::default(),
+                installer: true,
+            },
+            DesktopBundleTarget::Linux => BuildTarget::Linux {
+                build: BuildArgs::default(),
+                installer: true,
+            },
+        };
+        let err = run_in(&runner, &dir, target).unwrap_err();
+        assert!(
+            err.to_string().contains("cargo install cargo-packager"),
+            "{err}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }
