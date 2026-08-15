@@ -19,6 +19,12 @@ android/build/
 android/.gradle/
 build/
 
+# Desktop bundle output (`frust build macos|windows|linux`) and the .ico the
+# drive regenerates from `[desktop] icon` before every Windows build — build
+# output, never commit (kept in sync with `frust clean`'s REMOVED_DIRS).
+dist/
+windows/icon.ico
+
 # Machine-local Android SDK path + CLI-written version stamps.
 android/local.properties
 
