@@ -1104,9 +1104,12 @@ mod tests {
 
         let app = fixture.path("dist/macos/My App.app");
         let entitlements = fixture.path("macos/app.entitlements");
+        // A Developer ID identity is Apple-issued: both `--options runtime`
+        // (Hardened Runtime, always) and `--timestamp` (a secure timestamp,
+        // Apple-issued identities only) are present, in this exact order.
         let runner = cargo_ok().with(
             format!(
-                "codesign --force --sign Developer ID Application: Example --entitlements {} {}",
+                "codesign --force --sign Developer ID Application: Example --options runtime --entitlements {} --timestamp {}",
                 entitlements.display(),
                 app.display()
             ),
@@ -1120,6 +1123,41 @@ mod tests {
         let report = run(&runner, &fixture, DesktopBundleTarget::Macos).unwrap();
         assert!(report.notes.contains(&BundleNote::Signed {
             identity: "Developer ID Application: Example".to_string()
+        }));
+    }
+
+    /// The regression case the codesign flag policy exists for: an ad-hoc or
+    /// self-signed identity still gets the Hardened Runtime (harmless and
+    /// desired for every identity), but never `--timestamp` — a secure
+    /// timestamp needs Apple's timestamp service, and forcing it here would
+    /// make a local, offline signature depend on the network for no reason
+    /// (nothing trusts an ad-hoc signature's chain regardless).
+    #[test]
+    fn macos_codesign_omits_timestamp_for_a_non_apple_issued_identity() {
+        let fixture = Fixture::new("macos-signed-adhoc")
+            .manifest(
+                "[app]\nname = \"my_app\"\norg = \"dev.f0x\"\n\n\
+                 [desktop]\nname = \"My App\"\n\n\
+                 [macos]\nsigning-identity = \"My Self Signed\"\n",
+            )
+            .binary("my_app");
+
+        let app = fixture.path("dist/macos/My App.app");
+        let runner = cargo_ok().with(
+            format!(
+                "codesign --force --sign My Self Signed --options runtime {}",
+                app.display()
+            ),
+            Output {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+
+        let report = run(&runner, &fixture, DesktopBundleTarget::Macos).unwrap();
+        assert!(report.notes.contains(&BundleNote::Signed {
+            identity: "My Self Signed".to_string()
         }));
     }
 

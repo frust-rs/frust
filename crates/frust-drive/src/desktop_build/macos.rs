@@ -46,6 +46,19 @@ use super::{BundleNote, BundleReport, DesktopBuildError, DesktopBundleTarget};
 /// How many trailing `codesign` output lines a failure reports.
 const FAILURE_TAIL_LINES: usize = 20;
 
+/// Identity prefixes Apple itself issues. `--timestamp` is only ever passed
+/// for one of these: a secure timestamp requires reaching Apple's timestamp
+/// authority over the network, and an ad-hoc or self-signed local identity
+/// (`-`, a hand-rolled "My Self Signed" cert) has to keep signing possible
+/// fully offline — forcing `--timestamp` there would turn every such build
+/// into a network dependency for no verification benefit, since nothing
+/// trusts that signature's chain anyway.
+const APPLE_ISSUED_IDENTITY_PREFIXES: &[&str] = &[
+    "Developer ID Application:",
+    "Apple Distribution:",
+    "3rd Party Mac Developer Application:",
+];
+
 /// The macOS plist reader. Ships with the base system rather than with Xcode,
 /// so a bare `PATH` lookup is enough (`crate::ios_run::bundle_id`'s precedent).
 const PLUTIL: &str = "plutil";
@@ -269,11 +282,23 @@ pub(super) fn codesign(
     let app_arg = path_arg(app);
 
     // `--force` so re-signing an already-signed bundle (every rebuild) works
-    // rather than failing on the existing signature.
-    let mut args: Vec<&str> = vec!["--force", "--sign", identity.as_str()];
+    // rather than failing on the existing signature. `--options runtime`
+    // always: it enables the Hardened Runtime, which is harmless for an
+    // ad-hoc signature and mandatory for a Developer ID one to notarize —
+    // there is no case where leaving it off is preferable.
+    let mut args: Vec<&str> = vec![
+        "--force",
+        "--sign",
+        identity.as_str(),
+        "--options",
+        "runtime",
+    ];
     if let Some(entitlements) = entitlements.as_deref() {
         args.push("--entitlements");
         args.push(entitlements);
+    }
+    if is_apple_issued_identity(&identity) {
+        args.push("--timestamp");
     }
     args.push(&app_arg);
 
@@ -292,6 +317,14 @@ pub(super) fn codesign(
 
     notes.push(BundleNote::Signed { identity });
     Ok(())
+}
+
+/// Whether `identity` starts with one of [`APPLE_ISSUED_IDENTITY_PREFIXES`] —
+/// the only identities `codesign --timestamp` is passed for.
+fn is_apple_issued_identity(identity: &str) -> bool {
+    APPLE_ISSUED_IDENTITY_PREFIXES
+        .iter()
+        .any(|prefix| identity.starts_with(prefix))
 }
 
 /// A path as a command-line argument. Lossy by necessity — the
