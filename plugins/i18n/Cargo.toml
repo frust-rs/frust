@@ -98,6 +98,13 @@ trybuild = { workspace = true }
 # see `src/reactive.rs`'s module doc).
 frust-reactive = { workspace = true }
 
+# Both `frust-api` and `formatting` default on. `formatting`'s measured cost is
+# ~+1.09 MB — baked CLDR data, not code (`README.md` §10's Per-feature deltas table) —
+# re-confirmed default-on by the project owner on 2026-08-15 after that corrected
+# measurement (an earlier, dead-stripped-baseline figure had understated it). An app
+# that wants the smaller binary opts out explicitly:
+# `default-features = false, features = ["frust-api"]` keeps message-only i18n with no
+# ICU4X in the dependency graph at all.
 [features]
 default = ["frust-api", "formatting"]
 frust-api = ["dep:frust"]

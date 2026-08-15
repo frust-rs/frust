@@ -6,6 +6,8 @@ use std::fmt;
 use std::str::FromStr;
 
 use unic_langid::LanguageIdentifier;
+#[cfg(feature = "frust-api")]
+use unic_langid::subtags::Variant;
 use unic_langid::subtags::{Language, Region, Script};
 
 /// A BCP-47 locale identifier (e.g. `en-US`, `de-CH`, `zh-Hans-CN`).
@@ -40,29 +42,42 @@ impl Locale {
         &self.0
     }
 
-    /// Composes `language` with `region`, with no script/variant subtags —
-    /// the crate-private seam behind `reactive::I18n::format_locale`'s
-    /// composition rule (graft a requested tag's REGION onto the message
-    /// locale's language, e.g. `en` + `TH` region → `en-TH`) and
+    /// Grafts `region` onto `base`, preserving every other subtag `base`
+    /// carries (script, variants) — only the region subtag is added or
+    /// replaced. The crate-private seam behind
+    /// `reactive::I18n::format_locale`'s composition rule (graft a requested
+    /// tag's REGION onto the active message locale, e.g. `en` + `TH` region
+    /// → `en-TH`, or `zh-Hant` + `US` region → `zh-Hant-US`) and
     /// `reactive::I18n::set_locale`'s region-retention rule (graft a
     /// previously detected region onto a new region-less request, e.g.
-    /// `de-CH` retained + `set_locale("de")` → `de-CH` again). Both call
-    /// sites compose a *bare* language tag (the message locale, or a fresh
-    /// `set_locale` request with no region of its own), so dropping
-    /// script/variants here costs nothing in practice — never exposed
-    /// publicly, since a caller only ever reaches a composed locale through
-    /// those two methods, never by constructing one directly.
+    /// `de-CH` retained + `set_locale("de")` → `de-CH` again, or a retained
+    /// `US` region + `set_locale("zh-Hant")` → `zh-Hant-US`).
+    ///
+    /// An earlier revision of this doc claimed dropping script/variants here
+    /// "costs nothing in practice", on the premise that both call sites only
+    /// ever compose a *bare* language tag. That premise was false: a
+    /// `set_locale` caller's own requested tag, and `format_locale`'s active
+    /// message locale, can each carry a script (`zh-Hant`, `sr-Latn`, ...)
+    /// whenever the app registers script-qualified bundle locales — and
+    /// silently dropping it here mangled `set_locale("zh-Hant")` (plus a
+    /// retained region) into `zh-<region>` *before* negotiation ever ran,
+    /// negotiating the wrong script's bundle. Preserving `base`'s script and
+    /// variants is what keeps both call sites correct in that case; never
+    /// exposed publicly, since a caller only ever reaches a composed locale
+    /// through those two methods, never by constructing one directly.
     ///
     /// `frust-api`-gated: `reactive` (its only caller) doesn't compile
     /// without that feature — same gate, so `--no-default-features` never
     /// sees this as unused dead code.
     #[cfg(feature = "frust-api")]
-    pub(crate) fn compose_region(language: Language, region: Region) -> Self {
+    pub(crate) fn compose_region(base: &Locale, region: Region) -> Self {
+        let id = base.as_lang_id();
+        let variants: Vec<Variant> = id.variants().copied().collect();
         Locale(LanguageIdentifier::from_parts(
-            language,
-            None,
+            id.language,
+            id.script,
             Some(region),
-            &[],
+            &variants,
         ))
     }
 }

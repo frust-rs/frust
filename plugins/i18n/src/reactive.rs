@@ -197,7 +197,7 @@ impl I18n {
         {
             Some(tag) => tag.clone(),
             None => match requested.iter().find_map(Locale::region) {
-                Some(region) => Locale::compose_region(active.language(), region),
+                Some(region) => Locale::compose_region(&active, region),
                 None => active,
             },
         }
@@ -228,7 +228,7 @@ impl I18n {
                 .iter()
                 .find_map(Locale::region);
             match retained_region {
-                Some(region) => Locale::compose_region(requested.language(), region),
+                Some(region) => Locale::compose_region(&requested, region),
                 None => requested,
             }
         } else {
@@ -373,6 +373,33 @@ only-en = English only";
             .with_isolating(false)
     }
 
+    const ZH_HANS: &str = "which = hans";
+    const ZH_HANT: &str = "which = hant";
+    const SR_CYRL: &str = "which = cyrl";
+    const SR_LATN: &str = "which = latn";
+
+    /// A script-qualified bundle-locale fixture: two DIFFERENT-SCRIPT
+    /// bundles for the same language (`zh-Hans` Simplified vs. `zh-Hant`
+    /// Traditional), as a real Chinese-locale app would ship. `build_set`
+    /// above never carries a script, so a `compose_region` that silently
+    /// drops one would still pass every test that fixture backs — this
+    /// fixture is what actually exercises the script-preservation fix.
+    fn build_zh_script_set() -> LocaleSet {
+        LocaleSet::new(locale("zh-Hans"))
+            .with_locale(locale("zh-Hans"), [("app.ftl", ZH_HANS)])
+            .with_locale(locale("zh-Hant"), [("app.ftl", ZH_HANT)])
+            .with_isolating(false)
+    }
+
+    /// Same shape as [`build_zh_script_set`], for Serbian's Cyrillic/Latin
+    /// script split (`sr-Cyrl` vs. `sr-Latn`).
+    fn build_sr_script_set() -> LocaleSet {
+        LocaleSet::new(locale("sr-Cyrl"))
+            .with_locale(locale("sr-Cyrl"), [("app.ftl", SR_CYRL)])
+            .with_locale(locale("sr-Latn"), [("app.ftl", SR_LATN)])
+            .with_isolating(false)
+    }
+
     /// Installs an ambient reactive `Owner` — needed for `RwSignal::new`'s
     /// disposal registration and for `provide_context`/`use_context` to have
     /// somewhere to store/find a value. Mirrors `clean-signals-frust`'s own
@@ -508,7 +535,9 @@ only-en = English only";
         // the declared fallback (`en`) — `fr` shares no language with `en`
         // *and* carries no region to compose onto it, so rule 3 fires:
         // `format_locale` falls back to the message locale rather than
-        // adopting `fr`'s language wholesale (R1-M3's fix).
+        // adopting `fr`'s language wholesale — a would-be regression where an
+        // unsupported language a user's device requests leaks into the
+        // formatting locale despite the app never shipping messages for it.
         i18n.set_locale(locale("fr"));
 
         assert_eq!(i18n.locale().to_string(), "en");
@@ -545,8 +574,8 @@ only-en = English only";
 
         // The switcher passes a bare language tag, same as every documented
         // caller (README §4c/§5, the playground's `SWITCHER_LOCALES`) — the
-        // `CH` region must survive this, not collapse back to bare `de`
-        // (R1-M2's pin).
+        // `CH` region must survive this, not collapse back to bare `de`: the
+        // region-retention behavior `set_locale`'s own doc describes.
         i18n.set_locale(locale("de"));
 
         assert_eq!(i18n.locale().to_string(), "de");
@@ -570,10 +599,74 @@ only-en = English only";
         assert_eq!(i18n.format_locale().to_string(), "en-CA");
     }
 
-    /// R1-M3's rendered-output pin: `format_locale`'s rule-2 composition
-    /// must produce an ENGLISH month name (the message locale's language),
-    /// never Thai script, even though the composed formatting locale's
-    /// region is Thai. It does **not** pin a Gregorian year — verified
+    #[test]
+    fn set_locale_zh_hant_retains_a_previously_detected_region_without_dropping_script() {
+        let _owner = ambient_owner();
+        // Mirrors a Traditional-Chinese, US-region device: `system_locales()`
+        // detected `zh-Hant-US`.
+        let i18n =
+            I18n::new(build_zh_script_set(), &[locale("zh-Hant-US")]).expect("engine builds");
+        assert_eq!(i18n.locale().to_string(), "zh-Hant");
+        assert_eq!(i18n.format_locale().to_string(), "zh-Hant-US");
+        assert_eq!(i18n.t("which"), "hant");
+
+        // A bare-tag switcher call (no region, script intact) must retain
+        // the `US` region AND keep the `Hant` script it already carries. The
+        // pre-fix `compose_region(requested.language(), region)` composition
+        // dropped the script before negotiation/formatting ever saw it,
+        // composing a plain `zh-US` — `format_locale()` would then return
+        // that verbatim (rule 1), silently losing `Hant`.
+        i18n.set_locale(locale("zh-Hant"));
+
+        assert_eq!(i18n.locale().to_string(), "zh-Hant");
+        assert_eq!(i18n.format_locale().to_string(), "zh-Hant-US");
+        assert_eq!(i18n.t("which"), "hant");
+    }
+
+    #[test]
+    fn set_locale_sr_latn_retains_a_previously_detected_region_without_dropping_script() {
+        let _owner = ambient_owner();
+        // Mirrors a Latin-script Serbian, US-region device:
+        // `system_locales()` detected `sr-Latn-US`.
+        let i18n =
+            I18n::new(build_sr_script_set(), &[locale("sr-Latn-US")]).expect("engine builds");
+        assert_eq!(i18n.locale().to_string(), "sr-Latn");
+        assert_eq!(i18n.format_locale().to_string(), "sr-Latn-US");
+        assert_eq!(i18n.t("which"), "latn");
+
+        // Same region-retention contract as the `zh-Hant` test above — with
+        // the script dropped, the composed tag (`sr-US`) negotiates the
+        // WRONG bundle outright (`sr-Cyrl`, Cyrillic), not merely a region
+        // miss: `fluent-langneg`'s likely-subtags approximation maps a
+        // bare-region `sr` request to `sr-Cyrl`, never `sr-Latn`.
+        i18n.set_locale(locale("sr-Latn"));
+
+        assert_eq!(i18n.locale().to_string(), "sr-Latn");
+        assert_eq!(i18n.format_locale().to_string(), "sr-Latn-US");
+        assert_eq!(i18n.t("which"), "latn");
+    }
+
+    #[test]
+    fn format_locale_rule_2_composition_preserves_the_message_locales_own_script() {
+        let _owner = ambient_owner();
+        // Only `zh-Hant` is registered (no `zh-Hans`), so a Thai request
+        // with no matching bundle negotiates down to the `zh-Hant` fallback
+        // — rule 2 then composes that fallback's own REGION-less tag with
+        // the requested `TH` region. `zh-Hant`'s `Hant` script must survive
+        // that composition, not just its bare `zh` language.
+        let set = LocaleSet::new(locale("zh-Hant"))
+            .with_locale(locale("zh-Hant"), [("app.ftl", ZH_HANT)])
+            .with_isolating(false);
+        let i18n = I18n::new(set, &[locale("th-TH")]).expect("engine builds");
+
+        assert_eq!(i18n.locale().to_string(), "zh-Hant");
+        assert_eq!(i18n.format_locale().to_string(), "zh-Hant-TH");
+    }
+
+    /// `format_locale`'s rule-2 composition must produce an ENGLISH month
+    /// name (the message locale's language), never Thai script, even though
+    /// the composed formatting locale's region is Thai. It does **not** pin
+    /// a Gregorian year — verified
     /// empirically, ICU4X's calendar default is region-driven, so `en-TH`
     /// still renders a Buddhist-era year (`format_locale`'s own doc has the
     /// full explanation); this test pins that surprise too, rather than the

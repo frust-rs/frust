@@ -376,18 +376,22 @@ total = You owe { NUMBER($amount, style: "currency", currency: "USD") }
 placed = Order placed { DATETIME($when, dateStyle: "medium") }
 ```
 
-**In-message placeables format at the MESSAGE locale, not `format_locale()`.** This is the one
-exception to "pass `format_locale()`, never `locale()`" above: `with_icu_functions` builds each
-locale's `NUMBER`/`DATETIME` function once per registered bundle locale, at `Engine::new` time —
-`Engine` is immutable after that, so a `{ NUMBER($n) }`/`{ DATETIME($d) }` placeable inside an
-`.ftl` message always formats at whichever bundle locale resolved the message (`i18n.locale()`),
-for the life of the `Engine`; there is no way to route it through `format_locale()` instead
-short of rebuilding the whole engine on every `set_locale`. Under the composition rule above
-(§4c), that is the **same language** `format_locale()` would use — rule 1 keeps the message
-locale's language exactly, and rule 2 composes a region *onto* it — so the two only ever differ
-in region conventions (grouping, currency defaults, calendar), never in which language the text
-renders in. `docs/LIMITATIONS.md` records this as an accepted limitation, not a bug to work
-around per call site.
+**In-message placeables format at the locale of the BUNDLE THAT RESOLVES the message, not
+`format_locale()`.** This is the one exception to "pass `format_locale()`, never `locale()`"
+above: `with_icu_functions` builds each locale's `NUMBER`/`DATETIME` function once per registered
+bundle locale, at `Engine::new` time — `Engine` is immutable after that, so a `{ NUMBER($n) }`/
+`{ DATETIME($d) }` placeable inside an `.ftl` message always formats at whichever bundle's
+`FluentBundle` actually resolves that message, for the life of the `Engine`; there is no way to
+route it through `format_locale()` instead short of rebuilding the whole engine on every
+`set_locale`. That resolving bundle is usually `i18n.locale()` — the negotiated head of the
+fallback chain — but not always: a message present only further down the chain (a per-key miss,
+not a whole-locale one — the same fallback `.t()` itself walks) resolves through that fallback
+bundle instead, whose **language** can differ from `i18n.locale()`'s, not merely its region. A
+`de`-active app whose `only-en` message exists only in the `en` fallback bundle (no `de`
+translation shipped for that key) renders that message's placeables in **English** conventions —
+month names, grouping, calendar — even though every other message on the same screen renders in
+German. `docs/LIMITATIONS.md` records this as an accepted limitation, not a bug to work around per
+call site.
 
 Honored named options: `NUMBER`'s `style` (`decimal`/`percent`/`currency`) and `currency`;
 `DATETIME`'s `dateStyle`/`timeStyle`. Anything else (ECMA-402-style
