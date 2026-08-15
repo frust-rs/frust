@@ -287,7 +287,8 @@ fn out_of_range_section_falls_back() {
 
 /// The regression test for nav-label wrapping: at phone
 /// portrait width the bottom `navigation_bar` divides its width evenly across
-/// all six [`SECTION_LABELS`] destinations — 390px / 6 = 65px per slot — and
+/// every [`SECTION_LABELS`] destination — 390px / `SECTION_LABELS.len()` per
+/// slot (≈55.7px at seven) — and
 /// a label whose shaped text wraps to two lines overflows the bar's declared
 /// 64dp height (`label_y` = 44 inside a 64px box leaves only 20px, but two
 /// `labelMediumEmphasized` lines need 32px). Mounts the WHOLE
@@ -336,7 +337,7 @@ fn full_shell_nav_labels_fit_single_line_at_phone_width() {
         0,
     );
 
-    let mut runs_per_slot = [0usize; 6];
+    let mut runs_per_slot = vec![0usize; SECTION_LABELS.len()];
     for origin in &scene.text_run_origins {
         if (origin.y - expected_label_y).abs() > 0.5 {
             continue;

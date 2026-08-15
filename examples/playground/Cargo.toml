@@ -92,6 +92,16 @@ frust-native-widgets = { path = "../../plugins/native-widgets", features = [
     "demo-components",
 ] }
 
+# frust-i18n: playground is the device-gate vehicle for the "i18n" section —
+# `src/pages/i18n.rs`. Same hand-added-path-dep shape as `frust-camera`/
+# `frust-native-widgets` above (not yet a `frust tui` Add Plugin
+# contribution). Default features on: this app wants both `frust-api` (the
+# reactive `I18n` handle/context hooks) and `formatting` (the ICU4X
+# decimal/currency/date/time formatters the formatting-matrix section calls
+# directly, and the `NUMBER`/`DATETIME` Fluent placeables `locales/*/main.ftl`
+# uses).
+frust-i18n = { path = "../../plugins/i18n" }
+
 # Test-harness-only, NOT an escape hatch: the headless smoke test
 # (`tests/smoke.rs`) drives Frust's `RenderRoot` directly — the desktop
 # shell's own rebuild/layout/paint seam, no GPU, no window — the same harness

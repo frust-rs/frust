@@ -41,6 +41,16 @@
 
 pub mod pages;
 
+// The compile-time-loaded Fluent message catalog for the "i18n" section
+// (`pages/i18n.rs`) — one `locales!` invocation per module (the macro's own
+// contract), so this crate root is the app's only one. Expands, right here,
+// to `pub fn locale_set()`, `pub fn engine()`, and `pub mod keys` — reached
+// below as `locale_set()`/`crate::keys::…`. `pages/i18n.rs` reaches the
+// `keys` module the same way (`crate::keys::…`); `engine()` itself is
+// **not** used — it builds an ICU-function-free `Engine`, and the i18n
+// page's FTL messages need `NUMBER`/`DATETIME` (see [`setup_i18n`]).
+frust_i18n::locales!("locales");
+
 use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, Widget,
 };
@@ -362,12 +372,43 @@ fn home_page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
     any(Stack(layers))
 }
 
+/// Builds the app-scoped [`frust_i18n::I18n`] handle the "i18n" section
+/// (`pages/i18n.rs`) reads via `frust_i18n::use_i18n()`, and provides it
+/// through Frust's reactive context.
+///
+/// Called from [`PlaygroundApp::init`] — a root `Component::init` runs under
+/// the shell's own root `Owner` (`frust-core::component::Component::init`'s
+/// own doc), which is exactly the "ambient reactive owner"
+/// [`frust_i18n::I18n::new`]'s own doc asks a caller to construct under, the
+/// same call site `clean-signals-frust`'s `provide_controller` precedent
+/// uses.
+///
+/// Registers the ICU-backed `NUMBER`/`DATETIME` Fluent functions
+/// ([`frust_i18n::fmt::with_icu_functions`]) on the `LocaleSet` **before**
+/// building the [`frust_i18n::Engine`] — `locales/*/main.ftl`'s
+/// `order-total`/`last-visit` messages need them. That is why this builds
+/// its own `Engine` from [`locale_set`] rather than using the macro's own
+/// generated `engine()`: that one is built unconfigured (no ICU functions),
+/// on first use, behind a `OnceLock` — see [`crate`]'s `locales!` doc
+/// comment.
+fn setup_i18n() {
+    let set = frust_i18n::fmt::with_icu_functions(locale_set());
+    let engine = frust_i18n::Engine::new(set)
+        .expect("`locales!` validated every embedded source at compile time");
+    // Never fails the app: an empty/undetectable system locale list still
+    // negotiates against the engine's own fallback (`en`) — see
+    // `frust_i18n::I18n::from_engine`'s doc.
+    let requested = frust_i18n::system_locales().unwrap_or_default();
+    frust_i18n::provide_i18n(frust_i18n::I18n::from_engine(engine, &requested));
+}
+
 /// The root [`Component`]. This example's `frust::app!` call below seeds
 /// Material 3 as the app's starting theme via its `setup = { .. }` block
 /// (`frust::set_default_theme`, run before any shell construction) — a
 /// shell's own built-in fallback is [`Theme::neutral()`], and playground
 /// wants a real, design-language-neutral-enough baseline behind its plugin
-/// demos; `init` itself forces nothing — it only wires the reactive
+/// demos; `init` additionally provides the app-scoped [`frust_i18n::I18n`]
+/// handle (see [`setup_i18n`]) before wiring the reactive
 /// [`PlaygroundState`].
 #[derive(Default)]
 pub struct PlaygroundApp;
@@ -376,6 +417,7 @@ impl Component for PlaygroundApp {
     type State = PlaygroundState;
 
     fn init(&self) -> PlaygroundState {
+        setup_i18n();
         PlaygroundState::new()
     }
 
