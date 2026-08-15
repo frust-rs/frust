@@ -9,13 +9,14 @@
 //! |--------|---------------------|
 //! | `app_id` | The process AppUserModelID (taskbar grouping, notification attribution), set before the first window exists |
 //! | `window_icon` | Both `ICON_SMALL` (titlebar/alt-tab) and `ICON_BIG` (taskbar), attached at window-attribute time |
-//! | `menu_spec` | A native `HMENU` menu bar on the window's own handle, with `TranslateAcceleratorW` accelerators and activations reported through `frust_reactive::push_menu_event` |
+//! | `menu_spec` | A native `HMENU` menu bar on the window's own handle, with `TranslateAcceleratorW` accelerators and activations queued by muda's event handler, each carrying its own redraw into `frust_reactive::push_menu_event` |
 //! | (resolved theme) | The titlebar's light/dark appearance, via winit's native `Window::set_theme` |
 //!
 //! # Module shape
 //!
-//! - `menu` — the platform-free `MenuSpec` → menu plan mapping, plus the muda
-//!   menu built from it and the per-frame activation drain.
+//! - `menu` — the platform-free `MenuSpec` → menu plan mapping and the
+//!   activation queue behind it, plus the muda menu built from the plan and the
+//!   one-activation-per-frame pump that empties the queue.
 //! - `theme` — the titlebar's wanted-vs-applied brightness latch.
 //! - `win32_glue` — this crate's **sanctioned-unsafe zone**: every `unsafe`
 //!   block, and every `windows-sys`/winit-Windows-extension call, lives there
@@ -151,19 +152,40 @@ impl DesktopExtensions for WindowsExtensions {
         }
     }
 
-    /// Retains the window, installs the native menu bar on its `HWND`, and
-    /// applies any brightness that resolved before the window existed.
+    /// Retains the window, routes menu activations into the shell's own queue,
+    /// installs the native menu bar on the window's `HWND`, and applies any
+    /// brightness that resolved before the window existed.
     fn on_window_created(&mut self, window: &Arc<Window>) {
         self.window = Some(Arc::clone(window));
+        // Ordering matters: the queue must know which ids it accepts, and which
+        // window a menu activation wakes, before the menu that produces them
+        // exists. The retained `Arc<Window>` is that wake target, and it is
+        // load-bearing — neither route into the menu produces a winit event
+        // (a click arrives as a `WM_COMMAND`, which winit has no event for; an
+        // accelerator is consumed by this crate's message hook before winit
+        // sees the keystroke at all), so without an explicit `request_redraw`
+        // the dirty-driven loop would never produce the frame that delivers the
+        // activation (see the `menu` module).
+        let bridge = menu::bridge();
+        bridge.set_known_ids(self.menu_plan.activation_ids().clone());
+        // `window.clone()`, not `Arc::clone(window)`: the unsizing coercion to
+        // `Arc<dyn MenuWaker>` needs the method call's inferred target type.
+        bridge.set_waker(window.clone());
+        menu::install_event_handler();
         self.menu = menu::install(&self.menu_plan, window, &self.accelerators);
         self.sync_titlebar_theme();
     }
 
-    /// Drains the platform menu queue into `frust_reactive::push_menu_event`,
-    /// so an activation is visible to *this* frame's rebuild (the signal-poll
-    /// seam idiom — see the hook's own docs).
+    /// Hands one queued menu activation to `frust_reactive::push_menu_event`,
+    /// so it is visible to *this* frame's rebuild (the signal-poll seam idiom —
+    /// see the hook's own docs).
+    ///
+    /// One per frame, not the whole queue: the reactive menu source is a
+    /// single-slot signal this frame reads once, so a batch would coalesce to
+    /// its last event. The queue's remainder rides further frames the bridge
+    /// requests for itself (see the `menu` module).
     fn pump(&mut self) {
-        menu::pump_menu_events(&self.menu_plan);
+        menu::pump_menu_events();
     }
 
     /// Themes the titlebar to match the app's resolved brightness.
@@ -216,7 +238,7 @@ mod tests {
         assert_eq!(extensions.app_id.as_deref(), Some("dev.frust.fake"));
         assert_eq!(extensions.window_icon, Some(icon));
         assert!(!extensions.menu_plan.is_empty());
-        assert!(extensions.menu_plan.activates("file.open"));
+        assert!(extensions.menu_plan.activation_ids().contains("file.open"));
     }
 
     #[test]

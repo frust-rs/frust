@@ -30,13 +30,31 @@
 //! arriving while the app is idle would sit in the channel until some unrelated
 //! event happened to produce a frame. So this module installs the handler
 //! instead, queues the activation, and *requests a redraw* — the loop wakes,
-//! `pump` drains the queue at the top of that frame, and the resulting
-//! `frust_reactive::push_menu_event` is visible to the very same frame's
-//! rebuild.
+//! `pump` takes an activation off the queue at the top of that frame, and the
+//! resulting `frust_reactive::push_menu_event` is visible to the very same
+//! frame's rebuild.
 //!
 //! The queue is also what keeps the reactive push on the UI thread: `muda`'s
 //! handler is `Send + Sync` and its threading is the platform's business, while
 //! `push_menu_event` documents a UI-thread-only contract.
+//!
+//! # One activation per frame, then another frame
+//!
+//! [`MenuBridge::take_next`] hands `pump` exactly *one* queued activation per
+//! call and requests a further redraw while the queue is still non-empty.
+//! `frust_reactive`'s menu source is a single-slot signal (`MenuEvents::latest`)
+//! that a frame reads once, so pushing a whole batch into it between two frames
+//! would leave only the last activation observable — a burst of two menu
+//! choices, or one held key equivalent, would silently collapse. Frame-per-
+//! activation keeps the queue's order *and* its count intact all the way to app
+//! code, at the cost of one frame per activation, which is what the seam's own
+//! docs (`frust-reactive`'s `menu` module) promise.
+//!
+//! This is the same strategy `frust-shell-windows`' `menu` module implements
+//! against `muda`'s Win32 half — push bridge, known-ids filter, one activation
+//! per pump, rewake while more remain. The two crates keep separate copies
+//! (each owns its own platform's menu vocabulary) but must not diverge in
+//! behavior.
 //!
 //! **Residual:** while the window is hidden (see [`crate::lifecycle`]) no
 //! frames are produced, so an *app* item activated in that state stays queued
@@ -145,10 +163,31 @@ impl MenuBridge {
         true
     }
 
-    /// Move every queued activation into `out`, oldest first.
-    pub(crate) fn drain_into(&self, out: &mut Vec<String>) {
-        let mut inner = self.lock();
-        out.extend(inner.pending.drain(..));
+    /// Take the oldest queued activation, if any, asking for another frame
+    /// when the queue is not empty afterwards.
+    ///
+    /// One per call on purpose — see the module docs' single-slot rationale.
+    /// The rewake is what keeps the remaining activations moving: `pump` runs
+    /// only from a redraw, so a queue left non-empty without one would stall
+    /// until the next unrelated frame.
+    ///
+    /// Like [`submit`](Self::submit), the wake happens after the lock is
+    /// released.
+    pub(crate) fn take_next(&self) -> Option<String> {
+        let (id, waker) = {
+            let mut inner = self.lock();
+            let id = inner.pending.pop_front()?;
+            let waker = if inner.pending.is_empty() {
+                None
+            } else {
+                inner.waker.clone()
+            };
+            (id, waker)
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+        Some(id)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -421,10 +460,10 @@ mod tests {
         items.iter().map(|id| (*id).to_string()).collect()
     }
 
+    /// Every queued activation, taken one per call the way successive frames
+    /// would take them.
     fn drained(bridge: &MenuBridge) -> Vec<String> {
-        let mut out = Vec::new();
-        bridge.drain_into(&mut out);
-        out
+        std::iter::from_fn(|| bridge.take_next()).collect()
     }
 
     // --- spec → id set ---
@@ -523,6 +562,48 @@ mod tests {
             drained(&bridge),
             vec!["a".to_string(), "b".to_string(), "a".to_string()]
         );
+    }
+
+    #[test]
+    fn a_frame_takes_one_activation_and_asks_for_another_frame() {
+        // The single-slot push contract: each `pump` hands `push_menu_event`
+        // exactly one activation, and the queue's remainder is carried by a
+        // further redraw rather than by a batch the frame's one tracked read
+        // would coalesce.
+        let bridge = MenuBridge::new();
+        let waker = Arc::new(FakeWaker::default());
+        bridge.set_known_ids(ids(&["a", "b", "c"]));
+        bridge.set_waker(waker.clone());
+
+        bridge.submit("a");
+        bridge.submit("b");
+        bridge.submit("c");
+        let after_submits = waker.wakes();
+
+        assert_eq!(bridge.take_next().as_deref(), Some("a"));
+        assert_eq!(
+            waker.wakes(),
+            after_submits + 1,
+            "two activations still queued must wake the shell again"
+        );
+        assert_eq!(bridge.take_next().as_deref(), Some("b"));
+        assert_eq!(waker.wakes(), after_submits + 2);
+
+        // The last one empties the queue: nothing left to carry, no frame to
+        // ask for.
+        assert_eq!(bridge.take_next().as_deref(), Some("c"));
+        assert_eq!(waker.wakes(), after_submits + 2);
+    }
+
+    #[test]
+    fn taking_from_an_empty_queue_neither_yields_nor_wakes() {
+        // Every idle frame calls `pump`; none of them may request another.
+        let bridge = MenuBridge::new();
+        let waker = Arc::new(FakeWaker::default());
+        bridge.set_waker(waker.clone());
+
+        assert_eq!(bridge.take_next(), None);
+        assert_eq!(waker.wakes(), 0);
     }
 
     #[test]

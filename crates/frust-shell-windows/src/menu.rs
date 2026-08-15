@@ -22,10 +22,57 @@
 //! backend's — the config type's own docs make the backend the single
 //! validator. An unparseable accelerator therefore degrades to an item with no
 //! keyboard shortcut, logged, never to a menu that fails to install.
+//!
+//! # Push, not poll: why activations do not go through `MenuEvent::receiver`
+//!
+//! `muda` publishes activations two ways: a process-global channel
+//! (`MenuEvent::receiver()`) and a handler callback
+//! (`MenuEvent::set_event_handler`). Polling the channel from
+//! [`DesktopExtensions::pump`](frust_shell_desktop::extensions::DesktopExtensions::pump)
+//! alone would lose the wake: the shared desktop core is dirty-driven
+//! (`ControlFlow::Wait`) and calls `pump` only from a redraw, so an activation
+//! arriving while the app is idle would sit in the channel until some unrelated
+//! event happened to produce a frame. Accelerators are the sharp case — the
+//! message hook that runs `TranslateAcceleratorW` reports the keystroke as
+//! *handled*, so winit never sees an event of its own to wake the loop with.
+//!
+//! So this module installs the handler instead ([`install_event_handler`]),
+//! filters the activation against the plan's ids, queues it in [`MenuBridge`],
+//! and *requests a redraw* — the loop wakes, [`pump_menu_events`] takes one
+//! activation off the queue at the top of that frame, and the resulting
+//! `frust_reactive::push_menu_event` is visible to the very same frame's
+//! rebuild.
+//!
+//! The queue is also what keeps the reactive push on the UI thread. `muda`'s
+//! handler slot is typed `Fn(MenuEvent) + Send + Sync`, so the callback may in
+//! principle run on any thread, while `push_menu_event` documents a
+//! UI-thread-only contract; the handler therefore only queues and wakes (both
+//! `Send`-safe — `winit::window::Window` is `Send + Sync` and
+//! `request_redraw` is documented as callable from any thread), and the push
+//! itself happens on the event-loop thread inside `pump`.
+//!
+//! # One activation per frame, then another frame
+//!
+//! [`MenuBridge::take_next`] hands [`pump_menu_events`] exactly *one* queued
+//! activation per call and requests a further redraw while the queue is still
+//! non-empty. `frust_reactive`'s menu source is a single-slot signal
+//! (`MenuEvents::latest`) that a frame reads once, so pushing a whole batch
+//! into it between two frames would leave only the last activation observable —
+//! a burst of two menu choices, or one held accelerator, would silently
+//! collapse. Frame-per-activation keeps the queue's order *and* its count
+//! intact all the way to app code.
+//!
+//! This is the same strategy `frust-shell-macos`' `menu` module implements
+//! against `muda`'s AppKit half — push bridge, known-ids filter, one activation
+//! per pump, rewake while more remain. The two crates keep separate copies
+//! (each owns its own platform's menu vocabulary) but must not diverge in
+//! behavior.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use frust_shell_desktop::config::{MenuItemSpec, MenuRole, MenuSpec};
+use winit::window::Window;
 
 use crate::win32_glue::AcceleratorTable;
 
@@ -120,10 +167,13 @@ impl MenuPlan {
         &self.items
     }
 
-    /// Whether `id` belongs to an app item of this menu — i.e. whether an
-    /// activation carrying it should reach app code.
-    pub(crate) fn activates(&self, id: &str) -> bool {
-        self.activation_ids.contains(id)
+    /// The ids that may be reported as activations — i.e. exactly the ids an
+    /// activation must carry to reach app code.
+    ///
+    /// Published to [`MenuBridge::set_known_ids`] when the menu is installed,
+    /// so the filter runs in the platform handler rather than per frame.
+    pub(crate) fn activation_ids(&self) -> &HashSet<String> {
+        &self.activation_ids
     }
 }
 
@@ -219,7 +269,7 @@ pub(crate) struct InstalledMenu {}
 #[cfg(target_os = "windows")]
 pub(crate) fn install(
     plan: &MenuPlan,
-    window: &winit::window::Window,
+    window: &Window,
     accelerators: &AcceleratorTable,
 ) -> Option<InstalledMenu> {
     if plan.is_empty() {
@@ -250,7 +300,7 @@ pub(crate) fn install(
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn install(
     plan: &MenuPlan,
-    window: &winit::window::Window,
+    window: &Window,
     accelerators: &AcceleratorTable,
 ) -> Option<InstalledMenu> {
     let _ = (plan, window, accelerators);
@@ -349,29 +399,182 @@ fn predefined(role: PlannedRole, label: Option<&str>) -> muda::PredefinedMenuIte
     }
 }
 
-/// Drain the platform menu queue into `frust_reactive`, once per frame.
+/// The most queued-but-undelivered activations kept before the oldest are
+/// dropped.
 ///
-/// Both routes into it land here: a click on the menu, and a keystroke the
-/// message hook turned into a menu command via `TranslateAcceleratorW`. muda
-/// reports predefined items too (it assigns each its own id); those are the
-/// platform's own actions with nothing for app code to handle, so only ids the
-/// plan knows are forwarded.
-#[cfg(target_os = "windows")]
-pub(crate) fn pump_menu_events(plan: &MenuPlan) {
-    while let Ok(event) = muda::MenuEvent::receiver().try_recv() {
-        let id: &str = event.id().as_ref();
-        if plan.activates(id) {
-            frust_reactive::push_menu_event(id);
-        } else {
-            log::trace!("frust-shell-windows: ignoring non-app menu event {id:?}");
-        }
+/// A bound is needed because the queue drains a frame at a time (one activation
+/// per frame, see the module docs) while nothing stops the platform from
+/// enqueueing faster — a held accelerator repeating into a window whose frames
+/// are stalled (minimized, a modal loop, a long-running frame) would otherwise
+/// grow it without limit. 64 is far beyond any real burst.
+const MAX_PENDING: usize = 64;
+
+/// The redraw wake a menu activation triggers, behind a trait so the queue is
+/// testable without a live event loop (a `winit::Window` cannot be constructed
+/// without one).
+pub(crate) trait MenuWaker: Send + Sync {
+    /// Ask the shell for a frame, so `pump` runs and takes from the queue.
+    fn wake(&self);
+}
+
+impl MenuWaker for Window {
+    fn wake(&self) {
+        self.request_redraw();
     }
 }
 
-// Inert off Windows: no platform menu queue exists to drain.
+/// The queue between `muda`'s menu-event handler and the shell's per-frame
+/// pump (see the module docs).
+#[derive(Debug, Default)]
+pub(crate) struct MenuBridge {
+    inner: Mutex<Inner>,
+}
+
+#[derive(Default)]
+struct Inner {
+    /// The ids of the app items actually present in the installed menu (the
+    /// plan's [`MenuPlan::activation_ids`]). An activation whose id is not here
+    /// is dropped rather than forwarded: muda assigns its own ids to the
+    /// predefined items, and app code should never see one.
+    known_ids: HashSet<String>,
+    pending: VecDeque<String>,
+    waker: Option<Arc<dyn MenuWaker>>,
+}
+
+impl std::fmt::Debug for Inner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Inner")
+            .field("known_ids", &self.known_ids)
+            .field("pending", &self.pending)
+            .field("waker", &self.waker.is_some())
+            .finish()
+    }
+}
+
+impl MenuBridge {
+    /// An empty bridge that accepts no id and wakes nothing.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Declare which ids the installed menu can report.
+    pub(crate) fn set_known_ids(&self, ids: HashSet<String>) {
+        self.lock().known_ids = ids;
+    }
+
+    /// Install the redraw target an activation wakes.
+    pub(crate) fn set_waker(&self, waker: Arc<dyn MenuWaker>) {
+        self.lock().waker = Some(waker);
+    }
+
+    /// Queue an activation, returning whether it was accepted (i.e. whether the
+    /// id belongs to the installed menu).
+    ///
+    /// Called from muda's handler — which may run on any thread (see the module
+    /// docs) — so it does nothing but queue and wake. The wake happens after
+    /// the lock is released, so a waker that re-enters this bridge cannot
+    /// deadlock.
+    pub(crate) fn submit(&self, id: &str) -> bool {
+        let waker = {
+            let mut inner = self.lock();
+            if !inner.known_ids.contains(id) {
+                log::trace!("frust-shell-windows: ignoring non-app menu event {id:?}");
+                return false;
+            }
+            if inner.pending.len() >= MAX_PENDING {
+                let dropped = inner.pending.pop_front();
+                log::warn!(
+                    "frust-shell-windows: menu-event queue full ({MAX_PENDING}); dropped \
+                     {dropped:?} — no frame is draining it"
+                );
+            }
+            inner.pending.push_back(id.to_string());
+            inner.waker.clone()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+        true
+    }
+
+    /// Take the oldest queued activation, if any, asking for another frame when
+    /// the queue is not empty afterwards.
+    ///
+    /// One per call on purpose — see the module docs' single-slot rationale.
+    /// The rewake is what keeps the remaining activations moving: `pump` runs
+    /// only from a redraw, so a queue left non-empty without one would stall
+    /// until the next unrelated frame.
+    ///
+    /// Like [`submit`](Self::submit), the wake happens after the lock is
+    /// released.
+    pub(crate) fn take_next(&self) -> Option<String> {
+        let (id, waker) = {
+            let mut inner = self.lock();
+            let id = inner.pending.pop_front()?;
+            let waker = if inner.pending.is_empty() {
+                None
+            } else {
+                inner.waker.clone()
+            };
+            (id, waker)
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+        Some(id)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+        // Poison-tolerant: `submit` runs from the platform's own menu dispatch,
+        // and the state behind the lock is a queue plus two slots — nothing an
+        // unwind elsewhere could leave half-updated in a way a later frame
+        // could misread.
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The process-global bridge.
+///
+/// Global because muda's handler slot is global and can be set exactly once per
+/// process (its own `OnceCell`), so the handler cannot capture an extension
+/// instance that might be rebuilt.
+pub(crate) fn bridge() -> &'static MenuBridge {
+    static BRIDGE: OnceLock<MenuBridge> = OnceLock::new();
+    BRIDGE.get_or_init(MenuBridge::new)
+}
+
+/// Route muda's activations into this crate's queue, exactly once per process.
+///
+/// muda's own slot is a `OnceCell`, so a second registration anywhere in the
+/// process is silently ignored; the `Once` here keeps *this* crate from being
+/// that second registration when a shell is rebuilt.
+///
+/// Both routes into the menu land in this handler: a click on the menu bar, and
+/// a keystroke the message hook turned into a `WM_COMMAND` via
+/// `TranslateAcceleratorW`.
+#[cfg(target_os = "windows")]
+pub(crate) fn install_event_handler() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        muda::MenuEvent::set_event_handler(Some(|event: muda::MenuEvent| {
+            bridge().submit(event.id().as_ref());
+        }));
+    });
+}
+
+// Inert off Windows: muda is not compiled in, so there is nothing to route.
 #[cfg(not(target_os = "windows"))]
-pub(crate) fn pump_menu_events(plan: &MenuPlan) {
-    let _ = plan;
+pub(crate) fn install_event_handler() {}
+
+/// Hand one queued activation to `frust_reactive`, once per frame.
+///
+/// Platform-free: by this point the activation is a plain id the handler
+/// already filtered against the plan (see the module docs), so the same body
+/// serves every target — off Windows nothing ever fills the queue.
+pub(crate) fn pump_menu_events() {
+    if let Some(id) = bridge().take_next() {
+        frust_reactive::push_menu_event(id);
+    }
 }
 
 #[cfg(test)]
@@ -380,6 +583,40 @@ mod tests {
 
     fn item(id: &str, label: &str) -> MenuItemSpec {
         MenuItemSpec::item(id, label)
+    }
+
+    /// Whether an activation carrying `id` would reach app code — the filter
+    /// the bridge applies, asked of the plan that publishes the ids.
+    fn activates(plan: &MenuPlan, id: &str) -> bool {
+        plan.activation_ids().contains(id)
+    }
+
+    fn ids(items: &[&str]) -> HashSet<String> {
+        items.iter().map(|id| (*id).to_string()).collect()
+    }
+
+    /// A recording waker: the redraw request a live shell would make.
+    #[derive(Debug, Default)]
+    struct FakeWaker {
+        wakes: Mutex<usize>,
+    }
+
+    impl FakeWaker {
+        fn wakes(&self) -> usize {
+            *self.wakes.lock().expect("test mutex")
+        }
+    }
+
+    impl MenuWaker for FakeWaker {
+        fn wake(&self) {
+            *self.wakes.lock().expect("test mutex") += 1;
+        }
+    }
+
+    /// Every queued activation, taken one per call the way successive frames
+    /// would take them.
+    fn drained(bridge: &MenuBridge) -> Vec<String> {
+        std::iter::from_fn(|| bridge.take_next()).collect()
     }
 
     #[test]
@@ -520,13 +757,150 @@ mod tests {
             &MenuSpec::new().with_item(MenuItemSpec::submenu("File", file)),
         ));
 
-        assert!(plan.activates("file.open"));
-        // Nested two levels down — the drain must still forward it.
-        assert!(plan.activates("edit.undo"));
+        assert!(activates(&plan, "file.open"));
+        // Nested two levels down — the bridge must still accept it.
+        assert!(activates(&plan, "edit.undo"));
         // muda assigns predefined items ids of their own; none of them is the
         // app's, so none is ever forwarded.
-        assert!(!plan.activates("File"));
-        assert!(!plan.activates("1000"));
-        assert!(!plan.activates(""));
+        assert!(!activates(&plan, "File"));
+        assert!(!activates(&plan, "1000"));
+        assert!(!activates(&plan, ""));
+    }
+
+    // --- the activation queue ---
+
+    #[test]
+    fn a_known_activation_queues_and_wakes_the_shell() {
+        // The whole point of the push bridge: an activation arriving while the
+        // dirty-driven loop is idle asks for the frame that will deliver it.
+        let bridge = MenuBridge::new();
+        let waker = Arc::new(FakeWaker::default());
+        bridge.set_known_ids(ids(&["file.open"]));
+        bridge.set_waker(waker.clone());
+
+        assert!(bridge.submit("file.open"));
+        assert_eq!(waker.wakes(), 1);
+        assert_eq!(drained(&bridge), vec!["file.open".to_string()]);
+        // Taking empties the queue: a later frame must not re-report an
+        // activation it already pushed.
+        assert!(drained(&bridge).is_empty());
+    }
+
+    #[test]
+    fn an_unknown_activation_is_dropped_without_a_wake() {
+        // muda assigns its own ids to the predefined items this shell builds;
+        // none of them may reach app code, nor cost a frame.
+        let bridge = MenuBridge::new();
+        let waker = Arc::new(FakeWaker::default());
+        bridge.set_known_ids(ids(&["file.open"]));
+        bridge.set_waker(waker.clone());
+
+        assert!(!bridge.submit("1000"));
+        assert_eq!(waker.wakes(), 0);
+        assert!(drained(&bridge).is_empty());
+    }
+
+    #[test]
+    fn activations_are_taken_in_order() {
+        let bridge = MenuBridge::new();
+        bridge.set_known_ids(ids(&["a", "b"]));
+        bridge.submit("a");
+        bridge.submit("b");
+        bridge.submit("a");
+        assert_eq!(
+            drained(&bridge),
+            vec!["a".to_string(), "b".to_string(), "a".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_frame_takes_one_activation_and_asks_for_another_frame() {
+        // The single-slot push contract: each `pump` hands `push_menu_event`
+        // exactly one activation, and the queue's remainder is carried by a
+        // further redraw rather than by a batch the frame's one tracked read
+        // would coalesce.
+        let bridge = MenuBridge::new();
+        let waker = Arc::new(FakeWaker::default());
+        bridge.set_known_ids(ids(&["a", "b", "c"]));
+        bridge.set_waker(waker.clone());
+
+        bridge.submit("a");
+        bridge.submit("b");
+        bridge.submit("c");
+        let after_submits = waker.wakes();
+
+        assert_eq!(bridge.take_next().as_deref(), Some("a"));
+        assert_eq!(
+            waker.wakes(),
+            after_submits + 1,
+            "two activations still queued must wake the shell again"
+        );
+        assert_eq!(bridge.take_next().as_deref(), Some("b"));
+        assert_eq!(waker.wakes(), after_submits + 2);
+
+        // The last one empties the queue: nothing left to carry, no frame to
+        // ask for.
+        assert_eq!(bridge.take_next().as_deref(), Some("c"));
+        assert_eq!(waker.wakes(), after_submits + 2);
+    }
+
+    #[test]
+    fn taking_from_an_empty_queue_neither_yields_nor_wakes() {
+        // Every idle frame calls `pump`; none of them may request another.
+        let bridge = MenuBridge::new();
+        let waker = Arc::new(FakeWaker::default());
+        bridge.set_waker(waker.clone());
+
+        assert_eq!(bridge.take_next(), None);
+        assert_eq!(waker.wakes(), 0);
+    }
+
+    #[test]
+    fn a_bridge_with_no_waker_still_queues() {
+        // The handler is installed before the window exists in principle;
+        // losing the activation would be worse than losing the wake.
+        let bridge = MenuBridge::new();
+        bridge.set_known_ids(ids(&["a"]));
+        assert!(bridge.submit("a"));
+        assert_eq!(drained(&bridge), vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn the_queue_is_bounded_and_drops_the_oldest() {
+        let bridge = MenuBridge::new();
+        bridge.set_known_ids(ids(&["a", "newest"]));
+        for _ in 0..MAX_PENDING {
+            bridge.submit("a");
+        }
+        bridge.submit("newest");
+
+        let out = drained(&bridge);
+        assert_eq!(out.len(), MAX_PENDING);
+        assert_eq!(out.last().map(String::as_str), Some("newest"));
+    }
+
+    #[test]
+    fn the_process_global_bridge_is_one_instance() {
+        assert!(std::ptr::eq(bridge(), bridge()));
+    }
+
+    #[test]
+    fn the_plan_publishes_exactly_the_ids_the_bridge_filters_on() {
+        // The two halves of the filter: the plan derives the id set once, and
+        // the bridge is what actually applies it per activation.
+        let plan = MenuPlan::from_spec(Some(
+            &MenuSpec::new().with_item(MenuItemSpec::submenu(
+                "File",
+                MenuSpec::new()
+                    .with_item(item("file.open", "Open…"))
+                    .with_item(MenuItemSpec::role(MenuRole::Quit)),
+            )),
+        ));
+        let bridge = MenuBridge::new();
+        bridge.set_known_ids(plan.activation_ids().clone());
+
+        assert!(bridge.submit("file.open"));
+        assert!(!bridge.submit("1000"));
+        assert_eq!(drained(&bridge), vec!["file.open".to_string()]);
     }
 }

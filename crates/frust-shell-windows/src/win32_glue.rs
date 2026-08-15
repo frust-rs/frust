@@ -148,6 +148,13 @@ pub(crate) fn install_accelerator_hook(
 ///
 /// Returns `false` for every message while the table is empty, so an app whose
 /// menu failed to install keeps a completely ordinary message loop.
+///
+/// A `true` here is also why the menu queue owns its own wake: the keystroke
+/// never becomes a winit event, so nothing on winit's side marks the loop
+/// dirty. `TranslateAcceleratorW` turns it into a `WM_COMMAND` the window
+/// procedure feeds to muda, whose handler queues the activation in
+/// [`crate::menu`]'s bridge and requests the redraw that delivers it — the same
+/// path a mouse click on the menu takes.
 #[cfg(target_os = "windows")]
 fn translate_accelerator(table: &AcceleratorTable, msg: *const std::ffi::c_void) -> bool {
     use windows_sys::Win32::UI::WindowsAndMessaging::{HACCEL, MSG, TranslateAcceleratorW};

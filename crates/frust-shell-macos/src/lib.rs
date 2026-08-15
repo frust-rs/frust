@@ -6,9 +6,10 @@
 //!
 //! - a **native menu bar** built from `DesktopConfig`: the standard,
 //!   app-named application menu (About/Hide/Hide Others/Show All/Quit) plus
-//!   the app's own `MenuSpec`, with activations reaching app code through
-//!   `frust_reactive::push_menu_event` on the same frame they arrive (the
-//!   `menu` module);
+//!   the app's own `MenuSpec`, with an activation reaching app code through
+//!   `frust_reactive::push_menu_event` on the frame its own wake produces —
+//!   one activation per frame, each carried by a frame of its own (the `menu`
+//!   module);
 //! - **quit and reopen semantics**: `quit_on_last_window_closed = false` hides
 //!   the window on a close request instead of exiting, and a Dock-click
 //!   re-activation brings it back (the `lifecycle` module);
@@ -88,8 +89,6 @@ pub struct MacosExtensions {
     /// Close/reopen policy plus the retained window, shared with the AppKit
     /// activation observer (see [`lifecycle`]).
     lifecycle: Arc<Lifecycle>,
-    /// Reused across frames so the per-frame drain allocates nothing.
-    drained: Vec<String>,
     /// The installed menu bar. Retained because dropping it tears the native
     /// menu down.
     #[cfg(target_os = "macos")]
@@ -106,7 +105,6 @@ impl MacosExtensions {
             app_name: resolve_app_name(config.app_name.as_deref(), current_exe_stem().as_deref()),
             menu_spec: config.menu_spec.clone(),
             lifecycle: Arc::new(Lifecycle::new(config.quit_on_last_window_closed)),
-            drained: Vec::new(),
             #[cfg(target_os = "macos")]
             menu: None,
             #[cfg(target_os = "macos")]
@@ -137,13 +135,15 @@ impl DesktopExtensions for MacosExtensions {
     }
 
     fn pump(&mut self) {
-        // The per-OS half of the signal-poll seam: an activation drained here
-        // is visible to *this* frame's rebuild, since the core calls `pump` at
-        // the top of the redraw pass. `push_menu_event` is UI-thread-only,
-        // which is why the queue exists rather than a push from the platform
-        // callback itself (see the `menu` module docs).
-        menu::bridge().drain_into(&mut self.drained);
-        for id in self.drained.drain(..) {
+        // The per-OS half of the signal-poll seam: the activation taken here is
+        // visible to *this* frame's rebuild, since the core calls `pump` at the
+        // top of the redraw pass. `push_menu_event` is UI-thread-only, which is
+        // why the queue exists rather than a push from the platform callback
+        // itself — and exactly one activation crosses per frame, because the
+        // signal behind `push_menu_event` holds one event and this frame reads
+        // it once. `take_next` asks for a further redraw while more remain (see
+        // the `menu` module docs).
+        if let Some(id) = menu::bridge().take_next() {
             frust_reactive::push_menu_event(id);
         }
     }
@@ -164,8 +164,7 @@ impl std::fmt::Debug for MacosExtensions {
         debug
             .field("app_name", &self.app_name)
             .field("menu_spec", &self.menu_spec)
-            .field("lifecycle", &self.lifecycle)
-            .field("pending_menu_events", &self.drained.len());
+            .field("lifecycle", &self.lifecycle);
         #[cfg(target_os = "macos")]
         debug
             .field("menu_installed", &self.menu.is_some())
@@ -268,11 +267,12 @@ mod tests {
 
     #[test]
     fn a_pump_with_nothing_queued_pushes_nothing() {
-        // `push_menu_event` needs a live reactive runtime; the point here is
-        // that an idle frame never reaches it.
+        // `push_menu_event` panics off the UI thread and needs a live reactive
+        // runtime, so reaching it from a host test would be loud; the point
+        // here is that an idle frame never does.
         let mut extensions = MacosExtensions::new(&DesktopConfig::new());
         extensions.pump();
-        assert!(extensions.drained.is_empty());
+        extensions.pump();
     }
 
     #[test]
