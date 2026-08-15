@@ -489,3 +489,59 @@ list `docs/PLUGINS_DEVELOPMENT.md`'s i18n section tracks — keep both in sync):
   macro_diagnostics -- --ignored` — the `#[ignore]`d trybuild suite pinning every compile-fail
   message named above; not part of the default `cargo test` pass, run it explicitly when
   touching the macro.
+
+---
+
+## 10. Binary size
+
+The binary size impact of `frust-i18n` at the shipped profile (optimized release build), measured
+with the same two-release-build procedure that `frust-database` (§6) uses:
+
+| Feature set | Binary size | Notes |
+|---|---:|---|
+| Baseline (no i18n) | 302432 bytes (0.29 MB) | Baseline frust + frust-reactive only |
+| Messages only | 352576 bytes (0.34 MB) | `frust-i18n` with `frust-api`, no `formatting` |
+| Full default | 402256 bytes (0.38 MB) | `frust-i18n` with `frust-api` + `formatting` (ICU4X) |
+
+**Per-feature deltas:**
+
+| Feature | Cost | Notes |
+|---|---:|---|
+| Messages + reactive | **+50144 bytes** (+0.048 MB) | `frust-api` feature: locale negotiation, detection, reactive binding |
+| Formatting | **+49680 bytes** (+0.047 MB) | `formatting` feature: ICU4X decimal/datetime/plurals/experimental (currency) |
+
+### Measurement procedure
+
+Reproducible on a feature-flag change — re-run this exact procedure and update the table above,
+the raw figures, date, and toolchain version.
+
+1. Scaffold a minimal probe app inside a temp directory (in this repo's `.tmp/i18n-probe/` for
+   this run) with:
+   - `Cargo.toml` path-dependencies on `frust` + `frust-i18n` (optional) + `frust-reactive`
+   - `[profile.release]` configured identically to the ship floor (`lto = "fat"`,
+     `codegen-units = 1`, `strip = "symbols"`, `panic = "abort"`)
+   - `src/lib.rs` and `src/main.rs` that call the i18n API so the compiler doesn't dead-strip it
+   - `locales/en/main.ftl` with a minimal Fluent message (needed for `locales!` macro to compile)
+
+2. Build three times with the same release profile:
+   - Baseline: `cargo build --release` (no i18n feature enabled)
+   - Messages only: `cargo build --release --features messages-only` (frust-api, no formatting)
+   - Full: `cargo build --release --features full` (both frust-api and formatting)
+
+3. Record the exact byte count of each resulting binary (`target/release/i18n-probe`), the delta
+   between builds, the date, the exact rustc/cargo version, and the build machine's CPU/OS.
+
+**2026-08-15 raw figures** (macOS 25.5.0 (darwin-25), release/ship profile, rustc 1.97.1,
+build machine: Apple M1 Pro):
+
+| Build | Binary size | Bytes |
+|---|---:|---:|
+| Baseline (no i18n) | 0.29 MB | 302,432 |
+| Messages only (frust-api) | 0.34 MB | 352,576 |
+| Full (frust-api + formatting) | 0.38 MB | 402,256 |
+| **Messages delta** | **+0.048 MB** | **+50,144** |
+| **Formatting delta** | **+0.047 MB** | **+49,680** |
+
+The probe app was built in a temporary directory (`$WT/.tmp/i18n-probe/`) with separate
+`CARGO_TARGET_DIR` per build to isolate the artifacts, matching `frust-database`'s own §6
+procedure and avoiding conflicts with any concurrent builds or the repo's own target directory.
