@@ -60,7 +60,7 @@ pub(super) fn assemble(
     notes: &mut Vec<BundleNote>,
 ) -> Result<BundleReport, DesktopBuildError> {
     let root = DesktopBundleTarget::Windows.dist_dir(project_dir);
-    prepare_dir(&root)?;
+    prepare_dir(&root, project_dir)?;
 
     let executable = root.join(binary_file_name(
         DesktopBundleTarget::Windows,

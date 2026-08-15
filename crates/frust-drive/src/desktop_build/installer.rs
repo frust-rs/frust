@@ -257,7 +257,14 @@ pub fn build_installer(
         project_dir: project_dir.to_path_buf(),
         reason: format!("{err:#}"),
     })?;
-    let config = DesktopConfig::resolve(project_dir, &manifest);
+    // Path-unsafe desktop identity values are refused here exactly as they are
+    // in `super::build` — the same resolution, so the same typed rejection,
+    // reported as the manifest problem it is.
+    let config =
+        DesktopConfig::resolve(project_dir, &manifest).map_err(|err| InstallerError::Manifest {
+            project_dir: project_dir.to_path_buf(),
+            reason: err.to_string(),
+        })?;
 
     let out_dir = format
         .target()

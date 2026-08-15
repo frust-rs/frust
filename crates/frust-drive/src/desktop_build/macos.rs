@@ -48,7 +48,7 @@ pub(super) fn assemble(
     notes: &mut Vec<BundleNote>,
 ) -> Result<BundleReport, DesktopBuildError> {
     let root = app_path(project_dir, &config.display_name);
-    prepare_dir(&root)?;
+    prepare_dir(&root, project_dir)?;
 
     let contents = root.join("Contents");
     let resources = contents.join("Resources");
@@ -227,6 +227,7 @@ mod tests {
             Path::new("/projects/my_app"),
             &manifest::parse(toml).unwrap(),
         )
+        .unwrap()
     }
 
     fn info() -> BuildInfo {

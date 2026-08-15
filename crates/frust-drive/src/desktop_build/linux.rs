@@ -42,7 +42,7 @@ pub(super) fn assemble(
     let root = DesktopBundleTarget::Linux
         .dist_dir(project_dir)
         .join(&config.binary_name);
-    prepare_dir(&root)?;
+    prepare_dir(&root, project_dir)?;
 
     let mut artifacts = Vec::new();
 
@@ -136,6 +136,7 @@ mod tests {
             Path::new("/projects/my_app"),
             &manifest::parse(toml).unwrap(),
         )
+        .unwrap()
     }
 
     #[test]
@@ -162,14 +163,39 @@ mod tests {
         assert!(entry.contains("\nCategories=Utility;\n"), "{entry}");
     }
 
-    /// A display name carrying a newline must not be able to append a second
-    /// key to the entry.
+    /// A value carrying a newline must not be able to append a second key to
+    /// the entry. `[linux] categories` is the live vector: unlike the identity
+    /// values, a category is not a path, so `DesktopConfig::resolve` has no
+    /// reason to refuse it and [`sanitize`] is the only thing standing between
+    /// it and an injected `Exec=`.
     #[test]
-    fn a_multiline_display_name_cannot_inject_a_second_key() {
+    fn a_multiline_category_cannot_inject_a_second_key() {
         let entry = desktop_entry(&config(
             "[app]\nname = \"my_app\"\norg = \"dev.f0x\"\n\n\
-             [desktop]\nname = \"Evil\\nExec=/bin/sh\"\n",
+             [linux]\ncategories = [\"Evil\\nExec=/bin/sh\"]\n",
         ));
+        assert!(
+            entry.contains("\nCategories=EvilExec=/bin/sh;\n"),
+            "{entry}"
+        );
+        assert_eq!(
+            entry.lines().filter(|l| l.starts_with("Exec=")).count(),
+            1,
+            "{entry}"
+        );
+    }
+
+    /// The same protection still covers the identity values, even though
+    /// `DesktopConfig::resolve` now refuses a display name carrying a control
+    /// character before one can reach here (hence the hand-built config): the
+    /// two layers answer different questions — resolve asks whether a value is
+    /// a safe *path*, [`sanitize`] whether it is a safe *desktop-entry value* —
+    /// and neither is a substitute for the other.
+    #[test]
+    fn a_multiline_display_name_cannot_inject_a_second_key() {
+        let mut config = config("[app]\nname = \"my_app\"\norg = \"dev.f0x\"\n");
+        config.display_name = "Evil\nExec=/bin/sh".to_string();
+        let entry = desktop_entry(&config);
         assert!(entry.contains("\nName=EvilExec=/bin/sh\n"), "{entry}");
         assert_eq!(
             entry.lines().filter(|l| l.starts_with("Exec=")).count(),

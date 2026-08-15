@@ -37,6 +37,20 @@
 //! without one and the reason comes back as a [`BundleNote`] — a bundle with
 //! no icon still runs, and the scaffold's own placeholder logo is deliberately
 //! below the icon pipeline's minimum source size.
+//!
+//! **But an identity value that isn't a safe path is a hard refusal.** The
+//! display name, identifier and binary name each become a file or directory
+//! under `dist/` — one that a rebuild deletes recursively — so a value carrying
+//! a separator, a `..`, or a leading `/` fails the build with a typed error
+//! before anything is written ([`DesktopBuildError::UnsafeDesktopIdentity`],
+//! and [`DesktopBuildError::UnsafeIconPath`] for an icon path pointing out of
+//! the project). Note the line this draws through the icon rules above: an
+//! icon that is *unusable* degrades the bundle and is a note, while an icon
+//! path that *tries to leave the project* is a refusal. The first is a quality
+//! question, the second a safety one, and a safety answer is never a note.
+//! `bundle::prepare_dir` re-checks the same property against the actual
+//! directory it is about to delete, so a future caller cannot reintroduce the
+//! hole by assembling a path some other way.
 
 mod bundle;
 mod cargo;
@@ -59,6 +73,10 @@ use self::config::DesktopConfig;
 pub use installer::{
     CARGO_PACKAGER_PINNED, InstallerError, InstallerFormat, InstallerReport, build_installer,
 };
+
+/// The project-relative directory every desktop build output lands under, and
+/// the containment root [`bundle::prepare_dir`] refuses to step outside of.
+const DIST_DIR: &str = "dist";
 
 /// The bundle `frust build macos|windows|linux` requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,7 +121,7 @@ impl DesktopBundleTarget {
     /// `dist/linux`. The bundle itself lands inside it (see
     /// [`BundleReport::root`]).
     pub fn dist_dir(self, project_dir: &Path) -> PathBuf {
-        project_dir.join("dist").join(self.as_str())
+        project_dir.join(DIST_DIR).join(self.as_str())
     }
 }
 
@@ -225,6 +243,24 @@ pub enum DesktopBuildError {
         project_dir: PathBuf,
         reason: String,
     },
+    #[error(
+        "`{field}` is '{value}', which cannot be used as a file name — this value \
+         becomes a directory or file under `dist/`, so it must be a plain name: no \
+         `/` or `\\`, no `..`, no leading `/`, not empty, no control characters. \
+         Rename it in the manifest; it is refused rather than silently rewritten"
+    )]
+    UnsafeDesktopIdentity { field: &'static str, value: String },
+    #[error(
+        "`[desktop] icon` '{icon}' {reason} — the icon path is resolved relative to \
+         the project directory and must stay inside it"
+    )]
+    UnsafeIconPath { icon: String, reason: &'static str },
+    #[error(
+        "refusing to prepare the bundle directory '{path}': it is not inside the \
+         project's own '{dist_root}' output directory — preparing a bundle directory \
+         deletes it recursively first, so a target outside `dist/` is never touched"
+    )]
+    UnsafeBundleDir { path: PathBuf, dist_root: PathBuf },
     #[error("spawning `cargo {args}`: {reason}")]
     CargoSpawn { args: String, reason: String },
     #[error("`cargo {args}` failed:\n{tail}")]
@@ -301,7 +337,10 @@ fn build_with_host(
         project_dir: project_dir.to_path_buf(),
         reason: format!("{err:#}"),
     })?;
-    let config = DesktopConfig::resolve(project_dir, &manifest);
+    // Path-checked as it is resolved: a `[desktop] name`/`identifier`, an
+    // `[app] name` or a `[package] name` that would step outside `dist/`
+    // refuses here, before the first directory is created (let alone removed).
+    let config = DesktopConfig::resolve(project_dir, &manifest)?;
 
     let mut notes = Vec::new();
     // Windows only: the project's own `windows/build.rs` embeds
@@ -516,6 +555,134 @@ mod tests {
             "{err}"
         );
         assert!(err.to_string().contains("host-locked"), "{err}");
+    }
+
+    /// The traversal shapes every identity field is driven through below.
+    /// Written the way they would appear in a hand-edited `frust.toml` — a
+    /// crafted one, or a typo'd relative path someone meant as a hint.
+    const TRAVERSALS: &[&str] = &["../../etc", "/etc/passwd", "..\\..\\windows", "sub/dir"];
+
+    /// Every field that becomes a path refuses a traversal, on every target,
+    /// **before the compile** — proven by the empty fake runner, for which any
+    /// invocation at all would report `CargoSpawn` instead. Refusing that
+    /// early is what keeps the value away from `prepare_dir`'s `remove_dir_all`.
+    #[test]
+    fn every_desktop_identity_field_refuses_a_traversal_before_the_compile() {
+        for value in TRAVERSALS {
+            let escaped = value.replace('\\', "\\\\");
+            let manifests = [
+                format!(
+                    "[app]\nname = \"my_app\"\norg = \"dev.f0x\"\n\n\
+                     [desktop]\nname = \"{escaped}\"\n"
+                ),
+                format!(
+                    "[app]\nname = \"my_app\"\norg = \"dev.f0x\"\n\n\
+                     [desktop]\nidentifier = \"{escaped}\"\n"
+                ),
+                format!("[app]\nname = \"{escaped}\"\norg = \"dev.f0x\"\n"),
+            ];
+            for manifest in &manifests {
+                for target in [
+                    DesktopBundleTarget::Macos,
+                    DesktopBundleTarget::Windows,
+                    DesktopBundleTarget::Linux,
+                ] {
+                    let fixture = Fixture::new("traversal").manifest(manifest);
+                    let err = run(&FakeProcessRunner::new(), &fixture, target).unwrap_err();
+                    assert!(
+                        matches!(err, DesktopBuildError::UnsafeDesktopIdentity { .. }),
+                        "{target} {value:?}: {err}"
+                    );
+                    assert!(
+                        !fixture.path("dist").exists(),
+                        "{target} {value:?}: wrote into dist/ anyway"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `Cargo.toml`'s `[package] name` is the same hazard by another route —
+    /// it names the Linux bundle *directory* — and is refused the same way.
+    #[test]
+    fn a_traversal_in_the_cargo_package_name_refuses_the_build() {
+        for value in TRAVERSALS {
+            let fixture = Fixture::new("traversal-package").default_manifest().file(
+                "Cargo.toml",
+                &format!(
+                    "[package]\nname = \"{}\"\nversion = \"0.1.0\"\n",
+                    value.replace('\\', "\\\\")
+                ),
+            );
+            let err = run(
+                &FakeProcessRunner::new(),
+                &fixture,
+                DesktopBundleTarget::Linux,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, DesktopBuildError::UnsafeDesktopIdentity { .. }),
+                "{value:?}: {err}"
+            );
+            assert!(!fixture.path("dist").exists(), "{value:?}");
+        }
+    }
+
+    /// The defect in its concrete form: a display name climbing out of
+    /// `dist/macos` puts the `.app` — and the `remove_dir_all` that prepares
+    /// it — on top of an existing directory outside the build output. The
+    /// canary sits at exactly the path the unguarded code would have deleted.
+    #[test]
+    fn a_display_name_climbing_out_of_dist_never_reaches_remove_dir_all() {
+        let fixture = Fixture::new("escape-canary")
+            .manifest(
+                "[app]\nname = \"my_app\"\norg = \"dev.f0x\"\n\n\
+                 [desktop]\nname = \"../../victim\"\n",
+            )
+            .binary("my_app");
+        // `<project>/dist/macos/../../victim.app` is `<project>/victim.app`.
+        let victim = fixture.path("victim.app");
+        fs::create_dir_all(victim.join("nested")).unwrap();
+        fs::write(victim.join("nested/keep.txt"), b"precious").unwrap();
+
+        let err = run(&cargo_ok(), &fixture, DesktopBundleTarget::Macos).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DesktopBuildError::UnsafeDesktopIdentity {
+                    field: "[desktop] name",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        assert!(
+            victim.join("nested/keep.txt").is_file(),
+            "the bundle assembly deleted a directory outside dist/"
+        );
+    }
+
+    /// Where the icon rules meet the path rules: an icon the pipeline cannot
+    /// *use* is a note (see the tests above), but an icon path that tries to
+    /// leave the project is a refusal. Quality degrades a bundle; safety does
+    /// not degrade.
+    #[test]
+    fn an_icon_path_escaping_the_project_fails_the_build_instead_of_becoming_a_note() {
+        for value in ["../../../etc/passwd", "/etc/passwd", "..\\..\\secrets.png"] {
+            let fixture = Fixture::new("icon-escape")
+                .manifest(&format!(
+                    "[app]\nname = \"my_app\"\norg = \"dev.f0x\"\n\n\
+                     [desktop]\nicon = \"{}\"\n",
+                    value.replace('\\', "\\\\")
+                ))
+                .binary("my_app");
+            let err = run(&cargo_ok(), &fixture, DesktopBundleTarget::Linux).unwrap_err();
+            assert!(
+                matches!(err, DesktopBuildError::UnsafeIconPath { .. }),
+                "{value:?}: {err}"
+            );
+            assert!(!fixture.path("dist").exists(), "{value:?}");
+        }
     }
 
     #[test]
