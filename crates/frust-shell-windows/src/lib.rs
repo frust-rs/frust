@@ -17,7 +17,9 @@
 //! - `menu` — the platform-free `MenuSpec` → menu plan mapping and the
 //!   activation queue behind it, plus the muda menu built from the plan and the
 //!   one-activation-per-frame pump that empties the queue.
-//! - `theme` — the titlebar's wanted-vs-applied brightness latch.
+//! - `theme` — the titlebar's wanted-brightness latch (round 1: re-applies on
+//!   every core-signaled brightness change, not just the first — see that
+//!   module's docs for why, and for the residual gap it does not close).
 //! - `win32_glue` — this crate's **sanctioned-unsafe zone**: every `unsafe`
 //!   block, and every `windows-sys`/winit-Windows-extension call, lives there
 //!   and nowhere else (`docs/SHELLS_ARCHITECTURE.md`'s convention, the
