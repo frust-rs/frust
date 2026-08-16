@@ -1,13 +1,14 @@
 # Frust - SHELLS Development
 
 Device/emulator gates owned by the SHELLS unit (`frust-shell-common`, `frust-shell-desktop`,
-`frust-shell-android`, `frust-shell-ios`, plus the in-repo platform embedding modules). Shared
+`frust-shell-macos`, `frust-shell-windows`, `frust-shell-linux`, `frust-shell-android`,
+`frust-shell-ios`, plus the in-repo platform embedding modules). Shared
 prerequisites, build/run commands, the standard verify gate, the mobile compile gates, and the
 version-pin policy live in [DEVELOPMENT.md](DEVELOPMENT.md); the unit's design lives in
 [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md).
 
-Neither gate below has an automated counterpart — each is a person-driven check against an
-installed app (`frust run -d <device>`).
+No gate below has an automated counterpart — each is a person-driven check against an installed
+app (`frust run -d <device>` on mobile, a real desktop session otherwise).
 
 ## Deep-link manual test (Android)
 
@@ -45,6 +46,22 @@ is a person-driven check:
   and falls through to the platform's own default at the root.
 - **Density refresh:** move a running app between displays of different density; confirm
   layout rescales rather than sticking to launch-time density.
+
+## Per-OS desktop shell gate (macOS + Windows + Linux)
+
+A hardware gate for the native integration the shared winit core cannot cover, run against an app
+configured with an app name, reverse-DNS id, window icon and menu spec. macOS is closed; Windows
+and Linux are still owed (see [LIMITATIONS.md](LIMITATIONS.md) `desktop-shells-runtime-unverified`
+for exactly which checks remain). Per host:
+
+- **macOS:** menu bar shows the app-named application menu; ⌘Q and the menu Quit both exit;
+  Hide/Show All work; closing with `quit_on_last_window_closed = false` hides the window and a
+  Dock click from the *inactive* state brings it back; the zero-config preview is unchanged.
+- **Windows:** titlebar and taskbar icons; taskbar grouping under the configured AppUserModelID;
+  titlebar brightness follows an app-forced theme flip; the native menu bar and each declared
+  accelerator activate their item.
+- **Linux:** the window pairs with its `.desktop` entry (Wayland `app_id` / X11 `WM_CLASS`) and
+  the X11 window icon shows; run non-headless, on both session types where available.
 
 ## Version Pins
 
