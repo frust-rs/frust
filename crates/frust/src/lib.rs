@@ -723,9 +723,10 @@ pub use router_glue::{RouterDeepLinks, router_with_deep_links};
 /// motion vocabulary ([`MotionDurations`]/[`EasingSet`]) — all
 /// flat-re-exported so an app authors a custom theme against `frust::*` alone.
 pub use frust_theme::{
-    Brightness, ColorScheme, DesignLanguage, EasingSet, Elevation, ElevationLevel, GlassFill,
-    GlassMaterial, GlassScale, MotionDurations, MotionScheme, MotionSpring, ShadowSpec, ShapeScale,
-    StatusColors, StatusPalette, SurfaceRole, Theme, ThemeBuilder, ThemeExtensions, TypeScale,
+    Brightness, ColorScheme, DesignLanguage, EasingSet, Elevation, ElevationLevel, FontFace,
+    GlassFill, GlassMaterial, GlassScale, MotionDurations, MotionScheme, MotionSpring,
+    NativeTypefaces, ShadowSpec, ShapeScale, StatusColors, StatusPalette, SurfaceRole, Theme,
+    ThemeBuilder, ThemeExtensions, TypeScale,
 };
 
 /// Glyph's brightness-invariant terminal/tooltip ink — a
@@ -2003,6 +2004,35 @@ mod glass_reexport {
             GlassScale::ios27(),
             "Cupertino baseline carries the iOS-27 glass scale"
         );
+    }
+}
+
+/// Facade-level check that the native-typeface vocabulary
+/// ([`FontFace`]/[`NativeTypefaces`]) re-export through the
+/// `frust` facade — the seam a design system attaches via [`ThemeExtensions`]
+/// for a native-widgets plugin to consume.
+#[cfg(test)]
+mod native_typefaces_reexport {
+    use crate::{FontFace, NativeTypefaces};
+
+    // A build-time proof the types name-resolve through the facade.
+    #[allow(dead_code)]
+    fn _uses_all(_f: FontFace, _n: NativeTypefaces) {}
+
+    #[test]
+    fn native_typefaces_resolve_through_facade() {
+        // FontFace constructor is const and can be used in a static context.
+        let face = FontFace::new("test-family", b"test bytes");
+        assert_eq!(face.family, "test-family");
+        assert_eq!(face.bytes, b"test bytes");
+
+        // NativeTypefaces can be constructed and used as a ThemeExtensions payload.
+        let typefaces = NativeTypefaces {
+            button: Some(face),
+            body: Some(face),
+        };
+        assert!(typefaces.button.is_some());
+        assert!(typefaces.body.is_some());
     }
 }
 
