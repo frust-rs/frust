@@ -2143,3 +2143,86 @@ support worth exposing through `DesktopConfig`.
 **Evidence**: `workflow/plans/features/desktop-shells/PLAN.md` § Edge Cases & Risks (menus/deep
 links/lifecycle scope list: "multi-window stays out of scope (single window, like today —
 LIMITATIONS entry)").
+
+---
+
+### `paths-macos-legacy-fallback-runtime-unverified` — `frust-paths`' macOS data/cache-dir arm is unit-tested only
+
+**Observed**: `frust-paths::data_dir`/`cache_dir`'s dedicated macOS arm — resolving
+`$HOME/Library/Application Support`/`$HOME/Library/Caches` as the new base, with a **read-through
+legacy-XDG fallback** (if `<legacy base>/<app_stem>` exists and `<new base>/<app_stem>` does not,
+the function returns the legacy base instead, so an install that predates this arm keeps finding
+its data) — is proven only by unit tests against an injectable existence probe and a cross-target
+`cargo check`/`clippy --target aarch64-apple-darwin`, both from a Linux host. No real `~/Library`
+read-through has been observed on a real macOS filesystem.
+
+**Applies to**: every desktop-shells consumer resolving a data/cache directory on macOS —
+`shared-preferences`' file backend, `frust-shell-desktop`'s pipeline-cache path, and any future
+caller — until the fallback fires (or correctly does not fire) against a real `~/Library` tree.
+
+**Why accepted**: matches the existing iOS precedent in this file (also never run on a real device
+from this repo's test suite); the cross-target compile/clippy gates are the strongest proof
+achievable without the hardware. Joins the MacBook runtime-gate backlog alongside
+`desktop-shells-runtime-unverified` and `desktop-installer-runtime-partial` above, rather than
+duplicating either.
+
+**Evidence**: `crates/frust-paths/src/lib.rs` (`macos_dir_from`, `data_dir`/`cache_dir`'s macOS
+arms); desktop-shells Phase C task 01 completion summary, Risks/Limitations #1.
+
+---
+
+### `desktop-contributions-runtime-unverified` — the plugin desktop-contribution merge has never produced a signed, launched bundle
+
+**Observed**: `frust-drive::desktop_build::contributions` — the stage that merges an installed
+plugin's desktop-lane `Contribution` (`MacosPlistEntry`/`MacosEntitlement`/`LinuxDesktopEntry`)
+into the assembled bundle's `Info.plist`/`<identifier>.desktop`, and generates
+`dist/macos/<binary>.entitlements` on a signed build — is proven only against `FakeProcessRunner`
+and temp-dir fixtures. No plugin-contributed plist key or entitlement has been carried through a
+real `codesign`/Gatekeeper pass or a launched `.app`, and `--installer dmg`'s reuse of the same
+generated entitlements file (`entitlements_for_packaging`) is asserted only via the packager's
+config JSON, never a real signed `.dmg`.
+
+**Applies to**: any macOS or Linux build of a project depending on a plugin that contributes a
+desktop-lane entry — none does yet (the registry carries zero desktop rows in v1), so this is
+proven-mechanism-not-yet-exercised rather than a live gap.
+
+**Why accepted**: matches this environment's device-availability constraint (Linux hardware only),
+the same asymmetry `desktop-installer-runtime-partial` already accepts for installer assembly.
+Owed to the next MacBook pass: a real plugin desktop contribution, built and signed, confirmed via
+`codesign -dv`/Gatekeeper and a launched bundle actually carrying the merged plist key or
+entitlement.
+
+**Evidence**: `crates/frust-drive/src/desktop_build/contributions.rs`; desktop-shells Phase C task
+03 completion summary, Risks/Limitations #1-#2.
+
+---
+
+### `desktop-contributions-v1-scope` — three named scope limits on the plugin desktop-contribution seam
+
+**Observed**: three deliberate v1 narrowings on the desktop-contribution feature (Phase C), each
+enforced structurally rather than accidental:
+
+1. **No Windows variant.** `Contribution` has no Windows-lane desktop variant at all —
+   `desktop_build::contributions::applies_to` filters every existing variant out on a Windows
+   build, by an exhaustive (non-wildcard) match naming this explicitly.
+2. **Boolean-true-only entitlements.** `Contribution::MacosEntitlement` carries only a key and a
+   comment — `<key>k</key>`/`<true/>` is the only shape a plugin can contribute; a value-carrying
+   entitlement is not representable.
+3. **Base-contributions-only detection.** `frust_drive::plugin::desktop_contributions` scans only a
+   plugin's base `Contribution`s — one gated behind an opt-in `FeatureSpec` is invisible to it even
+   when a project selected that feature, since `add_plugin`'s `features` argument is never
+   persisted anywhere durable for this function to read back.
+
+**Applies to**: any future plugin wanting a Windows desktop integration point, a value-carrying
+entitlement, or a desktop contribution behind an optional feature bundle.
+
+**Why accepted**: all three are named, structural v1 boundaries in the code they live in (an
+exhaustive match, a doc-commented shape, a doc-commented scan scope), not gaps found later — each
+is future work gated on a real need materializing (a plugin wanting the wider shape) rather than
+spec'd speculatively ahead of one. The registry carries zero desktop-lane contributions today, so
+none of the three has blocked a real plugin yet.
+
+**Evidence**: `crates/frust-drive/src/desktop_build/contributions.rs`'s `applies_to` (Windows
+match arm); `crates/frust-drive/src/plugin/mod.rs`'s `Contribution::MacosEntitlement` doc comment;
+`crates/frust-drive/src/plugin/apply.rs`'s `desktop_contributions` doc comment; desktop-shells
+Phase C task 03 completion summary, Doc Updates Needed.

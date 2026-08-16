@@ -39,6 +39,27 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other unit
 | `plugins/database` | Synchronous embedded SQL database (`Database`/`Value`/`Engine`) over a swappable-engine seam — bundled SQLite via `rusqlite` (default) or an optional Turso engine (`engine-turso`); no OS integration |
 | `plugins/i18n` | Fluent Project + ICU4X internationalization/localization: compile-time bundle loading (`locales!`, via the companion `frust-i18n-macros` proc-macro crate), locale-aware message resolution, system-locale detection, and (`formatting` feature) ICU4X number/date/currency formatting |
 
+## Desktop Backend Status
+
+Every plugin above targets Android/iOS first; desktop coverage is uneven by design, not omission —
+this is the ground truth an app author needs before assuming a plugin "just works" in a desktop
+preview or a `frust build macos|windows|linux`. See
+[CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)'s Data Flow for how a plugin's desktop-lane
+`Contribution`s reach an assembled bundle.
+
+| Plugin | Desktop status | Detail |
+|--------|-----------------|--------|
+| `shared-preferences` | generic-desktop, macOS-native on macOS | NSUserDefaults (macOS, sharing the Apple arm with iOS) / a JSON file backend (Linux, Windows) |
+| `secure-storage` | generic-desktop, macOS-native on macOS | Keychain (macOS, sharing the Apple arm with iOS) / `keyring-core` + secret-service or Credential Manager (Linux, Windows) |
+| `camera` | macOS-native only | AVFoundation (macOS, sharing the Apple arm with iOS); no backend at all on Linux/Windows |
+| `clipboard` | generic-desktop | `arboard` on macOS, Linux, and Windows alike — macOS shares this arm rather than its own Apple `UIPasteboard` one (UIKit-only) |
+| `haptics` | unavailable-by-design | no first-class OS API to route to, on macOS, Linux, or Windows |
+| `iap` | deferred (v1) | dependency-free, always-erroring stub on macOS, Linux, and Windows — mobile-first scope, not a capability gap (`iap-desktop-unavailable-v1` in [LIMITATIONS.md](LIMITATIONS.md)) |
+| `clean-signals-frust` | platform-free | facade-tier glue with no OS integration to split by platform at all |
+| `database` | platform-free | file IO via `rusqlite`/`turso`; no OS integration, so no platform split |
+| `i18n` | platform-free | reaches the OS only for a `sys_locale` read; no backend split |
+| `native-widgets` (NATIVE_WIDGETS unit) | unavailable | no desktop backend of any kind — Android/iOS only (see [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md)) |
+
 ## Layer Dependencies
 
 Every OS-capability plugin (`shared-preferences`, `secure-storage`, `camera`, `clipboard`,
