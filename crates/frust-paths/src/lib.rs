@@ -23,7 +23,9 @@
 //!   *legacy* base instead (legacy base: `$XDG_DATA_HOME` if set and
 //!   absolute, else `$HOME/.local/share` — what this crate resolved on
 //!   macOS before it grew a dedicated arm), so existing installs keep
-//!   finding their data. This is per-app (`app_stem()`-granular), never
+//!   finding their data. This probe is `app_stem()`-granular, so it serves
+//!   only callers that join `app_stem()` onto the returned base (see
+//!   *Per-binary namespacing* and *Legacy bases* below); it never
 //!   migrates/copies/deletes anything, and XDG vars only feed the fallback
 //!   probe — they do **not** override the new base on macOS. Other Unix
 //!   (excluding iOS and macOS) resolves `$XDG_DATA_HOME` if set *and
@@ -46,9 +48,24 @@
 //!   did not — gaining a debug line there is an accepted, harmless
 //!   behavioral delta from consolidating the two.
 //! - **Per-binary namespacing** ([`app_stem`]): the current executable's
-//!   file stem (falling back to `"app"` if `current_exe()` fails), the
-//!   component every site joins onto its resolved base directory so that two
-//!   Frust apps on one machine never share a file.
+//!   file stem (falling back to `"app"` if `current_exe()` fails) — the
+//!   component a caller that resolves **one directory per app** joins onto
+//!   its resolved base directory so that two Frust apps on one machine never
+//!   share a file. It is that convention, not a universal path component:
+//!   a caller whose on-disk shape is deliberately machine-wide rather than
+//!   per-app (`frust-database`'s `<data_dir>/databases/<name>.db`) joins no
+//!   stem at all.
+//! - **Legacy bases** ([`legacy_data_dir`]/[`legacy_cache_dir`]): the
+//!   read-through fallback built into `data_dir()`/`cache_dir()` probes
+//!   `<base>/<app_stem>`, so it serves only the app-stem-shaped callers
+//!   above. A differently-shaped caller reads through at its own **file**
+//!   level instead: resolve the legacy base from these two functions, and
+//!   open the legacy file only when the new-shape file is absent and the
+//!   legacy one exists (never migrating, copying, or deleting) — what
+//!   `frust-database` and `frust-shell-desktop`'s pipeline cache do. Both
+//!   functions return `None` on every non-macOS target, where
+//!   `data_dir()`/`cache_dir()` already resolve that same location and no
+//!   legacy concept exists.
 //! - **Atomic write** ([`atomic_write`]): `create_dir_all` the parent
 //!   directory, write to a process-unique temp file (the target path with
 //!   its extension replaced by `tmp.<pid>`), then `rename` into place. A
@@ -92,7 +109,10 @@ use std::path::{Path, PathBuf};
 ///   deletes anything), so installs that predate this crate's dedicated
 ///   macOS arm keep finding their data. Legacy base: `$XDG_DATA_HOME` if
 ///   set and absolute, else `$HOME/.local/share` — the same resolution
-///   generic Unix uses below.
+///   generic Unix uses below. **The probe is `app_stem()`-granular**, so
+///   this built-in fallback serves only callers that join [`app_stem`]
+///   onto the returned base; a caller with a different on-disk shape must
+///   read through at its own file level via [`legacy_data_dir`].
 /// - Other Unix (excluding iOS and macOS): `$XDG_DATA_HOME` if set and
 ///   absolute, else `$HOME/.local/share`.
 /// - Windows: `%APPDATA%`.
@@ -141,7 +161,9 @@ pub fn data_dir() -> Option<PathBuf> {
 /// - macOS: `$HOME/Library/Caches`, with the same read-through legacy
 ///   fallback as [`data_dir`]'s macOS arm (legacy base: `$XDG_CACHE_HOME` if
 ///   set and absolute, else `$HOME/.cache`). XDG vars do not override this
-///   base, only the fallback probe.
+///   base, only the fallback probe — which is `app_stem()`-granular here
+///   too, so a caller with a different on-disk shape reads through at its
+///   own file level via [`legacy_cache_dir`].
 /// - Other Unix (excluding iOS and macOS): `$XDG_CACHE_HOME` if set and
 ///   absolute, else `$HOME/.cache`.
 /// - Windows: `%LOCALAPPDATA%`.
@@ -183,9 +205,78 @@ pub fn cache_dir() -> Option<PathBuf> {
     }
 }
 
+/// The **legacy** data-directory base a caller reads through to on macOS,
+/// or `None` where the concept doesn't exist.
+///
+/// - macOS: `Some(<legacy base>)` — `$XDG_DATA_HOME` if set and absolute,
+///   else `$HOME/.local/share`; `None` without a resolvable `HOME`. This is
+///   exactly the base [`data_dir`]'s own read-through fallback probes, and
+///   what this crate resolved on macOS before it grew a dedicated arm.
+/// - Every other target: `None`. There is no legacy location to read
+///   through to — [`data_dir`] already resolves that same directory (Unix)
+///   or an unrelated platform one (iOS/Windows) as its *current* base.
+///
+/// # When to call this instead of relying on [`data_dir`]
+///
+/// [`data_dir`]'s built-in macOS fallback probes `<base>/<app_stem>`, so it
+/// only fires for callers that join [`app_stem`] onto the base it returns.
+/// A caller whose on-disk shape has no `app_stem` component (e.g.
+/// `frust-database`'s deliberately machine-wide
+/// `<data_dir>/databases/<name>.db`) gets no fallback from `data_dir()` at
+/// all, and must read through at its own **file** level: build the
+/// new-shape path under [`data_dir`], and if that file does not exist,
+/// build the same shape under this legacy base and use it only if *that*
+/// file exists. Never migrate, copy, or delete — read-through only, exactly
+/// like the built-in probe.
+pub fn legacy_data_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        legacy_xdg_or_home(
+            std::env::var("XDG_DATA_HOME").ok().as_deref(),
+            "XDG_DATA_HOME",
+            std::env::var("HOME").ok().as_deref(),
+            &[".local", "share"],
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// The **legacy** cache-directory base a caller reads through to on macOS,
+/// or `None` where the concept doesn't exist — [`legacy_data_dir`]'s
+/// counterpart, with the same contract and the same file-level read-through
+/// obligation on the caller.
+///
+/// - macOS: `Some(<legacy base>)` — `$XDG_CACHE_HOME` if set and absolute,
+///   else `$HOME/.cache`; `None` without a resolvable `HOME`.
+/// - Every other target: `None`.
+pub fn legacy_cache_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        legacy_xdg_or_home(
+            std::env::var("XDG_CACHE_HOME").ok().as_deref(),
+            "XDG_CACHE_HOME",
+            std::env::var("HOME").ok().as_deref(),
+            &[".cache"],
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 /// `current_exe()`'s file stem, `"app"` fallback — the per-binary
-/// namespacing component every source site joins onto its resolved base
-/// directory (e.g. `<data_dir>/<app_stem>/frust/...`).
+/// namespacing component a caller resolving **one directory per app** joins
+/// onto its resolved base directory (e.g. `<data_dir>/<app_stem>/frust/...`).
+///
+/// It is that convention rather than a universal path component: a caller
+/// whose on-disk shape is deliberately machine-wide (`frust-database`'s
+/// `<data_dir>/databases/<name>.db`) joins no stem at all — and therefore
+/// gets no fallback from [`data_dir`]'s `app_stem`-granular macOS probe,
+/// which is what [`legacy_data_dir`]/[`legacy_cache_dir`] exist for.
 pub fn app_stem() -> OsString {
     std::env::current_exe()
         .ok()
@@ -295,7 +386,10 @@ fn cache_dir_from(xdg_cache_home: Option<&str>, home: Option<&str>) -> Option<Pa
 
 /// Absolute-validated `xdg` (logged-and-ignored at `debug` if set but
 /// relative), else `home` joined with `suffix` — computes the **legacy**
-/// base consulted only by [`macos_dir_from`]'s read-through-fallback probe.
+/// base, both for [`macos_dir_from`]'s read-through-fallback probe and for
+/// the [`legacy_data_dir`]/[`legacy_cache_dir`] a caller doing its own
+/// file-level read-through resolves; the one shared computation keeps the
+/// two from drifting apart.
 /// This duplicates rather than reuses [`xdg_or_home`]'s shape because that
 /// helper is compiled only for non-iOS, non-macOS Unix now that macOS has
 /// its own dedicated arm (see [`data_dir`]).
@@ -622,6 +716,111 @@ mod tests {
                 &exists,
             ),
             Some(PathBuf::from("/Users/alice/.local/share")),
+        );
+    }
+
+    // --- legacy_data_dir / legacy_cache_dir ------------------------------
+
+    /// The legacy *base* the public `legacy_data_dir`/`legacy_cache_dir`
+    /// return on macOS is computed by `legacy_xdg_or_home` — the same
+    /// helper `macos_dir_from`'s built-in probe uses — so driving that
+    /// helper with injected env values covers the macOS shape from any
+    /// host. (The public functions themselves only add the
+    /// `std::env::var` reads and the `#[cfg]` split.)
+    #[test]
+    fn legacy_data_base_shape_matches_pre_macos_arm_resolution() {
+        assert_eq!(
+            legacy_xdg_or_home(
+                None,
+                "XDG_DATA_HOME",
+                Some("/Users/alice"),
+                &[".local", "share"]
+            ),
+            Some(PathBuf::from("/Users/alice/.local/share"))
+        );
+        assert_eq!(
+            legacy_xdg_or_home(
+                Some("/custom/data"),
+                "XDG_DATA_HOME",
+                Some("/Users/alice"),
+                &[".local", "share"]
+            ),
+            Some(PathBuf::from("/custom/data")),
+            "an absolute XDG_DATA_HOME is the legacy base"
+        );
+        assert_eq!(
+            legacy_xdg_or_home(
+                Some("relative/data"),
+                "XDG_DATA_HOME",
+                Some("/Users/alice"),
+                &[".local", "share"]
+            ),
+            Some(PathBuf::from("/Users/alice/.local/share")),
+            "a relative XDG_DATA_HOME is ignored per the XDG spec"
+        );
+        assert_eq!(
+            legacy_xdg_or_home(None, "XDG_DATA_HOME", None, &[".local", "share"]),
+            None,
+            "no HOME: never guess"
+        );
+    }
+
+    #[test]
+    fn legacy_cache_base_shape_matches_pre_macos_arm_resolution() {
+        assert_eq!(
+            legacy_xdg_or_home(None, "XDG_CACHE_HOME", Some("/Users/alice"), &[".cache"]),
+            Some(PathBuf::from("/Users/alice/.cache"))
+        );
+        assert_eq!(
+            legacy_xdg_or_home(
+                Some("/custom/cache"),
+                "XDG_CACHE_HOME",
+                Some("/Users/alice"),
+                &[".cache"]
+            ),
+            Some(PathBuf::from("/custom/cache"))
+        );
+        assert_eq!(
+            legacy_xdg_or_home(None, "XDG_CACHE_HOME", None, &[".cache"]),
+            None
+        );
+    }
+
+    /// The documented non-macOS contract: there is no legacy location to
+    /// read through to, so both functions are unconditionally `None` — a
+    /// caller's file-level fallback compiles everywhere but only ever fires
+    /// on macOS.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn legacy_dirs_are_none_off_macos() {
+        assert_eq!(legacy_data_dir(), None);
+        assert_eq!(legacy_cache_dir(), None);
+    }
+
+    /// On macOS both resolve to the same legacy base the built-in probe
+    /// consults (`Some` on any host with a `HOME`); asserting the exact
+    /// path would depend on the running host's environment, so this pins
+    /// the agreement between the public function and the shared helper.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn legacy_dirs_match_the_shared_helper_on_macos() {
+        assert_eq!(
+            legacy_data_dir(),
+            legacy_xdg_or_home(
+                std::env::var("XDG_DATA_HOME").ok().as_deref(),
+                "XDG_DATA_HOME",
+                std::env::var("HOME").ok().as_deref(),
+                &[".local", "share"],
+            )
+        );
+        assert_eq!(
+            legacy_cache_dir(),
+            legacy_xdg_or_home(
+                std::env::var("XDG_CACHE_HOME").ok().as_deref(),
+                "XDG_CACHE_HOME",
+                std::env::var("HOME").ok().as_deref(),
+                &[".cache"],
+            )
         );
     }
 

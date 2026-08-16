@@ -2072,6 +2072,7 @@ name = "frust-database"
 version = "0.1.0"
 dependencies = [
  "frust-paths",
+ "log",
  "rusqlite",
  "thiserror 2.0.20",
  "tokio",

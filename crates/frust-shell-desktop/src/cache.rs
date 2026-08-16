@@ -11,32 +11,77 @@
 //! longer hand-rolls `XDG_CACHE_HOME`/`LOCALAPPDATA`/`current_exe`/`rename`
 //! logic) — this module keeps only the on-disk filename shape, the
 //! skip-unchanged check, and its own debug/info logging of outcome.
+//!
+//! It also owns its own **file-level** macOS legacy-base read-through on
+//! load: the app stem namespaces this module's *filename*, not a directory,
+//! so `frust_paths::cache_dir()`'s built-in `<base>/<app_stem>` probe never
+//! matches it (see `frust_paths::legacy_cache_dir`).
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-/// The path to the persisted desktop pipeline cache blob, or `None` when
-/// caching is disabled (no resolvable cache directory — see
+/// `<base>/frust/pipeline_cache_desktop_<app_stem>.bin` — this module's
+/// on-disk filename shape, over any base directory so the legacy-base
+/// read-through below (and tests) can build the same shape elsewhere.
+fn cache_file_path(base: &Path) -> PathBuf {
+    let mut file = std::ffi::OsString::from("pipeline_cache_desktop_");
+    file.push(frust_paths::app_stem());
+    file.push(".bin");
+    base.join("frust").join(file)
+}
+
+/// The path the desktop pipeline cache blob is **written** to, or `None`
+/// when caching is disabled (no resolvable cache directory — see
 /// `frust_paths::cache_dir`).
 ///
 /// The path is namespaced per binary (the current executable's file stem,
 /// via `frust_paths::app_stem`): every frust desktop app on a machine would
 /// otherwise share one file and concurrent apps would clobber each other's
-/// freshly-written cache.
+/// freshly-written cache. Note the stem namespaces the *filename*, not a
+/// directory, so `frust_paths::cache_dir()`'s own built-in macOS
+/// `<base>/<app_stem>` directory probe can't see this file — the load path
+/// does its own file-level read-through instead (see [`load_cache`]).
 pub fn cache_path() -> Option<PathBuf> {
-    let dir = frust_paths::cache_dir()?;
-    let mut file = std::ffi::OsString::from("pipeline_cache_desktop_");
-    file.push(frust_paths::app_stem());
-    file.push(".bin");
-    Some(dir.join("frust").join(file))
+    Some(cache_file_path(&frust_paths::cache_dir()?))
 }
 
 /// Load the pipeline cache blob from disk (best-effort).
 ///
 /// Returns `None` on any failure (file not found, read error, etc.),
 /// logging at debug level. The cache is optional; startup continues either way.
+///
+/// On macOS this reads through to the legacy cache base
+/// (`frust_paths::legacy_cache_dir`) when the current-location file is
+/// absent, so a cache written before `frust-paths` grew its dedicated macOS
+/// arm is still found. Nothing is migrated, copied, or deleted — saves keep
+/// writing [`cache_path`], and the stale legacy blob simply ages out.
 pub fn load_cache() -> Option<Vec<u8>> {
-    load_cache_from(&cache_path()?)
+    let path = load_path(&cache_path()?, frust_paths::legacy_cache_dir().as_deref());
+    load_cache_from(&path)
+}
+
+/// [`load_cache`]'s legacy-base read-through, parameterized over both bases
+/// so tests drive it against temp dirs: `new_path` unless that file is
+/// absent and the same filename shape under `legacy_base` exists.
+///
+/// `legacy_base` is `None` on every non-macOS target (see
+/// `frust_paths::legacy_cache_dir`), making this an identity function
+/// there.
+fn load_path(new_path: &Path, legacy_base: Option<&Path>) -> PathBuf {
+    if !new_path.exists()
+        && let Some(legacy_base) = legacy_base
+    {
+        let legacy_path = cache_file_path(legacy_base);
+        if legacy_path.exists() {
+            log::debug!(
+                "frust-shell-desktop: cache not found at {}, reading legacy {}",
+                new_path.display(),
+                legacy_path.display()
+            );
+            return legacy_path;
+        }
+    }
+    new_path.to_path_buf()
 }
 
 /// Path-parameterized body of [`load_cache`] — lets tests exercise the
@@ -192,5 +237,94 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+    }
+
+    // --- Legacy-base read-through on load (macOS shape) ------------------
+
+    /// A unique scratch *base* directory (the `cache_dir()` analog) under
+    /// the OS temp dir — the read-through tests probe the real filesystem,
+    /// so they must never touch the user's real `~/.cache`.
+    fn scratch_base(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "frust-cache-test-{}-base-{}",
+            std::process::id(),
+            tag
+        ))
+    }
+
+    /// Write a cache blob at this module's real filename shape under
+    /// `base`, returning its path.
+    fn seed_cache_file(base: &Path, data: &[u8]) -> PathBuf {
+        let path = cache_file_path(base);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, data).unwrap();
+        path
+    }
+
+    /// **Negative control**: the legacy base holds only
+    /// `frust/pipeline_cache_desktop_<stem>.bin` and deliberately no
+    /// `<app_stem>/` directory — the shape `frust_paths::cache_dir()`'s own
+    /// built-in probe looks for. The load path must still find it, and must
+    /// return the legacy bytes.
+    #[test]
+    fn test_load_path_reads_through_to_legacy_file_with_no_app_stem_dir() {
+        let new_base = scratch_base("rt-new");
+        let legacy_base = scratch_base("rt-legacy");
+        let legacy_path = seed_cache_file(&legacy_base, b"legacy-blob");
+
+        let stem_dir = legacy_base.join(frust_paths::app_stem());
+        assert!(!stem_dir.exists(), "test fixture must have no app-stem dir");
+
+        let resolved = load_path(&cache_file_path(&new_base), Some(&legacy_base));
+        assert_eq!(resolved, legacy_path);
+        assert_eq!(
+            load_cache_from(&resolved).as_deref(),
+            Some(&b"legacy-blob"[..])
+        );
+
+        let _ = fs::remove_dir_all(&new_base);
+        let _ = fs::remove_dir_all(&legacy_base);
+    }
+
+    /// A cache at the current location wins even when a legacy one exists,
+    /// and the legacy file is left untouched (read-through never migrates).
+    #[test]
+    fn test_load_path_prefers_the_new_file_when_both_exist() {
+        let new_base = scratch_base("both-new");
+        let legacy_base = scratch_base("both-legacy");
+        let new_path = seed_cache_file(&new_base, b"new-blob");
+        let legacy_path = seed_cache_file(&legacy_base, b"legacy-blob");
+
+        let resolved = load_path(&new_path, Some(&legacy_base));
+        assert_eq!(resolved, new_path);
+        assert_eq!(
+            load_cache_from(&resolved).as_deref(),
+            Some(&b"new-blob"[..])
+        );
+        assert!(legacy_path.exists(), "legacy file must be left untouched");
+
+        let _ = fs::remove_dir_all(&new_base);
+        let _ = fs::remove_dir_all(&legacy_base);
+    }
+
+    /// Neither file exists, or there is no legacy base at all (every
+    /// non-macOS target): the current-location path is returned unchanged,
+    /// so a later save still writes where `cache_path()` points.
+    #[test]
+    fn test_load_path_falls_back_to_the_new_path() {
+        let new_base = scratch_base("none-new");
+        let legacy_base = scratch_base("none-legacy");
+        let new_path = cache_file_path(&new_base);
+
+        assert_eq!(load_path(&new_path, Some(&legacy_base)), new_path);
+        assert_eq!(load_path(&new_path, None), new_path);
+    }
+
+    /// `cache_path()` is `cache_file_path()` over the resolved cache dir —
+    /// the shape the read-through rebuilds under a legacy base.
+    #[test]
+    fn test_cache_path_is_the_shared_filename_shape() {
+        let base = frust_paths::cache_dir().expect("cache dir resolvable on test hosts");
+        assert_eq!(cache_path(), Some(cache_file_path(&base)));
     }
 }

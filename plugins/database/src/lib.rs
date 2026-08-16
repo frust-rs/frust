@@ -454,6 +454,15 @@ impl Database {
     /// separator (`/` or `\`) — see [`Self::open_with`] for choosing a
     /// different engine, and [`Self::open_at`] for an explicit path.
     ///
+    /// The `databases/` directory is deliberately shared by every frust app
+    /// on the machine (no per-binary `app_stem` component), which is also
+    /// why this crate does its own **file-level** read-through on macOS: if
+    /// `<data_dir>/databases/<name>.db` doesn't exist but the same shape
+    /// under [`frust_paths::legacy_data_dir`] does, the legacy file is
+    /// opened where it already lives — nothing is migrated, copied, or
+    /// deleted. `data_dir()`'s own built-in macOS fallback probes
+    /// `<base>/<app_stem>` and so can never see this crate's paths.
+    ///
     /// # Errors
     /// [`DatabaseError::Storage`] if `name` is invalid, no data directory
     /// can be resolved (an unset `HOME`/`APPDATA` — this crate never
@@ -776,16 +785,56 @@ fn validate_name(name: &str) -> Result<(), DatabaseError> {
     Ok(())
 }
 
+/// `<base>/databases/<name>.db`, with the legacy-base **read-through**
+/// [`Database::open`] applies on macOS — factored out from
+/// [`resolve_db_path`] over both base directories so it's testable against
+/// temp dirs without ever touching a real data directory.
+///
+/// When the file under `base` does not exist and `legacy_base` is `Some`
+/// (macOS only — see [`frust_paths::legacy_data_dir`]), the same
+/// `databases/<name>.db` shape is checked under the legacy base and
+/// returned **only if that file exists**; otherwise the `base` path wins.
+/// Nothing is ever migrated, copied, or deleted: an existing database keeps
+/// being opened where it already lives.
+///
+/// This crate cannot rely on `data_dir()`'s own built-in macOS fallback,
+/// which probes `<base>/<app_stem>` — a `databases/` directory is
+/// deliberately shared by every frust app on the machine and joins no
+/// app-stem component, so that probe can never see it.
+fn resolve_db_path_from(
+    base: &Path,
+    legacy_base: Option<&Path>,
+    name: &str,
+) -> Result<PathBuf, DatabaseError> {
+    let path = db_file_path(base, name)?;
+    if !path.exists()
+        && let Some(legacy_base) = legacy_base
+    {
+        let legacy_path = db_file_path(legacy_base, name)?;
+        if legacy_path.exists() {
+            log::debug!(
+                "frust-database: {} not found, opening legacy {}",
+                path.display(),
+                legacy_path.display()
+            );
+            return Ok(legacy_path);
+        }
+    }
+    Ok(path)
+}
+
 /// [`Database::open`]'s full path resolution: sanitize `name`, resolve the
 /// user data directory, join this crate's standard `databases/<name>.db`
-/// location, and ensure the `databases` directory exists.
+/// location (reading through to a legacy base where one exists — see
+/// [`resolve_db_path_from`]), and ensure the resolved database's parent
+/// directory exists.
 fn resolve_db_path(name: &str) -> Result<PathBuf, DatabaseError> {
     let base = frust_paths::data_dir().ok_or_else(|| {
         DatabaseError::Storage(
             "could not resolve a user data directory (HOME/APPDATA unset)".into(),
         )
     })?;
-    let path = db_file_path(&base, name)?;
+    let path = resolve_db_path_from(&base, frust_paths::legacy_data_dir().as_deref(), name)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| DatabaseError::Storage(format!("creating databases directory: {e}")))?;
@@ -867,6 +916,108 @@ mod tests {
     #[test]
     fn db_file_path_rejects_empty_name() {
         assert!(db_file_path(Path::new("/tmp/x"), "").is_err());
+    }
+
+    // --- Legacy-base read-through (macOS shape, real temp dirs) ----------
+
+    /// A unique scratch directory under the OS temp dir — the read-through
+    /// tests below probe the real filesystem (`Path::exists`), so they must
+    /// never touch a real data directory.
+    fn scratch_dir(tag: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "frust-database-test-{}-{tag}-{n}",
+            std::process::id()
+        ))
+    }
+
+    /// Create `<base>/databases/<name>.db` with placeholder bytes and
+    /// return its path — the on-disk shape `db_file_path` builds.
+    fn seed_db_file(base: &Path, name: &str) -> PathBuf {
+        let path = db_file_path(base, name).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"placeholder").unwrap();
+        path
+    }
+
+    /// **Negative control for the whole fix**: an existing macOS install's
+    /// database lives at `<legacy base>/databases/<name>.db` and there is
+    /// no `<legacy base>/<app_stem>/` directory anywhere — the shape
+    /// `frust_paths::data_dir()`'s own built-in probe looks for. Resolution
+    /// must still find the legacy file. This fails if anyone "simplifies"
+    /// the fallback back into an `<legacy>/<app_stem>` directory probe.
+    #[test]
+    fn resolve_db_path_from_reads_through_to_legacy_file_with_no_app_stem_dir() {
+        let new_base = scratch_dir("legacy-read-through-new");
+        let legacy_base = scratch_dir("legacy-read-through-legacy");
+        let legacy_path = seed_db_file(&legacy_base, "app");
+
+        // The new base is empty, and the legacy base holds *only*
+        // `databases/app.db` — deliberately no `<app_stem>/` subdirectory.
+        let stem_dir = legacy_base.join(frust_paths::app_stem());
+        assert!(!stem_dir.exists(), "test fixture must have no app-stem dir");
+
+        assert_eq!(
+            resolve_db_path_from(&new_base, Some(&legacy_base), "app").unwrap(),
+            legacy_path,
+        );
+
+        let _ = fs::remove_dir_all(&new_base);
+        let _ = fs::remove_dir_all(&legacy_base);
+    }
+
+    /// A database already at the new location wins, even when a legacy file
+    /// also exists — read-through never overrides a live new-location file
+    /// (and never migrates/deletes the legacy one).
+    #[test]
+    fn resolve_db_path_from_prefers_the_new_file_when_both_exist() {
+        let new_base = scratch_dir("both-new");
+        let legacy_base = scratch_dir("both-legacy");
+        let new_path = seed_db_file(&new_base, "app");
+        let legacy_path = seed_db_file(&legacy_base, "app");
+
+        assert_eq!(
+            resolve_db_path_from(&new_base, Some(&legacy_base), "app").unwrap(),
+            new_path,
+        );
+        assert!(legacy_path.exists(), "legacy file must be left untouched");
+
+        let _ = fs::remove_dir_all(&new_base);
+        let _ = fs::remove_dir_all(&legacy_base);
+    }
+
+    /// Neither file exists (a first run): the new-location path is chosen,
+    /// so `resolve_db_path` creates the database where it belongs today.
+    #[test]
+    fn resolve_db_path_from_uses_the_new_path_when_neither_exists() {
+        let new_base = scratch_dir("neither-new");
+        let legacy_base = scratch_dir("neither-legacy");
+
+        assert_eq!(
+            resolve_db_path_from(&new_base, Some(&legacy_base), "app").unwrap(),
+            db_file_path(&new_base, "app").unwrap(),
+        );
+    }
+
+    /// `legacy_base: None` — every non-macOS target, where
+    /// `frust_paths::legacy_data_dir()` returns `None` — resolves to the
+    /// new path unconditionally.
+    #[test]
+    fn resolve_db_path_from_without_a_legacy_base_uses_the_new_path() {
+        let new_base = scratch_dir("no-legacy");
+        assert_eq!(
+            resolve_db_path_from(&new_base, None, "app").unwrap(),
+            db_file_path(&new_base, "app").unwrap(),
+        );
+    }
+
+    /// Name sanitization still runs ahead of any read-through.
+    #[test]
+    fn resolve_db_path_from_rejects_an_invalid_name() {
+        let new_base = scratch_dir("invalid-name");
+        assert!(resolve_db_path_from(&new_base, None, "a/b").is_err());
+        assert!(resolve_db_path_from(&new_base, None, "").is_err());
     }
 
     // --- Default-engine resolution ---------------------------------------
