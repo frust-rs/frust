@@ -1682,4 +1682,56 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dest);
     }
+
+    /// Every embedded plist-family template must be free of `--` inside XML
+    /// comments. XML forbids the sequence in a comment, and while `plutil
+    /// -lint` tolerates it, the strict parser `codesign` runs over an
+    /// entitlements file (AMFIUnserializeXML) rejects the whole file — a
+    /// scaffold shipping one fails every signed `frust build macos`
+    /// (macbook-gate-r2 finding F-5, where the comments spelled codesign
+    /// flags with their leading dashes).
+    #[test]
+    fn embedded_plist_templates_carry_no_double_hyphen_inside_comments() {
+        fn walk(dir: &include_dir::Dir<'_>, offenders: &mut Vec<String>) {
+            for entry in dir.entries() {
+                match entry {
+                    include_dir::DirEntry::Dir(sub) => walk(sub, offenders),
+                    include_dir::DirEntry::File(file) => {
+                        let name = file.path().to_string_lossy();
+                        let plist_family = [
+                            ".plist",
+                            ".plist.tmpl",
+                            ".entitlements",
+                            ".entitlements.tmpl",
+                        ]
+                        .iter()
+                        .any(|suffix| name.ends_with(suffix));
+                        if !plist_family {
+                            continue;
+                        }
+                        let Some(text) = file.contents_utf8() else {
+                            continue;
+                        };
+                        let mut rest = text;
+                        while let Some(open) = rest.find("<!--") {
+                            let body = &rest[open + 4..];
+                            let Some(close) = body.find("-->") else { break };
+                            if body[..close].contains("--") {
+                                offenders.push(name.to_string());
+                            }
+                            rest = &body[close + 3..];
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut offenders = Vec::new();
+        walk(&EMBEDDED_APP_TEMPLATE, &mut offenders);
+        assert!(
+            offenders.is_empty(),
+            "plist-family templates with `--` inside an XML comment (breaks \
+             codesign's AMFI parser): {offenders:?}"
+        );
+    }
 }

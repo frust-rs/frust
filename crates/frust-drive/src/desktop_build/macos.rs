@@ -53,9 +53,20 @@ const FAILURE_TAIL_LINES: usize = 20;
 /// fully offline — forcing `--timestamp` there would turn every such build
 /// into a network dependency for no verification benefit, since nothing
 /// trusts that signature's chain anyway.
+///
+/// The development prefixes (`Apple Development:`, plus its pre-Xcode-11
+/// spelling `Mac Developer:`) belong here for the same reason as the
+/// distribution ones: they are Apple-issued, timestamp-capable
+/// certificates, and classifying them as local used to make the installer
+/// lane skip `cargo-packager`'s codesign pass — which reassembles the
+/// bundle around the already-signed binary and so shipped a `.dmg` whose
+/// inner app had an *invalid* (not merely absent) signature
+/// (macbook-gate-r2 finding F-6).
 const APPLE_ISSUED_IDENTITY_PREFIXES: &[&str] = &[
     "Developer ID Application:",
     "Apple Distribution:",
+    "Apple Development:",
+    "Mac Developer:",
     "3rd Party Mac Developer Application:",
 ];
 

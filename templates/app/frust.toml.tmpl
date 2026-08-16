@@ -17,8 +17,9 @@ description = "{{ description }}"
 # drift comes back as a warning.
 #
 # `icon` is the single source image the icon pipeline derives every
-# platform's app icon from (`.icns`/`.ico`/`hicolor` PNGs) — point it at a
-# higher-resolution asset than the bundled demo logo before shipping.
+# platform's app icon from (`.icns`/`.ico`/`hicolor` PNGs). The bundled demo
+# logo is 1024x1024 — the pipeline needs at least 512x512, so keep any
+# replacement at or above that floor.
 [desktop]
 name = "{{ title_case_name }}"
 identifier = "{{ desktop_identifier }}"

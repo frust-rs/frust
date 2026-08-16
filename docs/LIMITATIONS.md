@@ -2023,14 +2023,19 @@ Phase A desktop shell.
 
 **Why accepted**: no public API sets the application-menu title for an unbundled process — it is
 sourced from the process/bundle name, not from any NSMenu item. Phase B's `.app` bundle assembly
-now ships and writes `CFBundleName` (from `DesktopConfig::display_name`) into every generated
-`Info.plist`, so a `frust build macos` bundle carries the fix and its bold menu title is
-**expected** to show the configured name correctly — not re-verified on hardware yet, since the
-MacBook runtime gate that found F-2 predates Phase B; owed to the next MacBook pass.
+ships `CFBundleName` (from `DesktopConfig::display_name`) in every `Info.plist`, and the MacBook
+runtime gate r2 (2026-08-17) verified the fix live: a `frust build macos` bundle's bold menu
+title reads the display name ("Gate App"), closing r1's F-2 for bundles. The shell's default
+About/Hide/Quit item labels follow the same name — `resolve_app_name` prefers the bundle's
+`CFBundleDisplayName`/`CFBundleName` over the executable stem when no `DesktopConfig::app_name`
+is set (gate r2 finding F-4). Only the unbundled bold title remains process-named, which is
+AppKit's own behavior.
 
 **Evidence**: `workflow/plans/features/desktop-shells/phase-a/followups/macbook-gate-r1/TASKS.md`
-gate table (G4, G5) and Findings (F-2); `crates/frust-drive/src/desktop_build/macos.rs`
-(`CFBundleName`/`CFBundleDisplayName` both set from the resolved display name).
+gate table (G4, G5) and Findings (F-2);
+`workflow/plans/features/desktop-shells/gates/macbook-gate-r2.md` (rows 1b, F-4);
+`crates/frust-shell-macos/src/lib.rs` (`resolve_app_name`), `src/appkit_glue.rs`
+(`bundle_display_name`).
 
 ---
 
@@ -2042,9 +2047,9 @@ verified for real on this host (`file` confirmed a genuine Debian binary package
 `.AppImage`** — the typed refusal path (`InstallerError::PackagerFailed`) was proven for real, but
 the format itself did not build on this host: `cargo-packager`'s vendored `linuxdeploy`'s `strip`
 step rejects a relocation section (`.relr.dyn`) this host's newer `binutils` emits — an
-upstream/environment tool mismatch, not a Frust defect. **macOS `.dmg`** — identity/signing config
-is now wired into `cargo-packager` (detailed below); runtime verification remains owed to a
-MacBook pass. **Windows NSIS `.exe`/WiX `.msi`** — owed to the Windows 11 PC pass (unit-tested
+upstream/environment tool mismatch, not a Frust defect. **macOS `.dmg`** — built and verified for real on the MacBook
+(gate r2, 2026-08-17; Developer-ID/notarization checks still owed — detailed below).
+**Windows NSIS `.exe`/WiX `.msi`** — owed to the Windows 11 PC pass (unit-tested
 against `FakeProcessRunner` only). **`.rpm`** is not a supported output at all —
 `cargo-packager` 0.11 builds only `.deb`/AppImage/pacman on Linux, so a requested `.rpm` is a typed
 `InstallerError::RpmNotSupported` refusal naming `tauri-bundler`'s documented `.rpm` path (or
@@ -2057,33 +2062,36 @@ passes the already-assembled bundle's `Contents/Info.plist` path and the entitle
 `macos/app.entitlements` exists) into cargo-packager's own config; verified against the pinned
 `cargo-packager` 0.11.8 source that its `Dmg` arm's synthesized `.app` overlays every key from the
 named plist onto its own generated one. `signingIdentity` is forwarded only when `[macos]
-signing-identity` is Apple-issued (the same three prefixes `codesign` uses below); a non-Apple
+signing-identity` is Apple-issued (the same prefix list `codesign` uses below); a non-Apple
 identity is suppressed instead, with a typed `InstallerNote::PackagerSigningSkipped` (rendered by
 the CLI as `Note (dmg): ...`) — cargo-packager's own codesign pass always adds `--timestamp`
 unconditionally (verified against the pinned source), which needs network access, so forwarding a
 local/self-signed identity would make `--installer dmg` depend on the network. Suppressing it keeps
-signing offline end-to-end; the `.dmg`'s inner `.app` ships unsigned, but the assembled bundle's own
-`codesign` pass (below) is unaffected. The `icons` entry for `.dmg` is likewise the assembled
+signing offline end-to-end; because the packager reassembles the bundle (which would break the
+suppressed identity's binary signature — gate r2 finding F-6), the packager is handed a
+signature-stripped copy of the executable (`stage_unsigned_binary`), so the `.dmg`'s inner `.app`
+ships cleanly unsigned; the assembled bundle's own `codesign` pass (below) is unaffected. The `icons` entry for `.dmg` is likewise the assembled
 bundle's own generated `<binary_name>.icns`, not the source PNG every other format uses —
 cargo-packager copies an `.icns` input verbatim, keeping its file name, so the merged plist's
 `CFBundleIconFile` (which names the binary, not the display name) resolves; a bundle with no
-generated `.icns` gets no `icons` entry for `.dmg` at all. What is still **owed to a MacBook pass**:
-the produced `.dmg`'s actual bundle identity, signature, and icon are unverified against a real
-build — the owed check is building a signed `.dmg` on real hardware, then running `codesign -dv`
-and a bundle-id inspection (`plutil`/`mdls`) against the `.app` cargo-packager synthesizes inside
-it, confirming that `.app` shows the project icon (not a generic or missing one) when mounted, and
-a separate `notarize = true` run with real Apple credentials exported, confirming the submission
-actually reaches `notarytool` and either succeeds or surfaces as the hard build failure this
-contract describes.
+generated `.icns` gets no `icons` entry for `.dmg` at all. The MacBook runtime gate r2
+(2026-08-17) verified the `.dmg` lane for real with an `Apple Development` identity: dmg built via
+the pinned packager, mounted, inner `.app` carrying the overlaid plist identity keys and a
+plugin-contributed key + entitlement, volume icon present, and the credential scrub proven with
+`APPLE_*` variables exported. What is still **owed**: the same run under a real `Developer ID
+Application` identity (none in the build keychain) — the packager's own re-sign of the inner
+`.app`, its secure timestamp, the pre-notarization `spctl` "rejected" verdict — plus a
+`notarize = true` run with real Apple credentials, confirming the submission reaches `notarytool`
+and either succeeds or surfaces as the hard build failure this contract describes.
 **codesign flags** —
 whenever a `[macos] signing-identity` is configured, `desktop_build::macos::codesign` always passes
 `--options runtime` (Hardened Runtime; harmless for an ad-hoc signature, mandatory for notarization
-eligibility) and passes `--timestamp` only when the identity carries one of the three Apple-issued
-prefixes (`Developer ID Application:`, `Apple Distribution:`, `3rd Party Mac Developer
-Application:`) — an ad-hoc/self-signed identity's codesign call therefore stays fully offline. This
-policy is unit-tested against `FakeProcessRunner` only; real-identity `--timestamp` behavior (Apple
-timestamp-server reachability, confirming an ad-hoc identity's call truly makes no network call) is
-unverified on hardware. **Notarization** (Apple's separate `notarytool` submission + stapling,
+eligibility) and passes `--timestamp` only when the identity carries one of the Apple-issued
+prefixes (`Developer ID Application:`, `Apple Distribution:`, `Apple Development:`,
+`Mac Developer:`, `3rd Party Mac Developer Application:` — the development prefixes joined the
+list after gate r2's F-6, where classifying them as local shipped a `.dmg` whose inner app had an
+invalid signature) — an ad-hoc/self-signed identity's codesign call therefore stays fully offline.
+Real `Developer ID` `--timestamp` behavior remains unverified on hardware. **Notarization** (Apple's separate `notarytool` submission + stapling,
 needed for a `.dmg` to run without a Gatekeeper warning on a machine that didn't build it) is
 opt-in and, by default, unreachable: `cargo-packager` falls through to notarization on its own
 whenever it can read Apple credentials from its environment, so `frust build --installer` removes
@@ -2101,10 +2109,10 @@ reaches `cargo-packager`'s notarization branch (Dmg + an Apple-issued identity).
 **Applies to**: `frust build <os> --installer`, and any macOS `.dmg` distributed outside the
 building machine.
 
-**Why accepted**: matches Phase A's device-availability constraint carried into Phase B — this
-environment has Linux hardware only, so macOS/Windows installer assembly is proven by unit test
-against a faked process runner, the same asymmetry `desktop-shells-runtime-unverified` already
-accepts for the shells themselves. The Linux `.AppImage` gap is a host tool-version mismatch with a
+**Why accepted**: matches Phase A's device-availability constraint carried into Phase B — the
+macOS half closed on the MacBook at gate r2 up to the identities that keychain holds; Windows
+installer assembly stays proven by unit test against a faked process runner, the same asymmetry
+`desktop-shells-runtime-unverified` already accepts for the shells themselves. The Linux `.AppImage` gap is a host tool-version mismatch with a
 proven typed-error path, not an unverified code path — closing it needs either a host with an
 older/compatible `binutils` or an upstream `linuxdeploy` fix, neither of which this pipeline
 controls. Notarization is wired and opt-in, but exercising it needs a real Apple Developer
@@ -2146,67 +2154,30 @@ LIMITATIONS entry)").
 
 ---
 
-### `paths-macos-legacy-fallback-runtime-unverified` — `frust-paths`' macOS data/cache-dir arm is unit-tested only
+### `paths-macos-legacy-fallback-runtime-unverified` — two of the three macOS legacy read-through sites have no runtime exercise
 
-**Observed**: `frust-paths::data_dir`/`cache_dir`'s dedicated macOS arm — resolving
-`$HOME/Library/Application Support`/`$HOME/Library/Caches` as the new base, with a **read-through
-legacy-XDG fallback** (if `<legacy base>/<app_stem>` exists and `<new base>/<app_stem>` does not,
-the function returns the legacy base instead, so an install that predates this arm keeps finding
-its data) — is proven only by unit tests against an injectable existence probe and a cross-target
-`cargo check`/`clippy --target aarch64-apple-darwin`, both from a Linux host. No real `~/Library`
-read-through has been observed on a real macOS filesystem.
+**Observed**: of the three macOS legacy-XDG read-through sites, only `plugins/database`'s
+file-level one (`resolve_db_path_from`, the sole live caller with durable data at stake) has run
+against a real `~/Library` tree — the MacBook runtime gate r2 (2026-08-17) verified fresh-create
+under `~/Library/Application Support`, the read-through opening a planted legacy
+`~/.local/share/databases/<name>.db` in place (nothing migrated, copied, or deleted), and
+new-wins with both present. The other two remain unit-tested only: `frust-paths`' **built-in**
+per-app-stem probe (`macos_dir_from`'s `<base>/<app_stem>` check) has no in-repo caller — it
+serves only a direct-API app doing its own `app_stem()`-shaped layout — and
+`frust-shell-desktop`'s pipeline-cache read-through (`load_path`, via
+`frust_paths::legacy_cache_dir`) is a no-op on macOS today regardless (Metal has no wgpu
+`PIPELINE_CACHE` feature, so a save never fires to populate either base; gate r2 confirmed no
+cache file appears). `shared-preferences` is inert here — its macOS backend is `NSUserDefaults`,
+so its `file` backend never runs.
 
-**Applies to**: `plugins/database` is the only live macOS caller with durable data at stake, and it
-has its own file-level read-through (`resolve_db_path_from`, driven by `frust_paths::legacy_data_dir`):
-`databases/<name>.db` reads through to the legacy base iff the new-location file is absent and the
-legacy one exists. `shared-preferences` is inert here — on macOS it dispatches entirely to the
-`apple` backend (`NSUserDefaults`), so its `file` backend (the only one this fallback could affect)
-never runs. `frust-shell-desktop`'s pipeline cache is structurally covered the same way
-(`load_path`, via `frust_paths::legacy_cache_dir`) but is a no-op on macOS today regardless (Metal
-has no wgpu `PIPELINE_CACHE` feature, so a save never fires to populate either base). The **built-in**
-per-app-stem probe inside `data_dir()`/`cache_dir()` itself (`macos_dir_from`'s `<base>/<app_stem>`
-check) has no in-repo caller exercising it today — none of the three callers above join `app_stem()`
-onto the base they get back; it serves only a direct-API app that does its own `app_stem()`-shaped
-layout on top of `data_dir()`/`cache_dir()`.
+**Why accepted**: the two unexercised sites have, respectively, no caller and no reachable save
+path — runtime proof would require building a caller that does not exist. Unit tests against an
+injectable existence probe plus the darwin cross-target gates cover the logic itself.
 
-**Why accepted**: matches the existing iOS precedent in this file (also never run on a real device
-from this repo's test suite); the cross-target compile/clippy gates are the strongest proof
-achievable without the hardware. All three read-through sites (`frust-paths`' built-in probe,
-`plugins/database`'s and `frust-shell-desktop`'s own file-level read-throughs) remain
-runtime-unverified against a real `~/Library` tree; joins the MacBook runtime-gate backlog alongside
-`desktop-shells-runtime-unverified` and `desktop-installer-runtime-partial` above, rather than
-duplicating either.
-
-**Evidence**: `crates/frust-paths/src/lib.rs` (`macos_dir_from`, `data_dir`/`cache_dir`'s macOS
-arms, `legacy_data_dir`/`legacy_cache_dir`); `plugins/database/src/lib.rs` (`resolve_db_path_from`
-and its negative-control test); `crates/frust-shell-desktop/src/cache.rs` (`load_path`); desktop-shells
-Phase C task 01 completion summary, Risks/Limitations #1.
-
----
-
-### `desktop-contributions-runtime-unverified` — the plugin desktop-contribution merge has never produced a signed, launched bundle
-
-**Observed**: `frust-drive::desktop_build::contributions` — the stage that merges an installed
-plugin's desktop-lane `Contribution` (`MacosPlistEntry`/`MacosEntitlement`/`LinuxDesktopEntry`)
-into the assembled bundle's `Info.plist`/`<identifier>.desktop`, and generates
-`dist/macos/<binary>.entitlements` on a signed build — is proven only against `FakeProcessRunner`
-and temp-dir fixtures. No plugin-contributed plist key or entitlement has been carried through a
-real `codesign`/Gatekeeper pass or a launched `.app`, and `--installer dmg`'s reuse of the same
-generated entitlements file (`entitlements_for_packaging`) is asserted only via the packager's
-config JSON, never a real signed `.dmg`.
-
-**Applies to**: any macOS or Linux build of a project depending on a plugin that contributes a
-desktop-lane entry — none does yet (the registry carries zero desktop rows in v1), so this is
-proven-mechanism-not-yet-exercised rather than a live gap.
-
-**Why accepted**: matches this environment's device-availability constraint (Linux hardware only),
-the same asymmetry `desktop-installer-runtime-partial` already accepts for installer assembly.
-Owed to the next MacBook pass: a real plugin desktop contribution, built and signed, confirmed via
-`codesign -dv`/Gatekeeper and a launched bundle actually carrying the merged plist key or
-entitlement.
-
-**Evidence**: `crates/frust-drive/src/desktop_build/contributions.rs`; desktop-shells Phase C task
-03 completion summary, Risks/Limitations #1-#2.
+**Evidence**: `crates/frust-paths/src/lib.rs` (`macos_dir_from`, `legacy_data_dir`/
+`legacy_cache_dir`); `plugins/database/src/lib.rs` (`resolve_db_path_from`);
+`crates/frust-shell-desktop/src/cache.rs` (`load_path`);
+`workflow/plans/features/desktop-shells/gates/macbook-gate-r2.md` (rows 4a-4c, 6a).
 
 ---
 

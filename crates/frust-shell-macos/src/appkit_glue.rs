@@ -54,7 +54,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::NSApplicationDidBecomeActiveNotification;
-use objc2_foundation::{NSNotification, NSNotificationCenter};
+use objc2_foundation::{NSBundle, NSNotification, NSNotificationCenter, NSString};
 
 use crate::lifecycle::Lifecycle;
 
@@ -169,4 +169,27 @@ impl std::fmt::Debug for AppActivationObserver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppActivationObserver").finish()
     }
+}
+
+/// The main bundle's user-facing name — `CFBundleDisplayName` if the app sets
+/// one, else `CFBundleName` — or `None` for a process running outside a
+/// `.app` bundle (a bare `cargo run` preview), whose info dictionary carries
+/// neither key. Feeds [`crate::resolve_app_name`]'s middle step so a bundled
+/// app's default menu items say "Quit Gate App", not "Quit gate_app"
+/// (macbook-gate-r2 finding F-4); safe `objc2-foundation` bindings
+/// throughout, so this adds no site to the module's `unsafe` inventory.
+pub(crate) fn bundle_display_name() -> Option<String> {
+    let info = NSBundle::mainBundle().infoDictionary()?;
+    for key in ["CFBundleDisplayName", "CFBundleName"] {
+        let Some(value) = info.objectForKey(&NSString::from_str(key)) else {
+            continue;
+        };
+        if let Some(name) = value.downcast_ref::<NSString>() {
+            let name = name.to_string();
+            if !name.trim().is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    None
 }

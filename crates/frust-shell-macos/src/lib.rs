@@ -101,8 +101,16 @@ pub struct MacosExtensions {
 impl MacosExtensions {
     /// Build the macOS extension set for `config`.
     pub fn new(config: &DesktopConfig) -> Self {
+        #[cfg(target_os = "macos")]
+        let bundle_name = appkit_glue::bundle_display_name();
+        #[cfg(not(target_os = "macos"))]
+        let bundle_name: Option<String> = None;
         Self {
-            app_name: resolve_app_name(config.app_name.as_deref(), current_exe_stem().as_deref()),
+            app_name: resolve_app_name(
+                config.app_name.as_deref(),
+                bundle_name.as_deref(),
+                current_exe_stem().as_deref(),
+            ),
             menu_spec: config.menu_spec.clone(),
             lifecycle: Arc::new(Lifecycle::new(config.quit_on_last_window_closed)),
             #[cfg(target_os = "macos")]
@@ -173,21 +181,29 @@ impl std::fmt::Debug for MacosExtensions {
     }
 }
 
-/// The name the application menu is titled with: the configured
-/// `DesktopConfig::app_name`, else the running executable's file stem, else
+/// The name the application menu (title and its About/Hide/Quit item labels)
+/// carries: the configured `DesktopConfig::app_name`, else the main bundle's
+/// display name, else the running executable's file stem, else
 /// [`DEFAULT_APP_NAME`].
 ///
-/// The executable stem is the middle fallback rather than `window_title()`'s
-/// because the two questions differ: an unnamed app should get the name macOS
-/// itself would show for an unbundled binary (`NSProcessInfo`'s process name
-/// is that same stem), not the window title's `Frust` placeholder — the
-/// application menu is where an app's name is most visible, and
-/// `DesktopConfig::app_name`'s docs keep the unset case distinguishable
-/// precisely so a shell can make this choice.
-fn resolve_app_name(app_name: Option<&str>, exe_stem: Option<&str>) -> String {
+/// The middle fallbacks mirror what macOS itself would show for the same
+/// process: a `.app`-bundled binary is named by its
+/// `CFBundleDisplayName`/`CFBundleName`
+/// ([`appkit_glue::bundle_display_name`]; macbook-gate-r2 finding F-4 — the
+/// stem gave a bundled app "Quit gate_app" where AppKit's own bold menu
+/// title already said "Gate App"), an unbundled one by its process name
+/// (`NSProcessInfo`'s, which is this same stem) — never the window title's
+/// `Frust` placeholder. `DesktopConfig::app_name`'s docs keep the unset case
+/// distinguishable precisely so a shell can make this choice.
+fn resolve_app_name(
+    app_name: Option<&str>,
+    bundle_name: Option<&str>,
+    exe_stem: Option<&str>,
+) -> String {
     app_name
         .map(str::trim)
         .filter(|name| !name.is_empty())
+        .or_else(|| bundle_name.map(str::trim).filter(|name| !name.is_empty()))
         .or_else(|| exe_stem.map(str::trim).filter(|stem| !stem.is_empty()))
         .unwrap_or(DEFAULT_APP_NAME)
         .to_string()
@@ -218,15 +234,29 @@ mod tests {
     #[test]
     fn a_configured_app_name_titles_the_application_menu() {
         assert_eq!(
-            resolve_app_name(Some("Huddle"), Some("huddle-dev")),
+            resolve_app_name(Some("Huddle"), Some("Bundle Huddle"), Some("huddle-dev")),
             "Huddle"
+        );
+    }
+
+    /// The bundled case (macbook-gate-r2 F-4): with no configured name, the
+    /// bundle's display name beats the executable stem, so the default menu
+    /// items say "Quit Gate App" rather than "Quit gate_app".
+    #[test]
+    fn an_unnamed_bundled_app_takes_the_bundle_display_name() {
+        assert_eq!(
+            resolve_app_name(None, Some("Gate App"), Some("gate_app")),
+            "Gate App"
         );
     }
 
     #[test]
     fn an_unnamed_app_falls_back_to_the_executable_stem_then_to_the_default() {
-        assert_eq!(resolve_app_name(None, Some("huddle-dev")), "huddle-dev");
-        assert_eq!(resolve_app_name(None, None), DEFAULT_APP_NAME);
+        assert_eq!(
+            resolve_app_name(None, None, Some("huddle-dev")),
+            "huddle-dev"
+        );
+        assert_eq!(resolve_app_name(None, None, None), DEFAULT_APP_NAME);
     }
 
     #[test]
@@ -234,11 +264,15 @@ mod tests {
         // A menu titled with whitespace is indistinguishable from a broken
         // menu bar on screen.
         assert_eq!(
-            resolve_app_name(Some("   "), Some("huddle-dev")),
+            resolve_app_name(Some("   "), None, Some("huddle-dev")),
             "huddle-dev"
         );
-        assert_eq!(resolve_app_name(Some(""), None), DEFAULT_APP_NAME);
-        assert_eq!(resolve_app_name(None, Some("  ")), DEFAULT_APP_NAME);
+        assert_eq!(
+            resolve_app_name(None, Some(" "), Some("huddle-dev")),
+            "huddle-dev"
+        );
+        assert_eq!(resolve_app_name(Some(""), None, None), DEFAULT_APP_NAME);
+        assert_eq!(resolve_app_name(None, None, Some("  ")), DEFAULT_APP_NAME);
     }
 
     #[test]

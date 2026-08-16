@@ -312,6 +312,11 @@ pub enum InstallerError {
 
     #[error("`cargo packager --config {config}` failed:\n{tail}")]
     PackagerFailed { config: PathBuf, tail: String },
+
+    #[error(
+        "`codesign` could not strip the suppressed identity's signature from the installer's binary copy '{path}':\n{tail}"
+    )]
+    StripSignature { path: PathBuf, tail: String },
 }
 
 /// A non-fatal observation about an installer build, returned instead of
@@ -343,8 +348,10 @@ impl fmt::Display for InstallerNote {
                 "`[macos] signing-identity` '{identity}' is not Apple-issued, so \
                  cargo-packager's own signing was skipped (it always signs with \
                  `--timestamp`, which needs Apple's timestamp service over the network) \
-                 — the .app inside the .dmg ships unsigned. The assembled bundle's own \
-                 codesign is unaffected, and signing stays offline"
+                 — the .app inside the .dmg ships unsigned: the packager reassembles \
+                 the bundle, which would break the identity's signature, so it is \
+                 handed a signature-stripped copy of the binary instead. The assembled \
+                 bundle's own codesign is unaffected, and signing stays offline"
             ),
             InstallerNote::NotarizationSuppressed => write!(
                 f,
@@ -438,7 +445,7 @@ pub fn build_installer(
     prepare_out_dir(&out_dir)?;
 
     let mut notes = Vec::new();
-    let packager_config = PackagerConfig::new(
+    let mut packager_config = PackagerConfig::new(
         &config,
         info,
         bundle,
@@ -447,6 +454,22 @@ pub fn build_installer(
         project_dir,
         &mut notes,
     );
+    // A `.dmg` whose identity was suppressed still points `binaries` at the
+    // assembled bundle's executable — a binary that suppressed identity
+    // already signed. `cargo-packager` reassembles its own bundle around the
+    // binary (fresh `Info.plist`), so handing it the signed one ships an
+    // inner app whose signature is *invalid* rather than absent — Gatekeeper
+    // reports it "damaged", a strictly worse state than unsigned
+    // (macbook-gate-r2 finding F-6). Stage a signature-stripped copy so the
+    // installer's app is exactly what [`InstallerNote::PackagerSigningSkipped`]
+    // promises: cleanly unsigned.
+    if format == InstallerFormat::Dmg
+        && config.macos_signing_identity.is_some()
+        && !packager_config.signs_with_an_apple_identity()
+    {
+        let staged = stage_unsigned_binary(runner, &bundle.executable, &out_dir, on_line)?;
+        packager_config.binaries[0].path = staged.to_string_lossy().into_owned();
+    }
     let config_path = out_dir.join("packager.json");
     write_config(&config_path, &packager_config)?;
 
@@ -518,6 +541,53 @@ pub fn build_installer(
         artifacts,
         notes,
     })
+}
+
+/// Copies `executable` to `<out_dir>/unsigned/<name>` and runs
+/// `codesign --remove-signature` on the copy — the binary a
+/// suppressed-identity `.dmg` build hands `cargo-packager` (see the call
+/// site in [`build_installer`] for why the signed original must not go in).
+/// The copy lives inside the packaging `out_dir` so it is torn down with
+/// every fresh run, and [`discover_artifacts`]'s extension filter never
+/// lists it.
+fn stage_unsigned_binary(
+    runner: &dyn ProcessRunner,
+    executable: &Path,
+    out_dir: &Path,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<PathBuf, InstallerError> {
+    let staged_dir = out_dir.join("unsigned");
+    fs::create_dir_all(&staged_dir).map_err(|source| InstallerError::Io {
+        action: "creating",
+        path: staged_dir.clone(),
+        source,
+    })?;
+    // `BundleReport::executable` is `Contents/MacOS/<binary_name>` by
+    // construction, so a file name always exists; the fallback only guards
+    // a hand-built report.
+    let staged = staged_dir.join(executable.file_name().unwrap_or("app".as_ref()));
+    fs::copy(executable, &staged).map_err(|source| InstallerError::Io {
+        action: "copying the bundle executable to",
+        path: staged.clone(),
+        source,
+    })?;
+
+    let staged_arg = staged.to_string_lossy().into_owned();
+    let args = ["--remove-signature", staged_arg.as_str()];
+    let mut prefixed = |line: &str| on_line(&format!("[codesign] {line}"));
+    let out = runner
+        .run_streaming("codesign", &args, None, &[], &mut prefixed)
+        .map_err(|err| InstallerError::StripSignature {
+            path: staged.clone(),
+            tail: format!("{err:#}"),
+        })?;
+    if !out.success {
+        return Err(InstallerError::StripSignature {
+            path: staged,
+            tail: tail_lines(&out.stderr, FAILURE_TAIL_LINES),
+        });
+    }
+    Ok(staged)
 }
 
 /// Checks `cargo-packager --version` (mirroring `doctor::CargoNdkValidator`'s
@@ -1334,14 +1404,24 @@ mod tests {
             .join("installer")
             .join("dmg");
         let config_arg = out_dir.join("packager.json").to_string_lossy().into_owned();
-        let runner = version_ok().with(
-            format!("cargo packager --config {config_arg}"),
-            Output {
-                success: true,
-                stdout: String::new(),
-                stderr: String::new(),
-            },
-        );
+        let staged = out_dir.join("unsigned").join("my_app");
+        let runner = version_ok()
+            .with(
+                format!("codesign --remove-signature {}", staged.display()),
+                Output {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
+            )
+            .with(
+                format!("cargo packager --config {config_arg}"),
+                Output {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
+            );
 
         let mut lines = Vec::new();
         let report = build_installer(
@@ -1376,6 +1456,15 @@ mod tests {
         );
         assert!(parsed["macos"].get("infoPlistPath").is_some(), "{written}");
         assert!(parsed["macos"].get("entitlements").is_some(), "{written}");
+
+        // The packager must be pointed at the signature-stripped copy, never
+        // the assembled bundle's signed executable (macbook-gate-r2 F-6).
+        assert_eq!(
+            parsed["binaries"][0]["path"],
+            staged.to_string_lossy().as_ref(),
+            "{written}"
+        );
+        assert!(staged.is_file(), "the staged unsigned copy must exist");
     }
 
     /// The default contract: a `.dmg` build that hands `cargo-packager` an
@@ -1440,6 +1529,63 @@ mod tests {
             .unwrap_or_else(|| panic!("expected a warning line: {lines:?}"));
         assert!(warning.contains("NOT notarized"), "{warning}");
         assert!(warning.contains("notarize = true"), "{warning}");
+    }
+
+    /// An `Apple Development:` identity is Apple-issued (macbook-gate-r2
+    /// finding F-6: classifying it as local made the packager skip signing
+    /// and ship a `.dmg` whose inner app carried an *invalid* signature), so
+    /// it is carried through to `cargo-packager` exactly like a Developer ID
+    /// one: `signingIdentity` present, no skip note, no signature-stripped
+    /// binary staged, and the packager pointed at the bundle's executable.
+    #[test]
+    fn dmg_config_carries_an_apple_development_identity_through() {
+        let fixture = Fixture::new("dmg-apple-development").manifest(
+            "[app]\nname = \"my_app\"\norg = \"dev.f0x\"\n\n\
+             [desktop]\nname = \"My App\"\nidentifier = \"dev.f0x.my_app\"\n\n\
+             [macos]\nsigning-identity = \"Apple Development: Example (TEAM123)\"\n",
+        );
+        let bundle = fixture.macos_app("my_app", true);
+        let out_dir = DesktopBundleTarget::Macos
+            .dist_dir(&fixture.dir)
+            .join("installer")
+            .join("dmg");
+        let config_arg = out_dir.join("packager.json").to_string_lossy().into_owned();
+        let runner = version_ok().with(
+            format!("cargo packager --config {config_arg}"),
+            Output {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+
+        let report = build_installer(
+            &runner,
+            &fixture.dir,
+            &info(),
+            &bundle,
+            InstallerFormat::Dmg,
+            &mut |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(report.notes, vec![InstallerNote::NotarizationSuppressed]);
+
+        let written = fs::read_to_string(out_dir.join("packager.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(
+            parsed["macos"]["signingIdentity"], "Apple Development: Example (TEAM123)",
+            "{written}"
+        );
+        assert_eq!(
+            parsed["binaries"][0]["path"],
+            bundle.executable.to_string_lossy().as_ref(),
+            "{written}"
+        );
+        assert!(
+            !out_dir.join("unsigned").exists(),
+            "no stripped copy may be staged for an Apple-issued identity"
+        );
     }
 
     /// The opt-in: `[macos] notarize = true` removes nothing, so the packaging
@@ -1532,7 +1678,7 @@ mod tests {
                 .join("installer")
                 .join(format.as_str());
             let config_arg = out_dir.join("packager.json").to_string_lossy().into_owned();
-            let runner = version_ok().with(
+            let mut runner = version_ok().with(
                 format!("cargo packager --config {config_arg}"),
                 Output {
                     success: true,
@@ -1540,6 +1686,21 @@ mod tests {
                     stderr: String::new(),
                 },
             );
+            if format == InstallerFormat::Dmg {
+                // The suppressed macOS identity also stages a
+                // signature-stripped binary copy (macbook-gate-r2 F-6).
+                runner = runner.with(
+                    format!(
+                        "codesign --remove-signature {}",
+                        out_dir.join("unsigned").join(binary).display()
+                    ),
+                    Output {
+                        success: true,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    },
+                );
+            }
 
             let report =
                 build_installer(&runner, &fixture.dir, &info(), &bundle, format, &mut |_| {})

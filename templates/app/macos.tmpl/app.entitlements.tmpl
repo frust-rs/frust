@@ -6,21 +6,26 @@
 	Hardened Runtime entitlements for {{ title_case_name }}. What the build
 	pipeline actually does, exactly, when `[macos] signing-identity` (see
 	`frust.toml`) is set:
-	  - The Hardened Runtime is always enabled at codesign time
-	    (`codesign --options runtime`), for every identity, ad-hoc included.
-	  - `codesign --timestamp` is added only when the identity is Apple-issued
-	    ("Developer ID Application:", "Apple Distribution:", or "3rd Party Mac
-	    Developer Application:") — a secure timestamp needs Apple's timestamp
-	    service, so an ad-hoc/self-signed local identity is never made to
-	    depend on the network to sign.
-	  - This file is passed to `codesign --entitlements` only when it exists
-	    at `macos/app.entitlements` in the project — deleting it drops
-	    entitlements from the signature entirely, it does not fall back to a
-	    default set.
+	  * The Hardened Runtime is always enabled at codesign time (codesign's
+	    `options runtime` flag), for every identity, ad-hoc included.
+	  * A secure timestamp (codesign's `timestamp` flag) is added only when
+	    the identity is Apple-issued ("Developer ID Application:",
+	    "Apple Distribution:", "Apple Development:", "Mac Developer:", or
+	    "3rd Party Mac Developer Application:") — a secure timestamp needs
+	    Apple's timestamp service, so an ad-hoc/self-signed local identity
+	    is never made to depend on the network to sign.
+	  * This file is handed to codesign (its `entitlements` flag) only when
+	    it exists at `macos/app.entitlements` in the project — deleting it
+	    drops entitlements from the signature entirely, it does not fall
+	    back to a default set.
 	Every entitlement below is commented out: a fresh scaffold builds and runs
 	unsigned/ad-hoc-signed locally, which needs none of these, and asking
 	Apple's notarization service for one the app doesn't actually use is a
 	real review flag — uncomment only what the app needs.
+	NOTE: never write two consecutive hyphens inside these comments (spell
+	codesign flags without their dashes, as above). XML forbids that sequence
+	in a comment, and while `plutil` tolerates it, the strict parser codesign
+	runs (AMFI) rejects the whole file, failing every signed build.
 	-->
 
 	<!--

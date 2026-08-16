@@ -161,7 +161,7 @@ vocabulary — and must not diverge in behavior.
 
 | Concern | macOS | Windows | Linux |
 |---------|-------|---------|-------|
-| App identity | resolved app name titles the application menu (configured name → executable stem → default) | `app_id` becomes the process AppUserModelID, claimed before the first window exists so the taskbar honors it | `app_id` becomes the Wayland `app_id` and X11 `WM_CLASS`, via winit's `with_name` |
+| App identity | resolved app name titles the application menu (configured name → bundle display name → executable stem → default) | `app_id` becomes the process AppUserModelID, claimed before the first window exists so the taskbar honors it | `app_id` becomes the Wayland `app_id` and X11 `WM_CLASS`, via winit's `with_name` |
 | Icon | not attached (macOS wants an application icon, which the bundle carries) | both `ICON_SMALL` (titlebar/alt-tab) and `ICON_BIG` (taskbar) | X11 window icon; Wayland has no window-icon protocol and sources it from the `.desktop` entry instead |
 | Menu | always builds the standard application menu (About/Hide/Hide Others/Show All/Quit) and appends the app's spec after it, so even a menu-less app gets a conventional bar with a working ⌘Q | builds only the app's own spec, with `TranslateAcceleratorW` accelerators; a role this platform cannot perform is dropped rather than faked | none — the menu is widget-drawn |
 | Theme | winit handles it | titlebar brightness follows the app's resolved theme through winit's `Window::set_theme`, re-issued on every change the core signals; a resolution arriving before the window exists is held pending | winit handles it |
