@@ -1,0 +1,7 @@
+[
+  "Cargo.toml.tmpl",
+  "README.md.tmpl",
+  ".gitignore",
+  "src/lib.rs.tmpl",
+  "src/tokens.rs.tmpl"
+]

@@ -86,6 +86,20 @@ pub enum Command {
         /// is required.
         #[arg(long = "arch", value_name = "ARCH")]
         arch: Option<ArchArg>,
+
+        /// Scaffold an out-of-tree **design-system** crate instead of an
+        /// app: a themed widget catalog crate depending on nothing but
+        /// `frust`, with no platform (`android`/`ios`) project. `dir` is
+        /// still the target directory and `--project-name` still overrides
+        /// the inferred crate name (also the design system's identity tag);
+        /// `--overwrite`/`--template-dir`/`--frust-path` still apply.
+        /// `--org`/`--description` are unused (a design-system crate has no
+        /// bundle identifier or app manifest); `--deeplink-scheme`/
+        /// `--deeplink-host`/`--arch` are rejected outright rather than
+        /// silently ignored, since a plain library crate has no deep-link
+        /// config or app-architecture variant for them to apply to.
+        #[arg(long = "design-system")]
+        design_system: bool,
     },
     /// Validate the Frust toolchain (Rust targets, NDK, Android SDK, Xcode).
     Doctor,

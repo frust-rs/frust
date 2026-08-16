@@ -294,6 +294,46 @@ impl TemplateContext {
     }
 }
 
+/// Values substituted into a **design-system** template's `.tmpl` file
+/// contents (`templates/design-system/`) — deliberately a strict subset of
+/// [`TemplateContext`]'s vars, not that struct reused with dummy values. A
+/// design-system crate is a plain library with no platform project, so it
+/// carries no `org`, no android/ios identifiers, and no deeplink config;
+/// [`crate::scaffold::generate_design_system`] is the counterpart of
+/// [`crate::scaffold::generate`] that renders against this context instead.
+#[derive(Debug, Clone)]
+pub struct DesignSystemContext {
+    /// The crate name (also its `DesignLanguage::Custom` identity tag) —
+    /// validated with [`validate_project_name`], the same grammar a
+    /// `frust create` app scaffold's `project_name` uses.
+    pub name: String,
+    pub frust_version: String,
+    pub frust_path: String,
+}
+
+impl DesignSystemContext {
+    /// The minijinja rendering context (`{{ name }}`, `{{ title_case_name }}`,
+    /// etc.) used for every design-system `.tmpl` file's content.
+    pub fn render_vars(&self) -> BTreeMap<&'static str, String> {
+        BTreeMap::from([
+            ("name", self.name.clone()),
+            ("title_case_name", title_case(&self.name)),
+            ("frust_version", self.frust_version.clone()),
+            ("frust_path", self.frust_path.clone()),
+        ])
+    }
+
+    /// Placeholder values usable as literal path segments — see
+    /// [`TemplateContext::path_vars`]'s doc for the convention. The
+    /// design-system template ships no dotted-identifier directory (no
+    /// android/ios tree), so this is empty today; kept as a real method
+    /// rather than omitted so [`crate::scaffold::generate_design_system`]'s
+    /// call shape matches [`crate::scaffold::generate`]'s.
+    pub fn path_vars(&self) -> BTreeMap<&'static str, String> {
+        BTreeMap::new()
+    }
+}
+
 /// Why a `--deeplink-scheme` value was rejected. Follows the
 /// `[ios] team`-style frust.toml precedent (`ios_build::team`) for what
 /// gets validated here versus left to the platform build tools: this is a
@@ -733,6 +773,28 @@ mod tests {
             frust_path_from_project_subdir("vendor/frust"),
             "../vendor/frust"
         );
+    }
+
+    fn test_design_system_context() -> DesignSystemContext {
+        DesignSystemContext {
+            name: "acme_design".into(),
+            frust_version: "0.1.0".into(),
+            frust_path: "/path/to/frust".into(),
+        }
+    }
+
+    #[test]
+    fn design_system_render_vars_include_name_and_derived_title_case() {
+        let vars = test_design_system_context().render_vars();
+        assert_eq!(vars.get("name").unwrap(), "acme_design");
+        assert_eq!(vars.get("title_case_name").unwrap(), "Acme Design");
+        assert_eq!(vars.get("frust_path").unwrap(), "/path/to/frust");
+        assert_eq!(vars.get("frust_version").unwrap(), "0.1.0");
+    }
+
+    #[test]
+    fn design_system_path_vars_are_empty() {
+        assert!(test_design_system_context().path_vars().is_empty());
     }
 
     mod resolve_frust_crate_path_tests {

@@ -8,10 +8,11 @@ pub mod renderer;
 #[allow(unused_imports)]
 // NameError/DeepLinkError: public API surface for future callers matching on variants
 pub use context::{
-    DeepLinkError, NameError, TemplateContext, title_case, validate_deeplink_scheme,
-    validate_project_name,
+    DeepLinkError, DesignSystemContext, NameError, TemplateContext, title_case,
+    validate_deeplink_scheme, validate_project_name,
 };
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -22,6 +23,15 @@ use include_dir::{Dir, include_dir};
 /// compile time so `frust create` works standalone without a repo
 /// checkout at runtime.
 static EMBEDDED_APP_TEMPLATE: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../templates/app");
+
+/// The `templates/design-system/` tree — the second template root
+/// [`generate_design_system`] selects, alongside [`EMBEDDED_APP_TEMPLATE`]
+/// above (the root [`generate`] renders). A design-system crate is a plain
+/// library with no platform project, so it ships as its own tree rather than
+/// an `--arch` variant of the app template (which the [`KNOWN_ARCHES`]
+/// convention below is scoped to).
+static EMBEDDED_DESIGN_SYSTEM_TEMPLATE: Dir<'_> =
+    include_dir!("$CARGO_MANIFEST_DIR/../../templates/design-system");
 
 /// Name of the manifest file (relative to the template root) that
 /// whitelists every file the template ships. Never itself copied into a
@@ -78,10 +88,12 @@ fn classify(entry: &str) -> (FileMode, &str) {
     }
 }
 
-/// Where to read the template tree from: the binary's embedded copy, or a
-/// filesystem override (`--template-dir`, undocumented, development only).
+/// Where to read the template tree from: one of the binary's embedded
+/// copies (which of the two [`Dir`]s selects the template *root* — app or
+/// design-system), or a filesystem override (`--template-dir`, undocumented,
+/// development only).
 enum Source<'a> {
-    Embedded,
+    Embedded(&'static Dir<'static>),
     Dir(&'a Path),
 }
 
@@ -93,7 +105,7 @@ impl Source<'_> {
 
     fn read(&self, relative: &str) -> Result<Vec<u8>> {
         match self {
-            Source::Embedded => EMBEDDED_APP_TEMPLATE
+            Source::Embedded(dir) => dir
                 .get_file(relative)
                 .map(|f| f.contents().to_vec())
                 .ok_or_else(|| {
@@ -150,7 +162,7 @@ pub fn generate(
 
     let source = match template_dir_override {
         Some(dir) => Source::Dir(dir),
-        None => Source::Embedded,
+        None => Source::Embedded(&EMBEDDED_APP_TEMPLATE),
     };
     let manifest = source.manifest()?;
     let render_vars = ctx.render_vars();
@@ -185,36 +197,107 @@ pub fn generate(
             logical.to_string()
         };
 
-        // A source-tree directory (e.g. `android.tmpl/`) may itself carry
-        // a `.tmpl` suffix as a purely organizational marker; strip it
-        // before path-placeholder expansion so it doesn't leak into the
-        // generated project (`android.tmpl/` → `android/`).
-        let target_logical = renderer::strip_tmpl_dir_suffixes(Path::new(&target_logical));
-        let out_relative = renderer::expand_path(&target_logical, &path_vars);
-        let out_path = dest.join(&out_relative);
-        if let Some(parent) = out_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("creating directory `{}`", parent.display()))?;
-        }
-        match mode {
-            FileMode::Render => {
-                let raw = source.read_to_string(entry)?;
-                let rendered = renderer::render(&raw, &render_vars)
-                    .with_context(|| format!("rendering `{entry}`"))?;
-                fs::write(&out_path, rendered)
-                    .with_context(|| format!("writing `{}`", out_path.display()))?;
-            }
-            FileMode::CopyVerbatim | FileMode::CopyAsIs => {
-                let bytes = source.read(entry)?;
-                fs::write(&out_path, bytes)
-                    .with_context(|| format!("writing `{}`", out_path.display()))?;
-            }
-        }
-        preserve_executable_bit(&out_path)
-            .with_context(|| format!("setting permissions on `{}`", out_path.display()))?;
+        let out_relative = write_entry(
+            &source,
+            entry,
+            &mode,
+            &target_logical,
+            dest,
+            &render_vars,
+            &path_vars,
+        )?;
         written.push(out_relative);
     }
     Ok(written)
+}
+
+/// Generates a new out-of-tree **design-system** crate at `dest` from the
+/// embedded `templates/design-system` tree (or `template_dir_override`, for
+/// development). Returns the relative paths written, in manifest order.
+/// Refuses a non-empty `dest` unless `overwrite` is set — the same contract
+/// [`generate`] carries for an app scaffold.
+///
+/// This is the counterpart [`generate`]'s own doc comment references: the
+/// design-system template root selected via [`DesignSystemContext`] instead
+/// of [`TemplateContext`]. A design-system crate is a plain library with no
+/// platform project and no `--arch` variant of its own, so this entry point
+/// carries neither an `arch` parameter nor the iOS-identifier fail-fast
+/// [`generate`] runs before writing.
+pub fn generate_design_system(
+    dest: &Path,
+    ctx: &DesignSystemContext,
+    template_dir_override: Option<&Path>,
+    overwrite: bool,
+) -> Result<Vec<PathBuf>> {
+    check_destination(dest, overwrite)?;
+
+    let source = match template_dir_override {
+        Some(dir) => Source::Dir(dir),
+        None => Source::Embedded(&EMBEDDED_DESIGN_SYSTEM_TEMPLATE),
+    };
+    let manifest = source.manifest()?;
+    let render_vars = ctx.render_vars();
+    let path_vars = ctx.path_vars();
+
+    let mut written = Vec::with_capacity(manifest.len());
+    for entry in &manifest {
+        let (mode, logical) = classify(entry);
+        let out_relative = write_entry(
+            &source,
+            entry,
+            &mode,
+            logical,
+            dest,
+            &render_vars,
+            &path_vars,
+        )?;
+        written.push(out_relative);
+    }
+    Ok(written)
+}
+
+/// Renders/copies one manifest `entry` to `dest`, given its (already
+/// arch-resolved, for the app root) logical output path. Shared by
+/// [`generate`] and [`generate_design_system`] — the design-system entry
+/// point has no arch selector, so it calls this directly with its own
+/// manifest entry's logical path.
+fn write_entry(
+    source: &Source,
+    entry: &str,
+    mode: &FileMode,
+    target_logical: &str,
+    dest: &Path,
+    render_vars: &BTreeMap<&str, String>,
+    path_vars: &BTreeMap<&str, String>,
+) -> Result<PathBuf> {
+    // A source-tree directory (e.g. `android.tmpl/`) may itself carry a
+    // `.tmpl` suffix as a purely organizational marker; strip it before
+    // path-placeholder expansion so it doesn't leak into the generated
+    // project (`android.tmpl/` → `android/`).
+    let target_logical = renderer::strip_tmpl_dir_suffixes(Path::new(target_logical));
+    let out_relative = renderer::expand_path(&target_logical, path_vars);
+    let out_path = dest.join(&out_relative);
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating directory `{}`", parent.display()))?;
+    }
+    match mode {
+        FileMode::Render => {
+            let raw = source.read_to_string(entry)?;
+            let rendered = renderer::render(&raw, render_vars)
+                .with_context(|| format!("rendering `{entry}`"))?;
+            fs::write(&out_path, rendered)
+                .with_context(|| format!("writing `{}`", out_path.display()))?;
+        }
+        FileMode::CopyVerbatim | FileMode::CopyAsIs => {
+            let bytes = source.read(entry)?;
+            fs::write(&out_path, bytes)
+                .with_context(|| format!("writing `{}`", out_path.display()))?;
+        }
+    }
+    preserve_executable_bit(&out_path)
+        .with_context(|| format!("setting permissions on `{}`", out_path.display()))?;
+    Ok(out_relative)
 }
 
 /// Filenames the scaffold vendors verbatim that must retain their
@@ -297,6 +380,14 @@ mod tests {
             frust_path: "/path/to/frust".into(),
             deeplink_scheme: None,
             deeplink_host: None,
+        }
+    }
+
+    fn test_design_system_context() -> DesignSystemContext {
+        DesignSystemContext {
+            name: "acme_design".into(),
+            frust_version: "0.1.0".into(),
+            frust_path: "/path/to/frust".into(),
         }
     }
 
@@ -1733,5 +1824,136 @@ mod tests {
             "plist-family templates with `--` inside an XML comment (breaks \
              codesign's AMFI parser): {offenders:?}"
         );
+    }
+
+    /// The design-system template root: file set, placeholder substitution,
+    /// and the catalogs-off contract — the counterpart of
+    /// `generate_produces_manifest_listed_files_with_substitutions` above.
+    #[test]
+    fn generate_design_system_produces_manifest_listed_files_with_substitutions() {
+        let dest = unique_temp_dir("design-system-manifest-set");
+        let ctx = test_design_system_context();
+
+        let written = generate_design_system(&dest, &ctx, None, false).unwrap();
+        assert_eq!(
+            written,
+            vec![
+                PathBuf::from("Cargo.toml"),
+                PathBuf::from("README.md"),
+                PathBuf::from(".gitignore"),
+                PathBuf::from("src/lib.rs"),
+                PathBuf::from("src/tokens.rs"),
+            ]
+        );
+
+        let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+        assert!(
+            cargo_toml.contains("name = \"acme_design\""),
+            "{cargo_toml}"
+        );
+        assert!(
+            cargo_toml.contains("frust = { path = \"/path/to/frust\""),
+            "{cargo_toml}"
+        );
+        // Catalogs-off contract: no built-in catalog feature, ever.
+        assert!(
+            cargo_toml.contains("default-features = false"),
+            "{cargo_toml}"
+        );
+        assert!(!cargo_toml.contains("\"glyph\""), "{cargo_toml}");
+        assert!(!cargo_toml.contains("\"material\""), "{cargo_toml}");
+        assert!(!cargo_toml.contains("\"cupertino\""), "{cargo_toml}");
+        assert!(!cargo_toml.contains("{{"), "{cargo_toml}");
+
+        let lib_rs = fs::read_to_string(dest.join("src/lib.rs")).unwrap();
+        assert!(
+            lib_rs.contains("frust::app!(App, setup = { acme_design::install(); });"),
+            "{lib_rs}"
+        );
+        assert!(lib_rs.contains("pub fn install()"), "{lib_rs}");
+        assert!(lib_rs.contains("pub struct BadgeView"), "{lib_rs}");
+        assert!(lib_rs.contains("frust::authoring::"), "{lib_rs}");
+        assert!(!lib_rs.contains("{{"), "{lib_rs}");
+
+        let tokens_rs = fs::read_to_string(dest.join("src/tokens.rs")).unwrap();
+        assert!(
+            tokens_rs.contains("pub const DESIGN_LANGUAGE: &str = \"acme_design\";"),
+            "{tokens_rs}"
+        );
+        assert!(
+            tokens_rs.contains("DesignLanguage::Custom(DESIGN_LANGUAGE)"),
+            "{tokens_rs}"
+        );
+        assert!(!tokens_rs.contains("{{"), "{tokens_rs}");
+
+        let readme = fs::read_to_string(dest.join("README.md")).unwrap();
+        assert!(readme.contains("# Acme Design"), "{readme}");
+        assert!(readme.contains("acme_design::install();"), "{readme}");
+        assert!(readme.contains("install-timing contract"), "{readme}");
+        assert!(
+            readme.contains("must never enable `glyph`/`material`/`cupertino`"),
+            "{readme}"
+        );
+        assert!(!readme.contains("{{"), "{readme}");
+
+        let gitignore = fs::read_to_string(dest.join(".gitignore")).unwrap();
+        assert!(gitignore.contains("/target"), "{gitignore}");
+
+        // No app-only artifacts (no platform project, no manifest file).
+        assert!(!dest.join("android").exists());
+        assert!(!dest.join("ios").exists());
+        assert!(!dest.join("frust.toml").exists());
+        assert!(!dest.join("template_manifest.json").exists());
+        assert!(!dest.join("Cargo.toml.tmpl").exists());
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn generate_design_system_refuses_non_empty_dest_without_overwrite() {
+        let dest = unique_temp_dir("design-system-refuse-non-empty");
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join("existing.txt"), b"x").unwrap();
+
+        let ctx = test_design_system_context();
+        let err = generate_design_system(&dest, &ctx, None, false).unwrap_err();
+        assert!(err.to_string().contains("existing.txt"), "{err}");
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn generate_design_system_allows_non_empty_dest_with_overwrite() {
+        let dest = unique_temp_dir("design-system-allow-overwrite");
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join("existing.txt"), b"x").unwrap();
+
+        let ctx = test_design_system_context();
+        assert!(generate_design_system(&dest, &ctx, None, true).is_ok());
+        assert!(dest.join("existing.txt").exists());
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// Two crate names render two independently-tagged themes: the identity
+    /// tag isn't accidentally hardcoded to the fixture value used elsewhere
+    /// in this file.
+    #[test]
+    fn generate_design_system_uses_the_given_crate_name_as_the_design_language_tag() {
+        let dest = unique_temp_dir("design-system-other-name");
+        let mut ctx = test_design_system_context();
+        ctx.name = "widgetry".into();
+
+        generate_design_system(&dest, &ctx, None, false).unwrap();
+
+        let tokens_rs = fs::read_to_string(dest.join("src/tokens.rs")).unwrap();
+        assert!(
+            tokens_rs.contains("pub const DESIGN_LANGUAGE: &str = \"widgetry\";"),
+            "{tokens_rs}"
+        );
+        let cargo_toml = fs::read_to_string(dest.join("Cargo.toml")).unwrap();
+        assert!(cargo_toml.contains("name = \"widgetry\""), "{cargo_toml}");
+
+        let _ = fs::remove_dir_all(&dest);
     }
 }
