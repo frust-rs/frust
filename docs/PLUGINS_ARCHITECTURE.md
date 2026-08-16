@@ -99,7 +99,7 @@ another `frust-*` framework crate; and the facade never depends on or re-exports
 dependency always runs from an app's own manifest into the plugin, never through the facade.
 `database` is the first plugin to need neither `frust-plugin` nor an FFI crate at all — a pure-Rust
 plugin whose "platform" is the filesystem — which the charter accommodates rather than exempts: it
-still depends on nothing but `frust-paths` and its engines, never another framework crate. Each
+still depends on nothing but `frust-paths`, `log`, and its engines, never another framework crate. Each
 plugin's backends are cfg-gated modules (`apple`/`android`/`file`/`desktop`/`unsupported`) behind
 one platform-independent public API, with FFI dependencies target-gated rather than unconditional.
 
