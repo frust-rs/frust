@@ -36,6 +36,7 @@ Consumers of the framework, not units — each keeps its own README, not an ARCH
 | `examples/shadertoy` | Fragment-shader effects showcase |
 | `examples/glyph-catalog` | Glyph design-system showcase (theme only) |
 | `examples/playground` | Plugin functionality, native widgets, platform views, responsiveness, and general testing showcase; a standalone workspace |
+| `examples/design-system-sample` | Out-of-tree design-system proof; built-in catalogs compiled off; standalone workspace |
 | `examples/no-catalogs` | Compile guard proving `frust --no-default-features` builds — part of the verify gate, not a showcase |
 
 `benchmarks/` is separate from the examples above: flutter-vs-frust comparative benchmarking

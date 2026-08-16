@@ -232,6 +232,18 @@ escape valve, not a leak — its only accessor, `into_surface`, is crate-private
 wrapped `wgpu::Surface` is never nameable outside `frust-render`; follow the same pattern
 for any future value crossing this boundary.
 
+### Enabling a built-in catalog feature from a design-system crate
+
+**BAD:** a `templates/design-system/`-derived crate's `Cargo.toml` declaring
+`frust = { features = ["glyph"] }` (or `material`/`cupertino`) to reach one convenience symbol.
+
+**GOOD:** depend on `frust::authoring` only, `default-features = false` on the `frust` edge, and
+file a gap against `authoring` instead. Cargo feature unification is additive across a build: one
+enabled catalog feature anywhere in the graph turns it on for every app depending on that crate,
+with no way for the app to switch it back off — the exact proof `examples/design-system-sample`
+exists to carry (its `cargo tree -e features -i frust -p sample-app` gate, see
+[DEVELOPMENT.md](DEVELOPMENT.md), fails loudly the moment this creeps in).
+
 ### Printing directly from a `frust-drive` build/run core
 
 **BAD:** a `println!`/`print!` inside `android_build`/`ios_build`/ `android_run`/`ios_run` —
@@ -432,7 +444,12 @@ Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantic
 ## Theming & Animation Conventions
 
 Token resolution and precedence, animation pacing, and design-system installation are the
-WIDGETS unit's rules — [WIDGETS_CODE_STANDARDS.md](WIDGETS_CODE_STANDARDS.md).
+WIDGETS unit's rules — [WIDGETS_CODE_STANDARDS.md](WIDGETS_CODE_STANDARDS.md). The same
+**explicit builder value > theme > fallback constant** precedence binds a `ThemeExtensions`
+payload identically to a plain token: a consumer (in-tree or an external catalog) checks its own
+explicit override first, then `Theme::extension::<T>()`, and only then a hardcoded fallback — see
+[NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md)'s typeface ladder for the
+shipped instance.
 
 ## Testing Patterns
 

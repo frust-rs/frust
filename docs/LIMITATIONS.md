@@ -2210,3 +2210,50 @@ none of the three has blocked a real plugin yet.
 match arm); `crates/frust-drive/src/plugin/mod.rs`'s `Contribution::MacosEntitlement` doc comment;
 `crates/frust-drive/src/plugin/apply.rs`'s `desktop_contributions` doc comment; desktop-shells
 Phase C task 03 completion summary, Doc Updates Needed.
+
+---
+
+### `native-typeface-first-publish-latch` — a mid-process design-system face swap doesn't reach native controls until relaunch
+
+**Observed**: `plugins/native-widgets`' typeface resolution (theme ladder L3) is extension-first,
+per slot, and re-publishes host-side (`api::theme`'s `PublishGuard`) whenever the active
+(button, body) face pair changes — including a live design-system swap. The *platform* halves do
+not follow: Android's `set_glyph_bytes` is a `OnceLock::set`, and both Android and iOS additionally
+cache each resolved face object process-wide once registration succeeds, so only the *first*
+(button, body) pair a process ever publishes actually reaches a native `Button`/`Label`/`Switch`.
+A later design-system swap re-publishes the new bytes from the host side with no error, but the
+platform keeps rendering the first system's faces until the process relaunches.
+
+**Why accepted**: widening the platform halves to re-register on a swap is a platform-side change
+with its own device gate, not a host-side one — deferred rather than blocking this feature.
+**Also owed**: custom-face rendering (either system's) has never been exercised on real Android/iOS
+hardware — this entry covers both the swap gap and that outstanding device gate.
+
+**Evidence**: `plugins/native-widgets/src/api/theme.rs`'s module doc ("Publishing: last-pair-wins,
+not once-per-process"); `plugins/native-widgets/src/android/fonts.rs` and
+`plugins/native-widgets/src/apple/fonts.rs` module docs (`OnceLock`/process-wide and thread-local
+cache notes).
+
+---
+
+### `semantics-untestable-out-of-tree` — an out-of-tree design system can implement `Widget::semantics` but cannot test it
+
+**Observed**: `examples/design-system-sample`'s widgets each carry a `semantics` impl, and the
+vocabulary to write one is fully public (`SemanticsCtx::push_node`/`push_container`, `Role`,
+`Node`, `Action`, `ChildPod::semantics_child`) — but nothing can *drive* a semantics pass from
+outside the framework: `SemanticsCtx::new` is `pub(crate)` in `frust-core`, and the only public
+producer, `frust_core::RenderRoot::semantics()`, is not re-exported by the `frust` facade. The
+framework's own catalogs are unaffected — they reach `RenderRoot` through a `frust-core`
+dev-dependency, a route `docs/CODE_STANDARDS.md` forbids outside the framework itself.
+
+**Applies to**: any external design-system crate wanting to unit-test its `Widget::semantics`
+output.
+
+**Why accepted**: closing it means either re-exporting a semantics-pass entry point from the
+facade or loosening `SemanticsCtx::new`'s visibility — a deliberate facade-API decision deferred
+to the feature owner, not a gap this task's scope covers.
+
+**Evidence**: `examples/design-system-sample/sample-design/src/testing.rs`'s module doc ("Known
+gap: `Widget::semantics` cannot be driven from out of tree") and the workspace README's "What it
+found" section; `crates/frust-widgets/tests/semantics_tree.rs` as the in-tree contrast that does
+reach `RenderRoot::semantics()`.
