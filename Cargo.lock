@@ -2054,6 +2054,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-cupertino"
+version = "0.1.0"
+dependencies = [
+ "frust",
+ "frust-widgets",
+]
+
+[[package]]
 name = "frust-dap"
 version = "0.1.0"
 dependencies = [
@@ -2112,6 +2120,14 @@ dependencies = [
  "thiserror 2.0.20",
  "toml 1.1.4+spec-1.1.0",
  "toml_edit 0.25.13+spec-1.1.0",
+]
+
+[[package]]
+name = "frust-glyph"
+version = "0.1.0"
+dependencies = [
+ "frust",
+ "frust-widgets",
 ]
 
 [[package]]
@@ -2177,6 +2193,14 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "frust-material"
+version = "0.1.0"
+dependencies = [
+ "frust",
+ "frust-widgets",
 ]
 
 [[package]]

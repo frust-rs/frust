@@ -8,7 +8,8 @@ resolver = "2"
 # of plugins/i18n, the `locales!` compile-time Fluent-bundle loader) — listed
 # explicitly like every other `plugins/*` member above; no glob in this list
 # reaches two directory levels deep.
-members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/iap", "plugins/database", "plugins/i18n", "plugins/i18n/macros"]
+members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/iap", "plugins/database", "plugins/i18n", "plugins/i18n/macros", "plugins/glyph", "plugins/material", "plugins/cupertino"]
+# design-system plugin tier (three catalog crates, future homes of Material/Cupertino/Glyph design-system implementations)
 # examples/no-catalogs is the catalog-free build's compile guard: unlike
 # every example excluded below, it is INCLUDED on purpose — a package-scoped
 # `cargo build -p no-catalogs`/`cargo check -p no-catalogs` compiles `frust

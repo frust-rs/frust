@@ -1,0 +1,15 @@
+# `frust-material`: the Material design-system catalog plugin (production deps:
+# frust facade only + kurbo/peniko when code lands; frust-widgets via
+# dev-dependency is the sanctioned test-fixture route and ships nothing).
+[package]
+name = "frust-material"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+frust = { path = "../../crates/frust", default-features = false }
+
+[dev-dependencies]
+frust-widgets = { path = "../../crates/frust-widgets", features = ["test-support"] }
