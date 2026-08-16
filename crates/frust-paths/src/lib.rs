@@ -231,11 +231,9 @@ pub fn cache_dir() -> Option<PathBuf> {
 pub fn legacy_data_dir() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        legacy_xdg_or_home(
+        legacy_data_dir_from(
             std::env::var("XDG_DATA_HOME").ok().as_deref(),
-            "XDG_DATA_HOME",
             std::env::var("HOME").ok().as_deref(),
-            &[".local", "share"],
         )
     }
     #[cfg(not(target_os = "macos"))]
@@ -255,11 +253,9 @@ pub fn legacy_data_dir() -> Option<PathBuf> {
 pub fn legacy_cache_dir() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        legacy_xdg_or_home(
+        legacy_cache_dir_from(
             std::env::var("XDG_CACHE_HOME").ok().as_deref(),
-            "XDG_CACHE_HOME",
             std::env::var("HOME").ok().as_deref(),
-            &[".cache"],
         )
     }
     #[cfg(not(target_os = "macos"))]
@@ -412,6 +408,23 @@ fn legacy_xdg_or_home(
         p.extend(suffix);
         p
     })
+}
+
+/// Env-parameterized body of [`legacy_data_dir`]: owns the `XDG_DATA_HOME`
+/// var name (used only in [`legacy_xdg_or_home`]'s ignored-relative-value
+/// debug log) and the `.local/share` legacy suffix — the literals
+/// [`legacy_data_dir`] itself no longer inlines. [`legacy_data_dir`] is thin
+/// `std::env::var` + `#[cfg]` wiring over this.
+#[cfg(any(target_os = "macos", test))]
+fn legacy_data_dir_from(xdg: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
+    legacy_xdg_or_home(xdg, "XDG_DATA_HOME", home, &[".local", "share"])
+}
+
+/// Env-parameterized body of [`legacy_cache_dir`] — [`legacy_data_dir_from`]'s
+/// counterpart, owning `XDG_CACHE_HOME` and the `.cache` suffix.
+#[cfg(any(target_os = "macos", test))]
+fn legacy_cache_dir_from(xdg: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
+    legacy_xdg_or_home(xdg, "XDG_CACHE_HOME", home, &[".cache"])
 }
 
 /// Env+probe-parameterized body of [`data_dir`]/[`cache_dir`]'s macOS arm.
@@ -725,8 +738,11 @@ mod tests {
     /// return on macOS is computed by `legacy_xdg_or_home` — the same
     /// helper `macos_dir_from`'s built-in probe uses — so driving that
     /// helper with injected env values covers the macOS shape from any
-    /// host. (The public functions themselves only add the
-    /// `std::env::var` reads and the `#[cfg]` split.)
+    /// host. (`legacy_data_dir_from`/`legacy_cache_dir_from` now own the
+    /// `XDG_*_HOME` var-name and suffix literals over that shared helper;
+    /// the public functions themselves only add the `std::env::var` reads
+    /// and the `#[cfg]` split — see the full-mapping tests for those two
+    /// functions below.)
     #[test]
     fn legacy_data_base_shape_matches_pre_macos_arm_resolution() {
         assert_eq!(
@@ -783,6 +799,61 @@ mod tests {
         assert_eq!(
             legacy_xdg_or_home(None, "XDG_CACHE_HOME", None, &[".cache"]),
             None
+        );
+    }
+
+    /// Full env-to-path mapping for [`legacy_data_dir_from`], runnable on
+    /// any host: a transposed suffix (e.g. accidentally reusing the
+    /// `.cache` suffix here) fails this test's `.local/share` assertions.
+    #[test]
+    fn legacy_data_dir_from_full_mapping() {
+        assert_eq!(
+            legacy_data_dir_from(None, Some("/Users/alice")),
+            Some(PathBuf::from("/Users/alice/.local/share")),
+            "no XDG_DATA_HOME: falls back to $HOME/.local/share"
+        );
+        assert_eq!(
+            legacy_data_dir_from(Some("/custom/data"), Some("/Users/alice")),
+            Some(PathBuf::from("/custom/data")),
+            "an absolute XDG_DATA_HOME wins outright"
+        );
+        assert_eq!(
+            legacy_data_dir_from(Some("relative/data"), Some("/Users/alice")),
+            Some(PathBuf::from("/Users/alice/.local/share")),
+            "a relative XDG_DATA_HOME is ignored per the XDG spec"
+        );
+        assert_eq!(
+            legacy_data_dir_from(None, None),
+            None,
+            "no HOME: never guess"
+        );
+    }
+
+    /// Full env-to-path mapping for [`legacy_cache_dir_from`] —
+    /// [`legacy_data_dir_from_full_mapping`]'s counterpart with a different
+    /// suffix (`.cache`), so a suffix or var-name literal transposed between
+    /// the two `_from` functions fails one of these two tests.
+    #[test]
+    fn legacy_cache_dir_from_full_mapping() {
+        assert_eq!(
+            legacy_cache_dir_from(None, Some("/Users/alice")),
+            Some(PathBuf::from("/Users/alice/.cache")),
+            "no XDG_CACHE_HOME: falls back to $HOME/.cache"
+        );
+        assert_eq!(
+            legacy_cache_dir_from(Some("/custom/cache"), Some("/Users/alice")),
+            Some(PathBuf::from("/custom/cache")),
+            "an absolute XDG_CACHE_HOME wins outright"
+        );
+        assert_eq!(
+            legacy_cache_dir_from(Some("relative/cache"), Some("/Users/alice")),
+            Some(PathBuf::from("/Users/alice/.cache")),
+            "a relative XDG_CACHE_HOME is ignored per the XDG spec"
+        );
+        assert_eq!(
+            legacy_cache_dir_from(None, None),
+            None,
+            "no HOME: never guess"
         );
     }
 
@@ -850,13 +921,20 @@ mod tests {
 
     /// A unique scratch path under the OS temp dir — tests must never touch
     /// a real data/cache directory.
+    ///
+    /// The unique leaf directory (`frust-paths-test-<pid>-<tag>-<n>`) is
+    /// created eagerly with `fs::create_dir` (fails loudly if the name is
+    /// already occupied, e.g. by a planted symlink) rather than left for a
+    /// later `create_dir_all` to walk through silently — `atomic_write`'s
+    /// own `create_dir_all` then only ever has to create the `nested/`
+    /// child underneath an already-verified-real directory.
     fn scratch_path(tag: &str) -> PathBuf {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        std::env::temp_dir()
-            .join(format!("frust-paths-test-{}-{tag}-{n}", std::process::id()))
-            .join("nested")
-            .join("file.bin")
+        let root =
+            std::env::temp_dir().join(format!("frust-paths-test-{}-{tag}-{n}", std::process::id()));
+        fs::create_dir(&root).expect("scratch root must not already exist (planted path?)");
+        root.join("nested").join("file.bin")
     }
 
     #[test]

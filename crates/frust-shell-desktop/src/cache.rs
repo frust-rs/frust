@@ -66,13 +66,22 @@ pub fn load_cache() -> Option<Vec<u8>> {
 ///
 /// `legacy_base` is `None` on every non-macOS target (see
 /// `frust_paths::legacy_cache_dir`), making this an identity function
-/// there.
+/// there — the `if let Some(legacy_base) = legacy_base` operand order below
+/// is load-bearing for that: it short-circuits before the `try_exists`
+/// stat ever runs, so a non-macOS launch is genuinely syscall-free here,
+/// not just discarding the stat's result.
+///
+/// Uses `try_exists` (not `exists`) so a momentarily unstat-able `new_path`
+/// (EACCES/ELOOP/dangling symlink) is treated as PRESENT — never silently
+/// diverted to a stale legacy cache; the subsequent read surfaces the real
+/// error on the canonical path. `Err(_)` on the legacy probe means treat it
+/// as absent — never divert onto a broken legacy path either.
 fn load_path(new_path: &Path, legacy_base: Option<&Path>) -> PathBuf {
-    if !new_path.exists()
-        && let Some(legacy_base) = legacy_base
+    if let Some(legacy_base) = legacy_base
+        && !new_path.try_exists().unwrap_or(true)
     {
         let legacy_path = cache_file_path(legacy_base);
-        if legacy_path.exists() {
+        if legacy_path.try_exists().unwrap_or(false) {
             log::debug!(
                 "frust-shell-desktop: cache not found at {}, reading legacy {}",
                 new_path.display(),
@@ -181,11 +190,16 @@ mod tests {
     /// A unique scratch path under the OS temp dir — tests must NEVER
     /// write to the user's real cache directory (`~/.cache`), so every
     /// I/O test goes through the `_from`/`_to` path-parameterized seams.
+    ///
+    /// The unique leaf directory (`frust-cache-test-<pid>-<tag>`) is
+    /// created eagerly with `fs::create_dir` (fails loudly if the name is
+    /// already occupied, e.g. by a planted symlink) rather than left for a
+    /// later `create_dir_all` to walk through silently.
     fn scratch_path(tag: &str) -> PathBuf {
-        std::env::temp_dir()
-            .join(format!("frust-cache-test-{}-{}", std::process::id(), tag))
-            .join("frust")
-            .join("pipeline_cache_desktop.bin")
+        let root =
+            std::env::temp_dir().join(format!("frust-cache-test-{}-{}", std::process::id(), tag));
+        fs::create_dir(&root).expect("scratch root must not already exist (planted path?)");
+        root.join("frust").join("pipeline_cache_desktop.bin")
     }
 
     /// The pure differs-check behind save_cache's skip-when-unchanged path
@@ -244,12 +258,18 @@ mod tests {
     /// A unique scratch *base* directory (the `cache_dir()` analog) under
     /// the OS temp dir — the read-through tests probe the real filesystem,
     /// so they must never touch the user's real `~/.cache`.
+    ///
+    /// Created eagerly with `fs::create_dir` (fails loudly if the name is
+    /// already occupied, e.g. by a planted symlink) rather than left for a
+    /// later `create_dir_all` to walk through silently.
     fn scratch_base(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
+        let dir = std::env::temp_dir().join(format!(
             "frust-cache-test-{}-base-{}",
             std::process::id(),
             tag
-        ))
+        ));
+        fs::create_dir(&dir).expect("scratch base must not already exist (planted path?)");
+        dir
     }
 
     /// Write a cache blob at this module's real filename shape under
@@ -303,6 +323,53 @@ mod tests {
         );
         assert!(legacy_path.exists(), "legacy file must be left untouched");
 
+        let _ = fs::remove_dir_all(&new_base);
+        let _ = fs::remove_dir_all(&legacy_base);
+    }
+
+    /// `Path::try_exists` (not `Path::exists`) semantics: a new-location
+    /// probe that errors (here, `EACCES` from an unreadable ancestor
+    /// directory) must never be treated as "absent" and diverted to a
+    /// legacy cache — `Err(_)` on the new-path probe means treat it as
+    /// PRESENT, so the unresolvable path is returned unchanged and a later
+    /// read surfaces the real error. This fails under the old
+    /// `Path::exists()` behaviour, which swallows the permission error into
+    /// `false` and would wrongly divert to `legacy_path` below.
+    #[test]
+    #[cfg(unix)]
+    fn test_load_path_does_not_divert_when_new_path_is_unstatable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let new_base = scratch_base("unstatable-new");
+        let locked_dir = new_base.join("locked");
+        fs::create_dir(&locked_dir).unwrap();
+        fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let legacy_base = scratch_base("unstatable-legacy");
+        let legacy_path = seed_cache_file(&legacy_base, b"legacy-blob");
+
+        let new_path = cache_file_path(&locked_dir);
+        if new_path.try_exists().is_ok() {
+            // Running as root (or under some other permission-bypassing
+            // capability): a 0o000 directory doesn't block traversal, so
+            // this fixture can't produce the EACCES this test targets.
+            // Restore permissions so cleanup below can actually remove the
+            // directory, then skip rather than assert something the
+            // fixture didn't exercise.
+            fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o700)).unwrap();
+            let _ = fs::remove_dir_all(&new_base);
+            let _ = fs::remove_dir_all(&legacy_base);
+            return;
+        }
+
+        let resolved = load_path(&new_path, Some(&legacy_base));
+        assert_eq!(
+            resolved, new_path,
+            "an unstatable new path must not divert to the legacy cache"
+        );
+        assert_ne!(resolved, legacy_path);
+
+        fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o700)).unwrap();
         let _ = fs::remove_dir_all(&new_base);
         let _ = fs::remove_dir_all(&legacy_base);
     }

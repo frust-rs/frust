@@ -807,11 +807,20 @@ fn resolve_db_path_from(
     name: &str,
 ) -> Result<PathBuf, DatabaseError> {
     let path = db_file_path(base, name)?;
-    if !path.exists()
-        && let Some(legacy_base) = legacy_base
+    // `if let Some(legacy_base) = legacy_base` first: on every non-macOS
+    // target `legacy_base` is `None`, so the `&&`'s right-hand side (the
+    // `try_exists` stat) never runs — genuinely syscall-free there, not
+    // just discarded. `try_exists` (not `exists`) so a momentarily
+    // unstat-able `path` (EACCES/ELOOP/dangling symlink) is treated as
+    // PRESENT — never silently diverted to a stale legacy file; the
+    // subsequent open surfaces the real error on the canonical path.
+    if let Some(legacy_base) = legacy_base
+        && !path.try_exists().unwrap_or(true)
     {
         let legacy_path = db_file_path(legacy_base, name)?;
-        if legacy_path.exists() {
+        // `Err(_)` on the legacy probe means treat it as absent — never
+        // divert onto a broken legacy path either.
+        if legacy_path.try_exists().unwrap_or(false) {
             log::debug!(
                 "frust-database: {} not found, opening legacy {}",
                 path.display(),
@@ -921,15 +930,21 @@ mod tests {
     // --- Legacy-base read-through (macOS shape, real temp dirs) ----------
 
     /// A unique scratch directory under the OS temp dir — the read-through
-    /// tests below probe the real filesystem (`Path::exists`), so they must
-    /// never touch a real data directory.
+    /// tests below probe the real filesystem (`Path::try_exists`), so they
+    /// must never touch a real data directory.
+    ///
+    /// Created eagerly with `fs::create_dir` (fails loudly if the name is
+    /// already occupied, e.g. by a planted symlink) rather than left for a
+    /// later `create_dir_all` to walk through silently.
     fn scratch_dir(tag: &str) -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
+        let dir = std::env::temp_dir().join(format!(
             "frust-database-test-{}-{tag}-{n}",
             std::process::id()
-        ))
+        ));
+        fs::create_dir(&dir).expect("scratch dir must not already exist (planted path?)");
+        dir
     }
 
     /// Create `<base>/databases/<name>.db` with placeholder bytes and
@@ -983,6 +998,53 @@ mod tests {
         );
         assert!(legacy_path.exists(), "legacy file must be left untouched");
 
+        let _ = fs::remove_dir_all(&new_base);
+        let _ = fs::remove_dir_all(&legacy_base);
+    }
+
+    /// `Path::try_exists` (not `Path::exists`) semantics: a new-location
+    /// probe that errors (here, `EACCES` from an unreadable ancestor
+    /// directory) must never be treated as "absent" and diverted to a
+    /// legacy file — `Err(_)` on the new-path probe means treat it as
+    /// PRESENT, so the unresolvable path is returned unchanged and the
+    /// subsequent `open` surfaces the real error. This fails under the old
+    /// `Path::exists()` behaviour, which swallows the permission error into
+    /// `false` and would wrongly divert to `legacy_path` below.
+    #[test]
+    #[cfg(unix)]
+    fn resolve_db_path_from_does_not_divert_when_new_path_is_unstatable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let new_base = scratch_dir("unstatable-new");
+        let locked_dir = new_base.join("locked");
+        fs::create_dir(&locked_dir).unwrap();
+        fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let legacy_base = scratch_dir("unstatable-legacy");
+        let legacy_path = seed_db_file(&legacy_base, "app");
+
+        let path = db_file_path(&locked_dir, "app").unwrap();
+        if path.try_exists().is_ok() {
+            // Running as root (or under some other permission-bypassing
+            // capability): a 0o000 directory doesn't block traversal, so
+            // this fixture can't produce the EACCES this test targets.
+            // Restore permissions so cleanup below can actually remove the
+            // directory, then skip rather than assert something the
+            // fixture didn't exercise.
+            fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o700)).unwrap();
+            let _ = fs::remove_dir_all(&new_base);
+            let _ = fs::remove_dir_all(&legacy_base);
+            return;
+        }
+
+        let resolved = resolve_db_path_from(&locked_dir, Some(&legacy_base), "app").unwrap();
+        assert_eq!(
+            resolved, path,
+            "an unstatable new path must not divert to the legacy file"
+        );
+        assert_ne!(resolved, legacy_path);
+
+        fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o700)).unwrap();
         let _ = fs::remove_dir_all(&new_base);
         let _ = fs::remove_dir_all(&legacy_base);
     }
