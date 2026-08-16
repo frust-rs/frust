@@ -142,6 +142,10 @@ impl DesignChoice {
             DesignLanguage::Glyph => DesignChoice::Glyph,
             DesignLanguage::Material3 => DesignChoice::Material3,
             DesignLanguage::Cupertino => DesignChoice::Cupertino,
+            _ => {
+                // external design systems (DesignLanguage::Custom) fall back to Material chrome here
+                DesignChoice::Material3
+            }
         }
     }
 }
@@ -241,6 +245,10 @@ pub fn compose(
             DesignLanguage::Glyph => Theme::glyph_baseline(),
             DesignLanguage::Material3 => Theme::m3_baseline(),
             DesignLanguage::Cupertino => Theme::cupertino_baseline(),
+            _ => {
+                // external design systems (DesignLanguage::Custom) fall back to Material chrome here
+                Theme::m3_baseline()
+            }
         },
     };
 

@@ -56,6 +56,10 @@ fn every_route_builds_under_both_design_languages_and_brightness_states() {
             DesignLanguage::Material3 => Theme::m3_baseline(),
             DesignLanguage::Cupertino => Theme::cupertino_baseline(),
             DesignLanguage::Glyph => Theme::glyph_baseline(),
+            _ => {
+                // external design systems (DesignLanguage::Custom) fall back to Material chrome here
+                Theme::m3_baseline()
+            }
         }
         .with_brightness(brightness);
         frust::provide_context(theme);

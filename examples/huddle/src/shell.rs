@@ -218,6 +218,21 @@ pub fn bottom_bar(
                 nav.router().go(t.route());
             },
         )),
+        _ => {
+            // external design systems (DesignLanguage::Custom) fall back to Material chrome here
+            any(navigation_bar::<HuddleState, _>(
+                Tab::ALL
+                    .iter()
+                    .map(|t| nav_item::<HuddleState>(t.label()).icon(any(icon(t.icon()).size(24.0))))
+                    .collect(),
+                selected,
+                move |_s: &mut HuddleState, idx: usize| {
+                    let t = Tab::from_index(idx);
+                    tab.set(t);
+                    nav.router().go(t.route());
+                },
+            ))
+        }
     };
     any(safe_area(bar).top(false))
 }

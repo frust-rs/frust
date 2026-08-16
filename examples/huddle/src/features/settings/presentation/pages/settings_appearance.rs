@@ -209,6 +209,17 @@ fn design_selector(
             )
             .cross_axis(CrossAxisAlignment::Center))
         }
+        _ => {
+            // external design systems (DesignLanguage::Custom) fall back to Material chrome here
+            any(button_group::<AppearanceState, _>(
+                DesignChoice::ALL.into_iter().map(|c| c.label()),
+                selected.index(),
+                move |st: &mut AppearanceState, idx: usize| {
+                    st.controller.design.set(DesignChoice::from_index(idx));
+                    spawn_apply(&st.controller, current.clone());
+                },
+            ))
+        }
     }
 }
 
@@ -241,6 +252,14 @@ fn brightness_switch(
             any(SizedBox(Some(8.0), None)),
             any(cupertino_switch(effective_dark, on_toggle)),
         ])),
+        _ => {
+            // external design systems (DesignLanguage::Custom) fall back to Material chrome here
+            any(Row(vec![
+                any(text("Dark").size(14.0)),
+                any(SizedBox(Some(8.0), None)),
+                any(Switch(effective_dark, on_toggle)),
+            ]))
+        }
     }
 }
 
