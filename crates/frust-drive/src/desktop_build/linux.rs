@@ -95,6 +95,9 @@ pub(super) fn assemble(
         root,
         executable,
         artifacts,
+        // Filled once by the caller: entitlements are a macOS-only concept
+        // (always `None` here), notes keep accruing after this assembly.
+        entitlements: None,
         notes: Vec::new(),
     })
 }
@@ -161,6 +164,19 @@ fn reconcile(
     }
 }
 
+/// Whether a desktop-entry line carries content of the group it sits in:
+/// blank lines and `#` comments do not.
+///
+/// The single definition both readers of a group use — [`entry_value`]'s
+/// lookup and [`super::contributions`]'s append, which needs the group's last
+/// *content* line to insert after. Two notions of it would put a contributed
+/// key between a trailing comment block and the `[Desktop Action …]` header
+/// that block introduces.
+pub(super) fn is_content_line(line: &str) -> bool {
+    let line = line.trim();
+    !line.is_empty() && !line.starts_with('#')
+}
+
 /// Reads one `[Desktop Entry]` key out of a desktop file, line-wise: blank
 /// lines and `#` comments are skipped, a `[…]` line switches groups, and the
 /// first `key=value` match inside the entry group wins.
@@ -178,7 +194,7 @@ pub(super) fn entry_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     let mut in_entry = false;
     for line in text.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+        if !is_content_line(line) {
             continue;
         }
         if let Some(group) = line.strip_prefix('[') {

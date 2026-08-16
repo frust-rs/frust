@@ -80,6 +80,9 @@ pub(super) fn assemble(
         root,
         executable,
         artifacts,
+        // Filled once by the caller: entitlements are a macOS-only concept
+        // (always `None` here), notes keep accruing after this assembly.
+        entitlements: None,
         notes: Vec::new(),
     })
 }

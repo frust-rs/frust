@@ -195,7 +195,7 @@ fn merge_info_plist(
         else {
             continue;
         };
-        if text.contains(&format!("<key>{key}</key>")) {
+        if has_root_key(&text, &xml_escape(key)) {
             notes.push(present_note(row, key, IN_INFO_PLIST));
             continue;
         }
@@ -268,7 +268,7 @@ fn resolve_entitlements(
         let Contribution::MacosEntitlement { key, comment } = row.contribution else {
             continue;
         };
-        if text.contains(&format!("<key>{key}</key>")) {
+        if has_root_key(&text, &xml_escape(key)) {
             notes.push(present_note(row, key, IN_ENTITLEMENTS));
             continue;
         }
@@ -352,15 +352,19 @@ fn merge_desktop_entry(
     Ok(())
 }
 
-/// The entitlements file a *packaging* pass should sign with: the merged file
-/// a `frust build macos` generated beside the `.app` when a plugin contributed
-/// an entitlement, else the project's own `macos/app.entitlements`, else
-/// nothing.
+/// The entitlements file a *packaging* pass should sign with when the build
+/// itself has no answer to give: the merged file a `frust build macos`
+/// generated beside the `.app` when a plugin contributed an entitlement, else
+/// the project's own `macos/app.entitlements`, else nothing.
 ///
-/// Shared with [`super::installer`] rather than re-derived there, for the same
-/// reason [`macos::is_apple_issued_identity`] is: `cargo-packager` runs its own
-/// codesign pass over the `.app` it synthesizes, so a `.dmg` would otherwise
-/// ship an app missing exactly the entitlements the assembled bundle carries.
+/// **A fallback, not the primary route.** A packaging pass takes
+/// [`BundleReport::entitlements`] — the exact path *this* build's `codesign`
+/// used — and reaches for this probe only when that is `None`: the
+/// unsigned-build-handed-to-a-packager-identity case, where the assembly
+/// resolved no entitlements at all (an entitlement without a signature is a
+/// no-op) but `cargo-packager`'s own codesign pass over the `.app` it
+/// synthesizes still needs one. Probing is second-best precisely because it
+/// trusts whatever file sits at the predictable dist path.
 pub(super) fn entitlements_for_packaging(
     project_dir: &Path,
     config: &DesktopConfig,
@@ -399,11 +403,35 @@ fn remove_generated(path: &Path) -> Result<(), DesktopBuildError> {
 ///
 /// `--` cannot appear inside an XML comment, and a plist that does not parse
 /// is a bundle that does not launch. Registry entries are static, trusted
-/// strings, but the collapse stays defensive rather than assuming that forever
-/// (the same tone [`crate::plugin::PluginAddError::UnsafeScaffoldPath`] takes).
+/// strings, but the sanitization stays defensive rather than assuming that
+/// forever (the same tone [`crate::plugin::PluginAddError::UnsafeScaffoldPath`]
+/// takes) — and it covers the **whole** composed text, plugin id included,
+/// since a plugin id is just as much a string as the comment is.
 fn comment_line(comment: &str, plugin_id: &str) -> String {
-    let comment = comment.replace("--", "-");
-    format!("\t<!-- {comment} (frust plugin: {plugin_id}) -->\n")
+    let text = xml_comment_text(&format!("{comment} (frust plugin: {plugin_id})"));
+    format!("\t<!-- {text} -->\n")
+}
+
+/// `raw` reduced to text that can legally sit inside `<!-- … -->`.
+///
+/// Every run of `-` collapses to a single `-`, which is a fixed point by
+/// construction — a `replace("--", "-")` pass is not (`---` leaves a surviving
+/// `--`, and a malformed comment is an unparseable plist, i.e. a dead `.app`).
+/// A trailing `-` goes too: it would sit against the closing delimiter.
+fn xml_comment_text(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut prev_dash = false;
+    for ch in raw.chars() {
+        if ch == '-' && prev_dash {
+            continue;
+        }
+        prev_dash = ch == '-';
+        out.push(ch);
+    }
+    while out.ends_with('-') || out.ends_with(' ') {
+        out.pop();
+    }
+    out
 }
 
 fn applied_note(row: &DesktopContribution) -> BundleNote {
@@ -448,6 +476,69 @@ fn read_text(path: &Path, row: &DesktopContribution) -> Result<String, DesktopBu
     })
 }
 
+/// Whether `escaped_key` is already a key of the plist's **root** dictionary —
+/// the one question "is this contributed key present?" actually asks, for both
+/// merge targets.
+///
+/// A whole-file substring search answers a different (and wrong) question in
+/// two ways, each of which silently drops a contribution the OS then kills the
+/// app over at runtime:
+///
+/// - a root-level key whose *name* also appears inside a nested dictionary
+///   (`NSAppTransportSecurity`'s sub-keys, `CFBundleURLTypes`,
+///   `UTExportedTypeDeclarations`) or inside an XML comment would be read as
+///   present and never inserted at root, where it is actually read;
+/// - the insertion writes [`xml_escape`]d text, so a key needing escaping
+///   could never match its own prior insertion — a second merge over the
+///   merged output would insert it again.
+///
+/// So: comments are stripped first, then `<dict>`/`</dict>` are depth-counted
+/// and a `<key>` counts only at depth 1 (inside the plist's outer dict), and
+/// the comparison is against the **escaped** spelling that insertion writes.
+/// Tags are matched in their canonical, no-inner-whitespace spelling — the
+/// same assumption the [`DICT_CLOSE`] insertion anchor already makes, and the
+/// spelling every plist this pipeline reads (Apple's tools', this module's
+/// own) is written in.
+fn has_root_key(text: &str, escaped_key: &str) -> bool {
+    let text = strip_xml_comments(text);
+    let needle = format!("<key>{escaped_key}</key>");
+    let mut depth = 0usize;
+    let mut idx = 0usize;
+    while let Some(found) = text[idx..].find('<') {
+        let at = idx + found;
+        let tail = &text[at..];
+        if tail.starts_with("<dict>") {
+            depth += 1;
+            idx = at + "<dict>".len();
+        } else if tail.starts_with(DICT_CLOSE) {
+            depth = depth.saturating_sub(1);
+            idx = at + DICT_CLOSE.len();
+        } else if depth == 1 && tail.starts_with(&needle) {
+            return true;
+        } else {
+            idx = at + 1;
+        }
+    }
+    false
+}
+
+/// `text` with every `<!-- … -->` span removed, so a key named only inside a
+/// comment is not mistaken for a declared one. An unterminated `<!--` comments
+/// out the rest of the file, exactly as an XML parser would read it.
+fn strip_xml_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        let Some(end) = rest[start..].find("-->") else {
+            return out;
+        };
+        rest = &rest[start + end + "-->".len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Inserts `block` before the **last** occurrence of `anchor`, or `None` when
 /// the text carries no such anchor (in which case nothing is written — the
 /// caller turns that into a typed refusal).
@@ -461,9 +552,11 @@ fn insert_before_last(text: &str, anchor: &str, block: &str) -> Option<String> {
 }
 
 /// Appends `block` at the end of a desktop entry's `[Desktop Entry]` group:
-/// after the group's last non-blank line, so a following `[Desktop Action …]`
-/// header (and the blank line separating it) stays where it is. `None` when
-/// the file has no `[Desktop Entry]` group at all.
+/// after the group's last **content** line as [`linux::is_content_line`]
+/// defines it — the same definition [`entry_value`]'s lookup uses — so a
+/// following `[Desktop Action …]` header, the blank line separating it, and
+/// any comment block introducing it all stay where they are. `None` when the
+/// file has no `[Desktop Entry]` group at all.
 fn append_to_entry_group(text: &str, block: &str) -> Option<String> {
     let mut in_group = false;
     let mut seen_group = false;
@@ -480,7 +573,7 @@ fn append_to_entry_group(text: &str, block: &str) -> Option<String> {
             }
             continue;
         }
-        if in_group && !trimmed.is_empty() {
+        if in_group && linux::is_content_line(trimmed) {
             insert_at = offset;
         }
     }
@@ -546,6 +639,13 @@ mod tests {
         key: "MimeType",
         value: "image/png;\nExec=/bin/sh",
         comment: "Handled\ntypes",
+    };
+    /// A key whose own spelling needs XML escaping: the file can only ever
+    /// carry it escaped, so the presence check has to compare escaped too.
+    static ESCAPED_KEY: Contribution = Contribution::MacosPlistEntry {
+        key: "NSFoo&Bar",
+        value: "ok",
+        comment: "Escaped key",
     };
 
     fn row(contribution: &'static Contribution) -> DesktopContribution {
@@ -692,6 +792,150 @@ mod tests {
         );
         assert!(
             merged.contains("<!-- Camera access (frust plugin: camera) -->"),
+            "{merged}"
+        );
+        assert!(
+            matches!(notes.as_slice(), [BundleNote::PluginContribution { .. }]),
+            "{notes:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A key that appears only *inside a nested dictionary* is not a key of
+    /// the root dict, so it is still inserted where the OS reads it. Read as
+    /// present it would be dropped with nothing but a note, and a bundle
+    /// missing a declared usage description is killed at runtime.
+    #[test]
+    fn a_key_present_only_in_a_nested_dict_is_still_inserted_at_the_root() {
+        let dir = temp_dir("plist-nested-namesake");
+        let plist = dir.join("Info.plist");
+        fs::write(
+            &plist,
+            "<plist version=\"1.0\">\n<dict>\n\
+             \t<key>NSAppTransportSecurity</key>\n\t<dict>\n\
+             \t\t<key>NSCameraUsageDescription</key>\n\t\t<string>nested</string>\n\t</dict>\n\
+             </dict>\n</plist>\n",
+        )
+        .unwrap();
+
+        let mut notes = Vec::new();
+        merge_info_plist(&plist, &[row(&CAMERA_USAGE)], &mut notes).unwrap();
+
+        let merged = fs::read_to_string(&plist).unwrap();
+        assert_eq!(
+            merged
+                .matches("<key>NSCameraUsageDescription</key>")
+                .count(),
+            2,
+            "{merged}"
+        );
+        // The root-level one is the contributed value, after the nested close.
+        let root_at = merged.rfind("<key>NSCameraUsageDescription</key>").unwrap();
+        assert!(root_at > merged.find("\t</dict>").unwrap(), "{merged}");
+        assert!(merged[root_at..].contains("Scan a document"), "{merged}");
+        assert!(merged.contains("<string>nested</string>"), "{merged}");
+        assert!(
+            matches!(notes.as_slice(), [BundleNote::PluginContribution { .. }]),
+            "{notes:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A key named only inside an XML comment is not declared at all — a
+    /// commented-out key is exactly the case a plugin's default should fill.
+    #[test]
+    fn a_key_named_only_in_a_comment_is_still_inserted() {
+        let dir = temp_dir("plist-commented-key");
+        let plist = dir.join("Info.plist");
+        fs::write(
+            &plist,
+            "<plist version=\"1.0\">\n<dict>\n\
+             \t<!-- <key>NSCameraUsageDescription</key> was removed for now -->\n\
+             </dict>\n</plist>\n",
+        )
+        .unwrap();
+
+        let mut notes = Vec::new();
+        merge_info_plist(&plist, &[row(&CAMERA_USAGE)], &mut notes).unwrap();
+
+        let merged = fs::read_to_string(&plist).unwrap();
+        assert!(merged.contains("Scan a document"), "{merged}");
+        assert!(
+            matches!(notes.as_slice(), [BundleNote::PluginContribution { .. }]),
+            "{notes:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A key whose spelling needs escaping is written escaped, so the presence
+    /// check must compare escaped too — otherwise a second merge over the
+    /// merged output inserts it all over again. Merging twice is idempotent.
+    #[test]
+    fn a_key_needing_xml_escaping_is_inserted_once_and_then_reported_present() {
+        let dir = temp_dir("plist-escaped-key");
+        let plist = dir.join("Info.plist");
+        fs::write(
+            &plist,
+            "<plist version=\"1.0\">\n<dict>\n</dict>\n</plist>\n",
+        )
+        .unwrap();
+
+        let mut notes = Vec::new();
+        merge_info_plist(&plist, &[row(&ESCAPED_KEY)], &mut notes).unwrap();
+        let once = fs::read_to_string(&plist).unwrap();
+        assert!(once.contains("<key>NSFoo&amp;Bar</key>"), "{once}");
+
+        merge_info_plist(&plist, &[row(&ESCAPED_KEY)], &mut notes).unwrap();
+        let twice = fs::read_to_string(&plist).unwrap();
+        assert_eq!(twice, once, "a second merge rewrote the plist");
+        assert!(
+            matches!(
+                notes.as_slice(),
+                [
+                    BundleNote::PluginContribution { .. },
+                    BundleNote::PluginEntryPresent { key, .. }
+                ] if key == "NSFoo&Bar"
+            ),
+            "{notes:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The entitlements half of the same check: an entitlement nested inside
+    /// another key's dictionary is not a root entitlement, so the contributed
+    /// one is still merged in.
+    #[test]
+    fn an_entitlement_present_only_in_a_nested_dict_is_still_merged_at_the_root() {
+        let dir = temp_dir("entitlements-nested-namesake");
+        let project_file = dir.join(PROJECT_ENTITLEMENTS_REL);
+        fs::create_dir_all(project_file.parent().unwrap()).unwrap();
+        fs::write(
+            &project_file,
+            "<plist version=\"1.0\">\n<dict>\n\
+             \t<key>com.apple.security.application-groups</key>\n\t<dict>\n\
+             \t\t<key>com.apple.security.device.camera</key>\n\t\t<true/>\n\t</dict>\n\
+             </dict>\n</plist>\n",
+        )
+        .unwrap();
+
+        let config = signing_config();
+        let mut notes = Vec::new();
+        let resolved = resolve_entitlements(
+            &dir,
+            &config,
+            &[row(&CAMERA_ENTITLEMENT)],
+            &mut Vec::new(),
+            &mut notes,
+        )
+        .unwrap()
+        .expect("a generated entitlements path");
+
+        let merged = fs::read_to_string(&resolved).unwrap();
+        assert_eq!(
+            merged
+                .matches("<key>com.apple.security.device.camera</key>")
+                .count(),
+            2,
             "{merged}"
         );
         assert!(
@@ -1043,6 +1287,78 @@ mod tests {
             "{merged}"
         );
         assert_eq!(merged.matches("-->").count(), 1, "{merged}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A well-formed XML comment: delimited, with no `--` and no trailing `-`
+    /// anywhere inside it. Anything else is a plist that does not parse.
+    fn assert_well_formed_comment(line: &str) {
+        let inner = line
+            .trim()
+            .strip_prefix("<!--")
+            .and_then(|rest| rest.strip_suffix("-->"))
+            .unwrap_or_else(|| panic!("not a delimited XML comment: {line:?}"));
+        assert!(!inner.contains("--"), "{line:?}");
+        assert!(!inner.ends_with('-'), "{line:?}");
+    }
+
+    /// Collapsing `--` to `-` once is not a fixed point (`---` leaves a `--`
+    /// behind), and the plugin id is part of the same comment text — so the
+    /// sanitization runs over the whole composed string, to a fixed point.
+    #[test]
+    fn every_run_of_dashes_in_a_comment_collapses_to_one() {
+        for (comment, plugin_id) in [
+            ("a --- b", "camera"),
+            ("a ---- b", "camera"),
+            ("plain", "cam--era"),
+            ("trailing dash -", "camera"),
+            ("--", "--"),
+        ] {
+            let line = comment_line(comment, plugin_id);
+            assert_well_formed_comment(&line);
+            assert!(line.starts_with('\t') && line.ends_with('\n'), "{line:?}");
+        }
+        // …and a run really does collapse to a single dash, rather than being
+        // dropped: the text still reads.
+        assert!(
+            comment_line("a ---- b", "camera").contains("a - b (frust plugin: camera)"),
+            "{}",
+            comment_line("a ---- b", "camera")
+        );
+    }
+
+    /// The group's last *content* line is the one definition
+    /// [`linux::entry_value`]'s lookup uses: a comment block at the end of
+    /// `[Desktop Entry]` introduces the group that follows it, so a
+    /// contributed key belongs *above* it, after the last real `key=value`.
+    #[test]
+    fn a_contributed_key_lands_above_a_trailing_comment_block() {
+        let dir = temp_dir("desktop-trailing-comment");
+        let entry = dir.join("app.desktop");
+        fs::write(
+            &entry,
+            "[Desktop Entry]\nType=Application\nName=My App\n\n\
+             # A new window action:\n# (kept for the launcher menu)\n\
+             [Desktop Action new]\nName=New Window\n",
+        )
+        .unwrap();
+
+        merge_desktop_entry(&entry, &[row(&MIME_TYPE)], &mut Vec::new()).unwrap();
+
+        let merged = fs::read_to_string(&entry).unwrap();
+        let mime_at = merged.find("MimeType=image/png;").unwrap();
+        assert!(mime_at > merged.find("Name=My App").unwrap(), "{merged}");
+        assert!(
+            mime_at < merged.find("# A new window action:").unwrap(),
+            "{merged}"
+        );
+        // The comment block still introduces the group it was written for.
+        assert!(
+            merged.contains(
+                "# A new window action:\n# (kept for the launcher menu)\n[Desktop Action new]"
+            ),
+            "{merged}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

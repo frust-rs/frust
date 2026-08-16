@@ -172,6 +172,17 @@ pub struct BundleReport {
     /// Every file this run wrote, in write order (executable, icon
     /// container(s), launcher metadata). Directories are not listed.
     pub artifacts: Vec<PathBuf>,
+    /// The entitlements file **this** build's `codesign` step was given: the
+    /// generated `dist/macos/<binary>.entitlements` when a plugin contributed
+    /// an entitlement, else the project's own `macos/app.entitlements` when it
+    /// ships one. `None` on every non-macOS target, on an unsigned build, and
+    /// on a build with no entitlements at all.
+    ///
+    /// Carried on the report so a later packaging pass signs with exactly what
+    /// the bundle was signed with, rather than re-deriving it by probing the
+    /// dist path and trusting whatever file happens to sit there (see
+    /// [`installer::build_installer`]).
+    pub entitlements: Option<PathBuf>,
     /// Everything worth telling a human that is not a failure — see
     /// [`BundleNote`].
     pub notes: Vec<BundleNote>,
@@ -565,7 +576,11 @@ fn build_with_contributions(
 
     // Notes are collected across every stage (pre-build icon, assembly,
     // codesign), so the assemblers leave the field empty and it is filled once
-    // here — the report is only complete after the last stage has run.
+    // here — the report is only complete after the last stage has run. The
+    // resolved entitlements follow the same fill-once-at-the-end contract: an
+    // assembler cannot know them (the merge that decides them runs after it),
+    // so it leaves `None` and this is the single site that answers.
+    report.entitlements = entitlements;
     report.notes = notes;
     on_line(&format!("bundle: {}", report.root.display()));
     Ok(report)
@@ -1637,6 +1652,9 @@ mod tests {
             "{:?}",
             report.artifacts
         );
+        // The exact file the signature covers, carried on the report so a
+        // packaging pass signs with it rather than probing for it.
+        assert_eq!(report.entitlements.as_deref(), Some(entitlements.as_path()));
 
         // The signature is the one registered above — an unregistered argv
         // would have failed the spawn — and every contribution is reported.
@@ -1778,6 +1796,8 @@ mod tests {
         );
         assert!(!fixture.path("dist/macos/my_app.entitlements").exists());
         assert!(report.notes.contains(&BundleNote::Unsigned));
+        // Nothing was signed, so there is no entitlements file to report.
+        assert_eq!(report.entitlements, None);
     }
 
     /// A plist with no `</dict>` cannot carry a contributed key, and a bundle

@@ -142,6 +142,10 @@ pub(super) fn assemble(
         root,
         executable,
         artifacts,
+        // Both filled once by the caller after the last stage has run — the
+        // plugin merge that resolves the entitlements runs after this
+        // assembly, and notes keep accruing through codesign.
+        entitlements: None,
         notes: Vec::new(),
     })
 }

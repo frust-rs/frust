@@ -663,14 +663,13 @@ struct PackagerMacosConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     signing_identity: Option<String>,
     /// The entitlements the packager's own codesign pass signs the `.app` it
-    /// synthesizes with, resolved by
-    /// [`super::contributions::entitlements_for_packaging`]: the merged file a
-    /// `frust build macos` generated beside the `.app` when a plugin
-    /// contributed an entitlement, else `<project>/macos/app.entitlements`
-    /// when the project ships one, else nothing. Sharing that resolution with
-    /// the assembly's own `codesign` call is what keeps a `.dmg`'s inner app
-    /// from being signed with fewer entitlements than the bundle it was built
-    /// from.
+    /// synthesizes with: [`BundleReport::entitlements`] — the exact file the
+    /// assembled bundle's own `codesign` was given — so a `.dmg`'s inner app
+    /// can never be signed with a different (or staler) set than the bundle it
+    /// was built from. A report carrying `None` falls back to
+    /// [`super::contributions::entitlements_for_packaging`]'s filesystem
+    /// probe, which is the only case left where nothing authoritative is on
+    /// hand (see that function's doc).
     #[serde(skip_serializing_if = "Option::is_none")]
     entitlements: Option<String>,
 }
@@ -733,7 +732,13 @@ impl PackagerConfig {
                     None
                 }
             }),
-            entitlements: super::contributions::entitlements_for_packaging(project_dir, config)
+            // The build's own answer first, verbatim: re-deriving it here
+            // would trust whatever file happens to sit at the predictable dist
+            // path rather than what this bundle was actually signed with.
+            entitlements: bundle
+                .entitlements
+                .clone()
+                .or_else(|| super::contributions::entitlements_for_packaging(project_dir, config))
                 .map(|path| path.to_string_lossy().into_owned()),
         });
 
@@ -820,6 +825,7 @@ mod tests {
                 root,
                 executable,
                 artifacts: Vec::new(),
+                entitlements: None,
                 notes: Vec::new(),
             }
         }
@@ -871,6 +877,7 @@ mod tests {
                 root,
                 executable,
                 artifacts,
+                entitlements: None,
                 notes: Vec::new(),
             }
         }
@@ -1160,11 +1167,15 @@ mod tests {
         }
     }
 
-    /// The defect this task fixes, made concrete: a `.dmg` build's config
-    /// names the *assembled* bundle's own `Contents/Info.plist` and carries
-    /// the resolved signing identity/entitlements, so `cargo-packager`'s
-    /// independently synthesized `.app` (see this module's doc) still ends up
-    /// signed with the project's identity instead of a stripped default.
+    /// A `.dmg` build's config names the *assembled* bundle's own
+    /// `Contents/Info.plist` and carries the resolved signing
+    /// identity/entitlements, so `cargo-packager`'s independently synthesized
+    /// `.app` (see this module's doc) still ends up signed with the project's
+    /// identity instead of a stripped default.
+    ///
+    /// The report here carries no resolved entitlements of its own (the
+    /// unsigned-assembly case), so this is also the fallback probe's test: it
+    /// finds the project's `macos/app.entitlements`.
     #[test]
     fn dmg_config_carries_the_macos_block_with_plist_signing_identity_and_entitlements() {
         let fixture = Fixture::new("dmg-macos-block").manifest(
@@ -1239,6 +1250,62 @@ mod tests {
                 .path("macos/app.entitlements")
                 .to_string_lossy()
                 .as_ref(),
+            "{written}"
+        );
+    }
+
+    /// The entitlements a packaging pass signs with are the ones **this
+    /// build's** `codesign` was given, taken off the report verbatim — never
+    /// re-derived by probing the dist path, which would trust whatever file
+    /// happens to sit there. Proven by handing the report a path the probe
+    /// would never answer with, while a project `macos/app.entitlements` (the
+    /// probe's answer) sits right there.
+    #[test]
+    fn dmg_config_signs_with_the_entitlements_the_build_resolved_not_a_probed_path() {
+        let fixture = Fixture::new("dmg-entitlements-threaded").manifest(
+            "[app]\nname = \"my_app\"\norg = \"dev.f0x\"\n\n\
+             [desktop]\nname = \"My App\"\nidentifier = \"dev.f0x.my_app\"\n\n\
+             [macos]\nsigning-identity = \"Developer ID Application: Example\"\n",
+        );
+        fs::create_dir_all(fixture.path("macos")).unwrap();
+        fs::write(
+            fixture.path("macos/app.entitlements"),
+            "<?xml version=\"1.0\"?><plist><dict/></plist>",
+        )
+        .unwrap();
+        let mut bundle = fixture.macos_app("my_app", true);
+        let resolved = fixture.path("dist/macos/my_app.entitlements");
+        bundle.entitlements = Some(resolved.clone());
+
+        let out_dir = DesktopBundleTarget::Macos
+            .dist_dir(&fixture.dir)
+            .join("installer")
+            .join("dmg");
+        let config_arg = out_dir.join("packager.json").to_string_lossy().into_owned();
+        let runner = version_ok().with(
+            format!("cargo packager --config {config_arg}"),
+            Output {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+
+        build_installer(
+            &runner,
+            &fixture.dir,
+            &info(),
+            &bundle,
+            InstallerFormat::Dmg,
+            &mut |_| {},
+        )
+        .unwrap();
+
+        let written = fs::read_to_string(out_dir.join("packager.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(
+            parsed["macos"]["entitlements"],
+            resolved.to_string_lossy().as_ref(),
             "{written}"
         );
     }
