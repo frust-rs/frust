@@ -2213,7 +2213,7 @@ Phase C task 03 completion summary, Doc Updates Needed.
 
 ---
 
-### `native-typeface-first-publish-latch` — a mid-process design-system face swap doesn't reach native controls until relaunch
+### `native-typeface-first-publish-latch` — a mid-process design-system-to-design-system face swap doesn't reach native controls until relaunch
 
 **Observed**: `plugins/native-widgets`' typeface resolution (theme ladder L3) is extension-first,
 per slot, and re-publishes host-side (`api::theme`'s `PublishGuard`) whenever the active
@@ -2224,15 +2224,33 @@ cache each resolved face object process-wide once registration succeeds, so only
 A later design-system swap re-publishes the new bytes from the host side with no error, but the
 platform keeps rendering the first system's faces until the process relaunches.
 
+Scope, post review-round-0 M2 fix: the ladder's step-3 (`Typeface::System`) arm used to carry the
+bundled Glyph bytes along even when `System` was selected ("so the other slot's publish doesn't
+blank them"), which meant a plain Material3/Cupertino theme with **no** `NativeTypefaces`
+extension published the non-empty pair `(Space Mono, IBM Plex Mono)` on its very first resolve —
+so *any* app that resolved a native control under an extension-less theme before installing a
+design system would latch Glyph's faces regardless of whether a real swap ever happened. That arm
+now publishes no bytes (`&[]`); an all-empty pair never crosses the platform seam
+(`publish_font_bytes`'s own skip), so an extension-less resolve latches nothing and a
+subsequently installed design system's pair becomes the process's first real publish and
+registers correctly. The residual gap this entry now covers is therefore narrower and genuinely
+platform-side only: a **mid-process swap from one real face pair to another** (e.g. one design
+system replaced by a second, or a design system's theme switching to `DesignLanguage::Glyph`
+after an extension-only pair already latched) still does not re-register on device until relaunch.
+A half-filled extension (one slot real, one slot `System`) is not itself a new instance of this
+gap — the empty slot resolves to `System` in that same resolve, so nothing ever asks the platform
+half to register bytes for it; the gap only resurfaces if a *later* resolve wants real bytes for
+that same slot, which is the ordinary swap case above.
+
 **Why accepted**: widening the platform halves to re-register on a swap is a platform-side change
 with its own device gate, not a host-side one — deferred rather than blocking this feature.
 **Also owed**: custom-face rendering (either system's) has never been exercised on real Android/iOS
 hardware — this entry covers both the swap gap and that outstanding device gate.
 
 **Evidence**: `plugins/native-widgets/src/api/theme.rs`'s module doc ("Publishing: last-pair-wins,
-not once-per-process"); `plugins/native-widgets/src/android/fonts.rs` and
-`plugins/native-widgets/src/apple/fonts.rs` module docs (`OnceLock`/process-wide and thread-local
-cache notes).
+not once-per-process" and "System publishes nothing"); `plugins/native-widgets/src/android/fonts.rs`
+and `plugins/native-widgets/src/apple/fonts.rs` module docs (`OnceLock`/process-wide and
+thread-local cache notes).
 
 ---
 

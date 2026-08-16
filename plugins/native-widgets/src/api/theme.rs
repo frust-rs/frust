@@ -49,7 +49,53 @@
 //!    Glyph's monospace faces on a Material3/Cupertino theme that never asked
 //!    for them would be a worse regression than leaving the platform's own
 //!    face alone, so a theme with neither an attached face nor the Glyph tag
-//!    lands here.
+//!    lands here. This arm publishes **no bytes** (`&[]`), not the bundled
+//!    Glyph bytes — see *System publishes nothing* below.
+//!
+//! ## System publishes nothing
+//!
+//! An earlier revision of step 3 carried the bundled Glyph bytes along even
+//! when `System` was selected, reasoning that this stopped the *other*
+//! slot's publish from "blanking" them. That reasoning was wrong: with the
+//! `glyph-fonts` feature on by default, it meant a theme with no
+//! `NativeTypefaces` extension at all — a plain, unmodified Material3
+//! baseline — published the non-empty pair `(Space Mono, IBM Plex Mono)` on
+//! its very first [`resolve`], because the ride-along bytes made the pair
+//! look non-empty to [`publish_font_bytes`]'s empty-pair skip. Since the
+//! platform halves latch their *first* published pair
+//! ([`crate::android::fonts::set_glyph_bytes`], mirrored on iOS), a
+//! Material3-only app that happened to construct any native control before
+//! installing a design system permanently latched Glyph's own faces — a
+//! design system's later, real publish would register correctly host-side
+//! (this module's own `ResolvedTheme`/props) but the platform half would
+//! never re-register the device-side font object, so the device kept
+//! rendering Space Mono / IBM Plex Mono for `GlyphMono`/`GlyphPlex` no
+//! matter what the design system published.
+//!
+//! With step 3 now publishing `&[]`, a Material3/no-extension resolve
+//! produces the empty pair `(&[], &[])`, [`publish_font_bytes`] skips it
+//! entirely (its own empty-pair short-circuit), and nothing latches — so a
+//! design system installed afterward gets the first real publish and
+//! registers correctly. Every legitimate need for the bundled Glyph bytes is
+//! still met: step 2 supplies them directly, in the same resolve, whenever a
+//! Glyph theme actually selects them for a slot — the ride-along in step 3
+//! never fired for a case step 2 did not already cover on its own.
+//!
+//! **Half-filled extension, one real slot + one `System` slot** (e.g. a
+//! design system that only overrides the button face): the published pair
+//! is one-sided — `(custom_button_bytes, &[])` — which is *not* the
+//! all-empty case, so it still crosses the seam and still latches
+//! process-wide via the platform halves' `OnceLock`. That is coherent with
+//! this resolve: the empty body slot resolves to `Typeface::System` in the
+//! very same call, so nothing ever asks the platform half to register
+//! `GlyphPlex` off these bytes — `typeface_for`/`descriptor_for` short-circuit
+//! `System` before touching the published payload at all. The empty half
+//! only becomes observable if a *later, different* resolve wants real bytes
+//! for that same slot (e.g. the app later switches to a Glyph theme, or the
+//! design system later fills the body slot too); that is exactly the
+//! existing first-publish-latch gap (see *Publishing* below and
+//! `docs/LIMITATIONS.md`'s `native-typeface-first-publish-latch`), not a new
+//! one this change introduces.
 //!
 //! `Switch` never actually shows text through this plugin today, but it's
 //! still a `TextView` subclass under the hood (`android.widget.Switch extends
@@ -303,12 +349,14 @@ fn plan_typefaces(theme: &Theme) -> (ResolvedFace, ResolvedFace) {
 /// `slot` is the wire-level slot this face would occupy
 /// ([`Typeface::GlyphMono`] for button, [`Typeface::GlyphPlex`] for body —
 /// see the module doc on why those names outlived their Glyph-only meaning).
-/// The `System` arm still carries whatever Glyph bytes exist so the *other*
-/// slot's publish doesn't blank them; nothing selects them. With
-/// `frust-theme`'s bundled bytes absent (this crate's `glyph-fonts` feature
-/// off) step 2 has nothing to apply, so a Glyph theme with no attached face
-/// lands on `System` too — the same face the platform half would have
-/// degraded to on finding no published bytes.
+/// The `System` arm publishes **no bytes at all** (`&[]`), whatever bundled
+/// Glyph bytes exist — see the module doc's *System publishes nothing*
+/// section for why an earlier ride-along here was a real bug, not a
+/// harmless belt-and-braces default. With `frust-theme`'s bundled bytes
+/// absent (this crate's `glyph-fonts` feature off) step 2 has nothing to
+/// apply, so a Glyph theme with no attached face lands on `System` too — the
+/// same face the platform half would have degraded to on finding no
+/// published bytes.
 fn resolve_slot(
     attached: Option<FontFace>,
     glyph: Option<&'static [u8]>,
@@ -324,9 +372,9 @@ fn resolve_slot(
             typeface: slot,
             bytes,
         },
-        (None, glyph) => ResolvedFace {
+        (None, _) => ResolvedFace {
             typeface: Typeface::System,
-            bytes: glyph.unwrap_or(&[]),
+            bytes: &[],
         },
     }
 }
@@ -590,6 +638,15 @@ mod tests {
         assert_eq!(button.typeface, Typeface::GlyphMono);
         assert_eq!(button.bytes, DISPLAY_FACE);
         assert_eq!(body.typeface, Typeface::System, "step 3 for the body slot");
+        assert_eq!(
+            body.bytes,
+            &[] as &[u8],
+            "the empty slot publishes no bytes — the one-sided pair \
+             (DISPLAY_FACE, &[]) still crosses the platform seam since it \
+             isn't the all-empty case, but nothing ever asks the platform \
+             half to register GlyphPlex off it because this same resolve \
+             already picked System for the body slot"
+        );
 
         let (button, body) = plan_typefaces(&with_faces(Theme::glyph_baseline(), faces));
         assert_eq!(button.bytes, DISPLAY_FACE, "still step 1");
@@ -648,17 +705,24 @@ mod tests {
             }
         );
 
-        // 3. no attached face and not a Glyph theme: the platform's own.
+        // 3. no attached face and not a Glyph theme: the platform's own —
+        // and it publishes NO bytes. An earlier revision let the bundled
+        // Glyph bytes ride along here, which meant a plain
+        // Material3/no-extension theme published a non-empty pair on its
+        // first resolve and permanently latched Glyph's faces platform-side
+        // — see the module doc's *System publishes nothing* section.
         assert_eq!(
             resolve_slot(None, Some(bundled), false, Typeface::GlyphMono),
             ResolvedFace {
                 typeface: Typeface::System,
-                bytes: bundled,
+                bytes: &[],
             },
-            "the bytes ride along so the other slot's publish can't blank \
-             them, but nothing selects them"
+            "System must not carry bundled bytes along — nothing selects \
+             them, and doing so latches them process-wide via the platform \
+             halves' first-publish-wins OnceLock"
         );
-        // …and with nothing bundled either, step 2 cannot apply at all.
+        // …and with nothing bundled either, step 2 cannot apply at all —
+        // same empty-bytes outcome.
         assert_eq!(
             resolve_slot(None, None, true, Typeface::GlyphMono),
             ResolvedFace {
@@ -697,6 +761,52 @@ mod tests {
             guard.take_if_changed(mono, plex),
             "swapping back is a change too — this is last-pair-wins, not a \
              set of every pair ever published"
+        );
+    }
+
+    #[test]
+    fn a_no_extension_material3_resolve_publishes_nothing_so_a_later_design_system_gets_the_first_real_publish()
+     {
+        // With `glyph-fonts` on by default, a plain Material3 theme with no
+        // `NativeTypefaces` extension used to publish the non-empty pair
+        // (Space Mono, IBM Plex Mono) on its very first resolve — because
+        // step 3's ride-along bytes made an otherwise-empty pair look
+        // non-empty to `publish_font_bytes`'s empty-pair skip. Since the
+        // platform halves latch their FIRST published pair, any native
+        // control resolving under a plain Material3/no-extension theme
+        // before a design system was installed would permanently latch
+        // Glyph's own faces, leaving a later design system's real faces to
+        // register correctly host-side but never on device.
+        //
+        // A local guard, not the process-global one — this replicates
+        // `publish_font_bytes`'s exact skip/take-if-changed logic so the
+        // sequence is self-contained regardless of what else this test
+        // binary already resolved.
+        let guard = PublishGuard::new();
+        let would_cross_the_seam = |theme: &Theme| {
+            let (button, body) = plan_typefaces(theme);
+            !(button.bytes.is_empty() && body.bytes.is_empty())
+                && guard.take_if_changed(button.bytes, body.bytes)
+        };
+
+        assert!(
+            !would_cross_the_seam(&Theme::m3_baseline()),
+            "a plain Material3 theme with no attached extension must \
+             publish nothing at all — the all-empty pair must never cross \
+             the platform seam"
+        );
+
+        // A design system now attaches its own faces. This must be the
+        // FIRST publish that actually reaches the platform half — nothing
+        // latched before it.
+        let acme = with_faces(
+            Theme::m3_baseline(),
+            NativeTypefaces::uniform(FontFace::new("Acme Text", BODY_FACE)),
+        );
+        assert!(
+            would_cross_the_seam(&acme),
+            "the design system's pair must be the first real publish, \
+             unblocked by the earlier no-op Material3 resolve"
         );
     }
 
