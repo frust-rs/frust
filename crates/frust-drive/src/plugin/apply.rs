@@ -192,7 +192,12 @@ pub struct DesktopContribution {
 /// "Installed" means the plugin's own base [`Contribution::CargoDep`] name
 /// appears as a `[dependencies]` key in the project's `Cargo.toml` — the
 /// same source of truth [`add_plugin`] itself writes to, read here rather
-/// than duplicated.
+/// than duplicated — **or** some other dependency entry renames itself via
+/// an inline `package = "<name>"` key ([`plugin_is_installed`]). A dependency
+/// carrying `optional = true` is never counted as installed, even when its
+/// name matches: an optional dep the app never enabled by feature must not
+/// merge the plugin's desktop-lane keys/entitlements into a bundle whose
+/// binary may not actually contain it.
 ///
 /// **v1 scope:** only a plugin's **base** contributions are scanned. A
 /// desktop contribution gated behind an optional [`super::FeatureSpec`]
@@ -200,7 +205,10 @@ pub struct DesktopContribution {
 /// feature — `add_plugin`'s `features` argument is never persisted
 /// anywhere, so there is no durable record of *which* features a project
 /// selected for this function to read back. Widening this is future work,
-/// gated on feature selection becoming durable.
+/// gated on feature selection becoming durable. Likewise, only the top-level
+/// `[dependencies]` table is consulted — a dep declared under a
+/// target-scoped table (`[target.'cfg(...)'.dependencies]`) is invisible to
+/// this function, matching the same base-only conservatism.
 ///
 /// Order is deterministic: registry order ([`known_plugins`]), then each
 /// plugin's own declaration order within `base`.
@@ -247,7 +255,12 @@ fn is_desktop_contribution(contribution: &Contribution) -> bool {
 }
 
 /// A plugin is "installed" iff its own base [`Contribution::CargoDep`] name
-/// appears as a `[dependencies]` key in `doc`.
+/// either appears as a `[dependencies]` key in `doc`, or names a **renamed**
+/// dependency entry via that entry's inline `package = "<name>"` key (e.g.
+/// `cam = { package = "frust-camera", path = "..." }`) — but never a dep
+/// entry carrying `optional = true`, whose base contributions must not merge
+/// into a bundle the plugin may not actually be linked into (see
+/// [`desktop_contributions`]'s doc comment).
 fn plugin_is_installed(spec: &PluginSpec, doc: &DocumentMut) -> bool {
     let Some(name) = spec.base.iter().find_map(|c| match c {
         Contribution::CargoDep { name } => Some(*name),
@@ -255,9 +268,32 @@ fn plugin_is_installed(spec: &PluginSpec, doc: &DocumentMut) -> bool {
     }) else {
         return false;
     };
-    doc.get("dependencies")
+    let Some(deps) = doc
+        .get("dependencies")
         .and_then(|item| item.as_table_like())
-        .is_some_and(|deps| deps.contains_key(name))
+    else {
+        return false;
+    };
+    deps.iter().any(|(key, value)| {
+        if dep_is_optional(value) {
+            return false;
+        }
+        key == name || dep_renamed_package(value) == Some(name)
+    })
+}
+
+/// Whether a `[dependencies]` entry carries `optional = true`.
+fn dep_is_optional(value: &Item) -> bool {
+    value
+        .as_table_like()
+        .and_then(|t| t.get("optional"))
+        .and_then(Item::as_bool)
+        .unwrap_or(false)
+}
+
+/// A `[dependencies]` entry's `package = "..."` value, if it renames itself.
+fn dep_renamed_package(value: &Item) -> Option<&str> {
+    value.as_table_like()?.get("package")?.as_str()
 }
 
 /// Append a macro invocation to the app crate's `src/lib.rs`
@@ -2175,6 +2211,93 @@ mod tests {
             )),
             "{result:?}"
         );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Parse a freshly scaffolded project's `Cargo.toml` and insert a
+    /// **renamed** dependency: `key_name = { package = "<dep_name>", path =
+    /// "..." }` — the shape `cam = { package = "frust-camera", ... }` takes.
+    fn cargo_doc_with_renamed_dep(root: &Path, key_name: &str, dep_name: &str) -> DocumentMut {
+        let cargo_path = root.join(CARGO_TOML_REL);
+        let mut doc = fs::read_to_string(&cargo_path)
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        let deps = doc
+            .get_mut("dependencies")
+            .and_then(Item::as_table_like_mut)
+            .unwrap();
+        let mut inline = InlineTable::new();
+        inline.insert("package", Value::from(dep_name));
+        inline.insert(
+            "path",
+            Value::from("/nonexistent/frust/checkout/../../plugins/x"),
+        );
+        deps.insert(key_name, Item::Value(Value::InlineTable(inline)));
+        doc
+    }
+
+    /// Parse a freshly scaffolded project's `Cargo.toml` and insert an
+    /// `optional = true` dependency named `dep_name`.
+    fn cargo_doc_with_optional_dep(root: &Path, dep_name: &str) -> DocumentMut {
+        let cargo_path = root.join(CARGO_TOML_REL);
+        let mut doc = fs::read_to_string(&cargo_path)
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        let deps = doc
+            .get_mut("dependencies")
+            .and_then(Item::as_table_like_mut)
+            .unwrap();
+        let mut inline = InlineTable::new();
+        inline.insert(
+            "path",
+            Value::from("/nonexistent/frust/checkout/../../plugins/x"),
+        );
+        inline.insert("optional", Value::from(true));
+        deps.insert(dep_name, Item::Value(Value::InlineTable(inline)));
+        doc
+    }
+
+    /// (f) `plugin_is_installed` (R0-m6): a dependency renamed via an inline
+    /// `package = "<name>"` key still counts as installed.
+    #[test]
+    fn desktop_contributions_for_renamed_dep_is_detected() {
+        let root = scaffold_project("desktop-contrib-renamed-dep");
+        let doc = cargo_doc_with_renamed_dep(&root, "desktop_test", "frust-desktop-test-plugin");
+
+        let result = desktop_contributions_for(&[DESKTOP_PLUGIN], &doc);
+        assert_eq!(result.len(), 3, "{result:?}");
+        assert!(result.iter().all(|c| c.plugin_id == "desktop-test-plugin"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// (g) `plugin_is_installed` (R0-m6): an `optional = true` dependency is
+    /// excluded even though its name matches — its base contributions must
+    /// not merge into a bundle whose binary may not contain it.
+    #[test]
+    fn desktop_contributions_for_optional_dep_is_excluded() {
+        let root = scaffold_project("desktop-contrib-optional-dep");
+        let doc = cargo_doc_with_optional_dep(&root, "frust-desktop-test-plugin");
+
+        let result = desktop_contributions_for(&[DESKTOP_PLUGIN], &doc);
+        assert!(result.is_empty(), "{result:?}");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// (h) `plugin_is_installed` (R0-m6): a plain, non-renamed, non-optional
+    /// dependency is still detected — the pre-existing behaviour is
+    /// preserved by the widened check.
+    #[test]
+    fn desktop_contributions_for_plain_dep_is_still_detected() {
+        let root = scaffold_project("desktop-contrib-plain-dep");
+        let doc = cargo_doc_with_dep(&root, "frust-desktop-test-plugin");
+
+        let result = desktop_contributions_for(&[DESKTOP_PLUGIN], &doc);
+        assert_eq!(result.len(), 3, "{result:?}");
 
         let _ = fs::remove_dir_all(&root);
     }

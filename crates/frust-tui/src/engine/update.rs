@@ -690,26 +690,16 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         },
         Message::AddPluginSucceeded(report) => match state.add_plugin.as_mut() {
             Some(dialog) => {
-                let (applied, already) = report.counts();
-                let id = report.plugin_id.clone();
+                let text = add_plugin_toast_text(&report);
                 dialog.succeed(report);
-                state.toasts.push(
-                    ToastKind::Success,
-                    format!("Added {id} · {applied} applied, {already} already present"),
-                );
+                state.toasts.push(ToastKind::Success, text);
                 Outcome::redraw()
             }
             // The dialog was closed before the apply finished — the edits still
             // landed, so surface a toast rather than silently dropping it.
             None => {
-                let (applied, already) = report.counts();
-                state.toasts.push(
-                    ToastKind::Success,
-                    format!(
-                        "Added {} · {applied} applied, {already} already present",
-                        report.plugin_id
-                    ),
-                );
+                let text = add_plugin_toast_text(&report);
+                state.toasts.push(ToastKind::Success, text);
                 Outcome::redraw()
             }
         },
@@ -1746,6 +1736,25 @@ fn open_add_plugin(state: &mut AppState) -> Outcome {
         redraw: true,
         effect: Some(Effect::ProbeCleanSignals),
     }
+}
+
+/// The `AddPluginSucceeded` toast text: `"Added <id> · <applied> applied,
+/// <already> already present[, <n> applied at build]"` — built from
+/// [`frust_drive::plugin::AddReport::outcome_counts`]'s three-bucket shape,
+/// the same counting rule `crate::ui::views::add_plugin`'s
+/// `report_summary_line` uses, so a desktop-lane [`AddOutcome::AppliedAtBuild`]
+/// item is never mislabeled "already present" here either. The trailing
+/// clause is only appended when the report actually carries one.
+fn add_plugin_toast_text(report: &frust_drive::plugin::AddReport) -> String {
+    let (applied, already_present, applied_at_build) = report.outcome_counts();
+    let mut text = format!(
+        "Added {} · {applied} applied, {already_present} already present",
+        report.plugin_id
+    );
+    if applied_at_build > 0 {
+        text.push_str(&format!(", {applied_at_build} applied at build"));
+    }
+    text
 }
 
 /// Apply `f` to the open Add Plugin dialog (if any) and redraw; idle when
@@ -3364,9 +3373,51 @@ mod tests {
         update(&mut st, Message::AddPluginSucceeded(report));
         assert_eq!(st.add_plugin.as_ref().unwrap().step, AddPluginStep::Report);
         assert!(!st.toasts.items.is_empty());
+        assert_eq!(
+            st.toasts.items.last().unwrap().text,
+            "Added shared-preferences · 1 applied, 0 already present"
+        );
         // Enter on the report closes the dialog.
         update(&mut st, Message::AddPluginAdvance);
         assert!(st.add_plugin.is_none());
+    }
+
+    /// A report carrying an [`AddOutcome::AppliedAtBuild`] item must toast
+    /// "applied at build", never "already present" — the same truthful
+    /// counting rule `crate::ui::views::add_plugin`'s `report_summary_line`
+    /// uses, via the shared `AddReport::outcome_counts` (R0 toast cluster).
+    #[test]
+    fn add_plugin_success_toast_labels_applied_at_build_items_correctly() {
+        use frust_drive::plugin::{AddItem, AddOutcome, AddReport};
+
+        let mut st = workbench_with_project();
+        update(&mut st, Message::OpenAddPlugin);
+        update(&mut st, Message::AddPluginAdvance); // into Options
+        update(&mut st, Message::AddPluginAdvance); // into Applying (emits effect)
+        let report = AddReport {
+            plugin_id: "desktop-test-plugin".to_string(),
+            items: vec![
+                AddItem {
+                    description: "Cargo.toml dependency `frust-desktop-test-plugin`".to_string(),
+                    outcome: AddOutcome::Applied,
+                },
+                AddItem {
+                    description: "Info.plist key `NSSupportsSuddenTermination` (applied at `frust build macos`)"
+                        .to_string(),
+                    outcome: AddOutcome::AppliedAtBuild,
+                },
+            ],
+        };
+        update(&mut st, Message::AddPluginSucceeded(report));
+        let text = &st.toasts.items.last().unwrap().text;
+        assert_eq!(
+            text,
+            "Added desktop-test-plugin · 1 applied, 0 already present, 1 applied at build",
+        );
+        assert!(
+            !text.contains("2 already present") && !text.contains("1 already present, 1 applied"),
+            "an AppliedAtBuild item must never be lumped into 'already present': {text}"
+        );
     }
 
     #[test]

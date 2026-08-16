@@ -359,6 +359,11 @@ impl AddReport {
     /// blanket-describe that bucket as "already present" — a desktop-lane
     /// item's honest outcome is [`AddOutcome::AppliedAtBuild`], never
     /// [`AddOutcome::AlreadyPresent`].
+    ///
+    /// Kept for compatibility with any caller that only needs the coarse
+    /// two-bucket shape; a caller that renders a per-outcome label (every
+    /// current one does) wants [`Self::outcome_counts`] instead — the one
+    /// counting rule the whole codebase shares.
     pub fn counts(&self) -> (usize, usize) {
         let applied = self
             .items
@@ -366,6 +371,25 @@ impl AddReport {
             .filter(|i| i.outcome == AddOutcome::Applied)
             .count();
         (applied, self.items.len() - applied)
+    }
+
+    /// `(applied, already_present, applied_at_build)` line-item counts — the
+    /// one truthful counting rule every report-rendering caller (the TUI
+    /// engine's toast, the add-plugin view's header) shares, so a
+    /// desktop-lane item is never mislabeled "already present". Additive to
+    /// [`Self::counts`], which stays for its coarser two-bucket callers.
+    pub fn outcome_counts(&self) -> (usize, usize, usize) {
+        let mut applied = 0;
+        let mut already_present = 0;
+        let mut applied_at_build = 0;
+        for item in &self.items {
+            match item.outcome {
+                AddOutcome::Applied => applied += 1,
+                AddOutcome::AlreadyPresent => already_present += 1,
+                AddOutcome::AppliedAtBuild => applied_at_build += 1,
+            }
+        }
+        (applied, already_present, applied_at_build)
     }
 }
 
@@ -469,5 +493,46 @@ mod tests {
             .describe(),
             "desktop entry `Categories` (applied at `frust build linux`)"
         );
+    }
+
+    fn item(outcome: AddOutcome) -> AddItem {
+        AddItem {
+            description: "test item".to_string(),
+            outcome,
+        }
+    }
+
+    #[test]
+    fn outcome_counts_buckets_all_three_outcomes_separately() {
+        let report = AddReport {
+            plugin_id: "test-plugin".to_string(),
+            items: vec![
+                item(AddOutcome::Applied),
+                item(AddOutcome::Applied),
+                item(AddOutcome::AlreadyPresent),
+                item(AddOutcome::AppliedAtBuild),
+            ],
+        };
+        assert_eq!(report.outcome_counts(), (2, 1, 1));
+        // `counts()` stays the coarser two-bucket shape it always was.
+        assert_eq!(report.counts(), (2, 2));
+    }
+
+    #[test]
+    fn outcome_counts_of_an_empty_report_is_all_zero() {
+        let report = AddReport {
+            plugin_id: "test-plugin".to_string(),
+            items: vec![],
+        };
+        assert_eq!(report.outcome_counts(), (0, 0, 0));
+    }
+
+    #[test]
+    fn outcome_counts_never_lumps_applied_at_build_with_already_present() {
+        let report = AddReport {
+            plugin_id: "test-plugin".to_string(),
+            items: vec![item(AddOutcome::AppliedAtBuild)],
+        };
+        assert_eq!(report.outcome_counts(), (0, 0, 1));
     }
 }

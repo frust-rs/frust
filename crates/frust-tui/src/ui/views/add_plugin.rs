@@ -315,31 +315,21 @@ fn render_feature(
 }
 
 /// The report header's `<applied> applied, <already> already present[, <n>
-/// applied at build]` clause — built from the three outcome counts directly
-/// rather than [`frust_drive::plugin::AddReport::counts`]'s two-bucket
-/// shape: that method's second bucket lumps [`AddOutcome::AlreadyPresent`]
-/// and [`AddOutcome::AppliedAtBuild`] together, and this view must not
-/// caption a desktop-lane item (never written to a project file, applied
-/// fresh at every `frust build <os>`) as "already present". The trailing
-/// clause is only appended when the report actually carries an
-/// `AppliedAtBuild` item — a pure, standalone function so the counting rule
-/// is unit-tested without a render pass and its column-width constraints.
+/// applied at build]` clause — built from
+/// [`frust_drive::plugin::AddReport::outcome_counts`]'s three-bucket shape
+/// rather than [`frust_drive::plugin::AddReport::counts`]'s coarser
+/// two-bucket one: that method's second bucket lumps
+/// [`AddOutcome::AlreadyPresent`] and [`AddOutcome::AppliedAtBuild`]
+/// together, and this view must not caption a desktop-lane item (never
+/// written to a project file, applied fresh at every `frust build <os>`) as
+/// "already present". The trailing clause is only appended when the report
+/// actually carries an `AppliedAtBuild` item — a pure, standalone function so
+/// the counting rule is unit-tested without a render pass and its
+/// column-width constraints. This is the one counting rule the codebase
+/// shares — `crate::engine::update`'s `AddPluginSucceeded` toast sites build
+/// their text from the same `outcome_counts()` call.
 fn report_summary_line(report: &frust_drive::plugin::AddReport) -> String {
-    let applied = report
-        .items
-        .iter()
-        .filter(|i| i.outcome == AddOutcome::Applied)
-        .count();
-    let already_present = report
-        .items
-        .iter()
-        .filter(|i| i.outcome == AddOutcome::AlreadyPresent)
-        .count();
-    let applied_at_build = report
-        .items
-        .iter()
-        .filter(|i| i.outcome == AddOutcome::AppliedAtBuild)
-        .count();
+    let (applied, already_present, applied_at_build) = report.outcome_counts();
     let mut summary = format!("{applied} applied, {already_present} already present");
     if applied_at_build > 0 {
         summary.push_str(&format!(", {applied_at_build} applied at build"));
