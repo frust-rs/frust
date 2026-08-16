@@ -471,6 +471,9 @@ must declare the same floor; the numbers are repeated in an in-file comment at e
 |----------|-------|-------------|
 | Android | **`minSdk = 26`** (Android 8.0) · `compileSdk = 36` | 10 Gradle files: `platform/android/frust-embedding`, `plugins/{camera,native-widgets,secure-storage}/platform/android`, `templates/app/android.tmpl/app`, and the 5 example/benchmark apps |
 | iOS | **15.0** | `platform/ios/FrustEmbedding/Package.swift` (`.iOS(.v15)`) and each app's `IPHONEOS_DEPLOYMENT_TARGET` |
+| macOS | **11.0** (`LSMinimumSystemVersion`, `[macos] minimum-system-version` overridable per app) | `crates/frust-drive/src/manifest.rs`'s `DEFAULT_MACOS_MINIMUM_SYSTEM_VERSION` — single source, rendered into `templates/app/macos.tmpl/Info.plist.tmpl`; no other site repeats the literal, so there is no lockstep comment to keep in sync |
+| Windows | **10** | Not an in-repo literal — inherited from the pinned `winit = "0.30.13"`'s own platform support |
+| Linux | No distro floor; a Vulkan-capable GPU driver (wgpu's requirement) | Not declared per-distro anywhere in this repo |
 
 **Adding a new Android module?** Copy the floor and the lockstep comment. **Adding a new iOS
 target?** `Package.swift`'s `platforms:` must stay **at or below** every consumer's
