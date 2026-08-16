@@ -3,8 +3,9 @@
 //! A `wgpu::PipelineCache` lets a driver reuse the machine code it compiled for
 //! vello's shader pipelines across process launches, cutting warm-start
 //! shader/pipeline compilation to near zero. wgpu only implements it on Vulkan
-//! (Android); Metal/desktop drivers manage their own caches, so this whole path
-//! is silently inert there (the feature is absent → no cache is ever created).
+//! (any Vulkan adapter — Android, Linux, Windows-on-Vulkan); Metal/DX12 drivers
+//! manage their own caches, so this whole path is silently inert there (the
+//! feature is absent → no cache is ever created).
 //!
 //! The shell owns file I/O and hands the framework an opaque `Vec<u8>` blob (no
 //! `serde`/file dependency lives here — see the task notes). Before that blob is

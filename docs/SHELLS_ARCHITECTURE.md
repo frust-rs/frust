@@ -196,11 +196,11 @@ frame runs when something asks for one, and a paced request resolves its next wa
 that paint's outcome.
 
 The desktop shell persists a pipeline cache through `frust-paths`, so second-and-later launches
-skip pipeline compilation on adapters that actually advertise `PIPELINE_CACHE` — in wgpu 29 that is
-Android Vulkan only (matching `frust-render`'s own doc on the feature); no desktop adapter
-(macOS/Windows/Linux) advertises it, so `save`/`load` are both no-ops on every desktop platform
-today. Loading also reads through to a legacy macOS cache base when the current-location file is
-absent, migrating nothing — that read-through is inert by construction (the legacy base is `Some`
+skip pipeline compilation on adapters that advertise `PIPELINE_CACHE` — in wgpu 29 that is any
+Vulkan adapter (Linux, and Windows when the selected backend is Vulkan; verified in wgpu-hal
+29.0.4's unconditional Vulkan feature set), never Metal or DX12 — so macOS never writes a cache.
+Loading is unconditional file I/O at startup on every desktop OS, and reads through to a legacy
+macOS cache base when the current-location file is absent, migrating nothing — that read-through is inert by construction (the legacy base is `Some`
 only on macOS, where a save never fires, so no legacy blob can exist); it survives purely as
 compatibility for the `frust-paths` macOS-arm change. The whole path is best-effort — startup never
 fails on cache I/O. See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) for `frust-paths` itself.

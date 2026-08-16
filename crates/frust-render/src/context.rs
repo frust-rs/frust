@@ -994,8 +994,9 @@ impl RenderContext {
 
     /// Whether the live device was created with `wgpu::Features::PIPELINE_CACHE`.
     ///
-    /// wgpu 29 only implements the persisted pipeline cache on Vulkan (Android);
-    /// Metal/desktop adapters never advertise the feature, so it is absent there
+    /// wgpu 29 only implements the persisted pipeline cache on Vulkan — every
+    /// Vulkan adapter advertises it (Android, Linux, Windows-on-Vulkan);
+    /// Metal and DX12 adapters never do, so it is absent there
     /// and [`create_pipeline_cache`](Self::create_pipeline_cache) returns `None`
     /// — the renderer then behaves exactly as it did before this path existed.
     /// Panics if no surface (and thus no device) has been created yet.

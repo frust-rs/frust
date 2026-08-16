@@ -85,7 +85,7 @@ struct ReadySurface {
     /// `RendererOptions` on the `Gpu` path) paired with the adapter fingerprint
     /// its data is framed under, so [`SurfaceRenderer::pipeline_cache_data`] can
     /// hand back a validatable blob. `None` on adapters without
-    /// `PIPELINE_CACHE` (Metal/desktop) — see
+    /// `PIPELINE_CACHE` (Metal/DX12) — see
     /// [`crate::context::RenderContext::create_pipeline_cache`].
     pipeline_cache: Option<(wgpu::PipelineCache, String)>,
     /// Offscreen WGSL fragment-shader effects (shader-showcase feature): the
@@ -207,7 +207,7 @@ pub struct SurfaceRenderer {
     /// disk via [`set_initial_pipeline_cache_data`](Self::set_initial_pipeline_cache_data),
     /// consumed at the next surface install to seed vello's shader-pipeline
     /// compilation. `None` is a cold start. Only meaningful on adapters with
-    /// `PIPELINE_CACHE` (Vulkan/Android); validated and discarded elsewhere.
+    /// `PIPELINE_CACHE` (any Vulkan adapter); validated and discarded elsewhere.
     initial_cache_data: Option<Vec<u8>>,
     /// The swapchain texture [`Self::acquire`] acquired and stashed for
     /// [`Self::submit`] to blit into and present (the acquire/submit span split).
@@ -254,14 +254,14 @@ impl SurfaceRenderer {
     /// Restores the persisted pipeline-cache blob a prior run produced via
     /// [`pipeline_cache_data`](Self::pipeline_cache_data), to seed vello's
     /// shader-pipeline compilation at the next surface install and cut warm-start
-    /// shader/pipeline compilation to near zero on Vulkan (Android).
+    /// shader/pipeline compilation to near zero on Vulkan.
     ///
     /// Builder-style (a setter rather than a new `on_surface_created*`
     /// parameter) so the three surface-creation entry points — and every shell
     /// call site — keep their signatures; the shell (persistence lands in tasks
     /// 13/14) calls this once after [`SurfaceRenderer::new`] and before the
     /// first `on_surface_created*`. Has no effect in practice on adapters
-    /// without `PIPELINE_CACHE` (Metal/desktop): the blob is validated against
+    /// without `PIPELINE_CACHE` (Metal/DX12): the blob is validated against
     /// the live adapter at install time and discarded on any mismatch. Passing
     /// `None` clears any restored blob (a cold start).
     pub fn set_initial_pipeline_cache_data(&mut self, data: Option<Vec<u8>>) {
@@ -273,7 +273,7 @@ impl SurfaceRenderer {
     /// [`crate::pipeline_cache`]).
     ///
     /// `None` when there is no live cache to read — no surface installed, or an
-    /// adapter without `PIPELINE_CACHE` (Metal/desktop) — or when the driver has
+    /// adapter without `PIPELINE_CACHE` (Metal/DX12) — or when the driver has
     /// produced nothing to hand back yet. The shell (tasks 13/14) writes the
     /// returned bytes to disk and feeds them back via
     /// [`set_initial_pipeline_cache_data`](Self::set_initial_pipeline_cache_data)
@@ -489,7 +489,7 @@ impl SurfaceRenderer {
         // `wgpu::PipelineCache` when the adapter supports it (Vulkan/Android) and
         // the shell restored a validated blob via
         // `set_initial_pipeline_cache_data`. Returns `None` on adapters without
-        // `PIPELINE_CACHE` (Metal/desktop) — the path is then byte-identical to
+        // `PIPELINE_CACHE` (Metal/DX12) — the path is then byte-identical to
         // before this existed. Created before the tier `match` so the `Gpu` arm
         // can clone it into `RendererOptions`; the `Cpu` tier runs no GPU
         // pipelines and leaves it unused (retained only so a later
