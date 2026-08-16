@@ -314,8 +314,42 @@ fn render_feature(
     );
 }
 
-/// The per-edit report: a `<applied>/<already>` header, one line per edit
-/// (Applied ✓ / AlreadyPresent •), and a muted manual-notes reminder.
+/// The report header's `<applied> applied, <already> already present[, <n>
+/// applied at build]` clause — built from the three outcome counts directly
+/// rather than [`frust_drive::plugin::AddReport::counts`]'s two-bucket
+/// shape: that method's second bucket lumps [`AddOutcome::AlreadyPresent`]
+/// and [`AddOutcome::AppliedAtBuild`] together, and this view must not
+/// caption a desktop-lane item (never written to a project file, applied
+/// fresh at every `frust build <os>`) as "already present". The trailing
+/// clause is only appended when the report actually carries an
+/// `AppliedAtBuild` item — a pure, standalone function so the counting rule
+/// is unit-tested without a render pass and its column-width constraints.
+fn report_summary_line(report: &frust_drive::plugin::AddReport) -> String {
+    let applied = report
+        .items
+        .iter()
+        .filter(|i| i.outcome == AddOutcome::Applied)
+        .count();
+    let already_present = report
+        .items
+        .iter()
+        .filter(|i| i.outcome == AddOutcome::AlreadyPresent)
+        .count();
+    let applied_at_build = report
+        .items
+        .iter()
+        .filter(|i| i.outcome == AddOutcome::AppliedAtBuild)
+        .count();
+    let mut summary = format!("{applied} applied, {already_present} already present");
+    if applied_at_build > 0 {
+        summary.push_str(&format!(", {applied_at_build} applied at build"));
+    }
+    summary
+}
+
+/// The per-edit report: a summary header ([`report_summary_line`]), one line
+/// per edit (Applied ✓ / AlreadyPresent • / AppliedAtBuild »), and a muted
+/// manual-notes reminder.
 fn render_report(
     frame: &mut Frame,
     dialog: &AddPluginDialog,
@@ -327,7 +361,7 @@ fn render_report(
     let Some(report) = &dialog.report else {
         return;
     };
-    let (applied, already) = report.counts();
+    let summary = report_summary_line(report);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("\u{2713} ", Style::default().fg(theme.success())),
@@ -336,7 +370,7 @@ fn render_report(
                 Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("  ·  {applied} applied, {already} already present"),
+                format!("  ·  {summary}"),
                 Style::default().fg(theme.muted()),
             ),
         ])),
@@ -351,6 +385,10 @@ fn render_report(
         let (glyph, color) = match item.outcome {
             AddOutcome::Applied => ("\u{2713}", theme.success()),
             AddOutcome::AlreadyPresent => ("\u{2022}", theme.muted()),
+            // Distinct from both Applied (✓) and AlreadyPresent (•): this
+            // edit was never made to a project file at all — it is recorded
+            // and applied fresh by every `frust build <os>` instead.
+            AddOutcome::AppliedAtBuild => ("\u{00bb}", theme.accent()),
         };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
@@ -448,5 +486,162 @@ fn step_hint(step: AddPluginStep) -> &'static str {
         AddPluginStep::Applying => "Applying…",
         AddPluginStep::Report => "Enter/Esc close",
         AddPluginStep::Error => "Enter retry · Esc back",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use frust_drive::plugin::{AddItem, AddReport};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Position;
+    use std::path::PathBuf;
+
+    use crate::ui::mouse::MouseRegions;
+
+    /// Render `dialog` alone (no base workbench layer beneath it) and return
+    /// the cell grid as a plain string — enough to assert a specific glyph
+    /// landed on a specific report row without pulling in the whole
+    /// `AppState`/`frust_tui::ui::render` pipeline `tests/snapshots.rs`
+    /// exercises for the dialog's other steps.
+    fn render_dialog_to_string(dialog: &AddPluginDialog) -> String {
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let theme = Theme::frust_dark();
+        let mut regions = MouseRegions::new();
+        terminal
+            .draw(|frame| {
+                let mut ctx = MouseCtx::new(&mut regions);
+                let area = frame.area();
+                render(frame, area, dialog, &theme, &mut ctx);
+            })
+            .expect("draw");
+        let buf = terminal.backend().buffer();
+        let area = buf.area;
+        let mut out = String::new();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                if let Some(cell) = buf.cell(Position::new(x, y)) {
+                    out.push_str(cell.symbol());
+                }
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// The report step renders a distinct `»` glyph for
+    /// [`AddOutcome::AppliedAtBuild`] — never `✓` (Applied) or `•`
+    /// (AlreadyPresent) — and the header's "applied at build" clause only
+    /// appears when the report actually carries one (see `render_report`'s
+    /// own doc comment for why it can't just reuse `AddReport::counts()`'s
+    /// two-bucket shape here).
+    #[test]
+    fn report_step_renders_a_distinct_glyph_for_applied_at_build() {
+        let mut dialog = AddPluginDialog::new(PathBuf::from("/tmp/example"));
+        dialog.succeed(AddReport {
+            plugin_id: "desktop-test-plugin".to_string(),
+            items: vec![
+                AddItem {
+                    description: "Cargo.toml dependency `frust-desktop-test-plugin`".to_string(),
+                    outcome: AddOutcome::Applied,
+                },
+                AddItem {
+                    description:
+                        "Info.plist key `NSSupportsSuddenTermination` (applied at `frust build macos`)"
+                            .to_string(),
+                    outcome: AddOutcome::AppliedAtBuild,
+                },
+            ],
+        });
+
+        let rendered = render_dialog_to_string(&dialog);
+        assert!(
+            rendered.contains("\u{00bb} Info.plist key"),
+            "expected the » glyph on the AppliedAtBuild row:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("\u{2022} Info.plist key")
+                && !rendered.contains("\u{2713} Info.plist key"),
+            "the AppliedAtBuild row must not carry the Applied/AlreadyPresent glyphs:\n{rendered}"
+        );
+    }
+
+    /// [`report_summary_line`]'s counting rule, standalone: the trailing
+    /// "applied at build" clause appears only when the report carries an
+    /// `AppliedAtBuild` item, with the right count — the header truthfulness
+    /// contract `render_report`'s doc comment describes. Checked as a pure
+    /// function rather than through a render pass, since the modal's fixed
+    /// 64-column width truncates a header this long before it ever reaches
+    /// the "already present"/"applied at build" clauses on screen.
+    #[test]
+    fn report_summary_line_includes_the_applied_at_build_clause_only_when_present() {
+        let mixed = AddReport {
+            plugin_id: "x".to_string(),
+            items: vec![
+                AddItem {
+                    description: "a".to_string(),
+                    outcome: AddOutcome::Applied,
+                },
+                AddItem {
+                    description: "b".to_string(),
+                    outcome: AddOutcome::AlreadyPresent,
+                },
+                AddItem {
+                    description: "c".to_string(),
+                    outcome: AddOutcome::AppliedAtBuild,
+                },
+            ],
+        };
+        assert_eq!(
+            report_summary_line(&mixed),
+            "1 applied, 1 already present, 1 applied at build"
+        );
+
+        let none_at_build = AddReport {
+            plugin_id: "x".to_string(),
+            items: vec![
+                AddItem {
+                    description: "a".to_string(),
+                    outcome: AddOutcome::Applied,
+                },
+                AddItem {
+                    description: "b".to_string(),
+                    outcome: AddOutcome::AlreadyPresent,
+                },
+            ],
+        };
+        assert_eq!(
+            report_summary_line(&none_at_build),
+            "1 applied, 1 already present"
+        );
+    }
+
+    /// A report with no `AppliedAtBuild` items must not grow the "applied at
+    /// build" clause — the header stays the original two-bucket text.
+    #[test]
+    fn report_step_omits_applied_at_build_clause_when_absent() {
+        let mut dialog = AddPluginDialog::new(PathBuf::from("/tmp/example"));
+        dialog.succeed(AddReport {
+            plugin_id: "secure-storage".to_string(),
+            items: vec![
+                AddItem {
+                    description: "Cargo.toml dependency `frust-secure-storage`".to_string(),
+                    outcome: AddOutcome::Applied,
+                },
+                AddItem {
+                    description: "Info.plist key `NSFaceIDUsageDescription`".to_string(),
+                    outcome: AddOutcome::AlreadyPresent,
+                },
+            ],
+        });
+
+        let rendered = render_dialog_to_string(&dialog);
+        assert!(
+            rendered.contains("1 applied, 1 already present")
+                && !rendered.contains("applied at build"),
+            "{rendered}"
+        );
     }
 }

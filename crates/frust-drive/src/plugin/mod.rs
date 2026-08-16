@@ -16,6 +16,15 @@
 //! why there is no `KotlinFile`/`ProguardRule` contribution — a copied file
 //! and a hand-appended keep rule both drift from the plugin they came from.
 //!
+//! The desktop lane ([`Contribution::MacosPlistEntry`]/
+//! [`Contribution::MacosEntitlement`]/[`Contribution::LinuxDesktopEntry`])
+//! never edits a project file at all: unlike every mobile contribution above,
+//! `add_plugin` only *records* one (reporting
+//! [`AddOutcome::AppliedAtBuild`]), and the desktop bundle a later
+//! `frust build macos|windows|linux` assembles applies it fresh every time —
+//! see [`apply::desktop_contributions`], the detection API a bundle-assembly
+//! task consumes.
+//!
 //! v1 is a **static in-crate registry** ([`known_plugins`]): the
 //! `frust-plugin.toml` cargo-metadata discovery ARCHITECTURE.md sketches stays
 //! the deferred v2 path (needed only once plugins live outside this repo).
@@ -26,7 +35,7 @@
 pub mod apply;
 pub mod registry;
 
-pub use apply::add_plugin;
+pub use apply::{DesktopContribution, add_plugin, desktop_contributions};
 pub use registry::known_plugins;
 
 use std::path::PathBuf;
@@ -219,6 +228,53 @@ pub enum Contribution {
         /// not written into the file itself.
         comment: &'static str,
     },
+    /// A `<key>/<string>` pair merged into the assembled macOS bundle's
+    /// `Contents/Info.plist` at `frust build macos` time — **not** into the
+    /// project's own `macos/Info.plist` (a later bundle-assembly task
+    /// consumes it via [`apply::desktop_contributions`]).
+    ///
+    /// Project desktop files (`macos/Info.plist`, `macos/app.entitlements`,
+    /// `linux/app.desktop`) are user-owned, hand-editable, reconciled files
+    /// — and a pre-Phase-B project may not even have them yet. So, unlike
+    /// [`Contribution::PlistEntry`]'s mobile counterpart, a desktop
+    /// contribution is never written into a project file at Add Plugin
+    /// time: `add_plugin` only *records* it (reporting
+    /// [`AddOutcome::AppliedAtBuild`]), and the assembled bundle applies it
+    /// fresh on **every** `frust build macos|windows|linux` — the same
+    /// "cannot outlive the plugin" property [`Contribution::GradleModule`]'s
+    /// own doc argues for, reached here by build-time application instead of
+    /// a manifest merger: remove the plugin dependency and the contribution
+    /// simply stops being applied, with no file left carrying it.
+    MacosPlistEntry {
+        key: &'static str,
+        value: &'static str,
+        comment: &'static str,
+    },
+    /// A boolean-true entitlement (`<key>k</key>` / `<true/>`) merged into
+    /// the entitlements passed to `codesign` at `frust build macos` time.
+    ///
+    /// v1 is boolean-true only — the dominant entitlement shape;
+    /// value-carrying entitlements are a future widening. Applied at build
+    /// time for the same reason [`Contribution::MacosPlistEntry`] is (see
+    /// its doc comment): `macos/app.entitlements` is a user-owned,
+    /// hand-editable project file, not an Add Plugin write target.
+    MacosEntitlement {
+        key: &'static str,
+        comment: &'static str,
+    },
+    /// A `[Desktop Entry]` `key=value` line merged into the assembled Linux
+    /// bundle's `<identifier>.desktop` at `frust build linux` time, only
+    /// when the key is absent — an existing key (user-owned) always wins.
+    ///
+    /// Applied at build time for the same reason
+    /// [`Contribution::MacosPlistEntry`] is (see its doc comment):
+    /// `linux/app.desktop` is a user-owned, hand-editable project file a
+    /// pre-Phase-B project may not even have at all.
+    LinuxDesktopEntry {
+        key: &'static str,
+        value: &'static str,
+        comment: &'static str,
+    },
 }
 
 impl Contribution {
@@ -246,6 +302,15 @@ impl Contribution {
             Contribution::ScaffoldFile { rel_path, .. } => {
                 format!("scaffolded file `{rel_path}`")
             }
+            Contribution::MacosPlistEntry { key, .. } => {
+                format!("Info.plist key `{key}` (applied at `frust build macos`)")
+            }
+            Contribution::MacosEntitlement { key, .. } => {
+                format!("entitlement `{key}` (applied at `frust build macos`)")
+            }
+            Contribution::LinuxDesktopEntry { key, .. } => {
+                format!("desktop entry `{key}` (applied at `frust build linux`)")
+            }
         }
     }
 }
@@ -258,6 +323,12 @@ pub enum AddOutcome {
     Applied,
     /// The edit was already present; nothing was written.
     AlreadyPresent,
+    /// The contribution is recorded in the registry and applied by every
+    /// `frust build <os>`; `add_plugin` performs no project-file edit for it
+    /// (see [`Contribution::MacosPlistEntry`] and its two siblings). Never
+    /// [`AddOutcome::AlreadyPresent`] — nothing is written here for a second
+    /// run to find already present.
+    AppliedAtBuild,
 }
 
 /// One line of an [`AddReport`]: what the edit was and whether it applied.
@@ -281,7 +352,13 @@ pub struct AddReport {
 }
 
 impl AddReport {
-    /// `(applied, already_present)` line-item counts — a report header summary.
+    /// `(applied, other)` line-item counts — a report header summary. The
+    /// second bucket lumps [`AddOutcome::AlreadyPresent`] and
+    /// [`AddOutcome::AppliedAtBuild`] together (neither wrote anything this
+    /// run): a caller rendering its own per-bucket label must not
+    /// blanket-describe that bucket as "already present" — a desktop-lane
+    /// item's honest outcome is [`AddOutcome::AppliedAtBuild`], never
+    /// [`AddOutcome::AlreadyPresent`].
     pub fn counts(&self) -> (usize, usize) {
         let applied = self
             .items
@@ -358,4 +435,39 @@ pub enum PluginAddError {
     /// than assuming that forever.
     #[error("scaffold file path `{0}` must be a relative path with no `..` component")]
     UnsafeScaffoldPath(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_lane_describe_strings_name_their_build_time() {
+        assert_eq!(
+            Contribution::MacosPlistEntry {
+                key: "NSSupportsSuddenTermination",
+                value: "NO",
+                comment: "test",
+            }
+            .describe(),
+            "Info.plist key `NSSupportsSuddenTermination` (applied at `frust build macos`)"
+        );
+        assert_eq!(
+            Contribution::MacosEntitlement {
+                key: "com.apple.security.network.client",
+                comment: "test",
+            }
+            .describe(),
+            "entitlement `com.apple.security.network.client` (applied at `frust build macos`)"
+        );
+        assert_eq!(
+            Contribution::LinuxDesktopEntry {
+                key: "Categories",
+                value: "Utility;",
+                comment: "test",
+            }
+            .describe(),
+            "desktop entry `Categories` (applied at `frust build linux`)"
+        );
+    }
 }
