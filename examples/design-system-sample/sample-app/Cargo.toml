@@ -1,0 +1,20 @@
+[package]
+name = "sample-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+# The design system under test, and the facade. `default-features = false` on
+# the `frust` edge is inherited from the workspace manifest (Cargo ignores it
+# when written on an inherited dependency — see that file's comment), so this
+# binary compiles with NO built-in catalog: no `frust::material::*`,
+# `frust::cupertino::*`, `frust::glyph::*`, and no bundled Glyph fonts.
+#
+# Nothing is re-enabled. `frust`'s only non-catalog features are `perf-trace`
+# (frame instrumentation, enabled by the `frust` CLI for debug/profile builds)
+# and `devtools` (the in-app debug service) — both tooling opt-ins, neither
+# needed to render three widgets.
+frust = { workspace = true }
+sample-design = { path = "../sample-design" }
