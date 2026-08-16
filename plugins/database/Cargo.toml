@@ -15,6 +15,10 @@ thiserror = { workspace = true }
 # reach on-disk SQLite storage directly rather than through an OS capability
 # API — see this crate's `lib.rs` charter doc.
 frust-paths = { path = "../../crates/frust-paths" }
+# One `debug!` line: the macOS legacy-base read-through in `resolve_db_path`
+# names both candidate paths when it opens the legacy database instead of
+# the new-location one, so a surprising open location is diagnosable.
+log = { workspace = true }
 # The sqlite engine backend (default, `engine-sqlite`) — optional so
 # `cargo check -p frust-database --no-default-features` still resolves to a
 # database-engine-free skeleton, the same way `engine-turso` below is optional.

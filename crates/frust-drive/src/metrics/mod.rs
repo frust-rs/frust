@@ -25,6 +25,11 @@
 //! parse-vs-spawn split.
 
 mod android;
+// Only `fetch_all`'s Linux branch calls the readers, but their bodies are
+// portable and tested on every host (see its module doc) — the allow is
+// scoped off-Linux so the Linux build (the one that ships this collector)
+// still reports real dead code.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod desktop;
 mod net_dev;
 mod proc_stat;
@@ -143,6 +148,9 @@ impl MetricsError {
         }
     }
 
+    // Its only callers are `desktop`'s readers, dead off Linux — same scoped
+    // allow as `mod desktop`.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn io(path: impl Into<String>, source: std::io::Error) -> Self {
         Self::Io {
             path: path.into(),

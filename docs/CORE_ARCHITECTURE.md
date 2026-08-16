@@ -24,7 +24,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how CORE relates to the other units.
 | `frust-reactive::runtime` | Process-wide `ReactiveRuntime`: background executor, root `Owner`, and the `FrameWaker` rebuild-wake bridge |
 | `frust-reactive::tracked` | `TrackedScope` — dependency tracking that wakes the shell when a tracked signal it read later changes |
 | `frust-reactive::task` / `deep_link` / `back` | `AsyncValue`/`use_task` heavy-work idiom, plus process-wide deep-link and back-press event sources |
-| `frust-paths::lib` | Data/cache-dir resolution and an atomic-write helper for desktop and mobile shells |
+| `frust-paths::lib` | Per-platform data/cache-dir resolution (including a macOS legacy-XDG read-through fallback) and an atomic-write helper for desktop and mobile shells |
 | `frust::lib` (facade) | Curates core/widgets/theme/reactive/shells into one flat API via `app!`/`run`/`Component`, plus `frust::authoring` — the widget-authoring vocabulary (trait lifecycle, child/event plumbing, geometry) an app needs to implement its own `View`/`Widget` pair without a direct dependency on `frust-core`/`frust-scene`/`frust-text`/`kurbo`/`peniko` |
 
 ## Layer Dependencies
@@ -43,8 +43,16 @@ drive the tracked-scope machinery its render loop needs.
 `frust-scene` exposes only `kurbo`/`peniko` types in its public API; this is the CORE side of the
 scene-layer purity boundary enforced against `frust-render` (see
 [ARCHITECTURE.md](ARCHITECTURE.md)). `frust-paths` is consumed by shells and plugins outside CORE
-for directory resolution — its leaf charter and cross-unit callers are also covered in the index.
-The facade's dependency on `frust-widgets`/`frust-theme` (WIDGETS) and the shell crates (SHELLS) is
+for directory resolution — its leaf charter and cross-unit callers are also covered in the index. On
+macOS, `data_dir()`/`cache_dir()` resolve `~/Library/Application Support`/`~/Library/Caches` as the
+base (XDG vars never override it) but read through to the pre-macOS-arm legacy XDG location when
+only it holds the app's `app_stem()`-named directory — never migrating, copying, or deleting. That
+built-in probe is `app_stem()`-granular, so the two differently-shaped in-repo callers
+(`plugins/database`, `frust-shell-desktop`'s pipeline cache) instead resolve the legacy base
+themselves via the public `legacy_data_dir()`/`legacy_cache_dir()` and do their own file-level
+read-through with the same never-migrate contract. See `paths-macos-legacy-fallback-runtime-unverified`
+in [LIMITATIONS.md](LIMITATIONS.md) for runtime-verification status. The facade's dependency on
+`frust-widgets`/`frust-theme` (WIDGETS) and the shell crates (SHELLS) is
 the facade/plugin boundary described in the index; CORE itself never depends on either.
 
 ## Data Flow

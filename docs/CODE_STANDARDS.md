@@ -13,11 +13,11 @@ off this index — read this plus the one that covers what you are touching:
 
 - **`unsafe` is confined to a small set of sanctioned platform-FFI boundaries.** Every other
   crate (`frust-core`, `frust-scene`, `frust-text`, `frust-widgets`, `frust-shell-common`,
-  `frust-shell-desktop`, `frust`) stays `unsafe`-free — where Masonry/xilem-style code would
-  reach for `unsafe` downcasting, use trait upcasting instead: bound a trait on `Any` (e.g.
-  `Widget: Any`) and downcast through `&mut dyn Any`. The sanctioned zones are raw-pointer
-  boundaries a GPU/platform shell cannot avoid, each isolated in one function/module with a
-  `# Safety` doc comment stating the caller contract:
+  `frust-shell-desktop`, `frust-shell-linux`, `frust`) stays `unsafe`-free — where
+  Masonry/xilem-style code would reach for `unsafe` downcasting, use trait upcasting instead:
+  bound a trait on `Any` (e.g. `Widget: Any`) and downcast through `&mut dyn Any`. The
+  sanctioned zones are raw-pointer boundaries a GPU/platform shell cannot avoid, each isolated
+  in one function/module with a `# Safety` doc comment stating the caller contract:
   - `frust-render`'s `create_android_surface`/`create_metal_surface` (`lifecycle.rs`) and
     `on_surface_created_from_android_window`/ `on_surface_created_from_metal_layer`
     (`renderer.rs`) — turn a caller-owned raw `ANativeWindow*`/`CAMetalLayer*` into a
@@ -30,6 +30,19 @@ off this index — read this plus the one that covers what you are touching:
     `Box::into_raw`/`from_raw`, the call into `on_surface_created_from_metal_layer`),
     `ios_app!`'s generated exports, and the split's `unsafe impl Send` for
     `SendableMetalLayer` plus a bare `libc::pthread_set_qos_class_self_np` self-boost.
+  - `frust-shell-macos`'s `appkit_glue` module — four sites: the whole `define_class!` block
+    counted as one (its `#[unsafe(super(NSObject))]`/`#[unsafe(method(…))]` attributes
+    declaring the reopen-notification observer class, AND the `unsafe impl NSObjectProtocol`
+    conformance it also carries, share the block's one `SAFETY:` note at the macro head),
+    `msg_send![super(this), init]` (`NSObject`'s designated initializer),
+    `NSNotificationCenter::addObserver_selector_name_object` plus the
+    `NSApplicationDidBecomeActiveNotification` `extern` static read that registers it, and the
+    matching `removeObserver` in `Drop`. Each is `SAFETY`-noted.
+  - `frust-shell-windows`'s `win32_glue` module — three sites:
+    `SetCurrentProcessExplicitAppUserModelID` (taskbar identity), the `TranslateAcceleratorW`
+    call inside the menu-accelerator message hook, and muda's `Menu::init_for_hwnd` attaching
+    the native menu bar to a live `HWND`. Each is `SAFETY`-noted; `frust-shell-linux` holds no
+    `unsafe` at all.
   - `frust-plugin`'s `android` module — reconstructs the raw `JavaVM`/`jobject` plugins need
     from `ndk-context`-stored handles, one sanctioned module, scoped `AttachGuard` per call.
   - `frust-shared-preferences`'s `apple` backend — two `setObject:forKey:` calls (`objc2`
@@ -72,7 +85,14 @@ off this index — read this plus the one that covers what you are touching:
   into JVM-/Swift-owned stack frames — a panic crossing the FFI boundary is undefined
   behavior, not a bug. `run_guarded_thread` is `guard`'s whole-thread-body counterpart:
   every render-thread `spawn` closure routes through it, so a caught panic exits cleanly and
-  drains any orphaned `Ack` instead of poisoning shared state.
+  drains any orphaned `Ack` instead of poisoning shared state. `frust-shell-macos` and
+  `frust-shell-windows` depend on neither `frust-shell-common` nor each other, so their
+  native-callback boundaries can't route through `guard`; each applies the same contract
+  locally instead — `appkit_glue`'s AppKit notification callback hand-rolls its own
+  `catch_unwind` around the observer body. The one exception is muda's menu-event handler
+  (shared by both crates' `menu` modules): it is a native-dispatch boundary held panic-free
+  by construction rather than by `catch_unwind` — the callback body is an infallible
+  mutex-guarded queue push plus a redraw request, nothing that can panic.
 - **State-sync, not op-forwarding, across a mobile IME bridge.** Android/iOS platform text
   input doesn't send individual keystrokes across the FFI boundary — the platform owns
   composition (Gboard, CJK marked text) against a local mirror, then hands the framework a
@@ -369,7 +389,11 @@ Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantic
   owner (running every `on_cleanup` registered under it since `init`) before dropping
   `State`. Register disposal (timers, controller/subscription teardown) with `on_cleanup`
   inside `init`/`build` — never hand-roll a `Drop` impl on `State`; `Drop` order across the
-  state/element/owner triple is not a contract, `on_cleanup` is.
+  state/element/owner triple is not a contract, `on_cleanup` is. That guarantee is itself
+  route-dependent: a process-exit shutdown (macOS AppKit `terminate:`) runs neither `on_cleanup`
+  nor `Drop` — see `docs/LIMITATIONS.md`'s `desktop-macos-quit-skips-executor-drop`. A plugin
+  handle that owns an OS resource (e.g. `frust-camera`'s `AppleSession`) must not assume
+  Drop-at-exit on macOS when held in app `State`.
 - **A `Cancel` arm still never touches state, even the component's own** — the
   Cancel-never-mutates-state rule above binds every handler a component hosts, including one
   reading `ComponentWidget`'s own `State` (a synthesized `Cancel` crossing a component

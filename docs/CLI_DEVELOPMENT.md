@@ -43,9 +43,21 @@ LAW; re-run the row's tripwire after touching it, and never run a blind `cargo u
 | `axum 0.8` (`frust-mcp`-only) | The HTTP layer rmcp's `StreamableHttpService` nests into | `cargo test -p frust-mcp` |
 | `base64 0.22` (`frust-mcp`-only) | Encodes/decodes screenshot payloads in MCP tool results | `cargo test -p frust-mcp` |
 | `tokio-util 0.7` (`frust-mcp`/`frust-dap`; also `frust-tui`, see [TUI_DEVELOPMENT.md](TUI_DEVELOPMENT.md)) | The `CancellationToken` graceful-shutdown seam, wired to Ctrl-C in `frust-mcp`'s standalone `run` and to the workbench's start/stop toggle for both embedded servers in `frust-tui` | `cargo test -p frust-mcp` && `cargo test -p frust-dap` && `cargo test -p frust-tui` |
+| `icns 0.4` (`frust-drive`-only, `default-features = false` + `pngio`) | `icons::generate_icns`'s macOS `.icns` authoring — the same crate `cargo-bundle` itself uses; `pngio` is the only feature the PNG-only pipeline needs (drops the default JPEG-2000 codec) | `cargo test -p frust-drive` |
+
+`.ico` authoring adds no new crate: `icons::generate_ico` rides the `ico` feature of the `image`
+pin RENDER already owns exactly (see [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)) —
+`image::codecs::ico`.
 
 `frust-drive` also shares `frust-tui`'s `toml_edit` pin — see
 [TUI_DEVELOPMENT.md](TUI_DEVELOPMENT.md).
+
+### External-tool / template-side pins (not Cargo dependencies)
+
+| Pin | Why | Tripwire |
+|---|---|---|
+| `cargo-packager 0.11.8` exact (external tool, shelled out to by `desktop_build::installer`) | Builds `.dmg`/NSIS/WiX/`.deb`/`.AppImage` installers over an assembled bundle; `frust doctor`'s `CargoPackagerValidator` gates on an exact version match (non-fatal — only `frust build --installer` needs it) and reports the install hint `cargo install cargo-packager --version 0.11.8 --locked` on a mismatch or absence | `cargo install cargo-packager --version 0.11.8 --locked` smoke + `cargo test -p frust-drive` |
+| `winresource 0.1` (generated app's own build-dependency, `templates/app/Cargo.toml.tmpl` — not a workspace pin) | Embeds `windows/icon.ico` plus file/product version into the compiled `.exe`; the actively-maintained fork of `winres`, unmaintained since 2021 | scaffold e2e (`create_e2e`) |
 
 ## `frust-mcp`
 

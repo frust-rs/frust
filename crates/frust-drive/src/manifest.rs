@@ -1,16 +1,18 @@
 //! The shared `frust.toml` reader.
 //!
 //! One deserialiser for every manifest section the drive pipelines consume
-//! (`[app]`, `[android]`, `[ios]`, `[signing]`), replacing the two
-//! near-identical `[app]`/`[android]` and `[app]`/`[ios]` structs
-//! `android_run::project` and `ios_run::project` each used to carry — those
-//! modules now own only their id-resolution logic and read the manifest
-//! through [`load`].
+//! (`[app]`, `[android]`, `[ios]`, `[signing]`, `[desktop]`, `[macos]`,
+//! `[windows]`, `[linux]`), replacing the two near-identical
+//! `[app]`/`[android]` and `[app]`/`[ios]` structs `android_run::project`
+//! and `ios_run::project` each used to carry — those modules now own only
+//! their id-resolution logic and read the manifest through [`load`].
 //!
 //! Unknown sections are ignored (`[deeplink]`, `[flavors]` are documentation
 //! for the platform templates, not tooling input), but `[signing]` and its
-//! `[signing.env]` subtable are `deny_unknown_fields`: a typo in the section
-//! that decides whether a release artifact is really signed must fail loudly
+//! `[signing.env]` subtable, and the desktop-shell sections
+//! (`[desktop]`/`[macos]`/`[windows]`/`[linux]`), are `deny_unknown_fields`: a
+//! typo in a section that decides whether a release artifact is really
+//! signed, or that feeds the desktop packaging pipeline, must fail loudly
 //! rather than silently fall back to the default.
 //!
 //! `ios_build::team` keeps its own deliberately-partial `[ios] team` parse —
@@ -33,6 +35,14 @@ pub struct Manifest {
     pub ios: Option<IosSection>,
     #[serde(default)]
     pub signing: Option<SigningSection>,
+    #[serde(default)]
+    pub desktop: Option<DesktopSection>,
+    #[serde(default)]
+    pub macos: Option<MacosSection>,
+    #[serde(default)]
+    pub windows: Option<WindowsSection>,
+    #[serde(default)]
+    pub linux: Option<LinuxSection>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -101,6 +111,88 @@ pub struct SigningEnv {
     pub key_password: Option<String>,
 }
 
+/// The default `[macos] minimum-system-version` when the section, or the
+/// field, is absent — see [`MacosSection::minimum_system_version_or_default`].
+const DEFAULT_MACOS_MINIMUM_SYSTEM_VERSION: &str = "11.0";
+
+/// `[desktop]` — cross-platform desktop identity shared by every desktop
+/// packaging pipeline: window title / menu app name / bundle display name,
+/// bundle id / `AppUserModelID` / Wayland `app_id`, and the source icon the
+/// `.icns`/`.ico`/hicolor pipeline renders from.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct DesktopSection {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub identifier: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+}
+
+/// `[macos]` — macOS-specific packaging overrides.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct MacosSection {
+    /// Minimum macOS version the bundle declares it runs on. Defaults to
+    /// [`DEFAULT_MACOS_MINIMUM_SYSTEM_VERSION`] when absent — read that
+    /// default through [`MacosSection::minimum_system_version_or_default`]
+    /// rather than matching on this field directly.
+    #[serde(default)]
+    pub minimum_system_version: Option<String>,
+    /// Codesigning identity (e.g. `"Developer ID Application: ..."`).
+    /// Presence enables the codesign step; absence leaves the bundle
+    /// unsigned.
+    #[serde(default)]
+    pub signing_identity: Option<String>,
+    /// Opt in to Apple notarization during an `--installer dmg` build:
+    /// `cargo-packager` then submits the `.app` it signed to Apple's notary
+    /// service, using credentials read from the build's own environment.
+    /// Absent (or `false`) is the default, and means those credentials are
+    /// **removed** from the packaging tool's environment so an exported
+    /// `APPLE_ID`/`APPLE_API_KEY` can't turn a local build into an upload —
+    /// see `desktop_build::installer`, which owns the mechanism. Read through
+    /// [`MacosSection::notarize_enabled`] rather than matching this directly.
+    #[serde(default)]
+    pub notarize: Option<bool>,
+}
+
+impl MacosSection {
+    /// [`MacosSection::minimum_system_version`], or
+    /// [`DEFAULT_MACOS_MINIMUM_SYSTEM_VERSION`] when absent.
+    pub fn minimum_system_version_or_default(&self) -> &str {
+        self.minimum_system_version
+            .as_deref()
+            .unwrap_or(DEFAULT_MACOS_MINIMUM_SYSTEM_VERSION)
+    }
+
+    /// [`MacosSection::notarize`], defaulting to `false` — an absent key and
+    /// an explicit `notarize = false` mean the same thing, and both are the
+    /// credential-scrubbing default.
+    pub fn notarize_enabled(&self) -> bool {
+        self.notarize.unwrap_or(false)
+    }
+}
+
+/// `[windows]` — Windows-specific packaging overrides.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct WindowsSection {
+    #[serde(default)]
+    pub file_version: Option<String>,
+    #[serde(default)]
+    pub product_version: Option<String>,
+}
+
+/// `[linux]` — Linux-specific packaging overrides.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct LinuxSection {
+    /// `.desktop` `Categories=` entries.
+    #[serde(default)]
+    pub categories: Option<Vec<String>>,
+}
+
 /// `<project_root>/frust.toml`.
 pub fn path(project_root: &Path) -> PathBuf {
     project_root.join("frust.toml")
@@ -152,6 +244,157 @@ mod tests {
         assert_eq!(m.app.name, "myapp");
         assert_eq!(m.app.org, "dev.f0x");
         assert!(m.signing.is_none());
+        assert!(m.desktop.is_none());
+        assert!(m.macos.is_none());
+        assert!(m.windows.is_none());
+        assert!(m.linux.is_none());
+    }
+
+    #[test]
+    fn desktop_sections_default_to_absent_and_the_macos_version_default_holds() {
+        let m = parse("[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n").unwrap();
+        assert!(m.desktop.is_none());
+        assert!(m.macos.is_none());
+        assert!(m.windows.is_none());
+        assert!(m.linux.is_none());
+        // The accessor default applies even to a freshly-constructed section
+        // with no `minimum-system-version` field of its own.
+        assert_eq!(
+            MacosSection::default().minimum_system_version_or_default(),
+            "11.0"
+        );
+    }
+
+    #[test]
+    fn parses_a_round_trip_of_every_desktop_section() {
+        let m = parse(
+            "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n\
+             [desktop]\nname = \"My App\"\nidentifier = \"com.example.myapp\"\n\
+             icon = \"assets/icon-1024.png\"\n\n\
+             [macos]\nminimum-system-version = \"12.0\"\n\
+             signing-identity = \"Developer ID Application: Example\"\nnotarize = true\n\n\
+             [windows]\nfile-version = \"1.0.0.0\"\nproduct-version = \"1.0.0\"\n\n\
+             [linux]\ncategories = [\"Utility\"]\n",
+        )
+        .unwrap();
+
+        let desktop = m.desktop.unwrap();
+        assert_eq!(desktop.name.as_deref(), Some("My App"));
+        assert_eq!(desktop.identifier.as_deref(), Some("com.example.myapp"));
+        assert_eq!(desktop.icon.as_deref(), Some("assets/icon-1024.png"));
+
+        let macos = m.macos.unwrap();
+        assert_eq!(macos.minimum_system_version_or_default(), "12.0");
+        assert_eq!(
+            macos.signing_identity.as_deref(),
+            Some("Developer ID Application: Example")
+        );
+        assert_eq!(macos.notarize, Some(true));
+        assert!(macos.notarize_enabled());
+
+        let windows = m.windows.unwrap();
+        assert_eq!(windows.file_version.as_deref(), Some("1.0.0.0"));
+        assert_eq!(windows.product_version.as_deref(), Some("1.0.0"));
+
+        let linux = m.linux.unwrap();
+        assert_eq!(
+            linux.categories.as_deref(),
+            Some(&["Utility".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn macos_minimum_system_version_defaults_when_the_section_is_present_but_the_field_is_not() {
+        let m = parse(
+            "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n\
+             [macos]\nsigning-identity = \"Developer ID Application: Example\"\n",
+        )
+        .unwrap();
+        let macos = m.macos.unwrap();
+        assert_eq!(macos.minimum_system_version_or_default(), "11.0");
+        assert!(macos.minimum_system_version.is_none());
+    }
+
+    /// Notarization is opt-in, and only the exact `notarize = true` opts in:
+    /// an absent key and an explicit `false` both leave the packaging step's
+    /// Apple credentials scrubbed.
+    #[test]
+    fn macos_notarize_defaults_to_off_and_only_true_opts_in() {
+        let absent = parse(
+            "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n\
+             [macos]\nsigning-identity = \"Developer ID Application: Example\"\n",
+        )
+        .unwrap()
+        .macos
+        .unwrap();
+        assert_eq!(absent.notarize, None);
+        assert!(!absent.notarize_enabled());
+        assert!(!MacosSection::default().notarize_enabled());
+
+        let explicit_false = parse(
+            "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n\
+             [macos]\nnotarize = false\n",
+        )
+        .unwrap()
+        .macos
+        .unwrap();
+        assert_eq!(explicit_false.notarize, Some(false));
+        assert!(!explicit_false.notarize_enabled());
+    }
+
+    /// The key is kebab-case-strict like every other desktop key: a
+    /// plausible-looking `notarise`/`notarization` typo must fail loudly
+    /// rather than silently leave a build the author believes notarizes
+    /// scrubbing its credentials instead.
+    #[test]
+    fn a_typo_in_the_macos_notarize_key_is_a_hard_error() {
+        for line in ["notarise = true", "notarization = true"] {
+            let err = parse(&format!(
+                "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n[macos]\n{line}\n"
+            ))
+            .unwrap_err();
+            assert!(err.to_string().contains("invalid frust.toml"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_typo_in_the_desktop_section_is_a_hard_error() {
+        let err = parse(
+            "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n\
+             [desktop]\nnaem = \"My App\"\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("invalid frust.toml"), "{err}");
+    }
+
+    #[test]
+    fn a_typo_in_the_macos_section_is_a_hard_error() {
+        let err = parse(
+            "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n\
+             [macos]\nminimum_system_version = \"11.0\"\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("invalid frust.toml"), "{err}");
+    }
+
+    #[test]
+    fn a_typo_in_the_windows_section_is_a_hard_error() {
+        let err = parse(
+            "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n\
+             [windows]\nfileversion = \"1.0.0.0\"\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("invalid frust.toml"), "{err}");
+    }
+
+    #[test]
+    fn a_typo_in_the_linux_section_is_a_hard_error() {
+        let err = parse(
+            "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n\
+             [linux]\ncategory = [\"Utility\"]\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("invalid frust.toml"), "{err}");
     }
 
     #[test]

@@ -63,12 +63,13 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey as WinitNamedKey};
 use winit::window::{ImePurpose, Theme as WinitTheme, Window, WindowAttributes, WindowId};
 
+use crate::config::DesktopConfig;
+use crate::extensions::{CloseAction, DesktopExtensions, NoExtensions};
 use crate::paced_wake::{ControlFlowIntent, next_paced_wake, paced_wake_action};
 use crate::render::FrameExecutor;
 
 /// Initial preview-window size, in logical pixels.
 const INITIAL_SIZE: LogicalSize<u32> = LogicalSize::new(800, 600);
-const WINDOW_TITLE: &str = "Frust";
 
 /// User events posted to the desktop event loop from off the UI thread.
 ///
@@ -87,8 +88,14 @@ const WINDOW_TITLE: &str = "Frust";
 /// wrapper) is neither `Copy` nor `PartialEq`, so this enum can no longer
 /// derive those either — every existing use already matched/constructed it by
 /// value, so nothing downstream needed to change.
+///
+/// `pub` only so [`DesktopEventLoopBuilder`](crate::DesktopEventLoopBuilder)
+/// — the type the builder-stage extension hook takes — can name the loop's
+/// user-event type; `#[doc(hidden)]` keeps it out of published docs, the same
+/// escape the `paced_wake` module uses for its test-only visibility.
+#[doc(hidden)]
 #[derive(Debug)]
-pub(crate) enum ShellUserEvent {
+pub enum ShellUserEvent {
     /// One or more tracked signals became dirty since the last frame — pump the
     /// UI-thread local task queue and request a redraw.
     SignalsDirty,
@@ -132,11 +139,41 @@ impl From<AccessibilityEvent> for ShellUserEvent {
 /// Blocks the calling thread on the winit event loop. The event loop is
 /// on-demand ([`ControlFlow::Wait`]): frames are produced only in response to a
 /// redraw request (state change on rebuild, or a resize), never free-running.
+///
+/// The zero-config entry point: delegates to [`run_desktop_with`] with a
+/// default [`DesktopConfig`] (title `"Frust"`, no icon, no menu, close quits)
+/// and [`NoExtensions`], so the dev preview behaves exactly as it did before
+/// either seam existed. A per-OS shell crate calls [`run_desktop_with`]
+/// instead.
 pub fn run_desktop<State, Logic, V>(state: State, app_logic: Logic) -> Result<()>
 where
     State: 'static,
     V: View<State>,
     Logic: FnMut(&mut State) -> V + 'static,
+{
+    run_desktop_with(state, app_logic, DesktopConfig::default(), NoExtensions)
+}
+
+/// [`run_desktop`] with the app's desktop identity ([`DesktopConfig`]) and a
+/// per-OS extension set ([`DesktopExtensions`]) supplied.
+///
+/// This is the entry point the facade calls once it knows which platform shell
+/// it is running under: `frust-shell-macos`/`-windows`/`-linux` each construct
+/// their own `E` (handing it the same `config`, which they read for identity
+/// this core only carries — `app_id`, `window_icon`, `menu_spec`) and call
+/// here. Generic over `E` rather than boxed — see [`crate::extensions`]'s
+/// module docs.
+pub fn run_desktop_with<State, Logic, V, E>(
+    state: State,
+    app_logic: Logic,
+    config: DesktopConfig,
+    mut extensions: E,
+) -> Result<()>
+where
+    State: 'static,
+    V: View<State>,
+    Logic: FnMut(&mut State) -> V + 'static,
+    E: DesktopExtensions,
 {
     // Install the stderr `log::Log` sink once, so `frust-shell-common::perf`'s
     // `log::info!` startup-span/frame-stats lines below are actually visible
@@ -150,8 +187,13 @@ where
     let epoch = Instant::now();
 
     // winit 0.30 has no `EventLoop::<T>::new()` — the typed-user-event loop is
-    // built through the builder only.
-    let event_loop = EventLoop::<ShellUserEvent>::with_user_event().build()?;
+    // built through the builder only. The builder is held in a local (rather
+    // than built off a temporary) so the extension's builder-stage hook can
+    // install platform builder extensions winit accepts nowhere else — a
+    // Windows message hook for menu accelerators being the motivating case.
+    let mut builder = EventLoop::<ShellUserEvent>::with_user_event();
+    extensions.on_event_loop_builder(&mut builder);
+    let event_loop = builder.build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
     // A tracked signal write on any thread fires this waker, which sends a user
@@ -203,6 +245,8 @@ where
     let mut handler = ShellHandler {
         state,
         app_logic,
+        config,
+        extensions,
         runtime,
         scope: TrackedScope::new(),
         root: RenderRoot::new(),
@@ -232,6 +276,9 @@ where
         // brightness never leaks into a light-preference platform).
         theme: base_theme(default_theme()),
         theme_seeded: false,
+        // No brightness reported to the extension yet, so the first
+        // resolution (`resumed`'s seed) counts as a change and fires the hook.
+        brightness_notified: None,
         theme_override: ThemeOverrideWatcher::new(),
         theme_override_active: false,
         font_registry: FontRegistryWatcher::new(),
@@ -333,6 +380,49 @@ fn theme_after_override_poll(
 fn follow_platform_brightness(theme: &mut Theme, override_active: bool, platform: Brightness) {
     theme.brightness =
         effective_brightness_for_platform_change(override_active, theme.brightness, platform);
+}
+
+/// Assemble the preview window's [`WindowAttributes`] from the app's
+/// [`DesktopConfig`], then hand them to the extension's pre-create hook.
+///
+/// The core's own three attributes come first so an extension can override any
+/// of them:
+/// * the title, from [`DesktopConfig::window_title`] (the configured
+///   `app_name`, else the `"Frust"` fallback this shell used to hardcode);
+/// * the initial logical size;
+/// * `visible(false)` — the accessibility adapter must be constructed before
+///   the window is ever shown (see [`Adapter::with_event_loop_proxy`]'s
+///   contract), so `resumed` makes it visible itself once that is done.
+///
+/// A free function taking the extension rather than a `ShellHandler` method so
+/// the config→attributes→hook composition is unit-testable with a spy, without
+/// a live event loop.
+fn window_attributes(
+    config: &DesktopConfig,
+    extensions: &mut impl DesktopExtensions,
+) -> WindowAttributes {
+    let attributes = WindowAttributes::default()
+        .with_title(config.window_title())
+        .with_inner_size(INITIAL_SIZE)
+        .with_visible(false);
+    extensions.on_window_attributes(attributes)
+}
+
+/// The brightness (if any) to report through
+/// [`DesktopExtensions::on_theme_brightness_changed`], given the last value
+/// reported and the shell's current resolved one.
+///
+/// `last` is `None` before the first report, so the initial resolution counts
+/// as a change: a platform shell learns the starting brightness rather than
+/// having to guess it and wait for a flip. Afterwards only a genuine difference
+/// fires — the hook's "actually changed" contract, which matters because its
+/// call site sits inside `apply_theme` (see there) and would otherwise fire on
+/// every re-push, including ones that swap one dark theme for another.
+fn brightness_change_to_notify(
+    last: Option<Brightness>,
+    current: Brightness,
+) -> Option<Brightness> {
+    (last != Some(current)).then_some(current)
 }
 
 /// Turns a post-loop `ShellHandler::fatal` into the `run_desktop` result.
@@ -560,9 +650,17 @@ struct ImeSync {
 }
 
 /// Owns everything a running desktop app needs across frames.
-struct ShellHandler<State: 'static, Logic, V: View<State>> {
+struct ShellHandler<State: 'static, Logic, V: View<State>, E> {
     state: State,
     app_logic: Logic,
+    /// The app's desktop identity, threaded in from [`run_desktop_with`]. Read
+    /// by this core only for the window title (see [`window_attributes`]); the
+    /// rest of it is the per-OS shells' business, and they hold their own copy.
+    config: DesktopConfig,
+    /// The per-OS extension set — [`NoExtensions`] for the zero-config preview.
+    /// Static, not boxed (see [`crate::extensions`]'s module docs), so a hook
+    /// that a shell leaves at its default costs nothing at runtime.
+    extensions: E,
     /// The process-wide reactive runtime, initialized on this (UI) thread in
     /// [`run_desktop`]. Per-frame rebuilds run under its root [`Owner`], and
     /// [`ReactiveRuntime::pump_local`] drains the UI-thread local task queue on
@@ -641,6 +739,12 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     /// Whether the initial theme has been pushed to the render root / context
     /// yet — seeded once in the first `resumed`, before the first rebuild.
     theme_seeded: bool,
+    /// The brightness last reported through
+    /// [`DesktopExtensions::on_theme_brightness_changed`], `None` before the
+    /// first report. The change gate behind that hook's "fires only when the
+    /// resolved brightness actually changes" contract — see
+    /// [`brightness_change_to_notify`] and [`ShellHandler::apply_theme`].
+    brightness_notified: Option<Brightness>,
     /// Polls the process-wide app-facing theme override slot
     /// (`frust::set_app_theme`/`clear_app_theme`) once per
     /// frame, before rebuild in `RedrawRequested` — see
@@ -688,11 +792,12 @@ struct ShellHandler<State: 'static, Logic, V: View<State>> {
     window_metrics: WindowMetricsPublisher,
 }
 
-impl<State, Logic, V> ShellHandler<State, Logic, V>
+impl<State, Logic, V, E> ShellHandler<State, Logic, V, E>
 where
     State: 'static,
     V: View<State>,
     Logic: FnMut(&mut State) -> V + 'static,
+    E: DesktopExtensions,
 {
     /// Deliver one input event to the tree and schedule a frame if it dirtied
     /// state. This is the dirty-driven half of the desktop model: the
@@ -767,13 +872,26 @@ where
     ///    a `Component::build`'s `use_context::<Theme>()` resolves it on the next
     ///    rebuild (the app-code path). Re-providing under the same owner replaces
     ///    the previous value, so a live dark-mode flip is observed next frame.
+    /// 3. [`DesktopExtensions::on_theme_brightness_changed`] fires when the
+    ///    resolved brightness actually moved, gated by
+    ///    [`brightness_change_to_notify`] — an override swapping one dark theme
+    ///    for another moves the theme without moving the brightness.
     ///
     /// Called once to seed the theme in `resumed` and again on every
-    /// `WindowEvent::ThemeChanged`.
+    /// `WindowEvent::ThemeChanged` and every per-frame app-override poll that
+    /// reports a change — i.e. every point at which the shell's resolved
+    /// brightness can move, which is why the hook fires from this single funnel
+    /// rather than from three separately-remembered call sites.
     fn apply_theme(&mut self, window: &Window) {
         self.root.set_theme(Box::new(self.theme.clone()));
         let theme = self.theme.clone();
         self.runtime.with_owner(move || provide_context(theme));
+        if let Some(brightness) =
+            brightness_change_to_notify(self.brightness_notified, self.theme.brightness)
+        {
+            self.brightness_notified = Some(brightness);
+            self.extensions.on_theme_brightness_changed(brightness);
+        }
         window.request_redraw();
     }
 
@@ -928,11 +1046,13 @@ fn build_tree_update(update: &SemanticsUpdate) -> TreeUpdate {
 /// the same helper every winit event goes through, so an injected tap is
 /// hit-tested, IME-synced and redraw-scheduled exactly like a real one.
 #[cfg(feature = "devtools")]
-impl<State, Logic, V> frust_shell_common::devtools::DevtoolsUi for ShellHandler<State, Logic, V>
+impl<State, Logic, V, E> frust_shell_common::devtools::DevtoolsUi
+    for ShellHandler<State, Logic, V, E>
 where
     State: 'static,
     V: View<State>,
     Logic: FnMut(&mut State) -> V + 'static,
+    E: DesktopExtensions,
 {
     fn inspect(&self) -> Vec<frust_core::InspectNode> {
         self.root.inspect()
@@ -948,11 +1068,12 @@ where
     }
 }
 
-impl<State, Logic, V> ApplicationHandler<ShellUserEvent> for ShellHandler<State, Logic, V>
+impl<State, Logic, V, E> ApplicationHandler<ShellUserEvent> for ShellHandler<State, Logic, V, E>
 where
     State: 'static,
     V: View<State>,
     Logic: FnMut(&mut State) -> V + 'static,
+    E: DesktopExtensions,
 {
     /// A tracked-signal write from any thread routes here via the frame waker →
     /// [`winit::event_loop::EventLoopProxy::send_event`]. Pump the UI-thread
@@ -1013,14 +1134,11 @@ where
         // mirroring Android's surfaceDestroyed/surfaceCreated so the §8.1
         // machine stays exercised on desktop too.
         if self.window.is_none() {
-            // `with_visible(false)`: the accesskit_winit adapter must be created
-            // before the window is ever shown (its documented contract — see
-            // `Adapter::with_event_loop_proxy`), so the window stays hidden until
-            // the adapter below is constructed, then is made visible.
-            let attrs = WindowAttributes::default()
-                .with_title(WINDOW_TITLE)
-                .with_inner_size(INITIAL_SIZE)
-                .with_visible(false);
+            // Title/size/hidden from the app's `DesktopConfig`, then through the
+            // extension's pre-create hook (`window_attributes`) — the only
+            // chance a per-OS shell gets at attributes winit refuses to change
+            // after creation (Wayland `app_id`, X11 icon).
+            let attrs = window_attributes(&self.config, &mut self.extensions);
             match event_loop.create_window(attrs) {
                 Ok(window) => {
                     self.adapter = Some(Adapter::with_event_loop_proxy(
@@ -1028,8 +1146,18 @@ where
                         &window,
                         self.accesskit_proxy.clone(),
                     ));
+                    // Post-create, pre-show: an extension attaches its native
+                    // menu to the live handle and retains the window here (the
+                    // one hook that receives it — see `crate::extensions`).
+                    // Before `set_visible` so a menu bar is in place the first
+                    // time the window is drawn, and after the adapter for the
+                    // same reason the window is created hidden at all: the
+                    // accesskit adapter must exist before the window is ever
+                    // shown (`Adapter::with_event_loop_proxy`'s contract).
+                    let window = Arc::new(window);
+                    self.extensions.on_window_created(&window);
                     window.set_visible(true);
-                    self.window = Some(Arc::new(window));
+                    self.window = Some(window);
                 }
                 Err(err) => {
                     self.fatal =
@@ -1144,7 +1272,17 @@ where
         }
 
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            // The extension decides whether a close request ends the app: the
+            // default (and the whole zero-config preview) is the unconditional
+            // exit this arm always was, while a macOS shell may hide its
+            // retained window instead and keep the loop alive. The
+            // pipeline-cache persistence path is unaffected either way — it
+            // hangs off the frame executor's drop once `run_app` returns, not
+            // off this event.
+            WindowEvent::CloseRequested => match self.extensions.on_close_requested() {
+                CloseAction::Exit => event_loop.exit(),
+                CloseAction::KeepRunning => {}
+            },
 
             WindowEvent::Resized(size) => {
                 // A resize with no live surface is dropped by the machine
@@ -1283,6 +1421,13 @@ where
                 // before rebuilding, so their signal writes are visible to this
                 // frame. Cheap no-op when the queue is empty.
                 self.runtime.pump_local();
+
+                // Drain the per-OS extension's own once-per-frame queue beside
+                // the polls below — a native menu's activations, pushed into
+                // `frust_reactive::push_menu_event`. Top of frame, so an
+                // activation drained here is visible to *this* frame's rebuild
+                // rather than the next one; a no-op for `NoExtensions`.
+                self.extensions.pump();
 
                 // Poll the app-facing theme override slot once
                 // per frame, before rebuild — mirrors the mobile shells'
@@ -1511,10 +1656,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposeLatch, ElementState, Ime, ImeSync, Tree, TreeId, WinitKey, WinitNamedKey,
-        WinitTheme, base_theme, brightness_from_winit, build_tree_update, default_theme, finish,
+        ComposeLatch, DesktopConfig, DesktopExtensions, ElementState, Ime, ImeSync, NoExtensions,
+        Tree, TreeId, WinitKey, WinitNamedKey, WinitTheme, base_theme, brightness_change_to_notify,
+        brightness_from_winit, build_tree_update, default_theme, finish,
         follow_platform_brightness, ime_purpose_for, map_key_event, map_modifiers, map_named_key,
-        physical_to_logical, theme_after_override_poll,
+        physical_to_logical, theme_after_override_poll, window_attributes,
     };
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{Node, NodeId, Role};
@@ -1522,7 +1668,7 @@ mod tests {
     use frust_theme::{Brightness, Theme};
     use kurbo::Point;
     use winit::keyboard::ModifiersState;
-    use winit::window::ImePurpose;
+    use winit::window::{ImePurpose, WindowAttributes};
 
     // --- brightness_from_winit ---
 
@@ -2397,6 +2543,108 @@ mod tests {
             scope.is_dirty(),
             "the rebuild's tracked read must still wake the frame loop after an \
              event pass"
+        );
+    }
+
+    // --- the desktop config / extension seam ---
+    //
+    // What is reachable without a live event loop: the config→attributes→hook
+    // composition (`window_attributes`) and the brightness change gate. The
+    // three hooks whose call sites need a real window or a running loop
+    // (`on_event_loop_builder` in `run_desktop_with`, `on_window_created` and
+    // `pump`/`on_close_requested` inside the winit callbacks) are documented at
+    // their call sites instead — winit exposes no way to construct an
+    // `ActiveEventLoop` or a `Window` outside `run_app`.
+
+    /// A recording extension: proves the production attribute path really runs
+    /// the hook (and runs it *last*, so a per-OS shell can override what the
+    /// core assembled).
+    #[derive(Debug, Default)]
+    struct SpyExtensions {
+        attributes_calls: usize,
+        override_title: Option<&'static str>,
+    }
+
+    impl DesktopExtensions for SpyExtensions {
+        fn on_window_attributes(&mut self, attributes: WindowAttributes) -> WindowAttributes {
+            self.attributes_calls += 1;
+            match self.override_title {
+                Some(title) => attributes.with_title(title),
+                None => attributes,
+            }
+        }
+    }
+
+    #[test]
+    fn window_attributes_default_to_the_historical_preview_window() {
+        // The `WINDOW_TITLE` const this shell used to hardcode now arrives via
+        // the default config, so the zero-config preview is unchanged.
+        let attributes = window_attributes(&DesktopConfig::default(), &mut NoExtensions);
+        assert_eq!(attributes.title, "Frust");
+        assert_eq!(attributes.inner_size, Some(super::INITIAL_SIZE.into()));
+        assert!(
+            !attributes.visible,
+            "the window must be created hidden — the accessibility adapter is \
+             constructed before it is shown"
+        );
+    }
+
+    #[test]
+    fn window_attributes_take_the_title_from_the_config() {
+        let config = DesktopConfig::new().with_app_name("Huddle");
+        let attributes = window_attributes(&config, &mut NoExtensions);
+        assert_eq!(attributes.title, "Huddle");
+    }
+
+    #[test]
+    fn window_attributes_run_the_extension_hook_last() {
+        let mut extensions = SpyExtensions {
+            override_title: Some("overridden"),
+            ..SpyExtensions::default()
+        };
+        let config = DesktopConfig::new().with_app_name("Huddle");
+        let attributes = window_attributes(&config, &mut extensions);
+
+        assert_eq!(extensions.attributes_calls, 1);
+        assert_eq!(
+            attributes.title, "overridden",
+            "the hook sees the core's attributes and its result wins — the only \
+             chance a per-OS shell gets at pre-create-only attributes"
+        );
+    }
+
+    // --- the theme-brightness hook's change gate ---
+
+    #[test]
+    fn the_first_resolved_brightness_is_always_reported() {
+        // Nothing reported yet (`resumed`'s seed): the extension learns the
+        // starting brightness rather than having to wait for a flip.
+        assert_eq!(
+            brightness_change_to_notify(None, Brightness::Light),
+            Some(Brightness::Light)
+        );
+    }
+
+    #[test]
+    fn an_unchanged_brightness_reports_nothing() {
+        // `apply_theme` also runs for theme re-pushes that move no brightness
+        // (an override swapping one dark theme for another), and the hook's
+        // contract is "actually changed".
+        assert_eq!(
+            brightness_change_to_notify(Some(Brightness::Dark), Brightness::Dark),
+            None
+        );
+    }
+
+    #[test]
+    fn a_changed_brightness_is_reported() {
+        assert_eq!(
+            brightness_change_to_notify(Some(Brightness::Light), Brightness::Dark),
+            Some(Brightness::Dark)
+        );
+        assert_eq!(
+            brightness_change_to_notify(Some(Brightness::Dark), Brightness::Light),
+            Some(Brightness::Light)
         );
     }
 }

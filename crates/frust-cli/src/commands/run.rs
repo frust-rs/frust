@@ -13,6 +13,7 @@ use crate::build_args::BuildArgs;
 use crate::cli::RenderTierArg;
 use frust_drive::android_run::{self, DeviceSelection};
 use frust_drive::build_info::{BuildInfo, BuildMode};
+use frust_drive::desktop_run::{self, DesktopPlan};
 use frust_drive::devices::{self, Device, Kind, Platform};
 use frust_drive::ios_run;
 use frust_drive::process::{ProcessRunner, StreamHandle, TryRecvError};
@@ -146,16 +147,23 @@ fn run_on_device(runner: &dyn ProcessRunner, device: &Device, info: &BuildInfo) 
 /// always means the desktop preview, skipping device discovery entirely so
 /// an attached-but-unselected device never changes what `--watch` does.
 ///
-/// Threads the resolved [`BuildInfo`] through to the spawn (verified
+/// The invocation itself is resolved by `frust_drive::desktop_run` — the one
+/// desktop launch-plan construction site the workbench and the MCP server also
+/// go through, so `frust run` and a `frust-tui` desktop session cannot drift
+/// apart. This front-end contributes exactly two things on top: the
+/// release-lean preflight's resolved feature list
+/// (`desktop_plan_with_features`), and a `--render-tier` override as
+/// [`RENDER_TIER_ENV_VAR`] — the one path that flag is actually plumbed to in
+/// v1 (see `Command::Run`'s doc comment).
+///
+/// What the plan carries is the resolved [`BuildInfo`] in full (verified
 /// pre-extraction gap — the old fallback ignored `--profile` and dropped
 /// every `--define`): the build mode selects the cargo profile arg
 /// (`--release`/`--profile profile`) and every define is passed as an
 /// environment variable to the launched process. A `--profile` run therefore
 /// reaches the desktop preview with `FRUST_TRACE=1` set (the define
 /// `BuildInfo::from_args` auto-injects), which is what makes desktop perf
-/// tracing work. A `--render-tier` override adds [`RENDER_TIER_ENV_VAR`] on
-/// top — the one path that flag is actually plumbed to in v1 (see
-/// `Command::Run`'s doc comment).
+/// tracing work.
 fn run_desktop_fallback(
     runner: &dyn ProcessRunner,
     info: &BuildInfo,
@@ -175,16 +183,39 @@ fn run_desktop_fallback(
     if let Some(warning) = warning {
         println!("{warning}");
     }
-    let args = desktop_cargo_run_args_with(info, &features);
-    let env = desktop_cargo_run_env(info, render_tier);
+    let plan = desktop_run::desktop_plan_with_features(&cwd, info, &features);
+    let env = desktop_cargo_run_env(&plan, render_tier);
 
     if watch {
-        return run_desktop_watch(runner, &args, &env, &cwd, hooks);
+        return run_desktop_watch(runner, &plan, &env, &cwd, hooks);
     }
 
     let mut on_line = |line: &str| println!("{line}");
-    let out = runner.run_streaming("cargo", &args, None, &env, &mut on_line)?;
+    // `cwd` is `None` rather than `plan.cwd`: the plan's working directory IS
+    // this process's current directory (that is what it was resolved from), so
+    // inheriting it keeps the spawn byte-identical to the pre-convergence one.
+    let out = runner.run_streaming(
+        &plan.program,
+        &arg_refs(&plan.args),
+        None,
+        &env_refs(&env),
+        &mut on_line,
+    )?;
     Ok(if out.success { 0 } else { 1 })
+}
+
+/// Borrow a resolved plan's owned argv as the `&[&str]` the
+/// [`ProcessRunner`] seam takes.
+fn arg_refs(args: &[String]) -> Vec<&str> {
+    args.iter().map(String::as_str).collect()
+}
+
+/// Borrow resolved env pairs as the `&[(&str, &str)]` the [`ProcessRunner`]
+/// seam takes.
+fn env_refs(env: &[(String, String)]) -> Vec<(&str, &str)> {
+    env.iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect()
 }
 
 /// Injectable seams for [`run_desktop_watch`]'s two process-wide side
@@ -285,8 +316,8 @@ const WATCH_DEBOUNCE: Duration = Duration::from_millis(300);
 /// side effect is ever touched by `cargo test`.
 fn run_desktop_watch(
     runner: &dyn ProcessRunner,
-    args: &[&str],
-    env: &[(&str, &str)],
+    plan: &DesktopPlan,
+    env: &[(String, String)],
     root: &Path,
     hooks: WatchHooks,
 ) -> Result<u8> {
@@ -314,7 +345,7 @@ fn run_desktop_watch(
     let mut on_line = |line: &str| println!("{line}");
     watch_loop_with_slot(
         runner,
-        args,
+        plan,
         env,
         &raw_rx,
         WATCH_DEBOUNCE,
@@ -389,14 +420,14 @@ fn spawn_fs_watcher(root: &Path, tx: mpsc::Sender<()>) -> Result<notify::Recomme
 #[cfg(test)]
 fn watch_loop(
     runner: &dyn ProcessRunner,
-    args: &[&str],
-    env: &[(&str, &str)],
+    plan: &DesktopPlan,
+    env: &[(String, String)],
     raw_changes: &mpsc::Receiver<()>,
     debounce: Duration,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<u8> {
     let current: Arc<Mutex<Option<StreamHandle>>> = Arc::new(Mutex::new(None));
-    watch_loop_with_slot(runner, args, env, raw_changes, debounce, &current, on_line)
+    watch_loop_with_slot(runner, plan, env, raw_changes, debounce, &current, on_line)
 }
 
 /// [`watch_loop`]'s body, parameterized on a shared `current`-handle slot so a
@@ -406,14 +437,14 @@ fn watch_loop(
 /// `recv_timeout` — so the handler can always acquire it promptly.
 fn watch_loop_with_slot(
     runner: &dyn ProcessRunner,
-    args: &[&str],
-    env: &[(&str, &str)],
+    plan: &DesktopPlan,
+    env: &[(String, String)],
     raw_changes: &mpsc::Receiver<()>,
     debounce: Duration,
     current: &Arc<Mutex<Option<StreamHandle>>>,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<u8> {
-    lock_slot(current).replace(runner.spawn_streaming("cargo", args, None, env)?);
+    lock_slot(current).replace(spawn_preview(runner, plan, env)?);
 
     loop {
         {
@@ -442,7 +473,7 @@ fn watch_loop_with_slot(
                 if let Some(mut handle) = slot.take() {
                     handle.kill();
                 }
-                slot.replace(runner.spawn_streaming("cargo", args, None, env)?);
+                slot.replace(spawn_preview(runner, plan, env)?);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -487,58 +518,38 @@ fn drain_available_lines(
     }
 }
 
-/// The `cargo run` argv the desktop fallback spawns: always `run`, plus the
-/// build mode's cargo profile arg (`[]`/`--profile profile`/`--release`) so
-/// a `frust run --release`/`--profile` desktop preview builds in the
-/// requested profile instead of always debug, plus the resolved cargo
-/// `features` (`--features frust/perf-trace --features frust/devtools` for
-/// debug/profile, `--features lean` for release) so the desktop preview
-/// matches the device pipelines: instrumentation and the in-app devtools
-/// service compiled IN for debug/profile, the log ceiling for release.
+/// Spawn one streamed desktop-preview child from a resolved plan — the single
+/// spawn shape both the plain fallback and the `--watch` loop's relaunches use.
 ///
-/// `features` is the release-lean-preflight-resolved list
-/// (`frust_drive::cargo_manifest::resolve_release_features`): a legacy app
-/// whose manifest lacks `lean` arrives here with it already dropped, so the
-/// argv simply omits `--features lean` rather than passing an undeclared
-/// feature to `cargo run`.
-fn desktop_cargo_run_args_with(info: &BuildInfo, features: &[&'static str]) -> Vec<&'static str> {
-    let mut args = vec!["run"];
-    args.extend_from_slice(info.mode.cargo_profile_arg());
-    for &feature in features {
-        args.push("--features");
-        args.push(feature);
-    }
-    args
+/// `cwd` is `None` for the same reason [`run_desktop_fallback`]'s own spawn
+/// passes it: the plan's working directory is this process's current
+/// directory.
+fn spawn_preview(
+    runner: &dyn ProcessRunner,
+    plan: &DesktopPlan,
+    env: &[(String, String)],
+) -> Result<StreamHandle> {
+    runner.spawn_streaming(&plan.program, &arg_refs(&plan.args), None, &env_refs(env))
 }
 
-/// The pure mode → argv mapping (declaring-app / debug / profile case): every
-/// feature `BuildMode::cargo_features` selects, unfiltered. Production always
-/// goes through [`desktop_cargo_run_args_with`] with the preflight-resolved
-/// list; this thin wrapper exists for the unit tests that assert the
-/// byte-identical mapping a declaring app still gets.
-#[cfg(test)]
-fn desktop_cargo_run_args(info: &BuildInfo) -> Vec<&'static str> {
-    desktop_cargo_run_args_with(info, info.mode.cargo_features())
-}
-
-/// The env pairs [`run_desktop_fallback`]'s `cargo run` is spawned with:
-/// every `--define KEY=VALUE` as `KEY=VALUE` (so e.g. a profile run's
-/// auto-injected `FRUST_TRACE=1` reaches the preview process), plus a
-/// `--render-tier` override as [`RENDER_TIER_ENV_VAR`]. Split out from the
-/// spawning call so the mapping is unit-testable without a fake runner that
-/// would otherwise ignore the `env` argument entirely (see
+/// The env pairs [`run_desktop_fallback`]'s `cargo run` is spawned with: the
+/// resolved plan's own environment (every `--define KEY=VALUE`, plus the
+/// profile build's auto-injected `FRUST_TRACE=1` — see
+/// `frust_drive::desktop_run`), plus this front-end's own `--render-tier`
+/// override as [`RENDER_TIER_ENV_VAR`], which no other front-end has.
+/// Split out from the spawning call so the mapping is unit-testable without a
+/// fake runner that would otherwise ignore the `env` argument entirely (see
 /// [`frust_drive::process::FakeProcessRunner::run_streaming`]).
 fn desktop_cargo_run_env(
-    info: &BuildInfo,
+    plan: &DesktopPlan,
     render_tier: Option<RenderTierArg>,
-) -> Vec<(&str, &str)> {
-    let mut env: Vec<(&str, &str)> = info
-        .defines
-        .iter()
-        .map(|(key, value)| (key.as_str(), value.as_str()))
-        .collect();
+) -> Vec<(String, String)> {
+    let mut env = plan.env.clone();
     if let Some(tier) = render_tier {
-        env.push((RENDER_TIER_ENV_VAR, tier.env_value()));
+        env.push((
+            RENDER_TIER_ENV_VAR.to_string(),
+            tier.env_value().to_string(),
+        ));
     }
     env
 }
@@ -613,6 +624,18 @@ mod tests {
         .unwrap()
     }
 
+    fn release_info() -> BuildInfo {
+        BuildInfo::from_args(
+            BuildArgs {
+                release: true,
+                ..Default::default()
+            }
+            .into_drive(),
+            BuildMode::Debug,
+        )
+        .unwrap()
+    }
+
     /// A physical iOS device dispatches to `ios_run::run_physical` rather
     /// than bailing out. The test process's cwd is the `frust-cli` crate root,
     /// not a generated Frust project, so `run_on_device` fails at
@@ -630,39 +653,57 @@ mod tests {
         assert!(message.contains("frust.toml"), "{message}");
     }
 
+    /// The plan the desktop fallback resolves for `info`, with the mode's own
+    /// (unfiltered) feature list — the declaring-app case every expectation
+    /// below is written against.
+    fn plan_for(info: &BuildInfo) -> DesktopPlan {
+        desktop_run::desktop_plan(Path::new("/tmp/project"), info)
+    }
+
+    fn env_pairs(env: &[(String, String)]) -> Vec<(&str, &str)> {
+        env_refs(env)
+    }
+
+    /// A bare `cargo run` plan (no features, no env) — the minimal shape the
+    /// watch-loop tests script their [`FakeProcessRunner`] against, so those
+    /// tests stay about the loop rather than about argv resolution (which
+    /// `frust_drive::desktop_run`'s own tests own).
+    fn bare_run_plan() -> DesktopPlan {
+        desktop_run::desktop_plan_with_features(Path::new("/tmp/project"), &debug_info(), &[])
+    }
+
     #[test]
     fn desktop_cargo_run_env_is_empty_without_defines_or_override() {
-        assert_eq!(
-            desktop_cargo_run_env(&debug_info(), None),
-            Vec::<(&str, &str)>::new()
-        );
+        let env = desktop_cargo_run_env(&plan_for(&debug_info()), None);
+        assert_eq!(env_pairs(&env), Vec::<(&str, &str)>::new());
     }
 
     #[test]
     fn desktop_cargo_run_env_sets_the_var_for_gpu() {
-        assert_eq!(
-            desktop_cargo_run_env(&debug_info(), Some(RenderTierArg::Gpu)),
-            vec![(RENDER_TIER_ENV_VAR, "gpu")]
-        );
+        let env = desktop_cargo_run_env(&plan_for(&debug_info()), Some(RenderTierArg::Gpu));
+        assert_eq!(env_pairs(&env), vec![(RENDER_TIER_ENV_VAR, "gpu")]);
     }
 
     #[test]
     fn desktop_cargo_run_env_sets_the_var_for_cpu() {
-        assert_eq!(
-            desktop_cargo_run_env(&debug_info(), Some(RenderTierArg::Cpu)),
-            vec![(RENDER_TIER_ENV_VAR, "cpu")]
-        );
+        let env = desktop_cargo_run_env(&plan_for(&debug_info()), Some(RenderTierArg::Cpu));
+        assert_eq!(env_pairs(&env), vec![(RENDER_TIER_ENV_VAR, "cpu")]);
     }
 
     /// Regression for the verified desktop-fallback gap: a `--profile`
     /// desktop preview must (a) build in the profile
     /// cargo profile and (b) receive the auto-injected `FRUST_TRACE=1` as an
     /// environment variable, not silently drop both.
+    ///
+    /// Asserted against the plan `run_desktop_fallback` now resolves through
+    /// `frust_drive::desktop_run` — the expectations themselves are the
+    /// pre-convergence ones, unchanged.
     #[test]
     fn desktop_fallback_threads_profile_mode_into_args_and_defines_into_env() {
         let info = profile_info();
+        let plan = plan_for(&info);
         assert_eq!(
-            desktop_cargo_run_args(&info),
+            plan.args,
             vec![
                 "run",
                 "--profile",
@@ -673,8 +714,8 @@ mod tests {
                 "frust/devtools"
             ]
         );
-        let env = desktop_cargo_run_env(&info, None);
-        assert!(env.contains(&("FRUST_TRACE", "1")), "{env:?}");
+        let env = desktop_cargo_run_env(&plan, None);
+        assert!(env_pairs(&env).contains(&("FRUST_TRACE", "1")), "{env:?}");
     }
 
     #[test]
@@ -682,7 +723,7 @@ mod tests {
         // Debug desktop preview compiles instrumentation AND the in-app
         // devtools service in — one `--features` pair per selected feature.
         assert_eq!(
-            desktop_cargo_run_args(&debug_info()),
+            plan_for(&debug_info()).args,
             vec![
                 "run",
                 "--features",
@@ -695,17 +736,9 @@ mod tests {
 
     #[test]
     fn desktop_cargo_run_args_release_carries_lean_not_perf_trace_or_devtools() {
-        let info = BuildInfo::from_args(
-            BuildArgs {
-                release: true,
-                ..Default::default()
-            }
-            .into_drive(),
-            BuildMode::Debug,
-        )
-        .unwrap();
+        let info = release_info();
         assert_eq!(
-            desktop_cargo_run_args(&info),
+            plan_for(&info).args,
             vec!["run", "--release", "--features", "lean"]
         );
     }
@@ -713,22 +746,17 @@ mod tests {
     /// Legacy direction: a release desktop preview whose
     /// preflight resolved to an EMPTY feature list (a legacy app that dropped
     /// `lean`) must produce argv with `--release` but no `--features` at all —
-    /// never an undeclared `--features lean` cargo would reject.
+    /// never an undeclared `--features lean` cargo would reject. This is the
+    /// preflight-resolved list the fallback threads into
+    /// `desktop_plan_with_features`.
     #[test]
     fn desktop_cargo_run_args_with_dropped_lean_omits_features() {
-        let info = BuildInfo::from_args(
-            BuildArgs {
-                release: true,
-                ..Default::default()
-            }
-            .into_drive(),
-            BuildMode::Debug,
-        )
-        .unwrap();
-        assert_eq!(
-            desktop_cargo_run_args_with(&info, &[]),
-            vec!["run", "--release"]
+        let plan = desktop_run::desktop_plan_with_features(
+            Path::new("/tmp/project"),
+            &release_info(),
+            &[],
         );
+        assert_eq!(plan.args, vec!["run", "--release"]);
     }
 
     /// Declaring direction: a declaring app resolves to
@@ -736,19 +764,11 @@ mod tests {
     /// mapping above.
     #[test]
     fn desktop_cargo_run_args_with_declared_lean_matches_pure_mapping() {
-        let info = BuildInfo::from_args(
-            BuildArgs {
-                release: true,
-                ..Default::default()
-            }
-            .into_drive(),
-            BuildMode::Debug,
-        )
-        .unwrap();
-        assert_eq!(
-            desktop_cargo_run_args_with(&info, &["lean"]),
-            vec!["run", "--release", "--features", "lean"]
-        );
+        let info = release_info();
+        let plan =
+            desktop_run::desktop_plan_with_features(Path::new("/tmp/project"), &info, &["lean"]);
+        assert_eq!(plan.args, plan_for(&info).args);
+        assert_eq!(plan.args, vec!["run", "--release", "--features", "lean"]);
     }
 
     #[test]
@@ -869,7 +889,7 @@ mod tests {
 
         let out = watch_loop(
             &runner,
-            &["run"],
+            &bare_run_plan(),
             &[],
             &raw_rx,
             Duration::from_millis(10),
@@ -912,7 +932,7 @@ mod tests {
 
         let out = watch_loop(
             &runner,
-            &["run"],
+            &bare_run_plan(),
             &[],
             &raw_rx,
             Duration::from_millis(50),
@@ -948,7 +968,7 @@ mod tests {
 
         let out = watch_loop(
             &runner,
-            &["run"],
+            &bare_run_plan(),
             &[],
             &raw_rx,
             Duration::from_millis(10),

@@ -66,12 +66,43 @@ frust-shell-android = { workspace = true }
 frust-shell-ios = { workspace = true }
 anyhow = { workspace = true }
 
-# The desktop preview shell pulls in winit → android-activity, which does not
-# compile for an Android target (and is dead weight there anyway); the Android
-# app is driven by `android_app!`/JNI instead. Gate it off Android so
-# `cargo check --target *-linux-android -p frust` builds the whole graph.
-[target.'cfg(not(target_os = "android"))'.dependencies]
+# The shared desktop core (winit event loop + render stack), off both mobile
+# targets. Android was always excluded — winit pulls in android-activity, which
+# does not compile for an Android target and is dead weight there anyway, since
+# the app is driven by `android_app!`/JNI. iOS is excluded for the same reason
+# (its app is driven by `ios_app!`'s C-ABI entry points, and winit's UIKit
+# backend is never entered), which additionally keeps winit, accesskit_winit and
+# their transitive graph out of an iOS build entirely.
+#
+# Deliberately `not(mobile)` rather than a list of desktop targets: a BSD-ish or
+# other niche desktop host keeps the generic core (and, with no per-OS table
+# below matching it, the no-op `NoExtensions` — see `lib.rs`'s
+# `desktop_extensions`).
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 frust-shell-desktop = { workspace = true }
+
+# The three per-OS desktop shells, each wired into the run path by `lib.rs`'s
+# `desktop_extensions` under the identical `cfg` that gates its dependency here.
+# Each crate compiles inert off its own target (see their crate docs), but the
+# facade still gates them per-OS so a build only ever resolves the native
+# bindings (muda/objc2/windows-sys) of the host it is building for.
+#
+# No feature forwards below (`glyph-fonts`/`perf-trace`/`devtools`): none of the
+# three declares a feature of its own. Their shared `frust-shell-desktop` edge
+# is one package instance in the graph, so the existing
+# `frust-shell-desktop/*` forwards already reach the core underneath them.
+[target.'cfg(target_os = "macos")'.dependencies]
+frust-shell-macos = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+frust-shell-windows = { workspace = true }
+
+# Linux only, not the wider "free unix" family `frust-shell-linux` itself gates
+# its winit Wayland/X11 extension usage on: a BSD would work, but nothing here
+# compile-gates one, so the wiring stays as narrow as the verification. Widening
+# it is one `cfg` here plus the matching arm in `lib.rs`'s `desktop_extensions`.
+[target.'cfg(target_os = "linux")'.dependencies]
+frust-shell-linux = { workspace = true }
 
 [dev-dependencies]
 # Test-only: `router_glue`'s unit tests build GPU-free fixture widgets
@@ -132,8 +163,8 @@ cupertino = ["frust-widgets/cupertino"]
 # frust-theme in this crate's transitive graph (mirrors the `perf-trace`
 # chain's shape below, inverted: default-ON instead of default-off); Cargo
 # applies each shell's feature per target the same way perf-trace does —
-# desktop's feature is a no-op on Android, Android/iOS's are no-ops off their
-# own target — so listing all of them is safe on every target.
+# desktop's feature is a no-op on both mobile targets, Android/iOS's are no-ops
+# off their own target — so listing all of them is safe on every target.
 #
 # Deliberately does NOT imply `glyph` above (the chain is left exactly as it
 # was): `--no-default-features --features glyph-fonts` alone is a legal but
@@ -151,7 +182,7 @@ glyph-fonts = [
 # Opt-in perf-trace instrumentation: re-exports perf-trace from all three shells.
 # Empty by default (opt-in survives cargo's additive unification; the CLI is the
 # sole enabler). Cargo applies each shell's feature per target: desktop's feature
-# activates only on non-Android targets; Android/iOS features activate only on
+# activates only on non-mobile targets; Android/iOS features activate only on
 # their respective targets.
 perf-trace = [
     "frust-shell-desktop/perf-trace",
@@ -160,7 +191,7 @@ perf-trace = [
 ]
 # Opt-in in-app devtools service: re-exports devtools from all three shells,
 # with the identical per-target forwarding shape `perf-trace` uses above
-# (desktop's feature activates only on non-Android targets; Android/iOS's only
+# (desktop's feature activates only on non-mobile targets; Android/iOS's only
 # on their own). Empty by default — a release build carries no listener, no
 # discovery line and no protocol symbols, because the FEATURE is absent, not
 # because a runtime check is false. The CLI is the sole enabler

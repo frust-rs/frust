@@ -1860,3 +1860,353 @@ does not become conditional).
 **Evidence**: `plugins/i18n/README.md` §10 (size measurement procedure and figures);
 `plugins/i18n/Cargo.toml`'s default feature list and the `formatting` feature's own
 dependencies; review R2-M1 and R2-M6 (workflow/reviews/i18n-plugin/REVIEW-r2.md).
+
+---
+
+### `desktop-shells-runtime-unverified` — the Windows and Linux desktop shells are compile-gated only, never launched
+
+**Observed**: Phase A's `frust-shell-macos`/`-windows`/`-linux` (menu bar, lifecycle, window
+icon/identity) were built and integrated from a headless Linux host — proven only via cross-target
+`cargo check` (Windows: `x86_64-pc-windows-gnu`; macOS: `aarch64-apple-darwin`, both host-side
+where the toolchain exists and via a containerized `rust:1-bookworm` + `mingw-w64` recipe; Linux:
+native `cargo check --workspace` here). **macOS** is no longer in this gap: the MacBook runtime
+gate (2026-08-15, `macbook-gate-r1`, 15/15 checks passed) launched real windows and verified the
+menu bar with the app-named items, ⌘Q via both the menu and the accelerator, Hide/Show All,
+close-then-Dock-click reopen from the inactive state, and the zero-config preview — all with no
+functional bugs found. Still owed: **Windows** — titlebar+taskbar icon, `AppUserModelID` grouping,
+dark titlebar following the app theme, the native menu bar, and accelerators (Ed's Windows 11 PC
+pass). **Linux** — Wayland `app_id`/X11 `WM_CLASS` pairing and the window icon (a non-headless
+Linux session; rides Phase B's `.desktop` milestone).
+
+**Applies to**: any app built with a Phase A desktop shell on Windows or Linux, until the matching
+device pass runs.
+
+**Why accepted**: PLAN.md's Edge Cases documented this verification asymmetry before the phase
+started (only Linux hardware was on hand); the cross-target compile gates are the strongest proof
+achievable without the device, and every native API call site was additionally read against its
+vendored source (muda 0.19.3, winit 0.30.13, windows-sys 0.61.2, objc2/objc2-app-kit 0.3.x) rather
+than guessed.
+
+**Evidence**: desktop-shells Phase A tasks 02/03/04/05/06 completion summaries (Risks/Limitations
+sections); `workflow/plans/features/desktop-shells/phase-a/TASKS.md` Build State (Wave 3
+integration-verify cross-target matrix); macOS runtime verification —
+`workflow/plans/features/desktop-shells/phase-a/followups/macbook-gate-r1/TASKS.md` (gate table
+G4, G5, G9, G12, G15).
+
+---
+
+### `desktop-windows-accelerator-compile-only` — the Windows menu-accelerator path is the riskiest compile-only claim
+
+**Observed**: `frust-shell-windows`'s keyboard-accelerator wiring
+(`EventLoopBuilderExtWindows::with_msg_hook` installing a closure that calls
+`TranslateAcceleratorW` against the menu's published `HACCEL`) is verified only by reading the
+vendored winit/windows-sys source — never run on Windows.
+
+**Applies to**: any `MenuSpec` item declaring an `accelerator` string on Windows.
+
+**Why accepted**: designed to degrade, not break. The hook holds an `Rc<Cell<isize>>` HACCEL slot
+that starts at `0` and is cleared on drop; while it is `0` (before menu install, after a refused
+install, or after the menu is dropped) the hook returns `false` for every message and winit's
+normal `TranslateMessage`/`DispatchMessageW` path runs exactly as if no hook existed — the failure
+mode is a working menu bar with no keyboard shortcuts, never a broken message loop.
+
+**Evidence**: desktop-shells Phase A task 04 completion summary (Notable Decisions #3,
+Risks/Limitations #1–#2).
+
+---
+
+### `desktop-windows-titlebar-theme-revert` — a Windows titlebar override can be silently reverted between app brightness changes
+
+**Observed**: winit 0.30.13's `Window::set_theme` never writes back its own `preferred_theme`
+field (a winit bug), so its `WM_SETTINGCHANGE` handler — which branches on that field being `None`
+to mean "no app override, follow the system" — treats an app-forced titlebar the same as an
+unthemed one and can silently re-apply the *system* theme over it, without necessarily firing
+`WindowEvent::ThemeChanged`. `frust-shell-windows`'s round-1 fix (`theme.rs`'s `TitlebarTheme`)
+removes the `applied == wanted` latch so every core-signaled brightness change re-issues
+`set_theme`, which closes the revert path between two *different* app-resolved brightnesses. It
+does not close a revert that happens *between* those changes — most notably while an app override
+is active: the core's override-wins rule holds `self.theme.brightness` steady across a platform
+`ThemeChanged`, so the edge-gate that drives `take_pending` may not re-fire at all while the
+mismatch persists.
+
+**Applies to**: `frust-shell-windows` apps using an OS-native (non-`with_theme`) titlebar with
+either the system-follow path or an app-forced brightness override, on any winit 0.30.13 build.
+
+**Why accepted**: no winit-level fix exists to consume (the bug is in winit, not fixable from this
+crate alone); a full fix needs shell-owned system-theme detection (e.g. polling the registry key
+winit itself would consult) rather than reacting to winit's event stream, which is deferred pending
+the Windows runtime gate (`desktop-shells-runtime-unverified`) that would let it be verified against
+a real WM_SETTINGCHANGE sequence.
+
+**Evidence**: `crates/frust-shell-windows/src/theme.rs` module docs ("The residual gap this round
+does not close"); desktop-shells Phase A fix-round-1 task F2.
+
+---
+
+### `desktop-macos-reopen-gap-already-active` — Dock-click reopen does not re-show an already-active hidden window
+
+**Observed**: winit 0.30 owns `NSApplication`'s delegate and panics if replaced, so
+`applicationShouldHandleReopen:` is unreachable; `frust-shell-macos` instead observes
+`NSApplicationDidBecomeActiveNotification`. AppKit does not post that notification when the app is
+already active — only on a genuine activation transition — so a Dock click on an already-active
+app whose window is hidden does not re-show it. A `MenuSpec` app-item activated while the window is
+hidden also stays queued (bounded at 64, oldest dropped with a warning) until some other event
+produces a frame.
+
+**Applies to**: macOS apps that hide (rather than close) their window and rely on Dock-click to
+bring it back.
+
+**Why accepted**: no public reopen hook exists in winit 0.30; the notification observer is the best
+available substitute. Flagged by the implementor for reviewer confirmation, closed by the round-1
+review, and the gap's exact shape was then confirmed live on real hardware.
+
+**Evidence**: desktop-shells Phase A task 03 completion summary (Notable Decisions #3,
+Risks/Limitations #3); `workflow/plans/features/desktop-shells/phase-a/TASKS.md` Notes
+(review-watch item #2). Runtime confirmation —
+`workflow/plans/features/desktop-shells/phase-a/followups/macbook-gate-r1/TASKS.md` G13: a
+Dock click on the already-active app with the window hidden did not re-show it (gap reproduced
+exactly); G12 confirms the inactive-path reopen works.
+
+---
+
+### `desktop-macos-quit-skips-executor-drop` — ⌘Q/menu Quit bypasses the whole `ShellHandler` `Drop` chain
+
+**Observed**: `frust-shell-macos` leaves Quit on muda's predefined AppKit `terminate:` action (both
+⌘Q and the menu item) because it must work while the window is hidden, when no frames are being
+produced to service a pumped quit request. On that route winit dispatches `LoopExiting`, but
+`run_app` never returns — AppKit tears the process down itself instead of returning control to
+Rust, so none of `ShellHandler`'s locals unwind. That skips its entire `Drop` chain, not only the
+frame executor: app `State`, `RenderRoot`, `TextContext`, the accesskit adapter, `FrameExecutor`
+(render-thread join, final present, best-effort pipeline-cache persist), `MacosExtensions`' menu +
+observer, and anything else reachable from app `State` — including cleanup that would normally ride
+root-`Owner` disposal rather than a hand-rolled `Drop` (see
+[docs/CODE_STANDARDS.md](CODE_STANDARDS.md) § State & Reactivity Conventions). A window-close
+request under the default policy (`CloseAction::Exit`) is unaffected and does take the full
+drop-chain shutdown.
+
+**Applies to**: macOS apps quitting via ⌘Q or the app menu's Quit item.
+
+**Why accepted**: scoped to the frame executor only — its skipped pipeline-cache persist is a
+documented no-op on macOS already (Metal has no `PIPELINE_CACHE`, per `frust-shell-desktop`'s own
+`cache` module docs), and nothing in the crate calls `std::process::exit`, so nothing observable is
+lost there specifically. That scoping does **not** extend to the rest of the skipped chain: an app
+holding an OS-resource-owning plugin handle in its `State` gets no chance to release it on this
+route. `frust-camera`'s `AppleSession` (shared by macOS and iOS; its `Drop` releases the capture
+device) is a real current instance of this, not a hypothetical one — a `CameraSession` reachable
+from app `State` on this quit route leaves the camera device unreleased by any Rust-side cleanup.
+Flagged by the implementor for reviewer confirmation, closed by the round-1 review, and both
+routes were then observed live on real hardware. A later fix would route termination through
+`appkit_glue`'s `applicationShouldTerminate:` (`NSApplication.TerminateReply.terminateLater`, run
+the graceful shutdown, then `terminateNow`) instead of the current predefined action.
+
+**Evidence**: desktop-shells Phase A task 03 completion summary (Notable Decisions #2);
+`workflow/plans/features/desktop-shells/phase-a/TASKS.md` Notes (review-watch item #1);
+`plugins/camera/src/apple.rs` (`AppleSession`'s `Drop`, module doc's macOS-shares-the-Apple-arm
+note). Runtime confirmation —
+`workflow/plans/features/desktop-shells/phase-a/followups/macbook-gate-r1/TASKS.md` G9 and G14:
+the `terminate:` route (menu Quit and ⌘Q, including while the window was hidden) exits without
+`run` returning; G10 confirms the close-window route returns from `run` cleanly (exit code 0).
+
+---
+
+### `desktop-macos-app-menu-title-process-name` — the bold application-menu title shows the process name, not `DesktopConfig::app_name`, for unbundled binaries
+
+**Observed**: AppKit derives the bold application-menu *title* in the menu bar from the
+bundle/process name and ignores the installed `NSMenu` item's title for unbundled binaries. A
+`cargo run`-style dev binary named "Frust Gate" via `DesktopConfig` shows `frust-gate` (the
+process name) as the bold menu title, while every item label inside it (About/Hide/Quit Frust
+Gate) correctly carries the configured name. Verified live on the MacBook runtime gate
+(`macbook-gate-r1`, finding F-2).
+
+**Applies to**: unbundled macOS dev-preview launches (`cargo run` / `frust run` fallback) using a
+Phase A desktop shell.
+
+**Why accepted**: no public API sets the application-menu title for an unbundled process — it is
+sourced from the process/bundle name, not from any NSMenu item. Phase B's `.app` bundle assembly
+ships `CFBundleName` (from `DesktopConfig::display_name`) in every `Info.plist`, and the MacBook
+runtime gate r2 (2026-08-17) verified the fix live: a `frust build macos` bundle's bold menu
+title reads the display name ("Gate App"), closing r1's F-2 for bundles. The shell's default
+About/Hide/Quit item labels follow the same name — `resolve_app_name` prefers the bundle's
+`CFBundleDisplayName`/`CFBundleName` over the executable stem when no `DesktopConfig::app_name`
+is set (gate r2 finding F-4). Only the unbundled bold title remains process-named, which is
+AppKit's own behavior.
+
+**Evidence**: `workflow/plans/features/desktop-shells/phase-a/followups/macbook-gate-r1/TASKS.md`
+gate table (G4, G5) and Findings (F-2);
+`workflow/plans/features/desktop-shells/gates/macbook-gate-r2.md` (rows 1b, F-4);
+`crates/frust-shell-macos/src/lib.rs` (`resolve_app_name`), `src/appkit_glue.rs`
+(`bundle_display_name`).
+
+---
+
+### `desktop-installer-runtime-partial` — installer formats are runtime-verified only where hardware and host tooling allow
+
+**Observed**: `frust build <os> --installer` shells out to a pinned `cargo-packager` over an
+already-assembled bundle. Runtime status per format, this run: **Linux `.deb`** — built and
+verified for real on this host (`file` confirmed a genuine Debian binary package). **Linux
+`.AppImage`** — the typed refusal path (`InstallerError::PackagerFailed`) was proven for real, but
+the format itself did not build on this host: `cargo-packager`'s vendored `linuxdeploy`'s `strip`
+step rejects a relocation section (`.relr.dyn`) this host's newer `binutils` emits — an
+upstream/environment tool mismatch, not a Frust defect. **macOS `.dmg`** — built and verified for real on the MacBook
+(gate r2, 2026-08-17; Developer-ID/notarization checks still owed — detailed below).
+**Windows NSIS `.exe`/WiX `.msi`** — owed to the Windows 11 PC pass (unit-tested
+against `FakeProcessRunner` only). **`.rpm`** is not a supported output at all —
+`cargo-packager` 0.11 builds only `.deb`/AppImage/pacman on Linux, so a requested `.rpm` is a typed
+`InstallerError::RpmNotSupported` refusal naming `tauri-bundler`'s documented `.rpm` path (or
+`alien` over the `.deb`) as the workaround, never a silent failure. Separately, **AppImage requires
+a square configured icon**: an absent or non-square `[desktop] icon` surfaces as `cargo-packager`'s
+own typed refusal ("Could not find a square icon to use as AppImage icon") rather than a bundle
+with no icon (unlike a plain `frust build linux`, where a bad icon only downgrades to a
+`BundleNote`). **macOS `.dmg` identity/signing** — `PackagerConfig`'s `macos` block (Dmg-only) now
+passes the already-assembled bundle's `Contents/Info.plist` path and the entitlements path (when
+`macos/app.entitlements` exists) into cargo-packager's own config; verified against the pinned
+`cargo-packager` 0.11.8 source that its `Dmg` arm's synthesized `.app` overlays every key from the
+named plist onto its own generated one. `signingIdentity` is forwarded only when `[macos]
+signing-identity` is Apple-issued (the same prefix list `codesign` uses below); a non-Apple
+identity is suppressed instead, with a typed `InstallerNote::PackagerSigningSkipped` (rendered by
+the CLI as `Note (dmg): ...`) — cargo-packager's own codesign pass always adds `--timestamp`
+unconditionally (verified against the pinned source), which needs network access, so forwarding a
+local/self-signed identity would make `--installer dmg` depend on the network. Suppressing it keeps
+signing offline end-to-end; because the packager reassembles the bundle (which would break the
+suppressed identity's binary signature — gate r2 finding F-6), the packager is handed a
+signature-stripped copy of the executable (`stage_unsigned_binary`), so the `.dmg`'s inner `.app`
+ships cleanly unsigned; the assembled bundle's own `codesign` pass (below) is unaffected. The `icons` entry for `.dmg` is likewise the assembled
+bundle's own generated `<binary_name>.icns`, not the source PNG every other format uses —
+cargo-packager copies an `.icns` input verbatim, keeping its file name, so the merged plist's
+`CFBundleIconFile` (which names the binary, not the display name) resolves; a bundle with no
+generated `.icns` gets no `icons` entry for `.dmg` at all. The MacBook runtime gate r2
+(2026-08-17) verified the `.dmg` lane for real with an `Apple Development` identity: dmg built via
+the pinned packager, mounted, inner `.app` carrying the overlaid plist identity keys and a
+plugin-contributed key + entitlement, volume icon present, and the credential scrub proven with
+`APPLE_*` variables exported. What is still **owed**: the same run under a real `Developer ID
+Application` identity (none in the build keychain) — the packager's own re-sign of the inner
+`.app`, its secure timestamp, the pre-notarization `spctl` "rejected" verdict — plus a
+`notarize = true` run with real Apple credentials, confirming the submission reaches `notarytool`
+and either succeeds or surfaces as the hard build failure this contract describes.
+**codesign flags** —
+whenever a `[macos] signing-identity` is configured, `desktop_build::macos::codesign` always passes
+`--options runtime` (Hardened Runtime; harmless for an ad-hoc signature, mandatory for notarization
+eligibility) and passes `--timestamp` only when the identity carries one of the Apple-issued
+prefixes (`Developer ID Application:`, `Apple Distribution:`, `Apple Development:`,
+`Mac Developer:`, `3rd Party Mac Developer Application:` — the development prefixes joined the
+list after gate r2's F-6, where classifying them as local shipped a `.dmg` whose inner app had an
+invalid signature) — an ad-hoc/self-signed identity's codesign call therefore stays fully offline.
+Real `Developer ID` `--timestamp` behavior remains unverified on hardware. **Notarization** (Apple's separate `notarytool` submission + stapling,
+needed for a `.dmg` to run without a Gatekeeper warning on a machine that didn't build it) is
+opt-in and, by default, unreachable: `cargo-packager` falls through to notarization on its own
+whenever it can read Apple credentials from its environment, so `frust build --installer` removes
+all nine `APPLE_*` credential variables (`APPLE_KEYCHAIN_PROFILE`; `APPLE_ID`/`APPLE_PASSWORD`/
+`APPLE_TEAM_ID`; `APPLE_API_KEY`/`APPLE_API_ISSUER`/`APPLE_API_KEY_PATH`; `APPLE_CERTIFICATE`/
+`APPLE_CERTIFICATE_PASSWORD` —
+`desktop_build::installer::APPLE_CREDENTIAL_ENV_VARS`) from the packaging child's environment
+unless `[macos] notarize = true` opts in, recorded either way by a typed `InstallerNote`
+(`NotarizationSuppressed`/`NotarizationEnabled`). Opted in, the credentials pass through and
+`cargo-packager` runs `xcrun notarytool submit --wait` against the signed `.app`: credentials that
+fail to resolve only warn and skip (never fail the build), but a resolved submission Apple rejects,
+or that fails to complete, is a hard installer error. Both notes fire only when the config really
+reaches `cargo-packager`'s notarization branch (Dmg + an Apple-issued identity).
+
+**Applies to**: `frust build <os> --installer`, and any macOS `.dmg` distributed outside the
+building machine.
+
+**Why accepted**: matches Phase A's device-availability constraint carried into Phase B — the
+macOS half closed on the MacBook at gate r2 up to the identities that keychain holds; Windows
+installer assembly stays proven by unit test against a faked process runner, the same asymmetry
+`desktop-shells-runtime-unverified` already accepts for the shells themselves. The Linux `.AppImage` gap is a host tool-version mismatch with a
+proven typed-error path, not an unverified code path — closing it needs either a host with an
+older/compatible `binutils` or an upstream `linuxdeploy` fix, neither of which this pipeline
+controls. Notarization is wired and opt-in, but exercising it needs a real Apple Developer
+session this environment has no MacBook or account to run — verification, not automation, is
+what's owed.
+
+**Evidence**: desktop-shells Phase B task 05 (`05-installers-doctor`) and task 07
+(`07-cli-build-targets`) completion summaries (Testing Performed — real Linux smoke: genuine `.deb`
+verified via `file`, `.AppImage` failure tail); `crates/frust-drive/src/desktop_build/installer.rs`
+(`InstallerFormat::for_target`, `RpmNotSupported`, `PackagerMacosConfig`, `InstallerNote`,
+`generated_icns`); desktop-shells Phase B fix round 1
+(`workflow/plans/features/desktop-shells/phase-b/followups/phase-b-fix-1/TASKS.md`, G3/G4) for the
+codesign-flags policy and the `macos` config-block wiring, respectively; round 2 (same file, G6/G7)
+for the icon-name alignment and the non-Apple signing-identity suppression; round 3 (same file,
+G8/G9) for the credential-scrub-by-default + `notarize` opt-in contract —
+`crates/frust-drive/src/desktop_build/installer.rs` (`APPLE_CREDENTIAL_ENV_VARS`,
+`InstallerNote::NotarizationSuppressed`/`NotarizationEnabled`), `crates/frust-drive/src/manifest.rs`
+(`MacosSection::notarize`/`notarize_enabled`), `crates/frust-drive/src/process.rs` (`ProcessRunner`'s
+`remove_env` support); `crates/frust-drive/src/desktop_build/macos.rs` (`codesign`,
+`APPLE_ISSUED_IDENTITY_PREFIXES`/`is_apple_issued_identity`).
+
+---
+
+### `desktop-single-window` — desktop shells support exactly one window
+
+**Observed**: `frust-shell-macos`/`-windows`/`-linux` and the shared `frust-shell-desktop` core
+create and manage a single `winit::window::Window`; there is no multi-window API at the facade or
+any per-OS shell.
+
+**Applies to**: every desktop shell, on every OS.
+
+**Why accepted**: matches the pre-existing desktop preview's scope ("like today"); a deliberate
+Phase A non-goal, not a defect — revisit only if a future winit brings first-class multi-window
+support worth exposing through `DesktopConfig`.
+
+**Evidence**: `workflow/plans/features/desktop-shells/PLAN.md` § Edge Cases & Risks (menus/deep
+links/lifecycle scope list: "multi-window stays out of scope (single window, like today —
+LIMITATIONS entry)").
+
+---
+
+### `paths-macos-legacy-fallback-runtime-unverified` — two of the three macOS legacy read-through sites have no runtime exercise
+
+**Observed**: of the three macOS legacy-XDG read-through sites, only `plugins/database`'s
+file-level one (`resolve_db_path_from`, the sole live caller with durable data at stake) has run
+against a real `~/Library` tree — the MacBook runtime gate r2 (2026-08-17) verified fresh-create
+under `~/Library/Application Support`, the read-through opening a planted legacy
+`~/.local/share/databases/<name>.db` in place (nothing migrated, copied, or deleted), and
+new-wins with both present. The other two remain unit-tested only: `frust-paths`' **built-in**
+per-app-stem probe (`macos_dir_from`'s `<base>/<app_stem>` check) has no in-repo caller — it
+serves only a direct-API app doing its own `app_stem()`-shaped layout — and
+`frust-shell-desktop`'s pipeline-cache read-through (`load_path`, via
+`frust_paths::legacy_cache_dir`) is a no-op on macOS today regardless (Metal has no wgpu
+`PIPELINE_CACHE` feature, so a save never fires to populate either base; gate r2 confirmed no
+cache file appears). `shared-preferences` is inert here — its macOS backend is `NSUserDefaults`,
+so its `file` backend never runs.
+
+**Why accepted**: the two unexercised sites have, respectively, no caller and no reachable save
+path — runtime proof would require building a caller that does not exist. Unit tests against an
+injectable existence probe plus the darwin cross-target gates cover the logic itself.
+
+**Evidence**: `crates/frust-paths/src/lib.rs` (`macos_dir_from`, `legacy_data_dir`/
+`legacy_cache_dir`); `plugins/database/src/lib.rs` (`resolve_db_path_from`);
+`crates/frust-shell-desktop/src/cache.rs` (`load_path`);
+`workflow/plans/features/desktop-shells/gates/macbook-gate-r2.md` (rows 4a-4c, 6a).
+
+---
+
+### `desktop-contributions-v1-scope` — three named scope limits on the plugin desktop-contribution seam
+
+**Observed**: three deliberate v1 narrowings on the desktop-contribution feature (Phase C), each
+enforced structurally rather than accidental:
+
+1. **No Windows variant.** `Contribution` has no Windows-lane desktop variant at all —
+   `desktop_build::contributions::applies_to` filters every existing variant out on a Windows
+   build, by an exhaustive (non-wildcard) match naming this explicitly.
+2. **Boolean-true-only entitlements.** `Contribution::MacosEntitlement` carries only a key and a
+   comment — `<key>k</key>`/`<true/>` is the only shape a plugin can contribute; a value-carrying
+   entitlement is not representable.
+3. **Base-contributions-only detection.** `frust_drive::plugin::desktop_contributions` scans only a
+   plugin's base `Contribution`s — one gated behind an opt-in `FeatureSpec` is invisible to it even
+   when a project selected that feature, since `add_plugin`'s `features` argument is never
+   persisted anywhere durable for this function to read back.
+
+**Applies to**: any future plugin wanting a Windows desktop integration point, a value-carrying
+entitlement, or a desktop contribution behind an optional feature bundle.
+
+**Why accepted**: all three are named, structural v1 boundaries in the code they live in (an
+exhaustive match, a doc-commented shape, a doc-commented scan scope), not gaps found later — each
+is future work gated on a real need materializing (a plugin wanting the wider shape) rather than
+spec'd speculatively ahead of one. The registry carries zero desktop-lane contributions today, so
+none of the three has blocked a real plugin yet.
+
+**Evidence**: `crates/frust-drive/src/desktop_build/contributions.rs`'s `applies_to` (Windows
+match arm); `crates/frust-drive/src/plugin/mod.rs`'s `Contribution::MacosEntitlement` doc comment;
+`crates/frust-drive/src/plugin/apply.rs`'s `desktop_contributions` doc comment; desktop-shells
+Phase C task 03 completion summary, Doc Updates Needed.

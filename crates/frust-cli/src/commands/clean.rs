@@ -15,14 +15,16 @@ use frust_drive::process::ProcessRunner;
 /// Gradle root-project build dir (where the generated
 /// `android/settings.gradle.kts` redirects the `:frust-embedding` embedding
 /// module's output, keeping the shared frust checkout pristine), the
-/// project-local Gradle cache, and `build/` (covers `build/ios`, the
-/// `-derivedDataPath`/archive output).
+/// project-local Gradle cache, `build/` (covers `build/ios`, the
+/// `-derivedDataPath`/archive output), and `dist/` (`frust build
+/// macos|windows|linux`'s bundle/installer output).
 /// Keep in sync with `templates/app/.gitignore`'s build-output patterns.
 const REMOVED_DIRS: &[&str] = &[
     "android/app/build",
     "android/build",
     "android/.gradle",
     "build",
+    "dist",
 ];
 
 /// The testable core of `clean`, taking an injected [`ProcessRunner`] and
@@ -147,6 +149,7 @@ mod tests {
         fs::create_dir_all(dir.join("android/build/frust-embedding")).unwrap();
         fs::create_dir_all(dir.join("android/.gradle")).unwrap();
         fs::create_dir_all(dir.join("build/ios")).unwrap();
+        fs::create_dir_all(dir.join("dist/linux/my_app")).unwrap();
 
         let runner = FakeProcessRunner::new().with("cargo clean", ok());
         let code = run_in(&runner, &dir).unwrap();
@@ -156,6 +159,26 @@ mod tests {
         assert!(!dir.join("android/build").exists());
         assert!(!dir.join("android/.gradle").exists());
         assert!(!dir.join("build").exists());
+        assert!(!dir.join("dist").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `frust build macos|windows|linux`'s bundle/installer output
+    /// (`dist/<os>/…`) is removed by `frust clean`, the same way the Gradle
+    /// and Xcode build dirs are — `dist/` predates this list, even though
+    /// `templates/app/.gitignore` already claimed it was kept in sync with
+    /// [`REMOVED_DIRS`].
+    #[test]
+    fn removes_the_dist_dir() {
+        let dir = unique_project_dir("removes-dist");
+        fs::write(dir.join("frust.toml"), "[app]\nname = \"x\"\norg = \"y\"\n").unwrap();
+        fs::create_dir_all(dir.join("dist/macos/My App.app/Contents/MacOS")).unwrap();
+        fs::write(dir.join("dist/macos/My App.app/Contents/MacOS/x"), "x").unwrap();
+
+        let runner = FakeProcessRunner::new().with("cargo clean", ok());
+        let code = run_in(&runner, &dir).unwrap();
+        assert_eq!(code, 0);
+        assert!(!dir.join("dist").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 

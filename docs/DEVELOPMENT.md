@@ -12,7 +12,7 @@ template work, and the version-pin rows each unit owns live in its spoke:
 |------|-------------------|-------|
 | CORE | [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md) | `reactive_graph`/`any_spawner`/`tokio`, `clean-signals`, `accesskit` pins |
 | RENDER | [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) | `vello`/`wgpu`, `image`, `vello_cpu` pins |
-| SHELLS | [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) | deep-link and safe-area/keyboard/back manual tests |
+| SHELLS | [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) | deep-link and safe-area/keyboard/back manual tests; `muda`, `windows-sys` pins |
 | PLUGINS | [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) | shared-preferences, secure-storage, camera, and IAP manual tests; `ndk-context`, `objc2*`, CameraX, OpenIAP, `keyring-core`, `arboard` pins |
 | CLI | [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) | template development; `notify` pin |
 | TUI | [TUI_DEVELOPMENT.md](TUI_DEVELOPMENT.md) | `ratatui`/`crossterm`/`ansi-to-tui`, `toml_edit` pins |
@@ -307,7 +307,32 @@ cargo check --target aarch64-apple-ios-sim -p frust-native-widgets --features de
 
 # Same --all-targets rationale as Android above:
 cargo check --all-targets --target aarch64-apple-ios-sim  -p frust-shell-ios -p frust-iap
+
+# Windows compile gate (cross-check; host-side if mingw-w64 + the rustup
+# target are installed, else the containerized recipe below): the shell+
+# facade graph must compile, AND the other two per-OS shells must compile
+# inert off-target (the frust-shell-android precedent, extended to desktop).
+cargo check --target x86_64-pc-windows-gnu \
+  -p frust -p frust-shell-windows -p frust-shell-macos -p frust-shell-linux
+
+# macOS compile gate (cross-check; proven feasible from a non-macOS host —
+# objc2/muda are pure Rust, no Apple SDK needed for a type-check). Same
+# inert-off-target coverage of the other two shells as the Windows gate.
+cargo check --target aarch64-apple-darwin \
+  -p frust -p frust-shell-macos -p frust-shell-windows -p frust-shell-linux
+
+# Linux: the standard `cargo check --workspace` gate at the top of this
+# section is native and green on a Linux host. On a macOS host, run it
+# inside the same containerized recipe below instead — a bare Mac host fails
+# by construction (`yeslogic-fontconfig-sys` needs a pkg-config sysroot).
 ```
+
+**Containerized recipe** for the two cross-checks above on a host without mingw-w64
+(e.g. devbox): `docker run --rm -v "$PWD":/src -w /src rust:1-bookworm bash -c
+'apt-get update && apt-get install -y gcc-mingw-w64-x86-64 && rustup target add
+x86_64-pc-windows-gnu aarch64-apple-darwin && <the two cargo check commands above>'`.
+Proven both ways: host-side (mingw-w64 + `rustup target add x86_64-pc-windows-gnu`)
+and via this container recipe.
 
 The iOS compile gate above is also the only check of the `accesskit_ios` adapter today —
 uncompiled on any host in this repo's history. Screen-reader verification
@@ -399,7 +424,8 @@ owns them:
 | `vello`/`wgpu`, `image`, `vello_cpu` | [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) |
 | `reactive_graph`/`any_spawner`/`tokio`, `clean-signals`, `accesskit` + adapters | [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md) |
 | `ndk-context`, `objc2*` (Foundation/Security/LocalAuthentication/UIKit/QuartzCore/CoreText/CoreFoundation), `androidx.camera`, `openiap-google`/`OpenIAP`, `keyring-core`, `arboard`, `fluent-rs`, `icu` (2.2/2.3), `icu_experimental`, `sys-locale` | [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) |
-| `notify`, `rmcp`, `axum`, `base64`, `tokio-util` | [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) |
+| `muda`, `windows-sys` (desktop shells' native menu-bar/Win32 bindings; `objc2-app-kit` rides the objc2 pin family above) | [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) |
+| `notify`, `rmcp`, `axum`, `base64`, `tokio-util`, `icns` (+ `cargo-packager`/`winresource`, external-tool/template-side, not `[workspace.dependencies]`) | [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) |
 | `ratatui`/`crossterm`/`ansi-to-tui`, `toml_edit` | [TUI_DEVELOPMENT.md](TUI_DEVELOPMENT.md) |
 
 The rules below bind every pin, wherever its row lives:
@@ -445,6 +471,9 @@ must declare the same floor; the numbers are repeated in an in-file comment at e
 |----------|-------|-------------|
 | Android | **`minSdk = 26`** (Android 8.0) · `compileSdk = 36` | 10 Gradle files: `platform/android/frust-embedding`, `plugins/{camera,native-widgets,secure-storage}/platform/android`, `templates/app/android.tmpl/app`, and the 5 example/benchmark apps |
 | iOS | **15.0** | `platform/ios/FrustEmbedding/Package.swift` (`.iOS(.v15)`) and each app's `IPHONEOS_DEPLOYMENT_TARGET` |
+| macOS | **11.0** (`LSMinimumSystemVersion`, `[macos] minimum-system-version` overridable per app) | Three separate literals, none referencing another: `crates/frust-drive/src/manifest.rs`'s private `DEFAULT_MACOS_MINIMUM_SYSTEM_VERSION` (the manifest-parsed default, read back at build time); `crates/frust-drive/src/scaffold/context.rs`'s own `pub` const of the same name (the scaffold-time default that fills `{{ macos_minimum_system_version }}` in `templates/app/macos.tmpl/Info.plist.tmpl`); and a hard-coded `<string>11.0</string>` test literal in `crates/frust-drive/src/scaffold/mod.rs`. This trio needs the same lockstep discipline as the Android table below but none of the three sites carries the in-file lockstep comment yet — treat that as open follow-up work |
+| Windows | **10**, de facto — winit itself supports 7+ and only tests 10 regularly | Not an in-repo literal. The floor comes from the Win10-era API `frust-shell-windows` actually drives: winit's `Window::set_theme` (native titlebar light/dark theming) reaches DWM immersive dark-mode support, which requires Windows 10 1809+ |
+| Linux | No distro floor; a GPU stack able to run vello's compute-shader pipelines (Vulkan in practice) | Not declared per-distro anywhere in this repo. wgpu itself imposes no Vulkan requirement (`crates/frust-render/src/context.rs` requests `Backends::from_env().unwrap_or_default()`, i.e. all backends including GL) — the real constraint is vello's compute path, and it is an untested assumption while the Linux desktop runtime gate is owed (see [LIMITATIONS.md](LIMITATIONS.md) `desktop-shells-runtime-unverified`) |
 
 **Adding a new Android module?** Copy the floor and the lockstep comment. **Adding a new iOS
 target?** `Package.swift`'s `platforms:` must stay **at or below** every consumer's

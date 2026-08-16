@@ -39,6 +39,27 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other unit
 | `plugins/database` | Synchronous embedded SQL database (`Database`/`Value`/`Engine`) over a swappable-engine seam — bundled SQLite via `rusqlite` (default) or an optional Turso engine (`engine-turso`); no OS integration |
 | `plugins/i18n` | Fluent Project + ICU4X internationalization/localization: compile-time bundle loading (`locales!`, via the companion `frust-i18n-macros` proc-macro crate), locale-aware message resolution, system-locale detection, and (`formatting` feature) ICU4X number/date/currency formatting |
 
+## Desktop Backend Status
+
+Every plugin above targets Android/iOS first; desktop coverage is uneven by design, not omission —
+this is the ground truth an app author needs before assuming a plugin "just works" in a desktop
+preview or a `frust build macos|windows|linux`. See
+[CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)'s Data Flow for how a plugin's desktop-lane
+`Contribution`s reach an assembled bundle.
+
+| Plugin | Desktop status | Detail |
+|--------|-----------------|--------|
+| `shared-preferences` | generic-desktop, macOS-native on macOS | NSUserDefaults (macOS, sharing the Apple arm with iOS) / a JSON file backend (Linux, Windows) |
+| `secure-storage` | generic-desktop, macOS-native on macOS | Keychain (macOS, sharing the Apple arm with iOS) / `keyring-core` + secret-service or Credential Manager (Linux, Windows) |
+| `camera` | macOS-native only | AVFoundation (macOS, sharing the Apple arm with iOS); no backend at all on Linux/Windows |
+| `clipboard` | generic-desktop | `arboard` on macOS, Linux, and Windows alike — macOS shares this arm rather than its own Apple `UIPasteboard` one (UIKit-only) |
+| `haptics` | unavailable-by-design | no first-class OS API to route to, on macOS, Linux, or Windows |
+| `iap` | deferred (v1) | dependency-free, always-erroring stub on macOS, Linux, and Windows — mobile-first scope, not a capability gap (`iap-desktop-unavailable-v1` in [LIMITATIONS.md](LIMITATIONS.md)) |
+| `clean-signals-frust` | platform-free | facade-tier glue with no OS integration to split by platform at all |
+| `database` | platform-free | file IO via `rusqlite`/`turso`; no OS integration, so no platform split |
+| `i18n` | platform-free | reaches the OS only for a `sys_locale` read; no backend split |
+| `native-widgets` (NATIVE_WIDGETS unit) | unavailable | no desktop backend of any kind — Android/iOS only (see [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md)) |
+
 ## Layer Dependencies
 
 Every OS-capability plugin (`shared-preferences`, `secure-storage`, `camera`, `clipboard`,
@@ -56,9 +77,9 @@ local `FrustEmbedding` one every other plugin package depends on.
 `clean-signals-frust` instead depends on the `frust` facade crate — its sole framework dependency —
 to bind a `clean_signals` controller into a `Component`'s reactive `Owner`. `database` depends on
 neither `frust-plugin` nor any target-gated FFI crate — its own dependencies are `frust-paths` (data
-directory) and its two swappable SQLite engines, `rusqlite` (default, C via `cc`) and the optional
-pure-Rust `turso`; both reach storage through plain file IO, so the crate needs no platform-handle
-substrate at all. `i18n` is the second plugin (after `native-widgets`) built on the single-crate
+directory), `log`, and its two swappable SQLite engines, `rusqlite` (default, C via `cc`) and the
+optional pure-Rust `turso`; both reach storage through plain file IO, so the crate needs no
+platform-handle substrate at all. `i18n` is the second plugin (after `native-widgets`) built on the single-crate
 platform-plugin-plus-facade-glue shape (`docs/PLUGINS_CODE_STANDARDS.md`'s Plugin Conventions): a
 default-on `frust-api` feature gates its sole `frust` facade dependency, so `cargo check -p
 frust-i18n --no-default-features` mechanically re-verifies the platform-plugin charter line — no
@@ -78,7 +99,7 @@ another `frust-*` framework crate; and the facade never depends on or re-exports
 dependency always runs from an app's own manifest into the plugin, never through the facade.
 `database` is the first plugin to need neither `frust-plugin` nor an FFI crate at all — a pure-Rust
 plugin whose "platform" is the filesystem — which the charter accommodates rather than exempts: it
-still depends on nothing but `frust-paths` and its engines, never another framework crate. Each
+still depends on nothing but `frust-paths`, `log`, and its engines, never another framework crate. Each
 plugin's backends are cfg-gated modules (`apple`/`android`/`file`/`desktop`/`unsupported`) behind
 one platform-independent public API, with FFI dependencies target-gated rather than unconditional.
 

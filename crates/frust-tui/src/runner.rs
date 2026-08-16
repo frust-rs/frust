@@ -19,6 +19,7 @@ use crossterm::event::{
     MouseButton as CtMouseButton, MouseEventKind,
 };
 use frust_drive::android_build::{self, AndroidArtifact};
+use frust_drive::desktop_build;
 use frust_drive::devices::{Platform, default_discoverers, discover_all};
 use frust_drive::doctor::{self, DoctorCtx, RealEnv};
 use frust_drive::ios_build::{self, IosArtifact};
@@ -815,16 +816,33 @@ fn run_build(
             ios_build::build(runner, &spec.project_root, &spec.info, &target, on_line)
                 .map(|artifacts| artifacts.paths)
         }
+        // The desktop pipeline reports non-fatal observations (a missing or
+        // too-small icon, a generated Info.plist, an unsigned .app) as typed
+        // notes on its report rather than printing them — this is the one
+        // place they become log lines. Its failures are a typed
+        // `DesktopBuildError` (host lock, manifest, compile, codesign), which
+        // `?` carries to the caller's `error: {err:#}` line: never a raw
+        // stderr dump into the workbench's raw-mode terminal.
+        BuildTargetSpec::DesktopBundle { target } => {
+            let report =
+                desktop_build::build(runner, &spec.project_root, &spec.info, *target, on_line)?;
+            for note in &report.notes {
+                on_line(&format!("note: {note}"));
+            }
+            Ok(vec![report.root, report.executable])
+        }
     }
 }
 
-/// The build-session tab label per artifact kind (`build apk`/`build ios`/…).
+/// The build-session tab label per artifact kind (`build apk`/`build ios`/
+/// `build linux`/…).
 fn build_target_label(target: &BuildTargetSpec) -> &'static str {
     match target {
         BuildTargetSpec::Apk { .. } => "apk",
         BuildTargetSpec::Appbundle => "appbundle",
         BuildTargetSpec::IosApp { .. } => "ios",
         BuildTargetSpec::Ipa { .. } => "ipa",
+        BuildTargetSpec::DesktopBundle { target } => target.as_str(),
     }
 }
 
@@ -833,7 +851,13 @@ fn build_target_label(target: &BuildTargetSpec) -> &'static str {
 /// removes; duplicated by value here since `clean` has no `frust-drive`
 /// surface to call into (see `docs/ARCHITECTURE.md`'s Module Structure —
 /// `clean` lives entirely in `frust-cli`, unlike `doctor`/`build`).
-const CLEAN_REMOVED_DIRS: &[&str] = &["android/app/build", "android/.gradle", "build"];
+const CLEAN_REMOVED_DIRS: &[&str] = &[
+    "android/app/build",
+    "android/build",
+    "android/.gradle",
+    "build",
+    "dist",
+];
 
 /// Run `cargo clean` + remove the generated Android/iOS build directories for
 /// `project_root` off the UI thread, reporting progress the same way
@@ -1865,6 +1889,8 @@ fn disable_mouse_capture() -> io::Result<()> {
 mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, MouseEvent};
+    use frust_drive::build_info::{BuildArgs, BuildInfo, BuildMode};
+    use frust_drive::desktop_build::DesktopBundleTarget;
     use frust_mcp::engine::{SessionEvent as McpSessionEvent, SessionState as McpSessionState};
 
     /// The runner's own half of the session-event feed: `dispatch` is what
@@ -2235,6 +2261,135 @@ mod tests {
 
         assert_eq!(runner.recorded_cwd(), Some(project_dir.clone()));
         let _ = std::fs::remove_dir_all(&project_dir);
+    }
+
+    // ── Desktop bundle builds ─────────────────────────────────────────────────
+
+    /// A project fixture for the desktop-bundle build arm: a temp directory
+    /// with a `frust.toml` naming the app, and (optionally) the binary a
+    /// successful `cargo build --release` would have produced.
+    fn desktop_fixture(tag: &str, with_binary: Option<&str>) -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "frust-tui-desktop-build-{tag}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("frust.toml"),
+            "[app]\nname = \"my_app\"\norg = \"dev.f0x\"\n",
+        )
+        .unwrap();
+        if let Some(binary) = with_binary {
+            let out = dir.join("target").join("release");
+            std::fs::create_dir_all(&out).unwrap();
+            std::fs::write(out.join(binary), b"#!/bin/sh\ntrue\n").unwrap();
+        }
+        dir
+    }
+
+    fn desktop_spec(project_root: PathBuf, target: DesktopBundleTarget) -> BuildSpec {
+        BuildSpec {
+            project_root,
+            info: BuildInfo::from_args(
+                BuildArgs {
+                    release: true,
+                    ..BuildArgs::default()
+                },
+                BuildMode::Release,
+            )
+            .unwrap(),
+            target: BuildTargetSpec::DesktopBundle { target },
+        }
+    }
+
+    /// The one `cargo` invocation the desktop pipeline makes for a release
+    /// build of a project whose `Cargo.toml` can't be read (the fixture's):
+    /// the release-lean preflight fails open and keeps `lean`.
+    const DESKTOP_RELEASE_BUILD: &str = "cargo build --release --features lean";
+
+    /// The whole desktop arm end to end through `run_build`: compile output
+    /// and the pipeline's own progress reach the session's line sink, each
+    /// `BundleNote` is surfaced as a log line (nothing is printed), and the
+    /// bundle plus its executable come back as the session's artifacts.
+    ///
+    /// Skipped when the environment names a `CARGO_TARGET_DIR`: the pipeline
+    /// then looks for the compiled binary there rather than in the fixture,
+    /// and planting a file inside a developer's shared target directory is not
+    /// this test's business.
+    #[test]
+    fn a_desktop_bundle_build_streams_its_notes_into_the_session_log() {
+        use frust_drive::process::{FakeProcessRunner, Output};
+
+        let Some(host) = DesktopBundleTarget::host() else {
+            return; // a host with no desktop bundle layout of its own
+        };
+        if std::env::var_os("CARGO_TARGET_DIR").is_some() {
+            return;
+        }
+        let binary = if host == DesktopBundleTarget::Windows {
+            "my_app.exe"
+        } else {
+            "my_app"
+        };
+        let dir = desktop_fixture("notes", Some(binary));
+        let runner = FakeProcessRunner::new().with(
+            DESKTOP_RELEASE_BUILD,
+            Output {
+                success: true,
+                stdout: "    Finished `release` profile [optimized]".to_string(),
+                stderr: String::new(),
+            },
+        );
+
+        let mut lines = Vec::new();
+        let paths = run_build(&runner, &desktop_spec(dir.clone(), host), &mut |line| {
+            lines.push(line.to_string())
+        })
+        .unwrap();
+
+        assert!(lines.iter().any(|l| l.starts_with("[cargo] ")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.starts_with("bundle: ")), "{lines:?}");
+        // The fixture configures no `[desktop] icon`, so the pipeline reports
+        // exactly that as a note rather than failing the build.
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("note: ") && l.contains("icon")),
+            "{lines:?}"
+        );
+        assert_eq!(paths.len(), 2, "the bundle root and its executable");
+        assert!(paths[1].is_file(), "{paths:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failed compile comes back as the pipeline's typed error (carrying its
+    /// own bounded output tail), which the caller renders as one `error:` log
+    /// line — never a raw stderr dump into the raw-mode terminal.
+    #[test]
+    fn a_failed_desktop_bundle_build_surfaces_the_typed_error() {
+        use frust_drive::process::{FakeProcessRunner, Output};
+
+        let Some(host) = DesktopBundleTarget::host() else {
+            return;
+        };
+        let dir = desktop_fixture("failed", None);
+        let runner = FakeProcessRunner::new().with(
+            DESKTOP_RELEASE_BUILD,
+            Output {
+                success: false,
+                stdout: String::new(),
+                stderr: "error[E0425]: cannot find value `nope` in this scope".to_string(),
+            },
+        );
+
+        let err = run_build(&runner, &desktop_spec(dir.clone(), host), &mut |_| {}).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("cargo build --release"), "{message}");
+        assert!(message.contains("E0425"), "{message}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── Help overlay ──────────────────────────────────────────────────────────

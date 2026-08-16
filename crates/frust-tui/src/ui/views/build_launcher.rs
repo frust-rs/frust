@@ -139,7 +139,13 @@ pub fn render(
             );
             advance(&mut y);
         }
-        ArtifactKind::Appbundle => {}
+        // A desktop bundle asks for nothing beyond mode/flavor/defines — its
+        // identity, icon and launcher metadata all come from `frust.toml` and
+        // the project's own `macos/`/`windows/`/`linux/` files.
+        ArtifactKind::Appbundle
+        | ArtifactKind::Macos
+        | ArtifactKind::Windows
+        | ArtifactKind::Linux => {}
         ArtifactKind::Ios => {
             render_toggle(
                 frame,
@@ -237,7 +243,10 @@ pub fn render(
 fn kind_row_count(kind: ArtifactKind) -> u16 {
     match kind {
         ArtifactKind::Apk | ArtifactKind::Ipa => 1,
-        ArtifactKind::Appbundle => 0,
+        ArtifactKind::Appbundle
+        | ArtifactKind::Macos
+        | ArtifactKind::Windows
+        | ArtifactKind::Linux => 0,
         ArtifactKind::Ios => 2,
     }
 }

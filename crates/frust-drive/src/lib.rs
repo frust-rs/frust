@@ -15,6 +15,9 @@ pub mod android_id;
 pub mod android_run;
 pub mod build_info;
 pub mod cargo_manifest;
+/// Desktop bundle assembly (`cargo build` + the per-OS `.app`/dist-dir/bundle
+/// layouts, icons, optional macOS codesign) — host-locked per target.
+pub mod desktop_build;
 /// The desktop `cargo run` launch plan shared by any front-end previewing a
 /// Frust project on the host (`frust-tui`'s own desktop session builder is
 /// not converged onto this module yet — see the module doc).
@@ -22,6 +25,7 @@ pub mod desktop_run;
 pub mod devices;
 pub mod devtools_client;
 pub mod doctor;
+pub mod icons;
 /// Process-wide termination handling (the single SIGINT/SIGTERM/SIGHUP owner
 /// and the secret-file scrub it runs). Internal: it is machinery the pipelines
 /// arm, not a surface a front-end drives.
