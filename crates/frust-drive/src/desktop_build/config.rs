@@ -64,6 +64,13 @@ pub(super) struct DesktopConfig {
     pub macos_minimum_system_version: String,
     /// `[macos] signing-identity`; `Some` enables the codesign step.
     pub macos_signing_identity: Option<String>,
+    /// `[macos] notarize`, defaulting to `false` — whether an installer build
+    /// may hand `cargo-packager` the Apple credentials that let it notarize
+    /// (and upload) the `.app` it signs. Read by
+    /// [`super::installer`], which scrubs those credentials from the packaging
+    /// tool's environment when this is `false`; no bundle-assembly step looks
+    /// at it.
+    pub macos_notarize: bool,
     /// `[linux] categories` for a generated desktop entry, defaulting to the
     /// same single `Utility` category the scaffolded entry carries.
     pub linux_categories: Vec<String>,
@@ -151,6 +158,7 @@ impl DesktopConfig {
             icon_source,
             macos_minimum_system_version,
             macos_signing_identity: macos.and_then(|m| m.signing_identity.clone()),
+            macos_notarize: macos.is_some_and(|m| m.notarize_enabled()),
             linux_categories,
             windows_version_overrides,
         })
@@ -338,7 +346,7 @@ mod tests {
              [desktop]\nname = \"My App\"\nidentifier = \"com.example.app\"\n\
              icon = \"assets/icon-1024.png\"\n\n\
              [macos]\nminimum-system-version = \"12.0\"\n\
-             signing-identity = \"Developer ID Application: Example\"\n\n\
+             signing-identity = \"Developer ID Application: Example\"\nnotarize = true\n\n\
              [windows]\nproduct-version = \"1.2.3\"\n\n\
              [linux]\ncategories = [\"Graphics\"]\n",
         );
@@ -351,6 +359,7 @@ mod tests {
             config.macos_signing_identity.as_deref(),
             Some("Developer ID Application: Example")
         );
+        assert!(config.macos_notarize);
         assert_eq!(config.linux_categories, vec!["Graphics".to_string()]);
         assert!(config.windows_version_overrides);
 
@@ -369,6 +378,9 @@ mod tests {
         assert_eq!(config.icon_source, None);
         assert_eq!(config.macos_minimum_system_version, "11.0");
         assert_eq!(config.macos_signing_identity, None);
+        // Notarization is opt-in: a manifest with no `[macos]` section at all
+        // resolves to the credential-scrubbing default.
+        assert!(!config.macos_notarize);
         assert_eq!(config.linux_categories, vec!["Utility".to_string()]);
         assert!(!config.windows_version_overrides);
 

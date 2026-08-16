@@ -145,6 +145,16 @@ pub struct MacosSection {
     /// unsigned.
     #[serde(default)]
     pub signing_identity: Option<String>,
+    /// Opt in to Apple notarization during an `--installer dmg` build:
+    /// `cargo-packager` then submits the `.app` it signed to Apple's notary
+    /// service, using credentials read from the build's own environment.
+    /// Absent (or `false`) is the default, and means those credentials are
+    /// **removed** from the packaging tool's environment so an exported
+    /// `APPLE_ID`/`APPLE_API_KEY` can't turn a local build into an upload —
+    /// see `desktop_build::installer`, which owns the mechanism. Read through
+    /// [`MacosSection::notarize_enabled`] rather than matching this directly.
+    #[serde(default)]
+    pub notarize: Option<bool>,
 }
 
 impl MacosSection {
@@ -154,6 +164,13 @@ impl MacosSection {
         self.minimum_system_version
             .as_deref()
             .unwrap_or(DEFAULT_MACOS_MINIMUM_SYSTEM_VERSION)
+    }
+
+    /// [`MacosSection::notarize`], defaulting to `false` — an absent key and
+    /// an explicit `notarize = false` mean the same thing, and both are the
+    /// credential-scrubbing default.
+    pub fn notarize_enabled(&self) -> bool {
+        self.notarize.unwrap_or(false)
     }
 }
 
@@ -255,7 +272,7 @@ mod tests {
              [desktop]\nname = \"My App\"\nidentifier = \"com.example.myapp\"\n\
              icon = \"assets/icon-1024.png\"\n\n\
              [macos]\nminimum-system-version = \"12.0\"\n\
-             signing-identity = \"Developer ID Application: Example\"\n\n\
+             signing-identity = \"Developer ID Application: Example\"\nnotarize = true\n\n\
              [windows]\nfile-version = \"1.0.0.0\"\nproduct-version = \"1.0.0\"\n\n\
              [linux]\ncategories = [\"Utility\"]\n",
         )
@@ -272,6 +289,8 @@ mod tests {
             macos.signing_identity.as_deref(),
             Some("Developer ID Application: Example")
         );
+        assert_eq!(macos.notarize, Some(true));
+        assert!(macos.notarize_enabled());
 
         let windows = m.windows.unwrap();
         assert_eq!(windows.file_version.as_deref(), Some("1.0.0.0"));
@@ -294,6 +313,48 @@ mod tests {
         let macos = m.macos.unwrap();
         assert_eq!(macos.minimum_system_version_or_default(), "11.0");
         assert!(macos.minimum_system_version.is_none());
+    }
+
+    /// Notarization is opt-in, and only the exact `notarize = true` opts in:
+    /// an absent key and an explicit `false` both leave the packaging step's
+    /// Apple credentials scrubbed.
+    #[test]
+    fn macos_notarize_defaults_to_off_and_only_true_opts_in() {
+        let absent = parse(
+            "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n\
+             [macos]\nsigning-identity = \"Developer ID Application: Example\"\n",
+        )
+        .unwrap()
+        .macos
+        .unwrap();
+        assert_eq!(absent.notarize, None);
+        assert!(!absent.notarize_enabled());
+        assert!(!MacosSection::default().notarize_enabled());
+
+        let explicit_false = parse(
+            "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n\
+             [macos]\nnotarize = false\n",
+        )
+        .unwrap()
+        .macos
+        .unwrap();
+        assert_eq!(explicit_false.notarize, Some(false));
+        assert!(!explicit_false.notarize_enabled());
+    }
+
+    /// The key is kebab-case-strict like every other desktop key: a
+    /// plausible-looking `notarise`/`notarization` typo must fail loudly
+    /// rather than silently leave a build the author believes notarizes
+    /// scrubbing its credentials instead.
+    #[test]
+    fn a_typo_in_the_macos_notarize_key_is_a_hard_error() {
+        for line in ["notarise = true", "notarization = true"] {
+            let err = parse(&format!(
+                "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n[macos]\n{line}\n"
+            ))
+            .unwrap_err();
+            assert!(err.to_string().contains("invalid frust.toml"), "{err}");
+        }
     }
 
     #[test]

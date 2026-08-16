@@ -29,9 +29,14 @@ icon = "assets/logo.png"
 # a GENERATED `Info.plist` only — this project ships its own
 # `macos/Info.plist` (copied verbatim), so change
 # `LSMinimumSystemVersion` there.
+# `notarize` opts an `--installer dmg` build into Apple notarization: the
+# packaging step then UPLOADS the signed app to Apple's notary service using
+# APPLE_* credentials from your environment (off by default — those variables
+# are removed from the packaging step's environment instead).
 # [macos]
 # minimum-system-version = "{{ macos_minimum_system_version }}"
 # signing-identity = "Developer ID Application: Example Org (TEAMID1234)"
+# notarize = true
 
 # Windows-only overrides. The FileVersion/ProductVersion a compiled `.exe`
 # carries are set by this project's own `windows/build.rs` at app-build time

@@ -71,6 +71,32 @@
 //! `.dmg` ships unsigned, the assembled bundle's own signature is untouched,
 //! and signing stays offline.
 //!
+//! **Notarization is opt-in, and the packaging child's Apple credentials are
+//! scrubbed until it is.** `cargo-packager`'s app-packaging path does not stop
+//! at codesigning: right after `codesign::try_sign` it falls through to
+//! `codesign::notarize_auth()` (`0.11.8`'s `src/package/app/mod.rs` and
+//! `src/codesign/macos.rs`), which resolves credentials **purely from the
+//! ambient environment** — `APPLE_KEYCHAIN_PROFILE`, else
+//! `APPLE_ID`+`APPLE_PASSWORD`+`APPLE_TEAM_ID`, else
+//! `APPLE_API_KEY`+`APPLE_API_ISSUER` (with `APPLE_API_KEY_PATH`, or an
+//! `AuthKey_<key id>.p8` discovered under `./private_keys`, `~/private_keys`,
+//! `~/.private_keys`, `~/.appstoreconnect/private_keys`) — and on success
+//! **uploads** the built `.app` to Apple's notary service, waits for the
+//! verdict, and turns a rejection or a submission failure into a hard build
+//! error. `try_sign` reads two more (`APPLE_CERTIFICATE`,
+//! `APPLE_CERTIFICATE_PASSWORD`) to import a p12 into a temporary keychain.
+//! Frust spawns the tool with this process's environment inherited, so a
+//! developer's ordinary exported credentials would silently arm all of that.
+//! The default is therefore to remove [`APPLE_CREDENTIAL_ENV_VARS`] from the
+//! packaging child's environment — the fallback then resolves nothing and
+//! `cargo-packager` logs a skip — with an [`InstallerNote::NotarizationSuppressed`]
+//! saying so and naming the opt-in. `[macos] notarize = true` passes them
+//! through instead, and says *that* with an
+//! [`InstallerNote::NotarizationEnabled`]. Both notes are emitted only when the
+//! config really carries a `signingIdentity` (Dmg + an Apple-issued identity),
+//! since that is the only case in which the packager reaches its notarization
+//! branch at all.
+//!
 //! **`.rpm` is a typed refusal, not a supported format.** `cargo-packager`
 //! 0.11 has no RPM backend at all (only `.deb`, AppImage, and pacman on
 //! Linux) — [`InstallerFormat::requested`] refuses `"rpm"` up front and names
@@ -103,6 +129,32 @@ use super::{BundleReport, DesktopBundleTarget};
 /// this module's tests and a real
 /// `cargo install cargo-packager --version <new> --locked` smoke afterward.
 pub const CARGO_PACKAGER_PINNED: &str = "0.11.8";
+
+/// Every environment variable `cargo-packager` 0.11.8 reads Apple credentials
+/// from, removed from the packaging child's environment unless `[macos]
+/// notarize = true` opts in (see this module's doc for what they arm).
+///
+/// Read off the pinned release's source rather than its documentation, and
+/// complete as of that release: `src/codesign/macos.rs::notarize_auth` reads
+/// the first seven (`APPLE_API_KEY_PATH` is the one the notarization docs
+/// don't mention — it short-circuits the `AuthKey_*.p8` directory search),
+/// and `try_sign`/`setup_keychain` in the same file read the last two to
+/// import a p12 into a temporary keychain. Nothing else in the crate reads an
+/// `APPLE_*` variable (`CI`, `CARGO_TERM_COLOR` and WiX's environment sweep
+/// are the only other `env::var` sites, and none of them carry credentials).
+/// Re-check this list against the source whenever [`CARGO_PACKAGER_PINNED`]
+/// moves.
+const APPLE_CREDENTIAL_ENV_VARS: &[&str] = &[
+    "APPLE_KEYCHAIN_PROFILE",
+    "APPLE_ID",
+    "APPLE_PASSWORD",
+    "APPLE_TEAM_ID",
+    "APPLE_API_KEY",
+    "APPLE_API_ISSUER",
+    "APPLE_API_KEY_PATH",
+    "APPLE_CERTIFICATE",
+    "APPLE_CERTIFICATE_PASSWORD",
+];
 
 /// How many trailing `cargo packager` output lines a failed invocation
 /// reports — the same bound [`super::cargo::build`] uses for a failed
@@ -273,6 +325,14 @@ pub enum InstallerNote {
     /// was **not** passed to `cargo-packager` — see this module's doc for the
     /// `--timestamp`/offline reason.
     PackagerSigningSkipped { identity: String },
+    /// The default: this build could have notarized (it hands
+    /// `cargo-packager` an Apple-issued identity), so the Apple credential
+    /// variables were removed from the packaging child's environment and no
+    /// upload to Apple happened.
+    NotarizationSuppressed,
+    /// `[macos] notarize = true`: the credentials were passed through, so the
+    /// packaging step may submit the signed `.app` to Apple.
+    NotarizationEnabled,
 }
 
 impl fmt::Display for InstallerNote {
@@ -285,6 +345,27 @@ impl fmt::Display for InstallerNote {
                  `--timestamp`, which needs Apple's timestamp service over the network) \
                  — the .app inside the .dmg ships unsigned. The assembled bundle's own \
                  codesign is unaffected, and signing stays offline"
+            ),
+            InstallerNote::NotarizationSuppressed => write!(
+                f,
+                "cargo-packager notarizes — and uploads to Apple — every .app it signs as \
+                 soon as Apple credentials are readable from its environment, so this build \
+                 ran with all of them removed from it (APPLE_KEYCHAIN_PROFILE, \
+                 APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID, \
+                 APPLE_API_KEY/APPLE_API_ISSUER/APPLE_API_KEY_PATH, \
+                 APPLE_CERTIFICATE/APPLE_CERTIFICATE_PASSWORD): the .dmg's app is signed but \
+                 NOT notarized, and nothing was sent to Apple. Add `notarize = true` under \
+                 `[macos]` in frust.toml to notarize on purpose"
+            ),
+            InstallerNote::NotarizationEnabled => write!(
+                f,
+                "`[macos] notarize = true`: Apple credentials are passed through to \
+                 cargo-packager, which UPLOADS the signed .app to Apple's notary service \
+                 (`xcrun notarytool submit --wait`) using whatever this build's environment \
+                 carries (APPLE_KEYCHAIN_PROFILE, or APPLE_ID + APPLE_PASSWORD + \
+                 APPLE_TEAM_ID, or APPLE_API_KEY + APPLE_API_ISSUER). With none of them set \
+                 it warns and skips; once they resolve, a failed or rejected submission \
+                 fails this build"
             ),
         }
     }
@@ -369,9 +450,28 @@ pub fn build_installer(
     let config_path = out_dir.join("packager.json");
     write_config(&config_path, &packager_config)?;
 
+    // Credentials are scrubbed unless the manifest opts in — see this module's
+    // doc. The scrub itself is unconditional (a format that never signs has
+    // nothing to lose by it); only the note is conditional, on the config
+    // really carrying the `signingIdentity` that gets `cargo-packager` as far
+    // as its notarization branch.
+    let scrubbed_env: &[&str] = if config.macos_notarize {
+        &[]
+    } else {
+        APPLE_CREDENTIAL_ENV_VARS
+    };
+    if packager_config.signs_with_an_apple_identity() {
+        notes.push(if config.macos_notarize {
+            InstallerNote::NotarizationEnabled
+        } else {
+            InstallerNote::NotarizationSuppressed
+        });
+    }
+
     // Streamed *before* the packaging run, so the reason a `.dmg`'s inner app
-    // will come out unsigned is on screen ahead of the tool's own output
-    // rather than after it (the same `warning: ` shape the run pipelines use).
+    // will come out unsigned — or the fact that this run may upload it to
+    // Apple — is on screen ahead of the tool's own output rather than after it
+    // (the same `warning: ` shape the run pipelines use).
     for note in &notes {
         on_line(&format!("warning: {note}"));
     }
@@ -380,7 +480,14 @@ pub fn build_installer(
     let args = ["packager", "--config", config_arg.as_str()];
     let mut prefixed = |line: &str| on_line(&format!("[cargo-packager] {line}"));
     let out = runner
-        .run_streaming("cargo", &args, Some(project_dir), &[], &mut prefixed)
+        .run_streaming_scrubbed(
+            "cargo",
+            &args,
+            Some(project_dir),
+            &[],
+            scrubbed_env,
+            &mut prefixed,
+        )
         .map_err(|err| InstallerError::PackagerSpawn {
             reason: format!("{err:#}"),
         })?;
@@ -642,6 +749,17 @@ impl PackagerConfig {
             formats: vec![format.as_str()],
             macos,
         }
+    }
+
+    /// Whether this config actually asks `cargo-packager` to codesign — i.e.
+    /// carries a `signingIdentity`, which only a Dmg build with an
+    /// Apple-issued identity ever does. That is exactly the condition under
+    /// which the tool reaches its post-signing notarization branch, so it is
+    /// what the notarization notes key off rather than the raw manifest value.
+    fn signs_with_an_apple_identity(&self) -> bool {
+        self.macos
+            .as_ref()
+            .is_some_and(|macos| macos.signing_identity.is_some())
     }
 }
 
@@ -1081,12 +1199,17 @@ mod tests {
         )
         .unwrap();
 
-        // An Apple-issued identity is wired through unchanged: nothing to warn
-        // about, nothing to note.
-        assert!(report.notes.is_empty(), "{:?}", report.notes);
+        // An Apple-issued identity is wired through unchanged — the only note
+        // is the default credential scrub (asserted in full by its own test
+        // below), never a signing-skipped one.
+        assert_eq!(report.notes, vec![InstallerNote::NotarizationSuppressed]);
         assert!(
-            !lines.iter().any(|l| l.starts_with("warning:")),
-            "{lines:?}"
+            !report
+                .notes
+                .iter()
+                .any(|note| matches!(note, InstallerNote::PackagerSigningSkipped { .. })),
+            "{:?}",
+            report.notes
         );
 
         let written = fs::read_to_string(out_dir.join("packager.json")).unwrap();
@@ -1181,6 +1304,194 @@ mod tests {
         );
         assert!(parsed["macos"].get("infoPlistPath").is_some(), "{written}");
         assert!(parsed["macos"].get("entitlements").is_some(), "{written}");
+    }
+
+    /// The default contract: a `.dmg` build that hands `cargo-packager` an
+    /// Apple-issued identity runs the tool with **every** credential variable
+    /// its notarization fallback reads removed from the child's environment,
+    /// so an exported `APPLE_ID`/`APPLE_API_KEY` can never turn a local build
+    /// into an upload to Apple. The note names the opt-in.
+    #[test]
+    fn a_signed_dmg_build_scrubs_every_apple_credential_var_by_default() {
+        let fixture = Fixture::new("dmg-scrub-default").manifest(
+            "[app]\nname = \"my_app\"\norg = \"dev.f0x\"\n\n\
+             [desktop]\nname = \"My App\"\nidentifier = \"dev.f0x.my_app\"\n\n\
+             [macos]\nsigning-identity = \"Developer ID Application: Example\"\n",
+        );
+        let bundle = fixture.macos_app("my_app", true);
+        let out_dir = DesktopBundleTarget::Macos
+            .dist_dir(&fixture.dir)
+            .join("installer")
+            .join("dmg");
+        let config_arg = out_dir.join("packager.json").to_string_lossy().into_owned();
+        let runner = version_ok().with(
+            format!("cargo packager --config {config_arg}"),
+            Output {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+
+        let mut lines = Vec::new();
+        let report = build_installer(
+            &runner,
+            &fixture.dir,
+            &info(),
+            &bundle,
+            InstallerFormat::Dmg,
+            &mut |line| lines.push(line.to_string()),
+        )
+        .unwrap();
+
+        // The exact set, in full — a variable dropped from the const would let
+        // the fallback resolve credentials again.
+        assert_eq!(
+            runner.recorded_env_removals(),
+            Some(
+                APPLE_CREDENTIAL_ENV_VARS
+                    .iter()
+                    .map(|key| key.to_string())
+                    .collect::<Vec<_>>()
+            )
+        );
+        assert_eq!(
+            runner.recorded_env_removals().unwrap().len(),
+            9,
+            "the full set cargo-packager 0.11.8 reads"
+        );
+
+        assert_eq!(report.notes, vec![InstallerNote::NotarizationSuppressed]);
+        let warning = lines
+            .iter()
+            .find(|l| l.starts_with("warning:"))
+            .unwrap_or_else(|| panic!("expected a warning line: {lines:?}"));
+        assert!(warning.contains("NOT notarized"), "{warning}");
+        assert!(warning.contains("notarize = true"), "{warning}");
+    }
+
+    /// The opt-in: `[macos] notarize = true` removes nothing, so the packaging
+    /// child inherits the credentials and `cargo-packager` may upload the
+    /// signed app — which the note says out loud, since a build that contacts
+    /// Apple and can fail on Apple's verdict is not what `frust build` does by
+    /// default.
+    #[test]
+    fn notarize_true_passes_the_credentials_through_and_warns_that_it_uploads() {
+        let fixture = Fixture::new("dmg-notarize-optin").manifest(
+            "[app]\nname = \"my_app\"\norg = \"dev.f0x\"\n\n\
+             [desktop]\nname = \"My App\"\nidentifier = \"dev.f0x.my_app\"\n\n\
+             [macos]\nsigning-identity = \"Developer ID Application: Example\"\n\
+             notarize = true\n",
+        );
+        let bundle = fixture.macos_app("my_app", true);
+        let out_dir = DesktopBundleTarget::Macos
+            .dist_dir(&fixture.dir)
+            .join("installer")
+            .join("dmg");
+        let config_arg = out_dir.join("packager.json").to_string_lossy().into_owned();
+        let runner = version_ok().with(
+            format!("cargo packager --config {config_arg}"),
+            Output {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+
+        let mut lines = Vec::new();
+        let report = build_installer(
+            &runner,
+            &fixture.dir,
+            &info(),
+            &bundle,
+            InstallerFormat::Dmg,
+            &mut |line| lines.push(line.to_string()),
+        )
+        .unwrap();
+
+        // The packaging call was made, and removed nothing — not "no call".
+        assert_eq!(runner.recorded_env_removals(), Some(Vec::new()));
+        assert_eq!(report.notes, vec![InstallerNote::NotarizationEnabled]);
+        let warning = lines
+            .iter()
+            .find(|l| l.starts_with("warning:"))
+            .unwrap_or_else(|| panic!("expected a warning line: {lines:?}"));
+        assert!(warning.contains("UPLOADS"), "{warning}");
+        assert!(warning.contains("notary service"), "{warning}");
+        assert!(warning.contains("fails this build"), "{warning}");
+        // The signing identity still reaches the config — the opt-in changes
+        // the child's environment, nothing about the config itself.
+        let written = fs::read_to_string(out_dir.join("packager.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(
+            parsed["macos"]["signingIdentity"], "Developer ID Application: Example",
+            "{written}"
+        );
+    }
+
+    /// A build `cargo-packager` never codesigns never reaches its notarization
+    /// branch either, so neither note is emitted — for a non-Apple identity
+    /// (whose `signingIdentity` is suppressed) and for a format with no
+    /// `macos` block at all. The scrub still applies: it costs nothing, and
+    /// keeps one rule rather than a per-format exception.
+    #[test]
+    fn a_build_that_cannot_notarize_gets_no_notarization_note_but_is_still_scrubbed() {
+        for (target, binary, format, manifest_body) in [
+            (
+                DesktopBundleTarget::Macos,
+                "my_app",
+                InstallerFormat::Dmg,
+                "[app]\nname = \"my_app\"\norg = \"dev.f0x\"\n\n\
+                 [macos]\nsigning-identity = \"My Self Signed\"\n",
+            ),
+            (
+                DesktopBundleTarget::Linux,
+                "my_app",
+                InstallerFormat::Deb,
+                "[app]\nname = \"my_app\"\norg = \"dev.f0x\"\n\n\
+                 [macos]\nsigning-identity = \"Developer ID Application: Example\"\n",
+            ),
+        ] {
+            let fixture =
+                Fixture::new(&format!("no-notarize-note-{format}")).manifest(manifest_body);
+            let bundle = fixture.bundle(target, binary);
+            let out_dir = target
+                .dist_dir(&fixture.dir)
+                .join("installer")
+                .join(format.as_str());
+            let config_arg = out_dir.join("packager.json").to_string_lossy().into_owned();
+            let runner = version_ok().with(
+                format!("cargo packager --config {config_arg}"),
+                Output {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
+            );
+
+            let report =
+                build_installer(&runner, &fixture.dir, &info(), &bundle, format, &mut |_| {})
+                    .unwrap_or_else(|err| panic!("{format}: {err}"));
+
+            assert!(
+                !report.notes.iter().any(|note| matches!(
+                    note,
+                    InstallerNote::NotarizationSuppressed | InstallerNote::NotarizationEnabled
+                )),
+                "{format}: {:?}",
+                report.notes
+            );
+            assert_eq!(
+                runner.recorded_env_removals(),
+                Some(
+                    APPLE_CREDENTIAL_ENV_VARS
+                        .iter()
+                        .map(|key| key.to_string())
+                        .collect::<Vec<_>>()
+                ),
+                "{format}"
+            );
+        }
     }
 
     /// The icon defect this task fixes: the `.dmg` config names the *bundle's
