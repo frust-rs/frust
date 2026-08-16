@@ -51,6 +51,13 @@
 //! never a failure: tool trouble must not block a build (the same stance
 //! `ios_run::bundle_id` takes on the identical tool).
 //!
+//! **Installed plugins contribute to the bundle, never to the project.** A
+//! plugin declaring a macOS `Info.plist` key, a macOS entitlement or a Linux
+//! desktop-entry key has it merged into the *assembled* bundle on every build
+//! — after assembly, before `codesign` — rather than written into a project
+//! file at `frust plugin add` time. See [`contributions`] for the merge rules
+//! (an existing key always wins; an unappliable one is a hard refusal).
+//!
 //! **A missing or unusable icon never fails a build.** The bundle is assembled
 //! without one and the reason comes back as a [`BundleNote`] — a bundle with
 //! no icon still runs, and the scaffold's own placeholder logo is deliberately
@@ -73,6 +80,7 @@
 mod bundle;
 mod cargo;
 mod config;
+mod contributions;
 mod installer;
 mod linux;
 mod macos;
@@ -84,6 +92,7 @@ use std::path::{Path, PathBuf};
 use crate::build_info::BuildInfo;
 use crate::doctor::{EnvLookup, RealEnv};
 use crate::manifest;
+use crate::plugin::DesktopContribution;
 use crate::process::ProcessRunner;
 
 use self::config::DesktopConfig;
@@ -224,6 +233,26 @@ pub enum BundleNote {
     /// keys were not checked against the manifest. Environmental, never a
     /// build failure.
     PlistUnverified { reason: String },
+    /// An installed plugin's desktop contribution was merged into the
+    /// assembled bundle (see the [`contributions`] module).
+    PluginContribution {
+        plugin_id: &'static str,
+        /// [`crate::plugin::Contribution::describe`]'s label for the edit.
+        description: String,
+    },
+    /// An installed plugin declares a key the bundle's own launcher file
+    /// already carries, so nothing was written — the existing (user-owned)
+    /// value wins.
+    PluginEntryPresent {
+        plugin_id: &'static str,
+        key: String,
+        /// Which file already had the key, for the message.
+        file: &'static str,
+    },
+    /// Plugins contributed entitlements to a build with no `[macos]
+    /// signing-identity`. Entitlements take effect only through a signature,
+    /// so none were applied — and none could have been.
+    EntitlementsSkippedUnsigned { count: usize },
 }
 
 impl fmt::Display for BundleNote {
@@ -289,6 +318,24 @@ impl fmt::Display for BundleNote {
                 f,
                 "could not read the copied `macos/Info.plist` back ({reason}) — its \
                  CFBundleExecutable/CFBundleIdentifier were not checked against frust.toml"
+            ),
+            BundleNote::PluginContribution {
+                plugin_id,
+                description,
+            } => write!(f, "plugin `{plugin_id}` contributed {description}"),
+            BundleNote::PluginEntryPresent {
+                plugin_id,
+                key,
+                file,
+            } => write!(
+                f,
+                "plugin `{plugin_id}` declares `{key}`, but {file} already carries that key — \
+                 the existing value wins and nothing was written"
+            ),
+            BundleNote::EntitlementsSkippedUnsigned { count } => write!(
+                f,
+                "{count} plugin entitlement(s) not applied — without a `[macos] \
+                 signing-identity` there is no signature for an entitlement to travel in"
             ),
         }
     }
@@ -360,6 +407,18 @@ pub enum DesktopBuildError {
         #[source]
         source: std::io::Error,
     },
+    #[error("reading the desktop contributions the project's installed plugins declare: {reason}")]
+    PluginContributions { reason: String },
+    #[error(
+        "plugin `{plugin_id}` contributes {description}, and it cannot be applied: {reason}. \
+         A bundle that silently ships without a declared key fails in front of a user at \
+         runtime, so this refuses the build instead of skipping the contribution"
+    )]
+    ContributionUnappliable {
+        plugin_id: &'static str,
+        description: String,
+        reason: String,
+    },
     #[error("spawning `codesign`: {reason}")]
     CodesignSpawn { reason: String },
     #[error("`codesign --sign {identity}` failed:\n{tail}")]
@@ -406,6 +465,29 @@ fn build_with_host(
     host: Option<DesktopBundleTarget>,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<BundleReport, DesktopBuildError> {
+    build_with_contributions(runner, env, project_dir, info, target, host, None, on_line)
+}
+
+/// [`build_with_host`]'s core, with the plugin desktop-contribution set
+/// injectable: `None` collects it from the project's installed plugins (the
+/// production path), `Some(rows)` uses exactly those rows instead.
+///
+/// The injection exists because the contribution registry is `&'static` data
+/// scanned out of the project's `Cargo.toml`, and the real registry carries no
+/// desktop rows at all yet — an end-to-end test could otherwise only ever
+/// observe the empty set, leaving the merge stage's placement in this pipeline
+/// (after assembly, before `codesign`) unprovable.
+#[allow(clippy::too_many_arguments)] // one injected seam past the threshold; every argument is a distinct injected dependency
+fn build_with_contributions(
+    runner: &dyn ProcessRunner,
+    env: &dyn EnvLookup,
+    project_dir: &Path,
+    info: &BuildInfo,
+    target: DesktopBundleTarget,
+    host: Option<DesktopBundleTarget>,
+    contributions: Option<&[DesktopContribution]>,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<BundleReport, DesktopBuildError> {
     if host != Some(target) {
         return Err(DesktopBuildError::HostMismatch { target, host });
     }
@@ -433,6 +515,19 @@ fn build_with_host(
     cargo::build(runner, project_dir, info, on_line)?;
     let binary = cargo::locate_binary(runner, env, project_dir, info, target, &config)?;
 
+    // Which desktop contributions the installed plugins owe this target, read
+    // from the same `Cargo.toml` the compile above just parsed — so a manifest
+    // problem is reported by cargo, with cargo's own diagnostics, rather than
+    // by this scan.
+    let collected;
+    let contributions = match contributions {
+        Some(rows) => rows,
+        None => {
+            collected = contributions::collect(project_dir, target)?;
+            &collected
+        }
+    };
+
     let mut report = match target {
         DesktopBundleTarget::Macos => {
             macos::assemble(runner, project_dir, info, &config, &binary, &mut notes)?
@@ -443,12 +538,26 @@ fn build_with_host(
         DesktopBundleTarget::Linux => linux::assemble(project_dir, &config, &binary, &mut notes)?,
     };
 
+    // The plugin merge runs over the assembled bundle and **before** the
+    // signature: `codesign` covers the bundle's files as they are when it
+    // runs, so a plist merged afterwards would invalidate it. It also answers
+    // which entitlements file the signature should carry.
+    let entitlements = contributions::apply(
+        project_dir,
+        &config,
+        &mut report,
+        contributions,
+        &mut notes,
+        on_line,
+    )?;
+
     if target == DesktopBundleTarget::Macos {
         macos::codesign(
             runner,
             project_dir,
             &config,
             &report.root,
+            entitlements.as_deref(),
             &mut notes,
             on_line,
         )?;
@@ -467,6 +576,7 @@ mod tests {
     use super::*;
     use crate::build_info::{BuildArgs, BuildMode};
     use crate::doctor::FakeEnv;
+    use crate::plugin::Contribution;
     use crate::process::{FakeProcessRunner, Output};
     use std::fs;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -588,6 +698,28 @@ mod tests {
             &release_info(),
             target,
             Some(target),
+            &mut |_| {},
+        )
+    }
+
+    /// [`run`] with an injected plugin desktop-contribution set — the seam
+    /// [`build_with_contributions`]'s doc explains. The real registry carries
+    /// no desktop rows, so this is the only way an end-to-end build can meet
+    /// one.
+    fn run_with(
+        runner: &FakeProcessRunner,
+        fixture: &Fixture,
+        target: DesktopBundleTarget,
+        rows: &[DesktopContribution],
+    ) -> Result<BundleReport, DesktopBuildError> {
+        build_with_contributions(
+            runner,
+            &FakeEnv::new(),
+            &fixture.dir,
+            &release_info(),
+            target,
+            Some(target),
+            Some(rows),
             &mut |_| {},
         )
     }
@@ -1385,6 +1517,397 @@ mod tests {
         .unwrap();
         assert!(lines.iter().any(|l| l.starts_with("[cargo] ")), "{lines:?}");
         assert!(lines.iter().any(|l| l.starts_with("bundle: ")), "{lines:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Plugin desktop contributions, end to end through the whole pipeline.
+    // The rows are synthetic (`&'static` statics) because the real registry
+    // declares no desktop contributions yet — see `build_with_contributions`.
+    // -----------------------------------------------------------------------
+
+    static PLIST_CAMERA: Contribution = Contribution::MacosPlistEntry {
+        key: "NSCameraUsageDescription",
+        value: "Scan a document & <sign> it",
+        comment: "Camera access",
+    };
+    static PLIST_MIC: Contribution = Contribution::MacosPlistEntry {
+        key: "NSMicrophoneUsageDescription",
+        value: "Record a voice note",
+        comment: "Microphone access",
+    };
+    static ENTITLEMENT_CAMERA: Contribution = Contribution::MacosEntitlement {
+        key: "com.apple.security.device.camera",
+        comment: "Camera device access",
+    };
+    static DESKTOP_MIME: Contribution = Contribution::LinuxDesktopEntry {
+        key: "MimeType",
+        value: "image/png;",
+        comment: "Handled file types",
+    };
+    static DESKTOP_CATEGORIES: Contribution = Contribution::LinuxDesktopEntry {
+        key: "Categories",
+        value: "Graphics;",
+        comment: "Launcher categories",
+    };
+
+    fn row(contribution: &'static Contribution) -> DesktopContribution {
+        DesktopContribution {
+            plugin_id: "camera",
+            contribution,
+        }
+    }
+
+    fn applied_descriptions(report: &BundleReport) -> Vec<&str> {
+        report
+            .notes
+            .iter()
+            .filter_map(|note| match note {
+                BundleNote::PluginContribution { description, .. } => Some(description.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The milestone case: a signing macOS build over a generated plist takes
+    /// both contributed keys into the bundle's own `Info.plist` and signs with
+    /// a generated entitlements file carrying the contributed entitlement.
+    #[test]
+    fn a_signing_macos_build_merges_plist_keys_and_signs_with_generated_entitlements() {
+        let fixture = Fixture::new("contrib-macos-signed")
+            .manifest(
+                "[app]\nname = \"my_app\"\norg = \"dev.f0x\"\n\n\
+                 [desktop]\nname = \"My App\"\n\n\
+                 [macos]\nsigning-identity = \"Developer ID Application: Example\"\n",
+            )
+            .binary("my_app");
+        let entitlements = fixture.path("dist/macos/my_app.entitlements");
+        let runner = cargo_ok().with(
+            format!(
+                "codesign --force --sign Developer ID Application: Example --options runtime \
+                 --entitlements {} --timestamp {}",
+                entitlements.display(),
+                fixture.path("dist/macos/My App.app").display()
+            ),
+            Output {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+
+        let report = run_with(
+            &runner,
+            &fixture,
+            DesktopBundleTarget::Macos,
+            &[
+                row(&PLIST_CAMERA),
+                row(&PLIST_MIC),
+                row(&ENTITLEMENT_CAMERA),
+            ],
+        )
+        .unwrap();
+
+        let plist = fixture.read("dist/macos/My App.app/Contents/Info.plist");
+        assert!(
+            plist.contains(
+                "<key>NSCameraUsageDescription</key>\n\t\
+                 <string>Scan a document &amp; &lt;sign&gt; it</string>"
+            ),
+            "{plist}"
+        );
+        assert!(
+            plist.contains("<key>NSMicrophoneUsageDescription</key>"),
+            "{plist}"
+        );
+        assert!(
+            plist.contains("<!-- Camera access (frust plugin: camera) -->"),
+            "{plist}"
+        );
+
+        // The entitlements are a generated dist artifact; the project ships
+        // none, so nothing of the project's was read or written.
+        let merged = fixture.read("dist/macos/my_app.entitlements");
+        assert!(
+            merged.contains("<key>com.apple.security.device.camera</key>"),
+            "{merged}"
+        );
+        assert!(!fixture.path("macos/app.entitlements").exists());
+        assert!(
+            report.artifacts.contains(&entitlements),
+            "{:?}",
+            report.artifacts
+        );
+
+        // The signature is the one registered above — an unregistered argv
+        // would have failed the spawn — and every contribution is reported.
+        assert!(report.notes.contains(&BundleNote::Signed {
+            identity: "Developer ID Application: Example".to_string()
+        }));
+        assert_eq!(applied_descriptions(&report).len(), 3, "{:?}", report.notes);
+    }
+
+    /// Ordering proof: with `codesign` registered as *failing*, the build
+    /// stops there — and the merged plist plus the generated entitlements are
+    /// already on disk, which can only be true if the merge ran first. A
+    /// signature over a bundle mutated afterwards would be invalid.
+    #[test]
+    fn contributions_are_merged_before_the_bundle_is_signed() {
+        let fixture = Fixture::new("contrib-macos-order")
+            .manifest(
+                "[app]\nname = \"my_app\"\norg = \"dev.f0x\"\n\n\
+                 [desktop]\nname = \"My App\"\n\n\
+                 [macos]\nsigning-identity = \"Developer ID Application: Example\"\n",
+            )
+            .binary("my_app");
+        let runner = cargo_ok().with(
+            "codesign ",
+            Output {
+                success: false,
+                stdout: String::new(),
+                stderr: "errSecInternalComponent".to_string(),
+            },
+        );
+
+        let mut lines = Vec::new();
+        let err = build_with_contributions(
+            &runner,
+            &FakeEnv::new(),
+            &fixture.dir,
+            &release_info(),
+            DesktopBundleTarget::Macos,
+            Some(DesktopBundleTarget::Macos),
+            Some(&[row(&PLIST_CAMERA), row(&ENTITLEMENT_CAMERA)]),
+            &mut |line| lines.push(line.to_string()),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, DesktopBuildError::CodesignFailed { .. }),
+            "{err}"
+        );
+        assert!(
+            fixture
+                .read("dist/macos/My App.app/Contents/Info.plist")
+                .contains("NSCameraUsageDescription")
+        );
+        assert!(fixture.path("dist/macos/my_app.entitlements").is_file());
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "plugins: applying 2 desktop contribution(s)"),
+            "{lines:?}"
+        );
+    }
+
+    /// A copied plist is merged exactly like a generated one — into the dist
+    /// copy, never the project's file — and a key the project already
+    /// declares wins, however the plugin would have spelled it. The fixture
+    /// nests a dictionary so the insertion anchor (the LAST `</dict>`) is
+    /// actually load-bearing.
+    #[test]
+    fn a_copied_plist_keeps_its_own_key_and_takes_the_new_one_into_the_root_dict() {
+        let project_plist = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <plist version=\"1.0\">\n<dict>\n\
+             \t<key>CFBundleExecutable</key>\n\t<string>my_app</string>\n\
+             \t<key>NSCameraUsageDescription</key>\n\t<string>My own words</string>\n\
+             \t<key>NSAppTransportSecurity</key>\n\t<dict>\n\
+             \t\t<key>NSAllowsArbitraryLoads</key>\n\t\t<true/>\n\t</dict>\n\
+             </dict>\n</plist>\n";
+        let fixture = Fixture::new("contrib-macos-copied")
+            .default_manifest()
+            .binary("my_app")
+            .file("macos/Info.plist", project_plist);
+        let runner = with_plutil(cargo_ok(), "CFBundleExecutable", "my_app");
+        let runner = with_plutil(runner, "CFBundleIdentifier", "dev.f0x.my_app");
+
+        let report = run_with(
+            &runner,
+            &fixture,
+            DesktopBundleTarget::Macos,
+            &[row(&PLIST_CAMERA), row(&PLIST_MIC)],
+        )
+        .unwrap();
+
+        let merged = fixture.read("dist/macos/My App.app/Contents/Info.plist");
+        assert!(merged.contains("<string>My own words</string>"), "{merged}");
+        assert!(!merged.contains("Scan a document"), "{merged}");
+        // The new key landed in the ROOT dict, after the nested one closed.
+        let key_at = merged
+            .find("<key>NSMicrophoneUsageDescription</key>")
+            .unwrap();
+        assert!(
+            key_at > merged.find("NSAllowsArbitraryLoads").unwrap(),
+            "{merged}"
+        );
+        assert!(key_at < merged.rfind("</dict>").unwrap(), "{merged}");
+        // The project's own file is untouched.
+        assert_eq!(fixture.read("macos/Info.plist"), project_plist);
+
+        assert!(
+            report.notes.iter().any(|note| matches!(
+                note,
+                BundleNote::PluginEntryPresent { key, .. } if key == "NSCameraUsageDescription"
+            )),
+            "{:?}",
+            report.notes
+        );
+        assert_eq!(applied_descriptions(&report).len(), 1, "{:?}", report.notes);
+    }
+
+    /// An entitlement needs a signature to mean anything, so an unsigned build
+    /// applies none: one note, no generated file, and no failure — the one
+    /// carve-out from the refuse-rather-than-skip rule.
+    #[test]
+    fn an_unsigned_macos_build_skips_entitlement_contributions_without_failing() {
+        let fixture = Fixture::new("contrib-macos-unsigned")
+            .default_manifest()
+            .binary("my_app");
+
+        let report = run_with(
+            &cargo_ok(),
+            &fixture,
+            DesktopBundleTarget::Macos,
+            &[row(&ENTITLEMENT_CAMERA)],
+        )
+        .unwrap();
+
+        assert!(
+            report
+                .notes
+                .contains(&BundleNote::EntitlementsSkippedUnsigned { count: 1 })
+        );
+        assert!(!fixture.path("dist/macos/my_app.entitlements").exists());
+        assert!(report.notes.contains(&BundleNote::Unsigned));
+    }
+
+    /// A plist with no `</dict>` cannot carry a contributed key, and a bundle
+    /// shipping without a declared usage description dies in front of a user —
+    /// so the build refuses rather than assembling a bundle that is missing it.
+    #[test]
+    fn a_plist_with_no_insertion_anchor_fails_a_build_that_has_contributions() {
+        let fixture = Fixture::new("contrib-macos-malformed")
+            .default_manifest()
+            .binary("my_app")
+            .file("macos/Info.plist", "<plist version=\"1.0\">nope</plist>\n");
+
+        let err = run_with(
+            &cargo_ok(),
+            &fixture,
+            DesktopBundleTarget::Macos,
+            &[row(&PLIST_CAMERA)],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                DesktopBuildError::ContributionUnappliable { plugin_id, .. } if *plugin_id == "camera"
+            ),
+            "{err}"
+        );
+
+        // …and the same project builds fine with nothing to contribute.
+        let report = run_with(&cargo_ok(), &fixture, DesktopBundleTarget::Macos, &[]).unwrap();
+        assert!(report.executable.is_file());
+    }
+
+    /// Linux, both entry provenances: a generated entry takes the contributed
+    /// key, and a copied one keeps the key it already declares.
+    #[test]
+    fn a_linux_build_merges_contributed_keys_into_generated_and_copied_entries() {
+        let generated = Fixture::new("contrib-linux-generated")
+            .default_manifest()
+            .binary("my_app");
+        let report = run_with(
+            &cargo_ok(),
+            &generated,
+            DesktopBundleTarget::Linux,
+            &[row(&DESKTOP_MIME)],
+        )
+        .unwrap();
+        let entry = generated.read("dist/linux/my_app/dev.f0x.my_app.desktop");
+        assert!(entry.contains("\nMimeType=image/png;\n"), "{entry}");
+        assert!(
+            entry.contains("# Handled file types (frust plugin: camera)"),
+            "{entry}"
+        );
+        assert!(report.notes.contains(&BundleNote::GeneratedDesktopEntry));
+        assert_eq!(applied_descriptions(&report).len(), 1, "{:?}", report.notes);
+
+        let copied = Fixture::new("contrib-linux-copied")
+            .default_manifest()
+            .binary("my_app")
+            .file(
+                "linux/app.desktop",
+                "[Desktop Entry]\nType=Application\nName=My App\nExec=my_app\n\
+                 Icon=dev.f0x.my_app\nCategories=Utility;\nTerminal=false\n",
+            );
+        let report = run_with(
+            &cargo_ok(),
+            &copied,
+            DesktopBundleTarget::Linux,
+            &[row(&DESKTOP_CATEGORIES), row(&DESKTOP_MIME)],
+        )
+        .unwrap();
+        let entry = copied.read("dist/linux/my_app/dev.f0x.my_app.desktop");
+        assert!(entry.contains("\nCategories=Utility;\n"), "{entry}");
+        assert!(!entry.contains("Graphics;"), "{entry}");
+        assert!(entry.contains("\nMimeType=image/png;\n"), "{entry}");
+        // The project's own entry is read, never written.
+        assert!(!copied.read("linux/app.desktop").contains("MimeType"));
+        assert!(
+            report.notes.iter().any(|note| matches!(
+                note,
+                BundleNote::PluginEntryPresent { key, .. } if key == "Categories"
+            )),
+            "{:?}",
+            report.notes
+        );
+    }
+
+    /// No installed plugins is the overwhelmingly common case and must change
+    /// nothing: the production collection path (no injected rows) records no
+    /// plugin note at all, and a target with no variant of its own (Windows)
+    /// applies nothing even when rows exist.
+    #[test]
+    fn a_build_with_no_desktop_contributions_records_nothing() {
+        let fixture = Fixture::new("contrib-none")
+            .default_manifest()
+            .binary("my_app");
+        let report = run(&cargo_ok(), &fixture, DesktopBundleTarget::Linux).unwrap();
+        assert!(
+            !report.notes.iter().any(|note| matches!(
+                note,
+                BundleNote::PluginContribution { .. }
+                    | BundleNote::PluginEntryPresent { .. }
+                    | BundleNote::EntitlementsSkippedUnsigned { .. }
+            )),
+            "{:?}",
+            report.notes
+        );
+        assert!(
+            !fixture
+                .read("dist/linux/my_app/dev.f0x.my_app.desktop")
+                .contains("frust plugin")
+        );
+
+        let windows = Fixture::new("contrib-windows")
+            .default_manifest()
+            .binary("my_app.exe");
+        let report = run_with(
+            &cargo_ok(),
+            &windows,
+            DesktopBundleTarget::Windows,
+            &[row(&PLIST_CAMERA), row(&DESKTOP_MIME)],
+        )
+        .unwrap();
+        assert!(
+            !report.notes.iter().any(|note| matches!(
+                note,
+                BundleNote::PluginContribution { .. } | BundleNote::PluginEntryPresent { .. }
+            )),
+            "{:?}",
+            report.notes
+        );
     }
 
     /// **Real smoke, this host.** A genuine `cargo build --release` through

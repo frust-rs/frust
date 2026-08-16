@@ -662,8 +662,15 @@ struct PackagerMacosConfig {
     /// unsigned, exactly like an unconfigured `frust build macos`.
     #[serde(skip_serializing_if = "Option::is_none")]
     signing_identity: Option<String>,
-    /// `<project>/macos/app.entitlements`, only when the project actually
-    /// ships one — the same existence gate [`super::macos::codesign`] applies.
+    /// The entitlements the packager's own codesign pass signs the `.app` it
+    /// synthesizes with, resolved by
+    /// [`super::contributions::entitlements_for_packaging`]: the merged file a
+    /// `frust build macos` generated beside the `.app` when a plugin
+    /// contributed an entitlement, else `<project>/macos/app.entitlements`
+    /// when the project ships one, else nothing. Sharing that resolution with
+    /// the assembly's own `codesign` call is what keeps a `.dmg`'s inner app
+    /// from being signed with fewer entitlements than the bundle it was built
+    /// from.
     #[serde(skip_serializing_if = "Option::is_none")]
     entitlements: Option<String>,
 }
@@ -726,10 +733,8 @@ impl PackagerConfig {
                     None
                 }
             }),
-            entitlements: {
-                let path = project_dir.join("macos").join("app.entitlements");
-                path.is_file().then(|| path.to_string_lossy().into_owned())
-            },
+            entitlements: super::contributions::entitlements_for_packaging(project_dir, config)
+                .map(|path| path.to_string_lossy().into_owned()),
         });
 
         PackagerConfig {

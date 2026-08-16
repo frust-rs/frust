@@ -124,7 +124,7 @@ pub(super) fn assemble(
         artifacts.extend(written);
     }
 
-    let plist = contents.join("Info.plist");
+    let plist = info_plist_path(&root);
     let project_plist = project_dir.join("macos").join("Info.plist");
     if project_plist.is_file() {
         copy_file(&project_plist, &plist)?;
@@ -260,8 +260,12 @@ fn icon_stem(name: &str) -> &str {
 /// [`BundleNote::Unsigned`] when none is configured — the whole of the
 /// "invoked iff configured" contract lives in this one branch.
 ///
-/// `macos/app.entitlements` is passed when the project has one (the scaffold
-/// ships it for exactly this call). Notarization is deliberately not
+/// `entitlements` is passed straight through to `codesign` when `Some`. The
+/// caller resolves it ([`super::contributions::apply`]) rather than this
+/// function probing for the project's `macos/app.entitlements` itself, because
+/// a plugin-contributed entitlement produces a *generated* file beside the
+/// `.app` instead — and the project's own file, when nothing is contributed,
+/// is exactly what that resolution answers. Notarization is deliberately not
 /// automated: it needs credentials and a network round trip, and stays a
 /// documented manual step.
 pub(super) fn codesign(
@@ -269,6 +273,7 @@ pub(super) fn codesign(
     project_dir: &Path,
     config: &DesktopConfig,
     app: &Path,
+    entitlements: Option<&Path>,
     notes: &mut Vec<BundleNote>,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<(), DesktopBuildError> {
@@ -277,8 +282,7 @@ pub(super) fn codesign(
         return Ok(());
     };
 
-    let entitlements = project_dir.join("macos").join("app.entitlements");
-    let entitlements = entitlements.is_file().then(|| path_arg(&entitlements));
+    let entitlements = entitlements.map(path_arg);
     let app_arg = path_arg(app);
 
     // `--force` so re-signing an already-signed bundle (every rebuild) works
@@ -388,7 +392,10 @@ fn info_plist(config: &DesktopConfig, info: &BuildInfo) -> String {
 
 /// XML text-node escaping for the five predefined entities — a display name
 /// is free-form user text and can carry any of them.
-fn xml_escape(value: &str) -> String {
+///
+/// Shared with [`super::contributions`] (a plugin's contributed plist value
+/// goes through the same escaping) rather than duplicated there.
+pub(super) fn xml_escape(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {
@@ -401,6 +408,13 @@ fn xml_escape(value: &str) -> String {
         }
     }
     out
+}
+
+/// The assembled bundle's own `Contents/Info.plist` — the **dist copy** every
+/// post-assembly step reads and edits (the plugin-contribution merge, the
+/// installer's packager config), never the project's own `macos/Info.plist`.
+pub(super) fn info_plist_path(app_root: &Path) -> PathBuf {
+    app_root.join("Contents").join("Info.plist")
 }
 
 /// The `.app` directory an assembly for `config` produces, without running

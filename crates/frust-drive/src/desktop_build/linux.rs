@@ -73,7 +73,7 @@ pub(super) fn assemble(
         }
     }
 
-    let entry = root.join(format!("{}.desktop", config.identifier));
+    let entry = entry_path(&root, config);
     let project_entry = project_dir.join("linux").join("app.desktop");
     if project_entry.is_file() {
         copy_file(&project_entry, &entry)?;
@@ -99,10 +99,17 @@ pub(super) fn assemble(
     })
 }
 
+/// The assembled bundle's desktop entry: `<identifier>.desktop` inside the
+/// bundle root — the **dist copy** a post-assembly step (the plugin-
+/// contribution merge) edits, never the project's own `linux/app.desktop`.
+pub(super) fn entry_path(root: &Path, config: &DesktopConfig) -> PathBuf {
+    root.join(format!("{}.desktop", config.identifier))
+}
+
 /// The group a desktop entry's own keys live in; a `[Desktop Action …]` group
 /// carries an `Exec=` of its own that describes a secondary action, not the
 /// application's own launch command.
-const DESKTOP_ENTRY_GROUP: &str = "Desktop Entry";
+pub(super) const DESKTOP_ENTRY_GROUP: &str = "Desktop Entry";
 
 /// Where an icon-name mismatch was declared, for
 /// [`BundleNote::IconIdentityMismatch`]'s message.
@@ -161,9 +168,13 @@ fn reconcile(
 /// Deliberately a handful of lines rather than a dependency — this reads two
 /// keys for a warning, and the format's own spec is `key=value` per line.
 /// Localized spellings (`Name[de]=`) are not matched, which is correct for the
-/// two keys read here: neither `Exec` nor `Icon` is localizable in practice,
+/// keys read through it: neither `Exec` nor `Icon` is localizable in practice,
 /// and a localized variant is not the value a launcher would run.
-fn entry_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+///
+/// Shared with [`super::contributions`] — a contributed key's
+/// already-present check is the same group-aware lookup, not a second
+/// hand-rolled one.
+pub(super) fn entry_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     let mut in_entry = false;
     for line in text.lines() {
         let line = line.trim();
@@ -251,7 +262,11 @@ fn desktop_entry(config: &DesktopConfig) -> String {
 /// A desktop-entry value is a single line: strip anything that would end it
 /// early (or inject a second key), since the display name is free-form user
 /// text from `frust.toml`.
-fn sanitize(value: &str) -> String {
+///
+/// Shared with [`super::contributions`], which runs a plugin's contributed
+/// key/value/comment through the same filter — the same "trusted, but not
+/// assumed trusted forever" stance the identity values get here.
+pub(super) fn sanitize(value: &str) -> String {
     value
         .chars()
         .filter(|ch| !ch.is_control())
