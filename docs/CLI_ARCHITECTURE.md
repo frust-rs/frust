@@ -39,7 +39,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how CLI relates to the other units.
 |--------|-----------------|
 | `frust-cli::commands` | One thin handler per subcommand; the sole construction site for the injected `RealProcessRunner` |
 | `frust-drive::process` | The `ProcessRunner` trait plus `RealProcessRunner`/`FakeProcessRunner` — the sole seam for shelling out |
-| `frust-drive::manifest` | The shared `frust.toml` reader (`[app]`/`[android]`/`[ios]`/`[signing]`/`[desktop]`/`[macos]`/`[windows]`/`[linux]`), replacing the duplicate deserialisers the Android/iOS run pipelines used to each carry |
+| `frust-drive::manifest` | The shared `frust.toml` reader (`[app]`/`[android]`/`[ios]`/`[signing]`/`[desktop]`/`[macos]`/`[windows]`/`[linux]`, `[macos]`'s `notarize` key gating Apple-notarization opt-in — see [LIMITATIONS.md](LIMITATIONS.md)), replacing the duplicate deserialisers the Android/iOS run pipelines used to each carry |
 | `frust-drive::icons` | PNG → `.icns`/`.ico`/hicolor-tree pipeline for `[desktop] icon`; a rejected or missing source degrades to a typed note, never a build failure (`desktop_build` consumes it) |
 | `frust-drive::desktop_build` | macOS/Windows/Linux bundle assembly (`DesktopBundleTarget`, host-locked) via `cargo build` + `ProcessRunner`, and its `installer` submodule (`cargo-packager` shell-out for `.dmg`/NSIS/WiX/`.deb`/`.AppImage`; `.rpm` is a typed refusal, not a supported format) |
 | `frust-drive::scaffold` | Manifest-driven template rendering that produces a new Frust project tree |
@@ -154,8 +154,10 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   `[macos] signing-identity`-driven). The handler calls `frust_drive::desktop_build::build`
   directly; the host-lock refusal (`DesktopBuildError::HostMismatch`) happens inside that call,
   before `frust.toml` is even read, so no separate CLI-side gate exists. `--installer` then calls
-  `build_installer` once per `InstallerFormat::for_target`, rendering each `BundleNote`/
-  `InstallerReport` line the same way `build_android`/`build_ios` render their own artifacts.
+  `build_installer` once per `InstallerFormat::for_target` — which scrubs the packaging child's
+  Apple credential env vars by default and passes them through only for `[macos] notarize = true`
+  (see [LIMITATIONS.md](LIMITATIONS.md)) — rendering each `BundleNote`/`InstallerReport` line the
+  same way `build_android`/`build_ios` render their own artifacts.
 - `build --release` (Android): `android_build::signing` resolves the four release-signing values
   (`storeFile`/`storePassword`/`keyAlias`/`keyPassword`) **once**, from the properties file named by
   `frust.toml`'s `[signing]` section (default `android/key.properties`, optionally key-prefixed) with

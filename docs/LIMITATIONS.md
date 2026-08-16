@@ -2071,7 +2071,10 @@ generated `.icns` gets no `icons` entry for `.dmg` at all. What is still **owed 
 the produced `.dmg`'s actual bundle identity, signature, and icon are unverified against a real
 build — the owed check is building a signed `.dmg` on real hardware, then running `codesign -dv`
 and a bundle-id inspection (`plutil`/`mdls`) against the `.app` cargo-packager synthesizes inside
-it, and confirming that `.app` shows the project icon (not a generic or missing one) when mounted.
+it, confirming that `.app` shows the project icon (not a generic or missing one) when mounted, and
+a separate `notarize = true` run with real Apple credentials exported, confirming the submission
+actually reaches `notarytool` and either succeeds or surfaces as the hard build failure this
+contract describes.
 **codesign flags** —
 whenever a `[macos] signing-identity` is configured, `desktop_build::macos::codesign` always passes
 `--options runtime` (Hardened Runtime; harmless for an ad-hoc signature, mandatory for notarization
@@ -2081,10 +2084,19 @@ Application:`) — an ad-hoc/self-signed identity's codesign call therefore stay
 policy is unit-tested against `FakeProcessRunner` only; real-identity `--timestamp` behavior (Apple
 timestamp-server reachability, confirming an ad-hoc identity's call truly makes no network call) is
 unverified on hardware. **Notarization** (Apple's separate `notarytool` submission + stapling,
-needed for a `.dmg` to run without a Gatekeeper warning on a machine that didn't build it) is still
-documented only — Hardened Runtime and a live entitlements file mean its prerequisites are now met
-by construction whenever a build is signed, but no code path calls `notarytool`; notarization itself
-remains a manual step.
+needed for a `.dmg` to run without a Gatekeeper warning on a machine that didn't build it) is
+opt-in and, by default, unreachable: `cargo-packager` falls through to notarization on its own
+whenever it can read Apple credentials from its environment, so `frust build --installer` removes
+all nine `APPLE_*` credential variables (`APPLE_KEYCHAIN_PROFILE`; `APPLE_ID`/`APPLE_PASSWORD`/
+`APPLE_TEAM_ID`; `APPLE_API_KEY`/`APPLE_API_ISSUER`/`APPLE_API_KEY_PATH`; `APPLE_CERTIFICATE`/
+`APPLE_CERTIFICATE_PASSWORD` —
+`desktop_build::installer::APPLE_CREDENTIAL_ENV_VARS`) from the packaging child's environment
+unless `[macos] notarize = true` opts in, recorded either way by a typed `InstallerNote`
+(`NotarizationSuppressed`/`NotarizationEnabled`). Opted in, the credentials pass through and
+`cargo-packager` runs `xcrun notarytool submit --wait` against the signed `.app`: credentials that
+fail to resolve only warn and skip (never fail the build), but a resolved submission Apple rejects,
+or that fails to complete, is a hard installer error. Both notes fire only when the config really
+reaches `cargo-packager`'s notarization branch (Dmg + an Apple-issued identity).
 
 **Applies to**: `frust build <os> --installer`, and any macOS `.dmg` distributed outside the
 building machine.
@@ -2095,8 +2107,9 @@ against a faked process runner, the same asymmetry `desktop-shells-runtime-unver
 accepts for the shells themselves. The Linux `.AppImage` gap is a host tool-version mismatch with a
 proven typed-error path, not an unverified code path — closing it needs either a host with an
 older/compatible `binutils` or an upstream `linuxdeploy` fix, neither of which this pipeline
-controls. Notarization needs a real Apple Developer session this environment has no MacBook or
-account to exercise; automating it is a scoped future addition, not an oversight.
+controls. Notarization is wired and opt-in, but exercising it needs a real Apple Developer
+session this environment has no MacBook or account to run — verification, not automation, is
+what's owed.
 
 **Evidence**: desktop-shells Phase B task 05 (`05-installers-doctor`) and task 07
 (`07-cli-build-targets`) completion summaries (Testing Performed — real Linux smoke: genuine `.deb`
@@ -2105,9 +2118,13 @@ verified via `file`, `.AppImage` failure tail); `crates/frust-drive/src/desktop_
 `generated_icns`); desktop-shells Phase B fix round 1
 (`workflow/plans/features/desktop-shells/phase-b/followups/phase-b-fix-1/TASKS.md`, G3/G4) for the
 codesign-flags policy and the `macos` config-block wiring, respectively; round 2 (same file, G6/G7)
-for the icon-name alignment and the non-Apple signing-identity suppression;
-`crates/frust-drive/src/desktop_build/macos.rs` (`codesign`,
-`APPLE_ISSUED_IDENTITY_PREFIXES`/`is_apple_issued_identity`, no notarization call site).
+for the icon-name alignment and the non-Apple signing-identity suppression; round 3 (same file,
+G8/G9) for the credential-scrub-by-default + `notarize` opt-in contract —
+`crates/frust-drive/src/desktop_build/installer.rs` (`APPLE_CREDENTIAL_ENV_VARS`,
+`InstallerNote::NotarizationSuppressed`/`NotarizationEnabled`), `crates/frust-drive/src/manifest.rs`
+(`MacosSection::notarize`/`notarize_enabled`), `crates/frust-drive/src/process.rs` (`ProcessRunner`'s
+`remove_env` support); `crates/frust-drive/src/desktop_build/macos.rs` (`codesign`,
+`APPLE_ISSUED_IDENTITY_PREFIXES`/`is_apple_issued_identity`).
 
 ---
 
