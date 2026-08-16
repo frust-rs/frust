@@ -26,26 +26,66 @@
 //! | `button_text_size_sp` | `type_scale.label_large.size` | `Button` text size |
 //! | `body_text_size_sp` | `type_scale.body_large.size` | `Label` text size |
 //! | `dark` | `brightness == Brightness::Dark` | every control (L1's `Context` qualification) |
-//! | `button_typeface` | `design_language == Glyph` ⇒ Space Mono, else the platform's own | `Button` `Typeface` (theme ladder L3) |
-//! | `body_typeface` | `design_language == Glyph` ⇒ IBM Plex Mono, else the platform's own | `Label`/`Switch` `Typeface` (theme ladder L3) |
+//! | `button_typeface` | `NativeTypefaces::button` ⇒ that face, else `design_language == Glyph` ⇒ Space Mono, else the platform's own | `Button` `Typeface` (theme ladder L3) |
+//! | `body_typeface` | `NativeTypefaces::body` ⇒ that face, else `design_language == Glyph` ⇒ IBM Plex Mono, else the platform's own | `Label`/`Switch` `Typeface` (theme ladder L3) |
 //!
-//! # Theme ladder L3: typography, gated on `design_language`
+//! # Theme ladder L3: typography, extension-first
 //!
 //! Unlike every other row above (folded unconditionally from whichever
-//! `Theme` is active), the two typeface rows first check
-//! [`Theme::design_language`]: only the Glyph baseline ships bundled fonts
-//! (`frust-theme`'s `glyph-fonts` feature), so a Material3/Cupertino theme
-//! resolves both to [`typeface::Typeface::System`] — imposing Glyph's
-//! monospace faces on a theme that never asked for them would be a worse
-//! regression than leaving the platform's own face alone. `Button` gets
-//! Space Mono (Glyph's bolder display face); `Label`/`Switch` share IBM Plex
-//! Mono (Glyph's body face) — `Switch` never actually shows text through
-//! this plugin today, but it's still a `TextView` subclass under the hood
-//! (`android.widget.Switch extends CompoundButton extends Button extends
-//! TextView`), so setting it costs nothing and future-proofs against a later
-//! on/off-text builder. Same "pin, not full fidelity" policy as every other
-//! row above — a future task can widen this to per-slot `TypeScale` family
-//! resolution if a control ever needs Glyph's display face specifically.
+//! `Theme` is active), the two typeface rows resolve through a three-step
+//! ladder, **independently per slot** ([`resolve_slot`]):
+//!
+//! 1. **[`frust_theme::NativeTypefaces`]**, the theme extension a third-party
+//!    design system attaches to carry its own faces (see that type's module
+//!    doc — no built-in baseline attaches it). Its `button`/`body` face bytes
+//!    are published straight through this module's existing two-payload
+//!    platform seam and selected for that slot.
+//! 2. **The Glyph shortcut** — no extension face for this slot, but
+//!    [`Theme::design_language`] is [`DesignLanguage::Glyph`]: the bundled
+//!    `frust_theme::glyph::font_data()` faces apply, `Button` getting Space
+//!    Mono (Glyph's bolder display face) and `Label`/`Switch` IBM Plex Mono
+//!    (Glyph's body face).
+//! 3. **[`typeface::Typeface::System`]** — the platform's own face. Imposing
+//!    Glyph's monospace faces on a Material3/Cupertino theme that never asked
+//!    for them would be a worse regression than leaving the platform's own
+//!    face alone, so a theme with neither an attached face nor the Glyph tag
+//!    lands here.
+//!
+//! `Switch` never actually shows text through this plugin today, but it's
+//! still a `TextView` subclass under the hood (`android.widget.Switch extends
+//! CompoundButton extends Button extends TextView`), so setting it costs
+//! nothing and future-proofs against a later on/off-text builder. Same "pin,
+//! not full fidelity" policy as every other row above — a future widening to
+//! per-slot `TypeScale` family resolution stays additive.
+//!
+//! ## `Typeface::GlyphMono`/`GlyphPlex` name two slots, not two Glyph faces
+//!
+//! With step 1 in place both variants mean "custom face slot 0 (button) /
+//! slot 1 (body)", whatever bytes were published into them — the Glyph faces
+//! are just step 2's occupants. The variants keep their Glyph-era names on
+//! purpose: their spellings are the frozen FFI wire strings
+//! (`crate::controls::typeface::Typeface::wire`) the Kotlin/ObjC halves
+//! decode, and `crate::android::fonts` reuses the same strings as the
+//! `face_id` half of its content-hash cache-file name. Renaming the Rust
+//! variants alone would leave the two out of step for no functional gain, so
+//! the mismatch is documented here instead.
+//!
+//! ## Publishing: last-pair-wins, not once-per-process
+//!
+//! [`publish_font_bytes`] crosses the platform seam only when the (button,
+//! body) payload pair differs from the pair this process last published
+//! ([`PublishGuard`], keyed on each payload's address+length rather than its
+//! content — a face is a `&'static [u8]`, so identity is the cheap and exact
+//! question). That subsumes the once-per-process publish this module used to
+//! do (an unchanging theme re-publishes nothing, every frame) while still
+//! letting an app swap in a theme carrying different faces.
+//!
+//! **Known gap, owed a device gate:** the *platform* halves still latch their
+//! first payload (`crate::android::fonts::set_glyph_bytes` is a
+//! `OnceLock::set`, and both arms cache each resolved face object
+//! process-wide), so a mid-process face swap re-publishes from here but does
+//! not re-register on device. Widening that is a platform-half change with
+//! its own device gate, not a host-side one.
 //!
 //! `Image` folds only `dark` — tinting an app-supplied photo from the theme
 //! would corrupt its content, and no builder method exposes an explicit tint
@@ -123,7 +163,10 @@
 //! must thread its value through [`resolve`]'s callers ahead of the theme,
 //! not into this module.
 
+use std::sync::{Mutex, PoisonError};
+
 use frust::{Brightness, Color, DesignLanguage, Theme};
+use frust_theme::{FontFace, NativeTypefaces};
 
 use crate::controls::typeface::Typeface;
 
@@ -195,9 +238,9 @@ pub(crate) struct ResolvedTheme {
 /// Resolve `theme` into the packed primitives every builder folds into its
 /// control's `params_json` — see the module doc's mapping table.
 pub(crate) fn resolve(theme: &Theme) -> ResolvedTheme {
-    publish_glyph_font_bytes();
+    let (button, body) = plan_typefaces(theme);
+    publish_font_bytes(button.bytes, body.bytes);
     let scheme = theme.scheme();
-    let is_glyph = theme.design_language == DesignLanguage::Glyph;
     ResolvedTheme {
         dark: is_dark(theme),
         accent_ink: argb_u32(scheme.primary),
@@ -208,69 +251,190 @@ pub(crate) fn resolve(theme: &Theme) -> ResolvedTheme {
         corner_radius_dp: theme.shape.small as f32,
         button_text_size_sp: theme.type_scale.label_large.size,
         body_text_size_sp: theme.type_scale.body_large.size,
-        button_typeface: if is_glyph {
-            Typeface::GlyphMono
-        } else {
-            Typeface::System
+        button_typeface: button.typeface,
+        body_typeface: body.typeface,
+    }
+}
+
+/// One typeface slot's resolution: which [`Typeface`] the control's props
+/// carry, and which face bytes that slot publishes across the platform seam.
+///
+/// Pure data, like every [`Setter`](crate::controls::Setter) plan elsewhere
+/// in this crate, so the whole ladder is host-testable with no FFI involved
+/// ([`plan_typefaces`] is the pure producer; [`resolve`] is the one caller
+/// that publishes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ResolvedFace {
+    /// The slot's selected face — see [`resolve_slot`].
+    typeface: Typeface,
+    /// The bytes to publish into this slot. Empty when nothing at all is
+    /// available for it (no attached face, no bundled Glyph bytes), in which
+    /// case [`Self::typeface`] is [`Typeface::System`] and the slot is never
+    /// asked to register them.
+    bytes: &'static [u8],
+}
+
+/// Both typeface slots, resolved through the module doc's extension-first
+/// ladder — pure; [`resolve`] publishes the result.
+fn plan_typefaces(theme: &Theme) -> (ResolvedFace, ResolvedFace) {
+    let faces = theme.extension::<NativeTypefaces>();
+    let is_glyph = theme.design_language == DesignLanguage::Glyph;
+    let (glyph_mono, glyph_plex) = glyph_font_bytes();
+    (
+        resolve_slot(
+            faces.and_then(|f| f.button),
+            glyph_mono,
+            is_glyph,
+            Typeface::GlyphMono,
+        ),
+        resolve_slot(
+            faces.and_then(|f| f.body),
+            glyph_plex,
+            is_glyph,
+            Typeface::GlyphPlex,
+        ),
+    )
+}
+
+/// One slot of the module doc's ladder: an attached [`FontFace`] wins; else
+/// the bundled Glyph face, but only when the active theme actually *is*
+/// Glyph; else the platform's own face.
+///
+/// `slot` is the wire-level slot this face would occupy
+/// ([`Typeface::GlyphMono`] for button, [`Typeface::GlyphPlex`] for body —
+/// see the module doc on why those names outlived their Glyph-only meaning).
+/// The `System` arm still carries whatever Glyph bytes exist so the *other*
+/// slot's publish doesn't blank them; nothing selects them. With
+/// `frust-theme`'s bundled bytes absent (this crate's `glyph-fonts` feature
+/// off) step 2 has nothing to apply, so a Glyph theme with no attached face
+/// lands on `System` too — the same face the platform half would have
+/// degraded to on finding no published bytes.
+fn resolve_slot(
+    attached: Option<FontFace>,
+    glyph: Option<&'static [u8]>,
+    is_glyph: bool,
+    slot: Typeface,
+) -> ResolvedFace {
+    match (attached, glyph) {
+        (Some(face), _) => ResolvedFace {
+            typeface: slot,
+            bytes: face.bytes,
         },
-        body_typeface: if is_glyph {
-            Typeface::GlyphPlex
-        } else {
-            Typeface::System
+        (None, Some(bytes)) if is_glyph => ResolvedFace {
+            typeface: slot,
+            bytes,
+        },
+        (None, glyph) => ResolvedFace {
+            typeface: Typeface::System,
+            bytes: glyph.unwrap_or(&[]),
         },
     }
 }
 
-/// Publish `frust-theme`'s embedded Glyph font bytes to the Android backend,
-/// once per process (theme ladder L3) — the api→runtime seam
+/// `frust-theme`'s embedded Glyph faces — the ladder's step 2, and the one
+/// place this crate names `frust_theme::glyph` (the api→runtime seam
 /// `crate::android::fonts`'s module doc describes: this crate's `Cargo.toml`
-/// allows a `frust-theme` dependency only behind this crate's own
-/// `frust-api` feature, and only this function ever names it, so the
-/// platform half (`crate::android::fonts`) stays free of it regardless of
-/// platform or feature state.
+/// allows a `frust-theme` dependency only behind its own `frust-api`
+/// feature, and only this module ever names it, so the platform half stays
+/// free of it regardless of platform or feature state).
 ///
 /// `frust_theme::glyph::font_data()` always exists — an empty slice with
 /// `frust-theme`'s own `glyph-fonts` feature off
-/// (`crates/frust-theme/src/glyph/mod.rs`'s own doc) — so this quietly does
-/// nothing on that configuration rather than panicking on an out-of-bounds
-/// index. Indices 0/3 are a documented coupling to `frust-theme`'s own
-/// (private) `font_data()` array literal — Space Mono ×3
+/// (`crates/frust-theme/src/glyph/mod.rs`'s own doc) — so this quietly
+/// yields `None`s on that configuration rather than panicking on an
+/// out-of-bounds index. Indices 0/3 are a documented coupling to
+/// `frust-theme`'s own (private) `font_data()` array literal — Space Mono ×3
 /// (Regular/Bold/Italic) then IBM Plex Mono ×4
 /// (Regular/Medium/SemiBold/Italic), each family's first entry being its
 /// Regular face; no public API names a face by weight, so a future reorder
 /// there would silently pick a different (but still valid) face, never a
 /// panic or crash.
-#[cfg(target_os = "android")]
-fn publish_glyph_font_bytes() {
-    static PUBLISHED: std::sync::Once = std::sync::Once::new();
-    PUBLISHED.call_once(|| {
-        let faces = frust_theme::glyph::font_data();
-        if let (Some(&mono), Some(&plex)) = (faces.first(), faces.get(3)) {
-            crate::android::fonts::set_glyph_bytes(mono, plex);
+fn glyph_font_bytes() -> (Option<&'static [u8]>, Option<&'static [u8]>) {
+    let faces = frust_theme::glyph::font_data();
+    (faces.first().copied(), faces.get(3).copied())
+}
+
+/// One published payload's identity: its address and length. A face is a
+/// `&'static [u8]`, so identity answers "are these the same bytes?" without
+/// hashing a megabyte of font data on every frame's resolve.
+type FaceKey = (usize, usize);
+
+/// See [`FaceKey`].
+fn face_key(bytes: &'static [u8]) -> FaceKey {
+    (bytes.as_ptr() as usize, bytes.len())
+}
+
+/// The (button, body) payload pair this process last published across the
+/// platform seam — see the module doc's *last-pair-wins* section. Held
+/// behind a plain `Mutex` (uncontended, allocation-free, taken once per
+/// [`resolve`]) rather than four loose atomics, so the pair is read and
+/// replaced as one value and can never tear across a swap.
+struct PublishGuard {
+    last: Mutex<Option<(FaceKey, FaceKey)>>,
+}
+
+impl PublishGuard {
+    /// A guard that has published nothing yet.
+    const fn new() -> Self {
+        Self {
+            last: Mutex::new(None),
         }
-    });
+    }
+
+    /// Record `button`/`body` as this process's current pair, reporting
+    /// whether it differs from the previous one — i.e. whether the caller
+    /// should actually cross the FFI seam. Swapping back to an
+    /// earlier pair republishes (this is "last pair", not "every pair ever
+    /// seen").
+    ///
+    /// Nothing under this lock can panic, so poisoning is unreachable; it is
+    /// still recovered rather than unwrapped, per this crate's no-panic-near-
+    /// FFI rule.
+    fn take_if_changed(&self, button: &'static [u8], body: &'static [u8]) -> bool {
+        let pair = (face_key(button), face_key(body));
+        let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        if *last == Some(pair) {
+            return false;
+        }
+        *last = Some(pair);
+        true
+    }
+}
+
+/// See [`PublishGuard`].
+static PUBLISHED: PublishGuard = PublishGuard::new();
+
+/// Publish this resolve's face payloads to the platform backend (theme
+/// ladder L3), skipping the seam entirely when they match the last published
+/// pair. Two payloads with nothing in either (no attached faces, no bundled
+/// Glyph bytes) publish nothing at all — there would be nothing to register.
+fn publish_font_bytes(button: &'static [u8], body: &'static [u8]) {
+    if (button.is_empty() && body.is_empty()) || !PUBLISHED.take_if_changed(button, body) {
+        return;
+    }
+    set_platform_font_bytes(button, body);
+}
+
+/// Android's half of [`publish_font_bytes`] — `crate::android::fonts` reads
+/// the two payloads back as slot 0 (`glyphMono`) / slot 1 (`glyphPlex`).
+#[cfg(target_os = "android")]
+fn set_platform_font_bytes(button: &'static [u8], body: &'static [u8]) {
+    crate::android::fonts::set_glyph_bytes(button, body);
 }
 
 /// iOS half of the same publish (theme ladder L3) —
 /// `crate::apple::fonts::set_glyph_bytes` mirrors the Android call above
-/// exactly (same indices into `frust_theme::glyph::font_data()`, same
-/// idempotent-publish contract).
+/// exactly (same two slots, same publish contract).
 #[cfg(target_os = "ios")]
-fn publish_glyph_font_bytes() {
-    static PUBLISHED: std::sync::Once = std::sync::Once::new();
-    PUBLISHED.call_once(|| {
-        let faces = frust_theme::glyph::font_data();
-        if let (Some(&mono), Some(&plex)) = (faces.first(), faces.get(3)) {
-            crate::apple::fonts::set_glyph_bytes(mono, plex);
-        }
-    });
+fn set_platform_font_bytes(button: &'static [u8], body: &'static [u8]) {
+    crate::apple::fonts::set_glyph_bytes(button, body);
 }
 
 /// No other platform backend reads the published bytes at all (desktop
 /// preview, wasm) — a no-op here rather than a platform-module reference
 /// neither configuration can compile.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn publish_glyph_font_bytes() {}
+fn set_platform_font_bytes(_button: &'static [u8], _body: &'static [u8]) {}
 
 #[cfg(test)]
 mod tests {
@@ -356,6 +520,211 @@ mod tests {
         let cupertino = resolve(&Theme::cupertino_baseline());
         assert_eq!(cupertino.button_typeface, Typeface::System);
         assert_eq!(cupertino.body_typeface, Typeface::System);
+    }
+
+    // --- theme ladder L3: the extension-first typeface ladder ---------------
+
+    static DISPLAY_FACE: &[u8] = b"design-system-display-face";
+    static BODY_FACE: &[u8] = b"design-system-body-face";
+
+    /// A theme carrying an attached [`NativeTypefaces`] over `base`.
+    fn with_faces(base: Theme, faces: NativeTypefaces) -> Theme {
+        Theme::builder(base).extension(faces).build()
+    }
+
+    #[test]
+    fn an_attached_extension_beats_the_glyph_shortcut_and_the_system_default() {
+        // Step 1 of the module doc's ladder, on a theme that would otherwise
+        // land on step 3 (Material3 tag, no bundled faces of its own).
+        let theme = with_faces(
+            Theme::m3_baseline(),
+            NativeTypefaces {
+                button: Some(FontFace::new("Acme Display", DISPLAY_FACE)),
+                body: Some(FontFace::new("Acme Text", BODY_FACE)),
+            },
+        );
+
+        let (button, body) = plan_typefaces(&theme);
+        assert_eq!(button.typeface, Typeface::GlyphMono, "custom slot 0");
+        assert_eq!(body.typeface, Typeface::GlyphPlex, "custom slot 1");
+        assert_eq!(button.bytes, DISPLAY_FACE);
+        assert_eq!(body.bytes, BODY_FACE);
+
+        // And it reaches the props every builder folds, not just the plan.
+        let tokens = resolve(&theme);
+        assert_eq!(tokens.button_typeface, Typeface::GlyphMono);
+        assert_eq!(tokens.body_typeface, Typeface::GlyphPlex);
+    }
+
+    #[test]
+    fn an_attached_extension_displaces_the_bundled_glyph_faces() {
+        // Same step 1, but over the one baseline that DOES have step-2 faces
+        // — the extension still wins, and the published payload is the design
+        // system's, not Glyph's.
+        let glyph_bytes = glyph_font_bytes();
+        let theme = with_faces(
+            Theme::glyph_baseline(),
+            NativeTypefaces::uniform(FontFace::new("Acme Text", BODY_FACE)),
+        );
+
+        let (button, body) = plan_typefaces(&theme);
+        assert_eq!(button.bytes, BODY_FACE);
+        assert_eq!(body.bytes, BODY_FACE);
+        assert_ne!(
+            Some(button.bytes),
+            glyph_bytes.0,
+            "an attached face must displace Space Mono, not sit behind it"
+        );
+    }
+
+    #[test]
+    fn a_half_filled_extension_falls_back_per_slot() {
+        // The ladder runs per slot: the filled one takes step 1, the empty
+        // one carries on to step 2 (Glyph theme) or step 3 (Material3).
+        let faces = NativeTypefaces {
+            button: Some(FontFace::new("Acme Display", DISPLAY_FACE)),
+            ..NativeTypefaces::default()
+        };
+
+        let (button, body) = plan_typefaces(&with_faces(Theme::m3_baseline(), faces));
+        assert_eq!(button.typeface, Typeface::GlyphMono);
+        assert_eq!(button.bytes, DISPLAY_FACE);
+        assert_eq!(body.typeface, Typeface::System, "step 3 for the body slot");
+
+        let (button, body) = plan_typefaces(&with_faces(Theme::glyph_baseline(), faces));
+        assert_eq!(button.bytes, DISPLAY_FACE, "still step 1");
+        assert_eq!(
+            body.typeface,
+            Typeface::GlyphPlex,
+            "step 2 for the body slot: Glyph's own bundled IBM Plex Mono"
+        );
+        assert_eq!(
+            body.bytes,
+            glyph_font_bytes()
+                .1
+                .expect("bundled with the `glyph-fonts` feature, on by default")
+        );
+    }
+
+    #[test]
+    fn an_empty_extension_resolves_exactly_like_no_extension_at_all() {
+        // `NativeTypefaces::default()` attaches the type without filling
+        // either slot — the ladder must treat that as "nothing attached".
+        let attached = plan_typefaces(&with_faces(
+            Theme::m3_baseline(),
+            NativeTypefaces::default(),
+        ));
+        assert_eq!(attached, plan_typefaces(&Theme::m3_baseline()));
+
+        let attached = plan_typefaces(&with_faces(
+            Theme::glyph_baseline(),
+            NativeTypefaces::default(),
+        ));
+        assert_eq!(attached, plan_typefaces(&Theme::glyph_baseline()));
+    }
+
+    #[test]
+    fn resolve_slot_covers_all_three_ladder_steps() {
+        let attached = FontFace::new("Acme Display", DISPLAY_FACE);
+        let bundled: &'static [u8] = b"bundled-glyph-face";
+
+        // 1. attached face wins, whatever the design language.
+        for is_glyph in [true, false] {
+            assert_eq!(
+                resolve_slot(Some(attached), Some(bundled), is_glyph, Typeface::GlyphMono),
+                ResolvedFace {
+                    typeface: Typeface::GlyphMono,
+                    bytes: DISPLAY_FACE,
+                }
+            );
+        }
+
+        // 2. no attached face + a Glyph theme: the bundled face.
+        assert_eq!(
+            resolve_slot(None, Some(bundled), true, Typeface::GlyphMono),
+            ResolvedFace {
+                typeface: Typeface::GlyphMono,
+                bytes: bundled,
+            }
+        );
+
+        // 3. no attached face and not a Glyph theme: the platform's own.
+        assert_eq!(
+            resolve_slot(None, Some(bundled), false, Typeface::GlyphMono),
+            ResolvedFace {
+                typeface: Typeface::System,
+                bytes: bundled,
+            },
+            "the bytes ride along so the other slot's publish can't blank \
+             them, but nothing selects them"
+        );
+        // …and with nothing bundled either, step 2 cannot apply at all.
+        assert_eq!(
+            resolve_slot(None, None, true, Typeface::GlyphMono),
+            ResolvedFace {
+                typeface: Typeface::System,
+                bytes: &[],
+            }
+        );
+    }
+
+    // --- the publish guard (theme swap) --------------------------------------
+
+    #[test]
+    fn the_publish_guard_crosses_the_seam_once_per_distinct_pair() {
+        // A local guard, not the process-global one: the sequence below is
+        // the whole contract, and asserting it against shared state would
+        // depend on whatever else this test binary already resolved.
+        let guard = PublishGuard::new();
+        let (mono, plex): (&'static [u8], &'static [u8]) = (DISPLAY_FACE, BODY_FACE);
+        let swapped: &'static [u8] = b"a-swapped-in-face";
+
+        assert!(guard.take_if_changed(mono, plex), "first pair publishes");
+        assert!(
+            !guard.take_if_changed(mono, plex),
+            "an unchanged theme re-resolving every frame must not re-cross the \
+             FFI seam"
+        );
+        assert!(
+            guard.take_if_changed(swapped, plex),
+            "a theme swap that changes only the button face republishes"
+        );
+        assert!(
+            guard.take_if_changed(swapped, swapped),
+            "…and so does one that then changes only the body face"
+        );
+        assert!(
+            guard.take_if_changed(mono, plex),
+            "swapping back is a change too — this is last-pair-wins, not a \
+             set of every pair ever published"
+        );
+    }
+
+    #[test]
+    fn face_key_is_stable_per_payload_and_distinct_across_payloads() {
+        // The guard's whole cheapness argument: a payload's identity, not a
+        // byte compare of a megabyte-scale face on every frame's resolve.
+        assert_eq!(face_key(DISPLAY_FACE), face_key(DISPLAY_FACE));
+        assert_ne!(face_key(DISPLAY_FACE), face_key(BODY_FACE));
+    }
+
+    #[test]
+    fn a_theme_swap_reaches_the_props_the_builders_fold() {
+        // The end-to-end shape of a live design-system swap: same baseline,
+        // different attached faces, and the resolved props follow.
+        let acme = with_faces(
+            Theme::m3_baseline(),
+            NativeTypefaces::uniform(FontFace::new("Acme Text", BODY_FACE)),
+        );
+        let plain = Theme::m3_baseline();
+
+        assert_eq!(resolve(&acme).body_typeface, Typeface::GlyphPlex);
+        assert_eq!(resolve(&plain).body_typeface, Typeface::System);
+        assert_eq!(
+            resolve(&acme).body_typeface,
+            Typeface::GlyphPlex,
+            "swapping back is not latched by the publish guard"
+        );
     }
 
     // --- the zero-FFI property: an unchanged theme resolves identically ---

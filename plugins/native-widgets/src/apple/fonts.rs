@@ -5,7 +5,7 @@
 //! the Apple way* below for why this arm needs neither a cache file nor any
 //! system-wide font-manager registration call at all.
 //!
-//! # `crate::api::theme::publish_glyph_font_bytes` is the only caller of
+//! # `crate::api::theme::publish_font_bytes` is the only caller of
 //! [`set_glyph_bytes`]
 //!
 //! Same api→runtime seam as the Android half (`crate::android::fonts`'s own
@@ -112,6 +112,12 @@ static BYTES: OnceLock<GlyphBytes> = OnceLock::new();
 /// simply never finds published bytes and every control quietly stays on
 /// [`Typeface::System`] — no warning, since nothing was ever asked to
 /// resolve.
+///
+/// First-call-wins is why a *live* face swap does not re-register here: the
+/// caller's own guard already skips an unchanged pair and re-publishes a
+/// changed one, but this arm latches the first (see `crate::api::theme`'s
+/// module doc — widening it is a platform-half change owing its own device
+/// gate).
 pub(crate) fn set_glyph_bytes(mono: &'static [u8], plex: &'static [u8]) {
     let _ = BYTES.set(GlyphBytes { mono, plex });
 }

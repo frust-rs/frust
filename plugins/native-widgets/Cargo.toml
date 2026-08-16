@@ -49,9 +49,11 @@ frust-core = { workspace = true, optional = true }
 # `--no-default-features` must keep this crate's platform-plugin charter
 # line intact.
 kurbo = { workspace = true, optional = true }
-# Theme ladder L3 (`src/api/theme.rs`'s `publish_glyph_font_bytes`):
-# the source of the bundled Glyph font bytes (`frust_theme::glyph::font_data`)
-# this crate's Android backend registers into a real `Typeface`. The `frust`
+# Theme ladder L3 (`src/api/theme.rs`'s `glyph_font_bytes`/
+# `publish_font_bytes`): the source of the bundled Glyph font bytes
+# (`frust_theme::glyph::font_data`) this crate's Android backend registers
+# into a real `Typeface`, plus the `NativeTypefaces` theme extension a
+# third-party design system attaches to publish its own faces instead. The `frust`
 # facade does NOT re-export these bytes (confirmed at implementation time —
 # neither `frust_theme::glyph` nor its `font_data` accessor appears anywhere
 # in `crates/frust/src/lib.rs`'s re-export list), so this is a direct,

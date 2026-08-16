@@ -35,11 +35,18 @@ use crate::runtime::Params;
 
 // --- the `Typeface` field and its wire codec --------------------------------
 
-/// Which Glyph face (or the platform's own default) a text-bearing control's
-/// `Typeface` should be set to — theme ladder L3. [`Self::System`] is
-/// both the platform's own default AND the target of
+/// Which registered face (or the platform's own default) a text-bearing
+/// control's `Typeface` should be set to — theme ladder L3. [`Self::System`]
+/// is both the platform's own default AND the target of
 /// [`crate::android::fonts`]'s registration-failure degrade path — never a
 /// distinct third case a caller has to handle separately.
+///
+/// The two Glyph-named variants really name the two publish **slots** (0:
+/// button/display, 1: body) — Glyph's bundled faces are only their default
+/// occupants, since a design system can publish its own through
+/// `frust_theme::NativeTypefaces`. Their names track the frozen wire
+/// spellings below rather than the bytes they carry; see `crate::api::theme`'s
+/// module doc for the full ladder and the naming rationale.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) enum Typeface {
     /// Space Mono — Glyph's display/heading face.

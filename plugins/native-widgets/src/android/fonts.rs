@@ -85,6 +85,12 @@ static BYTES: OnceLock<GlyphBytes> = OnceLock::new();
 /// a `Theme`, in which case [`typeface_for`] simply never finds published
 /// bytes and every control quietly stays on [`Typeface::System`] — no
 /// warning, since nothing was ever asked to register (see [`resolve`]).
+///
+/// First-call-wins is why a *live* face swap does not re-register here: the
+/// caller's own guard already skips an unchanged pair and re-publishes a
+/// changed one, but this arm latches the first (see `crate::api::theme`'s
+/// module doc — widening it is a platform-half change owing its own device
+/// gate).
 pub(crate) fn set_glyph_bytes(mono: &'static [u8], plex: &'static [u8]) {
     let _ = BYTES.set(GlyphBytes { mono, plex });
 }

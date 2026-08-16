@@ -28,6 +28,7 @@ pub mod motion;
 pub mod shape;
 pub mod status;
 pub mod theme;
+pub mod typefaces;
 pub mod typography;
 
 pub use builder::ThemeBuilder;
@@ -41,4 +42,5 @@ pub use motion::{CosmeticLoopRate, EasingSet, MotionDurations, MotionScheme, Mot
 pub use shape::ShapeScale;
 pub use status::{StatusColors, StatusPalette};
 pub use theme::{DesignLanguage, Theme};
+pub use typefaces::{FontFace, NativeTypefaces};
 pub use typography::TypeScale;
