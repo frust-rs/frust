@@ -15,14 +15,28 @@
 //! - **Data directory** ([`data_dir`]): iOS resolves
 //!   `$HOME/Library/Application Support` (`$HOME` is the sandbox container;
 //!   the XDG shape would hit the read-only container root — see
-//!   [`data_dir`]'s doc). Other Unix resolves `$XDG_DATA_HOME` if set *and
+//!   [`data_dir`]'s doc). **macOS also diverges from generic Unix**, for a
+//!   different reason than iOS: it resolves the platform-conventional
+//!   `$HOME/Library/Application Support` as its base, but with a
+//!   **read-through legacy-XDG fallback** — if `<legacy base>/<app_stem>`
+//!   exists and `<new base>/<app_stem>` does not, `data_dir()` returns the
+//!   *legacy* base instead (legacy base: `$XDG_DATA_HOME` if set and
+//!   absolute, else `$HOME/.local/share` — what this crate resolved on
+//!   macOS before it grew a dedicated arm), so existing installs keep
+//!   finding their data. This is per-app (`app_stem()`-granular), never
+//!   migrates/copies/deletes anything, and XDG vars only feed the fallback
+//!   probe — they do **not** override the new base on macOS. Other Unix
+//!   (excluding iOS and macOS) resolves `$XDG_DATA_HOME` if set *and
 //!   absolute*, else `$HOME/.local/share`. Windows resolves `%APPDATA%`.
 //!   Any other target, or an unresolvable environment (no `HOME`/`APPDATA`),
 //!   returns `None` — this crate never guesses a fallback that could
 //!   silently write into the process's current directory.
 //! - **Cache directory** ([`cache_dir`]): iOS resolves `$HOME/Library/Caches`;
-//!   other Unix resolves `$XDG_CACHE_HOME` if set and absolute, else
-//!   `$HOME/.cache`. Windows resolves `%LOCALAPPDATA%`. Same
+//!   macOS resolves `$HOME/Library/Caches` too, with the same
+//!   read-through legacy-XDG fallback as `data_dir` (legacy base:
+//!   `$XDG_CACHE_HOME` if absolute, else `$HOME/.cache`). Other Unix
+//!   (excluding iOS and macOS) resolves `$XDG_CACHE_HOME` if set and
+//!   absolute, else `$HOME/.cache`. Windows resolves `%LOCALAPPDATA%`. Same
 //!   `None`-on-unresolvable contract as `data_dir`.
 //! - **Absolute-validation debug log**: a set-but-relative `XDG_DATA_HOME`/
 //!   `XDG_CACHE_HOME` is ignored per the XDG Base Directory spec, and that
@@ -54,6 +68,8 @@
 //! Hand-rolled env logic is deliberate: this crate does not depend on the
 //! `dirs` crate (a recorded future enhancement, not a correctness gap).
 
+#[cfg(any(target_os = "macos", test))]
+use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -66,8 +82,19 @@ use std::path::{Path, PathBuf};
 ///   the XDG shape below would land on the container *root*, which the
 ///   sandbox rejects with `EPERM` on the first `create_dir_all`. XDG vars
 ///   are ignored here — they have no meaning inside an iOS sandbox.
-/// - Other Unix: `$XDG_DATA_HOME` if set and absolute, else
-///   `$HOME/.local/share`.
+/// - macOS: `$HOME/Library/Application Support`, the platform-conventional
+///   location — a *different* reason to diverge from generic Unix than
+///   iOS's sandbox constraint. XDG vars do **not** override this base; they
+///   only feed a **read-through legacy fallback**: if
+///   `<legacy base>/<app_stem>` exists and
+///   `<$HOME/Library/Application Support>/<app_stem>` does not, this
+///   function returns the *legacy* base instead (never migrates, copies, or
+///   deletes anything), so installs that predate this crate's dedicated
+///   macOS arm keep finding their data. Legacy base: `$XDG_DATA_HOME` if
+///   set and absolute, else `$HOME/.local/share` — the same resolution
+///   generic Unix uses below.
+/// - Other Unix (excluding iOS and macOS): `$XDG_DATA_HOME` if set and
+///   absolute, else `$HOME/.local/share`.
 /// - Windows: `%APPDATA%`.
 /// - Any other target: `None`.
 ///
@@ -78,7 +105,19 @@ pub fn data_dir() -> Option<PathBuf> {
     {
         ios_data_dir_from(std::env::var("HOME").ok().as_deref())
     }
-    #[cfg(all(unix, not(target_os = "ios")))]
+    #[cfg(target_os = "macos")]
+    {
+        macos_dir_from(
+            std::env::var("XDG_DATA_HOME").ok().as_deref(),
+            "XDG_DATA_HOME",
+            std::env::var("HOME").ok().as_deref(),
+            &["Library", "Application Support"],
+            &[".local", "share"],
+            &app_stem(),
+            &|p: &Path| p.exists(),
+        )
+    }
+    #[cfg(all(unix, not(target_os = "ios"), not(target_os = "macos")))]
     {
         data_dir_from(
             std::env::var("XDG_DATA_HOME").ok().as_deref(),
@@ -99,7 +138,12 @@ pub fn data_dir() -> Option<PathBuf> {
 ///
 /// - iOS: `$HOME/Library/Caches` — same sandbox-container reasoning as
 ///   [`data_dir`]'s iOS arm; XDG vars are ignored.
-/// - Other Unix: `$XDG_CACHE_HOME` if set and absolute, else `$HOME/.cache`.
+/// - macOS: `$HOME/Library/Caches`, with the same read-through legacy
+///   fallback as [`data_dir`]'s macOS arm (legacy base: `$XDG_CACHE_HOME` if
+///   set and absolute, else `$HOME/.cache`). XDG vars do not override this
+///   base, only the fallback probe.
+/// - Other Unix (excluding iOS and macOS): `$XDG_CACHE_HOME` if set and
+///   absolute, else `$HOME/.cache`.
 /// - Windows: `%LOCALAPPDATA%`.
 /// - Any other target: `None`.
 ///
@@ -110,7 +154,19 @@ pub fn cache_dir() -> Option<PathBuf> {
     {
         ios_cache_dir_from(std::env::var("HOME").ok().as_deref())
     }
-    #[cfg(all(unix, not(target_os = "ios")))]
+    #[cfg(target_os = "macos")]
+    {
+        macos_dir_from(
+            std::env::var("XDG_CACHE_HOME").ok().as_deref(),
+            "XDG_CACHE_HOME",
+            std::env::var("HOME").ok().as_deref(),
+            &["Library", "Caches"],
+            &[".cache"],
+            &app_stem(),
+            &|p: &Path| p.exists(),
+        )
+    }
+    #[cfg(all(unix, not(target_os = "ios"), not(target_os = "macos")))]
     {
         cache_dir_from(
             std::env::var("XDG_CACHE_HOME").ok().as_deref(),
@@ -198,9 +254,11 @@ fn ios_cache_dir_from(home: Option<&str>) -> Option<PathBuf> {
 
 /// Absolute-validated `xdg` (logged-and-ignored at `debug` if set but
 /// relative), else `home` joined with `suffix` — the shared shape behind
-/// both [`data_dir_from`]/[`cache_dir_from`] on non-iOS Unix (iOS resolves
-/// inside its sandbox container instead — see [`data_dir`]).
-#[cfg(all(unix, not(target_os = "ios")))]
+/// both [`data_dir_from`]/[`cache_dir_from`] on non-iOS, non-macOS Unix
+/// (iOS resolves inside its sandbox container instead, and macOS resolves
+/// its own new base with this same shape only feeding a legacy-fallback
+/// probe — see [`data_dir`] and [`legacy_xdg_or_home`]).
+#[cfg(all(unix, not(target_os = "ios"), not(target_os = "macos")))]
 fn xdg_or_home(
     xdg: Option<&str>,
     xdg_var_name: &str,
@@ -224,15 +282,89 @@ fn xdg_or_home(
 /// Env-parameterized body of [`data_dir`]'s Unix branch — lets tests
 /// exercise the resolution logic against injected values without ever
 /// touching the real `HOME`/`XDG_DATA_HOME`.
-#[cfg(all(unix, not(target_os = "ios")))]
+#[cfg(all(unix, not(target_os = "ios"), not(target_os = "macos")))]
 fn data_dir_from(xdg_data_home: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
     xdg_or_home(xdg_data_home, "XDG_DATA_HOME", home, &[".local", "share"])
 }
 
 /// Env-parameterized body of [`cache_dir`]'s Unix branch.
-#[cfg(all(unix, not(target_os = "ios")))]
+#[cfg(all(unix, not(target_os = "ios"), not(target_os = "macos")))]
 fn cache_dir_from(xdg_cache_home: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
     xdg_or_home(xdg_cache_home, "XDG_CACHE_HOME", home, &[".cache"])
+}
+
+/// Absolute-validated `xdg` (logged-and-ignored at `debug` if set but
+/// relative), else `home` joined with `suffix` — computes the **legacy**
+/// base consulted only by [`macos_dir_from`]'s read-through-fallback probe.
+/// This duplicates rather than reuses [`xdg_or_home`]'s shape because that
+/// helper is compiled only for non-iOS, non-macOS Unix now that macOS has
+/// its own dedicated arm (see [`data_dir`]).
+#[cfg(any(target_os = "macos", test))]
+fn legacy_xdg_or_home(
+    xdg: Option<&str>,
+    xdg_var_name: &str,
+    home: Option<&str>,
+    suffix: &[&str],
+) -> Option<PathBuf> {
+    if let Some(xdg) = xdg {
+        let path = PathBuf::from(xdg);
+        if path.is_absolute() {
+            return Some(path);
+        }
+        log::debug!("frust-paths: ignoring non-absolute {xdg_var_name} ({xdg})");
+    }
+    home.map(|home| {
+        let mut p = PathBuf::from(home);
+        p.extend(suffix);
+        p
+    })
+}
+
+/// Env+probe-parameterized body of [`data_dir`]/[`cache_dir`]'s macOS arm.
+///
+/// Resolves `home` joined with `new_suffix` (`Library/Application Support`
+/// or `Library/Caches`) as the base — `None` without `home`, same
+/// no-guessing contract as every other arm — then applies the
+/// **read-through legacy fallback**: if `<legacy base>/<app_stem>` exists
+/// and `<new base>/<app_stem>` does not, returns the legacy base instead
+/// (never migrates, copies, or deletes anything; logs one `debug` line
+/// naming both paths when it fires). The legacy base is computed by
+/// [`legacy_xdg_or_home`] from `xdg`/`home`/`legacy_suffix` — it is what
+/// this crate resolved on macOS before growing this dedicated arm.
+///
+/// `exists` is an injectable filesystem-existence probe (rather than a
+/// direct `Path::exists` call) so unit tests can drive every fallback
+/// branch on a Linux host without a real `~/Library`; [`data_dir`]/
+/// [`cache_dir`]'s macOS bodies wire in real `std::path::Path::exists`.
+#[cfg(any(target_os = "macos", test))]
+#[allow(clippy::too_many_arguments)]
+fn macos_dir_from(
+    xdg: Option<&str>,
+    xdg_var_name: &str,
+    home: Option<&str>,
+    new_suffix: &[&str],
+    legacy_suffix: &[&str],
+    app_stem: &OsStr,
+    exists: &dyn Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let home = home?;
+    let mut new_base = PathBuf::from(home);
+    new_base.extend(new_suffix);
+
+    if let Some(legacy_base) = legacy_xdg_or_home(xdg, xdg_var_name, Some(home), legacy_suffix) {
+        let new_app_dir = new_base.join(app_stem);
+        let legacy_app_dir = legacy_base.join(app_stem);
+        if !exists(&new_app_dir) && exists(&legacy_app_dir) {
+            log::debug!(
+                "frust-paths: {} not found, falling back to legacy {}",
+                new_app_dir.display(),
+                legacy_app_dir.display()
+            );
+            return Some(legacy_base);
+        }
+    }
+
+    Some(new_base)
 }
 
 /// Env-parameterized body of [`data_dir`]'s Windows branch.
@@ -282,7 +414,7 @@ mod tests {
     // --- data_dir_from / cache_dir_from (Unix) ---------------------------
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     fn data_dir_from_absolute_xdg_wins() {
         assert_eq!(
             data_dir_from(Some("/custom/data"), Some("/home/user")),
@@ -291,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     fn data_dir_from_relative_xdg_is_ignored_falls_back_to_home() {
         assert_eq!(
             data_dir_from(Some("relative/data"), Some("/home/user")),
@@ -300,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     fn data_dir_from_no_xdg_falls_back_to_home() {
         assert_eq!(
             data_dir_from(None, Some("/home/user")),
@@ -309,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     fn data_dir_from_unresolvable_is_none() {
         assert_eq!(data_dir_from(None, None), None);
         // A relative XDG var with no HOME to fall back to is also None.
@@ -317,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     fn cache_dir_from_absolute_xdg_wins() {
         assert_eq!(
             cache_dir_from(Some("/custom/cache"), Some("/home/user")),
@@ -326,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     fn cache_dir_from_relative_xdg_is_ignored_falls_back_to_home() {
         assert_eq!(
             cache_dir_from(Some("relative/cache"), Some("/home/user")),
@@ -335,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     fn cache_dir_from_no_xdg_falls_back_to_home() {
         assert_eq!(
             cache_dir_from(None, Some("/home/user")),
@@ -344,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     fn cache_dir_from_unresolvable_is_none() {
         assert_eq!(cache_dir_from(None, None), None);
     }
@@ -369,6 +501,128 @@ mod tests {
             Some(PathBuf::from("C:\\Users\\user\\AppData\\Local"))
         );
         assert_eq!(cache_dir_from(None), None);
+    }
+
+    // --- macos_dir_from (new base + read-through legacy fallback) --------
+
+    /// Test-only convenience so most cases don't need every `macos_dir_from`
+    /// argument spelled out — `new_suffix`/`legacy_suffix` default to the
+    /// data-dir shape (`Library/Application Support` / `.local/share`); the
+    /// cache-dir shape is exercised explicitly by
+    /// `macos_dir_from_cache_new_base_resolves_under_home`.
+    fn macos_data_dir_from(
+        xdg: Option<&str>,
+        home: Option<&str>,
+        app_stem: &str,
+        exists: &dyn Fn(&Path) -> bool,
+    ) -> Option<PathBuf> {
+        macos_dir_from(
+            xdg,
+            "XDG_DATA_HOME",
+            home,
+            &["Library", "Application Support"],
+            &[".local", "share"],
+            OsStr::new(app_stem),
+            exists,
+        )
+    }
+
+    const NEVER: &dyn Fn(&Path) -> bool = &|_: &Path| false;
+
+    #[test]
+    fn macos_dir_from_new_base_no_home_is_none() {
+        assert_eq!(macos_data_dir_from(None, None, "myapp", NEVER), None);
+    }
+
+    #[test]
+    fn macos_dir_from_new_base_resolves_under_home() {
+        assert_eq!(
+            macos_data_dir_from(None, Some("/Users/alice"), "myapp", NEVER),
+            Some(PathBuf::from("/Users/alice/Library/Application Support"))
+        );
+    }
+
+    #[test]
+    fn macos_dir_from_cache_new_base_resolves_under_home() {
+        assert_eq!(
+            macos_dir_from(
+                None,
+                "XDG_CACHE_HOME",
+                Some("/Users/alice"),
+                &["Library", "Caches"],
+                &[".cache"],
+                OsStr::new("myapp"),
+                NEVER,
+            ),
+            Some(PathBuf::from("/Users/alice/Library/Caches"))
+        );
+    }
+
+    #[test]
+    fn macos_dir_from_fallback_fires_when_legacy_exists_and_new_absent() {
+        let legacy_app = PathBuf::from("/Users/alice/.local/share/myapp");
+        let exists = move |p: &Path| p == legacy_app;
+        assert_eq!(
+            macos_data_dir_from(None, Some("/Users/alice"), "myapp", &exists),
+            Some(PathBuf::from("/Users/alice/.local/share")),
+        );
+    }
+
+    #[test]
+    fn macos_dir_from_fallback_does_not_fire_when_new_exists_regardless_of_legacy() {
+        let new_app = PathBuf::from("/Users/alice/Library/Application Support/myapp");
+        let legacy_app = PathBuf::from("/Users/alice/.local/share/myapp");
+        let exists = move |p: &Path| p == new_app || p == legacy_app;
+        assert_eq!(
+            macos_data_dir_from(None, Some("/Users/alice"), "myapp", &exists),
+            Some(PathBuf::from("/Users/alice/Library/Application Support")),
+        );
+    }
+
+    #[test]
+    fn macos_dir_from_fallback_does_not_fire_when_legacy_absent() {
+        assert_eq!(
+            macos_data_dir_from(None, Some("/Users/alice"), "myapp", NEVER),
+            Some(PathBuf::from("/Users/alice/Library/Application Support")),
+        );
+    }
+
+    #[test]
+    fn macos_dir_from_fallback_does_not_fire_when_both_exist_new_wins() {
+        let new_app = PathBuf::from("/Users/alice/Library/Application Support/myapp");
+        let legacy_app = PathBuf::from("/Users/alice/.local/share/myapp");
+        let exists = move |p: &Path| p == new_app || p == legacy_app;
+        assert_eq!(
+            macos_data_dir_from(None, Some("/Users/alice"), "myapp", &exists),
+            Some(PathBuf::from("/Users/alice/Library/Application Support")),
+        );
+    }
+
+    #[test]
+    fn macos_dir_from_legacy_base_honors_absolute_xdg() {
+        let legacy_app = PathBuf::from("/custom/data/myapp");
+        let exists = move |p: &Path| p == legacy_app;
+        assert_eq!(
+            macos_data_dir_from(Some("/custom/data"), Some("/Users/alice"), "myapp", &exists,),
+            Some(PathBuf::from("/custom/data")),
+        );
+    }
+
+    #[test]
+    fn macos_dir_from_legacy_base_ignores_relative_xdg() {
+        // A relative XDG_DATA_HOME is ignored for the legacy probe too, so
+        // the legacy base still falls back to `~/.local/share`.
+        let legacy_app = PathBuf::from("/Users/alice/.local/share/myapp");
+        let exists = move |p: &Path| p == legacy_app;
+        assert_eq!(
+            macos_data_dir_from(
+                Some("relative/data"),
+                Some("/Users/alice"),
+                "myapp",
+                &exists,
+            ),
+            Some(PathBuf::from("/Users/alice/.local/share")),
+        );
     }
 
     // --- data_dir / cache_dir (real env, smoke only) ---------------------
