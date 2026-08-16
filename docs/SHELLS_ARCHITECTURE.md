@@ -29,7 +29,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how SHELLS relates to the other units
 | `frust-shell-common::frame_gate` | Shared run/skip frame decision and pacing used by both continuous-loop mobile shells |
 | `frust-shell-common::render_split` | UI-thread/render-thread split vocabulary (scene handoff, lifecycle commands, completion barrier) every shell's default frame path uses |
 | `frust-shell-common::platform_view` | Differ turning per-paint platform-view frames into an idempotent create/update/dispose backlog for embedding native views |
-| `frust-shell-common` (signal-poll seams) | Small process-global slot-plus-poll seams (surface mode, theme override, fonts, system UI) each shell drains once per frame |
+| `frust-shell-common` (signal-poll seams) | Small process-global slot-plus-poll seams (surface mode, theme override, fonts, system UI) drained once per frame — surface mode and system UI on mobile only; theme override and fonts on every shell, desktop included |
 | `frust-shell-common::devtools` (feature `devtools`) | Shell-side `DevtoolsBackend` implementation plus the per-frame UI-thread hop and pump each shell drives; see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md) |
 | `frust-shell-desktop` | The shared winit core: event loop, UI-thread/render-thread surface split, accessibility adapter, paced wake, pipeline-cache persistence — plus the `DesktopExtensions` seam and the `DesktopConfig`/`MenuSpec` vocabulary the per-OS crates read. Also the zero-config dev-preview entry point |
 | `frust-shell-macos` | AppKit integration: the native menu bar (a standard application menu plus the app's own spec), hide-on-close and Dock-reopen lifecycle, and the reopen observer in its `appkit_glue` unsafe zone |
@@ -196,10 +196,14 @@ frame runs when something asks for one, and a paced request resolves its next wa
 that paint's outcome.
 
 The desktop shell persists a pipeline cache through `frust-paths`, so second-and-later launches
-skip Vulkan pipeline compilation on Linux/Windows; loading reads through to a legacy macOS cache
-base when the current-location file is absent, migrating nothing. The whole path is best-effort —
-startup never fails on cache I/O — and is a documented no-op on macOS, where Metal exposes no
-pipeline cache. See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) for `frust-paths` itself.
+skip pipeline compilation on adapters that actually advertise `PIPELINE_CACHE` — in wgpu 29 that is
+Android Vulkan only (matching `frust-render`'s own doc on the feature); no desktop adapter
+(macOS/Windows/Linux) advertises it, so `save`/`load` are both no-ops on every desktop platform
+today. Loading also reads through to a legacy macOS cache base when the current-location file is
+absent, migrating nothing — that read-through is inert by construction (the legacy base is `Some`
+only on macOS, where a save never fires, so no legacy blob can exist); it survives purely as
+compatibility for the `frust-paths` macOS-arm change. The whole path is best-effort — startup never
+fails on cache I/O. See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) for `frust-paths` itself.
 
 ### Mobile frame path
 
@@ -258,10 +262,11 @@ the bare theme cap regardless of any longer per-request interval (see
   (with a restart when the type changes on a steady-focused field, since Android never re-queries
   a bound connection), iOS into the `UITextInputTraits` matrix over its shared responder (every
   managed trait assigned in every arm, so no prior classification survives a switch), desktop into
-  winit's `ImePurpose`, which is a cosmetic hint on Wayland only. Both mobile shells reconcile the
-  platform's IME mirror on a per-frame poll behind a divergence guard rather than on focus edges
-  alone. The iOS Swift half remains compile- and device-unverified on the Linux build host — see
-  [LIMITATIONS.md](LIMITATIONS.md) `ime-ios-content-type-unverified`.
+  winit's `ImePurpose`, which is a cosmetic hint on Wayland only and never a secure-text-entry
+  boundary — a desktop password field gets no platform protection from it. Both mobile shells
+  reconcile the platform's IME mirror on a per-frame poll behind a divergence guard rather than
+  on focus edges alone. The iOS Swift half remains compile- and device-unverified on the Linux
+  build host — see [LIMITATIONS.md](LIMITATIONS.md) `ime-ios-content-type-unverified`.
 - **Platform-view embedding:** paint-time view frames feed the `platform_view` differ, which
   exposes a command backlog each shell's FFI layer polls and applies to the native view hierarchy,
   frame-paired to keep geometry in sync.
@@ -272,8 +277,9 @@ the bare theme cap regardless of any longer per-request interval (see
   process-wide request each shell drains once per frame — desktop wakes via its winit event-loop
   proxy, the mobile shells have no wake and pump at the top of every tick since their display loop
   runs continuously while resumed. An injected event dispatches through the shell's real input
-  path, never directly against widget code. Full detail in
-  [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md).
+  path, never directly against widget code. `FRUST_DEVTOOLS=0` is the one security-relevant runtime
+  kill switch here — it skips starting the service even in a `devtools`-featured build. Full detail
+  in [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md).
 - **Kill switches:** a set of additive, off-by-default env vars (`FRUST_NO_RENDER_THREAD`,
   `FRUST_NO_FRAME_GATE`, `FRUST_NO_ANIM_PACING`, `FRUST_NO_RESAMPLE`, `FRUST_NO_DIRECT_SURFACE`,
   `FRUST_NO_SHADER_EFFECTS`) each revert one frame-pipeline seam independently.

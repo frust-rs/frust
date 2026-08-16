@@ -30,9 +30,11 @@ off this index — read this plus the one that covers what you are touching:
     `Box::into_raw`/`from_raw`, the call into `on_surface_created_from_metal_layer`),
     `ios_app!`'s generated exports, and the split's `unsafe impl Send` for
     `SendableMetalLayer` plus a bare `libc::pthread_set_qos_class_self_np` self-boost.
-  - `frust-shell-macos`'s `appkit_glue` module — four sites: `define_class!`'s
-    `#[unsafe(super(NSObject))]`/`#[unsafe(method(…))]` declaring the reopen-notification
-    observer class, `msg_send![super(this), init]` (`NSObject`'s designated initializer),
+  - `frust-shell-macos`'s `appkit_glue` module — four sites: the whole `define_class!` block
+    counted as one (its `#[unsafe(super(NSObject))]`/`#[unsafe(method(…))]` attributes
+    declaring the reopen-notification observer class, AND the `unsafe impl NSObjectProtocol`
+    conformance it also carries, share the block's one `SAFETY:` note at the macro head),
+    `msg_send![super(this), init]` (`NSObject`'s designated initializer),
     `NSNotificationCenter::addObserver_selector_name_object` plus the
     `NSApplicationDidBecomeActiveNotification` `extern` static read that registers it, and the
     matching `removeObserver` in `Drop`. Each is `SAFETY`-noted.
@@ -83,7 +85,14 @@ off this index — read this plus the one that covers what you are touching:
   into JVM-/Swift-owned stack frames — a panic crossing the FFI boundary is undefined
   behavior, not a bug. `run_guarded_thread` is `guard`'s whole-thread-body counterpart:
   every render-thread `spawn` closure routes through it, so a caught panic exits cleanly and
-  drains any orphaned `Ack` instead of poisoning shared state.
+  drains any orphaned `Ack` instead of poisoning shared state. `frust-shell-macos` and
+  `frust-shell-windows` depend on neither `frust-shell-common` nor each other, so their
+  native-callback boundaries can't route through `guard`; each applies the same contract
+  locally instead — `appkit_glue`'s AppKit notification callback hand-rolls its own
+  `catch_unwind` around the observer body. The one exception is muda's menu-event handler
+  (shared by both crates' `menu` modules): it is a native-dispatch boundary held panic-free
+  by construction rather than by `catch_unwind` — the callback body is an infallible
+  mutex-guarded queue push plus a redraw request, nothing that can panic.
 - **State-sync, not op-forwarding, across a mobile IME bridge.** Android/iOS platform text
   input doesn't send individual keystrokes across the FFI boundary — the platform owns
   composition (Gboard, CJK marked text) against a local mirror, then hands the framework a

@@ -85,14 +85,18 @@ frust-scene/frust-text ──► frust-core ──► frust-widgets/frust-theme 
    (kurbo/peniko only)         │                                              │
         │                      └──────────► frust-render (vello/wgpu) ◄──────┘
         ▼                                                                    │
-   shell-desktop ◄─ shell-{macos,windows,linux} (facade target-gates all three;│
-                     macos/windows also pull frust-reactive; windows also frust-theme)
-        ▲                                                                     │
+   shell-desktop ──► shell-{macos,windows,linux}                             │
+        │                                                                    │
+        ▼                                                                    │
    shells (desktop tier above; shell-android; shell-ios) ◄────────────── uses facade
         │
         ▼
   plugins (frust-plugin, native-widgets, clean-signals-frust) — beside the facade, never inside it
 ```
+
+Desktop tier: `frust` target-gates all three of `frust-shell-{macos,windows,linux}` (each depends
+on `frust-shell-desktop`); `frust-shell-macos`/`frust-shell-windows` also pull `frust-reactive`,
+and `frust-shell-windows` additionally `frust-theme`.
 
 ## Cross-Unit Data Flow
 
