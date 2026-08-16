@@ -2156,18 +2156,31 @@ its data) — is proven only by unit tests against an injectable existence probe
 `cargo check`/`clippy --target aarch64-apple-darwin`, both from a Linux host. No real `~/Library`
 read-through has been observed on a real macOS filesystem.
 
-**Applies to**: every desktop-shells consumer resolving a data/cache directory on macOS —
-`shared-preferences`' file backend, `frust-shell-desktop`'s pipeline-cache path, and any future
-caller — until the fallback fires (or correctly does not fire) against a real `~/Library` tree.
+**Applies to**: `plugins/database` is the only live macOS caller with durable data at stake, and it
+has its own file-level read-through (`resolve_db_path_from`, driven by `frust_paths::legacy_data_dir`):
+`databases/<name>.db` reads through to the legacy base iff the new-location file is absent and the
+legacy one exists. `shared-preferences` is inert here — on macOS it dispatches entirely to the
+`apple` backend (`NSUserDefaults`), so its `file` backend (the only one this fallback could affect)
+never runs. `frust-shell-desktop`'s pipeline cache is structurally covered the same way
+(`load_path`, via `frust_paths::legacy_cache_dir`) but is a no-op on macOS today regardless (Metal
+has no wgpu `PIPELINE_CACHE` feature, so a save never fires to populate either base). The **built-in**
+per-app-stem probe inside `data_dir()`/`cache_dir()` itself (`macos_dir_from`'s `<base>/<app_stem>`
+check) has no in-repo caller exercising it today — none of the three callers above join `app_stem()`
+onto the base they get back; it serves only a direct-API app that does its own `app_stem()`-shaped
+layout on top of `data_dir()`/`cache_dir()`.
 
 **Why accepted**: matches the existing iOS precedent in this file (also never run on a real device
 from this repo's test suite); the cross-target compile/clippy gates are the strongest proof
-achievable without the hardware. Joins the MacBook runtime-gate backlog alongside
+achievable without the hardware. All three read-through sites (`frust-paths`' built-in probe,
+`plugins/database`'s and `frust-shell-desktop`'s own file-level read-throughs) remain
+runtime-unverified against a real `~/Library` tree; joins the MacBook runtime-gate backlog alongside
 `desktop-shells-runtime-unverified` and `desktop-installer-runtime-partial` above, rather than
 duplicating either.
 
 **Evidence**: `crates/frust-paths/src/lib.rs` (`macos_dir_from`, `data_dir`/`cache_dir`'s macOS
-arms); desktop-shells Phase C task 01 completion summary, Risks/Limitations #1.
+arms, `legacy_data_dir`/`legacy_cache_dir`); `plugins/database/src/lib.rs` (`resolve_db_path_from`
+and its negative-control test); `crates/frust-shell-desktop/src/cache.rs` (`load_path`); desktop-shells
+Phase C task 01 completion summary, Risks/Limitations #1.
 
 ---
 

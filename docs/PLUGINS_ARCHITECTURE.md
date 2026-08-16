@@ -77,9 +77,9 @@ local `FrustEmbedding` one every other plugin package depends on.
 `clean-signals-frust` instead depends on the `frust` facade crate — its sole framework dependency —
 to bind a `clean_signals` controller into a `Component`'s reactive `Owner`. `database` depends on
 neither `frust-plugin` nor any target-gated FFI crate — its own dependencies are `frust-paths` (data
-directory) and its two swappable SQLite engines, `rusqlite` (default, C via `cc`) and the optional
-pure-Rust `turso`; both reach storage through plain file IO, so the crate needs no platform-handle
-substrate at all. `i18n` is the second plugin (after `native-widgets`) built on the single-crate
+directory), `log`, and its two swappable SQLite engines, `rusqlite` (default, C via `cc`) and the
+optional pure-Rust `turso`; both reach storage through plain file IO, so the crate needs no
+platform-handle substrate at all. `i18n` is the second plugin (after `native-widgets`) built on the single-crate
 platform-plugin-plus-facade-glue shape (`docs/PLUGINS_CODE_STANDARDS.md`'s Plugin Conventions): a
 default-on `frust-api` feature gates its sole `frust` facade dependency, so `cargo check -p
 frust-i18n --no-default-features` mechanically re-verifies the platform-plugin charter line — no
