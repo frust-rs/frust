@@ -1,0 +1,27 @@
+[package]
+name = "{{ name }}"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# `frust` is the ONLY dependency a design-system crate should ever need —
+# every token type, the widget-authoring traits, the geometry/paint
+# vocabulary, and the `set_default_theme` install hook are reached through
+# the facade; see `frust::authoring` for the widget-authoring seam this
+# crate's one example widget (`src/lib.rs`) is built on.
+#
+# NOTE: temporary path dependency pointing at the Frust repo checkout that
+# generated this project ("frust_path" is explicitly a temporary mechanism —
+# the same one `frust create`'s app template uses). Once Frust crates are
+# published, `frust create` will emit a version dependency here instead.
+#
+# Catalogs off, and no `features` list at all: a design-system crate must
+# never enable a built-in catalog feature (`glyph`/`material`/`cupertino`).
+# Cargo features are additive and unify across a build — one such line here
+# would turn a built-in catalog back on for every app that depends on this
+# crate, with no way for that app to switch it off again. A design system
+# that needs a symbol only a catalog provides has found a gap in
+# `frust::authoring`, not a reason to enable one. See README.md.
+frust = { path = "{{ frust_path }}", default-features = false }
+

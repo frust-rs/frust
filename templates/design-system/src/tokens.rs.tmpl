@@ -1,0 +1,91 @@
+//! `{{ title_case_name }}`'s token layer: a [`frust::Theme`] built from
+//! [`Theme::neutral`](frust::Theme::neutral) plus this design system's own
+//! identity tag.
+//!
+//! [`Theme::neutral`](frust::Theme::neutral) is the design-language-free
+//! baseline every shell already falls back to — starting from a built-in
+//! catalog's own baseline (`m3_baseline`/`cupertino_baseline`) would inherit
+//! that catalog's shape/motion opinions and then require overwriting them.
+//! Building from neutral means every token this module does *not* set is a
+//! deliberate "no opinion", not an inherited one.
+
+use frust::{Color, ColorScheme, DesignLanguage, ShapeScale, Theme, ThemeBuilder};
+
+/// This design system's stable identity tag, carried on
+/// [`Theme::design_language`] as [`DesignLanguage::Custom`]. A host or
+/// widget that branches on design language sees this id rather than
+/// mistaking the system for a built-in one — the built-in `==` branch sites
+/// treat any `Custom` value as the neutral/System path, which is exactly
+/// what a system with no platform-native counterpart wants.
+pub const DESIGN_LANGUAGE: &str = "{{ name }}";
+
+/// The system's one color opinion, light mode. Replace with your own
+/// palette — this is a starting point, not a design decision.
+const PRIMARY_LIGHT: Color = Color::from_rgb8(0x2A, 0x5C, 0xA8);
+/// The system's one color opinion, dark mode.
+const PRIMARY_DARK: Color = Color::from_rgb8(0x8F, 0xB4, 0xE8);
+
+/// The system's one shape opinion: a small, uniform corner radius, in
+/// logical px. `full` is left at its baseline `f64::INFINITY` — the pill
+/// sentinel every consumer resolves against a box, not a radius.
+const RADIUS: f64 = 6.0;
+
+/// Build this design system's [`Theme`].
+///
+/// Composed the way a third-party design system is meant to compose one — a
+/// [`ThemeBuilder`] over a baseline, layering per-group edits — rather than
+/// by filling a `Theme` literal field by field. Brightness is left at the
+/// baseline's own value on purpose: the shell re-derives light/dark from the
+/// platform against whatever base [`crate::install`] seeded, and pinning it
+/// here would fight that.
+pub fn design_theme() -> Theme {
+    ThemeBuilder::new(Theme::neutral())
+        .map_colors_light(|s| ColorScheme {
+            primary: PRIMARY_LIGHT,
+            ..s
+        })
+        .map_colors_dark(|s| ColorScheme {
+            primary: PRIMARY_DARK,
+            ..s
+        })
+        .map_shape(|s| ShapeScale {
+            small: RADIUS,
+            medium: RADIUS,
+            ..s
+        })
+        .design_language(DesignLanguage::Custom(DESIGN_LANGUAGE))
+        .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_carries_the_custom_design_language_tag() {
+        let theme = design_theme();
+        assert_eq!(
+            theme.design_language,
+            DesignLanguage::Custom(DESIGN_LANGUAGE)
+        );
+        // Never mistakeable for a built-in language.
+        assert_ne!(theme.design_language, DesignLanguage::Material3);
+        assert_ne!(theme.design_language, DesignLanguage::Cupertino);
+    }
+
+    #[test]
+    fn theme_carries_both_brightnesses_of_the_primary_color() {
+        let theme = design_theme();
+        assert_eq!(theme.light.primary, PRIMARY_LIGHT);
+        assert_eq!(theme.dark.primary, PRIMARY_DARK);
+    }
+
+    #[test]
+    fn shape_is_flattened_but_full_stays_the_pill_sentinel() {
+        let theme = design_theme();
+        assert_eq!(theme.shape.small, RADIUS);
+        assert_eq!(theme.shape.medium, RADIUS);
+        assert!(theme.shape.full.is_infinite());
+    }
+}
+

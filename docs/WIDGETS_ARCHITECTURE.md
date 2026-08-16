@@ -42,7 +42,9 @@ Every container and interactive widget in `frust-widgets` is built through the c
 authoring toolkit rather than touching `frust-core` primitives directly, a boundary enforced by a
 conformance test. The three design-system catalogs (Material, Cupertino, Glyph) sit above both the
 baseline widget set and the authoring toolkit, each consuming a matching `frust-theme` token
-module; an app can disable all three to build its own design system on the same toolkit.
+module; an app can disable all three to build its own design system on the same toolkit — in-tree,
+or, as `examples/design-system-sample` proves, in an entirely external crate depending on `frust`
+alone (see *External Design-System Contract* below).
 
 ## Data Flow
 
@@ -126,6 +128,7 @@ module; an app can disable all three to build its own design system on the same 
 |------|---------|
 | `Theme` / `DesignLanguage` / `ThemeBuilder` | `frust-theme`'s aggregate design-token bundle, tagged by baseline (Material3/Cupertino/Glyph), plus a fluent editor |
 | `ColorScheme`, `TypeScale`, `ShapeScale`, `Elevation`, `MotionScheme`, `GlassScale`, `StatusPalette`, `GlyphInk` | Individual token-group types composed into `Theme` |
+| `NativeTypefaces` / `FontFace` | A `ThemeExtensions` payload carrying a design system's own native-control font bytes (button/body face pair); no built-in baseline attaches it — see NATIVE_WIDGETS_ARCHITECTURE.md's theme ladder |
 | authoring module (`build_child`/`rebuild_child`/`teardown_child`/`rebuild_children`, `route_event`, `VisitPods`/`visit_children!`) | The sanctioned seam for authoring any widget against `frust-core`, including child-introspection |
 | `Navigator` / `Router` / `hero()` | Page-stack and declarative routing plus shared-element transitions |
 | `ButtonStyle`, `ScrollInfo`, `IconData`/`IconSource`, `ImageSource`/`ImageFit` | Small per-widget config/state types shared across the baseline widget set |
@@ -134,6 +137,20 @@ module; an app can disable all three to build its own design system on the same 
 | `RouteNavigator` / `NavRequest` | Off-thread-safe navigation handle (Arc-backed plain data, no reactive types) |
 
 ## Architectural Facts & Constraints
+
+### External Design-System Contract
+`DesignLanguage` is `#[non_exhaustive]` with a `Custom(&'static str)` variant (compared by string
+content, not interning identity) so a third-party design system can tag its identity without a
+breaking enum change; every built-in `==` branch site (the catalog's slider, native-widgets' theme
+bridge) treats an unrecognized tag as the neutral/System path by construction. The public seam an
+external design system builds against is three-fold: the `frust_widgets::authoring` toolkit
+(container/callback plumbing, `visit_children!`), `Theme`'s token bus (`ThemeBuilder`'s per-group
+editors, `Theme::neutral()` as a language-free baseline), and `ThemeExtensions` for typed,
+no-lock-in payloads a baseline doesn't carry (e.g. `NativeTypefaces`, see Key Types).
+`examples/design-system-sample` is the reference proof — a themed catalog plus installer built on
+`frust`'s public API alone, every built-in catalog compiled off (see ARCHITECTURE.md's Examples
+table); its one finding, that `Widget::semantics` cannot be exercised from out of tree, is
+registered in LIMITATIONS.md.
 
 ### Reactive-Free Design
 `frust-widgets` contains no `reactive_graph` symbols crate-wide — the crate is entirely signal-free.

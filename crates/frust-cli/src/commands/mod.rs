@@ -46,6 +46,7 @@ pub fn dispatch(command: Command, cli: &Cli) -> Result<u8> {
             deeplink_scheme,
             deeplink_host,
             arch,
+            design_system,
         } => create::run(create::CreateArgs {
             dir,
             org,
@@ -57,6 +58,7 @@ pub fn dispatch(command: Command, cli: &Cli) -> Result<u8> {
             deeplink_scheme,
             deeplink_host,
             arch: arch.map(|a| a.as_str().to_string()),
+            design_system,
         }),
         Command::Clean => {
             let cwd = std::env::current_dir().context("reading current directory")?;

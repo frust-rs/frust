@@ -1,0 +1,272 @@
+//! `{{ title_case_name }}`: a starter, out-of-tree Frust design system.
+//!
+//! Distilled from the framework's own out-of-tree proof
+//! (`examples/design-system-sample` in the Frust repo) down to the smallest
+//! shape a design system needs: one token module ([`tokens`]) and one leaf
+//! widget ([`BadgeView`]/[`BadgeWidget`]), both built on `frust`'s public
+//! `frust::authoring` seam — no `frust-core`/`frust-widgets`/`frust-theme`
+//! dependency, and no built-in catalog (`glyph`/`material`/`cupertino`)
+//! enabled (see `README.md`).
+//!
+//! Add more widgets — a single-child container, an interactive control — the
+//! same way; `frust::authoring` is the whole seam.
+//!
+//! # Installing
+//!
+//! ```no_run
+//! # struct App;
+//! # impl Default for App { fn default() -> Self { App } }
+//! # impl frust::Component for App {
+//! #     type State = ();
+//! #     fn init(&self) -> Self::State {}
+//! #     fn build(&self, _s: &mut Self::State) -> frust::AnyView<Self::State> {
+//! #         frust::any(frust::text("hi"))
+//! #     }
+//! # }
+//! frust::app!(App, setup = { {{ name }}::install(); });
+//! # fn main() {}
+//! ```
+//!
+//! See [`install`]'s doc comment for why it must be called from `app!`'s
+//! `setup` block rather than from a `Component`, and `README.md` for the
+//! full contract.
+
+pub mod tokens;
+
+use frust::Theme;
+use frust::authoring::text::{TextContext, TextLayout, TextStyle};
+use frust::authoring::{
+    BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, LayoutCtx, PaintCtx, PaintScene, Point,
+    Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, Vec2, View, Widget,
+};
+
+pub use tokens::{DESIGN_LANGUAGE, design_theme};
+
+/// Make `{{ title_case_name }}` this app's starting design system.
+///
+/// # The install-timing contract
+///
+/// Call this from [`frust::app!`]'s `setup = { .. }` block, which runs
+/// **before** the shell builds its first frame and before any
+/// `Component::init` — the only placement with a kept ordering guarantee:
+///
+/// - **Not `Component::init`** — no ordering contract exists between a
+///   component's `init` and the shell's own theme seeding, so a theme
+///   installed there may or may not be in place for the first frame.
+/// - **Not [`frust::set_app_theme`]** — that is the app-facing *override*,
+///   and it pins brightness: an app themed that way stops following the
+///   platform's own light/dark flips. A design system wants the *base*,
+///   which is [`frust::set_default_theme`]: the shell keeps re-deriving
+///   light/dark from the platform appearance against whatever base was
+///   seeded.
+///
+/// The precedence the shell applies is: `set_app_theme` override →
+/// `set_default_theme` base (this call) → the shell's own `Theme::neutral()`
+/// fallback.
+pub fn install() {
+    frust::set_default_theme(design_theme());
+}
+
+// ---- Unthemed fallback constants ------------------------------------------
+//
+// A widget must paint *something* legible when no theme is threaded into
+// the pass (a unit test, a host that never seeded one).
+
+/// Horizontal padding inside the pill, in logical px.
+const PAD_X: f64 = 10.0;
+/// Vertical padding inside the pill, in logical px.
+const PAD_Y: f64 = 6.0;
+/// Label size, in logical px.
+const FONT_SIZE: f32 = 12.0;
+/// Hairline border width, in logical px.
+const BORDER_WIDTH: f64 = 1.0;
+/// Flattening tolerance for the border's rounded-rect stroke path.
+const PATH_TOLERANCE: f64 = 0.1;
+
+/// Unthemed fallback fill.
+const FALLBACK_FILL: Color = Color::from_rgb8(0xF1, 0xEC, 0xE3);
+/// Unthemed fallback label ink.
+const FALLBACK_INK: Color = Color::from_rgb8(0x1E, 0x1C, 0x19);
+/// Unthemed fallback border.
+const FALLBACK_BORDER: Color = Color::from_rgb8(0xD8, 0xD1, 0xC5);
+/// Unthemed fallback corner radius, in logical px.
+const FALLBACK_RADIUS: f64 = 3.0;
+
+/// A declarative badge — this system's one example widget, a **leaf**
+/// (paint-only, no children) built entirely on `frust::authoring`.
+pub struct BadgeView {
+    label: String,
+}
+
+/// Create a badge labelled `label`.
+pub fn badge(label: impl Into<String>) -> BadgeView {
+    BadgeView {
+        label: label.into(),
+    }
+}
+
+/// A retained, lazily-shaped text run: shapes on first layout and re-shapes
+/// whenever the content or the resolved style changes.
+struct Label {
+    content: String,
+    layout: Option<TextLayout>,
+    shaped_style: Option<TextStyle>,
+}
+
+impl Label {
+    fn new(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            layout: None,
+            shaped_style: None,
+        }
+    }
+
+    fn set_content(&mut self, content: impl Into<String>) {
+        let content = content.into();
+        if self.content != content {
+            self.content = content;
+            self.layout = None;
+        }
+    }
+
+    fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
+        if let Some(cached) = &self.layout
+            && self.shaped_style.as_ref() == Some(style)
+        {
+            return cached.size();
+        }
+        let text_ctx = ctx.text_context::<TextContext>();
+        let laid = text_ctx.layout(&self.content, style, None);
+        let size = laid.size();
+        self.layout = Some(laid);
+        self.shaped_style = Some(style.clone());
+        size
+    }
+
+    /// Emit this run's glyphs at absolute `origin`; a no-op before the first
+    /// [`Label::layout`].
+    fn paint(&self, origin: Point, scene: &mut dyn PaintScene) {
+        if let Some(layout) = &self.layout {
+            for run in layout.to_scene_runs(origin) {
+                scene.draw_glyph_run(run);
+            }
+        }
+    }
+}
+
+/// The retained widget for a [`BadgeView`].
+pub struct BadgeWidget {
+    label: Label,
+    label_text: String,
+    label_size: Size,
+}
+
+impl<State: 'static> View<State> for BadgeView {
+    type Element = BadgeWidget;
+
+    fn build(&self, _ctx: &mut BuildCtx<'_>) -> BadgeWidget {
+        BadgeWidget {
+            label: Label::new(self.label.clone()),
+            label_text: self.label.clone(),
+            label_size: Size::ZERO,
+        }
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut BadgeWidget,
+        _ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        if prev.label != self.label {
+            element.label.set_content(self.label.clone());
+            element.label_text = self.label.clone();
+            ChangeFlags::LAYOUT | ChangeFlags::PAINT
+        } else {
+            ChangeFlags::NONE
+        }
+    }
+}
+
+/// `(fill, ink, border)` for the current theme, or the fallback constants
+/// with none threaded.
+fn resolve_colors(theme: Option<&Theme>) -> (Color, Color, Color) {
+    match theme {
+        Some(theme) => {
+            let scheme = theme.scheme();
+            (scheme.surface_container, scheme.on_surface, scheme.outline)
+        }
+        None => (FALLBACK_FILL, FALLBACK_INK, FALLBACK_BORDER),
+    }
+}
+
+/// The pill's corner radius: `theme.shape.small`, else the fallback
+/// constant.
+fn resolve_radius(theme: Option<&Theme>) -> f64 {
+    theme.map_or(FALLBACK_RADIUS, |t| t.shape.small)
+}
+
+/// The label's style; only `color` varies.
+fn label_style(color: Color) -> TextStyle {
+    TextStyle::new(FONT_SIZE, color)
+}
+
+impl Widget for BadgeWidget {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        let theme = Theme::from_layout_ctx(ctx);
+        let (_, ink, _) = resolve_colors(theme);
+        // The resolved ink is baked into the shaped run here, at LAYOUT
+        // time: a theme swap forces `ChangeFlags::LAYOUT`, which always
+        // re-shapes with the new theme's ink.
+        let style = label_style(ink);
+        self.label_size = self.label.layout(ctx, &style);
+
+        let width = PAD_X * 2.0 + self.label_size.width;
+        let height = PAD_Y * 2.0 + self.label_size.height;
+        bc.constrain(Size::new(width, height))
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        let theme = Theme::from_paint_ctx(ctx);
+        let (fill, _, border) = resolve_colors(theme);
+        let radius = resolve_radius(theme);
+
+        scene.fill_rounded_rect(ctx.origin(), ctx.size(), radius, fill);
+        let rr = RoundedRect::from_rect(Rect::from_origin_size(Point::ORIGIN, ctx.size()), radius);
+        scene.stroke_path(
+            ctx.origin(),
+            &rr.to_path(PATH_TOLERANCE),
+            BORDER_WIDTH,
+            &Brush::Solid(border),
+        );
+
+        let label_y = (ctx.size().height - self.label_size.height) / 2.0;
+        self.label
+            .paint(ctx.origin() + Vec2::new(PAD_X, label_y), scene);
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        ctx.push_node(Role::Status, |node| {
+            node.set_label(self.label_text.as_str());
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_seeds_a_tagged_theme() {
+        // `set_default_theme` is a process-global with no public reader, so
+        // what is assertable here is that the call is total (no panic) and
+        // that the theme it seeds is the one this crate publishes.
+        install();
+        assert_eq!(
+            design_theme().design_language,
+            frust::DesignLanguage::Custom(DESIGN_LANGUAGE)
+        );
+    }
+}
+

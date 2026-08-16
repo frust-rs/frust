@@ -1096,5 +1096,26 @@ fn show_invite_modal(nav: &NavigatorController<HuddleState>, design: DesignLangu
                 },
             );
         }
+        _ => {
+            // external design systems (DesignLanguage::Custom) fall back to Material chrome here
+            let confirm_nav = nav.clone();
+            show_dialog(
+                nav,
+                move || {
+                    let confirm = confirm_nav.clone();
+                    dialog()
+                        .title("Invite people")
+                        .body("Send invites to this workspace? (mock)")
+                        .action(any(button("Send", move |_s: &mut HuddleState| {
+                            confirm.pop_with_result(PopResult::of(true));
+                        })))
+                },
+                |s: &mut HuddleState, result: PopResult| {
+                    if result.take::<bool>() == Some(true) {
+                        s.toasts.show("Invites sent (mock)");
+                    }
+                },
+            );
+        }
     }
 }

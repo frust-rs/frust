@@ -26,7 +26,21 @@ use crate::typography::TypeScale;
 /// (iOS) mapping" module docs for how [`ColorScheme::cupertino_light`]/
 /// [`ColorScheme::cupertino_dark`] fill the same 46 roles [`Theme::cupertino_baseline`]
 /// uses.
+///
+/// The tag is identity, not behavior: an external design system styles
+/// itself entirely via `Theme`'s tokens plus `Theme::extensions` (see
+/// [`ThemeExtensions`](crate::extensions::ThemeExtensions)) — this enum just
+/// lets a host/widget recognize which system is active, or deliberately
+/// ignore an unrecognized one. `#[non_exhaustive]` and [`Custom`](Self::Custom)
+/// together mean a new built-in variant, or a third-party system tagging
+/// itself, is never a breaking change for downstream code: the built-in
+/// `==`-based branch sites (`frust-widgets`' slider, native-widgets' theme
+/// bridge) already treat anything that isn't `Cupertino`/`Glyph` as the
+/// neutral/System path by construction, so an unrecognized `Custom` id falls
+/// through safely. Two `Custom` tags compare equal by string content, not by
+/// pointer/interning identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum DesignLanguage {
     /// Material 3 (Android/cross-platform baseline). Default.
     #[default]
@@ -37,6 +51,14 @@ pub enum DesignLanguage {
     /// enum variant; [`Theme::glyph_baseline`] is what shells construct
     /// explicitly to use it.
     Glyph,
+    /// A third-party design system's identity tag — the id is the system's
+    /// stable name (e.g. `"yaru"`). Carried so hosts/widgets that branch on
+    /// language can recognize (or deliberately ignore) an external system;
+    /// the built-in `==` branch sites (slider, native-widgets) treat any
+    /// `Custom` as the neutral/System path by construction. Compared by
+    /// string content — `Custom("yaru") == Custom("yaru")` even across two
+    /// distinct `&'static str` allocations with the same bytes.
+    Custom(&'static str),
 }
 
 /// A full design-token bundle: paired light/dark color schemes, the type
@@ -459,6 +481,23 @@ mod tests {
         let theme = Theme::neutral();
         let cloned = theme.clone();
         assert_eq!(cloned, theme);
+    }
+
+    // ---- DesignLanguage::Custom ---------------------------------------
+
+    #[test]
+    fn custom_design_language_compares_by_content() {
+        assert_eq!(DesignLanguage::Custom("x"), DesignLanguage::Custom("x"));
+        assert_ne!(DesignLanguage::Custom("x"), DesignLanguage::Custom("y"));
+        assert_ne!(DesignLanguage::Custom("x"), DesignLanguage::Material3);
+    }
+
+    #[test]
+    fn custom_design_language_round_trips_through_the_builder() {
+        let theme = Theme::builder(Theme::m3_baseline())
+            .design_language(DesignLanguage::Custom("sample"))
+            .build();
+        assert_eq!(theme.design_language, DesignLanguage::Custom("sample"));
     }
 
     #[test]

@@ -226,17 +226,23 @@ Additionally run:
   && (cd examples/playground && cargo test) \
   && (cd examples/playground && cargo clippy --all-targets -- -D warnings) \
   && (cd examples/playground && cargo fmt --check) \
+  && (cd examples/design-system-sample && cargo test) \
+  && (cd examples/design-system-sample && cargo clippy --all-targets -- -D warnings) \
+  && (cd examples/design-system-sample && cargo fmt --check) \
   && (cd plugins/clean-signals-frust && cargo test) \
   && (cd plugins/clean-signals-frust && cargo clippy --all-targets -- -D warnings)
 ```
 
-`examples/huddle`, `examples/playground`, and `plugins/clean-signals-frust` each gate from
-their own directory rather than `-p` from the repo root because all three are standalone
-workspaces excluded from the root one (*Version-Pin Policy*) — the same shape
-`examples/shadertoy` and `examples/glyph-catalog` gate under, from their own directories,
-per their own READMEs. `huddle` and `clean-signals-frust` git+rev-pin `clean-signals` to
-its public repo, so no local sibling checkout is required to run this gate. This gate is
-separate from `frust build apk`/`run`'s pipeline gate (*Run*).
+`examples/huddle`, `examples/playground`, `examples/design-system-sample`, and
+`plugins/clean-signals-frust` each gate from their own directory rather than `-p` from the repo
+root because all four are standalone workspaces excluded from the root one (*Version-Pin
+Policy*) — the same shape `examples/shadertoy` and `examples/glyph-catalog` gate under, from
+their own directories, per their own READMEs. `huddle` and `clean-signals-frust` git+rev-pin
+`clean-signals` to its public repo, so no local sibling checkout is required to run this gate.
+`design-system-sample` additionally needs `cargo tree -e features -i frust -p sample-app`
+(from its own directory) to print **no** `frust feature "..."` line — the proof every built-in
+catalog stays compiled off (that workspace's own README carries the negative control). This
+gate is separate from `frust build apk`/`run`'s pipeline gate (*Run*).
 
 **Non-default features are not compiled by the chain above.** `frust-render`'s
 `cpu-tier` (experimental `vello_cpu` render backend —

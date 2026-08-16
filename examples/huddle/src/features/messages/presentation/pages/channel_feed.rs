@@ -774,6 +774,10 @@ fn typing_row(design: DesignLanguage) -> AnyView<HuddleState> {
         // Glyph has no spinner chrome baseline yet —
         // falls through to the Material3 arm for now.
         DesignLanguage::Material3 | DesignLanguage::Glyph => any(loading_indicator()),
+        _ => {
+            // external design systems (DesignLanguage::Custom) fall back to Material chrome here
+            any(loading_indicator())
+        }
     };
     any(Padding(
         EdgeInsets::symmetric(4.0, 8.0),
@@ -796,6 +800,10 @@ fn loading_older_row(design: DesignLanguage) -> AnyView<HuddleState> {
         // Glyph has no spinner chrome baseline yet —
         // falls through to the Material3 arm for now.
         DesignLanguage::Material3 | DesignLanguage::Glyph => any(loading_indicator()),
+        _ => {
+            // external design systems (DesignLanguage::Custom) fall back to Material chrome here
+            any(loading_indicator())
+        }
     };
     any(Padding(
         EdgeInsets::all(8.0),

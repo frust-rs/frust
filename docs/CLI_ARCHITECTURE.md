@@ -43,7 +43,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how CLI relates to the other units.
 | `frust-drive::icons` | PNG → `.icns`/`.ico`/hicolor-tree pipeline for `[desktop] icon`; a rejected or missing source degrades to a typed note, never a build failure (`desktop_build` consumes it) |
 | `frust-drive::desktop_build` | macOS/Windows/Linux bundle assembly (`DesktopBundleTarget`, host-locked) via `cargo build` + `ProcessRunner`, and its `installer` submodule (`cargo-packager` shell-out for `.dmg`/NSIS/WiX/`.deb`/`.AppImage`; `.rpm` is a typed refusal, not a supported format) |
 | `frust-drive::desktop_build::contributions` | Merges installed plugins' desktop-lane `Contribution`s into the just-assembled bundle (`Info.plist`, `<identifier>.desktop`, a generated entitlements file), between assembly and codesign — see Data Flow below |
-| `frust-drive::scaffold` | Manifest-driven template rendering that produces a new Frust project tree |
+| `frust-drive::scaffold` | Manifest-driven template rendering that produces a new Frust project tree — an app from `templates/app/` (`TemplateContext`), or, under `--design-system`, a design-system crate from `templates/design-system/` (`DesignSystemContext`, a strict field subset) |
 | `frust-drive::doctor` | Pluggable environment validators plus a structured, non-blocking toolchain report; `CargoPackagerValidator` checks the pinned `cargo-packager` version and is non-fatal (`Partial` at worst — only `frust build --installer` needs it) |
 | `frust-drive::devices` | Pluggable per-platform device discovery, aggregated non-fatally |
 | `frust-drive::build_info` | The debug/profile/release + flavor funnel shared by run and build; `BuildMode::cargo_features()` also selects the `frust/perf-trace`+`frust/devtools` cargo-feature pair for Debug/Profile (see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)) |
@@ -144,7 +144,10 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   ever shells out directly.
 - `create`: CLI args convert into `frust-drive::scaffold::generate`, which renders the embedded
   `templates/app/` tree against a `TemplateContext` — a pure file-write, no `ProcessRunner`
-  involved.
+  involved. `create --design-system` takes a separate path (`generate_design_system` /
+  `DesignSystemContext`) rendering `templates/design-system/` instead — a plain library crate with
+  no platform manifest, so `--deeplink-scheme`/`--deeplink-host`/`--arch` are rejected outright
+  rather than silently ignored.
 - `doctor`/`devices`: `dispatch` runs `frust-drive`'s independent, non-fatal `Validator`/
   `DeviceDiscovery` sets through the injected runner; the CLI renders the resulting report.
 - `run`/`build`: CLI args become a `BuildInfo`, which drives `frust-drive`'s Android/iOS pipelines

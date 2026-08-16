@@ -1,0 +1,59 @@
+# {{ title_case_name }}
+
+A starter Frust design system: a themed widget catalog you own, built on the
+`frust` facade's public API alone — distilled from the framework's own
+out-of-tree proof (`examples/design-system-sample` in the Frust repo).
+
+## What's here
+
+| Module | Holds |
+|--------|-------|
+| [`tokens`] | `design_theme()` — a `Theme` built from `Theme::neutral()` plus this system's identity tag |
+| the crate root | `BadgeView`/`BadgeWidget` — one leaf widget authored against `frust::authoring`, and `install()` |
+
+Add more widgets (a single-child container, an interactive control) the same
+way — `frust::authoring` is the whole seam; nothing here reaches into
+`frust-core`/`frust-widgets`/`frust-theme` directly.
+
+## Installing
+
+```rust
+frust::app!(App, setup = {
+    {{ name }}::install();
+});
+```
+
+### The install-timing contract
+
+`{{ name }}::install()` calls `frust::set_default_theme`, and it must be
+called from `frust::app!`'s `setup = { .. }` block, **not** from a
+`Component::init`:
+
+- **`setup`, not `Component::init`** — `setup` runs before the shell builds
+  its first frame and before any component initialises. `Component::init`
+  has no kept ordering contract against the shell's own theme seeding, so a
+  theme installed there may or may not be in place for frame one.
+- **`set_default_theme`, not `set_app_theme`** — `set_app_theme` is the
+  app-facing *override* and it pins brightness, so an app themed that way
+  stops following platform light/dark. `set_default_theme` seeds the *base*
+  the shell keeps re-deriving light/dark against. Precedence:
+  `set_app_theme` override → `set_default_theme` base → the shell's own
+  `Theme::neutral()` fallback.
+
+## Never enable a built-in catalog feature
+
+A design-system crate must never enable `glyph`/`material`/`cupertino` on
+its `frust` dependency. Cargo features are additive and unify across a
+build: one such line here turns a built-in catalog back on for *every* app
+that depends on this crate, with no way for that app to switch it off
+again. A design system that needs a symbol only a catalog provides has
+found a gap in `frust::authoring`, not a reason to enable one. This crate's
+own `Cargo.toml` ships `default-features = false` with no `features` list —
+keep it that way.
+
+## Gate
+
+```bash
+cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check
+```
+

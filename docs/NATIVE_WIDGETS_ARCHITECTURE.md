@@ -60,8 +60,14 @@ who take the FFI dependency directly — app code stays on the six builders and 
   `NativeComponent::on_event` has no effect (a deferred Phase 4 gap) — only the six built-in
   controls actually deliver events end to end today.
 - Theme ladder: `Theme` folds into control props every frame but is diff-gated, so an unchanged
-  theme costs zero FFI calls; bundled fonts degrade to the platform system font when unavailable
-  (see [WIDGETS_ARCHITECTURE.md](WIDGETS_ARCHITECTURE.md) for `Theme` itself).
+  theme costs zero FFI calls (see [WIDGETS_ARCHITECTURE.md](WIDGETS_ARCHITECTURE.md) for `Theme`
+  itself). Typefaces resolve **extension-first, independently per slot** (button/body):
+  `NativeTypefaces` (a design system's attached `ThemeExtensions` payload) beats the Glyph bundled
+  faces (only when `design_language == Glyph`), which beats the platform's own system font.
+  Publishing is last-pair-wins and diff-gated the same as every other prop, but the *platform*
+  halves still latch their first published pair — a mid-process face swap re-publishes host-side
+  without re-registering on device until relaunch (see
+  [LIMITATIONS.md](LIMITATIONS.md)'s `native-typeface-first-publish-latch`).
 
 ## Key Types
 
