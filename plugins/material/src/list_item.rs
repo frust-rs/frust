@@ -28,17 +28,19 @@
 //! non-interactive row routes pointer events to its slot children (so a trailing
 //! control stays live).
 //!
-//! An interactive row is also the catalog's **hover** reference consumer: it
-//! claims the hover link from its uncaptured `Move` arm
-//! ([`frust::authoring::EventCtx::claim_hover`]) and paints the state layer's 8%
-//! hover overlay for it. Because a pointer *leaving* the row routes its next move
-//! to whatever it moved onto, the row never hears about the departure — so
-//! [`frust::authoring::PaintCtx::is_hovered`] is the authoritative read and paint
-//! re-syncs [`super::state_layer::StateLayer::set_hovered`] from it every frame.
-//! A press wins visually while it lasts (pressed 10% > hover 8%, the
-//! max-of-active-states rule), and a captured drag paints no hover at all — the
-//! framework refuses a claim from a captured pointer, so a touch gesture produces
-//! none either.
+//! An interactive row is also the catalog's **hover** reference consumer, and
+//! shows the whole three-part contract: it claims the hover link from its
+//! uncaptured `Move` arm ([`frust::authoring::EventCtx::claim_hover`]), latches the
+//! same hit test into [`super::state_layer::StateLayer::set_hovered`] and requests
+//! a redraw only when that flag changes (the frame that makes the 8% overlay appear
+//! on entry), and re-syncs the flag from
+//! [`frust::authoring::PaintCtx::is_hovered`] every paint — authoritative, because
+//! a pointer *leaving* the row routes its next move to whatever it moved onto, so
+//! the row never hears about the departure. A press wins visually while it lasts
+//! (pressed 10% > hover 8%, the max-of-active-states rule), and a **captured** drag
+//! paints no hover at all, the framework refusing a claim from a captured pointer.
+//! A touch drag that captured nothing is an ordinary hover pass, though, so the row
+//! can tint under a finger until the lift's `Up` ends the link.
 
 use std::rc::Rc;
 
@@ -419,11 +421,12 @@ impl Widget for ListItemWidget {
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         if self.interactive {
-            // The pod's hover link is authoritative, not the flag the `Move` arm
-            // set: a pointer that left the row routed its next move elsewhere, so
-            // no event ever told this row it stopped being hovered. Re-syncing here
-            // is what makes the overlay drop on the very frame the pointer moves
-            // onto a sibling.
+            // The pod's hover link is authoritative; the flag the `Move` arm
+            // latched is only what earns the row a frame when hover *begins*. A
+            // pointer that left the row routed its next move elsewhere, so no event
+            // ever told this row it stopped being hovered — self-correcting the flag
+            // here is what makes the overlay drop on the very frame the pointer
+            // moves onto a sibling.
             self.state_layer.set_hovered(ctx.is_hovered());
             let content_color = resolve_content_color(Theme::from_paint_ctx(ctx));
             self.state_layer.paint(
@@ -467,11 +470,13 @@ impl Widget for ListItemWidget {
                     // No capture: this is the hover pass. Claim the link whenever
                     // the pointer is inside the row — every qualifying move, not
                     // just the first, since a claim covers only its own pass. The
-                    // redraw is gated on the setter's changed-return so a pointer
-                    // wandering *within* the row costs nothing after the first move.
-                    // A claim made while some pointer is captured (this row's or
-                    // anyone's) is refused by the framework, so no drag or touch
-                    // gesture can reach this arm and tint the row.
+                    // redraw is gated on the setter's changed-return: that gating is
+                    // what paints the overlay on entry (a claim asks for no frame)
+                    // while a pointer wandering *within* the row costs nothing after
+                    // the first move. A claim made while some pointer is captured
+                    // (this row's or anyone's) is refused by the framework, so no
+                    // drag can reach this arm and tint the row; an uncaptured touch
+                    // drag can, and its lift's `Up` ends the link.
                     let over = inside(p.position, ctx.size());
                     if over {
                         ctx.claim_hover();
@@ -851,13 +856,22 @@ mod tests {
         let mut h = HoverHarness::new();
         assert!(h.overlay_rows().is_empty(), "no overlay at rest");
 
-        h.dispatch(PointerPhase::Move, 150.0, HoverHarness::row_y(0));
+        // The frame that makes the overlay appear is the row's own: `claim_hover`
+        // requests none, and the pipeline manufactures one only for a hover that
+        // ended, so the row's change-gated `request_redraw` is what asks here.
+        let gain = h.dispatch(PointerPhase::Move, 150.0, HoverHarness::row_y(0));
+        assert!(gain.needs_redraw, "entering a row repaints");
         assert_eq!(h.overlay_rows(), vec![0], "the hovered row tints");
         assert_eq!(
             h.overlay_alpha(),
             crate::state_layer::HOVER_OPACITY,
             "at the documented M3 hover opacity"
         );
+
+        // Moving within the same row re-claims but changes nothing.
+        let settled = h.dispatch(PointerPhase::Move, 160.0, HoverHarness::row_y(0));
+        assert!(!settled.needs_redraw, "an unchanged flag asks for nothing");
+        assert_eq!(h.overlay_rows(), vec![0]);
     }
 
     #[test]
@@ -868,8 +882,12 @@ mod tests {
 
         // The row the pointer left never receives an event about it — the move
         // routes to its sibling — so this is the case a widget cannot handle on
-        // its own, and exactly one row may end up tinted.
-        h.dispatch(PointerPhase::Move, 150.0, HoverHarness::row_y(1));
+        // its own, and exactly one row may end up tinted. The arriving row's own
+        // flag change is what asks for the frame (the root's hover mirror is
+        // identity-free and sees `true` → `true` across a handoff); a repaint being
+        // global is what lets the departing row drop its tint in the same frame.
+        let handoff = h.dispatch(PointerPhase::Move, 150.0, HoverHarness::row_y(1));
+        assert!(handoff.needs_redraw, "a row-to-row handoff repaints");
         assert_eq!(h.overlay_rows(), vec![1]);
 
         // Off both rows: nothing tints, and the row that lost hover gets the
@@ -922,6 +940,36 @@ mod tests {
             h.overlay_rows().is_empty(),
             "a click leaves no hover behind until the pointer moves again"
         );
+    }
+
+    #[test]
+    fn an_uncaptured_drag_tints_the_row_only_until_the_lift() {
+        // The touch shape: a contact that started on empty chrome captures nothing,
+        // so its moves are ordinary hover passes and the row it slides over does
+        // tint — nothing in the pipeline tells a finger from a mouse. The lift is
+        // what bounds it: a lifted contact sends no further move, so `Up` ending the
+        // hover link is the only thing that can drop the tint.
+        let mut h = HoverHarness::new();
+        h.dispatch(PointerPhase::Down, 150.0, 180.0);
+        assert!(h.overlay_rows().is_empty(), "pressed empty chrome, no row");
+
+        h.dispatch(PointerPhase::Move, 150.0, HoverHarness::row_y(1));
+        assert_eq!(
+            h.overlay_rows(),
+            vec![1],
+            "an uncaptured drag over the row is a hover pass"
+        );
+
+        let lift = h.dispatch(PointerPhase::Up, 150.0, HoverHarness::row_y(1));
+        assert!(
+            lift.needs_redraw,
+            "the lift asks for the frame that clears it"
+        );
+        assert!(
+            h.overlay_rows().is_empty(),
+            "the tint is transient: the lift ends the link"
+        );
+        assert_eq!(h.state.presses, 0, "no press fired: the row never captured");
     }
 
     // --- Semantics ---

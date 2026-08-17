@@ -2320,29 +2320,44 @@ reach `RenderRoot::semantics()`.
 
 ### `hover-window-leave-standing` — hover and press chrome outlive the state that caused them, until the next in-window `Move`
 
-**Observed**: three deliberate, test-pinned v1 gaps share one cause — nothing re-derives hover
+**Observed**: four deliberate, test-pinned v1 gaps share one cause — nothing re-derives hover
 without a fresh uncaptured pointer `Move`, and the desktop shell delivers no window-leave event.
 A pointer leaving the window keeps the last-hovered widget's tint standing (no `CursorLeft` is
 ever dispatched to clear it); a `Down` that ends a hover with the pointer then held still shows no
-tint for the press itself until the next `Move`; and a scroll or any other mutation happening
-under a stationary pointer leaves stale hover/pressed chrome in place rather than re-testing the
-pointer's position against whatever moved. All three resolve themselves on the next in-window
-pointer `Move`, which is what makes them a standing-until-next-move gap rather than a stuck one.
+tint for the press itself until the next `Move`; a click's `Up` likewise ends the link, so a mouse
+resting where it clicked shows no hover tint until it moves again; and a scroll or any other
+mutation happening under a stationary pointer leaves stale hover/pressed chrome in place rather
+than re-testing the pointer's position against whatever moved. All four resolve themselves on the
+next in-window pointer `Move`, which is what makes them a standing-until-next-move gap rather than
+a stuck one.
 
 **Applies to**: every desktop shell (`frust-shell-desktop`); any widget using
-`EventCtx::claim_hover`/`PaintCtx::is_hovered`. Mobile is unaffected — its moves are gesture-
-captured and never claim hover in the first place.
+`EventCtx::claim_hover`/`PaintCtx::is_hovered`. **Mobile is affected too, in one shape**: nothing
+in the pipeline distinguishes a touch contact from a mouse (`PointerEvent` carries no pointer
+kind, and both mobile shells map a touch drag to `PointerPhase::Move`), so the hover refusal is
+structural only for a **captured** pointer. A touch drag that captured nothing — a finger sliding
+over a non-capturing hover consumer — is an ordinary hover pass and does tint it. The tint is
+transient: the lift's `Up` ends the link, which is why `Up` is a hover-ending pass at all.
 
 **Why accepted**: hover is deliberately derived only from a real pointer `Move`, with no
 synthetic re-derivation pass, because the alternative (a per-frame position re-test independent of
 input) would give hover its own polling loop the rest of the pipeline doesn't have. A window-leave
 event is a real, addressable gap (winit exposes `CursorLeft`) but scoped out of this phase; the
-other two are accepted properties of the epoch model, not shell gaps.
+rest are accepted properties of the epoch model, not shell gaps. The touch residual is accepted
+over the alternative of a pointer-kind field on `PointerEvent`, which would widen the input
+vocabulary (and every out-of-tree exhaustive match on it) to suppress a transient tint that the
+`Up` rule already bounds to the length of the gesture.
+
+**Owed device check** (Android + iOS, not yet run): drag a finger across a non-capturing hover
+consumer (a `material::list_item` row with `on_press` is the reference; drag from empty chrome onto
+it so nothing captures) and confirm the 8% overlay appears under the finger *and* is gone by the
+frame after lift — i.e. the residual is transient, never a tint stranded on a touch-only screen.
 
 **Evidence**: `crates/frust-core/src/app.rs`'s hover pipeline tests (`a_captured_move_cannot_claim_hover`,
-`a_down_or_cancel_ends_the_hover`, `a_non_pointer_pass_leaves_a_live_hover_standing`);
+`a_down_up_or_cancel_ends_the_hover`, `a_non_pointer_pass_leaves_a_live_hover_standing`);
 `workflow/plans/features/shadcn-design-system/tasks/01-hover-pipeline.md` completion summary
-(2026-08-17, commit `68ac7e93`), "Known v1 gaps".
+(2026-08-17, commit `68ac7e93`), "Known v1 gaps"; the touch residual and the `Up` rule traced to a
+review round of the same feature (2026-08-17).
 
 ---
 

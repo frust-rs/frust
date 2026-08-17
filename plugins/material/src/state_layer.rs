@@ -36,13 +36,18 @@
 //!   records that claim down the pod chain. The claim is per-pass, so the pointer
 //!   moving anywhere else — including onto a widget this one never hears about —
 //!   drops the link with no leave event to deliver, which is exactly what a widget
-//!   could not do for itself before. Two rules bind a consumer:
-//!   [`frust::authoring::PaintCtx::is_hovered`] is the authoritative read (a widget
-//!   self-corrects [`StateLayer::set_hovered`] from it every paint, since the
-//!   pointer's *departure* never reaches its `event`), and a claim from a captured
-//!   pointer is refused by construction — so a drag never tints the widget under
-//!   the finger, and touch input (whose moves are gesture-captured) produces no
-//!   hover at all.
+//!   could not do for itself before. Three rules bind a consumer: it keeps its own
+//!   hover flag and gates its `request_redraw` on
+//!   [`StateLayer::set_hovered`]'s changed-return (the frame source for hover
+//!   *gain* — `claim_hover` asks for none);
+//!   [`frust::authoring::PaintCtx::is_hovered`] is the authoritative read, so the
+//!   widget re-syncs `set_hovered` from it every paint (the pointer's *departure*
+//!   never reaches its `event`); and a claim from a **captured** pointer is refused
+//!   by construction, so a drag never tints the widget under the finger. That
+//!   refusal is structural for a captured pointer only — nothing tells a touch
+//!   contact from a mouse, so an uncaptured touch drag over a non-capturing
+//!   consumer does tint, transiently, until the `Up` at lift ends the link
+//!   (`docs/LIMITATIONS.md`'s `hover-window-leave-standing`).
 //! - **`focused` — the focus-routing prerequisite landed** (`material::dialog`/
 //!   `sheet`, `cupertino::alert_dialog`/`action_sheet` all now call
 //!   `EventCtx::request_focus` on a `Down` and dismiss on a focus-routed

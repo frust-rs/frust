@@ -248,9 +248,9 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// The live hover epoch: the identity of the most recent completed hover pass.
     ///
     /// Advanced by exactly one per hover pass — an **uncaptured**
-    /// [`PointerPhase::Move`] (which may record a claim), or the `Down`/`Cancel`
-    /// that ends a hover outright (which may not) — and by nothing else, so a
-    /// scroll, key, IME, or housekeeping pass leaves a live hover standing.
+    /// [`PointerPhase::Move`] (which may record a claim), or the `Down`/`Up`/
+    /// `Cancel` that ends a hover outright (which may not) — and by nothing else,
+    /// so a scroll, key, IME, or housekeeping pass leaves a live hover standing.
     /// A [`crate::widget::ChildPod`]'s recorded stamp counts as hovered only while
     /// it equals this, which is what strands the previous claimant's path with no
     /// container having to clear it (see the [`crate::event`] module docs).
@@ -561,8 +561,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     ///
     /// The hover analog of [`RenderRoot::is_focus_active`], and a level accessor
     /// like it: hover is not a session (nothing has to be released), so there is no
-    /// generation counterpart. `false` on a touch-only app and on any app whose
-    /// widgets never call [`EventCtx::claim_hover`](crate::event::EventCtx::claim_hover).
+    /// generation counterpart. `false` for any app whose widgets never call
+    /// [`EventCtx::claim_hover`](crate::event::EventCtx::claim_hover). A touch app
+    /// can still see it go `true` transiently: nothing distinguishes a touch
+    /// contact from a mouse here, so an uncaptured touch drag over a
+    /// non-capturing claimant is an ordinary hover pass — ended by the `Up` at
+    /// lift (see `docs/LIMITATIONS.md`'s `hover-window-leave-standing`).
     pub fn is_hover_active(&self) -> bool {
         self.hover_active
     }
@@ -580,9 +584,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     ///
     /// [`CursorIcon::Default`] before the first `Move`, and after any `Move` in
     /// which no widget called
-    /// [`EventCtx::set_cursor`](crate::event::EventCtx::set_cursor) — so a
-    /// touch-only app, and any app whose widgets never request a cursor, reads
-    /// `Default` forever and the mobile shells simply never read this at all.
+    /// [`EventCtx::set_cursor`](crate::event::EventCtx::set_cursor) — so any app
+    /// whose widgets never request a cursor reads `Default` forever, and the mobile
+    /// shells never read this at all regardless of what resolves here.
     ///
     /// **Residual:** a widget that is torn down (or moves out from under a
     /// stationary pointer) while its request stands leaves the last shape in
@@ -1279,13 +1283,16 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// *derives* rather than merely mirrors: an **uncaptured** `Move` opens a hover
     /// pass (widgets on the hit-tested path may claim it — see
     /// [`EventCtx::claim_hover`](crate::event::EventCtx::claim_hover)), a
-    /// `Down`/`Cancel` ends whatever hover stood, and every other event leaves it
-    /// alone. There is nothing to release and no generation to bump: the epoch
+    /// `Down`/`Up`/`Cancel` ends whatever hover stood, and every other event leaves
+    /// it alone. There is nothing to release and no generation to bump: the epoch
     /// advance strands the previous claimant's path by itself, and the outcome's
-    /// `needs_redraw` carries the one repaint a widget that *lost* hover cannot ask
-    /// for. **No shell change is required for hover** — the desktop shell already
-    /// dispatches a `Move` on every cursor move, and the mobile shells only ever
-    /// produce mid-gesture (hence captured, hence ineligible) moves.
+    /// `needs_redraw` carries the one repaint **no widget can ask for** — a hover
+    /// that ended with nothing taking it. A hover that *begins* or *moves from one
+    /// claimant to another* is repainted by the new claimant's own change-gated
+    /// `request_redraw`, which is why keeping an internal hover flag is part of the
+    /// consumer contract rather than an optimization (see `claim_hover`).
+    /// **No shell change is required for hover** — the desktop shell already
+    /// dispatches a `Move` on every cursor move.
     ///
     /// The cursor is hover's sibling channel and the fourth thing this pass
     /// resolves: any pointer `Move` (captured included) re-resolves
@@ -1319,15 +1326,27 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
 
         // Hover is derived per **uncaptured** pointer `Move`: that pass, and only
         // that pass, may record a claim, so a captured drag can never paint hover
-        // under the pointer. A `Down`/`Cancel` is the other epoch-advancing pass —
-        // it ends whatever hover stood, without opening a new one (a press is not a
-        // hover, and a touch `Down` must not inherit one). `Up`, scroll, key, IME,
-        // and the housekeeping broadcast leave a live hover exactly as it was.
+        // under the pointer. Every other pointer phase — `Down`, `Up`, `Cancel` —
+        // is an epoch-advancing pass that *ends* whatever hover stood without
+        // opening a new one: a press is not a hover, a touch `Down` must not
+        // inherit one, and a lift is the only signal a touch contact leaving the
+        // screen ever produces (no further `Move` follows it, so a tint claimed
+        // during an uncaptured touch drag would otherwise stand indefinitely).
+        // Ending on `Up` costs a mouse the hover tint between a click's release
+        // and its next motion — the same standing-until-next-move class as the
+        // press-then-hold-still gap, and traded deliberately for a touch link that
+        // cannot outlive the finger (`docs/LIMITATIONS.md`'s
+        // `hover-window-leave-standing`). A scroll, key, IME, or the housekeeping
+        // broadcast leaves a live hover exactly as it was.
         let hover_pass = matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Move)
             && !self.pointer_captured;
         let hover_ends = matches!(
             event,
-            InputEvent::Pointer(p) if matches!(p.phase, PointerPhase::Down | PointerPhase::Cancel)
+            InputEvent::Pointer(p)
+                if matches!(
+                    p.phase,
+                    PointerPhase::Down | PointerPhase::Up | PointerPhase::Cancel
+                )
         );
         let hover_epoch = self.hover_epoch;
         let hover_was_active = self.hover_active;
@@ -1473,12 +1492,17 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         if cursor_pass {
             self.cursor = requested.unwrap_or_default();
         }
-        // A hover that *ended* needs one repaint the widget losing it cannot ask
-        // for: the pointer moved onto something else (or a press/cancel cleared the
-        // link), so the old claimant's `event()` was never called. A hover that
-        // *began* or *moved to another widget* is already covered — the new
-        // claimant's own changed-state redraw repaints the whole tree, which is what
-        // lets the old one drop its overlay from `PaintCtx::is_hovered`.
+        // A hover that ended with *nothing* taking it needs one repaint no widget
+        // can ask for: the pointer moved onto empty chrome (or a press/lift/cancel
+        // cleared the link), so the old claimant's `event()` was never called and
+        // the new state has no claimant to speak for it. Every other edge is the
+        // consumer's own: a hover that *began* or *moved from one claimant to
+        // another* is repainted by the new claimant's change-gated
+        // `request_redraw`, and because a repaint is global, that one frame is also
+        // what lets the widget losing the link drop its overlay from
+        // `PaintCtx::is_hovered`. This mirror is identity-free, so an A→B handoff
+        // is `true`→`true` here and manufactures nothing — which is exactly why the
+        // consumer's internal flag is normative (see `EventCtx::claim_hover`).
         let needs_redraw = needs_redraw || (hover_was_active && !self.hover_active);
 
         EventOutcome {
@@ -4205,8 +4229,17 @@ mod tests {
     /// A leaf that claims hover on any `Move` landing inside its own bounds — the
     /// canonical opt-in shape — and optionally captures the pointer on `Down` (the
     /// drag fixture: a captured pointer must never create hover).
+    ///
+    /// With `latches` set it follows the whole consumer contract: the same hit test
+    /// updates an internal flag, `request_redraw` is gated on that flag changing,
+    /// and `paint` self-corrects the flag from the authoritative
+    /// `PaintCtx::is_hovered`. Clearing `latches` is a deliberate negative control —
+    /// a claimant that keeps no flag — used to pin which frames the pipeline itself
+    /// does and does not manufacture.
     struct HoverLeaf {
         captures: bool,
+        latches: bool,
+        hovered: bool,
         probe: Rc<HoverProbe>,
     }
 
@@ -4216,6 +4249,11 @@ mod tests {
         }
         fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
             self.probe.painted_hovered.set(ctx.is_hovered());
+            if self.latches {
+                // The self-correction half of the contract: authoritative here,
+                // whatever the event arm last recorded.
+                self.hovered = ctx.is_hovered();
+            }
         }
         fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
             self.probe.event_hovered.set(ctx.is_hovered());
@@ -4232,6 +4270,10 @@ mod tests {
                     if inside {
                         ctx.claim_hover();
                     }
+                    if self.latches && self.hovered != inside {
+                        self.hovered = inside;
+                        ctx.request_redraw();
+                    }
                     // Deliberately `Ignored`: a hovering widget does not consume a
                     // move it merely watched (the shipped `ListItem` shape).
                     EventResult::Ignored
@@ -4244,6 +4286,31 @@ mod tests {
                 }
                 _ => EventResult::Ignored,
             }
+        }
+    }
+
+    /// A transparent container wrapping one hover leaf, recording what its **own**
+    /// `PaintCtx::is_hovered`/`EventCtx::is_hovered` reported — the
+    /// ancestor-on-the-claim-path case, which the two sibling leaves alone cannot
+    /// show.
+    struct HoverGroup {
+        probe: Rc<HoverProbe>,
+        child: crate::widget::ChildPod,
+    }
+
+    impl crate::widget::Widget for HoverGroup {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            let size = self.child.layout_child(ctx, bc);
+            self.child.set_origin(Point::ZERO);
+            size
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            self.probe.painted_hovered.set(ctx.is_hovered());
+            self.child.paint_child(ctx, scene);
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            self.probe.event_hovered.set(ctx.is_hovered());
+            self.child.event_child(ctx, event)
         }
     }
 
@@ -4291,24 +4358,51 @@ mod tests {
         }
     }
 
+    /// How one `HoverHarness` is shaped.
+    #[derive(Clone, Copy)]
+    struct HoverFixture {
+        /// Leaves capture the pointer on `Down` (the drag case).
+        captures: bool,
+        /// Leaves follow the consumer contract (latched flag + change-gated redraw
+        /// + paint-time self-correction).
+        latches: bool,
+        /// Wrap the top leaf in a [`HoverGroup`], so the claim path has an
+        /// ancestor pod between the claimant and the root.
+        nested: bool,
+    }
+
     struct HoverPairView {
         top: Rc<HoverProbe>,
         bottom: Rc<HoverProbe>,
-        captures: bool,
+        group: Rc<HoverProbe>,
+        fixture: HoverFixture,
+    }
+
+    impl HoverPairView {
+        fn leaf(&self, probe: &Rc<HoverProbe>) -> Box<dyn crate::widget::Widget> {
+            Box::new(HoverLeaf {
+                captures: self.fixture.captures,
+                latches: self.fixture.latches,
+                hovered: false,
+                probe: probe.clone(),
+            })
+        }
     }
 
     impl View<()> for HoverPairView {
         type Element = HoverPair;
         fn build(&self, _ctx: &mut BuildCtx<'_>) -> HoverPair {
+            let top: Box<dyn crate::widget::Widget> = if self.fixture.nested {
+                Box::new(HoverGroup {
+                    probe: self.group.clone(),
+                    child: crate::widget::ChildPod::new(self.leaf(&self.top)),
+                })
+            } else {
+                self.leaf(&self.top)
+            };
             HoverPair {
-                top: crate::widget::ChildPod::new(Box::new(HoverLeaf {
-                    captures: self.captures,
-                    probe: self.top.clone(),
-                })),
-                bottom: crate::widget::ChildPod::new(Box::new(HoverLeaf {
-                    captures: self.captures,
-                    probe: self.bottom.clone(),
-                })),
+                top: crate::widget::ChildPod::new(top),
+                bottom: crate::widget::ChildPod::new(self.leaf(&self.bottom)),
             }
         }
         fn rebuild(&self, _p: &Self, _e: &mut HoverPair, _c: &mut BuildCtx<'_>) -> ChangeFlags {
@@ -4316,26 +4410,58 @@ mod tests {
         }
     }
 
-    /// A `RenderRoot` over the hover fixture, plus the two probes.
+    /// A `RenderRoot` over the hover fixture, plus its probes.
     struct HoverHarness {
         root: RenderRoot<(), HoverPairView>,
         top: Rc<HoverProbe>,
         bottom: Rc<HoverProbe>,
+        group: Rc<HoverProbe>,
         state: (),
     }
 
     impl HoverHarness {
+        /// The contract-following fixture: two flat leaves that latch their own
+        /// hover flag, optionally capturing on `Down`.
         fn new(captures: bool) -> Self {
+            Self::build(HoverFixture {
+                captures,
+                latches: true,
+                nested: false,
+            })
+        }
+
+        /// The negative control: leaves that claim hover but keep no flag of their
+        /// own, so only frames the pipeline manufactures show up.
+        fn without_consumer_flag() -> Self {
+            Self::build(HoverFixture {
+                captures: false,
+                latches: false,
+                nested: false,
+            })
+        }
+
+        /// The top leaf wrapped in a container pod, for the path-semantics case.
+        fn nested() -> Self {
+            Self::build(HoverFixture {
+                captures: false,
+                latches: true,
+                nested: true,
+            })
+        }
+
+        fn build(fixture: HoverFixture) -> Self {
             let top = Rc::new(HoverProbe::default());
             let bottom = Rc::new(HoverProbe::default());
+            let group = Rc::new(HoverProbe::default());
             let mut root: RenderRoot<(), HoverPairView> = RenderRoot::new();
             let mut state = ();
-            let (t, b) = (top.clone(), bottom.clone());
+            let (t, b, g) = (top.clone(), bottom.clone(), group.clone());
             root.rebuild(
                 &mut move |_: &mut ()| HoverPairView {
                     top: t.clone(),
                     bottom: b.clone(),
-                    captures,
+                    group: g.clone(),
+                    fixture,
                 },
                 &mut state,
             );
@@ -4344,6 +4470,7 @@ mod tests {
                 root,
                 top,
                 bottom,
+                group,
                 state,
             }
         }
@@ -4397,7 +4524,7 @@ mod tests {
         assert_eq!(
             h.painted(),
             (true, false),
-            "exactly the claimant reads as hovered"
+            "the claimant reads as hovered, its sibling does not"
         );
 
         // A second move within the same leaf keeps the link (the claim is
@@ -4474,8 +4601,11 @@ mod tests {
     }
 
     #[test]
-    fn a_down_or_cancel_ends_the_hover() {
-        for ending in [PointerPhase::Down, PointerPhase::Cancel] {
+    fn a_down_up_or_cancel_ends_the_hover() {
+        // Every pointer phase other than an uncaptured `Move` ends the link. `Up`
+        // is in here for touch: a lifted finger sends no further move, so a tint
+        // claimed during an uncaptured touch drag would otherwise stand for good.
+        for ending in [PointerPhase::Down, PointerPhase::Up, PointerPhase::Cancel] {
             let mut h = HoverHarness::new(false);
             h.move_over(Leaf::Top);
             assert!(h.root.is_hover_active());
@@ -4512,11 +4642,91 @@ mod tests {
         h.root.event(&mut h.state, &InputEvent::Housekeeping);
         assert!(h.root.is_hover_active());
         assert_eq!(h.painted(), (true, false));
+    }
 
-        // An `Up` is not a hover pass either (a click without moving the mouse
-        // keeps whatever the preceding `Down` left, which is nothing).
-        h.dispatch(PointerPhase::Up, 50.0, 15.0);
+    #[test]
+    fn a_container_on_the_claim_path_reads_hovered_and_a_sibling_does_not() {
+        // The recorded thing is a path, so hover is `:hover`-shaped: the claimant
+        // and every ancestor enclosing it read hovered, nothing off the path does.
+        let mut h = HoverHarness::nested();
+        h.move_over(Leaf::Top);
+        h.paint();
+        assert!(h.top.painted_hovered.get(), "the claimant itself");
+        assert!(
+            h.group.painted_hovered.get(),
+            "the container enclosing the claimant is on the path too"
+        );
+        assert!(
+            !h.bottom.painted_hovered.get(),
+            "a sibling leaf is off the path"
+        );
+
+        // Move onto the sibling: the container goes unhovered with its child, and
+        // both reads agree about it on the next pass.
+        h.move_over(Leaf::Bottom);
+        h.paint();
+        assert!(!h.group.painted_hovered.get());
+        assert!(!h.top.painted_hovered.get());
+        assert!(h.bottom.painted_hovered.get());
+        h.move_over(Leaf::Top);
+        assert!(
+            !h.group.event_hovered.get(),
+            "the event read reports the previous pass, like the leaf's"
+        );
+        h.move_over(Leaf::Top);
+        assert!(
+            h.group.event_hovered.get(),
+            "the container observes the link its child holds"
+        );
+    }
+
+    #[test]
+    fn hover_gain_is_repainted_by_the_consumers_own_flag() {
+        let mut h = HoverHarness::new(false);
+        // Entering a widget: the root manufactures nothing here (its mirror went
+        // `false` → `true`, and it cannot know which widget cares), so the frame
+        // comes from the claimant's own change-gated request.
+        let gain = h.move_over(Leaf::Top);
+        assert!(gain.needs_redraw, "hover gain repaints");
+        assert_eq!(h.painted(), (true, false));
+
+        // Wandering within the same widget claims again but changes nothing, so it
+        // must not repaint per event.
+        let settled = h.dispatch(PointerPhase::Move, 60.0, 20.0);
+        assert!(!settled.needs_redraw, "an unchanged flag asks for nothing");
+
+        // A handoff repaints both sides at once: the arriving leaf's flag changed
+        // (it asks), and because a repaint is global that same frame is what lets
+        // the departing leaf drop its chrome from the authoritative paint read.
+        let handoff = h.move_over(Leaf::Bottom);
+        assert!(handoff.needs_redraw, "a claimant handoff repaints");
+        assert_eq!(
+            h.painted(),
+            (false, true),
+            "one frame settles both the loss and the gain"
+        );
+    }
+
+    #[test]
+    fn a_claimant_without_its_own_flag_gets_only_the_loss_frame() {
+        // The negative control for the contract above: leaves that claim hover but
+        // keep no flag of their own. Gain and handoff are invisible to the root
+        // (its hover mirror is identity-free — `false` → `true` and `true` →
+        // `true`), so nothing repaints for them, which is exactly why the
+        // consumer's latched flag is normative rather than an optimization.
+        let mut h = HoverHarness::without_consumer_flag();
+        let gain = h.move_over(Leaf::Top);
         assert!(h.root.is_hover_active());
+        assert!(!gain.needs_redraw, "no widget asked, and the root cannot");
+
+        let handoff = h.move_over(Leaf::Bottom);
+        assert!(h.root.is_hover_active());
+        assert!(!handoff.needs_redraw, "a handoff is `true` → `true` here");
+
+        // Loss is the one edge the root does cover, since no widget can see it.
+        let loss = h.dispatch(PointerPhase::Move, 50.0, 200.0);
+        assert!(!h.root.is_hover_active());
+        assert!(loss.needs_redraw, "the root manufactures the loss frame");
     }
 
     #[test]

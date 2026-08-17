@@ -345,13 +345,29 @@ widget in `frust-widgets`:
   surface here means the same thing it means everywhere: a full root focus/IME session release,
   not a value update (`docs/CORE_ARCHITECTURE.md`'s Focus/IME Lifecycle).
 
-- **Claim hover from the uncaptured `Move` arm, never latch it.** Call `EventCtx::claim_hover`
-  on every qualifying move (hit-test the position against the widget's own bounds first), not
-  just on entry — the claim is per-pass, so a widget that stops claiming stops being hovered on
-  the next pass, with no leave event to react to. Read `PaintCtx::is_hovered` at paint time as
-  the authoritative value and self-correct any internal flag from it there, since a pointer that
-  left the widget never delivers it another event (`docs/CORE_ARCHITECTURE.md`'s Hover and
-  Cursor section).
+- **A hover consumer claims from the uncaptured `Move` arm, latches its own flag, and
+  self-corrects that flag at paint time.** All three, because each covers a case the others
+  cannot:
+  - **Claim** with `EventCtx::claim_hover` on every qualifying move (hit-test the position
+    against the widget's own bounds first), not just on entry — the claim is per-pass, so a
+    widget that stops claiming stops being hovered on the next pass, with no leave event to
+    react to.
+  - **Latch** the same hit test into an internal hover flag and gate `request_redraw` on its
+    *changed*-return. This is the only frame source for hover *gain* and for a link moving from
+    one claimant to another: `claim_hover` requests no redraw, and the root manufactures one
+    only when a hover ends with nothing taking it (its mirror is identity-free, so a claimant
+    handoff is invisible to it). A widget without the flag shows no hover chrome on entry.
+  - **Self-correct** from `PaintCtx::is_hovered` in `paint` — it is authoritative, and fixes the
+    flag whenever no event could (the pointer left, or a container cleared/lapsed the link).
+    `frust_material::list_item` is the reference consumer for all three.
+
+  `PaintCtx::is_hovered`/`EventCtx::is_hovered` report **path** membership, not claimant
+  identity: "this widget or a descendant of it holds the link", so a container reads `true` while
+  the pointer is over a claiming child (CSS `:hover` semantics, which is what a web-derived
+  design system expects) and a widget that never claims can still read `true`; siblings and
+  off-path widgets read `false`. A `Down`, `Up`, or `Cancel` ends the link outright — consumers
+  re-claim on the next `Move` rather than expecting hover chrome to survive a click
+  (`docs/CORE_ARCHITECTURE.md`'s Hover and Cursor section).
 
 - **Ask for a cursor on every qualifying `Move`, never on `Down`.** `EventCtx::set_cursor` is
   stateless like `request_redraw`: a widget re-asks each move rather than latching a shape, and

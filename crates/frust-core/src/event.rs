@@ -23,20 +23,27 @@
 //! [`PointerPhase::Move`] arm ([`EventCtx::claim_hover`]), recorded as a path
 //! through the pod chain the same way focus is. The claim's identity is an
 //! *epoch*: [`crate::app::RenderRoot`] advances one hover epoch per hover pass
-//! (an uncaptured `Move`, or the `Down`/`Cancel` that ends a hover outright), a
-//! claim stamps that epoch onto every [`ChildPod`](crate::widget::ChildPod) from
-//! the claimant up to the root, and a link only counts as hovered while its
-//! stamp still matches the live epoch. So the previous claimant needs no explicit
-//! clearing — the pointer moving anywhere else advances the epoch and its stamp
-//! goes stale by construction, which is why a container that never hears about
-//! the move cannot leave a second widget reading as hovered.
+//! (an uncaptured `Move`, or the `Down`/`Up`/`Cancel` that ends a hover
+//! outright), a claim stamps that epoch onto every
+//! [`ChildPod`](crate::widget::ChildPod) from the claimant up to the root, and a
+//! link only counts as hovered while its stamp still matches the live epoch. So
+//! the previous claimant needs no explicit clearing — the pointer moving anywhere
+//! else advances the epoch and its stamp goes stale by construction, which is why
+//! a container that never hears about the move cannot leave a stale path standing.
+//!
+//! The recorded thing is a **path**, exactly like focus, and both hover reads
+//! report membership of it: the claimant *and* every ancestor enclosing it read
+//! hovered, the way CSS `:hover` applies to an element while the pointer is over
+//! one of its descendants. Nothing off the path does — a sibling, or a widget
+//! whose descendant did not claim, reads `false`.
 //!
 //! Only an **uncaptured** `Move` may claim: the root marks a captured pass
 //! ineligible outright, and [`ChildPod::event_child`](crate::widget::ChildPod::event_child)
 //! additionally refuses a claim from inside a pod that itself holds the capture
 //! path, so a drag can never paint hover under the finger. At most one claim per
 //! pass is recorded (the first, i.e. topmost in hit-test order — a later one is
-//! ineligible), so two overlapping widgets cannot both read as hovered.
+//! ineligible), so at most one path is hovered and two *stacked* widgets cannot
+//! each hold their own link.
 //!
 //! # The cursor is a per-pass request, on its own channel
 //!
@@ -869,8 +876,9 @@ pub struct EventCtx<'a> {
     /// Whether the receiving widget currently holds focus (threaded down from its
     /// pod's recorded focus flag; seeded from the root focus state at the root).
     has_focus: bool,
-    /// Whether the receiving widget currently holds the hover link — the pointer
-    /// is over it as of the last completed hover pass. Threaded down from its
+    /// Whether the receiving widget is on the recorded hover path — the pointer is
+    /// over it or over a descendant of it, as of the last completed hover pass.
+    /// Threaded down from its
     /// pod's recorded hover stamp (see `hover_epoch`), seeded from
     /// [`crate::app::RenderRoot`]'s own hover mirror at the root. The event-pass
     /// mirror of [`PaintCtx::is_hovered`](crate::widget::PaintCtx::is_hovered).
@@ -980,14 +988,26 @@ impl<'a> EventCtx<'a> {
 
     /// Claim the hover link: the pointer is over *this* widget, so the next paint
     /// pass reports [`PaintCtx::is_hovered`](crate::widget::PaintCtx::is_hovered)
-    /// for it — and, because a claim replaces the whole recorded path, for nothing
-    /// else.
+    /// for it — and, because the claim is recorded as a path, for every ancestor
+    /// enclosing it as well (see the [module docs](crate::event)).
     ///
-    /// # When to call it
+    /// # The consumer contract
     ///
-    /// From a [`PointerPhase::Move`] arm, once the widget has hit-tested the
-    /// event's `position` inside its own bounds — the same local test a press arm
-    /// does on `Up`:
+    /// Three things together, all three required:
+    ///
+    /// 1. **Claim from the [`PointerPhase::Move`] arm**, once the widget has
+    ///    hit-tested the event's `position` inside its own bounds — the same local
+    ///    test a press arm does on `Up`.
+    /// 2. **Keep an internal hover flag**, updated from that same hit test, and
+    ///    gate `request_redraw` on its *changed*-return. This call requests no
+    ///    frame of its own (below), and the root manufactures one only when a hover
+    ///    ends with nothing taking it — so a widget without this flag paints no
+    ///    hover chrome on entry, and none when the link moves from a sibling to it.
+    /// 3. **Read [`PaintCtx::is_hovered`](crate::widget::PaintCtx::is_hovered) in
+    ///    `paint` and self-correct the flag from it.** It is authoritative: the
+    ///    flag can be stale (a pointer that left the widget never delivers it
+    ///    another event; a container clearing or lapsing a link never tells the
+    ///    widget either), and this read is what fixes it.
     ///
     /// ```ignore
     /// PointerPhase::Move => {
@@ -999,6 +1019,12 @@ impl<'a> EventCtx<'a> {
     ///         return EventResult::Ignored;
     ///     }
     ///     // ... captured drag handling
+    /// }
+    ///
+    /// fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+    ///     // Authoritative; corrects the flag above whenever it went stale.
+    ///     self.state_layer.set_hovered(ctx.is_hovered());
+    ///     // ... paint the overlay
     /// }
     /// ```
     ///
@@ -1016,23 +1042,30 @@ impl<'a> EventCtx<'a> {
     /// widget therefore never has to ask whether claiming is allowed — it claims
     /// whenever the pointer is over it and the pipeline decides.
     ///
+    /// A `Down`, `Up`, or `Cancel` *ends* whatever hover stood without opening a
+    /// new one, so a consumer re-claims on the next `Move` rather than expecting
+    /// its chrome to survive a click.
+    ///
     /// # It does not request a redraw
     ///
     /// Deliberately: a pointer moving *within* one widget claims on every event,
     /// and repainting each time would be pure waste. The widget owns the change
-    /// detection instead (gate `request_redraw` on its own hover-state setter's
-    /// changed-return, as above), and a hover the widget never hears about losing
-    /// is corrected from
-    /// [`PaintCtx::is_hovered`](crate::widget::PaintCtx::is_hovered) at paint time
-    /// — the same self-correction an editable does for focus.
+    /// detection instead — which is what makes step 2 above part of the contract
+    /// rather than an optimization.
     pub fn claim_hover(&mut self) {
         if self.hover_eligible {
             self.hover_claimed = true;
         }
     }
 
-    /// Whether the receiving widget currently holds the hover link — i.e. whether
-    /// the last completed hover pass left the pointer over it.
+    /// Whether the receiving widget **or a descendant of it** holds the hover link
+    /// — i.e. whether the last completed hover pass recorded a claim path running
+    /// through this widget.
+    ///
+    /// So a container reads `true` while the pointer is over a claiming child
+    /// (CSS `:hover` semantics), and a widget that never claims can still read
+    /// `true` when a descendant does; a sibling or any other off-path widget reads
+    /// `false`.
     ///
     /// Threaded down from the widget's pod
     /// ([`ChildPod::hover_epoch`](crate::widget::ChildPod::hover_epoch) against

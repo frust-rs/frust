@@ -589,7 +589,8 @@ pub struct PaintCtx<'a> {
     /// the widget's `event()` — is finally observed here (see
     /// [`PaintCtx::has_focus`]).
     has_focus: bool,
-    /// Whether the widget being painted holds the hover link — seeded from its
+    /// Whether the widget being painted is on the recorded hover path (it or a
+    /// descendant holds the link) — seeded from its
     /// pod's recorded hover stamp ([`ChildPod::hover_epoch`], compared against
     /// `hover_epoch` below) by [`ChildPod::paint_child`], and from
     /// [`crate::app::RenderRoot`]'s hover mirror at the root. The paint-pass
@@ -868,17 +869,24 @@ impl<'a> PaintCtx<'a> {
         self.has_focus = has_focus;
     }
 
-    /// Whether the pointer is currently over the widget being painted.
+    /// Whether the pointer is over the widget being painted **or over a descendant
+    /// of it** — i.e. whether this widget is on the recorded hover path.
+    ///
+    /// A container therefore reads `true` while the pointer is over a claiming
+    /// child, the way CSS `:hover` applies to an element while the pointer is over
+    /// one of its descendants; a sibling or any other off-path widget reads
+    /// `false`.
     ///
     /// This is the **authoritative** hover signal, for the same reason
     /// [`PaintCtx::has_focus`] is authoritative for focus, only more strongly: a
     /// pointer leaving a widget routes its next move to whatever it moved *onto*,
-    /// so the widget it left never receives an event telling it so. A widget
-    /// therefore reads its hover state here (and self-corrects whatever flag it
-    /// tracks internally against it) rather than latching it in its `event` arm —
-    /// see [`EventCtx::claim_hover`] for the claim side.
+    /// so the widget it left never receives an event telling it so. A hover
+    /// consumer keeps its own hover flag (that is what earns it a repaint on entry
+    /// — see [`EventCtx::claim_hover`] for the whole contract) and **self-corrects
+    /// that flag from this read every paint**, which is what fixes it whenever an
+    /// event never came.
     ///
-    /// Hover is opt-in: a widget that never calls
+    /// Hover is opt-in: a widget in a tree where nothing ever calls
     /// [`claim_hover`](EventCtx::claim_hover) always reads `false` here.
     pub fn is_hovered(&self) -> bool {
         self.hovered

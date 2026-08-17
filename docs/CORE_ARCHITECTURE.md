@@ -184,10 +184,18 @@ values for it — `hover_active` (root-level mirror, the hover analog of `focus_
 stamp (`hover_epoch()`, no setter) rather than a flag: a claim stamps the live epoch up the pod
 chain, and a link counts as hovered only while its stamp still matches the live epoch, ANDed with
 the chain exactly like focus. `RenderRoot::event` advances the epoch once per hover pass — an
-uncaptured `Move` (which may record a claim) or the `Down`/`Cancel` that ends a hover outright —
-which strands the previous claimant's stamp with no leave event or explicit clearing required.
-`EventCtx::is_hovered`/`PaintCtx::is_hovered` read the seeded stamp; the paint-time read is
-authoritative, since a pointer that left a widget never delivers that widget another event.
+uncaptured `Move` (which may record a claim) or the `Down`/`Up`/`Cancel` that ends a hover outright
+— which strands the previous claimant's stamp with no leave event or explicit clearing required.
+
+What is recorded is a **path**, so `EventCtx::is_hovered`/`PaintCtx::is_hovered` answer "this
+widget or a descendant of it holds the link" (CSS `:hover` semantics — an enclosing container reads
+hovered while the pointer is over a claiming child; siblings and off-path widgets read `false`).
+The paint-time read is authoritative, since a pointer that left a widget never delivers that widget
+another event. Repaints split between the two sides: a consumer's own latched hover flag, redraw-
+gated on its change, is what produces the frame for hover *gain* and for a claimant-to-claimant
+handoff (the root's mirror is identity-free and cannot see either), while the root manufactures the
+one frame nobody can ask for — a hover ending with no new claimant. See `docs/CODE_STANDARDS.md`'s
+Interaction Semantics for the consumer contract.
 
 The cursor is hover's sibling channel and deliberately not derived from it: `EventCtx::set_cursor`
 writes a per-pass, thread-local request that `RenderRoot::event` resolves into the cached `cursor`
