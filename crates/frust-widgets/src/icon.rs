@@ -111,7 +111,11 @@ impl IconData {
     /// [`BezPath::from_svg`](kurbo::BezPath::from_svg); a parse failure is a
     /// wiring bug (a malformed generated entry) and panics. For a user path it
     /// clones the shared `BezPath` (cheap for the small paths icons are).
-    pub(crate) fn resolve(&self) -> (BezPath, f64) {
+    ///
+    /// Public because out-of-tree design systems (the design-system plugin
+    /// tier) paint icons through it — `IconData` without `resolve` has no
+    /// reachable geometry outside this crate.
+    pub fn resolve(&self) -> (BezPath, f64) {
         match &self.repr {
             IconRepr::Svg { d, design } => {
                 let path = BezPath::from_svg(d).unwrap_or_else(|e| {
@@ -129,7 +133,10 @@ impl IconData {
     /// Whether `self` and `other` name the same icon geometry, cheaply — an
     /// `Arc` pointer check for user paths, a `d`/design comparison for generated
     /// sources. Lets [`IconView::rebuild`] skip re-parsing an unchanged icon.
-    pub(crate) fn same(&self, other: &IconData) -> bool {
+    ///
+    /// Public for the same reason as [`IconData::resolve`]: out-of-tree design
+    /// systems need the cheap-identity check to skip re-parsing on rebuild.
+    pub fn same(&self, other: &IconData) -> bool {
         match (&self.repr, &other.repr) {
             (
                 IconRepr::Svg {
