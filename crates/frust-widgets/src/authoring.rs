@@ -59,6 +59,16 @@
 //! over a claiming child (CSS `:hover` semantics), and every off-path widget reads
 //! `false`.
 //!
+//! A container that wants hover chrome of its **own** has one extra rule: it
+//! claims *after* routing the move to its children, never before. Only one claim
+//! per pass is recorded and the first one recorded wins, so an ancestor that claims
+//! before it forwards makes every descendant ineligible for the pass — the child
+//! under the pointer never reads hovered, while its latched flag keeps flipping and
+//! asking for a frame on every move. Claiming after routing makes the container's
+//! claim a fallback: a child's claim wins and the container still reads hovered
+//! through the path, and when no child claims the container's own claim is what
+//! records.
+//!
 //! A **captured** pointer can never create hover, so a drag never paints hover
 //! under the finger and a widget that captures its own gesture is hover-free for
 //! the length of it. Nothing distinguishes a touch contact from a mouse, though: a

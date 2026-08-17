@@ -369,6 +369,14 @@ widget in `frust-widgets`:
   re-claim on the next `Move` rather than expecting hover chrome to survive a click
   (`docs/CORE_ARCHITECTURE.md`'s Hover and Cursor section).
 
+  **A container with hover chrome of its own claims *after* routing the `Move` to its
+  children, never before.** One claim per pass is recorded and the first one recorded wins,
+  so an ancestor claiming first makes every descendant ineligible for that pass — the child
+  under the pointer never reads hovered, while the latch rule above still has it repaint on
+  every move. Claiming after routing makes the container's claim a fallback: a descendant's
+  claim wins and the container still reads hovered through the path, and a container over no
+  claiming child still gets its own chrome.
+
 - **Ask for a cursor on every qualifying `Move`, never on `Down`.** `EventCtx::set_cursor` is
   stateless like `request_redraw`: a widget re-asks each move rather than latching a shape, and
   a captured drag re-asks from its own captured `Move` arm to keep its cursor outside its

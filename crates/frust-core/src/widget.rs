@@ -2185,8 +2185,11 @@ impl ChildPod {
         // a pod holding the capture path can never let a claim through (a drag
         // must not paint hover under the pointer, whatever the root's own capture
         // mirror says), and a pass that already recorded a claim is closed to
-        // further ones (topmost-first hit testing therefore makes the topmost
-        // claimant win).
+        // further ones, so the first claim recorded wins. With topmost-first hit
+        // testing and containers claiming only *after* they route (see
+        // `EventCtx::claim_hover`'s contract), that first claim is the topmost
+        // claimant's; a container that claims before it forwards is recorded first
+        // instead and closes the pass to its own subtree.
         let hover_eligible = ctx.is_hover_eligible() && !ctx.is_hover_claimed() && !self.active;
         let claim_epoch = ctx.hover_claim_epoch();
         let (captured, hover_claimed, focus_req, focus_rel, redraw, ime, result) = {

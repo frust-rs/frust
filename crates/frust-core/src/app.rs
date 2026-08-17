@@ -4289,13 +4289,46 @@ mod tests {
         }
     }
 
-    /// A transparent container wrapping one hover leaf, recording what its **own**
+    /// Whether the container claims hover for itself, and when relative to routing
+    /// the move into its child — the ordering the claim contract binds a container
+    /// to.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum GroupClaim {
+        /// Never claims — the transparent container, hovered only via the path.
+        Never,
+        /// Claims *after* routing: the contract-following container, whose claim is
+        /// a fallback the child's claim beats.
+        AfterRouting,
+        /// Claims *before* routing: the documented anti-pattern, kept as a
+        /// negative control.
+        BeforeRouting,
+    }
+
+    /// A container wrapping one hover leaf, recording what its **own**
     /// `PaintCtx::is_hovered`/`EventCtx::is_hovered` reported — the
     /// ancestor-on-the-claim-path case, which the two sibling leaves alone cannot
-    /// show.
+    /// show. With `claims` set it also wants hover chrome of its own, claiming
+    /// either side of the route to exercise the ordering rule.
     struct HoverGroup {
         probe: Rc<HoverProbe>,
+        claims: GroupClaim,
         child: crate::widget::ChildPod,
+    }
+
+    impl HoverGroup {
+        /// Whether this event is an uncaptured-move-shaped pass landing inside the
+        /// container's own bounds — the same local hit test a leaf claims on.
+        fn claims_on(&self, ctx: &EventCtx, event: &InputEvent) -> bool {
+            let InputEvent::Pointer(p) = event else {
+                return false;
+            };
+            let size = ctx.size();
+            matches!(p.phase, PointerPhase::Move)
+                && p.position.x >= 0.0
+                && p.position.y >= 0.0
+                && p.position.x < size.width
+                && p.position.y < size.height
+        }
     }
 
     impl crate::widget::Widget for HoverGroup {
@@ -4310,7 +4343,15 @@ mod tests {
         }
         fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
             self.probe.event_hovered.set(ctx.is_hovered());
-            self.child.event_child(ctx, event)
+            let claims = self.claims != GroupClaim::Never && self.claims_on(ctx, event);
+            if claims && self.claims == GroupClaim::BeforeRouting {
+                ctx.claim_hover();
+            }
+            let result = self.child.event_child(ctx, event);
+            if claims && self.claims == GroupClaim::AfterRouting {
+                ctx.claim_hover();
+            }
+            result
         }
     }
 
@@ -4369,6 +4410,8 @@ mod tests {
         /// Wrap the top leaf in a [`HoverGroup`], so the claim path has an
         /// ancestor pod between the claimant and the root.
         nested: bool,
+        /// Whether (and when) that container claims hover for itself.
+        group_claims: GroupClaim,
     }
 
     struct HoverPairView {
@@ -4395,6 +4438,7 @@ mod tests {
             let top: Box<dyn crate::widget::Widget> = if self.fixture.nested {
                 Box::new(HoverGroup {
                     probe: self.group.clone(),
+                    claims: self.fixture.group_claims,
                     child: crate::widget::ChildPod::new(self.leaf(&self.top)),
                 })
             } else {
@@ -4427,6 +4471,7 @@ mod tests {
                 captures,
                 latches: true,
                 nested: false,
+                group_claims: GroupClaim::Never,
             })
         }
 
@@ -4437,6 +4482,7 @@ mod tests {
                 captures: false,
                 latches: false,
                 nested: false,
+                group_claims: GroupClaim::Never,
             })
         }
 
@@ -4446,6 +4492,18 @@ mod tests {
                 captures: false,
                 latches: true,
                 nested: true,
+                group_claims: GroupClaim::Never,
+            })
+        }
+
+        /// The same nesting, with the container claiming hover for itself the way
+        /// the contract requires: after routing the move into its child.
+        fn nested_group_claiming(claims: GroupClaim) -> Self {
+            Self::build(HoverFixture {
+                captures: false,
+                latches: true,
+                nested: true,
+                group_claims: claims,
             })
         }
 
@@ -4678,6 +4736,71 @@ mod tests {
             h.group.event_hovered.get(),
             "the container observes the link its child holds"
         );
+    }
+
+    #[test]
+    fn an_ancestor_claiming_after_routing_loses_to_its_child_and_still_reads_hovered() {
+        // A container that wants hover chrome of its own claims after routing the
+        // move into its child. Only one claim per pass is recorded and the first one
+        // recorded wins, so the child's claim is the one that lands; the container's
+        // own late call is a silent no-op, and it reads hovered through the stamped
+        // path anyway — which is what makes this ordering correct in every case.
+        let mut h = HoverHarness::nested_group_claiming(GroupClaim::AfterRouting);
+        let gain = h.move_over(Leaf::Top);
+        h.paint();
+        assert!(
+            h.top.painted_hovered.get(),
+            "the child under the pointer holds the link"
+        );
+        assert!(
+            h.group.painted_hovered.get(),
+            "the container is on that path, so it reads hovered too"
+        );
+        assert!(
+            !h.bottom.painted_hovered.get(),
+            "a sibling leaf is off the path"
+        );
+        assert!(gain.needs_redraw, "hover gain repaints");
+
+        // The child's latched flag now agrees with the authoritative paint read, so
+        // wandering on within the same widget settles instead of repainting.
+        let settled = h.dispatch(PointerPhase::Move, 60.0, 20.0);
+        assert!(!settled.needs_redraw, "an unchanged flag asks for nothing");
+        h.paint();
+        assert!(h.top.painted_hovered.get());
+        assert!(h.group.painted_hovered.get());
+    }
+
+    #[test]
+    fn an_ancestor_claiming_before_routing_starves_its_subtree() {
+        // The negative control for the ordering rule above, pinning the trap it
+        // exists to prevent: a container that claims *before* forwarding is recorded
+        // first, which closes the pass to every descendant. The child under the
+        // pointer can never read hovered, so its hover chrome never appears — and
+        // because its latched flag is corrected back to `false` at paint time, it
+        // flips and asks for a frame again on every single move.
+        let mut h = HoverHarness::nested_group_claiming(GroupClaim::BeforeRouting);
+        h.move_over(Leaf::Top);
+        h.paint();
+        assert!(
+            !h.top.painted_hovered.get(),
+            "the ancestor's earlier claim made its child ineligible"
+        );
+        assert!(
+            h.group.painted_hovered.get(),
+            "the outermost claimant is the one holding the link here"
+        );
+        assert!(!h.bottom.painted_hovered.get());
+
+        // Repaint-per-move: the flag never converges, because the event arm and the
+        // authoritative paint read permanently disagree.
+        let again = h.dispatch(PointerPhase::Move, 60.0, 20.0);
+        assert!(
+            again.needs_redraw,
+            "the starved child re-flips its flag on every move"
+        );
+        h.paint();
+        assert!(!h.top.painted_hovered.get(), "and still paints no chrome");
     }
 
     #[test]

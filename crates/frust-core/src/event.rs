@@ -41,9 +41,13 @@
 //! ineligible outright, and [`ChildPod::event_child`](crate::widget::ChildPod::event_child)
 //! additionally refuses a claim from inside a pod that itself holds the capture
 //! path, so a drag can never paint hover under the finger. At most one claim per
-//! pass is recorded (the first, i.e. topmost in hit-test order — a later one is
-//! ineligible), so at most one path is hovered and two *stacked* widgets cannot
-//! each hold their own link.
+//! pass is recorded — the **first one recorded wins**, and every later claim in
+//! that pass is ineligible — so at most one path is hovered and two *stacked*
+//! widgets cannot each hold their own link. First-recorded is the topmost
+//! (deepest) claimant only while every container claims **after** routing the
+//! move to its children, which is what [`EventCtx::claim_hover`]'s contract
+//! requires of one: an ancestor that claims *before* it forwards is recorded
+//! first instead, and starves its whole subtree for the pass.
 //!
 //! # The cursor is a per-pass request, on its own channel
 //!
@@ -1034,13 +1038,29 @@ impl<'a> EventCtx<'a> {
     /// "the pointer moved somewhere else" self-clearing with no leave event to
     /// deliver.
     ///
+    /// **A container claims *after* routing the `Move` to its children, never
+    /// before.** One claim per pass is recorded and the first one recorded wins, so
+    /// an ancestor that claims before it forwards makes every descendant ineligible
+    /// for the pass: the child under the pointer reads
+    /// [`is_hovered`](EventCtx::is_hovered) `== false` forever while step 2 above
+    /// keeps flipping its flag and asking for a frame on every move — hover chrome
+    /// that never appears, plus a repaint per event. Claiming after routing is
+    /// correct in every case: a descendant's claim is recorded first and wins, the
+    /// container's own late call is then a silent no-op yet it still reads hovered
+    /// through the stamped path (below), and when no descendant claims, the
+    /// container's claim is what records, so its own chrome still works. A
+    /// container therefore never arbitrates — it orders.
+    ///
     /// # When it does nothing
     ///
     /// A call is silently ignored unless the pass is hover-eligible: a captured
     /// pointer (anywhere on the path), any phase other than an uncaptured `Move`,
     /// and any claim after the first one in the same pass all record nothing. A
-    /// widget therefore never has to ask whether claiming is allowed — it claims
-    /// whenever the pointer is over it and the pipeline decides.
+    /// **leaf** therefore never has to ask whether claiming is allowed — it claims
+    /// whenever the pointer is over it and the pipeline decides. A **container**
+    /// gets the same freedom only by claiming after it routes: it never asks
+    /// either, but *when* it claims decides whether its children may, per the
+    /// ordering rule above.
     ///
     /// A `Down`, `Up`, or `Cancel` *ends* whatever hover stood without opening a
     /// new one, so a consumer re-claims on the next `Move` rather than expecting
