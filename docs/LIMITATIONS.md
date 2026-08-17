@@ -2402,3 +2402,142 @@ is cosmetic (a stale shape, never a stuck-captured pointer) and self-corrects on
 a widget that is torn down … leaves the last shape in place until the next `Move`");
 `workflow/plans/features/shadcn-design-system/tasks/02-cursor-api.md` completion summary
 (2026-08-17, merged `49bc7657`), "Limitations" list.
+
+---
+
+### `shadcn-hover-overlays-touch-inert` — tooltip and hover-card never open on a touch device
+
+**Observed**: `frust-shadcn`'s `tooltip`/`hover_card` open only through the shared hover latch
+(`TooltipHover`, a trigger-rect-plus-open-flag `Rc<Cell<_>>` written from a hover-timing pass, not
+an event). Touch input has no hover, so neither component has any path that opens it; a
+long-press-opens-a-tooltip/hover-card gesture is not modelled.
+
+**Applies to**: `frust_shadcn::tooltip`/`hover_card` on Android, iOS, and any touch-driven desktop
+input; every other anchored/modal component in the catalog opens on a press and is unaffected.
+
+**Why accepted**: matches shadcn/ui's own upstream behavior (its tooltip/hover-card are hover-only
+on the web too); a long-press affordance would be new interaction design, not a port, and is
+deferred rather than invented speculatively.
+
+**Evidence**: `plugins/shadcn/src/components/tooltip.rs` module docs ("Touch" section — "Touch has
+no hover, so a tooltip never opens on a touch device. Long-press-opens-a-tooltip is not
+modelled.").
+
+---
+
+### `shadcn-desktop-interaction-gaps` — three named v1 narrowings in the shadcn port's desktop interaction
+
+**Observed**: three deliberate v1 gaps in `frust-shadcn`, each named in the component's own source
+rather than found later:
+
+1. **Context menu unreachable live on desktop.** `context_menu_trigger` opens on
+   `PointerButton::Secondary`, which the component drives correctly from a test — but
+   `frust-shell-desktop` forwards only `MouseButton::Left` from winit (`app_handler.rs`, "Primary
+   (left) button only in v1"), so no desktop app today can generate a `Secondary` press to open one
+   with. A shell change, not a component change, is the remedy path.
+2. **Drawer drag-to-close not implemented.** The drawer's `h-2 w-[100px]` handle (vaul's own drag
+   affordance upstream) is a *button* here in v1 — press-and-release dismisses; there is no drag
+   gesture.
+3. **Select has no type-ahead and a fixed dropdown height.** Radix's jump-to-typed-match behavior
+   is not ported; `SELECT_MAX_HEIGHT` is a 300px constant rather than measured from the host's
+   available space (no such measurement reaches a plugin-tier widget today).
+
+**Applies to**: `frust_shadcn::context_menu`, `drawer`, and `select`/`combobox`.
+
+**Why accepted**: each is a named, structural v1 boundary at the point in the source it lives
+(a doc comment or a named constant), not a gap found by later testing; (1) is blocked on a shell
+change outside this crate's own scope, (2) and (3) are deferred interaction work with no
+upstream-parity requirement forcing them into v1.
+
+**Evidence**: `plugins/shadcn/src/components/context_menu.rs` module docs ("Secondary-button
+reach"); `crates/frust-shell-desktop/src/app_handler.rs` ("Primary (left) button only in v1");
+`plugins/shadcn/src/overlay/modal.rs` (`ModalConfig::handle` doc comment, "It is a *button* in
+v1"); `plugins/shadcn/src/components/select.rs` module docs ("No type-ahead" and
+`SELECT_MAX_HEIGHT`).
+
+---
+
+### `overlay-no-auto-focus-on-appear` — a newly opened modal or anchored overlay does not claim keyboard focus itself
+
+**Observed**: neither `frust-shadcn`'s `modal` host nor its `anchored` host claims focus when it
+appears; both claim focus only in response to a `Down` inside themselves, so Escape (wired to fire
+only once the host holds focus) does nothing until a caller completes one pointer interaction with
+the overlay first. This is not new to shadcn — `frust_material::dialog` carries the identical gap
+— because the framework itself exposes no auto-focus-on-appear hook a widget can call on mount.
+
+**Applies to**: `frust_shadcn::overlay::modal`/`anchored` and every component built on them
+(dialog, alert-dialog, sheet, drawer, command, popover, dropdown/context menu, select, combobox);
+`frust_material::dialog`.
+
+**Why accepted**: a framework-level focus-management primitive (claim focus on mount) does not
+exist yet; every current design-system caller works around it the same documented way rather than
+inventing a per-crate special case.
+
+**Evidence**: `plugins/shadcn/src/overlay/modal.rs` and `plugins/shadcn/src/overlay/anchored.rs`
+module docs ("there is no auto-focus-on-appear hook in the framework").
+
+---
+
+### `no-plugin-reachable-deferred-state-callback` — a plugin-tier widget cannot queue a state-bearing callback onto a later frame
+
+**Observed**: the framework's `mark_pending_result_flush`/`take_pending_result_flush` seam that
+lets a widget defer a callback across frames is `frust-core`-internal — not re-exported through
+`frust::authoring` (`frust_widgets::authoring` re-exports the shape it wants callers to match, not
+the seam itself). A plugin-tier widget that needs to fire a callback carrying `&mut State` from a
+non-event pass (e.g. a hover-delay timer observed only in `paint`) has no way to reach it, and so
+cannot hold app state at all for that decision. `frust-shadcn`'s hover tooltip/hover-card is built
+around this exact hole: the open/close decision lives entirely in a widget-local, non-reactive
+`Rc<Cell<_>>` latch instead of app state, specifically because a resting pointer sends no event to
+carry `&mut State` through and the framework offers no alternate route to queue one.
+
+**Applies to**: any plugin-tier widget wanting to drive app state from a non-event, per-frame pass
+(paint-clock-driven delays, in particular); `frust_shadcn::tooltip`/`hover_card` today.
+
+**Why accepted**: the workaround (a shared, non-reactive latch plus an input-transparent top layer)
+fully covers shadcn's own tooltip/hover-card needs; widening the public seam is framework-level
+work with no second caller yet to justify it.
+
+**Evidence**: `plugins/shadcn/src/components/tooltip.rs` module docs ("the framework exposes no way
+for a plugin-tier widget to queue a state-bearing callback onto the next frame");
+`crates/frust-widgets/src/authoring.rs` (`mark_pending_result_flush`'s shape, not the function
+itself, documented there); `crates/frust/src/lib.rs`'s `authoring` module (no
+`mark_pending_result_flush` re-export).
+
+---
+
+### `shadcn-bubble-fixed-to-unit-state` — `bubble()` cannot be embedded directly in a `View<State>` tree for `State != ()`
+
+**Observed**: every other leaf component in `frust-shadcn` is generic over `State` (even the
+non-interactive ones carry an unused `State` bound so they compose directly into any app's tree);
+`bubble()`'s `BubbleView` instead implements `View<()>` only — its sibling `bubble_group()` in the
+same module is properly `State`-generic. An app with `State != ()` cannot place a `bubble()` as a
+direct child; it needs a `Component`-boundary indirection (a nested component whose own `State` is
+`()`) to embed one.
+
+**Applies to**: `frust_shadcn::bubble` only — no other component in the 48-component catalog has
+this asymmetry.
+
+**Why accepted**: a chat bubble has no callbacks to carry `State` for in the first place; the fix
+(a `State`-generic signature matching every sibling) is a small, low-risk cleanup with no
+functional gap behind it — tracked here as a catalog ergonomic inconsistency, not a capability
+gap.
+
+**Evidence**: `plugins/shadcn/src/components/bubble.rs` (`impl View<()> for BubbleView` versus
+`impl<State: 'static> View<State> for BubbleGroupView<State>` in the same file).
+
+---
+
+### `shadcn-demo-visual-gate-unrun` — the shadcn gallery's desktop manual visual gate has not been run
+
+**Observed**: `examples/shadcn-demo` (a root-workspace member — `cargo run -p shadcn-demo`) is the
+manual visual gate for `frust-shadcn`'s 48-component catalog, the same role `examples/huddle`'s
+`cargo run` plays for the baseline widget set. It has not yet been run against a live window.
+
+**Applies to**: every `frust-shadcn` component and theme preset — none has been visually confirmed
+on a real desktop compositor yet, only through host-run paint/event unit tests.
+
+**Why accepted**: owed to the project owner, the same shape as every other manual-visual-gate entry
+in this register; no automated pixel-diff gate exists for any design-system catalog yet.
+
+**Evidence**: `examples/shadcn-demo/Cargo.toml` module doc (root-workspace-member rationale);
+absence of a recorded run in this feature's task history.

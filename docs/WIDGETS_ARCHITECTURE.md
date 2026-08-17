@@ -172,7 +172,9 @@ built-in one does. `examples/design-system-sample` is the reference proof for a 
 crate (outside this repo's own workspace, unlike the three built-ins above) — a themed catalog plus
 installer built on `frust`'s public API alone (see ARCHITECTURE.md's Examples table); its one
 finding, that `Widget::semantics` cannot be exercised from out of tree, is registered in
-LIMITATIONS.md.
+LIMITATIONS.md. `plugins/shadcn` (`frust-shadcn`, PLUGINS unit) is the production-scale companion
+proof: a 48-component port of a real third-party design system (shadcn/ui) built on this same
+seam, not a sample — see PLUGINS_ARCHITECTURE.md's Design-System Plugins.
 
 Three more seams are part of the same public authoring surface: opt-in hover claiming
 (`EventCtx::claim_hover`/`PaintCtx::is_hovered`) for state-layer-style interaction chrome, cursor

@@ -22,12 +22,16 @@ bundle loading, locale-aware message resolution, system-locale detection, and (b
 `formatting` feature) ICU4X number/date/currency formatting — reaching no OS capability beyond
 a locale read.
 
-A tenth through twelfth crate — `plugins/glyph`, `plugins/material`, `plugins/cupertino`
-(`frust-glyph`/`frust-material`/`frust-cupertino`) — are the tier's **design-system plugins**: the
-three widget catalogs (Glyph, Material 3, Cupertino) that used to live in-tree as feature-gated
-`frust-widgets` modules now ship as ordinary sibling crates, each an app dependency beside `frust`
-rather than a cargo feature on it. They reach no OS capability at all and share nothing with the
-OS-capability plugins above beyond sitting in the same tier; see *Design-System Plugins* below.
+A tenth through thirteenth crate — `plugins/glyph`, `plugins/material`, `plugins/cupertino`,
+`plugins/shadcn` (`frust-glyph`/`frust-material`/`frust-cupertino`/`frust-shadcn`) — are the tier's
+**design-system plugins**: four widget catalogs (Glyph, Material 3, Cupertino, shadcn/ui), the
+first three extracted in-tree from what used to be feature-gated `frust-widgets` modules and now
+shipping as ordinary sibling crates, each an app dependency beside `frust` rather than a cargo
+feature on it. `plugins/shadcn` (`frust-shadcn`) is the tier's first **external-origin** catalog —
+a port of the third-party shadcn/ui v4 registry rather than an in-tree extraction — and so the
+tier's proof case that the external design-system contract holds for a catalog authored outside
+this repo. They reach no OS capability at all and share nothing with the OS-capability plugins
+above beyond sitting in the same tier; see *Design-System Plugins* below.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other units.
 
@@ -48,6 +52,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other unit
 | `plugins/glyph` | The Glyph design-system plugin (`frust-glyph`): terminal-native, dark-first, monospace-led widget catalog — including its own switch-class control (`toggle`), since baseline `frust-widgets` deliberately ships no `Switch` — plus its bundled OFL monospace fonts |
 | `plugins/material` | The Material 3 (+Expressive) design-system plugin (`frust-material`) |
 | `plugins/cupertino` | The Cupertino (iOS-styled) design-system plugin (`frust-cupertino`), including its own "Liquid Glass" `GlassScale` recipe |
+| `plugins/shadcn` | The shadcn/ui design-system plugin (`frust-shadcn`), the tier's first external-origin catalog: a port of shadcn/ui v4 (48 components), its own token system (vendored `neutral` base plus six sibling palettes folded onto the baseline `ColorScheme`, a `ShadcnTokens` extension for the roles it has no baseline analogue for), an `overlay` hosting seam for its anchored and modal panel families, and its own bundled Inter + JetBrains Mono variable fonts |
 
 ## Desktop Backend Status
 
@@ -68,7 +73,7 @@ preview or a `frust build macos|windows|linux`. See
 | `clean-signals-frust` | platform-free | facade-tier glue with no OS integration to split by platform at all |
 | `database` | platform-free | file IO via `rusqlite`/`turso`; no OS integration, so no platform split |
 | `i18n` | platform-free | reaches the OS only for a `sys_locale` read; no backend split |
-| `glyph` / `material` / `cupertino` | platform-free | pure widget/token crates over `frust::authoring`; no OS integration of any kind, desktop included |
+| `glyph` / `material` / `cupertino` / `shadcn` | platform-free | pure widget/token crates over `frust::authoring`; no OS integration of any kind, desktop included |
 | `native-widgets` (NATIVE_WIDGETS unit) | unavailable | no desktop backend of any kind — Android/iOS only (see [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md)) |
 
 ## Layer Dependencies
@@ -113,7 +118,7 @@ plugin whose "platform" is the filesystem — which the charter accommodates rat
 still depends on nothing but `frust-paths`, `log`, and its engines, never another framework crate. Each
 plugin's backends are cfg-gated modules (`apple`/`android`/`file`/`desktop`/`unsupported`) behind
 one platform-independent public API, with FFI dependencies target-gated rather than unconditional.
-The three design-system plugins are a fourth, distinct shape the charter above accommodates rather
+The four design-system plugins are a further, distinct shape the charter above accommodates rather
 than covers: no `frust-plugin`, no FFI crate, and — unlike every OS-capability plugin — a direct
 `frust` facade dependency, since a widget catalog's whole job is building against `frust::authoring`
 (see *Design-System Plugins* below).
@@ -133,28 +138,41 @@ call (biometric prompts, camera permission/capture, every `iap` store round trip
 ## Design-System Plugins
 
 `frust-glyph`/`frust-material`/`frust-cupertino` are the three built-in widget catalogs, extracted
-from `frust-widgets` into sibling plugin crates (see [WIDGETS_ARCHITECTURE.md](WIDGETS_ARCHITECTURE.md)'s
-External Design-System Contract for the toolkit they build against). Their charter:
+from `frust-widgets` into sibling plugin crates; `frust-shadcn` is the fourth, a port of the
+third-party shadcn/ui v4 registry rather than an in-tree extraction (see
+[WIDGETS_ARCHITECTURE.md](WIDGETS_ARCHITECTURE.md)'s External Design-System Contract for the
+toolkit they all build against). Their shared charter:
 
 - **Production deps: `frust` (`default-features = false`) plus `kurbo`/`peniko` only, never
   another `frust-*` crate.** This is what makes each one a real proof of the external
   design-system contract rather than a special-cased in-tree exception — an app depends on any of
-  the three exactly the way it would depend on a third-party catalog.
+  the four exactly the way it would depend on a third-party catalog.
 - **`frust-widgets` (`test-support` feature) and `frust-core` (test-only) are dev-dependencies,
   never production ones.** The sanctioned test-fixture/`RenderRoot` route: a catalog's own tests
   need a real `RenderRoot` to paint against and `frust-widgets`' GPU-free container fixtures, both
   of which the facade deliberately does not re-export to production code.
 - **`install()` is the one-line entry point, called from `app!`'s `setup = { .. }` block —
   before shell construction, the one point a shell reads the default-theme slot.** Each `install()`
-  calls `frust::set_default_theme(baseline())`; `frust_glyph::install()` additionally calls
-  `frust::register_app_fonts` for its bundled OFL monospace faces (Space Mono, IBM Plex Mono,
-  `plugins/glyph/fonts/`) — registered unconditionally, not behind a feature, since the crate has
-  no feature to gate them with. A call after shell construction takes effect only on a later
-  theme reseed, which may never happen.
-- **`frust_glyph::baseline()` attaches the `NativeTypefaces` theme extension** — the bundled faces
-  reach `frust-native-widgets`' native controls through this attach, not through any
+  calls `frust::set_default_theme(baseline())` (`frust_shadcn::install()` names its seed `theme()`
+  instead, but the shape is the same); `frust_glyph::install()` and `frust_shadcn::install()`
+  additionally call `frust::register_app_fonts` for their bundled fonts — Glyph's OFL monospace
+  faces (Space Mono, IBM Plex Mono, `plugins/glyph/fonts/`), shadcn's bundled Inter Variable and
+  JetBrains Mono Variable (OFL-1.1, no Reserved Font Name, `plugins/shadcn/fonts/`) — each
+  registered unconditionally, not behind a feature, since neither crate has a feature to gate them
+  with. A call after shell construction takes effect only on a later theme reseed, which may never
+  happen.
+- **`frust_glyph::baseline()` and `frust_shadcn::theme()` both attach the `NativeTypefaces` theme
+  extension** — the bundled faces reach `frust-native-widgets`' native controls through this
+  attach, not through any
   `DesignLanguage`-keyed special case (see [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md)'s
   theme ladder). Material's and Cupertino's `baseline()` attach no font extension.
+- **`frust-shadcn`'s one cross-component seam is its `overlay` module** — a full-area top-layer
+  widget pattern standing in for the DOM portal shadcn/ui itself relies on: an `anchored` host
+  (trigger-relative placement in window space, light-dismiss, no scrim — popover, tooltip,
+  hover-card, the menu/select/combobox family) and a `modal` host (scrim + centered/edge-pinned
+  panel over `NavigatorController::push_transparent_for_result` — dialog, alert-dialog, sheet,
+  drawer, command). Every other component paints inside its own box; only these reach through this
+  seam.
 
 ## Data Flow
 
