@@ -378,8 +378,9 @@ const HB_RING_SCALE_MIN: f64 = 0.6;
 const HB_RING_SCALE_MAX: f64 = 2.8;
 
 /// The ping ring's own (unscaled) diameter — the box the ring's
-/// border-only [`avatar`] strokes its full circle into, matching the
-/// original `SizedBox(18, 18)`.
+/// border-only, [`avatar`]`.`[`shape_full`](frust_glyph::AvatarView::shape_full)
+/// avatar strokes its true circle into (`shape_full`'s pill-radius clamp on a
+/// square box), matching the original `SizedBox(18, 18)`.
 const HB_RING_DIAMETER: f64 = 18.0;
 
 /// Paint headroom for the ping ring: [`AnimatedOpacity`] composites its child
@@ -394,8 +395,8 @@ const HB_RING_DIAMETER: f64 = 18.0;
 /// rect, not merely a layout-allocation illusion. The fix widens
 /// the *outer* slot the `AnimatedOpacity` itself lays out at (this constant)
 /// and centers the small unscaled ring inside it via [`Align`], so the
-/// recorded clip rect is already big enough to contain the circle at every
-/// scale up to [`HB_RING_SCALE_MAX`] — nothing left to clip. The [`avatar`]
+/// recorded clip rect is already big enough to contain the true circle at
+/// every scale up to [`HB_RING_SCALE_MAX`] — nothing left to clip. The [`avatar`]
 /// border strokes *centered* on the box's own edge (unlike the deleted
 /// Material catalog's `circular_progress`, which deliberately inset its arc
 /// radius to keep its stroke snug inside the box), so the painted diameter
@@ -430,10 +431,14 @@ fn heartbeat_ring_state(elapsed_in_cycle: f64, reduce: bool) -> (f64, f64) {
 /// [`SizedBox`], [`Align`]-centering the actual [`HB_RING_DIAMETER`] ring
 /// content, all under the same `AnimatedOpacity`-outside/`AnimatedScale`-inside
 /// nesting as before (see [`HB_RING_SLOT`]'s doc comment for why the nesting
-/// order — not just the sizing — matters here). The ring itself is a
-/// [`avatar`] with an empty label and a fully transparent background — its
-/// hairline border is the only thing painted, giving a border-only stroked
-/// circle rather than the deleted Material catalog's filled-arc primitive.
+/// order — not just the sizing — matters here). The ring itself is an
+/// [`avatar`] with an empty label, `.shape_full()` (a square box's pill-radius
+/// clamp — a true circle, not the default `shape.small` corner-rounded
+/// square), `.decorative()` (this ping is purely visual — no semantics node;
+/// `docs/CODE_STANDARDS.md`'s Semantics Conventions), and a fully transparent
+/// background — its hairline border is the only thing painted, giving a
+/// border-only stroked circle rather than the deleted Material catalog's
+/// filled-arc primitive.
 fn heartbeat_ring_view(ring_opacity: f64, ring_scale: f64) -> AnyView<CatalogState> {
     any(AnimatedOpacity(
         ring_opacity,
@@ -444,6 +449,8 @@ fn heartbeat_ring_view(ring_opacity: f64, ring_scale: f64) -> AnyView<CatalogSta
                 SizedBox(Some(HB_RING_DIAMETER), Some(HB_RING_DIAMETER)).child(
                     avatar("")
                         .size(HB_RING_DIAMETER)
+                        .shape_full()
+                        .decorative()
                         .background(with_alpha(amber(), 0.0))
                         .border_color(amber()),
                 ),
@@ -454,9 +461,9 @@ fn heartbeat_ring_view(ring_opacity: f64, ring_scale: f64) -> AnyView<CatalogSta
     .timing(ZERO))
 }
 
-/// 01 connection heartbeat: a radar-ping ring (a border-only [`avatar`]
-/// circle stroked under [`AnimatedOpacity`]/[`AnimatedScale`], driven by a
-/// wall-clock read — no per-widget custom paint needed) plus a
+/// 01 connection heartbeat: a radar-ping ring (a border-only, decorative,
+/// true-circle [`avatar`] stroked under [`AnimatedOpacity`]/[`AnimatedScale`],
+/// driven by a wall-clock read — no per-widget custom paint needed) plus a
 /// rolling (not snapping) latency readout. Tap-to-play: stopped by default,
 /// rendering the settled first latency sample
 /// with the ring hidden; tapping the row starts the wall-clock loop, and
@@ -964,7 +971,7 @@ fn demo_charge_ring(state: &CatalogState) -> FlexChild<CatalogState> {
         );
 
     let icon_stack: AnyView<CatalogState> =
-        any(SizedBox(Some(CHARGE_RING_SIZE), Some(CHARGE_RING_SIZE)).child(Stack(vec![icon_box])));
+        any(SizedBox(Some(CHARGE_RING_SIZE), Some(CHARGE_RING_SIZE)).child(icon_box));
 
     // The fill readout lives beside the title rather than traced as a ring
     // around the icon (see the fn's doc comment) — a third row in the same
@@ -973,7 +980,7 @@ fn demo_charge_ring(state: &CatalogState) -> FlexChild<CatalogState> {
     // of title text.
     let mut title_children = vec![
         inflexible(text("(untitled)").size(11.5)),
-        inflexible(text("/home/ed/dev/forgekit").size(9.5).color(muted())),
+        inflexible(text("~/dev/frust-demo").size(9.5).color(muted())),
     ];
     if holding && !reduce {
         title_children.push(gap(3.0));
@@ -1813,15 +1820,16 @@ mod tests {
     }
 
     /// The load-bearing regression guard: at T2 max extent
-    /// (`ring_scale == HB_RING_SCALE_MAX`), the ring's stroked circle —
-    /// resolved through the SAME `push_layer`(`AnimatedOpacity`) /
-    /// `push_transform`(`AnimatedScale`) composition the real paint pass uses
-    /// (see [`SlotRecorder`]'s doc comment) — must stay fully inside the
-    /// `AnimatedOpacity`'s own recorded clip rect. With just an 18×18
-    /// `AnimatedOpacity` slot and the scale applied *inside* it, this
-    /// assertion fails: the clip rect stays fixed at 18×18 absolute while the
-    /// circle's recorded transform grows with it, so the circle's bbox
-    /// overflows the clip on every edge once `ring_scale > 1.0x`.
+    /// (`ring_scale == HB_RING_SCALE_MAX`), the ring's stroked true circle
+    /// (`.shape_full()` — see [`heartbeat_ring_view`]) — resolved through the
+    /// SAME `push_layer`(`AnimatedOpacity`) / `push_transform`(`AnimatedScale`)
+    /// composition the real paint pass uses (see [`SlotRecorder`]'s doc
+    /// comment) — must stay fully inside the `AnimatedOpacity`'s own recorded
+    /// clip rect. With just an 18×18 `AnimatedOpacity` slot and the scale
+    /// applied *inside* it, this assertion fails: the clip rect stays fixed at
+    /// 18×18 absolute while the circle's recorded transform grows with it, so
+    /// the circle's bbox overflows the clip on every edge once
+    /// `ring_scale > 1.0x`.
     #[test]
     fn heartbeat_ring_stays_within_its_headroom_slot_at_max_extent() {
         let _owner = setup();
@@ -1839,7 +1847,7 @@ mod tests {
         );
         assert!(
             !recorder.draw_bboxes.is_empty(),
-            "the border-only avatar must stroke the ring"
+            "the border-only, true-circle avatar must stroke the ring"
         );
 
         // The outermost (largest) layer rect is the AnimatedOpacity's own
@@ -1864,6 +1872,41 @@ mod tests {
                  extent (scale {scale}x, base diameter {HB_RING_DIAMETER}px)"
             );
         }
+    }
+
+    /// The ping ring's `.decorative()` `avatar` (see [`heartbeat_ring_view`])
+    /// must contribute ZERO semantics nodes — it is purely visual, and
+    /// `docs/CODE_STANDARDS.md`'s Semantics Conventions bar a node with
+    /// nothing worth reporting. `RenderRoot::semantics` always roots the tree
+    /// at a synthetic `Role::Window` node (see its own doc comment), so a
+    /// standalone render of the ring must come back with exactly that one
+    /// node and nothing else — proof at the actual page composition, on top
+    /// of `frust-glyph`'s own `AvatarWidget` unit test for the mechanism.
+    #[test]
+    fn heartbeat_ring_contributes_zero_semantics_nodes() {
+        let _owner = setup();
+        let (opacity, scale) = heartbeat_ring_state(HB_RING_MS, false);
+
+        let mut root: RenderRoot<CatalogState, AnyView<CatalogState>> = RenderRoot::new();
+        let mut state = CatalogState::new();
+        let mut logic = |_s: &mut CatalogState| heartbeat_ring_view(opacity.max(0.3), scale);
+        root.rebuild(&mut logic, &mut state);
+        let mut tcx = TextContext::new();
+        let tcx_any: &mut dyn Any = &mut tcx;
+        root.layout_with_text(Size::new(200.0, 200.0), tcx_any);
+
+        let update = root.semantics();
+        assert_eq!(
+            update.nodes.len(),
+            1,
+            "the ping ring must add no semantics node beyond the synthetic root window, found: \
+             {:?}",
+            update
+                .nodes
+                .iter()
+                .map(|(_, n)| n.role())
+                .collect::<Vec<_>>()
+        );
     }
 
     /// Layout stability: the ping ring's headroom fix grows

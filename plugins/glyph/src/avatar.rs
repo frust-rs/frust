@@ -69,6 +69,8 @@ pub struct AvatarView {
     background: Option<Color>,
     foreground: Option<Color>,
     border_color: Option<Color>,
+    full_circle: bool,
+    decorative: bool,
 }
 
 /// Create an avatar showing `initials` (rendered uppercase, per the source's
@@ -81,6 +83,8 @@ pub fn avatar(initials: impl Into<String>) -> AvatarView {
         background: None,
         foreground: None,
         border_color: None,
+        full_circle: false,
+        decorative: false,
     }
 }
 
@@ -115,6 +119,29 @@ impl AvatarView {
     /// Override the border color outright.
     pub fn border_color(mut self, border_color: Color) -> Self {
         self.border_color = Some(border_color);
+        self
+    }
+
+    /// Resolve the corner radius against [`ShapeScale::full`] instead of the
+    /// default `shape.small` (a small rounded-square corner) — a fully round
+    /// box (`min(width, height) / 2`, [`ShapeScale::resolve`]'s pill
+    /// clamp), regardless of theming. For a square box (the common case —
+    /// `size` sets both edges) that pill clamp is a true circle. Opt-in;
+    /// existing callers keep the initials-box corner-radius look unchanged.
+    pub fn shape_full(mut self) -> Self {
+        self.full_circle = true;
+        self
+    }
+
+    /// Mark this avatar decorative: it contributes **no** semantics node.
+    /// For a purely visual instance — no initials worth announcing, e.g. a
+    /// status/progress ring reusing the box-paint primitive — pushing an
+    /// empty-label `Role::Image` node would add a contentless entry to the
+    /// accessibility tree (`docs/CODE_STANDARDS.md`'s Semantics Conventions:
+    /// nothing worth reporting ⇒ no semantics node). Opt-in; existing
+    /// callers keep reporting `Role::Image` with their initials unchanged.
+    pub fn decorative(mut self) -> Self {
+        self.decorative = true;
         self
     }
 }
@@ -181,6 +208,8 @@ pub struct AvatarWidget {
     background: Option<Color>,
     foreground: Option<Color>,
     border_color: Option<Color>,
+    full_circle: bool,
+    decorative: bool,
 }
 
 impl<State: 'static> View<State> for AvatarView {
@@ -196,6 +225,8 @@ impl<State: 'static> View<State> for AvatarView {
             background: self.background,
             foreground: self.foreground,
             border_color: self.border_color,
+            full_circle: self.full_circle,
+            decorative: self.decorative,
         }
     }
 
@@ -219,12 +250,17 @@ impl<State: 'static> View<State> for AvatarView {
             || prev.background != self.background
             || prev.foreground != self.foreground
             || prev.border_color != self.border_color
+            || prev.full_circle != self.full_circle
         {
             element.accent = self.accent;
             element.background = self.background;
             element.foreground = self.foreground;
             element.border_color = self.border_color;
+            element.full_circle = self.full_circle;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        if prev.decorative != self.decorative {
+            element.decorative = self.decorative;
         }
         flags
     }
@@ -256,6 +292,13 @@ impl AvatarWidget {
     }
 
     fn resolve_radius(&self, theme: Option<&Theme>) -> f64 {
+        if self.full_circle {
+            // `full` resolves against the box's own edges regardless of
+            // theming (unthemed falls back to the token's own INFINITY, still
+            // clamped to the pill radius below) — see `shape_full`'s doc.
+            let full = theme.map_or(f64::INFINITY, |t| t.shape.full);
+            return ShapeScale::resolve(full, self.size, self.size);
+        }
         match theme {
             Some(theme) => ShapeScale::resolve(theme.shape.small, self.size, self.size),
             None => AVATAR_RADIUS_FALLBACK,
@@ -293,6 +336,12 @@ impl Widget for AvatarWidget {
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
+        // A `decorative` instance (see `AvatarView::decorative`) has nothing
+        // worth reporting — no node at all, per `docs/CODE_STANDARDS.md`'s
+        // Semantics Conventions.
+        if self.decorative {
+            return;
+        }
         // An image-like decorative label carrying the (natural-cased) initials.
         ctx.push_node(Role::Image, |node| {
             node.set_label(self.initials_text.as_str());
@@ -444,5 +493,50 @@ mod tests {
             .find(|(_, n)| n.role() == Role::Image)
             .expect("avatar contributes a Role::Image node");
         assert_eq!(node.label(), Some("ed"));
+    }
+
+    #[test]
+    fn shape_full_resolves_a_true_circle_radius_themed_and_unthemed() {
+        // A square box (size sets both edges): `ShapeScale::resolve`'s pill
+        // clamp on an infinite radius is `min(w, h) / 2` — half the edge,
+        // i.e. a true circle, not `shape.small`'s corner-rounded square.
+        let mut w_themed = build(&avatar("").size(18.0).shape_full());
+        let rec_themed = layout_and_paint(&mut w_themed, Some(&crate::baseline()));
+        assert_eq!(rec_themed.rrects[0].2, 9.0);
+
+        let mut w_unthemed = build(&avatar("").size(18.0).shape_full());
+        let rec_unthemed = layout_and_paint(&mut w_unthemed, None);
+        assert_eq!(rec_unthemed.rrects[0].2, 9.0);
+    }
+
+    #[test]
+    fn plain_avatar_shape_still_resolves_the_small_token_radius() {
+        // Negative guard: `shape_full` is opt-in — an ordinary avatar keeps
+        // resolving `shape.small`'s corner-rounded-square radius, not a circle.
+        let mut w = build(&avatar("ed").size(18.0));
+        let rec = layout_and_paint(&mut w, Some(&crate::baseline()));
+        assert_ne!(rec.rrects[0].2, 9.0);
+    }
+
+    #[test]
+    fn decorative_avatar_contributes_no_semantics_node() {
+        fn logic(_s: &mut ()) -> AvatarView {
+            avatar("").decorative()
+        }
+        let mut root: frust_core::RenderRoot<(), AvatarView> = frust_core::RenderRoot::new();
+        let mut state = ();
+        root.rebuild(&mut logic, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(Size::new(100.0, 100.0), &mut tcx as &mut dyn Any);
+        let update = root.semantics();
+        assert!(
+            update.nodes.iter().all(|(_, n)| n.role() != Role::Image),
+            "a decorative avatar must contribute zero semantics nodes, found: {:?}",
+            update
+                .nodes
+                .iter()
+                .map(|(_, n)| n.role())
+                .collect::<Vec<_>>()
+        );
     }
 }
