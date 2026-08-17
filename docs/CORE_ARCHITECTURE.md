@@ -62,7 +62,9 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
 - `RenderRoot::layout` threads box constraints down and sizes up through the widget tree, kept
   renderer- and text-crate-agnostic via a type-erased text context.
 - `RenderRoot::paint` walks widgets into a renderer-agnostic `Scene`, later encoded for the GPU by
-  `frust-render` (RENDER unit).
+  `frust-render` (RENDER unit). `PaintCtx::origin` is the widget's **absolute window-space** origin:
+  each `ChildPod::paint_child` accumulates it by adding the child's parent-relative offset to the
+  parent's already-absolute origin; `ChildPod::origin` itself stays parent-relative.
 - A paint pass also carries a frame-request contract: `PaintCtx::request_frame` (`TickClass::Transition`,
   unpaced) marks the pass every-vsync (a max-lattice — any `Transition` request wins over a concurrent
   `CosmeticLoop` one); `request_frame_paced`/`request_frame_paced_at(interval)` (`TickClass::CosmeticLoop`)
@@ -173,6 +175,27 @@ live loss instead raises a thread-local `mark_focus_orphaned` flag — mirroring
 and `RenderRoot::rebuild` drains it (`take_focus_orphaned`) after its deferred-callback loop and
 releases the session, so the root's cached focus/IME state can never outlive the widget it described.
 
+## Hover and Cursor
+
+Hover has no Enter/Leave phase; it is an opt-in claim a widget records from its own uncaptured
+`Move` handler (`EventCtx::claim_hover`), not a state the pipeline infers. `RenderRoot` caches two
+values for it — `hover_active` (root-level mirror, the hover analog of `focus_active`) and
+`hover_epoch` (the identity of the last completed hover pass) — and every `ChildPod` carries a
+stamp (`hover_epoch()`, no setter) rather than a flag: a claim stamps the live epoch up the pod
+chain, and a link counts as hovered only while its stamp still matches the live epoch, ANDed with
+the chain exactly like focus. `RenderRoot::event` advances the epoch once per hover pass — an
+uncaptured `Move` (which may record a claim) or the `Down`/`Cancel` that ends a hover outright —
+which strands the previous claimant's stamp with no leave event or explicit clearing required.
+`EventCtx::is_hovered`/`PaintCtx::is_hovered` read the seeded stamp; the paint-time read is
+authoritative, since a pointer that left a widget never delivers that widget another event.
+
+The cursor is hover's sibling channel and deliberately not derived from it: `EventCtx::set_cursor`
+writes a per-pass, thread-local request that `RenderRoot::event` resolves into the cached `cursor`
+field on any pointer `Move` (captured included, so a drag keeps its own shape), last writer wins,
+and absence resolves to `CursorIcon::Default`. Every other pass leaves `cursor` standing. A shell
+reads it via `RenderRoot::cursor()` — see [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md) for the
+desktop-only apply path.
+
 ## Key Types
 
 | Type | Purpose |
@@ -181,8 +204,9 @@ releases the session, so the root's cached focus/IME state can never outlive the
 | `RenderRoot<State, V>` | Owns the widget tree and theme; drives rebuild/layout/paint/event |
 | `WidgetTree` / `InspectNode` | Read-only tree accessors (`roots`/`children`/`inspect`) and the plain owned snapshot node (id, type name, debug label, absolute bounds, children) they produce |
 | `Component` / `ComponentView` / `ComponentWidget` | Stateful widget analog with a per-instance reactive `Owner` |
-| `EventCtx` / `EventOutcome` / `InputEvent` | Event-pass context, result, and input vocabulary — including the `Housekeeping` broadcast variant (see Data Flow) |
-| `PaintCtx` / `PaintScene` / `PaintOutcome` | Paint-pass context and the renderer-agnostic paint target |
+| `EventCtx` / `EventOutcome` / `InputEvent` | Event-pass context, result, and input vocabulary — including the `Housekeeping` broadcast variant (see Data Flow), opt-in hover claiming (`claim_hover`/`is_hovered`), and cursor requests (`set_cursor`) |
+| `PaintCtx` / `PaintScene` / `PaintOutcome` | Paint-pass context and the renderer-agnostic paint target; `PaintCtx::is_hovered` is the authoritative hover read, `PaintCtx::origin` the absolute window-space origin (see Data Flow) |
+| `CursorIcon` | Non-exhaustive pointer-shape request vocabulary (`Default`/`Pointer`/`Text`/`Grab`/`Grabbing`/`ColResize`/`RowResize`/`NotAllowed`) a widget asks for via `EventCtx::set_cursor`, resolved into `RenderRoot::cursor()` |
 | `Scene` / `SceneBuilder` / `Command` | The renderer-agnostic vector display list |
 | `GlyphRun` / `ShaderProgram` | Shaped-text carrier and opaque shader handle riding through `Scene` |
 | `ReactiveRuntime` / `TrackedScope` / `FrameWaker` | Process-wide reactive substrate and its rebuild-wake bridge |

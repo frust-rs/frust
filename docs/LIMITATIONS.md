@@ -2315,3 +2315,75 @@ to the feature owner, not a gap this task's scope covers.
 gap: `Widget::semantics` cannot be driven from out of tree") and the workspace README's "What it
 found" section; `crates/frust-widgets/tests/semantics_tree.rs` as the in-tree contrast that does
 reach `RenderRoot::semantics()`.
+
+---
+
+### `hover-window-leave-standing` — hover and press chrome outlive the state that caused them, until the next in-window `Move`
+
+**Observed**: three deliberate, test-pinned v1 gaps share one cause — nothing re-derives hover
+without a fresh uncaptured pointer `Move`, and the desktop shell delivers no window-leave event.
+A pointer leaving the window keeps the last-hovered widget's tint standing (no `CursorLeft` is
+ever dispatched to clear it); a `Down` that ends a hover with the pointer then held still shows no
+tint for the press itself until the next `Move`; and a scroll or any other mutation happening
+under a stationary pointer leaves stale hover/pressed chrome in place rather than re-testing the
+pointer's position against whatever moved. All three resolve themselves on the next in-window
+pointer `Move`, which is what makes them a standing-until-next-move gap rather than a stuck one.
+
+**Applies to**: every desktop shell (`frust-shell-desktop`); any widget using
+`EventCtx::claim_hover`/`PaintCtx::is_hovered`. Mobile is unaffected — its moves are gesture-
+captured and never claim hover in the first place.
+
+**Why accepted**: hover is deliberately derived only from a real pointer `Move`, with no
+synthetic re-derivation pass, because the alternative (a per-frame position re-test independent of
+input) would give hover its own polling loop the rest of the pipeline doesn't have. A window-leave
+event is a real, addressable gap (winit exposes `CursorLeft`) but scoped out of this phase; the
+other two are accepted properties of the epoch model, not shell gaps.
+
+**Evidence**: `crates/frust-core/src/app.rs`'s hover pipeline tests (`a_captured_move_cannot_claim_hover`,
+`a_down_or_cancel_ends_the_hover`, `a_non_pointer_pass_leaves_a_live_hover_standing`);
+`workflow/plans/features/shadcn-design-system/tasks/01-hover-pipeline.md` completion summary
+(2026-08-17, commit `68ac7e93`), "Known v1 gaps".
+
+---
+
+### `cursor-desktop-runtime-unverified` — the desktop cursor-apply path has no live-window run
+
+**Observed**: `frust_core::CursorIcon` resolution and the winit mapping/change-gate
+(`winit_cursor_for`, `cursor_change_to_apply`, `ShellHandler::sync_cursor`) are unit- and
+compile-verified only — no session has opened a real desktop window and watched the platform
+pointer actually change shape over a widget requesting one.
+
+**Applies to**: every desktop shell (macOS, Windows, Linux) via `frust-shell-desktop`'s shared
+core.
+
+**Why accepted**: the mapping is exhaustive over `CursorIcon` and the change gate is a pure
+function, both covered by host-run unit tests; a live-window pass is an ordinary runtime-
+verification gap of the same shape already tracked for the rest of the desktop tier (see
+`desktop-shells-runtime-unverified`), not a defect specific to cursor.
+
+**Evidence**: `crates/frust-shell-desktop/src/app_handler.rs`'s
+`every_framework_cursor_maps_to_its_winit_counterpart`/`the_cursor_is_pushed_to_winit_only_on_a_change`
+tests; `workflow/plans/features/shadcn-design-system/tasks/02-cursor-api.md` completion summary
+(2026-08-17, merged `49bc7657`).
+
+---
+
+### `cursor-stale-until-next-move` — a torn-down or outrun cursor request keeps its last shape until the next `Move`
+
+**Observed**: `RenderRoot::cursor()` only re-resolves on a pointer `Move` (captured included); a
+widget that is torn down while its request stands, or that the pointer scrolls/moves out from
+under while stationary, leaves the last-resolved shape in place rather than falling back to
+`CursorIcon::Default` immediately. The next pointer `Move` re-resolves it correctly — this is the
+cursor's own version of `hover-window-leave-standing`'s standing-until-next-move window, on the
+same root cause (nothing re-derives without a real `Move`).
+
+**Applies to**: every desktop shell; any widget using `EventCtx::set_cursor`.
+
+**Why accepted**: re-resolving without a pointer `Move` would mean tracking every requester's
+liveness independently of input, the same cost the hover model above declines to pay; the residual
+is cosmetic (a stale shape, never a stuck-captured pointer) and self-corrects on the next motion.
+
+**Evidence**: `crates/frust-core/src/app.rs`'s `RenderRoot::cursor()` doc comment ("Residual:
+a widget that is torn down … leaves the last shape in place until the next `Move`");
+`workflow/plans/features/shadcn-design-system/tasks/02-cursor-api.md` completion summary
+(2026-08-17, merged `49bc7657`), "Limitations" list.

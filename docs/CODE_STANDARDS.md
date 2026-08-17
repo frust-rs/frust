@@ -345,6 +345,22 @@ widget in `frust-widgets`:
   surface here means the same thing it means everywhere: a full root focus/IME session release,
   not a value update (`docs/CORE_ARCHITECTURE.md`'s Focus/IME Lifecycle).
 
+- **Claim hover from the uncaptured `Move` arm, never latch it.** Call `EventCtx::claim_hover`
+  on every qualifying move (hit-test the position against the widget's own bounds first), not
+  just on entry — the claim is per-pass, so a widget that stops claiming stops being hovered on
+  the next pass, with no leave event to react to. Read `PaintCtx::is_hovered` at paint time as
+  the authoritative value and self-correct any internal flag from it there, since a pointer that
+  left the widget never delivers it another event (`docs/CORE_ARCHITECTURE.md`'s Hover and
+  Cursor section).
+
+- **Ask for a cursor on every qualifying `Move`, never on `Down`.** `EventCtx::set_cursor` is
+  stateless like `request_redraw`: a widget re-asks each move rather than latching a shape, and
+  a captured drag re-asks from its own captured `Move` arm to keep its cursor outside its
+  bounds. A press-specific cursor keys off the widget's own pressed state read in the `Move`
+  arm, not off `Down` — no pass other than `Move` resolves or resets the cursor, so a `Down`
+  handler that sets one would leave it standing for the length of a click with no chance to
+  restate it.
+
 ## Semantics Conventions
 
 Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantics` module):

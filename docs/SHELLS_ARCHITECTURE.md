@@ -267,6 +267,12 @@ the bare theme cap regardless of any longer per-request interval (see
   reconcile the platform's IME mirror on a per-frame poll behind a divergence guard rather than
   on focus edges alone. The iOS Swift half remains compile- and device-unverified on the Linux
   build host — see [LIMITATIONS.md](LIMITATIONS.md) `ime-ios-content-type-unverified`.
+- **Cursor:** desktop reads `RenderRoot::cursor()` after every event dispatch, beside
+  `sync_ime` (`ShellHandler::sync_cursor`), and applies it via winit's `Window::set_cursor` only
+  when it differs from the shape last pushed. `winit_cursor_for` (`frust-shell-desktop`) is the one
+  platform touch point mapping the framework's `CursorIcon` onto winit's own vocabulary; a mobile
+  shell never reads the resolved value. See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)'s Hover
+  and Cursor section for the request/resolve contract.
 - **Platform-view embedding:** paint-time view frames feed the `platform_view` differ, which
   exposes a command backlog each shell's FFI layer polls and applies to the native view hierarchy,
   frame-paired to keep geometry in sync.

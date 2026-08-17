@@ -174,6 +174,13 @@ installer built on `frust`'s public API alone (see ARCHITECTURE.md's Examples ta
 finding, that `Widget::semantics` cannot be exercised from out of tree, is registered in
 LIMITATIONS.md.
 
+Three more seams are part of the same public authoring surface: opt-in hover claiming
+(`EventCtx::claim_hover`/`PaintCtx::is_hovered`) for state-layer-style interaction chrome, cursor
+requests (`EventCtx::set_cursor`/`CursorIcon`, also flat-re-exported as `frust::CursorIcon`) for a
+design system's own hover/drag affordances, and the absolute-window-space `PaintCtx::origin`
+contract that an anchored-overlay pattern positions against (see CORE_ARCHITECTURE.md's Hover and
+Cursor section and Data Flow).
+
 ### Reactive-Free Design
 `frust-widgets` contains no `reactive_graph` symbols crate-wide — the crate is entirely signal-free.
 Reactive bridging lives in the CORE unit's facade (`router_glue.rs`, `back_glue.rs`), where observer
