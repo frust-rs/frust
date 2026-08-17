@@ -1,4 +1,4 @@
-//! The static plugin registry (v1) — thirteen entries mirroring `plugins/`:
+//! The static plugin registry (v1) — fourteen entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
@@ -26,13 +26,15 @@
 //! `locales/en/main.ftl` — the first registry entry to use
 //! [`Contribution::ScaffoldFile`] — and the `frust_i18n::locales!` app-crate
 //! macro invocation; see `I18N_BASE`'s doc comment for the ordering
-//! constraint between the two), and `glyph`/`material`/`cupertino`
+//! constraint between the two), `glyph`/`material`/`cupertino`
 //! (dependency only — the three built-in design-system catalogs, which left
 //! the `frust` facade's Cargo-feature graph and now each ship as their own
 //! sibling plugin crate; adding one contributes only the Cargo dependency —
 //! calling `frust_<name>::install()` in `app!(setup = {..})` to make it the
 //! app's active theme is left to the app, the same way `frust create`'s own
-//! scaffold does it).
+//! scaffold does it), and `shadcn` (dependency only, the same shape as the
+//! three built-ins above — the tier's first *external-origin* catalog,
+//! ported from shadcn/ui rather than authored in this repo).
 
 use super::{Contribution, FeatureSpec, PluginSpec};
 
@@ -423,6 +425,27 @@ const CUPERTINO: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+/// `shadcn`'s single base contribution — see [`GLYPH`]'s doc comment for the
+/// shape and the same install-call caveat. The tier's first *external-origin*
+/// catalog (ported from shadcn/ui rather than authored here — see
+/// `plugins/shadcn/src/lib.rs`), but the same pure-Cargo-dependency shape as
+/// `glyph`/`material`/`cupertino`: no OS-side integration, and making it the
+/// app's active theme is still a manual `frust_shadcn::install()` call in
+/// `app!(setup = {..})` the registry cannot add on the caller's behalf (it
+/// has no way to know where that block should go, or whether one is already
+/// installing another design system there).
+const SHADCN: PluginSpec = PluginSpec {
+    id: "shadcn",
+    summary: "shadcn/ui catalog; needs frust_shadcn::install() in app! setup \
+              (48 components + tokens + bundled Inter/JetBrains Mono fonts).",
+    crate_dir: "shadcn",
+    base: &[Contribution::CargoDep {
+        name: "frust-shadcn",
+    }],
+    optional_features: &[],
+    requires_sibling: None,
+};
+
 /// The v1 static plugin registry (Vec-factory convention). A caller (the CLI
 /// or the TUI Add Plugin dialog) enumerates this to drive selection without
 /// hardcoding plugin ids.
@@ -441,6 +464,7 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         GLYPH,
         MATERIAL,
         CUPERTINO,
+        SHADCN,
     ]
 }
 
@@ -460,7 +484,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_thirteen_v1_plugins() {
+    fn registry_lists_the_fourteen_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -478,21 +502,24 @@ mod tests {
                 "glyph",
                 "material",
                 "cupertino",
+                "shadcn",
             ]
         );
     }
 
-    /// The `glyph`/`material`/`cupertino` entries are each exactly one
-    /// `CargoDep` and nothing else — no manifest permission, plist key,
+    /// The `glyph`/`material`/`cupertino`/`shadcn` entries are each exactly
+    /// one `CargoDep` and nothing else — no manifest permission, plist key,
     /// Gradle module, or Swift package, since these are pure-Rust design
     /// systems built on `frust::authoring` alone (see `GLYPH`'s doc
-    /// comment).
+    /// comment) — `shadcn` included, despite being the tier's first
+    /// external-origin catalog: its registry shape is identical.
     #[test]
     fn design_system_plugins_are_each_a_cargo_dep_and_nothing_else() {
         for (id, crate_name) in [
             ("glyph", "frust-glyph"),
             ("material", "frust-material"),
             ("cupertino", "frust-cupertino"),
+            ("shadcn", "frust-shadcn"),
         ] {
             let spec = find_plugin(id).unwrap();
             assert_eq!(spec.crate_dir, id);

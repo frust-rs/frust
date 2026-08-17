@@ -579,7 +579,7 @@ fn add_plugin_select_step_100x30() {
 
 /// The select step with the cursor on the *last* registry card: the registry
 /// is taller than the workbench body at 100x30, so the card list scrolls, and
-/// the window follows the cursor to keep `cupertino` (the final
+/// the window follows the cursor to keep `shadcn` (the final
 /// `known_plugins()` row, reachable only once the window scrolls) drawn and
 /// focus-marked.
 ///
@@ -606,7 +606,7 @@ fn add_plugin_select_step_last_entry_scrolled_100x30() {
         );
     }
     assert!(
-        rendered.contains("\u{25b8} (o) cupertino"),
+        rendered.contains("\u{25b8} (o) shadcn"),
         "the focused last card must be drawn:\n{rendered}"
     );
 
