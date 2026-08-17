@@ -104,8 +104,7 @@ system installed falls back to `Theme::neutral()`.
 
 **shadcn gallery.** `cargo run -p shadcn-demo` (a root-workspace member, unlike `huddle` — no
 `cd`/standalone gate needed) opens the `frust-shadcn` catalog's desktop gallery: the manual visual
-gate for shadcn/ui component changes, the same shape as huddle's above (see
-[LIMITATIONS.md](LIMITATIONS.md) `shadcn-demo-visual-gate-unrun`).
+gate for shadcn/ui component changes, the same shape as huddle's above.
 
 `examples/huddle` additionally builds and runs on Android and iOS, from its own
 directory (its own `frust.toml`, package `it.f0x.huddle`):

@@ -2527,23 +2527,6 @@ gap.
 
 ---
 
-### `shadcn-demo-visual-gate-unrun` — the shadcn gallery's desktop manual visual gate has not been run
-
-**Observed**: `examples/shadcn-demo` (a root-workspace member — `cargo run -p shadcn-demo`) is the
-manual visual gate for `frust-shadcn`'s 48-component catalog, the same role `examples/huddle`'s
-`cargo run` plays for the baseline widget set. It has not yet been run against a live window.
-
-**Applies to**: every `frust-shadcn` component and theme preset — none has been visually confirmed
-on a real desktop compositor yet, only through host-run paint/event unit tests.
-
-**Why accepted**: owed to the project owner, the same shape as every other manual-visual-gate entry
-in this register; no automated pixel-diff gate exists for any design-system catalog yet.
-
-**Evidence**: `examples/shadcn-demo/Cargo.toml` module doc (root-workspace-member rationale);
-absence of a recorded run in this feature's task history.
-
----
-
 ### `shadcn-control-ladder-under-touch-floor` — every shadcn control height sits below the 44px tap-target floor
 
 **Observed**: `frust-shadcn`'s entire control-height ladder — `HEIGHT_XS`/`HEIGHT_SM`/
