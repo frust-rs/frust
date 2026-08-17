@@ -42,18 +42,6 @@ frust = { path = "../../crates/frust" }
 # (`frust_glyph::motion::{GlyphSlide,GlyphStagger}`) this app exists to
 # showcase now live here, not behind a `frust` feature.
 frust-glyph = { path = "../../plugins/glyph" }
-# `switch`/`circular_progress`/`ProgressValue` (Buttons+Forms' "baseline form
-# controls" row, Interactions' connection-heartbeat/charge-ring demos) were
-# never baseline `frust-widgets` items — pre-detach they reached this crate
-# only because `frust`'s formerly-default-on `material` feature pulled the
-# whole Material catalog in unconditionally alongside Glyph/Cupertino. The
-# detach (`frust` now `default = []`) makes that pre-existing dependency
-# explicit rather than removing the two demos or hand-rolling replacements —
-# same widgets, same behavior, now an honest sibling `frust-material`
-# dependency beside `frust-glyph` (the facade/plugin boundary in
-# docs/ARCHITECTURE.md is about the `frust` facade never depending on a
-# plugin, not about one app avoiding two catalog plugins side by side).
-frust-material = { path = "../../plugins/material" }
 
 # `log` facade dependency, present only so the release-only `lean` feature
 # below can raise the compiled-in log ceiling (release-lean build mode).

@@ -50,12 +50,20 @@ anti-patterns, interaction semantics, semantics, testing, comment conventions �
   latches the same hit test into `StateLayer::set_hovered` with a redraw gated on its
   changed-return, and re-syncs that flag from `PaintCtx::is_hovered` every paint
   (see `docs/CODE_STANDARDS.md`'s Interaction Semantics for the full convention).
-- **Glyph's token set adds three resolution precedents.** A per-status color with no
+- **Glyph's token set adds five resolution precedents.** A per-status color with no
   `ColorScheme` field (Success/Warning/Info) resolves `Theme::extension::<StatusPalette>()`
   first, before a role that already has one (Error) resolves it directly. `GlyphInk` is
   never brightness-swapped like a scheme role. Accent role split: `primary`/`on_primary` is
   accent text/icon ink, `primary_container`/`on_primary_container` is the bright fill —
-  conflating the two is the catalog's most common accent bug.
+  conflating the two is the catalog's most common accent bug. `--fg-dim` has no `ColorScheme`
+  role at all, so it resolves to `on_surface_variant` in **every** position — fill or text
+  alike, not just as a fill — reading brighter than the source's literal hex (`toggle`'s
+  off-knob test pins the shipped delta: themed dark paints `#a39c88` where the source authors
+  `#6b6556`). A border authored as alpha-over-fg is a **per-widget call, not a backdrop
+  rule**: `toggle`'s track border strokes a true alpha stroke over `on_surface` (its backdrop
+  is caller-arbitrary), while the catalog's container-class widgets — accordion, appbar,
+  card, badge, empty_state, navbar, dialog, list, menu — stroke the pre-flattened `outline`
+  role directly.
 - **A transition pattern's default timing resolves from `Theme.motion`, never a hand-rolled
   duration, and collapses under `reduce_motion`.**
   `PatternSwitcher`/`AnimatedOpacity`/`AnimatedScale` resolve `MotionScheme`'s

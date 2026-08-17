@@ -45,7 +45,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other unit
 | `plugins/clean-signals-frust` | Facade-tier glue crate binding the `clean_signals` clean-architecture core into Frust's `Component`/reactive model |
 | `plugins/database` | Synchronous embedded SQL database (`Database`/`Value`/`Engine`) over a swappable-engine seam — bundled SQLite via `rusqlite` (default) or an optional Turso engine (`engine-turso`); no OS integration |
 | `plugins/i18n` | Fluent Project + ICU4X internationalization/localization: compile-time bundle loading (`locales!`, via the companion `frust-i18n-macros` proc-macro crate), locale-aware message resolution, system-locale detection, and (`formatting` feature) ICU4X number/date/currency formatting |
-| `plugins/glyph` | The Glyph design-system plugin (`frust-glyph`): terminal-native, dark-first, monospace-led widget catalog plus its bundled OFL monospace fonts |
+| `plugins/glyph` | The Glyph design-system plugin (`frust-glyph`): terminal-native, dark-first, monospace-led widget catalog — including its own switch-class control (`toggle`), since baseline `frust-widgets` deliberately ships no `Switch` — plus its bundled OFL monospace fonts |
 | `plugins/material` | The Material 3 (+Expressive) design-system plugin (`frust-material`) |
 | `plugins/cupertino` | The Cupertino (iOS-styled) design-system plugin (`frust-cupertino`), including its own "Liquid Glass" `GlassScale` recipe |
 

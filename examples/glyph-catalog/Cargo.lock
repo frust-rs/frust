@@ -1074,15 +1074,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "frust-material"
-version = "0.1.0"
-dependencies = [
- "frust",
- "kurbo",
- "peniko",
-]
-
-[[package]]
 name = "frust-paths"
 version = "0.1.0"
 dependencies = [
@@ -1569,7 +1560,6 @@ dependencies = [
  "frust",
  "frust-core",
  "frust-glyph",
- "frust-material",
  "frust-reactive",
  "frust-scene",
  "frust-shell-common",

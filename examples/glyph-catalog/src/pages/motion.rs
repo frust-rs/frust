@@ -25,12 +25,8 @@ use frust_glyph::TermLine;
 use frust_glyph::motion::{GlyphSlide, SlideDirection};
 use frust_glyph::{
     PaletteItem, accordion, command_palette, glyph_dialog, show_command_palette, show_glyph_dialog,
-    tabs, term_block,
+    tabs, term_block, toggle,
 };
-// `switch` is a Material catalog widget (see `Cargo.toml`'s `frust-material`
-// dependency comment) — not `frust_glyph::*`, but not a baseline
-// `frust`/`frust-widgets` item either.
-use frust_material::switch;
 
 use crate::CatalogState;
 
@@ -166,7 +162,9 @@ fn demo_press() -> FlexChild<CatalogState> {
     ])
 }
 
-/// 02 toggle spring: a baseline switch (spatial knob translate + effects track).
+/// 02 toggle spring: `frust_glyph::toggle` itself — the demo now shows the
+/// authored component (spatial knob translate + effects track) rather than a
+/// Material stand-in.
 fn demo_toggle() -> FlexChild<CatalogState> {
     let on = toggle_sig();
     let checked = on.get();
@@ -174,7 +172,7 @@ fn demo_toggle() -> FlexChild<CatalogState> {
         inflexible(label("02 Toggle spring")),
         inflexible(caption("220ms spatial knob + 150ms effects track")),
         gap(6.0),
-        inflexible(switch(checked, move |_s: &mut CatalogState, v| on.set(v))),
+        inflexible(toggle(checked, move |_s: &mut CatalogState, v| on.set(v))),
     ])
 }
 
