@@ -21,11 +21,11 @@ expression: rendered
    Build · b      │    ( ) i18n                                                  │▓▓                
    Clean · c      │        Fluent Project-based                                  │▓▓                
    MCP off · M    │    ( ) glyph                                                 │▓▓                
-   DAP off · D    │        Glyph design-system catalog (widgets + tokens +       │▓▓                
+   DAP off · D    │        Glyph catalog; needs frust_glyph::install() in app!   │▓▓                
                   │    ( ) material                                              │▓▓                
-                  │        Material 3 design-system catalog (widgets + tokens);  │▓▓                
+                  │        Material 3 catalog; needs frust_material::install()   │▓▓                
                   │  ▸ (o) cupertino                                             │▓▓                
-                  │        Cupertino design-system catalog (widgets + tokens);   │▓▓                
+                  │        Cupertino catalog; needs frust_cupertino::install()   │▓▓                
                   │                                                              │▓▓                
                   │   Back    Next    Cancel                                     │▓▓                
                   │  ↑/↓ choose · Enter next · Esc close                         │▓▓                

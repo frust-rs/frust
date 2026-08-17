@@ -2258,6 +2258,39 @@ thread-local cache notes).
 
 ---
 
+### `refusal-banner-text-device-unverified` — the refusal banner's warning text has never rendered on real Android/iOS hardware
+
+**Observed**: `plugins/native-widgets/src/api/builders.rs`'s `placeholder()` — the frust-drawn
+fallback all six builders (`native_button`/`native_label`/`native_switch`/`native_slider`/
+`native_progress`/`native_image`) degrade to under `ResolvedSurfaceMode::RefusedTranslucent` —
+shapes its visible label/description prose through a crate-local `BannerText` helper built on
+`frust::authoring::text::{TextContext, TextLayout, TextStyle}` (system-UI font, not a
+design-system typeface — no design-system catalog is reachable from this plugin, the same charter
+the rest of the banner follows). Host-side tests prove the path non-vacuously:
+`placeholder_paints_visible_text_within_its_slot_rect_at_every_slot_size` asserts at least two
+glyph runs paint (label and description) at each of `native_switch`'s 70x40, `native_progress`'s
+260x24, `native_button`'s 160x48, and a deliberately tiny 40x16 slot, using a paint scene
+(`BoundsRecorder`) that actually honours the clip stack — remove `ClipToSlot`'s `push_clip` and a
+run's raw bounds would escape the slot rect and fail the assertion, rather than trivially passing
+by construction. None of this has run through an on-device or simulator Android/iOS text-shaping
+stack: font metrics, DPI, and native text shaping can all differ from the desktop `TextContext`
+these tests exercise.
+
+**Why accepted**: the fallback only paints under `ResolvedSurfaceMode::RefusedTranslucent`, itself
+reached only via a blit-path surface (see `cam-blit-opaque` above) or a deliberate
+`FRUST_NO_DIRECT_SURFACE=1` build — an on-demand path, not mainline rendering — so a device gate
+confirming the warning text actually renders and clips on real hardware is owed, not blocking.
+Rides alongside `native-typeface-first-publish-latch`'s own owed device gate (above) for the same
+plugin's typeface ladder — both are NATIVE_WIDGETS text-rendering paths awaiting real Android/iOS
+hardware.
+
+**Evidence**: `plugins/native-widgets/src/api/builders.rs`'s
+`placeholder_paints_visible_text_within_its_slot_rect_at_every_slot_size` and
+`a_refused_slot_still_publishes_no_platform_view_frame_through_the_clip_wrapper` tests (`cargo test
+-p native-widgets`, host-only).
+
+---
+
 ### `semantics-untestable-out-of-tree` — an out-of-tree design system can implement `Widget::semantics` but cannot test it
 
 **Observed**: `examples/design-system-sample`'s widgets each carry a `semantics` impl, and the

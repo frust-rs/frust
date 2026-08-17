@@ -214,11 +214,11 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
 # `--no-default-features`).
 kurbo = { workspace = true }
 peniko = { workspace = true }
-# The `placeholder_paints_within_its_slot_rect_at_every_slot_size` test
-# lays out a real `alert()` banner (`AlertWidget::layout` calls
+# The `placeholder_paints_visible_text_within_its_slot_rect_at_every_slot_size`
+# test lays out the crate-local `RefusalBanner` (its `BannerText` helper calls
 # `ctx.text_context::<frust_text::TextContext>()`), so it needs a genuine
-# `TextContext` to shape the title/body runs rather than a stub — dev-only,
-# same rationale as `kurbo`/`peniko` above.
+# `TextContext` to shape the label/description runs rather than a stub —
+# dev-only, same rationale as `kurbo`/`peniko` above.
 frust-text = { workspace = true }
 # Same test's recording `PaintScene` impl names `frust_scene::GlyphRun` in
 # its `draw_glyph_run` signature (`PaintScene::draw_glyph_run`'s own

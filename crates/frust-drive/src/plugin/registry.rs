@@ -385,9 +385,8 @@ const I18N: PluginSpec = PluginSpec {
 /// app already has installed there.
 const GLYPH: PluginSpec = PluginSpec {
     id: "glyph",
-    summary: "Glyph design-system catalog (widgets + tokens + bundled fonts); \
-              call `frust_glyph::install()` in `app!(setup = {..})` to make it \
-              the app's active theme.",
+    summary: "Glyph catalog; needs frust_glyph::install() in app! setup \
+              (widgets + tokens + bundled fonts).",
     crate_dir: "glyph",
     base: &[Contribution::CargoDep {
         name: "frust-glyph",
@@ -400,9 +399,8 @@ const GLYPH: PluginSpec = PluginSpec {
 /// the shape and the same install-call caveat.
 const MATERIAL: PluginSpec = PluginSpec {
     id: "material",
-    summary: "Material 3 design-system catalog (widgets + tokens); call \
-              `frust_material::install()` in `app!(setup = {..})` to make it \
-              the app's active theme.",
+    summary: "Material 3 catalog; needs frust_material::install() in app! \
+              setup (widgets + tokens).",
     crate_dir: "material",
     base: &[Contribution::CargoDep {
         name: "frust-material",
@@ -415,9 +413,8 @@ const MATERIAL: PluginSpec = PluginSpec {
 /// the shape and the same install-call caveat.
 const CUPERTINO: PluginSpec = PluginSpec {
     id: "cupertino",
-    summary: "Cupertino design-system catalog (widgets + tokens); call \
-              `frust_cupertino::install()` in `app!(setup = {..})` to make it \
-              the app's active theme.",
+    summary: "Cupertino catalog; needs frust_cupertino::install() in app! \
+              setup (widgets + tokens).",
     crate_dir: "cupertino",
     base: &[Contribution::CargoDep {
         name: "frust-cupertino",
