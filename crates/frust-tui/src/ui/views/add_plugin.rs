@@ -95,7 +95,15 @@ pub fn render(
             );
             advance(&mut y);
             for (i, entry) in dialog.entries.iter().enumerate() {
-                if y + 1 >= inner.bottom() {
+                // Reserve the trailing 2 rows for the button row + hint line
+                // unconditionally force-appended after this loop (the "Pad
+                // down to the button row" block below) — without this an
+                // entry can render into what becomes that row, and the two
+                // draws overlap in the terminal buffer (a shorter later
+                // line never clears a longer prior one). A long registry
+                // can fill every available row with no slack left for
+                // either.
+                if y + 1 >= inner.bottom().saturating_sub(2) {
                     break;
                 }
                 let focused = dialog.cursor == i;

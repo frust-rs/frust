@@ -408,6 +408,23 @@ mod tests {
             cargo_toml.contains("crate-type = [\"cdylib\", \"staticlib\", \"rlib\"]"),
             "{cargo_toml}"
         );
+        // Glyph ships as a sibling plugin crate dependency, not a `frust`
+        // Cargo feature: the `frust` edge itself names no features at all
+        // (`frust` carries no design-system catalog, `default = []`), and
+        // `frust-glyph` is depended on directly, the same shape
+        // `frust-shared-preferences` uses below.
+        assert!(
+            cargo_toml.contains(&format!("frust = {{ path = \"{}\" }}", ctx.frust_path)),
+            "{cargo_toml}"
+        );
+        assert!(
+            cargo_toml.contains("frust-glyph = { path ="),
+            "{cargo_toml}"
+        );
+        assert!(!cargo_toml.contains("[\"glyph\""), "{cargo_toml}");
+        assert!(!cargo_toml.contains("\"material\""), "{cargo_toml}");
+        assert!(!cargo_toml.contains("\"cupertino\""), "{cargo_toml}");
+        assert!(!cargo_toml.contains("glyph-fonts"), "{cargo_toml}");
         let frust_toml = fs::read_to_string(dest.join("frust.toml")).unwrap();
         assert!(frust_toml.contains("dev.f0x"), "{frust_toml}");
 
@@ -421,13 +438,12 @@ mod tests {
         assert!(!lib_rs.contains("App::new"), "{lib_rs}");
         assert!(lib_rs.contains("impl Component for MyAppApp"), "{lib_rs}");
         // The generated app ships Glyph by default: the `app!` invocation's
-        // `setup` block is what actually seeds it as the active theme (a
-        // Cargo feature alone only compiles the code in) — see
-        // `frust::glyph_theme::install`'s doc comment for the ordering
-        // contract.
+        // `setup` block is what actually seeds it as the active theme (the
+        // `frust-glyph` dependency alone only compiles the code in) — see
+        // `frust_glyph::install`'s doc comment for the ordering contract.
         assert!(
             lib_rs.contains(
-                "frust::app!(\n    MyAppApp,\n    setup = {\n        frust::glyph_theme::install();\n    }\n);"
+                "frust::app!(\n    MyAppApp,\n    setup = {\n        frust_glyph::install();\n    }\n);"
             ),
             "{lib_rs}"
         );
@@ -473,14 +489,8 @@ mod tests {
         // README.md generated with theme/font docs and examples
         let readme = fs::read_to_string(dest.join("README.md")).unwrap();
         assert!(readme.contains("Glyph design system"), "{readme}");
-        assert!(
-            readme.contains("set_app_theme(Theme::m3_baseline())"),
-            "{readme}"
-        );
-        assert!(
-            readme.contains("set_app_theme(Theme::cupertino_baseline())"),
-            "{readme}"
-        );
+        assert!(readme.contains("frust_material::install()"), "{readme}");
+        assert!(readme.contains("frust_cupertino::install()"), "{readme}");
         assert!(readme.contains("register_app_fonts"), "{readme}");
         assert!(readme.contains("Theme::builder"), "{readme}");
         // Verify no unresolved {{ }} placeholders remain
@@ -1417,7 +1427,7 @@ mod tests {
         // assertion in `generate_produces_manifest_listed_files_with_substitutions`.
         assert!(
             lib_rs.contains(
-                "frust::app!(\n    MyAppApp,\n    setup = {\n        frust::glyph_theme::install();\n    }\n);"
+                "frust::app!(\n    MyAppApp,\n    setup = {\n        frust_glyph::install();\n    }\n);"
             ),
             "{lib_rs}"
         );
@@ -1855,11 +1865,11 @@ mod tests {
             cargo_toml.contains("frust = { path = \"/path/to/frust\""),
             "{cargo_toml}"
         );
-        // Catalogs-off contract: no built-in catalog feature, ever.
-        assert!(
-            cargo_toml.contains("default-features = false"),
-            "{cargo_toml}"
-        );
+        // Catalogs-off contract: no built-in design-system feature, ever —
+        // `frust` itself carries no design-system catalog (`default = []`),
+        // so this template names no features on its `frust` dependency at
+        // all.
+        assert!(!cargo_toml.contains("default-features"), "{cargo_toml}");
         assert!(!cargo_toml.contains("\"glyph\""), "{cargo_toml}");
         assert!(!cargo_toml.contains("\"material\""), "{cargo_toml}");
         assert!(!cargo_toml.contains("\"cupertino\""), "{cargo_toml}");
@@ -1890,10 +1900,7 @@ mod tests {
         assert!(readme.contains("# Acme Design"), "{readme}");
         assert!(readme.contains("acme_design::install();"), "{readme}");
         assert!(readme.contains("install-timing contract"), "{readme}");
-        assert!(
-            readme.contains("must never enable `glyph`/`material`/`cupertino`"),
-            "{readme}"
-        );
+        assert!(readme.contains("sibling plugin crates"), "{readme}");
         assert!(!readme.contains("{{"), "{readme}");
 
         let gitignore = fs::read_to_string(dest.join(".gitignore")).unwrap();

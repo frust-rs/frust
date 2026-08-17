@@ -5,8 +5,9 @@
 //! shape a design system needs: one token module ([`tokens`]) and one leaf
 //! widget ([`BadgeView`]/[`BadgeWidget`]), both built on `frust`'s public
 //! `frust::authoring` seam — no `frust-core`/`frust-widgets`/`frust-theme`
-//! dependency, and no built-in catalog (`glyph`/`material`/`cupertino`)
-//! enabled (see `README.md`).
+//! dependency, and no built-in design system (`frust-glyph`/`frust-material`/
+//! `frust-cupertino`, each its own sibling plugin crate) depended on (see
+//! `README.md`).
 //!
 //! Add more widgets — a single-child container, an interactive control — the
 //! same way; `frust::authoring` is the whole seam.

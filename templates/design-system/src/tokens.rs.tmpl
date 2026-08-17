@@ -3,11 +3,11 @@
 //! identity tag.
 //!
 //! [`Theme::neutral`](frust::Theme::neutral) is the design-language-free
-//! baseline every shell already falls back to — starting from a built-in
-//! catalog's own baseline (`m3_baseline`/`cupertino_baseline`) would inherit
-//! that catalog's shape/motion opinions and then require overwriting them.
-//! Building from neutral means every token this module does *not* set is a
-//! deliberate "no opinion", not an inherited one.
+//! baseline every shell already falls back to — starting from another
+//! built-in system's own baseline (e.g. `frust_material::baseline()`) would
+//! inherit that system's shape/motion opinions and then require overwriting
+//! them. Building from neutral means every token this module does *not* set
+//! is a deliberate "no opinion", not an inherited one.
 
 use frust::{Color, ColorScheme, DesignLanguage, ShapeScale, Theme, ThemeBuilder};
 

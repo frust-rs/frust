@@ -22,17 +22,22 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # mechanism). Once Frust crates are published, `frust
 # create` will emit a version dependency here instead.
 #
-# Design system (gs1): Glyph is this app's design system, named explicitly
-# below (`"glyph"` + `"glyph-fonts"`) instead of left to `frust`'s own
-# crate-level defaults — mirrors the default `Cargo.toml.tmpl`'s comment (see
-# that file for the full rationale). `src/lib.rs`'s
-# `frust::app!(..., setup = { frust::glyph_theme::install(); })` is the
-# runtime call that actually makes it the active theme; delete
-# `"glyph"`/`"glyph-fonts"` below and that call to opt out (still builds,
-# neutral-themed), or swap them for `"material"`/`"cupertino"` plus the
-# matching `frust::set_default_theme(...)` call to use one of the other two
-# built-in design systems instead.
-frust = { path = "{{ frust_path }}", default-features = false, features = ["glyph", "material", "cupertino", "glyph-fonts"] }
+# `frust` itself carries no design-system catalog and its own `[features]`
+# default is `default = []` — there is nothing left to opt out of with
+# `default-features = false`, so this edge names no features at all (mirrors
+# the default `Cargo.toml.tmpl`'s comment).
+frust = { path = "{{ frust_path }}" }
+
+# Design system (gs1): Glyph is this app's design system, brought in as a
+# sibling plugin crate (`frust-glyph`, below) rather than a `frust` Cargo
+# feature — mirrors the default `Cargo.toml.tmpl`'s comment (see that file
+# for the full rationale). `src/lib.rs`'s `frust::app!(..., setup = {
+# frust_glyph::install(); })` is the runtime call that actually makes it the
+# active theme; delete the `frust-glyph` dependency below and that call to
+# opt out (still builds, neutral-themed), or swap it for `frust-material`/
+# `frust-cupertino` plus the matching `install()` call to use one of the
+# other two built-in design systems instead.
+frust-glyph = { path = "{{ frust_path }}/../../plugins/glyph" }
 
 # `--arch clean-signals` demo: the Frust
 # bridge for `clean-signals` (component-scoped controller lifecycle,
