@@ -316,15 +316,26 @@ impl<C: Component> Widget for ComponentWidget<C> {
         // handlers, not this carrier).
         let size = ctx.size();
         let has_focus = ctx.has_focus();
-        let (result, needs_redraw, captured, focus_req, focus_rel, ime) = {
+        // The hover link, its live epoch, and this pass's claim eligibility all
+        // cross the state boundary unchanged — a component is transparent to hover
+        // exactly as it is to focus, so a claim made below it still reaches the root
+        // and stamps the pod chain on the way (mirrored back through `claim_hover`).
+        let hovered = ctx.is_hovered();
+        let hover_epoch = ctx.hover_epoch();
+        let hover_eligible = ctx.is_hover_eligible();
+        let (result, needs_redraw, captured, hover_claimed, focus_req, focus_rel, ime) = {
             let state_any: &mut dyn Any = &mut self.state;
             let mut inner = EventCtx::new(state_any, Point::ZERO, size);
             inner.set_has_focus(has_focus);
+            inner.set_hovered(hovered);
+            inner.set_hover_epoch(hover_epoch);
+            inner.set_hover_eligible(hover_eligible);
             let result = route_child(&mut self.child, &mut inner, event);
             (
                 result,
                 inner.needs_redraw(),
                 inner.is_pointer_captured(),
+                inner.is_hover_claimed(),
                 inner.is_focus_requested(),
                 inner.is_focus_released(),
                 inner.take_ime_state(),
@@ -335,6 +346,9 @@ impl<C: Component> Widget for ComponentWidget<C> {
         }
         if captured {
             ctx.capture_pointer();
+        }
+        if hover_claimed {
+            ctx.claim_hover();
         }
         if focus_req {
             ctx.request_focus();

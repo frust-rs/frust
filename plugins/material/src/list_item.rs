@@ -27,6 +27,18 @@
 //! and paints the shared [`super::state_layer`] overlay tinted `on_surface`. A
 //! non-interactive row routes pointer events to its slot children (so a trailing
 //! control stays live).
+//!
+//! An interactive row is also the catalog's **hover** reference consumer: it
+//! claims the hover link from its uncaptured `Move` arm
+//! ([`frust::authoring::EventCtx::claim_hover`]) and paints the state layer's 8%
+//! hover overlay for it. Because a pointer *leaving* the row routes its next move
+//! to whatever it moved onto, the row never hears about the departure — so
+//! [`frust::authoring::PaintCtx::is_hovered`] is the authoritative read and paint
+//! re-syncs [`super::state_layer::StateLayer::set_hovered`] from it every frame.
+//! A press wins visually while it lasts (pressed 10% > hover 8%, the
+//! max-of-active-states rule), and a captured drag paints no hover at all — the
+//! framework refuses a claim from a captured pointer, so a touch gesture produces
+//! none either.
 
 use std::rc::Rc;
 
@@ -407,6 +419,12 @@ impl Widget for ListItemWidget {
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         if self.interactive {
+            // The pod's hover link is authoritative, not the flag the `Move` arm
+            // set: a pointer that left the row routed its next move elsewhere, so
+            // no event ever told this row it stopped being hovered. Re-syncing here
+            // is what makes the overlay drop on the very frame the pointer moves
+            // onto a sibling.
+            self.state_layer.set_hovered(ctx.is_hovered());
             let content_color = resolve_content_color(Theme::from_paint_ctx(ctx));
             self.state_layer.paint(
                 ctx,
@@ -446,6 +464,22 @@ impl Widget for ListItemWidget {
             }
             PointerPhase::Move => {
                 if !self.captured {
+                    // No capture: this is the hover pass. Claim the link whenever
+                    // the pointer is inside the row — every qualifying move, not
+                    // just the first, since a claim covers only its own pass. The
+                    // redraw is gated on the setter's changed-return so a pointer
+                    // wandering *within* the row costs nothing after the first move.
+                    // A claim made while some pointer is captured (this row's or
+                    // anyone's) is refused by the framework, so no drag or touch
+                    // gesture can reach this arm and tint the row.
+                    let over = inside(p.position, ctx.size());
+                    if over {
+                        ctx.claim_hover();
+                    }
+                    if self.state_layer.set_hovered(over) {
+                        ctx.request_redraw();
+                    }
+                    // Still `Ignored`: watching a move is not consuming it.
                     return EventResult::Ignored;
                 }
                 let inside_now = inside(p.position, ctx.size());
@@ -709,6 +743,184 @@ mod tests {
         assert_eq!(
             state.presses, 0,
             "row press callback does not fire on key event"
+        );
+    }
+
+    // --- Hover ---
+
+    /// A recording scene that captures each rounded rect's `(origin, size,
+    /// radius, color)` — the state-layer overlay's shape (see `state_layer.rs`'s
+    /// own `RRectRecorder`).
+    #[derive(Default)]
+    struct RRectRecorder {
+        rrects: Vec<(Point, Size, f64, Color)>,
+    }
+
+    impl PaintScene for RRectRecorder {
+        fn fill_rect(&mut self, _o: Point, _s: Size, _c: Color) {}
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+        fn fill_rounded_rect(&mut self, o: Point, s: Size, radius: f64, color: Color) {
+            self.rrects.push((o, s, radius, color));
+        }
+    }
+
+    /// Two interactive rows in a `Column` under a real `RenderRoot` — the only
+    /// harness that can exercise hover at all, since the hover link is recorded by
+    /// the root's event pass and read back through `PaintCtx::is_hovered`. It is
+    /// also the out-of-tree reachability proof: everything here is reached through
+    /// the `frust` facade, exactly as a third-party catalog would.
+    struct HoverHarness {
+        root: frust_core::RenderRoot<Counter, frust::FlexView<Counter>>,
+        state: Counter,
+        tcx: TextContext,
+    }
+
+    /// Window/row geometry: two stacked 56dp rows in a 300x200 window.
+    const HOVER_WINDOW: Size = Size::new(300.0, 200.0);
+
+    impl HoverHarness {
+        fn new() -> Self {
+            let mut h = HoverHarness {
+                root: frust_core::RenderRoot::new(),
+                state: Counter::default(),
+                tcx: TextContext::new(),
+            };
+            h.rebuild_layout();
+            h
+        }
+
+        fn rebuild_layout(&mut self) {
+            let mut app = |_s: &mut Counter| {
+                frust::Column(vec![
+                    frust::authoring::any(
+                        list_item::<Counter>("first").on_press(|s: &mut Counter| s.presses += 1),
+                    ),
+                    frust::authoring::any(
+                        list_item::<Counter>("second").on_press(|s: &mut Counter| s.presses += 1),
+                    ),
+                ])
+            };
+            self.root.rebuild(&mut app, &mut self.state);
+            self.root
+                .layout_with_text(HOVER_WINDOW, &mut self.tcx as &mut dyn Any);
+        }
+
+        fn dispatch(
+            &mut self,
+            phase: PointerPhase,
+            x: f64,
+            y: f64,
+        ) -> frust::authoring::EventOutcome {
+            self.root.event(
+                &mut self.state,
+                &InputEvent::Pointer(frust::authoring::PointerEvent {
+                    phase,
+                    position: Point::new(x, y),
+                    button: frust::authoring::PointerButton::Primary,
+                }),
+            )
+        }
+
+        /// The y-centre of row `index` (rows are `ONE_LINE_HEIGHT` tall).
+        fn row_y(index: usize) -> f64 {
+            ONE_LINE_HEIGHT * index as f64 + ONE_LINE_HEIGHT / 2.0
+        }
+
+        /// Paint and report which rows painted a state-layer overlay, by the
+        /// overlay rect's y origin.
+        fn overlay_rows(&mut self) -> Vec<usize> {
+            let mut rec = RRectRecorder::default();
+            self.root.paint(&mut rec, frust::FrameTime::ZERO);
+            rec.rrects
+                .iter()
+                .map(|(origin, _, _, _)| (origin.y / ONE_LINE_HEIGHT).round() as usize)
+                .collect()
+        }
+
+        /// The alpha of the single overlay painted this frame.
+        fn overlay_alpha(&mut self) -> f32 {
+            let mut rec = RRectRecorder::default();
+            self.root.paint(&mut rec, frust::FrameTime::ZERO);
+            let (_, _, _, color) = rec.rrects.first().copied().expect("one overlay painted");
+            color.components[3]
+        }
+    }
+
+    #[test]
+    fn hovering_a_row_paints_the_hover_overlay() {
+        let mut h = HoverHarness::new();
+        assert!(h.overlay_rows().is_empty(), "no overlay at rest");
+
+        h.dispatch(PointerPhase::Move, 150.0, HoverHarness::row_y(0));
+        assert_eq!(h.overlay_rows(), vec![0], "the hovered row tints");
+        assert_eq!(
+            h.overlay_alpha(),
+            crate::state_layer::HOVER_OPACITY,
+            "at the documented M3 hover opacity"
+        );
+    }
+
+    #[test]
+    fn hover_moves_to_the_row_under_the_pointer() {
+        let mut h = HoverHarness::new();
+        h.dispatch(PointerPhase::Move, 150.0, HoverHarness::row_y(0));
+        assert_eq!(h.overlay_rows(), vec![0]);
+
+        // The row the pointer left never receives an event about it — the move
+        // routes to its sibling — so this is the case a widget cannot handle on
+        // its own, and exactly one row may end up tinted.
+        h.dispatch(PointerPhase::Move, 150.0, HoverHarness::row_y(1));
+        assert_eq!(h.overlay_rows(), vec![1]);
+
+        // Off both rows: nothing tints, and the row that lost hover gets the
+        // repaint it could not ask for itself.
+        let outcome = h.dispatch(PointerPhase::Move, 150.0, 180.0);
+        assert!(outcome.needs_redraw);
+        assert!(h.overlay_rows().is_empty());
+    }
+
+    #[test]
+    fn a_captured_drag_paints_no_hover_overlay() {
+        let mut h = HoverHarness::new();
+        // Press row 0: the row captures, and the press overlay (10%) is what
+        // shows — never the hover one.
+        h.dispatch(PointerPhase::Down, 150.0, HoverHarness::row_y(0));
+        assert_eq!(h.overlay_rows(), vec![0]);
+        assert_eq!(h.overlay_alpha(), frust::authoring::PRESSED_OPACITY);
+
+        // Drag off the row: the captured row keeps receiving moves and its own
+        // `Move` arm calls `claim_hover()`, which must record nothing.
+        h.dispatch(PointerPhase::Move, 150.0, HoverHarness::row_y(1));
+        assert!(
+            h.overlay_rows().is_empty(),
+            "dragged outside: neither pressed nor hovered"
+        );
+
+        // Release outside: no press fires, and no hover was left behind.
+        h.dispatch(PointerPhase::Up, 150.0, HoverHarness::row_y(1));
+        assert_eq!(h.state.presses, 0);
+        assert!(h.overlay_rows().is_empty());
+    }
+
+    #[test]
+    fn hover_survives_a_rebuild_and_clears_on_press() {
+        let mut h = HoverHarness::new();
+        h.dispatch(PointerPhase::Move, 150.0, HoverHarness::row_y(0));
+        h.rebuild_layout();
+        assert_eq!(
+            h.overlay_rows(),
+            vec![0],
+            "an in-place rebuild keeps the pod that holds the link"
+        );
+
+        // A `Down` ends the hover link outright; the press overlay takes over.
+        h.dispatch(PointerPhase::Down, 150.0, HoverHarness::row_y(0));
+        assert_eq!(h.overlay_alpha(), frust::authoring::PRESSED_OPACITY);
+        h.dispatch(PointerPhase::Up, 150.0, HoverHarness::row_y(0));
+        assert_eq!(h.state.presses, 1);
+        assert!(
+            h.overlay_rows().is_empty(),
+            "a click leaves no hover behind until the pointer moves again"
         );
     }
 

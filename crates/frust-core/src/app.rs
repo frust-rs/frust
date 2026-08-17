@@ -240,6 +240,25 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// a widget publishing an inactive IME surface, or the generic-unmount orphan
     /// drain in [`RenderRoot::rebuild`] (see [`release_focus_session_in`]).
     focus_active: bool,
+    /// Whether the last completed hover pass left some widget in the tree holding
+    /// the hover link. Root-level mirror of the per-pod hover stamp (the hover
+    /// analog of `focus_active`), seeded into every event/paint pass so nothing
+    /// below can read as hovered while the root says nothing is.
+    hover_active: bool,
+    /// The live hover epoch: the identity of the most recent completed hover pass.
+    ///
+    /// Advanced by exactly one per hover pass — an **uncaptured**
+    /// [`PointerPhase::Move`] (which may record a claim), or the `Down`/`Cancel`
+    /// that ends a hover outright (which may not) — and by nothing else, so a
+    /// scroll, key, IME, or housekeeping pass leaves a live hover standing.
+    /// A [`crate::widget::ChildPod`]'s recorded stamp counts as hovered only while
+    /// it equals this, which is what strands the previous claimant's path with no
+    /// container having to clear it (see the [`crate::event`] module docs).
+    ///
+    /// Starts at `1`, not `0`: a freshly built pod's stamp is `0`, and starting the
+    /// epoch past it means a never-claimed pod cannot match the live epoch by
+    /// accident before the first hover pass ever runs.
+    hover_epoch: u64,
     /// The IME surface the focused widget last published (via
     /// [`EventCtx::publish_ime_state`]), surfaced to the shell by
     /// [`RenderRoot::ime_state`]. Persists across rebuilds/events until refreshed
@@ -370,6 +389,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             window_size: Size::ZERO,
             pointer_captured: false,
             focus_active: false,
+            hover_active: false,
+            // Past a fresh pod's `0` stamp — see the field doc.
+            hover_epoch: 1,
             ime_state: None,
             focus_ime_gen: 0,
             platform_view_frames: Vec::new(),
@@ -515,6 +537,18 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// Whether some widget in the tree currently holds keyboard/IME focus.
     pub fn is_focus_active(&self) -> bool {
         self.focus_active
+    }
+
+    /// Whether some widget in the tree currently holds the hover link — i.e.
+    /// whether the last hover pass (an uncaptured [`PointerPhase::Move`]) left the
+    /// pointer over a widget that claimed it.
+    ///
+    /// The hover analog of [`RenderRoot::is_focus_active`], and a level accessor
+    /// like it: hover is not a session (nothing has to be released), so there is no
+    /// generation counterpart. `false` on a touch-only app and on any app whose
+    /// widgets never call [`EventCtx::claim_hover`](crate::event::EventCtx::claim_hover).
+    pub fn is_hover_active(&self) -> bool {
+        self.hover_active
     }
 
     /// The IME surface the focused widget published, for the shell to drive the
@@ -1002,6 +1036,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // so a leaf-root editable observes its own focus; deeper focus is
             // threaded per-pod by `ChildPod::paint_child`.
             ctx.set_has_focus(self.focus_active);
+            // Thread the hover mirror + live epoch the same way: the root widget's
+            // own hover comes from the mirror (a leaf root can claim hover itself),
+            // and deeper links are resolved per-pod by `ChildPod::paint_child`
+            // against this epoch.
+            ctx.set_hovered(self.hover_active);
+            ctx.set_hover_epoch(self.hover_epoch);
             pod.widget_mut().paint(&mut ctx, scene);
             pod.clear_flags();
             // A focused editable republishes its IME surface during paint (which
@@ -1193,6 +1233,18 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// `Down` whose dispatch requested capture marks a gesture in flight; `Up`
     /// and `Cancel` release it (never a window-leave).
     ///
+    /// Root hover bookkeeping is the third recorded path, and the one this pass
+    /// *derives* rather than merely mirrors: an **uncaptured** `Move` opens a hover
+    /// pass (widgets on the hit-tested path may claim it — see
+    /// [`EventCtx::claim_hover`](crate::event::EventCtx::claim_hover)), a
+    /// `Down`/`Cancel` ends whatever hover stood, and every other event leaves it
+    /// alone. There is nothing to release and no generation to bump: the epoch
+    /// advance strands the previous claimant's path by itself, and the outcome's
+    /// `needs_redraw` carries the one repaint a widget that *lost* hover cannot ask
+    /// for. **No shell change is required for hover** — the desktop shell already
+    /// dispatches a `Move` on every cursor move, and the mobile shells only ever
+    /// produce mid-gesture (hence captured, hence ineligible) moves.
+    ///
     /// # Reentrancy
     ///
     /// This pass **never rebuilds or repaints**. Event handlers mutate `state`
@@ -1214,18 +1266,40 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             return EventOutcome::default();
         };
 
-        let (handled, needs_redraw, captured, focus_req, focus_rel, ime) = {
+        // Hover is derived per **uncaptured** pointer `Move`: that pass, and only
+        // that pass, may record a claim, so a captured drag can never paint hover
+        // under the pointer. A `Down`/`Cancel` is the other epoch-advancing pass —
+        // it ends whatever hover stood, without opening a new one (a press is not a
+        // hover, and a touch `Down` must not inherit one). `Up`, scroll, key, IME,
+        // and the housekeeping broadcast leave a live hover exactly as it was.
+        let hover_pass = matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Move)
+            && !self.pointer_captured;
+        let hover_ends = matches!(
+            event,
+            InputEvent::Pointer(p) if matches!(p.phase, PointerPhase::Down | PointerPhase::Cancel)
+        );
+        let hover_epoch = self.hover_epoch;
+        let hover_was_active = self.hover_active;
+
+        let (handled, needs_redraw, captured, hover_claimed, focus_req, focus_rel, ime) = {
             let state_any: &mut dyn Any = state;
             let mut ctx = EventCtx::new(state_any, pod.origin(), pod.size());
             // Seed the root widget's focus flag so a leaf-root editable that holds
             // focus can observe `has_focus()`; deeper focus is threaded per-pod.
             ctx.set_has_focus(self.focus_active);
+            // Same for the hover link, plus the live epoch every pod compares its
+            // stamp against and the eligibility gate that decides whether a claim
+            // is recordable at all this pass.
+            ctx.set_hovered(hover_was_active);
+            ctx.set_hover_epoch(hover_epoch);
+            ctx.set_hover_eligible(hover_pass);
             let result = pod.widget_mut().event(&mut ctx, event);
             let handled = matches!(result, EventResult::Handled);
             (
                 handled,
                 ctx.needs_redraw() || handled,
                 ctx.is_pointer_captured(),
+                ctx.is_hover_claimed(),
                 ctx.is_focus_requested(),
                 ctx.is_focus_released(),
                 ctx.take_ime_state(),
@@ -1313,6 +1387,23 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // are paint-time — so this is a contract note, not live behavior.
             InputEvent::Housekeeping => {}
         }
+
+        // Close the hover pass: advance the epoch (which strands every stamp this
+        // pass did not renew, wherever in the tree it sits) and refresh the mirror.
+        // A claim only counts on a `hover_pass` — an ineligible pass records none
+        // anyway, but stating it here keeps the mirror true by construction rather
+        // than by the eligibility gate alone.
+        if hover_pass || hover_ends {
+            self.hover_epoch = self.hover_epoch.wrapping_add(1);
+            self.hover_active = hover_pass && hover_claimed;
+        }
+        // A hover that *ended* needs one repaint the widget losing it cannot ask
+        // for: the pointer moved onto something else (or a press/cancel cleared the
+        // link), so the old claimant's `event()` was never called. A hover that
+        // *began* or *moved to another widget* is already covered — the new
+        // claimant's own changed-state redraw repaints the whole tree, which is what
+        // lets the old one drop its overlay from `PaintCtx::is_hovered`.
+        let needs_redraw = needs_redraw || (hover_was_active && !self.hover_active);
 
         EventOutcome {
             handled,
@@ -4008,5 +4099,364 @@ mod tests {
             "one wake, not a perpetual one — the flush is over"
         );
         assert!(!root.has_pending_change_flags());
+    }
+
+    // --- Hover: the claim pipeline -------------------------------------------
+    //
+    // Hover has no Enter/Leave phase to lean on (adding one to `PointerPhase`
+    // would break every out-of-tree exhaustive match). It is instead an opt-in
+    // claim a widget makes from its uncaptured `Move` arm, recorded as an epoch
+    // stamp down the pod chain — so the fixture below is deliberately shaped like
+    // a real container: two hit-tested children, a capture fast-path, and paint
+    // recording what `PaintCtx::is_hovered` reported.
+
+    /// Which of the fixture's two leaves an assertion is about.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Leaf {
+        Top,
+        Bottom,
+    }
+
+    /// What one hover leaf observed, shared out of the widget tree.
+    #[derive(Default)]
+    struct HoverProbe {
+        /// `PaintCtx::is_hovered()` as of the last paint.
+        painted_hovered: Cell<bool>,
+        /// `EventCtx::is_hovered()` as of the last event dispatch that reached it.
+        event_hovered: Cell<bool>,
+    }
+
+    /// A leaf that claims hover on any `Move` landing inside its own bounds — the
+    /// canonical opt-in shape — and optionally captures the pointer on `Down` (the
+    /// drag fixture: a captured pointer must never create hover).
+    struct HoverLeaf {
+        captures: bool,
+        probe: Rc<HoverProbe>,
+    }
+
+    impl crate::widget::Widget for HoverLeaf {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(100.0, 30.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            self.probe.painted_hovered.set(ctx.is_hovered());
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            self.probe.event_hovered.set(ctx.is_hovered());
+            let InputEvent::Pointer(p) = event else {
+                return EventResult::Ignored;
+            };
+            match p.phase {
+                PointerPhase::Move => {
+                    let size = ctx.size();
+                    let inside = p.position.x >= 0.0
+                        && p.position.y >= 0.0
+                        && p.position.x < size.width
+                        && p.position.y < size.height;
+                    if inside {
+                        ctx.claim_hover();
+                    }
+                    // Deliberately `Ignored`: a hovering widget does not consume a
+                    // move it merely watched (the shipped `ListItem` shape).
+                    EventResult::Ignored
+                }
+                PointerPhase::Down => {
+                    if self.captures {
+                        ctx.capture_pointer();
+                    }
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+    }
+
+    /// Two stacked hover leaves with a hit-tested route and a capture fast-path —
+    /// the minimum container that can show a claim moving between siblings.
+    struct HoverPair {
+        top: crate::widget::ChildPod,
+        bottom: crate::widget::ChildPod,
+    }
+
+    impl crate::widget::Widget for HoverPair {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.top.layout_child(ctx, bc);
+            self.top.set_origin(Point::ZERO);
+            self.bottom.layout_child(ctx, bc);
+            self.bottom.set_origin(Point::new(0.0, 30.0));
+            bc.max()
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            self.top.paint_child(ctx, scene);
+            self.bottom.paint_child(ctx, scene);
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            let releases = matches!(
+                event,
+                InputEvent::Pointer(p)
+                    if matches!(p.phase, PointerPhase::Up | PointerPhase::Cancel)
+            );
+            for pod in [&mut self.top, &mut self.bottom] {
+                if pod.is_active() {
+                    let r = pod.event_child(ctx, event);
+                    if releases {
+                        pod.set_active(false);
+                    }
+                    return r;
+                }
+            }
+            let pos = event.position();
+            for pod in [&mut self.top, &mut self.bottom] {
+                if pod.contains(pos) {
+                    return pod.event_child(ctx, event);
+                }
+            }
+            EventResult::Ignored
+        }
+    }
+
+    struct HoverPairView {
+        top: Rc<HoverProbe>,
+        bottom: Rc<HoverProbe>,
+        captures: bool,
+    }
+
+    impl View<()> for HoverPairView {
+        type Element = HoverPair;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> HoverPair {
+            HoverPair {
+                top: crate::widget::ChildPod::new(Box::new(HoverLeaf {
+                    captures: self.captures,
+                    probe: self.top.clone(),
+                })),
+                bottom: crate::widget::ChildPod::new(Box::new(HoverLeaf {
+                    captures: self.captures,
+                    probe: self.bottom.clone(),
+                })),
+            }
+        }
+        fn rebuild(&self, _p: &Self, _e: &mut HoverPair, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    /// A `RenderRoot` over the hover fixture, plus the two probes.
+    struct HoverHarness {
+        root: RenderRoot<(), HoverPairView>,
+        top: Rc<HoverProbe>,
+        bottom: Rc<HoverProbe>,
+        state: (),
+    }
+
+    impl HoverHarness {
+        fn new(captures: bool) -> Self {
+            let top = Rc::new(HoverProbe::default());
+            let bottom = Rc::new(HoverProbe::default());
+            let mut root: RenderRoot<(), HoverPairView> = RenderRoot::new();
+            let mut state = ();
+            let (t, b) = (top.clone(), bottom.clone());
+            root.rebuild(
+                &mut move |_: &mut ()| HoverPairView {
+                    top: t.clone(),
+                    bottom: b.clone(),
+                    captures,
+                },
+                &mut state,
+            );
+            root.layout(Size::new(100.0, 60.0));
+            HoverHarness {
+                root,
+                top,
+                bottom,
+                state,
+            }
+        }
+
+        /// Dispatch a pointer event at `(x, y)` in window space.
+        fn dispatch(&mut self, phase: PointerPhase, x: f64, y: f64) -> EventOutcome {
+            let event = InputEvent::Pointer(PointerEvent {
+                phase,
+                position: Point::new(x, y),
+                button: PointerButton::Primary,
+            });
+            self.root.event(&mut self.state, &event)
+        }
+
+        /// Move the pointer over the given leaf's middle.
+        fn move_over(&mut self, leaf: Leaf) -> EventOutcome {
+            match leaf {
+                Leaf::Top => self.dispatch(PointerPhase::Move, 50.0, 15.0),
+                Leaf::Bottom => self.dispatch(PointerPhase::Move, 50.0, 45.0),
+            }
+        }
+
+        /// Paint the tree, refreshing both probes' recorded hover state.
+        fn paint(&mut self) {
+            let mut scene = RecordingScene::default();
+            self.root.paint(&mut scene, FrameTime::ZERO);
+        }
+
+        /// `(top, bottom)` hover as the last paint reported it.
+        fn painted(&mut self) -> (bool, bool) {
+            self.paint();
+            (
+                self.top.painted_hovered.get(),
+                self.bottom.painted_hovered.get(),
+            )
+        }
+    }
+
+    #[test]
+    fn an_uncaptured_move_claims_hover_and_paint_reports_it() {
+        let mut h = HoverHarness::new(false);
+        assert!(!h.root.is_hover_active(), "nothing is hovered at rest");
+        assert_eq!(h.painted(), (false, false));
+
+        let outcome = h.move_over(Leaf::Top);
+        assert!(h.root.is_hover_active(), "the claim reached the root");
+        assert!(
+            !outcome.handled,
+            "a hovering widget need not consume the move"
+        );
+        assert_eq!(
+            h.painted(),
+            (true, false),
+            "exactly the claimant reads as hovered"
+        );
+
+        // A second move within the same leaf keeps the link (the claim is
+        // re-recorded every pass) without re-reporting a change.
+        h.dispatch(PointerPhase::Move, 60.0, 20.0);
+        assert_eq!(h.painted(), (true, false));
+    }
+
+    #[test]
+    fn a_second_widgets_claim_clears_the_first_and_asks_for_a_repaint() {
+        let mut h = HoverHarness::new(false);
+        h.move_over(Leaf::Top);
+        assert_eq!(h.painted(), (true, false));
+
+        // The pointer moves onto the sibling. The container never has to clear
+        // anything: the epoch advance strands the top pod's stamp.
+        h.move_over(Leaf::Bottom);
+        assert!(h.root.is_hover_active());
+        assert_eq!(
+            h.painted(),
+            (false, true),
+            "the previous claimant lost its link when the new one recorded"
+        );
+
+        // Both widgets need a repaint, and a repaint is global — one request
+        // covers them. The *losing* side is what the root itself must guarantee:
+        // moving onto a leaf that claims nothing still repaints.
+        let outcome = h.dispatch(PointerPhase::Move, 50.0, 200.0);
+        assert!(
+            !h.root.is_hover_active(),
+            "a move claiming nothing ends the hover"
+        );
+        assert!(
+            outcome.needs_redraw,
+            "the widget that lost hover cannot ask for the repaint itself"
+        );
+        assert_eq!(h.painted(), (false, false));
+
+        // ...and the same move repeated is not a change any more.
+        let settled = h.dispatch(PointerPhase::Move, 50.0, 200.0);
+        assert!(
+            !settled.needs_redraw,
+            "an already-hoverless move requests nothing"
+        );
+    }
+
+    #[test]
+    fn a_captured_move_cannot_claim_hover() {
+        let mut h = HoverHarness::new(true);
+        // Press the top leaf: it captures, and the `Down` itself ends any hover.
+        h.dispatch(PointerPhase::Down, 50.0, 15.0);
+        assert!(h.root.is_pointer_captured());
+        assert!(!h.root.is_hover_active());
+
+        // Drag: every one of these moves routes to the captured leaf, whose `Move`
+        // arm hit-tests inside and calls `claim_hover()` — and must record nothing.
+        h.dispatch(PointerPhase::Move, 50.0, 16.0);
+        assert!(
+            !h.root.is_hover_active(),
+            "a captured pointer never creates hover"
+        );
+        assert_eq!(h.painted(), (false, false));
+
+        // Dragging outside the leaf keeps routing to it (capture), still no hover.
+        h.dispatch(PointerPhase::Move, 50.0, 45.0);
+        assert!(!h.root.is_hover_active());
+        assert_eq!(h.painted(), (false, false));
+
+        // Release, then a fresh uncaptured move: hover is claimable again.
+        h.dispatch(PointerPhase::Up, 50.0, 15.0);
+        h.move_over(Leaf::Top);
+        assert!(h.root.is_hover_active());
+        assert_eq!(h.painted(), (true, false));
+    }
+
+    #[test]
+    fn a_down_or_cancel_ends_the_hover() {
+        for ending in [PointerPhase::Down, PointerPhase::Cancel] {
+            let mut h = HoverHarness::new(false);
+            h.move_over(Leaf::Top);
+            assert!(h.root.is_hover_active());
+
+            let outcome = h.dispatch(ending, 50.0, 15.0);
+            assert!(
+                !h.root.is_hover_active(),
+                "{ending:?} ends the hover link outright"
+            );
+            assert!(
+                outcome.needs_redraw,
+                "{ending:?} that dropped a hover asks for the repaint"
+            );
+            assert_eq!(h.painted(), (false, false));
+        }
+    }
+
+    #[test]
+    fn a_non_pointer_pass_leaves_a_live_hover_standing() {
+        let mut h = HoverHarness::new(false);
+        h.move_over(Leaf::Top);
+        assert_eq!(h.painted(), (true, false));
+
+        // Neither a scroll, a key, nor the housekeeping broadcast is a hover pass:
+        // the pointer has not moved, so the link must survive them untouched.
+        h.root.event(
+            &mut h.state,
+            &InputEvent::Scroll {
+                position: Point::new(50.0, 15.0),
+                delta: crate::event::ScrollDelta::Lines(0.0, 1.0),
+            },
+        );
+        assert!(h.root.is_hover_active());
+        h.root.event(&mut h.state, &InputEvent::Housekeeping);
+        assert!(h.root.is_hover_active());
+        assert_eq!(h.painted(), (true, false));
+
+        // An `Up` is not a hover pass either (a click without moving the mouse
+        // keeps whatever the preceding `Down` left, which is nothing).
+        h.dispatch(PointerPhase::Up, 50.0, 15.0);
+        assert!(h.root.is_hover_active());
+    }
+
+    #[test]
+    fn event_ctx_hover_reports_the_previous_pass_not_this_ones_claim() {
+        let mut h = HoverHarness::new(false);
+        // First move over the top leaf: it was not hovered when its handler ran.
+        h.move_over(Leaf::Top);
+        assert!(
+            !h.top.event_hovered.get(),
+            "a fresh claim does not retroactively flip `is_hovered`"
+        );
+        // Second move over the same leaf: now it observes the link it holds.
+        h.move_over(Leaf::Top);
+        assert!(
+            h.top.event_hovered.get(),
+            "the link recorded last pass is visible to this pass's handler"
+        );
     }
 }

@@ -23,15 +23,26 @@
 //!
 //! # Live vs. aspirational states
 //!
-//! Of the four interaction states this helper models, **only `pressed` is
-//! wired by any shipping widget today** — the max-of-active-states rule above
-//! describes the full M3 design, but three of its four inputs have no live
-//! signal source yet:
+//! Of the four interaction states this helper models, **`pressed` and `hovered`
+//! are wired by a shipping widget** ([`super::list_item`], the reference
+//! consumer) — the max-of-active-states rule above describes the full M3 design,
+//! but two of its four inputs still have no live signal source:
 //!
-//! - **`hovered` — unwireable today.** `frust::authoring::PointerPhase`
-//!   has only Down/Move/Up/Cancel — no
-//!   Enter/Leave/hover phase — so no widget can detect hover without future
-//!   input-pipeline work adding one.
+//! - **`hovered` — wireable, and wired.** There is still no Enter/Leave phase
+//!   (`frust::authoring::PointerPhase` remains Down/Move/Up/Cancel), because hover
+//!   is a **claim**, not a phase: a widget calls
+//!   [`frust::authoring::EventCtx::claim_hover`] from its *uncaptured* `Move` arm
+//!   once it has hit-tested the pointer inside its own bounds, and the framework
+//!   records that claim down the pod chain. The claim is per-pass, so the pointer
+//!   moving anywhere else — including onto a widget this one never hears about —
+//!   drops the link with no leave event to deliver, which is exactly what a widget
+//!   could not do for itself before. Two rules bind a consumer:
+//!   [`frust::authoring::PaintCtx::is_hovered`] is the authoritative read (a widget
+//!   self-corrects [`StateLayer::set_hovered`] from it every paint, since the
+//!   pointer's *departure* never reaches its `event`), and a claim from a captured
+//!   pointer is refused by construction — so a drag never tints the widget under
+//!   the finger, and touch input (whose moves are gesture-captured) produces no
+//!   hover at all.
 //! - **`focused` — the focus-routing prerequisite landed** (`material::dialog`/
 //!   `sheet`, `cupertino::alert_dialog`/`action_sheet` all now call
 //!   `EventCtx::request_focus` on a `Down` and dismiss on a focus-routed
@@ -46,10 +57,11 @@
 //! - **`dragged` — unwired.** No catalog widget reports a drag into
 //!   [`StateLayer::set_dragged`] yet.
 //!
-//! The `set_hovered`/`set_focused`/`set_dragged` setters remain the stable API
-//! for when those upstream signals exist; they are deliberately kept, not
-//! dead-stripped, so a widget can adopt each state the moment its source lands
-//! without re-plumbing this helper.
+//! The `set_focused`/`set_dragged` setters remain the stable API for when those
+//! upstream signals exist; they are deliberately kept, not dead-stripped, so a
+//! widget can adopt each state the moment its source lands without re-plumbing
+//! this helper — which is what let `set_hovered` be adopted above with no change
+//! to this file's own code.
 
 use frust::authoring::{PaintCtx, PaintScene};
 use kurbo::Rect;
