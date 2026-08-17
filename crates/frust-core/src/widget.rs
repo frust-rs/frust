@@ -830,7 +830,13 @@ impl<'a> PaintCtx<'a> {
         self.presented_frames = presented;
     }
 
-    /// The widget's origin in its parent's coordinate space.
+    /// The widget's absolute origin in window-space coordinates.
+    ///
+    /// This origin is accumulated as the paint pass descends the widget tree:
+    /// [`ChildPod::paint_child`] adds the child's parent-relative `origin` to the
+    /// parent's already-absolute `ctx.origin()`, threading the result down through
+    /// nested levels. Contrast [`ChildPod::origin`], which is parent-relative and
+    /// correct as documented.
     pub fn origin(&self) -> Point {
         self.origin
     }
@@ -2738,6 +2744,68 @@ mod tests {
         assert_eq!(
             frames[0].rect,
             Rect::from_origin_size(Point::new(105.0, 207.0), Size::new(10.0, 10.0))
+        );
+    }
+
+    #[test]
+    fn paint_ctx_origin_is_absolute_through_nested_offsets() {
+        // Nest a leaf widget under two levels of offset containers: the leaf
+        // must observe the summed absolute window-space origin, not a
+        // parent-relative one. This pins the accumulation contract that external
+        // design systems (anchored overlays) depend on.
+        use std::cell::Cell;
+
+        struct OriginRecorder {
+            recorded_origin: Cell<Option<Point>>,
+        }
+
+        impl Widget for OriginRecorder {
+            fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                bc.max()
+            }
+
+            fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+                self.recorded_origin.set(Some(ctx.origin()));
+            }
+        }
+
+        let mut lctx = LayoutCtx::new();
+
+        // Inner recorder at (20, 30) relative to middle container.
+        let recorder = OriginRecorder {
+            recorded_origin: Cell::new(None),
+        };
+        let inner = ChildPod::new(Box::new(recorder));
+        let mut middle = TranslatingWrapper { child: inner };
+        middle.child.set_origin(Point::new(20.0, 30.0));
+        middle
+            .child
+            .layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+
+        // Middle container at (50, 70) relative to outer.
+        let mut outer = ChildPod::new(Box::new(middle));
+        outer.set_origin(Point::new(50.0, 70.0));
+        outer.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+
+        // Paint from root at (0, 0).
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(400.0, 400.0));
+        outer.paint_child(&mut pctx, &mut scene);
+
+        // Verify: leaf's origin must be sum of all offsets:
+        // root(0,0) + outer(50,70) + middle(20,30) = (70, 100).
+        let leaf = outer
+            .widget_mut()
+            .downcast_mut::<TranslatingWrapper>()
+            .unwrap()
+            .child
+            .widget_mut()
+            .downcast_mut::<OriginRecorder>()
+            .unwrap();
+        assert_eq!(
+            leaf.recorded_origin.get(),
+            Some(Point::new(70.0, 100.0)),
+            "leaf must observe summed absolute origin"
         );
     }
 
