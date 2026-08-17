@@ -1,6 +1,8 @@
-# `frust-glyph`: the Glyph design-system catalog plugin (production deps: frust
-# facade only + kurbo/peniko when code lands; frust-widgets via dev-dependency
-# is the sanctioned test-fixture route and ships nothing).
+# `frust-glyph`: the Glyph design-system catalog plugin (production deps: the
+# frust facade only, plus kurbo/peniko for the geometry/color vocabulary its
+# widgets paint with — the same pins frust-widgets carries. frust-widgets and
+# frust-core are dev-dependencies: the sanctioned test-fixture/RenderRoot route,
+# shipping nothing).
 [package]
 name = "frust-glyph"
 version.workspace = true
@@ -10,6 +12,13 @@ license.workspace = true
 
 [dependencies]
 frust = { path = "../../crates/frust", default-features = false }
+kurbo = { workspace = true }
+peniko = { workspace = true }
 
 [dev-dependencies]
 frust-widgets = { path = "../../crates/frust-widgets", features = ["test-support"] }
+# Test-only: the catalog's paint/event tests drive a real `RenderRoot` (which
+# the facade does not re-export), and its `test-support` feature turns on the
+# `PaintCtx::for_test` clock seam — the only sanctioned way to paint at a chosen
+# `FrameTime` (the same dev-dependency shape `frust-widgets` carries).
+frust-core = { path = "../../crates/frust-core", features = ["test-support"] }
