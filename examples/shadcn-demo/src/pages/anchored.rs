@@ -189,19 +189,13 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
             }),
         )),
         gap(),
-        // --- Context menu: left-click-only shell caveat ---
-        any(text(
-            "Context menu area below — right-click won't reach it live: \
-             the desktop shell forwards only the left mouse button today \
-             (frust-shell-desktop's app_handler.rs). The component itself \
-             is complete and driven in its own tests.",
-        )
-        .size(12.0)),
+        // --- Context menu ---
+        any(text("Context menu area below — right-click to open it.").size(12.0)),
         any(SizedBox(None, Some(4.0))),
         any(context_menu_trigger(
             &context_menu_anchor,
             frust::SizedBox::<AppState>(Some(240.0), Some(60.0))
-                .child(text("Right-click here (see caveat above)").size(13.0)),
+                .child(text("Right-click here").size(13.0)),
         )),
         gap(),
         // --- Select: grouped, disabled option, long scrolling list ---

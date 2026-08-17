@@ -497,6 +497,44 @@ fn map_scroll_delta(delta: MouseScrollDelta, scale: f64) -> ScrollDelta {
     }
 }
 
+/// Map a winit [`MouseButton`] to our [`PointerButton`] vocabulary, or `None`
+/// for a button we forward nothing for yet (Middle/Back/Forward — dropped
+/// rather than misreported, until those gestures are specced; `PointerButton`
+/// itself already models `Middle`, but nothing in this shell dispatches it
+/// yet, so it stays out of the mapping alongside the two winit variants that
+/// have no `PointerButton` counterpart at all).
+///
+/// Pulled out as a free function so the mapping stays pure and directly
+/// unit-testable, the same shape as [`map_scroll_delta`] below.
+fn map_mouse_button(button: MouseButton) -> Option<PointerButton> {
+    match button {
+        MouseButton::Left => Some(PointerButton::Primary),
+        MouseButton::Right => Some(PointerButton::Secondary),
+        _ => None,
+    }
+}
+
+/// Whether a mapped button's press/release should reach the tree at all,
+/// given whether a pointer gesture is currently captured
+/// ([`RenderRoot::is_pointer_captured`]).
+///
+/// `RenderRoot` tracks capture as a single root-level flag, not one per
+/// button, and nothing but a Primary press opens a gesture today. Routing a
+/// stray right-click through the capturing widget mid-drag would hand it a
+/// `Down`/`Up` transition it never asked for, and a Secondary `Up` would
+/// clear the flag out from under a still-live Primary gesture — capture
+/// release is phase-only, not button-checked (see `RenderRoot::event`). So
+/// the conservative call: while captured, a Secondary event is dropped
+/// outright rather than routed to the capturer. A capture can only be
+/// Primary's own today, so this never costs a real gesture — only a second
+/// button pressed mid-drag, which nothing renders feedback for anyway.
+///
+/// Pulled out as a free function so the drop decision stays pure and
+/// directly unit-testable, without a live `RenderRoot`.
+fn mouse_button_should_dispatch(button: PointerButton, pointer_captured: bool) -> bool {
+    !(button == PointerButton::Secondary && pointer_captured)
+}
+
 /// Map a winit [`WinitNamedKey`] to our editing-semantics [`NamedKey`] set,
 /// or `None` for a named key we carry no editing semantics for
 /// (function keys, media keys, etc. — those fall through to `KeyboardInput`
@@ -1457,26 +1495,29 @@ where
                 );
             }
 
-            // Primary (left) button only in v1; other buttons are ignored until
-            // secondary/middle gestures are specced. The press/release position
-            // is the last `CursorMoved` position (winit carries none on the event).
-            WindowEvent::MouseInput {
-                state,
-                button: MouseButton::Left,
-                ..
-            } => {
-                let phase = match state {
-                    ElementState::Pressed => PointerPhase::Down,
-                    ElementState::Released => PointerPhase::Up,
-                };
-                self.dispatch(
-                    &window,
-                    InputEvent::Pointer(PointerEvent {
-                        phase,
-                        position: self.cursor,
-                        button: PointerButton::Primary,
-                    }),
-                );
+            // Primary (left) and secondary (right) buttons; Middle/Back/Forward
+            // are ignored until those gestures are specced (`map_mouse_button`).
+            // The press/release position is the last `CursorMoved` position
+            // (winit carries none on the event). A captured Secondary event is
+            // dropped rather than routed to the capturer — see
+            // `mouse_button_should_dispatch` for why.
+            WindowEvent::MouseInput { state, button, .. } => {
+                if let Some(mapped_button) = map_mouse_button(button)
+                    && mouse_button_should_dispatch(mapped_button, self.root.is_pointer_captured())
+                {
+                    let phase = match state {
+                        ElementState::Pressed => PointerPhase::Down,
+                        ElementState::Released => PointerPhase::Up,
+                    };
+                    self.dispatch(
+                        &window,
+                        InputEvent::Pointer(PointerEvent {
+                            phase,
+                            position: self.cursor,
+                            button: mapped_button,
+                        }),
+                    );
+                }
             }
 
             // Both the unit and the sign conversion live in `map_scroll_delta`.
@@ -1767,18 +1808,20 @@ mod tests {
         MouseScrollDelta, NoExtensions, Tree, TreeId, WinitCursorIcon, WinitKey, WinitNamedKey,
         WinitTheme, base_theme, brightness_change_to_notify, brightness_from_winit,
         build_tree_update, cursor_change_to_apply, default_theme, finish,
-        follow_platform_brightness, ime_purpose_for, map_key_event, map_modifiers, map_named_key,
-        map_scroll_delta, physical_to_logical, theme_after_override_poll, window_attributes,
-        winit_cursor_for,
+        follow_platform_brightness, ime_purpose_for, map_key_event, map_modifiers,
+        map_mouse_button, map_named_key, map_scroll_delta, mouse_button_should_dispatch,
+        physical_to_logical, theme_after_override_poll, window_attributes, winit_cursor_for,
     };
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{Node, NodeId, Role};
     use frust_core::event::{
-        CursorIcon, ImeContentType, ImeEvent, Key, KeyEvent, Modifiers, NamedKey, ScrollDelta,
+        CursorIcon, ImeContentType, ImeEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton,
+        ScrollDelta,
     };
     use frust_theme::{Brightness, DesignLanguage, Theme};
     use kurbo::Point;
     use winit::dpi::PhysicalPosition;
+    use winit::event::MouseButton;
     use winit::keyboard::ModifiersState;
     use winit::window::{ImePurpose, WindowAttributes};
 
@@ -1840,6 +1883,61 @@ mod tests {
     fn physical_to_logical_is_identity_at_unit_scale() {
         // A non-HiDPI display: physical and logical coincide.
         assert_eq!(physical_to_logical(37.0, 12.0, 1.0), Point::new(37.0, 12.0));
+    }
+
+    // --- map_mouse_button ---
+
+    #[test]
+    fn map_mouse_button_maps_left_to_primary() {
+        assert_eq!(
+            map_mouse_button(MouseButton::Left),
+            Some(PointerButton::Primary)
+        );
+    }
+
+    #[test]
+    fn map_mouse_button_maps_right_to_secondary() {
+        assert_eq!(
+            map_mouse_button(MouseButton::Right),
+            Some(PointerButton::Secondary)
+        );
+    }
+
+    #[test]
+    fn map_mouse_button_drops_middle_back_and_forward() {
+        // `PointerButton` already models `Middle`, but nothing dispatches it
+        // yet — this shell forwards only what v1 specced.
+        assert_eq!(map_mouse_button(MouseButton::Middle), None);
+        assert_eq!(map_mouse_button(MouseButton::Back), None);
+        assert_eq!(map_mouse_button(MouseButton::Forward), None);
+    }
+
+    // --- mouse_button_should_dispatch ---
+
+    #[test]
+    fn secondary_dispatches_uncaptured() {
+        assert!(mouse_button_should_dispatch(
+            PointerButton::Secondary,
+            false
+        ));
+    }
+
+    #[test]
+    fn secondary_is_dropped_while_captured() {
+        // The pinned choice: a right-click mid-drag must not disturb the
+        // Primary capture it can never have opened.
+        assert!(!mouse_button_should_dispatch(
+            PointerButton::Secondary,
+            true
+        ));
+    }
+
+    #[test]
+    fn primary_always_dispatches_captured_or_not() {
+        // Primary is the only button that can hold the capture today, so its
+        // own `Down`/`Up`/`Move` must never be the one this gate drops.
+        assert!(mouse_button_should_dispatch(PointerButton::Primary, false));
+        assert!(mouse_button_should_dispatch(PointerButton::Primary, true));
     }
 
     // --- map_scroll_delta ---
@@ -2598,7 +2696,7 @@ mod tests {
 
     use std::sync::Arc;
 
-    use frust_core::event::{EventCtx, EventResult, PointerButton, PointerEvent, PointerPhase};
+    use frust_core::event::{EventCtx, EventResult, PointerEvent, PointerPhase};
     use frust_core::layout::BoxConstraints;
     use frust_core::view::BuildCtx;
     use frust_core::widget::{LayoutCtx, PaintCtx, Widget};
