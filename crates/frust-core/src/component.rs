@@ -323,6 +323,11 @@ impl<C: Component> Widget for ComponentWidget<C> {
         let hovered = ctx.is_hovered();
         let hover_epoch = ctx.hover_epoch();
         let hover_eligible = ctx.is_hover_eligible();
+        // A cursor request needs no threading here at all, unlike every other
+        // channel this carrier mirrors: it rides one pass-scoped slot rather than a
+        // per-context field (see `crate::event`'s `CURSOR_REQUEST`), so a
+        // `set_cursor` below this boundary already reaches the root, and the
+        // component boundary is transparent to it by construction.
         let (result, needs_redraw, captured, hover_claimed, focus_req, focus_rel, ime) = {
             let state_any: &mut dyn Any = &mut self.state;
             let mut inner = EventCtx::new(state_any, Point::ZERO, size);
@@ -429,7 +434,8 @@ fn is_pointer_down(event: &InputEvent) -> bool {
 mod tests {
     use super::*;
     use crate::event::{
-        EditingState, ImeState, Key, KeyEvent, Modifiers, NamedKey, PointerButton, PointerEvent,
+        CursorIcon, EditingState, ImeState, Key, KeyEvent, Modifiers, NamedKey, PointerButton,
+        PointerEvent, clear_cursor_request, take_cursor_request,
     };
     use crate::view::any;
     use kurbo::Rect;
@@ -981,6 +987,73 @@ mod tests {
             "Cancel cleared pressed across the boundary"
         );
         assert!(!widget.child.is_active(), "Cancel released the capture");
+    }
+
+    // A leaf that asks for a cursor on every `Move` — the canonical request shape.
+    struct CursorLeafWidget;
+    impl Widget for CursorLeafWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(40.0, 40.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if let InputEvent::Pointer(p) = event
+                && p.phase == PointerPhase::Move
+            {
+                ctx.set_cursor(CursorIcon::Text);
+            }
+            EventResult::Ignored
+        }
+    }
+    struct CursorLeafView;
+    impl View<()> for CursorLeafView {
+        type Element = CursorLeafWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> CursorLeafWidget {
+            CursorLeafWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut CursorLeafWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+    struct CursorComp;
+    impl Component for CursorComp {
+        type State = ();
+        fn init(&self) {}
+        fn build(&self, _state: &mut ()) -> AnyView<()> {
+            any(CursorLeafView)
+        }
+    }
+
+    /// The component boundary is transparent to a cursor request with no mirroring
+    /// code at all — the request rides one pass-scoped slot rather than a
+    /// per-context field, so a refactor that turned it into a field (and forgot
+    /// this carrier, as every other channel here has to be threaded) would drop it.
+    #[test]
+    fn a_cursor_request_crosses_the_component_boundary() {
+        let _owner = ambient();
+        let view = component(CursorComp);
+        let mut widget = build_widget::<(), _>(&view);
+        let mut lctx = LayoutCtx::new();
+        widget.layout(&mut lctx, &BoxConstraints::tight(Size::new(40.0, 40.0)));
+
+        // `RenderRoot::event` clears the slot per pass; this test drives the widget
+        // directly, so it does the same before asserting on what the pass left.
+        clear_cursor_request();
+        let mut outer = ();
+        {
+            let mut ectx = EventCtx::new(&mut outer, Point::ZERO, Size::new(40.0, 40.0));
+            widget.event(&mut ectx, &pointer(PointerPhase::Move, 5.0, 5.0));
+        }
+        assert_eq!(
+            take_cursor_request(),
+            Some(CursorIcon::Text),
+            "a request from below the component boundary reaches the root"
+        );
     }
 
     // A focus + IME publishing leaf: focuses on a left-half Down and publishes

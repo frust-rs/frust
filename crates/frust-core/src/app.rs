@@ -21,8 +21,8 @@ use kurbo::{Point, Rect, Size};
 
 use crate::anim::FrameTime;
 use crate::event::{
-    EventCtx, EventOutcome, EventResult, ImeState, InputEvent, PointerButton, PointerEvent,
-    PointerPhase,
+    CursorIcon, EventCtx, EventOutcome, EventResult, ImeState, InputEvent, PointerButton,
+    PointerEvent, PointerPhase, clear_cursor_request, take_cursor_request,
 };
 use crate::insets::WindowInsets;
 use crate::layout::BoxConstraints;
@@ -259,6 +259,21 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// epoch past it means a never-claimed pod cannot match the live epoch by
     /// accident before the first hover pass ever runs.
     hover_epoch: u64,
+    /// The cursor the last cursor pass resolved — hover's sibling channel, and
+    /// the value a desktop shell reads through [`RenderRoot::cursor`].
+    ///
+    /// Deliberately **not** derived from `hover_active`: that mirror is
+    /// identity-free (it knows *that* something is hovered, not which widget or
+    /// what shape it wants), so a request travels its own pass-scoped slot
+    /// ([`EventCtx::set_cursor`]) and is resolved here.
+    ///
+    /// Re-resolved on every pointer [`PointerPhase::Move`], captured or not:
+    /// whatever the pass requested, or [`CursorIcon::Default`] when it requested
+    /// nothing. Every other pass leaves it standing — see [`RenderRoot::event`]
+    /// for why a `Down`/`Up` must not reset it. There is no generation counter
+    /// beside it: the shell compares the value it last applied (see
+    /// [`RenderRoot::cursor`]).
+    cursor: CursorIcon,
     /// The IME surface the focused widget last published (via
     /// [`EventCtx::publish_ime_state`]), surfaced to the shell by
     /// [`RenderRoot::ime_state`]. Persists across rebuilds/events until refreshed
@@ -392,6 +407,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             hover_active: false,
             // Past a fresh pod's `0` stamp — see the field doc.
             hover_epoch: 1,
+            cursor: CursorIcon::Default,
             ime_state: None,
             focus_ime_gen: 0,
             platform_view_frames: Vec::new(),
@@ -549,6 +565,32 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// widgets never call [`EventCtx::claim_hover`](crate::event::EventCtx::claim_hover).
     pub fn is_hover_active(&self) -> bool {
         self.hover_active
+    }
+
+    /// The cursor the tree last asked the host to show — what a desktop shell
+    /// pushes to its window (`frust-shell-desktop` maps it onto winit's own
+    /// cursor icons).
+    ///
+    /// A **level** accessor like [`RenderRoot::is_hover_active`], not an edge one:
+    /// the value re-resolves on every pointer [`PointerPhase::Move`] and stands
+    /// unchanged through every other pass, so a shell caches what it last applied
+    /// and calls the platform only when this differs. There is deliberately no
+    /// generation counter — a cursor is a *value*, not a session, and an unmoved
+    /// cursor is indistinguishable from one re-resolved to the same shape.
+    ///
+    /// [`CursorIcon::Default`] before the first `Move`, and after any `Move` in
+    /// which no widget called
+    /// [`EventCtx::set_cursor`](crate::event::EventCtx::set_cursor) — so a
+    /// touch-only app, and any app whose widgets never request a cursor, reads
+    /// `Default` forever and the mobile shells simply never read this at all.
+    ///
+    /// **Residual:** a widget that is torn down (or moves out from under a
+    /// stationary pointer) while its request stands leaves the last shape in
+    /// place until the next `Move` re-resolves it — the same self-correction
+    /// window hover has, and for the same reason: nothing re-resolves without
+    /// pointer motion.
+    pub fn cursor(&self) -> CursorIcon {
+        self.cursor
     }
 
     /// The IME surface the focused widget published, for the shell to drive the
@@ -1245,6 +1287,15 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// dispatches a `Move` on every cursor move, and the mobile shells only ever
     /// produce mid-gesture (hence captured, hence ineligible) moves.
     ///
+    /// The cursor is hover's sibling channel and the fourth thing this pass
+    /// resolves: any pointer `Move` (captured included) re-resolves
+    /// [`RenderRoot::cursor`] from the pass's last
+    /// [`EventCtx::set_cursor`](crate::event::EventCtx::set_cursor), defaulting to
+    /// [`CursorIcon::Default`] when nothing asked. It deliberately does **not**
+    /// fold into the outcome's `needs_redraw`: applying a cursor is a platform
+    /// call a desktop shell makes straight after this pass returns, with no frame
+    /// involved, and folding it in would repaint the tree on every hover move.
+    ///
     /// # Reentrancy
     ///
     /// This pass **never rebuilds or repaints**. Event handlers mutate `state`
@@ -1280,6 +1331,20 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         );
         let hover_epoch = self.hover_epoch;
         let hover_was_active = self.hover_active;
+
+        // The cursor pass is hover's pass widened by one case: **any** pointer
+        // `Move`, captured included, because a captured `Move` routes only to the
+        // capturing widget and that is exactly how a drag keeps its own cursor
+        // while the pointer is outside its bounds. Every other pass leaves the
+        // resolved cursor standing — notably `Down`/`Up`, whose handlers have no
+        // reason to restate a cursor and whose reset would blink the shape back to
+        // `Default` for the length of a click.
+        //
+        // The slot is cleared here rather than trusted to be empty: a `set_cursor`
+        // from a dispatch no root drove (a reconciler's synthesized `Cancel`)
+        // must not leak into this pass's resolution.
+        let cursor_pass = matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Move);
+        clear_cursor_request();
 
         let (handled, needs_redraw, captured, hover_claimed, focus_req, focus_rel, ime) = {
             let state_any: &mut dyn Any = state;
@@ -1396,6 +1461,17 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         if hover_pass || hover_ends {
             self.hover_epoch = self.hover_epoch.wrapping_add(1);
             self.hover_active = hover_pass && hover_claimed;
+        }
+
+        // Close the cursor pass: the last request of the pass wins, and its
+        // absence resolves to `Default` — which is what makes the request
+        // stateless (a widget that stops asking needs no clearing) and what a
+        // pointer moving off every requesting widget resolves to. Drained
+        // unconditionally so a request made on a non-cursor pass cannot survive
+        // into the next one; only a cursor pass commits it.
+        let requested = take_cursor_request();
+        if cursor_pass {
+            self.cursor = requested.unwrap_or_default();
         }
         // A hover that *ended* needs one repaint the widget losing it cannot ask
         // for: the pointer moved onto something else (or a press/cancel cleared the
@@ -4458,5 +4534,340 @@ mod tests {
             h.top.event_hovered.get(),
             "the link recorded last pass is visible to this pass's handler"
         );
+    }
+
+    // --- Cursor: the per-pass request channel ---------------------------------
+    //
+    // The cursor is hover's sibling and is deliberately not derived from it (the
+    // root's hover mirror is identity-free), so it gets its own fixture: two
+    // leaves that ask for different shapes, a container that can speak before or
+    // after routing (the last-writer case), and a capture fast-path (the drag
+    // case, where the shape must survive the pointer leaving the widget).
+
+    /// How the cursor fixture's container speaks relative to its children.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ContainerCursor {
+        /// Says nothing at all — the ordinary container.
+        Silent,
+        /// Asks *before* routing, so whatever the child asks for comes later.
+        BeforeRouting(CursorIcon),
+        /// Asks *after* routing, deliberately overriding its child.
+        AfterRouting(CursorIcon),
+    }
+
+    /// A leaf that asks for one cursor while the pointer is over it and another
+    /// while it holds the capture — the two shapes a real draggable control wants.
+    struct CursorLeaf {
+        hover_icon: Option<CursorIcon>,
+        drag_icon: Option<CursorIcon>,
+        captures: bool,
+        captured: bool,
+    }
+
+    impl crate::widget::Widget for CursorLeaf {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(100.0, 30.0))
+        }
+        // A cursor is resolved entirely in the event pass — this fixture never
+        // paints, unlike the hover one (whose authoritative read is at paint time).
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            let InputEvent::Pointer(p) = event else {
+                return EventResult::Ignored;
+            };
+            match p.phase {
+                PointerPhase::Move => {
+                    if self.captured {
+                        // The captured pass belongs to this widget wherever the
+                        // pointer has gone — re-asking here is what keeps the drag
+                        // shape alive outside its own bounds.
+                        if let Some(icon) = self.drag_icon {
+                            ctx.set_cursor(icon);
+                        }
+                        return EventResult::Handled;
+                    }
+                    let size = ctx.size();
+                    let inside = p.position.x >= 0.0
+                        && p.position.y >= 0.0
+                        && p.position.x < size.width
+                        && p.position.y < size.height;
+                    if inside && let Some(icon) = self.hover_icon {
+                        ctx.set_cursor(icon);
+                    }
+                    EventResult::Ignored
+                }
+                PointerPhase::Down => {
+                    if self.captures {
+                        ctx.capture_pointer();
+                        self.captured = true;
+                    }
+                    EventResult::Handled
+                }
+                PointerPhase::Up | PointerPhase::Cancel => {
+                    self.captured = false;
+                    EventResult::Ignored
+                }
+            }
+        }
+    }
+
+    /// Two stacked cursor leaves routed exactly like [`HoverPair`], plus the
+    /// container's own optional request.
+    struct CursorPair {
+        top: crate::widget::ChildPod,
+        bottom: crate::widget::ChildPod,
+        own: ContainerCursor,
+    }
+
+    impl crate::widget::Widget for CursorPair {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.top.layout_child(ctx, bc);
+            self.top.set_origin(Point::ZERO);
+            self.bottom.layout_child(ctx, bc);
+            self.bottom.set_origin(Point::new(0.0, 30.0));
+            bc.max()
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if let ContainerCursor::BeforeRouting(icon) = self.own {
+                ctx.set_cursor(icon);
+            }
+            let result = self.route(ctx, event);
+            if let ContainerCursor::AfterRouting(icon) = self.own {
+                ctx.set_cursor(icon);
+            }
+            result
+        }
+    }
+
+    impl CursorPair {
+        /// The capture-first, then hit-test routing every real container does.
+        fn route(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            let releases = matches!(
+                event,
+                InputEvent::Pointer(p)
+                    if matches!(p.phase, PointerPhase::Up | PointerPhase::Cancel)
+            );
+            for pod in [&mut self.top, &mut self.bottom] {
+                if pod.is_active() {
+                    let r = pod.event_child(ctx, event);
+                    if releases {
+                        pod.set_active(false);
+                    }
+                    return r;
+                }
+            }
+            let pos = event.position();
+            for pod in [&mut self.top, &mut self.bottom] {
+                if pod.contains(pos) {
+                    return pod.event_child(ctx, event);
+                }
+            }
+            EventResult::Ignored
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct CursorPairView {
+        own: ContainerCursor,
+        captures: bool,
+    }
+
+    impl View<()> for CursorPairView {
+        type Element = CursorPair;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> CursorPair {
+            CursorPair {
+                top: crate::widget::ChildPod::new(Box::new(CursorLeaf {
+                    hover_icon: Some(CursorIcon::Pointer),
+                    drag_icon: Some(CursorIcon::Grabbing),
+                    captures: self.captures,
+                    captured: false,
+                })),
+                bottom: crate::widget::ChildPod::new(Box::new(CursorLeaf {
+                    hover_icon: Some(CursorIcon::Text),
+                    drag_icon: None,
+                    captures: false,
+                    captured: false,
+                })),
+                own: self.own,
+            }
+        }
+        fn rebuild(&self, _p: &Self, _e: &mut CursorPair, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    /// A `RenderRoot` over the cursor fixture.
+    struct CursorHarness {
+        root: RenderRoot<(), CursorPairView>,
+        state: (),
+    }
+
+    impl CursorHarness {
+        fn new(own: ContainerCursor, captures: bool) -> Self {
+            let mut root: RenderRoot<(), CursorPairView> = RenderRoot::new();
+            let mut state = ();
+            root.rebuild(
+                &mut move |_: &mut ()| CursorPairView { own, captures },
+                &mut state,
+            );
+            root.layout(Size::new(100.0, 60.0));
+            CursorHarness { root, state }
+        }
+
+        fn dispatch(&mut self, phase: PointerPhase, x: f64, y: f64) -> EventOutcome {
+            let event = InputEvent::Pointer(PointerEvent {
+                phase,
+                position: Point::new(x, y),
+                button: PointerButton::Primary,
+            });
+            self.root.event(&mut self.state, &event)
+        }
+
+        fn move_over(&mut self, leaf: Leaf) {
+            match leaf {
+                Leaf::Top => self.dispatch(PointerPhase::Move, 50.0, 15.0),
+                Leaf::Bottom => self.dispatch(PointerPhase::Move, 50.0, 45.0),
+            };
+        }
+
+        fn cursor(&self) -> CursorIcon {
+            self.root.cursor()
+        }
+    }
+
+    #[test]
+    fn a_move_resolves_the_requested_cursor_and_absence_resolves_default() {
+        let mut h = CursorHarness::new(ContainerCursor::Silent, false);
+        assert_eq!(
+            h.cursor(),
+            CursorIcon::Default,
+            "nothing has asked for anything yet"
+        );
+
+        h.move_over(Leaf::Top);
+        assert_eq!(
+            h.cursor(),
+            CursorIcon::Pointer,
+            "the request reached the root"
+        );
+
+        // Moving onto the sibling re-resolves to *its* shape with nothing cleared:
+        // the pass simply has a different last writer.
+        h.move_over(Leaf::Bottom);
+        assert_eq!(h.cursor(), CursorIcon::Text);
+
+        // Moving off both: the next pass has no writer at all, and absence is the
+        // default rather than a stale value — the whole point of a stateless
+        // request.
+        h.dispatch(PointerPhase::Move, 50.0, 200.0);
+        assert_eq!(
+            h.cursor(),
+            CursorIcon::Default,
+            "a widget that stops asking falls back with nothing to clear"
+        );
+    }
+
+    #[test]
+    fn a_cursor_change_does_not_ask_for_a_repaint() {
+        // Applying a cursor is a platform call the shell makes after the pass, with
+        // no frame involved; folding it into `needs_redraw` would repaint the whole
+        // tree on every hover move.
+        let mut h = CursorHarness::new(ContainerCursor::Silent, false);
+        let outcome = h.dispatch(PointerPhase::Move, 50.0, 15.0);
+        assert_eq!(h.cursor(), CursorIcon::Pointer);
+        assert!(
+            !outcome.needs_redraw,
+            "a cursor request alone never schedules a frame"
+        );
+    }
+
+    #[test]
+    fn the_last_writer_on_the_routed_path_wins() {
+        // A container that asks before routing loses to its child: the child's
+        // handler runs later in the same pass, which is what makes a specific
+        // control override the generic surface behind it.
+        let mut h =
+            CursorHarness::new(ContainerCursor::BeforeRouting(CursorIcon::ColResize), false);
+        h.move_over(Leaf::Top);
+        assert_eq!(
+            h.cursor(),
+            CursorIcon::Pointer,
+            "the innermost widget the route reached spoke last"
+        );
+
+        // ...and the container's own request still resolves where no child asks
+        // (moving off both leaves leaves the container as the only writer).
+        h.dispatch(PointerPhase::Move, 50.0, 200.0);
+        assert_eq!(h.cursor(), CursorIcon::ColResize);
+
+        // The deliberate override is the mirror case: asking *after* routing beats
+        // the child.
+        let mut h =
+            CursorHarness::new(ContainerCursor::AfterRouting(CursorIcon::NotAllowed), false);
+        h.move_over(Leaf::Top);
+        assert_eq!(
+            h.cursor(),
+            CursorIcon::NotAllowed,
+            "a container overriding its children asks after routing"
+        );
+    }
+
+    #[test]
+    fn only_a_pointer_move_re_resolves_the_cursor() {
+        let mut h = CursorHarness::new(ContainerCursor::Silent, false);
+        h.move_over(Leaf::Top);
+        assert_eq!(h.cursor(), CursorIcon::Pointer);
+
+        // A press/release says nothing about the cursor, and must not blink it back
+        // to `Default` for the duration of a click.
+        h.dispatch(PointerPhase::Down, 50.0, 15.0);
+        assert_eq!(h.cursor(), CursorIcon::Pointer, "a Down leaves it standing");
+        h.dispatch(PointerPhase::Up, 50.0, 15.0);
+        assert_eq!(h.cursor(), CursorIcon::Pointer, "an Up leaves it standing");
+
+        // Neither does a scroll, a key, or the housekeeping broadcast.
+        h.root.event(
+            &mut h.state,
+            &InputEvent::Scroll {
+                position: Point::new(50.0, 15.0),
+                delta: crate::event::ScrollDelta::Lines(0.0, 1.0),
+            },
+        );
+        assert_eq!(h.cursor(), CursorIcon::Pointer);
+        h.root.event(&mut h.state, &InputEvent::Housekeeping);
+        assert_eq!(h.cursor(), CursorIcon::Pointer);
+    }
+
+    #[test]
+    fn a_captured_drag_keeps_the_capturing_widgets_cursor() {
+        let mut h = CursorHarness::new(ContainerCursor::Silent, true);
+        h.move_over(Leaf::Top);
+        assert_eq!(h.cursor(), CursorIcon::Pointer);
+
+        // Press the top leaf: it captures. The `Down` itself resolves nothing.
+        h.dispatch(PointerPhase::Down, 50.0, 15.0);
+        assert!(h.root.is_pointer_captured());
+        assert_eq!(h.cursor(), CursorIcon::Pointer);
+
+        // Drag inside, then well outside its own bounds and over the sibling: every
+        // one of these moves routes to the captured leaf alone, so its drag shape is
+        // the only request in the pass — the sibling's `Text` never gets a say.
+        h.dispatch(PointerPhase::Move, 50.0, 16.0);
+        assert_eq!(h.cursor(), CursorIcon::Grabbing);
+        h.dispatch(PointerPhase::Move, 50.0, 45.0);
+        assert_eq!(
+            h.cursor(),
+            CursorIcon::Grabbing,
+            "a captured drag keeps its own cursor outside its bounds"
+        );
+        h.dispatch(PointerPhase::Move, 50.0, 500.0);
+        assert_eq!(h.cursor(), CursorIcon::Grabbing);
+
+        // Release, then a fresh uncaptured move: the ordinary hit-tested resolution
+        // is back, and the drag shape is gone with nothing cleared.
+        h.dispatch(PointerPhase::Up, 50.0, 45.0);
+        h.move_over(Leaf::Bottom);
+        assert_eq!(h.cursor(), CursorIcon::Text);
     }
 }

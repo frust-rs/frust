@@ -40,8 +40,8 @@ use frust_core::RenderRoot;
 use frust_core::SemanticsUpdate;
 use frust_core::accesskit::{Tree, TreeId, TreeUpdate};
 use frust_core::event::{
-    EventOutcome, ImeContentType, ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey,
-    PointerButton, PointerEvent, PointerPhase, ScrollDelta,
+    CursorIcon, EventOutcome, ImeContentType, ImeEvent, InputEvent, Key, KeyEvent, Modifiers,
+    NamedKey, PointerButton, PointerEvent, PointerPhase, ScrollDelta,
 };
 use frust_core::insets::WindowInsets;
 use frust_core::view::View;
@@ -61,7 +61,10 @@ use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey as WinitNamedKey};
-use winit::window::{ImePurpose, Theme as WinitTheme, Window, WindowAttributes, WindowId};
+use winit::window::{
+    CursorIcon as WinitCursorIcon, ImePurpose, Theme as WinitTheme, Window, WindowAttributes,
+    WindowId,
+};
 
 use crate::config::DesktopConfig;
 use crate::extensions::{CloseAction, DesktopExtensions, NoExtensions};
@@ -257,6 +260,7 @@ where
         modifiers: Modifiers::default(),
         compose: ComposeLatch::default(),
         ime_sync: ImeSync::default(),
+        cursor_icon: CursorIcon::Default,
         window: None,
         accesskit_proxy,
         adapter: None,
@@ -634,6 +638,44 @@ fn ime_purpose_for(content_type: ImeContentType) -> ImePurpose {
     }
 }
 
+/// Map a resolved framework [`CursorIcon`] onto winit's own cursor vocabulary.
+///
+/// The single place in the framework where a cursor name touches a platform:
+/// core carries the request platform-neutrally (see
+/// [`frust_core::event::EventCtx::set_cursor`]) and this is the desktop
+/// translation. Every framework variant has an exact winit counterpart in the
+/// pinned `winit 0.30.13` (which sources its icons from `cursor-icon`, whose
+/// names follow CSS), so nothing here approximates.
+///
+/// The wildcard arm is not dead code: [`CursorIcon`] is `#[non_exhaustive]`, so a
+/// variant added later must compile here and *degrade* to the platform arrow
+/// rather than break the build or invent a shape.
+fn winit_cursor_for(icon: CursorIcon) -> WinitCursorIcon {
+    match icon {
+        CursorIcon::Default => WinitCursorIcon::Default,
+        CursorIcon::Pointer => WinitCursorIcon::Pointer,
+        CursorIcon::Text => WinitCursorIcon::Text,
+        CursorIcon::Grab => WinitCursorIcon::Grab,
+        CursorIcon::Grabbing => WinitCursorIcon::Grabbing,
+        CursorIcon::ColResize => WinitCursorIcon::ColResize,
+        CursorIcon::RowResize => WinitCursorIcon::RowResize,
+        CursorIcon::NotAllowed => WinitCursorIcon::NotAllowed,
+        _ => WinitCursorIcon::Default,
+    }
+}
+
+/// The winit cursor (if any) to push, given the shape last pushed and the one
+/// [`RenderRoot::cursor`] now resolves to.
+///
+/// `None` means "say nothing to winit": the resolved cursor re-resolves on every
+/// pointer `Move`, so an unguarded `set_cursor` would fire a platform call on
+/// every mouse motion for a value that had not moved. Split out as a free
+/// function for [`brightness_change_to_notify`]'s reason — the change decision is
+/// then unit-testable without a live window.
+fn cursor_change_to_apply(last: CursorIcon, current: CursorIcon) -> Option<WinitCursorIcon> {
+    (last != current).then(|| winit_cursor_for(current))
+}
+
 /// Cached view of what we last told winit about the platform IME, so
 /// [`ShellHandler::sync_ime`] only calls
 /// `set_ime_allowed`/`set_ime_cursor_area`/`set_ime_purpose` on an actual
@@ -700,6 +742,13 @@ struct ShellHandler<State: 'static, Logic, V: View<State>, E> {
     /// `set_ime_cursor_area`), so [`ShellHandler::sync_ime`] only calls them on
     /// an actual change.
     ime_sync: ImeSync,
+    /// The cursor shape last pushed to winit via `Window::set_cursor` — the change
+    /// gate behind [`ShellHandler::sync_cursor`]. Seeded with
+    /// [`CursorIcon::Default`], which is the shape a fresh window already has, so
+    /// the first push happens only when a widget actually asks for something else.
+    /// Named apart from `cursor` above deliberately: that one is the pointer's
+    /// *position*, this one its *shape*.
+    cursor_icon: CursorIcon,
     /// Created lazily in `resumed()` (macOS requires window creation there).
     window: Option<Arc<Window>>,
     /// A clone of the wake proxy handed to the `accesskit_winit` [`Adapter`] at
@@ -816,8 +865,31 @@ where
     fn dispatch(&mut self, window: &Window, event: InputEvent) {
         let outcome = event_under_owner(self.runtime, &mut self.root, &mut self.state, &event);
         self.sync_ime(window);
+        self.sync_cursor(window);
         if outcome.needs_redraw {
             window.request_redraw();
+        }
+    }
+
+    /// Push the cursor shape [`RenderRoot::cursor`] resolved to winit, but only
+    /// when it differs from the last one pushed.
+    ///
+    /// Called from [`ShellHandler::dispatch`] beside
+    /// [`sync_ime`](ShellHandler::sync_ime), and for the same reason: the shape can
+    /// move as a side effect of any event, not just a pointer one, since a handler
+    /// on any pass can change what the *next* `Move` resolves. It is deliberately
+    /// **not** tied to a frame — a cursor is a window property, not something
+    /// painted, so a hover that changes nothing but the shape costs one platform
+    /// call and no repaint.
+    ///
+    /// The change gate ([`cursor_change_to_apply`]) is load-bearing rather than
+    /// cosmetic: the resolved cursor re-resolves on every pointer `Move`, so an
+    /// unguarded push would call into the platform on every single mouse motion.
+    fn sync_cursor(&mut self, window: &Window) {
+        let resolved = self.root.cursor();
+        if let Some(winit_icon) = cursor_change_to_apply(self.cursor_icon, resolved) {
+            window.set_cursor(winit_icon);
+            self.cursor_icon = resolved;
         }
     }
 
@@ -1657,14 +1729,17 @@ where
 mod tests {
     use super::{
         ComposeLatch, DesktopConfig, DesktopExtensions, ElementState, Ime, ImeSync, NoExtensions,
-        Tree, TreeId, WinitKey, WinitNamedKey, WinitTheme, base_theme, brightness_change_to_notify,
-        brightness_from_winit, build_tree_update, default_theme, finish,
-        follow_platform_brightness, ime_purpose_for, map_key_event, map_modifiers, map_named_key,
-        physical_to_logical, theme_after_override_poll, window_attributes,
+        Tree, TreeId, WinitCursorIcon, WinitKey, WinitNamedKey, WinitTheme, base_theme,
+        brightness_change_to_notify, brightness_from_winit, build_tree_update,
+        cursor_change_to_apply, default_theme, finish, follow_platform_brightness, ime_purpose_for,
+        map_key_event, map_modifiers, map_named_key, physical_to_logical,
+        theme_after_override_poll, window_attributes, winit_cursor_for,
     };
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{Node, NodeId, Role};
-    use frust_core::event::{ImeContentType, ImeEvent, Key, KeyEvent, Modifiers, NamedKey};
+    use frust_core::event::{
+        CursorIcon, ImeContentType, ImeEvent, Key, KeyEvent, Modifiers, NamedKey,
+    };
     use frust_theme::{Brightness, DesignLanguage, Theme};
     use kurbo::Point;
     use winit::keyboard::ModifiersState;
@@ -2045,6 +2120,60 @@ mod tests {
     #[test]
     fn ime_sync_defaults_to_the_normal_purpose() {
         assert_eq!(ImeSync::default().purpose, ImePurpose::Normal);
+    }
+
+    // --- cursor: framework request -> winit shape, and the change gate ---
+    //
+    // The mapping is exhaustive over the framework's own vocabulary and the gate
+    // is what keeps `Window::set_cursor` off the per-mouse-motion path; both are
+    // pure, so neither needs a live window.
+
+    #[test]
+    fn every_framework_cursor_maps_to_its_winit_counterpart() {
+        for (ours, theirs) in [
+            (CursorIcon::Default, WinitCursorIcon::Default),
+            (CursorIcon::Pointer, WinitCursorIcon::Pointer),
+            (CursorIcon::Text, WinitCursorIcon::Text),
+            (CursorIcon::Grab, WinitCursorIcon::Grab),
+            (CursorIcon::Grabbing, WinitCursorIcon::Grabbing),
+            (CursorIcon::ColResize, WinitCursorIcon::ColResize),
+            (CursorIcon::RowResize, WinitCursorIcon::RowResize),
+            (CursorIcon::NotAllowed, WinitCursorIcon::NotAllowed),
+        ] {
+            assert_eq!(
+                winit_cursor_for(ours),
+                theirs,
+                "{ours:?} must reach the platform as {theirs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_cursor_is_pushed_to_winit_only_on_a_change() {
+        // A resolved cursor that has not moved says nothing to the platform — the
+        // resolution re-runs on every pointer `Move`, so this gate is what stops a
+        // platform call per mouse motion.
+        assert_eq!(
+            cursor_change_to_apply(CursorIcon::Default, CursorIcon::Default),
+            None,
+            "an unmoved cursor issues no winit call"
+        );
+        assert_eq!(
+            cursor_change_to_apply(CursorIcon::Pointer, CursorIcon::Pointer),
+            None
+        );
+
+        // Both directions of a real change fire, including the return to Default —
+        // a widget releasing its request must actually restore the arrow.
+        assert_eq!(
+            cursor_change_to_apply(CursorIcon::Default, CursorIcon::Pointer),
+            Some(WinitCursorIcon::Pointer)
+        );
+        assert_eq!(
+            cursor_change_to_apply(CursorIcon::Pointer, CursorIcon::Default),
+            Some(WinitCursorIcon::Default),
+            "dropping a request restores the platform arrow"
+        );
     }
 
     // --- build_tree_update ---

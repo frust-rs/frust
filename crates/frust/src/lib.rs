@@ -386,12 +386,20 @@ pub use frust_widgets::motion;
 /// ```
 pub mod authoring {
     // tier 1 — the trait vocabulary (frust-core)
+    /// The cursor vocabulary a widget requests through
+    /// [`EventCtx::set_cursor`](frust_core::event::EventCtx::set_cursor) — lifted
+    /// so a design system's own controls can name a shape (`Pointer` on a button,
+    /// `Text` over an editable, `Grabbing` on a live drag) without a direct
+    /// `frust-core` dependency. Also re-exported flat as
+    /// [`frust::CursorIcon`](crate::CursorIcon).
+    pub use frust_core::CursorIcon;
     pub use frust_core::{
         AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventOutcome,
         EventResult, HeroDirective, HeroFrames, InputEvent, Key, KeyEvent, LayoutCtx, Modifiers,
         NamedKey, PaintCtx, PaintOutcome, PaintScene, PointerButton, PointerEvent, PointerPhase,
         ScrollDelta, SemanticsCtx, SemanticsUpdate, TickClass, View, Widget, WidgetId, any,
     };
+
     /// The event-pass/IME-surface `EditingState` — see this module's own docs
     /// for the split against [`text::EditingState`](self::text::EditingState),
     /// `frust_text::editor`'s distinct, byte-indexed type. `ImeContentType` is
@@ -831,6 +839,22 @@ pub use frust_core::anim::{
 /// plain value (not an `RwSignal`); see [`WindowMetrics`]'s own doc for the
 /// derived-[`Orientation`] and rebuild-cost notes.
 pub use frust_core::{Orientation, WindowMetrics};
+
+/// The pointer-cursor vocabulary, flat-re-exported from `frust-core::event` (and
+/// also available through [`authoring::CursorIcon`]).
+///
+/// A widget asks for a shape from its own pointer handling —
+/// `ctx.set_cursor(CursorIcon::Pointer)` — and the desktop shell applies whatever
+/// the pass resolved; the request is per-pass and stateless, so a widget that
+/// stops asking falls back to [`CursorIcon::Default`] with nothing to clear. Lifted
+/// flat rather than left inside [`authoring`] because a design-system plugin's
+/// public builder API can *name* a cursor (a `Button::cursor(..)` override, a
+/// disabled control asking for [`CursorIcon::NotAllowed`]) without being a widget
+/// author itself. `#[non_exhaustive]`: match with a wildcard arm.
+///
+/// Honoured on desktop only — the mobile shells never read the resolved value, so
+/// setting a cursor unconditionally is safe on every platform.
+pub use frust_core::CursorIcon;
 
 /// Pure input/gesture helpers (slop constants, [`input::VelocityTracker`], the
 /// fling-decay math) re-exported for app authors and advanced widgets.
@@ -1878,6 +1902,53 @@ mod glass_reexport {
             .build();
         assert!(!theme.glass.control.is_opaque());
         assert_ne!(theme.glass, GlassScale::opaque_material());
+    }
+}
+
+/// Facade-level check that the pointer-cursor vocabulary ([`CursorIcon`])
+/// re-exports through the `frust` facade — flat *and* through
+/// [`authoring`](crate::authoring), since a design-system plugin reaches for it
+/// from both sides (its public builder API names a shape; its widget internals
+/// request one).
+#[cfg(test)]
+mod cursor_icon_reexport {
+    use crate::CursorIcon;
+
+    // A build-time proof the type name-resolves through the facade, flat and
+    // through the authoring seam, and that the two are the same type.
+    #[allow(dead_code)]
+    fn _uses_both(flat: CursorIcon, nested: crate::authoring::CursorIcon) {
+        let _same: CursorIcon = nested;
+        let _also: crate::authoring::CursorIcon = flat;
+    }
+
+    #[test]
+    fn the_cursor_vocabulary_resolves_through_the_facade() {
+        // Every shape a desktop-class design system needs is nameable from
+        // `frust::` alone — no `frust-core` dependency — and `Default` is what an
+        // unrequested pass resolves to, so a plugin can compare against it.
+        assert_eq!(CursorIcon::default(), CursorIcon::Default);
+        let shapes = [
+            CursorIcon::Default,
+            CursorIcon::Pointer,
+            CursorIcon::Text,
+            CursorIcon::Grab,
+            CursorIcon::Grabbing,
+            CursorIcon::ColResize,
+            CursorIcon::RowResize,
+            CursorIcon::NotAllowed,
+        ];
+        assert_ne!(shapes[1], CursorIcon::Default, "the shapes are distinct");
+        // `#[non_exhaustive]`: an out-of-tree match must carry a wildcard arm, so
+        // this is the shape a plugin's own mapping has to take.
+        for shape in shapes {
+            let described = match shape {
+                CursorIcon::Pointer => "clickable",
+                CursorIcon::Text => "editable",
+                _ => "other",
+            };
+            assert!(!described.is_empty());
+        }
     }
 }
 
