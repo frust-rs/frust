@@ -12,7 +12,7 @@
 //! it's paired with, rather than being told directly. This port has no CSS
 //! relation to lean on, so [`LabelView::disabled`] is the explicit flag a
 //! caller sets to mirror the paired control's own `disabled` state (plain
-//! composition, per this task's brief — no automatic pairing mechanism is
+//! composition, by design — no automatic pairing mechanism is
 //! invented). The `cursor-not-allowed` half of that CSS rule has no paint-time
 //! counterpart either: a label is not itself hit-tested, so there is no
 //! `Move` arm to request a cursor from.

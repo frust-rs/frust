@@ -8,7 +8,7 @@
 //!
 //! The `.tsx` sets `font-sans` (kbd inherits the document body face upstream
 //! — shadcn's own site has no special key-cap font). This port deliberately
-//! uses [`crate::tokens::mono_family`] instead, per this task's brief: a key
+//! uses [`crate::tokens::mono_family`] instead, by design: a key
 //! cap conventionally reads as monospace, and the catalog bundles JetBrains
 //! Mono for exactly this seam (`crate` docs, "Fonts") — an intentional
 //! improvement over the source rather than a fidelity gap, called out here so

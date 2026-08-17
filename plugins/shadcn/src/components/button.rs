@@ -2,7 +2,7 @@
 //! `tmp/ui/apps/v4/registry/new-york-v4/ui/button.tsx` (rev
 //! `d4fc45b1fbabfccb7a6a4333d8004cf19481caa9`) — `variant` × 6, `size` × 7
 //! (`default`/`xs`/`sm`/`lg`/`icon`/`icon-sm`/`icon-lg`; `icon-xs` is not
-//! ported, per this task's brief).
+//! ported — a deliberate scope cut).
 //!
 //! # Press reuses the hover swap
 //!
