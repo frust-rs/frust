@@ -936,9 +936,20 @@ impl Widget for ModalWidget {
             }
             1.0
         } else if self.anim.is_animating() {
-            if self.anim.advance(now) && !self.config.entrance.is_layout_affecting() {
-                // Paint-only motion (the fade/zoom): a plain frame request.
-                ctx.request_frame();
+            if self.anim.advance(now) {
+                // `advance`'s first call after `forward()` only seeds the
+                // clock (zero delta, but still truthy) — the continuation has
+                // to be requested on every truthy advance, not just the ones
+                // that moved `progress`, or a slide's seeding paint never
+                // schedules the frame that would carry it off zero.
+                if self.config.entrance.is_layout_affecting() {
+                    // The slide moves the panel, so the geometry must be
+                    // recomputed — `request_layout` implies a frame.
+                    ctx.request_layout();
+                } else {
+                    // Paint-only motion (the fade/zoom): a plain frame request.
+                    ctx.request_frame();
+                }
             }
             self.anim.value_clamped()
         } else {
@@ -1580,6 +1591,50 @@ pub(crate) mod tests {
         );
         frame(&mut w, SLIDE_MS as f64 * 2.0);
         assert_eq!(w.panel_rect().x1, WINDOW.width, "flush at rest");
+    }
+
+    #[test]
+    fn the_slide_entrances_seeding_paint_requests_a_layout() {
+        // `AnimationController::advance`'s first truthy call after `forward()`
+        // only seeds the clock — `progress` is still 0.0 after it. The
+        // continuation has to be requested on that seeding paint too, or a
+        // layout-affecting entrance (the sheet/drawer slide) never schedules
+        // the frame that would carry it off zero, and the panel sits
+        // permanently off-screen under a `ControlFlow::Wait` shell.
+        let mut w = build(&view(ModalConfig::edge(OverlaySide::Right)));
+        let size = layout(&mut w);
+        let mut rec = Recorder::default();
+        let mut ctx = PaintCtx::for_test(Point::ORIGIN, size, ft_ms(0.0));
+        w.paint(&mut ctx, &mut rec);
+        assert!(
+            w.progress().abs() < 1e-9,
+            "the seeding paint leaves progress at zero"
+        );
+        assert!(
+            ctx.needs_layout(),
+            "the seeding paint must still schedule the frame that ramps progress off zero"
+        );
+    }
+
+    #[test]
+    fn the_fade_zoom_entrances_seeding_paint_requests_a_frame() {
+        // The paint-only counterpart of the slide regression above: FadeZoom is
+        // not layout-affecting, so its continuation is a bare frame request.
+        // Pinned here so a future change to the shared `advance` branch cannot
+        // silently regress it alongside the slide.
+        let mut w = build(&view(ModalConfig::centered(MAX_WIDTH_LG)));
+        let size = layout(&mut w);
+        let mut rec = Recorder::default();
+        let mut ctx = PaintCtx::for_test(Point::ORIGIN, size, ft_ms(0.0));
+        w.paint(&mut ctx, &mut rec);
+        assert!(
+            w.progress().abs() < 1e-9,
+            "the seeding paint leaves progress at zero"
+        );
+        assert!(
+            ctx.needs_frame(),
+            "the seeding paint must still schedule the frame that ramps progress off zero"
+        );
     }
 
     #[test]
