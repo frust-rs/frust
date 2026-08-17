@@ -22,6 +22,13 @@ bundle loading, locale-aware message resolution, system-locale detection, and (b
 `formatting` feature) ICU4X number/date/currency formatting — reaching no OS capability beyond
 a locale read.
 
+A tenth through twelfth crate — `plugins/glyph`, `plugins/material`, `plugins/cupertino`
+(`frust-glyph`/`frust-material`/`frust-cupertino`) — are the tier's **design-system plugins**: the
+three widget catalogs (Glyph, Material 3, Cupertino) that used to live in-tree as feature-gated
+`frust-widgets` modules now ship as ordinary sibling crates, each an app dependency beside `frust`
+rather than a cargo feature on it. They reach no OS capability at all and share nothing with the
+OS-capability plugins above beyond sitting in the same tier; see *Design-System Plugins* below.
+
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other units.
 
 ## Module Structure
@@ -38,6 +45,9 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other unit
 | `plugins/clean-signals-frust` | Facade-tier glue crate binding the `clean_signals` clean-architecture core into Frust's `Component`/reactive model |
 | `plugins/database` | Synchronous embedded SQL database (`Database`/`Value`/`Engine`) over a swappable-engine seam — bundled SQLite via `rusqlite` (default) or an optional Turso engine (`engine-turso`); no OS integration |
 | `plugins/i18n` | Fluent Project + ICU4X internationalization/localization: compile-time bundle loading (`locales!`, via the companion `frust-i18n-macros` proc-macro crate), locale-aware message resolution, system-locale detection, and (`formatting` feature) ICU4X number/date/currency formatting |
+| `plugins/glyph` | The Glyph design-system plugin (`frust-glyph`): terminal-native, dark-first, monospace-led widget catalog plus its bundled OFL monospace fonts |
+| `plugins/material` | The Material 3 (+Expressive) design-system plugin (`frust-material`) |
+| `plugins/cupertino` | The Cupertino (iOS-styled) design-system plugin (`frust-cupertino`), including its own "Liquid Glass" `GlassScale` recipe |
 
 ## Desktop Backend Status
 
@@ -58,6 +68,7 @@ preview or a `frust build macos|windows|linux`. See
 | `clean-signals-frust` | platform-free | facade-tier glue with no OS integration to split by platform at all |
 | `database` | platform-free | file IO via `rusqlite`/`turso`; no OS integration, so no platform split |
 | `i18n` | platform-free | reaches the OS only for a `sys_locale` read; no backend split |
+| `glyph` / `material` / `cupertino` | platform-free | pure widget/token crates over `frust::authoring`; no OS integration of any kind, desktop included |
 | `native-widgets` (NATIVE_WIDGETS unit) | unavailable | no desktop backend of any kind — Android/iOS only (see [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md)) |
 
 ## Layer Dependencies
@@ -102,6 +113,10 @@ plugin whose "platform" is the filesystem — which the charter accommodates rat
 still depends on nothing but `frust-paths`, `log`, and its engines, never another framework crate. Each
 plugin's backends are cfg-gated modules (`apple`/`android`/`file`/`desktop`/`unsupported`) behind
 one platform-independent public API, with FFI dependencies target-gated rather than unconditional.
+The three design-system plugins are a fourth, distinct shape the charter above accommodates rather
+than covers: no `frust-plugin`, no FFI crate, and — unlike every OS-capability plugin — a direct
+`frust` facade dependency, since a widget catalog's whole job is building against `frust::authoring`
+(see *Design-System Plugins* below).
 
 A few cross-plugin conventions hold as boundary facts rather than mere style: pre-init detection is
 a plain atomic flag checked first, so a `NotInitialized` error holds even under `panic=abort`; a JNI
@@ -114,6 +129,32 @@ host-payload excerpts embedded in error strings are capped at `PAYLOAD_EXCERPT_B
 `frust-reactive`'s `spawn_blocking` is the documented pairing for every plugin's blocking or gated
 call (biometric prompts, camera permission/capture, every `iap` store round trip except
 `request_purchase`/`set_purchase_listener`) — see [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md).
+
+## Design-System Plugins
+
+`frust-glyph`/`frust-material`/`frust-cupertino` are the three built-in widget catalogs, extracted
+from `frust-widgets` into sibling plugin crates (see [WIDGETS_ARCHITECTURE.md](WIDGETS_ARCHITECTURE.md)'s
+External Design-System Contract for the toolkit they build against). Their charter:
+
+- **Production deps: `frust` (`default-features = false`) plus `kurbo`/`peniko` only, never
+  another `frust-*` crate.** This is what makes each one a real proof of the external
+  design-system contract rather than a special-cased in-tree exception — an app depends on any of
+  the three exactly the way it would depend on a third-party catalog.
+- **`frust-widgets` (`test-support` feature) and `frust-core` (test-only) are dev-dependencies,
+  never production ones.** The sanctioned test-fixture/`RenderRoot` route: a catalog's own tests
+  need a real `RenderRoot` to paint against and `frust-widgets`' GPU-free container fixtures, both
+  of which the facade deliberately does not re-export to production code.
+- **`install()` is the one-line entry point, called from `app!`'s `setup = { .. }` block —
+  before shell construction, the one point a shell reads the default-theme slot.** Each `install()`
+  calls `frust::set_default_theme(baseline())`; `frust_glyph::install()` additionally calls
+  `frust::register_app_fonts` for its bundled OFL monospace faces (Space Mono, IBM Plex Mono,
+  `plugins/glyph/fonts/`) — registered unconditionally, not behind a feature, since the crate has
+  no feature to gate them with. A call after shell construction takes effect only on a later
+  theme reseed, which may never happen.
+- **`frust_glyph::baseline()` attaches the `NativeTypefaces` theme extension** — the bundled faces
+  reach `frust-native-widgets`' native controls through this attach, not through any
+  `DesignLanguage`-keyed special case (see [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md)'s
+  theme ladder). Material's and Cupertino's `baseline()` attach no font extension.
 
 ## Data Flow
 

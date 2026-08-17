@@ -144,10 +144,16 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   ever shells out directly.
 - `create`: CLI args convert into `frust-drive::scaffold::generate`, which renders the embedded
   `templates/app/` tree against a `TemplateContext` — a pure file-write, no `ProcessRunner`
-  involved. `create --design-system` takes a separate path (`generate_design_system` /
+  involved. The rendered app depends on `frust-glyph` and calls `frust_glyph::install()` from
+  `app!(setup = { .. })`, so a freshly scaffolded app is Glyph-themed by default — swapping to
+  Material/Cupertino, or dropping a built-in design system entirely, is a manifest+setup-call edit
+  the template's own comments walk through (see [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)'s
+  Design-System Plugins). `create --design-system` takes a separate path (`generate_design_system` /
   `DesignSystemContext`) rendering `templates/design-system/` instead — a plain library crate with
   no platform manifest, so `--deeplink-scheme`/`--deeplink-host`/`--arch` are rejected outright
-  rather than silently ignored.
+  rather than silently ignored; its README documents that the three built-ins are sibling plugin
+  crates, not `frust` cargo features, so there is no "never re-enable a catalog feature" rule left
+  to state — a design-system crate cannot turn one on by existing.
 - `doctor`/`devices`: `dispatch` runs `frust-drive`'s independent, non-fatal `Validator`/
   `DeviceDiscovery` sets through the injected runner; the CLI renders the resulting report.
 - `run`/`build`: CLI args become a `BuildInfo`, which drives `frust-drive`'s Android/iOS pipelines
@@ -209,7 +215,11 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   [LIMITATIONS.md](LIMITATIONS.md)).
 - `plugin add`: `frust-drive::plugin::add_plugin` looks up a `PluginSpec` and applies its
   `Contribution`s as idempotent, format-preserving edits to a generated project (see
-  [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md) for the plugins this distributes).
+  [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md) for the plugins this distributes). The
+  registry holds 13 top-level entries, including the three design-system plugins (`glyph`/
+  `material`/`cupertino`) — the TUI's Add Plugin dialog lists all 13; each design-system entry's
+  base contribution is a single `CargoDep` (installing it is still a manual `<crate>::install()`
+  call in `app!`, since a plugin add cannot know where an app wants theme setup to run).
   `Contribution::ScaffoldFile` is the registry's first file-*creating* contribution, rather than
   an edit anchored inside an existing file: it writes the target file only when absent
   (`Applied`), leaves an existing one untouched even if its contents differ (`AlreadyPresent`,

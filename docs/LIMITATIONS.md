@@ -495,8 +495,9 @@ focus-severing sites.
 
 ### `focus-navbar-item-truncation-unmarked` — a truncated navbar/tabbar item drops its focus link silently
 
-**Observed**: `material::navbar`'s `NavigationBarView::rebuild` and
-`cupertino::tabbar`'s equivalent hand-roll their item pod lists rather than
+**Observed**: `frust_material::navbar`'s `NavigationBarView::rebuild` and
+`frust_cupertino::tabbar`'s equivalent (both now `plugins/{material,cupertino}`) hand-roll their
+item pod lists rather than
 going through `authoring::rebuild_children`. Their shrink arm honors half of
 the contract — an in-flight capture is cancelled (`cancel_item` +
 `set_active(false)`) and each item's icon/label children are torn down through
@@ -2235,8 +2236,11 @@ now publishes no bytes (`&[]`); an all-empty pair never crosses the platform sea
 subsequently installed design system's pair becomes the process's first real publish and
 registers correctly. The residual gap this entry now covers is therefore narrower and genuinely
 platform-side only: a **mid-process swap from one real face pair to another** (e.g. one design
-system replaced by a second, or a design system's theme switching to `DesignLanguage::Glyph`
-after an extension-only pair already latched) still does not re-register on device until relaunch.
+system's `install()` replaced by a second's — `frust_glyph::baseline()`'s `NativeTypefaces` attach
+is the one built-in byte source today, `plugins/glyph/fonts/` — publishing a fresh pair after an
+extension-only pair already latched; there is no design-language shortcut in the ladder to special
+case here, see NATIVE_WIDGETS_ARCHITECTURE.md's theme ladder) still does not re-register on device
+until relaunch.
 A half-filled extension (one slot real, one slot `System`) is not itself a new instance of this
 gap — the empty slot resolves to `System` in that same resolve, so nothing ever asks the platform
 half to register bytes for it; the gap only resurfaces if a *later* resolve wants real bytes for
@@ -2261,8 +2265,11 @@ vocabulary to write one is fully public (`SemanticsCtx::push_node`/`push_contain
 `Node`, `Action`, `ChildPod::semantics_child`) — but nothing can *drive* a semantics pass from
 outside the framework: `SemanticsCtx::new` is `pub(crate)` in `frust-core`, and the only public
 producer, `frust_core::RenderRoot::semantics()`, is not re-exported by the `frust` facade. The
-framework's own catalogs are unaffected — they reach `RenderRoot` through a `frust-core`
-dev-dependency, a route `docs/CODE_STANDARDS.md` forbids outside the framework itself.
+three built-in design-system plugins (`frust-glyph`/`frust-material`/`frust-cupertino`) are
+unaffected despite living outside `frust-widgets` now — each reaches `RenderRoot` through a
+sanctioned `frust-core` test-only dev-dependency, the same plugin-tier exemption
+`docs/PLUGINS_CODE_STANDARDS.md` records for the app-tier "no direct `frust-core` dependency" rule
+(`docs/CODE_STANDARDS.md`), not available to a genuinely external crate like `design-system-sample`.
 
 **Applies to**: any external design-system crate wanting to unit-test its `Widget::semantics`
 output.

@@ -68,14 +68,14 @@ other dependency's debug optimization the same way.
 "fat"`, `codegen-units = 1`, `strip = "symbols"`, `panic = "abort"`, at the default
 `opt-level = 3` — chosen over `"s"`/`"z"` after a smaller-opt-level win didn't clear a
 5% bar against a render-stack CPU-perf carve-out (measured via `scripts/size-report.sh`
-below). **Design-system feature gating.** `frust` default-enables
-`glyph`/`material`/`cupertino` (each `frust-widgets` catalog) plus `glyph-fonts`;
-`default-features = false` drops all four. Cargo silently ignores `default-features =
-false` on an *inherited* dependency (defaults stay on) — set it on the
-`[workspace.dependencies]` entry instead (root `Cargo.toml`'s
-`frust-widgets`/`frust-theme` edges); `frust = { workspace = true, default-features =
-false }` in a member is a hard Cargo error, so `examples/no-catalogs` uses a plain
-`path` dependency instead. **Widget-authoring test fixtures.** `frust-widgets`'
+below). **No design-system cargo features.** `frust` carries `default = []` (only the
+tooling opt-ins `perf-trace`/`devtools`) — there is no catalog feature to enable or
+disable. The three built-in design systems — `frust-glyph`/`frust-material`/
+`frust-cupertino` (`plugins/{glyph,material,cupertino}`) — are ordinary sibling plugin
+crates an app depends on beside `frust`, each installed via its own `install()` call
+(see *Run*'s design-system-install gate below); each also resolves `kurbo`/`peniko` via
+`{ workspace = true }`, riding the same single pin as every other crate rather than
+declaring one of its own. **Widget-authoring test fixtures.** `frust-widgets`'
 non-default `test-support` feature compiles in the crate's GPU-free container-widget
 fixtures (`frust_widgets::test_support`), so a design system built outside this crate
 can test its own containers the same way; off by default in a normal app build.
@@ -95,12 +95,12 @@ wake (e.g. a timer-driven completion) renders content with zero mouse movement, 
 on an input-triggered redraw. `examples/huddle`'s own verify gate (`cargo test` plus
 clippy, from its own directory) is part of *Test* below.
 
-**Glyph design-language gate.** `examples/huddle`'s appearance settings expose a
+**Design-system install gate.** `examples/huddle`'s appearance settings expose a
 four-way `System`/`Material3`/`Cupertino`/`Glyph` toggle; a Glyph dark+light check
 (desktop, Android, iOS) plus a reduced-motion pass round out the manual gate above — no
 automated check exists for either. `examples/huddle` seeds its own Glyph first-launch
-default via `frust::glyph_theme::install()` (`app!`'s setup block); a shell with no
-design system installed falls back to `Theme::neutral()`.
+default via `frust_glyph::install()` (`app!`'s setup block); a shell with no design
+system installed falls back to `Theme::neutral()`.
 
 `examples/huddle` additionally builds and runs on Android and iOS, from its own
 directory (its own `frust.toml`, package `it.f0x.huddle`):
@@ -204,19 +204,14 @@ gate confirming both before shipping.
 cargo build --workspace --locked \
   && cargo test --workspace \
   && cargo clippy --workspace --all-targets -- -D warnings \
-  && cargo fmt --check \
-  && cargo build -p no-catalogs
+  && cargo fmt --check
 ```
 
-`frust-drive`/`frust-tui` ride this gate automatically (root workspace members).
-
-**The `no-catalogs` step is load-bearing.** `cargo build`/`test --workspace` alone does
-NOT exercise the catalog-off configuration — Cargo unifies `frust`'s features across
-every root-workspace member (`plugins/native-widgets` has its own legitimate default-on
-`frust` dependency), so only the package-scoped build above actually compiles
-`--no-default-features` (`examples/no-catalogs/src/main.rs`'s doc comment has the full
-evidence). Skip it and a catalog opt-out regression ships behind a green `--workspace`
-run.
+`frust-drive`/`frust-tui` ride this gate automatically (root workspace members); so do
+the three design-system plugin crates (`frust-glyph`/`frust-material`/`frust-cupertino`,
+`plugins/{glyph,material,cupertino}`) — root workspace members like any other plugin,
+with no separate feature-off build to gate (`frust` has no catalog feature left to
+unify or drop — see *Build*'s design-system note above).
 
 Additionally run:
 
@@ -240,9 +235,12 @@ Policy*) — the same shape `examples/shadertoy` and `examples/glyph-catalog` ga
 their own directories, per their own READMEs. `huddle` and `clean-signals-frust` git+rev-pin
 `clean-signals` to its public repo, so no local sibling checkout is required to run this gate.
 `design-system-sample` additionally needs `cargo tree -e features -i frust -p sample-app`
-(from its own directory) to print **no** `frust feature "..."` line — the proof every built-in
-catalog stays compiled off (that workspace's own README carries the negative control). This
-gate is separate from `frust build apk`/`run`'s pipeline gate (*Run*).
+(from its own directory) to print **no** `frust feature "..."` line — no longer a catalog-off
+proof (`frust` carries no catalog feature anywhere for any dependent to print), but the
+out-of-tree-realism check that this workspace resolves `frust` exactly the way a real
+third-party design-system crate would, with nothing implicitly re-enabled by feature
+unification (that workspace's own README carries the full rationale). This gate is separate
+from `frust build apk`/`run`'s pipeline gate (*Run*).
 
 **Non-default features are not compiled by the chain above.** `frust-render`'s
 `cpu-tier` (experimental `vello_cpu` render backend —
