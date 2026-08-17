@@ -748,7 +748,7 @@ impl Widget for CommandWidget {
                 ScrollDelta::Pixels(_, y) => *y,
             };
             let before = self.scroll;
-            self.scroll -= dy;
+            self.scroll += dy;
             self.clamp_scroll();
             if (self.scroll - before).abs() > f64::EPSILON {
                 self.apply_scroll();
@@ -1256,7 +1256,12 @@ mod tests {
         assert!(w.scroll() > 0.0, "the highlight scrolled into view");
         assert!(w.scroll() <= w.content_height - w.viewport);
 
-        // A wheel scroll moves the same offset and clamps at the top.
+        // A wheel scroll moves the same offset, baseline `offset + dy` convention
+        // (frust-widgets' `ScrollView`/`ListView`). Reset to the top first, since
+        // the ArrowDown loop above already left `scroll` at its max — a wheel
+        // scroll from there would just clamp back to max and hide the growth.
+        w.scroll = 0.0;
+        w.apply_scroll();
         let before = w.scroll();
         dispatch(
             &mut w,
@@ -1266,7 +1271,7 @@ mod tests {
                 delta: ScrollDelta::Lines(0.0, 1.0),
             },
         );
-        assert!(w.scroll() < before);
+        assert!(w.scroll() > before);
     }
 
     #[test]
