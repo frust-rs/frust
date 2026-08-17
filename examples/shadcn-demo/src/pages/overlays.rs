@@ -7,6 +7,10 @@
 //! rebuilds, which is what lets a live-edited control inside it (the
 //! command dialog's search field) keep its own typed text rather than being
 //! fought back to the push-time snapshot on every pass.
+//!
+//! The navigator is this page's outermost view and the trigger list scrolls
+//! inside its root page: a pushed modal page inherits the navigator's own
+//! constraints, so those have to be the page slot's bounded ones.
 
 use frust::{Column, NavigatorController, PopResult, SizedBox, View, any, navigator, text};
 use frust_shadcn::{
@@ -60,7 +64,11 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
         let drawer_ctrl = root_controller.clone();
         let command_ctrl = root_controller.clone();
 
-        any(Column(vec![
+        // The scroll slot is *inside* the navigator's root page, never around
+        // the navigator: a pushed modal page is laid out under the navigator's
+        // own constraints, and a scroll view's infinite max height would
+        // collapse every panel it hosts to nothing.
+        crate::scroll_slot(any(Column(vec![
             any(crate::nav::heading("Overlays")),
             any(SizedBox(None, Some(16.0))),
             any(text(format!("Last result: {last_result}")).size(14.0)),
@@ -189,6 +197,6 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
                     record("command_dialog"),
                 );
             })),
-        ]))
+        ])))
     })
 }

@@ -44,6 +44,16 @@ impl Default for AppState {
     }
 }
 
+/// The gallery's ordinary page slot: 24px of padding inside a vertical
+/// scroll view.
+///
+/// The overlay-hosting pages call this **inside** themselves, around their own
+/// static body only, so the host itself keeps the bounded constraints it
+/// requires (`pages::overlays`, `pages::anchored`).
+pub fn scroll_slot(content: AnyView<AppState>) -> AnyView<AppState> {
+    any(scroll_view(Padding(EdgeInsets::all(24.0), content)))
+}
+
 #[derive(Default)]
 struct ShadcnDemoApp;
 
@@ -56,20 +66,29 @@ impl Component for ShadcnDemoApp {
 
     fn build(&self, state: &mut AppState) -> AnyView<AppState> {
         let page = state.page;
+        // The two overlay-hosting pages take the page slot's own bounded
+        // constraints and scroll their static body themselves; every other page
+        // is wrapped in the shared scroll slot here. An overlay host (a
+        // navigator hosting pushed modal pages, or a full-area `Stack` carrying
+        // the tooltip layer and the anchored overlays) fills the area it is
+        // given, and `scroll_view` hands its child an infinite max height —
+        // which those hosts coerce to a zero-height area, collapsing every
+        // panel they hold. See `frust_shadcn::overlay`'s mounting contract.
         let content = match page {
-            Page::Primitives => any(pages::primitives::page(&mut state.primitives)),
-            Page::Controls => any(pages::controls::page(&mut state.controls)),
-            Page::InputsTable => any(pages::inputs_table::page(&mut state.inputs_table)),
+            Page::Primitives => scroll_slot(any(pages::primitives::page(&mut state.primitives))),
+            Page::Controls => scroll_slot(any(pages::controls::page(&mut state.controls))),
+            Page::InputsTable => {
+                scroll_slot(any(pages::inputs_table::page(&mut state.inputs_table)))
+            }
             Page::Overlays => any(pages::overlays::page(&mut state.overlays)),
             Page::Anchored => any(pages::anchored::page(&mut state.anchored)),
-            Page::Theming => any(pages::theming::page(&mut state.theming)),
+            Page::Theming => scroll_slot(any(pages::theming::page(&mut state.theming))),
         };
-        let scrollable_content = scroll_view(Padding(EdgeInsets::all(24.0), content));
         any(FlexView::new(
             frust::Axis::Horizontal,
             vec![
                 frust::inflexible(any(sidebar(page))),
-                frust::flexible(1, any(scrollable_content)),
+                frust::flexible(1, content),
             ],
         )
         .cross_axis(CrossAxisAlignment::Stretch))

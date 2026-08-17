@@ -38,7 +38,11 @@
 //!   overlay, whose lifetime is far shorter than a navigation.
 //!
 //! Both hosts assume they are that top layer: they fill their constraints and
-//! treat their own box as the window the content is fitted into.
+//! treat their own box as the window the content is fitted into. That makes
+//! **bounded constraints part of the mounting contract**: neither the navigator
+//! nor the `Stack` may itself sit inside a [`frust::scroll_view`], whose child
+//! constraints are unbounded on the scroll axis — see [`finite_or_zero`]'s
+//! scroll-view trap for what collapses when one does.
 //!
 //! # Claim ordering
 //!
@@ -147,6 +151,22 @@ pub const SCRIM_ALPHA: f32 = 0.50;
 /// A host fills its area, so it expects bounded constraints — a navigator page
 /// or a full-screen [`frust::Stack`] always gives it those; this is the guard
 /// for the degenerate case (the same one `frust_material::dialog` applies).
+///
+/// # The scroll-view trap
+///
+/// The degenerate case has one common source: [`frust::scroll_view`] lays its
+/// child out with an *infinite* max on the scroll axis. A host mounted anywhere
+/// inside one — directly, or under a navigator/`Stack` that passes its own
+/// constraints through — therefore reads a zero-length area on that axis and
+/// collapses: a modal panel shrinks to a hairline while its barrier still
+/// swallows every pointer press, and an anchored panel or tooltip clamps to the
+/// area's origin far from its trigger. Each host's test module pins that
+/// outcome so the shape stays visible.
+///
+/// The remedy is at the mount, not here: keep the host outside the scroll view
+/// and scroll the page's own body inside it instead. This coercion cannot
+/// invent an extent nobody offered, and picking an arbitrary one would place
+/// panels against a box that does not exist.
 pub(crate) fn finite_or_zero(v: f64) -> f64 {
     if v.is_finite() { v } else { 0.0 }
 }

@@ -1409,6 +1409,37 @@ pub(crate) mod tests {
         );
     }
 
+    /// The constraints `frust::scroll_view` hands its child: the viewport
+    /// width, an infinite max height.
+    fn scrolled_bc() -> BoxConstraints {
+        BoxConstraints::new(
+            Size::new(WINDOW.width, 0.0),
+            Size::new(WINDOW.width, f64::INFINITY),
+        )
+    }
+
+    #[test]
+    fn an_unbounded_height_collapses_the_host_and_its_panel_to_nothing() {
+        // The documented mounts (a navigator page, a full-area `Stack`) are
+        // bounded; a host put inside a scroll view is not, and this is what
+        // that costs — pinned, not fixed here: the coercion cannot invent an
+        // extent nobody offered, so the fix belongs at the mount site.
+        let mut w = build(&view(settled(ModalConfig::centered(MAX_WIDTH_LG))));
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        let size = w.layout(&mut lctx, &scrolled_bc());
+        assert_eq!(size.height, 0.0, "no vertical area to fill");
+        assert_eq!(
+            w.panel_rect().height(),
+            0.0,
+            "the panel is a hairline, while the barrier still takes presses"
+        );
+        // The same host under the contract's own constraints is unharmed.
+        let bounded = w.layout(&mut lctx, &BoxConstraints::tight(WINDOW));
+        assert_eq!(bounded, WINDOW);
+        assert_eq!(w.panel_rect().height(), 120.0);
+    }
+
     #[test]
     fn the_scrim_is_black_at_fifty_percent_and_the_panel_is_background() {
         let theme = crate::theme().with_brightness(Brightness::Light);

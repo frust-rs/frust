@@ -5,7 +5,9 @@
 //! `frust_shadcn::overlay`'s module docs for the two supported mounts), gated
 //! on an `open` flag this page's `State` owns; the two hover-driven ones
 //! (tooltip, hover-card) mount **permanently**, input-transparent, per their
-//! own module docs.
+//! own module docs. The stack's own bottom child is the scrolling body, so the
+//! stack — and every host layered over it — keeps the page slot's bounded
+//! constraints rather than a scroll view's unbounded ones.
 
 use frust::{Column, Row, SizedBox, Stack, View, any, text};
 use frust_shadcn::overlay::{OverlayAlign, OverlayAnchor, OverlaySide, anchor};
@@ -223,9 +225,9 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
         )),
         any(SizedBox(None, Some(200.0))),
         any(text(
-            "The trigger below is parked near the scroll view's bottom edge \
-             so its popover has no room to open downward — watch it flip to \
-             open above instead (avoidCollisions' default flip).",
+            "Scroll the trigger below down to the window's bottom edge so its \
+             popover has no room to open downward — watch it flip to open \
+             above instead (avoidCollisions' default flip).",
         )
         .size(12.0)),
         any(SizedBox(None, Some(8.0))),
@@ -238,7 +240,11 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
         any(SizedBox(None, Some(24.0))),
     ]);
 
-    let mut layers: Vec<frust::AnyView<AppState>> = vec![any(base)];
+    // The stack is the full-area host every overlay below is placed against, so
+    // only the static body scrolls: a scroll view around the stack would hand
+    // the hosts an infinite max height, which they coerce to a zero-height area
+    // (a tooltip clamped to `y = 0`, an anchored panel with nowhere to sit).
+    let mut layers: Vec<frust::AnyView<AppState>> = vec![crate::scroll_slot(any(base))];
 
     if popover_open {
         layers.push(any(popover(text(

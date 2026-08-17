@@ -92,14 +92,24 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
             input_group_button("Go", |_: &mut AppState| {}),
         )),
         gap(),
-        any(native_select(COUNTRIES, country, |s: &mut AppState| {
-            let next = match s.inputs_table.country {
-                Some(i) => (i + 1) % COUNTRIES.len(),
-                None => 0,
-            };
-            s.inputs_table.country = Some(next);
-        })
-        .placeholder("Choose a country")),
+        // `native_select` is the styled trigger only — it has no popup of its
+        // own (the platform's native picker is what upstream defers to), so the
+        // demo cycles the options on activation and says so in the caption.
+        any(field(
+            native_select(COUNTRIES, country, |s: &mut AppState| {
+                let next = match s.inputs_table.country {
+                    Some(i) => (i + 1) % COUNTRIES.len(),
+                    None => 0,
+                };
+                s.inputs_table.country = Some(next);
+            })
+            .placeholder("Choose a country"),
+        )
+        .description(
+            "Styled trigger primitive only — activating it cycles the options \
+             here as a stand-in. The full dropdown is the select component on \
+             the Anchored page.",
+        )),
         gap(),
         // --- Table ---
         any(table(vec![

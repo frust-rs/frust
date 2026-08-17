@@ -833,6 +833,39 @@ mod tests {
         assert_eq!(rec.rects, vec![(rect.origin(), CONTENT)]);
     }
 
+    #[test]
+    fn an_unbounded_height_collapses_the_host_area_and_pins_the_content_to_its_top() {
+        // The documented mounts (a navigator page, a full-area `Stack`) are
+        // bounded; a host put inside a scroll view is not, and this is what
+        // that costs — pinned, not fixed here: the coercion cannot invent an
+        // extent nobody offered, so the fix belongs at the mount site.
+        let cell = OverlayAnchor::new();
+        cell.set(ANCHOR);
+        let view = anchored(Panel(CONTENT)).anchor(&cell);
+        let mut counter = 0u64;
+        let mut w = View::<AppState>::build(&view, &mut BuildCtx::new(&mut counter));
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        // The constraints `frust::scroll_view` hands its child: the viewport
+        // width, an infinite max height.
+        let scrolled = BoxConstraints::new(
+            Size::new(WINDOW.width, 0.0),
+            Size::new(WINDOW.width, f64::INFINITY),
+        );
+        let size = w.layout(&mut lctx, &scrolled);
+        assert_eq!(size.height, 0.0, "no vertical area to fill");
+        assert_eq!(
+            w.rect.y0, 0.0,
+            "the panel clamps to the top of a zero-height area, wherever its \
+             anchor sits"
+        );
+
+        // The same host under the contract's own constraints places normally.
+        let bounded = w.layout(&mut lctx, &BoxConstraints::tight(WINDOW));
+        assert_eq!(bounded, WINDOW);
+        assert_eq!(w.rect.y0, ANCHOR.y1 + SIDE_OFFSET);
+    }
+
     #[derive(Default)]
     struct Recorder {
         rects: Vec<(Point, Size)>,

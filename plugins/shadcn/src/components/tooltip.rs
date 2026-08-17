@@ -72,7 +72,7 @@ use frust::authoring::{
 use frust::{AnimationController, Curve, FrameTime, Theme, text};
 
 use crate::hit::inside;
-use crate::overlay::{OverlayAlign, OverlayPlacement, OverlaySide, place};
+use crate::overlay::{OverlayAlign, OverlayPlacement, OverlaySide, finite_or_zero, place};
 use crate::style;
 use crate::tokens::ShadcnTokens;
 
@@ -441,7 +441,9 @@ pub(crate) enum TooltipArrow {
 ///
 /// Mount it as the top child of a full-area [`frust::Stack`], **permanently** —
 /// it paints nothing while closed and consumes no input ever, so it costs a
-/// layout of its content and nothing else.
+/// layout of its content and nothing else. That stack must itself be bounded:
+/// inside a scroll view the layer has no vertical area to place a panel in
+/// (`crate::overlay`'s `finite_or_zero`, the scroll-view trap).
 pub fn tooltip<State: 'static>(
     hover: &TooltipHover,
     label: impl Into<String>,
@@ -575,16 +577,8 @@ impl<State: 'static> View<State> for TooltipLayerView<State> {
 impl Widget for TooltipLayerWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let area = Size::new(
-            if bc.max().width.is_finite() {
-                bc.max().width
-            } else {
-                0.0
-            },
-            if bc.max().height.is_finite() {
-                bc.max().height
-            } else {
-                0.0
-            },
+            finite_or_zero(bc.max().width),
+            finite_or_zero(bc.max().height),
         );
         let content = self.content.layout_child(ctx, &BoxConstraints::loose(area));
         self.anchor_used = self.hover.anchor();
@@ -1030,6 +1024,40 @@ mod tests {
             !outcome.handled,
             "a press over the panel is never swallowed"
         );
+    }
+
+    #[test]
+    fn an_unbounded_height_collapses_the_layer_and_clamps_the_panel_to_its_top() {
+        // The documented mount is a full-area `Stack`, which is bounded; a
+        // layer put inside a scroll view is not, and this is what that costs —
+        // pinned, not fixed here: the coercion cannot invent an extent nobody
+        // offered, so the fix belongs at the mount site.
+        let hover = TooltipHover::new();
+        let trigger = Rect::from_origin_size(Point::new(40.0, 300.0), TRIGGER);
+        hover.set_anchor(trigger);
+        let view: TooltipLayerView<AppState> = tooltip(&hover, "Add to library");
+        let mut counter = 0u64;
+        let mut w = View::<AppState>::build(&view, &mut BuildCtx::new(&mut counter));
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        // The constraints `frust::scroll_view` hands its child: the viewport
+        // width, an infinite max height.
+        let scrolled = BoxConstraints::new(
+            Size::new(WINDOW.width, 0.0),
+            Size::new(WINDOW.width, f64::INFINITY),
+        );
+        let size = w.layout(&mut lctx, &scrolled);
+        assert_eq!(size.height, 0.0, "no vertical area to fill");
+        assert_eq!(
+            w.panel_rect().y0,
+            0.0,
+            "clamped to the top of a zero-height area, nowhere near its trigger"
+        );
+
+        // The same layer under the contract's own constraints places normally.
+        let bounded = w.layout(&mut lctx, &BoxConstraints::tight(WINDOW));
+        assert_eq!(bounded, WINDOW);
+        assert_eq!(w.panel_rect().y1, trigger.y0, "flush above its trigger");
     }
 
     #[test]

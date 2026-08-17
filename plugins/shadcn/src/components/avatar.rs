@@ -219,8 +219,24 @@ impl Widget for AvatarWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let px = self.size.px();
         let size = bc.constrain(Size::new(px, px));
-        self.content.layout_child(ctx, &BoxConstraints::tight(size));
-        self.content.set_origin(Point::ZERO);
+        if self.is_fallback {
+            // `flex items-center justify-center`: the initials keep their
+            // natural size and sit in the middle of the circle. A tight
+            // constraint here would report the stretched box while the glyph
+            // run still painted at its origin — initials in the top-left
+            // corner — so the fallback is measured loose (which still bounds
+            // its wrap width at the circle's own width) and centred by origin.
+            let content = self.content.layout_child(ctx, &BoxConstraints::loose(size));
+            self.content.set_origin(Point::new(
+                ((size.width - content.width) / 2.0).max(0.0),
+                ((size.height - content.height) / 2.0).max(0.0),
+            ));
+        } else {
+            // The image is cover-fit: filling the whole box at the origin is
+            // exactly what the circular clip wants.
+            self.content.layout_child(ctx, &BoxConstraints::tight(size));
+            self.content.set_origin(Point::ZERO);
+        }
         size
     }
 
@@ -543,6 +559,37 @@ mod tests {
         let size = layout(&mut w);
         let rec = paint(&mut w, size);
         assert_eq!(rec.rounded_rects.len(), 1);
+    }
+
+    #[test]
+    fn fallback_content_is_centred_in_the_circle() {
+        let view: AvatarView<()> = avatar().fallback("AB");
+        let mut w = build(&view);
+        let size = layout(&mut w);
+        let content = w.content.size();
+        assert!(
+            content.width < size.width && content.height < size.height,
+            "the initials keep their natural size, not the stretched box"
+        );
+        assert_eq!(
+            w.content.origin(),
+            Point::new(
+                (size.width - content.width) / 2.0,
+                (size.height - content.height) / 2.0
+            ),
+            "centred on both axes, not pinned to the top-left corner"
+        );
+        assert_ne!(w.content.origin(), Point::ZERO);
+    }
+
+    #[test]
+    fn an_image_still_fills_the_whole_circle_from_its_origin() {
+        let source = ImageSource::from_rgba8(vec![0u8; 4 * 4 * 4], 4, 4);
+        let view: AvatarView<()> = avatar().image(source);
+        let mut w = build(&view);
+        let size = layout(&mut w);
+        assert_eq!(w.content.size(), size, "cover-fit fills the clip");
+        assert_eq!(w.content.origin(), Point::ZERO);
     }
 
     #[test]
