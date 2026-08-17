@@ -88,11 +88,7 @@ pub mod style;
 pub mod tokens;
 
 // The flat catalog namespace: every component module glob-re-exported from the
-// crate root, as one `use` item so the whole list can carry a single lint
-// allowance. A glob over a module that has no public items yet reads as an
-// unused import, which is exactly what every not-yet-ported component's stub
-// module is; drop the allowance once no stub is left.
-#[allow(unused_imports)]
+// crate root.
 pub use components::{
     accordion::*, alert::*, alert_dialog::*, aspect_ratio::*, attachment::*, avatar::*, badge::*,
     breadcrumb::*, bubble::*, button::*, button_group::*, card::*, checkbox::*, collapsible::*,
