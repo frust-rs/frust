@@ -62,7 +62,7 @@ use frust::authoring::{
 };
 
 use crate::hit::inside;
-use crate::style::{self, PATH_TOLERANCE};
+use crate::style::{self, PATH_TOLERANCE, precedence_fill, precedence_ink};
 use crate::text::{LabelRun, SHAPING_INK};
 use crate::tokens::ShadcnTokens;
 
@@ -249,46 +249,6 @@ fn resolve_colors(theme: Option<&Theme>, variant: ToggleVariant) -> ToggleColors
         hover_ink,
         ink,
         border,
-    }
-}
-
-/// The fill a two-state control paints under the current state, if any: the
-/// `on` state wins over hover, and a resting control paints nothing
-/// (`bg-transparent`).
-///
-/// The precedence the [module docs](self) fix ("`on` beats `hover`"), taken as
-/// plain colors so `toggle_group` — which resolves the same rule per item over
-/// a palette of its own — shares the decision rather than restating it.
-pub(crate) fn precedence_fill(
-    on: bool,
-    hovered: bool,
-    on_fill: Color,
-    hover_fill: Color,
-) -> Option<Color> {
-    if on {
-        Some(on_fill)
-    } else if hovered {
-        Some(hover_fill)
-    } else {
-        None
-    }
-}
-
-/// The label ink under the same precedence, falling back to the `resting` ink a
-/// control inherits when it is neither on nor hovered.
-pub(crate) fn precedence_ink(
-    on: bool,
-    hovered: bool,
-    on_ink: Color,
-    hover_ink: Color,
-    resting: Color,
-) -> Color {
-    if on {
-        on_ink
-    } else if hovered {
-        hover_ink
-    } else {
-        resting
     }
 }
 
@@ -803,43 +763,6 @@ mod tests {
         w.hovered = true;
         assert_eq!(w.fill(&colors), Some(colors.on_fill));
         assert_eq!(w.ink(&colors), colors.on_ink);
-    }
-
-    /// The precedence rule itself, over the four state combinations —
-    /// `toggle_group` resolves its per-item look through these same two
-    /// functions.
-    #[test]
-    fn the_precedence_rule_ranks_on_over_hover_over_rest() {
-        let on_color = Color::from_rgb8(0x01, 0x01, 0x01);
-        let hover = Color::from_rgb8(0x02, 0x02, 0x02);
-        let resting = Color::from_rgb8(0x03, 0x03, 0x03);
-
-        assert_eq!(
-            precedence_fill(true, false, on_color, hover),
-            Some(on_color)
-        );
-        assert_eq!(precedence_fill(true, true, on_color, hover), Some(on_color));
-        assert_eq!(precedence_fill(false, true, on_color, hover), Some(hover));
-        assert_eq!(
-            precedence_fill(false, false, on_color, hover),
-            None,
-            "`bg-transparent` at rest"
-        );
-
-        assert_eq!(
-            precedence_ink(true, false, on_color, hover, resting),
-            on_color
-        );
-        assert_eq!(
-            precedence_ink(true, true, on_color, hover, resting),
-            on_color
-        );
-        assert_eq!(precedence_ink(false, true, on_color, hover, resting), hover);
-        assert_eq!(
-            precedence_ink(false, false, on_color, hover, resting),
-            resting,
-            "the inherited `foreground`"
-        );
     }
 
     #[test]

@@ -1664,6 +1664,10 @@ pub(crate) mod tests {
             ctx.needs_frame(),
             "the seeding paint must still schedule the frame that ramps progress off zero"
         );
+        assert!(
+            !ctx.needs_layout(),
+            "a non-layout-affecting entrance must not also request a layout pass"
+        );
     }
 
     #[test]

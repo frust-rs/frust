@@ -78,10 +78,10 @@ use std::rc::Rc;
 
 use frust::authoring::{
     AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
-    ErasedArgCallback, EventCtx, EventResult, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx,
-    PaintScene, Point, PointerPhase, Rect, Role, ScrollDelta, SemanticsCtx, Size, ThemeTextColor,
-    View, Widget, any, build_child, erase_callback_arg, rebuild_child, rebuild_children,
-    route_event_single, teardown_child, text::FontWeight, visit_children,
+    ErasedArgCallback, EventCtx, EventResult, InputEvent, Key, KeyEvent, LayoutCtx, NamedKey,
+    PaintCtx, PaintScene, Point, PointerEvent, PointerPhase, Rect, Role, ScrollDelta, SemanticsCtx,
+    Size, ThemeTextColor, View, Widget, any, build_child, erase_callback_arg, rebuild_child,
+    rebuild_children, route_event_single, teardown_child, text::FontWeight, visit_children,
 };
 use frust::input::WHEEL_LINE_PX;
 use frust::{
@@ -515,6 +515,123 @@ impl CommandWidget {
             (pos.y >= top && pos.y < top + pod.size().height).then_some(i)
         })
     }
+
+    /// The `Widget::event` key arm: arrow/enter navigation, plus everything
+    /// unhandled falling through to the search field — split out of `event`
+    /// itself so the dispatcher stays a plain read of the event shape.
+    fn handle_key(
+        &mut self,
+        ctx: &mut EventCtx,
+        event: &InputEvent,
+        key: &KeyEvent,
+    ) -> EventResult {
+        match &key.key {
+            // Not handled *and* not forwarded — the field would consume it as
+            // a blur, and the host must see it to dismiss (module docs).
+            Key::Named(NamedKey::Escape) => EventResult::Ignored,
+            Key::Named(NamedKey::ArrowDown) => {
+                self.move_highlight(1);
+                ctx.request_redraw();
+                EventResult::Handled
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                self.move_highlight(-1);
+                ctx.request_redraw();
+                EventResult::Handled
+            }
+            Key::Named(NamedKey::Enter) => {
+                if let Some(row) = self.highlight {
+                    self.select(ctx, row);
+                    EventResult::Handled
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            _ => route_event_single(&mut self.pods[0], ctx, event),
+        }
+    }
+
+    /// The `Widget::event` scroll arm: the same `offset + dy` wheel convention
+    /// every scrollable in this catalog shares, clamped to the content range.
+    fn handle_scroll(
+        &mut self,
+        ctx: &mut EventCtx,
+        size: Size,
+        position: Point,
+        delta: &ScrollDelta,
+    ) -> EventResult {
+        if !self.list_rect(size).contains(position) {
+            return EventResult::Ignored;
+        }
+        let dy = match delta {
+            ScrollDelta::Lines(_, y) => y * WHEEL_LINE_PX,
+            ScrollDelta::Pixels(_, y) => *y,
+        };
+        let before = self.scroll;
+        self.scroll += dy;
+        self.clamp_scroll();
+        if (self.scroll - before).abs() > f64::EPSILON {
+            self.apply_scroll();
+            ctx.request_redraw();
+            return EventResult::Handled;
+        }
+        EventResult::Ignored
+    }
+
+    /// The `Widget::event` pointer arm: hover latching, press-to-highlight, and
+    /// release-to-select, with the input row routed to the field first.
+    fn handle_pointer(
+        &mut self,
+        ctx: &mut EventCtx,
+        event: &InputEvent,
+        size: Size,
+        p: &PointerEvent,
+    ) -> EventResult {
+        // The input row is the field's; the list is this widget's.
+        if p.position.y < INPUT_HEIGHT || self.pods[0].is_active() {
+            return route_event_single(&mut self.pods[0], ctx, event);
+        }
+        let row = self.row_at(p.position, size);
+        match p.phase {
+            PointerPhase::Move => {
+                // Claimed after the field routing above (the claim-ordering rule).
+                if row.is_some() {
+                    ctx.claim_hover();
+                    ctx.set_cursor(style::ACTIVE_CURSOR);
+                }
+                let hovered = row.filter(|i| self.rows[*i].selectable());
+                if self.hovered != hovered {
+                    self.hovered = hovered;
+                    ctx.request_redraw();
+                }
+                EventResult::Ignored
+            }
+            PointerPhase::Down => {
+                let Some(row) = row.filter(|i| self.rows[*i].selectable()) else {
+                    return EventResult::Ignored;
+                };
+                // Focus is what routes the arrows and Enter here afterwards.
+                ctx.request_focus();
+                self.highlight = Some(row);
+                ctx.capture_pointer();
+                ctx.request_redraw();
+                EventResult::Handled
+            }
+            PointerPhase::Up => {
+                let Some(row) = row.filter(|i| self.rows[*i].selectable()) else {
+                    return EventResult::Ignored;
+                };
+                if self.highlight == Some(row) {
+                    self.select(ctx, row);
+                }
+                EventResult::Handled
+            }
+            // A `Cancel` arm touches no app state — there is no press flag of its
+            // own to clear here beyond the highlight, which is view state the next
+            // move re-establishes.
+            PointerPhase::Cancel => EventResult::Handled,
+        }
+    }
 }
 
 impl<State: 'static> View<State> for CommandView<State> {
@@ -707,29 +824,7 @@ impl Widget for CommandWidget {
             return EventResult::Ignored;
         }
         if let InputEvent::Key(key) = event {
-            match &key.key {
-                // Not handled *and* not forwarded — the field would consume it as
-                // a blur, and the host must see it to dismiss (module docs).
-                Key::Named(NamedKey::Escape) => return EventResult::Ignored,
-                Key::Named(NamedKey::ArrowDown) => {
-                    self.move_highlight(1);
-                    ctx.request_redraw();
-                    return EventResult::Handled;
-                }
-                Key::Named(NamedKey::ArrowUp) => {
-                    self.move_highlight(-1);
-                    ctx.request_redraw();
-                    return EventResult::Handled;
-                }
-                Key::Named(NamedKey::Enter) => {
-                    if let Some(row) = self.highlight {
-                        self.select(ctx, row);
-                        return EventResult::Handled;
-                    }
-                    return EventResult::Ignored;
-                }
-                _ => return route_event_single(&mut self.pods[0], ctx, event),
-            }
+            return self.handle_key(ctx, event, key);
         }
         // Everything else the field owns goes to the field (IME, and pointer
         // events inside the input row).
@@ -738,70 +833,12 @@ impl Widget for CommandWidget {
         }
         let size = ctx.size();
         if let InputEvent::Scroll { position, delta } = event {
-            if !self.list_rect(size).contains(*position) {
-                return EventResult::Ignored;
-            }
-            let dy = match delta {
-                ScrollDelta::Lines(_, y) => y * WHEEL_LINE_PX,
-                ScrollDelta::Pixels(_, y) => *y,
-            };
-            let before = self.scroll;
-            self.scroll += dy;
-            self.clamp_scroll();
-            if (self.scroll - before).abs() > f64::EPSILON {
-                self.apply_scroll();
-                ctx.request_redraw();
-                return EventResult::Handled;
-            }
-            return EventResult::Ignored;
+            return self.handle_scroll(ctx, size, *position, delta);
         }
         let InputEvent::Pointer(p) = event else {
             return EventResult::Ignored;
         };
-        // The input row is the field's; the list is this widget's.
-        if p.position.y < INPUT_HEIGHT || self.pods[0].is_active() {
-            return route_event_single(&mut self.pods[0], ctx, event);
-        }
-        let row = self.row_at(p.position, size);
-        match p.phase {
-            PointerPhase::Move => {
-                // Claimed after the field routing above (the claim-ordering rule).
-                if row.is_some() {
-                    ctx.claim_hover();
-                    ctx.set_cursor(style::ACTIVE_CURSOR);
-                }
-                let hovered = row.filter(|i| self.rows[*i].selectable());
-                if self.hovered != hovered {
-                    self.hovered = hovered;
-                    ctx.request_redraw();
-                }
-                EventResult::Ignored
-            }
-            PointerPhase::Down => {
-                let Some(row) = row.filter(|i| self.rows[*i].selectable()) else {
-                    return EventResult::Ignored;
-                };
-                // Focus is what routes the arrows and Enter here afterwards.
-                ctx.request_focus();
-                self.highlight = Some(row);
-                ctx.capture_pointer();
-                ctx.request_redraw();
-                EventResult::Handled
-            }
-            PointerPhase::Up => {
-                let Some(row) = row.filter(|i| self.rows[*i].selectable()) else {
-                    return EventResult::Ignored;
-                };
-                if self.highlight == Some(row) {
-                    self.select(ctx, row);
-                }
-                EventResult::Handled
-            }
-            // A `Cancel` arm touches no app state — there is no press flag of its
-            // own to clear here beyond the highlight, which is view state the next
-            // move re-establishes.
-            PointerPhase::Cancel => EventResult::Handled,
-        }
+        self.handle_pointer(ctx, event, size, p)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
@@ -1252,24 +1289,58 @@ mod tests {
             );
         }
         assert!(w.scroll() > 0.0, "the highlight scrolled into view");
-        assert!(w.scroll() <= w.content_height - w.viewport);
+        let max_scroll = w.content_height - w.viewport;
+        assert!(w.scroll() <= max_scroll);
+
+        // Walk the highlight back to the first row through the same public key
+        // route used above — `scroll_into_view` lands `scroll` back at 0.0
+        // (the row's own top offset), so there is no need to poke the private
+        // field directly.
+        for _ in 0..20 {
+            dispatch(
+                &mut w,
+                &mut state,
+                &key_event(Key::Named(NamedKey::ArrowUp)),
+            );
+        }
+        assert_eq!(w.scroll(), 0.0, "walked back to the top row");
 
         // A wheel scroll moves the same offset, baseline `offset + dy` convention
-        // (frust-widgets' `ScrollView`/`ListView`). Reset to the top first, since
-        // the ArrowDown loop above already left `scroll` at its max — a wheel
-        // scroll from there would just clamp back to max and hide the growth.
-        w.scroll = 0.0;
-        w.apply_scroll();
+        // (frust-widgets' `ScrollView`/`ListView`): a positive `y` delta scrolls
+        // down (increases the offset).
+        let scroll_at = Point::new(100.0, INPUT_HEIGHT + 20.0);
         let before = w.scroll();
         dispatch(
             &mut w,
             &mut state,
             &InputEvent::Scroll {
-                position: Point::new(100.0, INPUT_HEIGHT + 20.0),
+                position: scroll_at,
                 delta: ScrollDelta::Lines(0.0, 1.0),
             },
         );
-        assert!(w.scroll() > before);
+        assert!(w.scroll() > before, "a positive delta scrolls down");
+
+        // Wheel past the max clamps at the bottom rather than overshooting.
+        dispatch(
+            &mut w,
+            &mut state,
+            &InputEvent::Scroll {
+                position: scroll_at,
+                delta: ScrollDelta::Lines(0.0, 1000.0),
+            },
+        );
+        assert_eq!(w.scroll(), max_scroll, "clamped at the bottom");
+
+        // Wheel back up past the top clamps at 0 rather than going negative.
+        dispatch(
+            &mut w,
+            &mut state,
+            &InputEvent::Scroll {
+                position: scroll_at,
+                delta: ScrollDelta::Lines(0.0, -1000.0),
+            },
+        );
+        assert_eq!(w.scroll(), 0.0, "clamped at the top");
     }
 
     #[test]

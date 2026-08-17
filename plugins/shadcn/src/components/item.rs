@@ -278,10 +278,14 @@ impl Widget for ItemWidget {
         if routed == EventResult::Handled {
             return routed;
         }
-        let on_press = self
-            .on_press
-            .as_mut()
-            .expect("on_press is set whenever interactive is true");
+        // `interactive` and `on_press` are kept in lockstep by `build`/`rebuild`
+        // (`interactive` is derived from `on_press.is_some()`), so this should
+        // never miss — but a broken invariant here must not panic under
+        // `panic=abort` inside a pointer handler; short-circuit as an ignored
+        // event instead of crashing the process.
+        let Some(on_press) = self.on_press.as_mut() else {
+            return EventResult::Ignored;
+        };
         match p.phase {
             PointerPhase::Down => {
                 self.pressed = true;

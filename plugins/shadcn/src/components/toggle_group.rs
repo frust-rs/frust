@@ -66,8 +66,8 @@ use frust::authoring::{
     text::{FontWeight, TextStyle},
 };
 
-use crate::components::toggle::{ToggleSize, ToggleVariant, precedence_fill, precedence_ink};
-use crate::style::{self, PATH_TOLERANCE};
+use crate::components::toggle::{ToggleSize, ToggleVariant};
+use crate::style::{self, PATH_TOLERANCE, precedence_fill, precedence_ink};
 use crate::text::{LabelRun, SHAPING_INK};
 use crate::tokens::ShadcnTokens;
 
