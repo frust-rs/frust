@@ -12,9 +12,9 @@
 
 use frust::authoring::text::{FontWeight, LineHeight, TextStyle};
 use frust::{
-    Brightness, ColorScheme, Curve, DesignLanguage, EasingSet, Elevation, ElevationLevel,
-    GlassScale, MotionDurations, MotionScheme, MotionSpring, ShadowSpec, ShapeScale, StatusColors,
-    StatusPalette, SurfaceRole, Theme, ThemeExtensions, TypeScale,
+    Brightness, ColorScheme, CosmeticLoopRate, Curve, DesignLanguage, EasingSet, Elevation,
+    ElevationLevel, GlassScale, MotionDurations, MotionScheme, MotionSpring, ShadowSpec,
+    ShapeScale, StatusColors, StatusPalette, SurfaceRole, Theme, ThemeExtensions, TypeScale,
 };
 use peniko::Color;
 
@@ -454,11 +454,8 @@ pub const fn elevation() -> Elevation {
 /// (`cubic-bezier(0.3, 0.0, 1.0, 1.0)`, M3's curve for elements leaving the
 /// screen).
 ///
-/// `cosmetic_loop_rate` reads off [`MotionScheme::neutral`]'s own 30Hz
-/// value rather than naming `CosmeticLoopRate` directly — that type is not
-/// nameable through the `frust` facade (only the `MotionScheme` field that
-/// holds one is), and every built-in baseline already declares the same
-/// 30Hz cap this scale wants.
+/// `cosmetic_loop_rate` is this design system's own authored value — 30Hz,
+/// the same cap every built-in baseline declares.
 pub const fn motion_scheme() -> MotionScheme {
     MotionScheme {
         fast_spatial: MotionSpring {
@@ -498,7 +495,7 @@ pub const fn motion_scheme() -> MotionScheme {
             exit: Curve::Cubic(0.3, 0.0, 1.0, 1.0),
         },
         reduce_motion: false,
-        cosmetic_loop_rate: MotionScheme::neutral().cosmetic_loop_rate,
+        cosmetic_loop_rate: CosmeticLoopRate::new(30.0),
     }
 }
 

@@ -662,10 +662,10 @@ pub use router_glue::{RouterDeepLinks, router_with_deep_links};
 /// vocabulary ([`MotionDurations`]/[`EasingSet`]) — all flat-re-exported so an
 /// app (or a design-system plugin) authors a theme against `frust::*` alone.
 pub use frust_theme::{
-    Brightness, ColorScheme, DesignLanguage, EasingSet, Elevation, ElevationLevel, FontFace,
-    GlassFill, GlassMaterial, GlassScale, MotionDurations, MotionScheme, MotionSpring,
-    NativeTypefaces, ShadowSpec, ShapeScale, StatusColors, StatusPalette, SurfaceRole, Theme,
-    ThemeBuilder, ThemeExtensions, TypeScale,
+    Brightness, ColorScheme, CosmeticLoopRate, DesignLanguage, EasingSet, Elevation,
+    ElevationLevel, FontFace, GlassFill, GlassMaterial, GlassScale, MotionDurations, MotionScheme,
+    MotionSpring, NativeTypefaces, ShadowSpec, ShapeScale, StatusColors, StatusPalette,
+    SurfaceRole, Theme, ThemeBuilder, ThemeExtensions, TypeScale,
 };
 
 /// The color type every [`ColorScheme`] role is expressed in

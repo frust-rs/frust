@@ -11,9 +11,9 @@
 
 use frust::authoring::text::{FontFamily, FontWeight, LineHeight, TextStyle};
 use frust::{
-    Brightness, ColorScheme, Curve, DesignLanguage, EasingSet, Elevation, ElevationLevel,
-    MotionDurations, MotionScheme, MotionSpring, ShadowSpec, ShapeScale, StatusColors,
-    StatusPalette, SurfaceRole, Theme, ThemeExtensions, TypeScale,
+    Brightness, ColorScheme, CosmeticLoopRate, Curve, DesignLanguage, EasingSet, Elevation,
+    ElevationLevel, MotionDurations, MotionScheme, MotionSpring, ShadowSpec, ShapeScale,
+    StatusColors, StatusPalette, SurfaceRole, Theme, ThemeExtensions, TypeScale,
 };
 use peniko::Color;
 
@@ -579,11 +579,8 @@ pub const fn elevation() -> Elevation {
 /// three easing slots, mirroring the springs' uniform-baseline treatment
 /// above.
 ///
-/// `cosmetic_loop_rate` reads off [`MotionScheme::neutral`]'s own 30Hz value
-/// rather than naming `CosmeticLoopRate` directly — that type is not
-/// nameable through the `frust` facade (only the `MotionScheme` field that
-/// holds one is), and every built-in baseline already declares the same
-/// 30Hz cap this scale wants.
+/// `cosmetic_loop_rate` is this design system's own authored value — 30Hz,
+/// the same cap every built-in baseline declares.
 pub const fn motion_scheme() -> MotionScheme {
     // ζ = 15.0 / (2 * sqrt(170.0)) ≈ 0.5753 (see doc comment above; sqrt
     // isn't const-evaluable on stable Rust, so the ratio is precomputed
@@ -614,7 +611,7 @@ pub const fn motion_scheme() -> MotionScheme {
             exit: Curve::EaseInOut,
         },
         reduce_motion: false,
-        cosmetic_loop_rate: MotionScheme::neutral().cosmetic_loop_rate,
+        cosmetic_loop_rate: CosmeticLoopRate::new(30.0),
     }
 }
 

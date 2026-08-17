@@ -8,8 +8,8 @@
 
 use frust::authoring::text::{FontFamily, FontWeight, GenericSlot, LineHeight, TextStyle};
 use frust::{
-    Curve, EasingSet, Elevation, ElevationLevel, GlassMaterial, GlassScale, MotionDurations,
-    MotionScheme, MotionSpring, ShadowSpec, ShapeScale, SurfaceRole, TypeScale,
+    CosmeticLoopRate, Curve, EasingSet, Elevation, ElevationLevel, GlassMaterial, GlassScale,
+    MotionDurations, MotionScheme, MotionSpring, ShadowSpec, ShapeScale, SurfaceRole, TypeScale,
 };
 
 // ---- Type scale ---------------------------------------------------------
@@ -284,12 +284,9 @@ pub const fn motion() -> MotionScheme {
         // `MotionScheme::reduce_motion`), so Glyph needs no per-catalog
         // reduced-motion handling of its own.
         reduce_motion: false,
-        // 30Hz, carried over from a built-in baseline rather than
-        // written literally: `CosmeticLoopRate` is not nameable through
-        // the `frust` facade (only the `MotionScheme` field that holds
-        // one is), and every built-in baseline already declares the same
-        // 30Hz cap this scale wants.
-        cosmetic_loop_rate: MotionScheme::neutral().cosmetic_loop_rate,
+        // 30Hz — this design system's own authored value, the same cap
+        // every built-in baseline declares.
+        cosmetic_loop_rate: CosmeticLoopRate::new(30.0),
     }
 }
 
