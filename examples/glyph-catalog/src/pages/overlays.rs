@@ -1,7 +1,7 @@
 //! Overlays section (reference §07): "Only one floating layer at a
 //! time" — a confirmation dialog, the signature amber-ring command palette
 //! (with a live substring filter), and the Glyph modal bottom sheet
-//! (`frust::glyph::sheet`) holding the reference build's own pane-picker demo.
+//! (`frust_glyph::sheet`) holding the reference build's own pane-picker demo.
 //!
 //! # Demo state lives outside `CatalogState` (deliberate)
 //!
@@ -19,14 +19,14 @@
 
 use std::cell::Cell;
 
-use frust::glyph::{
-    PaletteItem, command_palette, glyph_dialog, glyph_sheet, show_command_palette,
-    show_glyph_dialog, show_glyph_sheet,
-};
 use frust::{
     AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked,
     NavigatorController, Padding, PopResult, RwSignal, Set, SizedBox, Theme, any, button,
     inflexible, text, use_context,
+};
+use frust_glyph::{
+    PaletteItem, command_palette, glyph_dialog, glyph_sheet, show_command_palette,
+    show_glyph_dialog, show_glyph_sheet,
 };
 
 use crate::CatalogState;
@@ -38,7 +38,7 @@ use crate::CatalogState;
 /// the Light toggle).
 fn subhead_ink() -> Color {
     use_context::<Theme>()
-        .unwrap_or_else(Theme::glyph_baseline)
+        .unwrap_or_else(frust_glyph::baseline)
         .scheme()
         .on_surface_variant
 }
@@ -49,7 +49,7 @@ fn subhead_ink() -> Color {
 /// the Light toggle).
 fn caption_ink() -> Color {
     use_context::<Theme>()
-        .unwrap_or_else(Theme::glyph_baseline)
+        .unwrap_or_else(frust_glyph::baseline)
         .scheme()
         .primary
 }
@@ -114,7 +114,7 @@ fn all_palette_items() -> Vec<PaletteItem> {
 }
 
 /// The live substring filter driving `on_query` — the app's job (v1: the
-/// palette itself has no fuzzy engine, see `frust::glyph::command_palette`'s
+/// palette itself has no fuzzy engine, see `frust_glyph::command_palette`'s
 /// module docs). Case-insensitive; an empty query returns every item.
 fn filter_items(query: &str) -> Vec<PaletteItem> {
     if query.is_empty() {
@@ -140,7 +140,7 @@ fn caption_view(caption: &str) -> AnyView<CatalogState> {
 /// Wire the "Open dialog" button: `show_glyph_dialog` with the reference
 /// build's own confirmation copy (§07's "Revoke observer-token?"), a ghost
 /// Cancel + a danger Revoke action. Both actions pop immediately (bypassing
-/// the dialog's own exit animation — the same immediacy `crate::glyph::dialog`'s
+/// the dialog's own exit animation — the same immediacy `frust_glyph::dialog`'s
 /// tests document for an action tap); the scrim/Escape path still plays the
 /// widget's staged exit. The result lands in [`OverlaysDemo::caption`].
 fn open_dialog_button(
@@ -274,7 +274,7 @@ fn sheet_body(nav: NavigatorController<CatalogState>) -> AnyView<CatalogState> {
 
 /// Wire the "Bottom sheet" button: [`show_glyph_sheet`] holding
 /// [`sheet_body`] — the reference build's pane-picker sheet demo, now on the
-/// Glyph modal bottom sheet catalog widget (`frust::glyph::sheet`) rather
+/// Glyph modal bottom sheet catalog widget (`frust_glyph::sheet`) rather
 /// than a bespoke `glyph_card` pushed through the raw
 /// [`PageTransition::SlideUp`](frust::PageTransition::SlideUp) navigator
 /// primitive — that raw approach had no scrim/dimming of its own at all;

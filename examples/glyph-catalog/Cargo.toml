@@ -21,9 +21,11 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # NOTE: temporary path dependency pointing at the Frust repo checkout
 # that generated this project (the `frust_path` mechanism is
 # explicitly temporary). Once Frust crates are published, `frust
-# create` will emit a version dependency here instead. The default
-# `glyph-fonts` feature is left ON — this catalog showcases the Glyph
-# design language, so it needs the bundled Space Mono / IBM Plex Mono bytes.
+# create` will emit a version dependency here instead. `frust` itself
+# carries no design-system catalog (`default = []`) — the Glyph catalog
+# this app showcases is the `frust-glyph` plugin crate below, depended on
+# beside the facade, never inside it (docs/ARCHITECTURE.md's facade/plugin
+# boundary).
 frust = { path = "../../crates/frust" }
 # `frust` is the ONLY framework line this catalog ships for widget authoring.
 # `AppBackground` (`lib.rs`), `AnchorReporter` (`pages/appbar.rs`),
@@ -34,6 +36,24 @@ frust = { path = "../../crates/frust" }
 # `frust::kurbo`/`frust::peniko`, the long-tail valve, where a type isn't
 # lifted by name); no production code names `frust-core`/`kurbo`/`peniko`
 # directly any more.
+# The Glyph design-system plugin: every catalog widget (`frust_glyph::*`),
+# the assembled baseline `Theme` (`frust_glyph::baseline()`), the bundled
+# Space Mono / IBM Plex Mono fonts, and the two Glyph motion patterns
+# (`frust_glyph::motion::{GlyphSlide,GlyphStagger}`) this app exists to
+# showcase now live here, not behind a `frust` feature.
+frust-glyph = { path = "../../plugins/glyph" }
+# `switch`/`circular_progress`/`ProgressValue` (Buttons+Forms' "baseline form
+# controls" row, Interactions' connection-heartbeat/charge-ring demos) were
+# never baseline `frust-widgets` items — pre-detach they reached this crate
+# only because `frust`'s formerly-default-on `material` feature pulled the
+# whole Material catalog in unconditionally alongside Glyph/Cupertino. The
+# detach (`frust` now `default = []`) makes that pre-existing dependency
+# explicit rather than removing the two demos or hand-rolling replacements —
+# same widgets, same behavior, now an honest sibling `frust-material`
+# dependency beside `frust-glyph` (the facade/plugin boundary in
+# docs/ARCHITECTURE.md is about the `frust` facade never depending on a
+# plugin, not about one app avoiding two catalog plugins side by side).
+frust-material = { path = "../../plugins/material" }
 
 # `log` facade dependency, present only so the release-only `lean` feature
 # below can raise the compiled-in log ceiling (release-lean build mode).
@@ -65,7 +85,7 @@ frust-reactive = { path = "../../crates/frust-reactive" }
 frust-scene = { path = "../../crates/frust-scene" }
 # `frust-shell-common` is already a transitive dependency of `frust`; named
 # directly here only so `tests/glyph_default_theme.rs` can read back
-# `default_theme()` — the process-global slot `frust::glyph_theme::install()`
+# `default_theme()` — the process-global slot `frust_glyph::install()`
 # (called from this app's `frust::app!(.., setup = { .. })` block) writes
 # into, proving the install actually seeds Glyph rather than just compiling.
 frust-shell-common = { path = "../../crates/frust-shell-common" }

@@ -1,6 +1,6 @@
 //! AppBar section: six demo blocks — anatomy, scroll collapse, back-nav
 //! title crossfade, the overflow menu, selection mode, and the connection
-//! banner. The catalog's own root [`AppBar`](frust::glyph::app_bar)
+//! banner. The catalog's own root [`AppBar`](frust_glyph::app_bar)
 //! is the real integration; this section is the reference showcase, kept
 //! visually consistent with it.
 //!
@@ -25,9 +25,9 @@
 //!
 //! # The overflow-menu anchor: a genuine framework gap
 //!
-//! [`frust::glyph::show_glyph_menu`]'s anchor is a caller-reported
+//! [`frust_glyph::show_glyph_menu`]'s anchor is a caller-reported
 //! window-coordinate `Rect` (`frust::kurbo::Rect`, flat-re-exported by
-//! `frust::authoring`; `frust_widgets::glyph::menu`'s module docs describe how an `AppBar`'s
+//! `frust::authoring`; `frust_glyph::menu`'s module docs describe how an `AppBar`'s
 //! trailing icon records its own painted bounds during `paint`) — there is
 //! no ancestor-bounds query a widget can make mid-layout, and no facade
 //! widget reports a child's painted bounds back to app code. [`AnchorReporter`]
@@ -66,11 +66,6 @@ use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent, LayoutCtx,
     PaintCtx, PaintScene, Point, Rect, SemanticsCtx, Size, Widget,
 };
-use frust::glyph::{
-    BadgeVariant, BannerVariant, MenuEntry, TitleDirection, app_bar, banner_spec, glyph_list,
-    glyph_list_item, large_config, menu_item, menu_item_danger, menu_separator, selection_bar,
-    show_glyph_menu,
-};
 use frust::motion::patterns::SharedAxis;
 use frust::motion::switcher::pattern_switcher;
 use frust::{
@@ -78,6 +73,11 @@ use frust::{
     GetUntracked, Image, ImageFit, ImageSource, NavigatorController, Padding, PopResult, RwSignal,
     ScrollInfo, Set, SizedBox, Theme, View, any, button, checkbox, flexible, inflexible, safe_area,
     scroll_view, spawn_local, text, use_context,
+};
+use frust_glyph::{
+    BadgeVariant, BannerVariant, MenuEntry, TitleDirection, app_bar, banner_spec, glyph_list,
+    glyph_list_item, large_config, menu_item, menu_item_danger, menu_separator, selection_bar,
+    show_glyph_menu,
 };
 
 use crate::CatalogState;
@@ -90,7 +90,7 @@ use crate::CatalogState;
 /// baseline pre-context — see `navigation.rs`'s `accent()` twin.
 fn amber() -> Color {
     use_context::<Theme>()
-        .unwrap_or_else(Theme::glyph_baseline)
+        .unwrap_or_else(frust_glyph::baseline)
         .scheme()
         .primary
 }
@@ -98,13 +98,13 @@ fn amber() -> Color {
 /// A muted caption ink — see [`amber`]'s twin.
 fn muted() -> Color {
     use_context::<Theme>()
-        .unwrap_or_else(Theme::glyph_baseline)
+        .unwrap_or_else(frust_glyph::baseline)
         .scheme()
         .on_surface_variant
 }
 
 /// `color` with its alpha channel replaced — duplicated from
-/// `frust-widgets::glyph::badge`'s crate-private helper of the same shape
+/// `frust-glyph::badge`'s crate-private helper of the same shape
 /// (unreachable from here), see `interactions.rs`'s identical duplicate.
 fn with_alpha(color: Color, alpha: f32) -> Color {
     let c = color.components;
@@ -167,7 +167,7 @@ fn back_button(nav: NavigatorController<CatalogState>) -> AnyView<CatalogState> 
 
 /// Wrap a variation page's real `bar` over a scrollable `body` — the pushed
 /// full-screen frame every variation shares. `bar` consumes the top window
-/// inset itself (`glyph::app_bar`'s own module docs), so `body`'s safe area
+/// inset itself (`frust_glyph::app_bar`'s own module docs), so `body`'s safe area
 /// disables its own top edge (`.top(false)`) to avoid double-padding it,
 /// exactly mirroring `crate::lib`'s root shell composition.
 fn variation_frame(
@@ -442,7 +442,7 @@ local_sig!(collapse_elevated_sig, bool, false);
 /// Scroll offset (logical px) past which [`AppBarView::large`] is fully
 /// collapsed — matches `AppBarView::collapse_progress`'s own `min(1,
 /// offset/60)` mapping
-/// (`frust_widgets::glyph::appbar::AppBarView::collapse_progress`'s docs).
+/// (`frust_glyph::appbar::AppBarView::collapse_progress`'s docs).
 const COLLAPSE_SPAN_PX: f64 = 60.0;
 /// Scroll offset (logical px) past which the bar also raises its scrolled
 /// elevation — mirrors [`crate::ELEVATION_THRESHOLD_PX`] (the root AppBar's
@@ -459,7 +459,7 @@ fn collapse_meta_row() -> AnyView<CatalogState> {
         Axis::Horizontal,
         vec![
             inflexible(any(
-                frust::glyph::badge("connected", BadgeVariant::Success).dot(true)
+                frust_glyph::badge("connected", BadgeVariant::Success).dot(true)
             )),
             gap(8.0),
             inflexible(text("100.71.31.57:50051 · 42ms").size(11.0).color(muted())),
@@ -682,7 +682,7 @@ fn overflow_menu_entries() -> Vec<MenuEntry> {
 }
 
 /// 04 overflow menu: the real pushed page. A kebab trailing icon opens
-/// [`frust::glyph::show_glyph_menu`], anchored at the kebab's own painted
+/// [`frust_glyph::show_glyph_menu`], anchored at the kebab's own painted
 /// rect via [`AnchorReporter`] (see the [module docs](self)) — the inline
 /// demo's exact wiring, plus a leading [`back_button`] and scrollable filler
 /// content underneath.

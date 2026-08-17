@@ -3,10 +3,15 @@
 //! Every [`ButtonStyle`] (Primary/Secondary/Ghost/Danger/Icon), the `.small()`
 //! padding scale, and the built-in press-feedback scale are demonstrated
 //! alongside the baseline form controls (`text_input`, `checkbox`, `radio`,
-//! `switch`, `slider`) — all **BASELINE widgets rendered under the Glyph
-//! theme** (they aren't `frust::glyph::*` catalog components; they resolve
-//! their colors/shapes from the active [`Theme`](frust::Theme) like any other
-//! themed widget, which is how they read correctly here).
+//! `slider`) — **BASELINE widgets rendered under the Glyph theme** (they
+//! aren't `frust_glyph::*` catalog components; they resolve their
+//! colors/shapes from the active [`Theme`](frust::Theme) like any other
+//! themed widget, which is how they read correctly here). `switch` is the one
+//! exception in this row: it is a `frust_material::switch` catalog widget
+//! (see `Cargo.toml`'s `frust-material` dependency comment for why this
+//! otherwise Glyph-only crate carries it), included here because it renders
+//! correctly under any theme the same way and this page has shown it since
+//! before the design-system-catalog split.
 //!
 //! # Local interactive state (component-nested, not `CatalogState`)
 //!
@@ -71,8 +76,12 @@
 use frust::{
     Alignment, AnyView, Axis, ButtonStyle, Column, Component, CrossAxisAlignment, EdgeInsets,
     FlexView, Get, Padding, RwSignal, Set, SizedBox, any, button, checkbox, component, inflexible,
-    radio, slider, switch, text, text_input,
+    radio, slider, text, text_input,
 };
+// `switch` is a Material catalog widget (see `Cargo.toml`'s `frust-material`
+// dependency comment) — not `frust_glyph::*`, but not a baseline
+// `frust`/`frust-widgets` item either.
+use frust_material::switch;
 
 use crate::CatalogState;
 
@@ -188,7 +197,7 @@ impl Component for ButtonsFormsScreen {
             spacer(24.0),
             heading("Form Controls"),
             caption(
-                "BASELINE widgets (text_input/checkbox/radio/switch/slider) rendered under the Glyph theme — not frust::glyph::* catalog components, but themed the same way.",
+                "BASELINE widgets (text_input/checkbox/radio/switch/slider) rendered under the Glyph theme — not frust_glyph::* catalog components, but themed the same way.",
             ),
             spacer(12.0),
             caption("Text input (prompt-style placeholder):"),

@@ -14,18 +14,23 @@
 //! Originally a stub scaffold placeholder honoring the page-fn contract in
 //! `pages/mod.rs`.
 
-use frust::glyph::TermLine;
-use frust::glyph::{
-    PaletteItem, accordion, command_palette, glyph_dialog, show_command_palette, show_glyph_dialog,
-    tabs, term_block,
-};
-use frust::motion::patterns::{FadeScale, FadeThrough, GlyphSlide, SharedAxis, SlideDirection};
+use frust::motion::patterns::{FadeScale, FadeThrough, SharedAxis};
 use frust::motion::switcher::pattern_switcher;
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get,
     GetUntracked, MotionScheme, Padding, PageTransition, RwSignal, Set, SizedBox, Theme,
-    TransitionSpec, Update, any, button, inflexible, keyed, switch, text, use_context,
+    TransitionSpec, Update, any, button, inflexible, keyed, text, use_context,
 };
+use frust_glyph::TermLine;
+use frust_glyph::motion::{GlyphSlide, SlideDirection};
+use frust_glyph::{
+    PaletteItem, accordion, command_palette, glyph_dialog, show_command_palette, show_glyph_dialog,
+    tabs, term_block,
+};
+// `switch` is a Material catalog widget (see `Cargo.toml`'s `frust-material`
+// dependency comment) — not `frust_glyph::*`, but not a baseline
+// `frust`/`frust-widgets` item either.
+use frust_material::switch;
 
 use crate::CatalogState;
 
@@ -35,7 +40,7 @@ use crate::CatalogState;
 /// the Light toggle).
 fn amber() -> Color {
     use_context::<Theme>()
-        .unwrap_or_else(Theme::glyph_baseline)
+        .unwrap_or_else(frust_glyph::baseline)
         .scheme()
         .primary
 }
@@ -45,7 +50,7 @@ fn amber() -> Color {
 /// the Light toggle).
 fn muted() -> Color {
     use_context::<Theme>()
-        .unwrap_or_else(Theme::glyph_baseline)
+        .unwrap_or_else(frust_glyph::baseline)
         .scheme()
         .on_surface_variant
 }
@@ -239,7 +244,7 @@ fn sheet_scaffold(panel: AnyView<CatalogState>) -> AnyView<CatalogState> {
     any(Align(
         Alignment { x: 0.0, y: 1.0 },
         SizedBox(Some(SHEET_MAX_WIDTH), None)
-            .child(frust::glyph::glyph_card::<CatalogState>().desc(panel)),
+            .child(frust_glyph::glyph_card::<CatalogState>().desc(panel)),
     ))
 }
 
@@ -480,9 +485,9 @@ fn demo_boot() -> FlexChild<CatalogState> {
 /// See the page-fn contract in [`crate::pages`].
 pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
     // Durations/easings come from the canonical Glyph motion scheme (the app
-    // forces `Theme::glyph_baseline()`; only its `reduce_motion` flag toggles,
+    // forces `frust_glyph::baseline()`; only its `reduce_motion` flag toggles,
     // never these token values).
-    let motion = Theme::glyph_baseline().motion;
+    let motion = frust_glyph::baseline().motion;
 
     any(FlexView::new(
         Axis::Vertical,
