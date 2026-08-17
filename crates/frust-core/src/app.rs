@@ -21,8 +21,8 @@ use kurbo::{Point, Rect, Size};
 
 use crate::anim::FrameTime;
 use crate::event::{
-    CursorIcon, EventCtx, EventOutcome, EventResult, ImeState, InputEvent, PointerButton,
-    PointerEvent, PointerPhase, clear_cursor_request, take_cursor_request,
+    CursorIcon, CursorPass, EventCtx, EventOutcome, EventResult, ImeState, InputEvent,
+    PointerButton, PointerEvent, PointerPhase,
 };
 use crate::insets::WindowInsets;
 use crate::layout::BoxConstraints;
@@ -567,6 +567,10 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// contact from a mouse here, so an uncaptured touch drag over a
     /// non-capturing claimant is an ordinary hover pass — ended by the `Up` at
     /// lift (see `docs/LIMITATIONS.md`'s `hover-window-leave-standing`).
+    ///
+    /// A [`RenderRoot::rebuild`] that removes the claimant ends the link too, so
+    /// this never reports a hover held by a widget that no longer exists — the
+    /// hover counterpart of the unmount focus release (see that method).
     pub fn is_hover_active(&self) -> bool {
         self.hover_active
     }
@@ -689,6 +693,23 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             &mut self.ime_state,
             &mut self.focus_ime_gen,
         );
+    }
+
+    /// End the standing hover link outright, outside any hover pass: advance the
+    /// epoch (which strands every stamp in the tree at once, so no container has
+    /// to be told) and clear the mirror.
+    ///
+    /// Hover's analog of [`RenderRoot::release_focus_session`], and idempotent in
+    /// the same way — ending a hover nothing holds writes the same mirror back and
+    /// costs one epoch. There is no generation counter to move: hover is not a
+    /// session a shell mirrors (see [`RenderRoot::is_hover_active`]).
+    ///
+    /// The one caller is [`RenderRoot::rebuild`]'s severed-claimant drain; a hover
+    /// pass ends its own link inline, where it also decides the *new* one.
+    fn end_hover_link(&mut self) {
+        self.hover_epoch = self.hover_epoch.wrapping_add(1);
+        self.hover_active = false;
+        crate::event::set_live_hover_epoch(0);
     }
 
     /// The [`PlatformViewFrame`]s published during the most recent
@@ -905,6 +926,30 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // `focus_or_ime_changed` edge for the one repaint the release needs.
         if crate::event::take_focus_orphaned() {
             self.release_focus_session();
+        }
+
+        // Generic-unmount hover release, the same shape one channel over: a diff
+        // that dropped the `ChildPod` holding the live hover link has severed a
+        // path the epoch mechanism cannot strand, because stranding needs a hover
+        // pass and the dead claimant will never see another one. Without this the
+        // mirror stands over a widget that no longer exists — `is_hover_active()`
+        // reporting a link nothing holds — and every surviving ancestor of the
+        // claimant keeps painting hover chrome off its own still-matching stamp
+        // until some later `Move` re-derives, which never comes on a pointer the
+        // user has stopped moving.
+        //
+        // The mark is raised by the pod's destructor rather than by the
+        // reconcilers (the stamp has no setter for a container to cooperate
+        // through — see `mark_hover_orphaned`), which is what makes this cover
+        // every removal route, including hand-rolled containers outside this
+        // workspace. Drained after the flush loop for the focus release's reason:
+        // any pass of the loop may re-diff, and one end covers them all.
+        //
+        // Like that release it marks no `ChangeFlags` of its own: dropping a child
+        // is a structural change, and the reconciler that performed it already
+        // reported `LAYOUT | PAINT` for the frame this correction rides on.
+        if crate::event::take_hover_orphaned() && self.hover_active {
+            self.end_hover_link();
         }
 
         self.pending |= flags;
@@ -1361,9 +1406,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         //
         // The slot is cleared here rather than trusted to be empty: a `set_cursor`
         // from a dispatch no root drove (a reconciler's synthesized `Cancel`)
-        // must not leak into this pass's resolution.
+        // must not leak into this pass's resolution. The clear and the drain below
+        // are one bracket (`CursorPass`) rather than two bare calls, so a dispatch
+        // that re-entered this method could not silently eat the enclosing pass's
+        // request — see that guard.
         let cursor_pass = matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Move);
-        clear_cursor_request();
+        let cursor_slot = CursorPass::enter();
 
         let (handled, needs_redraw, captured, hover_claimed, focus_req, focus_rel, ime) = {
             let state_any: &mut dyn Any = state;
@@ -1480,6 +1528,16 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         if hover_pass || hover_ends {
             self.hover_epoch = self.hover_epoch.wrapping_add(1);
             self.hover_active = hover_pass && hover_claimed;
+            // Republish the link a dropping pod checks its stamp against, so a
+            // rebuild that removes the claimant can report the severance the
+            // epoch alone cannot strand (see `ChildPod`'s `Drop`). `0` while
+            // nothing holds a link, which is what makes a stale stamp's drop —
+            // the common case — cost one comparison and mark nothing.
+            crate::event::set_live_hover_epoch(if self.hover_active {
+                self.hover_epoch
+            } else {
+                0
+            });
         }
 
         // Close the cursor pass: the last request of the pass wins, and its
@@ -1488,7 +1546,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // pointer moving off every requesting widget resolves to. Drained
         // unconditionally so a request made on a non-cursor pass cannot survive
         // into the next one; only a cursor pass commits it.
-        let requested = take_cursor_request();
+        let requested = cursor_slot.take();
         if cursor_pass {
             self.cursor = requested.unwrap_or_default();
         }
@@ -4309,10 +4367,13 @@ mod tests {
     /// ancestor-on-the-claim-path case, which the two sibling leaves alone cannot
     /// show. With `claims` set it also wants hover chrome of its own, claiming
     /// either side of the route to exercise the ordering rule.
+    ///
+    /// The child is an `Option` so a rebuild can *remove* it — the unmount case,
+    /// where the claimant stops existing between hover passes.
     struct HoverGroup {
         probe: Rc<HoverProbe>,
         claims: GroupClaim,
-        child: crate::widget::ChildPod,
+        child: Option<crate::widget::ChildPod>,
     }
 
     impl HoverGroup {
@@ -4333,13 +4394,22 @@ mod tests {
 
     impl crate::widget::Widget for HoverGroup {
         fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-            let size = self.child.layout_child(ctx, bc);
-            self.child.set_origin(Point::ZERO);
-            size
+            match &mut self.child {
+                Some(child) => {
+                    let size = child.layout_child(ctx, bc);
+                    child.set_origin(Point::ZERO);
+                    size
+                }
+                // The same box with nothing in it, so removing the claimant
+                // changes what is under the pointer without moving the container.
+                None => bc.constrain(Size::new(100.0, 30.0)),
+            }
         }
         fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
             self.probe.painted_hovered.set(ctx.is_hovered());
-            self.child.paint_child(ctx, scene);
+            if let Some(child) = &mut self.child {
+                child.paint_child(ctx, scene);
+            }
         }
         fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
             self.probe.event_hovered.set(ctx.is_hovered());
@@ -4347,7 +4417,10 @@ mod tests {
             if claims && self.claims == GroupClaim::BeforeRouting {
                 ctx.claim_hover();
             }
-            let result = self.child.event_child(ctx, event);
+            let result = match &mut self.child {
+                Some(child) => child.event_child(ctx, event),
+                None => EventResult::Ignored,
+            };
             if claims && self.claims == GroupClaim::AfterRouting {
                 ctx.claim_hover();
             }
@@ -4412,6 +4485,9 @@ mod tests {
         nested: bool,
         /// Whether (and when) that container claims hover for itself.
         group_claims: GroupClaim,
+        /// Rebuild the container without its child: the unmount case, where the
+        /// pod holding the hover link is dropped by the view diff.
+        drop_claimant: bool,
     }
 
     struct HoverPairView {
@@ -4439,7 +4515,7 @@ mod tests {
                 Box::new(HoverGroup {
                     probe: self.group.clone(),
                     claims: self.fixture.group_claims,
-                    child: crate::widget::ChildPod::new(self.leaf(&self.top)),
+                    child: Some(crate::widget::ChildPod::new(self.leaf(&self.top))),
                 })
             } else {
                 self.leaf(&self.top)
@@ -4449,8 +4525,21 @@ mod tests {
                 bottom: crate::widget::ChildPod::new(self.leaf(&self.bottom)),
             }
         }
-        fn rebuild(&self, _p: &Self, _e: &mut HoverPair, _c: &mut BuildCtx<'_>) -> ChangeFlags {
-            ChangeFlags::NONE
+        fn rebuild(&self, p: &Self, e: &mut HoverPair, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+            // The only structural op this fixture performs: drop the nested
+            // container's child pod, the way a real reconciler drops a truncated
+            // or conditionally-removed child.
+            let removes_child = self.fixture.drop_claimant && !p.fixture.drop_claimant;
+            if !removes_child {
+                return ChangeFlags::NONE;
+            }
+            let group = e
+                .top
+                .widget_mut()
+                .downcast_mut::<HoverGroup>()
+                .expect("the drop-claimant fixture is the nested one");
+            group.child = None;
+            ChangeFlags::LAYOUT | ChangeFlags::PAINT
         }
     }
 
@@ -4461,6 +4550,10 @@ mod tests {
         bottom: Rc<HoverProbe>,
         group: Rc<HoverProbe>,
         state: (),
+        /// The shape the next rebuild re-states, so
+        /// [`HoverHarness::rebuild_without_claimant`] can flip one flag without
+        /// restating the rest.
+        fixture: HoverFixture,
     }
 
     impl HoverHarness {
@@ -4472,6 +4565,7 @@ mod tests {
                 latches: true,
                 nested: false,
                 group_claims: GroupClaim::Never,
+                drop_claimant: false,
             })
         }
 
@@ -4483,6 +4577,7 @@ mod tests {
                 latches: false,
                 nested: false,
                 group_claims: GroupClaim::Never,
+                drop_claimant: false,
             })
         }
 
@@ -4493,6 +4588,7 @@ mod tests {
                 latches: true,
                 nested: true,
                 group_claims: GroupClaim::Never,
+                drop_claimant: false,
             })
         }
 
@@ -4504,6 +4600,7 @@ mod tests {
                 latches: true,
                 nested: true,
                 group_claims: claims,
+                drop_claimant: false,
             })
         }
 
@@ -4530,7 +4627,28 @@ mod tests {
                 bottom,
                 group,
                 state,
+                fixture,
             }
+        }
+
+        /// Rebuild with the nested container's child removed — the claimant
+        /// unmounting between hover passes — and re-lay out, returning what the
+        /// diff reported.
+        fn rebuild_without_claimant(&mut self) -> ChangeFlags {
+            self.fixture.drop_claimant = true;
+            let fixture = self.fixture;
+            let (t, b, g) = (self.top.clone(), self.bottom.clone(), self.group.clone());
+            let flags = self.root.rebuild(
+                &mut move |_: &mut ()| HoverPairView {
+                    top: t.clone(),
+                    bottom: b.clone(),
+                    group: g.clone(),
+                    fixture,
+                },
+                &mut self.state,
+            );
+            self.root.layout(Size::new(100.0, 60.0));
+            flags
         }
 
         /// Dispatch a pointer event at `(x, y)` in window space.
@@ -4850,6 +4968,82 @@ mod tests {
         let loss = h.dispatch(PointerPhase::Move, 50.0, 200.0);
         assert!(!h.root.is_hover_active());
         assert!(loss.needs_redraw, "the root manufactures the loss frame");
+    }
+
+    #[test]
+    fn a_rebuild_that_removes_the_claimant_ends_the_hover() {
+        // The one severance the epoch cannot strand: the claimant is dropped by a
+        // view diff, so it will never see the `Move` that would have re-derived
+        // the link. Its pod reports the drop and `rebuild` ends the hover.
+        let mut h = HoverHarness::nested_group_claiming(GroupClaim::AfterRouting);
+        h.move_over(Leaf::Top);
+        h.paint();
+        assert!(h.root.is_hover_active());
+        assert!(h.top.painted_hovered.get(), "the claimant holds the link");
+        assert!(
+            h.group.painted_hovered.get(),
+            "its container is on the path"
+        );
+
+        let flags = h.rebuild_without_claimant();
+        assert!(
+            !h.root.is_hover_active(),
+            "the mirror cannot outlive the widget it described"
+        );
+        assert!(
+            !flags.is_empty(),
+            "the structural change carries the frame this correction rides on"
+        );
+
+        // The survivor is the ancestor that was on the claim path: its own stamp
+        // still names the epoch the claim recorded, so nothing but the epoch
+        // advance keeps it from painting hover chrome for a child that is gone.
+        h.paint();
+        assert!(
+            !h.group.painted_hovered.get(),
+            "the surviving ancestor lost the link with its child"
+        );
+        assert!(
+            !h.bottom.painted_hovered.get(),
+            "and the sibling never had it"
+        );
+
+        // And the pipeline is not wedged: the next move over the same spot claims
+        // cleanly, now for the container itself. (No frame is manufactured for
+        // that gain — this container keeps no latched flag of its own, which is
+        // the documented consumer-side half of the contract, not a pipeline job.)
+        h.move_over(Leaf::Top);
+        assert!(h.root.is_hover_active(), "the next move re-claims");
+        h.paint();
+        assert!(
+            h.group.painted_hovered.get(),
+            "the container is the claimant now"
+        );
+    }
+
+    #[test]
+    fn a_rebuild_that_keeps_the_claimant_leaves_the_hover_standing() {
+        // The negative control for the release above, and the reason the mark is
+        // gated on the *live* epoch rather than on "some pod with a stamp died":
+        // an ordinary rebuild — including one that drops pods carrying stale
+        // stamps — must not touch a link the pointer still rests on.
+        let mut h = HoverHarness::nested_group_claiming(GroupClaim::AfterRouting);
+        // Hover the top leaf, then hand the link to the sibling. The top pod chain
+        // keeps its (now stale) stamp, which is what the next rebuild drops.
+        h.move_over(Leaf::Top);
+        h.move_over(Leaf::Bottom);
+        assert!(h.root.is_hover_active());
+
+        h.rebuild_without_claimant();
+        assert!(
+            h.root.is_hover_active(),
+            "dropping a stale stamp is not a severance"
+        );
+        h.paint();
+        assert!(
+            h.bottom.painted_hovered.get(),
+            "the widget actually under the pointer keeps its chrome"
+        );
     }
 
     #[test]
