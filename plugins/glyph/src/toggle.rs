@@ -5,21 +5,27 @@
 //!
 //! # Why the catalog carries a switch at all
 //!
-//! The baseline widget set deliberately ships no `Switch` (`frust::Checkbox` is
-//! its only boolean control), and Glyph authors the toggle as its own design —
-//! not as a re-tint of the M3 switch: a hairline-bordered pill with a small
-//! constant-diameter knob, no state-layer overlay, and an accent *wash* rather
-//! than a filled track. The public shape still mirrors
-//! `frust_material::switch` (`toggle(checked, on_toggle)`) so an app can
-//! migrate between the two catalogs mechanically.
+//! The baseline widget set ships no `Switch` (`frust::Checkbox` is its only
+//! boolean control), and Glyph authors this one as its own design rather than a
+//! re-tint of the M3 switch: a hairline-bordered pill, a small
+//! constant-diameter knob, no state-layer overlay, an accent *wash* instead of
+//! a filled track. The public shape still mirrors `frust_material::switch`
+//! (`toggle(checked, on_toggle)`), so an app migrates between catalogs
+//! mechanically.
 //!
 //! # Controlled component (never self-mutating)
 //!
-//! Like [`crate::segmented_control`]/[`crate::tabs`], this is a **controlled**
-//! component: it reports the *requested* value through `on_toggle(state,
-//! !checked)` on a release inside its bounds and never flips its own `checked`.
-//! The app mutates its state and the next `rebuild` feeds the confirmed value
-//! back in, which is what starts the animation.
+//! Like [`crate::segmented_control`]/[`crate::tabs`], it reports the
+//! *requested* value through `on_toggle(state, !checked)` on a release inside
+//! its bounds and never flips its own `checked`; the app's next `rebuild` feeds
+//! the confirmed value back in, which is what starts the animation.
+//!
+//! # A touch slab around a fixed pill
+//!
+//! `layout` requests a [`TOUCH_TARGET`]-square slab and `paint` centers the
+//! fixed pill inside whatever box it was given, so the hit-tested area (the
+//! whole slab) and the painted control never diverge — and the a11y target
+//! clears the platform minimums a bare 38×22 misses.
 //!
 //! # Two motion tracks: the knob springs, the colors fade
 //!
@@ -29,61 +35,64 @@
 //! two independent progress lanes ([`Progress`]):
 //!
 //! - **knob position**: 220ms on the overshooting spatial bezier
-//!   ([`KNOB_DURATION`]/[`KNOB_CURVE`]). The overshoot is real, intended travel:
-//!   the knob briefly slides past its rest spot, exactly as the source's
-//!   `transform` transition does, so the position lane is read **unclamped**.
+//!   ([`KNOB_DURATION`]/[`KNOB_CURVE`]), read **unclamped** — the knob sliding
+//!   briefly past its rest spot is the source's intended travel.
 //! - **track/border/knob color**: 150ms on the non-overshooting effects bezier
 //!   ([`FADE_DURATION`]/[`FADE_CURVE`]), read clamped — a color never
 //!   extrapolates past its endpoint.
 //!
-//! Both pairs are hardcoded rather than theme-resolved for the reason
-//! [`crate::tabs`] documents for its indicator: an [`AnimationController`]'s
-//! duration/curve has no deferred, post-`build` theme-resolution seam the way a
-//! themed *color* does. They are the exact `MotionScheme::glyph()`
-//! `durations.base`/`easing.spatial` and `durations.fast`/`easing.effects`
-//! values ([`crate::tokens`]), so a themed app animates identically. Neither
-//! lane consults `reduce_motion`, matching the tabs indicator — these constants
-//! are the widget's only timing source.
+//! Both pairs stay hardcoded on the
+//! [`crate::tabs`]/[`crate::segmented_control`] convention: a Glyph
+//! transition's timing is part of the design's identity,
+//! not theme-tunable decoration. Nothing technical forces that — a controller's
+//! duration and curve resolve fine at paint time, as [`crate::accordion`] and
+//! `frust_material::switch`'s spring both do — it is a fidelity choice. The
+//! values are the exact `MotionScheme::glyph()` `durations.base`/
+//! `easing.spatial` and `durations.fast`/`easing.effects` ([`crate::tokens`]),
+//! so a themed app animates identically.
 //!
 //! Both lanes advance during `paint` and re-request a frame while in flight
-//! (the crate's advance-during-paint contract — see
-//! `docs/WIDGETS_CODE_STANDARDS.md`'s Theming & Animation Conventions). The
-//! knob is painted inside a fixed-size track, so this is a paint-only
-//! animation: bare `request_frame`, never `request_layout`.
+//! (`docs/WIDGETS_CODE_STANDARDS.md`'s Theming & Animation Conventions); under
+//! `theme.motion.reduce_motion` they snap to their targets and request nothing,
+//! so a state change paints its final frame at once. The pill never resizes, so
+//! this is a paint-only animation: bare `request_frame`, never
+//! `request_layout`.
 //!
 //! # Per-brightness paint (the source's dark/light split)
 //!
-//! The two brightnesses draw the *off* knob from different token families, and
-//! only light carries a lift shadow, so the resolve branches on
-//! `theme.brightness` (the [`crate::segmented_control`] precedent):
+//! Only the *off* knob and the lift shadow differ between brightnesses, so the
+//! resolve branches on `theme.brightness` (the [`crate::segmented_control`]
+//! precedent): dark draws the off knob from `--fg-dim` with no shadow; light
+//! draws the white `--bg-surface` slot over a `0 1px 2px` ink lift, because a
+//! white knob on a warm-paper track needs the lift to read as an object at all
+//! (painted inline rather than as an `Elevation` level — again
+//! [`crate::segmented_control`]'s call for its micro-shadow).
 //!
-//! - **Dark**: the off knob is `--fg-dim`, with no shadow.
-//! - **Light**: the off knob is the white `--bg-surface` slot plus a
-//!   `0 1px 2px` ink lift shadow — a white knob on a warm-paper track needs the
-//!   lift to read as an object at all. Inline paint rather than an `Elevation`
-//!   level, the same call [`crate::segmented_control`] makes for its 1px/2px
-//!   micro-shadow.
+//! Everything else is one role per value: the `bg-overlay` track slot off and an
+//! accent wash on, the `fg`-derived hairline border off and an accent wash on,
+//! and the bright-fill accent role (`primary_container`, `#ffb627` in both
+//! brightnesses) for the *on* knob — never the accent *text* role
+//! (`docs/WIDGETS_CODE_STANDARDS.md`'s Glyph accent-role split).
 //!
-//! Everything else resolves per brightness from one role each: the track is the
-//! `bg-overlay` surface slot off and an accent wash on; the border is the
-//! source's `fg`-derived hairline off and an accent wash on; the *on* knob is
-//! the bright-fill accent role (`primary_container`), which is `#ffb627` in both
-//! brightnesses — never the accent *text* role (see
-//! `docs/WIDGETS_CODE_STANDARDS.md`'s Glyph accent-role split).
+//! ## The `--fg-dim` role gap, and what it costs
 //!
-//! The one role gap: `--fg-dim` has no `ColorScheme` role at all, so the themed
-//! dark off-knob reuses `on_surface_variant` — the documented simplification
-//! [`crate::tag`] already makes (the unthemed fallback keeps the exact `fg-dim`
-//! hex, since it costs nothing to be precise there).
+//! `--fg-dim` has no `ColorScheme` role at all ([`crate::tokens::color`] maps
+//! `fg-muted` to `on_surface_variant` and leaves `fg-dim` unmapped), so the
+//! themed dark off-knob follows the catalog convention
+//! `docs/WIDGETS_CODE_STANDARDS.md` records — `--fg-dim` as a *fill* resolves to
+//! `on_surface_variant` — and paints `#a39c88` where the source authors
+//! `#6b6556`: ~2.5× the authored relative luminance, reading 4.9:1 against the
+//! `#272d3d` track instead of 2.4:1. That is the deliberate price of one
+//! catalog-wide convention over a per-widget token; both hexes are pinned by
+//! test (themed and unthemed) so it cannot drift unnoticed. The unthemed
+//! fallback keeps the exact source hex ([`TOGGLE_KNOB_OFF`]).
 //!
 //! # No disabled, focus, or pressed states in v1
 //!
-//! The sources author none: `.toggle` has no `:disabled`, `:focus-visible`, or
-//! `:active` rule in either brightness, and Glyph gives the toggle no
-//! state-layer overlay. So a press is armed state only — nothing paints
-//! differently while the finger is down. If a disabled state is ever added, the
-//! baseline `Button`'s 0.38 disabled-opacity convention is the precedent to
-//! follow, not a new invention.
+//! The sources author none — no `:disabled`, `:focus-visible`, or `:active` rule
+//! in either brightness, and no state-layer overlay — so a press is armed state
+//! only, painting nothing. A future disabled state should follow the baseline
+//! `Button`'s 0.38 disabled-opacity convention rather than invent one.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -107,8 +116,18 @@ const TRACK_W: f64 = 38.0;
 /// [`TRACK_W`] for why this is a constant rather than a token.
 const TRACK_H: f64 = 22.0;
 /// Track border thickness, logical px (`.toggle{border:1px solid …}`,
-/// `glyph-design-system.html:255`).
+/// `glyph-design-system.html:255`). Stroked on a path inset by half this width
+/// so the *painted* box measures exactly [`TRACK_W`]×[`TRACK_H`] — all three
+/// sources set `box-sizing:border-box`, which is also the premise
+/// [`KNOB_OFFSET`]'s math already assumes.
 const BORDER_W: f64 = 1.0;
+/// Interactive slab edge, logical px: `layout` requests
+/// `max(TRACK_W, TOUCH_TARGET) × max(TRACK_H, TOUCH_TARGET)` and centers the
+/// pill in it, because a 38×22 control clears no platform minimum (WCAG 2.2
+/// target-size 24px, iOS 44pt, Android 48dp). 44 is the value
+/// [`crate::sheet`]'s `HANDLE_TOUCH_TARGET` already wraps its 3px drag handle
+/// in — one slab size for the catalog's undersized chrome.
+const TOUCH_TARGET: f64 = 44.0;
 /// Knob diameter, logical px (`.toggle::after{width:16px;height:16px}`,
 /// `glyph-design-system.html:256`). Constant in both states — unlike the M3
 /// switch, Glyph's knob never resizes.
@@ -116,9 +135,9 @@ const KNOB_SIZE: f64 = 16.0;
 /// Knob inset from the track's *inner* (border-box) edge, logical px
 /// (`.toggle::after{top:2px;left:2px}`, `glyph-design-system.html:256`). The
 /// source's `::after` is positioned against the padding box, i.e. inside the
-/// 1px border — [`KNOB_OFFSET`] is the offset from the widget's own origin.
+/// 1px border — [`KNOB_OFFSET`] is that offset measured from the pill's origin.
 const KNOB_INSET: f64 = 2.0;
-/// The off-state knob offset from the widget origin on both axes, logical px:
+/// The off-state knob offset from the *pill's* origin on both axes, logical px:
 /// the border plus the source's 2px inset. Vertically this also centers the
 /// knob exactly (`(22 − 16) / 2 == 3`).
 const KNOB_OFFSET: f64 = BORDER_W + KNOB_INSET;
@@ -137,6 +156,16 @@ const PATH_TOLERANCE: f64 = 0.1;
 /// duration the "toggle spring" section pins for the knob
 /// (`glyph-motion.html:60`, `:166`–`:173`); the exact `MotionScheme::glyph()`
 /// `durations.base`.
+///
+/// **The sources disagree, and 220ms is the deliberate resolution.** Both
+/// design-system sheets author the knob as
+/// `transition: transform .18s var(--ease-spring)`
+/// (`glyph-design-system.html:256`, `glyph-design-system-light.html:153`) —
+/// 180ms — while the motion reference, which is *the* motion authority for this
+/// catalog, pins `--dur-base` 220ms on `--ease-spatial`
+/// (`glyph-motion.html:20`–`:21`, `:59`–`:62`) and repeats it in its toggle
+/// section. The authority wins: this is not a transcription slip to "fix" back
+/// to 180ms.
 const KNOB_DURATION: Duration = Duration::from_millis(220);
 /// Knob travel easing — `--ease-spatial`/`--ease-spring`,
 /// `cubic-bezier(0.34,1.35,0.64,1)` (`glyph-motion.html:21`,
@@ -197,7 +226,8 @@ const KNOB_SHADOW_DY: f64 = 1.0;
 /// themed `surface_container_highest`.
 const TOGGLE_TRACK_OFF: Color = Color::from_rgb8(0x27, 0x2d, 0x3d);
 /// Off-state knob fill — `--fg-dim` (`glyph-design-system.html:37`). Exact
-/// here; the themed path reuses `on_surface_variant` (see the module docs).
+/// here; the themed path resolves `on_surface_variant` instead and lands
+/// ~2.5× brighter (see the module docs' `--fg-dim` role gap).
 const TOGGLE_KNOB_OFF: Color = Color::from_rgb8(0x6b, 0x65, 0x56);
 /// The accent — `--amber` (`glyph-design-system.html:19`), themed
 /// `primary_container` for the knob fill and `primary` for the washes.
@@ -267,6 +297,16 @@ impl Progress {
         self.ctrl.forward();
     }
 
+    /// Land on the target immediately, cancelling any flight — the
+    /// `reduce_motion` path ([`crate::accordion`]'s `snap` idiom). A fresh
+    /// controller is idle, so a following [`Progress::advance`] stays at rest
+    /// and asks for nothing.
+    fn snap(&mut self) {
+        self.from = self.to;
+        self.displayed = self.to;
+        self.ctrl = AnimationController::new(self.duration).with_curve(self.curve);
+    }
+
     /// Advance to frame time `now`, returning whether the lane is still in
     /// flight (in which case the caller must request another frame).
     fn advance(&mut self, now: FrameTime) -> bool {
@@ -311,6 +351,9 @@ fn resolve_toggle_colors(theme: Option<&Theme>) -> ToggleColors {
         Some(theme) => {
             let scheme = theme.scheme();
             let (track_on_alpha, border_on_alpha, knob_off, knob_shadow) = match theme.brightness {
+                // `on_surface_variant` is `--fg-muted`, not the authored
+                // `--fg-dim`: the catalog convention, with the cost measured in
+                // the module docs and pinned by test.
                 Brightness::Dark => (
                     TRACK_ON_ALPHA_DARK,
                     BORDER_ON_ALPHA_DARK,
@@ -450,8 +493,8 @@ impl<State: 'static> View<State> for ToggleView<State> {
         }
         if prev.checked != self.checked {
             // The app is the source of truth: adopt the value and animate to
-            // it. Both lanes' timing is hardcoded, so — unlike a themed
-            // spring — nothing has to wait for a paint-time theme.
+            // it. Both lanes' timing is a constant, so `rebuild` can retarget
+            // them without waiting for a paint-time theme.
             element.checked = self.checked;
             let target = if self.checked { 1.0 } else { 0.0 };
             element.knob.retarget(target);
@@ -464,7 +507,11 @@ impl<State: 'static> View<State> for ToggleView<State> {
 
 impl Widget for ToggleWidget {
     fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        bc.constrain(Size::new(TRACK_W, TRACK_H))
+        // The touch slab, not the pill — see `TOUCH_TARGET`.
+        bc.constrain(Size::new(
+            TRACK_W.max(TOUCH_TARGET),
+            TRACK_H.max(TOUCH_TARGET),
+        ))
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
@@ -474,28 +521,47 @@ impl Widget for ToggleWidget {
         let theme = Theme::from_paint_ctx(ctx);
         let colors = resolve_toggle_colors(theme);
         let radius = track_radius(theme, track_size);
+        let reduce_motion = theme.map(|t| t.motion.reduce_motion).unwrap_or(false);
 
-        let now = ctx.frame_time();
-        // Both lanes advance every paint; either one still in flight owes the
-        // next frame (paint-only — the track's size never changes).
-        let knob_running = self.knob.advance(now);
-        let fade_running = self.fade.advance(now);
-        if knob_running || fade_running {
-            ctx.request_frame();
+        if reduce_motion {
+            // Land both lanes on the confirmed state and owe no frame.
+            self.knob.snap();
+            self.fade.snap();
+        } else {
+            // Both lanes advance every paint; either one still in flight owes
+            // the next frame (paint-only — the slab's size never changes).
+            let now = ctx.frame_time();
+            let knob_running = self.knob.advance(now);
+            let fade_running = self.fade.advance(now);
+            if knob_running || fade_running {
+                ctx.request_frame();
+            }
         }
 
-        let origin = ctx.origin();
+        // The pill keeps its authored size and centers in the slab, so paint
+        // and hit-testing agree however the box was constrained.
+        let box_size = ctx.size();
+        let origin = ctx.origin()
+            + Vec2::new(
+                ((box_size.width - TRACK_W) / 2.0).max(0.0),
+                ((box_size.height - TRACK_H) / 2.0).max(0.0),
+            );
         let fade = self.fade.value_clamped();
 
-        // Track fill, then its hairline border.
+        // Track fill, then its hairline border — stroked on the border's own
+        // centerline (inset half a border) so the painted box is border-box
+        // exact.
         scene.fill_rounded_rect(
             origin,
             track_size,
             radius,
             lerp_color(colors.track_off, colors.track_on, fade),
         );
-        let outline =
-            RoundedRect::from_rect(Rect::from_origin_size(Point::ORIGIN, track_size), radius);
+        let inset = BORDER_W / 2.0;
+        let outline = RoundedRect::from_rect(
+            Rect::from_origin_size(Point::ORIGIN, track_size).inset(-inset),
+            (radius - inset).max(0.0),
+        );
         scene.stroke_path(
             origin,
             &Shape::to_path(&outline, PATH_TOLERANCE),
@@ -550,6 +616,8 @@ impl Widget for ToggleWidget {
                     return EventResult::Ignored;
                 }
                 self.captured = false;
+                // `ctx.size()` is the touch slab, so the margin around the pill
+                // is live too.
                 if inside(p.position, ctx.size()) {
                     // Report the *requested* value; never self-toggle.
                     (self.on_toggle)(ctx, !self.checked);
@@ -619,6 +687,19 @@ mod tests {
         FrameTime::from_nanos((ms * 1_000_000.0) as u64)
     }
 
+    /// The laid-out box: the 44-square touch slab, not the pill.
+    const SLAB: Size = Size::new(TOUCH_TARGET, TOUCH_TARGET);
+
+    /// Where the centered pill starts inside [`SLAB`] — every geometry
+    /// assertion below is expressed relative to this, so the source-faithful
+    /// pill numbers stay readable.
+    fn pill_origin() -> Point {
+        Point::new(
+            (TOUCH_TARGET - TRACK_W) / 2.0,
+            (TOUCH_TARGET - TRACK_H) / 2.0,
+        )
+    }
+
     fn widget(checked: bool) -> ToggleWidget {
         build(&toggle::<ToggleState, _>(
             checked,
@@ -638,7 +719,7 @@ mod tests {
     /// asked for another frame.
     fn paint_at(w: &mut ToggleWidget, theme: Option<&Theme>, ms: f64) -> (Recorder, bool) {
         let mut rec = Recorder::default();
-        let base = PaintCtx::for_test(Point::ZERO, Size::new(TRACK_W, TRACK_H), ft_ms(ms));
+        let base = PaintCtx::for_test(Point::ZERO, SLAB, ft_ms(ms));
         let mut ctx = match theme {
             Some(t) => base.with_theme(t),
             None => base,
@@ -652,8 +733,11 @@ mod tests {
         paint_at(w, theme, 0.0).0
     }
 
+    /// The knob's x offset **inside the pill** — the source's own frame of
+    /// reference (`0` off, `KNOB_TRAVEL` across), independent of where the pill
+    /// sits in the slab.
     fn knob_x(rec: &Recorder) -> f64 {
-        rec.rrects[1].0.x
+        rec.rrects[1].0.x - pill_origin().x
     }
 
     fn ev(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
@@ -666,7 +750,7 @@ mod tests {
 
     fn dispatch(w: &mut ToggleWidget, state: &mut ToggleState, event: &InputEvent) {
         let state_any: &mut dyn Any = state;
-        let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(TRACK_W, TRACK_H));
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, SLAB);
         w.event(&mut ctx, event);
     }
 
@@ -680,21 +764,26 @@ mod tests {
         let mut off = widget(false);
         let rec = paint(&mut off, Some(&theme));
         assert_eq!(rec.rrects.len(), 2, "track + knob only");
-        // Track: `--bg-overlay` #272d3d, a pill.
+        // Track: `--bg-overlay` #272d3d, a pill centered in the slab.
         assert_eq!(rec.rrects[0].3, scheme.surface_container_highest);
         assert_eq!(rec.rrects[0].3, Color::from_rgb8(0x27, 0x2d, 0x3d));
         assert_eq!(rec.rrects[0].1, Size::new(TRACK_W, TRACK_H));
+        assert_eq!(rec.rrects[0].0, pill_origin());
         assert_eq!(rec.rrects[0].2, TRACK_H / 2.0);
         // Border: `--border-bright` rgba(242,234,217,0.18).
         assert_eq!(
             rec.strokes[0],
             with_alpha(Color::from_rgb8(0xf2, 0xea, 0xd9), 0.18)
         );
-        // Knob: `--fg-dim`'s themed stand-in (see the module docs), 16×16 at
-        // the off offset, no shadow in dark.
+        // Knob: `--fg-dim`'s themed stand-in — `on_surface_variant` #a39c88,
+        // NOT the authored #6b6556 (the documented role gap; the divergence is
+        // pinned here so it can't drift silently).
         assert_eq!(rec.rrects[1].3, scheme.on_surface_variant);
+        assert_eq!(rec.rrects[1].3, Color::from_rgb8(0xa3, 0x9c, 0x88));
+        assert_ne!(rec.rrects[1].3, TOGGLE_KNOB_OFF, "and it is not `--fg-dim`");
         assert_eq!(rec.rrects[1].1, Size::new(KNOB_SIZE, KNOB_SIZE));
-        assert_eq!(rec.rrects[1].0, Point::new(KNOB_OFFSET, KNOB_OFFSET));
+        assert_eq!(knob_x(&rec), KNOB_OFFSET, "off rests at the pill inset");
+        assert_eq!(rec.rrects[1].0.y, pill_origin().y + KNOB_OFFSET);
         assert!(rec.shadows.is_empty(), "dark authors no knob shadow");
 
         let mut on = widget(true);
@@ -734,15 +823,21 @@ mod tests {
         // Knob: the white `--bg-surface` slot, over a 0 1px 2px ink lift.
         assert_eq!(rec.rrects[1].3, scheme.surface_container_lowest);
         assert_eq!(rec.rrects[1].3, Color::from_rgb8(0xff, 0xff, 0xff));
+        assert_eq!(knob_x(&rec), KNOB_OFFSET);
         assert_eq!(rec.shadows.len(), 1, "light lifts the knob");
         let (shadow_origin, shadow_size, _, blur, shadow_color) = rec.shadows[0];
         assert_eq!(
             shadow_origin,
-            Point::new(KNOB_OFFSET, KNOB_OFFSET + KNOB_SHADOW_DY)
+            pill_origin() + Vec2::new(KNOB_OFFSET, KNOB_OFFSET + KNOB_SHADOW_DY)
         );
         assert_eq!(shadow_size, Size::new(KNOB_SIZE, KNOB_SIZE));
         assert_eq!(blur, KNOB_SHADOW_BLUR);
         assert_eq!(shadow_color, with_alpha(scheme.shadow, KNOB_SHADOW_ALPHA));
+        // The `shadow` role is warm ink #221d12 on Glyph light, not black.
+        assert_eq!(
+            shadow_color,
+            with_alpha(Color::from_rgb8(0x22, 0x1d, 0x12), KNOB_SHADOW_ALPHA)
+        );
 
         let mut on = widget(true);
         let rec = paint(&mut on, Some(&theme));
@@ -759,6 +854,7 @@ mod tests {
         // Knob: `--amber-fill` #ffb627 — identical to dark.
         assert_eq!(rec.rrects[1].3, scheme.primary_container);
         assert_eq!(rec.rrects[1].3, Color::from_rgb8(0xff, 0xb6, 0x27));
+        assert_eq!(knob_x(&rec), KNOB_OFFSET + KNOB_TRAVEL);
         // The source never overrides `box-shadow` on `:checked`.
         assert_eq!(rec.shadows.len(), 1, "the lift survives the checked state");
     }
@@ -787,6 +883,95 @@ mod tests {
             rec.strokes[0],
             with_alpha(TOGGLE_ACCENT, BORDER_ON_ALPHA_DARK)
         );
+    }
+
+    // ---- Layout slab + centered pill --------------------------------------
+
+    #[test]
+    fn layout_requests_a_touch_slab_around_the_pill() {
+        let mut w = widget(false);
+        let mut ctx = LayoutCtx::new();
+        let size = w.layout(&mut ctx, &BoxConstraints::loose(Size::new(200.0, 200.0)));
+        assert_eq!(size, SLAB);
+        assert!(
+            size.width > TRACK_W && size.height > TRACK_H,
+            "the interactive box is larger than the 38×22 pill it paints"
+        );
+        assert!(
+            size.width >= TOUCH_TARGET && size.height >= TOUCH_TARGET,
+            "and clears the platform minimum on both axes"
+        );
+    }
+
+    #[test]
+    fn paint_centers_the_fixed_pill_in_whatever_box_it_is_given() {
+        // A stretched/tightened box must move the pill, never scale it — that
+        // is what keeps paint and hit-testing (the whole box) in agreement.
+        let mut w = widget(true);
+        let mut rec = Recorder::default();
+        let box_size = Size::new(80.0, 60.0);
+        let mut ctx = PaintCtx::for_test(Point::new(10.0, 20.0), box_size, ft_ms(0.0));
+        w.paint(&mut ctx, &mut rec);
+
+        let expected = Point::new(
+            10.0 + (box_size.width - TRACK_W) / 2.0,
+            20.0 + (box_size.height - TRACK_H) / 2.0,
+        );
+        assert_eq!(rec.rrects[0].0, expected);
+        assert_eq!(rec.rrects[0].1, Size::new(TRACK_W, TRACK_H), "never scaled");
+        // The knob's on-state rest spot rides with the pill.
+        assert_eq!(
+            rec.rrects[1].0,
+            expected + Vec2::new(KNOB_OFFSET + KNOB_TRAVEL, KNOB_OFFSET)
+        );
+    }
+
+    #[test]
+    fn the_overshooting_knob_stays_inside_the_slab() {
+        // The spring reads unclamped, so the peak is past the rest spot — it
+        // must still land inside the painted box.
+        let prev = toggle::<ToggleState, _>(false, |_s, _v| {});
+        let mut w = build(&prev);
+        let next = toggle::<ToggleState, _>(true, |_s, _v| {});
+        let mut counter = 0u64;
+        View::<ToggleState>::rebuild(&next, &prev, &mut w, &mut BuildCtx::new(&mut counter));
+        paint_at(&mut w, None, 0.0);
+
+        let mut peak_right = f64::MIN;
+        for ms in (10..=210).step_by(10) {
+            let (rec, _) = paint_at(&mut w, None, ms as f64);
+            peak_right = peak_right.max(rec.rrects[1].0.x + KNOB_SIZE);
+        }
+        let rest_right = pill_origin().x + KNOB_OFFSET + KNOB_TRAVEL + KNOB_SIZE;
+        assert!(
+            peak_right > rest_right,
+            "the overshoot is real ({peak_right} vs {rest_right})"
+        );
+        assert!(
+            peak_right <= pill_origin().x + TRACK_W - BORDER_W,
+            "yet the knob never escapes the track's inner edge ({peak_right})"
+        );
+        assert!(
+            peak_right <= SLAB.width,
+            "nor the slab ({peak_right} vs {})",
+            SLAB.width
+        );
+    }
+
+    #[test]
+    fn a_tap_in_the_slab_margin_outside_the_pill_still_toggles() {
+        let mut w = widget(false);
+        let mut state = ToggleState::default();
+        // Bottom-right corner of the slab: outside the pill, inside the target.
+        let (x, y) = (TOUCH_TARGET - 1.0, TOUCH_TARGET - 1.0);
+        assert!(
+            x > pill_origin().x + TRACK_W && y > pill_origin().y + TRACK_H,
+            "the probe really is outside the painted pill"
+        );
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, x, y));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, x, y));
+        assert_eq!(state.last, Some(true));
+        assert_eq!(state.toggles, 1);
     }
 
     // ---- Knob travel + frame requests -------------------------------------
@@ -846,6 +1031,55 @@ mod tests {
         assert_eq!(rec.rrects[1].3, TOGGLE_KNOB_OFF);
     }
 
+    #[test]
+    fn reduce_motion_paints_the_final_state_at_once_and_requests_no_frame() {
+        let mut theme = crate::baseline();
+        theme.motion.reduce_motion = true;
+
+        let prev = toggle::<ToggleState, _>(false, |_s, _v| {});
+        let mut w = build(&prev);
+        let next = toggle::<ToggleState, _>(true, |_s, _v| {});
+        let mut counter = 0u64;
+        View::<ToggleState>::rebuild(&next, &prev, &mut w, &mut BuildCtx::new(&mut counter));
+
+        // The first paint after the flip is already the settled state — no
+        // seeding frame, no travel, nothing owed.
+        let (rec, again) = paint_at(&mut w, Some(&theme), 0.0);
+        assert!(!again, "reduce_motion owes no frame");
+        assert_eq!(
+            knob_x(&rec),
+            KNOB_OFFSET + KNOB_TRAVEL,
+            "the knob lands immediately"
+        );
+        assert_eq!(
+            rec.rrects[1].3,
+            theme.scheme().primary_container,
+            "and the color lane is done too"
+        );
+
+        // And it stays there: a later frame neither moves nor re-requests.
+        let (rec, again) = paint_at(&mut w, Some(&theme), 400.0);
+        assert!(!again);
+        assert_eq!(knob_x(&rec), KNOB_OFFSET + KNOB_TRAVEL);
+    }
+
+    #[test]
+    fn reduce_motion_snaps_a_reversal_back_as_well() {
+        let mut theme = crate::baseline();
+        theme.motion.reduce_motion = true;
+
+        let prev = toggle::<ToggleState, _>(true, |_s, _v| {});
+        let mut w = build(&prev);
+        let next = toggle::<ToggleState, _>(false, |_s, _v| {});
+        let mut counter = 0u64;
+        View::<ToggleState>::rebuild(&next, &prev, &mut w, &mut BuildCtx::new(&mut counter));
+
+        let (rec, again) = paint_at(&mut w, Some(&theme), 0.0);
+        assert!(!again);
+        assert_eq!(knob_x(&rec), KNOB_OFFSET);
+        assert_eq!(rec.rrects[1].3, theme.scheme().on_surface_variant);
+    }
+
     // ---- Interaction -------------------------------------------------------
 
     #[test]
@@ -895,7 +1129,7 @@ mod tests {
         let mut w = widget(false);
         let mut state = ToggleState::default();
         let state_any: &mut dyn Any = &mut state;
-        let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(TRACK_W, TRACK_H));
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, SLAB);
         let result = w.event(&mut ctx, &ev(PointerPhase::Move, 8.0, 11.0));
         assert!(matches!(result, EventResult::Ignored));
         assert!(!ctx.needs_redraw(), "a hover must not request a redraw");
@@ -926,10 +1160,12 @@ mod tests {
         assert_eq!(node.toggled(), Some(Toggled::True));
         assert!(node.supports_action(Action::Click));
         assert_eq!(node.label(), Some("auto-reconnect"));
+        // The a11y bounds are the touch slab, not the painted pill — the
+        // bigger target is the point.
         let bounds = node.bounds().expect("the switch node has bounds");
         assert_eq!(
             (bounds.x1 - bounds.x0, bounds.y1 - bounds.y0),
-            (TRACK_W, TRACK_H)
+            (TOUCH_TARGET, TOUCH_TARGET)
         );
     }
 
