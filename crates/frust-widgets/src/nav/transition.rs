@@ -1155,7 +1155,7 @@ mod tests {
     fn glyph_enter_exit_durations_from_theme_scheme() {
         // With a scheme, enter/exit pull the slow/fast duration + spatial/exit
         // easing tokens.
-        let m = MotionScheme::m3_expressive();
+        let m = MotionScheme::neutral();
         let (enter, exit) = preset_enter_exit(PageTransition::Glyph, Some(&m));
         assert_eq!(
             enter,
@@ -1188,7 +1188,7 @@ mod tests {
 
     #[test]
     fn resolve_spec_resolves_theme_default_when_motion_enabled() {
-        let m = MotionScheme::m3_expressive(); // reduce_motion == false
+        let m = MotionScheme::neutral(); // reduce_motion == false
         let resolved = resolve_spec(TransitionSpec::glyph(), Some(&m));
         assert_eq!(resolved.preset, PageTransition::Glyph);
         assert_eq!(
@@ -1204,7 +1204,7 @@ mod tests {
     fn reduce_motion_collapses_every_preset_to_crossfade() {
         // The Glyph design system's hard rule: reduced motion → ≤120ms linear
         // crossfade for every animated pattern.
-        let mut m = MotionScheme::m3_expressive();
+        let mut m = MotionScheme::neutral();
         m.reduce_motion = true;
         for preset in [
             PageTransition::Glyph,
@@ -1298,7 +1298,7 @@ mod tests {
         assert_eq!(enter, expected);
         assert_eq!(exit, expected);
 
-        let m = MotionScheme::m3_expressive();
+        let m = MotionScheme::neutral();
         let (enter, exit) =
             preset_enter_exit(PageTransition::Custom(custom_vertical_slide), Some(&m));
         assert_eq!(enter, expected);
@@ -1334,7 +1334,7 @@ mod tests {
             panic!("Custom's function must not be invoked on the resolve_spec path");
         }
 
-        let mut m = MotionScheme::m3_expressive();
+        let mut m = MotionScheme::neutral();
         m.reduce_motion = true;
         let resolved = resolve_spec(
             TransitionSpec::themed(PageTransition::Custom(panics_if_called)),
