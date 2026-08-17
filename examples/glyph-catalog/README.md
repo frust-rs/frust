@@ -23,8 +23,9 @@ transition:
 1. **Foundations** — live color/type/radius token specimens (every swatch
    re-resolves from the current theme, never a hardcoded hex).
 2. **Buttons + Forms** — every `ButtonStyle`, `.small()`, a loading demo, plus
-   the baseline form controls (`text_input`, `checkbox`, `radio`, `switch`,
-   `slider`) rendered under the Glyph theme.
+   the baseline form controls (`text_input`, `checkbox`, `radio`, `slider`)
+   rendered under the Glyph theme, alongside the Glyph catalog's own
+   `frust_glyph::toggle`.
 3. **Feedback** — badges, dismissible tags, alerts, toast triggers, and the
    progress/skeleton/dots loaders.
 4. **Navigation** — a standalone tabs demo, segmented control, breadcrumb, two
@@ -146,7 +147,7 @@ with reason (see each page's own module docs for the full rationale).
 | Textarea (`.multiline`) | ✓ |
 | Checkbox | ✓ |
 | Radio pair | ✓ |
-| Toggle switch (spring) | ✓ — `frust_material::switch`, not a `frust`/`frust-widgets` baseline item (see `Cargo.toml`'s `frust-material` dependency comment) |
+| Toggle switch (spring) | ✓ — `frust_glyph::toggle`, the Glyph catalog's own authored toggle-spring switch (`plugins/glyph/src/toggle.rs`), not a `frust`/`frust-widgets` baseline item |
 | Select dropdown | N/A — no `frust` widget exists for it |
 | Slider with live readout | ✓ |
 

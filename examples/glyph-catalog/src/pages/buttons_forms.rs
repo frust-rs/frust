@@ -6,12 +6,11 @@
 //! `slider`) — **BASELINE widgets rendered under the Glyph theme** (they
 //! aren't `frust_glyph::*` catalog components; they resolve their
 //! colors/shapes from the active [`Theme`](frust::Theme) like any other
-//! themed widget, which is how they read correctly here). `switch` is the one
-//! exception in this row: it is a `frust_material::switch` catalog widget
-//! (see `Cargo.toml`'s `frust-material` dependency comment for why this
-//! otherwise Glyph-only crate carries it), included here because it renders
-//! correctly under any theme the same way and this page has shown it since
-//! before the design-system-catalog split.
+//! themed widget, which is how they read correctly here). The row's boolean
+//! control is the one exception: it is `frust_glyph::toggle`, the Glyph
+//! catalog's own authored toggle-spring switch (`plugins/glyph/src/toggle.rs`)
+//! rather than a themed baseline widget — the row shows baseline form
+//! controls plus the glyph toggle, side by side, under the Glyph theme.
 //!
 //! # Local interactive state (component-nested, not `CatalogState`)
 //!
@@ -78,10 +77,9 @@ use frust::{
     FlexView, Get, Padding, RwSignal, Set, SizedBox, any, button, checkbox, component, inflexible,
     radio, slider, text, text_input,
 };
-// `switch` is a Material catalog widget (see `Cargo.toml`'s `frust-material`
-// dependency comment) — not `frust_glyph::*`, but not a baseline
-// `frust`/`frust-widgets` item either.
-use frust_material::switch;
+// The Glyph catalog's own authored toggle — not a baseline `frust`/
+// `frust-widgets` item, and not a themed stand-in for one either.
+use frust_glyph::toggle;
 
 use crate::CatalogState;
 
@@ -110,8 +108,8 @@ struct ButtonsFormsState {
     checkbox_checked: RwSignal<bool>,
     /// The radio-pair demo's selected index (0 = Option A, 1 = Option B).
     radio_selected: RwSignal<usize>,
-    /// The `switch` demo's controlled on/off state.
-    switch_on: RwSignal<bool>,
+    /// The `toggle` demo's controlled on/off state.
+    toggle_on: RwSignal<bool>,
     /// The `slider` demo's controlled value (`0.0..=1.0`), live-read out as a
     /// percentage beside it.
     slider_value: RwSignal<f64>,
@@ -137,7 +135,7 @@ impl Component for ButtonsFormsScreen {
             textarea_value: RwSignal::new(String::new()),
             checkbox_checked: RwSignal::new(true),
             radio_selected: RwSignal::new(0),
-            switch_on: RwSignal::new(false),
+            toggle_on: RwSignal::new(false),
             slider_value: RwSignal::new(0.4),
             disabled_input_value: RwSignal::new("Locked value".to_string()),
             enabled_compare_value: RwSignal::new("Editable value".to_string()),
@@ -153,7 +151,7 @@ impl Component for ButtonsFormsScreen {
         let textarea_value = state.textarea_value.get();
         let checkbox_checked = state.checkbox_checked.get();
         let radio_selected = state.radio_selected.get();
-        let switch_on = state.switch_on.get();
+        let toggle_on = state.toggle_on.get();
         let slider_value = state.slider_value.get();
         let disabled_input_value = state.disabled_input_value.get();
         let enabled_compare_value = state.enabled_compare_value.get();
@@ -197,7 +195,7 @@ impl Component for ButtonsFormsScreen {
             spacer(24.0),
             heading("Form Controls"),
             caption(
-                "BASELINE widgets (text_input/checkbox/radio/switch/slider) rendered under the Glyph theme — not frust_glyph::* catalog components, but themed the same way.",
+                "BASELINE widgets (text_input/checkbox/radio/slider) rendered under the Glyph theme — not frust_glyph::* catalog components, but themed the same way. The toggle below is the exception: a frust_glyph::toggle catalog widget.",
             ),
             spacer(12.0),
             caption("Text input (prompt-style placeholder):"),
@@ -247,11 +245,11 @@ impl Component for ButtonsFormsScreen {
             radio_pair_row(radio_selected),
             spacer(12.0),
             caption(
-                "Switch (spring-driven thumb travel via the theme's default_spatial spring, plus a track-color transition — toggle it):",
+                "Toggle (frust_glyph::toggle — a spring-driven knob travel plus a fading track/border color, both independently timed — toggle it):",
             ),
             spacer(4.0),
-            any(switch(switch_on, |s: &mut ButtonsFormsState, v: bool| {
-                s.switch_on.set(v)
+            any(toggle(toggle_on, |s: &mut ButtonsFormsState, v: bool| {
+                s.toggle_on.set(v)
             })),
             spacer(16.0),
             caption("Slider with live value readout:"),
