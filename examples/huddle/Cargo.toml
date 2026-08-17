@@ -35,6 +35,18 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # code names `frust-core`/`kurbo`/`peniko` directly any more.
 frust = { path = "../../crates/frust" }
 
+# Design-system plugins: the flat Material/Cupertino/Glyph widget/theme
+# symbols this app's presentation layer names (`frust_material::AppBar`,
+# `frust_cupertino::CupertinoButton`, `frust_glyph::install`/`baseline`, ...)
+# live in these sibling plugin crates now, not behind an in-tree `frust`
+# cargo feature (the catalog feature graph was dissolved — see
+# docs/DEVELOPMENT.md's Version-Pin Policy). The app's settings/appearance
+# flow switches between all three design languages live, so it depends on
+# every one of them, unlike a single-design-language app.
+frust-material = { path = "../../plugins/material" }
+frust-cupertino = { path = "../../plugins/cupertino" }
+frust-glyph = { path = "../../plugins/glyph" }
+
 # clean-signals (the async/use-case/controller/retry substrate) is
 # git+rev-pinned to the public repo rather than the sibling `clean-signals-rs`
 # checkout, so a scaffolded `--arch clean-signals` project builds on any

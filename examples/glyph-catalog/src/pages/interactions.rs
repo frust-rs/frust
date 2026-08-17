@@ -133,16 +133,20 @@ use std::time::{Duration, Instant};
 use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, View, Widget,
 };
-use frust::glyph::{BadgeVariant, TermLine, badge, glyph_card, term_block};
 use frust::motion::patterns::SharedAxis;
 use frust::motion::switcher::pattern_switcher;
 use frust::motion::{AnimatedOpacity, AnimatedScale};
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, Color, CrossAxisAlignment, Curve, EdgeInsets,
     FlexChild, FlexView, GestureDetector, Get, GetUntracked, Image, ImageFit, ImageSource, Padding,
-    ProgressValue, RwSignal, Set, SizedBox, Stack, Theme, Timing, Update, any, button,
-    circular_progress, flexible, inflexible, keyed, scroll_view, text, use_context,
+    RwSignal, Set, SizedBox, Stack, Theme, Timing, Update, any, button, flexible, inflexible,
+    keyed, scroll_view, text, use_context,
 };
+use frust_glyph::{BadgeVariant, TermLine, badge, glyph_card, term_block};
+// `circular_progress`/`ProgressValue` are Material catalog items (see
+// `Cargo.toml`'s `frust-material` dependency comment) — not
+// `frust_glyph::*`, but not baseline `frust`/`frust-widgets` items either.
+use frust_material::{ProgressValue, circular_progress};
 
 use crate::CatalogState;
 
@@ -151,7 +155,7 @@ use crate::CatalogState;
 /// `navigation.rs`/`overlays.rs`'s existing per-file precedent).
 fn amber() -> Color {
     use_context::<Theme>()
-        .unwrap_or_else(Theme::glyph_baseline)
+        .unwrap_or_else(frust_glyph::baseline)
         .scheme()
         .primary
 }
@@ -159,7 +163,7 @@ fn amber() -> Color {
 /// A muted caption ink — see [`amber`]'s twin.
 fn muted() -> Color {
     use_context::<Theme>()
-        .unwrap_or_else(Theme::glyph_baseline)
+        .unwrap_or_else(frust_glyph::baseline)
         .scheme()
         .on_surface_variant
 }
@@ -168,13 +172,13 @@ fn muted() -> Color {
 /// [`amber`]'s twin.
 fn error_ink() -> Color {
     use_context::<Theme>()
-        .unwrap_or_else(Theme::glyph_baseline)
+        .unwrap_or_else(frust_glyph::baseline)
         .scheme()
         .error
 }
 
 /// `color` with its alpha channel replaced — duplicated from
-/// `frust-widgets::glyph::badge`'s crate-private helper of the same shape
+/// `frust-glyph::badge`'s crate-private helper of the same shape
 /// (unreachable from here), used for the copy-field's flash wash.
 fn with_alpha(color: Color, alpha: f32) -> Color {
     let c = color.components;
@@ -1314,7 +1318,7 @@ const COPY_TOAST_MS: f64 = 1100.0;
 /// 08 copy burst: clicking the field flashes it, sends a few characters
 /// drifting up off the field, and shows a small inline "copied" toast — a
 /// composition of [`AnimatedOpacity`]/[`Align`]/a local
-/// [`badge`](frust::glyph::badge) rather than the global `toast_host` — this
+/// [`badge`](frust_glyph::badge) rather than the global `toast_host` — this
 /// demo's toast is deliberately scoped to the field, not the app-wide
 /// overlay.
 fn demo_copy_burst() -> FlexChild<CatalogState> {

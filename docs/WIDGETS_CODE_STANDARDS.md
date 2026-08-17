@@ -41,10 +41,10 @@ anti-patterns, interaction semantics, semantics, testing, comment conventions �
   `request_layout()` instead** (implies `request_frame`) — reserve bare `request_frame` for
   a paint-only animation, or the mobile intra-frame layout skip leaves it unresized
   ([SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)'s frame-pipeline data flow).
-- **State-layer opacity has one source: `material::state_layer`'s constants**
-  (`HOVER_OPACITY`/`FOCUS_OPACITY`/`PRESSED_OPACITY`/ `DRAGGED_OPACITY`, M3 `StateTokens`) —
-  a catalog widget imports them rather than hardcoding overlay opacity, taking the
-  **maximum** of concurrently-active states, never their sum.
+- **State-layer opacity has one source: `frust_material::state_layer`'s constants**
+  (`HOVER_OPACITY`/`FOCUS_OPACITY`/`PRESSED_OPACITY`/ `DRAGGED_OPACITY`, M3 `StateTokens`,
+  `plugins/material`) — a design-system widget imports them rather than hardcoding overlay
+  opacity, taking the **maximum** of concurrently-active states, never their sum.
 - **Glyph's token set adds three resolution precedents.** A per-status color with no
   `ColorScheme` field (Success/Warning/Info) resolves `Theme::extension::<StatusPalette>()`
   first, before a role that already has one (Error) resolves it directly. `GlyphInk` is
@@ -70,12 +70,14 @@ anti-patterns, interaction semantics, semantics, testing, comment conventions �
   shipped example, with one deliberate exception to the freeze-in-place rule above: it freezes
   **visible** rather than hidden (a position cue must stay legible) while still dropping all
   frame requests when frozen.
-- **Design-system code targets `frust_widgets::authoring`, never a catalog module.** A baseline
-  widget never imports `material`/`cupertino`/`glyph`; the container/callback plumbing, event
-  routing, and callback erasure every widget needs live in the public `authoring` module
-  instead — the same surface the three built-in, feature-gated catalogs themselves consume,
-  pinned `authoring`-only by `authoring_only_conformance.rs`; `PRESSED_OPACITY`'s
-  `material::state_layer` re-export is compatibility-only. `PageTransition::Custom` needs an
+- **Design-system code targets `frust_widgets::authoring` (reached as `frust::authoring`), never a
+  sibling design-system crate.** A baseline widget never imports `frust-glyph`/`frust-material`/
+  `frust-cupertino`; the container/callback plumbing, event routing, and callback erasure every
+  widget needs live in the public `authoring` module instead — the same surface the three
+  built-in design-system plugins themselves consume, enforced structurally now (each is a
+  separate crate whose only production dependency is `frust`, so it cannot reach anything
+  `authoring` doesn't re-export); `PRESSED_OPACITY`'s `frust_material::state_layer` re-export is
+  compatibility-only. `PageTransition::Custom` needs an
   explicit `Timing::Duration`/`Timing::Spring` (`Timing::ThemeDefault` falls back to the M3
   default, 300ms + `Curve::Emphasized`); `reduce_motion` collapses it only programmatically,
   and an interactive edge-swipe pop calls it like every preset.
@@ -86,10 +88,11 @@ anti-patterns, interaction semantics, semantics, testing, comment conventions �
   macro (`visit_children!(leading, children)`); a field shape behind its own row/slot struct
   implements the toolkit's `VisitPods` trait for that struct instead and stays on the same seam
   (see WIDGETS_ARCHITECTURE.md's Data Flow).
-- **A design system installs itself via `set_default_theme` + `register_app_fonts` from an
-  `app!` `setup` block — never `Component::init` (no kept ordering contract) or
-  `set_app_theme` (pins brightness, breaking platform dark/light following).**
-  `frust::glyph_theme::install()` is the built-in Glyph caller.
+- **A design system installs itself via `set_default_theme` + (if it bundles fonts)
+  `register_app_fonts` from an `app!` `setup` block — never `Component::init` (no kept ordering
+  contract) or `set_app_theme` (pins brightness, breaking platform dark/light following).**
+  `frust_glyph::install()`/`frust_material::install()`/`frust_cupertino::install()` are the
+  built-in callers; only Glyph's also registers fonts.
 
 ## See Also
 

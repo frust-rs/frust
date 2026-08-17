@@ -20,33 +20,23 @@
 //! `&mut Box<dyn Widget>` to drive `AnyView`'s type-erased reconciliation.
 //!
 //! That toolkit is **public** — see the [`authoring`] module — so a design
-//! system can be authored outside this crate at parity with the three built-in
-//! catalogs, which consume exactly the same surface. Every in-crate call site,
-//! including the three built-in catalogs, spells it out as
-//! `crate::authoring::build_child(...)`: there is no crate-root re-export
-//! shortcut, so reaching for a *promoted* item by a bare `crate::` path fails
-//! to compile. That covers most of the boundary but not all of it — an item
-//! `authoring` re-exports out of a private module (`ThemeTextColor`, from
-//! `crate::text`) still resolves by its own private path, so the compiler
-//! alone cannot enforce this. `crates/frust-widgets/tests/authoring_only_conformance.rs`
-//! closes the remainder by source-scanning the catalogs for such bypasses.
+//! system is authored outside this crate against exactly the surface the
+//! baseline widgets use themselves. No design-system catalog lives here any
+//! more: the three built-in ones ship as their own plugin crates
+//! (`frust-glyph`/`frust-material`/`frust-cupertino`), each depending on the
+//! `frust` facade alone, so the authoring boundary is now enforced by the
+//! crate graph rather than by a source scan.
 
 mod align;
 pub mod authoring;
 mod button;
 mod checkbox;
-#[cfg(feature = "cupertino")]
-pub mod cupertino;
 mod flex;
 mod gesture;
-#[cfg(feature = "glyph")]
-pub mod glyph;
 mod icon;
 pub mod icons;
 mod image;
 mod list_view;
-#[cfg(feature = "material")]
-pub mod material;
 pub mod motion;
 pub mod nav;
 mod padding;
@@ -99,104 +89,6 @@ pub use stack::{Stack, StackView, StackWidget};
 pub use text::{TextView, TextWidget, text};
 pub use textinput::{TextInput, TextInputView, TextInputWidget, text_input};
 
-// ---------------------------------------------------------------------
-// Material 3 Expressive widget catalog — flat re-exports so app code (via
-// the `frust` facade) never has to name `frust_widgets::material::*`
-// directly, mirroring the baseline widgets' flat re-export shape above.
-// Gated by the `material` feature (default-on) alongside `pub mod material`
-// above, so an app that never enables it compiles none of this catalog.
-// ---------------------------------------------------------------------
-#[cfg(feature = "material")]
-pub use material::appbar::{AppBar, AppBarView, AppBarWidget, app_bar};
-#[cfg(feature = "material")]
-pub use material::button_group::{ButtonGroup, ButtonGroupView, ButtonGroupWidget, button_group};
-#[cfg(feature = "material")]
-pub use material::card::{
-    CardVariant, CardView, CardWidget, card, elevated_card, filled_card, outlined_card,
-};
-#[cfg(feature = "material")]
-pub use material::chips::{
-    AssistChip, AssistChipView, AssistChipWidget, FilterChip, FilterChipView, FilterChipWidget,
-    assist_chip, filter_chip,
-};
-#[cfg(feature = "material")]
-pub use material::dialog::{DialogView, DialogWidget, dialog, show_dialog};
-#[cfg(feature = "material")]
-pub use material::fab::{FabSize, FabView, FabWidget, extended_fab, fab};
-#[cfg(feature = "material")]
-pub use material::fab_menu::{
-    FabMenu, FabMenuItem, FabMenuView, FabMenuWidget, fab_menu, fab_menu_item,
-};
-#[cfg(feature = "material")]
-pub use material::list_item::{
-    ListItem, ListItemLines, ListItemWidget, ONE_LINE_HEIGHT, THREE_LINE_HEIGHT, TWO_LINE_HEIGHT,
-    list_item,
-};
-#[cfg(feature = "material")]
-pub use material::loading_indicator::{
-    LoadingIndicator, LoadingIndicatorView, LoadingIndicatorWidget, loading_indicator,
-};
-#[cfg(feature = "material")]
-pub use material::navbar::{
-    NavItem, NavigationBar, NavigationBarView, NavigationBarWidget, nav_item, navigation_bar,
-};
-#[cfg(feature = "material")]
-pub use material::progress::{
-    CircularProgress, CircularProgressView, CircularProgressWidget, LinearProgress,
-    LinearProgressView, LinearProgressWidget, ProgressValue, circular_progress, linear_progress,
-};
-#[cfg(feature = "material")]
-pub use material::shape_morph::{RoundedPolygon, morph_path};
-#[cfg(feature = "material")]
-pub use material::sheet::{BottomSheetView, BottomSheetWidget, bottom_sheet, show_bottom_sheet};
-#[cfg(feature = "material")]
-pub use material::split_button::{SplitButton, SplitButtonView, SplitButtonWidget, split_button};
-#[cfg(feature = "material")]
-pub use material::switch::{Switch, SwitchView, SwitchWidget, switch};
-#[cfg(feature = "material")]
-pub use material::toolbar::{
-    DockedToolbar, FloatingToolbar, ToolbarVariant, ToolbarView, ToolbarWidget, docked_toolbar,
-    floating_toolbar,
-};
-
-// ---------------------------------------------------------------------
-// Cupertino (iOS) widget catalog — same flat re-export rationale as the
-// Material block above. Gated by the `cupertino` feature (default-on)
-// alongside `pub mod cupertino` above.
-// ---------------------------------------------------------------------
-#[cfg(feature = "cupertino")]
-pub use cupertino::action_sheet::{
-    CupertinoActionSheetView, CupertinoActionSheetWidget, show_action_sheet,
-};
-#[cfg(feature = "cupertino")]
-pub use cupertino::activity_indicator::{
-    CupertinoActivityIndicator, CupertinoActivityIndicatorView, CupertinoActivityIndicatorWidget,
-    cupertino_activity_indicator,
-};
-#[cfg(feature = "cupertino")]
-pub use cupertino::alert_dialog::{
-    CupertinoActionStyle, CupertinoAlertDialogView, CupertinoAlertDialogWidget,
-    CupertinoDialogAction, action, show_cupertino_alert,
-};
-#[cfg(feature = "cupertino")]
-pub use cupertino::button::{
-    CupertinoButton, CupertinoButtonSize, CupertinoButtonStyle, CupertinoButtonView,
-    CupertinoButtonWidget, cupertino_button,
-};
-#[cfg(feature = "cupertino")]
-pub use cupertino::navbar::{
-    CupertinoNavBar, CupertinoNavBarView, CupertinoNavBarWidget, cupertino_nav_bar,
-};
-#[cfg(feature = "cupertino")]
-pub use cupertino::switch::{
-    CupertinoSwitch, CupertinoSwitchView, CupertinoSwitchWidget, cupertino_switch,
-};
-#[cfg(feature = "cupertino")]
-pub use cupertino::tabbar::{
-    CupertinoTabBar, CupertinoTabBarView, CupertinoTabBarWidget, TabItem, cupertino_tab_bar,
-    tab_item,
-};
-
 /// A stable identity for a list child, so a container's reconciliation can match
 /// a child to its live widget *by key* across reorders/inserts instead of by
 /// position — the difference between "the third row's widget" and "row #42's
@@ -246,7 +138,8 @@ child_key_from!(
 /// Compiled into this crate's own test build, and — behind the non-default
 /// `test-support` feature — into the library itself, so a design system authored
 /// against [`authoring`] outside this crate can test its containers against the
-/// same fixtures the built-in catalogs use. The feature is off by default: a
+/// same fixtures this crate's own container tests use — the design-system
+/// plugin crates are exactly that consumer. The feature is off by default: a
 /// normal app ships none of this.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {

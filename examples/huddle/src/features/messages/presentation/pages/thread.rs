@@ -56,9 +56,10 @@ use std::sync::Arc;
 
 use frust::{
     Align, Alignment, AnyView, Axis, Color, CrossAxisAlignment, EdgeInsets, FlexView,
-    GestureDetector, Get, GetUntracked, Padding, RwSignal, Set, SizedBox, Stack, any, app_bar,
-    hero, icon, icons, inflexible, keyed, kurbo::Size, scroll_view, text, text_input, use_context,
+    GestureDetector, Get, GetUntracked, Padding, RwSignal, Set, SizedBox, Stack, any, hero, icon,
+    icons, inflexible, keyed, kurbo::Size, scroll_view, text, text_input, use_context,
 };
+use frust_material::app_bar;
 
 use crate::HuddleState;
 use crate::features::messages::domain::repositories::MessageRepository;
@@ -502,11 +503,13 @@ fn reaction_chips(
         let emoji = reaction.emoji.clone();
         let ctrl = Arc::clone(controller);
         let id = root.id;
-        chips.push(inflexible(any(frust::filter_chip::<HuddleState, _>(
-            label,
-            reaction.mine,
-            move |_st: &mut HuddleState, _on: bool| ctrl.toggle_reaction(id, &emoji),
-        ))));
+        chips.push(inflexible(any(
+            frust_material::filter_chip::<HuddleState, _>(
+                label,
+                reaction.mine,
+                move |_st: &mut HuddleState, _on: bool| ctrl.toggle_reaction(id, &emoji),
+            ),
+        )));
         chips.push(inflexible(any(SizedBox(Some(6.0), None))));
     }
 

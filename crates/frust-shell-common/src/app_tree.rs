@@ -629,7 +629,7 @@ mod tests {
             // recording `Scene` reads it back without naming a color type;
             // the color itself comes from a theme constructor (type inferred,
             // so this crate needs no `peniko` dependency).
-            let color = frust_theme::ColorScheme::m3_baseline_light().primary;
+            let color = frust_theme::ColorScheme::neutral_light().primary;
             scene.fill_rect(ctx.origin(), Size::new(self.baked, 1.0), color);
         }
     }

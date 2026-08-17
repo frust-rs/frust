@@ -88,9 +88,10 @@ pub use frust_core::view::{AnyView, View, any};
 //   otherwise unnameable without [`PageVisibility`]/[`VisibilityCallback`]/
 //   [`TransitionState`] themselves in scope.
 //
-// This closes a re-export gap: `frust-widgets`' own `show_glyph_dialog`
-// (`push_with_options(.., PushOptions::transparent())` with a custom
-// [`BackPolicy`]) already depends on exactly this seam, so an app-authored
+// This closes a re-export gap: a design-system plugin's own modal helper
+// (`frust_glyph::show_glyph_dialog` is the shipped example —
+// `push_with_options(.., PushOptions::transparent())` with a custom
+// [`BackPolicy`]) depends on exactly this seam, so an app- or plugin-authored
 // dialog/sheet could reach the *method* through [`NavigatorController`] but
 // never construct a call to it. See this file's
 // `push_with_options_dismiss_animated` test module below for the worked
@@ -231,7 +232,7 @@ pub use frust_widgets::{
 ///
 /// // A theme with reduce_motion on: resolve_spec collapses the spec to the
 /// // framework's own linear cross-fade, with no app-side collapse logic.
-/// let mut theme = Theme::m3_baseline();
+/// let mut theme = Theme::neutral();
 /// theme.motion.reduce_motion = true;
 ///
 /// let spec = TransitionSpec::duration(PageTransition::SlideUp);
@@ -246,51 +247,6 @@ pub use frust_widgets::{
 /// assert!(matches!(driver, TransitionDriver::Auto(_)));
 /// ```
 pub use frust_widgets::nav::transition::{TransitionDriver, make_driver, resolve_spec};
-
-/// The Material 3 Expressive widget catalog: AppBar,
-/// Card, Chips, Dialog, FAB, ListItem, NavigationBar, BottomSheet,
-/// Switch, and progress indicators — flat-re-exported from
-/// `frust-widgets` so app code (e.g. `examples/catalog`) never names that
-/// crate directly, mirroring the baseline-widget re-export block above.
-///
-/// Gated by this crate's default-on `material` feature, which forwards to
-/// `frust-widgets/material` — with it off the catalog is not compiled at all,
-/// so this block must be gated in lockstep or it would name absent items.
-#[cfg(feature = "material")]
-pub use frust_widgets::{
-    AppBar, AppBarView, AppBarWidget, AssistChip, AssistChipView, AssistChipWidget,
-    BottomSheetView, BottomSheetWidget, ButtonGroup, ButtonGroupView, ButtonGroupWidget,
-    CardVariant, CardView, CardWidget, CircularProgress, CircularProgressView,
-    CircularProgressWidget, DialogView, DialogWidget, DockedToolbar, FabMenu, FabMenuItem,
-    FabMenuView, FabMenuWidget, FabSize, FabView, FabWidget, FilterChip, FilterChipView,
-    FilterChipWidget, FloatingToolbar, LinearProgress, LinearProgressView, LinearProgressWidget,
-    ListItem, ListItemLines, ListItemWidget, LoadingIndicator, LoadingIndicatorView,
-    LoadingIndicatorWidget, NavItem, NavigationBar, NavigationBarView, NavigationBarWidget,
-    ONE_LINE_HEIGHT, ProgressValue, RoundedPolygon, SplitButton, SplitButtonView,
-    SplitButtonWidget, Switch, SwitchView, SwitchWidget, THREE_LINE_HEIGHT, TWO_LINE_HEIGHT,
-    ToolbarVariant, ToolbarView, ToolbarWidget, app_bar, assist_chip, bottom_sheet, button_group,
-    card, circular_progress, dialog, docked_toolbar, elevated_card, extended_fab, fab, fab_menu,
-    fab_menu_item, filled_card, filter_chip, floating_toolbar, linear_progress, list_item,
-    loading_indicator, morph_path, nav_item, navigation_bar, outlined_card, show_bottom_sheet,
-    show_dialog, split_button, switch,
-};
-
-/// The Cupertino (iOS) widget catalog: the
-/// Flutter-parity counterparts to a subset of the Material catalog above —
-/// flat-re-exported from `frust-widgets` for the same reason, and gated by the
-/// default-on `cupertino` feature for the same reason as the Material block.
-#[cfg(feature = "cupertino")]
-pub use frust_widgets::{
-    CupertinoActionSheetView, CupertinoActionSheetWidget, CupertinoActionStyle,
-    CupertinoActivityIndicator, CupertinoActivityIndicatorView, CupertinoActivityIndicatorWidget,
-    CupertinoAlertDialogView, CupertinoAlertDialogWidget, CupertinoButton, CupertinoButtonSize,
-    CupertinoButtonStyle, CupertinoButtonView, CupertinoButtonWidget, CupertinoDialogAction,
-    CupertinoNavBar, CupertinoNavBarView, CupertinoNavBarWidget, CupertinoSwitch,
-    CupertinoSwitchView, CupertinoSwitchWidget, CupertinoTabBar, CupertinoTabBarView,
-    CupertinoTabBarWidget, TabItem, action, cupertino_activity_indicator, cupertino_button,
-    cupertino_nav_bar, cupertino_switch, cupertino_tab_bar, show_action_sheet,
-    show_cupertino_alert, tab_item,
-};
 
 /// The `motion` module: declarative
 /// implicit-animation wrappers (`AnimatedOpacity`/`AnimatedScale` today;
@@ -310,24 +266,6 @@ pub use frust_widgets::{
 /// let _scale: frust::motion::AnimatedScaleView<()> = AnimatedScale(1.0, text("hi"));
 /// ```
 pub use frust_widgets::motion;
-
-/// The Glyph widget catalog: the
-/// terminal-native components with no Material/Cupertino equivalent
-/// (badges/tags/alerts, loaders + toast, nav chrome, content cards, the
-/// terminal block + tooltip, and the command-palette overlay). Re-exported
-/// **wholesale** (`pub use frust_widgets::glyph;`), following
-/// `frust_widgets::icons`/`frust_widgets::motion`'s wholesale-module
-/// precedent, so every widget a later fill task adds under
-/// `frust_widgets::glyph` rides along under `frust::glyph::*` with no further
-/// facade edit.
-///
-/// Gated by this crate's default-on `glyph` feature (which turns on
-/// `frust-widgets/glyph` **and** `frust-theme/glyph` — widgets and tokens
-/// together); the design-token half re-exports as [`GlyphInk`] below, and
-/// [`glyph_theme::install`] is the seam that makes a Glyph theme the app's
-/// starting point.
-#[cfg(feature = "glyph")]
-pub use frust_widgets::glyph;
 
 /// Everything needed to author a custom `View`/`Widget` pair.
 ///
@@ -706,42 +644,29 @@ pub use router_glue::{RouterDeepLinks, router_with_deep_links};
 /// [`use_context`]`::<`[`Theme`]`>()`; a widget reads it during paint/layout via
 /// `PaintCtx::theme_as`/`LayoutCtx::theme_as` (or `Theme::from_paint_ctx`).
 ///
-/// Includes the glass material tokens:
+/// Includes the glass material tokens — this crate ships the opaque recipe,
+/// and a design system authors its own translucent one over the same types:
 ///
 /// ```
 /// use frust::GlassScale;
 ///
-/// let glass = GlassScale::ios27();
-/// assert_eq!(glass.chrome.blur_radius_intent, 75.0);
-/// assert!(!glass.control.is_opaque());
+/// let glass = GlassScale::opaque_material();
+/// assert_eq!(glass.chrome.blur_radius_intent, 0.0);
+/// assert!(glass.control.is_opaque());
 /// ```
 ///
 /// Also the composable-theming surface:
 /// [`ThemeBuilder`] (`defineTheme`/`copyWith` analog), the no-lock-in typed
 /// extension slot ([`ThemeExtensions`]) plus its first consumer
-/// [`StatusPalette`]/[`StatusColors`] (success/warning/info), and the Glyph
-/// motion vocabulary ([`MotionDurations`]/[`EasingSet`]) — all
-/// flat-re-exported so an app authors a custom theme against `frust::*` alone.
+/// [`StatusPalette`]/[`StatusColors`] (success/warning/info), and the motion
+/// vocabulary ([`MotionDurations`]/[`EasingSet`]) — all flat-re-exported so an
+/// app (or a design-system plugin) authors a theme against `frust::*` alone.
 pub use frust_theme::{
-    Brightness, ColorScheme, DesignLanguage, EasingSet, Elevation, ElevationLevel, FontFace,
-    GlassFill, GlassMaterial, GlassScale, MotionDurations, MotionScheme, MotionSpring,
-    NativeTypefaces, ShadowSpec, ShapeScale, StatusColors, StatusPalette, SurfaceRole, Theme,
-    ThemeBuilder, ThemeExtensions, TypeScale,
+    Brightness, ColorScheme, CosmeticLoopRate, DesignLanguage, EasingSet, Elevation,
+    ElevationLevel, FontFace, GlassFill, GlassMaterial, GlassScale, MotionDurations, MotionScheme,
+    MotionSpring, NativeTypefaces, ShadowSpec, ShapeScale, StatusColors, StatusPalette,
+    SurfaceRole, Theme, ThemeBuilder, ThemeExtensions, TypeScale,
 };
-
-/// Glyph's brightness-invariant terminal/tooltip ink — a
-/// [`ThemeExtensions`] attachment on the Glyph baseline, never
-/// brightness-swapped like the rest of a [`ColorScheme`] (see
-/// `docs/CODE_STANDARDS.md`'s Theming conventions).
-///
-/// Gated by the default-on `glyph` feature alongside the widget catalog
-/// ([`glyph`](crate::glyph)): `frust_theme::GlyphInk` lives inside
-/// `frust-theme`'s own `glyph`-gated module, so this re-export tracks it.
-/// `Theme::glyph_baseline()` — the baseline that carries it — appears and
-/// disappears with the same feature; [`glyph_theme::install`] is how an app
-/// makes it the starting theme.
-#[cfg(feature = "glyph")]
-pub use frust_theme::GlyphInk;
 
 /// The color type every [`ColorScheme`] role is expressed in
 /// ([`peniko::Color`]), re-exported so app code can author its own color
@@ -767,12 +692,12 @@ pub use peniko::Color;
 /// flip until [`clear_app_theme`] runs).
 ///
 /// ```no_run
-/// use frust::{Theme, set_app_theme};
+/// use frust::{Brightness, Theme, set_app_theme};
 ///
-/// // Force the Cupertino baseline regardless of the platform's own
-/// // Material-vs-Cupertino default — e.g. the widget catalog's design-
-/// // language toggle.
-/// set_app_theme(Theme::cupertino_baseline());
+/// // Force one appearance end-to-end regardless of what the platform reports
+/// // — e.g. an in-app light/dark toggle. Any `Theme` works here; a design
+/// // system passes its own baseline instead of the neutral floor.
+/// set_app_theme(Theme::neutral().with_brightness(Brightness::Dark));
 /// ```
 pub use frust_shell_common::{clear_app_theme, set_app_theme};
 
@@ -781,21 +706,27 @@ pub use frust_shell_common::{clear_app_theme, set_app_theme};
 /// with, in place of its own built-in fallback — the seam a design-system
 /// plugin's `install()` calls. Unlike [`set_app_theme`], this does NOT pin
 /// brightness: the shell keeps re-deriving light/dark from the platform's own
-/// appearance against this same base, so a Glyph-themed app installed this
-/// way still honours system dark mode. See
+/// appearance against this same base, so a design-system-themed app installed
+/// this way still honours system dark mode. See
 /// `frust_shell_common::theme_default`'s module docs for the full precedence
 /// order ([`set_app_theme`] override → [`set_default_theme`] base → the
 /// shell's built-in fallback) and the brightness-following contrast with
 /// [`set_app_theme`] spelled out in full.
 ///
 /// ```no_run
-/// use frust::{Theme, set_default_theme};
+/// use frust::{Color, Theme, set_default_theme};
 ///
 /// // A design-system plugin's install() call, seeding its own base theme as
-/// // the app's starting point without pinning brightness. The built-in Glyph
-/// // installer (`frust::glyph_theme::install`, `glyph` feature) is this call
-/// // with `Theme::glyph_baseline()`, plus its bundled-font registration.
-/// set_default_theme(Theme::m3_baseline());
+/// // the app's starting point without pinning brightness. A real installer
+/// // hands over its whole token set; this one edits a single role off the
+/// // neutral floor to keep the example dependency-free.
+/// let base = Theme::builder(Theme::neutral())
+///     .map_colors_light(|mut c| {
+///         c.primary = Color::from_rgb8(0x6B, 0x4E, 0xFF);
+///         c
+///     })
+///     .build();
+/// set_default_theme(base);
 /// ```
 pub use frust_shell_common::set_default_theme;
 
@@ -834,87 +765,6 @@ pub use frust_shell_common::{SystemUiMode, SystemUiOverlay, set_system_ui_mode};
 /// frust::register_app_fonts(font_bytes);
 /// ```
 pub use frust_shell_common::font_registry::register_app_fonts;
-
-/// The Glyph design system's one-line installer.
-///
-/// Every shell's built-in fallback theme is the design-language-free
-/// `Theme::neutral()` and no shell registers a font of its own, so a Glyph app
-/// supplies both halves itself. [`install`](glyph_theme::install) is that call:
-/// it seeds `Theme::glyph_baseline()` through [`set_default_theme`] and pushes
-/// the bundled Space Mono / IBM Plex Mono faces through
-/// [`register_app_fonts`].
-///
-/// Gated by the default-on `glyph` feature (the tokens it names live behind
-/// `frust-theme`'s own `glyph` gate). Kept in the facade rather than
-/// `frust-shell-common` deliberately: it needs `frust-theme`'s Glyph tokens,
-/// and shell-common must stay design-language-free
-/// (`docs/ARCHITECTURE.md`'s Theme delivery).
-#[cfg(feature = "glyph")]
-pub mod glyph_theme {
-    /// Make the Glyph design system this app's starting point.
-    ///
-    /// Two process-global pushes, both already public seams:
-    ///
-    /// 1. [`set_default_theme`](crate::set_default_theme)`(Theme::glyph_baseline())`
-    ///    — the *base* a shell seeds itself with instead of its built-in
-    ///    `Theme::neutral()` fallback. Deliberately not
-    ///    [`set_app_theme`](crate::set_app_theme): a seeded default does not
-    ///    pin brightness, so a Glyph app still follows system dark mode.
-    /// 2. [`register_app_fonts`](crate::register_app_fonts) for every bundled
-    ///    Glyph face, so the Glyph type scale's families actually resolve. With
-    ///    `frust`'s `glyph-fonts` feature off the bundled bytes are not
-    ///    compiled in and this half is a no-op (`font_data()` answers an empty
-    ///    slice) — the type scale then falls back to whatever monospace family
-    ///    the platform has.
-    ///
-    /// # Timing: must run before the first frame
-    ///
-    /// A shell reads the default-theme slot and drains the font registry
-    /// **once, at construction**, before its first rebuild. A call after that
-    /// takes effect only on a later `clear_app_theme`-driven reseed, which may
-    /// never happen — so a late call silently does nothing visible.
-    ///
-    /// The supported way to get the timing right on all three platforms is
-    /// [`app!`](crate::app)'s setup block, which runs immediately before the
-    /// root component's `Component::init` and therefore before any shell
-    /// construction:
-    ///
-    /// ```no_run
-    /// use frust::{AnyView, Component, any, text};
-    ///
-    /// #[derive(Default)]
-    /// struct MyApp;
-    ///
-    /// impl Component for MyApp {
-    ///     type State = ();
-    ///     fn init(&self) -> Self::State {}
-    ///     fn build(&self, _state: &mut Self::State) -> AnyView<Self::State> {
-    ///         any(text("glyph"))
-    ///     }
-    /// }
-    ///
-    /// frust::app!(MyApp, setup = { frust::glyph_theme::install(); });
-    /// # fn main() {}
-    /// ```
-    ///
-    /// Calling it from `Component::init` itself also happens to be early
-    /// enough today, but that is not a contract this crate keeps; the setup
-    /// block is.
-    ///
-    /// # Thread contract and repeat calls
-    ///
-    /// Both underlying seams are plain `Mutex`-guarded process-globals
-    /// callable from any thread. Calling `install` twice is harmless but
-    /// wasteful: the second `set_default_theme` replaces an identical value,
-    /// and the font bytes are pushed (and later re-registered, shadowing the
-    /// same family names) a second time. Call it once.
-    pub fn install() {
-        crate::set_default_theme(crate::Theme::glyph_baseline());
-        for bytes in frust_theme::glyph::font_data() {
-            crate::register_app_fonts(bytes.to_vec());
-        }
-    }
-}
 
 // No app-facing translucent-surface opt-in lives here: Mode B is a
 // build-time HOST configuration selected by the
@@ -1394,9 +1244,9 @@ pub fn run<C: Component>(root: C) -> anyhow::Result<()> {
 /// `create_handle`/`ffi_glue::init` calls before building their `AppHandle`),
 /// so the ordering contract is identical on all three platforms.
 ///
-/// A design-system plugin's installer (`frust::glyph_theme::install`, or a
-/// third-party equivalent) is the intended payload; app code normally reaches
-/// this through [`app!`] rather than calling it directly.
+/// A design-system plugin's installer (`frust_glyph::install`, or any other
+/// design system's equivalent) is the intended payload; app code normally
+/// reaches this through [`app!`] rather than calling it directly.
 ///
 /// Desktop-only, matching [`run`]/[`App::run`].
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1530,7 +1380,7 @@ pub fn run_with_setup_and_config<C: Component>(
 /// # }
 /// frust::app!(MyApp, setup = { my_design_system::install(); });
 /// # mod my_design_system {
-/// #     pub fn install() { frust::set_default_theme(frust::Theme::m3_baseline()); }
+/// #     pub fn install() { frust::set_default_theme(frust::Theme::neutral()); }
 /// # }
 /// # fn main() {}
 /// ```
@@ -1538,9 +1388,8 @@ pub fn run_with_setup_and_config<C: Component>(
 /// This exists because a design system's installer must reach
 /// [`set_default_theme`]/[`register_app_fonts`] *before* a shell reads them,
 /// and Android has no `main` at all (its entry is the JNI `nativeInit`
-/// `android_app!` generates). Any plugin can use it; it is not
-/// Glyph-specific — the built-in Glyph installer
-/// (`frust::glyph_theme::install`, `glyph` feature) is just the first caller.
+/// `android_app!` generates). Any plugin can use it; it is not tied to one
+/// design system — `frust_glyph::install` is just the first caller.
 ///
 /// **When it runs**, identically on all three platforms: on the UI thread,
 /// after `ReactiveRuntime::init`, under the root reactive `Owner`, immediately
@@ -1745,10 +1594,9 @@ macro_rules! app {
 /// `pub fn __frust_main` (one per module, no fixed export name) and the
 /// `android_app!`/`ios_app!` halves expand to nothing.
 ///
-/// The setup payload here is deliberately feature-independent
-/// ([`set_default_theme`] with the always-available M3 baseline rather than
-/// `glyph_theme::install`), so this fixture also compiles under
-/// `--no-default-features`.
+/// The setup payload here names no design system
+/// ([`set_default_theme`] with [`Theme::neutral`] rather than a plugin's
+/// `install()`), so this fixture depends on the facade alone.
 #[cfg(test)]
 mod macro_expansion {
     // `#[allow(dead_code)]`: a zero-field unit struct's derived `Default::default()`
@@ -1775,7 +1623,7 @@ mod macro_expansion {
     crate::app!(
         TestApp,
         setup = {
-            crate::set_default_theme(crate::Theme::m3_baseline());
+            crate::set_default_theme(crate::Theme::neutral());
         }
     );
 }
@@ -1872,7 +1720,7 @@ mod macro_expansion_desktop_config {
         crate::app!(
             super::TestAppDesktop,
             setup = {
-                crate::set_default_theme(crate::Theme::m3_baseline());
+                crate::set_default_theme(crate::Theme::neutral());
             },
             desktop = { super::fixture_config() }
         );
@@ -1883,7 +1731,7 @@ mod macro_expansion_desktop_config {
             super::TestAppDesktop,
             desktop = { super::fixture_config() },
             setup = {
-                crate::set_default_theme(crate::Theme::m3_baseline());
+                crate::set_default_theme(crate::Theme::neutral());
             }
         );
     }
@@ -1986,24 +1834,50 @@ mod root_owner_wrap {
 
 /// Facade-level check that the glass material tokens
 /// ([`GlassScale`]/[`GlassMaterial`]/[`GlassFill`]) re-export through the
-/// `frust` facade, and the two baselines carry the matching scale.
+/// `frust` facade — including enough of the type to let a design-system
+/// plugin author its own translucent recipe against `frust::*` alone.
 #[cfg(test)]
 mod glass_reexport {
-    use crate::{GlassFill, GlassMaterial, GlassScale, Theme};
+    use crate::{GlassFill, GlassMaterial, GlassScale, ShadowSpec, Theme};
 
     // A build-time proof the types name-resolve through the facade.
     #[allow(dead_code)]
     fn _uses_all(_f: GlassFill, _m: GlassMaterial, _s: GlassScale) {}
 
     #[test]
-    fn baselines_expose_glass_through_the_facade() {
-        assert!(Theme::m3_baseline().glass.chrome.is_opaque());
-        assert!(!Theme::cupertino_baseline().glass.control.is_opaque());
-        assert_eq!(
-            Theme::cupertino_baseline().glass,
-            GlassScale::ios27(),
-            "Cupertino baseline carries the iOS-27 glass scale"
-        );
+    fn the_baseline_exposes_its_opaque_glass_through_the_facade() {
+        assert!(Theme::neutral().glass.chrome.is_opaque());
+        assert_eq!(Theme::neutral().glass, GlassScale::opaque_material());
+    }
+
+    #[test]
+    fn a_design_system_can_author_a_translucent_scale_through_the_facade() {
+        // The out-of-tree half of the same seam: every type a translucent
+        // recipe needs (`GlassScale`/`GlassMaterial`/`GlassFill`/`ShadowSpec`)
+        // must be constructible from `frust::*` with no `frust-theme`
+        // dependency — this is how a Cupertino-style plugin ships its own
+        // glass without the framework carrying the recipe.
+        let lens = GlassMaterial {
+            blur_radius_intent: 75.0,
+            fills_light: vec![GlassFill::new(1.0, 1.0, 1.0, 0.34)],
+            fills_dark: vec![GlassFill::new(0.0, 0.0, 0.0, 0.41)],
+            hairline_alpha: 0.5,
+            shadow: ShadowSpec {
+                y_offset: 18.0,
+                blur_std_dev: 24.0,
+                color_alpha: 0.30,
+            },
+        };
+        assert!(!lens.is_opaque());
+        let theme = Theme::builder(Theme::neutral())
+            .glass(GlassScale {
+                chrome: lens.clone(),
+                bar: lens.clone(),
+                control: lens,
+            })
+            .build();
+        assert!(!theme.glass.control.is_opaque());
+        assert_ne!(theme.glass, GlassScale::opaque_material());
     }
 }
 
@@ -2054,7 +1928,7 @@ mod motion_resolve_reuse {
     /// — the app never re-derives it.
     #[test]
     fn resolve_spec_collapses_under_reduce_motion_without_app_derivation() {
-        let mut theme = Theme::m3_baseline();
+        let mut theme = Theme::neutral();
         theme.motion.reduce_motion = true;
 
         let spec = crate::TransitionSpec::duration(PageTransition::SlideUp);
@@ -2086,7 +1960,7 @@ mod motion_resolve_reuse {
     /// the same resolve path, still with no app-side branching.
     #[test]
     fn resolve_spec_resolves_theme_default_when_reduce_motion_is_off() {
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         assert!(!theme.motion.reduce_motion);
 
         let spec = crate::TransitionSpec::new(PageTransition::SlideUp, Timing::ThemeDefault);

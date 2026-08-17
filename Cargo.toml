@@ -8,18 +8,14 @@ resolver = "2"
 # of plugins/i18n, the `locales!` compile-time Fluent-bundle loader) — listed
 # explicitly like every other `plugins/*` member above; no glob in this list
 # reaches two directory levels deep.
-members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/iap", "plugins/database", "plugins/i18n", "plugins/i18n/macros"]
-# examples/no-catalogs is the catalog-free build's compile guard: unlike
-# every example excluded below, it is INCLUDED on purpose — a package-scoped
-# `cargo build -p no-catalogs`/`cargo check -p no-catalogs` compiles `frust
-# --no-default-features` with nothing to remember. CONFIRMED LIMITATION:
-# `cargo build --workspace`/`cargo test --workspace` do NOT actually
-# exercise the catalog-off configuration — Cargo's feature resolver unifies
-# this crate's `frust` dependency with `plugins/native-widgets`'s own
-# (legitimately) default-on `frust`+`glyph-fonts` dependency into one
-# catalogs-ON build once both are roots in the same `--workspace` command.
-# See examples/no-catalogs/src/main.rs's top-of-file doc for the full
-# evidence and the standalone-command fallback this implies.
+members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/iap", "plugins/database", "plugins/i18n", "plugins/i18n/macros", "plugins/glyph", "plugins/material", "plugins/cupertino"]
+# plugins/{glyph,material,cupertino} are the design-system plugin tier: the
+# three catalogs that used to live in-tree behind `frust-widgets` cargo
+# features. They are ordinary root-workspace members — a `--workspace` run
+# builds and tests all three — because catalogs-out is now the only state
+# there is: `frust` has no default features and no catalog feature to unify,
+# so the standalone catalog-off compile guard this list used to carry
+# (examples/no-catalogs) has nothing left to guard.
 # examples/huddle (renamed from its prior directory name) is the
 # sole example (examples-convergence: hello/counter/notes/gallery/navdemo/
 # catalog/inbox were folded into it and deleted) — standalone (its own
@@ -46,13 +42,15 @@ members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secu
 # generated Android/iOS projects need a project-local `target/` dir, plus
 # hand-synced `[profile.*]` blocks that only take effect in a workspace root.
 # examples/design-system-sample (the out-of-tree design-system proof) is
-# standalone for a different reason from the four above: it is a nested
-# workspace of its own whose `frust` edge sets `default-features = false`, and
-# catalogs-off is the whole point of it. As a root member its `frust`
-# dependency would be feature-unified with plugins/native-widgets' legitimately
-# catalogs-ON one — the same limitation examples/no-catalogs documents — so the
-# proof would silently evaporate. Gate it from its own directory (see its
-# README).
+# standalone for a historical reason plus a live one. Historically it had to
+# be: its `frust` edge sets `default-features = false`, and as a root member
+# that would have been feature-unified with plugins/native-widgets'
+# legitimately catalogs-ON one, silently evaporating the proof. That hazard is
+# gone (`frust` has no catalog features left to unify), but the exclusion
+# stays on its own merits — the sample exists to prove a design system builds
+# from OUTSIDE this workspace, against the facade alone, and a root member
+# would prove nothing of the sort; it also keeps its own `target/`. Gate it
+# from its own directory (see its README).
 # plugins/clean-signals-frust (a facade-tier plugin) is a standalone
 # excluded workspace like huddle: its `clean-signals` core dep is a sibling
 # path dep that must never enter the root graph (see docs/DEVELOPMENT.md's
@@ -524,30 +522,14 @@ frust-core = { path = "crates/frust-core" }
 frust-scene = { path = "crates/frust-scene" }
 frust-render = { path = "crates/frust-render" }
 frust-text = { path = "crates/frust-text" }
-# `default-features = false` (gf2, glyph-fonts opt-out): this is the top of
-# the real opt-out chain — frust-theme's own `glyph-fonts` default no longer
-# reaches an app build through this edge. Every consumer that needs the
-# bundled Space Mono/IBM Plex Mono bytes back re-requests them through its
-# own `glyph-fonts` feature (mirroring the perf-trace chain's shape,
-# inverted: default-ON at the facade top instead of default-off) — see
-# `crates/frust/Cargo.toml`'s `default = ["glyph", "material", "cupertino",
-# "glyph-fonts"]`.
-frust-theme = { path = "crates/frust-theme", default-features = false }
-# `default-features = false` for the same reason as the `frust-theme` edge
-# above, one tier up: `frust-widgets`' three built-in catalogs
-# (`glyph`/`material`/`cupertino`) are its own default features, and an app that
-# authors its own design system against `frust_widgets::authoring` must be able
-# to compile none of them. That opt-out is only real if this edge stops
-# requesting them — the facade's `glyph`/`material`/`cupertino` features
-# (`crates/frust/Cargo.toml`) are the re-enabling asks, default-on there, so an
-# unmodified app build is unchanged. Cargo ignores `default-features = false`
-# written on an *inherited* edge (warning: "`default-features` is ignored ...,
-# since `default-features` was not specified for
-# `workspace.dependencies.frust-widgets`"), so the switch has to live here.
-# The two mobile shells' target-gated `frust-widgets` DEV-dependencies inherit
-# it too; their macro-expansion smoke tests only use `frust_widgets::text`
-# (a baseline widget, ungated), so nothing there needs a catalog back.
-frust-widgets = { path = "crates/frust-widgets", default-features = false }
+# Neither edge carries `default-features = false` any more: both crates now
+# declare no default features at all. `frust-theme` is pure token
+# infrastructure (no design-language module, no bundled fonts) and
+# `frust-widgets` is the baseline widget set plus the `authoring` toolkit —
+# a design system, in-tree plugin or third-party, composes over both from its
+# own crate.
+frust-theme = { path = "crates/frust-theme" }
+frust-widgets = { path = "crates/frust-widgets" }
 frust-reactive = { path = "crates/frust-reactive" }
 frust-plugin = { path = "crates/frust-plugin" }
 frust-paths = { path = "crates/frust-paths" }

@@ -42,8 +42,9 @@ use frust::authoring::{
 };
 use frust::{
     Align, Alignment, AnimationController, AnyView, Column, Curve, EdgeInsets, Get, GetUntracked,
-    Padding, RwSignal, SizedBox, Update, any, filled_card, text,
+    Padding, RwSignal, SizedBox, Update, any, text,
 };
+use frust_material::filled_card;
 
 /// The default auto-dismiss delay (Material snackbar-ish ~3s).
 pub const DEFAULT_DISMISS_AFTER: Duration = Duration::from_secs(3);

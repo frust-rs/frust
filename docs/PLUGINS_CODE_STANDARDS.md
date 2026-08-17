@@ -19,7 +19,14 @@ is additional or different for a plugin.
 - **No panics/unwinds near an FFI boundary**, the same rule as shell exports
   ([CODE_STANDARDS.md](CODE_STANDARDS.md)'s Language Idioms).
 - **Platform plugins never depend on `frust-*` framework crates** (`frust-plugin` +
-  `frust-paths` + FFI crates only); **facade plugins depend on `frust` alone**. A plugin
+  `frust-paths` + FFI crates only); **facade plugins depend on `frust` alone**. The three
+  design-system plugins (`frust-glyph`/`frust-material`/`frust-cupertino`) are facade plugins
+  that also name `kurbo`/`peniko` directly (mirroring `frust-widgets`' own manifest, since a
+  catalog builds custom widgets over `frust::authoring` the same way `frust-widgets` builds its
+  baseline set) — `frust-widgets` (`test-support` feature) and `frust-core` (test-only) are
+  sanctioned dev-dependencies for the same `RenderRoot`/fixture route `frust-widgets` itself
+  uses, never a production one (see [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)'s
+  Design-System Plugins). A plugin
   needing both splits into a platform-core plus facade-glue crate — **or** ships as one
   crate with a default-on `frust-api` feature gating the optional
   `frust`/`frust-core`/`frust-theme` deps (`frust-native-widgets`'s shape), so `cargo check

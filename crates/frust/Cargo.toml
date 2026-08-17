@@ -7,13 +7,11 @@ license.workspace = true
 
 [dependencies]
 frust-core = { workspace = true }
-# Inherits the workspace edge's `default-features = false` (root `Cargo.toml`),
-# so `frust-widgets`' three catalog features arrive ONLY through this crate's
-# own `glyph`/`material`/`cupertino` features below — the same opt-out shape the
-# `frust-theme` edge already uses for `glyph-fonts`. Cargo ignores a
-# `default-features = false` written on an *inherited* dependency (it warns and
-# the defaults stay on), which is why the switch lives on the workspace edge and
-# not here.
+# The baseline widget set. No design-system catalog rides this edge: the three
+# built-in catalogs left the tree and ship as their own plugin crates
+# (`frust-glyph`/`frust-material`/`frust-cupertino`), which an app depends on
+# beside the facade — never inside it (docs/ARCHITECTURE.md's facade/plugin
+# boundary).
 frust-widgets = { workspace = true }
 frust-reactive = { workspace = true }
 # Load-bearing: re-exported flat (Theme, ColorScheme, TypeScale, ShapeScale,
@@ -87,10 +85,10 @@ frust-shell-desktop = { workspace = true }
 # facade still gates them per-OS so a build only ever resolves the native
 # bindings (muda/objc2/windows-sys) of the host it is building for.
 #
-# No feature forwards below (`glyph-fonts`/`perf-trace`/`devtools`): none of the
-# three declares a feature of its own. Their shared `frust-shell-desktop` edge
-# is one package instance in the graph, so the existing
-# `frust-shell-desktop/*` forwards already reach the core underneath them.
+# No feature forwards below (`perf-trace`/`devtools`): none of the three
+# declares a feature of its own. Their shared `frust-shell-desktop` edge is one
+# package instance in the graph, so the existing `frust-shell-desktop/*`
+# forwards already reach the core underneath them.
 [target.'cfg(target_os = "macos")'.dependencies]
 frust-shell-macos = { workspace = true }
 
@@ -131,54 +129,13 @@ frust-core = { workspace = true }
 image = { workspace = true }
 
 [features]
-# The three built-in design-system catalogs plus the bundled Glyph fonts, all
-# default-on so an unmodified app build is exactly today's zero-config
-# experience. An app that authors its own design system against
-# `frust_widgets::authoring` builds with `default-features = false` and
-# re-enables only what it still wants.
-default = ["glyph", "material", "cupertino", "glyph-fonts"]
-# The Glyph design system, widgets AND tokens. `frust-widgets/glyph` already
-# implies `frust-theme/glyph` (the Glyph catalog consumes
-# `frust_theme::GlyphInk`), but `frust-theme/glyph` is listed explicitly
-# because the *intent* of this feature is the whole design system — the
-# tokens must survive a future change to `frust-widgets`' own forwarding.
-# Gates this crate's own `pub use frust_widgets::glyph;`, its
-# `frust_theme::GlyphInk` re-export, and the `glyph_theme::install()` helper
-# (see `src/lib.rs`).
-glyph = ["frust-widgets/glyph", "frust-theme/glyph"]
-# The Material 3 Expressive catalog; gates this crate's flat Material
-# re-export block.
-material = ["frust-widgets/material"]
-# The Cupertino catalog; gates this crate's flat Cupertino re-export block.
-cupertino = ["frust-widgets/cupertino"]
-# Default-on Glyph fonts (gf2, glyph-fonts opt-out chain): the root workspace
-# `frust-theme` edge sets `default-features = false`, so nothing pulls in the
-# bundled Space Mono/IBM Plex Mono bytes (`frust-theme::glyph::fonts`, ~1MB)
-# unless something in the graph asks for `frust-theme/glyph-fonts` — this is
-# that ask, on by default so a normal app build keeps today's zero-config
-# Glyph experience unchanged. An app opting out builds with
-# `default-features = false` on its own `frust` dependency (see
-# `templates/app/Cargo.toml.tmpl`'s comment) and re-adds any other default it
-# still wants. Forwards through every direct edge to
-# frust-theme in this crate's transitive graph (mirrors the `perf-trace`
-# chain's shape below, inverted: default-ON instead of default-off); Cargo
-# applies each shell's feature per target the same way perf-trace does —
-# desktop's feature is a no-op on both mobile targets, Android/iOS's are no-ops
-# off their own target — so listing all of them is safe on every target.
-#
-# Deliberately does NOT imply `glyph` above (the chain is left exactly as it
-# was): `--no-default-features --features glyph-fonts` alone is a legal but
-# odd corner — `frust-theme`'s Glyph tokens compile (the font bytes live in a
-# submodule of the module `frust-theme/glyph` gates) while this crate's own
-# Glyph re-exports and `glyph_theme::install()` stay absent. Ask for `glyph`
-# to get the design system.
-glyph-fonts = [
-    "frust-widgets/glyph-fonts",
-    "frust-shell-common/glyph-fonts",
-    "frust-shell-desktop/glyph-fonts",
-    "frust-shell-android/glyph-fonts",
-    "frust-shell-ios/glyph-fonts",
-]
+# No default features. The facade carries no design-system catalog: the three
+# built-in catalogs left the tree as their own plugin crates
+# (`frust-glyph`/`frust-material`/`frust-cupertino`), each depended on beside
+# `frust` and installed with its own `install()` call. `default-features =
+# false` on a `frust` edge is therefore no longer meaningful for catalog
+# opt-out — there is nothing to opt out of.
+default = []
 # Opt-in perf-trace instrumentation: re-exports perf-trace from all three shells.
 # Empty by default (opt-in survives cargo's additive unification; the CLI is the
 # sole enabler). Cargo applies each shell's feature per target: desktop's feature

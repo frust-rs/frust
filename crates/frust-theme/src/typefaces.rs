@@ -7,39 +7,35 @@
 //! `frust-native-widgets`' Android `TextView`/iOS `UILabel` family — cannot:
 //! the platform resolves fonts itself, so its host half needs the raw face
 //! *bytes* to register with `Typeface.createFromFile`/CoreText before any
-//! control can name the face at all. Until now the only bytes reachable there
-//! were the Glyph baseline's own bundled ones ([`crate::glyph`]'s
-//! `font_data()`), so a native control under a third-party design system was
-//! stuck on the platform's default face.
+//! control can name the face at all.
 //!
-//! This extension is that seam: a design system attaches its two faces here,
-//! and a native host reads them back with
-//! `theme.extension::<NativeTypefaces>()`. Two slots — a button/display face
-//! and a body face — mirroring the split `frust-native-widgets`' theme ladder
-//! already applies (`Button` on one face, `Label`/`Switch` on the other), and
-//! matching the two-payload shape its platform publish seam already carries;
-//! a design system with one face for everything uses
-//! [`NativeTypefaces::uniform`].
+//! This extension is that seam, and the **only** route those bytes take: a
+//! design system attaches its two faces here, and a native host reads them
+//! back with `theme.extension::<NativeTypefaces>()`. Two slots — a
+//! button/display face and a body face — mirroring the split
+//! `frust-native-widgets`' theme ladder already applies (`Button` on one
+//! face, `Label`/`Switch` on the other), and matching the two-payload shape
+//! its platform publish seam already carries; a design system with one face
+//! for everything uses [`NativeTypefaces::uniform`].
 //!
-//! # No baseline attaches this
+//! # No CORE baseline attaches this
 //!
-//! Unlike [`StatusPalette`](crate::status::StatusPalette) (attached to every
-//! built-in baseline), nothing in `frust-theme` attaches `NativeTypefaces` —
-//! not even [`Theme::glyph_baseline`](crate::theme::Theme::glyph_baseline).
-//! Glyph's native-control faces keep riding their existing route (the host
-//! reads `glyph::font_data()` directly), so attaching this is exclusively the
-//! attaching design system's job, and its absence is what tells a native host
-//! to fall back to that route. See `docs/NATIVE_WIDGETS_ARCHITECTURE.md`'s
-//! theme ladder.
+//! Unlike [`StatusPalette`](crate::status::StatusPalette) (attached to
+//! [`Theme::neutral`](crate::theme::Theme::neutral)), nothing this crate
+//! constructs attaches `NativeTypefaces`. Attaching it is exclusively a
+//! design system's job, and its absence is what tells a native host to leave
+//! the platform's own face alone — `frust_glyph`'s baseline is the shipped
+//! example of a design system that *does* attach it, which is how its
+//! monospace faces reach native controls at all. See
+//! `docs/NATIVE_WIDGETS_ARCHITECTURE.md`'s theme ladder.
 //!
 //! # Why `&'static [u8]`
 //!
-//! A design system embeds its faces with `include_bytes!`, exactly as
-//! [`crate::glyph`]'s bundled faces do, so `'static` bytes are what a caller
-//! already has and what a platform registration call already wants (no copy,
-//! no `Arc`, no lifetime threading through the theme). It also keeps
-//! [`FontFace`] `Copy` and keeps [`Theme`](crate::theme::Theme)'s own
-//! `Clone`/`PartialEq` cheap.
+//! A design system embeds its faces with `include_bytes!`, so `'static` bytes
+//! are what a caller already has and what a platform registration call
+//! already wants (no copy, no `Arc`, no lifetime threading through the
+//! theme). It also keeps [`FontFace`] `Copy` and keeps
+//! [`Theme`](crate::theme::Theme)'s own `Clone`/`PartialEq` cheap.
 //!
 //! Note that [`ThemeExtensions`](crate::extensions::ThemeExtensions)'
 //! `PartialEq` compares the *set of attached types*, never their values (see
@@ -57,7 +53,7 @@
 //! static DISPLAY: &[u8] = b"<display face bytes>";
 //! static BODY: &[u8] = b"<body face bytes>";
 //!
-//! let theme = Theme::builder(Theme::m3_baseline())
+//! let theme = Theme::builder(Theme::neutral())
 //!     .extension(NativeTypefaces {
 //!         button: Some(FontFace::new("Acme Display", DISPLAY)),
 //!         body: Some(FontFace::new("Acme Text", BODY)),
@@ -76,10 +72,9 @@
 /// platform has no way to look the family up), so it may be any stable,
 /// human-meaningful name for the face.
 ///
-/// `bytes` is one face's complete font file (TTF/OTF), the same shape
-/// [`crate::glyph`]'s `font_data()` entries carry. Equality is by *content*
-/// (derived), which is rarely what a hot path wants — see the module doc's
-/// note on keying off payload identity instead.
+/// `bytes` is one face's complete font file (TTF/OTF). Equality is by
+/// *content* (derived), which is rarely what a hot path wants — see the
+/// module doc's note on keying off payload identity instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FontFace {
     /// A stable family name for this face — diagnostics/de-duplication only.
@@ -147,7 +142,7 @@ mod tests {
 
     #[test]
     fn builder_attach_then_theme_extension_round_trips() {
-        let theme = Theme::builder(Theme::m3_baseline())
+        let theme = Theme::builder(Theme::neutral())
             .extension(NativeTypefaces {
                 button: Some(display()),
                 body: Some(body()),
@@ -166,7 +161,7 @@ mod tests {
     fn direct_insert_round_trips_too() {
         // The `extensions.insert` route an app takes on an already-built
         // `Theme`, rather than through the builder.
-        let mut theme = Theme::m3_baseline();
+        let mut theme = Theme::neutral();
         theme.extensions.insert(NativeTypefaces::uniform(body()));
         assert_eq!(
             theme.extension::<NativeTypefaces>(),
@@ -176,7 +171,7 @@ mod tests {
 
     #[test]
     fn re_attaching_replaces_last_write_wins() {
-        let theme = Theme::builder(Theme::m3_baseline())
+        let theme = Theme::builder(Theme::neutral())
             .extension(NativeTypefaces::uniform(display()))
             .extension(NativeTypefaces::uniform(body()))
             .build();
@@ -211,39 +206,24 @@ mod tests {
     }
 
     #[test]
-    fn no_built_in_baseline_attaches_this_extension() {
-        // The module doc's contract: attaching is exclusively the design
-        // system's job, and absence is what tells a native host to fall back
-        // to its own route.
-        assert!(
-            Theme::m3_baseline()
-                .extension::<NativeTypefaces>()
-                .is_none()
-        );
-        assert!(
-            Theme::cupertino_baseline()
-                .extension::<NativeTypefaces>()
-                .is_none()
-        );
+    fn no_core_baseline_attaches_this_extension() {
+        // The module doc's contract: attaching is exclusively a design
+        // system's job, and absence is what tells a native host to leave the
+        // platform's own face alone. `Theme::neutral()` is the only baseline
+        // this crate constructs, so it is the whole of "no CORE baseline"; a
+        // design system's baseline (`frust_glyph`'s, say) deliberately DOES
+        // attach one, and carries its own test for that.
         assert!(Theme::neutral().extension::<NativeTypefaces>().is_none());
-        #[cfg(feature = "glyph")]
-        assert!(
-            Theme::glyph_baseline()
-                .extension::<NativeTypefaces>()
-                .is_none(),
-            "Glyph's native faces keep riding `glyph::font_data()`, not this \
-             extension"
-        );
     }
 
     #[test]
     fn theme_equality_ignores_a_face_swap() {
         // `ThemeExtensions`' PartialEq compares the attached *type set*, so a
         // consumer must not diff themes to notice a face swap (module doc).
-        let with_display = Theme::builder(Theme::m3_baseline())
+        let with_display = Theme::builder(Theme::neutral())
             .extension(NativeTypefaces::uniform(display()))
             .build();
-        let with_body = Theme::builder(Theme::m3_baseline())
+        let with_body = Theme::builder(Theme::neutral())
             .extension(NativeTypefaces::uniform(body()))
             .build();
         assert_eq!(with_display, with_body);

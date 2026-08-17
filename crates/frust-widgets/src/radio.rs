@@ -90,7 +90,7 @@ pub struct RadioView<State: 'static> {
 /// Create a radio reflecting `selected`, labelled `label`. Attach a callback
 /// with [`RadioView::on_select`]; a radio with none is inert (still paints
 /// and captures the press, but never fires) — the same optional-callback
-/// shape as [`crate::material::list_item::ListItem::on_press`].
+/// shape a design system's own list-item row uses.
 pub fn radio<State: 'static>(selected: bool, label: impl Into<String>) -> RadioView<State> {
     RadioView {
         selected,
@@ -426,7 +426,7 @@ mod tests {
 
     #[test]
     fn themed_paint_resolves_roles() {
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         let scheme = theme.scheme();
         let mut off = widget(false);
         assert_eq!(

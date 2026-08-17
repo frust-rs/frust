@@ -495,8 +495,9 @@ focus-severing sites.
 
 ### `focus-navbar-item-truncation-unmarked` — a truncated navbar/tabbar item drops its focus link silently
 
-**Observed**: `material::navbar`'s `NavigationBarView::rebuild` and
-`cupertino::tabbar`'s equivalent hand-roll their item pod lists rather than
+**Observed**: `frust_material::navbar`'s `NavigationBarView::rebuild` and
+`frust_cupertino::tabbar`'s equivalent (both now `plugins/{material,cupertino}`) hand-roll their
+item pod lists rather than
 going through `authoring::rebuild_children`. Their shrink arm honors half of
 the contract — an in-flight capture is cancelled (`cancel_item` +
 `set_active(false)`) and each item's icon/label children are torn down through
@@ -2235,8 +2236,11 @@ now publishes no bytes (`&[]`); an all-empty pair never crosses the platform sea
 subsequently installed design system's pair becomes the process's first real publish and
 registers correctly. The residual gap this entry now covers is therefore narrower and genuinely
 platform-side only: a **mid-process swap from one real face pair to another** (e.g. one design
-system replaced by a second, or a design system's theme switching to `DesignLanguage::Glyph`
-after an extension-only pair already latched) still does not re-register on device until relaunch.
+system's `install()` replaced by a second's — `frust_glyph::baseline()`'s `NativeTypefaces` attach
+is the one built-in byte source today, `plugins/glyph/fonts/` — publishing a fresh pair after an
+extension-only pair already latched; there is no design-language shortcut in the ladder to special
+case here, see NATIVE_WIDGETS_ARCHITECTURE.md's theme ladder) still does not re-register on device
+until relaunch.
 A half-filled extension (one slot real, one slot `System`) is not itself a new instance of this
 gap — the empty slot resolves to `System` in that same resolve, so nothing ever asks the platform
 half to register bytes for it; the gap only resurfaces if a *later* resolve wants real bytes for
@@ -2254,6 +2258,39 @@ thread-local cache notes).
 
 ---
 
+### `refusal-banner-text-device-unverified` — the refusal banner's warning text has never rendered on real Android/iOS hardware
+
+**Observed**: `plugins/native-widgets/src/api/builders.rs`'s `placeholder()` — the frust-drawn
+fallback all six builders (`native_button`/`native_label`/`native_switch`/`native_slider`/
+`native_progress`/`native_image`) degrade to under `ResolvedSurfaceMode::RefusedTranslucent` —
+shapes its visible label/description prose through a crate-local `BannerText` helper built on
+`frust::authoring::text::{TextContext, TextLayout, TextStyle}` (system-UI font, not a
+design-system typeface — no design-system catalog is reachable from this plugin, the same charter
+the rest of the banner follows). Host-side tests prove the path non-vacuously:
+`placeholder_paints_visible_text_within_its_slot_rect_at_every_slot_size` asserts at least two
+glyph runs paint (label and description) at each of `native_switch`'s 70x40, `native_progress`'s
+260x24, `native_button`'s 160x48, and a deliberately tiny 40x16 slot, using a paint scene
+(`BoundsRecorder`) that actually honours the clip stack — remove `ClipToSlot`'s `push_clip` and a
+run's raw bounds would escape the slot rect and fail the assertion, rather than trivially passing
+by construction. None of this has run through an on-device or simulator Android/iOS text-shaping
+stack: font metrics, DPI, and native text shaping can all differ from the desktop `TextContext`
+these tests exercise.
+
+**Why accepted**: the fallback only paints under `ResolvedSurfaceMode::RefusedTranslucent`, itself
+reached only via a blit-path surface (see `cam-blit-opaque` above) or a deliberate
+`FRUST_NO_DIRECT_SURFACE=1` build — an on-demand path, not mainline rendering — so a device gate
+confirming the warning text actually renders and clips on real hardware is owed, not blocking.
+Rides alongside `native-typeface-first-publish-latch`'s own owed device gate (above) for the same
+plugin's typeface ladder — both are NATIVE_WIDGETS text-rendering paths awaiting real Android/iOS
+hardware.
+
+**Evidence**: `plugins/native-widgets/src/api/builders.rs`'s
+`placeholder_paints_visible_text_within_its_slot_rect_at_every_slot_size` and
+`a_refused_slot_still_publishes_no_platform_view_frame_through_the_clip_wrapper` tests (`cargo test
+-p native-widgets`, host-only).
+
+---
+
 ### `semantics-untestable-out-of-tree` — an out-of-tree design system can implement `Widget::semantics` but cannot test it
 
 **Observed**: `examples/design-system-sample`'s widgets each carry a `semantics` impl, and the
@@ -2261,8 +2298,11 @@ vocabulary to write one is fully public (`SemanticsCtx::push_node`/`push_contain
 `Node`, `Action`, `ChildPod::semantics_child`) — but nothing can *drive* a semantics pass from
 outside the framework: `SemanticsCtx::new` is `pub(crate)` in `frust-core`, and the only public
 producer, `frust_core::RenderRoot::semantics()`, is not re-exported by the `frust` facade. The
-framework's own catalogs are unaffected — they reach `RenderRoot` through a `frust-core`
-dev-dependency, a route `docs/CODE_STANDARDS.md` forbids outside the framework itself.
+three built-in design-system plugins (`frust-glyph`/`frust-material`/`frust-cupertino`) are
+unaffected despite living outside `frust-widgets` now — each reaches `RenderRoot` through a
+sanctioned `frust-core` test-only dev-dependency, the same plugin-tier exemption
+`docs/PLUGINS_CODE_STANDARDS.md` records for the app-tier "no direct `frust-core` dependency" rule
+(`docs/CODE_STANDARDS.md`), not available to a genuinely external crate like `design-system-sample`.
 
 **Applies to**: any external design-system crate wanting to unit-test its `Widget::semantics`
 output.

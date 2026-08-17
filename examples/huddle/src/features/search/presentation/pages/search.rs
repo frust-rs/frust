@@ -48,9 +48,10 @@ use std::sync::Arc;
 
 use frust::{
     Align, Alignment, AnyView, Axis, Color, Column, CrossAxisAlignment, EdgeInsets, FlexChild,
-    FlexView, GestureDetector, Get, Padding, Set, SizedBox, TextInput, any, filled_card, flexible,
-    hero, icon, icons, inflexible, keyed, list_item, scroll_view, text, use_context,
+    FlexView, GestureDetector, Get, Padding, Set, SizedBox, TextInput, any, flexible, hero, icon,
+    icons, inflexible, keyed, scroll_view, text, use_context,
 };
+use frust_material::{filled_card, list_item};
 
 use crate::HuddleState;
 use crate::features::channels::domain::Channel;

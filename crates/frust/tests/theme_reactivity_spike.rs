@@ -17,10 +17,10 @@
 //! owner's replaced value at read time, not a captured snapshot.
 //!
 //! The probe reads only `Theme::brightness`, so the baseline it seeds is
-//! arbitrary: it uses the design-language-free `Theme::neutral()` (rather than
-//! a `Theme::glyph_baseline()`, which lives behind `frust-theme`'s `glyph`
-//! feature) so this pin keeps running in every feature configuration of the
-//! facade, including `cargo test -p frust --no-default-features`.
+//! arbitrary: it uses the design-language-free `Theme::neutral()` — the one
+//! baseline no design system owns — so this pin keeps running in every feature
+//! configuration of the facade, including
+//! `cargo test -p frust --no-default-features`.
 
 use std::sync::{Arc, Mutex};
 

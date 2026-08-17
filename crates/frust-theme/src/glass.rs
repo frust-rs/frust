@@ -1,45 +1,26 @@
-//! iOS-27-kit "Liquid Glass" material tokens: a three-tier [`GlassScale`]
+//! Glass material tokens: a three-tier [`GlassScale`]
 //! (`chrome`/`bar`/`control`), each carrying a [`GlassMaterial`] recipe —
 //! background-blur intent, translucent fill washes for over-light and
 //! over-dark content, a specular hairline alpha, and a drop [`ShadowSpec`].
 //!
-//! This is **pure data**: no widget consumes it yet (a future update paints
-//! from it), and no blur is rendered here. A [`Theme`](crate::theme::Theme)
-//! carries one `GlassScale` regardless of design language so a widget can
-//! read a single API on either — [`GlassScale::ios27`] encodes the kit
-//! recipes, [`GlassScale::opaque_material`] the Material-language equivalent
-//! (zero blur intent, opaque surface — see that constructor's docs).
+//! This is **pure data**: no blur is rendered here. A
+//! [`Theme`](crate::theme::Theme) carries one `GlassScale` regardless of
+//! design language so a widget can read a single API on either — a widget
+//! branches on [`GlassMaterial::is_opaque`], never on a design-language tag.
 //!
-//! # Source
+//! This crate constructs exactly one recipe,
+//! [`GlassScale::opaque_material`]: zero blur intent, empty fill stacks,
+//! shadows reusing the [`Elevation::neutral`] table. It is what
+//! [`Theme::neutral`](crate::theme::Theme::neutral) carries, and the value a
+//! translucency-free design system keeps. A design system with real glass
+//! chrome (an iOS-style "Liquid Glass" recipe, say) authors its own
+//! `GlassScale` from its own mined source values and installs it through
+//! [`ThemeBuilder::glass`](crate::builder::ThemeBuilder::glass) — recipes are
+//! design-system data, not framework data.
 //!
-//! Recipes mined from the iOS 27 "Liquid Glass" kit
-//! (584 records, retrieved 2026-07-17). The three canonical tiers below are
-//! the json's dominant fill stacks per corner-radius family (fill `rgb`
-//! values are 0-1 floats, `a` the wash alpha):
-//!
-//! - **chrome** (popovers/sheets/menus), `radius 75`: over-dark fill stack
-//!   `[black a=0.41]` (25/108 records); over-light `[white a=0.34, white
-//!   a=0.84]` (25/108). A `[white a=0.34, white a=0.78]` variant (24/108)
-//!   exists at near-equal frequency — we pick the `0.84` top wash (slightly
-//!   more opaque chrome); the `0.78` variant is noted here as the alternative.
-//! - **bar** (tab/nav/toolbars), `radius 45`: over-light `[white a=0.07,
-//!   white a=0.03]` (all 11 `radius 45` records). The kit's dark bar records
-//!   (`Tab Bars/Dark`, `Toolbars/…/Dark`) composite `[gray(0.6) a=0.17]` over
-//!   an opaque background base; we mirror that translucent tint as the
-//!   over-dark wash `[gray(0.6) a=0.17]`, dropping the opaque base because a
-//!   glass bar composites over live content, not an opaque plate.
-//! - **control** (buttons/toggles), `radius 15`: no fill — a pure lens, so
-//!   both fill stacks are empty. (The kit's other `radius 15` records are
-//!   menus, which are semantically *chrome* despite the smaller corner; their
-//!   fills/shadow belong to the chrome tier, not to plain controls.)
-//!
-//! The `hairline_alpha` and `shadow` per tier are **tuned Frust policy**
-//! (documented, not load-bearing), in the same spirit as [`crate::elevation`]'s
-//! shadow math: the kit stores hairlines/shadows as multi-layer stacks that do
-//! not reduce cleanly to a single [`ShadowSpec`], so we pick a defensible
-//! per-tier value (chrome floats highest, bars sit flush with no shadow,
-//! controls get a subtle lift). [`GlassScale::opaque_material`]'s shadows reuse
-//! the [`Elevation::m3`] table so the opaque path matches Material elevation.
+//! `hairline_alpha` and `shadow` are **tuned Frust policy** on the opaque
+//! path (documented, not load-bearing), in the same spirit as
+//! [`crate::elevation`]'s shadow math.
 
 use peniko::Color;
 
@@ -74,8 +55,8 @@ impl GlassFill {
 /// [`GlassMaterial::is_opaque`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct GlassMaterial {
-    /// Background-blur intent in the kit's blur units (75 chrome / 45 bar / 15
-    /// control for [`GlassScale::ios27`]; `0.0` for the opaque path).
+    /// Background-blur intent in a design system's own blur units; `0.0` is
+    /// "no lens", the opaque path [`GlassScale::opaque_material`] takes.
     pub blur_radius_intent: f64,
     /// Washes composited over light content, bottom-to-top.
     pub fills_light: Vec<GlassFill>,
@@ -112,70 +93,18 @@ pub struct GlassScale {
 }
 
 impl GlassScale {
-    /// The iOS-27-kit glass scale — the recipes mined into
-    /// `glass-recipes.json` (see module docs). Blur intents 75/45/15.
-    pub fn ios27() -> Self {
-        Self {
-            chrome: GlassMaterial {
-                blur_radius_intent: 75.0,
-                fills_light: vec![
-                    GlassFill::new(1.0, 1.0, 1.0, 0.34),
-                    GlassFill::new(1.0, 1.0, 1.0, 0.84),
-                ],
-                fills_dark: vec![GlassFill::new(0.0, 0.0, 0.0, 0.41)],
-                hairline_alpha: 0.5,
-                shadow: ShadowSpec {
-                    y_offset: 18.0,
-                    blur_std_dev: 24.0,
-                    color_alpha: 0.30,
-                },
-            },
-            bar: GlassMaterial {
-                blur_radius_intent: 45.0,
-                fills_light: vec![
-                    GlassFill::new(1.0, 1.0, 1.0, 0.07),
-                    GlassFill::new(1.0, 1.0, 1.0, 0.03),
-                ],
-                // Derived from the kit's dark bar records (see module docs):
-                // their `[gray(0.6) a=0.17]` translucent tint, minus the
-                // opaque background base a live-content glass bar omits.
-                fills_dark: vec![GlassFill::new(0.6, 0.6, 0.6, 0.17)],
-                hairline_alpha: 0.5,
-                // Bars sit flush with content edges — the kit's `radius 45`
-                // records carry no shadow.
-                shadow: ShadowSpec {
-                    y_offset: 0.0,
-                    blur_std_dev: 0.0,
-                    color_alpha: 0.0,
-                },
-            },
-            control: GlassMaterial {
-                blur_radius_intent: 15.0,
-                // Pure lens — no fill (see module docs).
-                fills_light: Vec::new(),
-                fills_dark: Vec::new(),
-                hairline_alpha: 0.3,
-                shadow: ShadowSpec {
-                    y_offset: 2.0,
-                    blur_std_dev: 4.0,
-                    color_alpha: 0.12,
-                },
-            },
-        }
-    }
-
-    /// The Material-language equivalent scale: every tier is **opaque** —
+    /// The opaque scale: every tier is **opaque** —
     /// `blur_radius_intent == 0.0` and empty fill stacks — so a widget reading
-    /// [`GlassMaterial::is_opaque`] paints its surface-container role (the
-    /// opaque Material surface) instead of a translucent lens. This is the
-    /// "one API on either design language" seam: the same widget code reads
-    /// `theme.glass.<tier>` and branches on `is_opaque()`.
+    /// [`GlassMaterial::is_opaque`] paints its surface-container role instead
+    /// of a translucent lens. This is the "one API on either design language"
+    /// seam: the same widget code reads `theme.glass.<tier>` and branches on
+    /// `is_opaque()`.
     ///
-    /// Shadows reuse the [`Elevation::m3`] table so the opaque path lines up
-    /// with Material elevation: chrome = level 3 (menus/dialogs), bar = level
-    /// 2 (nav bar), control = level 1.
+    /// Shadows reuse the [`Elevation::neutral`] table so the opaque path
+    /// lines up with that elevation ladder: chrome = level 3
+    /// (menus/dialogs), bar = level 2 (nav bar), control = level 1.
     pub fn opaque_material() -> Self {
-        let m3 = Elevation::m3();
+        let elevation = Elevation::neutral();
         let opaque = |shadow: ShadowSpec| GlassMaterial {
             blur_radius_intent: 0.0,
             fills_light: Vec::new(),
@@ -184,12 +113,12 @@ impl GlassScale {
             shadow,
         };
         Self {
-            // M3's v1 shadow mapping doesn't branch by brightness (see
+            // The v1 shadow mapping doesn't branch by brightness (see
             // `elevation`'s module docs), so `shadow_light` and
             // `shadow_dark` are identical here — pick either.
-            chrome: opaque(m3.level3.shadow_light),
-            bar: opaque(m3.level2.shadow_light),
-            control: opaque(m3.level1.shadow_light),
+            chrome: opaque(elevation.level3.shadow_light),
+            bar: opaque(elevation.level2.shadow_light),
+            control: opaque(elevation.level1.shadow_light),
         }
     }
 }
@@ -197,55 +126,6 @@ impl GlassScale {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn ios27_blur_intents_match_canonical_tiers() {
-        let g = GlassScale::ios27();
-        assert_eq!(g.chrome.blur_radius_intent, 75.0);
-        assert_eq!(g.bar.blur_radius_intent, 45.0);
-        assert_eq!(g.control.blur_radius_intent, 15.0);
-    }
-
-    #[test]
-    fn ios27_chrome_fills_match_recipe() {
-        let g = GlassScale::ios27();
-        // over-dark: [black a=0.41]
-        assert_eq!(
-            g.chrome.fills_dark,
-            vec![GlassFill::new(0.0, 0.0, 0.0, 0.41)]
-        );
-        // over-light: [white a=0.34, white a=0.84] (0.84 variant picked)
-        assert_eq!(
-            g.chrome.fills_light,
-            vec![
-                GlassFill::new(1.0, 1.0, 1.0, 0.34),
-                GlassFill::new(1.0, 1.0, 1.0, 0.84),
-            ]
-        );
-    }
-
-    #[test]
-    fn ios27_bar_fills_match_recipe_and_derived_dark_mirror() {
-        let g = GlassScale::ios27();
-        // over-light: [white a=0.07, white a=0.03]
-        assert_eq!(
-            g.bar.fills_light,
-            vec![
-                GlassFill::new(1.0, 1.0, 1.0, 0.07),
-                GlassFill::new(1.0, 1.0, 1.0, 0.03),
-            ]
-        );
-        // over-dark: derived mirror from the kit's dark bar tint [gray(0.6) a=0.17]
-        assert_eq!(g.bar.fills_dark, vec![GlassFill::new(0.6, 0.6, 0.6, 0.17)]);
-    }
-
-    #[test]
-    fn ios27_control_is_a_pure_lens_with_no_fill() {
-        let g = GlassScale::ios27();
-        assert!(g.control.fills_light.is_empty());
-        assert!(g.control.fills_dark.is_empty());
-        assert!(!g.control.is_opaque()); // still a lens, just fill-less
-    }
 
     #[test]
     fn opaque_material_is_opaque_in_every_tier() {
@@ -259,26 +139,39 @@ mod tests {
     }
 
     #[test]
-    fn opaque_material_shadows_track_the_m3_elevation_table() {
+    fn opaque_material_shadows_track_the_neutral_elevation_table() {
         let g = GlassScale::opaque_material();
-        let m3 = Elevation::m3();
-        assert_eq!(g.chrome.shadow, m3.level3.shadow_light);
-        assert_eq!(g.bar.shadow, m3.level2.shadow_light);
-        assert_eq!(g.control.shadow, m3.level1.shadow_light);
+        let elevation = Elevation::neutral();
+        assert_eq!(g.chrome.shadow, elevation.level3.shadow_light);
+        assert_eq!(g.bar.shadow, elevation.level2.shadow_light);
+        assert_eq!(g.control.shadow, elevation.level1.shadow_light);
     }
 
     #[test]
-    fn both_constructors_populate_all_three_tiers() {
-        // ios27 carries the kit blur intents; opaque_material zeroes them —
-        // either way all three tier fields exist and are distinct materials.
-        let ios = GlassScale::ios27();
-        assert!(ios.chrome.blur_radius_intent > 0.0);
-        assert!(ios.bar.blur_radius_intent > 0.0);
-        assert!(ios.control.blur_radius_intent > 0.0);
-
-        let opaque = GlassScale::opaque_material();
-        assert!(opaque.chrome.is_opaque());
-        assert!(opaque.bar.is_opaque());
-        assert!(opaque.control.is_opaque());
+    fn a_design_system_scale_stays_a_lens_on_every_tier() {
+        // The other half of the `is_opaque` branch, built the way a design
+        // system with real glass chrome would build it (this crate ships no
+        // translucent recipe of its own): non-zero blur intent per tier is
+        // what makes a widget take the lens path instead of the opaque one.
+        let lens = |blur: f64| GlassMaterial {
+            blur_radius_intent: blur,
+            fills_light: vec![GlassFill::new(1.0, 1.0, 1.0, 0.34)],
+            fills_dark: vec![GlassFill::new(0.0, 0.0, 0.0, 0.41)],
+            hairline_alpha: 0.5,
+            shadow: ShadowSpec {
+                y_offset: 18.0,
+                blur_std_dev: 24.0,
+                color_alpha: 0.30,
+            },
+        };
+        let glass = GlassScale {
+            chrome: lens(75.0),
+            bar: lens(45.0),
+            control: lens(15.0),
+        };
+        for m in [&glass.chrome, &glass.bar, &glass.control] {
+            assert!(!m.is_opaque(), "a non-zero blur intent is never opaque");
+        }
+        assert!(GlassScale::opaque_material().chrome.is_opaque());
     }
 }

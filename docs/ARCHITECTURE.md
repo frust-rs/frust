@@ -18,9 +18,9 @@ its own spoke — read this to orient, then follow one link.
 |------|----------|-----------------|-------|
 | CORE | `frust-core`, `frust-scene`, `frust-reactive`, `frust-paths`, `frust` (facade) | View/Widget lifecycle, layout, event routing, the Component state boundary; renderer-agnostic scene display-list seam; leaf signals/tasks executor; leaf data/cache-dir resolution; facade curating all of the above into one app!/Component/View API | [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) |
 | RENDER | `frust-render`, `frust-text` | wgpu+Vello GPU backend encoding the scene display list and presenting to a surface, owning render-tier selection and per-surface shader effects; Parley-based text shaping/layout/IME editing engine | [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md) |
-| WIDGETS | `frust-widgets`, `frust-theme` | Baseline widget set (layout, controls, text, gestures, navigation, platform-view slots) plus three feature-gated design-system catalogs (Material, Cupertino, Glyph) over a shared authoring toolkit; sibling design-token crate bundled into the `Theme` widgets recover from context | [WIDGETS_ARCHITECTURE.md](WIDGETS_ARCHITECTURE.md) |
+| WIDGETS | `frust-widgets`, `frust-theme` | Baseline widget set (layout, controls, text, gestures, navigation, platform-view slots) over a shared authoring toolkit; sibling design-token crate bundled into the `Theme` widgets recover from context — the three built-in design systems now live in PLUGINS as sibling plugin crates | [WIDGETS_ARCHITECTURE.md](WIDGETS_ARCHITECTURE.md) |
 | SHELLS | `frust-shell-common`, `frust-shell-desktop`, `frust-shell-macos`, `frust-shell-windows`, `frust-shell-linux`, `frust-shell-android`, `frust-shell-ios` | The seam to each host: owns the event loop/frame callback, drives rebuild→layout→paint→encode→present, and translates native input/lifecycle/theme/insets/IME/deep-link/back/platform-view signals; desktop is a shared winit core plus three thin per-OS native-integration crates | [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md) |
-| PLUGINS | `frust-plugin`, `plugins/shared-preferences`, `plugins/secure-storage`, `plugins/camera`, `plugins/clipboard`, `plugins/haptics`, `plugins/iap`, `plugins/clean-signals-frust`, `plugins/database`, `plugins/i18n` | Shared Android platform-handle substrate; six OS-capability plugins behind a shared conformance suite; facade-tier glue for an external clean-architecture core; a pure-Rust embedded-SQL plugin; a Fluent+ICU4X internationalization plugin | [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md) |
+| PLUGINS | `frust-plugin`, `plugins/shared-preferences`, `plugins/secure-storage`, `plugins/camera`, `plugins/clipboard`, `plugins/haptics`, `plugins/iap`, `plugins/clean-signals-frust`, `plugins/database`, `plugins/i18n`, `plugins/glyph`, `plugins/material`, `plugins/cupertino` | Shared Android platform-handle substrate; six OS-capability plugins behind a shared conformance suite; facade-tier glue for an external clean-architecture core; a pure-Rust embedded-SQL plugin; a Fluent+ICU4X internationalization plugin; three design-system plugins (Glyph/Material/Cupertino) built on `frust::authoring` alone | [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md) |
 | NATIVE_WIDGETS | `frust-native-widgets` (`plugins/native-widgets`) | A platform plugin rendering real OS controls plus plugin-authored native view hierarchies, driven through exactly one generic factory/listener per platform; its **theme ladder** folds `Theme` into control props every frame (diff-gated) and degrades bundled fonts to the platform system font when unavailable | [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md) |
 | CLI | `frust-cli`, `frust-drive`, `frust-mcp`, `frust-dap` | Thin clap front-end plus the framework-free drive library: scaffolds projects, validates toolchain, discovers devices, drives Android/iOS run/build/clean pipelines; `frust-mcp` exposes the same driving/diagnosis surface to AI agents over an MCP Streamable HTTP server; `frust-dap` is a launch-orchestration DAP library with no process of its own — `frust-tui` is its only host | [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md) |
 | TUI | `frust-tui` | Mouse-first ratatui TEA terminal workbench supervising `frust-drive` sessions (scaffold/build/run/doctor/clean); can embed an `frust-mcp` server and a `frust-dap` server, both over the same sessions, so an AI agent or an IDE debugger drives what the user sees | [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md) |
@@ -36,8 +36,7 @@ Consumers of the framework, not units — each keeps its own README, not an ARCH
 | `examples/shadertoy` | Fragment-shader effects showcase |
 | `examples/glyph-catalog` | Glyph design-system showcase (theme only) |
 | `examples/playground` | Plugin functionality, native widgets, platform views, responsiveness, and general testing showcase; a standalone workspace |
-| `examples/design-system-sample` | Out-of-tree design-system proof; built-in catalogs compiled off; standalone workspace |
-| `examples/no-catalogs` | Compile guard proving `frust --no-default-features` builds — part of the verify gate, not a showcase |
+| `examples/design-system-sample` | Out-of-tree design-system proof, built on `frust`'s public API alone; standalone workspace |
 
 `benchmarks/` is separate from the examples above: flutter-vs-frust comparative benchmarking
 only (S1–S8, D1–D2 per `benchmarks/PROTOCOL.md`), not a framework showcase.
@@ -76,8 +75,10 @@ only (S1–S8, D1–D2 per `benchmarks/PROTOCOL.md`), not a framework showcase.
   the two sides of the devtools wire meet only at the protocol leaf. See
   [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md).
 - **Facade/plugin boundary** — the `frust` facade never depends on or re-exports a plugin. Plugins
-  (`frust-plugin` substrate, `native-widgets`, `clean-signals-frust`) sit *beside* the facade in an
-  app's own dependency list, never inside it.
+  (`frust-plugin` substrate, `native-widgets`, `clean-signals-frust`, and the three design-system
+  plugins `frust-glyph`/`frust-material`/`frust-cupertino`) sit *beside* the facade in an app's own
+  dependency list, never inside it — `frust` itself carries `default = []`, no catalog feature to
+  toggle.
 
 ```
 frust-reactive (leaf)              frust-paths (leaf)      tooling: frust-cli/-drive/-tui/-mcp/-dap
@@ -92,7 +93,8 @@ frust-scene/frust-text ──► frust-core ──► frust-widgets/frust-theme 
    shells (desktop tier above; shell-android; shell-ios) ◄────────────── uses facade
         │
         ▼
-  plugins (frust-plugin, native-widgets, clean-signals-frust) — beside the facade, never inside it
+  plugins (frust-plugin, native-widgets, clean-signals-frust, glyph/material/cupertino, ...)
+                                                    — beside the facade, never inside it
 ```
 
 Desktop tier: `frust` target-gates all three of `frust-shell-{macos,windows,linux}` (each depends

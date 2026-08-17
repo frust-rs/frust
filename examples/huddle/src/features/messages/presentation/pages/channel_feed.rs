@@ -78,8 +78,8 @@
 //!   hand-rolling one here. The keyed list gives newly-appended messages
 //!   stable identity, and the "being typed" affordance uses the facade's
 //!   self-animating
-//!   [`loading_indicator`](frust::loading_indicator) /
-//!   [`cupertino_activity_indicator`](frust::cupertino_activity_indicator)
+//!   [`loading_indicator`](frust_material::loading_indicator) /
+//!   [`cupertino_activity_indicator`](frust_cupertino::cupertino_activity_indicator)
 //!   as a live animation. Message rows are FLAT (no `Card` wrapper) — the
 //!   `filled_card`/`elevated_card` bubble
 //!   backgrounds were removed because the card's hardcoded 16px inset inflated
@@ -94,10 +94,11 @@ use std::sync::Arc;
 use frust::{
     Align, Alignment, AnyView, Axis, ChildKey, Color, CrossAxisAlignment, DesignLanguage,
     EdgeInsets, FlexView, GestureDetector, Get, GetUntracked, ListView, NavigatorController,
-    Padding, RwSignal, Set, SizedBox, Stack, Theme, Update, any, app_bar, assist_chip,
-    cupertino_activity_indicator, filter_chip, flexible, hero, icon, icons, inflexible,
-    kurbo::Size, loading_indicator, safe_area, text, text_input, use_context,
+    Padding, RwSignal, Set, SizedBox, Stack, Theme, Update, any, flexible, hero, icon, icons,
+    inflexible, kurbo::Size, safe_area, text, text_input, use_context,
 };
+use frust_cupertino::cupertino_activity_indicator;
+use frust_material::{app_bar, assist_chip, filter_chip, loading_indicator};
 
 use crate::HuddleState;
 use crate::features::messages::{FeedBody, FeedMessage, MessagesController};

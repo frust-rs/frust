@@ -26,13 +26,13 @@ tooling-isolation charter/verify-gate/pin policy with every unit rather than rea
 | `RENDER` | crates/frust-render, frust-text | A D |
 | `WIDGETS` | crates/frust-widgets, frust-theme | A C |
 | `SHELLS` | crates/frust-shell-{common,desktop,macos,windows,linux,android,ios} | A D |
-| `PLUGINS` | crates/frust-plugin, plugins/{shared-preferences,secure-storage,camera,clipboard,haptics,iap,clean-signals-frust,database,i18n} | A D C |
+| `PLUGINS` | crates/frust-plugin, plugins/{shared-preferences,secure-storage,camera,clipboard,haptics,iap,clean-signals-frust,database,i18n,glyph,material,cupertino} | A D C |
 | `NATIVE_WIDGETS` | plugins/native-widgets | A |
 | `CLI` | crates/frust-cli, frust-drive, frust-mcp, frust-dap | A D |
 | `TUI` | crates/frust-tui | A D C |
 | `DEVTOOLS` | crates/frust-devtools, frust-devtools-protocol | A |
 
-**Excluded** (consumers, not units — index line + own README only): examples/huddle, examples/shadertoy, examples/glyph-catalog, examples/playground, examples/no-catalogs, editors/vscode-frust.
+**Excluded** (consumers, not units — index line + own README only): examples/huddle, examples/shadertoy, examples/glyph-catalog, examples/playground, examples/design-system-sample, editors/vscode-frust.
 
 NATIVE_WIDGETS' pins/conventions ride PLUGINS' spokes (shared Apple FFI pins, one plugin charter).
 Conventions binding more than one unit (sanctioned-unsafe register, interaction/semantics

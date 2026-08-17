@@ -40,16 +40,10 @@ called from `frust::app!`'s `setup = { .. }` block, **not** from a
   `set_app_theme` override → `set_default_theme` base → the shell's own
   `Theme::neutral()` fallback.
 
-## Never enable a built-in catalog feature
-
-A design-system crate must never enable `glyph`/`material`/`cupertino` on
-its `frust` dependency. Cargo features are additive and unify across a
-build: one such line here turns a built-in catalog back on for *every* app
-that depends on this crate, with no way for that app to switch it off
-again. A design system that needs a symbol only a catalog provides has
-found a gap in `frust::authoring`, not a reason to enable one. This crate's
-own `Cargo.toml` ships `default-features = false` with no `features` list —
-keep it that way.
+Frust's own built-in design systems (`frust-glyph`/`frust-material`/
+`frust-cupertino`) are sibling plugin crates, not `frust` Cargo features —
+this crate's `Cargo.toml` enables nothing on its `frust` dependency, and
+neither should yours.
 
 ## Gate
 

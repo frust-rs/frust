@@ -12,17 +12,17 @@ expression: "render_to_string(100, 30, &state)"
    none found            │  No session running — start a run to open a log tab here.                
                          │                                                                          
  SESSIONS                │                                                                          
-   none running   ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
-                  │                                                              │▓▓                
- ACTIONS          │  Optional features  ·  secure-storage                        │▓▓                
-   New project · n│  ▸ [✓] biometric-gate                                        │▓▓                
-   Add plugin · a │        Per-store Face ID / Touch ID / BiometricPrompt gate:  │▓▓                
-   Doctor · d     │                                                              │▓▓                
-   Build · b      │   Back    Apply    Cancel                                    │▓▓                
-   Clean · c      │  ↑/↓ move · Space toggle · Enter apply · Esc back            │▓▓                
-   MCP off · M    ╰──────────────────────────────────────────────────────────────╯▓▓                
-   DAP off · D      ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                
-                         │                                                                          
+   none running          │                                                                          
+                  ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
+ ACTIONS          │                                                              │▓▓                
+   New project · n│  Optional features  ·  secure-storage                        │▓▓                
+   Add plugin · a │  ▸ [✓] biometric-gate                                        │▓▓                
+   Doctor · d     │        Per-store Face ID / Touch ID / BiometricPrompt gate:  │▓▓                
+   Build · b      │                                                              │▓▓                
+   Clean · c      │   Back    Apply    Cancel                                    │▓▓                
+   MCP off · M    │  ↑/↓ move · Space toggle · Enter apply · Esc back            │▓▓                
+   DAP off · D    ╰──────────────────────────────────────────────────────────────╯▓▓                
+                    ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                
                          │                                                                          
                          │                                                                          
                          │                                                                          

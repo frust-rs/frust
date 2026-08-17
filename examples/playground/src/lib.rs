@@ -7,12 +7,12 @@
 //! emulator, and the soft keyboard's IME seam — on a real device.
 //!
 //! This module is only the **shell**: the app state, the root [`navigator`]
-//! (whose home page is a Material [`app_bar`](frust::app_bar) — a plug brand
+//! (whose home page is a Material [`app_bar`](frust_material::app_bar) — a plug brand
 //! mark, the "playground" title, and the brightness/reduce-motion/animations
 //! toggles folded into its trailing actions — over a
 //! [`pattern_switcher`](frust::motion::switcher::pattern_switcher) hosting one
 //! of six section pages in a [`scroll_view`], with a bottom
-//! [`navigation_bar`](frust::navigation_bar) selecting between them, the whole
+//! [`navigation_bar`](frust_material::navigation_bar) selecting between them, the whole
 //! column inside one [`safe_area`] and under a toast overlay), and the
 //! [`frust::app!`] entry binding all three platforms. The section pages
 //! themselves live in [`pages`] — each a `page(&PlaygroundState) ->
@@ -60,9 +60,10 @@ use frust::motion::switcher::pattern_switcher;
 use frust::{
     Align, Alignment, AnyView, Axis, Brightness, Color, Component, EdgeInsets, FlexView, Get,
     GetUntracked, MotionScheme, NavigatorController, Padding, PageTransition, RwSignal, Set, Stack,
-    Theme, TransitionSpec, View, any, app_bar, button, flexible, icon, icons, inflexible, nav_item,
-    navigation_bar, navigator, safe_area, scroll_view, set_app_theme, text,
+    Theme, TransitionSpec, View, any, button, flexible, icon, icons, inflexible, navigator,
+    safe_area, scroll_view, set_app_theme, text,
 };
+use frust_material::{app_bar, nav_item, navigation_bar};
 
 use pages::SECTION_LABELS;
 
@@ -180,14 +181,14 @@ impl Default for PlaygroundState {
 }
 
 /// Force the app-wide theme from the current app-bar toggle flags: a
-/// [`ThemeBuilder`](frust::ThemeBuilder) over [`Theme::m3_baseline`] with
+/// [`ThemeBuilder`](frust::ThemeBuilder) over [`frust_material::baseline`] with
 /// the chosen brightness and the reduced-motion flag mapped into its
 /// [`MotionScheme`]. Called from all three toggles so the flags
 /// always compose (never clobber each other) — `reduce_motion` here is
 /// already the *effective* flag (see [`effective_reduce_motion`]), not the
 /// raw reduce-motion toggle.
 pub(crate) fn apply_theme(brightness: Brightness, reduce_motion: bool) {
-    let theme = Theme::builder(Theme::m3_baseline())
+    let theme = Theme::builder(frust_material::baseline())
         .brightness(brightness)
         .map_motion(move |m: MotionScheme| MotionScheme { reduce_motion, ..m })
         .build();
@@ -204,7 +205,7 @@ pub(crate) fn effective_reduce_motion(reduce_motion: bool, animations_enabled: b
     reduce_motion || !animations_enabled
 }
 
-/// The root [`app_bar`](frust::app_bar): a plug brand mark, the "playground"
+/// The root [`app_bar`](frust_material::app_bar): a plug brand mark, the "playground"
 /// title, and the brightness/reduce-motion/animations toggles folded into its
 /// trailing actions.
 fn playground_app_bar(state: &PlaygroundState) -> AnyView<PlaygroundState> {
@@ -230,7 +231,7 @@ fn playground_app_bar(state: &PlaygroundState) -> AnyView<PlaygroundState> {
     // Live accent-text role — resolves per-brightness (a fixed accent color
     // can fail AA on the light surface).
     let accent = frust::use_context::<frust::Theme>()
-        .unwrap_or_else(frust::Theme::m3_baseline)
+        .unwrap_or_else(frust_material::baseline)
         .scheme()
         .primary;
 
@@ -288,7 +289,7 @@ const TOAST_MARGIN_PX: f64 = 16.0;
 /// appending to [`PlaygroundState::toasts`] from an event handler.
 fn toast_overlay(pending: &[String]) -> AnyView<PlaygroundState> {
     let ink = frust::use_context::<Theme>()
-        .unwrap_or_else(Theme::m3_baseline)
+        .unwrap_or_else(frust_material::baseline)
         .scheme()
         .on_surface_variant;
     let lines = pending
@@ -362,7 +363,7 @@ fn home_page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
     // `column` would otherwise be a window straight through the surface, not
     // just `platform_views`'s own deliberate slot.
     let background_color = frust::use_context::<Theme>()
-        .unwrap_or_else(Theme::m3_baseline)
+        .unwrap_or_else(frust_material::baseline)
         .scheme()
         .surface;
     let mut layers = vec![any(AppBackground(background_color)), any(column)];
@@ -446,6 +447,6 @@ impl Component for PlaygroundApp {
 frust::app!(
     PlaygroundApp,
     setup = {
-        frust::set_default_theme(frust::Theme::m3_baseline());
+        frust::set_default_theme(frust_material::baseline());
     }
 );

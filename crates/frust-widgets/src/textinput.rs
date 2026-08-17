@@ -2146,10 +2146,10 @@ mod tests {
         // requesting blink frames entirely while frozen.
         let mut state = AppState::default();
         let mut root = harness(&mut state);
-        let mut theme = Theme::m3_baseline();
+        let mut theme = Theme::neutral();
         theme.motion.reduce_motion = true;
         root.set_theme(Box::new(theme));
-        let caret_color = Theme::m3_baseline().scheme().primary;
+        let caret_color = Theme::neutral().scheme().primary;
 
         // Focus seeds `blink_epoch` at the first paint (t=0).
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
@@ -2173,7 +2173,7 @@ mod tests {
         );
 
         // Clearing the token resumes the ordinary paced blink.
-        let mut theme = Theme::m3_baseline();
+        let mut theme = Theme::neutral();
         theme.motion.reduce_motion = false;
         root.set_theme(Box::new(theme));
         let resumed = root.paint(&mut NullScene, ft_ms(2.0 * BLINK_MS + 20.0));
@@ -2313,8 +2313,8 @@ mod tests {
     fn themed_chrome_resolves_roles() {
         let mut state = AppState::default();
         let mut root = harness(&mut state);
-        root.set_theme(Box::new(Theme::m3_baseline()));
-        let theme = Theme::m3_baseline();
+        root.set_theme(Box::new(Theme::neutral()));
+        let theme = Theme::neutral();
         let scheme = theme.scheme();
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
         let rec = paint_chrome(&mut root);
@@ -2661,7 +2661,7 @@ mod tests {
         };
         let mut root = harness(&mut state);
 
-        let mut theme = Theme::m3_baseline();
+        let mut theme = Theme::neutral();
         theme.brightness = frust_theme::Brightness::Dark;
         let expected = theme.scheme().on_surface;
         assert_ne!(
@@ -2695,7 +2695,7 @@ mod tests {
         };
         let mut root: RenderRoot<AppState, TextInputView<AppState>> = RenderRoot::new();
         root.rebuild(&mut logic, &mut state);
-        root.set_theme(Box::new(Theme::m3_baseline()));
+        root.set_theme(Box::new(Theme::neutral()));
         root.layout(Size::new(300.0, 200.0));
 
         assert_eq!(
@@ -2749,14 +2749,14 @@ mod tests {
         };
         let mut root = harness(&mut state);
 
-        let mut theme_a = Theme::m3_baseline();
+        let mut theme_a = Theme::neutral();
         theme_a.brightness = frust_theme::Brightness::Light;
         let color_a = theme_a.scheme().on_surface;
         root.set_theme(Box::new(theme_a));
         root.layout(Size::new(300.0, 200.0));
         assert_eq!(painted_text_color(&mut root), color_a);
 
-        let mut theme_b = Theme::m3_baseline();
+        let mut theme_b = Theme::neutral();
         theme_b.brightness = frust_theme::Brightness::Dark;
         let color_b = theme_b.scheme().on_surface;
         assert_ne!(
@@ -3962,19 +3962,40 @@ mod tests {
         assert_eq!(widget(&root).editor.text(), "");
     }
 
+    /// A design-system-shaped theme whose `on_surface_variant` role is itself
+    /// **translucent** — the shape an iOS-style design system installs (its
+    /// `secondaryLabel` token really is `rgba(.., 0.60)`). Built inline here
+    /// because no design language ships in this crate any more. The dim under
+    /// test is an alpha *multiplier* on the resolved role, so it has to behave
+    /// identically over an already-translucent one — which is exactly what a
+    /// token *swap* would not do.
+    fn translucent_role_theme() -> Theme {
+        Theme::builder(Theme::neutral())
+            .design_language(frust_theme::DesignLanguage::Cupertino)
+            .map_colors_light(|c| frust_theme::ColorScheme {
+                on_surface_variant: c.on_surface_variant.multiply_alpha(0.6),
+                ..c
+            })
+            .build()
+    }
+
     #[test]
     fn disabled_dims_content_and_outline_in_every_design_language() {
         // The dim is an alpha multiplier on the *resolved* role, so it must
-        // behave identically unthemed and under all three design languages —
-        // including Cupertino, whose `on_surface_variant` is itself translucent
-        // (the reason a token swap would not be portable).
-        let mut languages: Vec<(&str, Option<Theme>)> = vec![
+        // behave identically unthemed, under the neutral baseline, and under a
+        // design system whose own `on_surface_variant` is already translucent
+        // (see `translucent_role_theme` — the reason a token swap would not be
+        // portable).
+        let translucent = translucent_role_theme();
+        assert!(
+            translucent.scheme().on_surface_variant.components[3] < 1.0,
+            "fixture sanity: the third arm's role must really be translucent"
+        );
+        let languages: Vec<(&str, Option<Theme>)> = vec![
             ("unthemed", None),
-            ("material", Some(Theme::m3_baseline())),
-            ("cupertino", Some(Theme::cupertino_baseline())),
+            ("neutral", Some(Theme::neutral())),
+            ("translucent-role", Some(translucent)),
         ];
-        #[cfg(feature = "glyph")]
-        languages.push(("glyph", Some(Theme::glyph_baseline())));
         for (name, theme) in languages {
             let enabled = Chrome::resolve(theme.as_ref(), true);
             let disabled = Chrome::resolve(theme.as_ref(), false);
@@ -4009,10 +4030,10 @@ mod tests {
         };
         let mut logic = options_logic(false, false, false);
         let mut root = options_root(&mut logic, &mut state);
-        root.set_theme(Box::new(Theme::m3_baseline()));
+        root.set_theme(Box::new(Theme::neutral()));
         root.layout(Size::new(300.0, 200.0));
 
-        let expected = Theme::m3_baseline()
+        let expected = Theme::neutral()
             .scheme()
             .on_surface
             .multiply_alpha(DISABLED_CONTENT_ALPHA);
@@ -4129,13 +4150,11 @@ mod tests {
         // The first of the two dimming resolution points: `Chrome::resolve`,
         // observed here through the actual `paint` pass (not called directly),
         // so the assertion also proves `paint` feeds it `enabled` alone.
-        let mut languages: Vec<(&str, Option<Theme>)> = vec![
+        let languages: Vec<(&str, Option<Theme>)> = vec![
             ("unthemed", None),
-            ("material", Some(Theme::m3_baseline())),
-            ("cupertino", Some(Theme::cupertino_baseline())),
+            ("neutral", Some(Theme::neutral())),
+            ("translucent-role", Some(translucent_role_theme())),
         ];
-        #[cfg(feature = "glyph")]
-        languages.push(("glyph", Some(Theme::glyph_baseline())));
         for (name, theme) in languages {
             let mut state = AppState::default();
             let mut logic = options_logic(true, false, true);
@@ -4163,12 +4182,12 @@ mod tests {
         };
         let mut logic = options_logic(true, false, true);
         let mut root = options_root(&mut logic, &mut state);
-        root.set_theme(Box::new(Theme::m3_baseline()));
+        root.set_theme(Box::new(Theme::neutral()));
         root.layout(Size::new(300.0, 200.0));
 
         assert_eq!(
             painted_text_color(&mut root),
-            Theme::m3_baseline().scheme().on_surface,
+            Theme::neutral().scheme().on_surface,
             "a read-only field's glyphs stay full-alpha on_surface, not dimmed"
         );
     }

@@ -50,7 +50,7 @@ use crate::PlaygroundState;
 /// and dispatched by [`current`], and used verbatim as the shell's bottom
 /// navigation-bar destinations.
 ///
-/// Kept short on purpose: [`NavigationBarWidget`](frust::navigation_bar)
+/// Kept short on purpose: [`NavigationBarWidget`](frust_material::navigation_bar)
 /// divides the bar's width evenly across all seven destinations, so at phone
 /// width (390px logical) each slot is only ~55.7px wide. The longer human
 /// names ("Platform Views", "Native Widgets") wrapped to two lines there and

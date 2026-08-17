@@ -383,7 +383,7 @@ mod tests {
 
     #[test]
     fn themed_paint_resolves_roles() {
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         let scheme = theme.scheme();
         let mut off = widget(false);
         assert_eq!(

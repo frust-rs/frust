@@ -190,7 +190,7 @@ fn wide_layout(muted: Color) -> AnyView<PlaygroundState> {
 pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
     // Live theme read for the muted caption color, the same pattern every
     // other section page uses.
-    let theme = use_context::<Theme>().unwrap_or_else(Theme::m3_baseline);
+    let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
     let muted = theme.scheme().on_surface_variant;
 
     // The primitive under test. `None` is a supported state (shell hasn't

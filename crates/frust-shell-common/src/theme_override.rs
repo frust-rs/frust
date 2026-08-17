@@ -208,7 +208,7 @@ mod tests {
         // No call yet: a fresh watcher sees no pending change.
         assert_eq!(watcher.poll(), None);
 
-        let theme = Theme::cupertino_baseline();
+        let theme = Theme::neutral();
         set_app_theme(theme.clone());
         assert!(theme_override_active());
 
@@ -224,7 +224,7 @@ mod tests {
         reset_slot();
 
         let mut watcher = ThemeOverrideWatcher::new();
-        set_app_theme(Theme::cupertino_baseline());
+        set_app_theme(Theme::neutral());
         watcher.poll(); // consume the set
 
         clear_app_theme();
@@ -240,7 +240,7 @@ mod tests {
 
         let mut a = ThemeOverrideWatcher::new();
         let mut b = ThemeOverrideWatcher::new();
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         set_app_theme(theme.clone());
 
         assert_eq!(a.poll(), Some(Some(theme.clone())));

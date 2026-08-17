@@ -17,10 +17,11 @@
 use std::rc::Rc;
 
 use frust::{
-    AnyView, DesignLanguage, Get, RouterDeepLinks, RwSignal, Set, any, cupertino_tab_bar,
-    glyph::{glyph_nav_bar, glyph_nav_item_icon},
-    icon, icons, nav_item, navigation_bar, safe_area, tab_item,
+    AnyView, DesignLanguage, Get, RouterDeepLinks, RwSignal, Set, any, icon, icons, safe_area,
 };
+use frust_cupertino::{cupertino_tab_bar, tab_item};
+use frust_glyph::{glyph_nav_bar, glyph_nav_item_icon};
+use frust_material::{nav_item, navigation_bar};
 
 use crate::HuddleState;
 
@@ -223,7 +224,9 @@ pub fn bottom_bar(
             any(navigation_bar::<HuddleState, _>(
                 Tab::ALL
                     .iter()
-                    .map(|t| nav_item::<HuddleState>(t.label()).icon(any(icon(t.icon()).size(24.0))))
+                    .map(|t| {
+                        nav_item::<HuddleState>(t.label()).icon(any(icon(t.icon()).size(24.0)))
+                    })
                     .collect(),
                 selected,
                 move |_s: &mut HuddleState, idx: usize| {

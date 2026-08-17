@@ -25,7 +25,7 @@
 //! item outside that coverage falls through to the platform's system-font
 //! fallback: broad on desktop/Android, narrow on iOS, where an uncovered
 //! codepoint renders as a tofu box (found on-device 2026-07-23, per
-//! `frust_widgets::glyph::navbar`'s `NavItemGlyph` doc). The two strips below
+//! `frust_glyph::navbar`'s `NavItemGlyph` doc). The two strips below
 //! demonstrate both ends of that story: the top bar uses `┌ ─ ╳`
 //! (real bundled-font Box Drawing coverage, safe everywhere), the bottom bar
 //! uses `glyph_nav_item_icon` — app-local **vector** glyphs (square, diamond,
@@ -67,7 +67,7 @@ use crate::CatalogState;
 /// precedent — see e.g. `examples/huddle/src/lib.rs`).
 fn accent() -> Color {
     use_context::<Theme>()
-        .unwrap_or_else(Theme::glyph_baseline)
+        .unwrap_or_else(frust_glyph::baseline)
         .scheme()
         .primary
 }
@@ -141,7 +141,7 @@ fn icon_nav_selected() -> RwSignal<usize> {
 // Material Symbols set (see the module docs' "Why `IconSource`" section).
 // Nonzero-fill rings pair an outer subpath with an oppositely-wound inner
 // subpath — the same ring-via-opposite-winding technique
-// `frust_widgets::glyph::navbar`'s huddle-side precedent uses, just expressed
+// `frust_glyph::navbar`'s huddle-side precedent uses, just expressed
 // as SVG path data instead of `kurbo::BezPath` calls.
 
 /// A square outline (outer ring minus an inner square hole).
@@ -179,7 +179,7 @@ fn tabs_demo() -> AnyView<CatalogState> {
         "Activity".to_string(),
         "Settings".to_string(),
     ];
-    any(frust::glyph::tabs(
+    any(frust_glyph::tabs(
         labels,
         selected,
         move |_state: &mut CatalogState, idx: usize| sig.set(idx),
@@ -195,7 +195,7 @@ fn segmented_demo() -> AnyView<CatalogState> {
         "Grid".to_string(),
         "Compact".to_string(),
     ];
-    any(frust::glyph::segmented_control(
+    any(frust_glyph::segmented_control(
         segments,
         selected,
         move |_state: &mut CatalogState, idx: usize| sig.set(idx),
@@ -207,17 +207,17 @@ fn segmented_demo() -> AnyView<CatalogState> {
 fn breadcrumb_demo() -> AnyView<CatalogState> {
     let caption_sig = breadcrumb_caption();
     let crumbs = vec![
-        frust::glyph::crumb::<CatalogState>("catalog").on_tap(move |_s: &mut CatalogState| {
+        frust_glyph::crumb::<CatalogState>("catalog").on_tap(move |_s: &mut CatalogState| {
             caption_sig.set("→ catalog".to_string());
         }),
-        frust::glyph::crumb::<CatalogState>("sections").on_tap(move |_s: &mut CatalogState| {
+        frust_glyph::crumb::<CatalogState>("sections").on_tap(move |_s: &mut CatalogState| {
             caption_sig.set("→ sections".to_string());
         }),
-        frust::glyph::crumb::<CatalogState>("navigation"),
+        frust_glyph::crumb::<CatalogState>("navigation"),
     ];
     let caption = caption_sig.get();
     any(Column(vec![
-        any(frust::glyph::breadcrumb(crumbs)),
+        any(frust_glyph::breadcrumb(crumbs)),
         gap(6.0),
         any(text(caption).size(11.0)),
     ]))
@@ -229,11 +229,11 @@ fn char_nav_bar_demo() -> AnyView<CatalogState> {
     let sig = char_nav_selected();
     let selected = sig.get();
     let items = vec![
-        frust::glyph::glyph_nav_item("┌", "frame"),
-        frust::glyph::glyph_nav_item("─", "stream"),
-        frust::glyph::glyph_nav_item("╳", "close"),
+        frust_glyph::glyph_nav_item("┌", "frame"),
+        frust_glyph::glyph_nav_item("─", "stream"),
+        frust_glyph::glyph_nav_item("╳", "close"),
     ];
-    any(frust::glyph::glyph_nav_bar(
+    any(frust_glyph::glyph_nav_bar(
         items,
         selected,
         move |_state: &mut CatalogState, idx: usize| sig.set(idx),
@@ -246,11 +246,11 @@ fn icon_nav_bar_demo() -> AnyView<CatalogState> {
     let sig = icon_nav_selected();
     let selected = sig.get();
     let items = vec![
-        frust::glyph::glyph_nav_item_icon(SQUARE_ICON, "square"),
-        frust::glyph::glyph_nav_item_icon(DIAMOND_ICON, "diamond"),
-        frust::glyph::glyph_nav_item_icon(RINGED_DOT_ICON, "dot"),
+        frust_glyph::glyph_nav_item_icon(SQUARE_ICON, "square"),
+        frust_glyph::glyph_nav_item_icon(DIAMOND_ICON, "diamond"),
+        frust_glyph::glyph_nav_item_icon(RINGED_DOT_ICON, "dot"),
     ];
-    any(frust::glyph::glyph_nav_bar(
+    any(frust_glyph::glyph_nav_bar(
         items,
         selected,
         move |_state: &mut CatalogState, idx: usize| sig.set(idx),
@@ -261,11 +261,11 @@ fn icon_nav_bar_demo() -> AnyView<CatalogState> {
 /// override-everything variant.
 fn avatars_demo() -> AnyView<CatalogState> {
     any(Row(vec![
-        any(frust::glyph::avatar("ed").size(28.0)),
+        any(frust_glyph::avatar("ed").size(28.0)),
         any(SizedBox(Some(12.0), None)),
-        any(frust::glyph::avatar("mk").size(40.0)),
+        any(frust_glyph::avatar("mk").size(40.0)),
         any(SizedBox(Some(12.0), None)),
-        any(frust::glyph::avatar("ai")
+        any(frust_glyph::avatar("ai")
             .size(52.0)
             .accent(Color::from_rgb8(0x39, 0x49, 0xAB))),
     ]))

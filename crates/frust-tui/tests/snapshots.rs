@@ -13,7 +13,7 @@ use ratatui::layout::Position;
 use frust_dap::ide_config::{ConfigAction, IdeConfigResult, ParentIde};
 use frust_drive::devices::{Device, Kind, Platform};
 use frust_drive::doctor::{Area, Component, ComponentStatus, DoctorReport, FixCommand, Status};
-use frust_drive::plugin::{AddItem, AddOutcome, AddReport};
+use frust_drive::plugin::{AddItem, AddOutcome, AddReport, known_plugins};
 use frust_mcp::ClientEntry;
 use frust_tui::engine::{
     AddPluginDialog, AddPluginStep, AppState, BootstrapState, BootstrapWizard, BuildLauncher,
@@ -575,6 +575,42 @@ fn add_plugin_select_step_100x30() {
         30,
         &add_plugin_state(AddPluginStep::Select, false, 0)
     ));
+}
+
+/// The select step with the cursor on the *last* registry card: the registry
+/// is taller than the workbench body at 100x30, so the card list scrolls, and
+/// the window follows the cursor to keep `cupertino` (the final
+/// `known_plugins()` row, reachable only once the window scrolls) drawn and
+/// focus-marked.
+///
+/// Both contracts are asserted explicitly rather than left to the snapshot
+/// alone — a cell grid records chrome overdraw as faithfully as it records a
+/// correct frame: the modal must not paint over the three-row titlebar or the
+/// one-row status bar, and the focused entry must be on screen.
+#[test]
+fn add_plugin_select_step_last_entry_scrolled_100x30() {
+    let last = known_plugins().len() - 1;
+    let state = add_plugin_state(AddPluginStep::Select, false, last);
+    let rendered = render_to_string(100, 30, &state);
+
+    // Chrome rows, compared against the same base layer with no modal over it:
+    // any modal border, shadow, or content cell landing there shows up as a
+    // difference.
+    let base = render_to_string(100, 30, &workbench_state());
+    let rows: Vec<&str> = rendered.lines().collect();
+    let base_rows: Vec<&str> = base.lines().collect();
+    for row in [0, 1, 2, 29] {
+        assert_eq!(
+            rows[row], base_rows[row],
+            "row {row} is shell chrome and must be untouched by the dialog:\n{rendered}"
+        );
+    }
+    assert!(
+        rendered.contains("\u{25b8} (o) cupertino"),
+        "the focused last card must be drawn:\n{rendered}"
+    );
+
+    insta::assert_snapshot!(rendered);
 }
 
 /// The options step for secure-storage, showing its `[ ]` biometric-gate

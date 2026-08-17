@@ -109,12 +109,12 @@ fn setup() -> Owner {
 /// [`Brightness`] under the fresh ambient owner — mirroring a shell's own
 /// `provide_context(theme.clone())` push (`docs/ARCHITECTURE.md`'s Theme
 /// delivery, the app-code half). Every page reads `use_context::<Theme>()`
-/// (falling back to `Theme::glyph_baseline()` with no context), so this is
+/// (falling back to `frust_glyph::baseline()` with no context), so this is
 /// what lets the multi-brightness sweep below actually exercise each page's
 /// live-token re-resolution rather than only ever hitting the fallback.
 fn setup_with_theme(brightness: Brightness) -> (Owner, Theme) {
     let owner = setup();
-    let theme = Theme::builder(Theme::glyph_baseline())
+    let theme = Theme::builder(frust_glyph::baseline())
         .brightness(brightness)
         .build();
     provide_context(theme.clone());
@@ -347,7 +347,7 @@ fn full_shell_mounts_with_header_tabs_and_body() {
 }
 
 /// A headless no-double-top-padding regression test: the root
-/// [`glyph::app_bar`](frust::glyph::app_bar) consumes the top window inset
+/// [`glyph::app_bar`](frust_glyph::app_bar) consumes the top window inset
 /// itself (grows its own height by it), and the body `safe_area(...).top(false)`
 /// must NOT pad by that same inset a second time. Every painted glyph run's
 /// absolute Y translation should shift by exactly `top_inset` between a
@@ -446,7 +446,7 @@ const SETTLE_MS: u64 = 5000;
 #[test]
 fn every_section_requests_no_frames_with_animations_disabled() {
     for brightness in BRIGHTNESSES {
-        let theme = Theme::builder(Theme::glyph_baseline())
+        let theme = Theme::builder(frust_glyph::baseline())
             .brightness(brightness)
             .map_motion(|m: MotionScheme| MotionScheme {
                 reduce_motion: true,

@@ -22,7 +22,7 @@ pub mod scenarios;
 
 use frust::{
     AnyView, Axis, Brightness, Component, EdgeInsets, FlexChild, FlexView, Get, Padding, Set,
-    SizedBox, Stack, Theme, any, button, flexible, inflexible, safe_area, set_app_theme,
+    SizedBox, Stack, any, button, flexible, inflexible, safe_area, set_app_theme,
 };
 
 use scenarios::{BenchState, SCENARIOS};
@@ -39,7 +39,7 @@ impl Component for BenchApp {
     type State = BenchState;
 
     fn init(&self) -> BenchState {
-        let mut theme = Theme::m3_baseline();
+        let mut theme = frust_material::baseline();
         theme.brightness = Brightness::Dark;
         set_app_theme(theme);
         let state = BenchState::new();

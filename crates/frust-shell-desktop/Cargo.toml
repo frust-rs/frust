@@ -63,6 +63,3 @@ perf-trace = ["frust-shell-common/perf-trace", "frust-render/perf-trace"]
 # exactly like `perf-trace` above (the CLI is the sole enabler, for debug and
 # profile builds only).
 devtools = ["frust-shell-common/devtools"]
-# Forwards into frust-theme's own `glyph-fonts` (opt-out chain) — see
-# `frust-shell-common`'s Cargo.toml for the shape rationale.
-glyph-fonts = ["frust-theme/glyph-fonts"]

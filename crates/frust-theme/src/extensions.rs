@@ -27,7 +27,7 @@
 //!     logo_glow: bool,
 //! }
 //!
-//! let mut theme = Theme::m3_baseline();
+//! let mut theme = Theme::neutral();
 //! theme.extensions.insert(BrandTokens { logo_glow: true });
 //!
 //! let tokens = theme.extension::<BrandTokens>().expect("inserted above");

@@ -21,18 +21,8 @@ frust-text = { workspace = true }
 # introduces no cycle.
 frust-core = { workspace = true }
 
-[features]
-default = ["glyph", "glyph-fonts"]
-# Gates the Glyph design-language token set (`crate::glyph`: its color
-# scheme, type/shape/elevation/motion/glass scales, and
-# `Theme::glyph_baseline()`) — off, `--no-default-features` still leaves
-# `Theme::neutral()`/`Theme::m3_baseline()`/`Theme::cupertino_baseline()`
-# available; only Glyph-named items disappear.
-glyph = []
-# Embeds Space Mono + IBM Plex Mono TTF bytes (glyph::fonts::font_data())
-# via include_bytes! — no filesystem/network access at runtime. Implies
-# `glyph`: the font bytes live in `crate::glyph::fonts`, a submodule of the
-# module `glyph` gates, so wanting the bytes back requires the tokens too.
-# `--no-default-features` compiles the crate without either (fonts module
-# absent, every other token table unaffected).
-glyph-fonts = ["glyph"]
+# No features: this crate carries no design-language token module of its own.
+# `Theme::neutral()` is the language-free floor every shell falls back to, and
+# a design system (in-tree or third-party) composes its own tables over
+# `ThemeBuilder`/`ThemeExtensions` from its own crate — see
+# docs/WIDGETS_ARCHITECTURE.md's External Design-System Contract.

@@ -170,7 +170,7 @@ fn feed_screen_loads_and_renders_bubbles() {
     let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
     let mut tcx = TextContext::new();
 
-    frust::provide_context(frust::Theme::m3_baseline());
+    frust::provide_context(frust_material::baseline());
     state.nav.router().push("/channel/general");
 
     // The first frame paints the loading state (app bar + composer, few glyphs).
@@ -252,7 +252,7 @@ fn keyed_feed_list_with_loading_and_typing_indicators() {
     let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
     let mut tcx = TextContext::new();
 
-    frust::provide_context(frust::Theme::m3_baseline());
+    frust::provide_context(frust_material::baseline());
     state.nav.router().push("/channel/general");
 
     // Load the feed (the first frame is the loading state).

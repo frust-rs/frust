@@ -49,22 +49,15 @@ frust-core = { workspace = true, optional = true }
 # `--no-default-features` must keep this crate's platform-plugin charter
 # line intact.
 kurbo = { workspace = true, optional = true }
-# Theme ladder L3 (`src/api/theme.rs`'s `glyph_font_bytes`/
-# `publish_font_bytes`): the source of the bundled Glyph font bytes
-# (`frust_theme::glyph::font_data`) this crate's Android backend registers
-# into a real `Typeface`, plus the `NativeTypefaces` theme extension a
-# third-party design system attaches to publish its own faces instead. The `frust`
-# facade does NOT re-export these bytes (confirmed at implementation time —
-# neither `frust_theme::glyph` nor its `font_data` accessor appears anywhere
-# in `crates/frust/src/lib.rs`'s re-export list), so this is a direct,
-# feature-gated dependency rather than reaching the bytes through the facade.
+# Theme ladder L3 (`src/api/theme.rs`'s `plan_typefaces`/
+# `publish_font_bytes`): the `NativeTypefaces` theme extension a design
+# system attaches to publish its own native-control face bytes, plus the
+# `FontFace` those slots carry. The `frust` facade re-exports both types, but
+# this crate names `frust-theme` directly so the ladder's types stay
+# reachable independently of the facade's re-export list.
 # `optional = true`, gated behind `frust-api` below — same charter-line gate
 # as `frust`/`frust-core` above: with the feature off, this crate never
-# reaches this crate's dependency graph either. Inherits the workspace's own
-# `default-features = false` entry (the gf2 glyph-fonts opt-out chain,
-# `docs/DEVELOPMENT.md`'s *Glyph bundled fonts*) — this crate's own
-# `glyph-fonts` feature below re-requests the bundled bytes, mirroring
-# `frust-widgets`' identical edge.
+# reaches this crate's dependency graph either.
 frust-theme = { workspace = true, optional = true }
 
 # The Android `(JavaVM, application Context)` platform-handle substrate
@@ -221,36 +214,25 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
 # `--no-default-features`).
 kurbo = { workspace = true }
 peniko = { workspace = true }
-# The `placeholder_paints_within_its_slot_rect_at_every_slot_size` test
-# lays out a real `alert()` banner (`AlertWidget::layout` calls
+# The `placeholder_paints_visible_text_within_its_slot_rect_at_every_slot_size`
+# test lays out the crate-local `RefusalBanner` (its `BannerText` helper calls
 # `ctx.text_context::<frust_text::TextContext>()`), so it needs a genuine
-# `TextContext` to shape the title/body runs rather than a stub — dev-only,
-# same rationale as `kurbo`/`peniko` above.
+# `TextContext` to shape the label/description runs rather than a stub —
+# dev-only, same rationale as `kurbo`/`peniko` above.
 frust-text = { workspace = true }
 # Same test's recording `PaintScene` impl names `frust_scene::GlyphRun` in
 # its `draw_glyph_run` signature (`PaintScene::draw_glyph_run`'s own
-# parameter type) — dev-only, mirroring `crates/frust-widgets/src/glyph/
-# alert.rs`'s own test module doing the same.
+# parameter type) — dev-only.
 frust-scene = { workspace = true }
 
 [features]
-default = ["frust-api", "glyph-fonts"]
+default = ["frust-api"]
 # The app-facing builders (`native_button`/`native_label`/etc.).
 # Default-on so an app that adds this crate to its `Cargo.toml` gets them for
 # free; `--no-default-features` is the charter-line gate (`Cargo.toml`'s
-# `[dependencies]` comment above `frust`/`frust-core`/`frust-theme`).
+# `[dependencies]` comment above `frust`/`frust-core`/`frust-theme`), checked
+# with `cargo tree -p frust-native-widgets --no-default-features -e normal`.
 frust-api = ["dep:frust", "dep:frust-core", "dep:frust-theme", "dep:kurbo"]
-# Forwards into `frust-theme`'s own `glyph-fonts` (gf2 opt-out chain,
-# mirroring `frust-widgets`'/`frust`'s own edges, `docs/DEVELOPMENT.md`'s
-# *Glyph bundled fonts*) — theme ladder L3's bundled Space Mono/IBM
-# Plex Mono bytes. A separate feature (not folded into `frust-api` itself) so
-# an app can drop the ~1MB of font bytes while keeping every other
-# `frust-api` capability: `frust-native-widgets = { default-features = false,
-# features = ["frust-api"] }`. Only meaningful alongside `frust-api` (nothing
-# else in this crate touches `frust-theme`) — `--no-default-features` drops
-# both together, preserving this crate's platform-plugin charter line
-# (`cargo tree -p frust-native-widgets --no-default-features -e normal`).
-glyph-fonts = ["frust-theme/glyph-fonts"]
 # The demo composite (`src/demo.rs`): ONE `NativeComponent` owning a real
 # native subtree, so the subtree builder's `add_child`/`addSubview` have a
 # caller outside a host test and the whole define → register → mount path

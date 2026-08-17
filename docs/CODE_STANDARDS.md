@@ -232,17 +232,20 @@ escape valve, not a leak — its only accessor, `into_surface`, is crate-private
 wrapped `wgpu::Surface` is never nameable outside `frust-render`; follow the same pattern
 for any future value crossing this boundary.
 
-### Enabling a built-in catalog feature from a design-system crate
+### Reaching into a design-system plugin's internals from a design-system crate
 
-**BAD:** a `templates/design-system/`-derived crate's `Cargo.toml` declaring
-`frust = { features = ["glyph"] }` (or `material`/`cupertino`) to reach one convenience symbol.
+**BAD:** a `templates/design-system/`-derived crate's `Cargo.toml` declaring a dependency on
+`frust-glyph`/`frust-material`/`frust-cupertino` to reach one convenience symbol, or depending on
+`frust-widgets`/`frust-core` directly instead of the facade.
 
-**GOOD:** depend on `frust::authoring` only, `default-features = false` on the `frust` edge, and
-file a gap against `authoring` instead. Cargo feature unification is additive across a build: one
-enabled catalog feature anywhere in the graph turns it on for every app depending on that crate,
-with no way for the app to switch it back off — the exact proof `examples/design-system-sample`
-exists to carry (its `cargo tree -e features -i frust -p sample-app` gate, see
-[DEVELOPMENT.md](DEVELOPMENT.md), fails loudly the moment this creeps in).
+**GOOD:** depend on `frust::authoring` only (`frust`, `default-features = false`), and file a gap
+against `authoring` instead. The historical Cargo-feature-unification hazard this anti-pattern used
+to warn about (one `features = ["glyph"]` line silently turning a catalog back on for every
+dependent app) no longer applies — `frust` carries no catalog cargo feature at all; the three
+built-ins are ordinary sibling plugin crates ([PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)'s
+Design-System Plugins). `design-system-sample`'s `cargo tree -e features -i frust -p sample-app`
+gate (see [DEVELOPMENT.md](DEVELOPMENT.md)) now proves out-of-tree resolution realism rather than
+a catalog-off contract.
 
 ### Printing directly from a `frust-drive` build/run core
 
@@ -446,8 +449,9 @@ Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantic
 Token resolution and precedence, animation pacing, and design-system installation are the
 WIDGETS unit's rules — [WIDGETS_CODE_STANDARDS.md](WIDGETS_CODE_STANDARDS.md). The same
 **explicit builder value > theme > fallback constant** precedence binds a `ThemeExtensions`
-payload identically to a plain token: a consumer (in-tree or an external catalog) checks its own
-explicit override first, then `Theme::extension::<T>()`, and only then a hardcoded fallback — see
+payload identically to a plain token: a consumer (a design-system plugin or a fully external
+catalog) checks its own explicit override first, then `Theme::extension::<T>()`, and only then a
+hardcoded fallback — see
 [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md)'s typeface ladder for the
 shipped instance.
 

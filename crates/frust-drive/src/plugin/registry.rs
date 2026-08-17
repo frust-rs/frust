@@ -1,4 +1,4 @@
-//! The static plugin registry (v1) — ten entries mirroring `plugins/`:
+//! The static plugin registry (v1) — thirteen entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
@@ -26,7 +26,13 @@
 //! `locales/en/main.ftl` — the first registry entry to use
 //! [`Contribution::ScaffoldFile`] — and the `frust_i18n::locales!` app-crate
 //! macro invocation; see `I18N_BASE`'s doc comment for the ordering
-//! constraint between the two).
+//! constraint between the two), and `glyph`/`material`/`cupertino`
+//! (dependency only — the three built-in design-system catalogs, which left
+//! the `frust` facade's Cargo-feature graph and now each ship as their own
+//! sibling plugin crate; adding one contributes only the Cargo dependency —
+//! calling `frust_<name>::install()` in `app!(setup = {..})` to make it the
+//! app's active theme is left to the app, the same way `frust create`'s own
+//! scaffold does it).
 
 use super::{Contribution, FeatureSpec, PluginSpec};
 
@@ -369,6 +375,54 @@ const I18N: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+/// `glyph`'s single base contribution — a Cargo dependency and nothing else.
+/// Like `database`/`i18n`, this is a pure Cargo-graph addition with no
+/// OS-side integration: the registry only wires the dependency in, exactly
+/// the shape `frust create`'s own scaffold uses. Making the design system
+/// *active* still needs an explicit `frust_glyph::install()` call in the
+/// app's own `app!(setup = {..})` block — the registry cannot add that call
+/// for the caller, since it doesn't know which design system (if any) the
+/// app already has installed there.
+const GLYPH: PluginSpec = PluginSpec {
+    id: "glyph",
+    summary: "Glyph catalog; needs frust_glyph::install() in app! setup \
+              (widgets + tokens + bundled fonts).",
+    crate_dir: "glyph",
+    base: &[Contribution::CargoDep {
+        name: "frust-glyph",
+    }],
+    optional_features: &[],
+    requires_sibling: None,
+};
+
+/// `material`'s single base contribution — see [`GLYPH`]'s doc comment for
+/// the shape and the same install-call caveat.
+const MATERIAL: PluginSpec = PluginSpec {
+    id: "material",
+    summary: "Material 3 catalog; needs frust_material::install() in app! \
+              setup (widgets + tokens).",
+    crate_dir: "material",
+    base: &[Contribution::CargoDep {
+        name: "frust-material",
+    }],
+    optional_features: &[],
+    requires_sibling: None,
+};
+
+/// `cupertino`'s single base contribution — see [`GLYPH`]'s doc comment for
+/// the shape and the same install-call caveat.
+const CUPERTINO: PluginSpec = PluginSpec {
+    id: "cupertino",
+    summary: "Cupertino catalog; needs frust_cupertino::install() in app! \
+              setup (widgets + tokens).",
+    crate_dir: "cupertino",
+    base: &[Contribution::CargoDep {
+        name: "frust-cupertino",
+    }],
+    optional_features: &[],
+    requires_sibling: None,
+};
+
 /// The v1 static plugin registry (Vec-factory convention). A caller (the CLI
 /// or the TUI Add Plugin dialog) enumerates this to drive selection without
 /// hardcoding plugin ids.
@@ -384,6 +438,9 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         IAP,
         DATABASE,
         I18N,
+        GLYPH,
+        MATERIAL,
+        CUPERTINO,
     ]
 }
 
@@ -403,7 +460,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_ten_v1_plugins() {
+    fn registry_lists_the_thirteen_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -418,8 +475,40 @@ mod tests {
                 "iap",
                 "database",
                 "i18n",
+                "glyph",
+                "material",
+                "cupertino",
             ]
         );
+    }
+
+    /// The `glyph`/`material`/`cupertino` entries are each exactly one
+    /// `CargoDep` and nothing else — no manifest permission, plist key,
+    /// Gradle module, or Swift package, since these are pure-Rust design
+    /// systems built on `frust::authoring` alone (see `GLYPH`'s doc
+    /// comment).
+    #[test]
+    fn design_system_plugins_are_each_a_cargo_dep_and_nothing_else() {
+        for (id, crate_name) in [
+            ("glyph", "frust-glyph"),
+            ("material", "frust-material"),
+            ("cupertino", "frust-cupertino"),
+        ] {
+            let spec = find_plugin(id).unwrap();
+            assert_eq!(spec.crate_dir, id);
+            assert!(spec.optional_features.is_empty());
+            assert_eq!(spec.requires_sibling, None);
+
+            assert_eq!(spec.base.len(), 1, "{:?}", spec.base);
+            assert!(
+                matches!(
+                    spec.base[0],
+                    Contribution::CargoDep { name } if name == crate_name
+                ),
+                "{:?}",
+                spec.base
+            );
+        }
     }
 
     /// The `haptics` entry is exactly a `CargoDep` plus one

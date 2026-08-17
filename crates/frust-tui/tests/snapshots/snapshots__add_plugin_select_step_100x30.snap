@@ -3,29 +3,29 @@ source: crates/frust-tui/tests/snapshots.rs
 expression: "render_to_string(100, 30, &add_plugin_state(AddPluginStep::Select, false, 0))"
 ---
 ⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
-━━━━━━━━          ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
-                  │                                                              │▓▓                
- PROJECTS         │  Choose a plugin to add to this project                      │▓▓                
-  ▸ huddle        │  ▸ (o) shared-preferences                                    │▓▓                
-                  │        Synchronous, thread-safe key-value store (plaintext)  │▓▓                
- DEVICES ↻ r      │    ( ) secure-storage                                        │▓▓                
-   none found     │        Encrypted key-value store (Keychain / Keystore / key  │▓▓                
-                  │    ( ) clean-signals-frust                                   │▓▓                
- SESSIONS         │        Clean-architecture facade binding the clean-signals   │▓▓                
-   none running   │    ( ) camera                                                │▓▓                
-                  │        Camera preview (a platform view), still capture, and  │▓▓                
- ACTIONS          │    ( ) native-widgets                                        │▓▓                
-   New project · n│        Real OS controls (button, label, switch, slider, pro  │▓▓                
-   Add plugin · a │    ( ) clipboard                                             │▓▓                
-   Doctor · d     │        Synchronous plain-text clipboard access (ClipboardMa  │▓▓                
-   Build · b      │    ( ) haptics                                               │▓▓                
-   Clean · c      │        Minimal haptic feedback (selection tick, impact, suc  │▓▓                
-   MCP off · M    │    ( ) iap                                                   │▓▓                
-   DAP off · D    │        In-app purchases and subscriptions over Play Billing  │▓▓                
+━━━━━━━━                                                                                            
+                                                                                                    
+ PROJECTS         ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
+  ▸ huddle        │                                                              │▓▓                
+                  │  Choose a plugin to add to this project  (1-9 of 13)         │▓▓                
+ DEVICES ↻ r      │  ▸ (o) shared-preferences                                    │▓▓                
+   none found     │        Synchronous, thread-safe key-value store              │▓▓                
+                  │    ( ) secure-storage                                        │▓▓                
+ SESSIONS         │        Encrypted key-value store (Keychain / Keystore /      │▓▓                
+   none running   │    ( ) clean-signals-frust                                   │▓▓                
+                  │        Clean-architecture facade binding the clean-signals   │▓▓                
+ ACTIONS          │    ( ) camera                                                │▓▓                
+   New project · n│        Camera preview (a platform view), still capture, and  │▓▓                
+   Add plugin · a │    ( ) native-widgets                                        │▓▓                
+   Doctor · d     │        Real OS controls (button, label, switch, slider,      │▓▓                
+   Build · b      │    ( ) clipboard                                             │▓▓                
+   Clean · c      │        Synchronous plain-text clipboard access               │▓▓                
+   MCP off · M    │    ( ) haptics                                               │▓▓                
+   DAP off · D    │        Minimal haptic feedback (selection tick, impact,      │▓▓                
+                  │    ( ) iap                                                   │▓▓                
+                  │        In-app purchases and subscriptions over Play Billing  │▓▓                
                   │    ( ) database                                              │▓▓                
-                  │        Embedded SQL database (SQLite via rusqlite; engine-a  │▓▓                
-                  │    ( ) i18n                                                  │▓▓                
-                  │        Fluent Project-based internationalization/localizati  │▓▓                
+                  │        Embedded SQL database (SQLite via rusqlite;           │▓▓                
                   │                                                              │▓▓                
                   │   Back    Next    Cancel                                     │▓▓                
                   │  ↑/↓ choose · Enter next · Esc close                         │▓▓                

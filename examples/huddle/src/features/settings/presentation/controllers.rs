@@ -21,7 +21,7 @@
 //! notifications screen's `Component` via the same seam. Unlike
 //! [`SettingsController`], nothing here is applied to the running app — these
 //! are pure preference values the screen's [`radio`](frust::radio) group and
-//! [`Switch`](frust::Switch)es read and write. It embeds a [`ControllerCore`]
+//! [`Switch`](frust_material::Switch)es read and write. It embeds a [`ControllerCore`]
 //! by composition purely to satisfy the `use_controller`
 //! `AsRef<ControllerCore>` bound and keep the clean-architecture spine
 //! visible; it runs no use case.

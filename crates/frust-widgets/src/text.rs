@@ -44,12 +44,11 @@ pub enum ThemeTextColor {
     /// (used by [`crate::Button`]).
     OnPrimary,
     /// `colors.on_surface_variant` — a de-emphasized label/caption on the app
-    /// surface (used by [`crate::material::navbar`]'s unselected item labels
-    /// and [`crate::material::appbar`]'s trailing action slots' guidance).
+    /// surface (a navigation bar's unselected item labels, an app bar's
+    /// trailing action slots).
     OnSurfaceVariant,
     /// `colors.on_primary_container` — a label painted over a
-    /// `primary_container`-filled surface (used by
-    /// [`crate::material::fab`]'s extended-FAB visible label).
+    /// `primary_container`-filled surface (an extended FAB's visible label).
     OnPrimaryContainer,
     /// `colors.error` — a label reading as a destructive/error action (used
     /// by [`crate::Button`]'s `ButtonStyle::Danger`).
@@ -412,7 +411,7 @@ mod tests {
 
     #[test]
     fn themed_text_defaults_to_on_surface() {
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         assert_eq!(
             painted_color(text("x"), Some(&theme)),
             theme.scheme().on_surface
@@ -421,14 +420,14 @@ mod tests {
 
     #[test]
     fn on_primary_role_resolves_to_on_primary() {
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         let view = text("x").themed_role(ThemeTextColor::OnPrimary);
         assert_eq!(painted_color(view, Some(&theme)), theme.scheme().on_primary);
     }
 
     #[test]
     fn on_surface_variant_role_resolves_to_on_surface_variant() {
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         let view = text("x").themed_role(ThemeTextColor::OnSurfaceVariant);
         assert_eq!(
             painted_color(view, Some(&theme)),
@@ -438,7 +437,7 @@ mod tests {
 
     #[test]
     fn on_primary_container_role_resolves_to_on_primary_container() {
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         let view = text("x").themed_role(ThemeTextColor::OnPrimaryContainer);
         assert_eq!(
             painted_color(view, Some(&theme)),
@@ -448,7 +447,7 @@ mod tests {
 
     #[test]
     fn error_role_resolves_to_error() {
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         let view = text("x").themed_role(ThemeTextColor::Error);
         assert_eq!(painted_color(view, Some(&theme)), theme.scheme().error);
     }
@@ -456,7 +455,7 @@ mod tests {
     #[test]
     fn explicit_color_wins_over_theme() {
         // Precedence: an app-set `.color()` beats the themed default.
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         let custom = Color::from_rgb8(1, 2, 3);
         assert_eq!(painted_color(text("x").color(custom), Some(&theme)), custom);
     }
@@ -611,7 +610,7 @@ mod tests {
         let mut root: RenderRoot<(), TextView> = RenderRoot::new();
         let mut state = ();
 
-        let mut theme_a = Theme::m3_baseline();
+        let mut theme_a = Theme::neutral();
         theme_a.brightness = frust_theme::Brightness::Light;
         let color_a = theme_a.scheme().on_primary;
         root.set_theme(Box::new(theme_a));
@@ -632,7 +631,7 @@ mod tests {
         // mirroring a live appearance flip. Every shell re-lays-out/repaints
         // unconditionally on the next frame regardless of `rebuild`'s own
         // ChangeFlags, so drive layout/paint again here without a view change.
-        let mut theme_b = Theme::m3_baseline();
+        let mut theme_b = Theme::neutral();
         theme_b.brightness = frust_theme::Brightness::Dark;
         let color_b = theme_b.scheme().on_primary;
         assert_ne!(

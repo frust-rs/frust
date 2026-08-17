@@ -21,9 +21,10 @@
 use std::sync::Arc;
 
 use frust::{
-    Align, Alignment, AnyView, Button, Column, CrossAxisAlignment, Row, SizedBox, Theme, any,
-    filled_card, hero, text, use_context,
+    Align, Alignment, AnyView, Button, Column, CrossAxisAlignment, Row, SizedBox, Theme, any, hero,
+    text, use_context,
 };
+use frust_material::filled_card;
 
 use crate::HuddleState;
 use crate::features::profile::ProfileController;
@@ -52,7 +53,7 @@ pub fn profile_screen(user_id: String) -> AnyView<HuddleState> {
     // Status-dot color from the theme's semantic roles (never a hardcoded
     // literal — see `docs/CODE_STANDARDS.md`'s Theming conventions): tertiary
     // for online, secondary for away, error for do-not-disturb.
-    let theme = use_context::<Theme>().unwrap_or_else(Theme::m3_baseline);
+    let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
     let scheme = theme.scheme();
     let status_color = match profile.user.status {
         UserStatus::Online => scheme.tertiary,

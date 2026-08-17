@@ -120,7 +120,7 @@ local_sig!(second_slot_visible_sig, bool, false); // multi-slot stress toggle
 /// baseline pre-context.
 fn accent() -> Color {
     use_context::<Theme>()
-        .unwrap_or_else(Theme::m3_baseline)
+        .unwrap_or_else(frust_material::baseline)
         .scheme()
         .primary
 }
@@ -128,7 +128,7 @@ fn accent() -> Color {
 /// A muted caption ink — see [`accent`]'s twin.
 fn muted() -> Color {
     use_context::<Theme>()
-        .unwrap_or_else(Theme::m3_baseline)
+        .unwrap_or_else(frust_material::baseline)
         .scheme()
         .on_surface_variant
 }
