@@ -9,8 +9,8 @@
 //! parent-driven restyle of an arbitrary child's own paint), so it is not
 //! reproduced here — a member paints its own radius/border exactly as it
 //! would standalone. See the [module docs](self)'s *Scope* note for what
-//! this means for callers, and the crate report's per-task-10/11 note for
-//! the follow-on this leaves.
+//! this means for callers; a flush-border restyle of members is a known
+//! deferred follow-on.
 //!
 //! [`ButtonGroupText`]/[`ButtonGroupSeparator`] are not ported as distinct
 //! types: `ButtonGroupText` is an ordinary bordered/shadowed pill a caller

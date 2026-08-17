@@ -28,7 +28,7 @@
 //!   `text-xs` respectively, regardless of the container's size.
 //! - **No `AttachmentTrigger`/scroll.** The invisible full-cover trigger
 //!   button needs a `Button` component this catalog doesn't yet ship (a
-//!   task-10/11 follow-on); [`attachment_group`]'s horizontal-scroll
+//!   deferred follow-on); [`attachment_group`]'s horizontal-scroll
 //!   affordance isn't modeled (a plain row, matching every other
 //!   `*_group`/`*_list` container in this batch).
 
