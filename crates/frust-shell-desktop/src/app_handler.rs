@@ -469,6 +469,34 @@ fn physical_to_logical(x: f64, y: f64, scale: f64) -> Point {
     Point::new(x / scale, y / scale)
 }
 
+/// Map a winit [`MouseScrollDelta`] to our [`ScrollDelta`], bridging both the
+/// unit and the sign convention at the shell boundary.
+///
+/// Units: wheel notches stay [`ScrollDelta::Lines`] (the ScrollView widget
+/// converts to px at 40 px/line); a precision trackpad's `PixelDelta` is
+/// physical, so it is divided by the scale factor into logical pixels like
+/// every other coordinate.
+///
+/// Sign: winit reports the direction the **content** moves — a positive `y`
+/// moves the content down, revealing what sits above it (a natural-scroll
+/// preference is resolved by the OS before winit sees the delta, so this holds
+/// on every platform). Frust's scrollable widgets accumulate `offset + dy`,
+/// where a growing offset reveals **later** content — the opposite sense, on
+/// both axes. Both axes are therefore negated here, at the one boundary that
+/// knows winit's convention; everything downstream sees only frust's. The
+/// negation is load-bearing, not redundant sign-juggling: dropping it inverts
+/// scrolling in every desktop app, and correcting it in a widget instead would
+/// invert the touch/fling and programmatic paths that already agree.
+///
+/// Pulled out as a free function (the call site reads `scale` off a live
+/// `Window`) so the mapping stays a pure, directly unit-testable function.
+fn map_scroll_delta(delta: MouseScrollDelta, scale: f64) -> ScrollDelta {
+    match delta {
+        MouseScrollDelta::LineDelta(x, y) => ScrollDelta::Lines(-(x as f64), -(y as f64)),
+        MouseScrollDelta::PixelDelta(px) => ScrollDelta::Pixels(-px.x / scale, -px.y / scale),
+    }
+}
+
 /// Map a winit [`WinitNamedKey`] to our editing-semantics [`NamedKey`] set,
 /// or `None` for a named key we carry no editing semantics for
 /// (function keys, media keys, etc. — those fall through to `KeyboardInput`
@@ -522,8 +550,13 @@ fn map_modifiers(state: ModifiersState) -> Modifiers {
 ///
 /// Named keys ([`WinitKey::Named`]) map through [`map_named_key`]; anything
 /// else falls back to the key's resolved `text` (already dead-key/smart-quote
-/// resolved by the platform) as [`Key::Character`] — **unless** `composing` is
-/// set, in which case the character is dropped (the dedupe rule: while an IME
+/// resolved by the platform) as [`Key::Character`]. The spacebar is the one
+/// named key that resolves to a character instead: winit models it as
+/// [`WinitNamedKey::Space`] (never `Character(" ")`), but it types a space
+/// rather than carrying editing semantics, so it takes the character path with
+/// its `text` payload — falling back to `" "` on a platform that sends none.
+/// Either character path is dropped **while** `composing` is
+/// set (the dedupe rule: while an IME
 /// [`Ime::Preedit`] is active, `Ime::Commit` is the authoritative source for the
 /// composed text, not `KeyboardInput.text`). `repeat` passes through unfiltered
 /// — callers decide whether to honor auto-repeat. Only key-down (`Pressed`)
@@ -540,6 +573,16 @@ fn map_key_event(
         return None;
     }
     let key = match logical_key {
+        // Space is a named key that types text, so it resolves to a character
+        // ahead of the editing-semantics mapping below — `map_named_key` carries
+        // no `NamedKey` for it, and letting it fall through there would drop the
+        // event and leave every text widget unable to receive a space.
+        WinitKey::Named(WinitNamedKey::Space) => {
+            if composing {
+                return None;
+            }
+            Key::Character(text.unwrap_or(" ").to_string())
+        }
         WinitKey::Named(named) => Key::Named(map_named_key(*named)?),
         _ => {
             if composing {
@@ -1436,17 +1479,9 @@ where
                 );
             }
 
-            // Wheel notches stay `Lines` (the ScrollView widget converts to px at
-            // 40 px/line); precision-trackpad `PixelDelta` is physical, so divide
-            // by the scale factor into logical pixels like every other coordinate.
+            // Both the unit and the sign conversion live in `map_scroll_delta`.
             WindowEvent::MouseWheel { delta, .. } => {
-                let scroll = match delta {
-                    MouseScrollDelta::LineDelta(x, y) => ScrollDelta::Lines(x as f64, y as f64),
-                    MouseScrollDelta::PixelDelta(px) => {
-                        let scale = window.scale_factor();
-                        ScrollDelta::Pixels(px.x / scale, px.y / scale)
-                    }
-                };
+                let scroll = map_scroll_delta(delta, window.scale_factor());
                 self.dispatch(
                     &window,
                     InputEvent::Scroll {
@@ -1728,20 +1763,22 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposeLatch, DesktopConfig, DesktopExtensions, ElementState, Ime, ImeSync, NoExtensions,
-        Tree, TreeId, WinitCursorIcon, WinitKey, WinitNamedKey, WinitTheme, base_theme,
-        brightness_change_to_notify, brightness_from_winit, build_tree_update,
-        cursor_change_to_apply, default_theme, finish, follow_platform_brightness, ime_purpose_for,
-        map_key_event, map_modifiers, map_named_key, physical_to_logical,
-        theme_after_override_poll, window_attributes, winit_cursor_for,
+        ComposeLatch, DesktopConfig, DesktopExtensions, ElementState, Ime, ImeSync,
+        MouseScrollDelta, NoExtensions, Tree, TreeId, WinitCursorIcon, WinitKey, WinitNamedKey,
+        WinitTheme, base_theme, brightness_change_to_notify, brightness_from_winit,
+        build_tree_update, cursor_change_to_apply, default_theme, finish,
+        follow_platform_brightness, ime_purpose_for, map_key_event, map_modifiers, map_named_key,
+        map_scroll_delta, physical_to_logical, theme_after_override_poll, window_attributes,
+        winit_cursor_for,
     };
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{Node, NodeId, Role};
     use frust_core::event::{
-        CursorIcon, ImeContentType, ImeEvent, Key, KeyEvent, Modifiers, NamedKey,
+        CursorIcon, ImeContentType, ImeEvent, Key, KeyEvent, Modifiers, NamedKey, ScrollDelta,
     };
     use frust_theme::{Brightness, DesignLanguage, Theme};
     use kurbo::Point;
+    use winit::dpi::PhysicalPosition;
     use winit::keyboard::ModifiersState;
     use winit::window::{ImePurpose, WindowAttributes};
 
@@ -1803,6 +1840,36 @@ mod tests {
     fn physical_to_logical_is_identity_at_unit_scale() {
         // A non-HiDPI display: physical and logical coincide.
         assert_eq!(physical_to_logical(37.0, 12.0, 1.0), Point::new(37.0, 12.0));
+    }
+
+    // --- map_scroll_delta ---
+
+    #[test]
+    fn map_scroll_delta_negates_wheel_lines() {
+        // winit's positive y moves the content down (revealing what is above);
+        // frust's scrollables add the delta to an offset that grows to reveal
+        // later content, so the sign flips at this boundary.
+        assert_eq!(
+            map_scroll_delta(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0),
+            ScrollDelta::Lines(0.0, -1.0)
+        );
+        assert_eq!(
+            map_scroll_delta(MouseScrollDelta::LineDelta(2.0, -3.0), 1.0),
+            ScrollDelta::Lines(-2.0, 3.0)
+        );
+    }
+
+    #[test]
+    fn map_scroll_delta_negates_and_scales_pixel_deltas() {
+        // A 2× HiDPI display: a physical (20, 60) trackpad delta is logical
+        // (10, 30), negated onto frust's convention.
+        assert_eq!(
+            map_scroll_delta(
+                MouseScrollDelta::PixelDelta(PhysicalPosition::new(20.0, 60.0)),
+                2.0
+            ),
+            ScrollDelta::Pixels(-10.0, -30.0)
+        );
     }
 
     #[test]
@@ -2005,10 +2072,85 @@ mod tests {
     }
 
     #[test]
+    fn map_key_event_maps_space_to_a_character() {
+        // winit models the spacebar as `Named(Space)` carrying a `" "` text
+        // payload, never as `Character(" ")` — it must still reach a text widget
+        // as the character it types.
+        let event = map_key_event(
+            &WinitKey::Named(WinitNamedKey::Space),
+            Some(" "),
+            ElementState::Pressed,
+            false,
+            Modifiers::default(),
+            false,
+        );
+        assert_eq!(
+            event,
+            Some(KeyEvent {
+                key: Key::Character(" ".to_string()),
+                modifiers: Modifiers::default(),
+                repeat: false,
+            })
+        );
+    }
+
+    #[test]
+    fn map_key_event_maps_space_without_a_text_payload() {
+        // A platform that reports no resolved text for the spacebar still types
+        // a space.
+        let event = map_key_event(
+            &WinitKey::Named(WinitNamedKey::Space),
+            None,
+            ElementState::Pressed,
+            false,
+            Modifiers::default(),
+            false,
+        );
+        assert_eq!(
+            event,
+            Some(KeyEvent {
+                key: Key::Character(" ".to_string()),
+                modifiers: Modifiers::default(),
+                repeat: false,
+            })
+        );
+    }
+
+    #[test]
+    fn map_key_event_drops_space_while_composing() {
+        // Space takes the character path, so it takes the character dedupe rule
+        // with it: `Ime::Commit` is authoritative mid-composition.
+        let event = map_key_event(
+            &WinitKey::Named(WinitNamedKey::Space),
+            Some(" "),
+            ElementState::Pressed,
+            false,
+            Modifiers::default(),
+            true, // composing
+        );
+        assert_eq!(event, None);
+    }
+
+    #[test]
     fn map_key_event_is_none_for_unmapped_named_key_with_no_text() {
         let event = map_key_event(
             &WinitKey::Named(WinitNamedKey::F1),
             None,
+            ElementState::Pressed,
+            false,
+            Modifiers::default(),
+            false,
+        );
+        assert_eq!(event, None);
+    }
+
+    #[test]
+    fn map_key_event_is_none_for_unmapped_named_key_carrying_text() {
+        // The character carve-out is Space's alone: any other named key with no
+        // editing semantics stays dropped, text payload or not.
+        let event = map_key_event(
+            &WinitKey::Named(WinitNamedKey::F1),
+            Some("\u{f704}"),
             ElementState::Pressed,
             false,
             Modifiers::default(),
