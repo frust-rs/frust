@@ -1,6 +1,9 @@
-# `frust-material`: the Material design-system catalog plugin (production deps:
-# frust facade only + kurbo/peniko when code lands; frust-widgets via
-# dev-dependency is the sanctioned test-fixture route and ships nothing).
+# `frust-material`: the Material design-system catalog plugin (production
+# deps: frust facade + kurbo/peniko, pins mirrored exactly from
+# frust-widgets' own Cargo.toml, since this crate builds custom widgets over
+# frust::authoring the same way that crate's built-in catalogs did;
+# frust-widgets/frust-core via dev-dependency are the sanctioned test-fixture
+# route and ship nothing).
 [package]
 name = "frust-material"
 version.workspace = true
@@ -10,6 +13,9 @@ license.workspace = true
 
 [dependencies]
 frust = { path = "../../crates/frust", default-features = false }
+kurbo = { workspace = true }
+peniko = { workspace = true }
 
 [dev-dependencies]
 frust-widgets = { path = "../../crates/frust-widgets", features = ["test-support"] }
+frust-core = { path = "../../crates/frust-core" }
