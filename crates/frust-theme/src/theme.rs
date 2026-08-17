@@ -101,16 +101,17 @@ impl Theme {
     /// ([`ColorScheme::neutral_light`]/[`ColorScheme::neutral_dark`]); a
     /// numeric type scale resolved against a generic system-font stack with
     /// **no bundled font bytes referenced** ([`TypeScale::neutral`]); the
-    /// [`ShapeScale::m3`]/[`Elevation::m3`] value tables — reused rather than
-    /// re-authored, since neither is actually M3-branded in *value*
-    /// (`Elevation::m3`'s own module docs call its shadow math "TUNABLE,
-    /// not an M3-published spec", and [`GlassScale::opaque_material`]
-    /// already reuses `Elevation::m3` the same way); a no-overshoot
-    /// [`MotionScheme::neutral`]; and [`GlassScale::opaque_material`]
-    /// (already neutral). Attaches [`StatusPalette::neutral`], since
-    /// success/warning/info are a functional signal, not a design-language
-    /// "look" — the same reasoning `neutral_light`/`neutral_dark` use to keep
-    /// `error` real red instead of grayscaling it too.
+    /// [`ShapeScale::neutral`]/[`Elevation::neutral`] value tables — the M3
+    /// numbers reused rather than re-authored, since neither is actually
+    /// M3-branded in *value* (`Elevation::neutral`'s own module docs call
+    /// its shadow math "TUNABLE, not an M3-published spec", and
+    /// [`GlassScale::opaque_material`] already reuses `Elevation::neutral`
+    /// the same way); a no-overshoot [`MotionScheme::neutral`]; and
+    /// [`GlassScale::opaque_material`] (already neutral). Attaches
+    /// [`StatusPalette::neutral`], since success/warning/info are a
+    /// functional signal, not a design-language "look" — the same reasoning
+    /// `neutral_light`/`neutral_dark` use to keep `error` real red instead of
+    /// grayscaling it too.
     ///
     /// Starts in [`Brightness::Light`].
     ///
@@ -129,8 +130,8 @@ impl Theme {
             light: ColorScheme::neutral_light(),
             dark: ColorScheme::neutral_dark(),
             type_scale: TypeScale::neutral(&TextStyle::default()),
-            shape: ShapeScale::m3(),
-            elevation: Elevation::m3(),
+            shape: ShapeScale::neutral(),
+            elevation: Elevation::neutral(),
             motion: MotionScheme::neutral(),
             glass: GlassScale::opaque_material(),
             brightness: Brightness::Light,
@@ -326,8 +327,8 @@ mod tests {
         let theme = Theme::neutral();
         assert_eq!(theme.light, ColorScheme::neutral_light());
         assert_eq!(theme.dark, ColorScheme::neutral_dark());
-        assert_eq!(theme.shape, ShapeScale::m3());
-        assert_eq!(theme.elevation, Elevation::m3());
+        assert_eq!(theme.shape, ShapeScale::neutral());
+        assert_eq!(theme.elevation, Elevation::neutral());
         assert_eq!(theme.motion, MotionScheme::neutral());
         assert_eq!(theme.glass, GlassScale::opaque_material());
         assert_eq!(theme.brightness, Brightness::Light);

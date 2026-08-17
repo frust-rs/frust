@@ -1,6 +1,13 @@
-//! Material 3 elevation: 6 levels (0-5), each a dp value, a v1 shadow
-//! mapping, and the surface-container role a surface at that level should
-//! paint with.
+//! [`Elevation::neutral`]: the design-language-free 6-level (0-5) elevation
+//! table, each level a dp value, a v1 shadow mapping, and the
+//! surface-container role a surface at that level should paint with.
+//!
+//! This crate constructs no other `Elevation` — a design system builds its
+//! own from its own plugin crate (`frust-material`'s `tokens` module carries
+//! the Material 3 table these numbers originate from, source cited there;
+//! `frust-cupertino`'s carries the subtler iOS-idiom shadow mapping over the
+//! same dp ladder). The dp values and shadow math below are the M3 numbers
+//! reused verbatim (see `crate::theme::Theme::neutral`'s module docs).
 //!
 //! dp source: <https://m3.material.io/styles/elevation> (verified
 //! 2026-07-17): L0 0dp, L1 1dp, L2 3dp, L3 6dp, L4 8dp, L5 12dp. Component
@@ -18,25 +25,14 @@
 //! is the visual check for this mapping; treat it as adjustable, not load-
 //! bearing, Frust-specific policy.
 //!
-//! # Cupertino (iOS) mapping
-//!
-//! [`Elevation::cupertino`] reuses the same 6-level/dp ladder and
-//! `SurfaceRole` assignment as [`Elevation::m3`] (iOS has no published
-//! elevation-level system of its own to source a different ladder from
-//! either), but with a **subtler v1 shadow mapping**: `y_offset = dp / 4.0`,
-//! `blur_std_dev = dp * 0.6`, `color_alpha = 0.12` — iOS shadows are
-//! typically much softer/lower-contrast than Android's Material shadows
-//! (community convention, not an Apple-published spec — same "TUNABLE, not
-//! load-bearing" caveat as the M3 mapping above applies here too).
-//!
 //! # Per-brightness shadows
 //!
 //! [`ElevationLevel`] carries **separate** light/dark [`ShadowSpec`]s
 //! (`shadow_light`/`shadow_dark`), selected via [`ElevationLevel::shadow`].
-//! [`Elevation::m3`]/[`Elevation::cupertino`] duplicate the same v1 mapping
-//! into both slots — behavior-preserving, byte-identical rendered output on
-//! either brightness. A design language whose shadow recipe actually differs
-//! by brightness (e.g. Glyph) fills the two slots independently.
+//! [`Elevation::neutral`] duplicates the same v1 mapping into both slots —
+//! behavior-preserving, byte-identical rendered output on either brightness.
+//! A design language whose shadow recipe actually differs by brightness
+//! (e.g. Glyph) fills the two slots independently.
 
 use crate::color::Brightness;
 
@@ -101,23 +97,7 @@ const fn level(dp: f64, surface_role: SurfaceRole) -> ElevationLevel {
     }
 }
 
-/// The Cupertino v1 shadow mapping (see module docs) — same `dp` ladder as
-/// [`level`], subtler shadow math.
-const fn cupertino_level(dp: f64, surface_role: SurfaceRole) -> ElevationLevel {
-    let shadow = ShadowSpec {
-        y_offset: dp / 4.0,
-        blur_std_dev: dp * 0.6,
-        color_alpha: 0.12,
-    };
-    ElevationLevel {
-        dp,
-        shadow_light: shadow,
-        shadow_dark: shadow,
-        surface_role,
-    }
-}
-
-/// The 6 Material 3 elevation levels (0-5).
+/// The 6 elevation levels (0-5).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Elevation {
     pub level0: ElevationLevel,
@@ -129,10 +109,10 @@ pub struct Elevation {
 }
 
 impl Elevation {
-    /// The Material 3 baseline elevation table (dp values verified; shadow
-    /// math and surface-role assignment are this crate's documented v1
-    /// mapping — see module docs).
-    pub const fn m3() -> Self {
+    /// The neutral, design-language-free elevation table (dp values
+    /// verified; shadow math and surface-role assignment are this crate's
+    /// documented v1 mapping — see module docs).
+    pub const fn neutral() -> Self {
         Self {
             level0: level(0.0, SurfaceRole::Surface),
             level1: level(1.0, SurfaceRole::SurfaceContainerLow),
@@ -140,20 +120,6 @@ impl Elevation {
             level3: level(6.0, SurfaceRole::SurfaceContainerHigh),
             level4: level(8.0, SurfaceRole::SurfaceContainerHigh),
             level5: level(12.0, SurfaceRole::SurfaceContainerHighest),
-        }
-    }
-
-    /// The Cupertino (iOS) elevation table — same dp ladder and
-    /// `SurfaceRole` assignment as [`Elevation::m3`], with the subtler v1
-    /// shadow math described in the module docs.
-    pub const fn cupertino() -> Self {
-        Self {
-            level0: cupertino_level(0.0, SurfaceRole::Surface),
-            level1: cupertino_level(1.0, SurfaceRole::SurfaceContainerLow),
-            level2: cupertino_level(3.0, SurfaceRole::SurfaceContainer),
-            level3: cupertino_level(6.0, SurfaceRole::SurfaceContainerHigh),
-            level4: cupertino_level(8.0, SurfaceRole::SurfaceContainerHigh),
-            level5: cupertino_level(12.0, SurfaceRole::SurfaceContainerHighest),
         }
     }
 }
@@ -164,7 +130,7 @@ mod tests {
 
     #[test]
     fn dp_matches_table() {
-        let e = Elevation::m3();
+        let e = Elevation::neutral();
         assert_eq!(e.level0.dp, 0.0);
         assert_eq!(e.level1.dp, 1.0);
         assert_eq!(e.level2.dp, 3.0);
@@ -175,18 +141,18 @@ mod tests {
 
     #[test]
     fn shadow_mapping_is_consistent_with_dp() {
-        let e = Elevation::m3();
+        let e = Elevation::neutral();
         assert_eq!(e.level3.shadow_light.y_offset, 4.0);
         assert_eq!(e.level3.shadow_light.blur_std_dev, 6.0);
         assert_eq!(e.level3.shadow_light.color_alpha, 0.3);
     }
 
     #[test]
-    fn m3_shadow_is_identical_on_both_brightnesses() {
-        // Behavior-preserving: M3's v1 mapping doesn't branch by brightness,
+    fn neutral_shadow_is_identical_on_both_brightnesses() {
+        // Behavior-preserving: the v1 mapping doesn't branch by brightness,
         // so both slots hold the same value and the accessor returns it
         // either way.
-        let e = Elevation::m3();
+        let e = Elevation::neutral();
         assert_eq!(e.level3.shadow_light, e.level3.shadow_dark);
         assert_eq!(
             e.level3.shadow(Brightness::Light),
@@ -197,36 +163,9 @@ mod tests {
 
     #[test]
     fn surface_roles_match_static_container_direction() {
-        let e = Elevation::m3();
+        let e = Elevation::neutral();
         assert_eq!(e.level0.surface_role, SurfaceRole::Surface);
         assert_eq!(e.level3.surface_role, SurfaceRole::SurfaceContainerHigh);
         assert_eq!(e.level5.surface_role, SurfaceRole::SurfaceContainerHighest);
-    }
-
-    #[test]
-    fn cupertino_dp_ladder_matches_m3() {
-        // Same dp ladder as m3 (see module docs) — only the shadow math and
-        // (not tested here, unchanged) surface-role assignment differ.
-        let e = Elevation::cupertino();
-        assert_eq!(e.level0.dp, 0.0);
-        assert_eq!(e.level3.dp, 6.0);
-        assert_eq!(e.level5.dp, 12.0);
-    }
-
-    #[test]
-    fn cupertino_shadow_is_subtler_than_m3() {
-        let e = Elevation::cupertino();
-        assert_eq!(e.level3.shadow_light.y_offset, 1.5);
-        assert!((e.level3.shadow_light.blur_std_dev - 3.6).abs() < 1e-9);
-        assert_eq!(e.level3.shadow_light.color_alpha, 0.12);
-
-        let m3 = Elevation::m3();
-        assert!(e.level3.shadow_light.color_alpha < m3.level3.shadow_light.color_alpha);
-    }
-
-    #[test]
-    fn cupertino_shadow_is_identical_on_both_brightnesses() {
-        let e = Elevation::cupertino();
-        assert_eq!(e.level3.shadow_light, e.level3.shadow_dark);
     }
 }

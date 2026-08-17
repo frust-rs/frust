@@ -98,7 +98,10 @@ pub use toolbar::{
     floating_toolbar,
 };
 
-pub use tokens::{baseline, color_scheme_dark, color_scheme_light, status_palette};
+pub use tokens::{
+    baseline, color_scheme_dark, color_scheme_light, elevation, motion_scheme, shape_scale,
+    status_palette, type_scale,
+};
 
 /// Make Material 3 this app's starting design system.
 ///

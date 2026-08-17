@@ -12,8 +12,9 @@
 //!
 //! The trailing button carries a chevron that **rotates** to reflect the
 //! `open` state: down (▾) when closed, springing to up (▴) when open, animated
-//! by `CHEVRON_SPRING` — the exact `MotionScheme::m3_expressive().default_spatial`
-//! preset (stiffness 700, ζ 0.9). `split_button` is a *controlled* component:
+//! by `CHEVRON_SPRING` — the exact
+//! `crate::tokens::motion_scheme().default_spatial` preset (stiffness 700, ζ
+//! 0.9). `split_button` is a *controlled* component:
 //! the chevron follows the `open` prop the app feeds back (typically toggled
 //! inside `on_open`), not a self-owned toggle, matching the framework's
 //! controlled-component convention (see `docs/CODE_STANDARDS.md`). The spring
@@ -85,8 +86,8 @@ const CHEVRON_HALF_HEIGHT: f64 = 3.0;
 const CHEVRON_STROKE: f64 = 2.0;
 
 /// The chevron-rotation spring: the exact
-/// `MotionScheme::m3_expressive().default_spatial` preset (stiffness 700, ζ 0.9,
-/// mass 1). See the [module docs](self) for why it is a constant.
+/// `crate::tokens::motion_scheme().default_spatial` preset (stiffness 700, ζ
+/// 0.9, mass 1). See the [module docs](self) for why it is a constant.
 const CHEVRON_SPRING: SpringDesc = SpringDesc {
     mass: 1.0,
     stiffness: 700.0,
@@ -454,7 +455,6 @@ impl Widget for SplitButtonWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frust::MotionScheme;
     use frust::authoring::{PointerButton, PointerEvent};
     use std::any::Any;
 
@@ -498,7 +498,7 @@ mod tests {
 
     #[test]
     fn chevron_spring_matches_motion_scheme() {
-        let default_spatial = MotionScheme::m3_expressive().default_spatial;
+        let default_spatial = crate::tokens::motion_scheme().default_spatial;
         assert_eq!(CHEVRON_SPRING.stiffness, default_spatial.stiffness);
         assert_eq!(CHEVRON_SPRING.damping_ratio, default_spatial.damping_ratio);
         assert_eq!(CHEVRON_SPRING.mass, 1.0);

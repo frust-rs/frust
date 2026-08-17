@@ -54,7 +54,7 @@
 //! assert_eq!(theme.dark.primary, BRAND);
 //! assert_eq!(theme.shape.medium, 8.0);
 //! // Every other shape token is untouched (struct-update `..` above).
-//! assert_eq!(theme.shape.large, ShapeScale::m3().large);
+//! assert_eq!(theme.shape.large, ShapeScale::neutral().large);
 //! ```
 //!
 //! Attaching a typed extension (see [`crate::extensions`]):
@@ -344,11 +344,11 @@ mod tests {
         // Two whole-group swaps to the same group: the later call wins.
         let first = ShapeScale {
             medium: 8.0,
-            ..ShapeScale::m3()
+            ..ShapeScale::neutral()
         };
         let second = ShapeScale {
             medium: 16.0,
-            ..ShapeScale::m3()
+            ..ShapeScale::neutral()
         };
         let theme = Theme::builder(Theme::neutral())
             .shape(first)

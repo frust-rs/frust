@@ -120,13 +120,15 @@ const CONTAINER: Color = Color::from_rgb8(0xEA, 0xDD, 0xFF);
 /// `colors.on_primary_container`).
 const ON_CONTAINER: Color = Color::from_rgb8(0x21, 0x00, 0x5D);
 
-/// Unthemed-fallback shadow y-offset, matching `Elevation::m3().level3`'s
-/// `y_offset` exactly (`dp / 2.0 + 1.0` at `dp = 6.0`).
+/// Unthemed-fallback shadow y-offset, matching
+/// `crate::tokens::elevation().level3`'s `y_offset` exactly (`dp / 2.0 + 1.0`
+/// at `dp = 6.0`).
 const FALLBACK_SHADOW_Y_OFFSET: f64 = 4.0;
-/// Unthemed-fallback shadow blur std-dev, matching `Elevation::m3().level3`.
+/// Unthemed-fallback shadow blur std-dev, matching
+/// `crate::tokens::elevation().level3`.
 const FALLBACK_SHADOW_BLUR: f64 = 6.0;
-/// Unthemed-fallback shadow color (opaque black at `Elevation::m3().level3`'s
-/// `0.3` alpha).
+/// Unthemed-fallback shadow color (opaque black at
+/// `crate::tokens::elevation().level3`'s `0.3` alpha).
 const FALLBACK_SHADOW_COLOR: Color = Color::new([0.0, 0.0, 0.0, 0.3]);
 
 /// The FAB container size tier (small is not deprecated; medium is the
@@ -202,7 +204,7 @@ fn resolve_colors(theme: Option<&Theme>) -> (Color, Color) {
 /// by `colors.shadow` at the spec's `color_alpha`. Unthemed: the
 /// [`FALLBACK_SHADOW_BLUR`]/[`FALLBACK_SHADOW_Y_OFFSET`]/
 /// [`FALLBACK_SHADOW_COLOR`] constants exactly (the same values
-/// `Elevation::m3().level3` produces).
+/// `crate::tokens::elevation().level3` produces).
 fn resolve_shadow(theme: Option<&Theme>) -> (f64, f64, Color) {
     match theme {
         Some(theme) => {

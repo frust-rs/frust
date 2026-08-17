@@ -27,7 +27,7 @@
 //! square that springs rounder as the press-spring advances, drawn via
 //! [`super::shape_morph::morph_path`] (this module is that primitive's second
 //! consumer, after [`mod@super::loading_indicator`]). The spring is
-//! `PRESS_SPRING`, the exact `MotionScheme::m3_expressive().fast_spatial`
+//! `PRESS_SPRING`, the exact `crate::tokens::motion_scheme().fast_spatial`
 //! preset (stiffness 1400, ζ 0.9) — a snappy, slightly-overshooting pop. It is
 //! a named constant rather than a paint-time theme read because a press starts
 //! in the event pass, and event-pass code never reads a theme (see
@@ -92,9 +92,9 @@ const ON_SURFACE: Color = Color::from_rgb8(0x1D, 0x1B, 0x20);
 const OUTLINE_WIDTH: f64 = 1.0;
 
 /// The press-emphasis morph spring: the exact
-/// `MotionScheme::m3_expressive().fast_spatial` preset (stiffness 1400, ζ 0.9,
-/// mass 1). See the [module docs](self) for why it is a constant rather than a
-/// theme read.
+/// `crate::tokens::motion_scheme().fast_spatial` preset (stiffness 1400, ζ
+/// 0.9, mass 1). See the [module docs](self) for why it is a constant rather
+/// than a theme read.
 const PRESS_SPRING: SpringDesc = SpringDesc {
     mass: 1.0,
     stiffness: 1400.0,
@@ -510,8 +510,8 @@ impl Widget for ButtonGroupWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frust::FrameTime;
     use frust::authoring::{PointerButton, PointerEvent};
-    use frust::{FrameTime, MotionScheme};
     use kurbo::PathEl;
     use std::any::Any;
 
@@ -549,7 +549,7 @@ mod tests {
 
     #[test]
     fn press_spring_matches_motion_scheme() {
-        let fast = MotionScheme::m3_expressive().fast_spatial;
+        let fast = crate::tokens::motion_scheme().fast_spatial;
         assert_eq!(PRESS_SPRING.stiffness, fast.stiffness);
         assert_eq!(PRESS_SPRING.damping_ratio, fast.damping_ratio);
         assert_eq!(PRESS_SPRING.mass, 1.0);

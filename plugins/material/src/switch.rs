@@ -74,7 +74,7 @@ const THUMB_OFF: Color = Color::from_rgb8(0x9C, 0xA3, 0xAF);
 /// `colors.on_primary`).
 const THUMB_ON: Color = Color::from_rgb8(0xFF, 0xFF, 0xFF);
 
-/// The unthemed fallback spring, matching `MotionScheme::m3_expressive()`'s
+/// The unthemed fallback spring, matching `crate::tokens::motion_scheme()`'s
 /// `default_spatial` preset exactly (ζ 0.9, stiffness 700) — the thumb
 /// travel animates identically whether or not a theme is threaded.
 const FALLBACK_SPRING: SpringDesc = SpringDesc {

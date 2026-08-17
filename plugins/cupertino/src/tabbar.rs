@@ -481,7 +481,7 @@ const MINIMIZE_SPRING_VELOCITY: f64 = 4.0;
 
 /// Fallback Cupertino spring used to drive the minimize animation when no theme
 /// is threaded into paint (bare-core/pre-theme). Mirrors
-/// [`frust::MotionScheme::cupertino`]'s single baseline (mass 1.0,
+/// `crate::tokens::motion_scheme`'s single baseline (mass 1.0,
 /// stiffness 170.0, damping ratio ≈ 0.5753); a themed bar uses
 /// `theme.motion.default_spatial` instead.
 const FALLBACK_SPRING: SpringDesc = SpringDesc {

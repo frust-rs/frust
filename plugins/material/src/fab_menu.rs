@@ -42,7 +42,7 @@
 //! # Open/close motion (v1: fade, not slide)
 //!
 //! Open/close is spring-animated: `REVEAL_SPRING` is the exact
-//! `MotionScheme::m3_expressive().default_spatial` preset (stiffness 700, ζ
+//! `crate::tokens::motion_scheme().default_spatial` preset (stiffness 700, ζ
 //! 0.9), the same token [`mod@super::split_button`]'s chevron uses — a named
 //! constant, not a paint-time theme read, for the same reason (the app confirms
 //! `open` on rebuild, which threads no theme; `reveal_spring_matches_motion_scheme`
@@ -163,8 +163,8 @@ const SCRIM_ALPHA: f32 = 0.32;
 const SCRIM_FALLBACK: Color = Color::from_rgb8(0x00, 0x00, 0x00);
 
 /// Unthemed-fallback shadow y-offset for the trigger FAB, matching
-/// `Elevation::m3().level3`'s `y_offset` exactly — matches [`super::fab`]'s
-/// `FALLBACK_SHADOW_Y_OFFSET`.
+/// `crate::tokens::elevation().level3`'s `y_offset` exactly — matches
+/// [`super::fab`]'s `FALLBACK_SHADOW_Y_OFFSET`.
 const FALLBACK_SHADOW_Y_OFFSET: f64 = 4.0;
 /// Unthemed-fallback shadow blur std-dev — matches [`super::fab`]'s
 /// `FALLBACK_SHADOW_BLUR`.
@@ -174,7 +174,7 @@ const FALLBACK_SHADOW_BLUR: f64 = 6.0;
 const FALLBACK_SHADOW_COLOR: Color = Color::new([0.0, 0.0, 0.0, 0.3]);
 
 /// The reveal open/close spring: the exact
-/// `MotionScheme::m3_expressive().default_spatial` preset (stiffness 700, ζ
+/// `crate::tokens::motion_scheme().default_spatial` preset (stiffness 700, ζ
 /// 0.9, mass 1) — the same token [`super::split_button`]'s chevron uses. See
 /// the [module docs](self) for why it is a constant.
 const REVEAL_SPRING: SpringDesc = SpringDesc {
@@ -808,7 +808,6 @@ impl Widget for FabMenuWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frust::MotionScheme;
     use frust::authoring::{KeyEvent, Modifiers, PointerButton, PointerEvent};
     use frust_core::RenderRoot;
     use frust_widgets::test_support::leaf_any;
@@ -870,7 +869,7 @@ mod tests {
 
     #[test]
     fn reveal_spring_matches_motion_scheme() {
-        let default_spatial = MotionScheme::m3_expressive().default_spatial;
+        let default_spatial = crate::tokens::motion_scheme().default_spatial;
         assert_eq!(REVEAL_SPRING.stiffness, default_spatial.stiffness);
         assert_eq!(REVEAL_SPRING.damping_ratio, default_spatial.damping_ratio);
         assert_eq!(REVEAL_SPRING.mass, 1.0);

@@ -23,7 +23,7 @@
 //!   [`frust::ShapeScale::resolve`] against the bar's own fixed
 //!   height) with a `surface_container`-family fill and an M3 elevation
 //!   level-2 shadow (`SurfaceContainer` is level 2's own paired
-//!   `SurfaceRole` in `Elevation::m3()` — the
+//!   `SurfaceRole` in `crate::tokens::elevation()` — the
 //!   matching token pair, not an arbitrary pick). "Floating with inset
 //!   margins above content" describes the *placement* a caller gives it (a
 //!   [`frust::Stack`] with [`frust::Align`]/[`frust::Padding`] around this
@@ -100,17 +100,17 @@ const GAP: f64 = 8.0;
 const CONTAINER: Color = Color::from_rgb8(0xF3, 0xED, 0xF7);
 
 /// Unthemed-fallback floating-variant shadow y-offset, matching
-/// `Elevation::m3().level2`'s `y_offset` exactly (`dp / 2.0 + 1.0` at
-/// `dp = 3.0`) — matches [`super::fab_menu`]'s shadow constants' derivation,
-/// but at level 2 (`SurfaceContainer`, this widget's own container role)
-/// rather than level 3.
+/// `crate::tokens::elevation().level2`'s `y_offset` exactly (`dp / 2.0 + 1.0`
+/// at `dp = 3.0`) — matches [`super::fab_menu`]'s shadow constants'
+/// derivation, but at level 2 (`SurfaceContainer`, this widget's own
+/// container role) rather than level 3.
 const FALLBACK_SHADOW_Y_OFFSET: f64 = 2.5;
 /// Unthemed-fallback floating-variant shadow blur std-dev, matching
-/// `Elevation::m3().level2`.
+/// `crate::tokens::elevation().level2`.
 const FALLBACK_SHADOW_BLUR: f64 = 3.0;
 /// Unthemed-fallback floating-variant shadow color (opaque black at
-/// `Elevation::m3().level2`'s `0.3` alpha) — matches every other elevated
-/// catalog widget's shadow-color derivation (e.g. [`super::card`]'s).
+/// `crate::tokens::elevation().level2`'s `0.3` alpha) — matches every other
+/// elevated catalog widget's shadow-color derivation (e.g. [`super::card`]'s).
 const FALLBACK_SHADOW_COLOR: Color = Color::new([0.0, 0.0, 0.0, 0.3]);
 
 /// The M3X toolbar container variant. See the [module docs](self).
@@ -141,7 +141,7 @@ fn resolve_container(theme: Option<&Theme>) -> Color {
 /// The resolved corner radius for `variant`, against the bar's own `width`/
 /// `height`. Themed: `shape.full` (floating, resolved to a true pill) /
 /// `shape.none` (docked, i.e. square). Unthemed: the equivalent literal
-/// tokens ([`f64::INFINITY`]/`0.0`, [`ShapeScale::m3`]'s own values),
+/// tokens ([`f64::INFINITY`]/`0.0`, `crate::tokens::shape_scale`'s own values),
 /// resolved the same way.
 fn resolve_radius(theme: Option<&Theme>, variant: ToolbarVariant, width: f64, height: f64) -> f64 {
     let token = match theme {

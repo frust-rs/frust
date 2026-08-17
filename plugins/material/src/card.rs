@@ -89,13 +89,15 @@ const OUTLINE_VARIANT: Color = Color::from_rgb8(0xCA, 0xC4, 0xD0);
 /// theme resolves this from `colors.on_surface`).
 const ON_SURFACE: Color = Color::from_rgb8(0x1D, 0x1B, 0x20);
 
-/// Unthemed-fallback shadow y-offset, matching `Elevation::m3().level1`'s
-/// `y_offset` exactly (`dp / 2.0 + 1.0` at `dp = 1.0`).
+/// Unthemed-fallback shadow y-offset, matching
+/// `crate::tokens::elevation().level1`'s `y_offset` exactly (`dp / 2.0 + 1.0`
+/// at `dp = 1.0`).
 const FALLBACK_SHADOW_Y_OFFSET: f64 = 1.5;
-/// Unthemed-fallback shadow blur std-dev, matching `Elevation::m3().level1`.
+/// Unthemed-fallback shadow blur std-dev, matching
+/// `crate::tokens::elevation().level1`.
 const FALLBACK_SHADOW_BLUR: f64 = 1.0;
-/// Unthemed-fallback shadow color (opaque black at `Elevation::m3().level1`'s
-/// `0.3` alpha).
+/// Unthemed-fallback shadow color (opaque black at
+/// `crate::tokens::elevation().level1`'s `0.3` alpha).
 const FALLBACK_SHADOW_COLOR: Color = Color::new([0.0, 0.0, 0.0, 0.3]);
 
 /// The M3 card container variant. See the [module docs](self).

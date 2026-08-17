@@ -10,7 +10,7 @@
 //!
 //! This crate constructs exactly one recipe,
 //! [`GlassScale::opaque_material`]: zero blur intent, empty fill stacks,
-//! shadows reusing the [`Elevation::m3`] table. It is what
+//! shadows reusing the [`Elevation::neutral`] table. It is what
 //! [`Theme::neutral`](crate::theme::Theme::neutral) carries, and the value a
 //! translucency-free design system keeps. A design system with real glass
 //! chrome (an iOS-style "Liquid Glass" recipe, say) authors its own
@@ -100,11 +100,11 @@ impl GlassScale {
     /// seam: the same widget code reads `theme.glass.<tier>` and branches on
     /// `is_opaque()`.
     ///
-    /// Shadows reuse the [`Elevation::m3`] table so the opaque path lines up
-    /// with that elevation ladder: chrome = level 3 (menus/dialogs), bar =
-    /// level 2 (nav bar), control = level 1.
+    /// Shadows reuse the [`Elevation::neutral`] table so the opaque path
+    /// lines up with that elevation ladder: chrome = level 3
+    /// (menus/dialogs), bar = level 2 (nav bar), control = level 1.
     pub fn opaque_material() -> Self {
-        let m3 = Elevation::m3();
+        let elevation = Elevation::neutral();
         let opaque = |shadow: ShadowSpec| GlassMaterial {
             blur_radius_intent: 0.0,
             fills_light: Vec::new(),
@@ -113,12 +113,12 @@ impl GlassScale {
             shadow,
         };
         Self {
-            // M3's v1 shadow mapping doesn't branch by brightness (see
+            // The v1 shadow mapping doesn't branch by brightness (see
             // `elevation`'s module docs), so `shadow_light` and
             // `shadow_dark` are identical here — pick either.
-            chrome: opaque(m3.level3.shadow_light),
-            bar: opaque(m3.level2.shadow_light),
-            control: opaque(m3.level1.shadow_light),
+            chrome: opaque(elevation.level3.shadow_light),
+            bar: opaque(elevation.level2.shadow_light),
+            control: opaque(elevation.level1.shadow_light),
         }
     }
 }
@@ -139,12 +139,12 @@ mod tests {
     }
 
     #[test]
-    fn opaque_material_shadows_track_the_m3_elevation_table() {
+    fn opaque_material_shadows_track_the_neutral_elevation_table() {
         let g = GlassScale::opaque_material();
-        let m3 = Elevation::m3();
-        assert_eq!(g.chrome.shadow, m3.level3.shadow_light);
-        assert_eq!(g.bar.shadow, m3.level2.shadow_light);
-        assert_eq!(g.control.shadow, m3.level1.shadow_light);
+        let elevation = Elevation::neutral();
+        assert_eq!(g.chrome.shadow, elevation.level3.shadow_light);
+        assert_eq!(g.bar.shadow, elevation.level2.shadow_light);
+        assert_eq!(g.control.shadow, elevation.level1.shadow_light);
     }
 
     #[test]

@@ -63,8 +63,8 @@ const HEIGHT: f64 = 44.0;
 const PAD_X: f64 = 16.0;
 
 /// The title's iOS *Headline* type-role: 17pt Semibold (source:
-/// `frust-theme::typography`'s `TypeScale::cupertino` — Headline maps to SF
-/// 17pt Semibold). Hardcoded here rather than read from a live
+/// `crate::tokens::type_scale` — Headline maps to SF 17pt Semibold).
+/// Hardcoded here rather than read from a live
 /// `Theme::type_scale` for the same reason a Material `appbar`'s title
 /// tokens are: `Text` defers only *color* resolution past `View::build`, never
 /// size/weight.

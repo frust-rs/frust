@@ -1,5 +1,6 @@
 //! The Material 3 baseline design tokens this crate installs: a [`Theme`]
-//! aggregate plus its constituent light/dark [`ColorScheme`]s and the
+//! aggregate plus its constituent light/dark [`ColorScheme`]s, the M3 type
+//! scale/shape scale/elevation table/Expressive motion scheme, and the
 //! success/warning/info [`StatusPalette`] extension.
 //!
 //! Values sourced from Google's Material 3 design-system tokens v0.192
@@ -9,10 +10,11 @@
 //! catalog moved out of tree; nothing in the framework constructs them any
 //! more, so this crate owns them outright.
 
-use frust::authoring::text::TextStyle;
+use frust::authoring::text::{FontWeight, LineHeight, TextStyle};
 use frust::{
-    Brightness, ColorScheme, DesignLanguage, Elevation, GlassScale, MotionScheme, ShapeScale,
-    StatusColors, StatusPalette, Theme, ThemeExtensions, TypeScale,
+    Brightness, ColorScheme, Curve, DesignLanguage, EasingSet, Elevation, ElevationLevel,
+    GlassScale, MotionDurations, MotionScheme, MotionSpring, ShadowSpec, ShapeScale, StatusColors,
+    StatusPalette, SurfaceRole, Theme, ThemeExtensions, TypeScale,
 };
 use peniko::Color;
 
@@ -28,10 +30,10 @@ pub fn baseline() -> Theme {
     Theme {
         light: color_scheme_light(),
         dark: color_scheme_dark(),
-        type_scale: TypeScale::m3(&TextStyle::default()),
-        shape: ShapeScale::m3(),
-        elevation: Elevation::m3(),
-        motion: MotionScheme::m3_expressive(),
+        type_scale: type_scale(&TextStyle::default()),
+        shape: shape_scale(),
+        elevation: elevation(),
+        motion: motion_scheme(),
         glass: GlassScale::opaque_material(),
         brightness: Brightness::Light,
         design_language: DesignLanguage::Material3,
@@ -214,5 +216,413 @@ pub fn status_palette() -> StatusPalette {
             info_container: Color::from_rgb8(0x00, 0x4A, 0x76),
             on_info_container: Color::from_rgb8(0xD1, 0xE4, 0xFF),
         },
+    }
+}
+
+// ---- Type scale -------------------------------------------------------
+
+/// Source: <https://m3.material.io/styles/typography/type-scale-tokens>
+/// (verified 2026-07-17). Sizes are specified in sp; Frust treats sp and
+/// logical px 1:1 (see `frust-text`'s scale). Line heights are absolute
+/// logical pixels (`LineHeight::Absolute`, not a font-size-relative ratio) —
+/// M3 publishes them as fixed px values per token, not a ratio. Letter
+/// spacing is in logical pixels; `displayLarge`'s spacing is negative
+/// (tighter tracking at very large sizes).
+///
+/// `titleLarge` is weight 400 (Regular) per m3.material.io; a secondary
+/// source claims 500 — this module follows m3.material.io as the primary,
+/// more authoritative source.
+///
+/// [`TypeScale`] additionally carries 15 `_emphasized` variants (one per
+/// baseline role, 30 slots total) — the M3 Expressive emphasized scale.
+/// **Role-count resolution:** an earlier belief that emphasized variants were
+/// "15 baseline + 15 emphasized (30 total), applied to Display/Headline/Title
+/// roles" was contested — the "30 total" count was right but the
+/// "Display/Headline/Title only" scope was wrong. Verified directly against
+/// the primary source: Jetpack Compose Material3's generated token file
+/// (`androidx.compose.material3.tokens.TypographyTokens`/`TypeScaleTokens`,
+/// `VERSION: v0_103`,
+/// <https://github.com/androidx/androidx/blob/androidx-main/compose/material3/material3/src/commonMain/kotlin/androidx/compose/material3/tokens/TypeScaleTokens.kt>
+/// — Compose's `Typography` class doc comments enumerate an
+/// `*Emphasized` property for *all 15* baseline roles: `displayLarge`
+/// through `labelSmall`, not a Display/Headline/Title-only subset;
+/// retrieved/verified 2026-07-18). This module follows that: every one of
+/// the 15 baseline roles gets an emphasized sibling.
+///
+/// **M3 deltas** (from the same source): size and line height are unchanged
+/// between a role's baseline and emphasized token — only weight (and, for a
+/// handful of roles, letter spacing) shift. Weight always steps up one rung
+/// from the baseline token's own weight: Regular → Medium for every
+/// Regular-weight baseline role (`display_*`, `headline_*`, `title_large`,
+/// `body_*`), and Medium → Bold for every Medium-weight baseline role
+/// (`title_medium`, `title_small`, `label_*`) — so every emphasized style is
+/// guaranteed to differ from its base in weight. Letter spacing mostly
+/// matches the baseline value already in this module's tables; `body_large`
+/// is the one role whose emphasized tracking differs from its own baseline
+/// (0.5px baseline → 0.15px emphasized, matching the source's
+/// `BodyLargeEmphasizedTracking`).
+///
+/// One type-scale token's numeric shape: `(size_px, line_height_px,
+/// letter_spacing_px, weight)`.
+type TypeToken = (f32, f32, f32, FontWeight);
+
+const DISPLAY_LARGE: TypeToken = (57.0, 64.0, -0.25, FontWeight::REGULAR);
+const DISPLAY_MEDIUM: TypeToken = (45.0, 52.0, 0.0, FontWeight::REGULAR);
+const DISPLAY_SMALL: TypeToken = (36.0, 44.0, 0.0, FontWeight::REGULAR);
+const HEADLINE_LARGE: TypeToken = (32.0, 40.0, 0.0, FontWeight::REGULAR);
+const HEADLINE_MEDIUM: TypeToken = (28.0, 36.0, 0.0, FontWeight::REGULAR);
+const HEADLINE_SMALL: TypeToken = (24.0, 32.0, 0.0, FontWeight::REGULAR);
+const TITLE_LARGE: TypeToken = (22.0, 28.0, 0.0, FontWeight::REGULAR);
+const TITLE_MEDIUM: TypeToken = (16.0, 24.0, 0.15, FontWeight::MEDIUM);
+const TITLE_SMALL: TypeToken = (14.0, 20.0, 0.1, FontWeight::MEDIUM);
+const BODY_LARGE: TypeToken = (16.0, 24.0, 0.5, FontWeight::REGULAR);
+const BODY_MEDIUM: TypeToken = (14.0, 20.0, 0.25, FontWeight::REGULAR);
+const BODY_SMALL: TypeToken = (12.0, 16.0, 0.4, FontWeight::REGULAR);
+const LABEL_LARGE: TypeToken = (14.0, 20.0, 0.1, FontWeight::MEDIUM);
+const LABEL_MEDIUM: TypeToken = (12.0, 16.0, 0.5, FontWeight::MEDIUM);
+const LABEL_SMALL: TypeToken = (11.0, 16.0, 0.5, FontWeight::MEDIUM);
+
+// M3-Expressive emphasized tokens: same size/line-height as the matching
+// baseline `TypeToken` above in every case; weight steps up one rung from
+// the baseline role's own weight (Regular -> Medium, Medium -> Bold) and
+// letter spacing is the source's `*Emphasized*Tracking` value (see this
+// section's doc comment for the primary-source citation and resolution of
+// the contested Display/Headline/Title-only scope claim).
+const DISPLAY_LARGE_EMPHASIZED: TypeToken = (57.0, 64.0, 0.0, FontWeight::MEDIUM);
+const DISPLAY_MEDIUM_EMPHASIZED: TypeToken = (45.0, 52.0, 0.0, FontWeight::MEDIUM);
+const DISPLAY_SMALL_EMPHASIZED: TypeToken = (36.0, 44.0, 0.0, FontWeight::MEDIUM);
+const HEADLINE_LARGE_EMPHASIZED: TypeToken = (32.0, 40.0, 0.0, FontWeight::MEDIUM);
+const HEADLINE_MEDIUM_EMPHASIZED: TypeToken = (28.0, 36.0, 0.0, FontWeight::MEDIUM);
+const HEADLINE_SMALL_EMPHASIZED: TypeToken = (24.0, 32.0, 0.0, FontWeight::MEDIUM);
+const TITLE_LARGE_EMPHASIZED: TypeToken = (22.0, 28.0, 0.0, FontWeight::MEDIUM);
+const TITLE_MEDIUM_EMPHASIZED: TypeToken = (16.0, 24.0, 0.15, FontWeight::BOLD);
+const TITLE_SMALL_EMPHASIZED: TypeToken = (14.0, 20.0, 0.1, FontWeight::BOLD);
+const BODY_LARGE_EMPHASIZED: TypeToken = (16.0, 24.0, 0.15, FontWeight::MEDIUM);
+const BODY_MEDIUM_EMPHASIZED: TypeToken = (14.0, 20.0, 0.25, FontWeight::MEDIUM);
+const BODY_SMALL_EMPHASIZED: TypeToken = (12.0, 16.0, 0.4, FontWeight::MEDIUM);
+const LABEL_LARGE_EMPHASIZED: TypeToken = (14.0, 20.0, 0.1, FontWeight::BOLD);
+const LABEL_MEDIUM_EMPHASIZED: TypeToken = (12.0, 16.0, 0.5, FontWeight::BOLD);
+const LABEL_SMALL_EMPHASIZED: TypeToken = (11.0, 16.0, 0.5, FontWeight::BOLD);
+
+fn apply_type(base: &TextStyle, token: TypeToken) -> TextStyle {
+    let (size, line_height_px, letter_spacing, weight) = token;
+    TextStyle {
+        size,
+        weight,
+        letter_spacing,
+        line_height: LineHeight::Absolute(line_height_px),
+        ..base.clone()
+    }
+}
+
+/// Builds the Material 3 baseline type scale from `base` (its
+/// `family`/`style`/`color` are preserved on every token; only
+/// `size`/`weight`/`letter_spacing`/`line_height` are M3-specified).
+pub fn type_scale(base: &TextStyle) -> TypeScale {
+    TypeScale {
+        display_large: apply_type(base, DISPLAY_LARGE),
+        display_medium: apply_type(base, DISPLAY_MEDIUM),
+        display_small: apply_type(base, DISPLAY_SMALL),
+        headline_large: apply_type(base, HEADLINE_LARGE),
+        headline_medium: apply_type(base, HEADLINE_MEDIUM),
+        headline_small: apply_type(base, HEADLINE_SMALL),
+        title_large: apply_type(base, TITLE_LARGE),
+        title_medium: apply_type(base, TITLE_MEDIUM),
+        title_small: apply_type(base, TITLE_SMALL),
+        body_large: apply_type(base, BODY_LARGE),
+        body_medium: apply_type(base, BODY_MEDIUM),
+        body_small: apply_type(base, BODY_SMALL),
+        label_large: apply_type(base, LABEL_LARGE),
+        label_medium: apply_type(base, LABEL_MEDIUM),
+        label_small: apply_type(base, LABEL_SMALL),
+        display_large_emphasized: apply_type(base, DISPLAY_LARGE_EMPHASIZED),
+        display_medium_emphasized: apply_type(base, DISPLAY_MEDIUM_EMPHASIZED),
+        display_small_emphasized: apply_type(base, DISPLAY_SMALL_EMPHASIZED),
+        headline_large_emphasized: apply_type(base, HEADLINE_LARGE_EMPHASIZED),
+        headline_medium_emphasized: apply_type(base, HEADLINE_MEDIUM_EMPHASIZED),
+        headline_small_emphasized: apply_type(base, HEADLINE_SMALL_EMPHASIZED),
+        title_large_emphasized: apply_type(base, TITLE_LARGE_EMPHASIZED),
+        title_medium_emphasized: apply_type(base, TITLE_MEDIUM_EMPHASIZED),
+        title_small_emphasized: apply_type(base, TITLE_SMALL_EMPHASIZED),
+        body_large_emphasized: apply_type(base, BODY_LARGE_EMPHASIZED),
+        body_medium_emphasized: apply_type(base, BODY_MEDIUM_EMPHASIZED),
+        body_small_emphasized: apply_type(base, BODY_SMALL_EMPHASIZED),
+        label_large_emphasized: apply_type(base, LABEL_LARGE_EMPHASIZED),
+        label_medium_emphasized: apply_type(base, LABEL_MEDIUM_EMPHASIZED),
+        label_small_emphasized: apply_type(base, LABEL_SMALL_EMPHASIZED),
+    }
+}
+
+// ---- Shape scale --------------------------------------------------------
+
+/// The Material 3 shape scale: 10 corner-radius tokens (post-Expressive
+/// scale). Source: <https://m3.material.io/styles/shape/corner-radius-scale>
+/// (verified 2026-07-17; the pre-Expressive scale had 7 tokens, not 10).
+/// Radii are dp, treated 1:1 as logical px.
+pub const fn shape_scale() -> ShapeScale {
+    ShapeScale {
+        none: 0.0,
+        extra_small: 4.0,
+        small: 8.0,
+        medium: 12.0,
+        large: 16.0,
+        large_increased: 20.0,
+        extra_large: 28.0,
+        extra_large_increased: 32.0,
+        extra_extra_large: 48.0,
+        full: f64::INFINITY,
+    }
+}
+
+// ---- Elevation ----------------------------------------------------------
+
+/// dp source: <https://m3.material.io/styles/elevation> (verified
+/// 2026-07-17): L0 0dp, L1 1dp, L2 3dp, L3 6dp, L4 8dp, L5 12dp. Component
+/// mapping per the same source: L1 = elevated cards/bottom sheets, L2 = nav
+/// bar/menus, L3 = FAB/dialogs.
+///
+/// **Shadow math is TUNABLE, not an M3-published spec.** Material 3's 2023
+/// direction replaced tonal-overlay tinting with *static surface-container
+/// roles* for most elevated surfaces — the opposite of "primarily tonal
+/// overlay post-2023" — but shadows still exist alongside; M3 does not
+/// publish exact shadow blur/offset math, so this module defines a
+/// documented v1 mapping: `y_offset = dp / 2.0 + 1.0`, `blur_std_dev = dp`,
+/// shadow color = `ColorScheme::shadow` at `color_alpha` ~0.3. Treat it as
+/// adjustable, not load-bearing, Frust-specific policy.
+///
+/// [`ElevationLevel`] carries **separate** light/dark shadow specs; this
+/// mapping doesn't branch by brightness, so both slots hold the same value —
+/// behavior-preserving, byte-identical rendered output on either brightness.
+const fn elevation_level(dp: f64, surface_role: SurfaceRole) -> ElevationLevel {
+    let shadow = ShadowSpec {
+        y_offset: dp / 2.0 + 1.0,
+        blur_std_dev: dp,
+        color_alpha: 0.3,
+    };
+    ElevationLevel {
+        dp,
+        shadow_light: shadow,
+        shadow_dark: shadow,
+        surface_role,
+    }
+}
+
+/// The Material 3 baseline elevation table (dp values verified; shadow math
+/// and surface-role assignment are this crate's documented v1 mapping — see
+/// [`elevation_level`]'s doc comment).
+pub const fn elevation() -> Elevation {
+    Elevation {
+        level0: elevation_level(0.0, SurfaceRole::Surface),
+        level1: elevation_level(1.0, SurfaceRole::SurfaceContainerLow),
+        level2: elevation_level(3.0, SurfaceRole::SurfaceContainer),
+        level3: elevation_level(6.0, SurfaceRole::SurfaceContainerHigh),
+        level4: elevation_level(8.0, SurfaceRole::SurfaceContainerHigh),
+        level5: elevation_level(12.0, SurfaceRole::SurfaceContainerHighest),
+    }
+}
+
+// ---- Motion ---------------------------------------------------------------
+
+/// The Material 3 Expressive baseline motion scheme: six spring presets.
+///
+/// Source: material-components-android `docs/theming/Motion.md` (M3
+/// Expressive, verified 2026-07-17): fastSpatial (0.9, 1400), fastEffects
+/// (1.0, 3800), defaultSpatial (0.9, 700), defaultEffects (1.0, 1600),
+/// slowSpatial (0.9, 300), slowEffects (1.0, 800) — `(damping_ratio,
+/// stiffness)`, mass 1 for every preset. "Effects" springs (opacity/color)
+/// are critically damped (`damping_ratio: 1.0`) by design — no bounce;
+/// "spatial" springs (position/size) are `0.9`, allowing a small overshoot.
+///
+/// Duration/easing tokens are sourced from the same
+/// `material-components-android` `docs/theming/Motion.md`, which publishes a
+/// 16-value duration scale in four tiers — Short (50, 100, 150, 200ms),
+/// Medium (250, 300, 350, 400ms), Long (450, 500, 550, 600ms), Extra Long
+/// (700–1000ms) — plus the easing curves below. Glyph's five-slot
+/// `MotionDurations` vocabulary maps onto that scale as: `instant` → Short1
+/// (50ms), `fast` → Short3 (150ms), `base` → Medium2 (300ms, the most
+/// commonly-cited M3 "default" transition duration), `slow` → Long2 (500ms),
+/// `deliberate` → the Extra Long tier's floor (700ms).
+///
+/// `EasingSet`'s three slots map onto M3's own easing-curve tokens (Jetpack
+/// Compose's `androidx.compose.material3.tokens.MotionTokens` control
+/// points, same source): `spatial` → Emphasized Decelerate
+/// (`cubic-bezier(0.05, 0.7, 0.1, 1.0)`, M3's curve for entering/spatial
+/// transitions — its steep initial deceleration reads as a slight
+/// overshoot-adjacent settle), `effects` → Standard
+/// (`cubic-bezier(0.2, 0.0, 0.0, 1.0)`, M3's curve for opacity/color fades —
+/// never overshoots), `exit` → Standard Accelerate
+/// (`cubic-bezier(0.3, 0.0, 1.0, 1.0)`, M3's curve for elements leaving the
+/// screen).
+///
+/// `cosmetic_loop_rate` reads off [`MotionScheme::neutral`]'s own 30Hz
+/// value rather than naming `CosmeticLoopRate` directly — that type is not
+/// nameable through the `frust` facade (only the `MotionScheme` field that
+/// holds one is), and every built-in baseline already declares the same
+/// 30Hz cap this scale wants.
+pub const fn motion_scheme() -> MotionScheme {
+    MotionScheme {
+        fast_spatial: MotionSpring {
+            damping_ratio: 0.9,
+            stiffness: 1400.0,
+        },
+        fast_effects: MotionSpring {
+            damping_ratio: 1.0,
+            stiffness: 3800.0,
+        },
+        default_spatial: MotionSpring {
+            damping_ratio: 0.9,
+            stiffness: 700.0,
+        },
+        default_effects: MotionSpring {
+            damping_ratio: 1.0,
+            stiffness: 1600.0,
+        },
+        slow_spatial: MotionSpring {
+            damping_ratio: 0.9,
+            stiffness: 300.0,
+        },
+        slow_effects: MotionSpring {
+            damping_ratio: 1.0,
+            stiffness: 800.0,
+        },
+        durations: MotionDurations {
+            instant: 50.0,
+            fast: 150.0,
+            base: 300.0,
+            slow: 500.0,
+            deliberate: 700.0,
+        },
+        easing: EasingSet {
+            spatial: Curve::Cubic(0.05, 0.7, 0.1, 1.0),
+            effects: Curve::Cubic(0.2, 0.0, 0.0, 1.0),
+            exit: Curve::Cubic(0.3, 0.0, 1.0, 1.0),
+        },
+        reduce_motion: false,
+        cosmetic_loop_rate: MotionScheme::neutral().cosmetic_loop_rate,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn type_scale_display_large_matches_table() {
+        let scale = type_scale(&TextStyle::new(16.0, Color::BLACK));
+        assert_eq!(scale.display_large.size, 57.0);
+        assert_eq!(scale.display_large.line_height, LineHeight::Absolute(64.0));
+        assert_eq!(scale.display_large.letter_spacing, -0.25);
+        assert_eq!(scale.display_large.weight, FontWeight::REGULAR);
+    }
+
+    #[test]
+    fn type_scale_preserves_base_family_and_color() {
+        let base = TextStyle {
+            family: frust::authoring::text::FontFamily::named("Roboto"),
+            ..TextStyle::new(16.0, Color::from_rgb8(1, 2, 3))
+        };
+        let scale = type_scale(&base);
+        assert_eq!(scale.body_large.family, base.family);
+        assert_eq!(scale.body_large.color, base.color);
+    }
+
+    #[test]
+    fn type_scale_every_emphasized_role_differs_in_weight_from_its_base() {
+        let scale = type_scale(&TextStyle::new(16.0, Color::BLACK));
+        let pairs: [(&TextStyle, &TextStyle); 15] = [
+            (&scale.display_large, &scale.display_large_emphasized),
+            (&scale.display_medium, &scale.display_medium_emphasized),
+            (&scale.display_small, &scale.display_small_emphasized),
+            (&scale.headline_large, &scale.headline_large_emphasized),
+            (&scale.headline_medium, &scale.headline_medium_emphasized),
+            (&scale.headline_small, &scale.headline_small_emphasized),
+            (&scale.title_large, &scale.title_large_emphasized),
+            (&scale.title_medium, &scale.title_medium_emphasized),
+            (&scale.title_small, &scale.title_small_emphasized),
+            (&scale.body_large, &scale.body_large_emphasized),
+            (&scale.body_medium, &scale.body_medium_emphasized),
+            (&scale.body_small, &scale.body_small_emphasized),
+            (&scale.label_large, &scale.label_large_emphasized),
+            (&scale.label_medium, &scale.label_medium_emphasized),
+            (&scale.label_small, &scale.label_small_emphasized),
+        ];
+        for (b, emphasized) in pairs {
+            assert_ne!(
+                b.weight, emphasized.weight,
+                "expected emphasized weight to differ from base weight"
+            );
+        }
+    }
+
+    #[test]
+    fn shape_scale_matches_table() {
+        let s = shape_scale();
+        assert_eq!(s.none, 0.0);
+        assert_eq!(s.extra_small, 4.0);
+        assert_eq!(s.small, 8.0);
+        assert_eq!(s.medium, 12.0);
+        assert_eq!(s.large, 16.0);
+        assert_eq!(s.large_increased, 20.0);
+        assert_eq!(s.extra_large, 28.0);
+        assert_eq!(s.extra_large_increased, 32.0);
+        assert_eq!(s.extra_extra_large, 48.0);
+        assert!(s.full.is_infinite());
+    }
+
+    #[test]
+    fn elevation_dp_matches_table() {
+        let e = elevation();
+        assert_eq!(e.level0.dp, 0.0);
+        assert_eq!(e.level1.dp, 1.0);
+        assert_eq!(e.level2.dp, 3.0);
+        assert_eq!(e.level3.dp, 6.0);
+        assert_eq!(e.level4.dp, 8.0);
+        assert_eq!(e.level5.dp, 12.0);
+    }
+
+    #[test]
+    fn elevation_shadow_is_identical_on_both_brightnesses() {
+        let e = elevation();
+        assert_eq!(e.level3.shadow_light, e.level3.shadow_dark);
+    }
+
+    #[test]
+    fn motion_scheme_spring_presets_are_exact() {
+        let m = motion_scheme();
+        assert_eq!(
+            m.fast_spatial,
+            MotionSpring {
+                damping_ratio: 0.9,
+                stiffness: 1400.0
+            }
+        );
+        assert_eq!(
+            m.fast_effects,
+            MotionSpring {
+                damping_ratio: 1.0,
+                stiffness: 3800.0
+            }
+        );
+    }
+
+    #[test]
+    fn motion_scheme_effects_springs_are_critically_damped() {
+        let m = motion_scheme();
+        assert_eq!(m.fast_effects.damping_ratio, 1.0);
+        assert_eq!(m.default_effects.damping_ratio, 1.0);
+        assert_eq!(m.slow_effects.damping_ratio, 1.0);
+    }
+
+    #[test]
+    fn motion_scheme_cosmetic_loop_rate_is_30hz() {
+        assert_eq!(motion_scheme().cosmetic_loop_rate.hz(), 30.0);
+    }
+
+    #[test]
+    fn baseline_composes_the_m3_scales() {
+        let theme = baseline();
+        assert_eq!(theme.shape, shape_scale());
+        assert_eq!(theme.elevation, elevation());
+        assert_eq!(theme.motion, motion_scheme());
     }
 }

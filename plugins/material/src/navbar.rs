@@ -91,7 +91,7 @@ const LABEL_WEIGHT: FontWeight = FontWeight::BOLD;
 /// the same reason as the label's type-scale tokens above: an
 /// `AnimationController`'s spring parameters have no deferred, post-`build`
 /// resolution seam the way a themed *color* does. Matches
-/// `frust-theme::motion::MotionScheme::m3_expressive().default_effects`.
+/// `crate::tokens::motion_scheme().default_effects`.
 const DEFAULT_EFFECTS_SPRING: SpringDesc = SpringDesc {
     mass: 1.0,
     stiffness: 1600.0,

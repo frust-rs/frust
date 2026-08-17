@@ -185,7 +185,7 @@ const FLING_VELOCITY: f64 = 1e-3;
 /// (`docs/CODE_STANDARDS.md`'s Theming conventions say `EventCtx` threads no
 /// theme), the same reason a Material `button_group`'s own `PRESS_SPRING` is
 /// a hardcoded constant rather than a paint-time theme read; and
-/// `MotionScheme::cupertino()` (see `frust_theme`'s `motion` module docs)
+/// `crate::tokens::motion_scheme()` (see that function's doc comment)
 /// applies this exact spring uniformly to all six of its slots, so a themed
 /// Cupertino baseline would resolve to the identical value anyway. A
 /// Material-language theme's differing spring is intentionally not
