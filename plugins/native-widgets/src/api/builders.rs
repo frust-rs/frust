@@ -40,8 +40,9 @@
 //!
 //! Every builder consults `frust::resolved_surface_mode()` before composing
 //! its native slot: on [`ResolvedSurfaceMode::RefusedTranslucent`], it
-//! renders [`placeholder`] instead — a frust-drawn, semantics-labelled box —
-//! rather than an invisible, untappable native slot
+//! renders [`placeholder`] instead — a frust-drawn box that both *paints*
+//! the refusal as visible warning prose and publishes the same wording to a
+//! screen reader — rather than an invisible, untappable native slot
 //! (`docs/ARCHITECTURE.md`'s Platform-view flow: "App Rust now is told ...
 //! so a plugin can fall back deliberately instead of a dead slot"). The
 //! refusal is logged once, crate-wide, not once per control per frame.
@@ -49,6 +50,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Once};
 
+use frust::authoring::text::{FontWeight, LineHeight, TextContext, TextLayout, TextStyle};
 use frust::{
     Color, PlatformViewView, ResolvedSurfaceMode, SizedBox, Theme, on_cleanup, platform_view,
     resolved_surface_mode, use_context,
@@ -58,7 +60,7 @@ use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, Component, ComponentWidget, LayoutCtx,
     PaintCtx, PaintScene, SemanticsCtx, View, Widget, any, component,
 };
-use kurbo::Size;
+use kurbo::{Size, Vec2};
 
 use crate::controls::{
     BACKGROUND_COLOR, CHECKED, CONTENT_DESCRIPTION, CORNER_RADIUS_DP, DARK, ENABLED, FIT,
@@ -137,9 +139,11 @@ fn warn_refusal_once() {
 
 /// The frust-drawn placeholder every builder degrades to under
 /// [`ResolvedSurfaceMode::RefusedTranslucent`]: a sized box holding a
-/// [`RefusalBanner`] — a warning fill plus a `Role::Alert` semantics node
-/// carrying `control` as its label and the full explanation as its
-/// description — instead of an invisible, untappable native slot.
+/// [`RefusalBanner`] — a warning fill and border, the label plus explanation
+/// painted as visible prose, and the same wording published as a
+/// `Role::Alert` semantics node — instead of an invisible, untappable native
+/// slot. Both halves matter: a sighted user sees the warning, a screen-reader
+/// user hears it.
 ///
 /// # Why the banner is crate-local
 ///
@@ -149,20 +153,23 @@ fn warn_refusal_once() {
 /// — including whichever one the consuming app installed — ships as its own
 /// plugin crate beside this one. So the banner is a thin crate-local
 /// `View`/`Widget` pair, the same shape [`ClipToSlot`] below already uses,
-/// painting from the ambient [`Theme`]'s own error roles with an unthemed
-/// fallback (`docs/WIDGETS_CODE_STANDARDS.md`'s token-resolution rule) rather
-/// than borrowing a catalog's alert widget.
+/// shaping its own runs through [`BannerText`] and painting from the ambient
+/// [`Theme`]'s own error roles with an unthemed fallback
+/// (`docs/WIDGETS_CODE_STANDARDS.md`'s token-resolution rule) rather than
+/// borrowing a catalog's alert widget.
 ///
 /// # The clip-to-slot fix for oversized placeholder prose
 ///
 /// The explanatory prose is longer than most slot boxes allow (e.g.
 /// `native_switch`'s 70x40, `native_progress`'s 260x24), and `SizedBox` only
 /// tightens the reported [`Size`] the layout pass sees — it does not stop a
-/// child from drawing content sized off its own unclamped natural extent.
-/// Clipping the whole banner's paint to the slot rect (below) is what lets
-/// the full explanation stay in the semantics tree and the one-time
-/// [`warn_refusal_once`] log while guaranteeing the placeholder never paints
-/// outside its own slot, at any slot size the builders allow.
+/// child from drawing content sized off its own unclamped natural extent. The
+/// banner budgets its runs against the slot width, but a slot too short for
+/// even one wrapped line still overflows vertically. Clipping the whole
+/// banner's paint to the slot rect (below) is therefore load-bearing: it lets
+/// the full explanation stay painted, in the semantics tree, and in the
+/// one-time [`warn_refusal_once`] log while guaranteeing the placeholder never
+/// paints outside its own slot, at any slot size the builders allow.
 ///
 /// `pub(super)`: the generic mounting builder
 /// ([`crate::api::mount`]) degrades through this same placeholder — including
@@ -190,23 +197,147 @@ const REFUSAL_FILL: Color = Color::from_rgb8(0xFF, 0xDD, 0xB0);
 /// Unthemed fallback border for [`RefusalBanner`]. See [`REFUSAL_FILL`].
 const REFUSAL_BORDER: Color = Color::from_rgb8(0x8A, 0x53, 0x00);
 
+/// Unthemed fallback prose colour for [`RefusalBanner`] — the "on" role for
+/// [`REFUSAL_FILL`], dark enough to read over that amber. A themed paint reads
+/// `on_error_container` instead. See [`REFUSAL_FILL`].
+const REFUSAL_TEXT: Color = Color::from_rgb8(0x3B, 0x24, 0x00);
+
+/// Inset between the banner's border hairline and its prose, in logical px.
+const REFUSAL_PAD: f64 = 4.0;
+/// Gap between the label row and the description row, in logical px.
+const REFUSAL_ROW_GAP: f64 = 2.0;
+/// Label font size, in logical px — deliberately small, because the slots
+/// these placeholders stand in for are themselves small (`native_switch`'s
+/// 70x40 is the reference case).
+const REFUSAL_LABEL_SIZE: f32 = 12.0;
+/// Description font size, in logical px. See [`REFUSAL_LABEL_SIZE`].
+const REFUSAL_DESC_SIZE: f32 = 11.0;
+/// Prose line height, as a multiple of the font size.
+const REFUSAL_LINE_HEIGHT: f32 = 1.3;
+
+/// A minimal retained text run: shape once per (content, style, width),
+/// measure during `layout`, emit glyph runs during `paint`.
+///
+/// Mirrors `plugins/glyph/src/alert.rs`'s `GlyphLabel` — that module's own
+/// docs sanction duplicating this small helper per crate rather than sharing
+/// one, and a platform plugin could not share it anyway: it may not depend on
+/// a design-system plugin at all (`docs/PLUGINS_CODE_STANDARDS.md`'s charter
+/// line).
+///
+/// The shaping vocabulary comes through `frust::authoring::text` rather than a
+/// direct `frust-text` dependency — the one place this file reaches through
+/// the facade instead of naming a framework crate (`frust-core` is named
+/// directly, per this crate's `Cargo.toml`). `frust-text` is a **dev**-only
+/// dependency here, and the refusal placeholder is not worth promoting it to a
+/// production one: the facade re-export costs nothing and stays behind the
+/// same default-on `frust-api` feature gate as `frust` itself, so the
+/// `--no-default-features` charter line is untouched.
+struct BannerText {
+    content: String,
+    layout: Option<TextLayout>,
+    laid_out_style: Option<TextStyle>,
+    laid_out_max_width: Option<f32>,
+}
+
+impl BannerText {
+    fn new(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            layout: None,
+            laid_out_style: None,
+            laid_out_max_width: None,
+        }
+    }
+
+    fn set_content(&mut self, content: impl Into<String>) {
+        let content = content.into();
+        if self.content != content {
+            self.content = content;
+            self.layout = None;
+        }
+    }
+
+    fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle, max_width: Option<f32>) -> Size {
+        if let Some(cached) = &self.layout
+            && self.laid_out_max_width == max_width
+            && self.laid_out_style.as_ref() == Some(style)
+        {
+            return cached.size();
+        }
+        let laid = ctx
+            .text_context::<TextContext>()
+            .layout(&self.content, style, max_width);
+        let size = laid.size();
+        self.layout = Some(laid);
+        self.laid_out_style = Some(style.clone());
+        self.laid_out_max_width = max_width;
+        size
+    }
+
+    /// Emit this run's glyphs at `origin`. A no-op before the first
+    /// [`BannerText::layout`] — a paint without a preceding layout pass draws
+    /// no text rather than panicking for want of a text context.
+    fn paint(&self, origin: kurbo::Point, scene: &mut dyn PaintScene) {
+        if let Some(layout) = &self.layout {
+            for run in layout.to_scene_runs(origin) {
+                scene.draw_glyph_run(run);
+            }
+        }
+    }
+}
+
+fn refusal_label_style(color: Color) -> TextStyle {
+    TextStyle {
+        weight: FontWeight::SEMI_BOLD,
+        line_height: LineHeight::FontSizeRelative(REFUSAL_LINE_HEIGHT),
+        ..TextStyle::new(REFUSAL_LABEL_SIZE, color)
+    }
+}
+
+fn refusal_description_style(color: Color) -> TextStyle {
+    TextStyle {
+        weight: FontWeight::REGULAR,
+        line_height: LineHeight::FontSizeRelative(REFUSAL_LINE_HEIGHT),
+        ..TextStyle::new(REFUSAL_DESC_SIZE, color)
+    }
+}
+
+/// Explicit builder value > theme > fallback constant
+/// (`docs/WIDGETS_CODE_STANDARDS.md`) — there is no explicit override on the
+/// banner, so: the theme's `on_error_container` (the "on" role for the
+/// `error_container` fill the banner paints under it), else [`REFUSAL_TEXT`].
+fn refusal_text_color(theme: Option<&Theme>) -> Color {
+    match theme {
+        Some(theme) => theme.scheme().on_error_container,
+        None => REFUSAL_TEXT,
+    }
+}
+
 /// The refusal placeholder's own visual + accessible body — see
 /// [`placeholder`] for why it is crate-local rather than a catalog widget.
 ///
 /// Paints a filled, outlined box across whatever the slot gave it (so a
 /// refused control still reads as a deliberate "something is wrong here"
-/// marker rather than a hole), and publishes exactly one `Role::Alert`
-/// semantics node carrying `label` plus `description` — the
-/// semantics-labelled half of the refusal contract.
+/// marker rather than a hole) carrying `label` and `description` as visible
+/// prose, and publishes exactly one `Role::Alert` semantics node with the same
+/// two strings — the accessible half of the same refusal contract.
 struct RefusalBanner {
     label: String,
     description: String,
 }
 
 /// The retained widget for [`RefusalBanner`].
+///
+/// `label`/`description` are kept as plain strings alongside their
+/// [`BannerText`] runs because [`RefusalBannerWidget::semantics`] reports the
+/// wording whether or not a layout pass ever shaped it (the same split
+/// `AlertWidget` uses in `plugins/glyph/src/alert.rs`).
 struct RefusalBannerWidget {
     label: String,
     description: String,
+    label_run: BannerText,
+    description_run: BannerText,
+    label_size: Size,
 }
 
 impl<State: 'static> View<State> for RefusalBanner {
@@ -216,6 +347,9 @@ impl<State: 'static> View<State> for RefusalBanner {
         RefusalBannerWidget {
             label: self.label.clone(),
             description: self.description.clone(),
+            label_run: BannerText::new(self.label.clone()),
+            description_run: BannerText::new(self.description.clone()),
+            label_size: Size::ZERO,
         }
     }
 
@@ -230,17 +364,44 @@ impl<State: 'static> View<State> for RefusalBanner {
         }
         element.label = self.label.clone();
         element.description = self.description.clone();
-        ChangeFlags::PAINT
+        element.label_run.set_content(self.label.clone());
+        element
+            .description_run
+            .set_content(self.description.clone());
+        // New wording re-shapes, so this is a layout change, not paint-only.
+        ChangeFlags::LAYOUT | ChangeFlags::PAINT
     }
 
     fn teardown(&self, _element: &mut Self::Element, _ctx: &mut BuildCtx<'_>) {}
 }
 
 impl Widget for RefusalBannerWidget {
-    fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         // Fill whatever the enclosing `SizedBox` tightened to; with no
         // explicit slot size the builders leave it filling the parent.
-        bc.max()
+        let size = bc.max();
+
+        // Colour is baked into the shaped runs, so it is resolved here rather
+        // than at paint time — the same reason `AlertWidget::layout` reads the
+        // theme during layout.
+        let color = refusal_text_color(Theme::from_layout_ctx(ctx));
+        // Budget both runs against the slot, minus the prose inset on each
+        // side, so the wording wraps inside the slot instead of running off
+        // its natural single-line extent. A non-finite max (an unconstrained
+        // parent, i.e. no explicit `.size(w, h)`) means "no wrap budget"
+        // rather than a wrap at infinity.
+        let max_width = size
+            .width
+            .is_finite()
+            .then(|| (size.width - REFUSAL_PAD * 2.0).max(0.0) as f32);
+
+        self.label_size = self
+            .label_run
+            .layout(ctx, &refusal_label_style(color), max_width);
+        self.description_run
+            .layout(ctx, &refusal_description_style(color), max_width);
+
+        size
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
@@ -274,6 +435,15 @@ impl Widget for RefusalBannerWidget {
                 border,
             );
         }
+        // The prose paints last, over the fill and the border hairline. What
+        // keeps a run that outgrows a short slot from escaping it is
+        // [`ClipToSlot`], which wraps the whole banner (see [`placeholder`]) —
+        // deliberately, so the wording stays complete rather than truncated.
+        self.label_run
+            .paint(origin + Vec2::new(REFUSAL_PAD, REFUSAL_PAD), scene);
+        let description_y = REFUSAL_PAD + self.label_size.height + REFUSAL_ROW_GAP;
+        self.description_run
+            .paint(origin + Vec2::new(REFUSAL_PAD, description_y), scene);
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
@@ -283,10 +453,10 @@ impl Widget for RefusalBannerWidget {
 }
 
 /// Clips its child's paint to this widget's own laid-out bounds — see
-/// [`placeholder`]'s "Device-gate bar 7 fix" doc for why this exists instead
-/// of shrinking or wrapping the prose itself. A thin, crate-local wrapper
-/// (not a `frust-widgets` container) built directly against
-/// [`AnyView`]/[`Widget`] rather than `frust-widgets`' crate-private
+/// [`placeholder`]'s "The clip-to-slot fix for oversized placeholder prose"
+/// for why this exists instead of truncating the prose itself. A thin,
+/// crate-local wrapper (not a `frust-widgets` container) built directly
+/// against [`AnyView`]/[`Widget`] rather than `frust-widgets`' crate-private
 /// `ChildPod` plumbing, which this crate has no access to
 /// (`docs/CODE_STANDARDS.md`'s Plugin Conventions).
 struct ClipToSlot<State: 'static> {
@@ -1572,6 +1742,12 @@ mod tests {
         /// Every painted primitive's bounds, already clipped against
         /// whatever was active when it painted.
         painted: Vec<Rect>,
+        /// How many glyph runs carrying at least one glyph reached the scene,
+        /// counted *before* the clip intersection — the "the banner really
+        /// paints its warning text" half of the contract, which the clipped
+        /// bounds above cannot answer on their own (a fully-clipped run
+        /// records nothing).
+        glyph_runs: usize,
     }
 
     impl BoundsRecorder {
@@ -1629,6 +1805,7 @@ mod tests {
             let Some(first) = run.glyphs.first() else {
                 return;
             };
+            self.glyph_runs += 1;
             // The run's transform is a pure translation baked from the
             // paint-time origin (`frust_text::TextLayout::to_scene_runs`) —
             // `.translation()` recovers it directly. Glyph x/y are local
@@ -1665,12 +1842,11 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_paints_within_its_slot_rect_at_every_slot_size() {
+    fn placeholder_paints_visible_text_within_its_slot_rect_at_every_slot_size() {
         // A range of slot sizes the app-facing builders actually allow,
         // including `native_switch`'s own deliberately small box
         // (`examples/glyph-catalog/src/pages/native_widgets.rs`) and an
-        // even smaller one to stress the invariant further — the task's
-        // own "including the smallest" requirement.
+        // even smaller one to stress the invariant further.
         for (label, (w, h)) in [
             ("native_switch's own box (70x40)", (70.0, 40.0)),
             ("native_progress's own box (260x24)", (260.0, 24.0)),
@@ -1699,6 +1875,17 @@ mod tests {
                 !rec.painted.is_empty(),
                 "{label}: expected the placeholder to paint something"
             );
+            // The visible half of the refusal contract: a sighted user must
+            // see the warning wording, not just the warning fill — the
+            // `Role::Alert` node alone is not a substitute.
+            assert!(
+                rec.glyph_runs >= 2,
+                "{label}: expected the banner's label AND description to paint as glyph \
+                 runs, saw {} — a fill-only banner leaves a sighted user with no warning",
+                rec.glyph_runs
+            );
+            // ... and the clip wrapper must keep every one of those runs
+            // (plus the fill/border) inside the slot at the same time.
             let slot_rect = Rect::from_origin_size(Point::ZERO, laid);
             for bounds in &rec.painted {
                 assert!(
