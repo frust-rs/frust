@@ -32,7 +32,7 @@
 //! The thumb's on/off position is driven by a
 //! [`frust::AnimationController`] spring
 //! [`fling`](frust::AnimationController::fling) (the theme's
-//! `motion.default_spatial` — [`Theme::cupertino_baseline`]'s single documented
+//! `motion.default_spatial` — [`crate::baseline`]'s single documented
 //! iOS spring — falling back to the same values when unthemed), advanced during
 //! [`Widget::paint`] and re-requested via [`PaintCtx::request_frame`] while in
 //! flight (the crate's shared advance-during-paint contract). The fling starts
@@ -136,7 +136,7 @@ const TRACK_OFF_DARK: Color = Color::from_rgb8(0x39, 0x39, 0x3D);
 /// The thumb fill — white in both light and dark (iOS keeps the knob white).
 const THUMB: Color = Color::from_rgb8(0xFF, 0xFF, 0xFF);
 
-/// The unthemed fallback spring, matching [`Theme::cupertino_baseline`]'s
+/// The unthemed fallback spring, matching [`crate::baseline`]'s
 /// `motion.default_spatial` exactly (ζ ≈ 0.5753, stiffness 170) — the thumb
 /// travels identically whether or not a theme is threaded.
 const FALLBACK_SPRING: SpringDesc = SpringDesc {
@@ -162,7 +162,7 @@ const SPECULAR_PEAK_SCALE: f32 = 1.8;
 /// The `control` glass tier (buttons/toggles — see `frust-theme/src/glass.rs`)
 /// this widget's knob highlight/shadow reads. Themed: `theme.glass.control`
 /// (always [`crate::ios27`]'s tier on a Cupertino-tagged `Theme`,
-/// per [`Theme::cupertino_baseline`]). Unthemed: the same `ios27` control
+/// per [`crate::baseline`]). Unthemed: the same `ios27` control
 /// tier directly, so an unthemed paint matches a Cupertino-themed one exactly
 /// — there is no separate hand-tuned fallback to drift out of sync.
 fn resolve_control_glass(theme: Option<&Theme>) -> GlassMaterial {
@@ -573,7 +573,7 @@ mod tests {
 
     #[test]
     fn dark_theme_selects_dark_track_colors() {
-        let mut theme = Theme::cupertino_baseline();
+        let mut theme = crate::baseline();
         theme.brightness = Brightness::Dark;
         let mut on = widget(true);
         let rec = paint_rec(&mut on, Some(&theme));
@@ -611,7 +611,7 @@ mod tests {
         // No hand-tuned unthemed fallback to drift: both read the same
         // ios27 control glass tier (see resolve_control_glass's doc comment).
         let mut themed = widget(false);
-        let theme = Theme::cupertino_baseline();
+        let theme = crate::baseline();
         let rec_themed = paint_rec(&mut themed, Some(&theme));
         let mut unthemed = widget(false);
         let rec_unthemed = paint_rec(&mut unthemed, None);

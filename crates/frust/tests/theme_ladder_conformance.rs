@@ -37,12 +37,16 @@
 //!    extracted helpers**, exactly once each: deleting the call and inlining
 //!    the ladder back into the arm fails here even if the helper itself is
 //!    left behind, unused.
-//! 4. **No shell names the Glyph design system.** A shell must compile with
-//!    `frust-theme`'s `glyph` feature off, so neither `Theme::glyph_baseline()`
-//!    nor `frust_theme::glyph::*` may appear in shell *code* — the Glyph
-//!    tokens and their bundled fonts arrive through the same
-//!    `set_default_theme` + `register_app_fonts` seams as any other design
-//!    system's. Prose mentions are fine (the scan strips comments).
+//! 4. **No shell names the Glyph design system.** Glyph ships as its own
+//!    plugin crate no shell depends on, so neither `Theme::glyph_baseline()`
+//!    (a constructor that no longer exists anywhere) nor `frust_theme::glyph::*`
+//!    may appear in shell *code* — the Glyph tokens and their bundled fonts
+//!    arrive through the same `set_default_theme` + `register_app_fonts` seams
+//!    as any other design system's. The needles are deliberately kept as a
+//!    ban on the *spellings*, not just on what currently compiles: a
+//!    re-introduction attempt fails here with a reason rather than as a bare
+//!    unresolved-path error. Prose mentions are fine (the scan strips
+//!    comments).
 //! 5. **The three shells' ladder helpers are byte-identical** (modulo comments
 //!    and whitespace). The desktop copy is the one covered by real, host-run
 //!    unit tests (`frust-shell-desktop`'s `app_handler::tests`); this pins the
@@ -275,9 +279,12 @@ fn every_shell_routes_its_appearance_change_through_the_shared_decision() {
 /// Check 4: no shell names the Glyph design system, in production code OR in
 /// its own test module.
 ///
-/// `frust-theme`'s Glyph token module sits behind its `glyph` feature, so a
+/// The Glyph design system lives in its own plugin crate (`frust-glyph`), which
+/// no shell depends on; the framework constructs no Glyph tokens at all. A
 /// shell that spells `Theme::glyph_baseline()` or reaches into
-/// `frust_theme::glyph::*` stops compiling with that feature off. The mobile
+/// `frust_theme::glyph::*` therefore names nothing that exists — this check
+/// bans the spellings so the failure names the rule instead of surfacing as an
+/// unresolved path. The mobile
 /// shells' test modules matter as much as their production code here: they are
 /// only type-checked by an explicit `--all-targets` cross-check
 /// (`docs/DEVELOPMENT.md`), so a stale reference there would otherwise sit
@@ -297,11 +304,10 @@ fn no_shell_names_the_glyph_design_system() {
             assert!(
                 found.is_empty(),
                 "{rel} names `{needle}` in code ({} site(s)). No shell may depend on the \
-                 Glyph design system: its tokens live behind `frust-theme`'s `glyph` \
-                 feature, and a shell must compile with that feature off (the built-in \
-                 fallback is `Theme::neutral()`). A design system reaches a shell through \
-                 `set_default_theme` + `register_app_fonts`, never the other way \
-                 round:\n{}",
+                 Glyph design system: it lives in its own plugin crate (`frust-glyph`), \
+                 and a shell's built-in fallback is `Theme::neutral()`. A design system \
+                 reaches a shell through `set_default_theme` + `register_app_fonts`, \
+                 never the other way round:\n{}",
                 found.len(),
                 found.join("\n"),
             );

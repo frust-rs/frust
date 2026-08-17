@@ -28,11 +28,6 @@ perf-trace = []
 # cargo's feature unification keeps it off unless a build explicitly opts in
 # (the CLI turns it on for debug/profile builds — `BuildMode::cargo_features`).
 devtools = ["dep:frust-devtools", "dep:frust-devtools-protocol"]
-# Forwards into frust-theme's own `glyph-fonts` (gf2 opt-out chain). Nothing
-# in this crate is itself feature-gated on it — `font_registry` registers
-# whatever bytes a caller pushes — this is purely a pass-through edge so the
-# facade's default-on `glyph-fonts` feature reaches frust-theme.
-glyph-fonts = ["frust-theme/glyph-fonts"]
 
 [dependencies]
 # Platform-agnostic shell plumbing: no jni/ndk/winit here, so the whole crate

@@ -70,16 +70,17 @@
 //! `crate::android::fonts`'s identical contract: never a crash, never a
 //! panic across FFI (`docs/CODE_STANDARDS.md`'s no-unwind rule).
 //!
-//! # OFL-1.1 redistribution note
+//! # Font-byte redistribution note
 //!
-//! Same provenance as the Android half: [`Typeface::GlyphMono`]/
-//! [`Typeface::GlyphPlex`] resolve to Space Mono / IBM Plex Mono, the exact
-//! bytes `frust-theme`'s `glyph-fonts` feature bundles (Google Fonts / IBM,
-//! SIL Open Font License 1.1 — see `crates/frust-theme/src/glyph/fonts.rs`
-//! and `crates/frust-theme/fonts/README.md`). This module never persists
-//! them anywhere a user or another app can reach — a `CTFontDescriptor` sits
-//! in this process's own memory for this process's own lifetime, no file, no
-//! `Persistent`/`Session` scope registration.
+//! Same shape as the Android half: [`Typeface::GlyphMono`]/
+//! [`Typeface::GlyphPlex`] are publish slots carrying whatever face a design
+//! system attached through `frust_theme::NativeTypefaces` (`frust-glyph`
+//! attaches Space Mono / IBM Plex Mono, SIL Open Font License 1.1 — see
+//! `plugins/glyph/fonts/README.md`; another design system's licence terms are
+//! its own). This module never persists a face anywhere a user or another app
+//! can reach — a `CTFontDescriptor` sits in this process's own memory for
+//! this process's own lifetime, no file, no `Persistent`/`Session` scope
+//! registration.
 
 use std::cell::RefCell;
 use std::sync::{Once, OnceLock};

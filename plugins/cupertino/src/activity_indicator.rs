@@ -300,7 +300,7 @@ mod tests {
 
     #[test]
     fn reduce_motion_freezes_the_ring_and_stops_requesting_frames() {
-        let mut theme = Theme::cupertino_baseline();
+        let mut theme = crate::baseline();
         theme.motion.reduce_motion = true;
         let mut w = build(true);
         for _ in 0..3 {
@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn themed_paint_uses_secondary_label_color() {
-        let theme = Theme::cupertino_baseline();
+        let theme = crate::baseline();
         let mut w = build(false);
         let mut rec = StrokeRecorder::default();
         let mut ctx = PaintCtx::new(Point::ZERO, Size::new(DIAMETER, DIAMETER)).with_theme(&theme);

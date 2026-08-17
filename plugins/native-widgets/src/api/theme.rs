@@ -26,60 +26,46 @@
 //! | `button_text_size_sp` | `type_scale.label_large.size` | `Button` text size |
 //! | `body_text_size_sp` | `type_scale.body_large.size` | `Label` text size |
 //! | `dark` | `brightness == Brightness::Dark` | every control (L1's `Context` qualification) |
-//! | `button_typeface` | `NativeTypefaces::button` ⇒ that face, else `design_language == Glyph` ⇒ Space Mono, else the platform's own | `Button` `Typeface` (theme ladder L3) |
-//! | `body_typeface` | `NativeTypefaces::body` ⇒ that face, else `design_language == Glyph` ⇒ IBM Plex Mono, else the platform's own | `Label`/`Switch` `Typeface` (theme ladder L3) |
+//! | `button_typeface` | `NativeTypefaces::button` ⇒ that face, else the platform's own | `Button` `Typeface` (theme ladder L3) |
+//! | `body_typeface` | `NativeTypefaces::body` ⇒ that face, else the platform's own | `Label`/`Switch` `Typeface` (theme ladder L3) |
 //!
 //! # Theme ladder L3: typography, extension-first
 //!
 //! Unlike every other row above (folded unconditionally from whichever
-//! `Theme` is active), the two typeface rows resolve through a three-step
+//! `Theme` is active), the two typeface rows resolve through a two-step
 //! ladder, **independently per slot** ([`resolve_slot`]):
 //!
-//! 1. **[`frust_theme::NativeTypefaces`]**, the theme extension a third-party
-//!    design system attaches to carry its own faces (see that type's module
-//!    doc — no built-in baseline attaches it). Its `button`/`body` face bytes
-//!    are published straight through this module's existing two-payload
-//!    platform seam and selected for that slot.
-//! 2. **The Glyph shortcut** — no extension face for this slot, but
-//!    [`Theme::design_language`] is [`DesignLanguage::Glyph`]: the bundled
-//!    `frust_theme::glyph::font_data()` faces apply, `Button` getting Space
-//!    Mono (Glyph's bolder display face) and `Label`/`Switch` IBM Plex Mono
-//!    (Glyph's body face).
-//! 3. **[`typeface::Typeface::System`]** — the platform's own face. Imposing
-//!    Glyph's monospace faces on a Material3/Cupertino theme that never asked
-//!    for them would be a worse regression than leaving the platform's own
-//!    face alone, so a theme with neither an attached face nor the Glyph tag
-//!    lands here. This arm publishes **no bytes** (`&[]`), not the bundled
-//!    Glyph bytes — see *System publishes nothing* below.
+//! 1. **[`frust_theme::NativeTypefaces`]**, the theme extension a design
+//!    system attaches to carry its own faces (see that type's module doc — no
+//!    CORE baseline attaches it). Its `button`/`body` face bytes are published
+//!    straight through this module's two-payload platform seam and selected
+//!    for that slot.
+//! 2. **[`typeface::Typeface::System`]** — the platform's own face, for a
+//!    slot with no attached face. This arm publishes **no bytes** (`&[]`) —
+//!    see *System publishes nothing* below.
+//!
+//! **There is no design-language shortcut, and deliberately so.** A design
+//! system's fonts reach a native control through `NativeTypefaces` and
+//! nothing else: [`Theme::design_language`] is an identity tag this module
+//! never reads. `frust-glyph`'s baseline attaches the extension (its
+//! `tokens::native_typefaces()`), which is the whole of how its monospace
+//! faces reach `Button`/`Label`; a design system that attaches nothing gets
+//! the platform's own face, which is the correct outcome rather than a gap.
 //!
 //! ## System publishes nothing
 //!
-//! An earlier revision of step 3 carried the bundled Glyph bytes along even
-//! when `System` was selected, reasoning that this stopped the *other*
-//! slot's publish from "blanking" them. That reasoning was wrong: with the
-//! `glyph-fonts` feature on by default, it meant a theme with no
-//! `NativeTypefaces` extension at all — a plain, unmodified Material3
-//! baseline — published the non-empty pair `(Space Mono, IBM Plex Mono)` on
-//! its very first [`resolve`], because the ride-along bytes made the pair
-//! look non-empty to [`publish_font_bytes`]'s empty-pair skip. Since the
-//! platform halves latch their *first* published pair
-//! ([`crate::android::fonts::set_glyph_bytes`], mirrored on iOS), a
-//! Material3-only app that happened to construct any native control before
-//! installing a design system permanently latched Glyph's own faces — a
-//! design system's later, real publish would register correctly host-side
-//! (this module's own `ResolvedTheme`/props) but the platform half would
-//! never re-register the device-side font object, so the device kept
-//! rendering Space Mono / IBM Plex Mono for `GlyphMono`/`GlyphPlex` no
-//! matter what the design system published.
-//!
-//! With step 3 now publishing `&[]`, a Material3/no-extension resolve
-//! produces the empty pair `(&[], &[])`, [`publish_font_bytes`] skips it
-//! entirely (its own empty-pair short-circuit), and nothing latches — so a
-//! design system installed afterward gets the first real publish and
-//! registers correctly. Every legitimate need for the bundled Glyph bytes is
-//! still met: step 2 supplies them directly, in the same resolve, whenever a
-//! Glyph theme actually selects them for a slot — the ride-along in step 3
-//! never fired for a case step 2 did not already cover on its own.
+//! The `System` arm publishes the empty payload rather than any fallback
+//! bytes, and that is load-bearing. The *platform* halves latch their FIRST
+//! published pair ([`crate::android::fonts::set_glyph_bytes`], mirrored on
+//! iOS), so any non-empty pair crossing the seam before a design system is
+//! installed would permanently latch those bytes: the design system's later,
+//! real publish would register correctly host-side (this module's own
+//! `ResolvedTheme`/props) but the platform half would never re-register the
+//! device-side font object, and the device would keep rendering the latched
+//! faces. With `System` publishing `&[]`, a no-extension resolve produces the
+//! empty pair `(&[], &[])`, [`publish_font_bytes`] skips it entirely (its own
+//! empty-pair short-circuit), and nothing latches — so a design system
+//! installed afterward gets the first real publish and registers correctly.
 //!
 //! **Half-filled extension, one real slot + one `System` slot** (e.g. a
 //! design system that only overrides the button face): the published pair
@@ -91,11 +77,10 @@
 //! `GlyphPlex` off these bytes — `typeface_for`/`descriptor_for` short-circuit
 //! `System` before touching the published payload at all. The empty half
 //! only becomes observable if a *later, different* resolve wants real bytes
-//! for that same slot (e.g. the app later switches to a Glyph theme, or the
-//! design system later fills the body slot too); that is exactly the
-//! existing first-publish-latch gap (see *Publishing* below and
-//! `docs/LIMITATIONS.md`'s `native-typeface-first-publish-latch`), not a new
-//! one this change introduces.
+//! for that same slot (e.g. the design system later fills the body slot too);
+//! that is exactly the existing first-publish-latch gap (see *Publishing*
+//! below and `docs/LIMITATIONS.md`'s `native-typeface-first-publish-latch`),
+//! not a new one.
 //!
 //! `Switch` never actually shows text through this plugin today, but it's
 //! still a `TextView` subclass under the hood (`android.widget.Switch extends
@@ -106,10 +91,10 @@
 //!
 //! ## `Typeface::GlyphMono`/`GlyphPlex` name two slots, not two Glyph faces
 //!
-//! With step 1 in place both variants mean "custom face slot 0 (button) /
-//! slot 1 (body)", whatever bytes were published into them — the Glyph faces
-//! are just step 2's occupants. The variants keep their Glyph-era names on
-//! purpose: their spellings are the frozen FFI wire strings
+//! Both variants mean "custom face slot 0 (button) / slot 1 (body)", whatever
+//! bytes were published into them — the Glyph faces are merely the first
+//! occupants shipped. The variants keep their Glyph-era names on purpose:
+//! their spellings are the frozen FFI wire strings
 //! (`crate::controls::typeface::Typeface::wire`) the Kotlin/ObjC halves
 //! decode, and `crate::android::fonts` reuses the same strings as the
 //! `face_id` half of its content-hash cache-file name. Renaming the Rust
@@ -211,7 +196,7 @@
 
 use std::sync::{Mutex, PoisonError};
 
-use frust::{Brightness, Color, DesignLanguage, Theme};
+use frust::{Brightness, Color, Theme};
 use frust_theme::{FontFace, NativeTypefaces};
 
 use crate::controls::typeface::Typeface;
@@ -274,10 +259,10 @@ pub(crate) struct ResolvedTheme {
     /// `type_scale.body_large.size`, sp.
     pub(crate) body_text_size_sp: f32,
     /// `Button`'s `Typeface` (theme ladder L3) — see the module doc's
-    /// *typography, gated on `design_language`* section.
+    /// *typography, extension-first* section.
     pub(crate) button_typeface: Typeface,
     /// `Label`/`Switch`'s `Typeface` (theme ladder L3) — see the
-    /// module doc's *typography, gated on `design_language`* section.
+    /// module doc's *typography, extension-first* section.
     pub(crate) body_typeface: Typeface,
 }
 
@@ -313,10 +298,9 @@ pub(crate) fn resolve(theme: &Theme) -> ResolvedTheme {
 struct ResolvedFace {
     /// The slot's selected face — see [`resolve_slot`].
     typeface: Typeface,
-    /// The bytes to publish into this slot. Empty when nothing at all is
-    /// available for it (no attached face, no bundled Glyph bytes), in which
-    /// case [`Self::typeface`] is [`Typeface::System`] and the slot is never
-    /// asked to register them.
+    /// The bytes to publish into this slot. Empty when no face is attached
+    /// for it, in which case [`Self::typeface`] is [`Typeface::System`] and
+    /// the slot is never asked to register them.
     bytes: &'static [u8],
 }
 
@@ -324,82 +308,34 @@ struct ResolvedFace {
 /// ladder — pure; [`resolve`] publishes the result.
 fn plan_typefaces(theme: &Theme) -> (ResolvedFace, ResolvedFace) {
     let faces = theme.extension::<NativeTypefaces>();
-    let is_glyph = theme.design_language == DesignLanguage::Glyph;
-    let (glyph_mono, glyph_plex) = glyph_font_bytes();
     (
-        resolve_slot(
-            faces.and_then(|f| f.button),
-            glyph_mono,
-            is_glyph,
-            Typeface::GlyphMono,
-        ),
-        resolve_slot(
-            faces.and_then(|f| f.body),
-            glyph_plex,
-            is_glyph,
-            Typeface::GlyphPlex,
-        ),
+        resolve_slot(faces.and_then(|f| f.button), Typeface::GlyphMono),
+        resolve_slot(faces.and_then(|f| f.body), Typeface::GlyphPlex),
     )
 }
 
 /// One slot of the module doc's ladder: an attached [`FontFace`] wins; else
-/// the bundled Glyph face, but only when the active theme actually *is*
-/// Glyph; else the platform's own face.
+/// the platform's own face.
 ///
 /// `slot` is the wire-level slot this face would occupy
 /// ([`Typeface::GlyphMono`] for button, [`Typeface::GlyphPlex`] for body —
 /// see the module doc on why those names outlived their Glyph-only meaning).
-/// The `System` arm publishes **no bytes at all** (`&[]`), whatever bundled
-/// Glyph bytes exist — see the module doc's *System publishes nothing*
-/// section for why an earlier ride-along here was a real bug, not a
-/// harmless belt-and-braces default. With `frust-theme`'s bundled bytes
-/// absent (this crate's `glyph-fonts` feature off) step 2 has nothing to
-/// apply, so a Glyph theme with no attached face lands on `System` too — the
-/// same face the platform half would have degraded to on finding no
-/// published bytes.
-fn resolve_slot(
-    attached: Option<FontFace>,
-    glyph: Option<&'static [u8]>,
-    is_glyph: bool,
-    slot: Typeface,
-) -> ResolvedFace {
-    match (attached, glyph) {
-        (Some(face), _) => ResolvedFace {
+/// The `System` arm publishes **no bytes at all** (`&[]`) — see the module
+/// doc's *System publishes nothing* section for why any ride-along payload
+/// here is a real bug, not a harmless belt-and-braces default. There is no
+/// design-language arm: a design system's faces reach a native control ONLY
+/// through the extension.
+fn resolve_slot(attached: Option<FontFace>, slot: Typeface) -> ResolvedFace {
+    match attached {
+        Some(face) => ResolvedFace {
             typeface: slot,
             bytes: face.bytes,
         },
-        (None, Some(bytes)) if is_glyph => ResolvedFace {
-            typeface: slot,
-            bytes,
-        },
-        (None, _) => ResolvedFace {
+        None => ResolvedFace {
             typeface: Typeface::System,
             bytes: &[],
         },
     }
-}
-
-/// `frust-theme`'s embedded Glyph faces — the ladder's step 2, and the one
-/// place this crate names `frust_theme::glyph` (the api→runtime seam
-/// `crate::android::fonts`'s module doc describes: this crate's `Cargo.toml`
-/// allows a `frust-theme` dependency only behind its own `frust-api`
-/// feature, and only this module ever names it, so the platform half stays
-/// free of it regardless of platform or feature state).
-///
-/// `frust_theme::glyph::font_data()` always exists — an empty slice with
-/// `frust-theme`'s own `glyph-fonts` feature off
-/// (`crates/frust-theme/src/glyph/mod.rs`'s own doc) — so this quietly
-/// yields `None`s on that configuration rather than panicking on an
-/// out-of-bounds index. Indices 0/3 are a documented coupling to
-/// `frust-theme`'s own (private) `font_data()` array literal — Space Mono ×3
-/// (Regular/Bold/Italic) then IBM Plex Mono ×4
-/// (Regular/Medium/SemiBold/Italic), each family's first entry being its
-/// Regular face; no public API names a face by weight, so a future reorder
-/// there would silently pick a different (but still valid) face, never a
-/// panic or crash.
-fn glyph_font_bytes() -> (Option<&'static [u8]>, Option<&'static [u8]>) {
-    let faces = frust_theme::glyph::font_data();
-    (faces.first().copied(), faces.get(3).copied())
 }
 
 /// One published payload's identity: its address and length. A face is a
@@ -454,8 +390,8 @@ static PUBLISHED: PublishGuard = PublishGuard::new();
 
 /// Publish this resolve's face payloads to the platform backend (theme
 /// ladder L3), skipping the seam entirely when they match the last published
-/// pair. Two payloads with nothing in either (no attached faces, no bundled
-/// Glyph bytes) publish nothing at all — there would be nothing to register.
+/// pair. Two payloads with nothing in either (no attached faces) publish
+/// nothing at all — there would be nothing to register.
 fn publish_font_bytes(button: &'static [u8], body: &'static [u8]) {
     if (button.is_empty() && body.is_empty()) || !PUBLISHED.take_if_changed(button, body) {
         return;
@@ -488,86 +424,107 @@ fn set_platform_font_bytes(_button: &'static [u8], _body: &'static [u8]) {}
 mod tests {
     use super::*;
 
-    // --- mapping-table snapshots, both brightnesses (real, source-cited
-    // Glyph hex values — not a tautological re-derivation of `resolve`
-    // itself) --------------------------------------------------------------
+    // --- mapping-table snapshots: which ColorScheme/ShapeScale/TypeScale
+    // source each ResolvedTheme field actually reads. No design system ships
+    // in this crate's graph any more, so the fixture below is a theme built
+    // with a DISTINCT, recognizable value per source role — which is what
+    // makes these assertions a real row-by-row pin of the module doc's
+    // mapping table rather than a re-derivation of `resolve` itself. ------
 
-    #[test]
-    fn resolve_snapshots_the_glyph_dark_baseline() {
-        // Glyph dark (`crates/frust-theme/src/glyph/color.rs`'s
-        // `ColorScheme::glyph_dark`): primary == primary_container == the
-        // amber fill (dark's accent split collapses text/fill to the same
-        // hex), on_primary_container the near-black amber ink, on_surface
-        // the warm-white body ink.
-        let theme = Theme::glyph_baseline();
-        assert_eq!(theme.brightness, Brightness::Dark, "dark-first default");
-
-        let tokens = resolve(&theme);
-        assert!(tokens.dark);
-        assert_eq!(tokens.accent_ink, 0xFFFF_B627, "primary (accent ink)");
-        assert_eq!(tokens.accent_fill, 0xFFFF_B627, "primary_container (fill)");
-        assert_eq!(
-            tokens.on_accent_fill, 0xFF24_1A04,
-            "on_primary_container (ink atop the fill)"
-        );
-        assert_eq!(tokens.body_text, 0xFFF2_EAD9, "on_surface (body ink)");
-        assert_eq!(tokens.surface_bg, 0xFF16_1A23, "surface (bg-surface, dark)");
-        assert_eq!(tokens.corner_radius_dp, 6.0, "shape.small (Glyph)");
-        assert_eq!(tokens.button_text_size_sp, 12.5, "type_scale.label_large");
-        assert_eq!(tokens.body_text_size_sp, 13.0, "type_scale.body_large");
-        assert_eq!(tokens.button_typeface, Typeface::GlyphMono);
-        assert_eq!(tokens.body_typeface, Typeface::GlyphPlex);
+    /// A theme whose every mapped role carries its own distinctive value, so
+    /// a row reading the wrong role is caught by the value, not just by a
+    /// type check. `light` and `dark` differ role-for-role too, so the
+    /// brightness selector is exercised alongside the mapping.
+    fn mapped_theme() -> Theme {
+        Theme::builder(Theme::neutral())
+            .map_colors_light(|c| frust::ColorScheme {
+                primary: Color::from_rgb8(0x11, 0x00, 0x00),
+                primary_container: Color::from_rgb8(0x22, 0x00, 0x00),
+                on_primary_container: Color::from_rgb8(0x33, 0x00, 0x00),
+                on_surface: Color::from_rgb8(0x44, 0x00, 0x00),
+                surface: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+                ..c
+            })
+            .map_colors_dark(|c| frust::ColorScheme {
+                primary: Color::from_rgb8(0x00, 0x11, 0x00),
+                primary_container: Color::from_rgb8(0x00, 0x22, 0x00),
+                on_primary_container: Color::from_rgb8(0x00, 0x33, 0x00),
+                on_surface: Color::from_rgb8(0x00, 0x44, 0x00),
+                surface: Color::from_rgb8(0x00, 0x00, 0x00),
+                ..c
+            })
+            .map_shape(|s| frust::ShapeScale { small: 6.0, ..s })
+            .build()
     }
 
     #[test]
-    fn resolve_snapshots_the_glyph_light_variant() {
-        // Glyph light (`ColorScheme::glyph_light`): the accent role split
-        // pulls apart here — primary (text ink) darkens for AA on paper
-        // while primary_container (fill) stays the same bright amber.
-        let theme = Theme::glyph_baseline().with_brightness(Brightness::Light);
-
+    fn resolve_maps_each_role_to_its_documented_field_in_dark() {
+        let theme = mapped_theme().with_brightness(Brightness::Dark);
         let tokens = resolve(&theme);
-        assert!(!tokens.dark);
+
+        assert!(tokens.dark);
+        assert_eq!(tokens.accent_ink, 0xFF00_1100, "primary (accent ink)");
         assert_eq!(
-            tokens.accent_ink, 0xFFA3_650A,
-            "primary (accent ink, AA-darkened)"
+            tokens.accent_fill, 0xFF00_2200,
+            "primary_container (the bright fill, never bare primary)"
         );
         assert_eq!(
-            tokens.accent_fill, 0xFFFF_B627,
-            "primary_container (fill, unchanged from dark)"
-        );
-        assert_eq!(
-            tokens.on_accent_fill, 0xFF2A_1C04,
+            tokens.on_accent_fill, 0xFF00_3300,
             "on_primary_container (ink atop the fill)"
         );
-        assert_eq!(tokens.body_text, 0xFF22_1D12, "on_surface (body ink)");
+        assert_eq!(tokens.body_text, 0xFF00_4400, "on_surface (body ink)");
+        assert_eq!(tokens.surface_bg, 0xFF00_0000, "surface (page background)");
+        assert_eq!(tokens.corner_radius_dp, 6.0, "shape.small");
         assert_eq!(
-            tokens.surface_bg, 0xFFFF_FFFF,
-            "surface (bg-surface, light — the lightest slot)"
+            tokens.button_text_size_sp, theme.type_scale.label_large.size,
+            "type_scale.label_large"
         );
+        assert_eq!(
+            tokens.body_text_size_sp, theme.type_scale.body_large.size,
+            "type_scale.body_large"
+        );
+    }
+
+    #[test]
+    fn resolve_maps_the_light_scheme_when_the_theme_is_light() {
+        // The same rows, off the OTHER scheme — proving `resolve` reads
+        // `theme.scheme()` rather than a hardcoded half.
+        let theme = mapped_theme().with_brightness(Brightness::Light);
+        let tokens = resolve(&theme);
+
+        assert!(!tokens.dark);
+        assert_eq!(tokens.accent_ink, 0xFF11_0000);
+        assert_eq!(tokens.accent_fill, 0xFF22_0000);
+        assert_eq!(tokens.on_accent_fill, 0xFF33_0000);
+        assert_eq!(tokens.body_text, 0xFF44_0000);
+        assert_eq!(tokens.surface_bg, 0xFFFF_FFFF);
         // Shape/type scales don't vary by brightness.
         assert_eq!(tokens.corner_radius_dp, 6.0);
-        assert_eq!(tokens.button_text_size_sp, 12.5);
-        assert_eq!(tokens.body_text_size_sp, 13.0);
-        // Neither does the typeface choice — `design_language`, not
-        // `brightness`, gates it (module doc's *typography* section).
-        assert_eq!(tokens.button_typeface, Typeface::GlyphMono);
-        assert_eq!(tokens.body_typeface, Typeface::GlyphPlex);
     }
 
     #[test]
-    fn non_glyph_baselines_resolve_the_system_typeface() {
-        // Imposing Glyph's bundled monospace faces on a Material3/Cupertino
-        // theme that never asked for them would be a worse regression than
-        // leaving the platform's own face alone (module doc's *typography,
-        // gated on `design_language`* section).
-        let m3 = resolve(&Theme::m3_baseline());
-        assert_eq!(m3.button_typeface, Typeface::System);
-        assert_eq!(m3.body_typeface, Typeface::System);
+    fn a_theme_with_no_attached_faces_resolves_the_system_typeface() {
+        // The ladder's step 2, and the whole of the no-design-language rule:
+        // a theme that attaches no `NativeTypefaces` gets the platform's own
+        // face, whatever its `design_language` tag says. Both a plain neutral
+        // theme and a `Glyph`-TAGGED one land here — the tag is identity, not
+        // a font selector (module doc's *typography, extension-first*).
+        let plain = resolve(&Theme::neutral());
+        assert_eq!(plain.button_typeface, Typeface::System);
+        assert_eq!(plain.body_typeface, Typeface::System);
 
-        let cupertino = resolve(&Theme::cupertino_baseline());
-        assert_eq!(cupertino.button_typeface, Typeface::System);
-        assert_eq!(cupertino.body_typeface, Typeface::System);
+        let tagged = Theme::builder(Theme::neutral())
+            .design_language(frust::DesignLanguage::Glyph)
+            .build();
+        assert_eq!(tagged.design_language, frust::DesignLanguage::Glyph);
+        let tagged = resolve(&tagged);
+        assert_eq!(
+            tagged.button_typeface,
+            Typeface::System,
+            "a Glyph TAG with no attached faces selects nothing — only the \
+             extension does"
+        );
+        assert_eq!(tagged.body_typeface, Typeface::System);
     }
 
     // --- theme ladder L3: the extension-first typeface ladder ---------------
@@ -581,11 +538,11 @@ mod tests {
     }
 
     #[test]
-    fn an_attached_extension_beats_the_glyph_shortcut_and_the_system_default() {
+    fn an_attached_extension_beats_the_system_default() {
         // Step 1 of the module doc's ladder, on a theme that would otherwise
-        // land on step 3 (Material3 tag, no bundled faces of its own).
+        // land on step 2.
         let theme = with_faces(
-            Theme::m3_baseline(),
+            Theme::neutral(),
             NativeTypefaces {
                 button: Some(FontFace::new("Acme Display", DISPLAY_FACE)),
                 body: Some(FontFace::new("Acme Text", BODY_FACE)),
@@ -605,130 +562,74 @@ mod tests {
     }
 
     #[test]
-    fn an_attached_extension_displaces_the_bundled_glyph_faces() {
-        // Same step 1, but over the one baseline that DOES have step-2 faces
-        // — the extension still wins, and the published payload is the design
-        // system's, not Glyph's.
-        let glyph_bytes = glyph_font_bytes();
-        let theme = with_faces(
-            Theme::glyph_baseline(),
-            NativeTypefaces::uniform(FontFace::new("Acme Text", BODY_FACE)),
-        );
-
-        let (button, body) = plan_typefaces(&theme);
-        assert_eq!(button.bytes, BODY_FACE);
-        assert_eq!(body.bytes, BODY_FACE);
-        assert_ne!(
-            Some(button.bytes),
-            glyph_bytes.0,
-            "an attached face must displace Space Mono, not sit behind it"
-        );
-    }
-
-    #[test]
     fn a_half_filled_extension_falls_back_per_slot() {
         // The ladder runs per slot: the filled one takes step 1, the empty
-        // one carries on to step 2 (Glyph theme) or step 3 (Material3).
+        // one carries on to step 2 — including under a Glyph-TAGGED theme,
+        // where no tag-driven shortcut exists to rescue it.
         let faces = NativeTypefaces {
             button: Some(FontFace::new("Acme Display", DISPLAY_FACE)),
             ..NativeTypefaces::default()
         };
+        let tagged = Theme::builder(Theme::neutral())
+            .design_language(frust::DesignLanguage::Glyph)
+            .build();
 
-        let (button, body) = plan_typefaces(&with_faces(Theme::m3_baseline(), faces));
-        assert_eq!(button.typeface, Typeface::GlyphMono);
-        assert_eq!(button.bytes, DISPLAY_FACE);
-        assert_eq!(body.typeface, Typeface::System, "step 3 for the body slot");
-        assert_eq!(
-            body.bytes,
-            &[] as &[u8],
-            "the empty slot publishes no bytes — the one-sided pair \
-             (DISPLAY_FACE, &[]) still crosses the platform seam since it \
-             isn't the all-empty case, but nothing ever asks the platform \
-             half to register GlyphPlex off it because this same resolve \
-             already picked System for the body slot"
-        );
-
-        let (button, body) = plan_typefaces(&with_faces(Theme::glyph_baseline(), faces));
-        assert_eq!(button.bytes, DISPLAY_FACE, "still step 1");
-        assert_eq!(
-            body.typeface,
-            Typeface::GlyphPlex,
-            "step 2 for the body slot: Glyph's own bundled IBM Plex Mono"
-        );
-        assert_eq!(
-            body.bytes,
-            glyph_font_bytes()
-                .1
-                .expect("bundled with the `glyph-fonts` feature, on by default")
-        );
+        for (name, base) in [("neutral", Theme::neutral()), ("glyph-tagged", tagged)] {
+            let (button, body) = plan_typefaces(&with_faces(base, faces));
+            assert_eq!(button.typeface, Typeface::GlyphMono, "{name}");
+            assert_eq!(button.bytes, DISPLAY_FACE, "{name}");
+            assert_eq!(
+                body.typeface,
+                Typeface::System,
+                "{name}: step 2 for the unfilled body slot"
+            );
+            assert_eq!(
+                body.bytes,
+                &[] as &[u8],
+                "{name}: the empty slot publishes no bytes — the one-sided \
+                 pair (DISPLAY_FACE, &[]) still crosses the platform seam \
+                 since it isn't the all-empty case, but nothing ever asks the \
+                 platform half to register GlyphPlex off it because this same \
+                 resolve already picked System for the body slot"
+            );
+        }
     }
 
     #[test]
     fn an_empty_extension_resolves_exactly_like_no_extension_at_all() {
         // `NativeTypefaces::default()` attaches the type without filling
         // either slot — the ladder must treat that as "nothing attached".
-        let attached = plan_typefaces(&with_faces(
-            Theme::m3_baseline(),
-            NativeTypefaces::default(),
-        ));
-        assert_eq!(attached, plan_typefaces(&Theme::m3_baseline()));
-
-        let attached = plan_typefaces(&with_faces(
-            Theme::glyph_baseline(),
-            NativeTypefaces::default(),
-        ));
-        assert_eq!(attached, plan_typefaces(&Theme::glyph_baseline()));
+        let attached = plan_typefaces(&with_faces(Theme::neutral(), NativeTypefaces::default()));
+        assert_eq!(attached, plan_typefaces(&Theme::neutral()));
     }
 
     #[test]
-    fn resolve_slot_covers_all_three_ladder_steps() {
+    fn resolve_slot_covers_both_ladder_steps() {
         let attached = FontFace::new("Acme Display", DISPLAY_FACE);
-        let bundled: &'static [u8] = b"bundled-glyph-face";
 
-        // 1. attached face wins, whatever the design language.
-        for is_glyph in [true, false] {
-            assert_eq!(
-                resolve_slot(Some(attached), Some(bundled), is_glyph, Typeface::GlyphMono),
-                ResolvedFace {
-                    typeface: Typeface::GlyphMono,
-                    bytes: DISPLAY_FACE,
-                }
-            );
-        }
-
-        // 2. no attached face + a Glyph theme: the bundled face.
+        // 1. an attached face wins and occupies its wire slot.
         assert_eq!(
-            resolve_slot(None, Some(bundled), true, Typeface::GlyphMono),
+            resolve_slot(Some(attached), Typeface::GlyphMono),
             ResolvedFace {
                 typeface: Typeface::GlyphMono,
-                bytes: bundled,
+                bytes: DISPLAY_FACE,
             }
         );
 
-        // 3. no attached face and not a Glyph theme: the platform's own —
-        // and it publishes NO bytes. An earlier revision let the bundled
-        // Glyph bytes ride along here, which meant a plain
-        // Material3/no-extension theme published a non-empty pair on its
-        // first resolve and permanently latched Glyph's faces platform-side
-        // — see the module doc's *System publishes nothing* section.
+        // 2. no attached face: the platform's own — and it publishes NO
+        // bytes. Any ride-along payload here would make an otherwise-empty
+        // pair look non-empty to `publish_font_bytes`'s skip and permanently
+        // latch those bytes platform-side — see the module doc's *System
+        // publishes nothing* section.
         assert_eq!(
-            resolve_slot(None, Some(bundled), false, Typeface::GlyphMono),
+            resolve_slot(None, Typeface::GlyphMono),
             ResolvedFace {
                 typeface: Typeface::System,
                 bytes: &[],
             },
-            "System must not carry bundled bytes along — nothing selects \
-             them, and doing so latches them process-wide via the platform \
-             halves' first-publish-wins OnceLock"
-        );
-        // …and with nothing bundled either, step 2 cannot apply at all —
-        // same empty-bytes outcome.
-        assert_eq!(
-            resolve_slot(None, None, true, Typeface::GlyphMono),
-            ResolvedFace {
-                typeface: Typeface::System,
-                bytes: &[],
-            }
+            "System must carry no bytes — nothing selects them, and doing so \
+             latches them process-wide via the platform halves' \
+             first-publish-wins OnceLock"
         );
     }
 
@@ -765,18 +666,13 @@ mod tests {
     }
 
     #[test]
-    fn a_no_extension_material3_resolve_publishes_nothing_so_a_later_design_system_gets_the_first_real_publish()
+    fn a_no_extension_resolve_publishes_nothing_so_a_later_design_system_gets_the_first_real_publish()
      {
-        // With `glyph-fonts` on by default, a plain Material3 theme with no
-        // `NativeTypefaces` extension used to publish the non-empty pair
-        // (Space Mono, IBM Plex Mono) on its very first resolve — because
-        // step 3's ride-along bytes made an otherwise-empty pair look
-        // non-empty to `publish_font_bytes`'s empty-pair skip. Since the
-        // platform halves latch their FIRST published pair, any native
-        // control resolving under a plain Material3/no-extension theme
-        // before a design system was installed would permanently latch
-        // Glyph's own faces, leaving a later design system's real faces to
-        // register correctly host-side but never on device.
+        // The platform halves latch their FIRST published pair, so any
+        // native control resolving under a no-extension theme before a design
+        // system is installed must publish nothing at all — otherwise those
+        // bytes latch and the design system's real faces would register
+        // host-side but never on device.
         //
         // A local guard, not the process-global one — this replicates
         // `publish_font_bytes`'s exact skip/take-if-changed logic so the
@@ -790,23 +686,22 @@ mod tests {
         };
 
         assert!(
-            !would_cross_the_seam(&Theme::m3_baseline()),
-            "a plain Material3 theme with no attached extension must \
-             publish nothing at all — the all-empty pair must never cross \
-             the platform seam"
+            !would_cross_the_seam(&Theme::neutral()),
+            "a theme with no attached extension must publish nothing at all \
+             — the all-empty pair must never cross the platform seam"
         );
 
         // A design system now attaches its own faces. This must be the
         // FIRST publish that actually reaches the platform half — nothing
         // latched before it.
         let acme = with_faces(
-            Theme::m3_baseline(),
+            Theme::neutral(),
             NativeTypefaces::uniform(FontFace::new("Acme Text", BODY_FACE)),
         );
         assert!(
             would_cross_the_seam(&acme),
             "the design system's pair must be the first real publish, \
-             unblocked by the earlier no-op Material3 resolve"
+             unblocked by the earlier no-op resolve"
         );
     }
 
@@ -823,10 +718,10 @@ mod tests {
         // The end-to-end shape of a live design-system swap: same baseline,
         // different attached faces, and the resolved props follow.
         let acme = with_faces(
-            Theme::m3_baseline(),
+            Theme::neutral(),
             NativeTypefaces::uniform(FontFace::new("Acme Text", BODY_FACE)),
         );
-        let plain = Theme::m3_baseline();
+        let plain = Theme::neutral();
 
         assert_eq!(resolve(&acme).body_typeface, Typeface::GlyphPlex);
         assert_eq!(resolve(&plain).body_typeface, Typeface::System);
@@ -841,7 +736,7 @@ mod tests {
 
     #[test]
     fn an_unchanged_theme_resolves_to_partial_eq_equal_tokens() {
-        let theme = Theme::glyph_baseline();
+        let theme = mapped_theme();
         assert_eq!(
             resolve(&theme),
             resolve(&theme),
@@ -899,7 +794,7 @@ mod tests {
         const MIN_CONTRAST: f64 = 4.5; // WCAG AA, normal text
 
         for brightness in [Brightness::Dark, Brightness::Light] {
-            let theme = Theme::glyph_baseline().with_brightness(brightness);
+            let theme = Theme::neutral().with_brightness(brightness);
             let t = resolve(&theme);
 
             let label = contrast_ratio(t.body_text, t.surface_bg);
@@ -907,7 +802,7 @@ mod tests {
                 label >= MIN_CONTRAST,
                 "{brightness:?}: Label's body_text {:#010x} over surface_bg \
                  {:#010x} contrasts only {label:.2}:1 (need >= {MIN_CONTRAST}:1) \
-                 — exactly the dark-on-dark defect VERIFY-P1.md bar 3 found",
+                 — exactly the dark-on-dark defect an earlier device gate found",
                 t.body_text,
                 t.surface_bg
             );

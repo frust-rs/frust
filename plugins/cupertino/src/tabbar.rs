@@ -949,7 +949,7 @@ mod tests {
         // composites the token's over-light wash stack (read purely from
         // `Theme.glass.bar.fills_light`) as rounded-rect washes — the fill
         // stack reaches the paint layer.
-        let theme = Theme::cupertino_baseline();
+        let theme = crate::baseline();
         let material = &theme.glass.bar;
         assert!(
             !material.is_opaque(),
@@ -986,7 +986,7 @@ mod tests {
     fn material_theme_keeps_the_bar_opaque() {
         // An M3 theme's `glass.bar` is opaque, so the same code
         // fills the pill with the opaque surface color — never the wash stack.
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         assert!(theme.glass.bar.is_opaque());
         let view: CupertinoTabBarView<()> =
             cupertino_tab_bar(three_items(), 0, |_s: &mut (), _i| {});
@@ -1033,7 +1033,7 @@ mod tests {
         let mut m = MinimizeState::new();
         assert_eq!(m.progress(), 0.0);
         m.apply_scroll(40.0); // → minimized
-        let spring = SpringDesc::from(Theme::cupertino_baseline().motion.default_spatial);
+        let spring = SpringDesc::from(crate::baseline().motion.default_spatial);
         // First drive seeds the clock (zero delta); the next advances.
         m.drive(spring, FrameTime::from_nanos(0));
         assert_eq!(m.progress(), 0.0, "the seeding frame makes no progress");

@@ -2,13 +2,11 @@
 //! aggregate plus its constituent light/dark [`ColorScheme`]s and the
 //! success/warning/info [`StatusPalette`] extension.
 //!
-//! Copied from `frust-theme`'s own (ungated) `Theme::cupertino_baseline`/
-//! `ColorScheme::cupertino_light`/`_dark`/`StatusPalette::m3` — this crate
-//! owns its own copy rather than calling those inherent constructors so it
-//! stays self-sufficient once the in-tree Cupertino catalog (and its token
-//! constructors) are removed. The [`GlassScale::ios27`](frust::GlassScale::ios27)
-//! recipe copy lives in [`crate::glass`] instead (a separate module — see
-//! that module's own docs for why).
+//! These tables were lifted out of `frust-theme` when the Cupertino catalog
+//! moved out of tree; nothing in the framework constructs them any more, so
+//! this crate owns them outright. The Liquid Glass recipe lives in
+//! [`crate::glass`] instead (a separate module — see that module's own docs
+//! for why).
 
 use frust::authoring::text::TextStyle;
 use frust::{

@@ -18,8 +18,7 @@ frust-reactive = { workspace = true }
 # `DesktopExtensions::on_theme_brightness_changed` is typed in
 # `frust_theme::Brightness`, which `frust-shell-desktop` carries but does not
 # re-export — naming the hook's parameter type means naming this crate. Same
-# `{ workspace = true }` shape (and therefore the same `default-features =
-# false` glyph-fonts opt-out chain) as `frust-shell-desktop`'s own edge.
+# `{ workspace = true }` shape as `frust-shell-desktop`'s own edge.
 frust-theme = { workspace = true }
 winit = { workspace = true }
 log = { workspace = true }

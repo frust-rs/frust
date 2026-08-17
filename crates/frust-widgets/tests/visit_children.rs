@@ -11,12 +11,13 @@
 //! 1. **Toolkit-level**, one test per field shape the macro handles —
 //!    `ChildPod` (Padding), `Vec<ChildPod>` (Column), `Option<ChildPod>`
 //!    (SizedBox, present and absent), and a multi-slot site naming both shapes
-//!    at once (`PatternSwitcher`'s `exiting`/`child`, empty and filled) — plus
-//!    a catalog widget proving the same seam covers the design-system tier.
-//! 2. **Per hand-written site**, one test each for the containers whose
-//!    children live behind their own row/slot struct and therefore implement
-//!    `VisitPods` by hand: `fab_menu` (item rows) and `navigator` (the page
-//!    stack).
+//!    at once (`PatternSwitcher`'s `exiting`/`child`, empty and filled).
+//! 2. **Per hand-written site**, one test for the container whose children
+//!    live behind their own row/slot struct and therefore implements
+//!    `VisitPods` by hand: `navigator` (the page stack).
+//!
+//! The design-system plugin crates build on the same public seam and carry
+//! their own coverage of it; nothing here reaches across into a catalog.
 
 use std::any::Any;
 
@@ -116,46 +117,6 @@ fn an_optional_slot_publishes_only_when_present() {
     assert!(empty[0].children.is_empty());
 }
 
-#[cfg(feature = "material")]
-#[test]
-fn a_catalog_widget_is_covered_by_the_same_toolkit_seam() {
-    use frust_widgets::{CardVariant, card};
-
-    let nodes = inspect(&mut |_: &mut ()| {
-        card(
-            CardVariant::Filled,
-            Column(vec![any(text("title")), any(text("body"))]),
-        )
-    });
-    assert_eq!(
-        short_names(&nodes),
-        vec!["CardWidget", "FlexWidget", "TextWidget", "TextWidget"]
-    );
-}
-
-#[cfg(feature = "material")]
-#[test]
-fn a_catalog_widget_publishes_its_per_item_slots() {
-    // `NavigationBarWidget { items: Vec<ChildPod> }` where each item is itself
-    // a `NavItemWidget { icon, label }` — two macro sites composing.
-    use frust_widgets::{nav_item, navigation_bar};
-
-    let nodes = inspect(&mut |_: &mut ()| {
-        navigation_bar(
-            vec![
-                nav_item("one").icon(any(text("i1"))),
-                nav_item("two").icon(any(text("i2"))),
-            ],
-            0,
-            |_: &mut (), _| {},
-        )
-    });
-    assert_eq!(count(&nodes, "NavigationBarWidget"), 1);
-    assert_eq!(count(&nodes, "NavItemWidget"), 2);
-    // Each item publishes its icon and its label.
-    assert_eq!(count(&nodes, "TextWidget"), 4);
-}
-
 #[test]
 fn a_multi_slot_container_publishes_each_filled_slot() {
     // The multi-field macro shape: `visit_children!(exiting, child)` names one
@@ -179,30 +140,6 @@ fn a_multi_slot_container_publishes_each_filled_slot() {
         "the empty exiting slot contributes nothing"
     );
     assert_eq!(nodes[0].children.len(), 1);
-}
-
-#[cfg(feature = "material")]
-#[test]
-fn fab_menu_publishes_its_item_rows_and_its_trigger() {
-    // Hand-written site: `FabMenuItemPod { icon, label }` implements
-    // `VisitPods`, so an open menu shows two pods per item plus the trigger.
-    use frust_widgets::{fab_menu, fab_menu_item};
-
-    let nodes = inspect(&mut |_: &mut ()| {
-        fab_menu(
-            any(text("+")),
-            true,
-            vec![
-                fab_menu_item(any(text("a")), "alpha", |_: &mut ()| {}),
-                fab_menu_item(any(text("b")), "beta", |_: &mut ()| {}),
-            ],
-            |_: &mut ()| {},
-        )
-    });
-    assert_eq!(count(&nodes, "FabMenuWidget"), 1);
-    // Two items x (icon + label), plus the trigger icon.
-    assert_eq!(nodes[0].children.len(), 5);
-    assert_eq!(count(&nodes, "TextWidget"), 5);
 }
 
 #[test]

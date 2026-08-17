@@ -1098,7 +1098,7 @@ mod tests {
 
     #[test]
     fn themed_paint_resolves_primary_and_shape_small() {
-        let theme = frust_theme::Theme::m3_baseline();
+        let theme = frust_theme::Theme::neutral();
         let mut w = widget();
         let (radius, color) = paint_bg(&mut w, Some(&theme));
         assert_eq!(color, theme.scheme().primary, "resting fill is primary");
@@ -1143,14 +1143,14 @@ mod tests {
         let mut w = widget();
         assert_eq!(w.style, ButtonStyle::Primary);
         assert_eq!(paint_bg(&mut w, None), (RADIUS, FILL));
-        let theme = frust_theme::Theme::m3_baseline();
+        let theme = frust_theme::Theme::neutral();
         let mut w2 = widget();
         assert_eq!(paint_bg(&mut w2, Some(&theme)).1, theme.scheme().primary);
     }
 
     #[test]
     fn secondary_style_paints_raised_surface_and_outline_border() {
-        let theme = frust_theme::Theme::m3_baseline();
+        let theme = frust_theme::Theme::neutral();
         let mut w = styled_widget(ButtonStyle::Secondary);
         let mut rec = RRectRecorder::default();
         let mut ctx = PaintCtx::new(Point::ZERO, Size::new(100.0, 40.0)).with_theme(&theme);
@@ -1161,7 +1161,7 @@ mod tests {
 
     #[test]
     fn ghost_style_is_transparent_at_rest_and_washes_on_press() {
-        let theme = frust_theme::Theme::m3_baseline();
+        let theme = frust_theme::Theme::neutral();
         let mut w = styled_widget(ButtonStyle::Ghost);
         let mut rec = RRectRecorder::default();
         let mut ctx = PaintCtx::new(Point::ZERO, Size::new(100.0, 40.0)).with_theme(&theme);
@@ -1182,7 +1182,7 @@ mod tests {
 
     #[test]
     fn danger_style_paints_error_border_and_error_faint_pressed_wash() {
-        let theme = frust_theme::Theme::m3_baseline();
+        let theme = frust_theme::Theme::neutral();
         let mut w = styled_widget(ButtonStyle::Danger);
         let mut rec = RRectRecorder::default();
         let mut ctx = PaintCtx::new(Point::ZERO, Size::new(100.0, 40.0)).with_theme(&theme);
@@ -1206,7 +1206,7 @@ mod tests {
         // tests above). A design system's own baseline is exercised by that
         // design system's own tests; the mapping asserted here is
         // language-neutral by construction.
-        let baselines = [frust_theme::Theme::m3_baseline()];
+        let baselines = [frust_theme::Theme::neutral()];
         for theme in &baselines {
             let scheme = theme.scheme();
 
@@ -1424,7 +1424,7 @@ mod tests {
         // DISABLED_ALPHA without changing the colors themselves, so the
         // dimming works identically under Material, Cupertino, Glyph, and
         // unthemed modes.
-        let theme = frust_theme::Theme::m3_baseline();
+        let theme = frust_theme::Theme::neutral();
         let mut w = widget();
         w.disabled = true;
         let mut rec = RRectRecorder::default();
@@ -1473,7 +1473,7 @@ mod tests {
         let mut w = widget();
         w.loading = true;
 
-        let mut theme = frust_theme::Theme::m3_baseline();
+        let mut theme = frust_theme::Theme::neutral();
         theme.motion.reduce_motion = false;
         let mut ctx = PaintCtx::new(Point::ZERO, Size::new(100.0, 40.0)).with_theme(&theme);
         let mut scene = RRectRecorder::default();

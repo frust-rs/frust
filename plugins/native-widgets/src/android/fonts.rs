@@ -14,16 +14,17 @@
 //!
 //! # The platform half never depends on `frust-theme`
 //!
-//! The Glyph font bytes originate in `frust-theme`'s `glyph-fonts` feature,
-//! reachable only from [`crate::api::theme`] (behind this crate's
-//! `frust-api` feature — the one place this crate's `Cargo.toml` allows a
-//! `frust-theme` dependency at all, and only under `frust-api`). This module
-//! never names that crate: `crate::api::theme` publishes the plain
-//! `&'static [u8]` slices once via [`set_glyph_bytes`] — the api→runtime
-//! seam, exactly like `crate::api::theme::ResolvedTheme`'s packed
-//! colour/size primitives already cross it. `cargo check -p
-//! frust-native-widgets --no-default-features` never sees this module reach
-//! for `frust-theme`, feature on or off — see this crate's `Cargo.toml`.
+//! The face bytes originate in a design system's own
+//! `frust_theme::NativeTypefaces` attachment, read only by
+//! [`crate::api::theme`] (behind this crate's `frust-api` feature — the one
+//! place this crate's `Cargo.toml` allows a `frust-theme` dependency at all,
+//! and only under `frust-api`). This module never names that crate:
+//! `crate::api::theme` publishes the plain `&'static [u8]` slices once via
+//! [`set_glyph_bytes`] — the api→runtime seam, exactly like
+//! `crate::api::theme::ResolvedTheme`'s packed colour/size primitives already
+//! cross it. `cargo check -p frust-native-widgets --no-default-features`
+//! never sees this module reach for `frust-theme`, feature on or off — see
+//! this crate's `Cargo.toml`.
 //!
 //! # One-time, content-hash-keyed registration
 //!

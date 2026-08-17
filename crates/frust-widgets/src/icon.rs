@@ -451,7 +451,7 @@ mod tests {
         let explicit = Color::from_rgb8(0xAB, 0xCD, 0xEF);
         let view = icon(square_data()).color(explicit);
         let mut w = build(&view);
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         let rec = paint_rec(&mut w, Point::ZERO, Some(&theme));
         assert_eq!(rec.fills[0].2, explicit);
     }
@@ -460,7 +460,7 @@ mod tests {
     fn themed_default_resolves_on_surface() {
         let view = icon(square_data());
         let mut w = build(&view);
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         let rec = paint_rec(&mut w, Point::ZERO, Some(&theme));
         assert_eq!(rec.fills[0].2, theme.scheme().on_surface);
     }

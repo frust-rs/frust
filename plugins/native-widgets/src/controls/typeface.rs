@@ -17,19 +17,19 @@
 //! is (declared from `crate::controls`, itself compiled on every target —
 //! `crate::controls`'s own module doc).
 //!
-//! # OFL-1.1 redistribution note
+//! # Font-byte redistribution note
 //!
-//! [`Typeface::GlyphMono`]/[`Typeface::GlyphPlex`] resolve to Space Mono /
-//! IBM Plex Mono — the same bytes `frust-theme`'s `glyph-fonts` feature
-//! bundles (Google Fonts / IBM, SIL Open Font License 1.1; see
-//! `crates/frust-theme/src/glyph/fonts.rs`'s own module doc and
-//! `crates/frust-theme/fonts/README.md` for provenance and the full license
-//! text). `crate::android::fonts` writes those upstream bytes, unmodified, to
-//! a private app-cache file purely because `Typeface.createFromFile` needs a
-//! filesystem path (there is no create-from-bytes overload at this crate's
-//! `minSdk` 26 floor — `Font.Builder(ByteBuffer)` is API 29) — it never
-//! redistributes the fonts anywhere a user or
-//! another app can reach.
+//! [`Typeface::GlyphMono`]/[`Typeface::GlyphPlex`] name two publish SLOTS,
+//! not two specific faces: the bytes in them are whatever the active design
+//! system attached through `frust_theme::NativeTypefaces` (`frust-glyph`
+//! attaches Space Mono / IBM Plex Mono, both SIL Open Font License 1.1 —
+//! see `plugins/glyph/fonts/README.md` for that system's provenance and
+//! license text; another design system's licence terms are its own).
+//! `crate::android::fonts` writes those bytes, unmodified, to a private
+//! app-cache file purely because `Typeface.createFromFile` needs a filesystem
+//! path (there is no create-from-bytes overload at this crate's `minSdk` 26
+//! floor — `Font.Builder(ByteBuffer)` is API 29) — it never redistributes a
+//! face anywhere a user or another app can reach.
 
 use crate::runtime::Params;
 
@@ -42,16 +42,16 @@ use crate::runtime::Params;
 /// distinct third case a caller has to handle separately.
 ///
 /// The two Glyph-named variants really name the two publish **slots** (0:
-/// button/display, 1: body) — Glyph's bundled faces are only their default
-/// occupants, since a design system can publish its own through
-/// `frust_theme::NativeTypefaces`. Their names track the frozen wire
-/// spellings below rather than the bytes they carry; see `crate::api::theme`'s
-/// module doc for the full ladder and the naming rationale.
+/// button/display, 1: body) — whatever face a design system published into
+/// them through `frust_theme::NativeTypefaces`. Their names track the frozen
+/// wire spellings below rather than the bytes they carry; see
+/// `crate::api::theme`'s module doc for the full ladder and the naming
+/// rationale.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) enum Typeface {
-    /// Space Mono — Glyph's display/heading face.
+    /// Publish slot 0 — the attached display/button face.
     GlyphMono,
-    /// IBM Plex Mono — Glyph's UI face (titles/body/labels).
+    /// Publish slot 1 — the attached body face (titles/body/labels).
     GlyphPlex,
     /// The platform's own default `Typeface` — no registration and no real
     /// `setTypeface` call beyond restoring it (`setTypeface(null)`).
@@ -93,9 +93,9 @@ pub(crate) fn decode(params: &Params<'_>, key: &str) -> Typeface {
 
 // --- cache-key derivation (pure; `crate::android::fonts::register` uses it) -
 
-/// A content-hash-keyed cache filename for `bytes` under `face_id` — the
-/// registration spec's own wording: "one-time, content-hash-keyed cache-file
-/// write, then `Typeface.createFromFile`". Stable for identical bytes (so a
+/// A content-hash-keyed cache filename for `bytes` under `face_id`: a
+/// one-time cache-file write, then `Typeface.createFromFile`. Stable for
+/// identical bytes (so a
 /// later launch computes the exact same path and [`plan_registration`]
 /// reuses the existing file instead of rewriting it), and differs whenever
 /// the bytes differ (so a future font update never collides with, or is
@@ -117,7 +117,7 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 
 // --- registration-plan idempotency (pure) -----------------------------------
 
-/// What a Glyph face's one-time registration should do, given whether its
+/// What a published face's one-time registration should do, given whether its
 /// content-hash-keyed cache file already exists — modelled as pure data,
 /// like every [`Setter`](super::Setter) plan elsewhere in this crate, so
 /// idempotency across launches is host-testable with no filesystem/JNI

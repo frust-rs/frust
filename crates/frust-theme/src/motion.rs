@@ -464,9 +464,8 @@ mod tests {
 
     #[test]
     fn cosmetic_loop_rate_defaults_to_30hz_on_both_baselines() {
-        // Task acceptance criterion 1: default 30 on every baseline (the
-        // third, Glyph, is covered alongside its own constructor in
-        // `glyph::scales`).
+        // Default 30 on every scale this crate constructs; a design system
+        // overriding the rate carries its own coverage of that.
         assert_eq!(MotionScheme::m3_expressive().cosmetic_loop_rate.hz(), 30.0);
         assert_eq!(MotionScheme::cupertino().cosmetic_loop_rate.hz(), 30.0);
     }
@@ -513,7 +512,7 @@ mod tests {
         // Task acceptance criterion 1: ThemeBuilder override test.
         use crate::theme::Theme;
 
-        let base = Theme::m3_baseline();
+        let base = Theme::neutral();
         let theme = Theme::builder(base.clone())
             .map_motion(|m| MotionScheme {
                 cosmetic_loop_rate: CosmeticLoopRate::new(15.0),

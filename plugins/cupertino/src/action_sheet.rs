@@ -45,7 +45,7 @@
 //!
 //! When a [`Theme`] is threaded and its `glass.chrome` recipe is not the
 //! opaque-material path ([`frust::GlassMaterial::is_opaque`] — true
-//! on the Material baseline, false on [`Theme::cupertino_baseline`]), *both*
+//! on the Material baseline, false on [`crate::baseline`]), *both*
 //! the main action panel and the separate cancel block paint as their own
 //! `theme.glass.chrome` panel — fill-wash stack + specular hairline + drop
 //! shadow, straight from the token — and each row within either block paints
@@ -659,7 +659,7 @@ mod tests {
 
     #[test]
     fn glass_chrome_theme_paints_both_panels_fill_stack_hairline_and_shadow() {
-        let theme = Theme::cupertino_baseline();
+        let theme = crate::baseline();
         let mut w = build(&sheet_view());
         layout(&mut w, WINDOW);
         let rec = paint_with_theme(&mut w, WINDOW, Some(&theme));
@@ -691,7 +691,7 @@ mod tests {
 
     #[test]
     fn nested_row_capsule_radius_is_concentric_with_its_panel() {
-        let theme = Theme::cupertino_baseline();
+        let theme = crate::baseline();
         let mut w = build(&sheet_view());
         layout(&mut w, WINDOW);
         let rec = paint_with_theme(&mut w, WINDOW, Some(&theme));
@@ -710,7 +710,7 @@ mod tests {
 
     #[test]
     fn opaque_material_theme_keeps_the_pre_26_flat_panels() {
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         let mut w = build(&sheet_view());
         layout(&mut w, WINDOW);
         let rec = paint_with_theme(&mut w, WINDOW, Some(&theme));

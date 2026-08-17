@@ -10,10 +10,10 @@
 //! `frust_theme::extensions`' module docs):
 //!
 //! - **Success/Warning** resolve `theme.extension::<StatusPalette>()` first
-//!   (present on every built-in baseline —
-//!   `Theme::m3_baseline`/`cupertino_baseline`/`glyph_baseline` each attach
-//!   one), falling back to this module's literal Glyph-dark constants only in
-//!   the defensive case where an app cleared the extension.
+//!   (`Theme::neutral` and every design system's baseline — this crate's
+//!   [`crate::baseline`] included — attach one), falling back to this
+//!   module's literal Glyph-dark constants only in the defensive case where
+//!   an app cleared the extension.
 //! - **Error** resolves directly from `ColorScheme::error`/`error_container` —
 //!   M3's baseline *does* carry an error role, so no extension is needed.
 //! - **Neutral** resolves `surface_container_high`/`on_surface_variant` (the

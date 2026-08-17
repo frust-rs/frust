@@ -78,7 +78,7 @@
 //! # Press feedback
 //!
 //! A spring-driven `AnimationController` ([`AnimationController::fling`],
-//! [`Theme::cupertino_baseline`]'s `motion.default_spatial` — the same
+//! [`crate::baseline`]'s `motion.default_spatial` — the same
 //! Cupertino-idiom precedent [`crate::switch`] uses) drives a
 //! `0.0` (rest) → `1.0` (pressed) dip fraction, started on `Down`/reversed on
 //! `Up`/`Cancel`. At full press this shrinks the painted capsule by
@@ -176,7 +176,7 @@ const PRESS_ANIM_PERIOD: Duration = Duration::from_millis(200);
 /// `RELEASE_VELOCITY`.
 const FLING_VELOCITY: f64 = 1e-3;
 
-/// The press-dip spring: matches [`Theme::cupertino_baseline`]'s
+/// The press-dip spring: matches [`crate::baseline`]'s
 /// `motion.default_spatial` exactly (ζ ≈ 0.5753, stiffness 170).
 ///
 /// Used **unconditionally** (never re-resolved from a live theme), for two
@@ -251,7 +251,7 @@ pub enum CupertinoButtonStyle {
 /// no runtime dependency on that constructor's shape, mirroring every other
 /// widget in this crate's unthemed-fallback-constant convention. A
 /// pre-theme app therefore renders the same pure-lens control an app on the
-/// `Theme::cupertino_baseline()` would.
+/// `crate::baseline()` would.
 fn fallback_control_glass() -> GlassMaterial {
     GlassMaterial {
         blur_radius_intent: 15.0,
@@ -763,7 +763,7 @@ mod tests {
 
     #[test]
     fn glass_style_reads_the_control_tier_translucent_on_cupertino() {
-        let theme = Theme::cupertino_baseline();
+        let theme = crate::baseline();
         assert!(!theme.glass.control.is_opaque());
         let mut w = widget_with(CupertinoButtonSize::Medium, CupertinoButtonStyle::Glass);
         let rec = paint_rec(&mut w, Some(&theme));
@@ -786,7 +786,7 @@ mod tests {
 
     #[test]
     fn glass_style_degrades_to_opaque_fill_on_material() {
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         assert!(theme.glass.control.is_opaque());
         let mut w = widget_with(CupertinoButtonSize::Medium, CupertinoButtonStyle::Glass);
         let rec = paint_rec(&mut w, Some(&theme));
@@ -814,7 +814,7 @@ mod tests {
     fn filled_and_gray_styles_never_touch_glass() {
         // Filled/Gray paint exactly one fill and no hairline/shadow, regardless
         // of theme.
-        let theme = Theme::cupertino_baseline();
+        let theme = crate::baseline();
         let mut filled = widget_with(CupertinoButtonSize::Medium, CupertinoButtonStyle::Filled);
         let rec = paint_rec(&mut filled, Some(&theme));
         assert_eq!(rec.rrects.len(), 1);

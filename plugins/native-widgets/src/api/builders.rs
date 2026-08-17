@@ -49,11 +49,11 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Once};
 
-use frust::glyph::{AlertVariant, alert};
 use frust::{
-    PlatformViewView, ResolvedSurfaceMode, SizedBox, Theme, on_cleanup, platform_view,
+    Color, PlatformViewView, ResolvedSurfaceMode, SizedBox, Theme, on_cleanup, platform_view,
     resolved_surface_mode, use_context,
 };
+use frust_core::accesskit::Role;
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, Component, ComponentWidget, LayoutCtx,
     PaintCtx, PaintScene, SemanticsCtx, View, Widget, any, component,
@@ -136,30 +136,33 @@ fn warn_refusal_once() {
 }
 
 /// The frust-drawn placeholder every builder degrades to under
-/// [`ResolvedSurfaceMode::RefusedTranslucent`]: a sized box, a warning fill
-/// (`frust::glyph::alert`'s `Warning` variant, which also contributes a
-/// `Role::Alert` semantics node carrying `control` as its label — the
-/// semantics-label half of this fallback's contract), instead of an
-/// invisible, untappable native slot.
+/// [`ResolvedSurfaceMode::RefusedTranslucent`]: a sized box holding a
+/// [`RefusalBanner`] — a warning fill plus a `Role::Alert` semantics node
+/// carrying `control` as its label and the full explanation as its
+/// description — instead of an invisible, untappable native slot.
+///
+/// # Why the banner is crate-local
+///
+/// No design-system catalog is reachable from here: this is a platform
+/// plugin, and its dependency charter is `frust`/`frust-core` plus FFI
+/// (`docs/CODE_STANDARDS.md`'s Plugin Conventions), while every design system
+/// — including whichever one the consuming app installed — ships as its own
+/// plugin crate beside this one. So the banner is a thin crate-local
+/// `View`/`Widget` pair, the same shape [`ClipToSlot`] below already uses,
+/// painting from the ambient [`Theme`]'s own error roles with an unthemed
+/// fallback (`docs/WIDGETS_CODE_STANDARDS.md`'s token-resolution rule) rather
+/// than borrowing a catalog's alert widget.
 ///
 /// # The clip-to-slot fix for oversized placeholder prose
 ///
-/// `alert`'s explanatory body prose is longer than most slot boxes allow
-/// (e.g. `native_switch`'s 70x40, `native_progress`'s 260x24) — `SizedBox`
-/// only tightens the reported [`Size`] the layout pass sees, it does not
-/// stop `AlertWidget::paint` from drawing glyph runs sized off its own
-/// unclamped content, so the prose used to spill straight through into
-/// whatever the neighbouring slot painted. `AlertWidget` also drives its
-/// screen-reader description off that same body string
-/// (`docs/CODE_STANDARDS.md`'s Semantics Conventions — a widget's `body`
-/// text doubles as both its painted prose and its accessibility
-/// description), and it lives in `frust-widgets`, outside this crate's
-/// charter to change (a platform plugin depends on `frust`/`frust-core`
-/// only). Clipping the whole banner's
-/// paint to the slot rect (below) is what lets the full explanation stay in
-/// the semantics tree and the one-time [`warn_refusal_once`] log while
-/// guaranteeing the placeholder never paints outside its own slot, at any
-/// slot size the builders allow.
+/// The explanatory prose is longer than most slot boxes allow (e.g.
+/// `native_switch`'s 70x40, `native_progress`'s 260x24), and `SizedBox` only
+/// tightens the reported [`Size`] the layout pass sees — it does not stop a
+/// child from drawing content sized off its own unclamped natural extent.
+/// Clipping the whole banner's paint to the slot rect (below) is what lets
+/// the full explanation stay in the semantics tree and the one-time
+/// [`warn_refusal_once`] log while guaranteeing the placeholder never paints
+/// outside its own slot, at any slot size the builders allow.
 ///
 /// `pub(super)`: the generic mounting builder
 /// ([`crate::api::mount`]) degrades through this same placeholder — including
@@ -169,14 +172,114 @@ pub(super) fn placeholder<State: 'static>(
     control: &str,
 ) -> AnyView<State> {
     warn_refusal_once();
-    let banner = alert(
-        AlertVariant::Warning,
-        format!("Native {control} unavailable"),
-        "the host declared a translucent surface but the platform refused it — rendering a \
-         frust placeholder instead of an invisible native slot.",
-    );
+    let banner: AnyView<State> = any(RefusalBanner {
+        label: format!("Native {control} unavailable"),
+        description: "the host declared a translucent surface but the platform refused it — \
+                      rendering a frust placeholder instead of an invisible native slot."
+            .to_string(),
+    });
     let sized = SizedBox(size.map(|(w, _)| w), size.map(|(_, h)| h)).child(banner);
     any(ClipToSlot { child: any(sized) })
+}
+
+/// Unthemed fallback fill for [`RefusalBanner`] — a muted warning amber, used
+/// only when no [`Theme`] is threaded into the paint pass (a bare-core test).
+/// A themed paint reads `error_container`/`outline` instead.
+const REFUSAL_FILL: Color = Color::from_rgb8(0xFF, 0xDD, 0xB0);
+
+/// Unthemed fallback border for [`RefusalBanner`]. See [`REFUSAL_FILL`].
+const REFUSAL_BORDER: Color = Color::from_rgb8(0x8A, 0x53, 0x00);
+
+/// The refusal placeholder's own visual + accessible body — see
+/// [`placeholder`] for why it is crate-local rather than a catalog widget.
+///
+/// Paints a filled, outlined box across whatever the slot gave it (so a
+/// refused control still reads as a deliberate "something is wrong here"
+/// marker rather than a hole), and publishes exactly one `Role::Alert`
+/// semantics node carrying `label` plus `description` — the
+/// semantics-labelled half of the refusal contract.
+struct RefusalBanner {
+    label: String,
+    description: String,
+}
+
+/// The retained widget for [`RefusalBanner`].
+struct RefusalBannerWidget {
+    label: String,
+    description: String,
+}
+
+impl<State: 'static> View<State> for RefusalBanner {
+    type Element = RefusalBannerWidget;
+
+    fn build(&self, _ctx: &mut BuildCtx<'_>) -> Self::Element {
+        RefusalBannerWidget {
+            label: self.label.clone(),
+            description: self.description.clone(),
+        }
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut Self::Element,
+        _ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        if prev.label == self.label && prev.description == self.description {
+            return ChangeFlags::NONE;
+        }
+        element.label = self.label.clone();
+        element.description = self.description.clone();
+        ChangeFlags::PAINT
+    }
+
+    fn teardown(&self, _element: &mut Self::Element, _ctx: &mut BuildCtx<'_>) {}
+}
+
+impl Widget for RefusalBannerWidget {
+    fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        // Fill whatever the enclosing `SizedBox` tightened to; with no
+        // explicit slot size the builders leave it filling the parent.
+        bc.max()
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        // Explicit builder value > theme > fallback constant
+        // (`docs/WIDGETS_CODE_STANDARDS.md`) — there is no explicit override
+        // here, so: theme, else the two `REFUSAL_*` constants.
+        let (fill, border) = match Theme::from_paint_ctx(ctx) {
+            Some(theme) => {
+                let s = theme.scheme();
+                (s.error_container, s.error)
+            }
+            None => (REFUSAL_FILL, REFUSAL_BORDER),
+        };
+        let (origin, size) = (ctx.origin(), ctx.size());
+        scene.fill_rect(origin, size, fill);
+        // A 1px inset hairline, drawn as four edge fills rather than a
+        // stroked path so it needs no `BezPath`/`Brush` vocabulary here.
+        const EDGE: f64 = 1.0;
+        let edge = EDGE.min(size.width / 2.0).min(size.height / 2.0);
+        if edge > 0.0 {
+            scene.fill_rect(origin, Size::new(size.width, edge), border);
+            scene.fill_rect(
+                kurbo::Point::new(origin.x, origin.y + size.height - edge),
+                Size::new(size.width, edge),
+                border,
+            );
+            scene.fill_rect(origin, Size::new(edge, size.height), border);
+            scene.fill_rect(
+                kurbo::Point::new(origin.x + size.width - edge, origin.y),
+                Size::new(edge, size.height),
+                border,
+            );
+        }
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        let label = format!("{}. {}", self.label, self.description);
+        ctx.push_node(Role::Alert, |node| node.set_label(label));
+    }
 }
 
 /// Clips its child's paint to this widget's own laid-out bounds — see
@@ -1135,7 +1238,7 @@ mod tests {
 
     /// A minimal `PaintScene` — only `fill_rect`/`draw_text` have no default
     /// (see `frust_core::widget::PaintScene`'s trait definition); every other
-    /// method a placeholder's `alert`/`SizedBox` might call is defaulted.
+    /// method a placeholder's banner/`SizedBox` might call is defaulted.
     #[derive(Default)]
     struct NullScene;
 
@@ -1220,14 +1323,14 @@ mod tests {
     }
 
     // --- theme ladder L2: token folding, one snapshot per colour-bearing
-    // control (dark + light, real Glyph hex via `theme::resolve`) ----------
+    // control (dark + light, via `theme::resolve`) -------------------------
 
     fn dark_tokens() -> ResolvedTheme {
-        theme::resolve(&Theme::glyph_baseline())
+        theme::resolve(&Theme::neutral().with_brightness(frust::Brightness::Dark))
     }
 
     fn light_tokens() -> ResolvedTheme {
-        theme::resolve(&Theme::glyph_baseline().with_brightness(frust::Brightness::Light))
+        theme::resolve(&Theme::neutral().with_brightness(frust::Brightness::Light))
     }
 
     #[test]
@@ -1256,8 +1359,8 @@ mod tests {
         let light = view.params_for(7, Some(light_tokens()));
         assert_ne!(
             dark, light,
-            "Glyph's accent-role split changes `primary` between brightnesses \
-             (dark: primary == primary_container; light: they diverge)"
+            "a brightness flip must reach the folded params — both the `dark` \
+             flag and every colour role the button folds change with it"
         );
         assert!(light.contains("\"dark\":false"));
         assert!(dark.contains("\"dark\":true"));

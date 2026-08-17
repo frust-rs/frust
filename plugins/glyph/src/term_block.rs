@@ -589,7 +589,7 @@ mod tests {
     #[test]
     fn brightness_invariance_recording_scene_identical_dark_vs_light() {
         // Identical paint under Light and Dark
-        // glyph_baseline() brightness.
+        // brightness of this crate's own baseline().
         let dark = crate::baseline();
         let light = dark.clone().with_brightness(frust::Brightness::Light);
 
@@ -604,7 +604,7 @@ mod tests {
     }
 
     #[test]
-    fn themed_ink_resolves_from_glyph_baseline_extension() {
+    fn themed_ink_resolves_from_the_glyph_baseline_extension() {
         let theme = crate::baseline();
         let mut w = build(demo_lines(), false);
         let rec = layout_and_paint(&mut w, Some(&theme));

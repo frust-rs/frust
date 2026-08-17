@@ -23,27 +23,10 @@ image = { workspace = true }
 frust-core = { workspace = true, features = ["test-support"] }
 
 [features]
-default = ["glyph", "material", "cupertino"]
-# Forwards into frust-theme's own `glyph-fonts` (gf2 opt-out chain, mirroring
-# the perf-trace chain's shape) — the root workspace edge above no longer
-# requests frust-theme's defaults, so this is one of the re-enabling edges
-# the facade's default-on `glyph-fonts` feature turns on.
-glyph-fonts = ["frust-theme/glyph-fonts"]
 # Compiles the GPU-free container test fixtures (`test_support`) into the
 # library, so a design system authored against `frust_widgets::authoring`
-# outside this crate can test its own containers against the same fixtures the
-# built-in catalogs use. Off by default — a normal app ships none of it; the
-# module is always available inside this crate's own `cfg(test)` build.
+# outside this crate can test its own containers against the same fixtures
+# this crate's own container tests use. Off by default — a normal app ships
+# none of it; the module is always available inside this crate's own
+# `cfg(test)` build.
 test-support = []
-# The three built-in widget catalogs (Module Structure's `frust-widgets` row),
-# each independently gate-able and default-on so an unmodified consumer keeps
-# compiling every catalog unchanged. A design system authored outside this
-# crate against the public `authoring` toolkit can disable all three.
-# `glyph` also turns on frust-theme's own `glyph` gate: the Glyph catalog
-# resolves Glyph-specific tokens (`frust_theme::GlyphInk`, consumed by
-# `glyph::term_block`/`glyph::tooltip`). The workspace's frust-theme edge is
-# `default-features = false`, so nothing else switches those tokens on for a
-# standalone `-p frust-widgets --features glyph` build.
-glyph = ["frust-theme/glyph"]
-material = []
-cupertino = []

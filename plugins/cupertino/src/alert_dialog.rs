@@ -46,7 +46,7 @@
 //!
 //! When a [`Theme`] is threaded and its `glass.chrome` recipe is not the
 //! opaque-material path ([`GlassMaterial::is_opaque`] — true on the Material
-//! baseline, false on [`Theme::cupertino_baseline`]), the panel paints the
+//! baseline, false on [`crate::baseline`]), the panel paints the
 //! chrome fill-wash stack + a specular hairline + the tier's drop shadow
 //! straight from `theme.glass.chrome`, and each action row paints as its own
 //! nested "button" capsule inset from the panel edge, its corner radius
@@ -745,7 +745,7 @@ mod tests {
 
     #[test]
     fn glass_chrome_theme_paints_the_fill_stack_hairline_and_shadow() {
-        let theme = Theme::cupertino_baseline(); // light brightness by default
+        let theme = crate::baseline(); // light brightness by default
         let mut w = build(&alert_view());
         let window = Size::new(400.0, 800.0);
         layout(&mut w, window);
@@ -773,7 +773,7 @@ mod tests {
 
     #[test]
     fn nested_action_button_radius_is_concentric_with_the_panel() {
-        let theme = Theme::cupertino_baseline();
+        let theme = crate::baseline();
         let mut w = build(&alert_view());
         let window = Size::new(400.0, 800.0);
         layout(&mut w, window);
@@ -799,7 +799,7 @@ mod tests {
         // hairline, no nested button capsules; the legacy flat-fill +
         // hairline-row layout paints instead (bullet 3: Material appearance
         // unchanged).
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         let mut w = build(&alert_view());
         let window = Size::new(400.0, 800.0);
         layout(&mut w, window);

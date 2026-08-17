@@ -28,15 +28,15 @@ const IBM_PLEX_MONO_FAMILY: &str = "IBM Plex Mono";
 /// `extension::<NativeTypefaces>()` are always `Some` on a Glyph theme.
 ///
 /// **Starts in [`Brightness::Dark`]** — a deliberate divergence from
-/// `Theme::m3_baseline`/`Theme::cupertino_baseline` (both
+/// `Theme::neutral` and the other design systems' baselines (all
 /// [`Brightness::Light`]): Glyph is a **dark-first** system (its dark HTML
 /// build is the canonical brightness). Call
 /// `.with_brightness(Brightness::Light)` to select the light scheme (e.g.
 /// to honor a live OS light-mode preference before handing the theme to
 /// `set_app_theme`).
 ///
-/// Not `const` (like the built-in baselines): [`ThemeExtensions`]' `HashMap`
-/// and the type scale's per-slot `FontFamily` stacks aren't const-evaluable.
+/// Not `const` (like `Theme::neutral`): [`ThemeExtensions`]' `HashMap` and
+/// the type scale's per-slot `FontFamily` stacks aren't const-evaluable.
 pub fn baseline() -> Theme {
     let mut extensions = ThemeExtensions::new();
     extensions.insert(color::status());

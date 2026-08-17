@@ -5,12 +5,23 @@
 //! fallback — a widget, not just a token constructor, depends on this
 //! specific recipe.
 //!
-//! Copied from `frust-theme`'s own (ungated) `GlassScale::ios27` — see that
-//! constructor's doc comment (`crates/frust-theme/src/glass.rs`) for the
-//! recipe's mined source and the load-bearing rationale for each tier's
-//! chosen wash/hairline/shadow values. This crate owns its own copy rather
-//! than calling that inherent constructor so it stays self-sufficient once
-//! the in-tree Cupertino catalog is removed.
+//! # Source
+//!
+//! Recipes mined from the iOS 27 "Liquid Glass" kit (584 records, retrieved
+//! 2026-07-17); the three canonical tiers below are the json's dominant fill
+//! stacks per corner-radius family — chrome (popovers/sheets/menus) at radius
+//! 75, bar (tab/nav/toolbars) at radius 45, control (buttons/toggles) at
+//! radius 15, a pure lens with no fill. The kit's dark bar records composite
+//! their tint over an opaque background base; the over-dark wash below mirrors
+//! the tint alone, since a glass bar composites over live content rather than
+//! an opaque plate. Per-tier `hairline_alpha`/`shadow` are **tuned policy**,
+//! not kit-cited: the kit stores multi-layer stacks that do not reduce cleanly
+//! to a single `ShadowSpec`, so each tier gets a defensible value (chrome
+//! floats highest, bars sit flush with no shadow, controls get a subtle lift).
+//!
+//! These values lived in `frust-theme` until the Cupertino catalog moved out
+//! of tree; the framework now constructs only the opaque scale
+//! (`GlassScale::opaque_material`), so this crate owns the recipe outright.
 
 use frust::{GlassFill, GlassMaterial, GlassScale, ShadowSpec};
 

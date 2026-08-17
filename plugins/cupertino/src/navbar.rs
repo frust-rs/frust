@@ -540,7 +540,7 @@ mod tests {
         // so the bar composites the token's over-light wash stack (read purely
         // from `Theme.glass.bar.fills_light`) and draws a specular white
         // hairline whose alpha is the tier's `hairline_alpha`.
-        let theme = Theme::cupertino_baseline();
+        let theme = crate::baseline();
         let material = &theme.glass.bar;
         assert!(
             !material.is_opaque(),
@@ -574,7 +574,7 @@ mod tests {
         // An M3 theme's `glass.bar` is opaque, so the same code
         // paints the opaque surface fill + outline_variant separator — the
         // pre-glass look, never the glass wash stack.
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         assert!(theme.glass.bar.is_opaque());
         let view: CupertinoNavBarView<()> = cupertino_nav_bar("Home");
         let mut w = build(&view);

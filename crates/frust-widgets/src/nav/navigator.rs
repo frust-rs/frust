@@ -829,8 +829,8 @@ impl<State: 'static> NavigatorController<State> {
 
     /// Push a **transparent** page (e.g. a dialog/bottom sheet) with an explicit
     /// [`TransitionSpec`] (e.g. [`PageTransition::M3FadeThrough`] for a dialog,
-    /// [`PageTransition::SlideUp`] for a bottom sheet — see
-    /// [`crate::material::dialog`]/[`crate::material::sheet`]'s usage sketch),
+    /// [`PageTransition::SlideUp`] for a bottom sheet — a design system's own
+    /// dialog/sheet helpers are the shipped callers),
     /// and register `on_result`, invoked with `&mut State` when *this* page is
     /// later popped (carrying the pop's [`PopResult`]) — the modal-with-a-result
     /// combination [`push_transparent`](Self::push_transparent) and
@@ -5244,17 +5244,18 @@ mod tests {
     // ---------------------------------------------------------------------
 
     // --- A `ThemeDefault` Glyph push resolves the *enter duration* from
-    //     the active MotionScheme (m3_baseline's `slow` = 500ms), not the 300ms
-    //     unthemed M3 fallback. Proven by the transition still running at 340ms
-    //     under the theme, where the unthemed control has already finalized. ---
+    //     the active MotionScheme (the neutral baseline's `slow` = 400ms), not
+    //     the 300ms unthemed M3 fallback. Proven by the transition still
+    //     running at 340ms under the theme, where the unthemed control has
+    //     already finalized. ---
 
     #[test]
     fn glyph_theme_default_resolves_enter_duration_from_scheme() {
-        // Themed: push `TransitionSpec::glyph()` (ThemeDefault timing) under the
-        // m3_baseline theme whose Glyph enter timing is the scheme's slow = 500ms.
+        // Themed: push `TransitionSpec::glyph()` (ThemeDefault timing) under a
+        // theme whose Glyph enter timing is the scheme's slow = 400ms.
         let controller: NavigatorController<()> = NavigatorController::new();
         let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
-        root.set_theme(Box::new(Theme::m3_baseline()));
+        root.set_theme(Box::new(Theme::neutral()));
         let mut app = {
             let ctrl = controller.clone();
             move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0))
@@ -5269,13 +5270,13 @@ mod tests {
         let (_f2, nf2) = full_frame(&mut root, &mut app, &mut state, ft(340));
         assert!(
             nf1 && nf2,
-            "the theme-resolved 500ms enter duration is still running at 320/340ms"
+            "the theme-resolved 400ms enter duration is still running at 320/340ms"
         );
 
         // Control: the identical push with NO theme threaded falls back to the
         // 300ms M3 default, which settles (ft 320) and finalizes (ft 340) — so it
         // requests no frame at 340ms. The divergence proves the theme resolution
-        // changed the enter duration (300ms → 500ms) at first paint.
+        // changed the enter duration (300ms → 400ms) at first paint.
         let ctrl2: NavigatorController<()> = NavigatorController::new();
         let mut root2: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
         let mut app2 = {
@@ -5303,7 +5304,7 @@ mod tests {
     fn reduce_motion_collapses_glyph_push_to_crossfade() {
         let controller: NavigatorController<()> = NavigatorController::new();
         let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
-        let mut reduced = Theme::m3_baseline();
+        let mut reduced = Theme::neutral();
         reduced.motion.reduce_motion = true;
         root.set_theme(Box::new(reduced));
         let mut app = {
@@ -5858,7 +5859,7 @@ mod tests {
 
         let controller: NavigatorController<()> = NavigatorController::new();
         let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
-        let mut reduced = Theme::m3_baseline();
+        let mut reduced = Theme::neutral();
         reduced.motion.reduce_motion = true;
         root.set_theme(Box::new(reduced));
         let mut app = {

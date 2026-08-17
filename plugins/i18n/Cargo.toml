@@ -44,14 +44,13 @@ unic-langid = { workspace = true }
 # anywhere in the tree) — `cargo tree -p frust-i18n --no-default-features -e
 # normal` is the tripwire.
 #
-# A literal `path` dependency, not `{ workspace = true }` — matching
-# `examples/no-catalogs`'s own precedent (`docs/DEVELOPMENT.md`'s *Build*
-# section): Cargo forbids a workspace-inherited dependency from overriding
-# `default-features` unless the workspace-level entry already sets it
-# explicitly, and the root `frust` entry doesn't. `src/reactive.rs`'s
-# eventual signal-binding glue needs none of `frust`'s default catalog
-# features (`glyph`/`material`/`cupertino`/`glyph-fonts`) — a future
-# `default-features = false` trim only works from a plain path dependency.
+# A literal `path` dependency, not `{ workspace = true }`: Cargo forbids a
+# workspace-inherited dependency from overriding `default-features` unless
+# the workspace-level entry already sets it explicitly, and the root `frust`
+# entry doesn't. `frust` itself now has no default features at all (the three
+# design-system catalogs left the tree as their own plugin crates), so there
+# is nothing left to trim — the plain path edge stays for the override
+# freedom, not for a catalog opt-out.
 frust = { path = "../../crates/frust", optional = true }
 
 # The `formatting` feature's ICU4X number/date/plural formatting stack

@@ -2,11 +2,12 @@
 //! aggregate plus its constituent light/dark [`ColorScheme`]s and the
 //! success/warning/info [`StatusPalette`] extension.
 //!
-//! Copied from `frust-theme`'s own (ungated) `Theme::m3_baseline`/
-//! `ColorScheme::m3_baseline_light`/`_dark`/`StatusPalette::m3` — this crate
-//! owns its own copy rather than calling those inherent constructors so it
-//! stays self-sufficient once the in-tree Material catalog (and its token
-//! constructors) are removed.
+//! Values sourced from Google's Material 3 design-system tokens v0.192
+//! (`material-components/material-web` `tokens/versions/v0_192/
+//! _md-sys-color.scss` + `_md-ref-palette.scss`), resolved 2026-07-17, seed
+//! color `#6750A4`. These tables lived in `frust-theme` until the Material
+//! catalog moved out of tree; nothing in the framework constructs them any
+//! more, so this crate owns them outright.
 
 use frust::authoring::text::TextStyle;
 use frust::{

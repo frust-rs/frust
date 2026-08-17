@@ -1,11 +1,11 @@
 //! Core transition patterns: the object-safe [`TransitionPattern`] trait plus
-//! the three source-verified core patterns — [`FadeThrough`], [`SharedAxis`]
-//! (X/Y/Scaled), and [`FadeScale`] — that
+//! the four source-verified patterns — [`FadeThrough`], [`SharedAxis`]
+//! (X/Y/Scaled), [`FadeScale`], and [`ContainerTransform`] (rect-to-rect
+//! morph + fade-through composite) — that
 //! [`super::switcher::PatternSwitcher`] stages an outgoing/incoming child pair
-//! under, plus the remaining Glyph patterns: [`ContainerTransform`]
-//! (rect-to-rect morph + fade-through composite), [`GlyphSlide`] (directional
-//! 16dp slide + fade), and [`GlyphStagger`] (per-item log-reveal, driven either
-//! as a switch pattern or as a plain per-item helper).
+//! under. A design system's own patterns live in its own crate
+//! (`frust_glyph::motion` is the shipped example) and implement the same
+//! public trait from there.
 //!
 //! # Pure staging math, no widgets
 //!
@@ -34,10 +34,9 @@
 //!
 //! # Scaffold contract
 //!
-//! This file owns its own contents only — the [`TransitionPattern`] trait,
-//! the three core patterns, and the extended Glyph patterns
-//! (ContainerTransform + Glyph patterns) all live here and never edit
-//! `motion/mod.rs`'s module list or re-export block (see that module's docs).
+//! This file owns its own contents only — the [`TransitionPattern`] trait and
+//! the four patterns above all live here and never edit `motion/mod.rs`'s
+//! module list or re-export block (see that module's docs).
 //! The trait's `size` parameter is a deliberate extension point the
 //! hero-rect-bearing patterns hang off of, kept in the signature now so a
 //! boxed `dyn TransitionPattern` never needs a shape change.
@@ -45,7 +44,7 @@
 use std::time::Duration;
 
 use frust_core::Curve;
-use frust_core::anim::{Lerp, StaggerSpec};
+use frust_core::anim::Lerp;
 use kurbo::{Point, Rect, Size};
 
 // --- Fade-through staging (source-verified) -------------------
@@ -485,216 +484,6 @@ impl TransitionPattern for ContainerTransform {
     }
 }
 
-// --- GlyphSlide -----------------------------------------
-
-/// GlyphSlide travel distance, 16 logical px (dp). The Glyph directional
-/// enter/exit slide distance.
-const GLYPH_SLIDE_DISTANCE_DP: f64 = 16.0;
-
-/// GlyphSlide enter duration — a 340ms spatial slide-in + fade. A
-/// pattern-native constant the switcher's caller can pass to
-/// [`.timing(...)`](super::switcher::PatternSwitcherView::timing); the theme's
-/// glyph `MotionScheme` resolves the effective timing otherwise.
-pub const GLYPH_SLIDE_ENTER: Duration = Duration::from_millis(340);
-
-/// GlyphSlide exit duration — a 150ms exit-curve slide-out;
-/// exits run faster than entrances. See [`GLYPH_SLIDE_ENTER`].
-pub const GLYPH_SLIDE_EXIT: Duration = Duration::from_millis(150);
-
-/// GlyphSlide enter spatial easing — the Glyph `spatial` curve, matching
-/// `frust_theme::MotionScheme::m3_expressive`'s `easing.spatial`
-/// (`Cubic(0.05,0.7,0.1,1)`); the unthemed fallback for the slide-in motion.
-const GLYPH_SLIDE_SPATIAL: Curve = Curve::Cubic(0.05, 0.7, 0.1, 1.0);
-
-/// GlyphSlide enter fade easing — the Glyph `effects` curve
-/// (`Cubic(0.2,0,0,1)`; opacity, never overshoots).
-const GLYPH_SLIDE_EFFECTS: Curve = Curve::Cubic(0.2, 0.0, 0.0, 1.0);
-
-/// GlyphSlide exit easing — the Glyph `exit` curve (`Cubic(0.3,0,1,1)`;
-/// accelerates leaving content out), driving both the slide-out offset and the
-/// exit fade.
-const GLYPH_SLIDE_EXIT_CURVE: Curve = Curve::Cubic(0.3, 0.0, 1.0, 1.0);
-
-/// The leading fraction of the shared transition timeline the (faster) exit
-/// slide-out completes within — 150ms exit over the 340ms enter timeline — so
-/// the outgoing child clears before the incoming child settles. Mirrors the
-/// fade-through split idiom above.
-const GLYPH_SLIDE_EXIT_FRACTION: f64 = 150.0 / 340.0;
-
-/// Which way a [`GlyphSlide`] entering child travels (the incoming child moves
-/// *toward* this edge; `reverse` mirrors it).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SlideDirection {
-    /// Travels upward: the incoming child enters from below and rises into place.
-    Up,
-    /// Travels downward: the incoming child enters from above and drops into place.
-    Down,
-    /// Travels left: the incoming child enters from the right.
-    Left,
-    /// Travels right: the incoming child enters from the left.
-    Right,
-}
-
-impl SlideDirection {
-    /// Unit travel vector `(x, y)` in logical-px space (y-down).
-    fn unit(self) -> (f64, f64) {
-        match self {
-            SlideDirection::Up => (0.0, -1.0),
-            SlideDirection::Down => (0.0, 1.0),
-            SlideDirection::Left => (-1.0, 0.0),
-            SlideDirection::Right => (1.0, 0.0),
-        }
-    }
-}
-
-/// Glyph's directional slide: the incoming child slides in
-/// [`GLYPH_SLIDE_DISTANCE_DP`] along [`SlideDirection`] over the enter timeline
-/// while fading in; the outgoing child slides out the same way over the faster
-/// [`GLYPH_SLIDE_EXIT_FRACTION`] of the timeline while fading out. `reverse`
-/// mirrors the travel direction (a "back" switch).
-///
-/// # reduce_motion
-///
-/// Like every [`TransitionPattern`], the `reduce_motion` collapse is applied by
-/// [`super::switcher::PatternSwitcher`], which substitutes a fast linear
-/// [`FadeThrough`] crossfade (no slide) for the whole pattern when the theme's
-/// `MotionScheme::reduce_motion` is set — so a slide never plays under reduced
-/// motion.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct GlyphSlide {
-    /// The direction the incoming child travels.
-    pub direction: SlideDirection,
-}
-
-impl GlyphSlide {
-    /// A slide in the given direction.
-    pub const fn new(direction: SlideDirection) -> Self {
-        Self { direction }
-    }
-}
-
-impl TransitionPattern for GlyphSlide {
-    fn resolve(&self, p: f64, reverse: bool, _size: Size) -> (PatternLayer, PatternLayer) {
-        let pc = p.clamp(0.0, 1.0);
-        let (mut ux, mut uy) = self.direction.unit();
-        if reverse {
-            ux = -ux;
-            uy = -uy;
-        }
-
-        // Incoming: enters over the full timeline — starts offset OPPOSITE the
-        // travel direction by the full distance and eases to rest, fading in.
-        let enter = GLYPH_SLIDE_SPATIAL.transform(pc);
-        let in_off = (1.0 - enter) * GLYPH_SLIDE_DISTANCE_DP;
-        let incoming = PatternLayer {
-            dx: -ux * in_off,
-            dy: -uy * in_off,
-            alpha: GLYPH_SLIDE_EFFECTS.transform(pc) as f32,
-            scale: 1.0,
-        };
-
-        // Exiting: a faster slide-out compressed into the leading fraction of the
-        // timeline — continues in the travel direction, fading on the exit curve.
-        let exit_local = (pc / GLYPH_SLIDE_EXIT_FRACTION).min(1.0);
-        let exit = GLYPH_SLIDE_EXIT_CURVE.transform(exit_local);
-        let out_off = exit * GLYPH_SLIDE_DISTANCE_DP;
-        let exiting = PatternLayer {
-            dx: ux * out_off,
-            dy: uy * out_off,
-            alpha: (1.0 - exit) as f32,
-            scale: 1.0,
-        };
-
-        (incoming, exiting)
-    }
-}
-
-// --- GlyphStagger (StaggerSpec) ----------------------
-
-/// GlyphStagger per-item reveal duration — a 150ms `effects`-curve fade-in
-/// (the reference build's rendered value).
-const GLYPH_STAGGER_ITEM_MS: f64 = 150.0;
-
-/// GlyphStagger inter-item delay — 90ms. **Prose-vs-rendered discrepancy**:
-/// Glyph's spec *prose* cites a different figure, but 90ms is the value
-/// the reference build actually *renders*; the rendered value wins here.
-const GLYPH_STAGGER_DELAY_MS: f64 = 90.0;
-
-/// GlyphStagger per-item easing — the Glyph `effects` curve (`Cubic(0.2,0,0,1)`;
-/// an opacity reveal, never overshoots).
-const GLYPH_STAGGER_CURVE: Curve = Curve::Cubic(0.2, 0.0, 0.0, 1.0);
-
-/// Glyph's staggered log-reveal: each item fades in over
-/// [`GLYPH_STAGGER_ITEM_MS`], successive items offset by [`GLYPH_STAGGER_DELAY_MS`],
-/// all driven off one shared `0.0..=1.0` controller value via `frust-core`'s
-/// [`StaggerSpec`] — no per-item controller.
-///
-/// Unlike the two-child [`TransitionPattern`]s above, a stagger reveals an
-/// N-item *list*, so it isn't expressible as the trait's `(incoming, exiting)`
-/// pair. It is instead a plain per-item helper: a list-entrance container asks
-/// for each item's [`item_layer`](Self::item_layer), and unrelated widgets
-/// (a `TermBlock`, a boot sequence) drive the same [`item_progress`](Self::item_progress)
-/// directly.
-///
-/// # reduce_motion
-///
-/// Pass `reduce_motion = true` to collapse the stagger: every item reveals
-/// together on the shared progress (no per-item delay) — a single fast fade
-/// instead of a cascade.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct GlyphStagger {
-    /// The underlying per-item timing spec (Glyph values via [`GlyphStagger::glyph`]).
-    pub spec: StaggerSpec,
-}
-
-impl GlyphStagger {
-    /// The Glyph-baseline stagger: 90ms per-item delay, 150ms `effects`-curve
-    /// per-item reveal.
-    pub const fn glyph() -> Self {
-        Self {
-            spec: StaggerSpec {
-                per_item_delay: GLYPH_STAGGER_DELAY_MS,
-                item_duration: GLYPH_STAGGER_ITEM_MS,
-                item_curve: GLYPH_STAGGER_CURVE,
-            },
-        }
-    }
-
-    /// The full timeline length (in the spec's ms unit) for `n` items — size an
-    /// `AnimationController`'s forward duration off this so one value drives every
-    /// item. Delegates to [`StaggerSpec::total_duration`].
-    pub fn total_duration(&self, n: usize) -> f64 {
-        self.spec.total_duration(n)
-    }
-
-    /// Item `i`'s eased reveal progress in `[0, 1]` at the shared controller
-    /// `overall`, for a list of `n` items. Delegates to
-    /// [`StaggerSpec::item_progress`]; `reduce_motion` collapses the cascade so
-    /// every item tracks `overall` directly (no per-item delay).
-    pub fn item_progress(&self, overall: f64, i: usize, n: usize, reduce_motion: bool) -> f64 {
-        if reduce_motion {
-            return overall.clamp(0.0, 1.0);
-        }
-        self.spec.item_progress(overall, i, n)
-    }
-
-    /// Item `i`'s reveal [`PatternLayer`] — an opacity-only fade-in (a log/boot
-    /// line appearing), with no spatial offset. See
-    /// [`item_progress`](Self::item_progress) for the `reduce_motion` collapse.
-    pub fn item_layer(
-        &self,
-        overall: f64,
-        i: usize,
-        n: usize,
-        reduce_motion: bool,
-    ) -> PatternLayer {
-        PatternLayer {
-            alpha: self.item_progress(overall, i, n, reduce_motion) as f32,
-            ..PatternLayer::IDENTITY
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -957,133 +746,26 @@ mod tests {
         }
     }
 
-    // --- GlyphSlide ------------------------------------
-
-    #[test]
-    fn glyph_slide_up_offsets_and_alphas_forward_and_reverse() {
-        let gs = GlyphSlide::new(SlideDirection::Up);
-
-        // Forward t=0: incoming enters from below (dy = +16), invisible; exiting
-        // at rest, opaque.
-        let (inc, out) = gs.resolve(0.0, false, SIZE);
-        assert!(
-            (inc.dy - GLYPH_SLIDE_DISTANCE_DP).abs() < 1e-9,
-            "enters from below"
-        );
-        assert_eq!(inc.dx, 0.0);
-        assert_eq!(inc.alpha, 0.0);
-        assert_eq!(out.dy, 0.0);
-        assert_eq!(out.alpha, 1.0);
-
-        // Forward t=1: incoming settled (dy=0, opaque); exiting slid out the top
-        // (dy = -16) and faded.
-        let (inc, out) = gs.resolve(1.0, false, SIZE);
-        assert!(inc.dy.abs() < 1e-9);
-        assert!((inc.alpha - 1.0).abs() < 1e-6);
-        assert!(
-            (out.dy + GLYPH_SLIDE_DISTANCE_DP).abs() < 1e-9,
-            "exits to the top"
-        );
-        assert_eq!(out.alpha, 0.0);
-
-        // Forward t=0.5: incoming partway (offset shrinking, alpha rising); exit
-        // already complete (150/340 fraction ≈ 0.44 < 0.5), fully gone.
-        let (inc, out) = gs.resolve(0.5, false, SIZE);
-        let enter = GLYPH_SLIDE_SPATIAL.transform(0.5);
-        assert!((inc.dy - (1.0 - enter) * GLYPH_SLIDE_DISTANCE_DP).abs() < 1e-9);
-        assert!(inc.alpha > 0.0 && inc.alpha < 1.0);
-        assert!(out.alpha.abs() < 1e-6, "faster exit completes before t=0.5");
-        assert!((out.dy + GLYPH_SLIDE_DISTANCE_DP).abs() < 1e-9);
-
-        // Reverse mirrors the vertical direction (enters from above instead).
-        let (inc_r, _out_r) = gs.resolve(0.0, true, SIZE);
-        assert!(
-            (inc_r.dy + GLYPH_SLIDE_DISTANCE_DP).abs() < 1e-9,
-            "reverse enters from above"
-        );
-    }
-
-    #[test]
-    fn glyph_slide_horizontal_moves_on_x_only() {
-        let (inc, out) = GlyphSlide::new(SlideDirection::Left).resolve(0.0, false, SIZE);
-        assert_eq!(inc.dy, 0.0);
-        assert_eq!(out.dy, 0.0);
-        // Left travel: incoming enters from the right (dx = +16).
-        assert!((inc.dx - GLYPH_SLIDE_DISTANCE_DP).abs() < 1e-9);
-    }
-
-    #[test]
-    fn glyph_slide_exit_is_faster_than_enter() {
-        assert_eq!(GLYPH_SLIDE_ENTER, Duration::from_millis(340));
-        assert_eq!(GLYPH_SLIDE_EXIT, Duration::from_millis(150));
-        assert!(GLYPH_SLIDE_EXIT < GLYPH_SLIDE_ENTER);
-        assert!((GLYPH_SLIDE_EXIT_FRACTION - 150.0 / 340.0).abs() < 1e-12);
-    }
-
-    // --- GlyphStagger (StaggerSpec) -----------------
-
-    #[test]
-    fn glyph_stagger_item_progress_matches_staggerspec_for_five_items() {
-        let gs = GlyphStagger::glyph();
-        let spec = gs.spec;
-        let n = 5;
-        // Delegation identity: matches the underlying StaggerSpec math exactly.
-        for &overall in &[0.0, 0.2, 0.5, 0.8, 1.0] {
-            for i in 0..n {
-                assert!(
-                    (gs.item_progress(overall, i, n, false) - spec.item_progress(overall, i, n))
-                        .abs()
-                        < 1e-12,
-                    "GlyphStagger delegates to StaggerSpec at overall={overall}, i={i}"
-                );
-            }
-        }
-
-        // Hand-computed anchor: 5 items, delay=90, dur=150 → total = 4*90+150 =
-        // 510ms. Item 2 opens at 180ms, closes at 330ms. At overall=0.5 →
-        // elapsed=255ms → local=(255-180)/150=0.5, eased by the effects curve.
-        assert!((gs.total_duration(5) - 510.0).abs() < 1e-9);
-        let eased = GLYPH_STAGGER_CURVE.transform(0.5);
-        assert!((gs.item_progress(0.5, 2, 5, false) - eased).abs() < 1e-9);
-        // Item 0 has fully revealed by then; the last item hasn't opened.
-        assert_eq!(gs.item_progress(0.5, 0, 5, false), 1.0);
-        assert_eq!(gs.item_progress(0.5, 4, 5, false), 0.0);
-    }
-
-    #[test]
-    fn glyph_stagger_reduce_motion_collapses_to_simultaneous_fade() {
-        let gs = GlyphStagger::glyph();
-        // Every item tracks `overall` directly — no per-item delay.
-        for i in 0..5 {
-            assert!((gs.item_progress(0.5, i, 5, true) - 0.5).abs() < 1e-12);
-        }
-        // The collapse is observable: the last item is 0.0 staggered but 0.5
-        // collapsed at overall=0.5.
-        assert_eq!(gs.item_progress(0.5, 4, 5, false), 0.0);
-        assert!((gs.item_progress(0.5, 4, 5, true) - 0.5).abs() < 1e-12);
-        // item_layer carries the collapsed alpha, identity elsewhere.
-        let layer = gs.item_layer(0.5, 4, 5, true);
-        assert!((layer.alpha - 0.5).abs() < 1e-6);
-        assert_eq!(layer.dx, 0.0);
-        assert_eq!(layer.scale, 1.0);
-    }
-
     #[test]
     fn transition_patterns_reduce_motion_collapse_target_removes_motion() {
         // The switcher collapses ANY pattern to a fast FadeThrough
         // crossfade under reduce_motion. Prove the collapse *removes spatial
         // motion* — FadeThrough (the collapse target) is non-directional (no
-        // slide) where GlyphSlide and ContainerTransform translate, at a shared
-        // mid-progress. (FadeThrough keeps its own subtle scale-up; the removed
-        // motion is the directional slide/morph offset.)
+        // slide) where a translating pattern moves, at a shared mid-progress.
+        // (FadeThrough keeps its own subtle scale-up; the removed motion is the
+        // directional slide/morph offset.) `SharedAxis` and
+        // `ContainerTransform` are the two in-crate translating patterns; an
+        // out-of-crate pattern (e.g. `frust_glyph::motion::GlyphSlide`)
+        // collapses identically, since the switcher substitutes the pattern
+        // wholesale rather than asking it to reduce itself.
         let (ft_in, _) = FadeThrough.resolve(0.5, false, SIZE);
         assert_eq!(ft_in.dx, 0.0);
         assert_eq!(ft_in.dy, 0.0);
 
-        let (slide_in, _) = GlyphSlide::new(SlideDirection::Up).resolve(0.5, false, SIZE);
+        let (axis_in, _) = SharedAxis::X.resolve(0.5, false, SIZE);
         assert!(
-            slide_in.dy.abs() > 0.0,
-            "GlyphSlide offsets where the collapse does not"
+            axis_in.dx.abs() > 0.0,
+            "SharedAxis offsets where the collapse does not"
         );
 
         let (ct_in, _) = ContainerTransform::from_source(SRC).resolve(0.5, false, SIZE);

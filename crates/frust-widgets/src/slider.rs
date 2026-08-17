@@ -18,17 +18,17 @@
 //! so Material rendering stays byte-identical. The kit's mined data
 //! (`kit-colors-type-metrics.json`) has **no `Sliders` size record at all**
 //! (only shadow recipes for the knob in `glass-recipes.json`, with no
-//! width/height fields) — a strictly more inconclusive case than
-//! [`crate::cupertino::switch`]'s, which at least had an ambiguous record to
-//! reject. Per the same evidence rule applied elsewhere in this catalog,
+//! width/height fields). Per the same evidence rule this repo applies to any
+//! unsourced platform metric,
 //! [`CUPERTINO_THUMB`] is therefore **community-approximate**, not kit-cited
 //! (see its doc comment); the groove thickness ([`TRACK_H`]) is shared with
 //! the Material path unchanged, since there is no evidence either way to
 //! diverge it. The knob's reflective treatment (drop shadow + specular
-//! gradient) mirrors [`crate::cupertino::switch`]'s exactly, reading the same
-//! `theme.glass.control` tier (buttons/toggles/sliders — the kit's "control"
-//! glass tier covers interactive controls generally, see
-//! `frust-theme/src/glass.rs`'s module docs). iOS 26.2's "Liquid Glass
+//! gradient) reads the theme's own `glass.control` tier (buttons/toggles/
+//! sliders — the "control" glass tier covers interactive controls generally,
+//! see `frust-theme/src/glass.rs`'s module docs), so the recipe is whatever
+//! the active design system authored, never a value named here. iOS 26.2's
+//! "Liquid Glass
 //! slider" claims (a user-facing OS tint-adjustment control) are **not**
 //! what this branch re-skins — this is Frust's `Slider` widget, a different
 //! control; this widget ships a visual re-skin only, no behavior changes.
@@ -242,8 +242,7 @@ impl Widget for SliderWidget {
 
         if is_cupertino(theme) {
             // Cupertino re-skin: larger reflective knob — see
-            // the module docs' Design-language branch section. Mirrors
-            // `cupertino::switch`'s shadow+highlight treatment exactly.
+            // the module docs' Design-language branch section.
             let diam = CUPERTINO_THUMB;
             let thumb_origin = Point::new(thumb_x - diam / 2.0, mid_y - diam / 2.0);
             let thumb_size = Size::new(diam, diam);
@@ -466,8 +465,8 @@ mod tests {
     }
 
     #[test]
-    fn themed_paint_resolves_m3_slider_roles() {
-        let theme = Theme::m3_baseline();
+    fn themed_paint_resolves_the_scheme_s_slider_roles() {
+        let theme = Theme::neutral();
         let scheme = theme.scheme();
         assert_eq!(
             paint_colors(0.5, Some(&theme)),
@@ -480,10 +479,10 @@ mod tests {
     }
 
     #[test]
-    fn material_and_unthemed_paint_have_no_reflective_treatment() {
-        // Byte-identical to the pre-Cupertino behavior — no
-        // draw_shadow/fill_rounded_rect_brush calls leak into the Material
-        // (or unthemed) path.
+    fn non_cupertino_and_unthemed_paint_have_no_reflective_treatment() {
+        // No draw_shadow/fill_rounded_rect_brush call leaks into the default
+        // (or unthemed) path — only a `Cupertino`-tagged theme takes the
+        // reflective branch.
         let mut unthemed = widget(0.5);
         let mut rec = TrackRecorder::default();
         let mut ctx = PaintCtx::new(Point::ZERO, Size::new(200.0, HEIGHT));
@@ -492,7 +491,12 @@ mod tests {
         assert!(rec.shadows.is_empty());
         assert!(rec.brushes.is_empty());
 
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
+        assert_ne!(
+            theme.design_language,
+            DesignLanguage::Cupertino,
+            "the default path under test must not be the Cupertino one"
+        );
         let mut themed = widget(0.5);
         let mut rec = TrackRecorder::default();
         let mut ctx = PaintCtx::new(Point::ZERO, Size::new(200.0, HEIGHT)).with_theme(&theme);
@@ -502,9 +506,36 @@ mod tests {
         assert!(rec.brushes.is_empty());
     }
 
+    /// A `Cupertino`-tagged theme carrying a translucent `control` glass tier
+    /// — the shape a Cupertino design system installs, built inline here
+    /// because no design language ships in this crate. The shadow/hairline
+    /// values are arbitrary-but-distinctive: the branch under test reads them
+    /// straight off the theme, so what matters is that the assertions below
+    /// track THESE numbers rather than a hardcoded recipe.
+    fn cupertino_theme() -> Theme {
+        Theme::builder(Theme::neutral())
+            .design_language(DesignLanguage::Cupertino)
+            .map_glass(|mut g| {
+                g.control = GlassMaterial {
+                    blur_radius_intent: 15.0,
+                    fills_light: Vec::new(),
+                    fills_dark: Vec::new(),
+                    hairline_alpha: 0.3,
+                    shadow: frust_theme::ShadowSpec {
+                        y_offset: 2.0,
+                        blur_std_dev: 4.0,
+                        color_alpha: 0.12,
+                    },
+                };
+                g
+            })
+            .build()
+    }
+
     #[test]
     fn cupertino_themed_paint_uses_the_larger_reflective_knob() {
-        let theme = Theme::cupertino_baseline();
+        let theme = cupertino_theme();
+        assert_eq!(theme.design_language, DesignLanguage::Cupertino);
         let mut w = widget(0.5);
         let mut rec = TrackRecorder::default();
         let mut ctx = PaintCtx::new(Point::ZERO, Size::new(200.0, HEIGHT)).with_theme(&theme);
@@ -516,7 +547,7 @@ mod tests {
         assert_eq!(rec.rrects[2], CUPERTINO_THUMB_FILL);
 
         assert_eq!(rec.shadows.len(), 1, "one drop shadow under the knob");
-        let expected = GlassScale::ios27().control.shadow;
+        let expected = theme.glass.control.shadow;
         assert_eq!(
             rec.shadows[0].2,
             CUPERTINO_THUMB / 2.0,

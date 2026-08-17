@@ -547,7 +547,7 @@ mod tests {
     }
 
     fn reduced_motion_theme() -> Theme {
-        let mut theme = Theme::m3_baseline();
+        let mut theme = Theme::neutral();
         theme.motion.reduce_motion = true;
         theme
     }
