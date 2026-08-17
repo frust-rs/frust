@@ -15,8 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use frust::{
-    AnyView, Component, GetUntracked, PopResult, Theme, TransitionSpec, handles_back,
-    push_back_press,
+    AnyView, Component, GetUntracked, PopResult, TransitionSpec, handles_back, push_back_press,
 };
 use frust_core::RenderRoot;
 use frust_text::TextContext;
@@ -184,7 +183,7 @@ fn modal_round_trip_delivers_its_result() {
     let mut state = HuddleApp.init();
     let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
 
-    frust::provide_context(Theme::m3_baseline());
+    frust::provide_context(frust_material::baseline());
     root.rebuild(&mut logic, &mut state);
 
     let delivered: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));

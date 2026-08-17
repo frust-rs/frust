@@ -23,12 +23,12 @@
 use std::sync::Arc;
 
 use frust::{
-    Align, Alignment, AnyView, Axis, Brightness, Button, CardVariant, Color, Column,
-    CrossAxisAlignment, DesignLanguage, EdgeInsets, FlexView, Get, Image, ImageFit, Padding, Row,
-    Set, SizedBox, Stack, Switch, Theme, any, app_bar, button_group, card, component,
-    cupertino_button, cupertino_switch, flexible, inflexible, scroll_view, slider, text,
-    use_context,
+    Align, Alignment, AnyView, Axis, Brightness, Button, Color, Column, CrossAxisAlignment,
+    DesignLanguage, EdgeInsets, FlexView, Get, Image, ImageFit, Padding, Row, Set, SizedBox, Stack,
+    Theme, any, component, flexible, inflexible, scroll_view, slider, text, use_context,
 };
+use frust_cupertino::{cupertino_button, cupertino_switch};
+use frust_material::{CardVariant, Switch, app_bar, button_group, card};
 
 use crate::HuddleState;
 use crate::failure::HuddleFailure;
@@ -63,7 +63,7 @@ impl frust::Component for AppearanceScreen {
         // Seed the brightness/design selectors from the currently-active theme so
         // a re-entered screen reflects the live language/brightness (accent + type
         // scale seed from their defaults — see `SettingsController::new`).
-        let theme = use_context::<Theme>().unwrap_or_else(Theme::m3_baseline);
+        let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
         let design0 = DesignChoice::from_design_language(theme.design_language);
         let brightness0 = BrightnessChoice::from_brightness(theme.brightness);
 
@@ -82,7 +82,7 @@ impl frust::Component for AppearanceScreen {
         let type_factor = state.controller.type_factor.get();
         let veil_opacity = state.controller.veil.get();
 
-        let theme = use_context::<Theme>().unwrap_or_else(Theme::m3_baseline);
+        let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
         let design_lang = theme.design_language;
         let effective_dark = theme.brightness == Brightness::Dark;
         let brightness = theme.brightness;

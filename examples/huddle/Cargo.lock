@@ -1087,6 +1087,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-cupertino"
+version = "0.1.0"
+dependencies = [
+ "frust",
+ "kurbo",
+ "peniko",
+]
+
+[[package]]
+name = "frust-glyph"
+version = "0.1.0"
+dependencies = [
+ "frust",
+ "kurbo",
+ "peniko",
+]
+
+[[package]]
+name = "frust-material"
+version = "0.1.0"
+dependencies = [
+ "frust",
+ "kurbo",
+ "peniko",
+]
+
+[[package]]
 name = "frust-paths"
 version = "0.1.0"
 dependencies = [
@@ -1782,6 +1809,9 @@ dependencies = [
  "clean-signals-frust",
  "frust",
  "frust-core",
+ "frust-cupertino",
+ "frust-glyph",
+ "frust-material",
  "frust-reactive",
  "frust-scene",
  "frust-text",

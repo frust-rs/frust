@@ -11,7 +11,7 @@
 //! `SECTION_HEADER_HEIGHT` constants, mirrored here as the same magic numbers
 //! since `screens` is a private module unreachable from this integration-test
 //! crate), and a two-line result row's `TWO_LINE_HEIGHT` (72px, re-exported
-//! from `frust-widgets`) is a fixed, non-font-metric-dependent constant —
+//! from `frust-material`) is a fixed, non-font-metric-dependent constant —
 //! so `AppBar(64) + field(56) + header(32) + half-row(36) = 188` is fully
 //! deterministic, the same style of hand-computed offset `tests/shell.rs`'s
 //! bottom-bar test (`bar_y = 568.0`) already relies on. The one exception is
@@ -54,9 +54,9 @@ const APP_BAR_HEIGHT: f64 = 64.0;
 const FIELD_HEIGHT: f64 = 56.0;
 /// Mirrors `screens/search.rs`'s private `SECTION_HEADER_HEIGHT`.
 const SECTION_HEADER_HEIGHT: f64 = 32.0;
-/// Half of `frust::TWO_LINE_HEIGHT` (a two-line row's supporting text
+/// Half of `frust_material::TWO_LINE_HEIGHT` (a two-line row's supporting text
 /// promotes every search result row to that height).
-const HALF_TWO_LINE_ROW: f64 = frust::TWO_LINE_HEIGHT / 2.0;
+const HALF_TWO_LINE_ROW: f64 = frust_material::TWO_LINE_HEIGHT / 2.0;
 
 /// The bottom navigation bar's Search tab slot (see `tests/shell.rs`'s own
 /// `slot_centers`/`bar_y`): tapping here switches the active tab to Search.

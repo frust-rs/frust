@@ -65,9 +65,10 @@ use frust::authoring::{
 };
 use frust::{
     AnimationController, Axis, CrossAxisAlignment, Curve, EdgeInsets, FlexView, FrameTime,
-    GestureDetector, IconSource, Padding, SizedBox, Theme, filled_card, flexible, icon, inflexible,
+    GestureDetector, IconSource, Padding, SizedBox, Theme, flexible, icon, inflexible,
     input::TOUCH_SLOP, text,
 };
+use frust_material::filled_card;
 use std::time::Duration;
 
 /// Height (logical px) of the drag-handle region reserved at the top of the
@@ -1050,7 +1051,7 @@ mod tests {
 
         // Build a dark theme (M3 baseline is light; we'd need a dark variant, but
         // for now we verify that a theme is applied by checking the colors differ).
-        let dark_theme = Theme::m3_baseline();
+        let dark_theme = frust_material::baseline();
         let scheme = dark_theme.scheme();
 
         let mut rec = ColorRecorder::default();

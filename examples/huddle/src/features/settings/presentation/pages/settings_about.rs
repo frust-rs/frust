@@ -8,9 +8,10 @@
 
 use frust::{
     Align, Alignment, AnyView, Axis, Color, Column, CrossAxisAlignment, EdgeInsets, FlexView,
-    Image, ImageFit, ImageSource, Padding, SizedBox, Stack, Theme, any, app_bar, filled_card,
-    flexible, inflexible, outlined_card, scroll_view, text, use_context,
+    Image, ImageFit, ImageSource, Padding, SizedBox, Stack, Theme, any, flexible, inflexible,
+    scroll_view, text, use_context,
 };
+use frust_material::{app_bar, filled_card, outlined_card};
 
 use crate::HuddleState;
 use crate::ui::solid_source::solid_source;
@@ -20,7 +21,7 @@ const LOGO_PNG: &[u8] = include_bytes!("../../../../../assets/logo.png");
 
 /// The about page.
 pub fn about_screen() -> AnyView<HuddleState> {
-    let theme = use_context::<Theme>().unwrap_or_else(Theme::m3_baseline);
+    let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
     let scheme = theme.scheme();
 
     let icon_block = match ImageSource::decode(LOGO_PNG) {

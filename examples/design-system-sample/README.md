@@ -88,25 +88,39 @@ frust v0.1.0 (.../crates/frust)
         └── sample-app v0.1.0 (.../sample-app) (*)
 ```
 
-The same command run against a catalogs-on dependent (from the framework repo
-root: `cargo tree -e features -i frust -p frust-native-widgets`) prints
-`frust feature "glyph"`, `"material"`, `"cupertino"`, `"glyph-fonts"` and
-`"default"` — that is the negative control proving the check can fail.
+The negative control this check used to have — a catalogs-on dependent
+turning `glyph`/`material`/`cupertino`/`glyph-fonts` back on for `frust` via
+Cargo's feature-additivity (`cargo tree -e features -i frust -p
+frust-native-widgets`, from the framework repo root) — no longer exists to
+demonstrate: `frust` carries no catalog cargo feature at all any more (the
+three built-in catalogs left the tree as `frust-material`/`frust-cupertino`/
+`frust-glyph`, ordinary sibling plugin crates each app opts into beside
+`frust`, the same way this workspace's `sample-app` opts into
+`sample-design`). Printing no catalog-name feature line is therefore not
+this workspace's special property any more — it is true of *every* `frust`
+dependent in the repo now, because there is no catalog-name feature left
+anywhere to print.
 
 ### The rule this implies for design-system crates
 
-**A design-system crate must never enable a built-in catalog feature.** Cargo
-features are additive and unify across a build: one `features = ["glyph"]` line
-in a design system turns Material/Cupertino/Glyph back on for *every* app that
-depends on it, and the app has no way to switch them off again. A design system
-that needs a symbol only a catalog provides has found a gap in
-`frust::authoring` — file that, don't enable the catalog.
+**A design-system crate enables nothing on `frust` by existing.** The
+Cargo-feature-additivity hazard this section used to warn about — one
+`features = ["glyph"]` line in a design-system crate silently turning
+Material/Cupertino/Glyph back on for *every* app that depends on it, with no
+way to switch them off again — is retired along with the catalog feature
+graph itself: `frust` has nothing named `glyph`/`material`/`cupertino`/
+`glyph-fonts` left to enable. A design-system crate today is shaped exactly
+like `sample-design`: a sibling crate an app depends on directly, built on
+`frust::authoring` plus whatever `frust` re-exports by name — the same seam
+the three built-in design systems (`frust-material`/`frust-cupertino`/
+`frust-glyph`) use.
 
-The same additivity is why this workspace is **excluded** from the framework's
-root workspace (root `Cargo.toml`'s `[workspace] exclude`): as a root member,
-Cargo would unify its `frust` edge with `plugins/native-widgets`' legitimately
-catalogs-on one and the proof would silently evaporate — the limitation
-`examples/no-catalogs/src/main.rs` documents in full.
+This workspace stays **excluded** from the framework's root workspace (root
+`Cargo.toml`'s `[workspace] exclude`) for **out-of-tree realism and
+`target/` isolation**, not to dodge a resolver hazard: a design-system crate
+must resolve `frust` exactly the way a real third-party crate would, from
+its own checkout with its own lockfile and its own `target/` dir, never as a
+root-workspace member riding the framework's shared build.
 
 ## The install-timing contract
 

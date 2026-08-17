@@ -1051,7 +1051,7 @@ fn readout_block(
 /// baseline pre-context.
 fn accent() -> Color {
     use_context::<Theme>()
-        .unwrap_or_else(Theme::m3_baseline)
+        .unwrap_or_else(frust_material::baseline)
         .scheme()
         .primary
 }
@@ -1059,7 +1059,7 @@ fn accent() -> Color {
 /// A muted caption ink.
 fn muted() -> Color {
     use_context::<Theme>()
-        .unwrap_or_else(Theme::m3_baseline)
+        .unwrap_or_else(frust_material::baseline)
         .scheme()
         .on_surface_variant
 }

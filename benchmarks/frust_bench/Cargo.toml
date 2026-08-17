@@ -37,6 +37,14 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # long-tail valves — nothing production pins a framework internal any more.
 frust = { path = "../../crates/frust" }
 
+# frust-material: the one Material 3 dark baseline `BenchApp::init` forces
+# app-wide (matching S1's `0xFF0D1421` canvas) — no other Material/Cupertino/
+# Glyph widget is used anywhere in this bench. The catalog feature graph the
+# baseline used to reach through `frust` directly was dissolved (see
+# docs/DEVELOPMENT.md's Version-Pin Policy); the design-system plugin crates
+# carry it now.
+frust-material = { path = "../../plugins/material" }
+
 # `frust-shell-common::perf`: the scenario-marker API
 # (`mark_scenario_start`/`mark_scenario_end`) the scenario driver brackets
 # each scenario window with (`docs/ARCHITECTURE.md`'s `FrameStats`/

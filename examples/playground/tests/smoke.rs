@@ -112,12 +112,12 @@ fn setup() -> Owner {
 /// [`Brightness`] under the fresh ambient owner — mirroring a shell's own
 /// `provide_context(theme.clone())` push (`docs/ARCHITECTURE.md`'s Theme
 /// delivery, the app-code half). Every page reads `use_context::<Theme>()`
-/// (falling back to `Theme::m3_baseline()` with no context), so this is what
-/// lets the multi-brightness sweep below actually exercise each page's
+/// (falling back to `frust_material::baseline()` with no context), so this is
+/// what lets the multi-brightness sweep below actually exercise each page's
 /// live-token re-resolution rather than only ever hitting the fallback.
 fn setup_with_theme(brightness: Brightness) -> (Owner, Theme) {
     let owner = setup();
-    let theme = Theme::builder(Theme::m3_baseline())
+    let theme = Theme::builder(frust_material::baseline())
         .brightness(brightness)
         .build();
     provide_context(theme.clone());

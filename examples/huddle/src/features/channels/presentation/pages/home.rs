@@ -79,11 +79,12 @@ use frust::authoring::{
 use frust::{
     Align, Alignment, AnimationController, AnyView, Axis, ChildKey, Column, CrossAxisAlignment,
     DesignLanguage, EdgeInsets, FlexView, GestureDetector, Get, Image, ImageFit, ImageSource,
-    ListView, NavigatorController, Padding, PopResult, ProgressValue, Row, SizedBox, Stack, Theme,
-    View, action, any, app_bar, button, circular_progress, component, dialog, flexible, hero, icon,
-    icons, inflexible, safe_area, scroll_view, show_cupertino_alert, show_dialog, switch, text,
+    ListView, NavigatorController, Padding, PopResult, Row, SizedBox, Stack, Theme, View, any,
+    button, component, flexible, hero, icon, icons, inflexible, safe_area, scroll_view, text,
     text_input, use_context,
 };
+use frust_cupertino::{action, show_cupertino_alert};
+use frust_material::{ProgressValue, app_bar, circular_progress, dialog, show_dialog, switch};
 
 use clean_signals_frust::use_controller;
 

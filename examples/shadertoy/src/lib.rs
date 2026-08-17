@@ -16,8 +16,8 @@ pub mod shaders;
 use frust::authoring::scene::ShaderProgram;
 use frust::{
     AnyView, Axis, Brightness, Color, Component, EdgeInsets, FlexView, Get, Padding, RwSignal,
-    SizedBox, Stack, SystemUiMode, Theme, any, button, flexible, inflexible, safe_area,
-    set_app_theme, set_system_ui_mode, text,
+    SizedBox, Stack, SystemUiMode, any, button, flexible, inflexible, safe_area, set_app_theme,
+    set_system_ui_mode, text,
 };
 
 use shader_view::shader_view;
@@ -157,7 +157,7 @@ impl Component for ShadertoyApp {
     type State = AppState;
 
     fn init(&self) -> AppState {
-        let mut theme = Theme::m3_baseline();
+        let mut theme = frust_material::baseline();
         theme.brightness = Brightness::Dark;
         set_app_theme(theme);
         AppState {

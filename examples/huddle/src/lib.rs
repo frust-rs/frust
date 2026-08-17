@@ -169,7 +169,7 @@ impl Component for HuddleApp {
 
         // The persistent chrome branches on the live design language (the
         // appearance settings screen swaps it via `set_app_theme`).
-        let theme = use_context::<Theme>().unwrap_or_else(Theme::m3_baseline);
+        let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
         let design: DesignLanguage = theme.design_language;
 
         let bottom = shell::bottom_bar(design, Rc::clone(&state.nav), state.tab);
@@ -190,7 +190,7 @@ impl Component for HuddleApp {
 
 // The showcase's sole entry point: one line binds `HuddleApp`
 // to all three platforms. The `setup` block installs Glyph as the seeded
-// default theme (`frust::glyph_theme::install()`) before any shell reads the
+// default theme (`frust_glyph::install()`) before any shell reads the
 // default-theme slot — a shell's own fallback is `Theme::neutral()` now, and
 // the appearance settings screen's System/Material3/Cupertino/Glyph toggle
 // (`features::settings`, driven by `set_app_theme`) still needs a Glyph
@@ -198,6 +198,6 @@ impl Component for HuddleApp {
 frust::app!(
     HuddleApp,
     setup = {
-        frust::glyph_theme::install();
+        frust_glyph::install();
     }
 );

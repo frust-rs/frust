@@ -371,7 +371,7 @@ fn formatting_table(format_locale: &Locale, muted: Color) -> AnyView<I18nDemoPag
 /// baseline pre-context — the same pattern every other section page uses.
 fn accent() -> Color {
     use_context::<Theme>()
-        .unwrap_or_else(Theme::m3_baseline)
+        .unwrap_or_else(frust_material::baseline)
         .scheme()
         .primary
 }
@@ -379,7 +379,7 @@ fn accent() -> Color {
 /// A muted caption ink.
 fn muted() -> Color {
     use_context::<Theme>()
-        .unwrap_or_else(Theme::m3_baseline)
+        .unwrap_or_else(frust_material::baseline)
         .scheme()
         .on_surface_variant
 }

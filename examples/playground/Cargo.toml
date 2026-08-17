@@ -28,6 +28,16 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # (`examples/glyph-catalog` is the design-language app; `examples/no-catalogs`
 # is the catalog-free compile guard).
 frust = { path = "../../crates/frust" }
+
+# frust-material: playground's home-page chrome (the [`app_bar`], the
+# section-switching [`navigation_bar`]) and the "Native Widgets" section's
+# frust-side comparison column ([`switch`]/[`linear_progress`]/`ProgressValue`)
+# use the Material widget catalog — the flat symbols the in-tree catalog
+# feature graph used to re-export through `frust` directly (dissolved — see
+# docs/DEVELOPMENT.md's Version-Pin Policy). Playground is the plugin/
+# capability testing ground, not a design-system showcase, so it takes only
+# Material (no Cupertino/Glyph usage anywhere in this app).
+frust-material = { path = "../../plugins/material" }
 # `frust` is the ONLY framework line this app ships for widget authoring.
 # `AppBackground` (`lib.rs`) and the `FrameTicker`/`GateFrameTicker` pair
 # (`pages/camera.rs`, `pages/native_widgets.rs`) — every hand-rolled

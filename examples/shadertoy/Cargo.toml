@@ -25,9 +25,16 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # create` will emit a version dependency here instead.
 frust = { path = "../../crates/frust" }
 
-# `frust` is the ONLY framework line this example ships. The hand-rolled
-# `ShaderView` `View`/`Widget` pair reaches its whole vocabulary through
-# `frust::authoring` (trait vocabulary + geometry) and
+# frust-material: the one Material 3 dark baseline this example forces app-wide
+# (`ShadertoyApp::init`, matching `benchmarks/frust_bench`'s shell) — no other
+# Material/Cupertino/Glyph widget is used anywhere in this app. The catalog
+# feature graph the baseline used to reach through `frust` directly was
+# dissolved (see docs/DEVELOPMENT.md's Version-Pin Policy); the design-system
+# plugin crates carry it now.
+frust-material = { path = "../../plugins/material" }
+
+# The hand-rolled `ShaderView` `View`/`Widget` pair reaches its whole
+# vocabulary through `frust::authoring` (trait vocabulary + geometry) and
 # `frust::authoring::scene::ShaderProgram` — so nothing production pins a
 # framework internal like `kurbo`/`peniko` any more.
 

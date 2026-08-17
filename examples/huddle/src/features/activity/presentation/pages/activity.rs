@@ -23,9 +23,9 @@ use std::sync::Arc;
 use clean_signals::async_state::AsyncState;
 use frust::{
     Align, Alignment, AnyView, Axis, Column, CrossAxisAlignment, FlexView, GestureDetector, Get,
-    SizedBox, any, app_bar, filled_card, filter_chip, flexible, hero, icon, icons, inflexible,
-    list_item, scroll_view, text, use_context,
+    SizedBox, any, flexible, hero, icon, icons, inflexible, scroll_view, text, use_context,
 };
+use frust_material::{app_bar, filled_card, filter_chip, list_item};
 
 /// CircleAvatar diameter — radius 20 → 40 (Material sizing
 /// reference), matching the roster's leading avatars.

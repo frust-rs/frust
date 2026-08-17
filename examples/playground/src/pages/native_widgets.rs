@@ -202,9 +202,9 @@ use std::time::Instant;
 use frust::{
     Align, Alignment, AnyView, Axis, Brightness, ButtonStyle, Color, CrossAxisAlignment,
     EdgeInsets, FlexChild, FlexView, Get, GetUntracked, Image, ImageFit, ImageSource, Padding,
-    ProgressValue, RwSignal, Set, SizedBox, Theme, any, button, checkbox, inflexible,
-    linear_progress, slider, switch, text, use_context,
+    RwSignal, Set, SizedBox, Theme, any, button, checkbox, inflexible, slider, text, use_context,
 };
+use frust_material::{ProgressValue, linear_progress, switch};
 // GateFrameTicker (see its own doc comment) is a hand-rolled `View`/`Widget`
 // pair — reached, like every other widget in this file, entirely through the
 // `frust`/`frust_native_widgets` facades. Mirrors `camera.rs`'s identical
@@ -311,7 +311,7 @@ local_sig!(stress_visible_sig, bool, false); // 50-slot stress toggle, off by de
 /// baseline pre-context.
 fn accent() -> Color {
     use_context::<Theme>()
-        .unwrap_or_else(Theme::m3_baseline)
+        .unwrap_or_else(frust_material::baseline)
         .scheme()
         .primary
 }
@@ -319,7 +319,7 @@ fn accent() -> Color {
 /// A muted caption ink.
 fn muted() -> Color {
     use_context::<Theme>()
-        .unwrap_or_else(Theme::m3_baseline)
+        .unwrap_or_else(frust_material::baseline)
         .scheme()
         .on_surface_variant
 }
@@ -636,7 +636,7 @@ fn progress_demo(value: i32) -> AnyView<PlaygroundState> {
 }
 
 /// The frust-drawn counterpart of [`progress_demo`] —
-/// [`linear_progress`](frust::linear_progress), frust's own determinate bar,
+/// [`linear_progress`](frust_material::linear_progress), frust's own determinate bar,
 /// on the same value.
 fn progress_drawn(value: i32) -> AnyView<PlaygroundState> {
     any(linear_progress(ProgressValue::Determinate(
@@ -834,7 +834,7 @@ fn composite_block(visible: bool, slider_value: i32) -> Vec<FlexChild<Playground
         ensure_demo_registered();
         // Read only on the mounted path — a hidden card costs this page
         // nothing, which is the whole point of the default-off toggle.
-        let theme = use_context::<Theme>().unwrap_or_else(Theme::m3_baseline);
+        let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
         let scheme = theme.scheme();
         block(vec![inflexible(composite_demo(
             format!("Composite \u{2014} slider {slider_value}"),

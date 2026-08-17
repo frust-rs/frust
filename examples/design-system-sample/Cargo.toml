@@ -3,12 +3,17 @@
 # holding a design-system crate and the app that installs it. Standalone for
 # one reason the other examples share and one of its own:
 #
-# 1. The root workspace's `examples/*` member glob would otherwise pull both
-#    crates in, and Cargo's feature resolver would then unify their
-#    `default-features = false` `frust` edge with `plugins/native-widgets`'
-#    legitimately catalogs-ON one — the exact unification
-#    `examples/no-catalogs/src/main.rs` documents. Catalogs-off is the whole
-#    point here, so this workspace must resolve `frust`'s features on its own.
+# 1. Out-of-tree realism: a design-system crate here must resolve `frust`
+#    exactly the way a real third-party crate would from its own checkout —
+#    its own `target/` dir, its own lockfile, no root-workspace member glob
+#    silently widening what it can reach. This is no longer a feature-
+#    unification concern: `frust` ships no catalog cargo feature to unify at
+#    all (the three built-in design systems — `frust-material`/
+#    `frust-cupertino`/`frust-glyph` — are ordinary sibling plugin crates
+#    now, each depended on beside `frust` the same way this workspace's own
+#    `sample-design` is), so a design-system crate enables nothing on `frust`
+#    by existing; the isolation here is about realism and `target/` hygiene,
+#    not dodging a resolver hazard.
 # 2. Its gate (`cargo test && cargo clippy --all-targets -- -D warnings &&
 #    cargo fmt --check`, from this directory — see README.md) is meant to run
 #    exactly the way a third-party design system's own CI would: outside the
@@ -32,15 +37,18 @@ publish = false
 # example lives in (the same `frust_path` mechanism `frust create` emits);
 # a published Frust would be a version dependency here instead.
 #
-# `default-features = false` is LOAD-BEARING and belongs on THIS
-# workspace-dependency entry, not on the member edges: Cargo silently ignores
-# `default-features = false` written on an *inherited* dependency (the
-# defaults stay on), and hard-errors if the workspace entry left it
-# unspecified. Setting it here means both members inherit a `frust` with
-# `glyph`/`material`/`cupertino`/`glyph-fonts` all OFF — no built-in catalog
-# is compiled anywhere in this workspace. See README.md's verification note.
+# `default-features = false` on THIS workspace-dependency entry (not on the
+# member edges — Cargo silently ignores that key written on an *inherited*
+# dependency, and hard-errors if the workspace entry left it unspecified) is
+# now a no-op rather than an opt-out: `frust`'s own `default = []` already
+# carries no built-in catalog to turn off — the three catalogs left the tree
+# as ordinary sibling plugin crates (`frust-material`/`frust-cupertino`/
+# `frust-glyph`), and this sample depends on none of them. Kept here for the
+# same reason a real third-party design-system crate would keep it: making
+# the catalogs-off contract explicit rather than relying on `frust`'s
+# current defaults staying empty. See README.md's verification note.
 #
-# Nothing is re-enabled: the only non-catalog `frust` features are
+# Nothing is re-enabled: the only `frust` features left at all are
 # `perf-trace` and `devtools`, both tooling opt-ins this sample has no use
 # for.
 frust = { path = "../../crates/frust", default-features = false }
