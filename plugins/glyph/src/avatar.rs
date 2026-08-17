@@ -19,6 +19,12 @@
 //! itself); [`AvatarView::background`]/[`AvatarView::foreground`]/
 //! [`AvatarView::border_color`] override any single channel outright (they win
 //! over `accent`).
+//!
+//! Two further opt-in builders: [`AvatarView::shape_full`] resolves the corner
+//! radius against [`ShapeScale::full`] instead of `shape.small`, painting a
+//! true circle rather than a rounded square; [`AvatarView::decorative`] marks a
+//! purely visual instance so it contributes no semantics node instead of the
+//! default `Role::Image` initials label.
 
 use frust::authoring::Role;
 use frust::authoring::text::{
@@ -261,6 +267,9 @@ impl<State: 'static> View<State> for AvatarView {
         }
         if prev.decorative != self.decorative {
             element.decorative = self.decorative;
+            // Semantics-only, but `PAINT` is what bumps the root's semantics
+            // dirty gate, and there is no narrower flag.
+            flags |= ChangeFlags::PAINT;
         }
         flags
     }
@@ -516,6 +525,18 @@ mod tests {
         let mut w = build(&avatar("ed").size(18.0));
         let rec = layout_and_paint(&mut w, Some(&crate::baseline()));
         assert_ne!(rec.rrects[0].2, 9.0);
+    }
+
+    #[test]
+    fn a_decorative_change_alone_is_a_republish() {
+        let prev = avatar("ed");
+        let mut w = build(&prev);
+        assert!(!w.decorative);
+        let next = avatar("ed").decorative();
+        let mut counter = 0u64;
+        let flags = View::<()>::rebuild(&next, &prev, &mut w, &mut BuildCtx::new(&mut counter));
+        assert!(w.decorative);
+        assert!(!flags.is_empty(), "the semantics dirty gate rides `PAINT`");
     }
 
     #[test]

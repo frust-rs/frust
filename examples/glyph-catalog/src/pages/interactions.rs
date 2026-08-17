@@ -970,8 +970,18 @@ fn demo_charge_ring(state: &CatalogState) -> FlexChild<CatalogState> {
             ])),
         );
 
+    // `SizedBox` TIGHTENS its child's constraints (both axes forced to
+    // CHARGE_RING_SIZE), which would clamp `icon_box`'s own 26×26 `SizedBox`
+    // request up to the full 34×34 slot — an inner tightened box can't ask
+    // for less than what its own incoming constraint already forces. `Align`
+    // LOOSENS the constraint it hands its child instead (min relaxed to
+    // zero, max untouched — `crates/frust-widgets/src/align.rs`'s module
+    // docs), so `icon_box` recovers its authored 26×26 footprint and Align
+    // centers it in the remaining 34×34 space, matching the reference's
+    // small-icon-in-a-bigger-slot look.
     let icon_stack: AnyView<CatalogState> =
-        any(SizedBox(Some(CHARGE_RING_SIZE), Some(CHARGE_RING_SIZE)).child(icon_box));
+        any(SizedBox(Some(CHARGE_RING_SIZE), Some(CHARGE_RING_SIZE))
+            .child(Align(Alignment::CENTER, icon_box)));
 
     // The fill readout lives beside the title rather than traced as a ring
     // around the icon (see the fn's doc comment) — a third row in the same
@@ -1661,8 +1671,9 @@ mod tests {
     use kurbo::{Affine, Shape};
 
     use super::{
-        Axis, CHARGE_ROW_H, FlexView, HB_RING_DIAMETER, HB_RING_MS, HB_RING_SCALE_MAX,
-        HB_RING_SLOT, demo_charge_ring, heartbeat_ring_state, heartbeat_ring_view,
+        Axis, CHARGE_ICON_SIZE, CHARGE_RING_SIZE, CHARGE_ROW_H, FlexView, HB_RING_DIAMETER,
+        HB_RING_MS, HB_RING_SCALE_MAX, HB_RING_SLOT, demo_charge_ring, heartbeat_ring_state,
+        heartbeat_ring_view,
     };
 
     /// A geometry-tracking `PaintScene` recorder: replays the SAME
@@ -1911,7 +1922,7 @@ mod tests {
 
     /// Layout stability: the ping ring's headroom fix grows
     /// ONLY the ring's own layout slot (`HB_RING_DIAMETER` → `HB_RING_SLOT`,
-    /// `18px` → `52px`) — its `01 Connection heartbeat` row's
+    /// `18px` → `56px`) — its `01 Connection heartbeat` row's
     /// `CrossAxisAlignment::Center` keeps every sibling (the "connected"
     /// badge, the latency text) at its own natural size, just re-centered
     /// within the now-taller row, not stretched to match. `demo_heartbeat`'s
@@ -1988,6 +1999,57 @@ mod tests {
             (wide.height() - CHARGE_ROW_H).abs() < 1.0,
             "glow height should stay {CHARGE_ROW_H}px, got {}px",
             wide.height()
+        );
+    }
+
+    /// Regression guard for `demo_charge_ring`'s `icon_stack` constraint bug:
+    /// wrapping `icon_box` (a [`CHARGE_ICON_SIZE`]-square `SizedBox`)
+    /// directly in an outer [`CHARGE_RING_SIZE`]-square `SizedBox` tightens
+    /// the inner box's own request up to the full slot (`SizedBox` always
+    /// TIGHTENS its child's constraints; only the `Align` wrapper between
+    /// the two LOOSENS them), so `icon_box`'s resolved footprint stops
+    /// tracking [`CHARGE_ICON_SIZE`] at all and always reports
+    /// [`CHARGE_RING_SIZE`] instead — the constant goes inert.
+    ///
+    /// `Align` centers its child within whatever free space it's given, so a
+    /// correctly-loosened [`CHARGE_ICON_SIZE`] `icon_box` inside the
+    /// [`CHARGE_RING_SIZE`] slot shows up as a `(CHARGE_RING_SIZE -
+    /// CHARGE_ICON_SIZE) / 2` margin on each axis; the pre-fix (inert,
+    /// slot-filling) `icon_box` would show a zero margin instead (no free
+    /// space left for `Align` to center within). The icon's own painted
+    /// background `Image` (`solid_source`/`ImageFit::Fill`) is the smallest
+    /// image rect this demo paints — the row's `glow` wash is the only
+    /// other one, and it always spans most of the row's width (see
+    /// [`charge_ring_glow_fills_its_row_width`]) — so its left edge is the
+    /// geometry probe: `block()`'s and `row_inner`'s own 12px paddings (the
+    /// same two constants [`charge_ring_glow_fills_its_row_width`] hardcodes
+    /// as `BLOCK_PADDING`) plus the margin above.
+    #[test]
+    fn charge_ring_icon_keeps_its_authored_footprint_inside_the_wider_slot() {
+        let _owner = setup();
+        const BLOCK_PADDING: f64 = 12.0;
+        const ROW_PADDING: f64 = 12.0;
+        const MARGIN: f64 = (CHARGE_RING_SIZE - CHARGE_ICON_SIZE) / 2.0;
+
+        let recorder = paint_view_into_recorder(
+            |s| super::any(FlexView::new(Axis::Vertical, vec![demo_charge_ring(s)])),
+            Size::new(390.0, 400.0),
+        );
+
+        let icon = recorder
+            .image_rects
+            .iter()
+            .min_by(|a, b| a.width().total_cmp(&b.width()))
+            .expect("demo_charge_ring must paint at least one image (the icon background)");
+
+        let expected_x0 = BLOCK_PADDING + ROW_PADDING + MARGIN;
+        assert!(
+            (icon.x0 - expected_x0).abs() < 1.0,
+            "the icon should sit centered with a {MARGIN}px margin inside its \
+             {CHARGE_RING_SIZE}px slot (expected x0 ~{expected_x0}), not clamped to fill it \
+             (the pre-fix bug, x0 == {}), got x0 {}",
+            BLOCK_PADDING + ROW_PADDING,
+            icon.x0
         );
     }
 

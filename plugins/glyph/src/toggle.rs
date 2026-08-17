@@ -25,7 +25,8 @@
 //! `layout` requests a [`TOUCH_TARGET`]-square slab and `paint` centers the
 //! fixed pill inside whatever box it was given, so the hit-tested area (the
 //! whole slab) and the painted control never diverge — and the a11y target
-//! clears the platform minimums a bare 38×22 misses.
+//! clears WCAG 2.2 and iOS's minimums a bare 38×22 misses (4dp under
+//! Android's; see [`TOUCH_TARGET`]'s doc for why that shortfall is accepted).
 //!
 //! # Two motion tracks: the knob springs, the colors fade
 //!
@@ -124,9 +125,10 @@ const BORDER_W: f64 = 1.0;
 /// Interactive slab edge, logical px: `layout` requests
 /// `max(TRACK_W, TOUCH_TARGET) × max(TRACK_H, TOUCH_TARGET)` and centers the
 /// pill in it, because a 38×22 control clears no platform minimum (WCAG 2.2
-/// target-size 24px, iOS 44pt, Android 48dp). 44 is the value
-/// [`crate::sheet`]'s `HANDLE_TOUCH_TARGET` already wraps its 3px drag handle
-/// in — one slab size for the catalog's undersized chrome.
+/// target-size 24px, iOS 44pt, Android 48dp). 44 clears WCAG 2.2 and iOS
+/// outright but sits 4dp under Android's 48dp — accepted for consistency with
+/// [`crate::sheet`]'s `HANDLE_TOUCH_TARGET`, already the same 44 value its 3px
+/// drag handle wraps in — one slab size for the catalog's undersized chrome.
 const TOUCH_TARGET: f64 = 44.0;
 /// Knob diameter, logical px (`.toggle::after{width:16px;height:16px}`,
 /// `glyph-design-system.html:256`). Constant in both states — unlike the M3
@@ -899,7 +901,8 @@ mod tests {
         );
         assert!(
             size.width >= TOUCH_TARGET && size.height >= TOUCH_TARGET,
-            "and clears the platform minimum on both axes"
+            "and clears WCAG 2.2 / iOS's minimum on both axes (4dp under \
+             Android's 48dp, accepted — see `TOUCH_TARGET`'s doc)"
         );
     }
 
