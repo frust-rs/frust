@@ -40,8 +40,8 @@ use frust_core::RenderRoot;
 use frust_core::SemanticsUpdate;
 use frust_core::accesskit::{Tree, TreeId, TreeUpdate};
 use frust_core::event::{
-    EventOutcome, ImeContentType, ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey,
-    PointerButton, PointerEvent, PointerPhase, ScrollDelta,
+    CursorIcon, EventOutcome, ImeContentType, ImeEvent, InputEvent, Key, KeyEvent, Modifiers,
+    NamedKey, PointerButton, PointerEvent, PointerPhase, ScrollDelta,
 };
 use frust_core::insets::WindowInsets;
 use frust_core::view::View;
@@ -61,7 +61,10 @@ use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey as WinitNamedKey};
-use winit::window::{ImePurpose, Theme as WinitTheme, Window, WindowAttributes, WindowId};
+use winit::window::{
+    CursorIcon as WinitCursorIcon, ImePurpose, Theme as WinitTheme, Window, WindowAttributes,
+    WindowId,
+};
 
 use crate::config::DesktopConfig;
 use crate::extensions::{CloseAction, DesktopExtensions, NoExtensions};
@@ -257,6 +260,7 @@ where
         modifiers: Modifiers::default(),
         compose: ComposeLatch::default(),
         ime_sync: ImeSync::default(),
+        cursor_icon: CursorIcon::Default,
         window: None,
         accesskit_proxy,
         adapter: None,
@@ -465,6 +469,34 @@ fn physical_to_logical(x: f64, y: f64, scale: f64) -> Point {
     Point::new(x / scale, y / scale)
 }
 
+/// Map a winit [`MouseScrollDelta`] to our [`ScrollDelta`], bridging both the
+/// unit and the sign convention at the shell boundary.
+///
+/// Units: wheel notches stay [`ScrollDelta::Lines`] (the ScrollView widget
+/// converts to px at 40 px/line); a precision trackpad's `PixelDelta` is
+/// physical, so it is divided by the scale factor into logical pixels like
+/// every other coordinate.
+///
+/// Sign: winit reports the direction the **content** moves — a positive `y`
+/// moves the content down, revealing what sits above it (a natural-scroll
+/// preference is resolved by the OS before winit sees the delta, so this holds
+/// on every platform). Frust's scrollable widgets accumulate `offset + dy`,
+/// where a growing offset reveals **later** content — the opposite sense, on
+/// both axes. Both axes are therefore negated here, at the one boundary that
+/// knows winit's convention; everything downstream sees only frust's. The
+/// negation is load-bearing, not redundant sign-juggling: dropping it inverts
+/// scrolling in every desktop app, and correcting it in a widget instead would
+/// invert the touch/fling and programmatic paths that already agree.
+///
+/// Pulled out as a free function (the call site reads `scale` off a live
+/// `Window`) so the mapping stays a pure, directly unit-testable function.
+fn map_scroll_delta(delta: MouseScrollDelta, scale: f64) -> ScrollDelta {
+    match delta {
+        MouseScrollDelta::LineDelta(x, y) => ScrollDelta::Lines(-(x as f64), -(y as f64)),
+        MouseScrollDelta::PixelDelta(px) => ScrollDelta::Pixels(-px.x / scale, -px.y / scale),
+    }
+}
+
 /// Map a winit [`WinitNamedKey`] to our editing-semantics [`NamedKey`] set,
 /// or `None` for a named key we carry no editing semantics for
 /// (function keys, media keys, etc. — those fall through to `KeyboardInput`
@@ -518,8 +550,13 @@ fn map_modifiers(state: ModifiersState) -> Modifiers {
 ///
 /// Named keys ([`WinitKey::Named`]) map through [`map_named_key`]; anything
 /// else falls back to the key's resolved `text` (already dead-key/smart-quote
-/// resolved by the platform) as [`Key::Character`] — **unless** `composing` is
-/// set, in which case the character is dropped (the dedupe rule: while an IME
+/// resolved by the platform) as [`Key::Character`]. The spacebar is the one
+/// named key that resolves to a character instead: winit models it as
+/// [`WinitNamedKey::Space`] (never `Character(" ")`), but it types a space
+/// rather than carrying editing semantics, so it takes the character path with
+/// its `text` payload — falling back to `" "` on a platform that sends none.
+/// Either character path is dropped **while** `composing` is
+/// set (the dedupe rule: while an IME
 /// [`Ime::Preedit`] is active, `Ime::Commit` is the authoritative source for the
 /// composed text, not `KeyboardInput.text`). `repeat` passes through unfiltered
 /// — callers decide whether to honor auto-repeat. Only key-down (`Pressed`)
@@ -536,6 +573,16 @@ fn map_key_event(
         return None;
     }
     let key = match logical_key {
+        // Space is a named key that types text, so it resolves to a character
+        // ahead of the editing-semantics mapping below — `map_named_key` carries
+        // no `NamedKey` for it, and letting it fall through there would drop the
+        // event and leave every text widget unable to receive a space.
+        WinitKey::Named(WinitNamedKey::Space) => {
+            if composing {
+                return None;
+            }
+            Key::Character(text.unwrap_or(" ").to_string())
+        }
         WinitKey::Named(named) => Key::Named(map_named_key(*named)?),
         _ => {
             if composing {
@@ -634,6 +681,44 @@ fn ime_purpose_for(content_type: ImeContentType) -> ImePurpose {
     }
 }
 
+/// Map a resolved framework [`CursorIcon`] onto winit's own cursor vocabulary.
+///
+/// The single place in the framework where a cursor name touches a platform:
+/// core carries the request platform-neutrally (see
+/// [`frust_core::event::EventCtx::set_cursor`]) and this is the desktop
+/// translation. Every framework variant has an exact winit counterpart in the
+/// pinned `winit 0.30.13` (which sources its icons from `cursor-icon`, whose
+/// names follow CSS), so nothing here approximates.
+///
+/// The wildcard arm is not dead code: [`CursorIcon`] is `#[non_exhaustive]`, so a
+/// variant added later must compile here and *degrade* to the platform arrow
+/// rather than break the build or invent a shape.
+fn winit_cursor_for(icon: CursorIcon) -> WinitCursorIcon {
+    match icon {
+        CursorIcon::Default => WinitCursorIcon::Default,
+        CursorIcon::Pointer => WinitCursorIcon::Pointer,
+        CursorIcon::Text => WinitCursorIcon::Text,
+        CursorIcon::Grab => WinitCursorIcon::Grab,
+        CursorIcon::Grabbing => WinitCursorIcon::Grabbing,
+        CursorIcon::ColResize => WinitCursorIcon::ColResize,
+        CursorIcon::RowResize => WinitCursorIcon::RowResize,
+        CursorIcon::NotAllowed => WinitCursorIcon::NotAllowed,
+        _ => WinitCursorIcon::Default,
+    }
+}
+
+/// The winit cursor (if any) to push, given the shape last pushed and the one
+/// [`RenderRoot::cursor`] now resolves to.
+///
+/// `None` means "say nothing to winit": the resolved cursor re-resolves on every
+/// pointer `Move`, so an unguarded `set_cursor` would fire a platform call on
+/// every mouse motion for a value that had not moved. Split out as a free
+/// function for [`brightness_change_to_notify`]'s reason — the change decision is
+/// then unit-testable without a live window.
+fn cursor_change_to_apply(last: CursorIcon, current: CursorIcon) -> Option<WinitCursorIcon> {
+    (last != current).then(|| winit_cursor_for(current))
+}
+
 /// Cached view of what we last told winit about the platform IME, so
 /// [`ShellHandler::sync_ime`] only calls
 /// `set_ime_allowed`/`set_ime_cursor_area`/`set_ime_purpose` on an actual
@@ -700,6 +785,13 @@ struct ShellHandler<State: 'static, Logic, V: View<State>, E> {
     /// `set_ime_cursor_area`), so [`ShellHandler::sync_ime`] only calls them on
     /// an actual change.
     ime_sync: ImeSync,
+    /// The cursor shape last pushed to winit via `Window::set_cursor` — the change
+    /// gate behind [`ShellHandler::sync_cursor`]. Seeded with
+    /// [`CursorIcon::Default`], which is the shape a fresh window already has, so
+    /// the first push happens only when a widget actually asks for something else.
+    /// Named apart from `cursor` above deliberately: that one is the pointer's
+    /// *position*, this one its *shape*.
+    cursor_icon: CursorIcon,
     /// Created lazily in `resumed()` (macOS requires window creation there).
     window: Option<Arc<Window>>,
     /// A clone of the wake proxy handed to the `accesskit_winit` [`Adapter`] at
@@ -816,8 +908,31 @@ where
     fn dispatch(&mut self, window: &Window, event: InputEvent) {
         let outcome = event_under_owner(self.runtime, &mut self.root, &mut self.state, &event);
         self.sync_ime(window);
+        self.sync_cursor(window);
         if outcome.needs_redraw {
             window.request_redraw();
+        }
+    }
+
+    /// Push the cursor shape [`RenderRoot::cursor`] resolved to winit, but only
+    /// when it differs from the last one pushed.
+    ///
+    /// Called from [`ShellHandler::dispatch`] beside
+    /// [`sync_ime`](ShellHandler::sync_ime), and for the same reason: the shape can
+    /// move as a side effect of any event, not just a pointer one, since a handler
+    /// on any pass can change what the *next* `Move` resolves. It is deliberately
+    /// **not** tied to a frame — a cursor is a window property, not something
+    /// painted, so a hover that changes nothing but the shape costs one platform
+    /// call and no repaint.
+    ///
+    /// The change gate ([`cursor_change_to_apply`]) is load-bearing rather than
+    /// cosmetic: the resolved cursor re-resolves on every pointer `Move`, so an
+    /// unguarded push would call into the platform on every single mouse motion.
+    fn sync_cursor(&mut self, window: &Window) {
+        let resolved = self.root.cursor();
+        if let Some(winit_icon) = cursor_change_to_apply(self.cursor_icon, resolved) {
+            window.set_cursor(winit_icon);
+            self.cursor_icon = resolved;
         }
     }
 
@@ -1364,17 +1479,9 @@ where
                 );
             }
 
-            // Wheel notches stay `Lines` (the ScrollView widget converts to px at
-            // 40 px/line); precision-trackpad `PixelDelta` is physical, so divide
-            // by the scale factor into logical pixels like every other coordinate.
+            // Both the unit and the sign conversion live in `map_scroll_delta`.
             WindowEvent::MouseWheel { delta, .. } => {
-                let scroll = match delta {
-                    MouseScrollDelta::LineDelta(x, y) => ScrollDelta::Lines(x as f64, y as f64),
-                    MouseScrollDelta::PixelDelta(px) => {
-                        let scale = window.scale_factor();
-                        ScrollDelta::Pixels(px.x / scale, px.y / scale)
-                    }
-                };
+                let scroll = map_scroll_delta(delta, window.scale_factor());
                 self.dispatch(
                     &window,
                     InputEvent::Scroll {
@@ -1656,17 +1763,22 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposeLatch, DesktopConfig, DesktopExtensions, ElementState, Ime, ImeSync, NoExtensions,
-        Tree, TreeId, WinitKey, WinitNamedKey, WinitTheme, base_theme, brightness_change_to_notify,
-        brightness_from_winit, build_tree_update, default_theme, finish,
+        ComposeLatch, DesktopConfig, DesktopExtensions, ElementState, Ime, ImeSync,
+        MouseScrollDelta, NoExtensions, Tree, TreeId, WinitCursorIcon, WinitKey, WinitNamedKey,
+        WinitTheme, base_theme, brightness_change_to_notify, brightness_from_winit,
+        build_tree_update, cursor_change_to_apply, default_theme, finish,
         follow_platform_brightness, ime_purpose_for, map_key_event, map_modifiers, map_named_key,
-        physical_to_logical, theme_after_override_poll, window_attributes,
+        map_scroll_delta, physical_to_logical, theme_after_override_poll, window_attributes,
+        winit_cursor_for,
     };
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{Node, NodeId, Role};
-    use frust_core::event::{ImeContentType, ImeEvent, Key, KeyEvent, Modifiers, NamedKey};
+    use frust_core::event::{
+        CursorIcon, ImeContentType, ImeEvent, Key, KeyEvent, Modifiers, NamedKey, ScrollDelta,
+    };
     use frust_theme::{Brightness, DesignLanguage, Theme};
     use kurbo::Point;
+    use winit::dpi::PhysicalPosition;
     use winit::keyboard::ModifiersState;
     use winit::window::{ImePurpose, WindowAttributes};
 
@@ -1728,6 +1840,36 @@ mod tests {
     fn physical_to_logical_is_identity_at_unit_scale() {
         // A non-HiDPI display: physical and logical coincide.
         assert_eq!(physical_to_logical(37.0, 12.0, 1.0), Point::new(37.0, 12.0));
+    }
+
+    // --- map_scroll_delta ---
+
+    #[test]
+    fn map_scroll_delta_negates_wheel_lines() {
+        // winit's positive y moves the content down (revealing what is above);
+        // frust's scrollables add the delta to an offset that grows to reveal
+        // later content, so the sign flips at this boundary.
+        assert_eq!(
+            map_scroll_delta(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0),
+            ScrollDelta::Lines(0.0, -1.0)
+        );
+        assert_eq!(
+            map_scroll_delta(MouseScrollDelta::LineDelta(2.0, -3.0), 1.0),
+            ScrollDelta::Lines(-2.0, 3.0)
+        );
+    }
+
+    #[test]
+    fn map_scroll_delta_negates_and_scales_pixel_deltas() {
+        // A 2× HiDPI display: a physical (20, 60) trackpad delta is logical
+        // (10, 30), negated onto frust's convention.
+        assert_eq!(
+            map_scroll_delta(
+                MouseScrollDelta::PixelDelta(PhysicalPosition::new(20.0, 60.0)),
+                2.0
+            ),
+            ScrollDelta::Pixels(-10.0, -30.0)
+        );
     }
 
     #[test]
@@ -1930,10 +2072,85 @@ mod tests {
     }
 
     #[test]
+    fn map_key_event_maps_space_to_a_character() {
+        // winit models the spacebar as `Named(Space)` carrying a `" "` text
+        // payload, never as `Character(" ")` — it must still reach a text widget
+        // as the character it types.
+        let event = map_key_event(
+            &WinitKey::Named(WinitNamedKey::Space),
+            Some(" "),
+            ElementState::Pressed,
+            false,
+            Modifiers::default(),
+            false,
+        );
+        assert_eq!(
+            event,
+            Some(KeyEvent {
+                key: Key::Character(" ".to_string()),
+                modifiers: Modifiers::default(),
+                repeat: false,
+            })
+        );
+    }
+
+    #[test]
+    fn map_key_event_maps_space_without_a_text_payload() {
+        // A platform that reports no resolved text for the spacebar still types
+        // a space.
+        let event = map_key_event(
+            &WinitKey::Named(WinitNamedKey::Space),
+            None,
+            ElementState::Pressed,
+            false,
+            Modifiers::default(),
+            false,
+        );
+        assert_eq!(
+            event,
+            Some(KeyEvent {
+                key: Key::Character(" ".to_string()),
+                modifiers: Modifiers::default(),
+                repeat: false,
+            })
+        );
+    }
+
+    #[test]
+    fn map_key_event_drops_space_while_composing() {
+        // Space takes the character path, so it takes the character dedupe rule
+        // with it: `Ime::Commit` is authoritative mid-composition.
+        let event = map_key_event(
+            &WinitKey::Named(WinitNamedKey::Space),
+            Some(" "),
+            ElementState::Pressed,
+            false,
+            Modifiers::default(),
+            true, // composing
+        );
+        assert_eq!(event, None);
+    }
+
+    #[test]
     fn map_key_event_is_none_for_unmapped_named_key_with_no_text() {
         let event = map_key_event(
             &WinitKey::Named(WinitNamedKey::F1),
             None,
+            ElementState::Pressed,
+            false,
+            Modifiers::default(),
+            false,
+        );
+        assert_eq!(event, None);
+    }
+
+    #[test]
+    fn map_key_event_is_none_for_unmapped_named_key_carrying_text() {
+        // The character carve-out is Space's alone: any other named key with no
+        // editing semantics stays dropped, text payload or not.
+        let event = map_key_event(
+            &WinitKey::Named(WinitNamedKey::F1),
+            Some("\u{f704}"),
             ElementState::Pressed,
             false,
             Modifiers::default(),
@@ -2045,6 +2262,60 @@ mod tests {
     #[test]
     fn ime_sync_defaults_to_the_normal_purpose() {
         assert_eq!(ImeSync::default().purpose, ImePurpose::Normal);
+    }
+
+    // --- cursor: framework request -> winit shape, and the change gate ---
+    //
+    // The mapping is exhaustive over the framework's own vocabulary and the gate
+    // is what keeps `Window::set_cursor` off the per-mouse-motion path; both are
+    // pure, so neither needs a live window.
+
+    #[test]
+    fn every_framework_cursor_maps_to_its_winit_counterpart() {
+        for (ours, theirs) in [
+            (CursorIcon::Default, WinitCursorIcon::Default),
+            (CursorIcon::Pointer, WinitCursorIcon::Pointer),
+            (CursorIcon::Text, WinitCursorIcon::Text),
+            (CursorIcon::Grab, WinitCursorIcon::Grab),
+            (CursorIcon::Grabbing, WinitCursorIcon::Grabbing),
+            (CursorIcon::ColResize, WinitCursorIcon::ColResize),
+            (CursorIcon::RowResize, WinitCursorIcon::RowResize),
+            (CursorIcon::NotAllowed, WinitCursorIcon::NotAllowed),
+        ] {
+            assert_eq!(
+                winit_cursor_for(ours),
+                theirs,
+                "{ours:?} must reach the platform as {theirs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_cursor_is_pushed_to_winit_only_on_a_change() {
+        // A resolved cursor that has not moved says nothing to the platform — the
+        // resolution re-runs on every pointer `Move`, so this gate is what stops a
+        // platform call per mouse motion.
+        assert_eq!(
+            cursor_change_to_apply(CursorIcon::Default, CursorIcon::Default),
+            None,
+            "an unmoved cursor issues no winit call"
+        );
+        assert_eq!(
+            cursor_change_to_apply(CursorIcon::Pointer, CursorIcon::Pointer),
+            None
+        );
+
+        // Both directions of a real change fire, including the return to Default —
+        // a widget releasing its request must actually restore the arrow.
+        assert_eq!(
+            cursor_change_to_apply(CursorIcon::Default, CursorIcon::Pointer),
+            Some(WinitCursorIcon::Pointer)
+        );
+        assert_eq!(
+            cursor_change_to_apply(CursorIcon::Pointer, CursorIcon::Default),
+            Some(WinitCursorIcon::Default),
+            "dropping a request restores the platform arrow"
+        );
     }
 
     // --- build_tree_update ---

@@ -28,6 +28,54 @@
 //!   a child [`text`](crate::text) run with the themed color role it should
 //!   default to, instead of hardcoding a color.
 //!
+//! # Hover: claim it, latch it, then correct it at paint time
+//!
+//! There is no hover phase and no Enter/Leave event. A widget that wants hover
+//! chrome opts in with three things, each covering a case the others cannot:
+//!
+//! - In its **uncaptured** [`PointerPhase::Move`] arm, hit-test the event position
+//!   against its own bounds and call
+//!   [`EventCtx::claim_hover`](frust_core::EventCtx::claim_hover) when it is
+//!   inside — on *every* such move, not just on entry (the claim is per-pass, not
+//!   sticky).
+//! - Latch that same hit test into an internal hover flag, and gate
+//!   `request_redraw` on the flag actually *changing*. This is the frame source
+//!   for hover gain (and for the link moving from a sibling onto this widget):
+//!   `claim_hover` asks for no redraw, and the pipeline manufactures one only when
+//!   a hover ends with nothing taking it. Gating on the change is also what keeps
+//!   a pointer wandering inside one widget from repainting per event.
+//! - In `paint`, read
+//!   [`PaintCtx::is_hovered`](frust_core::PaintCtx::is_hovered) as the
+//!   authoritative value and self-correct the flag from it. This is not optional
+//!   belt-and-braces: a pointer leaving the widget routes its next move onto
+//!   whatever it moved *onto*, so the widget it left never gets an event saying so.
+//!
+//! Everything else is the pipeline's job. `frust-core` stamps the claim down the
+//! pod chain and strands the previous claimant by advancing a hover epoch, so a
+//! container needs no hover bookkeeping at all — [`route_event`] and
+//! [`route_event_single`] carry it for free, and a hand-rolled router that
+//! forwards through [`ChildPod::event_child`] does too. Because the claim is
+//! recorded as a *path*, an enclosing container reads hovered while the pointer is
+//! over a claiming child (CSS `:hover` semantics), and every off-path widget reads
+//! `false`.
+//!
+//! A container that wants hover chrome of its **own** has one extra rule: it
+//! claims *after* routing the move to its children, never before. Only one claim
+//! per pass is recorded and the first one recorded wins, so an ancestor that claims
+//! before it forwards makes every descendant ineligible for the pass — the child
+//! under the pointer never reads hovered, while its latched flag keeps flipping and
+//! asking for a frame on every move. Claiming after routing makes the container's
+//! claim a fallback: a child's claim wins and the container still reads hovered
+//! through the path, and when no child claims the container's own claim is what
+//! records.
+//!
+//! A **captured** pointer can never create hover, so a drag never paints hover
+//! under the finger and a widget that captures its own gesture is hover-free for
+//! the length of it. Nothing distinguishes a touch contact from a mouse, though: a
+//! touch drag that captured nothing is an ordinary hover pass, so a non-capturing
+//! consumer can tint transiently under a finger — the `Up` at lift ends the link
+//! (see `docs/LIMITATIONS.md`'s `hover-window-leave-standing`).
+//!
 //! **Application code should prefer `frust::authoring`**, which re-exports
 //! everything below plus the `frust-core` trait vocabulary and `kurbo`/`peniko`
 //! geometry — so an app depends on `frust` alone. The example spells its imports

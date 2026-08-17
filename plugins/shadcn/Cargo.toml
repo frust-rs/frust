@@ -1,0 +1,28 @@
+# `frust-shadcn`: the shadcn/ui design-system catalog plugin — the tier's first
+# external-origin design system (ported from shadcn/ui v4, not authored here;
+# upstream is MIT-licensed, © 2023 shadcn — see LICENSE-shadcn-ui.md beside this
+# manifest for the vendored license text).
+# Production deps are the frust facade plus kurbo/peniko for the geometry/color
+# vocabulary its widgets paint with, the same pins frust-widgets carries and the
+# same shape frust-glyph/frust-material/frust-cupertino carry; frust-widgets and
+# frust-core are dev-dependencies only (the sanctioned test-fixture/RenderRoot
+# route, shipping nothing).
+[package]
+name = "frust-shadcn"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+frust = { path = "../../crates/frust", default-features = false }
+kurbo = { workspace = true }
+peniko = { workspace = true }
+
+[dev-dependencies]
+frust-widgets = { path = "../../crates/frust-widgets", features = ["test-support"] }
+# Test-only: the catalog's paint/event tests drive a real `RenderRoot` (which
+# the facade does not re-export), and `test-support` turns on the
+# `PaintCtx::for_test` clock seam — the same dev-dependency shape every other
+# design-system plugin carries.
+frust-core = { path = "../../crates/frust-core", features = ["test-support"] }

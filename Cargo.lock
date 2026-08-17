@@ -2321,6 +2321,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-shadcn"
+version = "0.1.0"
+dependencies = [
+ "frust",
+ "frust-core",
+ "frust-widgets",
+ "kurbo",
+ "peniko",
+]
+
+[[package]]
 name = "frust-shared-preferences"
 version = "0.1.0"
 dependencies = [
@@ -6382,6 +6393,14 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
  "digest",
+]
+
+[[package]]
+name = "shadcn-demo"
+version = "0.1.0"
+dependencies = [
+ "frust",
+ "frust-shadcn",
 ]
 
 [[package]]

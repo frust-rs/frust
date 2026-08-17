@@ -15,6 +15,51 @@
 //! records which child was active so it can route later moves/releases directly.
 //! Capture auto-releases on [`PointerPhase::Up`]/[`PointerPhase::Cancel`] (never
 //! on window-leave).
+//!
+//! # Hover is a claim, not a phase
+//!
+//! There is no Enter/Leave phase, and [`PointerPhase`] deliberately gains none:
+//! hover is an **opt-in claim** a widget makes from its ordinary uncaptured
+//! [`PointerPhase::Move`] arm ([`EventCtx::claim_hover`]), recorded as a path
+//! through the pod chain the same way focus is. The claim's identity is an
+//! *epoch*: [`crate::app::RenderRoot`] advances one hover epoch per hover pass
+//! (an uncaptured `Move`, or the `Down`/`Up`/`Cancel` that ends a hover
+//! outright), a claim stamps that epoch onto every
+//! [`ChildPod`](crate::widget::ChildPod) from the claimant up to the root, and a
+//! link only counts as hovered while its stamp still matches the live epoch. So
+//! the previous claimant needs no explicit clearing — the pointer moving anywhere
+//! else advances the epoch and its stamp goes stale by construction, which is why
+//! a container that never hears about the move cannot leave a stale path standing.
+//!
+//! The recorded thing is a **path**, exactly like focus, and both hover reads
+//! report membership of it: the claimant *and* every ancestor enclosing it read
+//! hovered, the way CSS `:hover` applies to an element while the pointer is over
+//! one of its descendants. Nothing off the path does — a sibling, or a widget
+//! whose descendant did not claim, reads `false`.
+//!
+//! Only an **uncaptured** `Move` may claim: the root marks a captured pass
+//! ineligible outright, and [`ChildPod::event_child`](crate::widget::ChildPod::event_child)
+//! additionally refuses a claim from inside a pod that itself holds the capture
+//! path, so a drag can never paint hover under the finger. At most one claim per
+//! pass is recorded — the **first one recorded wins**, and every later claim in
+//! that pass is ineligible — so at most one path is hovered and two *stacked*
+//! widgets cannot each hold their own link. First-recorded is the topmost
+//! (deepest) claimant only while every container claims **after** routing the
+//! move to its children, which is what [`EventCtx::claim_hover`]'s contract
+//! requires of one: an ancestor that claims *before* it forwards is recorded
+//! first instead, and starves its whole subtree for the pass.
+//!
+//! # The cursor is a per-pass request, on its own channel
+//!
+//! [`EventCtx::set_cursor`] is hover's sibling and deliberately **not** derived
+//! from it: the root's hover mirror is identity-free (it knows *that* something
+//! is hovered, not which widget or what shape that widget wants), so the cursor
+//! gets its own channel — one slot per pass, last writer wins, resolved by
+//! [`crate::app::RenderRoot::event`] into [`crate::app::RenderRoot::cursor`] for
+//! a desktop shell to apply. Absence resolves to [`CursorIcon::Default`], so a
+//! widget that stops asking needs no clearing, and only a pointer
+//! [`PointerPhase::Move`] re-resolves — a captured `Move` included, which is what
+//! lets a drag keep its own cursor outside its bounds.
 
 use std::any::Any;
 use std::cell::Cell;
@@ -66,6 +111,49 @@ pub struct PointerEvent {
     pub position: Point,
     /// Which button the event carries (`Primary` for touch/pen).
     pub button: PointerButton,
+}
+
+/// The pointer cursor a widget asks the host to display.
+///
+/// A **request vocabulary**, not a rendering one: platform-neutral names a
+/// widget states its intent in ([`EventCtx::set_cursor`]), which a desktop shell
+/// maps onto its own host API — `frust-shell-desktop` onto winit's own cursor
+/// icons, the one place any of these names touches a platform. Deliberately
+/// tiny: the shapes a desktop-class design system actually needs, not a full CSS
+/// cursor set.
+///
+/// `#[non_exhaustive]` from birth, so widening it later cannot break an
+/// out-of-tree `match` (a shell or design system must carry a wildcard arm and
+/// degrade an unknown request to [`CursorIcon::Default`] rather than fail to
+/// compile).
+///
+/// **Nothing below a desktop shell honours a request.** The mobile shells never
+/// read the resolved value — a touch host has no pointer to shape — so a widget
+/// may set a cursor unconditionally and get the desktop behaviour where it
+/// exists and no behaviour at all where it does not.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum CursorIcon {
+    /// The host's ordinary arrow. The resolved value of any pass in which no
+    /// widget asked for anything else, so a widget never has to ask for it to
+    /// "give the cursor back" (see [`EventCtx::set_cursor`]).
+    #[default]
+    Default,
+    /// The clickable hand: buttons, links, and anything else a press activates.
+    Pointer,
+    /// The text I-beam: editable or selectable text.
+    Text,
+    /// An open hand: this is draggable, and no drag has started yet.
+    Grab,
+    /// A closed hand: a drag is in progress.
+    Grabbing,
+    /// A column-resize handle — a divider the pointer moves horizontally.
+    ColResize,
+    /// A row-resize handle — a divider the pointer moves vertically.
+    RowResize,
+    /// The action under the pointer is refused: a disabled control, or a drop
+    /// target rejecting what is being dragged.
+    NotAllowed,
 }
 
 /// A scroll amount, in either discrete lines or continuous pixels.
@@ -490,6 +578,52 @@ pub fn take_focus_orphaned() -> bool {
     FOCUS_ORPHANED.with(|flag| flag.replace(false))
 }
 
+thread_local! {
+    /// The cursor a widget asked for during the event pass currently running on
+    /// this thread — written by [`EventCtx::set_cursor`], cleared and drained by
+    /// [`crate::app::RenderRoot::event`].
+    ///
+    /// A side channel for a *routing* reason rather than the missing-handle
+    /// reason [`PENDING_RESULT_FLUSH`] and [`FOCUS_ORPHANED`] above have. Unlike
+    /// capture, focus, and hover, a cursor request has nothing to record **per
+    /// pod**: the root wants one value — whichever widget on the routed path
+    /// spoke last — and no container between that widget and the root reads it or
+    /// acts on it. Bubbling it pod by pod would mean widening every container's
+    /// fold to carry a value no container uses.
+    ///
+    /// **Pass-scoped, not persistent.** `RenderRoot::event` clears the slot
+    /// before dispatching and drains it after, so a request never outlives its
+    /// pass, and a [`EventCtx::set_cursor`] made from a dispatch no root drives
+    /// (the `Cancel` a reconciler synthesizes during a rebuild, say) is dropped
+    /// by the next pass's clear rather than leaking into it. Last write wins,
+    /// which is what makes the innermost widget the routed path reaches the one
+    /// that decides.
+    ///
+    /// Thread-local rather than a process-global for the same UI-thread-affinity
+    /// reason as its two neighbours: the tree that requests a cursor and the
+    /// `RenderRoot` whose shell applies it live on one thread, and a global would
+    /// let a hover on one thread reshape another window's pointer.
+    static CURSOR_REQUEST: Cell<Option<CursorIcon>> = const { Cell::new(None) };
+}
+
+/// Clear any pending cursor request, so the pass about to run starts from
+/// "nobody has asked for anything".
+///
+/// Absence is not a missing answer — it *is* the answer
+/// ([`CursorIcon::Default`]), which is why the clear is what makes the request
+/// model stateless: a widget that stops asking stops being obeyed, with nothing
+/// to release.
+pub(crate) fn clear_cursor_request() {
+    CURSOR_REQUEST.with(|slot| slot.set(None));
+}
+
+/// Take (and clear) the cursor requested during this pass, `None` when no widget
+/// asked. Drained by [`crate::app::RenderRoot::event`], which resolves it into
+/// the root's shell-facing cursor.
+pub(crate) fn take_cursor_request() -> Option<CursorIcon> {
+    CURSOR_REQUEST.with(|slot| slot.take())
+}
+
 /// What kind of content a focused editable field holds — the hint a widget
 /// publishes so each shell can configure the platform input method.
 ///
@@ -746,6 +880,31 @@ pub struct EventCtx<'a> {
     /// Whether the receiving widget currently holds focus (threaded down from its
     /// pod's recorded focus flag; seeded from the root focus state at the root).
     has_focus: bool,
+    /// Whether the receiving widget is on the recorded hover path — the pointer is
+    /// over it or over a descendant of it, as of the last completed hover pass.
+    /// Threaded down from its
+    /// pod's recorded hover stamp (see `hover_epoch`), seeded from
+    /// [`crate::app::RenderRoot`]'s own hover mirror at the root. The event-pass
+    /// mirror of [`PaintCtx::is_hovered`](crate::widget::PaintCtx::is_hovered).
+    hovered: bool,
+    /// Set by [`EventCtx::claim_hover`]; read by the enclosing container, which
+    /// stamps the claim onto its child's pod and bubbles it further up (the hover
+    /// mirror of `focus_requested`).
+    hover_claimed: bool,
+    /// Whether a [`EventCtx::claim_hover`] call in this (sub)dispatch records
+    /// anything at all. `false` unless the root marked this pass an uncaptured
+    /// [`PointerPhase::Move`], and narrowed further on the way down: a pod holding
+    /// the capture path, or a pass in which a claim was already recorded, hands
+    /// its child an ineligible context. This is what makes "a captured pointer
+    /// never creates hover" and "at most one claimant per pass" true by
+    /// construction rather than by a check the root has to remember.
+    hover_eligible: bool,
+    /// The hover epoch of the last **completed** hover pass — what a pod's
+    /// recorded stamp must equal for its link to still count
+    /// ([`EventCtx::hover_epoch`]). A claim made during *this* pass records
+    /// [`EventCtx::hover_claim_epoch`] instead (one past this value), because the
+    /// root advances its own epoch when the pass ends.
+    hover_epoch: u64,
     /// The IME surface the focused widget published this dispatch, if any; bubbles
     /// up the focus chain to [`crate::app::RenderRoot`].
     ime_state: Option<ImeState>,
@@ -764,6 +923,10 @@ impl<'a> EventCtx<'a> {
             focus_requested: false,
             focus_released: false,
             has_focus: false,
+            hovered: false,
+            hover_claimed: false,
+            hover_eligible: false,
+            hover_epoch: 0,
             ime_state: None,
             origin,
             size,
@@ -827,6 +990,185 @@ impl<'a> EventCtx<'a> {
         self.has_focus
     }
 
+    /// Claim the hover link: the pointer is over *this* widget, so the next paint
+    /// pass reports [`PaintCtx::is_hovered`](crate::widget::PaintCtx::is_hovered)
+    /// for it — and, because the claim is recorded as a path, for every ancestor
+    /// enclosing it as well (see the [module docs](crate::event)).
+    ///
+    /// # The consumer contract
+    ///
+    /// Three things together, all three required:
+    ///
+    /// 1. **Claim from the [`PointerPhase::Move`] arm**, once the widget has
+    ///    hit-tested the event's `position` inside its own bounds — the same local
+    ///    test a press arm does on `Up`.
+    /// 2. **Keep an internal hover flag**, updated from that same hit test, and
+    ///    gate `request_redraw` on its *changed*-return. This call requests no
+    ///    frame of its own (below), and the root manufactures one only when a hover
+    ///    ends with nothing taking it — so a widget without this flag paints no
+    ///    hover chrome on entry, and none when the link moves from a sibling to it.
+    /// 3. **Read [`PaintCtx::is_hovered`](crate::widget::PaintCtx::is_hovered) in
+    ///    `paint` and self-correct the flag from it.** It is authoritative: the
+    ///    flag can be stale (a pointer that left the widget never delivers it
+    ///    another event; a container clearing or lapsing a link never tells the
+    ///    widget either), and this read is what fixes it.
+    ///
+    /// ```ignore
+    /// PointerPhase::Move => {
+    ///     if !self.captured {
+    ///         // Uncaptured move: this is the hover pass.
+    ///         let over = inside(p.position, ctx.size());
+    ///         if over { ctx.claim_hover(); }
+    ///         if self.state_layer.set_hovered(over) { ctx.request_redraw(); }
+    ///         return EventResult::Ignored;
+    ///     }
+    ///     // ... captured drag handling
+    /// }
+    ///
+    /// fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+    ///     // Authoritative; corrects the flag above whenever it went stale.
+    ///     self.state_layer.set_hovered(ctx.is_hovered());
+    ///     // ... paint the overlay
+    /// }
+    /// ```
+    ///
+    /// **Claim on every qualifying `Move`, not just on entry.** The claim is
+    /// per-pass, not sticky: a widget that stops claiming stops being hovered on
+    /// the next hover pass. That is the mechanism, not a defect — it is what makes
+    /// "the pointer moved somewhere else" self-clearing with no leave event to
+    /// deliver.
+    ///
+    /// **A container claims *after* routing the `Move` to its children, never
+    /// before.** One claim per pass is recorded and the first one recorded wins, so
+    /// an ancestor that claims before it forwards makes every descendant ineligible
+    /// for the pass: the child under the pointer reads
+    /// [`is_hovered`](EventCtx::is_hovered) `== false` forever while step 2 above
+    /// keeps flipping its flag and asking for a frame on every move — hover chrome
+    /// that never appears, plus a repaint per event. Claiming after routing is
+    /// correct in every case: a descendant's claim is recorded first and wins, the
+    /// container's own late call is then a silent no-op yet it still reads hovered
+    /// through the stamped path (below), and when no descendant claims, the
+    /// container's claim is what records, so its own chrome still works. A
+    /// container therefore never arbitrates — it orders.
+    ///
+    /// # When it does nothing
+    ///
+    /// A call is silently ignored unless the pass is hover-eligible: a captured
+    /// pointer (anywhere on the path), any phase other than an uncaptured `Move`,
+    /// and any claim after the first one in the same pass all record nothing. A
+    /// **leaf** therefore never has to ask whether claiming is allowed — it claims
+    /// whenever the pointer is over it and the pipeline decides. A **container**
+    /// gets the same freedom only by claiming after it routes: it never asks
+    /// either, but *when* it claims decides whether its children may, per the
+    /// ordering rule above.
+    ///
+    /// A `Down`, `Up`, or `Cancel` *ends* whatever hover stood without opening a
+    /// new one, so a consumer re-claims on the next `Move` rather than expecting
+    /// its chrome to survive a click.
+    ///
+    /// # It does not request a redraw
+    ///
+    /// Deliberately: a pointer moving *within* one widget claims on every event,
+    /// and repainting each time would be pure waste. The widget owns the change
+    /// detection instead — which is what makes step 2 above part of the contract
+    /// rather than an optimization.
+    pub fn claim_hover(&mut self) {
+        if self.hover_eligible {
+            self.hover_claimed = true;
+        }
+    }
+
+    /// Whether the receiving widget **or a descendant of it** holds the hover link
+    /// — i.e. whether the last completed hover pass recorded a claim path running
+    /// through this widget.
+    ///
+    /// So a container reads `true` while the pointer is over a claiming child
+    /// (CSS `:hover` semantics), and a widget that never claims can still read
+    /// `true` when a descendant does; a sibling or any other off-path widget reads
+    /// `false`.
+    ///
+    /// Threaded down from the widget's pod
+    /// ([`ChildPod::hover_epoch`](crate::widget::ChildPod::hover_epoch) against
+    /// the live epoch) and seeded at the root from `RenderRoot`'s hover mirror, so
+    /// it reflects state as of *before* this dispatch: a
+    /// [`claim_hover`](EventCtx::claim_hover) made in this pass does not flip it.
+    /// Mirrors [`EventCtx::has_focus`]; the paint-pass form is
+    /// [`PaintCtx::is_hovered`](crate::widget::PaintCtx::is_hovered), which is the
+    /// authoritative read for a widget's own hover chrome.
+    pub fn is_hovered(&self) -> bool {
+        self.hovered
+    }
+
+    /// Ask the host to show `icon` while the pointer is where it is now.
+    ///
+    /// The request is per-pass and stateless, exactly like
+    /// [`request_redraw`](EventCtx::request_redraw) and
+    /// [`claim_hover`](EventCtx::claim_hover): it says what the cursor should be
+    /// *for this pass*, and a widget that stops asking falls back to
+    /// [`CursorIcon::Default`] with nothing to clear.
+    ///
+    /// # When to call it
+    ///
+    /// From a [`PointerPhase::Move`] arm, on the same hit test a
+    /// [`claim_hover`](EventCtx::claim_hover) rides — the two are siblings, and a
+    /// widget that wants hover chrome usually wants a cursor too:
+    ///
+    /// ```ignore
+    /// PointerPhase::Move => {
+    ///     if !self.captured {
+    ///         if inside(p.position, ctx.size()) {
+    ///             ctx.claim_hover();
+    ///             ctx.set_cursor(CursorIcon::Pointer);
+    ///         }
+    ///         return EventResult::Ignored;
+    ///     }
+    ///     // Captured drag: this widget owns the pass, so its request wins
+    ///     // wherever the pointer has gone.
+    ///     ctx.set_cursor(CursorIcon::Grabbing);
+    ///     // ... drag handling
+    /// }
+    /// ```
+    ///
+    /// **Ask on every `Move`, not just on entry**, and ask from the captured
+    /// `Move`s too if a drag should keep its own shape: a captured pass routes
+    /// only to the capturing widget, so re-asking there is what keeps a
+    /// `Grabbing` cursor alive while the pointer is dragged outside the widget's
+    /// own bounds.
+    ///
+    /// # Which pass the root actually resolves
+    ///
+    /// Only a pointer [`PointerPhase::Move`] — captured or not — re-resolves the
+    /// cursor ([`crate::app::RenderRoot::cursor`]). A request made on any other
+    /// pass records nothing, and, just as importantly, no other pass *resets* the
+    /// cursor: a `Down`/`Up` whose handlers say nothing about the cursor leaves
+    /// the standing shape alone rather than blinking it back to `Default` for the
+    /// duration of a click. A widget wanting a press-specific cursor therefore
+    /// keys it off its own pressed state from the `Move` arm rather than setting
+    /// it on `Down`.
+    ///
+    /// # Last writer wins
+    ///
+    /// One value is resolved per pass, and the last `set_cursor` of the pass is
+    /// it. Because a container routes to its child from the middle of its own
+    /// handler, the innermost widget the route reaches normally speaks last and
+    /// therefore wins — which is what makes a specific control override the
+    /// generic surface behind it. A container that deliberately overrides its
+    /// children sets the cursor *after* routing.
+    ///
+    /// # It does not request a redraw
+    ///
+    /// Deliberately, for [`claim_hover`](EventCtx::claim_hover)'s reason: a
+    /// pointer moving within one widget re-asks on every event, and the shell
+    /// applies the resolved cursor whether or not a frame is painted.
+    ///
+    /// Takes `&mut self` like every other request on this context even though the
+    /// pass's request slot is not a field of it (`CURSOR_REQUEST`, above): asking
+    /// is something a widget does *through its context*, and keeping the signature
+    /// honest about that leaves the storage free to move.
+    pub fn set_cursor(&mut self, icon: CursorIcon) {
+        CURSOR_REQUEST.with(|slot| slot.set(Some(icon)));
+    }
+
     /// Publish this widget's IME surface (editing state + caret) for the shell.
     ///
     /// The value bubbles up the focus chain to [`crate::app::RenderRoot`], where
@@ -862,6 +1204,53 @@ impl<'a> EventCtx<'a> {
         self.has_focus = has_focus;
     }
 
+    /// Whether a widget claimed hover during this (sub)dispatch (container-side).
+    pub(crate) fn is_hover_claimed(&self) -> bool {
+        self.hover_claimed
+    }
+
+    /// Whether a [`EventCtx::claim_hover`] call in this (sub)dispatch would record
+    /// anything — read by [`crate::widget::ChildPod::event_child`], which narrows
+    /// it further before handing it to a child.
+    pub(crate) fn is_hover_eligible(&self) -> bool {
+        self.hover_eligible
+    }
+
+    /// Seed whether the receiving (root) widget holds the hover link — the hover
+    /// mirror of [`EventCtx::set_has_focus`].
+    pub(crate) fn set_hovered(&mut self, hovered: bool) {
+        self.hovered = hovered;
+    }
+
+    /// Seed whether this pass may record a hover claim at all. Called by
+    /// [`crate::app::RenderRoot::event`], which sets it only for an **uncaptured**
+    /// [`PointerPhase::Move`].
+    pub(crate) fn set_hover_eligible(&mut self, eligible: bool) {
+        self.hover_eligible = eligible;
+    }
+
+    /// Seed the live hover epoch (the last completed hover pass's). Called by
+    /// [`crate::app::RenderRoot::event`] at the root and threaded unchanged into
+    /// every child by [`crate::widget::ChildPod::event_child`].
+    pub(crate) fn set_hover_epoch(&mut self, epoch: u64) {
+        self.hover_epoch = epoch;
+    }
+
+    /// The live hover epoch: a pod whose recorded stamp equals this still holds
+    /// the hover link.
+    pub(crate) fn hover_epoch(&self) -> u64 {
+        self.hover_epoch
+    }
+
+    /// The epoch a claim recorded during *this* pass takes — one past the live
+    /// one, because [`crate::app::RenderRoot::event`] advances its epoch when the
+    /// hover pass ends. Wrapping is deliberate and harmless: the stamp is only
+    /// ever compared for equality, never ordered, and a wrap would need 2^64 hover
+    /// passes to collide with a link recorded before it.
+    pub(crate) fn hover_claim_epoch(&self) -> u64 {
+        self.hover_epoch.wrapping_add(1)
+    }
+
     /// The receiving widget's origin in its parent's coordinate space.
     pub fn origin(&self) -> Point {
         self.origin
@@ -873,10 +1262,21 @@ impl<'a> EventCtx<'a> {
     }
 
     /// Create a fresh sub-context for a child at `origin`/`size`, reborrowing the
-    /// same erased state. The child's `needs_redraw`/`capture_requested`/focus
-    /// flags start clear; `has_focus` reflects the child pod's recorded focus
-    /// flag. The parent folds the results back in with [`EventCtx::absorb_child`].
-    pub(crate) fn child_ctx(&mut self, origin: Point, size: Size, focused: bool) -> EventCtx<'_> {
+    /// same erased state. The child's `needs_redraw`/`capture_requested`/focus and
+    /// hover-claim flags start clear; `has_focus` reflects the child pod's recorded
+    /// focus flag, `hovered` its recorded hover link, and `hover_eligible` whether
+    /// the child may claim hover at all (the caller narrows it — see
+    /// [`crate::widget::ChildPod::event_child`]). The live hover epoch is threaded
+    /// down unchanged. The parent folds the results back in with
+    /// [`EventCtx::absorb_child`].
+    pub(crate) fn child_ctx(
+        &mut self,
+        origin: Point,
+        size: Size,
+        focused: bool,
+        hovered: bool,
+        hover_eligible: bool,
+    ) -> EventCtx<'_> {
         EventCtx {
             state: &mut *self.state,
             needs_redraw: false,
@@ -884,24 +1284,32 @@ impl<'a> EventCtx<'a> {
             focus_requested: false,
             focus_released: false,
             has_focus: focused,
+            hovered,
+            hover_claimed: false,
+            hover_eligible,
+            hover_epoch: self.hover_epoch,
             ime_state: None,
             origin,
             size,
         }
     }
 
-    /// Fold a child dispatch's redraw/capture/focus flags (and any published IME
-    /// surface) back into this context.
+    /// Fold a child dispatch's redraw/capture/hover-claim/focus flags (and any
+    /// published IME surface) back into this context.
     pub(crate) fn absorb_child(
         &mut self,
         child_needs_redraw: bool,
         child_captured: bool,
+        child_hover_claimed: bool,
         child_focus_requested: bool,
         child_focus_released: bool,
         child_ime_state: Option<ImeState>,
     ) {
         self.needs_redraw |= child_needs_redraw;
         self.capture_requested |= child_captured;
+        // A claim bubbles like a focus request: every pod between the claimant and
+        // the root records it, so the whole path carries the same stamp.
+        self.hover_claimed |= child_hover_claimed;
         self.focus_requested |= child_focus_requested;
         self.focus_released |= child_focus_released;
         if child_ime_state.is_some() {
@@ -956,11 +1364,17 @@ mod tests {
         let mut count = 0u32;
         let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
         {
-            let mut child = ctx.child_ctx(Point::new(1.0, 2.0), Size::new(3.0, 4.0), false);
+            let mut child = ctx.child_ctx(
+                Point::new(1.0, 2.0),
+                Size::new(3.0, 4.0),
+                false,
+                false,
+                false,
+            );
             child.request_redraw();
             child.capture_pointer();
             let (redraw, cap) = (child.needs_redraw(), child.is_pointer_captured());
-            ctx.absorb_child(redraw, cap, false, false, None);
+            ctx.absorb_child(redraw, cap, false, false, false, None);
         }
         assert!(ctx.needs_redraw());
         assert!(ctx.is_pointer_captured());
@@ -983,9 +1397,9 @@ mod tests {
     fn child_ctx_seeds_has_focus_from_pod_flag() {
         let mut count = 0u32;
         let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
-        let focused_child = ctx.child_ctx(Point::ZERO, Size::ZERO, true);
+        let focused_child = ctx.child_ctx(Point::ZERO, Size::ZERO, true, false, false);
         assert!(focused_child.has_focus());
-        let unfocused_child = ctx.child_ctx(Point::ZERO, Size::ZERO, false);
+        let unfocused_child = ctx.child_ctx(Point::ZERO, Size::ZERO, false, false, false);
         assert!(!unfocused_child.has_focus());
     }
 
@@ -1006,7 +1420,7 @@ mod tests {
             content_type: ImeContentType::Normal,
         };
         {
-            let mut child = ctx.child_ctx(Point::ZERO, Size::ZERO, false);
+            let mut child = ctx.child_ctx(Point::ZERO, Size::ZERO, false, false, false);
             child.request_focus();
             child.publish_ime_state(published.clone());
             let (fr, frl, ime) = (
@@ -1014,11 +1428,51 @@ mod tests {
                 child.is_focus_released(),
                 child.take_ime_state(),
             );
-            ctx.absorb_child(false, false, fr, frl, ime);
+            ctx.absorb_child(false, false, false, fr, frl, ime);
         }
         assert!(ctx.is_focus_requested());
         assert!(!ctx.is_focus_released());
         assert_eq!(ctx.take_ime_state(), Some(published));
+    }
+
+    #[test]
+    fn claim_hover_records_nothing_unless_the_pass_is_eligible() {
+        let mut count = 0u32;
+        let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+        // A bare context is ineligible by default — the safe direction: a widget
+        // that claims on a pass the root never marked a hover pass records nothing.
+        assert!(!ctx.is_hover_eligible());
+        ctx.claim_hover();
+        assert!(
+            !ctx.is_hover_claimed(),
+            "an ineligible claim records nothing"
+        );
+
+        ctx.set_hover_eligible(true);
+        ctx.claim_hover();
+        assert!(ctx.is_hover_claimed());
+        // A claim never touches the redraw channel: the widget owns change
+        // detection (see `claim_hover`'s docs).
+        assert!(!ctx.needs_redraw());
+    }
+
+    #[test]
+    fn child_ctx_seeds_hover_and_absorb_bubbles_a_claim() {
+        let mut count = 0u32;
+        let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+        ctx.set_hover_epoch(7);
+        {
+            // A hovered, eligible child: it sees its own link and its claim
+            // bubbles into the parent so the whole path records the same stamp.
+            let mut child = ctx.child_ctx(Point::ZERO, Size::ZERO, false, true, true);
+            assert!(child.is_hovered());
+            assert_eq!(child.hover_epoch(), 7, "the live epoch threads down");
+            assert_eq!(child.hover_claim_epoch(), 8, "a claim takes the next epoch");
+            child.claim_hover();
+            let claimed = child.is_hover_claimed();
+            ctx.absorb_child(false, false, claimed, false, false, None);
+        }
+        assert!(ctx.is_hover_claimed());
     }
 
     #[test]
@@ -1103,10 +1557,10 @@ mod tests {
             ..ImeState::default()
         };
         {
-            let mut child = ctx.child_ctx(Point::ZERO, Size::ZERO, true);
+            let mut child = ctx.child_ctx(Point::ZERO, Size::ZERO, true, false, false);
             child.publish_ime_state(published.clone());
             let ime = child.take_ime_state();
-            ctx.absorb_child(false, false, false, false, ime);
+            ctx.absorb_child(false, false, false, false, false, ime);
         }
         assert_eq!(ctx.take_ime_state(), Some(published));
     }
@@ -1180,5 +1634,41 @@ mod tests {
             !has_pending_result_flush(),
             "the drain is what clears it, not the peek"
         );
+    }
+
+    #[test]
+    fn a_cursor_request_is_one_slot_the_last_writer_owns() {
+        // Thread-affine like the two flags above, and libtest gives each test its
+        // own thread — but clear first anyway so nothing earlier on this thread
+        // leaks in (which is exactly what `RenderRoot::event` does per pass).
+        clear_cursor_request();
+        assert_eq!(take_cursor_request(), None, "absence means Default");
+
+        let mut count = 0u32;
+        let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+        ctx.set_cursor(CursorIcon::Text);
+        // A second widget on the same routed path speaks later and therefore wins;
+        // there is no per-pod recording to merge, only this one slot.
+        {
+            let mut child = ctx.child_ctx(Point::ZERO, Size::ZERO, false, false, false);
+            child.set_cursor(CursorIcon::Pointer);
+        }
+        assert_eq!(
+            take_cursor_request(),
+            Some(CursorIcon::Pointer),
+            "the last set_cursor of the pass is the resolved one"
+        );
+        assert_eq!(
+            take_cursor_request(),
+            None,
+            "the drain is destructive — one request per pass"
+        );
+    }
+
+    #[test]
+    fn the_default_cursor_is_the_platform_arrow() {
+        // `Default::default()` is what an absent request resolves to at the root,
+        // so the derive must land on the arrow and not on some named shape.
+        assert_eq!(CursorIcon::default(), CursorIcon::Default);
     }
 }

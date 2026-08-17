@@ -8,14 +8,16 @@ resolver = "2"
 # of plugins/i18n, the `locales!` compile-time Fluent-bundle loader) — listed
 # explicitly like every other `plugins/*` member above; no glob in this list
 # reaches two directory levels deep.
-members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/iap", "plugins/database", "plugins/i18n", "plugins/i18n/macros", "plugins/glyph", "plugins/material", "plugins/cupertino"]
-# plugins/{glyph,material,cupertino} are the design-system plugin tier: the
-# three catalogs that used to live in-tree behind `frust-widgets` cargo
-# features. They are ordinary root-workspace members — a `--workspace` run
-# builds and tests all three — because catalogs-out is now the only state
-# there is: `frust` has no default features and no catalog feature to unify,
-# so the standalone catalog-off compile guard this list used to carry
-# (examples/no-catalogs) has nothing left to guard.
+members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/iap", "plugins/database", "plugins/i18n", "plugins/i18n/macros", "plugins/cupertino", "plugins/glyph", "plugins/material", "plugins/shadcn"]
+# plugins/{cupertino,glyph,material,shadcn} are the design-system plugin tier
+# (listed alphabetically): the three catalogs that used to live in-tree behind
+# `frust-widgets` cargo features, plus `shadcn` — the tier's first
+# external-origin catalog, ported rather than authored here. They are ordinary
+# root-workspace members — a `--workspace` run builds and tests all four —
+# because catalogs-out is now the only state there is: `frust` has no default
+# features and no catalog feature to unify, so the standalone catalog-off
+# compile guard this list used to carry (examples/no-catalogs) has nothing left
+# to guard.
 # examples/huddle (renamed from its prior directory name) is the
 # sole example (examples-convergence: hello/counter/notes/gallery/navdemo/
 # catalog/inbox were folded into it and deleted) — standalone (its own

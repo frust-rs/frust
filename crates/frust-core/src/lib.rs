@@ -55,10 +55,10 @@ pub use anim::{
 pub use app::{Orientation, RenderRoot, WindowMetrics};
 pub use component::{Component, ComponentView, ComponentWidget, component};
 pub use event::{
-    EditingState, EventCtx, EventOutcome, EventResult, ImeContentType, ImeEvent, ImeState,
-    InputEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton, PointerEvent, PointerPhase,
-    ScrollDelta, has_pending_result_flush, mark_focus_orphaned, mark_pending_result_flush,
-    take_focus_orphaned, take_pending_result_flush,
+    CursorIcon, EditingState, EventCtx, EventOutcome, EventResult, ImeContentType, ImeEvent,
+    ImeState, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton, PointerEvent,
+    PointerPhase, ScrollDelta, has_pending_result_flush, mark_focus_orphaned,
+    mark_pending_result_flush, take_focus_orphaned, take_pending_result_flush,
 };
 pub use input::{
     FLING_DECAY, FLING_STOP, MOUSE_SLOP, TOUCH_SLOP, VELOCITY_WINDOW_MS, VelocityTracker,

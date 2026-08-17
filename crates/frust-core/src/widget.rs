@@ -589,6 +589,22 @@ pub struct PaintCtx<'a> {
     /// the widget's `event()` — is finally observed here (see
     /// [`PaintCtx::has_focus`]).
     has_focus: bool,
+    /// Whether the widget being painted is on the recorded hover path (it or a
+    /// descendant holds the link) — seeded from its
+    /// pod's recorded hover stamp ([`ChildPod::hover_epoch`], compared against
+    /// `hover_epoch` below) by [`ChildPod::paint_child`], and from
+    /// [`crate::app::RenderRoot`]'s hover mirror at the root. The paint-pass
+    /// mirror of [`EventCtx::is_hovered`] and the *authoritative* hover read for a
+    /// widget's own chrome: a pointer that left the widget routes its next move
+    /// elsewhere, so the widget's own `event()` never hears about the loss (see
+    /// [`PaintCtx::is_hovered`]).
+    hovered: bool,
+    /// The live hover epoch — the epoch of the last completed hover pass, threaded
+    /// from [`crate::app::RenderRoot::paint`] and copied into each child by
+    /// [`ChildPod::paint_child`] (global, like the clock). A pod's recorded stamp
+    /// counts as hovered only while it equals this; see the [`crate::event`] module
+    /// docs for the epoch mechanism.
+    hover_epoch: u64,
     /// The shell-provided time for this frame, threaded from
     /// [`crate::app::RenderRoot::paint`] and seeded into each child by
     /// [`ChildPod::paint_child`]. Defaults to [`FrameTime::ZERO`] (the "no time
@@ -687,6 +703,8 @@ impl<'a> PaintCtx<'a> {
             paced_interval: None,
             ime_state: None,
             has_focus: false,
+            hovered: false,
+            hover_epoch: 0,
             frame_time: FrameTime::ZERO,
             theme: None,
             window_insets: WindowInsets::default(),
@@ -813,7 +831,13 @@ impl<'a> PaintCtx<'a> {
         self.presented_frames = presented;
     }
 
-    /// The widget's origin in its parent's coordinate space.
+    /// The widget's absolute origin in window-space coordinates.
+    ///
+    /// This origin is accumulated as the paint pass descends the widget tree:
+    /// [`ChildPod::paint_child`] adds the child's parent-relative `origin` to the
+    /// parent's already-absolute `ctx.origin()`, threading the result down through
+    /// nested levels. Contrast [`ChildPod::origin`], which is parent-relative and
+    /// correct as documented.
     pub fn origin(&self) -> Point {
         self.origin
     }
@@ -843,6 +867,49 @@ impl<'a> PaintCtx<'a> {
     /// of [`EventCtx::set_has_focus`].
     pub(crate) fn set_has_focus(&mut self, has_focus: bool) {
         self.has_focus = has_focus;
+    }
+
+    /// Whether the pointer is over the widget being painted **or over a descendant
+    /// of it** — i.e. whether this widget is on the recorded hover path.
+    ///
+    /// A container therefore reads `true` while the pointer is over a claiming
+    /// child, the way CSS `:hover` applies to an element while the pointer is over
+    /// one of its descendants; a sibling or any other off-path widget reads
+    /// `false`.
+    ///
+    /// This is the **authoritative** hover signal, for the same reason
+    /// [`PaintCtx::has_focus`] is authoritative for focus, only more strongly: a
+    /// pointer leaving a widget routes its next move to whatever it moved *onto*,
+    /// so the widget it left never receives an event telling it so. A hover
+    /// consumer keeps its own hover flag (that is what earns it a repaint on entry
+    /// — see [`EventCtx::claim_hover`] for the whole contract) and **self-corrects
+    /// that flag from this read every paint**, which is what fixes it whenever an
+    /// event never came.
+    ///
+    /// Hover is opt-in: a widget in a tree where nothing ever calls
+    /// [`claim_hover`](EventCtx::claim_hover) always reads `false` here.
+    pub fn is_hovered(&self) -> bool {
+        self.hovered
+    }
+
+    /// Seed whether the widget being painted holds the hover link. Called by
+    /// [`ChildPod::paint_child`] (from the pod's recorded stamp) and by
+    /// [`crate::app::RenderRoot::paint`] (from its hover mirror) — the paint mirror
+    /// of [`EventCtx::set_hovered`].
+    pub(crate) fn set_hovered(&mut self, hovered: bool) {
+        self.hovered = hovered;
+    }
+
+    /// Seed the live hover epoch. Called by [`crate::app::RenderRoot::paint`] at
+    /// the root and by [`ChildPod::paint_child`] for each child, mirroring how
+    /// `frame_time` is threaded (copied down unchanged).
+    pub(crate) fn set_hover_epoch(&mut self, epoch: u64) {
+        self.hover_epoch = epoch;
+    }
+
+    /// The live hover epoch a pod's recorded stamp is compared against.
+    pub(crate) fn hover_epoch(&self) -> u64 {
+        self.hover_epoch
     }
 
     /// The shell-provided time for this frame (monotonic, arbitrary origin).
@@ -1218,6 +1285,8 @@ impl<'a> PaintCtx<'a> {
             paced_interval: None,
             ime_state: None,
             has_focus: self.has_focus,
+            hovered: self.hovered,
+            hover_epoch: self.hover_epoch,
             frame_time: self.frame_time,
             theme: self.theme,
             window_insets: self.window_insets,
@@ -1735,6 +1804,18 @@ pub struct ChildPod {
     /// second recorded path, a mirror of `active`). Maintained by
     /// [`ChildPod::event_child`] on a `focus_requested`/`focus_released` bubble.
     focused: bool,
+    /// The hover epoch this pod's recorded hover link belongs to — stamped by
+    /// [`ChildPod::event_child`] when a [`EventCtx::claim_hover`] bubbles through
+    /// it, and never explicitly cleared. `0` until a claim first passes through —
+    /// a [`RenderRoot`](crate::app::RenderRoot)'s live epoch starts past `0`, so a
+    /// never-claimed pod reads unhovered.
+    ///
+    /// The hover analog of `active`/`focused`, but a stamp rather than a flag,
+    /// because hover has no leave event to clear it with: the pointer moving
+    /// elsewhere advances the live epoch, which strands every stale stamp at once
+    /// without the container that owns it having to hear about the move. See the
+    /// [`crate::event`] module docs.
+    hover_epoch: u64,
     /// This pod's persistent semantics base id, lazily assigned on
     /// the pod's first [`ChildPod::semantics_child`] visit from the
     /// [`RenderRoot`](crate::app::RenderRoot) allocator and reused for the whole
@@ -1788,6 +1869,7 @@ impl ChildPod {
             size: Size::ZERO,
             active: false,
             focused: false,
+            hover_epoch: 0,
             semantics_id: Cell::new(None),
             debug_label: None,
             inspect_id: Cell::new(None),
@@ -1909,6 +1991,19 @@ impl ChildPod {
         self.focused = focused;
     }
 
+    /// The hover epoch this pod's recorded hover link belongs to — the hover
+    /// counterpart of [`ChildPod::is_focused`], reported as a stamp rather than a
+    /// flag because "is it hovered?" is only answerable against the live epoch
+    /// (`0` means no claim has ever passed through this pod).
+    ///
+    /// There is no setter: the stamp is maintained solely by
+    /// [`ChildPod::event_child`] from a claim bubble, so a container cannot record
+    /// or clear a hover link by hand — which is what keeps at most one path
+    /// hovered. See the [`crate::event`] module docs.
+    pub fn hover_epoch(&self) -> u64 {
+        self.hover_epoch
+    }
+
     /// Lay the child out under `bc`, recording and returning its chosen size.
     pub fn layout_child(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let size = self.widget.layout(ctx, bc);
@@ -1962,6 +2057,15 @@ impl ChildPod {
         // link force `has_focus == false` for the whole subtree below it,
         // matching the effective gating focus-path routing gives events.
         child_ctx.set_has_focus(self.focused && ctx.has_focus());
+        // Thread the live hover epoch down unchanged (global, like the clock), and
+        // seed this child's hover link from its own recorded stamp against it —
+        // ANDed with the ancestor's hover, exactly like `focused` above. Both halves
+        // are load-bearing: the stamp is what distinguishes the current claim path
+        // from a stale one no container ever cleared, and the chain is what keeps a
+        // context carrying no live epoch at all (a bare `PaintCtx::new`, whose `0`
+        // would match a never-claimed pod's `0`) from reading as hovered.
+        child_ctx.set_hover_epoch(ctx.hover_epoch());
+        child_ctx.set_hovered(self.hover_epoch == ctx.hover_epoch() && ctx.is_hovered());
         self.widget.paint(&mut child_ctx, scene);
         // Bubble the child's continuation-frame request AND its tick class up
         // unchanged: forwarding the aggregate class (rather than always calling
@@ -2074,11 +2178,32 @@ impl ChildPod {
     /// child.
     pub fn event_child(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         let local = event.translated(-self.origin.to_vec2());
-        let (captured, focus_req, focus_rel, redraw, ime, result) = {
-            let mut child_ctx = ctx.child_ctx(self.origin, self.size, self.focused);
+        // The child's hover link, composed with the ancestor chain exactly like
+        // `focused` (see `paint_child`).
+        let hovered = self.hover_epoch == ctx.hover_epoch() && ctx.is_hovered();
+        // Two narrowings on top of whatever the root allowed, both structural:
+        // a pod holding the capture path can never let a claim through (a drag
+        // must not paint hover under the pointer, whatever the root's own capture
+        // mirror says), and a pass that already recorded a claim is closed to
+        // further ones, so the first claim recorded wins. With topmost-first hit
+        // testing and containers claiming only *after* they route (see
+        // `EventCtx::claim_hover`'s contract), that first claim is the topmost
+        // claimant's; a container that claims before it forwards is recorded first
+        // instead and closes the pass to its own subtree.
+        let hover_eligible = ctx.is_hover_eligible() && !ctx.is_hover_claimed() && !self.active;
+        let claim_epoch = ctx.hover_claim_epoch();
+        let (captured, hover_claimed, focus_req, focus_rel, redraw, ime, result) = {
+            let mut child_ctx = ctx.child_ctx(
+                self.origin,
+                self.size,
+                self.focused,
+                hovered,
+                hover_eligible,
+            );
             let result = self.widget.event(&mut child_ctx, &local);
             (
                 child_ctx.is_pointer_captured(),
+                child_ctx.is_hover_claimed(),
                 child_ctx.is_focus_requested(),
                 child_ctx.is_focus_released(),
                 child_ctx.needs_redraw(),
@@ -2088,6 +2213,12 @@ impl ChildPod {
         };
         if captured {
             self.active = true;
+        }
+        // Stamp the claim onto this pod so the whole path from the claimant up to
+        // the root carries the epoch the next paint compares against. Never
+        // cleared: a stale stamp is stranded by the next epoch advance instead.
+        if hover_claimed {
+            self.hover_epoch = claim_epoch;
         }
         // Focus is the second recorded path, maintained exactly like `active`: a
         // `focus_requested` bubble records this child as the focused one; a
@@ -2099,7 +2230,7 @@ impl ChildPod {
         if focus_req {
             self.focused = true;
         }
-        ctx.absorb_child(redraw, captured, focus_req, focus_rel, ime);
+        ctx.absorb_child(redraw, captured, hover_claimed, focus_req, focus_rel, ime);
         result
     }
 
@@ -2628,6 +2759,68 @@ mod tests {
     }
 
     #[test]
+    fn paint_ctx_origin_is_absolute_through_nested_offsets() {
+        // Nest a leaf widget under two levels of offset containers: the leaf
+        // must observe the summed absolute window-space origin, not a
+        // parent-relative one. This pins the accumulation contract that external
+        // design systems (anchored overlays) depend on.
+        use std::cell::Cell;
+
+        struct OriginRecorder {
+            recorded_origin: Cell<Option<Point>>,
+        }
+
+        impl Widget for OriginRecorder {
+            fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                bc.max()
+            }
+
+            fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+                self.recorded_origin.set(Some(ctx.origin()));
+            }
+        }
+
+        let mut lctx = LayoutCtx::new();
+
+        // Inner recorder at (20, 30) relative to middle container.
+        let recorder = OriginRecorder {
+            recorded_origin: Cell::new(None),
+        };
+        let inner = ChildPod::new(Box::new(recorder));
+        let mut middle = TranslatingWrapper { child: inner };
+        middle.child.set_origin(Point::new(20.0, 30.0));
+        middle
+            .child
+            .layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+
+        // Middle container at (50, 70) relative to outer.
+        let mut outer = ChildPod::new(Box::new(middle));
+        outer.set_origin(Point::new(50.0, 70.0));
+        outer.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+
+        // Paint from root at (0, 0).
+        let mut scene = RecordingScene::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(400.0, 400.0));
+        outer.paint_child(&mut pctx, &mut scene);
+
+        // Verify: leaf's origin must be sum of all offsets:
+        // root(0,0) + outer(50,70) + middle(20,30) = (70, 100).
+        let leaf = outer
+            .widget_mut()
+            .downcast_mut::<TranslatingWrapper>()
+            .unwrap()
+            .child
+            .widget_mut()
+            .downcast_mut::<OriginRecorder>()
+            .unwrap();
+        assert_eq!(
+            leaf.recorded_origin.get(),
+            Some(Point::new(70.0, 100.0)),
+            "leaf must observe summed absolute origin"
+        );
+    }
+
+    #[test]
     fn request_frame_alone_does_not_set_needs_layout() {
         // A paint-only animation (request_frame, no request_layout) must leave
         // `needs_layout` clear — the mobile intra-frame layout-skip depends on this.
@@ -3120,6 +3313,154 @@ mod tests {
         focused_parent2.set_has_focus(true);
         pod.paint_child(&mut focused_parent2, &mut scene);
         assert_eq!(seen.get(), Some(false));
+    }
+
+    #[test]
+    fn child_pod_stamps_a_hover_claim_and_seeds_it_by_epoch() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        /// A probe that claims hover on every event it receives and records what
+        /// `is_hovered()` each pass reported.
+        struct HoverProbe {
+            event_seen: Rc<Cell<Option<bool>>>,
+            paint_seen: Rc<Cell<Option<bool>>>,
+        }
+        impl Widget for HoverProbe {
+            fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                bc.constrain(Size::new(10.0, 10.0))
+            }
+            fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+                self.paint_seen.set(Some(ctx.is_hovered()));
+            }
+            fn event(&mut self, ctx: &mut EventCtx, _event: &InputEvent) -> EventResult {
+                self.event_seen.set(Some(ctx.is_hovered()));
+                ctx.claim_hover();
+                EventResult::Ignored
+            }
+        }
+
+        let event_seen = Rc::new(Cell::new(None));
+        let paint_seen = Rc::new(Cell::new(None));
+        let mut pod = ChildPod::new(Box::new(HoverProbe {
+            event_seen: event_seen.clone(),
+            paint_seen: paint_seen.clone(),
+        }));
+        let mut lctx = LayoutCtx::new();
+        pod.layout_child(&mut lctx, &BoxConstraints::tight(Size::new(10.0, 10.0)));
+        let mut scene = RecordingScene::default();
+        let mut state = ();
+        let event = InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Move,
+            position: Point::new(5.0, 5.0),
+            button: PointerButton::Primary,
+        });
+
+        // A never-claimed pod carries no stamp, and reads unhovered against any
+        // live epoch (the root's starts past `0` for exactly this reason).
+        assert_eq!(pod.hover_epoch(), 0);
+
+        // Dispatch on an INELIGIBLE pass (the default): the claim records nothing.
+        {
+            let mut ctx = EventCtx::new(&mut state as &mut dyn Any, Point::ZERO, pod.size());
+            ctx.set_hover_epoch(4);
+            pod.event_child(&mut ctx, &event);
+            assert!(!ctx.is_hover_claimed(), "nothing bubbled up");
+        }
+        assert_eq!(pod.hover_epoch(), 0, "no stamp from an ineligible pass");
+
+        // Dispatch on an eligible pass: the pod is stamped with the *next* epoch
+        // (the root advances its own when the pass ends) and the claim bubbles.
+        {
+            let mut ctx = EventCtx::new(&mut state as &mut dyn Any, Point::ZERO, pod.size());
+            ctx.set_hover_epoch(4);
+            ctx.set_hovered(true);
+            ctx.set_hover_eligible(true);
+            pod.event_child(&mut ctx, &event);
+            assert!(ctx.is_hover_claimed());
+            assert_eq!(
+                event_seen.get(),
+                Some(false),
+                "the pod held no link going into this pass"
+            );
+        }
+        assert_eq!(pod.hover_epoch(), 5);
+
+        // Paint against the epoch the claim recorded: hovered, and the ancestor
+        // chain is ANDed in exactly like focus.
+        let mut live = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        live.set_hover_epoch(5);
+        live.set_hovered(true);
+        pod.paint_child(&mut live, &mut scene);
+        assert_eq!(paint_seen.get(), Some(true));
+
+        // Same stamp under an UNHOVERED ancestor: the chain wins.
+        let mut unhovered_parent = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        unhovered_parent.set_hover_epoch(5);
+        unhovered_parent.set_hovered(false);
+        pod.paint_child(&mut unhovered_parent, &mut scene);
+        assert_eq!(paint_seen.get(), Some(false));
+
+        // The epoch moves on (the pointer went elsewhere): the stamp is stranded
+        // with nobody clearing it — the whole point of stamping rather than
+        // flagging.
+        let mut later = PaintCtx::new(Point::ZERO, Size::new(10.0, 10.0));
+        later.set_hover_epoch(6);
+        later.set_hovered(true);
+        pod.paint_child(&mut later, &mut scene);
+        assert_eq!(paint_seen.get(), Some(false));
+
+        // A pod holding the capture path refuses a claim outright, whatever the
+        // pass says — a drag never paints hover under the pointer.
+        pod.set_active(true);
+        {
+            let mut ctx = EventCtx::new(&mut state as &mut dyn Any, Point::ZERO, pod.size());
+            ctx.set_hover_epoch(6);
+            ctx.set_hover_eligible(true);
+            pod.event_child(&mut ctx, &event);
+            assert!(!ctx.is_hover_claimed());
+        }
+        assert_eq!(pod.hover_epoch(), 5, "the captured pod kept its old stamp");
+    }
+
+    /// Two overlapping children can both hit-test a point (a Stack, or any
+    /// container whose topmost child ignores the move). Only the first claim in
+    /// dispatch order is recorded, so — with topmost-first hit testing — the
+    /// topmost claimant wins and no pass can leave two widgets hovered.
+    #[test]
+    fn only_the_first_hover_claim_in_a_pass_is_recorded() {
+        struct Claimer;
+        impl Widget for Claimer {
+            fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                bc.constrain(Size::new(10.0, 10.0))
+            }
+            fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+            fn event(&mut self, ctx: &mut EventCtx, _event: &InputEvent) -> EventResult {
+                ctx.claim_hover();
+                EventResult::Ignored
+            }
+        }
+
+        let mut first = ChildPod::new(Box::new(Claimer));
+        let mut second = ChildPod::new(Box::new(Claimer));
+        let mut state = ();
+        let event = InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Move,
+            position: Point::new(5.0, 5.0),
+            button: PointerButton::Primary,
+        });
+        let mut ctx = EventCtx::new(&mut state as &mut dyn Any, Point::ZERO, Size::ZERO);
+        ctx.set_hover_epoch(2);
+        ctx.set_hover_eligible(true);
+
+        first.event_child(&mut ctx, &event);
+        second.event_child(&mut ctx, &event);
+        assert_eq!(first.hover_epoch(), 3, "the first claim is recorded");
+        assert_eq!(
+            second.hover_epoch(),
+            0,
+            "the pass was closed to further claims"
+        );
     }
 
     #[test]

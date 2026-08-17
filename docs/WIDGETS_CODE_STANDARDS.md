@@ -45,6 +45,11 @@ anti-patterns, interaction semantics, semantics, testing, comment conventions â€
   (`HOVER_OPACITY`/`FOCUS_OPACITY`/`PRESSED_OPACITY`/ `DRAGGED_OPACITY`, M3 `StateTokens`,
   `plugins/material`) â€” a design-system widget imports them rather than hardcoding overlay
   opacity, taking the **maximum** of concurrently-active states, never their sum.
+  `frust_material::list_item` is the reference consumer for the hover state specifically, and
+  shows all three parts of the contract: it claims hover from its own uncaptured `Move` arm,
+  latches the same hit test into `StateLayer::set_hovered` with a redraw gated on its
+  changed-return, and re-syncs that flag from `PaintCtx::is_hovered` every paint
+  (see `docs/CODE_STANDARDS.md`'s Interaction Semantics for the full convention).
 - **Glyph's token set adds five resolution precedents.** A per-status color with no
   `ColorScheme` field (Success/Warning/Info) resolves `Theme::extension::<StatusPalette>()`
   first, before a role that already has one (Error) resolves it directly. `GlyphInk` is

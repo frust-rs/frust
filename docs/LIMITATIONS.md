@@ -2315,3 +2315,242 @@ to the feature owner, not a gap this task's scope covers.
 gap: `Widget::semantics` cannot be driven from out of tree") and the workspace README's "What it
 found" section; `crates/frust-widgets/tests/semantics_tree.rs` as the in-tree contrast that does
 reach `RenderRoot::semantics()`.
+
+---
+
+### `hover-window-leave-standing` — hover and press chrome outlive the state that caused them, until the next in-window `Move`
+
+**Observed**: four deliberate, test-pinned v1 gaps share one cause — nothing re-derives hover
+without a fresh uncaptured pointer `Move`, and the desktop shell delivers no window-leave event.
+A pointer leaving the window keeps the last-hovered widget's tint standing (no `CursorLeft` is
+ever dispatched to clear it); a `Down` that ends a hover with the pointer then held still shows no
+tint for the press itself until the next `Move`; a click's `Up` likewise ends the link, so a mouse
+resting where it clicked shows no hover tint until it moves again; and a scroll or any other
+mutation happening under a stationary pointer leaves stale hover/pressed chrome in place rather
+than re-testing the pointer's position against whatever moved. All four resolve themselves on the
+next in-window pointer `Move`, which is what makes them a standing-until-next-move gap rather than
+a stuck one.
+
+**Applies to**: every desktop shell (`frust-shell-desktop`); any widget using
+`EventCtx::claim_hover`/`PaintCtx::is_hovered`. **Mobile is affected too, in one shape**: nothing
+in the pipeline distinguishes a touch contact from a mouse (`PointerEvent` carries no pointer
+kind, and both mobile shells map a touch drag to `PointerPhase::Move`), so the hover refusal is
+structural only for a **captured** pointer. A touch drag that captured nothing — a finger sliding
+over a non-capturing hover consumer — is an ordinary hover pass and does tint it. The tint is
+transient: the lift's `Up` ends the link, which is why `Up` is a hover-ending pass at all.
+
+**Why accepted**: hover is deliberately derived only from a real pointer `Move`, with no
+synthetic re-derivation pass, because the alternative (a per-frame position re-test independent of
+input) would give hover its own polling loop the rest of the pipeline doesn't have. A window-leave
+event is a real, addressable gap (winit exposes `CursorLeft`) but scoped out of this phase; the
+rest are accepted properties of the epoch model, not shell gaps. The touch residual is accepted
+over the alternative of a pointer-kind field on `PointerEvent`, which would widen the input
+vocabulary (and every out-of-tree exhaustive match on it) to suppress a transient tint that the
+`Up` rule already bounds to the length of the gesture.
+
+**Owed device check** (Android + iOS, not yet run): drag a finger across a non-capturing hover
+consumer (a `material::list_item` row with `on_press` is the reference; drag from empty chrome onto
+it so nothing captures) and confirm the 8% overlay appears under the finger *and* is gone by the
+frame after lift — i.e. the residual is transient, never a tint stranded on a touch-only screen.
+
+**Evidence**: `crates/frust-core/src/app.rs`'s hover pipeline tests (`a_captured_move_cannot_claim_hover`,
+`a_down_up_or_cancel_ends_the_hover`, `a_non_pointer_pass_leaves_a_live_hover_standing`);
+`workflow/plans/features/shadcn-design-system/tasks/01-hover-pipeline.md` completion summary
+(2026-08-17, commit `68ac7e93`), "Known v1 gaps"; the touch residual and the `Up` rule traced to a
+review round of the same feature (2026-08-17).
+
+---
+
+### `cursor-desktop-runtime-unverified` — the desktop cursor-apply path has no live-window run
+
+**Observed**: `frust_core::CursorIcon` resolution and the winit mapping/change-gate
+(`winit_cursor_for`, `cursor_change_to_apply`, `ShellHandler::sync_cursor`) are unit- and
+compile-verified only — no session has opened a real desktop window and watched the platform
+pointer actually change shape over a widget requesting one.
+
+**Applies to**: every desktop shell (macOS, Windows, Linux) via `frust-shell-desktop`'s shared
+core.
+
+**Why accepted**: the mapping is exhaustive over `CursorIcon` and the change gate is a pure
+function, both covered by host-run unit tests; a live-window pass is an ordinary runtime-
+verification gap of the same shape already tracked for the rest of the desktop tier (see
+`desktop-shells-runtime-unverified`), not a defect specific to cursor.
+
+**Evidence**: `crates/frust-shell-desktop/src/app_handler.rs`'s
+`every_framework_cursor_maps_to_its_winit_counterpart`/`the_cursor_is_pushed_to_winit_only_on_a_change`
+tests; `workflow/plans/features/shadcn-design-system/tasks/02-cursor-api.md` completion summary
+(2026-08-17, merged `49bc7657`).
+
+---
+
+### `cursor-stale-until-next-move` — a torn-down or outrun cursor request keeps its last shape until the next `Move`
+
+**Observed**: `RenderRoot::cursor()` only re-resolves on a pointer `Move` (captured included); a
+widget that is torn down while its request stands, or that the pointer scrolls/moves out from
+under while stationary, leaves the last-resolved shape in place rather than falling back to
+`CursorIcon::Default` immediately. The next pointer `Move` re-resolves it correctly — this is the
+cursor's own version of `hover-window-leave-standing`'s standing-until-next-move window, on the
+same root cause (nothing re-derives without a real `Move`).
+
+**Applies to**: every desktop shell; any widget using `EventCtx::set_cursor`.
+
+**Why accepted**: re-resolving without a pointer `Move` would mean tracking every requester's
+liveness independently of input, the same cost the hover model above declines to pay; the residual
+is cosmetic (a stale shape, never a stuck-captured pointer) and self-corrects on the next motion.
+
+**Evidence**: `crates/frust-core/src/app.rs`'s `RenderRoot::cursor()` doc comment ("Residual:
+a widget that is torn down … leaves the last shape in place until the next `Move`");
+`workflow/plans/features/shadcn-design-system/tasks/02-cursor-api.md` completion summary
+(2026-08-17, merged `49bc7657`), "Limitations" list.
+
+---
+
+### `shadcn-hover-overlays-touch-inert` — tooltip and hover-card never open on a touch device
+
+**Observed**: `frust-shadcn`'s `tooltip`/`hover_card` open only through the shared hover latch
+(`TooltipHover`, a trigger-rect-plus-open-flag `Rc<Cell<_>>` written from a hover-timing pass, not
+an event). Touch input has no hover, so neither component has any path that opens it; a
+long-press-opens-a-tooltip/hover-card gesture is not modelled.
+
+**Applies to**: `frust_shadcn::tooltip`/`hover_card` on Android, iOS, and any touch-driven desktop
+input; every other anchored/modal component in the catalog opens on a press and is unaffected.
+
+**Why accepted**: matches shadcn/ui's own upstream behavior (its tooltip/hover-card are hover-only
+on the web too); a long-press affordance would be new interaction design, not a port, and is
+deferred rather than invented speculatively.
+
+**Evidence**: `plugins/shadcn/src/components/tooltip.rs` module docs ("Touch" section — "Touch has
+no hover, so a tooltip never opens on a touch device. Long-press-opens-a-tooltip is not
+modelled.").
+
+---
+
+### `shadcn-desktop-interaction-gaps` — three named v1 narrowings in the shadcn port's desktop interaction
+
+**Observed**: three deliberate v1 gaps in `frust-shadcn`, each named in the component's own source
+rather than found later:
+
+1. **Context menu unreachable live on desktop.** `context_menu_trigger` opens on
+   `PointerButton::Secondary`, which the component drives correctly from a test — but
+   `frust-shell-desktop` forwards only `MouseButton::Left` from winit (`app_handler.rs`, "Primary
+   (left) button only in v1"), so no desktop app today can generate a `Secondary` press to open one
+   with. A shell change, not a component change, is the remedy path.
+2. **Drawer drag-to-close not implemented.** The drawer's `h-2 w-[100px]` handle (vaul's own drag
+   affordance upstream) is a *button* here in v1 — press-and-release dismisses; there is no drag
+   gesture.
+3. **Select has no type-ahead and a fixed dropdown height.** Radix's jump-to-typed-match behavior
+   is not ported; `SELECT_MAX_HEIGHT` is a 300px constant rather than measured from the host's
+   available space (no such measurement reaches a plugin-tier widget today).
+
+**Applies to**: `frust_shadcn::context_menu`, `drawer`, and `select`/`combobox`.
+
+**Why accepted**: each is a named, structural v1 boundary at the point in the source it lives
+(a doc comment or a named constant), not a gap found by later testing; (1) is blocked on a shell
+change outside this crate's own scope, (2) and (3) are deferred interaction work with no
+upstream-parity requirement forcing them into v1.
+
+**Evidence**: `plugins/shadcn/src/components/context_menu.rs` module docs ("Secondary-button
+reach"); `crates/frust-shell-desktop/src/app_handler.rs` ("Primary (left) button only in v1");
+`plugins/shadcn/src/overlay/modal.rs` (`ModalConfig::handle` doc comment, "It is a *button* in
+v1"); `plugins/shadcn/src/components/select.rs` module docs ("No type-ahead" and
+`SELECT_MAX_HEIGHT`).
+
+---
+
+### `overlay-no-auto-focus-on-appear` — a newly opened modal or anchored overlay does not claim keyboard focus itself
+
+**Observed**: neither `frust-shadcn`'s `modal` host nor its `anchored` host claims focus when it
+appears; both claim focus only in response to a `Down` inside themselves, so Escape (wired to fire
+only once the host holds focus) does nothing until a caller completes one pointer interaction with
+the overlay first. This is not new to shadcn — `frust_material::dialog` carries the identical gap
+— because the framework itself exposes no auto-focus-on-appear hook a widget can call on mount.
+
+**Applies to**: `frust_shadcn::overlay::modal`/`anchored` and every component built on them
+(dialog, alert-dialog, sheet, drawer, command, popover, dropdown/context menu, select, combobox);
+`frust_material::dialog`.
+
+**Why accepted**: a framework-level focus-management primitive (claim focus on mount) does not
+exist yet; every current design-system caller works around it the same documented way rather than
+inventing a per-crate special case.
+
+**Evidence**: `plugins/shadcn/src/overlay/modal.rs` and `plugins/shadcn/src/overlay/anchored.rs`
+module docs ("there is no auto-focus-on-appear hook in the framework").
+
+---
+
+### `no-plugin-reachable-deferred-state-callback` — a plugin-tier widget cannot queue a state-bearing callback onto a later frame
+
+**Observed**: the framework's `mark_pending_result_flush`/`take_pending_result_flush` seam that
+lets a widget defer a callback across frames is `frust-core`-internal — not re-exported through
+`frust::authoring` (`frust_widgets::authoring` re-exports the shape it wants callers to match, not
+the seam itself). A plugin-tier widget that needs to fire a callback carrying `&mut State` from a
+non-event pass (e.g. a hover-delay timer observed only in `paint`) has no way to reach it, and so
+cannot hold app state at all for that decision. `frust-shadcn`'s hover tooltip/hover-card is built
+around this exact hole: the open/close decision lives entirely in a widget-local, non-reactive
+`Rc<Cell<_>>` latch instead of app state, specifically because a resting pointer sends no event to
+carry `&mut State` through and the framework offers no alternate route to queue one.
+
+**Applies to**: any plugin-tier widget wanting to drive app state from a non-event, per-frame pass
+(paint-clock-driven delays, in particular); `frust_shadcn::tooltip`/`hover_card` today.
+
+**Why accepted**: the workaround (a shared, non-reactive latch plus an input-transparent top layer)
+fully covers shadcn's own tooltip/hover-card needs; widening the public seam is framework-level
+work with no second caller yet to justify it.
+
+**Evidence**: `plugins/shadcn/src/components/tooltip.rs` module docs ("the framework exposes no way
+for a plugin-tier widget to queue a state-bearing callback onto the next frame");
+`crates/frust-widgets/src/authoring.rs` (`mark_pending_result_flush`'s shape, not the function
+itself, documented there); `crates/frust/src/lib.rs`'s `authoring` module (no
+`mark_pending_result_flush` re-export).
+
+---
+
+### `shadcn-bubble-fixed-to-unit-state` — `bubble()` cannot be embedded directly in a `View<State>` tree for `State != ()`
+
+**Observed**: every other leaf component in `frust-shadcn` is generic over `State` (even the
+non-interactive ones carry an unused `State` bound so they compose directly into any app's tree);
+`bubble()`'s `BubbleView` instead implements `View<()>` only — its sibling `bubble_group()` in the
+same module is properly `State`-generic. An app with `State != ()` cannot place a `bubble()` as a
+direct child; it needs a `Component`-boundary indirection (a nested component whose own `State` is
+`()`) to embed one.
+
+**Applies to**: `frust_shadcn::bubble` only — no other component in the 48-component catalog has
+this asymmetry.
+
+**Why accepted**: a chat bubble has no callbacks to carry `State` for in the first place; the fix
+(a `State`-generic signature matching every sibling) is a small, low-risk cleanup with no
+functional gap behind it — tracked here as a catalog ergonomic inconsistency, not a capability
+gap.
+
+**Evidence**: `plugins/shadcn/src/components/bubble.rs` (`impl View<()> for BubbleView` versus
+`impl<State: 'static> View<State> for BubbleGroupView<State>` in the same file).
+
+---
+
+### `shadcn-control-ladder-under-touch-floor` — every shadcn control height sits below the 44px tap-target floor
+
+**Observed**: `frust-shadcn`'s entire control-height ladder — `HEIGHT_XS`/`HEIGHT_SM`/
+`HEIGHT_DEFAULT`/`HEIGHT_LG` (24/32/36/40 logical px, `plugins/shadcn/src/style.rs`) — sits below
+the 44px mobile tap-target convention, including `HEIGHT_LG`, the roomiest rung the ladder offers.
+There is no larger size to opt into and no density mechanism that widens one.
+
+**Applies to**: every sized control in the 48-component catalog that reads the ladder (button,
+input, select trigger, and every component built on them); every platform this crate targets,
+touch and pointer alike — the metrics are fixed, not resolved per input modality.
+
+**Why accepted, and permanent by design**: port fidelity to shadcn/ui's exact metrics is a hard
+requirement of this external-origin catalog — changing the visual heights is not on the table. The
+crate's own charter is "desktop-first, mobile-friendly" (`plugins/shadcn/src/lib.rs`, Charter):
+shadcn's metrics are kept as-is, touch *correctness* (press states, scrim taps, scrolling) is
+required, a separate mobile design is not, and no density mechanism is invented — deliberately
+distinct from the framework's overall mobile-first charter. The ladder is pinned by test
+(`control_heights_are_the_shadcn_size_ladder`, which asserts every rung, including `lg`, stays
+under the 44px floor), so this cannot regress silently or drift toward "fixed" over time. An
+extended-hit-area mechanism — hit-testing beyond a control's visual bounds on touch — was evaluated
+and is not cheaply available today: `frust-core`/`frust-widgets` expose no min-target convention or
+hit-padding seam a plugin-tier widget could opt into. If one ever lands framework-wide, this catalog
+is a natural adopter; that is the remedy path, recorded here rather than invented per-catalog.
+
+**Evidence**: `plugins/shadcn/src/style.rs` (`HEIGHT_XS`/`HEIGHT_SM`/`HEIGHT_DEFAULT`/`HEIGHT_LG`
+doc comments and the `control_heights_are_the_shadcn_size_ladder` pinning test);
+`plugins/shadcn/src/lib.rs`'s Charter section ("Desktop-first, mobile-friendly").
