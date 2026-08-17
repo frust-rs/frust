@@ -2541,3 +2541,33 @@ in this register; no automated pixel-diff gate exists for any design-system cata
 
 **Evidence**: `examples/shadcn-demo/Cargo.toml` module doc (root-workspace-member rationale);
 absence of a recorded run in this feature's task history.
+
+---
+
+### `shadcn-control-ladder-under-touch-floor` — every shadcn control height sits below the 44px tap-target floor
+
+**Observed**: `frust-shadcn`'s entire control-height ladder — `HEIGHT_XS`/`HEIGHT_SM`/
+`HEIGHT_DEFAULT`/`HEIGHT_LG` (24/32/36/40 logical px, `plugins/shadcn/src/style.rs`) — sits below
+the 44px mobile tap-target convention, including `HEIGHT_LG`, the roomiest rung the ladder offers.
+There is no larger size to opt into and no density mechanism that widens one.
+
+**Applies to**: every sized control in the 48-component catalog that reads the ladder (button,
+input, select trigger, and every component built on them); every platform this crate targets,
+touch and pointer alike — the metrics are fixed, not resolved per input modality.
+
+**Why accepted, and permanent by design**: port fidelity to shadcn/ui's exact metrics is a hard
+requirement of this external-origin catalog — changing the visual heights is not on the table. The
+crate's own charter is "desktop-first, mobile-friendly" (`plugins/shadcn/src/lib.rs`, Charter):
+shadcn's metrics are kept as-is, touch *correctness* (press states, scrim taps, scrolling) is
+required, a separate mobile design is not, and no density mechanism is invented — deliberately
+distinct from the framework's overall mobile-first charter. The ladder is pinned by test
+(`control_heights_are_the_shadcn_size_ladder`, which asserts every rung, including `lg`, stays
+under the 44px floor), so this cannot regress silently or drift toward "fixed" over time. An
+extended-hit-area mechanism — hit-testing beyond a control's visual bounds on touch — was evaluated
+and is not cheaply available today: `frust-core`/`frust-widgets` expose no min-target convention or
+hit-padding seam a plugin-tier widget could opt into. If one ever lands framework-wide, this catalog
+is a natural adopter; that is the remedy path, recorded here rather than invented per-catalog.
+
+**Evidence**: `plugins/shadcn/src/style.rs` (`HEIGHT_XS`/`HEIGHT_SM`/`HEIGHT_DEFAULT`/`HEIGHT_LG`
+doc comments and the `control_heights_are_the_shadcn_size_ladder` pinning test);
+`plugins/shadcn/src/lib.rs`'s Charter section ("Desktop-first, mobile-friendly").
