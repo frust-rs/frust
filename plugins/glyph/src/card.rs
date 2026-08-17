@@ -463,6 +463,41 @@ mod tests {
     }
 
     #[test]
+    fn inspect_surfaces_only_the_filled_slots() {
+        // Regression coverage for the hand-written `Slot` `VisitPods` impl
+        // (ported from crates/frust-widgets/tests/visit_children.rs, which
+        // covered this shape before the design-system extraction). If
+        // `Slot::visit_pods` ever stopped forwarding to its `pod` field —
+        // dropping a filled slot — `RenderRoot::inspect()` would silently
+        // stop reporting it too (the exact regression `WidgetTree::inspect`/
+        // devtools depend on this seam to never allow): the node list below
+        // would fall from 3 entries to 1, and the child count from 2 to 0.
+        fn logic(_s: &mut ()) -> GlyphCardView<()> {
+            glyph_card().title(text("t")).desc(text("d"))
+        }
+        let mut root: frust_core::RenderRoot<(), GlyphCardView<()>> = frust_core::RenderRoot::new();
+        let mut state = ();
+        root.rebuild(&mut logic, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(Size::new(300.0, 300.0), &mut tcx as &mut dyn Any);
+        let nodes = root.inspect();
+
+        let short_names: Vec<&str> = nodes
+            .iter()
+            .map(|n| {
+                let bare = n.type_name.split('<').next().unwrap_or(n.type_name);
+                bare.rsplit("::").next().unwrap_or(bare)
+            })
+            .collect();
+        assert_eq!(
+            short_names,
+            vec!["GlyphCardWidget", "TextWidget", "TextWidget"],
+            "the empty footer slot contributes nothing"
+        );
+        assert_eq!(nodes[0].children.len(), 2);
+    }
+
+    #[test]
     fn semantics_forwards_every_present_slot_under_a_container() {
         fn logic(_s: &mut ()) -> GlyphCardView<()> {
             glyph_card().title(text("Title")).desc(text("Desc"))

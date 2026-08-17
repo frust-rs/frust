@@ -16,8 +16,12 @@
 //!    live behind their own row/slot struct and therefore implements
 //!    `VisitPods` by hand: `navigator` (the page stack).
 //!
-//! The design-system plugin crates build on the same public seam and carry
-//! their own coverage of it; nothing here reaches across into a catalog.
+//! The design-system plugin crates' own hand-written `VisitPods` impls —
+//! `frust-glyph`'s `Slot` (`plugins/glyph/src/card.rs`) and `ActiveToast`
+//! (`plugins/glyph/src/toast.rs`), and `frust-material`'s `FabMenuItemPod`
+//! (`plugins/material/src/fab_menu.rs`) — are no longer covered here; each
+//! now carries its own `RenderRoot`-driven `inspect()` regression test in its
+//! owning crate's `#[cfg(test)]` module instead.
 
 use std::any::Any;
 

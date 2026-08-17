@@ -1332,6 +1332,60 @@ mod tests {
     }
 
     #[test]
+    fn inspect_surfaces_icon_and_label_pods_per_item_plus_the_trigger() {
+        // Regression coverage for the hand-written `FabMenuItemPod`
+        // `VisitPods` impl (ported from
+        // crates/frust-widgets/tests/visit_children.rs, which covered this
+        // shape before the design-system extraction). If
+        // `FabMenuItemPod::visit_pods` ever stopped forwarding one of
+        // `icon`/`label`, the child count and TextWidget count below would
+        // both fall short of 5 — a dropped-child regression
+        // `RenderRoot::inspect()`/devtools depend on this seam to never
+        // allow.
+        fn logic(_s: &mut ()) -> FabMenuView<()> {
+            fab_menu::<(), _>(
+                icon_stub::<()>(),
+                true,
+                vec![
+                    fab_menu_item(icon_stub::<()>(), "alpha", |_s: &mut ()| {}),
+                    fab_menu_item(icon_stub::<()>(), "beta", |_s: &mut ()| {}),
+                ],
+                |_s: &mut ()| {},
+            )
+        }
+        let mut root: RenderRoot<(), FabMenuView<()>> = RenderRoot::new();
+        let mut state = ();
+        root.rebuild(&mut logic, &mut state);
+        let mut tcx = frust::authoring::text::TextContext::new();
+        root.layout_with_text(Size::new(400.0, 600.0), &mut tcx as &mut dyn Any);
+        let nodes = root.inspect();
+
+        let short_names: Vec<&str> = nodes
+            .iter()
+            .map(|n| {
+                let bare = n.type_name.split('<').next().unwrap_or(n.type_name);
+                bare.rsplit("::").next().unwrap_or(bare)
+            })
+            .collect();
+        assert_eq!(
+            short_names
+                .iter()
+                .filter(|n| **n == "FabMenuWidget")
+                .count(),
+            1
+        );
+        assert_eq!(
+            nodes[0].children.len(),
+            5,
+            "two items x (icon + label), plus the trigger icon"
+        );
+        assert_eq!(
+            short_names.iter().filter(|n| **n == "TextWidget").count(),
+            5
+        );
+    }
+
+    #[test]
     fn semantics_reports_closed_trigger_then_open_menu() {
         fn logic_closed(_s: &mut ()) -> FabMenuView<()> {
             fab_menu::<(), _>(leaf_any(24.0, 24.0), false, vec![], |_s: &mut ()| {})

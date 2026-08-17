@@ -1362,6 +1362,56 @@ mod tests {
         assert_eq!(host.event(&mut ectx, &ev), EventResult::Ignored);
     }
 
+    // -- ToastHost: VisitPods regression (RenderRoot::inspect) ---------------
+
+    #[test]
+    fn inspect_surfaces_the_active_toast_only_while_one_is_playing() {
+        // Regression coverage for the hand-written `ActiveToast` `VisitPods`
+        // impl (ported from crates/frust-widgets/tests/visit_children.rs,
+        // which covered this shape before the design-system extraction). If
+        // `ActiveToast::visit_pods` ever stopped forwarding to its `child`
+        // field, a playing host's node list below would collapse to just
+        // `["ToastHostWidget"]` — indistinguishable from the idle host, and
+        // silently invisible to `WidgetTree::inspect`/devtools even though
+        // the toast is actually on screen.
+        use frust::authoring::text::TextContext;
+        use frust_core::{InspectNode, RenderRoot};
+        use std::any::Any;
+
+        fn short_names(nodes: &[InspectNode]) -> Vec<&str> {
+            nodes
+                .iter()
+                .map(|n| {
+                    let bare = n.type_name.split('<').next().unwrap_or(n.type_name);
+                    bare.rsplit("::").next().unwrap_or(bare)
+                })
+                .collect()
+        }
+
+        fn idle_logic(_: &mut ()) -> ToastHostView {
+            toast_host(Vec::<String>::new())
+        }
+        let mut idle_root: RenderRoot<(), ToastHostView> = RenderRoot::new();
+        let mut state = ();
+        idle_root.rebuild(&mut idle_logic, &mut state);
+        let mut idle_tcx = TextContext::new();
+        idle_root.layout_with_text(Size::new(400.0, 400.0), &mut idle_tcx as &mut dyn Any);
+        assert_eq!(short_names(&idle_root.inspect()), vec!["ToastHostWidget"]);
+
+        fn playing_logic(_: &mut ()) -> ToastHostView {
+            toast_host(vec!["hello".to_string()])
+        }
+        let mut playing_root: RenderRoot<(), ToastHostView> = RenderRoot::new();
+        playing_root.rebuild(&mut playing_logic, &mut state);
+        let mut playing_tcx = TextContext::new();
+        playing_root.layout_with_text(Size::new(400.0, 400.0), &mut playing_tcx as &mut dyn Any);
+        assert_eq!(
+            short_names(&playing_root.inspect()),
+            vec!["ToastHostWidget", "ToastWidget", "TextWidget"],
+            "the active toast (and its own child) hang under the host"
+        );
+    }
+
     #[test]
     fn enter_offset_sign_flips_between_top_and_bottom_anchors() {
         fn early_enter_dy(anchor: ToastAnchor) -> f64 {
