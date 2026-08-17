@@ -90,15 +90,20 @@ mod text;
 pub mod tokens;
 
 // The flat catalog namespace: every component module glob-re-exported from the
-// crate root.
+// crate root, as one `use` item so the whole list can carry a single lint
+// allowance. A glob over a module that has no public items yet reads as an
+// unused import, which is exactly what every not-yet-ported component's stub
+// module is; drop the allowance once no stub is left.
+#[allow(unused_imports)]
 pub use components::{
     accordion::*, alert::*, alert_dialog::*, aspect_ratio::*, attachment::*, avatar::*, badge::*,
-    breadcrumb::*, bubble::*, button::*, button_group::*, card::*, checkbox::*, collapsible::*,
-    combobox::*, command::*, context_menu::*, dialog::*, drawer::*, dropdown_menu::*, empty::*,
-    field::*, hover_card::*, input::*, input_group::*, item::*, kbd::*, label::*, marker::*,
-    native_select::*, pagination::*, popover::*, progress::*, radio_group::*, scroll_area::*,
-    select::*, separator::*, sheet::*, skeleton::*, slider::*, spinner::*, switch::*, table::*,
-    tabs::*, textarea::*, toggle::*, toggle_group::*, tooltip::*,
+    breadcrumb::*, bubble::*, button::*, button_group::*, card::*, carousel::*, checkbox::*,
+    collapsible::*, combobox::*, command::*, context_menu::*, dialog::*, drawer::*,
+    dropdown_menu::*, empty::*, field::*, hover_card::*, input::*, input_group::*, input_otp::*,
+    item::*, kbd::*, label::*, marker::*, message::*, message_scroller::*, native_select::*,
+    pagination::*, popover::*, progress::*, questionnaire::*, radio_group::*, resizable::*,
+    scroll_area::*, select::*, separator::*, sheet::*, sidebar::*, skeleton::*, slider::*,
+    spinner::*, switch::*, table::*, tabs::*, textarea::*, toggle::*, toggle_group::*, tooltip::*,
 };
 
 /// The design language itself, flattened to the root alongside the catalog: the
