@@ -55,11 +55,12 @@ use frust::authoring::{
 use frust::{AnimationController, Curve, Theme};
 use std::time::Duration;
 
+use crate::hit::inside;
 use crate::overlay::{
     AnchoredOverlayView, AnchoredOverlayWidget, OverlayAlign, OverlayAnchor, OverlayPlacement,
     OverlaySide, anchor as capture_anchor, anchored,
 };
-use crate::style::{self, ShadcnShadow};
+use crate::style::{self, PATH_TOLERANCE, ShadcnShadow};
 use crate::tokens::ShadcnTokens;
 
 /// `w-72` — the popover panel's width, in logical px.
@@ -84,8 +85,6 @@ const SHADOW_SPILL: f64 = 32.0;
 /// Panel width used when the incoming constraints are horizontally unbounded —
 /// a host always gives bounded ones, so this only guards the degenerate case.
 const UNBOUNDED_WIDTH: f64 = 320.0;
-/// Flattening tolerance for the stroked panel border.
-const PATH_TOLERANCE: f64 = 0.1;
 
 /// The chrome of one anchored panel: padding, how wide it gets, and which shadow
 /// rung it sits on.
@@ -603,11 +602,6 @@ impl Widget for PopoverTriggerWidget {
     }
 
     visit_children!(child);
-}
-
-/// Whether widget-local `pos` lies inside a `size`-shaped box.
-pub(crate) fn inside(pos: Point, size: Size) -> bool {
-    pos.x >= 0.0 && pos.y >= 0.0 && pos.x < size.width && pos.y < size.height
 }
 
 #[cfg(test)]

@@ -77,7 +77,7 @@ use crate::overlay::{
     AnchoredOverlayView, AnchoredOverlayWidget, OverlayAlign, OverlayAnchor, OverlayPlacement,
     OverlaySide, SIDE_OFFSET, anchored,
 };
-use crate::style;
+use crate::style::{self, PATH_TOLERANCE};
 use crate::tokens::ShadcnTokens;
 
 /// `px-2` — an item/label row's horizontal padding.
@@ -99,8 +99,6 @@ const SUBMENU_GAP: f64 = SIDE_OFFSET;
 /// Quarter turn: the rotation that turns lucide's `chevron-down` into its
 /// `chevron-right`.
 const CHEVRON_RIGHT: f64 = -std::f64::consts::FRAC_PI_2;
-/// Flattening tolerance for the check glyph's path.
-const PATH_TOLERANCE: f64 = 0.1;
 /// Lucide's icon viewBox edge, and its nominal stroke width in the same units.
 const LUCIDE_VIEWBOX: f64 = 24.0;
 /// Lucide's nominal stroke width, in viewBox units.

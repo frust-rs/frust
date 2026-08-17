@@ -46,7 +46,8 @@ use frust::{TextView, Theme, text};
 
 use crate::components::input::FALLBACK;
 use crate::components::native_select::{activates, draw_chevron};
-use crate::style;
+use crate::hit::inside;
+use crate::style::{self, PATH_TOLERANCE};
 use crate::tokens::ShadcnTokens;
 
 /// Gap between items: `gap-1`.
@@ -59,8 +60,6 @@ const EDGE_GAP: f64 = 4.0;
 const DARK_ACCENT_ALPHA: f32 = 0.5;
 /// Alpha of the dark-mode outline fill: `dark:bg-input/30`.
 const DARK_OUTLINE_ALPHA: f32 = 0.3;
-/// Flattening tolerance for the active item's stroked border.
-const PATH_TOLERANCE: f64 = 0.1;
 /// Lucide's `viewBox` edge, the denominator its coordinates are given in.
 const LUCIDE_VIEWBOX: f64 = 24.0;
 /// Outer diameter of one `MoreHorizontal` dot, in `viewBox` units (`r="1"` with a
@@ -311,11 +310,6 @@ impl<State: 'static> PaginationView<State> {
             })
             .collect()
     }
-}
-
-/// Whether `pos` (widget-local) lies inside a `size`-shaped box.
-fn inside(pos: Point, size: Size) -> bool {
-    pos.x >= 0.0 && pos.y >= 0.0 && pos.x < size.width && pos.y < size.height
 }
 
 impl PaginationWidget {

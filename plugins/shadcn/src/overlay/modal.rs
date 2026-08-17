@@ -73,7 +73,7 @@ use frust::{
 use kurbo::RoundedRectRadii;
 
 use super::{OverlaySide, finite_or_zero};
-use crate::style::{self, ShadcnShadow};
+use crate::style::{self, PATH_TOLERANCE, ShadcnShadow};
 use crate::tokens::ShadcnTokens;
 
 /// `max-w-lg` — the dialog/command panel's cap, in logical px (Tailwind
@@ -123,8 +123,6 @@ const HANDLE_INSET: f64 = 16.0;
 /// same chrome-only widening [`CLOSE_HIT`] documents).
 const HANDLE_HIT_HEIGHT: f64 = 24.0;
 
-/// Flattening tolerance for the panel's border/corner paths.
-const PATH_TOLERANCE: f64 = 0.1;
 /// Lucide's icon viewBox edge; its stroke width in the same units.
 const LUCIDE_VIEWBOX: f64 = 24.0;
 /// Lucide's nominal stroke width, in viewBox units.

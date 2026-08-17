@@ -37,7 +37,7 @@ use frust::{
     Column, CrossAxisAlignment, EdgeInsets, Padding, Row, Theme, flexible, inflexible, text,
 };
 
-use crate::style::{BORDER_WIDTH, SHADOW_SM, TEXT_SM, draw_shadow};
+use crate::style::{BORDER_WIDTH, PATH_TOLERANCE, SHADOW_SM, TEXT_SM, draw_shadow};
 use crate::tokens::ShadcnTokens;
 
 /// Vertical padding of the outer card (`py-6`), in logical px.
@@ -48,8 +48,6 @@ const CARD_GAP: f64 = 24.0; // spacing(6)
 const SLOT_PAD_X: f64 = 24.0; // spacing(6)
 /// Gap between a header's title/description rows (`gap-2`), in logical px.
 const HEADER_GAP: f64 = 8.0; // spacing(2)
-/// Flattening tolerance for the card's stroked border path.
-const PATH_TOLERANCE: f64 = 0.1;
 
 /// Interleave `children` with a `gap`-tall [`frust::SizedBox`] spacer between
 /// each pair — [`FlexView`](frust::FlexView) v1's stand-in for a native `gap`

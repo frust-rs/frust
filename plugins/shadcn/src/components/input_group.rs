@@ -48,6 +48,7 @@ use frust::{TextView, Theme, text};
 
 use crate::components::input::{FALLBACK, FieldChrome, paint_field_border, resolve_field_border};
 use crate::components::native_select::activates;
+use crate::hit::inside;
 use crate::style;
 use crate::tokens::ShadcnTokens;
 
@@ -303,11 +304,6 @@ impl<State: 'static> View<State> for InputGroupView<State> {
             teardown_child(&self.addons[index].1, pod, ctx);
         }
     }
-}
-
-/// Whether `pos` (widget-local) lies inside a `size`-shaped box.
-fn inside(pos: Point, size: Size) -> bool {
-    pos.x >= 0.0 && pos.y >= 0.0 && pos.x < size.width && pos.y < size.height
 }
 
 impl Widget for InputGroupWidget {

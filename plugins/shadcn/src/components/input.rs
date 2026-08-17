@@ -68,12 +68,9 @@ use frust::authoring::{
 };
 use frust::{Theme, text_input};
 
-use crate::style;
+use crate::hit::inside;
+use crate::style::{self, PATH_TOLERANCE};
 use crate::tokens::{ShadcnBase, ShadcnPalette, ShadcnRadius, ShadcnTokens};
-
-/// Flattening tolerance for the stroked border path (the value every catalog's
-/// stroked outline uses).
-const PATH_TOLERANCE: f64 = 0.1;
 
 /// Field width used when the incoming constraints are horizontally unbounded —
 /// the baseline field's own fallback, restated here because this widget resolves
@@ -385,11 +382,6 @@ impl<State: 'static> View<State> for InputView<State> {
     fn teardown(&self, element: &mut InputWidget, ctx: &mut BuildCtx<'_>) {
         teardown_child(&self.control(), &mut element.child, ctx);
     }
-}
-
-/// Whether `pos` (widget-local) lies inside a `size`-shaped box.
-fn inside(pos: Point, size: Size) -> bool {
-    pos.x >= 0.0 && pos.y >= 0.0 && pos.x < size.width && pos.y < size.height
 }
 
 impl Widget for InputWidget {

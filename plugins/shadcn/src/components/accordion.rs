@@ -54,6 +54,7 @@ use frust::{AnimationController, Curve, TextView, Theme, text};
 
 use crate::components::input::FALLBACK;
 use crate::components::native_select::{activates, draw_chevron};
+use crate::hit::inside;
 use crate::style;
 use crate::tokens::ShadcnTokens;
 
@@ -337,11 +338,6 @@ impl<State: 'static> View<State> for AccordionView<State> {
             teardown_child(&self.items[index].content, &mut chunk[1], ctx);
         }
     }
-}
-
-/// Whether `pos` (widget-local) lies inside a `size`-shaped box.
-fn inside(pos: Point, size: Size) -> bool {
-    pos.x >= 0.0 && pos.y >= 0.0 && pos.x < size.width && pos.y < size.height
 }
 
 impl AccordionWidget {

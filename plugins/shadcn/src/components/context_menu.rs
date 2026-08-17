@@ -47,7 +47,8 @@ use frust::authoring::{
 };
 
 use crate::components::dropdown_menu::{DropdownMenuItem, MenuListStyle, menu_panel};
-use crate::components::popover::{OnOpenChange, PanelHandle, PanelStyle, inside};
+use crate::components::popover::{OnOpenChange, PanelHandle, PanelStyle};
+use crate::hit::inside;
 use crate::overlay::{
     AnchoredOverlayView, AnchoredOverlayWidget, OverlayAlign, OverlayAnchor, OverlayPlacement,
     OverlaySide, anchored,

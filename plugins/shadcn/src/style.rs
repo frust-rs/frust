@@ -68,8 +68,10 @@ pub const HEIGHT_DEFAULT: f64 = 36.0;
 pub const HEIGHT_SM: f64 = 32.0;
 /// Control height for the `xs` size: `h-6` (`button` size `xs`).
 pub const HEIGHT_XS: f64 = 24.0;
-/// Control height for the `lg` size: `h-10` (`button` size `lg`) — the smallest
-/// shadcn size that clears a comfortable touch target.
+/// Control height for the `lg` size: `h-10` (`button` size `lg`) — the tallest
+/// rung of the ladder, and still below the 44px mobile tap-target convention
+/// [`HEIGHT_DEFAULT`] documents. The whole ladder is desktop-first; `lg` is the
+/// roomiest choice available, not a touch-sized one.
 pub const HEIGHT_LG: f64 = 40.0;
 
 /// Default icon edge: `[&_svg:not([class*='size-'])]:size-4` — the size every
@@ -90,9 +92,14 @@ pub const TEXT_BASE: f64 = 16.0;
 /// Border width for every bordered control: Tailwind's `border` = 1px.
 pub const BORDER_WIDTH: f64 = 1.0;
 
-/// Flattening tolerance for the rounded-rect paths this module strokes — the
+/// Flattening tolerance for every path this catalog strokes or fills — the
 /// same value the other catalogs' stroked outlines use.
-const STROKE_TOLERANCE: f64 = 0.1;
+///
+/// Curves reach `Shape::to_path` as polylines accurate to this many logical px,
+/// which is well under a device pixel at any sane scale factor; a component
+/// flattening a rounded rect, an arc, or a glyph path reads this rather than
+/// naming its own tolerance.
+pub(crate) const PATH_TOLERANCE: f64 = 0.1;
 
 // ---- Interaction-state treatments ----------------------------------------
 
@@ -214,7 +221,7 @@ pub fn draw_focus_ring(
     );
     scene.stroke_path(
         origin,
-        &rr.to_path(STROKE_TOLERANCE),
+        &rr.to_path(PATH_TOLERANCE),
         FOCUS_RING_WIDTH,
         &Brush::Solid(with_alpha(ring, FOCUS_RING_OPACITY)),
     );

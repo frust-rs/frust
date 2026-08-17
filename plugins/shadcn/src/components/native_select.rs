@@ -40,6 +40,7 @@ use frust::{Theme, text};
 use crate::components::input::{
     FALLBACK, FieldChrome, input_border, paint_field_border, resolve_field_border,
 };
+use crate::hit::inside;
 use crate::style;
 
 /// Right inset of the chevron's box: `right-3.5`.
@@ -266,11 +267,6 @@ impl<State: 'static> View<State> for NativeSelectView<State> {
     fn teardown(&self, element: &mut NativeSelectWidget, ctx: &mut BuildCtx<'_>) {
         teardown_child(&self.label_view(), &mut element.label, ctx);
     }
-}
-
-/// Whether `pos` (widget-local) lies inside a `size`-shaped box.
-fn inside(pos: Point, size: Size) -> bool {
-    pos.x >= 0.0 && pos.y >= 0.0 && pos.x < size.width && pos.y < size.height
 }
 
 /// Whether `key` activates a focused trigger (`Space`/`Enter`, the keys a native

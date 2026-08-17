@@ -34,6 +34,7 @@ use frust::authoring::{
 use frust::{Theme, text};
 use peniko::Color;
 
+use crate::hit::inside;
 use crate::style;
 
 /// `itemVariants`' `variant` axis. `Default` = shadcn's `default`.
@@ -205,10 +206,6 @@ impl<State: 'static> View<State> for ItemView<State> {
             frust::authoring::teardown_child(view, pod, ctx);
         }
     }
-}
-
-fn inside(pos: Point, size: Size) -> bool {
-    pos.x >= 0.0 && pos.y >= 0.0 && pos.x < size.width && pos.y < size.height
 }
 
 impl Widget for ItemWidget {

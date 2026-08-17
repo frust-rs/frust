@@ -91,7 +91,7 @@ use frust::{
 
 use crate::overlay::modal::MAX_WIDTH_LG;
 use crate::overlay::{self, ModalConfig, ModalContent, ModalView, ModalWidget, modal};
-use crate::style;
+use crate::style::{self, PATH_TOLERANCE};
 use crate::tokens::ShadcnTokens;
 
 /// `h-9` — the input row's height.
@@ -117,8 +117,6 @@ const SEARCH_ICON_OPACITY: f32 = 0.5;
 /// Width used when the incoming constraints are horizontally unbounded — the
 /// panel is normally sized by its host (a centred modal, an anchored popover).
 const UNBOUNDED_WIDTH: f64 = 320.0;
-/// Flattening tolerance for the search glyph's arc path.
-const PATH_TOLERANCE: f64 = 0.1;
 /// Lucide's icon viewBox edge, and its nominal stroke width in the same units.
 const LUCIDE_VIEWBOX: f64 = 24.0;
 /// Lucide's nominal stroke width, in viewBox units.

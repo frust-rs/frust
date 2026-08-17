@@ -18,71 +18,18 @@
 //! `Move` arm to request a cursor from.
 
 use frust::Theme;
-use frust::authoring::text::{FontWeight, TextContext, TextLayout, TextStyle};
+use frust::authoring::text::{FontWeight, TextStyle};
 use frust::authoring::{
-    BoxConstraints, BuildCtx, ChangeFlags, Color, LayoutCtx, PaintCtx, PaintScene, Point, Role,
+    BoxConstraints, BuildCtx, ChangeFlags, Color, LayoutCtx, PaintCtx, PaintScene, Role,
     SemanticsCtx, Size, View, Widget,
 };
 
 use crate::style::{TEXT_SM, disabled_tint};
+use crate::text::Label;
 
 /// Unthemed fallback ink (a theme resolves this from `colors.on_surface`,
 /// shadcn's `--foreground`).
 const FALLBACK_INK: Color = Color::from_rgb8(0x0A, 0x0A, 0x0A);
-
-/// A cached, lazily-shaped label run — the same shape
-/// `sample_design::badge::Label` and [`crate::components::kbd`]'s private
-/// `Label` use (see either module's docs for the "leaf shapes its own run"
-/// rationale). **Dedup candidate**: this is the third private copy of this
-/// exact helper in this catalog (`badge`, `kbd`, here) — a shared
-/// `crate::style` (or new `crate::text`) home would collapse all three, but
-/// per this task's file-discipline rule a shared helper is out of scope for
-/// this file.
-struct Label {
-    content: String,
-    layout: Option<TextLayout>,
-    shaped_style: Option<TextStyle>,
-}
-
-impl Label {
-    fn new(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            layout: None,
-            shaped_style: None,
-        }
-    }
-
-    fn set_content(&mut self, content: impl Into<String>) {
-        let content = content.into();
-        if self.content != content {
-            self.content = content;
-            self.layout = None;
-        }
-    }
-
-    fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
-        if let Some(cached) = &self.layout
-            && self.shaped_style.as_ref() == Some(style)
-        {
-            return cached.size();
-        }
-        let text_ctx = ctx.text_context::<TextContext>();
-        let laid = text_ctx.layout(&self.content, style, None);
-        let size = laid.size();
-        self.layout = Some(laid);
-        self.shaped_style = Some(style.clone());
-        size
-    }
-
-    fn paint(&self, origin: Point, scene: &mut dyn PaintScene) {
-        if let Some(layout) = &self.layout {
-            for run in layout.to_scene_runs(origin) {
-                scene.draw_glyph_run(run);
-            }
-        }
-    }
-}
 
 /// A declarative shadcn label.
 pub struct LabelView {
@@ -186,6 +133,8 @@ impl Widget for LabelWidget {
 mod tests {
     use super::*;
     use crate::style::DISABLED_OPACITY;
+    use frust::authoring::Point;
+    use frust::authoring::text::TextContext;
     use std::any::Any;
 
     fn build(view: &LabelView) -> LabelWidget {

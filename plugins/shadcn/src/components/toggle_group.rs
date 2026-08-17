@@ -63,23 +63,17 @@ use frust::authoring::{
     Action, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, EventCtx, EventResult, InputEvent,
     Key, KeyEvent, LayoutCtx, NamedKey, PaintCtx, PaintScene, Point, PointerPhase, Rect, Role,
     RoundedRect, SemanticsCtx, Shape, Size, Toggled, View, Widget, erase_callback_arg,
-    text::{FontWeight, TextContext, TextLayout, TextStyle},
+    text::{FontWeight, TextStyle},
 };
 
-use crate::components::toggle::{ToggleSize, ToggleVariant};
-use crate::style;
+use crate::components::toggle::{ToggleSize, ToggleVariant, precedence_fill, precedence_ink};
+use crate::style::{self, PATH_TOLERANCE};
+use crate::text::{LabelRun, SHAPING_INK};
 use crate::tokens::ShadcnTokens;
 
 /// Horizontal padding per item, in logical px (`px-3` — the group's own override
 /// of whatever `px-*` the size axis would give a standalone toggle).
 pub const TOGGLE_GROUP_PADDING_X: f64 = 12.0;
-
-/// Flattening tolerance for the group's border/divider paths.
-const PATH_TOLERANCE: f64 = 0.1;
-
-/// The color a label run is *shaped* with; never painted (every run is re-brushed
-/// with the state's resolved ink at paint time).
-const SHAPING_INK: Color = Color::BLACK;
 
 /// Unthemed fallback `--foreground` (resting ink).
 const FALLBACK_FOREGROUND: Color = Color::from_rgb8(0x0A, 0x0A, 0x0A);
@@ -301,51 +295,6 @@ struct ItemEntry {
     x: f64,
     /// The item's width incl. padding (filled at layout).
     width: f64,
-}
-
-/// A retained text run whose ink is applied at paint time (see `toggle`'s module
-/// docs for why the color is not baked into the shaped run).
-struct LabelRun {
-    content: String,
-    layout: Option<TextLayout>,
-    laid_out_style: Option<TextStyle>,
-}
-
-impl LabelRun {
-    fn new(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            layout: None,
-            laid_out_style: None,
-        }
-    }
-
-    fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
-        if let Some(cached) = &self.layout
-            && self.laid_out_style.as_ref() == Some(style)
-        {
-            return cached.size();
-        }
-        let text_ctx = ctx.text_context::<TextContext>();
-        let laid = text_ctx.layout(&self.content, style, None);
-        let size = laid.size();
-        self.layout = Some(laid);
-        self.laid_out_style = Some(style.clone());
-        size
-    }
-
-    fn size(&self) -> Size {
-        self.layout.as_ref().map_or(Size::ZERO, |l| l.size())
-    }
-
-    fn paint(&self, origin: Point, color: Color, scene: &mut dyn PaintScene) {
-        if let Some(layout) = &self.layout {
-            for mut run in layout.to_scene_runs(origin) {
-                run.brush = Brush::Solid(color);
-                scene.draw_glyph_run(run);
-            }
-        }
-    }
 }
 
 impl<State: 'static> View<State> for ToggleGroupView<State> {
@@ -605,13 +554,7 @@ impl Widget for ToggleGroupWidget {
                 );
             }
             // Pressed wins over hover (`toggle`'s documented precedence).
-            let fill = if on {
-                Some(colors.on_fill)
-            } else if hovered {
-                Some(colors.hover_fill)
-            } else {
-                None
-            };
+            let fill = precedence_fill(on, hovered, colors.on_fill, colors.hover_fill);
             if let Some(fill) = fill {
                 if flush {
                     // Square inside the clip: the group's corners do the rounding.
@@ -672,13 +615,7 @@ impl Widget for ToggleGroupWidget {
             let dimmed = !self.enabled(index);
             let on = self.is_on(index, &selected);
             let hovered = self.hovered == Some(index) && !dimmed;
-            let ink = if on {
-                colors.on_ink
-            } else if hovered {
-                colors.hover_ink
-            } else {
-                colors.ink
-            };
+            let ink = precedence_ink(on, hovered, colors.on_ink, colors.hover_ink, colors.ink);
             let label = item.run.size();
             let label_origin = Point::new(
                 origin.x + item.x + (item.width - label.width) / 2.0,
@@ -812,6 +749,7 @@ impl Widget for ToggleGroupWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frust::authoring::text::TextContext;
     use frust::authoring::{
         BezPath, EventOutcome, Modifiers, PointerButton, PointerEvent, SemanticsUpdate,
     };

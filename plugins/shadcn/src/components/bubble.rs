@@ -29,14 +29,15 @@
 //! recorded here rather than re-derived.
 
 use frust::Theme;
-use frust::authoring::text::{TextContext, TextLayout, TextStyle};
+use frust::authoring::text::TextStyle;
 use frust::authoring::{
     BoxConstraints, Brush, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Point, Role,
     RoundedRect, SemanticsCtx, Shape, Size, View, Widget,
 };
 use peniko::Color;
 
-use crate::style;
+use crate::style::{self, PATH_TOLERANCE};
+use crate::text::Label;
 
 /// `bubbleVariants`' `variant` axis. `Default` = shadcn's `default`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -69,7 +70,6 @@ const PAD_X: f64 = style::SPACING_UNIT * 3.0;
 const PAD_Y: f64 = style::SPACING_UNIT * 2.0;
 /// `border` width for `Outline`.
 const BORDER_WIDTH: f64 = style::BORDER_WIDTH;
-const STROKE_TOLERANCE: f64 = 0.1;
 
 /// A declarative shadcn chat bubble. See the [module docs](self).
 pub struct BubbleView {
@@ -152,46 +152,6 @@ fn resolve_colors(
             Color::from_rgb8(0xE7, 0x00, 0x0B),
             None,
         ),
-    }
-}
-
-/// A retained, lazily-shaped text run (the [`crate::style`]/badge precedent:
-/// the ink is baked into the layout at LAYOUT time).
-struct Label {
-    content: String,
-    layout: Option<TextLayout>,
-    shaped_style: Option<TextStyle>,
-}
-
-impl Label {
-    fn new(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            layout: None,
-            shaped_style: None,
-        }
-    }
-
-    fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
-        if let Some(cached) = &self.layout
-            && self.shaped_style.as_ref() == Some(style)
-        {
-            return cached.size();
-        }
-        let text_ctx = ctx.text_context::<TextContext>();
-        let laid = text_ctx.layout(&self.content, style, None);
-        let size = laid.size();
-        self.layout = Some(laid);
-        self.shaped_style = Some(style.clone());
-        size
-    }
-
-    fn paint(&self, origin: Point, scene: &mut dyn PaintScene) {
-        if let Some(layout) = &self.layout {
-            for run in layout.to_scene_runs(origin) {
-                scene.draw_glyph_run(run);
-            }
-        }
     }
 }
 
@@ -317,7 +277,7 @@ impl Widget for BubbleWidget {
             );
             scene.stroke_path(
                 origin,
-                &rr.to_path(STROKE_TOLERANCE),
+                &rr.to_path(PATH_TOLERANCE),
                 BORDER_WIDTH,
                 &Brush::Solid(border),
             );
@@ -328,7 +288,7 @@ impl Widget for BubbleWidget {
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
         ctx.push_node(Role::Label, |node| {
-            node.set_label(self.label.content.as_str());
+            node.set_label(self.label.content());
         });
     }
 }
@@ -443,6 +403,7 @@ impl Widget for BubbleGroupWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frust::authoring::text::TextContext;
     use std::any::Any;
 
     fn build(view: &BubbleView) -> BubbleWidget {

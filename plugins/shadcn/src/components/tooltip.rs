@@ -71,7 +71,7 @@ use frust::authoring::{
 };
 use frust::{AnimationController, Curve, FrameTime, Theme, text};
 
-use crate::components::popover::inside;
+use crate::hit::inside;
 use crate::overlay::{OverlayAlign, OverlayPlacement, OverlaySide, place};
 use crate::style;
 use crate::tokens::ShadcnTokens;

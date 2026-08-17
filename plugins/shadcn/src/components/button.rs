@@ -34,21 +34,21 @@
 //! claims, no cursor, no focus.
 
 use frust::Theme;
-use frust::authoring::text::{FontWeight, TextContext, TextLayout, TextStyle};
+use frust::authoring::text::{FontWeight, TextStyle};
 use frust::authoring::{
     Action, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, ErasedCallback, EventCtx,
-    EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Rect, Role,
-    RoundedRect, SemanticsCtx, Shape, Size, Vec2, View, Widget, erase_callback,
+    EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerPhase, Role, RoundedRect,
+    SemanticsCtx, Shape, Size, Vec2, View, Widget, erase_callback,
 };
 
+use crate::hit::inside;
 use crate::style::{
-    ACTIVE_CURSOR, BORDER_WIDTH, HOVER_SECONDARY_ALPHA, HOVER_SOLID_ALPHA, SHADOW_XS, TEXT_SM,
-    TEXT_XS, disabled_tint, draw_focus_ring, draw_shadow, focus_border, ring_color, with_alpha,
+    ACTIVE_CURSOR, BORDER_WIDTH, HOVER_SECONDARY_ALPHA, HOVER_SOLID_ALPHA, PATH_TOLERANCE,
+    SHADOW_XS, TEXT_SM, TEXT_XS, disabled_tint, draw_focus_ring, draw_shadow, focus_border,
+    ring_color, with_alpha,
 };
+use crate::text::Label;
 use crate::tokens::ShadcnTokens;
-
-/// Flattening tolerance for the border's stroked path.
-const PATH_TOLERANCE: f64 = 0.1;
 
 /// cva `variant` axis. `Default` is shadcn's own `default`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -205,55 +205,6 @@ impl ButtonVariant {
     }
 }
 
-/// A cached, lazily-shaped label run. **Dedup candidate** (see
-/// `crate::components::label`'s note) — this catalog's private leaf-text
-/// helper is now duplicated across `badge`, `button`, `kbd`, and `label`.
-struct Label {
-    content: String,
-    layout: Option<TextLayout>,
-    shaped_style: Option<TextStyle>,
-}
-
-impl Label {
-    fn new(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            layout: None,
-            shaped_style: None,
-        }
-    }
-
-    fn set_content(&mut self, content: impl Into<String>) {
-        let content = content.into();
-        if self.content != content {
-            self.content = content;
-            self.layout = None;
-        }
-    }
-
-    fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
-        if let Some(cached) = &self.layout
-            && self.shaped_style.as_ref() == Some(style)
-        {
-            return cached.size();
-        }
-        let text_ctx = ctx.text_context::<TextContext>();
-        let laid = text_ctx.layout(&self.content, style, None);
-        let size = laid.size();
-        self.layout = Some(laid);
-        self.shaped_style = Some(style.clone());
-        size
-    }
-
-    fn paint(&self, origin: Point, scene: &mut dyn PaintScene) {
-        if let Some(layout) = &self.layout {
-            for run in layout.to_scene_runs(origin) {
-                scene.draw_glyph_run(run);
-            }
-        }
-    }
-}
-
 /// A declarative shadcn button.
 pub struct ButtonView<State: 'static> {
     label: String,
@@ -310,10 +261,6 @@ pub struct ButtonWidget {
     hovered: bool,
     pressed: bool,
     captured: bool,
-}
-
-fn inside(pos: Point, size: Size) -> bool {
-    Rect::from_origin_size(Point::ORIGIN, size).contains(pos)
 }
 
 impl<State: 'static> View<State> for ButtonView<State> {
@@ -445,12 +392,7 @@ impl Widget for ButtonWidget {
             draw_focus_ring(scene, origin, size, radius, ring);
         }
 
-        let label_size = self
-            .label
-            .layout
-            .as_ref()
-            .map(TextLayout::size)
-            .unwrap_or_default();
+        let label_size = self.label.size();
         let label_origin = origin
             + Vec2::new(
                 (size.width - label_size.width) / 2.0,
@@ -536,6 +478,8 @@ impl Widget for ButtonWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frust::authoring::Point;
+    use frust::authoring::text::TextContext;
     use std::any::Any;
 
     #[derive(Default)]

@@ -54,6 +54,7 @@ use frust::authoring::{
 use frust::{TextView, Theme, text};
 
 use crate::components::input::FALLBACK;
+use crate::hit::inside;
 use crate::style;
 
 /// Cell padding: `p-2` on a body cell, `px-2` on a head cell.
@@ -379,11 +380,6 @@ impl<State: 'static> View<State> for TableView<State> {
             teardown_child(&view, pod, ctx);
         }
     }
-}
-
-/// Whether `pos` (widget-local) lies inside a `size`-shaped box.
-fn inside(pos: Point, size: Size) -> bool {
-    pos.x >= 0.0 && pos.y >= 0.0 && pos.x < size.width && pos.y < size.height
 }
 
 impl TableWidget {

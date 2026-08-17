@@ -67,12 +67,13 @@ use frust::authoring::{
     EventResult, InputEvent, Key, KeyEvent, LayoutCtx, NamedKey, PaintCtx, PaintScene, Point,
     PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, View, Widget, any,
     build_child, erase_callback_arg, rebuild_children, route_event_single, teardown_child,
-    text::{FontWeight, TextContext, TextLayout, TextStyle},
+    text::{FontWeight, TextStyle},
     visit_children,
 };
 use frust::{AnimationController, Brightness, ChildKey, Curve, FrameTime, Theme};
 
-use crate::style;
+use crate::style::{self, PATH_TOLERANCE};
+use crate::text::{LabelRun, SHAPING_INK};
 use crate::tokens::ShadcnTokens;
 
 /// The tab strip's height, in logical px (`h-9`).
@@ -120,13 +121,6 @@ const INDICATOR_DURATION: Duration = Duration::from_millis(150);
 /// The cross-fade's easing — Tailwind's `--default-transition-timing-function`,
 /// `cubic-bezier(0.4, 0, 0.2, 1)`.
 const INDICATOR_CURVE: Curve = Curve::Cubic(0.4, 0.0, 0.2, 1.0);
-
-/// Flattening tolerance for the active pill's border path.
-const PATH_TOLERANCE: f64 = 0.1;
-
-/// The color a label run is *shaped* with; never painted (each run is re-brushed
-/// with the state's ink at paint time — see `toggle`'s module docs).
-const SHAPING_INK: Color = Color::BLACK;
 
 /// Unthemed fallback `--muted` (the default variant's strip).
 const FALLBACK_MUTED: Color = Color::from_rgb8(0xF5, 0xF5, 0xF5);
@@ -303,58 +297,6 @@ fn arrow_step(key: &KeyEvent) -> Option<isize> {
         Key::Named(NamedKey::ArrowRight | NamedKey::ArrowDown) => Some(1),
         Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowUp) => Some(-1),
         _ => None,
-    }
-}
-
-/// A retained text run whose ink is applied at paint time.
-struct LabelRun {
-    content: String,
-    layout: Option<TextLayout>,
-    laid_out_style: Option<TextStyle>,
-}
-
-impl LabelRun {
-    fn new(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            layout: None,
-            laid_out_style: None,
-        }
-    }
-
-    fn set_content(&mut self, content: impl Into<String>) {
-        let content = content.into();
-        if self.content != content {
-            self.content = content;
-            self.layout = None;
-        }
-    }
-
-    fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
-        if let Some(cached) = &self.layout
-            && self.laid_out_style.as_ref() == Some(style)
-        {
-            return cached.size();
-        }
-        let text_ctx = ctx.text_context::<TextContext>();
-        let laid = text_ctx.layout(&self.content, style, None);
-        let size = laid.size();
-        self.layout = Some(laid);
-        self.laid_out_style = Some(style.clone());
-        size
-    }
-
-    fn size(&self) -> Size {
-        self.layout.as_ref().map_or(Size::ZERO, |l| l.size())
-    }
-
-    fn paint(&self, origin: Point, color: Color, scene: &mut dyn PaintScene) {
-        if let Some(layout) = &self.layout {
-            for mut run in layout.to_scene_runs(origin) {
-                run.brush = Brush::Solid(color);
-                scene.draw_glyph_run(run);
-            }
-        }
     }
 }
 
@@ -946,6 +888,7 @@ impl Widget for TabsWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frust::authoring::text::TextContext;
     use frust::authoring::{
         BezPath, EventOutcome, Modifiers, PointerButton, PointerEvent, SemanticsUpdate,
     };

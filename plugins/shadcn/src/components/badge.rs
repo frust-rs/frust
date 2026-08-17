@@ -21,24 +21,24 @@
 //! shared focus ring or cursor already provide.
 
 use frust::Theme;
-use frust::authoring::text::{FontWeight, TextContext, TextLayout, TextStyle};
+use frust::authoring::text::{FontWeight, TextStyle};
 use frust::authoring::{
     Action, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, ErasedCallback, EventCtx,
-    EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Rect, Role,
-    RoundedRect, SemanticsCtx, Shape, Size, Vec2, View, Widget, erase_callback,
+    EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerPhase, Role, RoundedRect,
+    SemanticsCtx, Shape, Size, Vec2, View, Widget, erase_callback,
 };
 
+use crate::hit::inside;
 use crate::style::{
-    ACTIVE_CURSOR, BORDER_WIDTH, HOVER_SOLID_ALPHA, TEXT_XS, draw_focus_ring, focus_border,
-    ring_color, with_alpha,
+    ACTIVE_CURSOR, BORDER_WIDTH, HOVER_SOLID_ALPHA, PATH_TOLERANCE, TEXT_XS, draw_focus_ring,
+    focus_border, ring_color, with_alpha,
 };
+use crate::text::Label;
 
 /// Horizontal padding inside the pill (`px-2` = `spacing(2)`), in logical px.
 const PAD_X: f64 = 8.0;
 /// Vertical padding inside the pill (`py-0.5` = `spacing(0.5)`), in logical px.
 const PAD_Y: f64 = 2.0;
-/// Flattening tolerance for the pill's stroked border path.
-const PATH_TOLERANCE: f64 = 0.1;
 
 /// cva `variant` axis. `Default` is shadcn's own `default`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -163,55 +163,6 @@ impl<State: 'static> BadgeView<State> {
     }
 }
 
-/// A cached, lazily-shaped label run. **Dedup candidate** (see
-/// `crate::components::label`'s identical note) — this catalog's private
-/// leaf-text helper has now been copied into `badge`, `kbd`, and `label`.
-struct Label {
-    content: String,
-    layout: Option<TextLayout>,
-    shaped_style: Option<TextStyle>,
-}
-
-impl Label {
-    fn new(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            layout: None,
-            shaped_style: None,
-        }
-    }
-
-    fn set_content(&mut self, content: impl Into<String>) {
-        let content = content.into();
-        if self.content != content {
-            self.content = content;
-            self.layout = None;
-        }
-    }
-
-    fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
-        if let Some(cached) = &self.layout
-            && self.shaped_style.as_ref() == Some(style)
-        {
-            return cached.size();
-        }
-        let text_ctx = ctx.text_context::<TextContext>();
-        let laid = text_ctx.layout(&self.content, style, None);
-        let size = laid.size();
-        self.layout = Some(laid);
-        self.shaped_style = Some(style.clone());
-        size
-    }
-
-    fn paint(&self, origin: Point, scene: &mut dyn PaintScene) {
-        if let Some(layout) = &self.layout {
-            for run in layout.to_scene_runs(origin) {
-                scene.draw_glyph_run(run);
-            }
-        }
-    }
-}
-
 /// The retained widget for a [`BadgeView`].
 pub struct BadgeWidget {
     label: Label,
@@ -224,10 +175,6 @@ pub struct BadgeWidget {
     hovered: bool,
     pressed: bool,
     captured: bool,
-}
-
-fn inside(pos: Point, size: Size) -> bool {
-    Rect::from_origin_size(Point::ORIGIN, size).contains(pos)
 }
 
 impl<State: 'static> View<State> for BadgeView<State> {
@@ -341,12 +288,7 @@ impl Widget for BadgeWidget {
         // forcing a relayout from either would fight that contract. Only
         // `Outline`/`Ghost`'s hover ink (`on_primary_container`) is affected in
         // practice, and the fill swap alone still reads as the active state.
-        let label_size = self
-            .label
-            .layout
-            .as_ref()
-            .map(TextLayout::size)
-            .unwrap_or_default();
+        let label_size = self.label.size();
         let label_origin = ctx.origin()
             + Vec2::new(
                 (ctx.size().width - label_size.width) / 2.0,
@@ -437,6 +379,7 @@ impl Widget for BadgeWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frust::authoring::Point;
     use frust::authoring::text::TextContext;
     use std::any::Any;
 

@@ -47,9 +47,9 @@
 //!
 //! The label's color depends on hover, which only ever requests a *repaint* — so
 //! baking the color into the shaped run (what `frust::text` does at layout time)
-//! would leave a hover color change one relayout behind. Instead the run is shaped
-//! with a sentinel color and every `GlyphRun` is re-brushed at paint time
-//! ([`ToggleLabel::paint`]), which keeps the shape cache keyed on geometry alone.
+//! would leave a hover color change one relayout behind. Instead the label is a
+//! [`crate::text::LabelRun`]: shaped once with a sentinel color, then re-brushed
+//! per paint, which keeps the shape cache keyed on geometry alone.
 
 use std::rc::Rc;
 
@@ -58,20 +58,13 @@ use frust::authoring::{
     Action, BoxConstraints, Brush, BuildCtx, ChangeFlags, Color, EventCtx, EventResult, InputEvent,
     Key, KeyEvent, LayoutCtx, NamedKey, PaintCtx, PaintScene, Point, PointerPhase, Rect, Role,
     RoundedRect, SemanticsCtx, Shape, Size, Toggled, View, Widget, erase_callback_arg,
-    text::{FontWeight, TextContext, TextLayout, TextStyle},
+    text::{FontWeight, TextStyle},
 };
 
-use crate::style;
+use crate::hit::inside;
+use crate::style::{self, PATH_TOLERANCE};
+use crate::text::{LabelRun, SHAPING_INK};
 use crate::tokens::ShadcnTokens;
-
-/// Flattening tolerance for the outline variant's border path.
-const PATH_TOLERANCE: f64 = 0.1;
-
-/// The color a label run is *shaped* with. Never painted: every run is re-brushed
-/// with the state's resolved ink (see the [module docs](self)), and keeping the
-/// shaping color constant keeps the text shape cache from missing on a color
-/// change.
-const SHAPING_INK: Color = Color::BLACK;
 
 /// Unthemed fallback resting ink — the `neutral` preset's light `--foreground`.
 const FALLBACK_FOREGROUND: Color = Color::from_rgb8(0x0A, 0x0A, 0x0A);
@@ -183,67 +176,6 @@ impl<State: 'static> ToggleView<State> {
     }
 }
 
-/// A retained text run whose color is applied at paint time.
-///
-/// The shape/measure half mirrors the per-file label helpers the other catalogs
-/// carry (`frust_glyph::tabs`' `GlyphLabel`); the difference is
-/// [`ToggleLabel::paint`], which re-brushes each run instead of painting the
-/// color the layout was shaped with — see the [module docs](self).
-struct ToggleLabel {
-    content: String,
-    layout: Option<TextLayout>,
-    laid_out_style: Option<TextStyle>,
-}
-
-impl ToggleLabel {
-    fn new(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            layout: None,
-            laid_out_style: None,
-        }
-    }
-
-    fn set_content(&mut self, content: impl Into<String>) {
-        let content = content.into();
-        if self.content != content {
-            self.content = content;
-            self.layout = None;
-        }
-    }
-
-    /// Shape (or reuse) the run and return its measured size.
-    fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
-        if let Some(cached) = &self.layout
-            && self.laid_out_style.as_ref() == Some(style)
-        {
-            return cached.size();
-        }
-        let text_ctx = ctx.text_context::<TextContext>();
-        let laid = text_ctx.layout(&self.content, style, None);
-        let size = laid.size();
-        self.layout = Some(laid);
-        self.laid_out_style = Some(style.clone());
-        size
-    }
-
-    /// The measured size of the last shaped run (`ZERO` before the first layout).
-    fn size(&self) -> Size {
-        self.layout.as_ref().map_or(Size::ZERO, |l| l.size())
-    }
-
-    /// Paint the run at `origin` in `color`, overriding whatever ink it was
-    /// shaped with.
-    fn paint(&self, origin: Point, color: Color, scene: &mut dyn PaintScene) {
-        if let Some(layout) = &self.layout {
-            for mut run in layout.to_scene_runs(origin) {
-                run.brush = Brush::Solid(color);
-                scene.draw_glyph_run(run);
-            }
-        }
-    }
-}
-
 /// The label's text style: the theme's own (Inter) family at the catalog's
 /// `text-sm`/`font-medium`, or the bundled sans stack when no theme is threaded.
 ///
@@ -320,6 +252,46 @@ fn resolve_colors(theme: Option<&Theme>, variant: ToggleVariant) -> ToggleColors
     }
 }
 
+/// The fill a two-state control paints under the current state, if any: the
+/// `on` state wins over hover, and a resting control paints nothing
+/// (`bg-transparent`).
+///
+/// The precedence the [module docs](self) fix ("`on` beats `hover`"), taken as
+/// plain colors so `toggle_group` — which resolves the same rule per item over
+/// a palette of its own — shares the decision rather than restating it.
+pub(crate) fn precedence_fill(
+    on: bool,
+    hovered: bool,
+    on_fill: Color,
+    hover_fill: Color,
+) -> Option<Color> {
+    if on {
+        Some(on_fill)
+    } else if hovered {
+        Some(hover_fill)
+    } else {
+        None
+    }
+}
+
+/// The label ink under the same precedence, falling back to the `resting` ink a
+/// control inherits when it is neither on nor hovered.
+pub(crate) fn precedence_ink(
+    on: bool,
+    hovered: bool,
+    on_ink: Color,
+    hover_ink: Color,
+    resting: Color,
+) -> Color {
+    if on {
+        on_ink
+    } else if hovered {
+        hover_ink
+    } else {
+        resting
+    }
+}
+
 /// Whether `key` activates the control: `Space` (arriving as typed text — there
 /// is no `NamedKey::Space`) or `Enter`.
 fn is_activation_key(key: &KeyEvent) -> bool {
@@ -330,17 +302,12 @@ fn is_activation_key(key: &KeyEvent) -> bool {
     }
 }
 
-/// Whether `pos` (widget-local) is inside a `size`-sized box.
-fn inside(pos: Point, size: Size) -> bool {
-    Rect::from_origin_size(Point::ORIGIN, size).contains(pos)
-}
-
 impl<State: 'static> View<State> for ToggleView<State> {
     type Element = ToggleWidget;
 
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> ToggleWidget {
         ToggleWidget {
-            label: ToggleLabel::new(self.label.clone()),
+            label: LabelRun::new(self.label.clone()),
             label_text: self.label.clone(),
             pressed: self.pressed,
             variant: self.variant,
@@ -392,7 +359,7 @@ impl<State: 'static> View<State> for ToggleView<State> {
 
 /// The retained widget for a [`ToggleView`].
 pub struct ToggleWidget {
-    label: ToggleLabel,
+    label: LabelRun,
     /// The label text, retained for the semantics node's accessible name.
     label_text: String,
     /// The app-confirmed pressed value (source of truth; adopted on `rebuild`).
@@ -419,27 +386,26 @@ impl ToggleWidget {
         changed
     }
 
-    /// The fill to paint under the current state, if any: pressed wins over
-    /// hover, and a resting toggle paints nothing (`bg-transparent`).
+    /// The fill to paint under the current state, if any — see
+    /// [`precedence_fill`].
     fn fill(&self, colors: &ToggleColors) -> Option<Color> {
-        if self.pressed {
-            Some(colors.on_fill)
-        } else if self.hovered {
-            Some(colors.hover_fill)
-        } else {
-            None
-        }
+        precedence_fill(
+            self.pressed,
+            self.hovered,
+            colors.on_fill,
+            colors.hover_fill,
+        )
     }
 
     /// The label ink under the current state, on the same precedence.
     fn ink(&self, colors: &ToggleColors) -> Color {
-        if self.pressed {
-            colors.on_ink
-        } else if self.hovered {
-            colors.hover_ink
-        } else {
-            colors.ink
-        }
+        precedence_ink(
+            self.pressed,
+            self.hovered,
+            colors.on_ink,
+            colors.hover_ink,
+            colors.ink,
+        )
     }
 }
 
@@ -602,6 +568,7 @@ impl Widget for ToggleWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frust::authoring::text::TextContext;
     use frust::authoring::{
         BezPath, EventOutcome, Modifiers, PointerButton, PointerEvent, SemanticsUpdate,
     };
@@ -836,6 +803,43 @@ mod tests {
         w.hovered = true;
         assert_eq!(w.fill(&colors), Some(colors.on_fill));
         assert_eq!(w.ink(&colors), colors.on_ink);
+    }
+
+    /// The precedence rule itself, over the four state combinations —
+    /// `toggle_group` resolves its per-item look through these same two
+    /// functions.
+    #[test]
+    fn the_precedence_rule_ranks_on_over_hover_over_rest() {
+        let on_color = Color::from_rgb8(0x01, 0x01, 0x01);
+        let hover = Color::from_rgb8(0x02, 0x02, 0x02);
+        let resting = Color::from_rgb8(0x03, 0x03, 0x03);
+
+        assert_eq!(
+            precedence_fill(true, false, on_color, hover),
+            Some(on_color)
+        );
+        assert_eq!(precedence_fill(true, true, on_color, hover), Some(on_color));
+        assert_eq!(precedence_fill(false, true, on_color, hover), Some(hover));
+        assert_eq!(
+            precedence_fill(false, false, on_color, hover),
+            None,
+            "`bg-transparent` at rest"
+        );
+
+        assert_eq!(
+            precedence_ink(true, false, on_color, hover, resting),
+            on_color
+        );
+        assert_eq!(
+            precedence_ink(true, true, on_color, hover, resting),
+            on_color
+        );
+        assert_eq!(precedence_ink(false, true, on_color, hover, resting), hover);
+        assert_eq!(
+            precedence_ink(false, false, on_color, hover, resting),
+            resting,
+            "the inherited `foreground`"
+        );
     }
 
     #[test]

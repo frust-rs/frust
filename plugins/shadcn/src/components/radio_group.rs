@@ -56,7 +56,7 @@ use frust::authoring::{
 };
 use frust::{Brightness, Theme};
 
-use crate::style;
+use crate::style::{self, PATH_TOLERANCE};
 
 /// Item edge, in logical px (`size-4`).
 pub const RADIO_SIZE: f64 = 16.0;
@@ -70,10 +70,6 @@ pub const RADIO_DOT_SIZE: f64 = 8.0;
 /// Alpha of the item fill in dark mode (`dark:bg-input/30`); light mode paints
 /// no fill at all.
 const DARK_FILL_ALPHA: f32 = 0.30;
-
-/// Flattening tolerance for the item ring's stroke path (the catalog's shared
-/// value).
-const PATH_TOLERANCE: f64 = 0.1;
 
 /// Unthemed fallback ring token — the `neutral` preset's light `--input`.
 const FALLBACK_INPUT: Color = Color::from_rgb8(0xE5, 0xE5, 0xE5);

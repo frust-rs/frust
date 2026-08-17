@@ -37,11 +37,8 @@ use frust::authoring::{
 };
 use frust::{Theme, text};
 
-use crate::style::{BORDER_WIDTH, with_alpha};
+use crate::style::{BORDER_WIDTH, PATH_TOLERANCE, with_alpha};
 use crate::tokens::ShadcnTokens;
-
-/// Flattening tolerance for the panel's stroked border path.
-const PATH_TOLERANCE: f64 = 0.1;
 
 /// Horizontal padding (`px-4`), in logical px.
 const PAD_X: f64 = 16.0;

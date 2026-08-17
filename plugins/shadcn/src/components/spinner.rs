@@ -34,7 +34,7 @@ use frust::authoring::{
 use frust::{AnimationController, Curve, Theme};
 use kurbo::Arc as KurboArc;
 
-use crate::style::{ICON_SIZE, scale_alpha};
+use crate::style::{ICON_SIZE, PATH_TOLERANCE, scale_alpha};
 
 /// Full-rotation period — Tailwind's `animate-spin` (`1s linear infinite`).
 const SPIN_PERIOD: Duration = Duration::from_millis(1000);
@@ -43,8 +43,6 @@ const SPIN_PERIOD: Duration = Duration::from_millis(1000);
 const SWEEP: f64 = PI * 1.5;
 /// Stroke width, in logical px.
 const STROKE_WIDTH: f64 = 2.0;
-/// Flattening tolerance for the arc's stroke path.
-const PATH_TOLERANCE: f64 = 0.1;
 /// Alpha the arc paints at while `reduce_motion` freezes it — dims the frozen
 /// glyph rather than leaving it looking like a static, finished ring.
 const REDUCED_MOTION_ALPHA: f32 = 0.5;

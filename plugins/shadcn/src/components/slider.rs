@@ -56,7 +56,8 @@ use frust::authoring::{
     RoundedRect, SemanticsCtx, Shape, Size, View, Widget, erase_callback_arg,
 };
 
-use crate::style;
+use crate::hit::inside;
+use crate::style::{self, PATH_TOLERANCE};
 
 /// Thumb edge, in logical px (`size-4`).
 pub const SLIDER_THUMB_SIZE: f64 = 16.0;
@@ -75,9 +76,6 @@ pub const SLIDER_THUMB_RING_WIDTH: f64 = 4.0;
 /// horizontally-unconstrained parent (a `Row` measuring loosely) would otherwise
 /// give an infinite one. A port decision, not a source value.
 const UNCONSTRAINED_WIDTH: f64 = 200.0;
-
-/// Flattening tolerance for the thumb's border/ring paths.
-const PATH_TOLERANCE: f64 = 0.1;
 
 /// Unthemed fallback track — the `neutral` preset's light `--muted`.
 const FALLBACK_MUTED: Color = Color::from_rgb8(0xF5, 0xF5, 0xF5);
@@ -177,11 +175,6 @@ fn resolve_colors(theme: Option<&Theme>) -> SliderColors {
             thumb: Color::WHITE,
         },
     }
-}
-
-/// Whether `pos` (widget-local) is inside a `size`-sized box.
-fn inside(pos: Point, size: Size) -> bool {
-    Rect::from_origin_size(Point::ORIGIN, size).contains(pos)
 }
 
 impl<State: 'static> View<State> for SliderView<State> {

@@ -53,7 +53,8 @@ use frust::authoring::{
 };
 use frust::{Brightness, Theme};
 
-use crate::style;
+use crate::hit::inside;
+use crate::style::{self, PATH_TOLERANCE};
 
 /// Box edge, in logical px (`size-4`).
 pub const CHECKBOX_SIZE: f64 = 16.0;
@@ -180,11 +181,6 @@ fn check_path(origin: Point, size: f64) -> BezPath {
     path.line_to(at(9.0, 17.0));
     path.line_to(at(20.0, 6.0));
     path
-}
-
-/// Whether `pos` (widget-local) is inside a `size`-sized box.
-fn inside(pos: Point, size: Size) -> bool {
-    Rect::from_origin_size(Point::ORIGIN, size).contains(pos)
 }
 
 /// Whether `key` activates a control: `Space` (WAI-ARIA's checkbox key, arriving
@@ -427,10 +423,6 @@ impl Widget for CheckboxWidget {
         });
     }
 }
-
-/// Flattening tolerance for the border's rounded-rect stroke path (the
-/// catalog's shared value).
-const PATH_TOLERANCE: f64 = 0.1;
 
 #[cfg(test)]
 mod tests {

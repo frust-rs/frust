@@ -26,7 +26,7 @@
 //!   line; this port lays every part out on one row (deviation, matching
 //!   [`crate::components::button_group`]'s single-row-only note).
 
-use frust::authoring::text::{TextContext, TextLayout, TextStyle};
+use frust::authoring::text::TextStyle;
 use frust::authoring::{
     Action, AnyView, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, CursorIcon, EventCtx,
     EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Role,
@@ -36,7 +36,9 @@ use frust::{Theme, text};
 use kurbo::{Line, Shape};
 use peniko::Color;
 
+use crate::hit::inside;
 use crate::style;
+use crate::text::{LabelRun, SHAPING_INK};
 
 /// `gap-1.5` — the gap between breadcrumb parts.
 const LIST_GAP: f64 = style::SPACING_UNIT * 1.5;
@@ -174,48 +176,11 @@ impl Widget for BreadcrumbListWidget {
 
 // ---- BreadcrumbLink ---------------------------------------------------
 
-/// A retained, lazily-shaped label whose *color* is overridden per paint
-/// (never re-baked into the shape) — the seam a hover-recolored run needs,
-/// since the framework's layout-time-baked-color contract would otherwise
-/// force a relayout on every hover change.
-struct Label {
-    content: String,
-    layout: Option<TextLayout>,
-    shaped_at_size: Option<f32>,
-}
-
-impl Label {
-    fn new(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            layout: None,
-            shaped_at_size: None,
-        }
-    }
-
-    fn layout(&mut self, ctx: &mut LayoutCtx, size: f32) -> Size {
-        if let Some(cached) = &self.layout
-            && self.shaped_at_size == Some(size)
-        {
-            return cached.size();
-        }
-        let text_ctx = ctx.text_context::<TextContext>();
-        let style = TextStyle::new(size, Color::BLACK);
-        let laid = text_ctx.layout(&self.content, &style, None);
-        let s = laid.size();
-        self.layout = Some(laid);
-        self.shaped_at_size = Some(size);
-        s
-    }
-
-    fn paint(&self, origin: Point, ink: Color, scene: &mut dyn PaintScene) {
-        if let Some(layout) = &self.layout {
-            for mut run in layout.to_scene_runs(origin) {
-                run.brush = Brush::Solid(ink);
-                scene.draw_glyph_run(run);
-            }
-        }
-    }
+/// The text style a link's label is shaped with: `text-sm` at the sentinel ink
+/// every paint-time-recolored run uses (the hover ink is applied per paint —
+/// see [`LabelRun`]).
+fn link_style() -> TextStyle {
+    TextStyle::new(style::TEXT_SM as f32, SHAPING_INK)
 }
 
 /// A view-held, typed click callback (erased on build).
@@ -246,7 +211,7 @@ impl<State: 'static> BreadcrumbLinkView<State> {
 
 /// The retained widget for a [`BreadcrumbLinkView`].
 pub struct BreadcrumbLinkWidget {
-    label: Label,
+    label: LabelRun,
     hovered: bool,
     captured: bool,
     on_click: Option<frust::authoring::ErasedCallback>,
@@ -257,7 +222,7 @@ impl<State: 'static> View<State> for BreadcrumbLinkView<State> {
 
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> BreadcrumbLinkWidget {
         BreadcrumbLinkWidget {
-            label: Label::new(self.label.clone()),
+            label: LabelRun::new(self.label.clone()),
             hovered: false,
             captured: false,
             on_click: self.on_click.as_ref().map(frust::authoring::erase_callback),
@@ -272,7 +237,7 @@ impl<State: 'static> View<State> for BreadcrumbLinkView<State> {
     ) -> ChangeFlags {
         let mut flags = ChangeFlags::NONE;
         if prev.label != self.label {
-            element.label = Label::new(self.label.clone());
+            element.label = LabelRun::new(self.label.clone());
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         element.on_click = self.on_click.as_ref().map(frust::authoring::erase_callback);
@@ -289,13 +254,9 @@ fn resolve_link_ink(hovered: bool, theme: Option<&Theme>) -> Color {
     }
 }
 
-fn inside(pos: Point, size: Size) -> bool {
-    pos.x >= 0.0 && pos.y >= 0.0 && pos.x < size.width && pos.y < size.height
-}
-
 impl Widget for BreadcrumbLinkWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        bc.constrain(self.label.layout(ctx, style::TEXT_SM as f32))
+        bc.constrain(self.label.layout(ctx, &link_style()))
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
@@ -360,7 +321,7 @@ impl Widget for BreadcrumbLinkWidget {
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
         ctx.push_node(Role::Link, |node| {
-            node.set_label(self.label.content.as_str());
+            node.set_label(self.label.content());
             if self.on_click.is_some() {
                 node.add_action(Action::Click);
             }

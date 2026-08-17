@@ -83,8 +83,10 @@
 //! [`font_data`] exposes the raw bytes for a host that wants them directly.
 
 mod components;
+mod hit;
 pub mod overlay;
 pub mod style;
+mod text;
 pub mod tokens;
 
 // The flat catalog namespace: every component module glob-re-exported from the

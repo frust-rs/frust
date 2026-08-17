@@ -59,7 +59,8 @@ use frust::authoring::{
 };
 use frust::{AnimationController, Brightness, Curve, FrameTime, Theme, Tween};
 
-use crate::style;
+use crate::hit::inside;
+use crate::style::{self, PATH_TOLERANCE};
 
 /// Track width for [`SwitchSize::Default`], in logical px (`w-8`).
 pub const SWITCH_TRACK_WIDTH: f64 = 32.0;
@@ -93,9 +94,6 @@ const SWITCH_DURATION: Duration = Duration::from_millis(150);
 /// `--default-transition-timing-function`, `cubic-bezier(0.4, 0, 0.2, 1)`. Never
 /// overshoots, so neither the travel nor the color blend extrapolates.
 const SWITCH_CURVE: Curve = Curve::Cubic(0.4, 0.0, 0.2, 1.0);
-
-/// Flattening tolerance for the focused border's stroke path.
-const PATH_TOLERANCE: f64 = 0.1;
 
 /// Unthemed fallback checked track — the `neutral` preset's light `--primary`.
 const FALLBACK_PRIMARY: Color = Color::from_rgb8(0x17, 0x17, 0x17);
@@ -254,11 +252,6 @@ fn is_activation_key(key: &KeyEvent) -> bool {
         Key::Character(text) => text == " ",
         _ => false,
     }
-}
-
-/// Whether `pos` (widget-local) is inside a `size`-sized box.
-fn inside(pos: Point, size: Size) -> bool {
-    Rect::from_origin_size(Point::ORIGIN, size).contains(pos)
 }
 
 impl<State: 'static> View<State> for SwitchView<State> {

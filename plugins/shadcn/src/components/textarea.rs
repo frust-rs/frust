@@ -36,6 +36,7 @@ use frust::authoring::{
 use frust::{Theme, text_input};
 
 use crate::components::input::{FieldChrome, paint_field_border, resolve_field_border};
+use crate::hit::inside;
 use crate::style;
 use crate::tokens::ShadcnRadius;
 
@@ -182,11 +183,6 @@ impl<State: 'static> View<State> for TextareaView<State> {
     fn teardown(&self, element: &mut TextareaWidget, ctx: &mut BuildCtx<'_>) {
         teardown_child(&self.control(), &mut element.child, ctx);
     }
-}
-
-/// Whether `pos` (widget-local) lies inside a `size`-shaped box.
-fn inside(pos: Point, size: Size) -> bool {
-    pos.x >= 0.0 && pos.y >= 0.0 && pos.x < size.width && pos.y < size.height
 }
 
 impl Widget for TextareaWidget {

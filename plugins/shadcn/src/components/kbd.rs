@@ -15,7 +15,7 @@
 //! a future re-port against upstream doesn't "fix" it back.
 
 use frust::Theme;
-use frust::authoring::text::{FontWeight, TextContext, TextLayout, TextStyle};
+use frust::authoring::text::{FontWeight, TextStyle};
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
     InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, Vec2, View,
@@ -23,6 +23,7 @@ use frust::authoring::{
 };
 
 use crate::style::{SPACING_UNIT, TEXT_XS};
+use crate::text::Label;
 use crate::tokens::mono_family;
 
 /// Key-cap height (`h-5`), in logical px.
@@ -43,58 +44,6 @@ const FALLBACK_FILL: Color = Color::from_rgb8(0xF5, 0xF5, 0xF5);
 /// Unthemed fallback ink (a theme resolves this from
 /// `colors.on_surface_variant`, shadcn's `--muted-foreground`).
 const FALLBACK_INK: Color = Color::from_rgb8(0x73, 0x73, 0x73);
-
-/// A cached, lazily-shaped mono text run — the same shape
-/// `sample_design::badge::Label` uses (see that module's docs for why a leaf
-/// wanting an arbitrary ink shapes its own run rather than nesting a `Text`
-/// child): [`crate::authoring`]'s `ThemeTextColor` has no `on_surface_variant`
-/// role paired with a forced mono family, so `Kbd` builds its own
-/// [`TextStyle`] from [`mono_family`].
-struct Label {
-    content: String,
-    layout: Option<TextLayout>,
-    shaped_style: Option<TextStyle>,
-}
-
-impl Label {
-    fn new(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            layout: None,
-            shaped_style: None,
-        }
-    }
-
-    fn set_content(&mut self, content: impl Into<String>) {
-        let content = content.into();
-        if self.content != content {
-            self.content = content;
-            self.layout = None;
-        }
-    }
-
-    fn layout(&mut self, ctx: &mut LayoutCtx, style: &TextStyle) -> Size {
-        if let Some(cached) = &self.layout
-            && self.shaped_style.as_ref() == Some(style)
-        {
-            return cached.size();
-        }
-        let text_ctx = ctx.text_context::<TextContext>();
-        let laid = text_ctx.layout(&self.content, style, None);
-        let size = laid.size();
-        self.layout = Some(laid);
-        self.shaped_style = Some(style.clone());
-        size
-    }
-
-    fn paint(&self, origin: Point, scene: &mut dyn PaintScene) {
-        if let Some(layout) = &self.layout {
-            for run in layout.to_scene_runs(origin) {
-                scene.draw_glyph_run(run);
-            }
-        }
-    }
-}
 
 /// A declarative shadcn key cap.
 pub struct KbdView {
@@ -150,6 +99,10 @@ fn resolve_colors(theme: Option<&Theme>) -> (Color, Color) {
 }
 
 /// The mono label style at the resolved ink.
+///
+/// Built here rather than nested as a themed `text` child because
+/// `ThemeTextColor` has no `on_surface_variant` role paired with a forced mono
+/// family — the cap shapes its own run instead (see [`crate::text`]).
 fn label_style(ink: Color) -> TextStyle {
     TextStyle {
         family: mono_family(),
@@ -176,12 +129,7 @@ impl Widget for KbdWidget {
 
         // Text is centered both axes inside the cap (`items-center
         // justify-center` upstream).
-        let text_size = self
-            .label
-            .layout
-            .as_ref()
-            .map(TextLayout::size)
-            .unwrap_or_default();
+        let text_size = self.label.size();
         let label_origin = ctx.origin()
             + Vec2::new(
                 (ctx.size().width - text_size.width) / 2.0,

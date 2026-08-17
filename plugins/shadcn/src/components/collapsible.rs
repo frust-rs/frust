@@ -37,6 +37,7 @@ use frust::authoring::{
 use frust::{AnimationController, Curve, Theme};
 
 use crate::components::native_select::activates;
+use crate::hit::inside;
 use crate::style;
 use crate::tokens::ShadcnTokens;
 
@@ -175,11 +176,6 @@ impl<State: 'static> View<State> for CollapsibleView<State> {
         teardown_child(&self.trigger, &mut element.pods[0], ctx);
         teardown_child(&self.content, &mut element.pods[1], ctx);
     }
-}
-
-/// Whether `pos` (widget-local) lies inside a `size`-shaped box.
-fn inside(pos: Point, size: Size) -> bool {
-    pos.x >= 0.0 && pos.y >= 0.0 && pos.x < size.width && pos.y < size.height
 }
 
 /// A fresh `0 → 1` reveal ramp at the source's own `duration-200`, eased out.
