@@ -2058,7 +2058,10 @@ name = "frust-cupertino"
 version = "0.1.0"
 dependencies = [
  "frust",
+ "frust-core",
  "frust-widgets",
+ "kurbo",
+ "peniko",
 ]
 
 [[package]]
