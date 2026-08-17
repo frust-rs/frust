@@ -40,9 +40,10 @@
 //!   keep this page's `build` re-invoked every frame while an animation needs
 //!   to keep advancing. **This replaces an earlier `pump()`**
 //!   (a since-fixed bug): an invisible
-//!   `AnimatedOpacity(0.0)` wrapping an Indeterminate `circular_progress`,
-//!   riding *that* unrelated widget's own always-request-frame paint
-//!   behavior as a side effect instead of declaring the need directly.
+//!   `AnimatedOpacity(0.0)` wrapping an Indeterminate circular-progress
+//!   spinner (the since-removed Material catalog's own indicator), riding
+//!   *that* unrelated widget's own always-request-frame paint behavior as a
+//!   side effect instead of declaring the need directly.
 //!   Mounting [`frame_ticker`] is the same per-frame-rebuild idiom
 //!   `frust_bench`'s `s6_text` `WidthPulse` pattern uses, adapted to a
 //!   page fn with no `Component`/`PaintCtx` of its own — now via a widget
@@ -142,11 +143,13 @@ use frust::{
     RwSignal, Set, SizedBox, Stack, Theme, Timing, Update, any, button, flexible, inflexible,
     keyed, scroll_view, text, use_context,
 };
-use frust_glyph::{BadgeVariant, TermLine, badge, glyph_card, term_block};
-// `circular_progress`/`ProgressValue` are Material catalog items (see
-// `Cargo.toml`'s `frust-material` dependency comment) — not
-// `frust_glyph::*`, but not baseline `frust`/`frust-widgets` items either.
-use frust_material::{ProgressValue, circular_progress};
+// `progress` is aliased to avoid shadowing by `demo_charge_ring`'s own local
+// `progress: f64` binding (the hold fraction it reads off
+// `GestureDetectorView::on_hold_progress`) — the two names would otherwise
+// collide in that fn's scope.
+use frust_glyph::{
+    BadgeVariant, TermLine, avatar, badge, glyph_card, progress as glyph_progress, term_block,
+};
 
 use crate::CatalogState;
 
@@ -303,10 +306,10 @@ fn block(children: Vec<FlexChild<CatalogState>>) -> FlexChild<CatalogState> {
 /// unconditional [`PaintCtx::request_frame`] call in its own `paint` —
 /// mounted by a `demo_*` fn only while its own wall-clock animation is still
 /// running, so a request traces directly to the demo that issued it (see the
-/// [module docs](self)'s wall-clock note). Deliberately does not reuse
-/// `circular_progress(ProgressValue::Indeterminate)`'s own always-request
-/// paint behavior the way the deleted `pump()` did — that made the request
-/// an unrelated side effect instead of this widget's stated purpose.
+/// [module docs](self)'s wall-clock note). Deliberately does not reuse a
+/// circular-progress spinner's own always-request paint behavior (the
+/// since-removed `pump()`'s trick — see the module docs) — that made the
+/// request an unrelated side effect instead of this widget's stated purpose.
 struct FrameTicker;
 
 impl<State: 'static> View<State> for FrameTicker {
@@ -374,8 +377,10 @@ const HB_LATENCIES: [f64; 6] = [36.0, 52.0, 41.0, 68.0, 29.0, 44.0];
 const HB_RING_SCALE_MIN: f64 = 0.6;
 const HB_RING_SCALE_MAX: f64 = 2.8;
 
-/// The ping ring's own (unscaled) diameter — the box [`circular_progress`]
-/// strokes its full circle into, matching the original `SizedBox(18, 18)`.
+/// The ping ring's own (unscaled) diameter — the box the ring's
+/// border-only, [`avatar`]`.`[`shape_full`](frust_glyph::AvatarView::shape_full)
+/// avatar strokes its true circle into (`shape_full`'s pill-radius clamp on a
+/// square box), matching the original `SizedBox(18, 18)`.
 const HB_RING_DIAMETER: f64 = 18.0;
 
 /// Paint headroom for the ping ring: [`AnimatedOpacity`] composites its child
@@ -388,12 +393,16 @@ const HB_RING_DIAMETER: f64 = 18.0;
 /// this module's `heartbeat_ring_stays_within_its_headroom_slot_at_max_extent`
 /// recording-fake test, which found the cut is a real `push_layer` clip
 /// rect, not merely a layout-allocation illusion. The fix widens
-/// the *outer* slot the `AnimatedOpacity` itself lays out at (this constant,
-/// `>= HB_RING_DIAMETER * HB_RING_SCALE_MAX` — `18.0 * 2.8 = 50.4`, plus a
-/// small rounding margin) and centers the small unscaled ring inside it via
-/// [`Align`], so the recorded clip rect is already big enough to contain the
-/// circle at every scale up to [`HB_RING_SCALE_MAX`] — nothing left to clip.
-const HB_RING_SLOT: f64 = 52.0;
+/// the *outer* slot the `AnimatedOpacity` itself lays out at (this constant)
+/// and centers the small unscaled ring inside it via [`Align`], so the
+/// recorded clip rect is already big enough to contain the true circle at
+/// every scale up to [`HB_RING_SCALE_MAX`] — nothing left to clip. The [`avatar`]
+/// border strokes *centered* on the box's own edge (unlike the deleted
+/// Material catalog's `circular_progress`, which deliberately inset its arc
+/// radius to keep its stroke snug inside the box), so the painted diameter
+/// is `HB_RING_DIAMETER` plus the border width, not `HB_RING_DIAMETER`
+/// alone — `(18.0 + 1.0) * 2.8 = 53.2`, plus a small rounding margin.
+const HB_RING_SLOT: f64 = 56.0;
 
 /// Pure ping-ring geometry at `elapsed_in_cycle` ms into [`demo_heartbeat`]'s
 /// per-cycle clock (`reduce` suppresses the ping outright, matching
@@ -422,7 +431,14 @@ fn heartbeat_ring_state(elapsed_in_cycle: f64, reduce: bool) -> (f64, f64) {
 /// [`SizedBox`], [`Align`]-centering the actual [`HB_RING_DIAMETER`] ring
 /// content, all under the same `AnimatedOpacity`-outside/`AnimatedScale`-inside
 /// nesting as before (see [`HB_RING_SLOT`]'s doc comment for why the nesting
-/// order — not just the sizing — matters here).
+/// order — not just the sizing — matters here). The ring itself is an
+/// [`avatar`] with an empty label, `.shape_full()` (a square box's pill-radius
+/// clamp — a true circle, not the default `shape.small` corner-rounded
+/// square), `.decorative()` (this ping is purely visual — no semantics node;
+/// `docs/CODE_STANDARDS.md`'s Semantics Conventions), and a fully transparent
+/// background — its hairline border is the only thing painted, giving a
+/// border-only stroked circle rather than the deleted Material catalog's
+/// filled-arc primitive.
 fn heartbeat_ring_view(ring_opacity: f64, ring_scale: f64) -> AnyView<CatalogState> {
     any(AnimatedOpacity(
         ring_opacity,
@@ -430,8 +446,14 @@ fn heartbeat_ring_view(ring_opacity: f64, ring_scale: f64) -> AnyView<CatalogSta
             Alignment::CENTER,
             AnimatedScale(
                 ring_scale,
-                SizedBox(Some(HB_RING_DIAMETER), Some(HB_RING_DIAMETER))
-                    .child(circular_progress(ProgressValue::Determinate(1.0))),
+                SizedBox(Some(HB_RING_DIAMETER), Some(HB_RING_DIAMETER)).child(
+                    avatar("")
+                        .size(HB_RING_DIAMETER)
+                        .shape_full()
+                        .decorative()
+                        .background(with_alpha(amber(), 0.0))
+                        .border_color(amber()),
+                ),
             )
             .timing(ZERO),
         )),
@@ -439,8 +461,8 @@ fn heartbeat_ring_view(ring_opacity: f64, ring_scale: f64) -> AnyView<CatalogSta
     .timing(ZERO))
 }
 
-/// 01 connection heartbeat: a radar-ping ring (a full-circle
-/// [`circular_progress`] stroke under [`AnimatedOpacity`]/[`AnimatedScale`],
+/// 01 connection heartbeat: a radar-ping ring (a border-only, decorative,
+/// true-circle [`avatar`] stroked under [`AnimatedOpacity`]/[`AnimatedScale`],
 /// driven by a wall-clock read — no per-widget custom paint needed) plus a
 /// rolling (not snapping) latency readout. Tap-to-play: stopped by default,
 /// rendering the settled first latency sample
@@ -881,13 +903,16 @@ local_sig!(charge_floated_sig, bool, false);
 const CHARGE_HOLD_MS: u64 = 700;
 /// The leading icon box's side length, in logical px.
 const CHARGE_ICON_SIZE: f64 = 26.0;
-/// The charge ring's diameter — slightly larger than the icon so the arc
-/// traces around it, matching the reference's ring-around-the-icon framing
-/// (a static position here rather than around the pointer: application code
-/// has no reach to the raw pointer coordinates `on_hold_progress` observes).
+/// The icon slot's outer footprint — slightly larger than the icon itself.
+/// No longer traced with a ring (see [`demo_charge_ring`]'s doc comment for
+/// where the fill readout lives now), but kept as the icon's own footprint
+/// constant so the icon box's sizing is unaffected by that change.
 const CHARGE_RING_SIZE: f64 = 34.0;
-/// The row's fixed height, in logical px.
-const CHARGE_ROW_H: f64 = 56.0;
+/// The row's fixed height, in logical px. Taller than the original
+/// ring-around-the-icon layout's `56px` to give the charge bar (a third row
+/// under the title, see [`demo_charge_ring`]'s doc comment) room without
+/// crowding the existing two lines of title text.
+const CHARGE_ROW_H: f64 = 72.0;
 /// The float glow/shadow wash's alpha: bumped up from an earlier `0.10` for
 /// contrast on the Glyph dark baseline (the shadow needs visible contrast on
 /// the dark theme too) — matches [`demo_charge_ring`]'s own floated
@@ -896,23 +921,24 @@ const CHARGE_ROW_H: f64 = 56.0;
 const CHARGE_GLOW_ALPHA: f32 = 0.18;
 
 /// 05 long-press → float: holding the row past [`CHARGE_HOLD_MS`] fills a
-/// charge ring ([`circular_progress`]'s stroked-arc sweep, the same primitive
-/// the heartbeat ping ring uses) via
+/// charge bar — [`glyph_progress`], the Glyph catalog's own authored
+/// determinate shimmer indicator (`plugins/glyph/src/progress.rs`), read
+/// out beneath the row's title while holding — via
 /// `GestureDetectorView::on_hold_progress`/`GestureDetectorView::hold_threshold_ms`;
 /// reaching the threshold "floats" the row (scale 1.03 + an amber
 /// wash standing in for the reference's box-shadow — see the [module
 /// docs](self)'s substitution note — + a chip); an early lift or slop-break
-/// resets the ring to empty (the widget's own final-`0.0` contract). Tapping
+/// resets the bar to empty (the widget's own final-`0.0` contract). Tapping
 /// a floated row drops it back down.
 ///
 /// **Reset idiom**: `on_hold_progress`'s Cancel staleness gap
 /// (`frust_widgets::gesture`'s module docs) means a platform `Cancel`
 /// mid-hold delivers no final observation, so a naive consumer could be left
-/// showing a stale, frozen ring from an interrupted hold. This demo's
+/// showing a stale, frozen bar from an interrupted hold. This demo's
 /// `on_hold_progress` handler always trusts the widget's latest observation
 /// — never clamping it to be monotonically non-decreasing — so a fresh press
 /// cycle's low-restarting first observation (`press_start` re-anchors on
-/// every `Down`) overwrites any stale value immediately, letting the ring
+/// every `Down`) overwrites any stale value immediately, letting the bar
 /// self-correct the moment the *next* hold begins rather than only after a
 /// full press-release cycle completes.
 fn demo_charge_ring(state: &CatalogState) -> FlexChild<CatalogState> {
@@ -944,24 +970,33 @@ fn demo_charge_ring(state: &CatalogState) -> FlexChild<CatalogState> {
             ])),
         );
 
-    let mut icon_layers = vec![icon_box];
-    if holding && !reduce {
-        icon_layers.push(any(Align(
-            Alignment::CENTER,
-            SizedBox(Some(CHARGE_RING_SIZE), Some(CHARGE_RING_SIZE))
-                .child(circular_progress(ProgressValue::Determinate(progress))),
-        )));
-    }
+    // `SizedBox` TIGHTENS its child's constraints (both axes forced to
+    // CHARGE_RING_SIZE), which would clamp `icon_box`'s own 26×26 `SizedBox`
+    // request up to the full 34×34 slot — an inner tightened box can't ask
+    // for less than what its own incoming constraint already forces. `Align`
+    // LOOSENS the constraint it hands its child instead (min relaxed to
+    // zero, max untouched — `crates/frust-widgets/src/align.rs`'s module
+    // docs), so `icon_box` recovers its authored 26×26 footprint and Align
+    // centers it in the remaining 34×34 space, matching the reference's
+    // small-icon-in-a-bigger-slot look.
     let icon_stack: AnyView<CatalogState> =
-        any(SizedBox(Some(CHARGE_RING_SIZE), Some(CHARGE_RING_SIZE)).child(Stack(icon_layers)));
+        any(SizedBox(Some(CHARGE_RING_SIZE), Some(CHARGE_RING_SIZE))
+            .child(Align(Alignment::CENTER, icon_box)));
 
-    let title_col: AnyView<CatalogState> = any(FlexView::new(
-        Axis::Vertical,
-        vec![
-            inflexible(text("(untitled)").size(11.5)),
-            inflexible(text("/home/ed/dev/forgekit").size(9.5).color(muted())),
-        ],
-    ));
+    // The fill readout lives beside the title rather than traced as a ring
+    // around the icon (see the fn's doc comment) — a third row in the same
+    // vertical FlexView, shown only while holding. `CHARGE_ROW_H` carries
+    // the extra height this third row needs beyond the original two lines
+    // of title text.
+    let mut title_children = vec![
+        inflexible(text("(untitled)").size(11.5)),
+        inflexible(text("~/dev/frust-demo").size(9.5).color(muted())),
+    ];
+    if holding && !reduce {
+        title_children.push(gap(3.0));
+        title_children.push(inflexible(glyph_progress(progress)));
+    }
+    let title_col: AnyView<CatalogState> = any(FlexView::new(Axis::Vertical, title_children));
 
     let chip: AnyView<CatalogState> = any(AnimatedOpacity(
         if floated { 1.0 } else { 0.0 },
@@ -1046,9 +1081,9 @@ fn demo_charge_ring(state: &CatalogState) -> FlexChild<CatalogState> {
     block(vec![
         inflexible(label("05 Long-press → float")),
         inflexible(caption(if reduce {
-            "reduced motion — press and hold; floats instantly at the threshold, no ring/scale"
+            "reduced motion — press and hold; floats instantly at the threshold, no bar/scale"
         } else {
-            "press and hold the row ~700ms — a charge ring fills; lift early to cancel"
+            "press and hold the row ~700ms — a charge bar fills; lift early to cancel"
         })),
         gap(6.0),
         inflexible(gesture),
@@ -1636,8 +1671,9 @@ mod tests {
     use kurbo::{Affine, Shape};
 
     use super::{
-        Axis, CHARGE_ROW_H, FlexView, HB_RING_DIAMETER, HB_RING_MS, HB_RING_SCALE_MAX,
-        HB_RING_SLOT, demo_charge_ring, heartbeat_ring_state, heartbeat_ring_view,
+        Axis, CHARGE_ICON_SIZE, CHARGE_RING_SIZE, CHARGE_ROW_H, FlexView, HB_RING_DIAMETER,
+        HB_RING_MS, HB_RING_SCALE_MAX, HB_RING_SLOT, demo_charge_ring, heartbeat_ring_state,
+        heartbeat_ring_view,
     };
 
     /// A geometry-tracking `PaintScene` recorder: replays the SAME
@@ -1795,15 +1831,16 @@ mod tests {
     }
 
     /// The load-bearing regression guard: at T2 max extent
-    /// (`ring_scale == HB_RING_SCALE_MAX`), the ring's stroked circle —
-    /// resolved through the SAME `push_layer`(`AnimatedOpacity`) /
-    /// `push_transform`(`AnimatedScale`) composition the real paint pass uses
-    /// (see [`SlotRecorder`]'s doc comment) — must stay fully inside the
-    /// `AnimatedOpacity`'s own recorded clip rect. With just an 18×18
-    /// `AnimatedOpacity` slot and the scale applied *inside* it, this
-    /// assertion fails: the clip rect stays fixed at 18×18 absolute while the
-    /// circle's recorded transform grows with it, so the circle's bbox
-    /// overflows the clip on every edge once `ring_scale > 1.0x`.
+    /// (`ring_scale == HB_RING_SCALE_MAX`), the ring's stroked true circle
+    /// (`.shape_full()` — see [`heartbeat_ring_view`]) — resolved through the
+    /// SAME `push_layer`(`AnimatedOpacity`) / `push_transform`(`AnimatedScale`)
+    /// composition the real paint pass uses (see [`SlotRecorder`]'s doc
+    /// comment) — must stay fully inside the `AnimatedOpacity`'s own recorded
+    /// clip rect. With just an 18×18 `AnimatedOpacity` slot and the scale
+    /// applied *inside* it, this assertion fails: the clip rect stays fixed at
+    /// 18×18 absolute while the circle's recorded transform grows with it, so
+    /// the circle's bbox overflows the clip on every edge once
+    /// `ring_scale > 1.0x`.
     #[test]
     fn heartbeat_ring_stays_within_its_headroom_slot_at_max_extent() {
         let _owner = setup();
@@ -1821,7 +1858,7 @@ mod tests {
         );
         assert!(
             !recorder.draw_bboxes.is_empty(),
-            "circular_progress must stroke the ring"
+            "the border-only, true-circle avatar must stroke the ring"
         );
 
         // The outermost (largest) layer rect is the AnimatedOpacity's own
@@ -1848,9 +1885,44 @@ mod tests {
         }
     }
 
+    /// The ping ring's `.decorative()` `avatar` (see [`heartbeat_ring_view`])
+    /// must contribute ZERO semantics nodes — it is purely visual, and
+    /// `docs/CODE_STANDARDS.md`'s Semantics Conventions bar a node with
+    /// nothing worth reporting. `RenderRoot::semantics` always roots the tree
+    /// at a synthetic `Role::Window` node (see its own doc comment), so a
+    /// standalone render of the ring must come back with exactly that one
+    /// node and nothing else — proof at the actual page composition, on top
+    /// of `frust-glyph`'s own `AvatarWidget` unit test for the mechanism.
+    #[test]
+    fn heartbeat_ring_contributes_zero_semantics_nodes() {
+        let _owner = setup();
+        let (opacity, scale) = heartbeat_ring_state(HB_RING_MS, false);
+
+        let mut root: RenderRoot<CatalogState, AnyView<CatalogState>> = RenderRoot::new();
+        let mut state = CatalogState::new();
+        let mut logic = |_s: &mut CatalogState| heartbeat_ring_view(opacity.max(0.3), scale);
+        root.rebuild(&mut logic, &mut state);
+        let mut tcx = TextContext::new();
+        let tcx_any: &mut dyn Any = &mut tcx;
+        root.layout_with_text(Size::new(200.0, 200.0), tcx_any);
+
+        let update = root.semantics();
+        assert_eq!(
+            update.nodes.len(),
+            1,
+            "the ping ring must add no semantics node beyond the synthetic root window, found: \
+             {:?}",
+            update
+                .nodes
+                .iter()
+                .map(|(_, n)| n.role())
+                .collect::<Vec<_>>()
+        );
+    }
+
     /// Layout stability: the ping ring's headroom fix grows
     /// ONLY the ring's own layout slot (`HB_RING_DIAMETER` → `HB_RING_SLOT`,
-    /// `18px` → `52px`) — its `01 Connection heartbeat` row's
+    /// `18px` → `56px`) — its `01 Connection heartbeat` row's
     /// `CrossAxisAlignment::Center` keeps every sibling (the "connected"
     /// badge, the latency text) at its own natural size, just re-centered
     /// within the now-taller row, not stretched to match. `demo_heartbeat`'s
@@ -1927,6 +1999,93 @@ mod tests {
             (wide.height() - CHARGE_ROW_H).abs() < 1.0,
             "glow height should stay {CHARGE_ROW_H}px, got {}px",
             wide.height()
+        );
+    }
+
+    /// Regression guard for `demo_charge_ring`'s `icon_stack` constraint bug:
+    /// wrapping `icon_box` (a [`CHARGE_ICON_SIZE`]-square `SizedBox`)
+    /// directly in an outer [`CHARGE_RING_SIZE`]-square `SizedBox` tightens
+    /// the inner box's own request up to the full slot (`SizedBox` always
+    /// TIGHTENS its child's constraints; only the `Align` wrapper between
+    /// the two LOOSENS them), so `icon_box`'s resolved footprint stops
+    /// tracking [`CHARGE_ICON_SIZE`] at all and always reports
+    /// [`CHARGE_RING_SIZE`] instead — the constant goes inert.
+    ///
+    /// `Align` centers its child within whatever free space it's given, so a
+    /// correctly-loosened [`CHARGE_ICON_SIZE`] `icon_box` inside the
+    /// [`CHARGE_RING_SIZE`] slot shows up as a `(CHARGE_RING_SIZE -
+    /// CHARGE_ICON_SIZE) / 2` margin on each axis; the pre-fix (inert,
+    /// slot-filling) `icon_box` would show a zero margin instead (no free
+    /// space left for `Align` to center within). The icon's own painted
+    /// background `Image` (`solid_source`/`ImageFit::Fill`) is the smallest
+    /// image rect this demo paints — the row's `glow` wash is the only
+    /// other one, and it always spans most of the row's width (see
+    /// [`charge_ring_glow_fills_its_row_width`]) — so its left edge is the
+    /// geometry probe: `block()`'s and `row_inner`'s own 12px paddings (the
+    /// same two constants [`charge_ring_glow_fills_its_row_width`] hardcodes
+    /// as `BLOCK_PADDING`) plus the margin above.
+    #[test]
+    fn charge_ring_icon_keeps_its_authored_footprint_inside_the_wider_slot() {
+        let _owner = setup();
+        const BLOCK_PADDING: f64 = 12.0;
+        const ROW_PADDING: f64 = 12.0;
+        const MARGIN: f64 = (CHARGE_RING_SIZE - CHARGE_ICON_SIZE) / 2.0;
+
+        let recorder = paint_view_into_recorder(
+            |s| super::any(FlexView::new(Axis::Vertical, vec![demo_charge_ring(s)])),
+            Size::new(390.0, 400.0),
+        );
+
+        let icon = recorder
+            .image_rects
+            .iter()
+            .min_by(|a, b| a.width().total_cmp(&b.width()))
+            .expect("demo_charge_ring must paint at least one image (the icon background)");
+
+        let expected_x0 = BLOCK_PADDING + ROW_PADDING + MARGIN;
+        assert!(
+            (icon.x0 - expected_x0).abs() < 1.0,
+            "the icon should sit centered with a {MARGIN}px margin inside its \
+             {CHARGE_RING_SIZE}px slot (expected x0 ~{expected_x0}), not clamped to fill it \
+             (the pre-fix bug, x0 == {}), got x0 {}",
+            BLOCK_PADDING + ROW_PADDING,
+            icon.x0
+        );
+    }
+
+    /// The charge bar ([`glyph_progress`] — the ring's border-only-avatar-era
+    /// replacement, see `demo_charge_ring`'s doc comment) mounts only while
+    /// holding: a wide, thin `rounded_rect` (the bar's track, painted
+    /// regardless of theme or fill fraction) appears in the recorded output
+    /// only when `progress > 0.0` and the row isn't floated, and disappears
+    /// once the hold ends — the demo actually paints and tracks progress
+    /// through the new widget, not just the removed one.
+    #[test]
+    fn charge_bar_mounts_only_while_holding() {
+        let _owner = setup();
+        const W: f64 = 390.0;
+
+        super::charge_progress_sig().set(0.4);
+        let holding_recorder = paint_view_into_recorder(
+            |s| super::any(FlexView::new(Axis::Vertical, vec![demo_charge_ring(s)])),
+            Size::new(W, 400.0),
+        );
+        super::charge_progress_sig().set(0.0);
+        let idle_recorder = paint_view_into_recorder(
+            |s| super::any(FlexView::new(Axis::Vertical, vec![demo_charge_ring(s)])),
+            Size::new(W, 400.0),
+        );
+
+        let is_bar_track = |r: &Rect| r.width() > 80.0 && r.height() < 10.0;
+        assert!(
+            holding_recorder.rounded_rects.iter().any(is_bar_track),
+            "a wide, thin bar track should paint while holding, got {:?}",
+            holding_recorder.rounded_rects
+        );
+        assert!(
+            !idle_recorder.rounded_rects.iter().any(is_bar_track),
+            "no bar track should paint once the hold ends, got {:?}",
+            idle_recorder.rounded_rects
         );
     }
 }

@@ -6,10 +6,17 @@
 //! (color schemes, type/shape/elevation/motion/glass scales, the
 //! brightness-invariant [`GlyphInk`] extension, the assembled [`baseline`]
 //! theme), the bundled monospace faces, the two Glyph [`motion`] patterns, and
-//! the widget catalog — terminal-native components that have no Material or
-//! Cupertino equivalent (badges/tags/alerts, loaders + toast, nav chrome,
-//! content cards, the terminal block + tooltip, and the command-palette
-//! overlay).
+//! the widget catalog.
+//!
+//! The catalog holds two kinds of component. Most are terminal-native ones with
+//! no Material or Cupertino equivalent (badges/tags/alerts, loaders + toast, nav
+//! chrome, content cards, the terminal block + tooltip, and the command-palette
+//! overlay). The rest are ordinary controls whose *authored Glyph design*
+//! diverges from what re-theming a baseline widget would produce — the baseline
+//! set is token-themed, not re-designed, per design language. [`toggle`] is the
+//! first of those: Glyph authors its own switch (a hairline-bordered pill with a
+//! constant-diameter springing knob and an accent wash), and the baseline
+//! deliberately ships no `Switch` at all for it to re-theme.
 //!
 //! # Installing it
 //!
@@ -89,6 +96,7 @@ pub mod tabs;
 pub mod tag;
 pub mod term_block;
 pub mod toast;
+pub mod toggle;
 pub mod tokens;
 pub mod tooltip;
 
@@ -115,6 +123,7 @@ pub use tabs::*;
 pub use tag::*;
 pub use term_block::*;
 pub use toast::*;
+pub use toggle::*;
 pub use tooltip::*;
 
 /// The design language itself, flattened to the root alongside the catalog:
