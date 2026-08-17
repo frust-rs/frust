@@ -11,19 +11,19 @@ expression: "render_to_string(100, 30, &state)"
  DEVICES ↻ r             │                                                                          
    none found            │  No session running — start a run to open a log tab here.                
                          │                                                                          
- SESSIONS         ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
-   none running   │                                                              │▓▓                
-                  │  ✓ Added secure-storage  ·  2 applied, 1 already present     │▓▓                
- ACTIONS          │    ✓ Cargo.toml dependency `frust-secure-storage`            │▓▓                
-   New project · n│    ✓ AndroidManifest.xml permission `android.permission.USE  │▓▓                
-   Add plugin · a │    • Info.plist key `NSFaceIDUsageDescription`               │▓▓                
-   Doctor · d     │  See the plugin README for any remaining manual steps.       │▓▓                
-   Build · b      │                                                              │▓▓                
-   Clean · c      │   Back    Done    Cancel                                     │▓▓                
-   MCP off · M    │  Enter/Esc close                                             │▓▓                
-   DAP off · D    ╰──────────────────────────────────────────────────────────────╯▓▓                
+ SESSIONS                │                                                                          
+   none running   ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
+                  │                                                              │▓▓                
+ ACTIONS          │  ✓ Added secure-storage  ·  2 applied, 1 already present     │▓▓                
+   New project · n│    ✓ Cargo.toml dependency `frust-secure-storage`            │▓▓                
+   Add plugin · a │    ✓ AndroidManifest.xml permission `android.permission.USE  │▓▓                
+   Doctor · d     │    • Info.plist key `NSFaceIDUsageDescription`               │▓▓                
+   Build · b      │  See the plugin README for any remaining manual steps.       │▓▓                
+   Clean · c      │                                                              │▓▓                
+   MCP off · M    │   Back    Done    Cancel                                     │▓▓                
+   DAP off · D    │  Enter/Esc close                                             │▓▓                
+                  ╰──────────────────────────────────────────────────────────────╯▓▓                
                     ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                
-                         │                                                                          
                          │                                                                          
                          │                                                                          
                          │                                                                          

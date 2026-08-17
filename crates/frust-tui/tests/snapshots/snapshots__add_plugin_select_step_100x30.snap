@@ -2,33 +2,33 @@
 source: crates/frust-tui/tests/snapshots.rs
 expression: "render_to_string(100, 30, &add_plugin_state(AddPluginStep::Select, false, 0))"
 ---
-⚙ Frust │ huddle ▾╭ Add plugin ───────────────────────────────────── [Esc] Close ╮ ▶ Run    ⚒ Build 
-━━━━━━━━          │                                                              │▓▓                
-                  │  Choose a plugin to add to this project                      │▓▓                
- PROJECTS         │  ▸ (o) shared-preferences                                    │▓▓                
-  ▸ huddle        │        Synchronous, thread-safe key-value store (plaintext)  │▓▓                
+⚙ Frust │ huddle ▾ · frust 0.1.0 · ◌ checking…                                     ▶ Run    ⚒ Build 
+━━━━━━━━                                                                                            
+                                                                                                    
+ PROJECTS         ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
+  ▸ huddle        │                                                              │▓▓                
+                  │  Choose a plugin to add to this project  (1-9 of 13)         │▓▓                
+ DEVICES ↻ r      │  ▸ (o) shared-preferences                                    │▓▓                
+   none found     │        Synchronous, thread-safe key-value store              │▓▓                
                   │    ( ) secure-storage                                        │▓▓                
- DEVICES ↻ r      │        Encrypted key-value store (Keychain / Keystore / key  │▓▓                
-   none found     │    ( ) clean-signals-frust                                   │▓▓                
+ SESSIONS         │        Encrypted key-value store (Keychain / Keystore /      │▓▓                
+   none running   │    ( ) clean-signals-frust                                   │▓▓                
                   │        Clean-architecture facade binding the clean-signals   │▓▓                
- SESSIONS         │    ( ) camera                                                │▓▓                
-   none running   │        Camera preview (a platform view), still capture, and  │▓▓                
-                  │    ( ) native-widgets                                        │▓▓                
- ACTIONS          │        Real OS controls (button, label, switch, slider, pro  │▓▓                
-   New project · n│    ( ) clipboard                                             │▓▓                
-   Add plugin · a │        Synchronous plain-text clipboard access (ClipboardMa  │▓▓                
-   Doctor · d     │    ( ) haptics                                               │▓▓                
-   Build · b      │        Minimal haptic feedback (selection tick, impact, suc  │▓▓                
-   Clean · c      │    ( ) iap                                                   │▓▓                
-   MCP off · M    │        In-app purchases and subscriptions over Play Billing  │▓▓                
-   DAP off · D    │    ( ) database                                              │▓▓                
-                  │        Embedded SQL database (SQLite via rusqlite; engine-a  │▓▓                
-                  │    ( ) i18n                                                  │▓▓                
-                  │        Fluent Project-based internationalization/localizati  │▓▓                
-                  │    ( ) glyph                                                 │▓▓                
-                  │        Glyph design-system catalog (widgets + tokens + bund  │▓▓                
-                  │    ( ) material                                              │▓▓                
-                  │        Material 3 design-system catalog (widgets + tokens);  │▓▓                
+ ACTIONS          │    ( ) camera                                                │▓▓                
+   New project · n│        Camera preview (a platform view), still capture, and  │▓▓                
+   Add plugin · a │    ( ) native-widgets                                        │▓▓                
+   Doctor · d     │        Real OS controls (button, label, switch, slider,      │▓▓                
+   Build · b      │    ( ) clipboard                                             │▓▓                
+   Clean · c      │        Synchronous plain-text clipboard access               │▓▓                
+   MCP off · M    │    ( ) haptics                                               │▓▓                
+   DAP off · D    │        Minimal haptic feedback (selection tick, impact,      │▓▓                
+                  │    ( ) iap                                                   │▓▓                
+                  │        In-app purchases and subscriptions over Play Billing  │▓▓                
+                  │    ( ) database                                              │▓▓                
+                  │        Embedded SQL database (SQLite via rusqlite;           │▓▓                
+                  │                                                              │▓▓                
                   │   Back    Next    Cancel                                     │▓▓                
                   │  ↑/↓ choose · Enter next · Esc close                         │▓▓                
-● ready  │  r run ╰──────────────────────────────────────────────────────────────╯▓▓       [mouse ✓]
+                  ╰──────────────────────────────────────────────────────────────╯▓▓                
+                    ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                
+● ready  │  r run · b build · d doctor · ⌘ palette · ? help                                [mouse ✓]
