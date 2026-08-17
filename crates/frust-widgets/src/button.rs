@@ -1197,28 +1197,16 @@ mod tests {
     }
 
     #[test]
-    fn per_style_fill_border_label_hold_under_glyph_dark_light_and_m3() {
+    fn per_style_fill_border_label_hold_across_baselines() {
         // The same style -> role mapping (per the module docs' "uniform
         // across languages") reads straight off `ColorScheme` fields rather
-        // than hardcoding a per-baseline table, so this asserts it against
-        // three concrete baselines
-        // rather than just M3 (already covered field-by-field by the
-        // `secondary`/`ghost`/`danger`_style_* tests above).
-        // The Glyph baselines exist only with the `glyph` feature on (it gates
-        // frust-theme's whole Glyph token module). With it off this asserts the
-        // same mapping against M3 alone — the style -> role mapping is
-        // language-neutral, so coverage narrows without becoming wrong.
-        #[allow(unused_mut)]
-        let mut baselines = vec![frust_theme::Theme::m3_baseline()];
-        #[cfg(feature = "glyph")]
-        {
-            // dark (the canonical brightness), then light
-            baselines.push(frust_theme::Theme::glyph_baseline());
-            baselines.push(
-                frust_theme::Theme::glyph_baseline()
-                    .with_brightness(frust_theme::Brightness::Light),
-            );
-        }
+        // than hardcoding a per-baseline table, so this asserts it against a
+        // baseline matrix rather than a single one (each style is already
+        // covered field-by-field by the `secondary`/`ghost`/`danger`_style_*
+        // tests above). A design system's own baseline is exercised by that
+        // design system's own tests; the mapping asserted here is
+        // language-neutral by construction.
+        let baselines = [frust_theme::Theme::m3_baseline()];
         for theme in &baselines {
             let scheme = theme.scheme();
 

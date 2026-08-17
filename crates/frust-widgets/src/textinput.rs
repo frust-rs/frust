@@ -3965,16 +3965,14 @@ mod tests {
     #[test]
     fn disabled_dims_content_and_outline_in_every_design_language() {
         // The dim is an alpha multiplier on the *resolved* role, so it must
-        // behave identically unthemed and under all three design languages —
-        // including Cupertino, whose `on_surface_variant` is itself translucent
-        // (the reason a token swap would not be portable).
-        let mut languages: Vec<(&str, Option<Theme>)> = vec![
+        // behave identically unthemed and under every design language in the
+        // matrix below — including Cupertino, whose `on_surface_variant` is
+        // itself translucent (the reason a token swap would not be portable).
+        let languages: Vec<(&str, Option<Theme>)> = vec![
             ("unthemed", None),
             ("material", Some(Theme::m3_baseline())),
             ("cupertino", Some(Theme::cupertino_baseline())),
         ];
-        #[cfg(feature = "glyph")]
-        languages.push(("glyph", Some(Theme::glyph_baseline())));
         for (name, theme) in languages {
             let enabled = Chrome::resolve(theme.as_ref(), true);
             let disabled = Chrome::resolve(theme.as_ref(), false);
@@ -4129,13 +4127,11 @@ mod tests {
         // The first of the two dimming resolution points: `Chrome::resolve`,
         // observed here through the actual `paint` pass (not called directly),
         // so the assertion also proves `paint` feeds it `enabled` alone.
-        let mut languages: Vec<(&str, Option<Theme>)> = vec![
+        let languages: Vec<(&str, Option<Theme>)> = vec![
             ("unthemed", None),
             ("material", Some(Theme::m3_baseline())),
             ("cupertino", Some(Theme::cupertino_baseline())),
         ];
-        #[cfg(feature = "glyph")]
-        languages.push(("glyph", Some(Theme::glyph_baseline())));
         for (name, theme) in languages {
             let mut state = AppState::default();
             let mut logic = options_logic(true, false, true);

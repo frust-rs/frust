@@ -10,17 +10,20 @@
 //!
 //! 1. **Toolkit-level**, one test per field shape the macro handles —
 //!    `ChildPod` (Padding), `Vec<ChildPod>` (Column), `Option<ChildPod>`
-//!    (SizedBox, present and absent) — plus a catalog widget proving the same
-//!    seam covers the design-system tier.
+//!    (SizedBox, present and absent), and a multi-slot site naming both shapes
+//!    at once (`PatternSwitcher`'s `exiting`/`child`, empty and filled) — plus
+//!    a catalog widget proving the same seam covers the design-system tier.
 //! 2. **Per hand-written site**, one test each for the containers whose
 //!    children live behind their own row/slot struct and therefore implement
-//!    `VisitPods` by hand: `glyph_card` (slots), `fab_menu` (item rows),
-//!    `toast_host` (the active toast), and `navigator` (the page stack).
+//!    `VisitPods` by hand: `fab_menu` (item rows) and `navigator` (the page
+//!    stack).
 
 use std::any::Any;
 
 use frust_core::{AnyView, InspectNode, RenderRoot, View, any};
 use frust_text::TextContext;
+use frust_widgets::motion::patterns::FadeThrough;
+use frust_widgets::motion::switcher::{PatternSwitcherView, pattern_switcher};
 use frust_widgets::{
     Column, EdgeInsets, NavigatorController, NavigatorView, Padding, SizedBox, navigator, text,
 };
@@ -153,20 +156,29 @@ fn a_catalog_widget_publishes_its_per_item_slots() {
     assert_eq!(count(&nodes, "TextWidget"), 4);
 }
 
-#[cfg(feature = "glyph")]
 #[test]
-fn glyph_card_publishes_each_filled_slot() {
-    // Hand-written site: children live behind the module's own `Slot` struct,
-    // which implements `VisitPods`. Only the filled slots appear.
-    use frust_widgets::glyph::card::glyph_card;
-
-    let nodes = inspect(&mut |_: &mut ()| glyph_card().title(text("t")).desc(text("d")));
+fn a_multi_slot_container_publishes_each_filled_slot() {
+    // The multi-field macro shape: `visit_children!(exiting, child)` names one
+    // `Option<ChildPod>` slot and one `ChildPod` slot on the same site. At rest
+    // the transient `exiting` slot is empty, so only the live child appears.
+    let nodes = inspect(&mut |_: &mut ()| {
+        pattern_switcher(
+            0u32,
+            FadeThrough,
+            Column(vec![any(text("t")), any(text("d"))]),
+        )
+    });
     assert_eq!(
         short_names(&nodes),
-        vec!["GlyphCardWidget", "TextWidget", "TextWidget"],
-        "the empty footer slot contributes nothing"
+        vec![
+            "PatternSwitcherWidget",
+            "FlexWidget",
+            "TextWidget",
+            "TextWidget"
+        ],
+        "the empty exiting slot contributes nothing"
     );
-    assert_eq!(nodes[0].children.len(), 2);
+    assert_eq!(nodes[0].children.len(), 1);
 }
 
 #[cfg(feature = "material")]
@@ -193,21 +205,38 @@ fn fab_menu_publishes_its_item_rows_and_its_trigger() {
     assert_eq!(count(&nodes, "TextWidget"), 5);
 }
 
-#[cfg(feature = "glyph")]
 #[test]
-fn the_toast_host_publishes_its_active_toast_only_while_one_is_playing() {
-    // Hand-written site: the active toast is held behind `ActiveToast`.
-    use frust_widgets::glyph::toast::toast_host;
+fn a_transient_slot_publishes_its_child_only_while_one_is_playing() {
+    // The other half of the multi-slot shape above: `exiting` fills only while
+    // a transition runs, so the inspector must pick it up mid-flight and drop
+    // it again once the slot empties. Driven by an identity change (the
+    // switcher freezes the outgoing child at rebuild), so no paint clock is
+    // needed here.
+    let mut root: RenderRoot<u32, _> = RenderRoot::new();
+    let mut app_logic = |key: &mut u32| -> PatternSwitcherView<u32, FadeThrough> {
+        pattern_switcher(*key, FadeThrough, text("page"))
+    };
+    let mut state = 0u32;
+    let mut text_ctx = TextContext::new();
 
-    let idle = inspect(&mut |_: &mut ()| toast_host(Vec::<String>::new()));
-    assert_eq!(short_names(&idle), vec!["ToastHostWidget"]);
+    root.rebuild(&mut app_logic, &mut state);
+    root.layout_with_text(Size::new(400.0, 400.0), &mut text_ctx as &mut dyn Any);
+    assert_eq!(
+        short_names(&root.inspect()),
+        vec!["PatternSwitcherWidget", "TextWidget"],
+        "at rest the empty exiting slot contributes nothing"
+    );
 
-    let playing = inspect(&mut |_: &mut ()| toast_host(vec!["hello".to_string()]));
+    state = 1;
+    root.rebuild(&mut app_logic, &mut state);
+    root.layout_with_text(Size::new(400.0, 400.0), &mut text_ctx as &mut dyn Any);
+    let playing = root.inspect();
     assert_eq!(
         short_names(&playing),
-        vec!["ToastHostWidget", "ToastWidget", "TextWidget"],
-        "the active toast (and its own child) hang under the host"
+        vec!["PatternSwitcherWidget", "TextWidget", "TextWidget"],
+        "the frozen exiting child (and the incoming one) both hang under the switcher"
     );
+    assert_eq!(playing[0].children.len(), 2);
 }
 
 #[test]

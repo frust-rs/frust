@@ -124,6 +124,7 @@ pub fn default_theme() -> Option<Theme> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frust_theme::Brightness;
     use std::sync::Mutex as StdMutex;
 
     // Serializes every test in this module against the shared process-wide
@@ -152,12 +153,11 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_slot();
 
-        // A design-language-free baseline on purpose: `Theme::glyph_baseline()`
-        // lives behind `frust-theme`'s `glyph` feature, which THIS crate does
-        // not request — naming it here breaks `cargo test -p frust-shell-common`
-        // while `--workspace` stays green via feature unification. Nothing below
-        // is Glyph-specific.
-        let theme = Theme::m3_baseline();
+        // A design-language-free baseline on purpose: a design system's own
+        // baseline lives in that design system's crate, which THIS crate does
+        // not depend on. Nothing below is design-system-specific — the slot
+        // stores whatever `Theme` it is handed.
+        let theme = Theme::neutral();
         set_default_theme(theme.clone());
 
         // Two (in fact three) consecutive reads all return the same value —
@@ -172,12 +172,20 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_slot();
 
-        set_default_theme(Theme::m3_baseline());
-        assert_eq!(default_theme(), Some(Theme::m3_baseline()));
+        set_default_theme(Theme::neutral());
+        assert_eq!(default_theme(), Some(Theme::neutral()));
 
-        let cupertino = Theme::cupertino_baseline();
-        set_default_theme(cupertino.clone());
-        assert_eq!(default_theme(), Some(cupertino));
+        // The second seed must be *visibly* different from the first, or the
+        // read-back below would pass even if the replace were a no-op. The
+        // cheapest visible edit over the same baseline: flip its brightness.
+        let replacement = Theme::neutral().with_brightness(Brightness::Dark);
+        assert_ne!(
+            replacement,
+            Theme::neutral(),
+            "the replacement must differ from the first seed for this test to be able to fail"
+        );
+        set_default_theme(replacement.clone());
+        assert_eq!(default_theme(), Some(replacement));
     }
 
     #[test]
@@ -185,9 +193,9 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_slot();
 
-        // Feature-independent baseline — see the note in
+        // Design-system-independent baseline — see the note in
         // `default_theme_read_is_non_destructive`.
-        let theme = Theme::m3_baseline();
+        let theme = Theme::neutral();
         let handle = std::thread::spawn({
             let theme = theme.clone();
             move || set_default_theme(theme)

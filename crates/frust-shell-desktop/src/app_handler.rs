@@ -1665,7 +1665,7 @@ mod tests {
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{Node, NodeId, Role};
     use frust_core::event::{ImeContentType, ImeEvent, Key, KeyEvent, Modifiers, NamedKey};
-    use frust_theme::{Brightness, Theme};
+    use frust_theme::{Brightness, DesignLanguage, Theme};
     use kurbo::Point;
     use winit::keyboard::ModifiersState;
     use winit::window::{ImePurpose, WindowAttributes};
@@ -1699,12 +1699,14 @@ mod tests {
 
         let owner = Owner::new();
         let resolved = owner.with(|| {
-            let mut light = Theme::m3_baseline();
+            let mut light = Theme::neutral();
             light.brightness = Brightness::Light;
             provide_context(light);
 
-            // A live flip: re-provide a dark theme under the same owner.
-            let mut dark = Theme::m3_baseline();
+            // A live flip: re-provide a dark theme under the same owner. Same
+            // baseline, opposite brightness — the brightness is what the
+            // read-back below discriminates on.
+            let mut dark = Theme::neutral();
             dark.brightness = Brightness::Dark;
             provide_context(dark);
 
@@ -2105,6 +2107,23 @@ mod tests {
     // still passes `default_theme()` into `base_theme`, and that the two mobile
     // shells' helper copies stay identical to the ones exercised here.
 
+    /// A stand-in for the base theme a design-system plugin seeds through
+    /// `set_default_theme`.
+    ///
+    /// Deliberately **not** `Theme::neutral()`: the ladder's whole point is
+    /// that a seeded base displaces the shell's built-in floor, so every
+    /// assertion below that spells `assert_ne!(.., Theme::neutral())` — or
+    /// reads a seeded value back — needs a theme the floor cannot be confused
+    /// with. The visible edit is the design-language tag, the one field a
+    /// third-party design system is expected to claim (`DesignLanguage` is
+    /// `#[non_exhaustive]` with exactly this `Custom` variant for it); every
+    /// token stays the neutral baseline's, so no catalog is named here.
+    fn seeded_design_system_theme() -> Theme {
+        Theme::builder(Theme::neutral())
+            .design_language(DesignLanguage::Custom("test-design-system"))
+            .build()
+    }
+
     #[test]
     fn an_unseeded_shell_starts_on_the_builtin_fallback_at_the_platform_brightness() {
         // Behavior 1. Nothing seeded: the seed site lands on the shell's own
@@ -2128,7 +2147,7 @@ mod tests {
     #[test]
     fn a_seeded_default_is_the_base_and_still_follows_platform_brightness() {
         // Behavior 2. A design system's `set_default_theme` supplies the base...
-        let seeded = Theme::m3_baseline();
+        let seeded = seeded_design_system_theme();
         let mut theme = base_theme(Some(seeded.clone()));
         assert_eq!(theme, seeded);
         // ...in place of the built-in floor, not layered over it.
@@ -2157,7 +2176,7 @@ mod tests {
         // proves more than an inequality could: the arm cannot even observe the
         // seeded default or the platform brightness, so no seeded value and no
         // platform preference can influence what an override resolves to.
-        let forced = Theme::cupertino_baseline().with_brightness(Brightness::Light);
+        let forced = Theme::neutral().with_brightness(Brightness::Light);
         let decided = theme_after_override_poll(
             Some(Some(forced.clone())),
             || panic!("an active override must not consult the seeded default"),
@@ -2167,8 +2186,10 @@ mod tests {
 
         // ...and it keeps winning against a *later* live platform flip
         // (`ThemeChanged`'s override-wins rule), exactly where the seeded
-        // default of the test above followed the platform instead.
-        let mut active = Theme::cupertino_baseline().with_brightness(Brightness::Light);
+        // default of the test above followed the platform instead. The
+        // distinction that must survive here is brightness, not identity:
+        // `Light` forced against a `Dark` platform report.
+        let mut active = Theme::neutral().with_brightness(Brightness::Light);
         follow_platform_brightness(&mut active, true, Brightness::Dark);
         assert_eq!(active.brightness, Brightness::Light);
     }
@@ -2179,7 +2200,7 @@ mod tests {
         // seeded: the revert lands on THAT base at the window's current
         // brightness — not on the built-in fallback, and not on the cleared
         // override's pinned brightness.
-        let seeded = Theme::m3_baseline();
+        let seeded = seeded_design_system_theme();
         let decided = theme_after_override_poll(
             Some(None),
             || Some(seeded.clone()),
@@ -2247,7 +2268,7 @@ mod tests {
              the slot has no reset, so tests that read it cannot be order-independent"
         );
 
-        let seeded = Theme::cupertino_baseline();
+        let seeded = seeded_design_system_theme();
         frust_shell_common::set_default_theme(seeded.clone());
 
         // The same composition the seed site (`run_desktop`'s `theme:` field)

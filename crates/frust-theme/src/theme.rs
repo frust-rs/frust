@@ -159,11 +159,11 @@ impl Theme {
     /// already reuses `Elevation::m3` the same way); a no-overshoot
     /// [`MotionScheme::neutral`] (unlike `m3_expressive`'s deliberately
     /// bouncy springs); and [`GlassScale::opaque_material`] (already
-    /// neutral). Attaches [`StatusPalette::m3`] like both other built-in
-    /// baselines, since success/warning/info are a functional signal, not a
-    /// design-language "look" — the same reasoning `neutral_light`/
-    /// `neutral_dark` use to keep `error` real red instead of grayscaling
-    /// it too.
+    /// neutral). Attaches [`StatusPalette::neutral`] — every built-in
+    /// baseline carries a status palette, since success/warning/info are a
+    /// functional signal, not a design-language "look" — the same reasoning
+    /// `neutral_light`/`neutral_dark` use to keep `error` real red instead of
+    /// grayscaling it too.
     ///
     /// **This is the floor every shell falls back to** when no design system
     /// seeded one via `set_default_theme` — see `docs/ARCHITECTURE.md`'s Theme
@@ -182,7 +182,7 @@ impl Theme {
     /// const-evaluable.
     pub fn neutral() -> Self {
         let mut extensions = ThemeExtensions::new();
-        extensions.insert(StatusPalette::m3());
+        extensions.insert(StatusPalette::neutral());
         Self {
             light: ColorScheme::neutral_light(),
             dark: ColorScheme::neutral_dark(),
@@ -447,14 +447,14 @@ mod tests {
     }
 
     #[test]
-    fn neutral_attaches_the_m3_status_palette_extension() {
+    fn neutral_attaches_the_neutral_status_palette_extension() {
         use crate::status::StatusPalette;
         // Success/warning/info are a functional signal, not a "look" — the
         // same reasoning `error` stays real red in `ColorScheme::neutral_*`
         // (see that constructor's doc comment).
         assert_eq!(
             Theme::neutral().extension::<StatusPalette>(),
-            Some(&StatusPalette::m3())
+            Some(&StatusPalette::neutral())
         );
     }
 

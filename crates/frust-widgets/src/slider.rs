@@ -110,14 +110,19 @@ fn is_cupertino(theme: Option<&Theme>) -> bool {
 }
 
 /// The `control` glass tier (buttons/toggles/sliders) the Cupertino knob's
-/// shadow/highlight reads — mirrors [`crate::cupertino::switch`]'s
-/// `resolve_control_glass` exactly (themed: `theme.glass.control`; unthemed:
-/// [`GlassScale::ios27`]'s `control` tier directly, so there is no separate
-/// hand-tuned fallback to drift out of sync — see that module's doc comment).
+/// shadow/highlight reads: `theme.glass.control`.
+///
+/// The unthemed arm is **unreachable by construction** — the sole call site
+/// sits inside the `is_cupertino(theme)` guard in `paint`, and
+/// `is_cupertino(None)` is `false`, so `theme` is always `Some` here. It
+/// therefore resolves to the language-free [`GlassScale::opaque_material`]
+/// tier rather than naming a design language's glass recipe: a fallback no
+/// paint pass can observe must not pin this baseline widget to a catalog's
+/// token table.
 fn resolve_control_glass(theme: Option<&Theme>) -> GlassMaterial {
     theme
         .map(|t| t.glass.control.clone())
-        .unwrap_or_else(|| GlassScale::ios27().control)
+        .unwrap_or_else(|| GlassScale::opaque_material().control)
 }
 
 /// Return `color` with its alpha channel replaced by `alpha` (mirrors the

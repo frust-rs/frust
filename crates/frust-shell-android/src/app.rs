@@ -830,7 +830,7 @@ mod tests {
         app_is_dark, base_theme, effective_reduce_motion, follow_platform_brightness,
         theme_after_override_poll,
     };
-    use frust_theme::{Brightness, Theme};
+    use frust_theme::{Brightness, DesignLanguage, Theme};
 
     // --- the default-theme precedence ladder (seed / appearance / override) ---
     //
@@ -848,6 +848,22 @@ mod tests {
     // site — including the seed site's `base_theme(default_theme())` — AND pins
     // these helpers' bodies identical to the desktop shell's, whose twin of
     // every test below does run on the host.
+
+    /// A stand-in for the base theme a design-system plugin seeds through
+    /// `set_default_theme` — the desktop twin's helper, verbatim.
+    ///
+    /// Deliberately **not** `Theme::neutral()`: the ladder's whole point is
+    /// that a seeded base displaces the shell's built-in floor, so every
+    /// assertion below that spells `assert_ne!(.., Theme::neutral())` — or
+    /// reads a seeded value back — needs a theme the floor cannot be confused
+    /// with. The visible edit is the design-language tag, the one field a
+    /// third-party design system is expected to claim; every token stays the
+    /// neutral baseline's, so no catalog is named here.
+    fn seeded_design_system_theme() -> Theme {
+        Theme::builder(Theme::neutral())
+            .design_language(DesignLanguage::Custom("test-design-system"))
+            .build()
+    }
 
     #[test]
     fn an_unseeded_shell_starts_on_the_builtin_fallback_at_the_platform_brightness() {
@@ -868,7 +884,7 @@ mod tests {
     #[test]
     fn a_seeded_default_is_the_base_and_still_follows_platform_brightness() {
         // Behavior 2. A design system's `set_default_theme` supplies the base...
-        let seeded = Theme::m3_baseline();
+        let seeded = seeded_design_system_theme();
         let mut theme = base_theme(Some(seeded.clone()));
         assert_eq!(theme, seeded);
         // ...in place of the built-in floor, not layered over it.
@@ -889,7 +905,7 @@ mod tests {
         // proves more than an inequality could: the arm cannot even observe the
         // seeded default or the platform brightness, so no seeded value and no
         // device preference can influence what an override resolves to.
-        let forced = Theme::cupertino_baseline().with_brightness(Brightness::Light);
+        let forced = Theme::neutral().with_brightness(Brightness::Light);
         let decided = theme_after_override_poll(
             Some(Some(forced.clone())),
             || panic!("an active override must not consult the seeded default"),
@@ -899,8 +915,10 @@ mod tests {
 
         // ...and it keeps winning against a *later* `nativeSetAppearance` flip
         // (the override-wins rule), exactly where the seeded default of the
-        // test above followed the platform instead.
-        let mut active = Theme::cupertino_baseline().with_brightness(Brightness::Light);
+        // test above followed the platform instead. The distinction that must
+        // survive here is brightness, not identity: `Light` forced against a
+        // `Dark` device report.
+        let mut active = Theme::neutral().with_brightness(Brightness::Light);
         follow_platform_brightness(&mut active, true, Brightness::Dark);
         assert_eq!(active.brightness, Brightness::Light);
     }
@@ -911,7 +929,7 @@ mod tests {
         // seeded: the revert lands on THAT base at the device's last reported
         // brightness (`platform_brightness`) — not on the built-in fallback,
         // and not on the cleared override's pinned brightness.
-        let seeded = Theme::m3_baseline();
+        let seeded = seeded_design_system_theme();
         let decided =
             theme_after_override_poll(Some(None), || Some(seeded.clone()), || Brightness::Dark);
         assert_eq!(
@@ -967,7 +985,7 @@ mod tests {
         // observed on-device. `app_is_dark` must report the APP's theme (dark),
         // not the device's (light) — the whole point of this seam existing.
         let device_reports_light = Brightness::Light;
-        let mut theme = Theme::cupertino_baseline().with_brightness(Brightness::Dark);
+        let mut theme = Theme::neutral().with_brightness(Brightness::Dark);
         // Mirrors `AndroidAppHandle::set_appearance`'s call shape: an
         // in-effect override (`override_active = true`) must not let a
         // disagreeing platform report flip the resolved brightness.
@@ -984,7 +1002,7 @@ mod tests {
         // must stay dark-appropriate (light-on-light is invisible), not follow
         // the device into a light-on-light mismatch.
         let device_reports_dark = Brightness::Dark;
-        let mut theme = Theme::m3_baseline().with_brightness(Brightness::Light);
+        let mut theme = Theme::neutral().with_brightness(Brightness::Light);
         follow_platform_brightness(&mut theme, true, device_reports_dark);
         assert!(
             !app_is_dark(&theme),
@@ -1031,9 +1049,9 @@ mod tests {
         // incoming theme and re-applies the OS report over it, so a live
         // accessibility toggle still reaches a catalog app that forced its own
         // theme. This asserts the composition that arm performs.
-        let forced = Theme::cupertino_baseline();
+        let forced = Theme::neutral();
         let authored = forced.motion.reduce_motion;
-        assert!(!authored, "the shipped Cupertino baseline authors `false`");
+        assert!(!authored, "every shipped baseline authors `false`");
         let mut active = forced;
         active.motion.reduce_motion = effective_reduce_motion(authored, true);
         assert!(active.motion.reduce_motion);

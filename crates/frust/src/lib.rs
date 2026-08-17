@@ -231,7 +231,7 @@ pub use frust_widgets::{
 ///
 /// // A theme with reduce_motion on: resolve_spec collapses the spec to the
 /// // framework's own linear cross-fade, with no app-side collapse logic.
-/// let mut theme = Theme::m3_baseline();
+/// let mut theme = Theme::neutral();
 /// theme.motion.reduce_motion = true;
 ///
 /// let spec = TransitionSpec::duration(PageTransition::SlideUp);
@@ -767,12 +767,12 @@ pub use peniko::Color;
 /// flip until [`clear_app_theme`] runs).
 ///
 /// ```no_run
-/// use frust::{Theme, set_app_theme};
+/// use frust::{Brightness, Theme, set_app_theme};
 ///
-/// // Force the Cupertino baseline regardless of the platform's own
-/// // Material-vs-Cupertino default — e.g. the widget catalog's design-
-/// // language toggle.
-/// set_app_theme(Theme::cupertino_baseline());
+/// // Force one appearance end-to-end regardless of what the platform reports
+/// // — e.g. an in-app light/dark toggle. Any `Theme` works here; a design
+/// // system passes its own baseline instead of the neutral floor.
+/// set_app_theme(Theme::neutral().with_brightness(Brightness::Dark));
 /// ```
 pub use frust_shell_common::{clear_app_theme, set_app_theme};
 
@@ -789,13 +789,19 @@ pub use frust_shell_common::{clear_app_theme, set_app_theme};
 /// [`set_app_theme`] spelled out in full.
 ///
 /// ```no_run
-/// use frust::{Theme, set_default_theme};
+/// use frust::{Color, Theme, set_default_theme};
 ///
 /// // A design-system plugin's install() call, seeding its own base theme as
-/// // the app's starting point without pinning brightness. The built-in Glyph
-/// // installer (`frust::glyph_theme::install`, `glyph` feature) is this call
-/// // with `Theme::glyph_baseline()`, plus its bundled-font registration.
-/// set_default_theme(Theme::m3_baseline());
+/// // the app's starting point without pinning brightness. A real installer
+/// // hands over its whole token set; this one edits a single role off the
+/// // neutral floor to keep the example dependency-free.
+/// let base = Theme::builder(Theme::neutral())
+///     .map_colors_light(|mut c| {
+///         c.primary = Color::from_rgb8(0x6B, 0x4E, 0xFF);
+///         c
+///     })
+///     .build();
+/// set_default_theme(base);
 /// ```
 pub use frust_shell_common::set_default_theme;
 
@@ -1530,7 +1536,7 @@ pub fn run_with_setup_and_config<C: Component>(
 /// # }
 /// frust::app!(MyApp, setup = { my_design_system::install(); });
 /// # mod my_design_system {
-/// #     pub fn install() { frust::set_default_theme(frust::Theme::m3_baseline()); }
+/// #     pub fn install() { frust::set_default_theme(frust::Theme::neutral()); }
 /// # }
 /// # fn main() {}
 /// ```
