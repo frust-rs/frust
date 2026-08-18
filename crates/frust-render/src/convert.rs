@@ -9,8 +9,8 @@
 //! can reuse Frust's scene encoding (mirrors how `frust-scene` allows
 //! only `peniko` types in its own public API).
 
-use frust_scene::{Command, GlyphRun, PathStyle, Scene};
-use kurbo::{Affine, BezPath, Line, Point, Rect, RoundedRect, Stroke};
+use frust_scene::{Command, DashPattern, GlyphRun, PathStyle, Scene};
+use kurbo::{Affine, BezPath, Line, Point, Rect, RoundedRect, RoundedRectRadii, Stroke};
 use peniko::{Brush, Color, Fill, ImageData};
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -22,14 +22,15 @@ use std::sync::OnceLock;
 pub(crate) trait SceneSink {
     /// Fill an axis-aligned rectangle with `brush` under `transform`.
     fn fill_rect(&mut self, style: Fill, transform: Affine, brush: &Brush, rect: &Rect);
-    /// Fill an axis-aligned rounded rectangle (uniform corner `radius`).
+    /// Fill an axis-aligned rounded rectangle with per-corner `radii` (a
+    /// uniform radius arrives as four equal corners).
     fn fill_rounded_rect(
         &mut self,
         style: Fill,
         transform: Affine,
         brush: &Brush,
         rect: &Rect,
-        radius: f64,
+        radii: RoundedRectRadii,
     );
     /// Stroke a straight line segment from `p0` to `p1` with the given `width`.
     fn stroke_line(&mut self, transform: Affine, brush: &Brush, p0: Point, p1: Point, width: f64);
@@ -37,16 +38,20 @@ pub(crate) trait SceneSink {
     fn draw_glyph_run(&mut self, run: &GlyphRun);
     /// Push a rectangular clip onto the backend's clip stack, under `transform`.
     fn push_clip(&mut self, transform: Affine, rect: &Rect);
-    /// Push a clip with uniformly rounded corners onto the backend's clip
+    /// Push a clip with per-corner rounded corners onto the backend's clip
     /// stack, under `transform`. Popped by [`SceneSink::pop_clip`], the same
     /// pop the rectangular clip uses.
-    fn push_clip_rounded(&mut self, transform: Affine, rect: &Rect, radius: f64);
+    fn push_clip_rounded(&mut self, transform: Affine, rect: &Rect, radii: RoundedRectRadii);
     /// Pop the most recently pushed clip, rectangular or rounded.
     fn pop_clip(&mut self);
     /// Draw a decoded image (natural pixel size `data.width`x`data.height`),
     /// scaled to fill `dest`, under `transform`.
     fn draw_image(&mut self, transform: Affine, data: &ImageData, dest: &Rect);
     /// Draw a gaussian-blurred rounded-rectangle elevation shadow.
+    ///
+    /// A single `radius`, unlike the two rounded methods above: neither backend
+    /// has a per-corner blurred primitive, so the walk lowers a per-corner
+    /// shadow before it reaches a sink (see `encode_into_with_shaders`).
     fn draw_blurred_rounded_rect(
         &mut self,
         transform: Affine,
@@ -135,9 +140,9 @@ pub(crate) fn encode_into_with_shaders(
     // independently (a transient, transition-only artifact where translucent
     // group content overlaps a slot mid-animation — documented tradeoff).
     enum Group {
-        /// A clip group; `Some(radius)` when the clip has rounded corners, so
+        /// A clip group; `Some(radii)` when the clip has rounded corners, so
         /// the hoist below re-pushes it with its corners intact.
-        Clip(Option<f64>),
+        Clip(Option<RoundedRectRadii>),
         Layer(f32),
     }
     let mut groups: Vec<(Group, Affine, Rect)> = Vec::new();
@@ -151,10 +156,10 @@ pub(crate) fn encode_into_with_shaders(
             } => sink.fill_rect(Fill::NonZero, *transform, brush, rect),
             Command::RoundedRect {
                 rect,
-                radius,
+                radii,
                 brush,
                 transform,
-            } => sink.fill_rounded_rect(Fill::NonZero, *transform, brush, rect, *radius),
+            } => sink.fill_rounded_rect(Fill::NonZero, *transform, brush, rect, radii_of(*radii)),
             Command::Line {
                 p0,
                 p1,
@@ -169,14 +174,15 @@ pub(crate) fn encode_into_with_shaders(
             }
             Command::PushClipRounded {
                 rect,
-                radius,
+                radii,
                 transform,
             } => {
                 // Same clip stack as `PushClip` (one `PopClip` pops either);
-                // the radius rides along so the `ClearRect` hoist can re-push
+                // the radii ride along so the `ClearRect` hoist can re-push
                 // the rounded shape rather than squaring its corners.
-                groups.push((Group::Clip(Some(*radius)), *transform, *rect));
-                sink.push_clip_rounded(*transform, rect, *radius);
+                let radii = radii_of(*radii);
+                groups.push((Group::Clip(Some(radii)), *transform, *rect));
+                sink.push_clip_rounded(*transform, rect, radii);
             }
             Command::PopClip => {
                 groups.pop();
@@ -191,11 +197,18 @@ pub(crate) fn encode_into_with_shaders(
             }
             Command::BlurredRoundedRect {
                 rect,
-                radius,
+                radii,
                 std_dev,
                 color,
                 transform,
-            } => sink.draw_blurred_rounded_rect(*transform, rect, *color, *radius, *std_dev),
+            } => {
+                // vello 0.9's `draw_blurred_rounded_rect` and vello_cpu's
+                // `fill_blurred_rounded_rect` both take ONE radius, so a
+                // per-corner shadow lowers to its largest corner here — the
+                // single place the downgrade lives, shared by both tiers (see
+                // `frust_scene::CornerRadii::largest` for why the largest).
+                sink.draw_blurred_rounded_rect(*transform, rect, *color, radii.largest(), *std_dev)
+            }
             Command::PushLayer {
                 rect,
                 alpha,
@@ -232,7 +245,7 @@ pub(crate) fn encode_into_with_shaders(
                     for (kind, t, r) in &groups {
                         match kind {
                             Group::Clip(None) => sink.push_clip(*t, r),
-                            Group::Clip(Some(radius)) => sink.push_clip_rounded(*t, r, *radius),
+                            Group::Clip(Some(radii)) => sink.push_clip_rounded(*t, r, *radii),
                             Group::Layer(alpha) => sink.push_layer(*t, r, *alpha),
                         }
                     }
@@ -245,7 +258,15 @@ pub(crate) fn encode_into_with_shaders(
                 transform,
             } => match style {
                 PathStyle::Fill => sink.fill_path(*transform, brush, path),
-                PathStyle::Stroke { width } => sink.stroke_path(*transform, brush, path, *width),
+                PathStyle::Stroke { width, dash } => match dash {
+                    Some(dash) if dash.is_effective() => {
+                        let dashed = dash_path(path, *dash);
+                        sink.stroke_path(*transform, brush, &dashed, *width);
+                    }
+                    // No pattern, or a degenerate one (see
+                    // `DashPattern::is_effective`): a plain solid stroke.
+                    _ => sink.stroke_path(*transform, brush, path, *width),
+                },
             },
             Command::ShaderQuad {
                 program,
@@ -297,6 +318,33 @@ pub(crate) fn encode_into_with_shaders(
     }
 }
 
+/// The scene's per-corner radii as the `kurbo` shape vocabulary both sinks
+/// build their concrete `RoundedRect` from — the one conversion site for the
+/// scene→render radii hop (scene-layer purity keeps `kurbo::RoundedRectRadii`
+/// out of `frust-scene`'s commands, `docs/ARCHITECTURE.md`).
+fn radii_of(radii: frust_scene::CornerRadii) -> RoundedRectRadii {
+    RoundedRectRadii::new(
+        radii.top_left,
+        radii.top_right,
+        radii.bottom_right,
+        radii.bottom_left,
+    )
+}
+
+/// Expands `path` into its dash segments — the sub-paths a dashed stroke is
+/// actually made of.
+///
+/// Dashing happens HERE, in the shared command walk, rather than in either
+/// sink: vello 0.9's `Scene::stroke` does honour a `kurbo::Stroke`'s dash
+/// fields, but `vello_cpu`'s `set_stroke` does not, so flattening once at the
+/// decode site is what keeps the two tiers pixel-comparable. `kurbo::dash` is
+/// the same iterator vello itself uses, so the GPU tier's output is unchanged
+/// by taking this route. Each dash becomes its own open sub-path, capped and
+/// joined by the single `Stroke` the sink applies to the whole result.
+fn dash_path(path: &BezPath, dash: DashPattern) -> BezPath {
+    kurbo::dash(path.iter(), dash.phase, &[dash.on, dash.off]).collect()
+}
+
 impl SceneSink for vello::Scene {
     fn fill_rect(&mut self, style: Fill, transform: Affine, brush: &Brush, rect: &Rect) {
         self.fill(style, transform, brush, None, rect);
@@ -308,11 +356,11 @@ impl SceneSink for vello::Scene {
         transform: Affine,
         brush: &Brush,
         rect: &Rect,
-        radius: f64,
+        radii: RoundedRectRadii,
     ) {
         // `kurbo::RoundedRect` implements `Shape`, so it fills through the same
         // path as a plain rect.
-        let rounded = RoundedRect::from_rect(*rect, radius);
+        let rounded = RoundedRect::from_rect(*rect, radii);
         self.fill(style, transform, brush, None, &rounded);
     }
 
@@ -352,13 +400,13 @@ impl SceneSink for vello::Scene {
         );
     }
 
-    fn push_clip_rounded(&mut self, transform: Affine, rect: &Rect, radius: f64) {
+    fn push_clip_rounded(&mut self, transform: Affine, rect: &Rect, radii: RoundedRectRadii) {
         // Same layer-as-clip mechanism as `push_clip` above, with a rounded
         // shape: `vello::Scene::push_layer` takes `clip: &impl Shape`, and
         // `kurbo::RoundedRect` is one. The concrete `RoundedRect` is built
         // HERE, inside the render crate — `frust-scene` carries only `Rect` +
-        // `f64` (scene-layer purity, `docs/ARCHITECTURE.md`).
-        let rounded = RoundedRect::from_rect(*rect, radius);
+        // its own `CornerRadii` (scene-layer purity, `docs/ARCHITECTURE.md`).
+        let rounded = RoundedRect::from_rect(*rect, radii);
         self.push_layer(
             Fill::NonZero,
             peniko::BlendMode::default(),
@@ -483,7 +531,8 @@ fn natural_to_dest_transform(transform: Affine, data: &ImageData, dest: &Rect) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frust_scene::{FontHandle, Glyph, GlyphRun, SceneBuilder};
+    use frust_scene::{CornerRadii, FontHandle, Glyph, GlyphRun, SceneBuilder};
+    use kurbo::{PathEl, Shape};
     use peniko::color::palette::css::RED;
     use peniko::{Blob, FontData};
 
@@ -496,7 +545,7 @@ mod tests {
         },
         RoundedRect {
             rect: Rect,
-            radius: f64,
+            radii: RoundedRectRadii,
             transform: Affine,
         },
         Line {
@@ -516,7 +565,7 @@ mod tests {
         },
         PushClipRounded {
             rect: Rect,
-            radius: f64,
+            radii: RoundedRectRadii,
             transform: Affine,
         },
         PopClip,
@@ -574,12 +623,12 @@ mod tests {
             transform: Affine,
             _brush: &Brush,
             rect: &Rect,
-            radius: f64,
+            radii: RoundedRectRadii,
         ) {
             assert_eq!(style, Fill::NonZero);
             self.events.push(Event::RoundedRect {
                 rect: *rect,
-                radius,
+                radii,
                 transform,
             });
         }
@@ -615,10 +664,10 @@ mod tests {
             });
         }
 
-        fn push_clip_rounded(&mut self, transform: Affine, rect: &Rect, radius: f64) {
+        fn push_clip_rounded(&mut self, transform: Affine, rect: &Rect, radii: RoundedRectRadii) {
             self.events.push(Event::PushClipRounded {
                 rect: *rect,
-                radius,
+                radii,
                 transform,
             });
         }
@@ -819,7 +868,7 @@ mod tests {
             vec![
                 Event::PushClipRounded {
                     rect: clip,
-                    radius: 8.0,
+                    radii: RoundedRectRadii::from(8.0),
                     transform: translate,
                 },
                 Event::FillRect {
@@ -854,7 +903,7 @@ mod tests {
             vec![
                 Event::PushClipRounded {
                     rect: clip_rect,
-                    radius: 12.0,
+                    radii: RoundedRectRadii::from(12.0),
                     transform: Affine::IDENTITY,
                 },
                 Event::PushLayer {
@@ -890,7 +939,7 @@ mod tests {
             vec![
                 Event::PushClipRounded {
                     rect: clip,
-                    radius: 9.0,
+                    radii: RoundedRectRadii::from(9.0),
                     transform: Affine::IDENTITY,
                 },
                 Event::PopClip,
@@ -900,7 +949,7 @@ mod tests {
                 },
                 Event::PushClipRounded {
                     rect: clip,
-                    radius: 9.0,
+                    radii: RoundedRectRadii::from(9.0),
                     transform: Affine::IDENTITY,
                 },
                 Event::PopClip,
@@ -934,11 +983,113 @@ mod tests {
         let mut sink = RecordingSink::default();
         encode_into(&scene, &mut sink);
 
+        // The uniform-radius regression: the pre-per-corner spelling must still
+        // reach the sink as four equal corners, i.e. the identical shape it
+        // encoded before per-corner radii existed.
         assert_eq!(
             sink.events,
             vec![Event::RoundedRect {
                 rect,
-                radius: 3.0,
+                radii: RoundedRectRadii::new(3.0, 3.0, 3.0, 3.0),
+                transform: Affine::IDENTITY,
+            }]
+        );
+    }
+
+    #[test]
+    fn rounded_rect_radii_map_each_corner_through_in_kurbo_order() {
+        // The corner-order contract: `CornerRadii`'s clockwise-from-top-left
+        // fields must land on the same fields of `kurbo::RoundedRectRadii` —
+        // a transposition here would round the wrong corners with no other
+        // signal than a visual one.
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let rect = Rect::new(0.0, 0.0, 10.0, 8.0);
+        builder.fill_rounded_rect_radii(
+            rect,
+            CornerRadii::new(1.0, 2.0, 3.0, 4.0),
+            Brush::Solid(RED),
+        );
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        assert_eq!(
+            sink.events,
+            vec![Event::RoundedRect {
+                rect,
+                radii: RoundedRectRadii::new(1.0, 2.0, 3.0, 4.0),
+                transform: Affine::IDENTITY,
+            }]
+        );
+    }
+
+    #[test]
+    fn rounded_clip_radii_map_through_and_survive_the_clear_rect_hoist() {
+        // The per-corner half of the hoist contract: a punch pops every open
+        // group and re-pushes it, and the re-push must carry the SAME per-corner
+        // radii — squaring (or uniform-ising) them would reshape everything
+        // painted after a nested slot's punch.
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let clip = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let hole = Rect::new(20.0, 20.0, 60.0, 60.0);
+        let radii = CornerRadii::new(9.0, 9.0, 0.0, 0.0);
+        builder.push_clip_rounded_radii(clip, radii);
+        builder.clear_rect(hole);
+        builder.pop_clip();
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        let expected_radii = RoundedRectRadii::new(9.0, 9.0, 0.0, 0.0);
+        assert_eq!(
+            sink.events,
+            vec![
+                Event::PushClipRounded {
+                    rect: clip,
+                    radii: expected_radii,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PopClip,
+                Event::ClearRect {
+                    rect: hole,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PushClipRounded {
+                    rect: clip,
+                    radii: expected_radii,
+                    transform: Affine::IDENTITY,
+                },
+                Event::PopClip,
+            ]
+        );
+    }
+
+    #[test]
+    fn per_corner_blurred_shadow_lowers_to_its_largest_corner() {
+        // Neither tier has a per-corner blurred primitive, so the walk collapses
+        // the four corners to the largest one before the sink sees them.
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let rect = Rect::new(0.0, 0.0, 10.0, 8.0);
+        builder.draw_blurred_rounded_rect_radii(
+            rect,
+            CornerRadii::new(12.0, 12.0, 0.0, 0.0),
+            2.5,
+            RED,
+        );
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        assert_eq!(
+            sink.events,
+            vec![Event::BlurredRoundedRect {
+                rect,
+                color: RED,
+                radius: 12.0,
+                std_dev: 2.5,
                 transform: Affine::IDENTITY,
             }]
         );
@@ -1409,6 +1560,8 @@ mod tests {
         let mut sink = RecordingSink::default();
         encode_into(&scene, &mut sink);
 
+        // The undashed regression: a plain stroke reaches the sink with its
+        // path byte-identical, never routed through the dash expansion.
         assert_eq!(
             sink.events,
             vec![Event::StrokePath {
@@ -1417,6 +1570,206 @@ mod tests {
                 transform: Affine::IDENTITY,
             }]
         );
+    }
+
+    /// The length of every dash in a dashed path — one entry per `MoveTo`-started
+    /// sub-path, in emission order.
+    ///
+    /// Only `MoveTo`/`LineTo` appear, since every dashed path here is built from
+    /// straight segments; anything else means the expansion changed shape and is
+    /// a test-worthy surprise rather than something to silently measure.
+    fn dash_lengths(path: &BezPath) -> Vec<f64> {
+        let mut lengths: Vec<f64> = Vec::new();
+        let mut last: Option<Point> = None;
+        for element in path.elements() {
+            match element {
+                PathEl::MoveTo(p) => {
+                    lengths.push(0.0);
+                    last = Some(*p);
+                }
+                PathEl::LineTo(p) => {
+                    let from = last.expect("a LineTo always follows a MoveTo");
+                    *lengths.last_mut().expect("a dash is open") += (*p - from).hypot();
+                    last = Some(*p);
+                }
+                other => panic!("expected only MoveTo/LineTo in a dashed path, got {other:?}"),
+            }
+        }
+        lengths
+    }
+
+    /// `dash_lengths` sorted, so an assertion states which dashes exist without
+    /// pinning kurbo's emission order — the dash iterator deliberately emits a
+    /// sub-path's *first* dash last so it can merge with one wrapping through a
+    /// `ClosePath`.
+    fn sorted_dash_lengths(path: &BezPath) -> Vec<f64> {
+        let mut lengths = dash_lengths(path);
+        lengths.sort_by(f64::total_cmp);
+        lengths
+    }
+
+    fn horizontal_line_path(length: f64) -> BezPath {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.line_to((length, 0.0));
+        path
+    }
+
+    fn assert_close(got: &[f64], want: &[f64]) {
+        assert_eq!(
+            got.len(),
+            want.len(),
+            "dash count: got {got:?}, want {want:?}"
+        );
+        for (g, w) in got.iter().zip(want) {
+            assert!(
+                (g - w).abs() < 1e-6,
+                "dash lengths differ: got {got:?}, want {want:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dashed_line_decodes_into_one_stroke_of_evenly_spaced_dashes() {
+        // A 10-long line under a 2-on/2-off pattern: dashes at [0,2], [4,6],
+        // [8,10] — three sub-paths of length 2, all inside ONE stroke call (the
+        // dash expansion happens before the sink, so the sink still sees a
+        // single stroke with a single width).
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.stroke_path_dashed(
+            horizontal_line_path(10.0),
+            2.0,
+            DashPattern::new(2.0, 2.0),
+            Brush::Solid(RED),
+        );
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        assert_eq!(sink.events.len(), 1);
+        match &sink.events[0] {
+            Event::StrokePath {
+                path,
+                width,
+                transform,
+            } => {
+                assert_eq!(*width, 2.0);
+                assert_eq!(*transform, Affine::IDENTITY);
+                assert_close(&sorted_dash_lengths(path), &[2.0, 2.0, 2.0]);
+            }
+            other => panic!("expected StrokePath, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dash_phase_shifts_the_pattern_along_the_path() {
+        // The same 10-long line, offset one unit into the cycle: the run that
+        // started at 0 is clipped to length 1 and everything else slides along,
+        // still totalling half the path (2 on out of every 4).
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.stroke_path_dashed(
+            horizontal_line_path(10.0),
+            2.0,
+            DashPattern::new(2.0, 2.0).with_phase(1.0),
+            Brush::Solid(RED),
+        );
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        match &sink.events[0] {
+            Event::StrokePath { path, .. } => {
+                assert_close(&sorted_dash_lengths(path), &[1.0, 2.0, 2.0]);
+            }
+            other => panic!("expected StrokePath, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dashed_rect_perimeter_decodes_into_dashes_covering_half_of_it() {
+        // A closed 10x10 rect (perimeter 40) under a 4-on/4-off pattern: five
+        // dashes of length 4 — dashes wrap around the corners and through the
+        // `ClosePath` seam, so this covers the closed-sub-path case a straight
+        // line cannot.
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.stroke_path_dashed(
+            Rect::new(0.0, 0.0, 10.0, 10.0).to_path(0.01),
+            1.0,
+            DashPattern::new(4.0, 4.0),
+            Brush::Solid(RED),
+        );
+
+        let mut sink = RecordingSink::default();
+        encode_into(&scene, &mut sink);
+
+        match &sink.events[0] {
+            Event::StrokePath { path, .. } => {
+                let lengths = sorted_dash_lengths(path);
+                assert_close(&lengths, &[4.0, 4.0, 4.0, 4.0, 4.0]);
+                assert!(
+                    (lengths.iter().sum::<f64>() - 20.0).abs() < 1e-6,
+                    "dashes must cover half the 40-unit perimeter, got {lengths:?}"
+                );
+            }
+            other => panic!("expected StrokePath, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn degenerate_dash_patterns_stroke_the_path_solid() {
+        // A zero-length gap (and a zero-length dash, and a non-finite one) has
+        // no dashed interpretation, so the walk must stroke the original path
+        // rather than hand a degenerate cycle to the dash iterator.
+        for dash in [
+            DashPattern::new(4.0, 0.0),
+            DashPattern::new(0.0, 4.0),
+            DashPattern::new(f64::NAN, 4.0),
+        ] {
+            let mut scene = Scene::new();
+            let mut builder = SceneBuilder::new(&mut scene);
+            let path = horizontal_line_path(10.0);
+            builder.stroke_path_dashed(path.clone(), 2.0, dash, Brush::Solid(RED));
+
+            let mut sink = RecordingSink::default();
+            encode_into(&scene, &mut sink);
+
+            assert_eq!(
+                sink.events,
+                vec![Event::StrokePath {
+                    path: path.clone(),
+                    width: 2.0,
+                    transform: Affine::IDENTITY,
+                }],
+                "{dash:?} should stroke solid"
+            );
+        }
+    }
+
+    /// The per-corner and dashed commands must reach a real `vello::Scene`
+    /// (through `kurbo::RoundedRect`/`kurbo::dash`, both built inside this
+    /// crate) without panicking — the `RecordingSink` checks above only verify
+    /// the structural mapping.
+    #[test]
+    fn per_corner_and_dashed_commands_encode_into_a_real_vello_scene_without_panicking() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let radii = CornerRadii::new(16.0, 0.0, 8.0, 4.0);
+        builder.push_clip_rounded_radii(Rect::new(0.0, 0.0, 64.0, 64.0), radii);
+        builder.fill_rounded_rect_radii(Rect::new(0.0, 0.0, 32.0, 32.0), radii, Brush::Solid(RED));
+        builder.draw_blurred_rounded_rect_radii(Rect::new(0.0, 0.0, 32.0, 32.0), radii, 2.0, RED);
+        builder.pop_clip();
+        builder.stroke_path_dashed(
+            triangle_path(),
+            2.0,
+            DashPattern::new(3.0, 2.0).with_phase(1.0),
+            Brush::Solid(RED),
+        );
+
+        let mut vello_scene = vello::Scene::new();
+        encode_scene(&scene, &mut vello_scene);
     }
 
     /// A widget can paint a stroked arc via `PaintScene`/`SceneBuilder` without

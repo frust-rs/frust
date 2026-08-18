@@ -4,7 +4,7 @@ use kurbo::{Affine, BezPath, Point, Rect};
 use peniko::{Brush, Color, ImageData};
 
 use crate::glyph::GlyphRun;
-use crate::scene::{Command, PathStyle, Scene};
+use crate::scene::{Command, CornerRadii, DashPattern, PathStyle, Scene};
 use crate::shader::ShaderProgram;
 
 /// Records paint commands into a [`Scene`], maintaining a transform stack.
@@ -69,11 +69,21 @@ impl<'a> SceneBuilder<'a> {
 
     /// Records a filled rounded rectangle (uniform corner `radius`) under the
     /// current transform.
+    ///
+    /// The uniform-radius spelling of [`SceneBuilder::fill_rounded_rect_radii`]
+    /// — kept verbatim so every existing call site is unaffected by per-corner
+    /// radii.
     pub fn fill_rounded_rect(&mut self, rect: Rect, radius: f64, brush: Brush) {
+        self.fill_rounded_rect_radii(rect, CornerRadii::from(radius), brush);
+    }
+
+    /// Records a filled rounded rectangle with per-corner `radii` under the
+    /// current transform.
+    pub fn fill_rounded_rect_radii(&mut self, rect: Rect, radii: CornerRadii, brush: Brush) {
         let transform = self.current_transform();
         self.scene.push(Command::RoundedRect {
             rect,
-            radius,
+            radii,
             brush,
             transform,
         });
@@ -115,10 +125,18 @@ impl<'a> SceneBuilder<'a> {
     /// rectangular [`SceneBuilder::push_clip`], since both share one clip stack
     /// (see [`Command::PushClipRounded`]).
     pub fn push_clip_rounded(&mut self, rect: Rect, radius: f64) {
+        self.push_clip_rounded_radii(rect, CornerRadii::from(radius));
+    }
+
+    /// Pushes a clip with per-corner `radii` onto the render backend's clip
+    /// stack, recording the current transform — the per-corner spelling of
+    /// [`SceneBuilder::push_clip_rounded`], popped by the same
+    /// [`SceneBuilder::pop_clip`].
+    pub fn push_clip_rounded_radii(&mut self, rect: Rect, radii: CornerRadii) {
         let transform = self.current_transform();
         self.scene.push(Command::PushClipRounded {
             rect,
-            radius,
+            radii,
             transform,
         });
     }
@@ -142,8 +160,9 @@ impl<'a> SceneBuilder<'a> {
         });
     }
 
-    /// Records a gaussian-blurred rounded-rectangle shadow under the current
-    /// transform (see [`Command::BlurredRoundedRect`]).
+    /// Records a gaussian-blurred rounded-rectangle shadow (uniform corner
+    /// `radius`) under the current transform (see
+    /// [`Command::BlurredRoundedRect`]).
     pub fn draw_blurred_rounded_rect(
         &mut self,
         rect: Rect,
@@ -151,10 +170,27 @@ impl<'a> SceneBuilder<'a> {
         std_dev: f64,
         color: Color,
     ) {
+        self.draw_blurred_rounded_rect_radii(rect, CornerRadii::from(radius), std_dev, color);
+    }
+
+    /// Records a gaussian-blurred rounded-rectangle shadow with per-corner
+    /// `radii` under the current transform.
+    ///
+    /// Neither render tier has a per-corner blurred primitive, so a non-uniform
+    /// shadow lowers through [`CornerRadii::largest`] at encode time — see
+    /// [`Command::BlurredRoundedRect`] for why the largest corner and not the
+    /// smallest.
+    pub fn draw_blurred_rounded_rect_radii(
+        &mut self,
+        rect: Rect,
+        radii: CornerRadii,
+        std_dev: f64,
+        color: Color,
+    ) {
         let transform = self.current_transform();
         self.scene.push(Command::BlurredRoundedRect {
             rect,
-            radius,
+            radii,
             std_dev,
             color,
             transform,
@@ -205,7 +241,29 @@ impl<'a> SceneBuilder<'a> {
         let transform = self.current_transform();
         self.scene.push(Command::Path {
             path,
-            style: PathStyle::Stroke { width },
+            style: PathStyle::Stroke { width, dash: None },
+            brush,
+            transform,
+        });
+    }
+
+    /// Records a *dashed* stroked path under the current transform: the same
+    /// stroke [`SceneBuilder::stroke_path`] records, carrying a [`DashPattern`]
+    /// the render crate expands into dash segments at encode time.
+    pub fn stroke_path_dashed(
+        &mut self,
+        path: BezPath,
+        width: f64,
+        dash: DashPattern,
+        brush: Brush,
+    ) {
+        let transform = self.current_transform();
+        self.scene.push(Command::Path {
+            path,
+            style: PathStyle::Stroke {
+                width,
+                dash: Some(dash),
+            },
             brush,
             transform,
         });
@@ -386,13 +444,35 @@ mod tests {
         match &scene.commands()[0] {
             Command::RoundedRect {
                 rect: got,
-                radius,
+                radii,
                 transform,
                 ..
             } => {
                 assert_eq!(*got, rect);
-                assert_eq!(*radius, 4.0);
+                // The uniform spelling must encode as all-four-corners-equal.
+                assert_eq!(*radii, CornerRadii::uniform(4.0));
                 assert_eq!(*transform, translate);
+            }
+            other => panic!("expected RoundedRect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rounded_rect_radii_round_trips_each_corner() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let rect = Rect::new(0.0, 0.0, 10.0, 8.0);
+        let radii = CornerRadii::new(1.0, 2.0, 3.0, 4.0);
+        builder.fill_rounded_rect_radii(rect, radii, red_brush());
+
+        match &scene.commands()[0] {
+            Command::RoundedRect {
+                rect: got,
+                radii: r,
+                ..
+            } => {
+                assert_eq!(*got, rect);
+                assert_eq!(*r, radii);
             }
             other => panic!("expected RoundedRect, got {other:?}"),
         }
@@ -465,15 +545,34 @@ mod tests {
         match &scene.commands()[0] {
             Command::PushClipRounded {
                 rect: got,
-                radius,
+                radii,
                 transform,
             } => {
                 assert_eq!(*got, rect);
-                assert_eq!(*radius, 8.0);
+                assert_eq!(*radii, CornerRadii::uniform(8.0));
                 assert_eq!(*transform, scale);
             }
             other => panic!("expected PushClipRounded, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn push_clip_rounded_radii_round_trips_each_corner() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let rect = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let radii = CornerRadii::new(8.0, 8.0, 0.0, 0.0);
+        builder.push_clip_rounded_radii(rect, radii);
+        builder.pop_clip();
+
+        let commands = scene.commands();
+        assert_eq!(commands.len(), 2);
+        match &commands[0] {
+            Command::PushClipRounded { radii: r, .. } => assert_eq!(*r, radii),
+            other => panic!("expected PushClipRounded, got {other:?}"),
+        }
+        // Still one clip stack: the per-corner push pops through the shared pop.
+        assert!(matches!(commands[1], Command::PopClip));
     }
 
     #[test]
@@ -616,13 +715,13 @@ mod tests {
         match &scene.commands()[0] {
             Command::BlurredRoundedRect {
                 rect: got_rect,
-                radius,
+                radii,
                 std_dev,
                 color,
                 transform,
             } => {
                 assert_eq!(*got_rect, rect);
-                assert_eq!(*radius, 4.0);
+                assert_eq!(*radii, CornerRadii::uniform(4.0));
                 assert_eq!(*std_dev, 2.5);
                 assert_eq!(*color, RED);
                 assert_eq!(*transform, Affine::IDENTITY);
@@ -641,6 +740,19 @@ mod tests {
 
         match &scene.commands()[0] {
             Command::BlurredRoundedRect { transform, .. } => assert_eq!(*transform, translate),
+            other => panic!("expected BlurredRoundedRect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn draw_blurred_rounded_rect_radii_round_trips_each_corner() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let radii = CornerRadii::new(12.0, 12.0, 0.0, 0.0);
+        builder.draw_blurred_rounded_rect_radii(Rect::new(0.0, 0.0, 10.0, 8.0), radii, 2.5, RED);
+
+        match &scene.commands()[0] {
+            Command::BlurredRoundedRect { radii: r, .. } => assert_eq!(*r, radii),
             other => panic!("expected BlurredRoundedRect, got {other:?}"),
         }
     }
@@ -764,7 +876,42 @@ mod tests {
                 ..
             } => {
                 assert_eq!(*got_path, path);
-                assert_eq!(*style, PathStyle::Stroke { width: 2.5 });
+                // An undashed stroke records `dash: None` — the encode-time
+                // solid path every pre-dash caller keeps taking.
+                assert_eq!(
+                    *style,
+                    PathStyle::Stroke {
+                        width: 2.5,
+                        dash: None
+                    }
+                );
+            }
+            other => panic!("expected Path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stroke_path_dashed_round_trips_its_pattern() {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        let path = triangle_path();
+        let dash = DashPattern::new(4.0, 2.0).with_phase(1.0);
+        builder.stroke_path_dashed(path.clone(), 2.5, dash, red_brush());
+
+        match &scene.commands()[0] {
+            Command::Path {
+                path: got_path,
+                style,
+                ..
+            } => {
+                assert_eq!(*got_path, path);
+                assert_eq!(
+                    *style,
+                    PathStyle::Stroke {
+                        width: 2.5,
+                        dash: Some(dash)
+                    }
+                );
             }
             other => panic!("expected Path, got {other:?}"),
         }

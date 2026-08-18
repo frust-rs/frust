@@ -400,6 +400,14 @@ pub mod authoring {
         ScrollDelta, SemanticsCtx, SemanticsUpdate, TickClass, View, Widget, WidgetId, any,
     };
 
+    /// The paint vocabulary [`PaintScene`]'s per-corner and dashed methods name
+    /// — `fill_rounded_rect_radii`/`push_clip_rounded_radii` take a
+    /// [`CornerRadii`], `stroke_path_dashed` a [`DashPattern`]. Lifted for the
+    /// same reason [`WindowInsets`] is: a widget calling those methods cannot
+    /// otherwise name their arguments. Re-exported through `frust-core`'s paint
+    /// surface, so this is the same type [`scene::CornerRadii`] names.
+    pub use frust_core::{CornerRadii, DashPattern};
+
     /// The event-pass/IME-surface `EditingState` — see this module's own docs
     /// for the split against [`text::EditingState`](self::text::EditingState),
     /// `frust_text::editor`'s distinct, byte-indexed type. `ImeContentType` is
@@ -477,10 +485,16 @@ pub mod authoring {
     }
 
     /// The renderer-agnostic display list, for widgets painting below `PaintScene`.
+    ///
+    /// `CornerRadii`/`DashPattern` are the same types the flat
+    /// [`authoring::CornerRadii`](super::CornerRadii)/[`authoring::DashPattern`](super::DashPattern)
+    /// re-exports name — listed here too because they are named by
+    /// `Command::RoundedRect`/`PathStyle`, which a widget recording commands
+    /// directly has to match on.
     pub mod scene {
         pub use frust_scene::{
-            Command, FontHandle, Glyph, GlyphRun, PathStyle, Scene, SceneBuilder, ShaderProgram,
-            arc_path,
+            Command, CornerRadii, DashPattern, FontHandle, Glyph, GlyphRun, PathStyle, Scene,
+            SceneBuilder, ShaderProgram, arc_path,
         };
     }
 }
