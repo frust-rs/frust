@@ -93,6 +93,8 @@ use frust::text_input;
 use frust::{BackPolicy, NavigatorController, PopResult, PushOptions};
 use frust::{TransitionDriver, TransitionSpec, make_driver};
 
+use crate::press::presses;
+
 /// Panel padding on all four edges, in logical px.
 const PANEL_PAD: f64 = 8.0;
 /// The prompt-prefixed input row height, in logical px.
@@ -924,6 +926,12 @@ impl Widget for CommandPaletteWidget {
             PointerPhase::Down => {
                 if self.input_rect.contains(p.position) {
                     return frust::authoring::route_event_single(&mut self.input, ctx, event);
+                }
+                // The palette is modal: it swallows a secondary press like
+                // every other one, but arms neither a row press nor the scrim
+                // dismiss from it.
+                if !presses(p) {
+                    return EventResult::Handled;
                 }
                 if let Some(i) = self.row_at(p.position) {
                     self.pressed_row = Some(i);

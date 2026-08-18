@@ -115,6 +115,8 @@ use frust::{
     BackPolicy, NavigatorController, PageTransition, PopResult, PushOptions, TransitionSpec,
 };
 
+use super::press::presses;
+
 /// Scrim opacity behind a modal bottom sheet (M3 spec: 32%, matching the
 /// dialog scrim).
 const SCRIM_ALPHA: f32 = 0.32;
@@ -582,8 +584,9 @@ impl Widget for BottomSheetWidget {
                     // on the second tap (claim-once-hygiene review,
                     // 2026-08-06).
                     ctx.request_focus();
-                    // A Down in the handle strip begins a drag.
-                    if self.handle_target.contains(p.position) {
+                    // A Down in the handle strip begins a drag — primary only:
+                    // a secondary press drags nothing.
+                    if presses(p) && self.handle_target.contains(p.position) {
                         self.drag_active = true;
                         self.drag_start_y = p.position.y;
                         ctx.capture_pointer();
@@ -596,7 +599,12 @@ impl Widget for BottomSheetWidget {
                         return EventResult::Handled;
                     }
                     // Falls to the modal barrier: swallow, arming a scrim dismiss
-                    // when the press started outside the panel.
+                    // when the press started outside the panel. A secondary
+                    // press is swallowed the same way but arms nothing, so a
+                    // right-click can never dismiss the sheet.
+                    if !presses(p) {
+                        return EventResult::Handled;
+                    }
                     self.scrim_captured = true;
                     self.scrim_down_outside = !self.panel.contains(p.position);
                     ctx.capture_pointer();

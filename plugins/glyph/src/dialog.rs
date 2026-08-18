@@ -143,6 +143,8 @@ use frust::text;
 use frust::{BackPolicy, NavigatorController, PopResult, PushOptions};
 use frust::{TransitionDriver, TransitionSpec, make_driver};
 
+use crate::press::presses;
+
 /// Scrim opacity behind the panel at full enter (an original, hand-picked
 /// value — a terminal-dark modal barrier, heavier than M3's 32% so the amber
 /// panel reads against the void surface).
@@ -1107,8 +1109,7 @@ impl Widget for GlyphDialogWidget {
         };
         match p.phase {
             PointerPhase::Down => {
-                self.scrim_captured = true;
-                self.scrim_down_outside = !self.panel.contains(p.position);
+                let down_outside = !self.panel.contains(p.position);
                 // Dead panel space (padding, the title, the gaps): this Down
                 // reached neither an action nor the body/content slot, yet the
                 // slot held the live session — so it is a blur *inside* the
@@ -1127,9 +1128,20 @@ impl Widget for GlyphDialogWidget {
                 // outside-Down behavior is unchanged, and a scrim tap that
                 // actually dismisses already ends the session through the
                 // navigator's own pop path.
-                if content_held_session && !self.scrim_down_outside {
+                if content_held_session && !down_outside {
                     ctx.publish_ime_state(cleared_ime_state());
                 }
+                // The barrier swallows a secondary press like every other one —
+                // it blocks the page behind it whatever button pressed — but it
+                // arms no scrim dismiss from it, so a right-click can never
+                // close the dialog. The session bookkeeping above is deliberately
+                // *not* button-gated: a `Down` is a blur at the root whatever
+                // button carried it.
+                if !presses(p) {
+                    return EventResult::Handled;
+                }
+                self.scrim_captured = true;
+                self.scrim_down_outside = down_outside;
                 ctx.capture_pointer();
                 EventResult::Handled
             }
@@ -1214,6 +1226,15 @@ mod tests {
             phase,
             position: Point::new(x, y),
             button: PointerButton::Primary,
+        })
+    }
+
+    /// The same event on the secondary (right) button.
+    fn secondary_ev(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: PointerButton::Secondary,
         })
     }
 
@@ -1528,6 +1549,49 @@ mod tests {
             Phase::Enter,
             "a non-dismissible scrim never begins exit"
         );
+    }
+
+    #[test]
+    fn a_secondary_scrim_press_is_swallowed_but_never_dismisses() {
+        let view: GlyphDialogView<()> = glyph_dialog().title("Hi");
+        let mut w = build(&view);
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        w.layout(&mut lctx, &BoxConstraints::tight(Size::new(400.0, 600.0)));
+
+        let mut dummy = ();
+        let dispatch = |w: &mut GlyphDialogWidget, dummy: &mut (), e: &InputEvent| {
+            let s: &mut dyn Any = dummy;
+            let mut ctx = EventCtx::new(s, Point::ZERO, Size::new(400.0, 600.0));
+            w.event(&mut ctx, e)
+        };
+        // The same top-left scrim point a primary tap dismisses from.
+        let r = dispatch(
+            &mut w,
+            &mut dummy,
+            &secondary_ev(PointerPhase::Down, 5.0, 5.0),
+        );
+        assert_eq!(
+            r,
+            EventResult::Handled,
+            "the barrier still swallows it — the page behind stays blocked"
+        );
+        assert!(!w.scrim_captured, "but arms no scrim dismiss");
+        dispatch(
+            &mut w,
+            &mut dummy,
+            &secondary_ev(PointerPhase::Up, 5.0, 5.0),
+        );
+        assert_eq!(
+            w.phase,
+            Phase::Enter,
+            "a right-click never begins the dialog's exit"
+        );
+
+        // The primary scrim tap still dismisses.
+        dispatch(&mut w, &mut dummy, &ev(PointerPhase::Down, 5.0, 5.0));
+        dispatch(&mut w, &mut dummy, &ev(PointerPhase::Up, 5.0, 5.0));
+        assert_eq!(w.phase, Phase::Exit);
     }
 
     // -- `dismissable(bool)` gates the scrim and Escape together --

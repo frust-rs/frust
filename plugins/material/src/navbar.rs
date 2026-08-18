@@ -55,6 +55,8 @@ use peniko::Color;
 
 use frust::authoring::ThemeTextColor;
 
+use super::press::presses;
+
 /// Container height of the current Expressive baseline, in logical px.
 ///
 /// Source: androidx `NavigationBarTokens` (material-components-android
@@ -341,6 +343,9 @@ impl Widget for NavItemWidget {
         };
         match p.phase {
             PointerPhase::Down => {
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 self.pressed = true;
                 self.captured = true;
                 ctx.capture_pointer();

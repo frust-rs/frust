@@ -88,6 +88,8 @@ use peniko::{Brush, Color};
 use frust::Timing;
 use frust::{TransitionDriver, make_driver};
 
+use crate::press::presses;
+
 // ---- Long-press timing ----------------------------------------------------
 
 /// The press duration after which a held press reveals the tooltip.
@@ -478,6 +480,12 @@ impl Widget for TooltipWidget {
         if let InputEvent::Pointer(p) = event {
             match p.phase {
                 PointerPhase::Down => {
+                    // Only a primary press arms the long-press bubble. A
+                    // secondary press still reaches the child (whose own
+                    // context handling, if any, owns it) but opens no capture.
+                    if !presses(p) {
+                        return self.child.event_child(ctx, event);
+                    }
                     self.press = PressState::Pressed {
                         down_pos: p.position,
                         press_start: None,

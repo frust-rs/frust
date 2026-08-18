@@ -56,7 +56,7 @@ use frust::authoring::{
     RoundedRect, SemanticsCtx, Shape, Size, View, Widget, erase_callback_arg,
 };
 
-use crate::hit::inside;
+use crate::hit::{inside, presses};
 use crate::style::{self, PATH_TOLERANCE};
 
 /// Thumb edge, in logical px (`size-4`).
@@ -543,7 +543,7 @@ impl Widget for SliderWidget {
             }
             InputEvent::Pointer(p) => match p.phase {
                 PointerPhase::Down => {
-                    if !inside(p.position, size) {
+                    if !presses(p) || !inside(p.position, size) {
                         return EventResult::Ignored;
                     }
                     // A press anywhere on the row grabs the nearest thumb and jumps
@@ -736,6 +736,15 @@ mod tests {
             phase,
             position: Point::new(x, y),
             button: PointerButton::Primary,
+        })
+    }
+
+    /// The same event on the secondary (right) button.
+    fn secondary(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: PointerButton::Secondary,
         })
     }
 
@@ -936,6 +945,44 @@ mod tests {
         assert_eq!(w.focused_thumb, 1);
         assert_eq!(state.last.clone().unwrap(), vec![10.0, 60.0]);
         assert_eq!(w.values, vec![10.0, 90.0], "the app owns the values");
+    }
+
+    #[test]
+    fn a_secondary_press_never_grabs_a_thumb_or_moves_the_value() {
+        let (mut w, size) = laid_out(view(vec![50.0]));
+        let mut state = Values::default();
+        let seventy = w.center_x(70.0);
+
+        assert_eq!(
+            dispatch(
+                &mut w,
+                &mut state,
+                size,
+                &secondary(PointerPhase::Down, seventy, 8.0)
+            ),
+            EventResult::Ignored
+        );
+        assert_eq!(w.captured, None, "no thumb grabbed, no capture opened");
+        assert_eq!(state.count, 0, "and no value reported");
+
+        // A move after it is an ordinary hover pass, not a drag.
+        dispatch(
+            &mut w,
+            &mut state,
+            size,
+            &pointer(PointerPhase::Move, seventy, 8.0),
+        );
+        assert_eq!(state.count, 0);
+
+        // The primary press still grabs and jumps.
+        dispatch(
+            &mut w,
+            &mut state,
+            size,
+            &pointer(PointerPhase::Down, seventy, 8.0),
+        );
+        assert_eq!(w.captured, Some(0));
+        assert_eq!(state.last.clone().unwrap(), vec![70.0]);
     }
 
     #[test]

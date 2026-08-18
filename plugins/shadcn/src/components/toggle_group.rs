@@ -66,8 +66,9 @@ use frust::authoring::{
     text::{FontWeight, TextStyle},
 };
 
-use crate::components::toggle::{ToggleSize, ToggleVariant, precedence_fill, precedence_ink};
-use crate::style::{self, PATH_TOLERANCE};
+use crate::components::toggle::{ToggleSize, ToggleVariant};
+use crate::hit::presses;
+use crate::style::{self, PATH_TOLERANCE, precedence_fill, precedence_ink};
 use crate::text::{LabelRun, SHAPING_INK};
 use crate::tokens::ShadcnTokens;
 
@@ -663,6 +664,9 @@ impl Widget for ToggleGroupWidget {
             }
             InputEvent::Pointer(p) => match p.phase {
                 PointerPhase::Down => {
+                    if !presses(p) {
+                        return EventResult::Ignored;
+                    }
                     let Some(index) = self.hit_item(p.position, size.height) else {
                         return EventResult::Ignored;
                     };

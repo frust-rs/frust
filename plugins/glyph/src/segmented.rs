@@ -51,6 +51,8 @@ use frust::{Brightness, ShapeScale, Theme};
 use kurbo::{Point, Rect, Size, Vec2};
 use peniko::Color;
 
+use crate::press::presses;
+
 /// Container inner padding, logical px (`.segmented{padding:3px}`).
 const SEG_PAD: f64 = 3.0;
 /// Gap between segments, logical px (`.segmented{gap:2px}`).
@@ -411,6 +413,7 @@ impl Widget for SegmentedControlWidget {
             return EventResult::Ignored;
         };
         match p.phase {
+            PointerPhase::Down if !presses(p) => EventResult::Ignored,
             PointerPhase::Down => match self.hit_index(p.position) {
                 Some(i) => {
                     self.pressed = Some(i);

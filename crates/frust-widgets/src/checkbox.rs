@@ -18,6 +18,7 @@ use frust_theme::Theme;
 use kurbo::{Point, Size};
 use peniko::Color;
 
+use crate::authoring::presses;
 use crate::text;
 
 /// Side length of the check box, in logical px.
@@ -186,6 +187,9 @@ impl Widget for CheckboxWidget {
         };
         match p.phase {
             PointerPhase::Down => {
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 self.pressed = true;
                 self.captured = true;
                 ctx.capture_pointer();
@@ -269,10 +273,43 @@ mod tests {
         })
     }
 
+    /// The same event on the secondary (right) button.
+    fn secondary_ev(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(frust_core::PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: frust_core::PointerButton::Secondary,
+        })
+    }
+
     fn dispatch(w: &mut CheckboxWidget, state: &mut ToggleState, event: &InputEvent) {
         let state_any: &mut dyn Any = state;
         let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(120.0, 24.0));
         w.event(&mut ctx, event);
+    }
+
+    #[test]
+    fn a_secondary_press_never_captures_or_toggles() {
+        let mut w = widget(false);
+        let mut state = ToggleState::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            &secondary_ev(PointerPhase::Down, 5.0, 12.0),
+        );
+        assert!(!w.pressed);
+        assert!(!w.captured, "no capture for the shell to get stuck on");
+        dispatch(
+            &mut w,
+            &mut state,
+            &secondary_ev(PointerPhase::Up, 5.0, 12.0),
+        );
+        assert_eq!(state.toggles, 0);
+
+        // The primary gesture still toggles.
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 5.0, 12.0));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 5.0, 12.0));
+        assert_eq!(state.toggles, 1);
     }
 
     #[test]

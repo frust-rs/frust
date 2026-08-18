@@ -79,6 +79,8 @@ use peniko::{Brush, Color};
 use frust::Timing;
 use frust::{TransitionDriver, make_driver};
 
+use crate::press::presses;
+
 // ---- Metrics (compact bar, retrieved 2026-07-22) ---------------------------
 
 /// Compact content-bar height, logical px (`.appbar{height:52px}`). The top
@@ -1483,7 +1485,10 @@ impl AppBarWidget {
                     }
                     PointerPhase::Down => {}
                 }
-            } else if p.phase == PointerPhase::Down && self.close_rect.contains(p.position) {
+            } else if p.phase == PointerPhase::Down
+                && presses(p)
+                && self.close_rect.contains(p.position)
+            {
                 self.close_pressed = true;
                 self.close_captured = true;
                 ctx.capture_pointer();

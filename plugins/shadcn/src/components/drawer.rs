@@ -16,14 +16,35 @@
 //! and so it is here. `DrawerContent` carries **no shadow class** — unlike the
 //! sheet's `shadow-lg` — and no close button.
 //!
-//! # Drag-to-close: not in v1
+//! # Drag-to-close and snap points
 //!
-//! vaul's whole premise is a draggable sheet. This port's handle is a
-//! **button**: a press and release on it dismisses ([`crate::overlay::modal`]'s
-//! handle contract), alongside the scrim tap and Escape. The drag gesture —
-//! capture on the handle's `Down`, track the panel with the pointer, a
-//! `Grabbing` cursor, a velocity/threshold commit — is a deferred residual, not
-//! an oversight; nothing in the shipped widget pretends to be draggable.
+//! vaul's whole premise is a draggable sheet, and this port's drawer is one on
+//! all four edges: a press on the handle — or anywhere on the panel its content
+//! did not take — captures, the panel tracks the pointer along its own axis
+//! (`Grabbing` while it does, `Grab` over the handle at rest), and the release
+//! commits by position and velocity. Past the midpoint (or on a fast flick
+//! toward the edge) the drawer continues into the exit ramp and closes;
+//! anything shorter settles back open. A press that never moves is still a tap:
+//! on the handle it dismisses, which is the button behavior this port shipped
+//! before the gesture existed.
+//!
+//! [`DrawerView::snap_points`] adds Base UI's intermediate resting points — a
+//! fraction of the drawer's extent below `1`, logical px above it. The drawer
+//! opens at the first point and a release snaps to the nearest one (closing
+//! counts as a point of its own), with a flick taking the next one along.
+//! [`crate::overlay::modal`] owns the mechanics for both.
+//!
+//! `drag` is unconditionally on ([`config`] sets it regardless of whether
+//! [`DrawerView::on_dismiss`]/[`DrawerView::on_close`] is wired) — matching
+//! vaul, which never gates the gesture itself on a close callback existing.
+//! What *is* gated is the outcome: a drawer with neither hook wired still
+//! drags, but a release past the closing threshold springs back open instead
+//! of closing (`crate::overlay::modal`'s dismissable-only exit-ramp rule),
+//! the same reachability floor Escape already applied.
+//!
+//! A controlled `active_snap_point` (with its `on_snap_change` companion) is
+//! **not** in this pass: the drawer owns its resting point internally, and an
+//! app that needs to drive one from its own state has no seam for it yet.
 //!
 //! # Slots
 //!
@@ -118,12 +139,14 @@ impl DrawerSide {
 }
 
 /// The drawer panel's chrome for `side`: [`ModalConfig::edge`]'s pinning, with
-/// the drawer's own corners, `max-h-[80vh]` cap, absent shadow and handle.
+/// the drawer's own corners, `max-h-[80vh]` cap, absent shadow, handle, and
+/// vaul's drag gesture on every edge.
 fn config(side: DrawerSide) -> ModalConfig {
     let mut config = ModalConfig::edge(side.overlay_side())
         .corners(side.corners())
         .shadow(None)
-        .handle(side.has_handle());
+        .handle(side.has_handle())
+        .drag(true);
     if side.overlay_side().is_vertical() {
         config = config.extent(
             ModalExtent::Content,
@@ -185,10 +208,28 @@ impl<State: 'static> DrawerView<State> {
         self
     }
 
-    /// Set the dismiss callback — a scrim tap, the drag handle, or Escape.
-    /// [`show_drawer`] wires this to `controller.pop()`.
+    /// Set the **unstaged** dismiss callback — a scrim tap, the drag handle, or
+    /// Escape — used only when no [`on_close`](Self::on_close) hook is wired
+    /// (see [`crate::overlay::modal`]'s exit-motion contract).
+    /// [`show_drawer`] wires both.
     pub fn on_dismiss<F: Fn(&mut State) + 'static>(mut self, on_dismiss: F) -> Self {
         self.inner = self.inner.on_dismiss(on_dismiss);
+        self
+    }
+
+    /// Set the state-free close hook fired once the exit ramp has settled —
+    /// what a `Stack`-mounted drawer wires instead of `on_dismiss` to animate
+    /// out. [`show_drawer`] wires this to `controller.pop()`.
+    pub fn on_close<F: Fn() + 'static>(mut self, on_close: F) -> Self {
+        self.inner = self.inner.on_close(on_close);
+        self
+    }
+
+    /// Set the drawer's snap points: a fraction of its extent at or below `1`,
+    /// logical px above it (see the [module docs](self)). The drawer opens at
+    /// the first point.
+    pub fn snap_points(mut self, points: &[f64]) -> Self {
+        self.inner = self.inner.snap_points(points);
         self
     }
 }
@@ -239,10 +280,12 @@ mod tests {
     use crate::overlay::modal::tests::{Block, Recorder, WINDOW, escape, ft_ms, pointer};
     use frust::Brightness;
     use frust::authoring::{
-        BoxConstraints, EventCtx, InputEvent, LayoutCtx, PaintCtx, Point, PointerPhase, Size,
-        Widget, any, text::TextContext,
+        BoxConstraints, CursorIcon, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, Point,
+        PointerButton, PointerEvent, PointerPhase, Size, Widget, any, text::TextContext,
     };
+    use frust_core::RenderRoot;
     use std::any::Any;
+    use std::cell::Cell;
 
     #[derive(Default)]
     struct Flags {
@@ -287,6 +330,28 @@ mod tests {
         let state_any: &mut dyn Any = state;
         let mut ctx = EventCtx::new(state_any, Point::ZERO, WINDOW);
         w.event(&mut ctx, event);
+    }
+
+    /// The same event on the secondary (right) button.
+    fn secondary(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: PointerButton::Secondary,
+        })
+    }
+
+    /// [`dispatch`], also reporting whether the event was consumed and whether
+    /// the widget asked for the pointer.
+    fn dispatch_probe(
+        w: &mut ModalWidget,
+        state: &mut Flags,
+        event: &InputEvent,
+    ) -> (EventResult, bool) {
+        let state_any: &mut dyn Any = state;
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, WINDOW);
+        let result = w.event(&mut ctx, event);
+        (result, ctx.is_pointer_captured())
     }
 
     #[test]
@@ -350,6 +415,237 @@ mod tests {
 
         dispatch(&mut w, &mut state, &escape());
         assert_eq!(state.dismissed, 3);
+    }
+
+    #[test]
+    fn a_drawer_with_no_dismiss_hook_springs_back_from_a_drag_instead_of_wedging() {
+        // Neither `on_dismiss` nor `on_close` wired — `drawer` alone, not
+        // `sample` (which wires `on_dismiss`).
+        let mut w = build(&drawer(
+            DrawerSide::Bottom,
+            vec![drawer_header(vec![drawer_title("Move goal")])],
+        ));
+        layout(&mut w);
+        settle(&mut w);
+        let extent = w.panel_rect().height();
+        let start = w.handle_rect().unwrap().center();
+        let mut state = Flags::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, start.x, start.y),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Move, start.x, start.y + extent * 0.9),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Up, start.x, start.y + extent * 0.9),
+        );
+        for ms in [3000.0, 5000.0] {
+            let mut ctx = PaintCtx::for_test(Point::ORIGIN, WINDOW, ft_ms(ms));
+            w.paint(&mut ctx, &mut Recorder::default());
+            layout(&mut w);
+        }
+        assert!(
+            (w.progress() - 1.0).abs() < 1e-9,
+            "springs back open rather than sticking invisible near zero: {}",
+            w.progress()
+        );
+        assert_eq!(state.dismissed, 0);
+
+        // The panel is still hittable and interactive after the recovery — a
+        // fresh handle press still captures normally, not lost to a stuck
+        // capture flag left over from the sprung-back drag.
+        let (result, captured) = dispatch_probe(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, start.x, start.y),
+        );
+        assert_eq!(result, EventResult::Handled);
+        assert!(captured, "the handle still captures a fresh press");
+    }
+
+    #[test]
+    fn a_secondary_press_is_swallowed_but_drags_and_dismisses_nothing() {
+        let mut w = build(&sample(DrawerSide::Bottom));
+        layout(&mut w);
+        settle(&mut w);
+        let mut state = Flags::default();
+        let handle = w.handle_rect().unwrap().center();
+
+        let (result, captured) = dispatch_probe(
+            &mut w,
+            &mut state,
+            &secondary(PointerPhase::Down, handle.x, handle.y),
+        );
+        assert_eq!(
+            result,
+            EventResult::Handled,
+            "the barrier still blocks the page behind it, whatever button pressed"
+        );
+        assert!(!captured, "but it opens no drag and takes no capture");
+        dispatch(
+            &mut w,
+            &mut state,
+            &secondary(PointerPhase::Move, handle.x, handle.y + 60.0),
+        );
+        assert_eq!(w.progress(), 1.0, "the panel never followed the pointer");
+        dispatch(
+            &mut w,
+            &mut state,
+            &secondary(PointerPhase::Up, handle.x, handle.y),
+        );
+        assert_eq!(state.dismissed, 0);
+
+        // The scrim swallows a secondary press the same way, and dismisses on
+        // neither half of it.
+        let (result, _) =
+            dispatch_probe(&mut w, &mut state, &secondary(PointerPhase::Down, 5.0, 5.0));
+        assert_eq!(result, EventResult::Handled);
+        dispatch(&mut w, &mut state, &secondary(PointerPhase::Up, 5.0, 5.0));
+        assert_eq!(state.dismissed, 0);
+
+        // The primary gesture still dismisses off the handle.
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, handle.x, handle.y),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Up, handle.x, handle.y),
+        );
+        assert_eq!(state.dismissed, 1);
+    }
+
+    /// The `(axis, closing direction)` a drawer on `side` drags along: `+1`
+    /// when leaving means growing coordinates.
+    fn close_dir(side: DrawerSide) -> (bool, f64) {
+        match side {
+            DrawerSide::Bottom => (true, 1.0),
+            DrawerSide::Top => (true, -1.0),
+            DrawerSide::Right => (false, 1.0),
+            DrawerSide::Left => (false, -1.0),
+        }
+    }
+
+    #[test]
+    fn every_edge_enters_flush_and_drags_out_to_close() {
+        for side in [
+            DrawerSide::Bottom,
+            DrawerSide::Top,
+            DrawerSide::Right,
+            DrawerSide::Left,
+        ] {
+            let closed = Rc::new(Cell::new(0u32));
+            let hook = closed.clone();
+            let mut w = build(&sample(side).on_close(move || hook.set(hook.get() + 1)));
+            layout(&mut w);
+            settle(&mut w);
+            let panel = w.panel_rect();
+            // Flush against its own edge once the slide is over, with the
+            // rounding that edge calls for (`rounded-t-lg` / `rounded-b-lg`,
+            // square on a side drawer).
+            match side {
+                DrawerSide::Bottom => {
+                    assert_eq!(panel.y1, WINDOW.height);
+                    assert_eq!(side.corners(), ModalCorners::Top);
+                }
+                DrawerSide::Top => {
+                    assert_eq!(panel.y0, 0.0);
+                    assert_eq!(side.corners(), ModalCorners::Bottom);
+                }
+                DrawerSide::Right => {
+                    assert_eq!(panel.x1, WINDOW.width);
+                    assert_eq!(side.corners(), ModalCorners::None);
+                }
+                DrawerSide::Left => {
+                    assert_eq!(panel.x0, 0.0);
+                    assert_eq!(side.corners(), ModalCorners::None);
+                }
+            }
+
+            // Drag from the panel's own surface, most of the way out.
+            let (vertical, dir) = close_dir(side);
+            let extent = if vertical {
+                panel.height()
+            } else {
+                panel.width()
+            };
+            let start = panel.center();
+            let travel = dir * extent * 0.7;
+            let (dx, dy) = if vertical {
+                (0.0, travel)
+            } else {
+                (travel, 0.0)
+            };
+            let mut state = Flags::default();
+            dispatch(
+                &mut w,
+                &mut state,
+                &pointer(PointerPhase::Down, start.x, start.y),
+            );
+            dispatch(
+                &mut w,
+                &mut state,
+                &pointer(PointerPhase::Move, start.x + dx, start.y + dy),
+            );
+            assert!(
+                (w.progress() - 0.3).abs() < 1e-9,
+                "{side:?} tracks the pointer: {}",
+                w.progress()
+            );
+            dispatch(
+                &mut w,
+                &mut state,
+                &pointer(PointerPhase::Up, start.x + dx, start.y + dy),
+            );
+            for ms in [3000.0, 5000.0] {
+                let mut ctx = PaintCtx::for_test(Point::ORIGIN, WINDOW, ft_ms(ms));
+                w.paint(&mut ctx, &mut Recorder::default());
+                layout(&mut w);
+            }
+            assert_eq!(closed.get(), 1, "{side:?} closed");
+            assert_eq!(w.progress(), 0.0);
+            assert_eq!(state.dismissed, 0, "the staged hook, not the raw callback");
+        }
+    }
+
+    #[test]
+    fn the_cursor_is_grab_over_the_handle_and_grabbing_while_dragging() {
+        let mut root: RenderRoot<Flags, DrawerView<Flags>> = RenderRoot::new();
+        let mut state = Flags::default();
+        let mut logic = |_: &mut Flags| sample(DrawerSide::Bottom);
+        root.rebuild(&mut logic, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
+        // Two frames to settle the slide, relaying out between them.
+        for ms in [0.0, 2000.0] {
+            root.paint(&mut Recorder::default(), ft_ms(ms));
+            root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
+        }
+        // Where the handle lands, measured off an identically laid-out widget
+        // (the root hands out no widget reference of its own).
+        let handle = {
+            let mut probe = build(&sample(DrawerSide::Bottom));
+            layout(&mut probe);
+            settle(&mut probe);
+            probe.handle_rect().expect("a handle").center()
+        };
+        root.event(&mut state, &pointer(PointerPhase::Move, handle.x, handle.y));
+        assert_eq!(root.cursor(), CursorIcon::Grab);
+
+        root.event(&mut state, &pointer(PointerPhase::Down, handle.x, handle.y));
+        root.event(
+            &mut state,
+            &pointer(PointerPhase::Move, handle.x, handle.y + 60.0),
+        );
+        assert_eq!(root.cursor(), CursorIcon::Grabbing);
     }
 
     #[test]

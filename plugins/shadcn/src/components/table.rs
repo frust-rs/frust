@@ -54,7 +54,7 @@ use frust::authoring::{
 use frust::{TextView, Theme, text};
 
 use crate::components::input::FALLBACK;
-use crate::hit::inside;
+use crate::hit::{inside, presses};
 use crate::style;
 
 /// Cell padding: `p-2` on a body cell, `px-2` on a head cell.
@@ -585,6 +585,9 @@ impl Widget for TableWidget {
                 EventResult::Handled
             }
             PointerPhase::Down => {
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 let Some(index) = self
                     .row_at(p.position, size)
                     .filter(|i| self.is_activatable(*i))

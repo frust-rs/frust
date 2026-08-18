@@ -74,6 +74,8 @@ use kurbo::{Point, Rect, Size, Vec2};
 use peniko::Color;
 use std::time::Duration;
 
+use crate::press::presses;
+
 /// Horizontal padding per tab, logical px (`.tab{padding:10px 4px}` → 4px
 /// horizontal).
 const TAB_PAD_X: f64 = 4.0;
@@ -559,6 +561,11 @@ impl Widget for TabsWidget {
         };
         match p.phase {
             PointerPhase::Down => {
+                // Only a primary press arms a tab tap or a pan; a secondary
+                // press is a context gesture and operates neither.
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 self.down_start = p.position;
                 self.panning = false;
                 match self.hit_index(p.position) {

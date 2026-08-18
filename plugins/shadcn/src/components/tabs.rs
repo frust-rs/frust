@@ -72,6 +72,7 @@ use frust::authoring::{
 };
 use frust::{AnimationController, Brightness, ChildKey, Curve, FrameTime, Theme};
 
+use crate::hit::presses;
 use crate::style::{self, PATH_TOLERANCE};
 use crate::text::{LabelRun, SHAPING_INK};
 use crate::tokens::ShadcnTokens;
@@ -799,6 +800,9 @@ impl Widget for TabsWidget {
             }
             InputEvent::Pointer(p) => match p.phase {
                 PointerPhase::Down => {
+                    if !presses(p) {
+                        return EventResult::Ignored;
+                    }
                     let Some(index) = self.hit_trigger(p.position) else {
                         return EventResult::Ignored;
                     };

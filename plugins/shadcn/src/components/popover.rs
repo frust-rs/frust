@@ -18,10 +18,15 @@
 //! wrapper over that host: it builds the panel, hands the host the placement, and
 //! maps the host's dismiss onto `on_open_change(false)`.
 //!
-//! Open/close is **controlled**: the app owns the flag, mounts the host while it
-//! is set, and gets every close request (a press outside, Escape) through
-//! `on_open_change`. There is no uncontrolled mode — mounting *is* the open
-//! state, and a widget cannot mount itself.
+//! Open/close is **controlled**: the app owns the flag and gets every close
+//! request (a press outside, Escape) through `on_open_change`. There is no
+//! uncontrolled mode — a widget cannot open itself.
+//!
+//! Two mounts are supported, and [`crate::overlay::anchored`] documents both.
+//! Mounting the popover only while the flag is set is the simple one; mounting
+//! it always and handing the flag down through [`PopoverView::open`] is the
+//! **kept-mounted** pattern, and the only one that can play an exit ramp (see
+//! the panel section below).
 //!
 //! # The shared panel
 //!
@@ -32,16 +37,42 @@
 //! in padding and width. They live here because the popover is the family's
 //! archetype, exactly as `native_select` owns the shared chevron.
 //!
-//! Two class lists are deliberately not modelled:
+//! `data-[side=*]:slide-in-from-*` — the 8px directional slide that rides along
+//! with the entrance — is deliberately not modelled: the host resolves the side
+//! (it may flip), and the panel is not told which side it landed on, so the
+//! slide has no direction to take. The fade and the zoom carry the entrance on
+//! their own.
 //!
-//! * **`data-[side=*]:slide-in-from-*`** — the 8px directional slide that rides
-//!   along with the entrance. The host resolves the side (it may flip), and the
-//!   panel is not told which side it landed on, so the slide has no direction to
-//!   take. The fade and the zoom carry the entrance on their own.
-//! * **The exit animation** (`data-[state=closed]:*`). A closed overlay is
-//!   unmounted by the app on the frame it closes, so there is no widget left to
-//!   run an exit ramp — the same limit every unmount-on-close overlay in the
-//!   catalog has.
+//! # The exit ramp
+//!
+//! `data-[state=closed]:fade-out-0 zoom-out-95` is the entrance played
+//! backwards, and the panel runs it off the same frame clock. A panel handed
+//! `open == false` ramps its presence down to zero over the entrance's own
+//! 200ms **scaled to how much travel is left** (a half-open panel closes in
+//! half the time, at the same rate rather than at half speed over the full
+//! duration — `PanelWidget::begin_ramp`, mirroring `ModalWidget::begin_ramp`),
+//! goes on painting the whole way, and paints nothing at all once it settles.
+//! Reopening mid-ramp reverses from wherever the presence had got to rather
+//! than snapping back to transparent — again at the scaled rate — and
+//! `reduce_motion` collapses both directions to a jump.
+//!
+//! **A closing panel is inert to everything but a press that lands on it.** It
+//! claims no hover, takes no key, and forwards nothing to its own content — so
+//! nothing inside a panel already dismissed can be triggered by a press during
+//! the ramp — but a `Down` that lands on the panel while it is still visually
+//! present (`presence > 0.0`) is nonetheless *swallowed*, not passed through to
+//! whatever the page has underneath (the anchored host's exit-ramp swallow, see
+//! [`crate::overlay::anchored`]'s Dismissal section). A `Down` outside the
+//! panel, and every press once the ramp has fully settled, still passes through
+//! untouched: the click that dismissed the popover already reached the page,
+//! and that is preserved.
+//!
+//! This needs the kept-mounted pattern: a panel the app unmounts on close has no
+//! frames left to ramp in, and the exit is simply truncated (see
+//! [`crate::overlay::anchored`]'s mounting docs). Either way the close is
+//! reported to the app **immediately** — `on_open_change(false)` fires from the
+//! dismiss event itself, so app state is never lagging behind the animation; it
+//! is only the pixels that linger.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -55,7 +86,7 @@ use frust::authoring::{
 use frust::{AnimationController, Curve, Theme};
 use std::time::Duration;
 
-use crate::hit::inside;
+use crate::hit::{inside, presses};
 use crate::overlay::{
     AnchoredOverlayView, AnchoredOverlayWidget, OverlayAlign, OverlayAnchor, OverlayPlacement,
     OverlaySide, anchor as capture_anchor, anchored,
@@ -73,9 +104,10 @@ pub(crate) const MENU_PADDING: f64 = 4.0;
 /// `min-w-[8rem]` — the menu/select panel's minimum width, in logical px.
 pub(crate) const MIN_MENU_WIDTH: f64 = 128.0;
 
-/// `duration-200` — the entrance ramp, shared with the modal family.
+/// `duration-200` — the entrance ramp, shared with the modal family. The exit
+/// (`data-[state=closed]:*`) is the same ramp run backwards.
 const ENTRANCE_MS: u64 = 200;
-/// `zoom-in-95` — the scale the entrance starts from.
+/// `zoom-in-95`/`zoom-out-95` — the scale the ramp starts from and returns to.
 const ZOOM_FROM: f64 = 0.95;
 /// Below this the progress is treated as unchanged (no frame is asked for).
 const PROGRESS_EPSILON: f64 = 1e-4;
@@ -106,8 +138,14 @@ pub(crate) struct PanelStyle {
     pub anchor: Option<OverlayAnchor>,
     /// The panel's shadow rung.
     pub shadow: ShadcnShadow,
-    /// Whether the panel runs the `fade-in-0 zoom-in-95` entrance.
+    /// Whether the panel runs the `fade-in-0 zoom-in-95` ramp at all. A panel
+    /// whose parent composites it (the hover card, inside the tooltip layer)
+    /// sets this `false` and is always fully present.
     pub entrance: bool,
+    /// Whether the panel is open. Flipping it to `false` on a **mounted** panel
+    /// starts the exit ramp (see the [module docs](self)); the default `true` is
+    /// the mount-on-open contract.
+    pub open: bool,
 }
 
 impl PanelStyle {
@@ -121,6 +159,7 @@ impl PanelStyle {
             anchor: None,
             shadow: style::SHADOW_MD,
             entrance: true,
+            open: true,
         }
     }
 
@@ -134,6 +173,7 @@ impl PanelStyle {
             anchor: None,
             shadow: style::SHADOW_MD,
             entrance: true,
+            open: true,
         }
     }
 
@@ -175,16 +215,96 @@ pub(crate) struct PanelWidget {
     content: ChildPod,
     style: PanelStyle,
     anim: AnimationController,
+    /// Whether the mount pass has taken its first ramp decision.
     started: bool,
-    progress: f64,
+    /// The open flag the last paint ramped toward — a change is what starts the
+    /// entrance or the exit.
+    was_open: bool,
+    /// How present the panel is: `0.0` gone, `1.0` settled. One value for both
+    /// directions, since the exit is the entrance backwards.
+    presence: f64,
+    /// The `(from, to)` presence the running ramp interpolates between —
+    /// `anim` itself only ever drives `0.0..=1.0`, eased; this is what maps
+    /// that back onto the presence range (mirrors `ModalWidget::ramp`/`begin_ramp`).
+    ramp: (f64, f64),
 }
 
 impl PanelWidget {
-    /// The entrance ramp's progress, `0.0` at mount and `1.0` at rest —
-    /// introspection for this crate's own tests.
+    /// How present the panel is — `0.0` gone, `1.0` settled. Introspection for
+    /// this crate's own tests.
     #[cfg(test)]
     pub(crate) fn progress(&self) -> f64 {
-        self.progress
+        self.presence
+    }
+
+    /// Start a ramp from the current presence to `to`, over the entrance's own
+    /// duration scaled by how much of the travel is left — a half-open panel
+    /// closes in half the time, rather than at half speed over the full 200ms
+    /// (mirrors `ModalWidget::begin_ramp`, which this was ported from: a
+    /// reverse-mid-entrance interrupt must cover the same *distance* in the
+    /// same *rate*, not the same wall-clock duration regardless of distance).
+    fn begin_ramp(&mut self, to: f64) {
+        let from = self.presence;
+        self.ramp = (from, to);
+        let fraction = (to - from).abs().clamp(0.0, 1.0);
+        let duration = Duration::from_millis(ENTRANCE_MS).mul_f64(fraction);
+        self.anim = AnimationController::new(duration).with_curve(Curve::EaseOut);
+        self.anim.forward();
+    }
+
+    /// The presence the running ramp is at, mapping `anim`'s own `0.0..=1.0`
+    /// eased drive back onto the `(from, to)` presence range `begin_ramp` set up.
+    fn ramp_value(&self) -> f64 {
+        let (from, to) = self.ramp;
+        from + (to - from) * self.anim.value_clamped()
+    }
+
+    /// Take this paint's ramp decision, returning the presence to paint at.
+    ///
+    /// Split out of [`Widget::paint`] so the paint arm reads as chrome: this is
+    /// the whole open/close state machine, and it is the only thing that touches
+    /// the controller.
+    fn ramp(&mut self, ctx: &mut PaintCtx, reduce_motion: bool) -> f64 {
+        let open = self.style.open;
+        // A panel that mounts already closed has nothing to ramp out of, so it
+        // joins the two standing instant cases rather than running a no-op
+        // reverse that asks for 200ms of frames.
+        let instant = reduce_motion || !self.style.entrance || (!self.started && !open);
+        if !self.started || open != self.was_open {
+            self.started = true;
+            self.was_open = open;
+            if instant {
+                self.anim.stop();
+                self.presence = if open { 1.0 } else { 0.0 };
+            } else {
+                // Both directions start from the presence the panel already
+                // had, so reopening mid-exit reverses from where the ramp had
+                // got to — and, since `begin_ramp` scales the duration to the
+                // remaining travel, at the same rate the interrupted ramp was
+                // running at, not at half speed over the full duration.
+                self.begin_ramp(if open { 1.0 } else { 0.0 });
+            }
+        }
+        if instant {
+            // `reduce_motion` collapses either direction to a jump and stops
+            // asking for frames.
+            if self.anim.is_animating() {
+                self.anim.stop();
+            }
+            self.presence = if open { 1.0 } else { 0.0 };
+        } else if self.anim.is_animating() {
+            if self.anim.advance(ctx.frame_time()) {
+                ctx.request_frame();
+            }
+            let next = self.ramp_value();
+            if (next - self.presence).abs() > PROGRESS_EPSILON {
+                // One more frame to paint the value just computed — including
+                // the settled one the final advance lands on.
+                ctx.request_frame();
+            }
+            self.presence = next;
+        }
+        self.presence
     }
 }
 
@@ -197,8 +317,12 @@ impl<State: 'static> View<State> for PanelView<State> {
             content: build_child(&self.content, ctx),
             anim: AnimationController::new(Duration::from_millis(ENTRANCE_MS))
                 .with_curve(Curve::EaseOut),
-            started: !style.entrance,
-            progress: if style.entrance { 0.0 } else { 1.0 },
+            started: false,
+            // Seeded closed so the first paint's ramp decision reads as an
+            // open edge and runs the entrance.
+            was_open: false,
+            presence: 0.0,
+            ramp: (0.0, 0.0),
             style,
         }
     }
@@ -217,6 +341,10 @@ impl<State: 'static> View<State> for PanelView<State> {
             || style.min_width != element.style.min_width
         {
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        if style.open != element.style.open {
+            // The paint is what starts the ramp, in either direction.
+            flags |= ChangeFlags::PAINT;
         }
         element.style = style;
         flags
@@ -253,7 +381,6 @@ impl Widget for PanelWidget {
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let (origin, size) = (ctx.origin(), ctx.size());
-        let now = ctx.frame_time();
         // One scope for every theme read: a live `&Theme` borrows the context,
         // and the frame requests plus the child paint below need it mutably.
         let (reduce_motion, radius, fill, border, shadow) = {
@@ -267,42 +394,23 @@ impl Widget for PanelWidget {
             )
         };
 
-        if !self.started {
-            self.started = true;
-            if !reduce_motion {
-                self.anim.forward();
-            }
+        let presence = self.ramp(ctx, reduce_motion);
+        if !self.style.open && presence <= 0.0 {
+            // Settled closed: the exit ramp is over and there is nothing left to
+            // draw. The widget stays mounted, costing a layout and this check.
+            return;
         }
-        let next = if reduce_motion {
-            // `reduce_motion` collapses the entrance to a jump and stops asking
-            // for frames.
-            if self.anim.is_animating() {
-                self.anim.stop();
-            }
-            1.0
-        } else if self.anim.is_animating() {
-            if self.anim.advance(now) {
-                ctx.request_frame();
-            }
-            self.anim.value_clamped()
-        } else {
-            self.progress
-        };
-        if (next - self.progress).abs() > PROGRESS_EPSILON {
-            self.progress = next;
-            ctx.request_frame();
-        }
-        let progress = self.progress;
 
-        let entering = progress < 1.0;
-        if entering {
-            // `fade-in-0`: composite the panel at the ramp's alpha, over a layer
-            // inflated so the shadow that reaches outside it is not clipped away.
+        let ramping = presence < 1.0;
+        if ramping {
+            // `fade-in-0`/`fade-out-0`: composite the panel at the ramp's alpha,
+            // over a layer inflated so the shadow that reaches outside it is not
+            // clipped away.
             let layer = Rect::from_origin_size(origin, size).inflate(SHADOW_SPILL, SHADOW_SPILL);
-            scene.push_layer(layer.origin(), layer.size(), progress as f32);
-            // …and `zoom-in-95`: scale about the panel's own centre.
+            scene.push_layer(layer.origin(), layer.size(), presence as f32);
+            // …and `zoom-in-95`/`zoom-out-95`: scale about the panel's own centre.
             let c = Rect::from_origin_size(origin, size).center();
-            let scale = ZOOM_FROM + (1.0 - ZOOM_FROM) * progress;
+            let scale = ZOOM_FROM + (1.0 - ZOOM_FROM) * presence;
             scene.push_transform(
                 Affine::translate(c.to_vec2())
                     * Affine::scale(scale)
@@ -324,13 +432,36 @@ impl Widget for PanelWidget {
         scene.pop_clip();
         stroke_panel_border(scene, origin, size, radius, border);
 
-        if entering {
+        if ramping {
             scene.pop_transform();
             scene.pop_layer();
         }
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        // A broadcast reaches the content whatever the panel's state — it is
+        // never consumed, and it is what keeps the pods live.
+        if event.is_broadcast() {
+            return route_event_single(&mut self.content, ctx, event);
+        }
+        // A closed or closing panel forwards nothing to its content and claims
+        // no hover/focus (the module docs' exit ramp) — but while it is still
+        // visually present (`presence > 0.0`) a `Down` is nonetheless
+        // *swallowed* here, unconditionally `Handled` with no other effect. The
+        // anchored host only ever reaches this arm for a `Down` that already
+        // landed inside `content_rect` — its own `route_event_single` call does
+        // that hit test — so this can never claim a press outside the panel;
+        // it only stops one that is still on top of it from falling through to
+        // whatever the page has underneath. Once the ramp settles, `presence`
+        // is exactly `0.0` and the panel is fully out of the loop again.
+        if !self.style.open {
+            if self.presence > 0.0
+                && matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Down)
+            {
+                return EventResult::Handled;
+            }
+            return EventResult::Ignored;
+        }
         // A focus-routed event reaches the content unconditionally. The panel is
         // pure chrome around exactly one child and never focuses itself, so the
         // focus-path gate the shared helper applies would strand a key in a panel
@@ -346,7 +477,10 @@ impl Widget for PanelWidget {
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
-        self.content.semantics_child(ctx);
+        // A panel on its way out is not there to be read.
+        if self.style.open {
+            self.content.semantics_child(ctx);
+        }
     }
 
     visit_children!(content);
@@ -421,6 +555,17 @@ impl<State: 'static> PopoverView<State> {
     /// Override the panel's `w-72` width.
     pub fn width(self, width: f64) -> Self {
         self.style.borrow_mut().width = Some(width);
+        self
+    }
+
+    /// Hand a **kept-mounted** popover the app's open flag, so closing it plays
+    /// the exit ramp instead of vanishing (see the [module docs](self)).
+    ///
+    /// The default is `true`: a mounted popover is an open one, which is what a
+    /// mount-on-open app wants.
+    pub fn open(mut self, open: bool) -> Self {
+        self.style.borrow_mut().open = open;
+        self.inner = self.inner.open(open);
         self
     }
 
@@ -567,7 +712,7 @@ impl Widget for PopoverTriggerWidget {
         };
         let inside = inside(p.position, ctx.size());
         match p.phase {
-            PointerPhase::Down if inside => {
+            PointerPhase::Down if inside && presses(p) => {
                 self.captured = true;
                 ctx.capture_pointer();
                 // Focus is what routes Escape to the overlay's host afterwards.
@@ -713,27 +858,94 @@ pub(crate) mod tests {
     struct AppState {
         open: bool,
         opens: Vec<bool>,
+        /// Presses a widget sitting *under* the trigger and the popover host
+        /// in the stack actually received — the ground truth for whether a
+        /// press fell through to the page rather than merely asserting on
+        /// `EventResult` at the host boundary (see [`PageProbe`]).
+        page_presses: u32,
+    }
+
+    /// A full-area leaf sitting under the trigger and the popover host in the
+    /// stack — "the page". Reports every `Down` it receives into
+    /// [`AppState::page_presses`], so a test can prove a press did or did not
+    /// fall through the (closing) host down to it, rather than only checking
+    /// the host's own `EventResult`.
+    struct PageProbe;
+
+    /// The retained half of [`PageProbe`].
+    struct PageProbeWidget;
+
+    impl View<AppState> for PageProbe {
+        type Element = PageProbeWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> PageProbeWidget {
+            PageProbeWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut PageProbeWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    impl Widget for PageProbeWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            let InputEvent::Pointer(p) = event else {
+                return EventResult::Ignored;
+            };
+            if p.phase == PointerPhase::Down {
+                ctx.state_mut::<AppState>().page_presses += 1;
+                return EventResult::Handled;
+            }
+            EventResult::Ignored
+        }
+        fn semantics(&self, _ctx: &mut SemanticsCtx) {}
     }
 
     const TRIGGER: Size = Size::new(80.0, 36.0);
     const CONTENT: Size = Size::new(120.0, 40.0);
 
-    /// The mount an app uses: the trigger in the page, the panel as the top
-    /// child of a full-area [`frust::Stack`] while the app's flag is set.
+    /// The mount an app uses: [`PageProbe`] standing in for "the rest of the
+    /// page", the trigger, and the panel as the top child of a full-area
+    /// [`frust::Stack`].
+    ///
+    /// `kept` picks between the two mount contracts — mount-on-open (the panel
+    /// is in the tree only while the flag is set) and kept-mounted (it is always
+    /// in the tree, handed the flag through `open`), which is the one an exit
+    /// ramp needs.
     struct Harness {
         root: RenderRoot<AppState, frust::StackView<AppState>>,
         state: AppState,
         tcx: TextContext,
         anchor: OverlayAnchor,
+        kept: bool,
+        clock: f64,
     }
 
     impl Harness {
         fn new() -> Self {
+            Self::with_mount(false)
+        }
+
+        /// A kept-mounted harness — the pattern an exit ramp requires.
+        fn kept_mounted() -> Self {
+            Self::with_mount(true)
+        }
+
+        fn with_mount(kept: bool) -> Self {
             let mut h = Harness {
                 root: RenderRoot::new(),
                 state: AppState::default(),
                 tcx: TextContext::new(),
                 anchor: OverlayAnchor::new(),
+                kept,
+                clock: 0.0,
             };
             h.root.set_theme(Box::new(light()));
             h.pass();
@@ -742,6 +954,7 @@ pub(crate) mod tests {
 
         fn pass(&mut self) {
             let anchor = self.anchor.clone();
+            let kept = self.kept;
             let mut logic = move |state: &mut AppState| {
                 let trigger =
                     popover_trigger(&anchor, SizedBox(Some(TRIGGER.width), Some(TRIGGER.height)))
@@ -750,14 +963,15 @@ pub(crate) mod tests {
                             s.opens.push(open);
                             s.open = open;
                         });
-                let mut children = vec![any(trigger)];
-                if state.open {
+                let mut children = vec![any(PageProbe), any(trigger)];
+                if kept || state.open {
                     children.push(any(popover(SizedBox(
                         Some(CONTENT.width),
                         Some(CONTENT.height),
                     ))
                     .anchor(&anchor)
                     .width(CONTENT.width + 2.0 * POPOVER_PADDING)
+                    .open(state.open)
                     .on_open_change(|s: &mut AppState, open| {
                         s.opens.push(open);
                         s.open = open;
@@ -768,7 +982,16 @@ pub(crate) mod tests {
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
                 .layout_with_text(WINDOW, &mut self.tcx as &mut dyn Any);
-            self.root.paint(&mut Recorder::default(), ft_ms(0.0));
+            let now = self.clock;
+            self.root.paint(&mut Recorder::default(), ft_ms(now));
+        }
+
+        /// Paint at `ms` without rebuilding — the ramp's own frames.
+        fn paint_at(&mut self, ms: f64) -> Recorder {
+            self.clock = ms;
+            let mut rec = Recorder::default();
+            self.root.paint(&mut rec, ft_ms(ms));
+            rec
         }
 
         fn event(&mut self, event: InputEvent) {
@@ -921,6 +1144,286 @@ pub(crate) mod tests {
         let jumped = frame(&mut w, 0.0, &reduced);
         assert!(jumped.layers.is_empty(), "no fade at all");
         assert!((w.progress() - 1.0).abs() < 1e-9);
+    }
+
+    /// A panel over a live style handle, plus the rebuild that re-reads it —
+    /// the seam a component's `open` flag reaches a mounted panel through.
+    struct PanelHarness {
+        view: PanelView<AppState>,
+        widget: PanelWidget,
+        size: Size,
+        counter: u64,
+    }
+
+    impl PanelHarness {
+        fn new(style: PanelHandle) -> Self {
+            let view: PanelView<AppState> = panel(SizedBox(Some(120.0), Some(40.0)), style);
+            let mut counter = 0u64;
+            let mut widget = View::<AppState>::build(&view, &mut BuildCtx::new(&mut counter));
+            let mut tcx = TextContext::new();
+            let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+            let size = widget.layout(&mut lctx, &BoxConstraints::loose(WINDOW));
+            PanelHarness {
+                view,
+                widget,
+                size,
+                counter,
+            }
+        }
+
+        /// Re-read the style handle, the way an app's rebuild does. The view is
+        /// its own previous self: only the handle's contents changed.
+        fn rebuild(&mut self) {
+            View::<AppState>::rebuild(
+                &self.view,
+                &self.view,
+                &mut self.widget,
+                &mut BuildCtx::new(&mut self.counter),
+            );
+        }
+
+        fn frame(&mut self, ms: f64, theme: &Theme) -> Recorder {
+            let mut rec = Recorder::default();
+            let mut ctx = PaintCtx::for_test(Point::ORIGIN, self.size, ft_ms(ms))
+                .with_theme(theme as &dyn Any);
+            self.widget.paint(&mut ctx, &mut rec);
+            rec
+        }
+    }
+
+    #[test]
+    fn a_closing_panel_fades_and_zooms_back_out_then_stops_painting() {
+        let style: PanelHandle = Rc::new(RefCell::new(PanelStyle::popover()));
+        let mut h = PanelHarness::new(style.clone());
+        let theme = light();
+        // Settle the entrance first, so the exit starts from a full panel.
+        h.frame(0.0, &theme);
+        h.frame(ENTRANCE_MS as f64 * 2.0, &theme);
+        assert!((h.widget.progress() - 1.0).abs() < 1e-9);
+
+        style.borrow_mut().open = false;
+        h.rebuild();
+        let start = ENTRANCE_MS as f64 * 2.0;
+        // The closing edge still paints a whole panel; the ramp only starts
+        // moving on the frame after (the controller seeds its clock first).
+        let edge = h.frame(start, &theme);
+        assert_eq!(edge.rrects.len(), 1, "the panel is still there");
+
+        let mid = h.frame(start + ENTRANCE_MS as f64 / 2.0, &theme);
+        assert_eq!(mid.rrects.len(), 1, "and still painting");
+        assert!(
+            mid.layers[0] > 0.0 && mid.layers[0] < 1.0,
+            "at a partial alpha"
+        );
+        assert_eq!(mid.transforms.len(), 1, "with the zoom-out riding along");
+        let later = h.frame(start + ENTRANCE_MS as f64 * 0.75, &theme);
+        assert!(later.layers[0] < mid.layers[0], "presence is decreasing");
+
+        let gone = h.frame(start + ENTRANCE_MS as f64 * 2.0, &theme);
+        assert!(gone.rrects.is_empty(), "nothing painted at settle");
+        assert_eq!(h.widget.progress(), 0.0);
+        // And it stays gone.
+        assert!(
+            h.frame(start + ENTRANCE_MS as f64 * 4.0, &theme)
+                .rrects
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn reduce_motion_takes_a_closing_panel_away_on_the_frame_it_closes() {
+        let mut reduced = light();
+        reduced.motion.reduce_motion = true;
+        let style: PanelHandle = Rc::new(RefCell::new(PanelStyle::popover()));
+        let mut h = PanelHarness::new(style.clone());
+        assert_eq!(h.frame(0.0, &reduced).rrects.len(), 1, "open at once");
+
+        style.borrow_mut().open = false;
+        h.rebuild();
+        assert!(
+            h.frame(16.0, &reduced).rrects.is_empty(),
+            "and closed at once — no ramp in either direction"
+        );
+        assert_eq!(h.widget.progress(), 0.0);
+    }
+
+    #[test]
+    fn reopening_mid_exit_ramps_back_up_from_the_presence_it_had() {
+        let style: PanelHandle = Rc::new(RefCell::new(PanelStyle::popover()));
+        let mut h = PanelHarness::new(style.clone());
+        let theme = light();
+        h.frame(0.0, &theme);
+        h.frame(ENTRANCE_MS as f64 * 2.0, &theme);
+
+        let start = ENTRANCE_MS as f64 * 2.0;
+        style.borrow_mut().open = false;
+        h.rebuild();
+        h.frame(start, &theme);
+        let half = h.frame(start + ENTRANCE_MS as f64 / 2.0, &theme);
+        let interrupted = half.layers[0];
+        assert!(interrupted > 0.0 && interrupted < 1.0);
+
+        style.borrow_mut().open = true;
+        h.rebuild();
+        let seed_time = start + ENTRANCE_MS as f64 / 2.0;
+        let resumed = h.frame(seed_time, &theme);
+        assert_eq!(
+            resumed.layers[0], interrupted,
+            "the entrance picks up where the exit left off, not at zero"
+        );
+        let climbing = h.frame(start + ENTRANCE_MS as f64 * 0.75, &theme);
+        assert!(climbing.layers[0] > interrupted, "and climbs from there");
+
+        // Pin the *rate*, not just the direction: the reopen only has
+        // `1.0 - interrupted` left to travel, so `begin_ramp` scales the
+        // 200ms entrance to that remaining fraction rather than covering the
+        // partial distance at half speed over the whole duration.
+        let remaining = 1.0 - interrupted as f64;
+        let scaled_duration = ENTRANCE_MS as f64 * remaining;
+        assert!(
+            scaled_duration < ENTRANCE_MS as f64,
+            "a partial reopen must take less than the full entrance duration"
+        );
+        let just_before = h.frame(seed_time + scaled_duration * 0.99, &theme);
+        assert!(
+            just_before.layers[0] < 1.0,
+            "not settled just short of the scaled duration"
+        );
+        let just_after = h.frame(seed_time + scaled_duration + 1.0, &theme);
+        assert!(
+            just_after.layers.is_empty(),
+            "settled within the scaled duration, not the full 200ms — a fixed \
+             full-duration ramp would still be short of it here"
+        );
+        assert!((h.widget.progress() - 1.0).abs() < 1e-9);
+
+        let settled = h.frame(start + ENTRANCE_MS as f64 * 3.0, &theme);
+        assert!(settled.layers.is_empty(), "back to a plain composite");
+        assert!((h.widget.progress() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_kept_mounted_popover_reports_the_close_at_once_and_paints_it_out() {
+        let mut h = Harness::kept_mounted();
+        h.click(10.0, 10.0);
+        assert!(h.state.open);
+        h.paint_at(ENTRANCE_MS as f64 * 2.0);
+
+        // The light dismiss: app state is truthful immediately, on the very
+        // event that closed it.
+        h.event(pointer(PointerPhase::Down, 380.0, 580.0));
+        assert_eq!(h.state.opens, vec![true, false], "reported at once");
+        assert!(!h.state.open);
+        h.pass();
+
+        let start = h.clock;
+        let mid = h.paint_at(start + ENTRANCE_MS as f64 / 2.0);
+        assert!(
+            mid.rrects
+                .iter()
+                .any(|(_, _, _, c)| *c == light().scheme().surface_container_high),
+            "the panel is still on screen through the ramp"
+        );
+        assert!(mid.layers[0] > 0.0 && mid.layers[0] < 1.0);
+
+        let gone = h.paint_at(start + ENTRANCE_MS as f64 * 2.0);
+        assert!(
+            !gone
+                .rrects
+                .iter()
+                .any(|(_, _, _, c)| *c == light().scheme().surface_container_high),
+            "and gone at settle"
+        );
+    }
+
+    #[test]
+    fn a_closing_popover_swallows_an_inside_press_during_the_exit_ramp_but_not_an_outside_one() {
+        let mut h = Harness::kept_mounted();
+        h.click(10.0, 10.0);
+        h.paint_at(ENTRANCE_MS as f64 * 2.0);
+        let placed = crate::overlay::place(
+            h.anchor.rect(),
+            Size::new(
+                CONTENT.width + 2.0 * POPOVER_PADDING,
+                CONTENT.height + 2.0 * POPOVER_PADDING,
+            ),
+            Rect::from_origin_size(Point::ORIGIN, WINDOW),
+            OverlayPlacement::default(),
+        );
+        let c = placed.center();
+
+        // A press outside closes it — consumed by the dismiss itself, so it
+        // too never reaches the page. The panel is now mid-ramp over `c`.
+        let outside_dismiss = h
+            .root
+            .event(&mut h.state, &pointer(PointerPhase::Down, 380.0, 580.0));
+        assert!(outside_dismiss.handled, "the dismiss press is consumed");
+        h.pass();
+        assert!(!h.state.open);
+        assert_eq!(h.state.page_presses, 0, "a dismiss never reaches the page");
+        let mid = h.paint_at(h.clock + ENTRANCE_MS as f64 / 2.0);
+        assert!(
+            mid.layers[0] > 0.0,
+            "still painting where the next press lands"
+        );
+
+        // Inside `content_rect`: swallowed. Absorbed by the still-visible
+        // panel, forwarded nowhere further, and re-arming no dismissal.
+        let before_opens = h.state.opens.len();
+        let inside = h
+            .root
+            .event(&mut h.state, &pointer(PointerPhase::Down, c.x, c.y));
+        assert!(inside.handled, "the closing panel swallows a press on it");
+        assert_eq!(h.state.page_presses, 0, "and it never reaches the page");
+        assert_eq!(
+            h.state.opens.len(),
+            before_opens,
+            "and dismisses nothing new"
+        );
+
+        // Outside `content_rect`: still passes through, exactly as documented
+        // — the exit-ramp swallow only ever covers the content's own bounds.
+        h.root
+            .event(&mut h.state, &pointer(PointerPhase::Down, 380.0, 580.0));
+        assert_eq!(
+            h.state.page_presses, 1,
+            "an outside press still reaches the page during the exit ramp"
+        );
+    }
+
+    #[test]
+    fn a_settled_closed_popover_lets_a_press_over_its_old_position_through() {
+        let mut h = Harness::kept_mounted();
+        h.click(10.0, 10.0);
+        h.paint_at(ENTRANCE_MS as f64 * 2.0);
+        let placed = crate::overlay::place(
+            h.anchor.rect(),
+            Size::new(
+                CONTENT.width + 2.0 * POPOVER_PADDING,
+                CONTENT.height + 2.0 * POPOVER_PADDING,
+            ),
+            Rect::from_origin_size(Point::ORIGIN, WINDOW),
+            OverlayPlacement::default(),
+        );
+        let c = placed.center();
+
+        h.event(pointer(PointerPhase::Down, 380.0, 580.0));
+        h.pass();
+        assert!(!h.state.open);
+        // Run the exit ramp all the way out.
+        h.paint_at(h.clock + ENTRANCE_MS as f64 * 4.0);
+
+        let outcome = h
+            .root
+            .event(&mut h.state, &pointer(PointerPhase::Down, c.x, c.y));
+        assert!(
+            outcome.handled,
+            "the page under the old panel position now gets the press"
+        );
+        assert_eq!(
+            h.state.page_presses, 1,
+            "settled: the press reaches the page"
+        );
     }
 
     #[test]

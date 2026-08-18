@@ -170,6 +170,48 @@ pub const fn disabled_tint(color: Color, disabled: bool) -> Color {
     }
 }
 
+// ---- Two-state precedence --------------------------------------------------
+
+/// The fill a two-state control paints under the current state, if any: the
+/// `on` state wins over hover, and a resting control paints nothing
+/// (`bg-transparent`).
+///
+/// Shared by `toggle` (the precedence's originating fix) and `toggle_group`,
+/// which resolves the same rule per item over a palette of its own, so the two
+/// components share the decision rather than restating it.
+pub(crate) fn precedence_fill(
+    on: bool,
+    hovered: bool,
+    on_fill: Color,
+    hover_fill: Color,
+) -> Option<Color> {
+    if on {
+        Some(on_fill)
+    } else if hovered {
+        Some(hover_fill)
+    } else {
+        None
+    }
+}
+
+/// The label ink under the same precedence, falling back to the `resting` ink a
+/// control inherits when it is neither on nor hovered.
+pub(crate) fn precedence_ink(
+    on: bool,
+    hovered: bool,
+    on_ink: Color,
+    hover_ink: Color,
+    resting: Color,
+) -> Color {
+    if on {
+        on_ink
+    } else if hovered {
+        hover_ink
+    } else {
+        resting
+    }
+}
+
 // ---- Focus ring -----------------------------------------------------------
 
 /// The ring color for the pass's theme, under the documented ladder
@@ -476,6 +518,43 @@ mod tests {
         assert!((bbox.y1 - (origin.y + size.height + 1.5)).abs() < 1e-6);
         // ...in the ring color at 50%.
         assert_eq!(color.components[3], FOCUS_RING_OPACITY);
+    }
+
+    /// The precedence rule itself, over the four state combinations —
+    /// `toggle`/`toggle_group` both resolve their per-control/per-item look
+    /// through these same two functions.
+    #[test]
+    fn the_precedence_rule_ranks_on_over_hover_over_rest() {
+        let on_color = Color::from_rgb8(0x01, 0x01, 0x01);
+        let hover = Color::from_rgb8(0x02, 0x02, 0x02);
+        let resting = Color::from_rgb8(0x03, 0x03, 0x03);
+
+        assert_eq!(
+            precedence_fill(true, false, on_color, hover),
+            Some(on_color)
+        );
+        assert_eq!(precedence_fill(true, true, on_color, hover), Some(on_color));
+        assert_eq!(precedence_fill(false, true, on_color, hover), Some(hover));
+        assert_eq!(
+            precedence_fill(false, false, on_color, hover),
+            None,
+            "`bg-transparent` at rest"
+        );
+
+        assert_eq!(
+            precedence_ink(true, false, on_color, hover, resting),
+            on_color
+        );
+        assert_eq!(
+            precedence_ink(true, true, on_color, hover, resting),
+            on_color
+        );
+        assert_eq!(precedence_ink(false, true, on_color, hover, resting), hover);
+        assert_eq!(
+            precedence_ink(false, false, on_color, hover, resting),
+            resting,
+            "the inherited `foreground`"
+        );
     }
 
     #[test]

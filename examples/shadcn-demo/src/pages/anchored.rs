@@ -1,13 +1,21 @@
 //! Anchored: the non-modal, trigger-relative overlay family — popover,
 //! tooltip, hover-card, dropdown menu, context menu, select and combobox.
-//! Every click-driven one mounts as the top child of a full-area
-//! [`frust::Stack`] (this page's own content IS that stack — see
-//! `frust_shadcn::overlay`'s module docs for the two supported mounts), gated
-//! on an `open` flag this page's `State` owns; the two hover-driven ones
-//! (tooltip, hover-card) mount **permanently**, input-transparent, per their
-//! own module docs. The stack's own bottom child is the scrolling body, so the
-//! stack — and every host layered over it — keeps the page slot's bounded
-//! constraints rather than a scroll view's unbounded ones.
+//! Every one of them mounts as a child of a full-area [`frust::Stack`] (this
+//! page's own content IS that stack — see `frust_shadcn::overlay`'s module docs
+//! for the two supported mounts). The stack's own bottom child is the scrolling
+//! body, so the stack — and every host layered over it — keeps the page slot's
+//! bounded constraints rather than a scroll view's unbounded ones.
+//!
+//! # Kept mounted, not mounted-on-open
+//!
+//! Every panel here is mounted **unconditionally** and handed the app's flag as
+//! `.open(state.flag)`, rather than wrapped in an `if state.flag { … }`. That is
+//! what buys the exit animation: there is no framework seam that keeps a view
+//! alive past the rebuild that unmounts it, so a panel can only fade and scale
+//! back out while it is still in the tree with `open == false`. A closed panel
+//! is inert — it claims no hover, consumes no press, publishes no semantics —
+//! and costs one layout pass. Wrapping the mount in an `if` stays valid and
+//! correct; it just truncates the exit.
 
 use frust::{Column, Row, SizedBox, Stack, View, any, text};
 use frust_shadcn::overlay::{OverlayAlign, OverlayAnchor, OverlaySide, anchor};
@@ -140,6 +148,14 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
              exists in the framework yet.",
         )
         .size(12.0)),
+        any(SizedBox(None, Some(8.0))),
+        any(crate::nav::caption(
+            "Watch each panel CLOSE: every one is kept mounted and handed \
+             `.open(flag)`, so a dismissal fades and scales it back out (a tooltip \
+             and a hover card fade only, per source) instead of vanishing between \
+             two frames. Reopening mid-exit picks the entrance up from wherever the \
+             ramp had got to.",
+        )),
         gap(),
         // --- Popover: placement knobs + light-dismiss + Escape-after-press ---
         any(Row(vec![
@@ -189,19 +205,18 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
             }),
         )),
         gap(),
-        // --- Context menu: left-click-only shell caveat ---
+        // --- Context menu ---
         any(text(
-            "Context menu area below — right-click won't reach it live: \
-             the desktop shell forwards only the left mouse button today \
-             (frust-shell-desktop's app_handler.rs). The component itself \
-             is complete and driven in its own tests.",
+            "Context menu area below — right-click it to open the menu at the \
+                 press point (the desktop shell forwards the secondary mouse button, \
+                 so this is live; a left-click does nothing here).",
         )
         .size(12.0)),
         any(SizedBox(None, Some(4.0))),
         any(context_menu_trigger(
             &context_menu_anchor,
             frust::SizedBox::<AppState>(Some(240.0), Some(60.0))
-                .child(text("Right-click here (see caveat above)").size(13.0)),
+                .child(text("Right-click here").size(13.0)),
         )),
         gap(),
         // --- Select: grouped, disabled option, long scrolling list ---
@@ -246,26 +261,24 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
     // (a tooltip clamped to `y = 0`, an anchored panel with nowhere to sit).
     let mut layers: Vec<frust::AnyView<AppState>> = vec![crate::scroll_slot(any(base))];
 
-    if popover_open {
-        layers.push(any(popover(text(
-            "Placement knobs move me around the trigger.",
-        ))
-        .anchor(&popover_anchor)
-        .side(side)
-        .align(align)
-        .offset(offset)
-        .on_open_change(|s: &mut AppState, open: bool| {
-            s.anchored.popover_open = open;
-        })));
-    }
+    layers.push(any(popover(text(
+        "Placement knobs move me around the trigger.",
+    ))
+    .anchor(&popover_anchor)
+    .side(side)
+    .align(align)
+    .offset(offset)
+    .open(popover_open)
+    .on_open_change(|s: &mut AppState, open: bool| {
+        s.anchored.popover_open = open;
+    })));
 
-    if flip_open {
-        layers.push(any(popover(text("I flip when the bottom edge is tight."))
-            .anchor(&flip_anchor)
-            .on_open_change(|s: &mut AppState, open: bool| {
-                s.anchored.flip_open = open;
-            })));
-    }
+    layers.push(any(popover(text("I flip when the bottom edge is tight."))
+        .anchor(&flip_anchor)
+        .open(flip_open)
+        .on_open_change(|s: &mut AppState, open: bool| {
+            s.anchored.flip_open = open;
+        })));
 
     layers.push(any(tooltip(&tooltip_hover, "A tooltip, 700ms after rest")));
     layers.push(any(hover_card(
@@ -276,82 +289,78 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
         ]),
     )));
 
-    if dropdown_open {
-        layers.push(any(dropdown_menu(
-            vec![
-                dropdown_menu_label("Actions"),
-                dropdown_menu_item("Bold")
-                    .checked(dropdown_bold)
-                    .shortcut("\u{2318}B"),
-                dropdown_menu_item("Italic").shortcut("\u{2318}I"),
-                dropdown_menu_separator(),
-                dropdown_menu_item("Align left").radio(dropdown_align == "left"),
-                dropdown_menu_item("Align center").radio(dropdown_align == "center"),
-                dropdown_menu_item("Align right").radio(dropdown_align == "right"),
-                dropdown_menu_separator(),
-                dropdown_menu_item("Disabled row").disabled(true),
-                dropdown_menu_item("More").submenu(vec![
-                    dropdown_menu_item("Duplicate"),
-                    dropdown_menu_item("Archive"),
-                ]),
-            ],
-            move |s: &mut AppState, index: usize| match index {
-                1 => s.anchored.dropdown_bold = !s.anchored.dropdown_bold,
-                4 => s.anchored.dropdown_align = "left".to_string(),
-                5 => s.anchored.dropdown_align = "center".to_string(),
-                6 => s.anchored.dropdown_align = "right".to_string(),
-                _ => {}
-            },
-        )
-        .anchor(&dropdown_anchor)
-        .on_open_change(|s: &mut AppState, open: bool| {
-            s.anchored.dropdown_open = open;
-        })));
-    }
+    layers.push(any(dropdown_menu(
+        vec![
+            dropdown_menu_label("Actions"),
+            dropdown_menu_item("Bold")
+                .checked(dropdown_bold)
+                .shortcut("\u{2318}B"),
+            dropdown_menu_item("Italic").shortcut("\u{2318}I"),
+            dropdown_menu_separator(),
+            dropdown_menu_item("Align left").radio(dropdown_align == "left"),
+            dropdown_menu_item("Align center").radio(dropdown_align == "center"),
+            dropdown_menu_item("Align right").radio(dropdown_align == "right"),
+            dropdown_menu_separator(),
+            dropdown_menu_item("Disabled row").disabled(true),
+            dropdown_menu_item("More").submenu(vec![
+                dropdown_menu_item("Duplicate"),
+                dropdown_menu_item("Archive"),
+            ]),
+        ],
+        move |s: &mut AppState, index: usize| match index {
+            1 => s.anchored.dropdown_bold = !s.anchored.dropdown_bold,
+            4 => s.anchored.dropdown_align = "left".to_string(),
+            5 => s.anchored.dropdown_align = "center".to_string(),
+            6 => s.anchored.dropdown_align = "right".to_string(),
+            _ => {}
+        },
+    )
+    .anchor(&dropdown_anchor)
+    .open(dropdown_open)
+    .on_open_change(|s: &mut AppState, open: bool| {
+        s.anchored.dropdown_open = open;
+    })));
 
-    if context_menu_open {
-        layers.push(any(context_menu(
-            vec![
-                dropdown_menu_item("Copy").shortcut("\u{2318}C"),
-                dropdown_menu_item("Paste").shortcut("\u{2318}V"),
-                dropdown_menu_separator(),
-                dropdown_menu_item("Delete"),
-            ],
-            |_: &mut AppState, _index: usize| {},
-        )
-        .anchor(&context_menu_anchor)
-        .on_open_change(|s: &mut AppState, open: bool| {
-            s.anchored.context_menu_open = open;
-        })));
-    }
+    layers.push(any(context_menu(
+        vec![
+            dropdown_menu_item("Copy").shortcut("\u{2318}C"),
+            dropdown_menu_item("Paste").shortcut("\u{2318}V"),
+            dropdown_menu_separator(),
+            dropdown_menu_item("Delete"),
+        ],
+        |_: &mut AppState, _index: usize| {},
+    )
+    .anchor(&context_menu_anchor)
+    .open(context_menu_open)
+    .on_open_change(|s: &mut AppState, open: bool| {
+        s.anchored.context_menu_open = open;
+    })));
 
-    if select_open {
-        layers.push(any(select(
-            fruit_options(),
-            select_value,
-            |s: &mut AppState, index: usize| {
-                s.anchored.select_value = Some(index);
-                s.anchored.select_open = false;
-            },
-        )
-        .anchor(&select_anchor)));
-    }
+    layers.push(any(select(
+        fruit_options(),
+        select_value,
+        |s: &mut AppState, index: usize| {
+            s.anchored.select_value = Some(index);
+            s.anchored.select_open = false;
+        },
+    )
+    .anchor(&select_anchor)
+    .open(select_open)));
 
-    if combobox_open {
-        layers.push(any(combobox(
-            FRUITS.iter().map(|f| combobox_item(*f)).collect(),
-            combobox_query,
-            |s: &mut AppState, q: String| {
-                s.anchored.combobox_query = q;
-            },
-            move |s: &mut AppState, index: usize| {
-                s.anchored.combobox_value = FRUITS.get(index).map(|f| f.to_string());
-                s.anchored.combobox_open = false;
-                s.anchored.combobox_query.clear();
-            },
-        )
-        .anchor(&combobox_anchor)));
-    }
+    layers.push(any(combobox(
+        FRUITS.iter().map(|f| combobox_item(*f)).collect(),
+        combobox_query,
+        |s: &mut AppState, q: String| {
+            s.anchored.combobox_query = q;
+        },
+        move |s: &mut AppState, index: usize| {
+            s.anchored.combobox_value = FRUITS.get(index).map(|f| f.to_string());
+            s.anchored.combobox_open = false;
+            s.anchored.combobox_query.clear();
+        },
+    )
+    .anchor(&combobox_anchor)
+    .open(combobox_open)));
 
     Stack(layers)
 }

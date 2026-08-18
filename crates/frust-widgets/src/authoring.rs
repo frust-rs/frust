@@ -866,6 +866,27 @@ fn releases_capture(event: &InputEvent) -> bool {
     )
 }
 
+/// Whether `p` carries a button that may begin a press.
+///
+/// A press/activation machine — a `pressed` visual, a pointer capture, an
+/// up-inside callback, a drag — starts on the **primary** button alone: the left
+/// mouse button, or any touch/pen contact (which every shell reports as
+/// [`PointerButton::Primary`] too). A secondary press is a context gesture: no
+/// baseline widget does anything with it, so it is left for a context-menu
+/// consumer instead of activating the control under the cursor.
+///
+/// Move/hover arms deliberately do **not** consult this: hover chrome and cursor
+/// shapes are position-driven, and a move carries no meaningful button. Neither
+/// do the focus-session arms — [`is_pointer_down`]'s blur-on-outside-tap, and a
+/// widget's own `request_focus`/IME publish — because the root reads *any* `Down`
+/// that bubbles no claim as a blur, whatever button carried it.
+///
+/// `frust_shadcn`'s `hit::presses` is the same predicate for that catalog; each
+/// catalog keeps its own copy rather than depending on a sibling crate.
+pub(crate) fn presses(p: &PointerEvent) -> bool {
+    p.button == PointerButton::Primary
+}
+
 /// Whether `event` is a pointer `Down` — the phase that both opens a capture and
 /// triggers blur-on-outside-tap evaluation in the routing helpers.
 fn is_pointer_down(event: &InputEvent) -> bool {

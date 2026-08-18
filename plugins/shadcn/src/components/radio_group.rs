@@ -56,6 +56,7 @@ use frust::authoring::{
 };
 use frust::{Brightness, Theme};
 
+use crate::hit::presses;
 use crate::style::{self, PATH_TOLERANCE};
 
 /// Item edge, in logical px (`size-4`).
@@ -431,6 +432,9 @@ impl Widget for RadioGroupWidget {
             }
             InputEvent::Pointer(p) => match p.phase {
                 PointerPhase::Down => {
+                    if !presses(p) {
+                        return EventResult::Ignored;
+                    }
                     let Some(index) = self.hit_item(p.position) else {
                         return EventResult::Ignored;
                     };

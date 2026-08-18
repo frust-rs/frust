@@ -837,7 +837,11 @@ impl<'a> PaintCtx<'a> {
     /// [`ChildPod::paint_child`] adds the child's parent-relative `origin` to the
     /// parent's already-absolute `ctx.origin()`, threading the result down through
     /// nested levels. Contrast [`ChildPod::origin`], which is parent-relative and
-    /// correct as documented.
+    /// correct as documented, and [`EventCtx::origin`], which is **also**
+    /// parent-relative — the event pass translates the event into the child's
+    /// local space instead of accumulating the origin. This is therefore the only
+    /// context origin an overlay, popup, or reported window-space rect may be
+    /// anchored from.
     pub fn origin(&self) -> Point {
         self.origin
     }
@@ -1815,7 +1819,22 @@ pub struct ChildPod {
     /// elsewhere advances the live epoch, which strands every stale stamp at once
     /// without the container that owns it having to hear about the move. See the
     /// [`crate::event`] module docs.
+    ///
+    /// The one move the epoch cannot strand is the pod's own removal, which is
+    /// why this field is also what `Drop` reports on (see the `Drop` impl and
+    /// `mark_hover_orphaned`).
     hover_epoch: u64,
+    /// The identity of the [`RenderRoot`](crate::app::RenderRoot) whose pass
+    /// stamped `hover_epoch`, recorded with it and never cleared either. `0` until
+    /// a claim first passes through.
+    ///
+    /// Epoch counters are per-root and all start at `1`, so two roots on one
+    /// thread produce colliding integers by construction. Only `Drop` reads this:
+    /// it is what tells this pod's own root's live link from another root's
+    /// identically-numbered epoch, so a dying pod can never end a hover it was
+    /// never part of. The event/paint comparisons need no such qualifier — a pod
+    /// is only ever visited by the root that owns its tree.
+    hover_root: u64,
     /// This pod's persistent semantics base id, lazily assigned on
     /// the pod's first [`ChildPod::semantics_child`] visit from the
     /// [`RenderRoot`](crate::app::RenderRoot) allocator and reused for the whole
@@ -1849,6 +1868,37 @@ thread_local! {
     static NEXT_INSPECT_ID: Cell<u64> = const { Cell::new(ChildPod::INSPECT_ID_BASE) };
 }
 
+impl Drop for ChildPod {
+    /// Report a **live** hover link severed by the pod's own removal, so
+    /// [`RenderRoot::rebuild`](crate::app::RenderRoot::rebuild) ends the hover
+    /// before the frame ends.
+    ///
+    /// The epoch mechanism strands a stale stamp on every hover pass, but a pass
+    /// is exactly what a removed widget no longer gets: a rebuild that drops the
+    /// claimant leaves the root's mirror standing (`is_hover_active()` keeps
+    /// reporting a link nothing holds) and leaves every surviving ancestor of the
+    /// dead claimant reading hovered off its own still-matching stamp, until some
+    /// later `Move` happens to re-derive — which never arrives on a pointer the
+    /// user has stopped moving. This destructor is the hover analog of the
+    /// focus-orphan mark, and lives here rather than in the reconcilers because
+    /// the stamp has no setter for a container to cooperate through; see
+    /// `crate::event::mark_hover_orphaned` for the full rationale and the
+    /// "only when the link was live" invariant this comparison enforces.
+    ///
+    /// The comparison is against the published `(root, epoch)` pair, not the epoch
+    /// alone: per-root counters collide, so an unqualified match would let a pod
+    /// of one root end another root's live hover (see `hover_root`).
+    ///
+    /// Costs one predictable branch on a `u64` field per pod dropped; the
+    /// thread-local read happens only for the pod chain that has actually held a
+    /// claim at some point.
+    fn drop(&mut self) {
+        if crate::event::live_hover_link_is(self.hover_root, self.hover_epoch) {
+            crate::event::mark_hover_orphaned(self.hover_root);
+        }
+    }
+}
+
 impl ChildPod {
     /// Where [`ChildPod::inspect_id`]'s allocator starts.
     ///
@@ -1870,6 +1920,7 @@ impl ChildPod {
             active: false,
             focused: false,
             hover_epoch: 0,
+            hover_root: 0,
             semantics_id: Cell::new(None),
             debug_label: None,
             inspect_id: Cell::new(None),
@@ -2000,6 +2051,27 @@ impl ChildPod {
     /// [`ChildPod::event_child`] from a claim bubble, so a container cannot record
     /// or clear a hover link by hand — which is what keeps at most one path
     /// hovered. See the [`crate::event`] module docs.
+    ///
+    /// # A bare stamp answers nothing
+    ///
+    /// The returned `u64` is an identity, not an ordering and not a boolean. It
+    /// means something only compared **for equality against the live epoch**, and
+    /// that comparison is the pipeline's own: the live epoch rides the running
+    /// context (`PaintCtx::hover_epoch`/`EventCtx::hover_epoch`), both
+    /// crate-private, and the comparison is already ANDed with the ancestor chain
+    /// by `paint_child`/`event_child` before any widget sees it. Treating a
+    /// non-zero stamp as "hovered", or ordering two pods' stamps, reads reasonable
+    /// and is wrong: a stamp is never cleared, only stranded by the next epoch
+    /// advance, so a pod the pointer left an hour ago still carries a non-zero
+    /// one, and the counter wraps.
+    ///
+    /// **Read [`PaintCtx::is_hovered`] instead** (authoritative), or
+    /// [`EventCtx::is_hovered`] for the state as of the previous pass; between
+    /// them they answer "is this widget or its subtree hovered" — which is the
+    /// question a widget actually has. A container asking the narrower "*which* of
+    /// my children" answers it with the same hit test its own claim rides, not
+    /// from here. This accessor is diagnostic — tooling, tests, and the debug
+    /// dump — the way [`ChildPod::type_name`] is.
     pub fn hover_epoch(&self) -> u64 {
         self.hover_epoch
     }
@@ -2217,8 +2289,12 @@ impl ChildPod {
         // Stamp the claim onto this pod so the whole path from the claimant up to
         // the root carries the epoch the next paint compares against. Never
         // cleared: a stale stamp is stranded by the next epoch advance instead.
+        // The running root's identity rides along, so this pod's destructor can
+        // tell its own root's live link from another root's identical epoch
+        // integer (see `hover_root`).
         if hover_claimed {
             self.hover_epoch = claim_epoch;
+            self.hover_root = ctx.hover_root();
         }
         // Focus is the second recorded path, maintained exactly like `active`: a
         // `focus_requested` bubble records this child as the focused one; a
@@ -3425,8 +3501,11 @@ mod tests {
 
     /// Two overlapping children can both hit-test a point (a Stack, or any
     /// container whose topmost child ignores the move). Only the first claim in
-    /// dispatch order is recorded, so — with topmost-first hit testing — the
-    /// topmost claimant wins and no pass can leave two widgets hovered.
+    /// **dispatch order** is recorded, which is the primitive; "the topmost
+    /// claimant wins" is the consequence of dispatching topmost-first *and* of
+    /// every container claiming after it routes (see `EventCtx::claim_hover`),
+    /// not a rule this level enforces. Either way, no pass can leave two widgets
+    /// hovered.
     #[test]
     fn only_the_first_hover_claim_in_a_pass_is_recorded() {
         struct Claimer;

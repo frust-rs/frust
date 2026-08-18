@@ -47,6 +47,8 @@ use peniko::{Brush, Color};
 
 use frust::authoring::ThemeTextColor;
 
+use super::press::presses;
+
 /// Horizontal padding around the leading label, in logical px.
 const PAD_X: f64 = 20.0;
 /// Vertical padding around the leading label, in logical px.
@@ -379,6 +381,9 @@ impl Widget for SplitButtonWidget {
         };
         match p.phase {
             PointerPhase::Down => {
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 let Some(half) = self.half_at(p.position) else {
                     return EventResult::Ignored;
                 };

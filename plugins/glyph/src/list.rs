@@ -36,6 +36,8 @@ use frust::{ShapeScale, Theme};
 use kurbo::{Point, Rect, RoundedRect, Shape, Size, Vec2};
 use peniko::{Brush, Color};
 
+use crate::press::presses;
+
 /// Corner-rounding tolerance for the container border stroke.
 const PATH_TOLERANCE: f64 = 0.1;
 /// Horizontal padding inside a row, in logical px.
@@ -531,6 +533,9 @@ impl Widget for GlyphListWidget {
         }
         match p.phase {
             PointerPhase::Down => {
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 if let Some(idx) = self.row_at(p.position.y) {
                     self.pressed_row = Some(idx);
                     self.captured_row = Some(idx);

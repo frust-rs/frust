@@ -258,6 +258,7 @@ where
         scene: Scene::new(),
         cursor: Point::ZERO,
         modifiers: Modifiers::default(),
+        secondary_down_delivered: false,
         compose: ComposeLatch::default(),
         ime_sync: ImeSync::default(),
         cursor_icon: CursorIcon::Default,
@@ -494,6 +495,78 @@ fn map_scroll_delta(delta: MouseScrollDelta, scale: f64) -> ScrollDelta {
     match delta {
         MouseScrollDelta::LineDelta(x, y) => ScrollDelta::Lines(-(x as f64), -(y as f64)),
         MouseScrollDelta::PixelDelta(px) => ScrollDelta::Pixels(-px.x / scale, -px.y / scale),
+    }
+}
+
+/// Map a winit [`MouseButton`] to our [`PointerButton`] vocabulary, or `None`
+/// for a button we forward nothing for yet (Middle/Back/Forward — dropped
+/// rather than misreported, until those gestures are specced; `PointerButton`
+/// itself already models `Middle`, but nothing in this shell dispatches it
+/// yet, so it stays out of the mapping alongside the two winit variants that
+/// have no `PointerButton` counterpart at all).
+///
+/// Pulled out as a free function so the mapping stays pure and directly
+/// unit-testable, the same shape as [`map_scroll_delta`] below.
+fn map_mouse_button(button: MouseButton) -> Option<PointerButton> {
+    match button {
+        MouseButton::Left => Some(PointerButton::Primary),
+        MouseButton::Right => Some(PointerButton::Secondary),
+        _ => None,
+    }
+}
+
+/// Whether a mapped button's press/release should reach the tree at all, given
+/// the phase, whether a pointer gesture is currently captured
+/// ([`RenderRoot::is_pointer_captured`]), and the delivery latch this gate owns
+/// (`ShellHandler::secondary_down_delivered`, threaded in by `&mut`).
+///
+/// Primary is never gated: it is the button a capture belongs to, and its whole
+/// gesture must reach the tree.
+///
+/// Secondary is gated to keep two invariants at once:
+///
+/// - **A secondary press never disturbs a live capture.** `RenderRoot` tracks
+///   capture as a single root-level flag, not one per button, and releases it
+///   on phase alone — never button-checked (see `RenderRoot::event`). A
+///   secondary `Down` routed to a mid-drag capturer would hand it a transition
+///   it never asked for, and a secondary `Up` would clear the flag out from
+///   under a still-live primary gesture. So a secondary `Down` arriving while
+///   captured is dropped.
+/// - **Pairing: the tree never sees an unpaired secondary event.** A widget's
+///   press contract is a `Down` followed by its own `Up`, so dropping a release
+///   whose press *was* delivered is as wrong as delivering a release whose press
+///   was not — a stateless "drop while captured" rule does exactly that when a
+///   capture opens between the two (a right-click that opened a context menu
+///   whose `Up` then vanishes, leaving the menu's own press state armed). The
+///   latch therefore records what happened to the `Down`, and the `Up` follows
+///   it regardless of what the capture flag says by then.
+///
+/// Pulled out as a free function so the decision stays directly unit-testable
+/// without a live `RenderRoot`, the same shape as [`map_scroll_delta`].
+fn mouse_button_should_dispatch(
+    button: PointerButton,
+    phase: PointerPhase,
+    pointer_captured: bool,
+    secondary_down_delivered: &mut bool,
+) -> bool {
+    if button != PointerButton::Secondary {
+        return true;
+    }
+    match phase {
+        PointerPhase::Down => {
+            let deliver = !pointer_captured;
+            *secondary_down_delivered = deliver;
+            deliver
+        }
+        PointerPhase::Up => {
+            let deliver = *secondary_down_delivered;
+            *secondary_down_delivered = false;
+            deliver
+        }
+        // `MouseInput` is the only caller and produces just the two phases
+        // above; a pointer `Move`/`Cancel` is built elsewhere (`CursorMoved`
+        // makes its own Primary event) and never reaches this gate.
+        PointerPhase::Move | PointerPhase::Cancel => true,
     }
 }
 
@@ -778,6 +851,10 @@ struct ShellHandler<State: 'static, Logic, V: View<State>, E> {
     /// delivers *before* the `KeyboardInput` that uses it, so this is always
     /// current by the time a key event is mapped.
     modifiers: Modifiers,
+    /// Whether the last secondary (right) `Down` was actually dispatched to the
+    /// tree — the latch [`mouse_button_should_dispatch`] pairs a secondary
+    /// release against, so the tree never sees an unpaired one.
+    secondary_down_delivered: bool,
     /// Tracks whether an IME preedit composition is in progress, so
     /// `KeyboardInput`-derived `Character` events can be deduped against it.
     compose: ComposeLatch,
@@ -1457,26 +1534,35 @@ where
                 );
             }
 
-            // Primary (left) button only in v1; other buttons are ignored until
-            // secondary/middle gestures are specced. The press/release position
-            // is the last `CursorMoved` position (winit carries none on the event).
-            WindowEvent::MouseInput {
-                state,
-                button: MouseButton::Left,
-                ..
-            } => {
+            // Primary (left) and secondary (right) buttons; Middle/Back/Forward
+            // are ignored until those gestures are specced (`map_mouse_button`).
+            // The press/release position is the last `CursorMoved` position
+            // (winit carries none on the event). A Secondary press that arrives
+            // while a gesture is captured is dropped, and its release follows
+            // whatever happened to its press — see
+            // `mouse_button_should_dispatch` for both invariants.
+            WindowEvent::MouseInput { state, button, .. } => {
                 let phase = match state {
                     ElementState::Pressed => PointerPhase::Down,
                     ElementState::Released => PointerPhase::Up,
                 };
-                self.dispatch(
-                    &window,
-                    InputEvent::Pointer(PointerEvent {
+                if let Some(mapped_button) = map_mouse_button(button)
+                    && mouse_button_should_dispatch(
+                        mapped_button,
                         phase,
-                        position: self.cursor,
-                        button: PointerButton::Primary,
-                    }),
-                );
+                        self.root.is_pointer_captured(),
+                        &mut self.secondary_down_delivered,
+                    )
+                {
+                    self.dispatch(
+                        &window,
+                        InputEvent::Pointer(PointerEvent {
+                            phase,
+                            position: self.cursor,
+                            button: mapped_button,
+                        }),
+                    );
+                }
             }
 
             // Both the unit and the sign conversion live in `map_scroll_delta`.
@@ -1767,18 +1853,20 @@ mod tests {
         MouseScrollDelta, NoExtensions, Tree, TreeId, WinitCursorIcon, WinitKey, WinitNamedKey,
         WinitTheme, base_theme, brightness_change_to_notify, brightness_from_winit,
         build_tree_update, cursor_change_to_apply, default_theme, finish,
-        follow_platform_brightness, ime_purpose_for, map_key_event, map_modifiers, map_named_key,
-        map_scroll_delta, physical_to_logical, theme_after_override_poll, window_attributes,
-        winit_cursor_for,
+        follow_platform_brightness, ime_purpose_for, map_key_event, map_modifiers,
+        map_mouse_button, map_named_key, map_scroll_delta, mouse_button_should_dispatch,
+        physical_to_logical, theme_after_override_poll, window_attributes, winit_cursor_for,
     };
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{Node, NodeId, Role};
     use frust_core::event::{
-        CursorIcon, ImeContentType, ImeEvent, Key, KeyEvent, Modifiers, NamedKey, ScrollDelta,
+        CursorIcon, ImeContentType, ImeEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton,
+        ScrollDelta,
     };
     use frust_theme::{Brightness, DesignLanguage, Theme};
     use kurbo::Point;
     use winit::dpi::PhysicalPosition;
+    use winit::event::MouseButton;
     use winit::keyboard::ModifiersState;
     use winit::window::{ImePurpose, WindowAttributes};
 
@@ -1840,6 +1928,112 @@ mod tests {
     fn physical_to_logical_is_identity_at_unit_scale() {
         // A non-HiDPI display: physical and logical coincide.
         assert_eq!(physical_to_logical(37.0, 12.0, 1.0), Point::new(37.0, 12.0));
+    }
+
+    // --- map_mouse_button ---
+
+    #[test]
+    fn map_mouse_button_maps_left_to_primary() {
+        assert_eq!(
+            map_mouse_button(MouseButton::Left),
+            Some(PointerButton::Primary)
+        );
+    }
+
+    #[test]
+    fn map_mouse_button_maps_right_to_secondary() {
+        assert_eq!(
+            map_mouse_button(MouseButton::Right),
+            Some(PointerButton::Secondary)
+        );
+    }
+
+    #[test]
+    fn map_mouse_button_drops_middle_back_and_forward() {
+        // `PointerButton` already models `Middle`, but nothing dispatches it
+        // yet — this shell forwards only what v1 specced.
+        assert_eq!(map_mouse_button(MouseButton::Middle), None);
+        assert_eq!(map_mouse_button(MouseButton::Back), None);
+        assert_eq!(map_mouse_button(MouseButton::Forward), None);
+    }
+
+    // --- mouse_button_should_dispatch ---
+
+    /// One secondary press/release through the gate, against a caller-owned
+    /// latch — the shape `WindowEvent::MouseInput` calls it in.
+    fn secondary(phase: PointerPhase, captured: bool, latch: &mut bool) -> bool {
+        mouse_button_should_dispatch(PointerButton::Secondary, phase, captured, latch)
+    }
+
+    #[test]
+    fn an_uncaptured_secondary_press_and_its_release_both_dispatch() {
+        let mut latch = false;
+        assert!(secondary(PointerPhase::Down, false, &mut latch));
+        assert!(secondary(PointerPhase::Up, false, &mut latch));
+        // The latch is spent by the release it paired.
+        assert!(!latch);
+    }
+
+    #[test]
+    fn a_secondary_press_is_dropped_while_captured_and_so_is_its_release() {
+        // A right-click mid-drag must not disturb the Primary capture it can
+        // never have opened — and dropping the press means dropping the
+        // release too, or the tree sees an `Up` with no `Down`.
+        let mut latch = false;
+        assert!(!secondary(PointerPhase::Down, true, &mut latch));
+        assert!(!secondary(PointerPhase::Up, true, &mut latch));
+        assert!(!secondary(PointerPhase::Up, false, &mut latch));
+    }
+
+    #[test]
+    fn a_delivered_secondary_press_gets_its_release_even_if_a_capture_opened() {
+        // The pairing invariant, and the wedge this gate exists to prevent: the
+        // press was delivered while nothing was captured, something captured in
+        // between (the widget it opened, or an unrelated one), and the release
+        // must still land — otherwise the capture never closes.
+        let mut latch = false;
+        assert!(secondary(PointerPhase::Down, false, &mut latch));
+        assert!(secondary(PointerPhase::Up, true, &mut latch));
+        assert!(!latch);
+    }
+
+    #[test]
+    fn a_secondary_release_without_a_delivered_press_never_dispatches() {
+        // A release arriving with a cold latch (a press consumed by a native
+        // menu, or one that landed before the window was focused) is not the
+        // second half of anything.
+        let mut latch = false;
+        assert!(!secondary(PointerPhase::Up, false, &mut latch));
+        assert!(!secondary(PointerPhase::Up, true, &mut latch));
+    }
+
+    #[test]
+    fn a_second_secondary_press_re_arms_the_latch_rather_than_stacking() {
+        // Two presses in a row (a release lost to the platform) leave the latch
+        // describing the *last* press, so exactly one release is ever paired.
+        let mut latch = false;
+        assert!(secondary(PointerPhase::Down, false, &mut latch));
+        assert!(!secondary(PointerPhase::Down, true, &mut latch));
+        assert!(!secondary(PointerPhase::Up, false, &mut latch));
+    }
+
+    #[test]
+    fn primary_always_dispatches_captured_or_not_and_leaves_the_latch_alone() {
+        // Primary is the button a capture belongs to, so its own `Down`/`Up`
+        // must never be the one this gate drops — and a Primary gesture must
+        // not disturb a secondary press waiting for its release.
+        let mut latch = true;
+        for captured in [false, true] {
+            for phase in [PointerPhase::Down, PointerPhase::Up] {
+                assert!(mouse_button_should_dispatch(
+                    PointerButton::Primary,
+                    phase,
+                    captured,
+                    &mut latch
+                ));
+            }
+        }
+        assert!(latch);
     }
 
     // --- map_scroll_delta ---
@@ -2598,7 +2792,7 @@ mod tests {
 
     use std::sync::Arc;
 
-    use frust_core::event::{EventCtx, EventResult, PointerButton, PointerEvent, PointerPhase};
+    use frust_core::event::{EventCtx, EventResult, PointerEvent, PointerPhase};
     use frust_core::layout::BoxConstraints;
     use frust_core::view::BuildCtx;
     use frust_core::widget::{LayoutCtx, PaintCtx, Widget};

@@ -1,11 +1,12 @@
-//! The catalog's one pointer hit test.
+//! The catalog's two pointer admission tests.
 //!
-//! Every interactive component in this crate answers the same question in its
-//! `event` arms — "did this pointer land on me?" — against widget-local
-//! coordinates and the size `EventCtx` reports. That test lives here so the
-//! catalog has exactly one answer to it, boundaries included.
+//! Every interactive component in this crate answers the same pair of questions
+//! in its `event` arms — "did this pointer land on me?" ([`inside`], against
+//! widget-local coordinates and the size `EventCtx` reports) and "may this
+//! button start a press?" ([`presses`]) — so the catalog has exactly one answer
+//! to each, boundaries included.
 
-use frust::authoring::{Point, Size};
+use frust::authoring::{Point, PointerButton, PointerEvent, Size};
 
 /// Whether widget-local `pos` lies inside a `size`-shaped box.
 ///
@@ -15,6 +16,24 @@ use frust::authoring::{Point, Size};
 /// never both claim the same pointer.
 pub(crate) fn inside(pos: Point, size: Size) -> bool {
     pos.x >= 0.0 && pos.y >= 0.0 && pos.x < size.width && pos.y < size.height
+}
+
+/// Whether `p` carries a button that may begin a press.
+///
+/// A press/activation machine — a `pressed` visual, a pointer capture, an
+/// up-inside callback — starts on the **primary** button alone: the left mouse
+/// button, or any touch/pen contact (which every shell reports as
+/// [`PointerButton::Primary`] too). A secondary press is a context gesture:
+/// `context_menu`'s trigger owns it, and no other component in this catalog
+/// does anything with it. That matches the browser the catalog ports from — a
+/// right-click never activates a control — and it is the invariant
+/// `RenderRoot`'s capture bookkeeping rests on, since capture release there is
+/// phase-only and never button-checked.
+///
+/// Move/hover arms deliberately do **not** consult this: hover chrome and
+/// cursor shapes are position-driven, and a move carries no meaningful button.
+pub(crate) fn presses(p: &PointerEvent) -> bool {
+    p.button == PointerButton::Primary
 }
 
 #[cfg(test)]
@@ -61,5 +80,20 @@ mod tests {
     #[test]
     fn a_zero_sized_box_can_never_be_hit() {
         assert!(!inside(Point::ORIGIN, Size::ZERO));
+    }
+
+    fn at(button: PointerButton) -> PointerEvent {
+        PointerEvent {
+            phase: frust::authoring::PointerPhase::Down,
+            position: Point::ORIGIN,
+            button,
+        }
+    }
+
+    #[test]
+    fn only_the_primary_button_presses() {
+        assert!(presses(&at(PointerButton::Primary)));
+        assert!(!presses(&at(PointerButton::Secondary)));
+        assert!(!presses(&at(PointerButton::Middle)));
     }
 }

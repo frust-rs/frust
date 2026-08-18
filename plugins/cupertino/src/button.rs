@@ -105,6 +105,8 @@ use peniko::{Brush, Color};
 
 use frust::text;
 
+use crate::press::presses;
+
 /// Small size-class content height, logical px. Source: `Buttons/Dark/Small/
 /// Bordered/Text/1 - Idle` (49×28) — see the module docs' size-class table.
 const SMALL_HEIGHT: f64 = 28.0;
@@ -563,6 +565,9 @@ impl Widget for CupertinoButtonWidget {
         };
         match p.phase {
             PointerPhase::Down => {
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 self.captured = true;
                 self.press_in();
                 ctx.capture_pointer();
@@ -651,10 +656,43 @@ mod tests {
         })
     }
 
+    /// The same event on the secondary (right) button.
+    fn secondary_ev(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(frust::authoring::PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: frust::authoring::PointerButton::Secondary,
+        })
+    }
+
     fn dispatch(w: &mut CupertinoButtonWidget, state: &mut Counter, event: &InputEvent) {
         let state_any: &mut dyn Any = state;
         let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(80.0, 34.0));
         w.event(&mut ctx, event);
+    }
+
+    #[test]
+    fn a_secondary_press_neither_presses_nor_captures_nor_fires() {
+        let mut w = widget();
+        let mut state = Counter::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            &secondary_ev(PointerPhase::Down, 10.0, 10.0),
+        );
+        assert!(!w.captured, "no capture for the shell to wedge on");
+        dispatch(
+            &mut w,
+            &mut state,
+            &secondary_ev(PointerPhase::Up, 10.0, 10.0),
+        );
+        assert_eq!(state.presses, 0);
+
+        // The primary gesture is untouched by the guard.
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 10.0, 10.0));
+        assert!(w.captured);
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(state.presses, 1);
     }
 
     fn layout(w: &mut CupertinoButtonWidget, max_w: f64) -> Size {

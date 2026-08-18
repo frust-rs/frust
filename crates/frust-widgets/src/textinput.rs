@@ -194,6 +194,8 @@ use frust_theme::Theme;
 use kurbo::{Point, Rect, Size, Vec2};
 use peniko::Color;
 
+use crate::authoring::presses;
+
 /// Default corner radius of the field chrome, in logical px. Overridable
 /// per-instance with [`TextInputView::corner_radius`] — see the module docs'
 /// "Chrome" section for why this is a builder default rather than a `Theme`
@@ -1611,6 +1613,25 @@ impl Widget for TextInputWidget {
             InputEvent::Pointer(p) => match p.phase {
                 PointerPhase::Down => {
                     if inside(p.position, ctx.size()) {
+                        // Caret placement and selection dragging are
+                        // **primary-only**, deliberately stricter than a
+                        // browser (which places the caret on a right-click
+                        // before opening its context menu): frust has no
+                        // context-menu contract to pair that with yet, so a
+                        // secondary press moves nothing rather than silently
+                        // relocating a caret the user cannot see a menu for.
+                        // It is still consumed, and re-claims an *existing*
+                        // focus session: the root reads any `Down` bubbling no
+                        // claim as a blur, and a right-click must not blur a
+                        // field being typed into or retract its keyboard. It
+                        // never *starts* a session — right-clicking an
+                        // unfocused field raises no keyboard.
+                        if !presses(p) {
+                            if ctx.has_focus() {
+                                ctx.request_focus();
+                            }
+                            return EventResult::Handled;
+                        }
                         ctx.request_focus();
                         ctx.capture_pointer();
                         self.focused = true;
@@ -1770,6 +1791,15 @@ mod tests {
         })
     }
 
+    /// The same event on the secondary (right) button.
+    fn secondary_pointer(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: PointerButton::Secondary,
+        })
+    }
+
     fn ch(text: &str) -> InputEvent {
         InputEvent::Key(KeyEvent {
             key: Key::Character(text.to_string()),
@@ -1800,6 +1830,48 @@ mod tests {
         let ime = root.ime_state().expect("focus publishes an IME surface");
         assert!(ime.active);
         assert!(ime.caret.is_some(), "an IME surface carries a caret rect");
+    }
+
+    #[test]
+    fn a_secondary_press_neither_focuses_nor_moves_the_caret_nor_blurs() {
+        let mut state = AppState::default();
+        let mut root = harness(&mut state);
+
+        // Unfocused: a right-click takes no focus and opens no IME session,
+        // deliberately stricter than a browser (which places a caret first).
+        root.event(
+            &mut state,
+            &secondary_pointer(PointerPhase::Down, 10.0, 10.0),
+        );
+        assert!(!root.is_focus_active());
+        assert!(!widget(&root).focused);
+        assert!(root.ime_state().is_none());
+
+        // Focused and typed into: a right-click anywhere in the field leaves the
+        // caret where it is, and leaves the live session alone — it is consumed
+        // as a tap *inside* the field, never read as an outside-tap blur.
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 10.0));
+        for c in ["a", "b", "c"] {
+            root.event(&mut state, &ch(c));
+        }
+        let caret = widget(&root).editor.editing_state_bytes().extent;
+        assert_eq!(caret, 3, "the caret sits after the typed text");
+
+        let outcome = root.event(
+            &mut state,
+            &secondary_pointer(PointerPhase::Down, 1.0, 10.0),
+        );
+
+        assert!(outcome.handled, "the field still swallows the press");
+        assert_eq!(
+            widget(&root).editor.editing_state_bytes().extent,
+            caret,
+            "a right-click places no caret"
+        );
+        assert!(!widget(&root).captured, "and starts no selection drag");
+        assert!(root.is_focus_active(), "the typing session survives it");
+        assert!(widget(&root).focused);
     }
 
     #[test]

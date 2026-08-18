@@ -114,6 +114,8 @@ use frust_core::{
 };
 use kurbo::{Point, Size};
 
+use crate::authoring::presses;
+
 /// The press duration after which a held press becomes a long-press.
 ///
 /// **Community-approximate**: neither platform publishes this as a stable
@@ -368,6 +370,13 @@ impl Widget for GestureDetectorWidget {
         if let InputEvent::Pointer(p) = event {
             match p.phase {
                 PointerPhase::Down => {
+                    // Only a primary press arms a recognizer. A secondary press
+                    // is a context gesture — it starts neither a tap nor a
+                    // long-press and opens no capture — but it still reaches the
+                    // child, whose own context handling (if any) owns it.
+                    if !presses(p) {
+                        return self.child.event_child(ctx, event);
+                    }
                     self.state = Recognizer::Pressed {
                         down_pos: p.position,
                         press_start: None,

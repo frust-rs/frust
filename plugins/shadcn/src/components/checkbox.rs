@@ -12,7 +12,7 @@
 //! | `shadow-xs` | [`style::SHADOW_XS`] |
 //! | `dark:bg-input/30` | [`DARK_FILL_ALPHA`] over `outline_variant`, dark only |
 //! | `data-[state=checked]:bg-primary` + `:border-primary` | `primary` fill and border |
-//! | `data-[state=checked]:text-primary-foreground` | the check mark's `on_primary` stroke |
+//! | `data-[state=checked]:text-primary-foreground` | the check/minus mark's `on_primary` stroke |
 //! | `focus-visible:border-ring` + `ring-[3px] ring-ring/50` | [`style::focus_border`] + [`style::draw_focus_ring`] |
 //! | `disabled:opacity-50` + `disabled:cursor-not-allowed` | [`style::disabled_tint`] + [`style::DISABLED_CURSOR`] |
 //!
@@ -23,12 +23,35 @@
 //! leaves its own `checked` alone until the next `rebuild` feeds the confirmed
 //! value back down (`docs/CODE_STANDARDS.md`'s Interaction Semantics).
 //!
+//! # The indeterminate state, and where it diverges from the source
+//!
+//! Radix's primitive models a third value (`checked = "indeterminate"`) and
+//! shadcn's own data-table passes it — `checked={allSelected || (someSelected &&
+//! "indeterminate")}` in `blocks/dashboard-01/components/data-table.tsx`, same
+//! rev — so [`CheckboxView::indeterminate`] carries it here. Two behaviors come
+//! straight from the primitive, one is a deliberate divergence:
+//!
+//! - **Activating an indeterminate box reports `true`**, not `!checked` — Radix
+//!   resolves a mixed state upward (`isIndeterminate(prev) ? true : !prev`), so a
+//!   half-selected "select all" completes the selection rather than clearing it.
+//!   The one exception is `checked && indeterminate` together — representable
+//!   here but not in Radix's own three-value `checked` prop — where reporting
+//!   `true` would just echo the value the app already holds; that combination
+//!   reports `!checked` instead, so the control never goes unclickable-out (see
+//!   [`CheckboxWidget::request_toggle`]).
+//! - **Semantics report [`Toggled::Mixed`]**, the ARIA `aria-checked="mixed"` the
+//!   primitive emits.
+//! - **The mark is a minus on the `primary` fill.** The source authors *no*
+//!   `data-[state=indeterminate]` rule at all and renders one `CheckIcon` for both
+//!   states, so its literal indeterminate rendering is an unfilled box carrying a
+//!   check — indistinguishable from a partially-styled checked box, and it
+//!   misreports "some of these are selected". This port paints lucide's
+//!   `MinusIcon` (`M5 12h14`, the same glyph `input-otp.tsx` imports) on the same
+//!   `primary` fill a checked box gets, which is the treatment the mixed state
+//!   actually needs.
+//!
 //! # What the port deliberately does not carry
 //!
-//! - **No indeterminate state.** Radix's primitive models `checked =
-//!   "indeterminate"`, but the shadcn registry component renders a single
-//!   `CheckIcon` indicator and authors no `data-[state=indeterminate]` rule, so
-//!   there is no third look to port. `checked` stays a `bool`.
 //! - **No hover chrome.** The class list has no `hover:` variant — a checkbox
 //!   acknowledges the pointer with the cursor, not a fill swap. The widget still
 //!   claims the hover link from its uncaptured `Move` arm (so an enclosing
@@ -53,7 +76,7 @@ use frust::authoring::{
 };
 use frust::{Brightness, Theme};
 
-use crate::hit::inside;
+use crate::hit::{inside, presses};
 use crate::style::{self, PATH_TOLERANCE};
 
 /// Box edge, in logical px (`size-4`).
@@ -66,7 +89,8 @@ pub const CHECKBOX_SIZE: f64 = 16.0;
 /// 6px) is not what the source asks for.
 pub const CHECKBOX_RADIUS: f64 = 4.0;
 
-/// Check-mark box edge, in logical px (`size-3.5` on the `CheckIcon`).
+/// Mark box edge, in logical px (`size-3.5` on the `CheckIcon`, and on the
+/// `MinusIcon` the indeterminate state substitutes for it).
 const CHECK_SIZE: f64 = 14.0;
 
 /// Side of the lucide icon viewBox the check path's coordinates are authored in
@@ -94,6 +118,7 @@ type OnCheckedChange<State> = Rc<dyn Fn(&mut State, bool)>;
 /// A declarative shadcn checkbox. See the [module docs](self).
 pub struct CheckboxView<State: 'static> {
     checked: bool,
+    indeterminate: bool,
     disabled: bool,
     label: Option<String>,
     on_checked_change: OnCheckedChange<State>,
@@ -113,6 +138,7 @@ pub fn checkbox<State: 'static, F: Fn(&mut State, bool) + 'static>(
 ) -> CheckboxView<State> {
     CheckboxView {
         checked,
+        indeterminate: false,
         disabled: false,
         label: None,
         on_checked_change: Rc::new(on_checked_change),
@@ -120,6 +146,18 @@ pub fn checkbox<State: 'static, F: Fn(&mut State, bool) + 'static>(
 }
 
 impl<State: 'static> CheckboxView<State> {
+    /// Put the box in the mixed state: the `primary` fill under a minus mark,
+    /// [`Toggled::Mixed`] semantics, and an activation that reports `true`
+    /// whatever `checked` says (see the [module docs](self)).
+    ///
+    /// Takes precedence over `checked` for everything it paints, matching
+    /// Radix's own value shape — `checked = "indeterminate"` is a *third* value
+    /// there, not a flag beside the boolean.
+    pub fn indeterminate(mut self, indeterminate: bool) -> Self {
+        self.indeterminate = indeterminate;
+        self
+    }
+
     /// Disable the control: 50% opacity, inert to pointer and key, and a
     /// not-allowed cursor (`disabled:opacity-50 disabled:cursor-not-allowed`).
     pub fn disabled(mut self, disabled: bool) -> Self {
@@ -183,6 +221,17 @@ fn check_path(origin: Point, size: f64) -> BezPath {
     path
 }
 
+/// The lucide `MinusIcon` path (`M5 12h14`), scaled from its 24-unit viewBox to
+/// a `size`-square box and translated to `origin` — the indeterminate mark.
+fn minus_path(origin: Point, size: f64) -> BezPath {
+    let s = size / ICON_VIEWBOX;
+    let at = |x: f64, y: f64| Point::new(origin.x + x * s, origin.y + y * s);
+    let mut path = BezPath::new();
+    path.move_to(at(5.0, 12.0));
+    path.line_to(at(19.0, 12.0));
+    path
+}
+
 /// Whether `key` activates a control: `Space` (WAI-ARIA's checkbox key, arriving
 /// as typed text since there is no `NamedKey::Space`) or `Enter`.
 ///
@@ -202,6 +251,7 @@ impl<State: 'static> View<State> for CheckboxView<State> {
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> CheckboxWidget {
         CheckboxWidget {
             checked: self.checked,
+            indeterminate: self.indeterminate,
             disabled: self.disabled,
             label: self.label.clone(),
             captured: false,
@@ -221,6 +271,11 @@ impl<State: 'static> View<State> for CheckboxView<State> {
         if prev.checked != self.checked {
             // The app is the source of truth: adopt the confirmed value.
             element.checked = self.checked;
+            flags |= ChangeFlags::PAINT;
+        }
+        if prev.indeterminate != self.indeterminate {
+            // Same contract as `checked`: the app owns the mixed state too.
+            element.indeterminate = self.indeterminate;
             flags |= ChangeFlags::PAINT;
         }
         if prev.disabled != self.disabled {
@@ -245,6 +300,9 @@ impl<State: 'static> View<State> for CheckboxView<State> {
 pub struct CheckboxWidget {
     /// The app-confirmed value (source of truth; adopted on `rebuild`).
     checked: bool,
+    /// The app-confirmed mixed state, which outranks `checked` everywhere it is
+    /// painted or announced (source of truth; adopted on `rebuild`).
+    indeterminate: bool,
     disabled: bool,
     label: Option<String>,
     /// Armed by a `Down` inside (alongside `capture_pointer`), cleared on
@@ -264,9 +322,35 @@ impl CheckboxWidget {
         }
     }
 
-    /// Report the requested value (`!checked`) without touching `checked`.
+    /// Report the requested value without touching any of this widget's own
+    /// state: `!checked` normally, and `true` from the mixed state (Radix
+    /// resolves an indeterminate box upward — see the [module docs](self)).
+    ///
+    /// **`checked && indeterminate` is the one combination Radix's own model
+    /// cannot hold** (its `checked` prop is `true`/`false`/`"indeterminate"`,
+    /// never `"indeterminate"` *and* `true` at once), but this port's two
+    /// independent booleans can represent it. Resolving it upward to `true`
+    /// there — the ordinary mixed-state rule — would report the value the app
+    /// already holds, an activation the app can observe no effect from.
+    /// Indeterminate still outranks `checked` everywhere it is *painted or
+    /// announced* (see [`filled`](Self::filled) and the semantics node); only
+    /// this exit path treats the two independently, falling through to
+    /// `!checked` so the control always has somewhere left to go.
     fn request_toggle(&mut self, ctx: &mut EventCtx) {
-        (self.on_checked_change)(ctx, !self.checked);
+        let next = if self.indeterminate && self.checked {
+            !self.checked
+        } else if self.indeterminate {
+            true
+        } else {
+            !self.checked
+        };
+        (self.on_checked_change)(ctx, next);
+    }
+
+    /// Whether the box paints its filled treatment: checked *or* mixed, both of
+    /// which carry a mark on the `primary` fill.
+    fn filled(&self) -> bool {
+        self.checked || self.indeterminate
     }
 }
 
@@ -292,7 +376,7 @@ impl Widget for CheckboxWidget {
             theme,
         );
 
-        let fill = if self.checked {
+        let fill = if self.filled() {
             Some(colors.primary)
         } else {
             colors.unchecked_fill
@@ -303,7 +387,7 @@ impl Widget for CheckboxWidget {
 
         // The border is the checked/unchecked token, overridden by the ring
         // color while focused (`focus-visible:border-ring`).
-        let resting_border = if self.checked {
+        let resting_border = if self.filled() {
             colors.primary
         } else {
             colors.border
@@ -321,9 +405,16 @@ impl Widget for CheckboxWidget {
             &Brush::Solid(tint(border)),
         );
 
-        if self.checked {
+        if self.filled() {
             let inset = (CHECKBOX_SIZE - CHECK_SIZE) / 2.0;
-            let path = check_path(Point::new(inset, inset), CHECK_SIZE);
+            let at = Point::new(inset, inset);
+            // The mixed state's minus outranks the check, the way Radix's third
+            // value outranks the boolean.
+            let path = if self.indeterminate {
+                minus_path(at, CHECK_SIZE)
+            } else {
+                check_path(at, CHECK_SIZE)
+            };
             scene.stroke_path(
                 origin,
                 &path,
@@ -356,7 +447,7 @@ impl Widget for CheckboxWidget {
                 let size = ctx.size();
                 match p.phase {
                     PointerPhase::Down => {
-                        if self.disabled || !inside(p.position, size) {
+                        if self.disabled || !presses(p) || !inside(p.position, size) {
                             return EventResult::Ignored;
                         }
                         self.captured = true;
@@ -414,7 +505,11 @@ impl Widget for CheckboxWidget {
             if let Some(label) = &self.label {
                 node.set_label(label.as_str());
             }
-            node.set_toggled(Toggled::from(self.checked));
+            node.set_toggled(if self.indeterminate {
+                Toggled::Mixed
+            } else {
+                Toggled::from(self.checked)
+            });
             if self.disabled {
                 node.set_disabled();
             } else {
@@ -482,6 +577,14 @@ mod tests {
         View::<Toggles>::build(&view(checked, disabled), &mut BuildCtx::new(&mut counter))
     }
 
+    fn mixed_widget(checked: bool) -> CheckboxWidget {
+        let mut counter = 0u64;
+        View::<Toggles>::build(
+            &view(checked, false).indeterminate(true),
+            &mut BuildCtx::new(&mut counter),
+        )
+    }
+
     fn paint(w: &mut CheckboxWidget, theme: Option<&Theme>) -> Recorder {
         let mut rec = Recorder::default();
         let size = Size::new(CHECKBOX_SIZE, CHECKBOX_SIZE);
@@ -498,6 +601,15 @@ mod tests {
             phase,
             position: Point::new(x, y),
             button: PointerButton::Primary,
+        })
+    }
+
+    /// The same event on the secondary (right) button.
+    fn secondary(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: PointerButton::Secondary,
         })
     }
 
@@ -590,6 +702,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_indeterminate_box_fills_primary_and_strokes_a_minus() {
+        let theme = crate::theme();
+        let scheme = theme.scheme();
+        let mut w = mixed_widget(false);
+        let rec = paint(&mut w, Some(&theme));
+
+        assert_eq!(
+            rec.rrects.len(),
+            1,
+            "the mixed state fills like a checked one"
+        );
+        assert_eq!(rec.rrects[0].3, scheme.primary);
+        assert_eq!(rec.strokes.len(), 2, "border + mark");
+        assert_eq!(rec.strokes[0].2, scheme.primary, "`border-primary`");
+
+        // The minus is a flat horizontal run, unlike the check's two segments.
+        let (bbox, width, mark) = rec.strokes[1];
+        assert_eq!(mark, scheme.on_primary);
+        assert!(bbox.height() < 1e-9, "`M5 12h14` has no vertical extent");
+        assert!((width - CHECK_STROKE_VIEWBOX * CHECK_SIZE / ICON_VIEWBOX).abs() < 1e-9);
+        // ...and it sits centred in the 16px box, 5/24ths in from the icon edge.
+        let inset = (CHECKBOX_SIZE - CHECK_SIZE) / 2.0;
+        assert!((bbox.y0 - CHECKBOX_SIZE / 2.0).abs() < 1e-9);
+        assert!((bbox.x0 - (inset + 5.0 * CHECK_SIZE / ICON_VIEWBOX)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_mixed_state_outranks_checked_in_paint() {
+        let theme = crate::theme();
+        let mut checked_and_mixed = mixed_widget(true);
+        let rec = paint(&mut checked_and_mixed, Some(&theme));
+        assert!(
+            rec.strokes[1].0.height() < 1e-9,
+            "a checked box that is also mixed still paints the minus"
+        );
+    }
+
     // ---- Interaction ------------------------------------------------------
 
     #[test]
@@ -609,6 +759,81 @@ mod tests {
         dispatch(&mut on, &mut state, &pointer(PointerPhase::Up, 8.0, 8.0));
         assert_eq!(state.last, Some(false));
         assert!(on.checked);
+    }
+
+    /// Radix resolves a mixed box **upward**: activating it asks for `true`,
+    /// never `!checked` — but only where Radix's own model can actually sit
+    /// (`checked = false`, mixed on top). `checked = true` together with
+    /// `indeterminate` is a combination Radix's three-value `checked` prop
+    /// cannot represent at all, so it is not "whichever boolean the mixed
+    /// value sits on top of" here — see
+    /// `checked_and_indeterminate_together_round_trips_out` below.
+    #[test]
+    fn activating_an_indeterminate_box_asks_for_true() {
+        let mut w = mixed_widget(false);
+        let mut state = Toggles::default();
+        dispatch(&mut w, &mut state, &pointer(PointerPhase::Down, 8.0, 8.0));
+        dispatch(&mut w, &mut state, &pointer(PointerPhase::Up, 8.0, 8.0));
+        assert_eq!(state.last, Some(true));
+        assert!(w.indeterminate, "the app owns the mixed state too");
+
+        dispatch(&mut w, &mut state, &space());
+        assert_eq!(state.last, Some(true), "the key path agrees");
+        assert_eq!(state.count, 2);
+    }
+
+    /// `checked && indeterminate` is representable here even though Radix's
+    /// own `checked` prop can never hold both at once. Resolving it upward to
+    /// `true` (the ordinary mixed-state rule) would report the value the app
+    /// already holds — an activation with no observable effect, leaving the
+    /// control unclickable-out. It reports `!checked` instead, so pressing it
+    /// always has somewhere left to go, and a second press from the resulting
+    /// plain-unchecked state behaves exactly like any other checkbox.
+    #[test]
+    fn checked_and_indeterminate_together_round_trips_out() {
+        let mut w = mixed_widget(true);
+        let mut state = Toggles::default();
+        dispatch(&mut w, &mut state, &pointer(PointerPhase::Down, 8.0, 8.0));
+        dispatch(&mut w, &mut state, &pointer(PointerPhase::Up, 8.0, 8.0));
+        assert_eq!(
+            state.last,
+            Some(false),
+            "reporting `true` would echo the app's own already-held value"
+        );
+        assert!(w.checked && w.indeterminate, "still controlled by the app");
+
+        dispatch(&mut w, &mut state, &space());
+        assert_eq!(state.last, Some(false), "the key path agrees");
+        assert_eq!(state.count, 2);
+
+        // The app takes the hint and clears both props: an ordinary checkbox
+        // from here on.
+        let mut plain = widget(false, false);
+        dispatch(
+            &mut plain,
+            &mut state,
+            &pointer(PointerPhase::Down, 8.0, 8.0),
+        );
+        dispatch(&mut plain, &mut state, &pointer(PointerPhase::Up, 8.0, 8.0));
+        assert_eq!(state.last, Some(true));
+    }
+
+    #[test]
+    fn a_secondary_press_never_captures_or_toggles() {
+        let mut w = widget(false, false);
+        let mut state = Toggles::default();
+        assert_eq!(
+            dispatch(&mut w, &mut state, &secondary(PointerPhase::Down, 8.0, 8.0)),
+            EventResult::Ignored
+        );
+        assert!(!w.captured, "no capture for the shell to get stuck on");
+        dispatch(&mut w, &mut state, &secondary(PointerPhase::Up, 8.0, 8.0));
+        assert_eq!(state.count, 0);
+
+        // The primary gesture still toggles.
+        dispatch(&mut w, &mut state, &pointer(PointerPhase::Down, 8.0, 8.0));
+        dispatch(&mut w, &mut state, &pointer(PointerPhase::Up, 8.0, 8.0));
+        assert_eq!(state.count, 1);
     }
 
     #[test]
@@ -700,6 +925,17 @@ mod tests {
         assert!(w.disabled);
         assert!(!w.captured, "disabling clears an armed press");
         assert!(flags.needs_paint());
+
+        // The mixed state reconciles the same way, in both directions.
+        let mixed = view(true, true).indeterminate(true);
+        let flags =
+            View::<Toggles>::rebuild(&mixed, &next, &mut w, &mut BuildCtx::new(&mut counter));
+        assert!(w.indeterminate);
+        assert!(flags.needs_paint());
+        let flags =
+            View::<Toggles>::rebuild(&next, &mixed, &mut w, &mut BuildCtx::new(&mut counter));
+        assert!(!w.indeterminate);
+        assert!(flags.needs_paint());
     }
 
     // ---- Root-driven: focus ring, cursor, semantics ------------------------
@@ -711,6 +947,7 @@ mod tests {
         root: frust_core::RenderRoot<Toggles, CheckboxView<Toggles>>,
         state: Toggles,
         disabled: bool,
+        indeterminate: bool,
     }
 
     impl Harness {
@@ -719,6 +956,7 @@ mod tests {
                 root: frust_core::RenderRoot::new(),
                 state: Toggles::default(),
                 disabled,
+                indeterminate: false,
             };
             h.root.set_theme(Box::new(crate::theme()));
             h.rebuild();
@@ -727,12 +965,14 @@ mod tests {
 
         fn rebuild(&mut self) {
             let disabled = self.disabled;
+            let indeterminate = self.indeterminate;
             let mut logic = move |_s: &mut Toggles| {
                 checkbox::<Toggles, _>(false, |s: &mut Toggles, v: bool| {
                     s.last = Some(v);
                     s.count += 1;
                 })
                 .disabled(disabled)
+                .indeterminate(indeterminate)
                 .label("terms")
             };
             self.root.rebuild(&mut logic, &mut self.state);
@@ -813,5 +1053,20 @@ mod tests {
             .expect("a Role::CheckBox node");
         assert!(node.is_disabled());
         assert!(!node.supports_action(Action::Click));
+    }
+
+    #[test]
+    fn semantics_reports_the_mixed_state_as_toggled_mixed() {
+        let mut h = Harness::new(false);
+        h.indeterminate = true;
+        h.rebuild();
+        let update = h.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::CheckBox)
+            .expect("a Role::CheckBox node");
+        assert_eq!(node.toggled(), Some(Toggled::Mixed), "aria-checked=mixed");
+        assert!(node.supports_action(Action::Click));
     }
 }

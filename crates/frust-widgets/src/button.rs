@@ -85,6 +85,7 @@ use frust_theme::Theme;
 use kurbo::{Affine, Arc as KurboArc, Point, RoundedRect, Shape, Size, Vec2};
 use peniko::{Brush, Color};
 
+use crate::authoring::presses;
 use crate::nav::transition::{TransitionDriver, make_driver};
 use crate::text;
 use crate::text::ThemeTextColor;
@@ -869,6 +870,9 @@ impl Widget for ButtonWidget {
         };
         match p.phase {
             PointerPhase::Down => {
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 self.pressed = true;
                 self.captured = true;
                 self.press.set_pressed(true);
@@ -959,10 +963,44 @@ mod tests {
         })
     }
 
+    /// The same event on the secondary (right) button.
+    fn secondary_ev(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(frust_core::PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: frust_core::PointerButton::Secondary,
+        })
+    }
+
     fn dispatch(w: &mut ButtonWidget, state: &mut Counter, event: &InputEvent) {
         let state_any: &mut dyn Any = state;
         let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(100.0, 40.0));
         w.event(&mut ctx, event);
+    }
+
+    #[test]
+    fn a_secondary_press_neither_presses_nor_captures_nor_fires() {
+        let mut w = widget();
+        let mut state = Counter::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            &secondary_ev(PointerPhase::Down, 10.0, 10.0),
+        );
+        assert!(!w.pressed, "no pressed chrome on a right-click");
+        assert!(!w.captured, "and no capture for the shell to wedge on");
+        dispatch(
+            &mut w,
+            &mut state,
+            &secondary_ev(PointerPhase::Up, 10.0, 10.0),
+        );
+        assert_eq!(state.presses, 0);
+
+        // The primary gesture is untouched by the guard.
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 10.0, 10.0));
+        assert!(w.pressed);
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(state.presses, 1);
     }
 
     #[test]

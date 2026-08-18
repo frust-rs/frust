@@ -60,10 +60,10 @@ use std::rc::Rc;
 
 use frust::authoring::{
     AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
-    ErasedArgCallback, EventCtx, EventResult, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx,
-    PaintScene, Point, PointerPhase, Role, ScrollDelta, SemanticsCtx, Size, ThemeTextColor, View,
-    Widget, any, build_child, erase_callback_arg, rebuild_children, route_event_single,
-    teardown_child, text::FontWeight, visit_children,
+    ErasedArgCallback, EventCtx, EventResult, InputEvent, Key, KeyEvent, LayoutCtx, NamedKey,
+    PaintCtx, PaintScene, Point, PointerEvent, PointerPhase, Role, ScrollDelta, SemanticsCtx, Size,
+    ThemeTextColor, View, Widget, any, build_child, erase_callback_arg, rebuild_children,
+    route_event_single, teardown_child, text::FontWeight, visit_children,
 };
 use frust::input::WHEEL_LINE_PX;
 use frust::{
@@ -73,6 +73,7 @@ use frust::{
 
 use crate::components::native_select::draw_chevron;
 use crate::components::popover::{MENU_PADDING, PanelHandle, PanelStyle, PanelView, panel};
+use crate::hit::presses;
 use crate::overlay::{
     AnchoredOverlayView, AnchoredOverlayWidget, OverlayAlign, OverlayAnchor, OverlayPlacement,
     OverlaySide, SIDE_OFFSET, anchored,
@@ -702,6 +703,156 @@ impl MenuListWidget {
             (pos.y >= top && pos.y < top + pod.size().height).then_some(i)
         })
     }
+
+    /// The `Widget::event` key arm: arrow/enter/escape navigation, split out of
+    /// `event` itself so the dispatcher stays a plain read of the event shape.
+    fn handle_key(&mut self, ctx: &mut EventCtx, key: &KeyEvent) -> EventResult {
+        match &key.key {
+            // Neither handled nor forwarded: the host dismisses on it.
+            Key::Named(NamedKey::Escape) => {
+                if self.open_sub.is_some() {
+                    self.close_submenu();
+                    ctx.request_redraw();
+                    return EventResult::Handled;
+                }
+                EventResult::Ignored
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                self.move_highlight(1);
+                ctx.request_redraw();
+                EventResult::Handled
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                self.move_highlight(-1);
+                ctx.request_redraw();
+                EventResult::Handled
+            }
+            Key::Named(NamedKey::ArrowRight) => {
+                if let Some(row) = self.highlight
+                    && self.open_submenu_at(row)
+                {
+                    ctx.request_redraw();
+                    return EventResult::Handled;
+                }
+                EventResult::Ignored
+            }
+            Key::Named(NamedKey::ArrowLeft) => {
+                if self.open_sub.is_some() {
+                    self.close_submenu();
+                    ctx.request_redraw();
+                    return EventResult::Handled;
+                }
+                EventResult::Ignored
+            }
+            Key::Named(NamedKey::Enter) => {
+                let Some(row) = self.highlight else {
+                    return EventResult::Ignored;
+                };
+                if self.open_submenu_at(row) {
+                    ctx.request_redraw();
+                    return EventResult::Handled;
+                }
+                self.select(ctx, row);
+                EventResult::Handled
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// The `Widget::event` scroll arm: the same `offset + dy` wheel convention
+    /// every scrollable in this catalog shares, clamped to the content range.
+    fn handle_scroll(
+        &mut self,
+        ctx: &mut EventCtx,
+        size: Size,
+        position: Point,
+        delta: &ScrollDelta,
+    ) -> EventResult {
+        if position.y < 0.0 || position.y >= size.height {
+            return EventResult::Ignored;
+        }
+        let dy = match delta {
+            ScrollDelta::Lines(_, y) => y * WHEEL_LINE_PX,
+            ScrollDelta::Pixels(_, y) => *y,
+        };
+        let before = self.scroll;
+        self.scroll += dy;
+        self.clamp_scroll();
+        if (self.scroll - before).abs() > f64::EPSILON {
+            self.apply_scroll();
+            ctx.request_redraw();
+            return EventResult::Handled;
+        }
+        EventResult::Ignored
+    }
+
+    /// The `Widget::event` pointer arm: hover latching (with submenu
+    /// open/close), press-to-highlight, and release-to-select.
+    fn handle_pointer(&mut self, ctx: &mut EventCtx, size: Size, p: &PointerEvent) -> EventResult {
+        // Only a primary press operates the list. The whole gesture is refused,
+        // `Up` included, because a release resolves against the highlight rather
+        // than a capture flag — a secondary release would otherwise select
+        // whatever row a hover had highlighted. The hover pass (`Move`), which
+        // is also what opens a submenu, is untouched.
+        if !presses(p) && p.phase != PointerPhase::Move {
+            return EventResult::Ignored;
+        }
+        let row = self.row_at(p.position, size);
+        match p.phase {
+            PointerPhase::Move => {
+                // Claimed after the submenu routing above (the claim-ordering
+                // rule): a hovered row inside an open submenu wins the claim.
+                if row.is_some() {
+                    ctx.claim_hover();
+                    ctx.set_cursor(style::ACTIVE_CURSOR);
+                }
+                let hovered = row.filter(|i| self.rows[*i].selectable());
+                if self.hovered != hovered {
+                    self.hovered = hovered;
+                    match hovered {
+                        Some(i) => {
+                            self.highlight = Some(i);
+                            // Hovering a sub-trigger opens it; hovering anything
+                            // else closes whatever was open.
+                            if !self.open_submenu_at(i) {
+                                self.close_submenu();
+                            }
+                        }
+                        // A non-selectable row (a separator, a group label, or a
+                        // disabled item) is "anything else" too — closes whatever
+                        // was open rather than leaving a stale submenu hanging
+                        // open over an unrelated row.
+                        None => self.close_submenu(),
+                    }
+                    ctx.request_redraw();
+                }
+                EventResult::Ignored
+            }
+            PointerPhase::Down => {
+                let Some(row) = row.filter(|i| self.rows[*i].selectable()) else {
+                    return EventResult::Ignored;
+                };
+                // Focus is what routes the arrows and Enter here afterwards.
+                ctx.request_focus();
+                self.highlight = Some(row);
+                ctx.capture_pointer();
+                ctx.request_redraw();
+                EventResult::Handled
+            }
+            PointerPhase::Up => {
+                let Some(row) = row.filter(|i| self.rows[*i].selectable()) else {
+                    return EventResult::Ignored;
+                };
+                if self.highlight == Some(row) && !self.open_submenu_at(row) {
+                    self.select(ctx, row);
+                }
+                EventResult::Handled
+            }
+            // A `Cancel` arm touches no app state: the highlight is view state
+            // the next move re-establishes.
+            PointerPhase::Cancel => EventResult::Handled,
+        }
+    }
 }
 
 impl<State: 'static> View<State> for MenuListView<State> {
@@ -960,129 +1111,18 @@ impl Widget for MenuListWidget {
         }
 
         if let InputEvent::Key(key) = event {
-            match &key.key {
-                // Neither handled nor forwarded: the host dismisses on it.
-                Key::Named(NamedKey::Escape) => {
-                    if self.open_sub.is_some() {
-                        self.close_submenu();
-                        ctx.request_redraw();
-                        return EventResult::Handled;
-                    }
-                    return EventResult::Ignored;
-                }
-                Key::Named(NamedKey::ArrowDown) => {
-                    self.move_highlight(1);
-                    ctx.request_redraw();
-                    return EventResult::Handled;
-                }
-                Key::Named(NamedKey::ArrowUp) => {
-                    self.move_highlight(-1);
-                    ctx.request_redraw();
-                    return EventResult::Handled;
-                }
-                Key::Named(NamedKey::ArrowRight) => {
-                    if let Some(row) = self.highlight
-                        && self.open_submenu_at(row)
-                    {
-                        ctx.request_redraw();
-                        return EventResult::Handled;
-                    }
-                    return EventResult::Ignored;
-                }
-                Key::Named(NamedKey::ArrowLeft) => {
-                    if self.open_sub.is_some() {
-                        self.close_submenu();
-                        ctx.request_redraw();
-                        return EventResult::Handled;
-                    }
-                    return EventResult::Ignored;
-                }
-                Key::Named(NamedKey::Enter) => {
-                    let Some(row) = self.highlight else {
-                        return EventResult::Ignored;
-                    };
-                    if self.open_submenu_at(row) {
-                        ctx.request_redraw();
-                        return EventResult::Handled;
-                    }
-                    self.select(ctx, row);
-                    return EventResult::Handled;
-                }
-                _ => return EventResult::Ignored,
-            }
+            return self.handle_key(ctx, key);
         }
 
         let size = ctx.size();
         if let InputEvent::Scroll { position, delta } = event {
-            if position.y < 0.0 || position.y >= size.height {
-                return EventResult::Ignored;
-            }
-            let dy = match delta {
-                ScrollDelta::Lines(_, y) => y * WHEEL_LINE_PX,
-                ScrollDelta::Pixels(_, y) => *y,
-            };
-            let before = self.scroll;
-            self.scroll += dy;
-            self.clamp_scroll();
-            if (self.scroll - before).abs() > f64::EPSILON {
-                self.apply_scroll();
-                ctx.request_redraw();
-                return EventResult::Handled;
-            }
-            return EventResult::Ignored;
+            return self.handle_scroll(ctx, size, *position, delta);
         }
 
         let InputEvent::Pointer(p) = event else {
             return EventResult::Ignored;
         };
-        let row = self.row_at(p.position, size);
-        match p.phase {
-            PointerPhase::Move => {
-                // Claimed after the submenu routing above (the claim-ordering
-                // rule): a hovered row inside an open submenu wins the claim.
-                if row.is_some() {
-                    ctx.claim_hover();
-                    ctx.set_cursor(style::ACTIVE_CURSOR);
-                }
-                let hovered = row.filter(|i| self.rows[*i].selectable());
-                if self.hovered != hovered {
-                    self.hovered = hovered;
-                    if let Some(i) = hovered {
-                        self.highlight = Some(i);
-                        // Hovering a sub-trigger opens it; hovering anything else
-                        // closes whatever was open.
-                        if !self.open_submenu_at(i) {
-                            self.close_submenu();
-                        }
-                    }
-                    ctx.request_redraw();
-                }
-                EventResult::Ignored
-            }
-            PointerPhase::Down => {
-                let Some(row) = row.filter(|i| self.rows[*i].selectable()) else {
-                    return EventResult::Ignored;
-                };
-                // Focus is what routes the arrows and Enter here afterwards.
-                ctx.request_focus();
-                self.highlight = Some(row);
-                ctx.capture_pointer();
-                ctx.request_redraw();
-                EventResult::Handled
-            }
-            PointerPhase::Up => {
-                let Some(row) = row.filter(|i| self.rows[*i].selectable()) else {
-                    return EventResult::Ignored;
-                };
-                if self.highlight == Some(row) && !self.open_submenu_at(row) {
-                    self.select(ctx, row);
-                }
-                EventResult::Handled
-            }
-            // A `Cancel` arm touches no app state: the highlight is view state
-            // the next move re-establishes.
-            PointerPhase::Cancel => EventResult::Handled,
-        }
+        self.handle_pointer(ctx, size, p)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
@@ -1103,11 +1143,14 @@ impl Widget for MenuListWidget {
 /// A declarative shadcn dropdown menu. See [`dropdown_menu`].
 pub struct DropdownMenuView<State: 'static> {
     inner: AnchoredOverlayView<State>,
+    style: PanelHandle,
     placement: OverlayPlacement,
 }
 
 /// Build a dropdown-menu panel over `items`, to be mounted while the app's own
-/// open flag is set (see [`crate::popover`] for the mount contract).
+/// open flag is set — or kept mounted with the flag handed to
+/// [`DropdownMenuView::open`] for an exit ramp (see [`crate::popover`] for both
+/// mount contracts).
 ///
 /// `on_select(state, index)` reports an activation, with `index` counted
 /// depth-first over the item tree (see the [module docs](self)).
@@ -1116,11 +1159,17 @@ pub fn dropdown_menu<State: 'static, F: Fn(&mut State, usize) + 'static>(
     on_select: F,
 ) -> DropdownMenuView<State> {
     let style: PanelHandle = Rc::new(RefCell::new(PanelStyle::menu()));
-    let content = menu_panel(items, MenuListStyle::menu(), style, Rc::new(on_select));
+    let content = menu_panel(
+        items,
+        MenuListStyle::menu(),
+        style.clone(),
+        Rc::new(on_select),
+    );
     // A menu lines up with the trigger's leading edge, not its centre.
     let placement = OverlayPlacement::default().align(OverlayAlign::Start);
     DropdownMenuView {
         inner: anchored(content).placement(placement),
+        style,
         placement,
     }
 }
@@ -1148,6 +1197,18 @@ impl<State: 'static> DropdownMenuView<State> {
     pub fn offset(mut self, offset: f64) -> Self {
         self.placement.offset = offset;
         self.apply_placement()
+    }
+
+    /// Hand a **kept-mounted** menu the app's open flag, so closing it plays the
+    /// panel's exit ramp instead of vanishing (see [`crate::popover`]).
+    ///
+    /// The default is `true`: a mounted menu is an open one. A selection still
+    /// reports through `on_select` on the release that made it — only the pixels
+    /// linger, and an open submenu fades out inside its parent.
+    pub fn open(mut self, open: bool) -> Self {
+        self.style.borrow_mut().open = open;
+        self.inner = self.inner.open(open);
+        self
     }
 
     /// Set the open-change callback: a press outside the menu or a focus-routed
@@ -1401,6 +1462,32 @@ mod tests {
     }
 
     #[test]
+    fn hovering_a_non_selectable_row_closes_an_open_submenu() {
+        let mut w = build(&list_view());
+        layout(&mut w);
+        let mut state = AppState::default();
+        let sub_row = 5;
+        let p = row_center(&w, sub_row);
+        dispatch(&mut w, &mut state, &pointer(PointerPhase::Move, p.x, p.y));
+        assert_eq!(w.open_submenu(), Some(sub_row), "hover opens it");
+
+        // Row 3 is the separator between the disabled row and `Status Bar` —
+        // hovering it is "anything else" too, and must close the submenu the
+        // same way hovering a plain item does.
+        let separator = row_center(&w, 3);
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Move, separator.x, separator.y),
+        );
+        assert_eq!(
+            w.open_submenu(),
+            None,
+            "hovering a separator closes the open submenu"
+        );
+    }
+
+    #[test]
     fn a_submenu_row_reports_its_own_depth_first_index() {
         let mut w = build(&list_view());
         layout(&mut w);
@@ -1514,24 +1601,58 @@ mod tests {
             );
         }
         assert!(w.scroll() > 0.0, "the highlight scrolled into view");
-        assert!(w.scroll() <= w.content_height - w.viewport);
+        let max_scroll = w.content_height - w.viewport;
+        assert!(w.scroll() <= max_scroll);
+
+        // Walk the highlight back to the first row through the same public key
+        // route used above — `scroll_into_view` lands `scroll` back at 0.0
+        // (the row's own top offset), so there is no need to poke the private
+        // field directly.
+        for _ in 0..10 {
+            dispatch(
+                &mut w,
+                &mut state,
+                &key_event(Key::Named(NamedKey::ArrowUp)),
+            );
+        }
+        assert_eq!(w.scroll(), 0.0, "walked back to the top row");
 
         // A wheel scroll moves the same offset, baseline `offset + dy` convention
-        // (frust-widgets' `ScrollView`/`ListView`). Reset to the top first, since
-        // the ArrowDown loop above already left `scroll` at its max — a wheel
-        // scroll from there would just clamp back to max and hide the growth.
-        w.scroll = 0.0;
-        w.apply_scroll();
+        // (frust-widgets' `ScrollView`/`ListView`): a positive `y` delta scrolls
+        // down (increases the offset).
+        let scroll_at = Point::new(20.0, 20.0);
         let before = w.scroll();
         dispatch(
             &mut w,
             &mut state,
             &InputEvent::Scroll {
-                position: Point::new(20.0, 20.0),
+                position: scroll_at,
                 delta: ScrollDelta::Lines(0.0, 1.0),
             },
         );
-        assert!(w.scroll() > before);
+        assert!(w.scroll() > before, "a positive delta scrolls down");
+
+        // Wheel past the max clamps at the bottom rather than overshooting.
+        dispatch(
+            &mut w,
+            &mut state,
+            &InputEvent::Scroll {
+                position: scroll_at,
+                delta: ScrollDelta::Lines(0.0, 1000.0),
+            },
+        );
+        assert_eq!(w.scroll(), max_scroll, "clamped at the bottom");
+
+        // Wheel back up past the top clamps at 0 rather than going negative.
+        dispatch(
+            &mut w,
+            &mut state,
+            &InputEvent::Scroll {
+                position: scroll_at,
+                delta: ScrollDelta::Lines(0.0, -1000.0),
+            },
+        );
+        assert_eq!(w.scroll(), 0.0, "clamped at the top");
     }
 
     #[test]
@@ -1549,6 +1670,135 @@ mod tests {
         let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
         let size = w.layout(&mut lctx, &BoxConstraints::loose(WINDOW));
         assert_eq!(size.width, MIN_MENU_WIDTH, "min-w-[8rem]");
+    }
+
+    /// `duration-200`, the shared ramp the panel exits over.
+    const RAMP_MS: f64 = 200.0;
+
+    /// A kept-mounted menu: always in the tree, handed the app's flag, which is
+    /// the mount an exit ramp needs (see [`crate::overlay::anchored`]).
+    struct KeptHarness {
+        root: RenderRoot<AppState, frust::StackView<AppState>>,
+        state: AppState,
+        tcx: TextContext,
+        anchor: OverlayAnchor,
+        open: bool,
+        clock: f64,
+    }
+
+    impl KeptHarness {
+        fn new() -> Self {
+            let anchor = OverlayAnchor::new();
+            anchor.set(Rect::new(20.0, 20.0, 100.0, 56.0));
+            let mut h = KeptHarness {
+                root: RenderRoot::new(),
+                state: AppState::default(),
+                tcx: TextContext::new(),
+                anchor,
+                open: true,
+                clock: 0.0,
+            };
+            h.root.set_theme(Box::new(light()));
+            h.pass();
+            h
+        }
+
+        fn pass(&mut self) {
+            let anchor = self.anchor.clone();
+            let open = self.open;
+            let mut logic = move |_s: &mut AppState| {
+                frust::Stack(vec![any(dropdown_menu(items(), |s: &mut AppState, i| {
+                    s.selected.push(i)
+                })
+                .anchor(&anchor)
+                .open(open)
+                .on_open_change(|s: &mut AppState, o| s.opens.push(o)))])
+            };
+            self.root.rebuild(&mut logic, &mut self.state);
+            self.root
+                .layout_with_text(WINDOW, &mut self.tcx as &mut dyn Any);
+            let now = self.clock;
+            self.root.paint(&mut Recorder::default(), ft_ms(now));
+        }
+
+        fn paint_at(&mut self, ms: f64) -> Recorder {
+            self.clock = ms;
+            let mut rec = Recorder::default();
+            self.root.paint(&mut rec, ft_ms(ms));
+            rec
+        }
+
+        /// The centre of `Profile`, the first selectable row — under the panel's
+        /// `p-1` and the `My Account` group label above it.
+        fn first_item_row(&self) -> Point {
+            let anchor = self.anchor.rect();
+            Point::new(
+                anchor.x0 + 20.0,
+                anchor.y1 + SIDE_OFFSET + MENU_PADDING + 24.0 + 14.0,
+            )
+        }
+
+        /// Whether the panel's `bg-popover` box was drawn.
+        fn painted(rec: &Recorder) -> bool {
+            let theme = light();
+            rec.rrects
+                .iter()
+                .any(|(_, _, _, c)| *c == theme.scheme().surface_container_high)
+        }
+    }
+
+    #[test]
+    fn a_kept_mounted_menu_paints_out_its_exit_and_consumes_nothing_meanwhile() {
+        let mut h = KeptHarness::new();
+        h.paint_at(RAMP_MS * 2.0);
+        assert!(KeptHarness::painted(&h.paint_at(RAMP_MS * 2.0)));
+        let panel = h.first_item_row();
+
+        // The app closes it; the widget stays mounted and ramps out.
+        h.open = false;
+        h.pass();
+        let start = h.clock;
+        let mid = h.paint_at(start + RAMP_MS / 2.0);
+        assert!(KeptHarness::painted(&mid), "still on screen");
+        assert!(mid.layers[0] > 0.0 && mid.layers[0] < 1.0);
+
+        // A press over the closing panel reaches the page under it.
+        let before = h.state.opens.len();
+        let outcome = h
+            .root
+            .event(&mut h.state, &pointer(PointerPhase::Down, panel.x, panel.y));
+        assert!(
+            outcome.handled,
+            "a closing menu swallows a press that lands on it"
+        );
+        assert_eq!(h.state.selected, Vec::<usize>::new(), "and selects nothing");
+        assert_eq!(h.state.opens.len(), before, "and dismisses nothing");
+
+        assert!(
+            !KeptHarness::painted(&h.paint_at(start + RAMP_MS * 2.0)),
+            "gone at settle"
+        );
+    }
+
+    #[test]
+    fn a_kept_mounted_menu_that_reopens_is_live_again() {
+        let mut h = KeptHarness::new();
+        h.paint_at(RAMP_MS * 2.0);
+        h.open = false;
+        h.pass();
+        h.paint_at(h.clock + RAMP_MS * 2.0);
+        assert!(!KeptHarness::painted(&h.paint_at(h.clock)));
+
+        h.open = true;
+        h.pass();
+        let reopened = h.paint_at(h.clock + RAMP_MS * 2.0);
+        assert!(KeptHarness::painted(&reopened), "the entrance ran again");
+        let row = h.first_item_row();
+        h.root
+            .event(&mut h.state, &pointer(PointerPhase::Down, row.x, row.y));
+        h.root
+            .event(&mut h.state, &pointer(PointerPhase::Up, row.x, row.y));
+        assert_eq!(h.state.selected, vec![1], "`Profile`, the first item row");
     }
 
     #[test]

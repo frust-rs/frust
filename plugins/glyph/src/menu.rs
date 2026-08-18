@@ -132,6 +132,8 @@ use frust::Timing;
 use frust::{BackPolicy, NavigatorController, PopResult, PushOptions};
 use frust::{TransitionDriver, TransitionSpec, make_driver};
 
+use crate::press::presses;
+
 /// The window-edge clamp margin, in logical px (an original, hand-picked value, kept
 /// aligned with the dialog/palette catalog's typical panel gutter).
 const WINDOW_MARGIN: f64 = 8.0;
@@ -1045,6 +1047,13 @@ impl Widget for GlyphMenuWidget {
         };
         match p.phase {
             PointerPhase::Down => {
+                // The menu is modal: it swallows a secondary press like every
+                // other one, but arms neither an item nor the scrim dismiss
+                // from it. (The focus re-claim above stays button-agnostic:
+                // any `Down` bubbling no claim is a blur at the root.)
+                if !presses(p) {
+                    return EventResult::Handled;
+                }
                 if let Some(i) = self.item_at(p.position) {
                     self.pressed_row = Some(i);
                     ctx.capture_pointer();

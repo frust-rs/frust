@@ -44,6 +44,8 @@ use frust_theme::{DesignLanguage, GlassMaterial, GlassScale, Theme};
 use kurbo::{Point, Size};
 use peniko::{Brush, Color, Gradient};
 
+use crate::authoring::presses;
+
 /// Slider control height, in logical px.
 const HEIGHT: f64 = 24.0;
 /// Default track width when the incoming constraints are unbounded.
@@ -289,6 +291,9 @@ impl Widget for SliderWidget {
         };
         match p.phase {
             PointerPhase::Down => {
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 self.captured = true;
                 ctx.capture_pointer();
                 let v = value_from_x(p.position.x, ctx.size().width);
@@ -355,10 +360,36 @@ mod tests {
         })
     }
 
+    /// The same event on the secondary (right) button.
+    fn secondary_ev(phase: PointerPhase, x: f64) -> InputEvent {
+        InputEvent::Pointer(frust_core::PointerEvent {
+            phase,
+            position: Point::new(x, 12.0),
+            button: frust_core::PointerButton::Secondary,
+        })
+    }
+
     fn dispatch(w: &mut SliderWidget, state: &mut Val, event: &InputEvent) {
         let state_any: &mut dyn Any = state;
         let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(200.0, HEIGHT));
         w.event(&mut ctx, event);
+    }
+
+    #[test]
+    fn a_secondary_press_never_captures_or_reports_a_value() {
+        let mut w = widget(0.0);
+        let mut state = Val::default();
+        dispatch(&mut w, &mut state, &secondary_ev(PointerPhase::Down, 50.0));
+        assert!(!w.captured, "no capture opened");
+        assert_eq!(state.changes, 0, "and no value reported");
+        // A move after it is an ordinary uncaptured pass, not a drag.
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Move, 120.0));
+        assert_eq!(state.changes, 0);
+
+        // The primary press still reports.
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 50.0));
+        assert!(w.captured);
+        assert_eq!(state.value, 0.25);
     }
 
     #[test]

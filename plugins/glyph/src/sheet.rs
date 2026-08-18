@@ -213,6 +213,8 @@ use frust::Timing;
 use frust::{BackPolicy, NavigatorController, PopResult, PushOptions};
 use frust::{TransitionDriver, TransitionSpec, make_driver};
 
+use crate::press::presses;
+
 /// Scrim opacity behind the panel at full enter — the same value
 /// [`crate::dialog`] uses (the Glyph modal barrier constant, applied
 /// here too for a consistent barrier weight across the catalog's two modal
@@ -1145,7 +1147,11 @@ impl GlyphSheetWidget {
                 // machine owns the panel's offset and a drag would fight it, so
                 // the press falls through to the barrier arm below instead —
                 // which swallows it (an inside-panel press dismisses nothing).
-                if self.phase == Phase::Shown && self.handle_target.contains(p.position) {
+                // Primary-only: a secondary press drags no handle.
+                if presses(p)
+                    && self.phase == Phase::Shown
+                    && self.handle_target.contains(p.position)
+                {
                     // Seed the origin from where the panel actually *is*, so
                     // grabbing one mid-spring-back does not teleport it to rest;
                     // for the ordinary grab-at-rest this is just the `Down` y.
@@ -1166,6 +1172,11 @@ impl GlyphSheetWidget {
                 if frust::authoring::route_event_single(&mut self.content, ctx, event)
                     == EventResult::Handled
                 {
+                    return EventResult::Handled;
+                }
+                // The barrier swallows a secondary press like any other, but
+                // arms no scrim dismiss from it.
+                if !presses(p) {
                     return EventResult::Handled;
                 }
                 self.scrim_captured = true;

@@ -48,7 +48,7 @@ use frust::{TextView, Theme, text};
 
 use crate::components::input::{FALLBACK, FieldChrome, paint_field_border, resolve_field_border};
 use crate::components::native_select::activates;
-use crate::hit::inside;
+use crate::hit::{inside, presses};
 use crate::style;
 use crate::tokens::ShadcnTokens;
 
@@ -638,6 +638,9 @@ impl Widget for InputGroupButtonWidget {
         }
         match p.phase {
             PointerPhase::Down => {
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 self.pressed = true;
                 self.captured = true;
                 ctx.capture_pointer();

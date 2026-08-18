@@ -42,6 +42,8 @@ use frust::{ShapeScale, Theme};
 use kurbo::{Point, Rect, RoundedRect, Shape, Size, Vec2};
 use peniko::{Brush, Color};
 
+use crate::press::presses;
+
 /// Corner-rounding tolerance for the tag's hairline border (matches
 /// `crate::badge`'s constant of the same name).
 const PATH_TOLERANCE: f64 = 0.1;
@@ -334,6 +336,9 @@ impl Widget for TagWidget {
             .inflate(REMOVE_HIT_SLOP, REMOVE_HIT_SLOP);
         match p.phase {
             PointerPhase::Down => {
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 if !inside(p.position, hit_rect) {
                     return EventResult::Ignored;
                 }

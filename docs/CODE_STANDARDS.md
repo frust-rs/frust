@@ -275,6 +275,15 @@ widget in `frust-widgets`:
   }
   ```
 
+- **Only `PointerButton::Primary` starts a press/capture/activation.** A secondary (or other
+  non-primary) press is a context gesture, not an activation — the sanctioned consumer is a
+  context-menu trigger, never the widget's own `on_press`/`on_toggle`/`on_change`. A barrier or
+  light-dismiss layer may still consume any button to close, but must not enter press state from a
+  non-primary one, while focus/IME session re-claims stay button-agnostic. Every widget tree
+  carries its own crate-private predicate for the rule — `frust_widgets::authoring::presses`,
+  `frust_shadcn::hit::presses`, and `press::presses` in each catalog crate — no cross-crate
+  dependency.
+
 - **Controlled components never self-mutate.** `Checkbox`/`Slider` report the *requested*
   value through `on_toggle`/`on_change` and leave `checked`/`value` untouched until the next
   `rebuild` feeds the app-confirmed value back down — never flip `self.checked` inline in a

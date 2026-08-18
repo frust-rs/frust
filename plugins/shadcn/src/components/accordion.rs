@@ -54,7 +54,7 @@ use frust::{AnimationController, Curve, TextView, Theme, text};
 
 use crate::components::input::FALLBACK;
 use crate::components::native_select::{activates, draw_chevron};
-use crate::hit::inside;
+use crate::hit::{inside, presses};
 use crate::style;
 use crate::tokens::ShadcnTokens;
 
@@ -591,6 +591,9 @@ impl Widget for AccordionWidget {
                 EventResult::Handled
             }
             PointerPhase::Down => {
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 let Some(index) = self
                     .trigger_at(p.position, size)
                     .filter(|index| !self.rows[*index].disabled)

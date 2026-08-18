@@ -76,6 +76,8 @@ use peniko::{Brush, Color};
 
 use super::alert_dialog::{CupertinoActionStyle, CupertinoDialogAction, action, action_label_view};
 
+use crate::press::presses;
+
 /// Horizontal margin from the window edges to the sheet panels, in logical px.
 ///
 /// **Community-approximate**: ~8pt matches the inset iOS action sheets sit at;
@@ -508,6 +510,14 @@ impl<State: 'static> Widget for CupertinoActionSheetWidget<State> {
                 // add a claim-once guard, it kills the session on the second
                 // tap.
                 ctx.request_focus();
+                // The barrier swallows a secondary press like every other one —
+                // it blocks the page behind it whatever button pressed — but it
+                // arms nothing, so a right-click can neither pick an action row
+                // nor dismiss. (The focus re-claim above stays button-agnostic:
+                // any `Down` bubbling no claim is a blur at the root.)
+                if !presses(p) {
+                    return EventResult::Handled;
+                }
                 self.captured = true;
                 ctx.capture_pointer();
                 EventResult::Handled

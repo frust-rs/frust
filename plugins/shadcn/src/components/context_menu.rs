@@ -26,12 +26,9 @@
 //! # Secondary-button reach
 //!
 //! `PointerEvent::button` carries [`PointerButton::Secondary`], which is what
-//! this trigger matches on, so the component is complete against the framework's
-//! own input vocabulary and drives from a test verbatim. The **desktop shell**
-//! does not yet translate a right mouse button into it — `frust-shell-desktop`
-//! forwards `MouseButton::Left` only — so on a desktop app today the trigger sees
-//! no secondary press to open on. That is a shell gap, not a component one:
-//! nothing here needs to change when the shell starts forwarding the button.
+//! this trigger matches on: on desktop, `frust-shell-desktop` forwards the
+//! right mouse button as a secondary press, so a right-click over the trigger
+//! area opens the menu at the pointer.
 //!
 //! Touch has no secondary button at all, and long-press-opens-a-context-menu is
 //! not modelled: a touch device sees no context menu from this component.
@@ -57,11 +54,14 @@ use crate::overlay::{
 /// A declarative shadcn context menu. See [`context_menu`].
 pub struct ContextMenuView<State: 'static> {
     inner: AnchoredOverlayView<State>,
+    style: PanelHandle,
     placement: OverlayPlacement,
 }
 
 /// Build a context-menu panel over `items`, to be mounted while the app's own
-/// open flag is set (see [`crate::popover`] for the mount contract).
+/// open flag is set — or kept mounted with the flag handed to
+/// [`ContextMenuView::open`] for an exit ramp (see [`crate::popover`] for both
+/// mount contracts).
 ///
 /// `on_select(state, index)` reports an activation with the same depth-first
 /// index [`crate::dropdown_menu`] documents — the two share their whole list.
@@ -70,13 +70,19 @@ pub fn context_menu<State: 'static, F: Fn(&mut State, usize) + 'static>(
     on_select: F,
 ) -> ContextMenuView<State> {
     let style: PanelHandle = Rc::new(RefCell::new(PanelStyle::menu()));
-    let content = menu_panel(items, MenuListStyle::menu(), style, Rc::new(on_select));
+    let content = menu_panel(
+        items,
+        MenuListStyle::menu(),
+        style.clone(),
+        Rc::new(on_select),
+    );
     // Anchored to a *point*: below and trailing of it, flush against it.
     let placement = OverlayPlacement::on(OverlaySide::Bottom)
         .align(OverlayAlign::Start)
         .offset(0.0);
     ContextMenuView {
         inner: anchored(content).placement(placement),
+        style,
         placement,
     }
 }
@@ -93,6 +99,16 @@ impl<State: 'static> ContextMenuView<State> {
     pub fn side(mut self, side: OverlaySide) -> Self {
         self.placement.side = side;
         self.inner = self.inner.placement(self.placement);
+        self
+    }
+
+    /// Hand a **kept-mounted** menu the app's open flag, so closing it plays the
+    /// panel's exit ramp instead of vanishing (see [`crate::popover`]).
+    ///
+    /// The default is `true`: a mounted menu is an open one.
+    pub fn open(mut self, open: bool) -> Self {
+        self.style.borrow_mut().open = open;
+        self.inner = self.inner.open(open);
         self
     }
 
@@ -293,20 +309,37 @@ mod tests {
     /// proves it is absolute rather than region-local.
     const INSET: f64 = 24.0;
 
+    /// `duration-200`, the shared ramp the panel exits over.
+    const RAMP_MS: f64 = 200.0;
+
     struct Harness {
         root: RenderRoot<AppState, frust::StackView<AppState>>,
         state: AppState,
         tcx: TextContext,
         anchor: OverlayAnchor,
+        /// Whether the menu is kept mounted and handed the flag (the mount an
+        /// exit ramp needs) rather than mounted only while open.
+        kept: bool,
+        clock: f64,
     }
 
     impl Harness {
         fn new() -> Self {
+            Self::with_mount(false)
+        }
+
+        fn kept_mounted() -> Self {
+            Self::with_mount(true)
+        }
+
+        fn with_mount(kept: bool) -> Self {
             let mut h = Harness {
                 root: RenderRoot::new(),
                 state: AppState::default(),
                 tcx: TextContext::new(),
                 anchor: OverlayAnchor::new(),
+                kept,
+                clock: 0.0,
             };
             h.root.set_theme(Box::new(light()));
             h.pass();
@@ -315,6 +348,7 @@ mod tests {
 
         fn pass(&mut self) {
             let anchor = self.anchor.clone();
+            let kept = self.kept;
             let mut logic = move |state: &mut AppState| {
                 let region = Padding(
                     frust::EdgeInsets::all(INSET),
@@ -325,11 +359,12 @@ mod tests {
                         }),
                 );
                 let mut children = vec![any(region)];
-                if state.open {
+                if kept || state.open {
                     children.push(any(context_menu(items(), |s: &mut AppState, i| {
                         s.selected.push(i)
                     })
                     .anchor(&anchor)
+                    .open(state.open)
                     .on_open_change(|s: &mut AppState, open| {
                         s.opens.push(open);
                         s.open = open;
@@ -340,7 +375,24 @@ mod tests {
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
                 .layout_with_text(WINDOW, &mut self.tcx as &mut dyn Any);
-            self.root.paint(&mut Recorder::default(), ft_ms(0.0));
+            let now = self.clock;
+            self.root.paint(&mut Recorder::default(), ft_ms(now));
+        }
+
+        /// Paint at `ms` without rebuilding — the ramp's own frames.
+        fn paint_at(&mut self, ms: f64) -> Recorder {
+            self.clock = ms;
+            let mut rec = Recorder::default();
+            self.root.paint(&mut rec, ft_ms(ms));
+            rec
+        }
+
+        /// Whether the menu's `bg-popover` panel was drawn.
+        fn panel_painted(rec: &Recorder) -> bool {
+            let theme = light();
+            rec.rrects
+                .iter()
+                .any(|(_, _, _, c)| *c == theme.scheme().surface_container_high)
         }
 
         fn event(&mut self, event: InputEvent) {
@@ -399,6 +451,42 @@ mod tests {
         h.event(pointer(PointerPhase::Up, panel.x0 + 20.0, panel.y0 + 12.0));
         h.event(escape());
         assert!(!h.state.opens.last().unwrap(), "the last report is a close");
+    }
+
+    #[test]
+    fn a_kept_mounted_menu_paints_out_its_exit_and_consumes_nothing_meanwhile() {
+        let mut h = Harness::kept_mounted();
+        h.event(secondary(PointerPhase::Down, 80.0, 90.0));
+        // The press point lands in the anchor on the next paint, and the host
+        // re-places itself on the layout after that.
+        h.pass();
+        h.paint_at(RAMP_MS * 2.0);
+        assert!(Harness::panel_painted(&h.paint_at(h.clock)));
+        let row = Point::new(h.anchor.rect().x0 + 20.0, h.anchor.rect().y0 + 12.0);
+
+        // A press outside closes it; the menu stays mounted and ramps out.
+        h.event(pointer(PointerPhase::Down, 380.0, 580.0));
+        assert_eq!(h.state.opens, vec![true, false], "reported at once");
+        assert!(!h.state.open);
+
+        let start = h.clock;
+        let mid = h.paint_at(start + RAMP_MS / 2.0);
+        assert!(Harness::panel_painted(&mid), "still on screen");
+        assert!(mid.layers[0] > 0.0 && mid.layers[0] < 1.0);
+
+        let outcome = h
+            .root
+            .event(&mut h.state, &pointer(PointerPhase::Down, row.x, row.y));
+        assert!(
+            outcome.handled,
+            "a closing menu swallows a press that lands on it"
+        );
+        assert_eq!(h.state.selected, Vec::<usize>::new());
+
+        assert!(
+            !Harness::panel_painted(&h.paint_at(start + RAMP_MS * 2.0)),
+            "gone at settle"
+        );
     }
 
     #[test]

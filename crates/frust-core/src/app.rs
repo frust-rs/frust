@@ -16,13 +16,14 @@
 use std::any::Any;
 use std::cell::Cell;
 use std::num::NonZeroU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use kurbo::{Point, Rect, Size};
 
 use crate::anim::FrameTime;
 use crate::event::{
-    CursorIcon, EventCtx, EventOutcome, EventResult, ImeState, InputEvent, PointerButton,
-    PointerEvent, PointerPhase, clear_cursor_request, take_cursor_request,
+    CursorIcon, CursorPass, EventCtx, EventOutcome, EventResult, ImeState, InputEvent,
+    PointerButton, PointerEvent, PointerPhase,
 };
 use crate::insets::WindowInsets;
 use crate::layout::BoxConstraints;
@@ -216,6 +217,20 @@ fn release_focus_session_in(
     }
 }
 
+/// The allocator behind [`RenderRoot::root_identity`], handing every root a
+/// value no other root shares.
+///
+/// Starts at `1` so `0` stays available as "no root" (a pod that has never held a
+/// claim, and the at-rest published hover link — see
+/// `crate::event::set_live_hover_link`).
+///
+/// A module-level static rather than an associated const/`static` inside the
+/// generic `impl`: the latter is monomorphized per `<State, V>` pair, which would
+/// hand two roots of different concrete types the same identity — exactly the
+/// collision this counter exists to remove. `Relaxed` is enough because the value
+/// is only ever compared for equality, never used to order anything.
+static NEXT_ROOT_IDENTITY: AtomicU64 = AtomicU64::new(1);
+
 /// Owns the retained tree and drives the rebuild/layout/paint passes for a
 /// single-root application.
 ///
@@ -259,6 +274,18 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// epoch past it means a never-claimed pod cannot match the live epoch by
     /// accident before the first hover pass ever runs.
     hover_epoch: u64,
+    /// This root's process-unique identity, assigned once at construction from
+    /// [`NEXT_ROOT_IDENTITY`] and never reused.
+    ///
+    /// It exists for exactly one comparison: the hover-orphan channel
+    /// (`crate::event`'s `mark_hover_orphaned`/`take_hover_orphaned`) is a
+    /// thread-local a *destructor* writes, so a second root driving passes on the
+    /// same thread can otherwise see a mark that is none of its business.
+    /// `hover_epoch` cannot tell them apart — every root's counter starts at `1`
+    /// and advances per hover pass, so two roots hold colliding integers as a rule
+    /// rather than as a fluke. Publishing and draining `(identity, epoch)` is what
+    /// keeps one root's unmounting claimant from ending another's live hover.
+    root_identity: u64,
     /// The cursor the last cursor pass resolved — hover's sibling channel, and
     /// the value a desktop shell reads through [`RenderRoot::cursor`].
     ///
@@ -407,6 +434,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             hover_active: false,
             // Past a fresh pod's `0` stamp — see the field doc.
             hover_epoch: 1,
+            root_identity: NEXT_ROOT_IDENTITY.fetch_add(1, Ordering::Relaxed),
             cursor: CursorIcon::Default,
             ime_state: None,
             focus_ime_gen: 0,
@@ -567,6 +595,10 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// contact from a mouse here, so an uncaptured touch drag over a
     /// non-capturing claimant is an ordinary hover pass — ended by the `Up` at
     /// lift (see `docs/LIMITATIONS.md`'s `hover-window-leave-standing`).
+    ///
+    /// A [`RenderRoot::rebuild`] that removes the claimant ends the link too, so
+    /// this never reports a hover held by a widget that no longer exists — the
+    /// hover counterpart of the unmount focus release (see that method).
     pub fn is_hover_active(&self) -> bool {
         self.hover_active
     }
@@ -689,6 +721,23 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             &mut self.ime_state,
             &mut self.focus_ime_gen,
         );
+    }
+
+    /// End the standing hover link outright, outside any hover pass: advance the
+    /// epoch (which strands every stamp in the tree at once, so no container has
+    /// to be told) and clear the mirror.
+    ///
+    /// Hover's analog of [`RenderRoot::release_focus_session`], and idempotent in
+    /// the same way — ending a hover nothing holds writes the same mirror back and
+    /// costs one epoch. There is no generation counter to move: hover is not a
+    /// session a shell mirrors (see [`RenderRoot::is_hover_active`]).
+    ///
+    /// The one caller is [`RenderRoot::rebuild`]'s severed-claimant drain; a hover
+    /// pass ends its own link inline, where it also decides the *new* one.
+    fn end_hover_link(&mut self) {
+        self.hover_epoch = self.hover_epoch.wrapping_add(1);
+        self.hover_active = false;
+        crate::event::set_live_hover_link(self.root_identity, 0);
     }
 
     /// The [`PlatformViewFrame`]s published during the most recent
@@ -905,6 +954,39 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // `focus_or_ime_changed` edge for the one repaint the release needs.
         if crate::event::take_focus_orphaned() {
             self.release_focus_session();
+        }
+
+        // Generic-unmount hover release, the same shape one channel over: a diff
+        // that dropped the `ChildPod` holding the live hover link has severed a
+        // path the epoch mechanism cannot strand, because stranding needs a hover
+        // pass and the dead claimant will never see another one. Without this the
+        // mirror stands over a widget that no longer exists — `is_hover_active()`
+        // reporting a link nothing holds — and every surviving ancestor of the
+        // claimant keeps painting hover chrome off its own still-matching stamp
+        // until some later `Move` re-derives, which never comes on a pointer the
+        // user has stopped moving.
+        //
+        // The mark is raised by the pod's destructor rather than by the
+        // reconcilers (the stamp has no setter for a container to cooperate
+        // through — see `mark_hover_orphaned`), which is what makes this cover
+        // every removal route, including hand-rolled containers outside this
+        // workspace. That reach is also why the mark is qualified by
+        // `root_identity`: a destructor fires whenever a pod happens to die, so
+        // an unqualified mark could be a second root's on this thread. Drained
+        // after the flush loop for the focus release's reason: any pass of the
+        // loop may re-diff, and one end covers them all.
+        //
+        // Unlike that release this one flags `PAINT` of its own. The reconciler
+        // that dropped the claimant usually reported `LAYOUT | PAINT` already,
+        // but "usually" is not a contract this drain can rest on: the destructor
+        // route deliberately covers containers outside this workspace (that is
+        // its whole reason for existing), and one of those can drop a pod while
+        // reporting whatever flags it likes. Ending a hover always changes what
+        // paints, so the correction states its own need for the frame it rides
+        // on — idempotent where the reconciler already said so.
+        if crate::event::take_hover_orphaned(self.root_identity) && self.hover_active {
+            self.end_hover_link();
+            flags |= ChangeFlags::PAINT;
         }
 
         self.pending |= flags;
@@ -1350,6 +1432,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         );
         let hover_epoch = self.hover_epoch;
         let hover_was_active = self.hover_active;
+        let root_identity = self.root_identity;
 
         // The cursor pass is hover's pass widened by one case: **any** pointer
         // `Move`, captured included, because a captured `Move` routes only to the
@@ -1361,9 +1444,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         //
         // The slot is cleared here rather than trusted to be empty: a `set_cursor`
         // from a dispatch no root drove (a reconciler's synthesized `Cancel`)
-        // must not leak into this pass's resolution.
+        // must not leak into this pass's resolution. The clear and the drain below
+        // are one bracket (`CursorPass`) rather than two bare calls, so a dispatch
+        // that re-entered this method could not silently eat the enclosing pass's
+        // request — see that guard.
         let cursor_pass = matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Move);
-        clear_cursor_request();
+        let cursor_slot = CursorPass::enter();
 
         let (handled, needs_redraw, captured, hover_claimed, focus_req, focus_rel, ime) = {
             let state_any: &mut dyn Any = state;
@@ -1377,6 +1463,10 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             ctx.set_hovered(hover_was_active);
             ctx.set_hover_epoch(hover_epoch);
             ctx.set_hover_eligible(hover_pass);
+            // Stamped onto whichever pod records a claim, so that pod's
+            // destructor can tell this root's link from another root's
+            // identically-numbered epoch (see `root_identity`).
+            ctx.set_hover_root(root_identity);
             let result = pod.widget_mut().event(&mut ctx, event);
             let handled = matches!(result, EventResult::Handled);
             (
@@ -1480,6 +1570,21 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         if hover_pass || hover_ends {
             self.hover_epoch = self.hover_epoch.wrapping_add(1);
             self.hover_active = hover_pass && hover_claimed;
+            // Republish the link a dropping pod checks its stamp against, so a
+            // rebuild that removes the claimant can report the severance the
+            // epoch alone cannot strand (see `ChildPod`'s `Drop`). Epoch `0` while
+            // nothing holds a link, which is what makes a stale stamp's drop —
+            // the common case — cost one comparison and mark nothing. The
+            // identity rides with it because epoch integers are per-root and
+            // collide by construction (see `root_identity`).
+            crate::event::set_live_hover_link(
+                self.root_identity,
+                if self.hover_active {
+                    self.hover_epoch
+                } else {
+                    0
+                },
+            );
         }
 
         // Close the cursor pass: the last request of the pass wins, and its
@@ -1488,7 +1593,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // pointer moving off every requesting widget resolves to. Drained
         // unconditionally so a request made on a non-cursor pass cannot survive
         // into the next one; only a cursor pass commits it.
-        let requested = take_cursor_request();
+        let requested = cursor_slot.take();
         if cursor_pass {
             self.cursor = requested.unwrap_or_default();
         }
@@ -4309,10 +4414,13 @@ mod tests {
     /// ancestor-on-the-claim-path case, which the two sibling leaves alone cannot
     /// show. With `claims` set it also wants hover chrome of its own, claiming
     /// either side of the route to exercise the ordering rule.
+    ///
+    /// The child is an `Option` so a rebuild can *remove* it — the unmount case,
+    /// where the claimant stops existing between hover passes.
     struct HoverGroup {
         probe: Rc<HoverProbe>,
         claims: GroupClaim,
-        child: crate::widget::ChildPod,
+        child: Option<crate::widget::ChildPod>,
     }
 
     impl HoverGroup {
@@ -4333,13 +4441,22 @@ mod tests {
 
     impl crate::widget::Widget for HoverGroup {
         fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-            let size = self.child.layout_child(ctx, bc);
-            self.child.set_origin(Point::ZERO);
-            size
+            match &mut self.child {
+                Some(child) => {
+                    let size = child.layout_child(ctx, bc);
+                    child.set_origin(Point::ZERO);
+                    size
+                }
+                // The same box with nothing in it, so removing the claimant
+                // changes what is under the pointer without moving the container.
+                None => bc.constrain(Size::new(100.0, 30.0)),
+            }
         }
         fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
             self.probe.painted_hovered.set(ctx.is_hovered());
-            self.child.paint_child(ctx, scene);
+            if let Some(child) = &mut self.child {
+                child.paint_child(ctx, scene);
+            }
         }
         fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
             self.probe.event_hovered.set(ctx.is_hovered());
@@ -4347,7 +4464,10 @@ mod tests {
             if claims && self.claims == GroupClaim::BeforeRouting {
                 ctx.claim_hover();
             }
-            let result = self.child.event_child(ctx, event);
+            let result = match &mut self.child {
+                Some(child) => child.event_child(ctx, event),
+                None => EventResult::Ignored,
+            };
             if claims && self.claims == GroupClaim::AfterRouting {
                 ctx.claim_hover();
             }
@@ -4412,6 +4532,14 @@ mod tests {
         nested: bool,
         /// Whether (and when) that container claims hover for itself.
         group_claims: GroupClaim,
+        /// Rebuild the container without its child: the unmount case, where the
+        /// pod holding the hover link is dropped by the view diff.
+        drop_claimant: bool,
+        /// Report [`ChangeFlags::NONE`] from that removal — the hand-rolled
+        /// container outside this workspace, which drops a pod while reporting
+        /// whatever it likes. The in-tree reconcilers report `LAYOUT | PAINT`,
+        /// which is what the release used to lean on instead of flagging its own.
+        silent_reconciler: bool,
     }
 
     struct HoverPairView {
@@ -4439,7 +4567,7 @@ mod tests {
                 Box::new(HoverGroup {
                     probe: self.group.clone(),
                     claims: self.fixture.group_claims,
-                    child: crate::widget::ChildPod::new(self.leaf(&self.top)),
+                    child: Some(crate::widget::ChildPod::new(self.leaf(&self.top))),
                 })
             } else {
                 self.leaf(&self.top)
@@ -4449,8 +4577,25 @@ mod tests {
                 bottom: crate::widget::ChildPod::new(self.leaf(&self.bottom)),
             }
         }
-        fn rebuild(&self, _p: &Self, _e: &mut HoverPair, _c: &mut BuildCtx<'_>) -> ChangeFlags {
-            ChangeFlags::NONE
+        fn rebuild(&self, p: &Self, e: &mut HoverPair, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+            // The only structural op this fixture performs: drop the nested
+            // container's child pod, the way a real reconciler drops a truncated
+            // or conditionally-removed child.
+            let removes_child = self.fixture.drop_claimant && !p.fixture.drop_claimant;
+            if !removes_child {
+                return ChangeFlags::NONE;
+            }
+            let group = e
+                .top
+                .widget_mut()
+                .downcast_mut::<HoverGroup>()
+                .expect("the drop-claimant fixture is the nested one");
+            group.child = None;
+            if self.fixture.silent_reconciler {
+                ChangeFlags::NONE
+            } else {
+                ChangeFlags::LAYOUT | ChangeFlags::PAINT
+            }
         }
     }
 
@@ -4461,6 +4606,10 @@ mod tests {
         bottom: Rc<HoverProbe>,
         group: Rc<HoverProbe>,
         state: (),
+        /// The shape the next rebuild re-states, so
+        /// [`HoverHarness::rebuild_without_claimant`] can flip one flag without
+        /// restating the rest.
+        fixture: HoverFixture,
     }
 
     impl HoverHarness {
@@ -4472,6 +4621,8 @@ mod tests {
                 latches: true,
                 nested: false,
                 group_claims: GroupClaim::Never,
+                drop_claimant: false,
+                silent_reconciler: false,
             })
         }
 
@@ -4483,6 +4634,8 @@ mod tests {
                 latches: false,
                 nested: false,
                 group_claims: GroupClaim::Never,
+                drop_claimant: false,
+                silent_reconciler: false,
             })
         }
 
@@ -4493,6 +4646,8 @@ mod tests {
                 latches: true,
                 nested: true,
                 group_claims: GroupClaim::Never,
+                drop_claimant: false,
+                silent_reconciler: false,
             })
         }
 
@@ -4504,6 +4659,22 @@ mod tests {
                 latches: true,
                 nested: true,
                 group_claims: claims,
+                drop_claimant: false,
+                silent_reconciler: false,
+            })
+        }
+
+        /// The same nesting, with a container that drops its child while
+        /// reporting no flags — the hand-rolled container outside this workspace
+        /// the destructor route exists to cover.
+        fn nested_group_with_silent_reconciler() -> Self {
+            Self::build(HoverFixture {
+                captures: false,
+                latches: true,
+                nested: true,
+                group_claims: GroupClaim::AfterRouting,
+                drop_claimant: false,
+                silent_reconciler: true,
             })
         }
 
@@ -4530,7 +4701,40 @@ mod tests {
                 bottom,
                 group,
                 state,
+                fixture,
             }
+        }
+
+        /// Rebuild with the nested container's child removed — the claimant
+        /// unmounting between hover passes — and re-lay out, returning what the
+        /// diff reported.
+        fn rebuild_without_claimant(&mut self) -> ChangeFlags {
+            self.fixture.drop_claimant = true;
+            self.rebuild_current()
+        }
+
+        /// Rebuild restating the shape already on screen: nothing of this root's
+        /// own is severed, so any hover end it performs came from elsewhere.
+        fn rebuild_unchanged(&mut self) -> ChangeFlags {
+            self.rebuild_current()
+        }
+
+        /// Re-run the diff against the fixture as it currently stands, then
+        /// re-lay out, returning what the diff reported.
+        fn rebuild_current(&mut self) -> ChangeFlags {
+            let fixture = self.fixture;
+            let (t, b, g) = (self.top.clone(), self.bottom.clone(), self.group.clone());
+            let flags = self.root.rebuild(
+                &mut move |_: &mut ()| HoverPairView {
+                    top: t.clone(),
+                    bottom: b.clone(),
+                    group: g.clone(),
+                    fixture,
+                },
+                &mut self.state,
+            );
+            self.root.layout(Size::new(100.0, 60.0));
+            flags
         }
 
         /// Dispatch a pointer event at `(x, y)` in window space.
@@ -4850,6 +5054,138 @@ mod tests {
         let loss = h.dispatch(PointerPhase::Move, 50.0, 200.0);
         assert!(!h.root.is_hover_active());
         assert!(loss.needs_redraw, "the root manufactures the loss frame");
+    }
+
+    #[test]
+    fn a_rebuild_that_removes_the_claimant_ends_the_hover() {
+        // The one severance the epoch cannot strand: the claimant is dropped by a
+        // view diff, so it will never see the `Move` that would have re-derived
+        // the link. Its pod reports the drop and `rebuild` ends the hover.
+        let mut h = HoverHarness::nested_group_claiming(GroupClaim::AfterRouting);
+        h.move_over(Leaf::Top);
+        h.paint();
+        assert!(h.root.is_hover_active());
+        assert!(h.top.painted_hovered.get(), "the claimant holds the link");
+        assert!(
+            h.group.painted_hovered.get(),
+            "its container is on the path"
+        );
+
+        let flags = h.rebuild_without_claimant();
+        assert!(
+            !h.root.is_hover_active(),
+            "the mirror cannot outlive the widget it described"
+        );
+        assert!(
+            flags.contains(ChangeFlags::PAINT),
+            "the correction states its own need for a frame, whatever the \
+             reconciler that dropped the claimant reported"
+        );
+
+        // The survivor is the ancestor that was on the claim path: its own stamp
+        // still names the epoch the claim recorded, so nothing but the epoch
+        // advance keeps it from painting hover chrome for a child that is gone.
+        h.paint();
+        assert!(
+            !h.group.painted_hovered.get(),
+            "the surviving ancestor lost the link with its child"
+        );
+        assert!(
+            !h.bottom.painted_hovered.get(),
+            "and the sibling never had it"
+        );
+
+        // And the pipeline is not wedged: the next move over the same spot claims
+        // cleanly, now for the container itself. (No frame is manufactured for
+        // that gain — this container keeps no latched flag of its own, which is
+        // the documented consumer-side half of the contract, not a pipeline job.)
+        h.move_over(Leaf::Top);
+        assert!(h.root.is_hover_active(), "the next move re-claims");
+        h.paint();
+        assert!(
+            h.group.painted_hovered.get(),
+            "the container is the claimant now"
+        );
+    }
+
+    #[test]
+    fn a_silent_reconcilers_removal_still_carries_its_own_repaint() {
+        // The reason the release flags `PAINT` itself rather than trusting the
+        // diff to have reported one. The destructor route deliberately reaches
+        // containers this workspace never sees, and such a container can drop the
+        // claimant while reporting nothing — leaving the hover correctly ended but
+        // the frame that shows it unrequested, on a pointer the user has stopped
+        // moving.
+        let mut h = HoverHarness::nested_group_with_silent_reconciler();
+        h.move_over(Leaf::Top);
+        assert!(h.root.is_hover_active());
+
+        let flags = h.rebuild_without_claimant();
+        assert!(!h.root.is_hover_active(), "the link ends either way");
+        assert_eq!(
+            flags,
+            ChangeFlags::PAINT,
+            "and the frame it needs comes from the release, not from the diff"
+        );
+    }
+
+    #[test]
+    fn a_rebuild_that_keeps_the_claimant_leaves_the_hover_standing() {
+        // The negative control for the release above, and the reason the mark is
+        // gated on the *live* epoch rather than on "some pod with a stamp died":
+        // an ordinary rebuild — including one that drops pods carrying stale
+        // stamps — must not touch a link the pointer still rests on.
+        let mut h = HoverHarness::nested_group_claiming(GroupClaim::AfterRouting);
+        // Hover the top leaf, then hand the link to the sibling. The top pod chain
+        // keeps its (now stale) stamp, which is what the next rebuild drops.
+        h.move_over(Leaf::Top);
+        h.move_over(Leaf::Bottom);
+        assert!(h.root.is_hover_active());
+
+        h.rebuild_without_claimant();
+        assert!(
+            h.root.is_hover_active(),
+            "dropping a stale stamp is not a severance"
+        );
+        h.paint();
+        assert!(
+            h.bottom.painted_hovered.get(),
+            "the widget actually under the pointer keeps its chrome"
+        );
+    }
+
+    #[test]
+    fn another_roots_dying_claimant_cannot_end_this_roots_hover() {
+        // Two roots on one thread. Each has run exactly one hover pass, so their
+        // epoch counters hold the identical integer — the collision the root
+        // identity exists to break. Without it, the first root's pods dying (its
+        // window closing, a page tearing down) raise a mark the second root's
+        // next rebuild drains, ending a hover the pointer is still resting on.
+        let mut first = HoverHarness::nested_group_claiming(GroupClaim::AfterRouting);
+        let mut second = HoverHarness::nested_group_claiming(GroupClaim::AfterRouting);
+        first.move_over(Leaf::Top);
+        second.move_over(Leaf::Top);
+        assert_eq!(
+            first.root.hover_epoch, second.root.hover_epoch,
+            "the two roots' epochs collide, which is the whole premise"
+        );
+        assert!(first.root.is_hover_active());
+        assert!(second.root.is_hover_active());
+
+        // Drop the first root outright: every pod it owns runs the destructor
+        // that reports a severed hover link, including the claimant's.
+        drop(first);
+
+        second.rebuild_unchanged();
+        assert!(
+            second.root.is_hover_active(),
+            "a mark another root raised is none of this root's business"
+        );
+        second.paint();
+        assert!(
+            second.top.painted_hovered.get(),
+            "the widget under the pointer keeps its chrome"
+        );
     }
 
     #[test]

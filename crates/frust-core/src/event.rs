@@ -31,6 +31,13 @@
 //! else advances the epoch and its stamp goes stale by construction, which is why
 //! a container that never hears about the move cannot leave a stale path standing.
 //!
+//! Stranding needs a hover pass, and there is exactly one way for a link to lose
+//! its owner without one: a rebuild that *removes* the claimant, which will never
+//! see another `Move`. A dropped [`ChildPod`](crate::widget::ChildPod) holding the
+//! live link therefore reports itself, and
+//! [`RenderRoot::rebuild`](crate::app::RenderRoot::rebuild) ends the hover before
+//! the frame does — the hover twin of the focus-orphan release.
+//!
 //! The recorded thing is a **path**, exactly like focus, and both hover reads
 //! report membership of it: the claimant *and* every ancestor enclosing it read
 //! hovered, the way CSS `:hover` applies to an element while the pointer is over
@@ -579,9 +586,132 @@ pub fn take_focus_orphaned() -> bool {
 }
 
 thread_local! {
+    /// Which root owes a hover end because a pod holding its LIVE hover link was
+    /// dropped by this thread's view diff — raised by [`mark_hover_orphaned`] and
+    /// drained by [`take_hover_orphaned`]. `None` when nothing is owed.
+    ///
+    /// Hover's analog of [`FOCUS_ORPHANED`], and a side channel for the same
+    /// missing-handle reason: the reconciler that drops the claimant's
+    /// [`ChildPod`](crate::widget::ChildPod) runs inside a
+    /// [`View::rebuild`](crate::view::View::rebuild) with no
+    /// [`RenderRoot`](crate::app::RenderRoot) to clear the root's hover mirror
+    /// with. Idempotent for the same reason too: several pods severed in one diff
+    /// owe exactly one hover end.
+    ///
+    /// **Root-qualified rather than data-free**, which is where it diverges from
+    /// its focus neighbour. Focus is raised *and* drained inside one root's own
+    /// `rebuild`, so a bare bool cannot reach a second root. A hover mark comes
+    /// from a destructor, which fires whenever a pod happens to die — including
+    /// while another root on the same thread is the one that rebuilds next — so
+    /// the mark carries the identity of the root whose link died and only that
+    /// root's drain consumes it. Two roots' epoch counters legitimately collide
+    /// (each starts at `1` and advances per hover pass), so the identity, not the
+    /// epoch, is what keeps them apart.
+    ///
+    /// One slot, so two roots severed between the same pair of rebuilds leave the
+    /// later mark standing and the earlier root's mirror to lapse on its own next
+    /// hover pass — the pre-existing degradation, never a release of a link that
+    /// is still held.
+    static HOVER_ORPHANED: Cell<Option<u64>> = const { Cell::new(None) };
+
+    /// The hover link standing on this thread right now as `(root identity,
+    /// epoch)`, or `(0, 0)` when nothing holds one — published by
+    /// [`RenderRoot::event`](crate::app::RenderRoot::event) whenever it closes a
+    /// hover pass, and read by a dropping pod to tell a live link from a stale
+    /// stamp ([`live_hover_link_is`]).
+    ///
+    /// The root would otherwise be unreachable from a destructor, and the
+    /// distinction is the whole invariant: pods carrying *stale* stamps are
+    /// dropped constantly (any recycled list row that was hovered at some point),
+    /// and ending the hover on one of those would drop the chrome of whatever is
+    /// hovered now.
+    ///
+    /// Thread-local for its neighbours' UI-thread-affinity reason. It mirrors
+    /// **one** root, so a second `RenderRoot` driving passes on the same thread
+    /// overwrites it — costing the first root's hover the drop-time check (its
+    /// link then lapses on the next `Move`, the pre-existing behaviour) rather
+    /// than corrupting anything. The root identity in the pair is what makes that
+    /// last clause true: a pod of the overwritten root can no longer match the
+    /// published link by an epoch integer the two roots happen to share, so it
+    /// marks nothing instead of ending the *other* root's live hover.
+    static LIVE_HOVER_LINK: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+}
+
+/// Record that a [`ChildPod`](crate::widget::ChildPod) holding the **live** hover
+/// link was dropped, so [`RenderRoot::rebuild`](crate::app::RenderRoot::rebuild)
+/// ends the hover before the frame ends.
+///
+/// # Why a destructor, and not the reconcilers
+///
+/// [`mark_focus_orphaned`]'s callers are the reconcilers themselves, because a
+/// focused pod's link is a flag they own and clear (`set_focused`). Hover has no
+/// such flag and no setter: the link is an epoch stamp
+/// ([`ChildPod::hover_epoch`](crate::widget::ChildPod::hover_epoch)) that only
+/// [`ChildPod::event_child`](crate::widget::ChildPod::event_child) may write,
+/// deliberately, so that no container can record or clear a hover by hand. A
+/// container therefore *cannot* report its own severance, and hand-rolled
+/// containers outside this workspace could never opt in. The pod reports instead,
+/// from `Drop`, which covers every removal route — a truncated `Vec`, a
+/// `None`-ed `Option`, a keyed reconciler's dropped entry, a whole subtree torn
+/// down — with nothing to remember to call.
+///
+/// # The invariant: a mark means the LIVE link lost its owner
+///
+/// Exactly [`mark_focus_orphaned`]'s invariant, enforced by the stamp comparison
+/// instead of a chain: a pod marks only when its own stamp is non-zero *and*
+/// names the published link — same root identity, same epoch
+/// ([`live_hover_link_is`]). A stale stamp — the far commoner case, since a
+/// stamp is never cleared, only stranded by the next epoch advance — marks
+/// nothing, and so does a stamp from a *different* root that happens to carry the
+/// same epoch integer.
+///
+/// `root` is the identity the claim was stamped with (the root that ran the hover
+/// pass), so only that root's [`take_hover_orphaned`] consumes the mark.
+///
+/// Idempotent and thread-affine, exactly like [`mark_focus_orphaned`].
+pub(crate) fn mark_hover_orphaned(root: u64) {
+    HOVER_ORPHANED.with(|slot| slot.set(Some(root)));
+}
+
+/// Take (and clear) a [`mark_hover_orphaned`] mark raised for `root`.
+///
+/// Drained by [`RenderRoot::rebuild`](crate::app::RenderRoot::rebuild), which
+/// ends its own standing hover link per `true` it takes. Destructive for the
+/// matching root only, mirroring [`take_focus_orphaned`]: a mark another root
+/// raised is left standing rather than consumed, which is what keeps two roots on
+/// one thread from ending each other's hover.
+pub(crate) fn take_hover_orphaned(root: u64) -> bool {
+    HOVER_ORPHANED.with(|slot| {
+        if slot.get() == Some(root) {
+            slot.set(None);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+/// Publish the hover link standing on this thread — `root`'s live epoch while one
+/// of its widgets holds the link, epoch `0` while none does.
+///
+/// Called by [`RenderRoot::event`](crate::app::RenderRoot::event) as it closes a
+/// hover pass, and by the rebuild-time end that [`take_hover_orphaned`] drives.
+pub(crate) fn set_live_hover_link(root: u64, epoch: u64) {
+    LIVE_HOVER_LINK.with(|slot| slot.set((root, epoch)));
+}
+
+/// Whether `(root, epoch)` is the hover link standing on this thread — what a
+/// dropping [`ChildPod`](crate::widget::ChildPod) compares its own stamp against
+/// (see [`mark_hover_orphaned`]). Epoch `0` is "no link" and never matches.
+pub(crate) fn live_hover_link_is(root: u64, epoch: u64) -> bool {
+    epoch != 0 && LIVE_HOVER_LINK.with(|slot| slot.get()) == (root, epoch)
+}
+
+thread_local! {
     /// The cursor a widget asked for during the event pass currently running on
-    /// this thread — written by [`EventCtx::set_cursor`], cleared and drained by
-    /// [`crate::app::RenderRoot::event`].
+    /// this thread — written by [`EventCtx::set_cursor`], bracketed by the
+    /// [`CursorPass`] guard [`crate::app::RenderRoot::event`] holds for the
+    /// length of its dispatch.
     ///
     /// A side channel for a *routing* reason rather than the missing-handle
     /// reason [`PENDING_RESULT_FLUSH`] and [`FOCUS_ORPHANED`] above have. Unlike
@@ -591,19 +721,110 @@ thread_local! {
     /// acts on it. Bubbling it pod by pod would mean widening every container's
     /// fold to carry a value no container uses.
     ///
-    /// **Pass-scoped, not persistent.** `RenderRoot::event` clears the slot
-    /// before dispatching and drains it after, so a request never outlives its
-    /// pass, and a [`EventCtx::set_cursor`] made from a dispatch no root drives
-    /// (the `Cancel` a reconciler synthesizes during a rebuild, say) is dropped
-    /// by the next pass's clear rather than leaking into it. Last write wins,
-    /// which is what makes the innermost widget the routed path reaches the one
-    /// that decides.
+    /// **Pass-scoped, not persistent.** The guard clears the slot before
+    /// dispatching and drains it after, so a request never outlives its pass, and
+    /// a [`EventCtx::set_cursor`] made from a dispatch no root drives (the
+    /// `Cancel` a reconciler synthesizes during a rebuild, say) is dropped by the
+    /// next pass's clear rather than leaking into it. Last write wins, which is
+    /// what makes the innermost widget the routed path reaches the one that
+    /// decides. A *nested* pass is scoped the same way and hands the slot back
+    /// (see [`CursorPass`]).
     ///
     /// Thread-local rather than a process-global for the same UI-thread-affinity
     /// reason as its two neighbours: the tree that requests a cursor and the
     /// `RenderRoot` whose shell applies it live on one thread, and a global would
     /// let a hover on one thread reshape another window's pointer.
     static CURSOR_REQUEST: Cell<Option<CursorIcon>> = const { Cell::new(None) };
+
+    /// Whether a cursor pass is open on this thread — `false` at rest, `true` for
+    /// the length of one, however many are nested. Owned by [`CursorPass`], which
+    /// is the only thing that reads or writes it: [`CursorPass::enter`] captures
+    /// the previous value into the guard and `Drop` puts exactly that value back,
+    /// so an unwind through a nested pass restores the enclosing pass's state
+    /// rather than leaving a counter to unwind correctly on its own.
+    ///
+    /// The one question it answers is whether [`CursorPass::enter`] found an
+    /// *enclosing* pass's in-progress request in the slot (restore it on exit) or
+    /// a stray request made outside any pass (drop it), which the slot's own
+    /// contents cannot distinguish.
+    static CURSOR_PASS_OPEN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The open/close bracket around one cursor pass, and the guard that makes the
+/// pass-scoped slot above survive re-entrancy.
+///
+/// # Why a guard rather than a bare clear/take pair
+///
+/// The slot is *pass-scoped*: cleared before a dispatch, drained after it, so a
+/// request never outlives the pass that made it. Spelled as a bare
+/// [`clear_cursor_request`] + [`take_cursor_request`] pair that contract holds
+/// only while passes never nest — a nested dispatch's clear would erase a request
+/// the enclosing pass had already collected, and its drain would take one the
+/// enclosing pass was still owed. Nothing in this workspace nests a pass today
+/// ([`RenderRoot::event`](crate::app::RenderRoot::event) documents the rule, and
+/// the devtools injector hops its synthetic events onto the UI thread's queue
+/// rather than calling into a live dispatch), but the failure is silent and the
+/// cost of ruling it out is one stack slot.
+///
+/// # What nesting resolves to
+///
+/// Save-and-restore, so **every** pass — nested or not — resolves exactly the
+/// requests made inside it, and an inner pass returns the slot to the enclosing
+/// pass untouched:
+///
+/// * [`CursorPass::enter`] stashes whatever the enclosing pass had collected and
+///   starts the inner pass from empty (the same "absence *is* the answer" state a
+///   top-level pass starts from).
+/// * [`CursorPass::take`] drains what this pass alone recorded, and **consumes
+///   the guard**: a pass resolves exactly once, and the drain is what closes it.
+/// * `Drop` puts the enclosing pass's stash back — or, at the outermost level,
+///   leaves the slot clear, exactly as the bare pair did, so a request made
+///   outside any pass (a reconciler's synthesized `Cancel`) is still dropped
+///   rather than leaked into the next one.
+pub(crate) struct CursorPass {
+    /// What the slot is restored to when this pass ends: the enclosing pass's
+    /// in-progress request when nested, `None` at the outermost level.
+    restore: Option<CursorIcon>,
+    /// Whether a pass was already open when this one entered — put back verbatim
+    /// by `Drop`, so an inner pass leaves the enclosing one open and the
+    /// outermost leaves the thread at rest.
+    was_open: bool,
+}
+
+impl CursorPass {
+    /// Open a cursor pass, starting it from "nobody has asked for anything".
+    pub(crate) fn enter() -> Self {
+        let was_open = CURSOR_PASS_OPEN.with(|open| open.replace(true));
+        let stashed = CURSOR_REQUEST.with(|slot| slot.replace(None));
+        Self {
+            // Only an enclosing pass is owed its request back; a value found in
+            // the slot with no pass open is a stray (see `CURSOR_REQUEST`).
+            restore: if was_open { stashed } else { None },
+            was_open,
+        }
+    }
+
+    /// Take what *this* pass recorded — the value the root resolves into its
+    /// shell-facing cursor. `None` when no widget asked, which resolves to
+    /// [`CursorIcon::Default`].
+    ///
+    /// Consumes the guard, so the pass ends here: a second drain of the same pass
+    /// is unrepresentable rather than a silent `None` (the slot is drained
+    /// destructively, so a repeat call would report "nobody asked" for a pass that
+    /// had already resolved).
+    pub(crate) fn take(self) -> Option<CursorIcon> {
+        take_cursor_request()
+    }
+}
+
+impl Drop for CursorPass {
+    fn drop(&mut self) {
+        CURSOR_PASS_OPEN.with(|open| open.set(self.was_open));
+        match self.restore.take() {
+            Some(icon) => CURSOR_REQUEST.with(|slot| slot.set(Some(icon))),
+            None => clear_cursor_request(),
+        }
+    }
 }
 
 /// Clear any pending cursor request, so the pass about to run starts from
@@ -613,13 +834,17 @@ thread_local! {
 /// ([`CursorIcon::Default`]), which is why the clear is what makes the request
 /// model stateless: a widget that stops asking stops being obeyed, with nothing
 /// to release.
+///
+/// A root brackets its pass with [`CursorPass`] instead of calling this directly;
+/// it is the outermost end of that bracket.
 pub(crate) fn clear_cursor_request() {
     CURSOR_REQUEST.with(|slot| slot.set(None));
 }
 
 /// Take (and clear) the cursor requested during this pass, `None` when no widget
-/// asked. Drained by [`crate::app::RenderRoot::event`], which resolves it into
-/// the root's shell-facing cursor.
+/// asked. Reached through [`CursorPass::take`] from
+/// [`crate::app::RenderRoot::event`], which resolves it into the root's
+/// shell-facing cursor.
 pub(crate) fn take_cursor_request() -> Option<CursorIcon> {
     CURSOR_REQUEST.with(|slot| slot.take())
 }
@@ -905,6 +1130,11 @@ pub struct EventCtx<'a> {
     /// [`EventCtx::hover_claim_epoch`] instead (one past this value), because the
     /// root advances its own epoch when the pass ends.
     hover_epoch: u64,
+    /// The identity of the [`crate::app::RenderRoot`] running this pass, stamped
+    /// onto a pod beside the claim epoch ([`EventCtx::hover_root`]) so a pod
+    /// dropped later can tell its own root's live link from another root's
+    /// identically-numbered epoch. `0` outside a root-driven pass.
+    hover_root: u64,
     /// The IME surface the focused widget published this dispatch, if any; bubbles
     /// up the focus chain to [`crate::app::RenderRoot`].
     ime_state: Option<ImeState>,
@@ -927,6 +1157,7 @@ impl<'a> EventCtx<'a> {
             hover_claimed: false,
             hover_eligible: false,
             hover_epoch: 0,
+            hover_root: 0,
             ime_state: None,
             origin,
             size,
@@ -957,6 +1188,17 @@ impl<'a> EventCtx<'a> {
     /// Capture the pointer: subsequent moves/releases should route back to this
     /// widget. The enclosing container reads [`EventCtx::is_pointer_captured`]
     /// after the dispatch returns to record the active child.
+    ///
+    /// **Capture is a `Down`-time concept here.** Only the `Down` arm of
+    /// [`RenderRoot::event`](crate::app::RenderRoot::event) folds a request into
+    /// the root's own capture mirror, so a capture opened from a `Move` records
+    /// the pod's active path (routing works) while the root still reads
+    /// uncaptured. For hover that means a `Move` that both captures and
+    /// [`claim_hover`](EventCtx::claim_hover)s records the claim — the pod's
+    /// eligibility gate reads the active flag as it stood *before* this dispatch —
+    /// and then lapses on the next `Move`, where the now-active pod is ineligible.
+    /// A gesture that wants hover chrome for its whole drag keeps its own pressed
+    /// flag rather than relying on the link.
     pub fn capture_pointer(&mut self) {
         self.capture_requested = true;
     }
@@ -1050,6 +1292,14 @@ impl<'a> EventCtx<'a> {
     /// through the stamped path (below), and when no descendant claims, the
     /// container's claim is what records, so its own chrome still works. A
     /// container therefore never arbitrates — it orders.
+    ///
+    /// **Its sibling channel resolves the opposite way.** A claim is
+    /// *first*-writer-wins; [`set_cursor`](EventCtx::set_cursor) is
+    /// *last*-writer-wins. So the same "claim/ask after routing" placement means
+    /// two different things in one handler: the container's claim is a **fallback**
+    /// its child beats, while the container's cursor request is an **override**
+    /// that beats its child's. A container that wants the child's cursor to win
+    /// must ask *before* it routes — the mirror image of the ordering here.
     ///
     /// # When it does nothing
     ///
@@ -1155,6 +1405,13 @@ impl<'a> EventCtx<'a> {
     /// generic surface behind it. A container that deliberately overrides its
     /// children sets the cursor *after* routing.
     ///
+    /// **Note the asymmetry with [`claim_hover`](EventCtx::claim_hover)**, which
+    /// is first-writer-wins: a container claiming after routing yields hover to
+    /// its child, while a container asking for a cursor after routing overrides
+    /// its child. Placing the two calls side by side in one `Move` arm — the
+    /// example above — is correct precisely because a leaf has no child to order
+    /// against; a *container* writing both has to place them separately.
+    ///
     /// # It does not request a redraw
     ///
     /// Deliberately, for [`claim_hover`](EventCtx::claim_hover)'s reason: a
@@ -1242,6 +1499,20 @@ impl<'a> EventCtx<'a> {
         self.hover_epoch
     }
 
+    /// Seed the identity of the root running this pass. Called by
+    /// [`crate::app::RenderRoot::event`] at the root and threaded unchanged into
+    /// every child by [`crate::widget::ChildPod::event_child`], which stamps it
+    /// beside the claim epoch.
+    pub(crate) fn set_hover_root(&mut self, root: u64) {
+        self.hover_root = root;
+    }
+
+    /// The identity of the root running this pass — stamped onto a claiming pod
+    /// so its destructor can qualify its epoch (see [`mark_hover_orphaned`]).
+    pub(crate) fn hover_root(&self) -> u64 {
+        self.hover_root
+    }
+
     /// The epoch a claim recorded during *this* pass takes — one past the live
     /// one, because [`crate::app::RenderRoot::event`] advances its epoch when the
     /// hover pass ends. Wrapping is deliberate and harmless: the stamp is only
@@ -1251,7 +1522,19 @@ impl<'a> EventCtx<'a> {
         self.hover_epoch.wrapping_add(1)
     }
 
-    /// The receiving widget's origin in its parent's coordinate space.
+    /// The receiving widget's origin in its **parent's** coordinate space.
+    ///
+    /// Not the window-space origin, and **not** the same frame of reference as
+    /// [`PaintCtx::origin`](crate::widget::PaintCtx::origin), which is absolute:
+    /// the paint pass accumulates each child's parent-relative offset onto its
+    /// parent's already-absolute origin, while the event pass instead translates
+    /// the *event* into the child's local space
+    /// ([`ChildPod::event_child`](crate::widget::ChildPod::event_child)) and hands
+    /// down the pod's own offset unaccumulated. So an event position is already
+    /// local (compare it against `Point::ZERO` and [`EventCtx::size`], never
+    /// against this), and anything anchored in window space — an overlay, a
+    /// popup, a reported rect — must be computed from `PaintCtx::origin` in
+    /// `paint`, not from this value.
     pub fn origin(&self) -> Point {
         self.origin
     }
@@ -1266,8 +1549,9 @@ impl<'a> EventCtx<'a> {
     /// hover-claim flags start clear; `has_focus` reflects the child pod's recorded
     /// focus flag, `hovered` its recorded hover link, and `hover_eligible` whether
     /// the child may claim hover at all (the caller narrows it — see
-    /// [`crate::widget::ChildPod::event_child`]). The live hover epoch is threaded
-    /// down unchanged. The parent folds the results back in with
+    /// [`crate::widget::ChildPod::event_child`]). The live hover epoch and the
+    /// running root's identity are threaded down unchanged (a claim anywhere in
+    /// the subtree is stamped with both). The parent folds the results back in with
     /// [`EventCtx::absorb_child`].
     pub(crate) fn child_ctx(
         &mut self,
@@ -1288,6 +1572,7 @@ impl<'a> EventCtx<'a> {
             hover_claimed: false,
             hover_eligible,
             hover_epoch: self.hover_epoch,
+            hover_root: self.hover_root,
             ime_state: None,
             origin,
             size,
@@ -1637,6 +1922,52 @@ mod tests {
     }
 
     #[test]
+    fn a_hover_mark_belongs_to_the_root_whose_link_it_names() {
+        // Two roots on one thread hold colliding epoch integers by construction
+        // (every root's counter starts at 1 and advances per hover pass), so the
+        // published link and the mark are both qualified by the root's identity.
+        // Simulated here with two ids rather than two `RenderRoot`s: this is the
+        // channel's own contract, and the pods on either side of it only ever
+        // reach it through these four functions.
+        const ROOT_A: u64 = 11;
+        const ROOT_B: u64 = 22;
+        const EPOCH: u64 = 7;
+
+        set_live_hover_link(ROOT_B, EPOCH);
+        assert!(
+            live_hover_link_is(ROOT_B, EPOCH),
+            "the publishing root's pod recognizes its own live link"
+        );
+        assert!(
+            !live_hover_link_is(ROOT_A, EPOCH),
+            "the same epoch integer under another root is not this link"
+        );
+        assert!(
+            !live_hover_link_is(ROOT_B, 0),
+            "epoch 0 is 'no link' and matches nothing"
+        );
+
+        // A mark raised for one root is not the other's to consume: draining the
+        // wrong one must neither report nor clear it.
+        mark_hover_orphaned(ROOT_A);
+        assert!(
+            !take_hover_orphaned(ROOT_B),
+            "a root does not end its hover on another root's severance"
+        );
+        assert!(
+            take_hover_orphaned(ROOT_A),
+            "and the mark is still standing for the root that owns it"
+        );
+        assert!(
+            !take_hover_orphaned(ROOT_A),
+            "the drain is destructive for the matching root"
+        );
+
+        // Leave the thread-local at rest for anything else on this thread.
+        set_live_hover_link(0, 0);
+    }
+
+    #[test]
     fn a_cursor_request_is_one_slot_the_last_writer_owns() {
         // Thread-affine like the two flags above, and libtest gives each test its
         // own thread — but clear first anyway so nothing earlier on this thread
@@ -1662,6 +1993,58 @@ mod tests {
             take_cursor_request(),
             None,
             "the drain is destructive — one request per pass"
+        );
+    }
+
+    #[test]
+    fn a_nested_cursor_pass_resolves_its_own_and_hands_the_slot_back() {
+        // The reentrancy guard on the pass-scoped slot. `RenderRoot::event`
+        // forbids re-entering itself, so this shape is not reachable today —
+        // which is the point: the failure it would produce (an inner dispatch
+        // silently eating the request the outer pass had already collected, or
+        // draining one the outer pass was still owed) is invisible, so the
+        // bracket enforces the scoping rather than the convention doing it.
+        let outer = CursorPass::enter();
+        let mut count = 0u32;
+        {
+            let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+            ctx.set_cursor(CursorIcon::Grab);
+        }
+        // A nested pass starts from absence, like any other — and draining it
+        // ends it, handing the enclosing pass's request straight back.
+        assert_eq!(
+            CursorPass::enter().take(),
+            None,
+            "a nested pass starts from absence, like any other"
+        );
+        {
+            let inner = CursorPass::enter();
+            let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+            ctx.set_cursor(CursorIcon::Text);
+            drop(ctx);
+            assert_eq!(
+                inner.take(),
+                Some(CursorIcon::Text),
+                "and resolves exactly what was asked inside it"
+            );
+        }
+        // `take` consumes the guard, so the outermost pass ends here: the slot is
+        // cleared rather than restored, and a `set_cursor` made outside any pass
+        // (a reconciler's synthesized `Cancel`) still cannot leak into the next.
+        assert_eq!(
+            outer.take(),
+            Some(CursorIcon::Grab),
+            "the enclosing pass's request survived the nested one"
+        );
+        {
+            let mut ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+            ctx.set_cursor(CursorIcon::NotAllowed);
+        }
+        let next = CursorPass::enter();
+        assert_eq!(
+            next.take(),
+            None,
+            "a request made between passes belongs to no pass"
         );
     }
 

@@ -1,69 +1,231 @@
-//! The gallery's page picker: a narrow left-hand panel built out of shadcn
-//! components themselves (buttons + a separator), never a bespoke `sidebar`
-//! widget — the task brief is explicit that this demo composes what the
-//! catalog already ships.
+//! The gallery's shell: the real `frust_shadcn::sidebar` family driving page
+//! selection, plus the inset's own top bar.
+//!
+//! The nav is a `sidebar_provider` composition — groups, labels, menu items
+//! with an active state, a badge, per-item and per-group actions, a nested
+//! sub-menu, the header/footer slots, the rail, and `sidebar_trigger` in the
+//! content's top bar. The panel is `SidebarCollapsible::Icon`, so collapsing it
+//! leaves the 48px icon rail rather than removing it: every menu button keeps
+//! its glyph and drops its label, and labels/badges/actions/sub-lists take zero
+//! space.
+//!
+//! Ctrl/Cmd+B is handled by the provider *after* routing, and key events are
+//! focus-routed, so the shortcut fires whenever nothing focused has taken the
+//! chord first — which is why the top bar says so on screen.
 
-use frust::{Column, EdgeInsets, Padding, Row, SizedBox, any, text};
-use frust_shadcn::{ButtonVariant, button, separator};
+use frust::{
+    Axis, CrossAxisAlignment, EdgeInsets, FlexView, IconSource, Padding, Row, SizedBox, any,
+    flexible, icon, icons, inflexible, text,
+};
+use frust_shadcn::{
+    SidebarCollapsible, SidebarMenuButtonSize, SidebarView, separator, sidebar, sidebar_content,
+    sidebar_footer, sidebar_group, sidebar_group_action, sidebar_group_label, sidebar_header,
+    sidebar_menu, sidebar_menu_action, sidebar_menu_badge, sidebar_menu_button, sidebar_menu_item,
+    sidebar_menu_sub, sidebar_menu_sub_button, sidebar_menu_sub_item, sidebar_separator,
+    sidebar_trigger,
+};
 
 use crate::AppState;
 
-/// The six gallery pages, in nav order.
+/// The ten gallery pages, in nav order.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Primitives,
     Controls,
     InputsTable,
+    Layout,
     Overlays,
     Anchored,
+    Chat,
+    Questionnaire,
+    DataTable,
     Theming,
 }
 
 impl Page {
-    const ALL: [(Page, &'static str); 6] = [
-        (Page::Primitives, "Primitives"),
-        (Page::Controls, "Controls"),
-        (Page::InputsTable, "Inputs & Table"),
-        (Page::Overlays, "Overlays"),
-        (Page::Anchored, "Anchored"),
-        (Page::Theming, "Theming"),
-    ];
+    /// The page's nav label, reused as the top bar's title.
+    pub fn title(self) -> &'static str {
+        match self {
+            Page::Primitives => "Primitives",
+            Page::Controls => "Controls",
+            Page::InputsTable => "Inputs & Table",
+            Page::Layout => "Layout",
+            Page::Overlays => "Overlays",
+            Page::Anchored => "Anchored",
+            Page::Chat => "Chat",
+            Page::Questionnaire => "Questionnaire",
+            Page::DataTable => "Data Table",
+            Page::Theming => "Theming",
+        }
+    }
 }
 
-/// A fixed-width column of nav buttons, the active page shown as
-/// [`ButtonVariant::Secondary`] and every other as [`ButtonVariant::Ghost`].
-pub fn sidebar(active: Page) -> impl frust::View<AppState> + use<> {
-    let mut children: Vec<frust::AnyView<AppState>> = Vec::with_capacity(Page::ALL.len() * 2 + 1);
-    for (page, label) in Page::ALL {
-        let variant = if page == active {
-            ButtonVariant::Secondary
-        } else {
-            ButtonVariant::Ghost
-        };
-        children.push(any(
-            button(label, move |s: &mut AppState| s.page = page).variant(variant)
-        ));
-        children.push(any(SizedBox(None, Some(4.0))));
-    }
-    children.push(any(separator()));
-    Padding(
-        EdgeInsets::all(12.0),
-        Column(vec![
-            any(Padding(
-                EdgeInsets {
-                    left: 0.0,
-                    top: 0.0,
-                    right: 0.0,
-                    bottom: 12.0,
-                },
-                text("shadcn demo").size(16.0),
-            )),
-            any(Column(children)),
-        ]),
+/// One nav row: a menu button that selects `page`, lit when it is the active
+/// one and carrying the glyph an icon-mode rail shows on its own.
+fn nav_button(page: Page, active: Page, glyph: IconSource) -> frust::AnyView<AppState> {
+    any(
+        sidebar_menu_button(page.title(), move |s: &mut AppState| s.page = page)
+            .icon(icon(glyph).size(16.0))
+            .active(page == active),
     )
+}
+
+/// The nav panel: header, three groups, footer, rail.
+pub fn shell_sidebar(state: &AppState) -> SidebarView<AppState> {
+    let active = state.page;
+    let message_count = state.chat.messages.len();
+
+    let gallery = sidebar_group(vec![
+        any(sidebar_group_label("Gallery")),
+        sidebar_menu(vec![
+            any(sidebar_menu_item(vec![nav_button(
+                Page::Primitives,
+                active,
+                icons::STAR,
+            )])),
+            any(sidebar_menu_item(vec![nav_button(
+                Page::Controls,
+                active,
+                icons::SETTINGS,
+            )])),
+            any(sidebar_menu_item(vec![nav_button(
+                Page::InputsTable,
+                active,
+                icons::EDIT,
+            )])),
+            any(sidebar_menu_item(vec![nav_button(
+                Page::Layout,
+                active,
+                icons::PANE_MARK,
+            )])),
+        ]),
+    ]);
+
+    // The one nested list: `Anchored` reads as a sub-section of `Overlays`, so
+    // it is a `sidebar_menu_sub` under it rather than a fourth top-level row.
+    let overlays = sidebar_group(vec![
+        any(sidebar_group_label("Overlays")),
+        sidebar_menu(vec![
+            any(sidebar_menu_item(vec![nav_button(
+                Page::Overlays,
+                active,
+                icons::SCAN_MARK,
+            )])),
+            any(sidebar_menu_sub(vec![any(sidebar_menu_sub_item(vec![
+                any(
+                    sidebar_menu_sub_button(Page::Anchored.title(), |s: &mut AppState| {
+                        s.page = Page::Anchored
+                    })
+                    .icon(icon(icons::PUSH_PIN).size(14.0))
+                    .active(active == Page::Anchored),
+                ),
+            ]))])),
+        ]),
+    ]);
+
+    let patterns = sidebar_group(vec![
+        // `sidebar_menu_item` is the composed row this port gives a label plus
+        // its trailing action (upstream positions the action absolutely).
+        any(sidebar_menu_item(vec![
+            any(sidebar_group_label("Patterns")),
+            any(sidebar_group_action(
+                icon(icons::REFRESH).size(14.0),
+                "Reset the pattern demos",
+                |s: &mut AppState| {
+                    s.chat = Default::default();
+                    s.questionnaire = Default::default();
+                    s.data_table = Default::default();
+                },
+            )),
+        ])),
+        sidebar_menu(vec![
+            any(sidebar_menu_item(vec![
+                nav_button(Page::Chat, active, icons::FORUM),
+                any(sidebar_menu_action(
+                    icon(icons::DELETE).size(14.0),
+                    "Clear the transcript",
+                    |s: &mut AppState| s.chat.messages.clear(),
+                )),
+                any(sidebar_menu_badge(message_count.to_string())),
+            ])),
+            any(sidebar_menu_item(vec![nav_button(
+                Page::Questionnaire,
+                active,
+                icons::DONE_ALL,
+            )])),
+            any(sidebar_menu_item(vec![nav_button(
+                Page::DataTable,
+                active,
+                icons::DESCRIPTION,
+            )])),
+        ]),
+    ]);
+
+    sidebar(sidebar_content(vec![
+        gallery,
+        any(sidebar_separator()),
+        overlays,
+        any(sidebar_separator()),
+        patterns,
+    ]))
+    .header(sidebar_header(vec![sidebar_menu(vec![any(
+        sidebar_menu_item(vec![any(sidebar_menu_button(
+            "shadcn demo",
+            |_: &mut AppState| {},
+        )
+        .icon(icon(icons::PALETTE).size(18.0))
+        .size(SidebarMenuButtonSize::Lg))]),
+    )])]))
+    .footer(sidebar_footer(vec![sidebar_menu(vec![any(
+        sidebar_menu_item(vec![nav_button(Page::Theming, active, icons::LIGHT_MODE)]),
+    )])]))
+    .collapsible(SidebarCollapsible::Icon)
+    .rail(true)
+}
+
+/// The inset's top bar: the trigger, the active page's title, and the shortcut
+/// hint, over a hairline.
+pub fn top_bar(page: Page, open: bool) -> impl frust::View<AppState> + use<> {
+    let bar = FlexView::new(
+        Axis::Horizontal,
+        vec![
+            inflexible(any(sidebar_trigger(
+                open,
+                |s: &mut AppState, next: bool| {
+                    s.sidebar_open = next;
+                },
+            ))),
+            inflexible(any(SizedBox::<AppState>(Some(12.0), None))),
+            flexible(1, any(text(page.title().to_string()).size(16.0))),
+            inflexible(any(text(
+                "Ctrl/Cmd+B toggles the panel \u{2014} or drag its rail",
+            )
+            .size(12.0))),
+        ],
+    )
+    .cross_axis(CrossAxisAlignment::Center);
+
+    frust::Column(vec![
+        any(Padding(
+            EdgeInsets {
+                left: 16.0,
+                top: 10.0,
+                right: 16.0,
+                bottom: 10.0,
+            },
+            bar,
+        )),
+        any(separator()),
+    ])
 }
 
 /// A section heading used at the top of every gallery page.
 pub fn heading(title: &str) -> impl frust::View<AppState> + use<> {
     Row(vec![any(text(title.to_string()).size(24.0))])
+}
+
+/// A page's small print: the caption style every gallery section explains
+/// itself in.
+pub fn caption(body: impl Into<String>) -> frust::TextView {
+    text(body.into()).size(12.0)
 }

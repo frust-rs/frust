@@ -59,7 +59,7 @@ use frust::authoring::{
 };
 use frust::{AnimationController, Brightness, Curve, FrameTime, Theme, Tween};
 
-use crate::hit::inside;
+use crate::hit::{inside, presses};
 use crate::style::{self, PATH_TOLERANCE};
 
 /// Track width for [`SwitchSize::Default`], in logical px (`w-8`).
@@ -483,7 +483,7 @@ impl Widget for SwitchWidget {
                 let size = ctx.size();
                 match p.phase {
                     PointerPhase::Down => {
-                        if self.disabled || !inside(p.position, size) {
+                        if self.disabled || !presses(p) || !inside(p.position, size) {
                             return EventResult::Ignored;
                         }
                         self.captured = true;

@@ -74,6 +74,7 @@ pub mod alert_dialog;
 pub mod button;
 mod glass;
 pub mod navbar;
+mod press;
 pub mod switch;
 pub mod tabbar;
 mod tokens;
