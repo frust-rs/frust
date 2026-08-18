@@ -107,10 +107,24 @@
 //! drawer opens to the **first** point (fully open with none given), and the
 //! resting set the release snaps to is those points plus `0.0` (closed) — so
 //! with no snap points at all the two candidates are `0.0` and `1.0` and
-//! "nearest" is exactly the conventional drag-past-the-midpoint commit.
-//! The panel is laid out at its full extent and translated to expose the
-//! active fraction (vaul's own transform model), so a partially-open drawer
-//! carries a proportionally lighter scrim rather than a full-strength one.
+//! "nearest" is exactly the conventional drag-past-the-midpoint commit. A
+//! first point that itself normalizes to `0.0` is the one exception:
+//! [`ModalWidget::open_progress`] floors it to fully open rather than
+//! authoring a panel with nothing to open to. The panel is laid out at its
+//! full extent and translated to expose the active fraction (vaul's own
+//! transform model), so a partially-open drawer carries a proportionally
+//! lighter scrim rather than a full-strength one.
+//!
+//! # Dragging a non-dismissable panel
+//!
+//! [`ModalConfig::drag`] stays on whether or not the panel is
+//! [`dismissable`](ModalWidget::dismissable) — Base UI fidelity again: vaul
+//! never gates the *gesture* on whether a close callback exists, only the
+//! *outcome* does. A drag past the closing threshold on a panel with neither
+//! [`ModalView::on_dismiss`] nor [`ModalView::on_close`] wired springs back
+//! to [`ModalWidget::open_progress`] instead of continuing into the exit ramp
+//! ([`ModalWidget::settle_drag`]) — the same reachability rule the Escape
+//! handler already applied by gating on `dismissable()`.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -592,7 +606,10 @@ impl<State: 'static> ModalView<State> {
 
     /// Set the drawer's snap points: `0..=1` a fraction of the panel's own
     /// extent, above `1` logical px (Base UI's contract — see the
-    /// [module docs](self)). The panel opens to the first point.
+    /// [module docs](self)). The panel opens to the first point — **except**
+    /// a first point of `0.0` itself, which [`ModalWidget::open_progress`]
+    /// treats as absent (fully open) rather than authoring a panel that
+    /// opens already closed.
     pub fn snap_points(mut self, points: &[f64]) -> Self {
         self.snap_points = points.to_vec();
         self
@@ -861,10 +878,22 @@ impl ModalWidget {
 
     /// The progress an open panel rests at: the first snap point, or fully
     /// open with none authored.
+    ///
+    /// Floored above [`PROGRESS_EPSILON`]: a first point that normalizes to
+    /// `0.0` (an explicit `snap_points(&[0.0])`, or a `0.0`-fraction point on
+    /// an as-yet-unmeasured extent) is treated as **absent** rather than as
+    /// "open to closed" — the entrance ramp always has a nonzero target to
+    /// animate toward, matching [`Self::settle_drag`]'s own floor for a
+    /// non-dismissable panel. There is no fallible surface here
+    /// ([`ModalView::snap_points`] is a plain builder call), so an
+    /// unreachable configuration silently falls back to fully open instead
+    /// of panicking.
     pub fn open_progress(&self) -> f64 {
         self.snap_points
             .first()
-            .map_or(1.0, |p| self.normalize_snap(*p))
+            .map(|p| self.normalize_snap(*p))
+            .filter(|p| *p > PROGRESS_EPSILON)
+            .unwrap_or(1.0)
     }
 
     /// A snap point in progress space: `0..=1` is already a fraction of the
@@ -1098,9 +1127,22 @@ impl ModalWidget {
 
     /// Settle a released drag: continue into the exit ramp when it landed
     /// closed, otherwise ramp back to the point it snapped to.
+    ///
+    /// A closed landing on a non-[`dismissable`](Self::dismissable) panel
+    /// springs back to [`Self::open_progress`] instead of staging an exit:
+    /// [`Self::request_dismiss`] no-ops with neither hook wired, and by the
+    /// time a drag settles `progress` has already tracked the pointer down
+    /// near `0.0` (unlike the tap-to-dismiss paths above, which never move
+    /// it) — a bare no-op would leave the panel resting there, an invisible
+    /// full-window input barrier with nothing to recover it.
     fn settle_drag(&mut self, ctx: &mut EventCtx, target: f64) {
         if target <= PROGRESS_EPSILON {
-            self.request_dismiss(ctx);
+            if self.dismissable() {
+                self.request_dismiss(ctx);
+            } else {
+                self.begin_ramp(self.open_progress(), false);
+                ctx.request_redraw();
+            }
         } else {
             self.begin_ramp(target, false);
             ctx.request_redraw();
@@ -2443,6 +2485,71 @@ pub(crate) mod tests {
                 assert!((w.progress() - 1.0).abs() < 1e-9);
             }
         }
+    }
+
+    #[test]
+    fn a_non_dismissable_drawer_springs_back_from_a_drag_past_the_midpoint() {
+        // Neither `on_dismiss` nor `on_close` wired: `modal` alone, not the
+        // `view`/`staged` helpers above (both wire `on_dismiss`) — the shape
+        // a `Stack`-mounted drawer with no dismiss hook is left in.
+        let mut w = build(&modal(Block(Size::new(200.0, 120.0)), drawer_config()));
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+        let extent = w.panel_rect().height();
+        let start = w.handle_rect().unwrap().center();
+        let mut state = Flags::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, start.x, start.y),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Move, start.x, start.y + extent * 0.9),
+        );
+        assert!(
+            w.progress() < 0.2,
+            "the panel still tracks the pointer while dragging: {}",
+            w.progress()
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Up, start.x, start.y + extent * 0.9),
+        );
+        run_ramp(&mut w, 3000.0);
+        assert!(
+            (w.progress() - 1.0).abs() < 1e-9,
+            "no dismiss hook: springs back to open_progress() instead of \
+             sticking near zero as an invisible full-window barrier — {}",
+            w.progress()
+        );
+        // The panel is unambiguously open and hittable where it rests, not a
+        // residual off-screen sliver.
+        assert!(w.panel_rect().contains(w.panel_rect().center()));
+        assert!(w.panel_rect().y0 < WINDOW.height && w.panel_rect().y1 == WINDOW.height);
+        assert_eq!(state.dismissed, 0, "no dismiss hook ever fired");
+    }
+
+    #[test]
+    fn snap_points_zero_is_treated_as_absent_and_opens_fully() {
+        let (view, _closed) = staged(drawer_config());
+        let mut w = build(&view.snap_points(&[0.0]));
+        assert!(
+            w.open_progress() > PROGRESS_EPSILON,
+            "a first point of 0.0 is treated as absent: {}",
+            w.open_progress()
+        );
+        assert_eq!(w.open_progress(), 1.0, "falls back to fully open");
+
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+        assert!(
+            (w.progress() - 1.0).abs() < 1e-9,
+            "the drawer opens fully rather than opening already closed: {}",
+            w.progress()
+        );
     }
 
     #[test]

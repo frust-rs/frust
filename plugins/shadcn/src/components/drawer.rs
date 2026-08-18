@@ -34,6 +34,14 @@
 //! counts as a point of its own), with a flick taking the next one along.
 //! [`crate::overlay::modal`] owns the mechanics for both.
 //!
+//! `drag` is unconditionally on ([`config`] sets it regardless of whether
+//! [`DrawerView::on_dismiss`]/[`DrawerView::on_close`] is wired) — matching
+//! vaul, which never gates the gesture itself on a close callback existing.
+//! What *is* gated is the outcome: a drawer with neither hook wired still
+//! drags, but a release past the closing threshold springs back open instead
+//! of closing (`crate::overlay::modal`'s dismissable-only exit-ramp rule),
+//! the same reachability floor Escape already applied.
+//!
 //! A controlled `active_snap_point` (with its `on_snap_change` companion) is
 //! **not** in this pass: the drawer owns its resting point internally, and an
 //! app that needs to drive one from its own state has no seam for it yet.
@@ -407,6 +415,58 @@ mod tests {
 
         dispatch(&mut w, &mut state, &escape());
         assert_eq!(state.dismissed, 3);
+    }
+
+    #[test]
+    fn a_drawer_with_no_dismiss_hook_springs_back_from_a_drag_instead_of_wedging() {
+        // Neither `on_dismiss` nor `on_close` wired — `drawer` alone, not
+        // `sample` (which wires `on_dismiss`).
+        let mut w = build(&drawer(
+            DrawerSide::Bottom,
+            vec![drawer_header(vec![drawer_title("Move goal")])],
+        ));
+        layout(&mut w);
+        settle(&mut w);
+        let extent = w.panel_rect().height();
+        let start = w.handle_rect().unwrap().center();
+        let mut state = Flags::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, start.x, start.y),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Move, start.x, start.y + extent * 0.9),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Up, start.x, start.y + extent * 0.9),
+        );
+        for ms in [3000.0, 5000.0] {
+            let mut ctx = PaintCtx::for_test(Point::ORIGIN, WINDOW, ft_ms(ms));
+            w.paint(&mut ctx, &mut Recorder::default());
+            layout(&mut w);
+        }
+        assert!(
+            (w.progress() - 1.0).abs() < 1e-9,
+            "springs back open rather than sticking invisible near zero: {}",
+            w.progress()
+        );
+        assert_eq!(state.dismissed, 0);
+
+        // The panel is still hittable and interactive after the recovery — a
+        // fresh handle press still captures normally, not lost to a stuck
+        // capture flag left over from the sprung-back drag.
+        let (result, captured) = dispatch_probe(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, start.x, start.y),
+        );
+        assert_eq!(result, EventResult::Handled);
+        assert!(captured, "the handle still captures a fresh press");
     }
 
     #[test]
