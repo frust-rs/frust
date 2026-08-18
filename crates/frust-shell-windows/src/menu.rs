@@ -76,9 +76,12 @@ use winit::window::Window;
 
 use crate::win32_glue::AcceleratorTable;
 
-/// The [`MenuRole`]s Windows implements. `MenuRole::ShowAll` has no member: it
-/// is a macOS-only notion (muda documents it unsupported on Windows), so it is
-/// dropped from the plan rather than faked with an item that does nothing.
+/// The [`MenuRole`]s Windows hands to muda as predefined items.
+/// `MenuRole::ShowAll` has no member: it is a macOS-only notion (muda
+/// documents it unsupported on Windows), so it is dropped from the plan rather
+/// than faked with an item that does nothing. Neither has `MenuRole::Quit` —
+/// it plans to [`PlannedItem::Quit`], an item this crate owns, because muda's
+/// own predefined quit is a Windows dead end (see that variant).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PlannedRole {
     About,
@@ -86,22 +89,30 @@ pub(crate) enum PlannedRole {
     HideOthers,
     Minimize,
     CloseWindow,
-    Quit,
 }
 
-impl PlannedRole {
-    /// The Windows equivalent of `role`, or `None` when this platform has none.
-    fn for_role(role: MenuRole) -> Option<Self> {
-        match role {
-            MenuRole::About => Some(Self::About),
-            MenuRole::Hide => Some(Self::Hide),
-            MenuRole::HideOthers => Some(Self::HideOthers),
-            MenuRole::Minimize => Some(Self::Minimize),
-            MenuRole::CloseWindow => Some(Self::CloseWindow),
-            MenuRole::Quit => Some(Self::Quit),
-            MenuRole::ShowAll => None,
+/// Plan one role spec: a muda-predefined [`PlannedItem::Role`], this crate's
+/// own [`PlannedItem::Quit`], or `None` (logged) when Windows has no
+/// equivalent.
+fn plan_role(role: MenuRole, label: Option<String>) -> Option<PlannedItem> {
+    let planned = match role {
+        MenuRole::Quit => return Some(PlannedItem::Quit { label }),
+        MenuRole::About => PlannedRole::About,
+        MenuRole::Hide => PlannedRole::Hide,
+        MenuRole::HideOthers => PlannedRole::HideOthers,
+        MenuRole::Minimize => PlannedRole::Minimize,
+        MenuRole::CloseWindow => PlannedRole::CloseWindow,
+        MenuRole::ShowAll => {
+            log::debug!(
+                "frust-shell-windows: dropping menu role {role:?} — Windows has no equivalent"
+            );
+            return None;
         }
-    }
+    };
+    Some(PlannedItem::Role {
+        role: planned,
+        label,
+    })
 }
 
 /// One entry of a planned menu level: a [`MenuItemSpec`] that survived the
@@ -121,6 +132,17 @@ pub(crate) enum PlannedItem {
     /// A platform-implemented item. Reports no activation.
     Role {
         role: PlannedRole,
+        /// An override for the platform's own label.
+        label: Option<String>,
+    },
+    /// `MenuRole::Quit`, planned as an item this crate owns rather than muda's
+    /// predefined quit: on Windows that predefined calls `PostQuitMessage`,
+    /// whose `WM_QUIT` winit's pump never treats as an exit — activating it
+    /// does nothing (found live in the Windows runtime gate). The realized
+    /// item carries [`QUIT_ID`], which the activation handler turns into a
+    /// `WM_CLOSE` on the menued window; like [`Role`](Self::Role), it reports
+    /// no activation to app code.
+    Quit {
         /// An override for the platform's own label.
         label: Option<String>,
     },
@@ -193,18 +215,7 @@ fn plan_items(items: &[MenuItemSpec]) -> Vec<PlannedItem> {
                 accelerator: accelerator.clone(),
                 enabled: *enabled,
             }),
-            MenuItemSpec::Role { role, label } => match PlannedRole::for_role(*role) {
-                Some(role) => Some(PlannedItem::Role {
-                    role,
-                    label: label.clone(),
-                }),
-                None => {
-                    log::debug!(
-                        "frust-shell-windows: dropping menu role {role:?} — Windows has no equivalent"
-                    );
-                    None
-                }
-            },
+            MenuItemSpec::Role { role, label } => plan_role(*role, label.clone()),
             MenuItemSpec::Separator => Some(PlannedItem::Separator),
             MenuItemSpec::Submenu { label, menu } => Some(PlannedItem::Submenu {
                 label: label.clone(),
@@ -222,7 +233,7 @@ fn collect_activation_ids(items: &[PlannedItem], ids: &mut HashSet<String>) {
                 ids.insert(id.clone());
             }
             PlannedItem::Submenu { items, .. } => collect_activation_ids(items, ids),
-            PlannedItem::Role { .. } | PlannedItem::Separator => {}
+            PlannedItem::Role { .. } | PlannedItem::Quit { .. } | PlannedItem::Separator => {}
         }
     }
 }
@@ -251,7 +262,9 @@ impl InstalledMenu {
 impl Drop for InstalledMenu {
     fn drop(&mut self) {
         // The `HACCEL` dies with `self.menu`; the message hook outlives both.
+        // The quit target dies with the menued window's menu the same way.
         self.accelerators.clear();
+        QUIT_TARGET.store(0, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -291,8 +304,9 @@ pub(crate) fn install(
         accelerators: accelerators.clone(),
     };
     // Only now, with the menu attached and retained, does the hook get a table
-    // to translate against.
+    // to translate against — and the quit intercept a window to close.
     accelerators.set(installed.haccel());
+    QUIT_TARGET.store(hwnd, std::sync::atomic::Ordering::Release);
     Some(installed)
 }
 
@@ -306,6 +320,22 @@ pub(crate) fn install(
     let _ = (plan, window, accelerators);
     None
 }
+
+/// The id the realized [`PlannedItem::Quit`] carries, intercepted by the
+/// activation handler and never forwarded to app code (it is not an
+/// activation id, so the bridge would drop it anyway). Namespaced so no
+/// real app id lands on it; an app item that used it regardless would quit
+/// when activated — accepted rather than defended against.
+#[cfg(target_os = "windows")]
+const QUIT_ID: &str = "frust-shell-windows::quit";
+
+/// The `HWND` a quit activation closes; `0` while no menu is installed.
+///
+/// Global for the same reason [`bridge`] is: muda's handler slot is
+/// process-global and set exactly once, so the handler cannot capture
+/// per-install state.
+#[cfg(target_os = "windows")]
+static QUIT_TARGET: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
 /// Turn the plan into a real muda menu tree.
 #[cfg(target_os = "windows")]
@@ -357,13 +387,32 @@ fn append_items(target: &dyn MenuContainer, items: &[PlannedItem]) -> muda::Resu
             PlannedItem::Role { role, label } => {
                 target.append_item(&predefined(*role, label.as_deref()))?;
             }
+            PlannedItem::Quit { label } => {
+                // "&Exit" matches muda's own Windows default for the quit
+                // predefined this item replaces; no accelerator, also matching
+                // (Windows reserves Alt+F4 for close and has no quit chord).
+                target.append_item(&muda::MenuItem::with_id(
+                    QUIT_ID,
+                    label.as_deref().unwrap_or("&Exit"),
+                    true,
+                    None,
+                ))?;
+            }
             PlannedItem::Separator => {
                 target.append_item(&muda::PredefinedMenuItem::separator())?;
             }
             PlannedItem::Submenu { label, items } => {
+                // Attach before filling — the order is load-bearing: muda
+                // registers an item's accelerator into the root `HACCEL` by
+                // walking the submenu's `root_menu_haccel_stores` at append
+                // time, and a *detached* submenu's store map is empty. Items
+                // appended before the submenu joins its parent keep their
+                // shortcut text (muda appends the `\t`-chord unconditionally)
+                // but never enter the accelerator table, so the chord is
+                // silently dead (found live in the Windows runtime gate).
                 let submenu = muda::Submenu::new(label, true);
-                append_items(&submenu, items)?;
                 target.append_item(&submenu)?;
+                append_items(&submenu, items)?;
             }
         }
     }
@@ -395,7 +444,6 @@ fn predefined(role: PlannedRole, label: Option<&str>) -> muda::PredefinedMenuIte
         PlannedRole::HideOthers => muda::PredefinedMenuItem::hide_others(label),
         PlannedRole::Minimize => muda::PredefinedMenuItem::minimize(label),
         PlannedRole::CloseWindow => muda::PredefinedMenuItem::close_window(label),
-        PlannedRole::Quit => muda::PredefinedMenuItem::quit(label),
     }
 }
 
@@ -557,7 +605,18 @@ pub(crate) fn install_event_handler() {
     static INSTALLED: std::sync::Once = std::sync::Once::new();
     INSTALLED.call_once(|| {
         muda::MenuEvent::set_event_handler(Some(|event: muda::MenuEvent| {
-            bridge().submit(event.id().as_ref());
+            let id = event.id().as_ref();
+            if id == QUIT_ID {
+                // Quit closes rather than exits directly: the `WM_CLOSE`
+                // surfaces as winit's `CloseRequested`, so quit-by-menu and
+                // the titlebar's own close button share one decision
+                // (`on_close_requested`) instead of racing two exit paths.
+                crate::win32_glue::post_close(
+                    QUIT_TARGET.load(std::sync::atomic::Ordering::Acquire),
+                );
+                return;
+            }
+            bridge().submit(id);
         }));
     });
 }
@@ -680,10 +739,7 @@ mod tests {
                         enabled: true,
                     },
                     PlannedItem::Separator,
-                    PlannedItem::Role {
-                        role: PlannedRole::Quit,
-                        label: None,
-                    },
+                    PlannedItem::Quit { label: None },
                 ],
             }]
         );
@@ -696,8 +752,7 @@ mod tests {
             .with_item(MenuItemSpec::role(MenuRole::Hide))
             .with_item(MenuItemSpec::role(MenuRole::HideOthers))
             .with_item(MenuItemSpec::role(MenuRole::Minimize))
-            .with_item(MenuItemSpec::role(MenuRole::CloseWindow))
-            .with_item(MenuItemSpec::role(MenuRole::Quit));
+            .with_item(MenuItemSpec::role(MenuRole::CloseWindow));
         let plan = MenuPlan::from_spec(Some(&spec));
 
         let roles: Vec<PlannedRole> = plan
@@ -716,8 +771,34 @@ mod tests {
                 PlannedRole::HideOthers,
                 PlannedRole::Minimize,
                 PlannedRole::CloseWindow,
-                PlannedRole::Quit,
             ]
+        );
+    }
+
+    #[test]
+    fn quit_plans_to_an_owned_item_that_reports_no_activation() {
+        // Not a `PlannedItem::Role`: muda's predefined quit dead-ends on
+        // Windows (`PostQuitMessage` under a winit pump), so the plan keeps
+        // quit as an item this crate realizes and intercepts itself — and its
+        // reserved id must stay out of the activation set so it can never
+        // reach app code as a menu event.
+        let spec = MenuSpec::new().with_item(MenuItemSpec::role(MenuRole::Quit));
+        let plan = MenuPlan::from_spec(Some(&spec));
+
+        assert_eq!(plan.items(), [PlannedItem::Quit { label: None }]);
+        assert!(plan.activation_ids().is_empty());
+    }
+
+    #[test]
+    fn quit_keeps_its_label_override() {
+        let spec =
+            MenuSpec::new().with_item(MenuItemSpec::role(MenuRole::Quit).with_label("Leave"));
+        let plan = MenuPlan::from_spec(Some(&spec));
+        assert_eq!(
+            plan.items(),
+            [PlannedItem::Quit {
+                label: Some("Leave".to_string()),
+            }]
         );
     }
 
