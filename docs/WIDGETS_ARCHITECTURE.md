@@ -245,10 +245,16 @@ staying flat against item count while an eagerly-built `ScrollView`+`Column` sca
 linearly; a CI-durable structural assertion in the same file pins the windowed-materialization fact
 itself (not the timing) at `N = 10,000`.
 
-### Recent Additions (Batch 2)
+### Recent Additions
 **Navigator observation:** `TransitionState` and `PageVisibility` seams; `overlay_host()` constructor;
 R23 semantics forwarding. **Routing:** route params now merge query under path captures, and
 `RouteNavigator` allows off-thread navigation. **Widgets:** `frust_glyph::sheet` (modal overlay with
-staged dismiss and scrim fade, now `plugins/glyph`); `button` disabled state; `TextInput` read-only
-mode and `content_type` IME hints; `TextView` alignment control; `EmptyStateView` and `MenuEntry`
-icon slots; badge `Info` variant with warning border.
+staged dismiss and scrim fade, now `plugins/glyph`); `frust_glyph::radio` (labelled ring+dot,
+`Role::RadioButton`); `button` disabled state; `TextInput` read-only mode and `content_type` IME
+hints; `TextView` alignment control, `.max_lines`, and `.overflow(TextOverflow)` (measure-and-
+truncate, see RENDER_ARCHITECTURE.md); `EmptyStateView` and `MenuEntry` icon slots; badge `Info`
+variant with warning border. **Baseline primitives:** `container()`/`colored_box()` (`ContainerView`:
+fill, per-corner `CornerRadii` radius, `BorderStyle::Solid`/`Dashed` border, glow, expand, size/
+size_centered); `divider()` (required color, thickness, vertical); `icon_button()` (transparent-at-
+rest pressable icon, `Role::Button`). **Icons:** the generated catalog (see *Icon Generation*) gained
+`ARROW_UPWARD`/`ARROW_DOWNWARD`/`ARROW_FORWARD`/`CONTENT_COPY`.

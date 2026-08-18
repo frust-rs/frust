@@ -57,7 +57,19 @@ is a cross-unit rule; see [ARCHITECTURE.md](ARCHITECTURE.md).
 - `SurfaceAlphaRequest` resolves the platform's compositing/alpha mode to pick the presentation
   path, feeding translucency state upstream to paint.
 - Text: style + string → `TextContext` (cached shaping) → `TextLayout` → `GlyphRun`s via
-  `to_scene_runs`, consumed by `SceneBuilder` as scene `Command`s.
+  `to_scene_runs`, consumed by `SceneBuilder` as scene `Command`s. `TextContext::layout_bounded`
+  additionally measures against a max line count and applies `TextOverflow` by truncating the shaped
+  text (measure-and-truncate), since parley 0.11 exposes no native ellipsis primitive.
+- `frust-render`'s shared command walk (`convert.rs`), which both the GPU (vello) and cpu-tier
+  (vello_cpu) sinks run through, is where two scene-layer geometry primitives lower to
+  backend-specific shapes: a dashed stroke (`Command::Path`'s `DashPattern`) is flattened to a plain
+  path via kurbo's dash iterator *before* either sink runs, since vello honors a `kurbo::Stroke`'s
+  dash fields but `vello_cpu` does not — pre-flattening once at decode time keeps the two tiers
+  pixel-comparable; a per-corner blurred shadow (`Command::BlurredRoundedRect`'s `CornerRadii`)
+  collapses to `CornerRadii::largest()`, since both sinks' blurred-rect primitive takes one radius
+  (accepted approximation, see LIMITATIONS.md). `Command::RoundedRect`/`PushClipRounded` carry the
+  same `CornerRadii` through to an exact `kurbo::RoundedRect` per corner — only the blur path
+  collapses it.
 - `TextContext::register_fonts` hot-swaps app-supplied fonts and invalidates cached shaping,
   forcing relayout upstream.
 - Focus-routed Key/Ime events drive `TextEditor`, producing an `EditingState` (UTF-16 indexed)
@@ -73,5 +85,6 @@ is a cross-unit rule; see [ARCHITECTURE.md](ARCHITECTURE.md).
 | `RenderTier` / `TierCaps` | GPU-vs-CPU render-backend selection, probed from adapter capabilities plus an override |
 | `SurfacePhase` / `FrameOutcome` / `EncodeOutcome` / `AcquireOutcome` | The surface-can-be-destroyed-anytime lifecycle state machine shared by every shell |
 | `encode_scene` | The sole function converting a `frust_scene::Scene` into a `vello::Scene` |
-| `TextContext` / `TextStyle` / `TextLayout` | Renderer-agnostic shaping surface: font/cache state, styling knobs, and a finished measurable shaped block |
+| `CornerRadii` / `DashPattern` (`frust-scene`) | Per-corner rounding and dash geometry carried by `RoundedRect`/`PushClipRounded`/`BlurredRoundedRect`/dashed-stroke commands; lowered to backend shapes in the shared command walk (see Data Flow) |
+| `TextContext` / `TextStyle` / `TextLayout` / `TextOverflow` | Renderer-agnostic shaping surface: font/cache state, styling knobs, a finished measurable shaped block, and `layout_bounded`'s measure-and-truncate overflow mode |
 | `TextEditor` / `EditingState` / `EditOp` | The Parley-based editing engine and its state-sync payload at the platform IME seam |
