@@ -199,8 +199,9 @@ pub use frust_widgets::icons;
 /// queued in an event handler (on any thread — the queue never panics
 /// off-thread) applies on the next frame.
 pub use frust_widgets::{
-    DEFAULT_REDIRECT_LIMIT, ErrorBuilder, Location, NavRequest, NavWaker, PathPattern, Redirect,
-    Resolution, ResolvedPage, Route, RouteBuilder, RouteNavigator, RouteParams, Router,
+    DEFAULT_REDIRECT_LIMIT, ErrorBuilder, Location, NavChange, NavRequest, NavWaker, PathPattern,
+    Redirect, Resolution, ResolvedPage, Route, RouteBuilder, RouteNavigator, RouteParams,
+    RouteStack, Router,
 };
 
 /// The page-transition **resolve/drive** path: the framework's own reduce-
@@ -502,6 +503,7 @@ pub use kurbo;
 pub use peniko;
 
 mod back_glue;
+mod route_state;
 mod router_glue;
 
 /// Android back-press ⇄ navigator auto-wiring:
@@ -645,6 +647,17 @@ pub fn overlay_host<State: 'static>(
 /// facade that sees both `frust-widgets`' `Router` and `frust-reactive`'s
 /// deep-link source together; neither underlying crate depends on the other.
 pub use router_glue::{RouterDeepLinks, router_with_deep_links};
+
+/// The reactive route-state observable: [`RouteObserver`] is the signal
+/// face over `frust_widgets`' signal-free `RouteStack`/[`NavChange`] — the
+/// counterpart to [`RouteNavigator`] (*intent*, queued requests) that reads
+/// *fact* (the last-published stack) instead. Construct once (typically in
+/// `Component::init`) and attach with
+/// [`observe`](RouteObserver::observe)`(navigator(...))`;
+/// [`RouterDeepLinks::routes`] hands out the one it wired for a router-driven
+/// navigator. See `route_state`'s module docs for why this bridge lives in
+/// the facade rather than `frust-widgets`.
+pub use route_state::RouteObserver;
 
 /// The design-token vocabulary: the [`Theme`] bundle plus its
 /// component token tables, flat-re-exported from `frust-theme` so app code

@@ -140,6 +140,8 @@ use frust_core::{
 use frust_theme::Theme;
 use kurbo::{Affine, Point, Rect, Size, Vec2};
 
+use super::path::Location;
+use super::route_state::RouteStack;
 use super::transition::{
     Layer, PageTransition, TransitionDriver, TransitionSpec, TransitionState, lerp_rect,
     make_driver, resolve_layers, resolve_spec, settle_driver,
@@ -205,6 +207,12 @@ pub enum PageVisibility {
 /// the root page). Fired by the navigator from a rebuild whenever the page's
 /// [`PageVisibility`] changes — never twice with the same value.
 pub type VisibilityCallback = Rc<dyn Fn(PageVisibility)>;
+
+/// A route-change observer, registered navigator-wide via
+/// [`NavigatorView::on_route_change`]. Fired from [`NavigatorWidget::publish_state`]
+/// only when the published [`RouteStack`] actually changed — see
+/// `route_state`'s module docs.
+pub type RouteChangeCallback = Rc<dyn Fn(&RouteStack)>;
 
 // --- Back reach: the ambient "is the hosting page input-routed?" seam --------
 
@@ -363,6 +371,7 @@ pub struct PushOptions<State: 'static> {
     on_result: Option<ResultCallback<State>>,
     dismiss_signal: Option<Rc<Cell<u64>>>,
     on_visibility: Option<VisibilityCallback>,
+    route: Option<Location>,
 }
 
 impl<State: 'static> PushOptions<State> {
@@ -377,6 +386,7 @@ impl<State: 'static> PushOptions<State> {
             on_result: None,
             dismiss_signal: None,
             on_visibility: None,
+            route: None,
         }
     }
 
@@ -464,6 +474,61 @@ impl<State: 'static> PushOptions<State> {
         self.on_visibility = Some(Rc::new(f));
         self
     }
+
+    /// Stamp this page's route identity (`R-B1`): the [`Location`] it was
+    /// pushed with, published on the navigator's [`RouteStack`] and never
+    /// derived from depth. Omit for a page pushed as a bare builder (an
+    /// overlay/dialog) — it then publishes a `None` entry, which
+    /// [`RouteStack::current_route`] skips.
+    pub fn route(mut self, location: Location) -> Self {
+        self.route = Some(location);
+        self
+    }
+}
+
+/// Options for [`NavigatorController::replace_with_options`] — opacity, an
+/// optional per-op transition override, and the route identity attached
+/// to the replacement page. A smaller sibling of [`PushOptions`]: a replaced
+/// page has no pusher-side use for a result callback, a `BackPolicy`, a
+/// dismiss signal, or a visibility observer, since it does not sit *under*
+/// anything it could be dismissed back to.
+pub struct ReplaceOptions {
+    opaque: bool,
+    transition: Option<TransitionSpec>,
+    route: Option<Location>,
+}
+
+impl ReplaceOptions {
+    /// Options for an **opaque** replacement page (the shipped
+    /// [`NavigatorController::replace`] default).
+    pub fn opaque() -> Self {
+        Self {
+            opaque: true,
+            transition: None,
+            route: None,
+        }
+    }
+
+    /// Options for a **transparent** replacement page.
+    pub fn transparent() -> Self {
+        Self {
+            opaque: false,
+            ..Self::opaque()
+        }
+    }
+
+    /// Override the navigator's default transition for this replace only.
+    pub fn transition(mut self, spec: TransitionSpec) -> Self {
+        self.transition = Some(spec);
+        self
+    }
+
+    /// Stamp the replacement page's route identity — see
+    /// [`PushOptions::route`].
+    pub fn route(mut self, location: Location) -> Self {
+        self.route = Some(location);
+        self
+    }
 }
 
 /// One queued navigation op, recorded by the [`NavigatorController`] and drained
@@ -484,6 +549,9 @@ enum NavOp<State: 'static> {
         /// The page-visibility observer registered by
         /// [`PushOptions::on_visibility`], if any.
         on_visibility: Option<VisibilityCallback>,
+        /// The route identity from [`PushOptions::route`], `None` for a
+        /// bare-builder overlay/dialog push.
+        route: Option<Location>,
     },
     /// Pop the top page (never the last/root page), delivering `result` to the
     /// popped page's pusher-registered callback. A pop *reverses* the popped
@@ -499,6 +567,9 @@ enum NavOp<State: 'static> {
         opaque: bool,
         /// Per-op transition override (`None` → the navigator's default).
         transition: Option<TransitionSpec>,
+        /// The route identity from [`ReplaceOptions::route`], `None` for
+        /// a plain [`NavigatorController::replace`]/`replace_with`.
+        route: Option<Location>,
     },
 }
 
@@ -606,6 +677,16 @@ pub struct NavigatorController<State: 'static> {
     /// *binding* that moves when the widget re-captures its host, wrapping the
     /// same reactive-free cell idiom as the published state.
     host_reach: Rc<RefCell<Option<Rc<Cell<bool>>>>>,
+    /// The published route-state snapshot — a fourth published slot
+    /// beside `depth`/`back_interest`/`transition`, written by
+    /// [`NavigatorWidget::publish_state`] after every committed stack
+    /// mutation (see `route_state`'s module docs for the staleness contract
+    /// and why an in-flight interactive edge swipe does not publish here).
+    ///
+    /// `RefCell`, not `Cell`: the payload (`RouteStack`) is not `Copy` —
+    /// precedented on this same type by [`ops`](Self::ops) and
+    /// [`host_reach`](Self::host_reach).
+    route_stack: Rc<RefCell<RouteStack>>,
 }
 
 impl<State: 'static> Clone for NavigatorController<State> {
@@ -617,6 +698,7 @@ impl<State: 'static> Clone for NavigatorController<State> {
             transition: Rc::clone(&self.transition),
             mounted: Rc::clone(&self.mounted),
             host_reach: Rc::clone(&self.host_reach),
+            route_stack: Rc::clone(&self.route_stack),
         }
     }
 }
@@ -637,6 +719,7 @@ impl<State: 'static> NavigatorController<State> {
             transition: Rc::new(Cell::new(TransitionState::default())),
             mounted: Rc::new(Cell::new(0)),
             host_reach: Rc::new(RefCell::new(None)),
+            route_stack: Rc::new(RefCell::new(RouteStack::default())),
         }
     }
 
@@ -790,6 +873,21 @@ impl<State: 'static> NavigatorController<State> {
         self.transition.get()
     }
 
+    /// The navigator's currently published route-state snapshot — a
+    /// clone, authoritative as of the last publish (see `route_state`'s
+    /// module docs' staleness contract, in particular the interactive-swipe
+    /// window).
+    pub fn route_stack(&self) -> RouteStack {
+        self.route_stack.borrow().clone()
+    }
+
+    /// The route stack's current generation — an O(1) change gate equivalent
+    /// to `route_stack().generation()` but without cloning the whole
+    /// snapshot.
+    pub fn route_generation(&self) -> u64 {
+        self.route_stack.borrow().generation()
+    }
+
     /// Push an **opaque** page built by `builder` on top of the stack, using the
     /// navigator's default transition (instant unless the navigator sets one).
     pub fn push(&self, builder: impl Fn() -> AnyView<State> + 'static) {
@@ -878,6 +976,7 @@ impl<State: 'static> NavigatorController<State> {
             back: options.back,
             dismiss_signal: options.dismiss_signal,
             on_visibility: options.on_visibility,
+            route: options.route,
         });
     }
 
@@ -901,6 +1000,7 @@ impl<State: 'static> NavigatorController<State> {
             back: BackPolicy::Pop,
             dismiss_signal: None,
             on_visibility: None,
+            route: None,
         });
     }
 
@@ -943,6 +1043,7 @@ impl<State: 'static> NavigatorController<State> {
             builder: Rc::new(builder),
             opaque: true,
             transition: None,
+            route: None,
         });
     }
 
@@ -957,6 +1058,24 @@ impl<State: 'static> NavigatorController<State> {
             builder: Rc::new(builder),
             opaque: true,
             transition: Some(transition),
+            route: None,
+        });
+    }
+
+    /// Replace the top page with an explicit [`ReplaceOptions`] — the
+    /// full-control variant carrying a route identity alongside opacity
+    /// and transition. [`Router::go`](super::router::Router::go)/
+    /// [`Router::replace`](super::router::Router::replace) push through this.
+    pub fn replace_with_options(
+        &self,
+        builder: impl Fn() -> AnyView<State> + 'static,
+        options: ReplaceOptions,
+    ) {
+        self.enqueue(NavOp::Replace {
+            builder: Rc::new(builder),
+            opaque: options.opaque,
+            transition: options.transition,
+            route: options.route,
         });
     }
 
@@ -1013,6 +1132,17 @@ pub struct NavigatorView<State: 'static> {
     /// Whether a [`Covered`](PageVisibility::Covered) page stops re-running its
     /// builder. Default `false` — the shipped behaviour.
     cull_covered_builds: bool,
+    /// The ROOT page's route identity — the root has no [`PushOptions`]
+    /// to carry [`PushOptions::route`], so this mirrors
+    /// [`root_visibility`](Self::root_visibility)'s shape. Installed on the
+    /// root page entry at `build`, like the root's [`BackPolicy`].
+    root_route: Option<Location>,
+    /// Navigator-wide route-change observer — see
+    /// [`on_route_change`](Self::on_route_change). Unlike `root_visibility`
+    /// this is refreshed on every rebuild (live-configurable, like
+    /// `default_transition`), since it observes the whole navigator rather
+    /// than one page.
+    route_change: Option<RouteChangeCallback>,
 }
 
 impl<State: 'static> NavigatorView<State> {
@@ -1077,6 +1207,26 @@ impl<State: 'static> NavigatorView<State> {
         self
     }
 
+    /// Stamp the ROOT page's route identity — see
+    /// [`PushOptions::route`], the pushed-page equivalent.
+    pub fn root_route(mut self, location: Location) -> Self {
+        self.root_route = Some(location);
+        self
+    }
+
+    /// Observe this navigator's route-state, navigator-wide: fired from
+    /// [`NavigatorWidget::publish_state`] only when the published
+    /// [`RouteStack`] actually changes (an unchanged stack across N rebuilds
+    /// fires it zero times) — never with `&mut State` (it fires from a
+    /// rebuild), exactly like [`PushOptions::on_visibility`]'s contract. The
+    /// facade's reactive route-observer bridges this into signals (see
+    /// `docs/WIDGETS_ARCHITECTURE.md`'s reactive-free note): capture a plain
+    /// `Rc<Cell<_>>` here, don't reach for app state.
+    pub fn on_route_change(mut self, f: impl Fn(&RouteStack) + 'static) -> Self {
+        self.route_change = Some(Rc::new(f));
+        self
+    }
+
     /// Resolve whether the edge-swipe gesture is enabled: the explicit override if
     /// set, else on for the iOS-push preset (the transition the swipe is designed
     /// around) and off for every other default.
@@ -1099,6 +1249,8 @@ pub fn navigator<State: 'static>(
         pop_swipe: None,
         root_visibility: None,
         cull_covered_builds: false,
+        root_route: None,
+        route_change: None,
     }
 }
 
@@ -1212,6 +1364,11 @@ struct PageEntry<State: 'static> {
     /// a page is skipped only once it has *already* been reconciled while
     /// covered.
     reconciled_covered: bool,
+    /// This page's route identity, stamped at push time from
+    /// [`PushOptions::route`]/[`NavigatorView::root_route`]/
+    /// [`ReplaceOptions::route`]. `None` for a bare-builder overlay/dialog
+    /// push — see `route_state`'s module docs.
+    route: Option<Location>,
     /// Whether an input event can reach **this page**, all the way up: this
     /// navigator is itself reachable AND this page is in
     /// [`input_routed_pages`](NavigatorWidget::input_routed_pages). Republished
@@ -1402,6 +1559,17 @@ pub struct NavigatorWidget<State: 'static> {
     /// [`reachable`](Self::reachable) — the one input this navigator has into
     /// "can a back press legitimately reach me?".
     host_reach: Option<Rc<Cell<bool>>>,
+    /// The shared route-state slot published to the [`NavigatorController`] —
+    /// a clone of the controller's `Rc<RefCell<RouteStack>>`, refreshed
+    /// by [`publish_route_stack`](Self::publish_route_stack) — called from
+    /// [`publish_state`](Self::publish_state) — after every committed stack
+    /// mutation.
+    route_stack: Rc<RefCell<RouteStack>>,
+    /// The navigator-wide route-change observer from
+    /// [`NavigatorView::on_route_change`], refreshed every `build`/`rebuild`
+    /// (unlike per-page `on_visibility`, since this observes the whole
+    /// navigator).
+    route_change: Option<RouteChangeCallback>,
 }
 
 /// Whether the navigator's **own stack** wants a back press ahead-of-time: it is
@@ -1430,11 +1598,17 @@ fn unmount_cell(mounted: &Cell<usize>) {
 
 impl<State: 'static> NavigatorWidget<State> {
     /// Publish the current page-stack depth **and** back-interest to the shared
-    /// controller slots, refresh the published [`TransitionState`]'s depths, and
-    /// fire any page-visibility changes. Called after every stack mutation — at
-    /// the end of `apply_ops`, after a transition finalize, and at the end of
+    /// controller slots, refresh the published [`TransitionState`]'s depths,
+    /// fire any page-visibility changes, and republish the route-state
+    /// snapshot via [`publish_route_stack`](Self::publish_route_stack).
+    /// Called after every **committed** stack mutation — at the end of
+    /// `apply_ops`, after a transition finalize, and at the end of
     /// `build`/`rebuild` — so `NavigatorController::depth`/`can_pop`/
-    /// `back_interest`/`transition` read authoritative values.
+    /// `back_interest`/`transition`/`route_stack` read authoritative values.
+    /// Deliberately **not** called from
+    /// [`begin_interactive_pop`](Self::begin_interactive_pop): an in-flight
+    /// interactive edge-swipe pop is uncommitted (see `route_state`'s module
+    /// docs' staleness contract).
     fn publish_state(&mut self) {
         self.depth.set(self.pages.len());
         let top_policy = self.pages.last().map(|p| p.back).unwrap_or(BackPolicy::Pop);
@@ -1454,6 +1628,56 @@ impl<State: 'static> NavigatorWidget<State> {
         }
         self.transition_state.set(t);
         self.publish_visibility();
+        self.publish_route_stack();
+    }
+
+    /// Recompute the route-state snapshot from the current page stack and
+    /// publish it iff it actually changed — an unchanged stack costs only the
+    /// O(depth) comparison below, no allocation (see `route_state`'s module
+    /// docs' derivation note). Called from
+    /// [`publish_state`](Self::publish_state), so it runs at build, at the
+    /// end of `apply_ops`, after a transition finalize, and at the end of
+    /// `rebuild` — **never** from [`begin_interactive_pop`](Self::begin_interactive_pop)
+    /// itself, which is the deliberate uncommitted-swipe gap `route_state`'s
+    /// staleness contract documents.
+    ///
+    /// **The interactive guard.** `rebuild`'s trailing `publish_state` call is
+    /// unconditional (it also refreshes `depth`/`back_interest` every pass),
+    /// so it still runs on every settle-spring frame between release and
+    /// finalize — not just at steal. `self.pages` has already lost the
+    /// stashed page for that whole window (popped at steal, restored or torn
+    /// down only at [`finalize_transition`](Self::finalize_transition), which
+    /// clears `self.transition` first thing), so this checks the transition
+    /// itself rather than trying to keep every OTHER call site from ever
+    /// running during the drag: while `self.transition` is `Some` and
+    /// `interactive`, the stack is still provisional and this returns without
+    /// touching the published snapshot at all — not even the unchanged-check
+    /// below runs. The settle-frame publish (`finalize_transition` already
+    /// cleared `self.transition`) is what finally sees the real diff, in one
+    /// step, whichever way the drag resolved.
+    fn publish_route_stack(&mut self) {
+        if self.transition.as_ref().is_some_and(|t| t.interactive) {
+            return;
+        }
+        let unchanged = {
+            let published = self.route_stack.borrow();
+            let entries = published.entries();
+            entries.len() == self.pages.len()
+                && entries
+                    .iter()
+                    .zip(self.pages.iter())
+                    .all(|(prev, page)| *prev == page.route)
+        };
+        if unchanged {
+            return;
+        }
+        let entries: Vec<Option<Location>> = self.pages.iter().map(|p| p.route.clone()).collect();
+        self.route_stack.borrow_mut().set(entries);
+        if let Some(observer) = self.route_change.clone() {
+            // Clone the `Rc` out before firing, like `publish_visibility`: the
+            // callback is app code and may reach back into the controller.
+            observer(&self.route_stack.borrow());
+        }
     }
 
     /// Whether **this navigator** is reachable by input at all — `true` unless
@@ -2214,6 +2438,7 @@ impl<State: 'static> NavigatorWidget<State> {
                     back,
                     dismiss_signal,
                     on_visibility,
+                    route,
                 } => {
                     let spec = self.effective_spec(transition);
                     // A push severs nothing, but it does *cover* the current top
@@ -2254,6 +2479,7 @@ impl<State: 'static> NavigatorWidget<State> {
                         visibility: None,
                         on_visibility,
                         reconciled_covered: false,
+                        route,
                         reach,
                     });
                     // Full gate (`top_pod_focused`): the covered page's own link
@@ -2280,6 +2506,7 @@ impl<State: 'static> NavigatorWidget<State> {
                     builder,
                     opaque,
                     transition,
+                    route,
                 } => {
                     let spec = self.effective_spec(transition);
                     // The replaced top is the outgoing pod; read its link before
@@ -2315,6 +2542,7 @@ impl<State: 'static> NavigatorWidget<State> {
                             // with it — it is being torn down, not covered).
                             on_visibility: None,
                             reconciled_covered: false,
+                            route,
                             reach: Rc::clone(&reach),
                         };
                         if spec.is_animated() {
@@ -2341,6 +2569,7 @@ impl<State: 'static> NavigatorWidget<State> {
                             visibility: None,
                             on_visibility: None,
                             reconciled_covered: false,
+                            route,
                             reach,
                         });
                     }
@@ -2721,6 +2950,7 @@ impl<State: 'static> View<State> for NavigatorView<State> {
                 visibility: None,
                 on_visibility: self.root_visibility.clone(),
                 reconciled_covered: false,
+                route: self.root_route.clone(),
                 reach: root_reach,
             }],
             pending_results: Vec::new(),
@@ -2736,6 +2966,8 @@ impl<State: 'static> View<State> for NavigatorView<State> {
             mounted: Rc::clone(&self.controller.mounted),
             cull_covered_builds: self.cull_covered_builds,
             host_reach,
+            route_stack: Rc::clone(&self.controller.route_stack),
+            route_change: self.route_change.clone(),
         };
         // Apply any ops the app queued before the first frame.
         let ops = self.controller.drain();
@@ -2775,8 +3007,9 @@ impl<State: 'static> View<State> for NavigatorView<State> {
         //    misuse would additionally blow away every page's widget state
         //    (`push_pop_preserves_page_widget_state`'s guarantee) for a
         //    consequence out of proportion to the mistake. Re-binding keeps the
-        //    stack — and the app's data — intact; only the four published cells
-        //    move to point at the new controller.
+        //    stack — and the app's data — intact; only the five published cells
+        //    (`route_stack` joined the original four) move to point at the
+        //    new controller.
         //
         //    Ordering: unmount the OLD controller through `element.mounted`
         //    (the cell still bound from the last build/rebind) BEFORE rebinding
@@ -2804,6 +3037,7 @@ impl<State: 'static> View<State> for NavigatorView<State> {
             element.back_interest = Rc::clone(&self.controller.back_interest);
             element.transition_state = Rc::clone(&self.controller.transition);
             element.mounted = Rc::clone(&self.controller.mounted);
+            element.route_stack = Rc::clone(&self.controller.route_stack);
             self.controller.mount();
         }
         // Keep the widget's default transition in sync with the view so an app can
@@ -2811,6 +3045,10 @@ impl<State: 'static> View<State> for NavigatorView<State> {
         element.default_transition = self.default_transition;
         // Refresh the edge-swipe enable flag from the view too (live-configurable).
         element.pop_swipe_enabled = self.resolve_pop_swipe();
+        // Refresh the route-change observer too — navigator-wide (unlike
+        // per-page `on_visibility`), so live-configurable exactly like the two
+        // fields above.
+        element.route_change = self.route_change.clone();
         // Same for the covered-build cull switch (default `false`).
         element.cull_covered_builds = self.cull_covered_builds;
         // Re-capture the hosting page's reach cell: this rebuild runs inside
@@ -3105,6 +3343,7 @@ fn cleared_ime_state() -> ImeState {
 
 #[cfg(test)]
 mod tests {
+    use super::super::route_state::NavChange;
     use super::*;
     use crate::test_support::RecordingScene;
     use crate::{Column, FlexView, Stack};
@@ -7482,5 +7721,262 @@ mod tests {
             (0, 0),
             "R23 parity: what contributes no node is exactly what receives no input"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Route-state observable.
+    // ---------------------------------------------------------------------
+
+    fn route(path: &str) -> Location {
+        Location::parse(path)
+    }
+
+    // --- (a) push/push/pop publishes [A]→[A,B]→[A] with Push/Pop. ---
+
+    #[test]
+    fn push_pop_publishes_the_route_stack_with_derived_change() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0)).root_route(route("/a"))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+
+        let initial = controller.route_stack();
+        assert_eq!(initial.entries(), &[Some(route("/a"))]);
+        assert_eq!(initial.change(), NavChange::Initial);
+        let gen0 = initial.generation();
+
+        controller.push_with_options(
+            || sized_page(50.0, 50.0),
+            PushOptions::opaque().route(route("/b")),
+        );
+        root.rebuild(&mut app, &mut state);
+        let after_push = controller.route_stack();
+        assert_eq!(
+            after_push.entries(),
+            &[Some(route("/a")), Some(route("/b"))]
+        );
+        assert_eq!(after_push.change(), NavChange::Push);
+        assert!(after_push.generation() > gen0);
+
+        controller.pop();
+        root.rebuild(&mut app, &mut state);
+        let after_pop = controller.route_stack();
+        assert_eq!(after_pop.entries(), &[Some(route("/a"))]);
+        assert_eq!(after_pop.change(), NavChange::Pop);
+        assert!(after_pop.generation() > after_push.generation());
+    }
+
+    // --- (b) a `request_back` pop publishes identically to a programmatic pop
+    //     — the case the #40 mirror class missed. ---
+
+    #[test]
+    fn request_back_pop_publishes_identically_to_a_programmatic_pop() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0)).root_route(route("/a"))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        controller.push_with_options(
+            || sized_page(50.0, 50.0),
+            PushOptions::opaque().route(route("/b")),
+        );
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            controller.route_stack().entries(),
+            &[Some(route("/a")), Some(route("/b"))]
+        );
+
+        controller.request_back();
+        root.rebuild(&mut app, &mut state);
+
+        let stack = controller.route_stack();
+        assert_eq!(
+            stack.entries(),
+            &[Some(route("/a"))],
+            "request_back's Pop routing publishes the same way apply_pop does"
+        );
+        assert_eq!(stack.change(), NavChange::Pop);
+    }
+
+    // --- (c) an unchanged stack across 10 rebuilds bumps the generation once. ---
+
+    #[test]
+    fn an_unchanged_stack_across_rebuilds_bumps_the_generation_once() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0)).root_route(route("/a"))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+        let generation_after_first_build = controller.route_generation();
+
+        for _ in 0..10 {
+            root.rebuild(&mut app, &mut state);
+        }
+
+        assert_eq!(
+            controller.route_generation(),
+            generation_after_first_build,
+            "10 rebuilds with no stack mutation must not re-bump the generation"
+        );
+    }
+
+    // --- (d) a builder-pushed overlay publishes a `None` entry; `current_route`
+    //     skips it — the structural form of muxr's
+    //     "a transparent overlay never retitles the bar". ---
+
+    #[test]
+    fn a_routeless_overlay_publishes_none_and_current_route_skips_it() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized_page(100.0, 100.0)).root_route(route("/a"))
+        };
+        let mut state = ();
+        root.rebuild(&mut app, &mut state);
+
+        // A bare-builder overlay push (a dialog) — no `.route(...)` call.
+        controller.push_with_options(|| sized_page(50.0, 50.0), PushOptions::transparent());
+        root.rebuild(&mut app, &mut state);
+
+        let stack = controller.route_stack();
+        assert_eq!(
+            stack.entries(),
+            &[Some(route("/a")), None],
+            "an overlay pushed as a bare builder publishes a `None` entry"
+        );
+        assert_eq!(
+            stack.current(),
+            None,
+            "the raw top is the overlay itself, which carries no route"
+        );
+        assert_eq!(
+            stack.current_route().map(|l| l.path.as_str()),
+            Some("/a"),
+            "chrome reading current_route sees the routed page underneath, unretitled"
+        );
+    }
+
+    // --- (b') the uncommitted-swipe contract, both ways. ---
+
+    #[test]
+    fn interactive_swipe_mid_drag_is_uncommitted_then_publishes_on_settle() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| {
+                navigator(&ctrl, || sized_page(100.0, 100.0))
+                    .root_route(route("/a"))
+                    .pop_swipe(true)
+            }
+        };
+        let mut state = ();
+        controller.push_with_options(
+            || sized_page(100.0, 60.0),
+            PushOptions::opaque().route(route("/b")),
+        );
+        let mut scene = TransitionScene::default();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut scene, ft(0));
+
+        let pre_drag = controller.route_stack();
+        assert_eq!(pre_drag.entries(), &[Some(route("/a")), Some(route("/b"))]);
+        let pre_drag_generation = pre_drag.generation();
+
+        // Steal the gesture with a drag past slop, then hold mid-drag.
+        root.event(&mut state, &down(5.0, 50.0));
+        root.paint(&mut scene, ft(100));
+        root.event(&mut state, &move_to(80.0, 50.0));
+        root.paint(&mut scene, ft(116));
+
+        // Mid-drag: the observable is UNCOMMITTED — still the pre-swipe stack,
+        // same generation, no callback fired.
+        let mid_drag = controller.route_stack();
+        assert_eq!(
+            mid_drag.entries(),
+            pre_drag.entries(),
+            "an in-flight interactive pop must not publish"
+        );
+        assert_eq!(
+            mid_drag.generation(),
+            pre_drag_generation,
+            "mid-drag: the generation is untouched"
+        );
+
+        // Release past the commit point (progress 0.75 > 0.5) -> completes.
+        root.event(&mut state, &up(80.0, 50.0));
+        run_until_settled(&mut root, &mut app, &mut state, 200);
+
+        let settled = controller.route_stack();
+        assert_eq!(
+            settled.entries(),
+            &[Some(route("/a"))],
+            "a completed swipe publishes on the settle frame"
+        );
+        assert_eq!(settled.change(), NavChange::Pop);
+        assert!(
+            settled.generation() > pre_drag_generation,
+            "the settle-frame publish bumps the generation"
+        );
+    }
+
+    #[test]
+    fn interactive_swipe_cancel_publishes_nothing_and_generation_is_untouched() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| {
+                navigator(&ctrl, || sized_page(100.0, 100.0))
+                    .root_route(route("/a"))
+                    .pop_swipe(true)
+            }
+        };
+        let mut state = ();
+        controller.push_with_options(
+            || sized_page(100.0, 60.0),
+            PushOptions::opaque().route(route("/b")),
+        );
+        let mut scene = TransitionScene::default();
+        root.rebuild(&mut app, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut scene, ft(0));
+
+        let pre_drag = controller.route_stack();
+        let pre_drag_generation = pre_drag.generation();
+
+        // Small, slow drag (well under half, low velocity) then release -> cancel.
+        root.event(&mut state, &down(5.0, 50.0));
+        root.paint(&mut scene, ft(200));
+        root.event(&mut state, &move_to(30.0, 50.0)); // progress 0.25 (< 0.5)
+        root.paint(&mut scene, ft(400));
+        root.event(&mut state, &up(30.0, 50.0)); // cancel
+
+        run_until_settled(&mut root, &mut app, &mut state, 500);
+
+        let after = controller.route_stack();
+        assert_eq!(
+            after.entries(),
+            pre_drag.entries(),
+            "a cancelled swipe publishes nothing at all"
+        );
+        assert_eq!(
+            after.generation(),
+            pre_drag_generation,
+            "generation is untouched end-to-end by a cancelled swipe"
+        );
+        assert_eq!(after.change(), pre_drag.change());
     }
 }

@@ -73,7 +73,7 @@ use std::rc::Rc;
 
 use frust_core::{AnyView, any};
 
-use super::navigator::NavigatorController;
+use super::navigator::{NavigatorController, PushOptions, ReplaceOptions};
 use super::path::{Location, PathPattern, RouteParams, encode_segment};
 use super::route::{NavRequest, RouteNavigator};
 
@@ -415,15 +415,27 @@ impl<State: 'static> Router<State> {
     /// Reset the stack to the matched chain (replace semantics — the current top's
     /// state is dropped). See the [module docs](self)'s deferred note on
     /// arbitrary-depth reset.
+    ///
+    /// Each resolved page is stamped with its own [`ResolvedPage::location`]
+    /// (`R-B1`) — [`NavigatorController::route_stack`] tracks the
+    /// resulting page-to-route mapping, so no consumer needs to re-derive it.
     pub fn go(&self, location: &str) {
         match self.resolved(location) {
             Resolution::Matched { pages, .. } => {
                 let mut pages = pages.into_iter();
                 if let Some(first) = pages.next() {
-                    self.controller.replace(first.into_page_builder());
+                    let route = first.location().clone();
+                    self.controller.replace_with_options(
+                        first.into_page_builder(),
+                        ReplaceOptions::opaque().route(route),
+                    );
                 }
                 for page in pages {
-                    self.controller.push(page.into_page_builder());
+                    let route = page.location().clone();
+                    self.controller.push_with_options(
+                        page.into_page_builder(),
+                        PushOptions::opaque().route(route),
+                    );
                 }
             }
             Resolution::Error { location } => {
@@ -433,11 +445,17 @@ impl<State: 'static> Router<State> {
     }
 
     /// Push the matched leaf page onto the stack (the page below is retained).
+    ///
+    /// Stamps the leaf's [`ResolvedPage::location`] — see [`go`](Self::go)'s doc.
     pub fn push(&self, location: &str) {
         match self.resolved(location) {
             Resolution::Matched { pages, .. } => {
                 if let Some(leaf) = pages.into_iter().next_back() {
-                    self.controller.push(leaf.into_page_builder());
+                    let route = leaf.location().clone();
+                    self.controller.push_with_options(
+                        leaf.into_page_builder(),
+                        PushOptions::opaque().route(route),
+                    );
                 }
             }
             Resolution::Error { location } => {
@@ -449,11 +467,17 @@ impl<State: 'static> Router<State> {
     /// Replace the top page with the matched leaf (the top's state is dropped;
     /// the stack depth is unchanged). [`go`](Self::go)'s single-page case, minus
     /// the chain push — the op a [`NavRequest::Replace`] applies.
+    ///
+    /// Stamps the leaf's [`ResolvedPage::location`] — see [`go`](Self::go)'s doc.
     pub fn replace(&self, location: &str) {
         match self.resolved(location) {
             Resolution::Matched { pages, .. } => {
                 if let Some(leaf) = pages.into_iter().next_back() {
-                    self.controller.replace(leaf.into_page_builder());
+                    let route = leaf.location().clone();
+                    self.controller.replace_with_options(
+                        leaf.into_page_builder(),
+                        ReplaceOptions::opaque().route(route),
+                    );
                 }
             }
             Resolution::Error { location } => {
@@ -662,6 +686,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::super::navigator::{NavigatorView, navigator};
+    use super::super::route_state::NavChange;
 
     fn params(pairs: &[(&str, &str)]) -> RouteParams {
         pairs
@@ -1118,6 +1143,63 @@ mod tests {
             vec![(Point::ZERO, Size::new(99.0, 99.0))],
             "the error page replaced the top"
         );
+    }
+
+    // ================= Route-state stamping =================
+
+    #[test]
+    fn go_push_replace_all_stamp_the_resolved_location_onto_the_route_stack() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let router: Router<()> = Router::with_controller(
+            &controller,
+            vec![
+                Route::new("/home", |_| sized(10.0, 10.0)),
+                Route::new("/detail", |_| sized(20.0, 20.0)),
+                Route::new("/other", |_| sized(30.0, 30.0)),
+            ],
+        );
+
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized(10.0, 10.0))
+        };
+        let mut state = ();
+        // No `.root_route(...)`: the very first page is seeded by `router.go`
+        // below, not the navigator's own initial builder.
+        root.rebuild(&mut app, &mut state);
+
+        router.go("/home");
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            controller.route_stack().entries(),
+            &[Some(Location::parse("/home"))],
+            "Router::go stamps the resolved location via ReplaceOptions::route"
+        );
+
+        router.push("/detail");
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            controller.route_stack().entries(),
+            &[
+                Some(Location::parse("/home")),
+                Some(Location::parse("/detail"))
+            ],
+            "Router::push stamps the resolved location via PushOptions::route"
+        );
+        assert_eq!(controller.route_stack().change(), NavChange::Push);
+
+        router.replace("/other");
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            controller.route_stack().entries(),
+            &[
+                Some(Location::parse("/home")),
+                Some(Location::parse("/other"))
+            ],
+            "Router::replace stamps the resolved location via ReplaceOptions::route"
+        );
+        assert_eq!(controller.route_stack().change(), NavChange::Replace);
     }
 
     // ================= RouteNavigator seam (pump) =================

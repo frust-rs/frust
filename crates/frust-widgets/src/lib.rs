@@ -66,11 +66,12 @@ pub use list_view::{ListView, ListViewWidget, list_view};
 pub use nav::hero::{HeroView, HeroWidget, hero};
 pub use nav::navigator::{
     BackPolicy, NavigatorController, NavigatorId, NavigatorView, NavigatorWidget, PageBuilder,
-    PageVisibility, PopResult, PushOptions, ResultCallback, VisibilityCallback, navigator,
-    overlay_host,
+    PageVisibility, PopResult, PushOptions, ReplaceOptions, ResultCallback, RouteChangeCallback,
+    VisibilityCallback, navigator, overlay_host,
 };
 pub use nav::path::{Location, PathPattern, RouteParams};
 pub use nav::route::{NavRequest, NavWaker, RouteNavigator};
+pub use nav::route_state::{NavChange, RouteStack};
 pub use nav::router::{
     DEFAULT_REDIRECT_LIMIT, ErrorBuilder, Redirect, Resolution, ResolvedPage, Route, RouteBuilder,
     Router,

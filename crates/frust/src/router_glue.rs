@@ -44,6 +44,8 @@ use frust_reactive::{DeepLink, ReactiveRuntime, deep_links};
 use frust_widgets::{RouteNavigator, Router};
 use reactive_graph::traits::Get;
 
+use crate::route_state::RouteObserver;
+
 /// Normalize a raw deep-link source string into a router-ready path.
 /// Platform shells push the RAW URL as delivered by the
 /// OS (`fktest://item/7`, or `https://host/item/7`) into the deep-link
@@ -111,6 +113,9 @@ fn normalize_deep_link(raw: &str) -> String {
 pub struct RouterDeepLinks<State: 'static> {
     router: Router<State>,
     consumed: Rc<RefCell<Option<DeepLink>>>,
+    /// The route-state observable wired to this router's navigator — see
+    /// [`routes`](Self::routes).
+    routes: RouteObserver,
 }
 
 impl<State: 'static> RouterDeepLinks<State> {
@@ -149,7 +154,11 @@ impl<State: 'static> RouterDeepLinks<State> {
         // module docs), does not re-navigate to it.
         let consumed = Rc::new(RefCell::new(links.initial.map(DeepLink::new)));
 
-        Self { router, consumed }
+        Self {
+            router,
+            consumed,
+            routes: RouteObserver::new(),
+        }
     }
 
     /// Apply everything queued on the router's
@@ -199,6 +208,22 @@ impl<State: 'static> RouterDeepLinks<State> {
     /// Requests land on the next [`track`](Self::track).
     pub fn route_navigator(&self) -> RouteNavigator {
         self.router.route_navigator()
+    }
+
+    /// The route-state observable wired to this router — attach it to
+    /// the router-driven navigator with
+    /// `.observe(navigator(links.router().controller(), ...))`:
+    ///
+    /// ```ignore
+    /// state.router_links.routes().observe(navigator(&c, initial))
+    /// ```
+    ///
+    /// `Copy`, so calling this more than once (or storing the result
+    /// alongside `route_navigator()`, e.g. under `provide_context`) hands out
+    /// clones of the same signals — reads through any of them see the same
+    /// published state.
+    pub fn routes(&self) -> RouteObserver {
+        self.routes
     }
 }
 
