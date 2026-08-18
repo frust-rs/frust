@@ -890,9 +890,15 @@ impl Widget for SidebarWidget {
         }
 
         // The freshly advanced width, not the one the last layout used: the
-        // relayout this paint just asked for lands after it, so painting the stale
-        // width would leave the panel a frame behind its own animation.
-        let live = Size::new(self.width.min(size.width), size.height);
+        // relayout this paint just asked for lands after it, so painting the
+        // stale width would leave the panel a frame behind its own animation —
+        // in both directions, collapsing and expanding alike. A mid-expand
+        // frame can briefly draw wider than this widget's own laid-out box,
+        // but never visibly: `[panel, inset]` is also the paint order (see
+        // `SidebarProviderWidget::pods`), and the inset repaints its own full
+        // box, uncropped, right after — covering exactly the strip the panel
+        // spilled into.
+        let live = Size::new(self.width, size.height);
         let (panel_origin, panel_size) = self.panel_box(live);
         let panel_origin = origin + panel_origin.to_vec2();
         if panel_size.width > 0.0 {
@@ -3049,6 +3055,24 @@ mod tests {
         h.pass();
         h.frame(0.0);
         assert_eq!(h.frame(0.0).panel_width(), 0.0);
+    }
+
+    #[test]
+    fn the_expand_animates_the_width_without_lagging_a_frame_behind_the_box() {
+        // Mirrors `the_collapse_animates_the_width_and_reduce_motion_jumps` in the
+        // other direction: starting closed and toggling open, the panel's own
+        // clip band must track the animation's fresh value every frame, not the
+        // stale box the prior frame's layout produced (that regression showed as
+        // the panel visibly not opening at all until a frame after the toggle).
+        let mut h = Harness::new(Cfg::default(), false, false);
+        h.frame(0.0);
+        h.key(Key::Character("b".to_string()), ctrl());
+        h.pass();
+        h.frame(0.0); // seeds the clock
+        let mid = h.frame(COLLAPSE_MS as f64 / 2.0).panel_width();
+        assert!(mid > 0.0 && mid < SIDEBAR_WIDTH, "mid-expand: {mid}");
+        let done = h.frame(COLLAPSE_MS as f64 * 2.0).panel_width();
+        assert_eq!(done, SIDEBAR_WIDTH, "offcanvas ends fully open");
     }
 
     #[test]

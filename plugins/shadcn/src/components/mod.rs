@@ -6,8 +6,8 @@
 //! module path per component. Two conventions keep that flat surface workable:
 //!
 //! - **Public symbols are component-prefixed**: `ButtonVariant`, `BadgeVariant`,
-//!   `CardView`, never a bare `Variant` or `Size`. Forty-eight modules glob into
-//!   one namespace; an unprefixed name is a collision waiting for the next
+//!   `CardView`, never a bare `Variant` or `Size`. Every component module globs
+//!   into one namespace; an unprefixed name is a collision waiting for the next
 //!   component to land.
 //! - **The module list is fixed up front.** Every planned component has a module
 //!   from the start (empty until the widget lands), so adding a component never

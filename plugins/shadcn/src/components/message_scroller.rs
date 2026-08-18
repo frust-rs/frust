@@ -610,6 +610,14 @@ impl Widget for MessageScrollerWidget {
                 }
                 self.dragging = false;
                 self.down_active = true;
+                // A glide leaves the viewport mid-content when it is cut short
+                // here, so `stuck` (latched true the moment the button was
+                // pressed, ahead of the glide finishing) needs re-deriving from
+                // where the offset actually landed — otherwise it keeps
+                // reporting stuck with the button affordance suppressed, and
+                // the next relayout silently snaps the offset back to the edge
+                // with no further user action.
+                let glide_cancelled = self.glide.is_some();
                 self.fling = None;
                 self.glide = None;
                 self.last_anim = None;
@@ -617,6 +625,9 @@ impl Widget for MessageScrollerWidget {
                 self.last_drag = position;
                 self.tracker.clear();
                 self.tracker.record(self.event_time_ms(), position.y);
+                if glide_cancelled && let Some(stuck) = self.resolve_stick() {
+                    self.notify_stick(ctx, stuck);
+                }
                 ctx.capture_pointer();
                 route_event(&mut self.items, ctx, event);
                 EventResult::Handled
@@ -1279,6 +1290,52 @@ mod tests {
         );
         h.frame(GLIDE_MS as f64 * 2.0);
         assert_eq!(h.offset(), h.max_offset(), "landed on the live edge");
+    }
+
+    #[test]
+    fn a_press_that_cuts_a_glide_short_re_derives_stuck_from_the_offset() {
+        let mut h = Harness::new(8);
+        h.wheel(-300.0);
+        h.frame(REVEAL_MS as f64 * 2.0);
+
+        let center = h.button_center();
+        h.pointer(PointerPhase::Down, center);
+        h.pointer(PointerPhase::Up, center);
+        assert!(h.stuck(), "the press re-sticks immediately");
+
+        h.frame(0.0);
+        h.frame(GLIDE_MS as f64 / 2.0);
+        let mid_offset = h.offset();
+        assert!(mid_offset < h.max_offset(), "still mid-glide: {mid_offset}");
+
+        // A fresh press over the content cuts the glide short before it lands.
+        h.pointer(PointerPhase::Down, Point::new(100.0, 100.0));
+        assert_eq!(
+            h.offset(),
+            mid_offset,
+            "the press itself does not move the offset"
+        );
+        assert!(
+            !h.stuck(),
+            "the offset sits mid-content, so stuck must not still read true"
+        );
+        let events_after_down = h.state.stick_events.len();
+
+        // Nothing further happened: the pin in `layout` must not snap the
+        // offset back to the edge on its own.
+        h.layout();
+        assert_eq!(h.offset(), mid_offset, "no snap on the next relayout");
+        assert_eq!(
+            h.state.stick_events.len(),
+            events_after_down,
+            "a plain relayout reports nothing new"
+        );
+
+        let center = h.button_center();
+        assert!(
+            h.widget.hits_button(center),
+            "the button affordance is available again, not suppressed by a stale stuck=true"
+        );
     }
 
     #[test]

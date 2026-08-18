@@ -106,6 +106,13 @@ const GROUP_GAP: f64 = 8.0;
 /// no fill, the same split `checkbox` documents.
 const DARK_FILL_ALPHA: f32 = 0.30;
 
+/// The glyph a masked slot's digit is replaced with — [`InputOtpView::masked`].
+/// Same choice `frust_widgets::TextInput` masks with (Android's
+/// `inputType=textPassword` default, the one platform that publishes a
+/// specific character); this port has no glyph the *upstream* library names,
+/// since upstream carries no masking option at all.
+const OTP_MASK_CHAR: char = '\u{2022}';
+
 /// Side of the lucide viewBox the separator's coordinates are authored in.
 const ICON_VIEWBOX: f64 = 24.0;
 /// Lucide's uniform stroke width, in viewBox units.
@@ -145,6 +152,7 @@ pub struct InputOtpView<State: 'static> {
     mode: InputOtpMode,
     disabled: bool,
     label: Option<String>,
+    masked: bool,
     on_change: OnChange<State>,
     on_complete: Option<OnChange<State>>,
 }
@@ -168,6 +176,7 @@ pub fn input_otp<State: 'static, F: Fn(&mut State, String) + 'static>(
         mode: InputOtpMode::default(),
         disabled: false,
         label: None,
+        masked: false,
         on_change: Rc::new(on_change),
         on_complete: None,
     }
@@ -214,6 +223,20 @@ impl<State: 'static> InputOtpView<State> {
     /// itself, so this is the only source for the semantics node's label.
     pub fn label(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());
+        self
+    }
+
+    /// Mask the code — for a passcode delivered over a shoulder-surfable
+    /// screen, not upstream's own `input-otp` shape (the ported registry file
+    /// carries no masking prop; upstream renders every digit visibly by
+    /// design, which is why this defaults to `false`). Mirrors
+    /// `frust_widgets`' `TextInputView::obscured` convention: the semantics
+    /// node becomes [`Role::PasswordInput`] and reports the bulleted mirror,
+    /// never the real code, to an assistive-tech client; each painted slot
+    /// shows the same bullet in place of its digit, so the visible and
+    /// announced states never disagree.
+    pub fn masked(mut self, masked: bool) -> Self {
+        self.masked = masked;
         self
     }
 }
@@ -284,6 +307,7 @@ impl<State: 'static> View<State> for InputOtpView<State> {
             mode: self.mode,
             disabled: self.disabled,
             label: self.label.clone(),
+            masked: self.masked,
             caret: 0,
             slots: Vec::new(),
             blink_epoch: FrameTime::ZERO,
@@ -309,6 +333,12 @@ impl<State: 'static> View<State> for InputOtpView<State> {
         if prev.length != self.length || prev.groups != self.groups {
             element.length = self.length;
             element.groups = self.groups.clone();
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        if prev.masked != self.masked {
+            element.masked = self.masked;
+            // The slot runs are keyed from `masked` too (bullets vs. digits),
+            // so a bare toggle needs the same re-key `value` changing gets.
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         if prev.value != self.value || flags.needs_layout() {
@@ -349,6 +379,8 @@ pub struct InputOtpWidget {
     mode: InputOtpMode,
     disabled: bool,
     label: Option<String>,
+    /// See [`InputOtpView::masked`].
+    masked: bool,
     /// The insertion index into `value` (`0..=value.len()`) — the only state
     /// this widget owns.
     caret: usize,
@@ -369,14 +401,23 @@ pub struct InputOtpWidget {
 impl InputOtpWidget {
     /// Adopt an app-confirmed code: truncate it to `length`, re-key the slot
     /// runs, and clamp the caret into it.
+    ///
+    /// A masked group's runs carry [`OTP_MASK_CHAR`] rather than the real
+    /// digit — `self.value` (and everything the caret/editing math reads) is
+    /// always the real code, so masking touches only what gets painted.
     fn adopt_value(&mut self, value: &str) {
         self.value = value.chars().take(self.length).collect();
         let chars: Vec<char> = self.value.chars().collect();
         self.slots.clear();
         for index in 0..self.length {
-            self.slots.push(LabelRun::new(
-                chars.get(index).map(|c| c.to_string()).unwrap_or_default(),
-            ));
+            let glyph = chars.get(index).map(|c| {
+                if self.masked {
+                    OTP_MASK_CHAR.to_string()
+                } else {
+                    c.to_string()
+                }
+            });
+            self.slots.push(LabelRun::new(glyph.unwrap_or_default()));
         }
         self.caret = self.caret.min(chars.len());
     }
@@ -742,11 +783,27 @@ impl Widget for InputOtpWidget {
     fn semantics(&self, ctx: &mut SemanticsCtx) {
         // One `<input>` upstream is one node here: the group is a single text
         // field carrying the whole code, not N boxes.
-        ctx.push_node(Role::TextInput, |node| {
+        //
+        // Masked mirrors `frust_widgets::TextInput::obscured`'s node shape:
+        // `Role::PasswordInput` plus the bulleted mirror as the reported
+        // value, never the real code — an assistive-tech client reads the
+        // node value verbatim, so publishing the real code there would defeat
+        // the masking the painted slots already carry.
+        let role = if self.masked {
+            Role::PasswordInput
+        } else {
+            Role::TextInput
+        };
+        let value = if self.masked {
+            self.value.chars().map(|_| OTP_MASK_CHAR).collect()
+        } else {
+            self.value.clone()
+        };
+        ctx.push_node(role, |node| {
             if let Some(label) = &self.label {
                 node.set_label(label.as_str());
             }
-            node.set_value(self.value.clone());
+            node.set_value(value);
             if self.disabled {
                 node.set_disabled();
             } else {
@@ -939,6 +996,24 @@ mod tests {
         let (w, _) = laid_out(&view("1234567890"));
         assert_eq!(w.value, "123456");
         assert_eq!(w.slots.len(), LENGTH);
+    }
+
+    #[test]
+    fn masked_paints_bullets_over_every_filled_slot_and_the_real_code_stays_the_value() {
+        let (w, _) = laid_out(&view("12").masked(true));
+        assert_eq!(w.value, "12", "the real code is untouched by masking");
+        assert_eq!(w.slots[0].content(), "\u{2022}");
+        assert_eq!(w.slots[1].content(), "\u{2022}");
+        assert_eq!(
+            w.slots[2].content(),
+            "",
+            "an empty slot stays empty, not a bullet"
+        );
+
+        // Unmasked (the default) still shows the real digit.
+        let (w, _) = laid_out(&view("12"));
+        assert_eq!(w.slots[0].content(), "1");
+        assert_eq!(w.slots[1].content(), "2");
     }
 
     // ---- Paint -------------------------------------------------------------
@@ -1201,6 +1276,7 @@ mod tests {
         state: Codes,
         tcx: TextContext,
         disabled: bool,
+        masked: bool,
     }
 
     impl Harness {
@@ -1217,8 +1293,26 @@ mod tests {
                 },
                 tcx: TextContext::new(),
                 disabled,
+                masked: false,
             };
             h.root.set_theme(Box::new(theme));
+            h.pass();
+            h
+        }
+
+        /// A harness whose group is [`InputOtpView::masked`].
+        fn masked(value: &str) -> Self {
+            let mut h = Harness {
+                root: frust_core::RenderRoot::new(),
+                state: Codes {
+                    value: value.to_string(),
+                    ..Codes::default()
+                },
+                tcx: TextContext::new(),
+                disabled: false,
+                masked: true,
+            };
+            h.root.set_theme(Box::new(crate::theme()));
             h.pass();
             h
         }
@@ -1240,9 +1334,10 @@ mod tests {
 
         fn pass(&mut self) {
             let disabled = self.disabled;
+            let masked = self.masked;
             let mut logic = move |s: &mut Codes| {
                 let value = s.value.clone();
-                view(&value).disabled(disabled)
+                view(&value).disabled(disabled).masked(masked)
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
@@ -1380,5 +1475,39 @@ mod tests {
             .find(|(_, n)| n.role() == Role::TextInput)
             .expect("a Role::TextInput node");
         assert!(node.is_disabled());
+    }
+
+    #[test]
+    fn masked_reports_a_password_node_with_the_bulleted_code() {
+        let h = Harness::masked("1234");
+        let update = h.semantics();
+        assert!(
+            !update
+                .nodes
+                .iter()
+                .any(|(_, n)| n.role() == Role::TextInput),
+            "masked never publishes the plain-text role"
+        );
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::PasswordInput)
+            .expect("a Role::PasswordInput node");
+        assert_eq!(node.label(), Some("one-time code"));
+        assert_eq!(
+            node.value(),
+            Some("\u{2022}\u{2022}\u{2022}\u{2022}"),
+            "the real code never reaches the semantics tree"
+        );
+
+        // Unmasked (the default) stays exactly what it always was.
+        let h = Harness::new(false);
+        let update = h.semantics();
+        assert!(
+            !update
+                .nodes
+                .iter()
+                .any(|(_, n)| n.role() == Role::PasswordInput)
+        );
     }
 }

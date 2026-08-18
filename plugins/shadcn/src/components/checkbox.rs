@@ -34,6 +34,11 @@
 //! - **Activating an indeterminate box reports `true`**, not `!checked` — Radix
 //!   resolves a mixed state upward (`isIndeterminate(prev) ? true : !prev`), so a
 //!   half-selected "select all" completes the selection rather than clearing it.
+//!   The one exception is `checked && indeterminate` together — representable
+//!   here but not in Radix's own three-value `checked` prop — where reporting
+//!   `true` would just echo the value the app already holds; that combination
+//!   reports `!checked` instead, so the control never goes unclickable-out (see
+//!   [`CheckboxWidget::request_toggle`]).
 //! - **Semantics report [`Toggled::Mixed`]**, the ARIA `aria-checked="mixed"` the
 //!   primitive emits.
 //! - **The mark is a minus on the `primary` fill.** The source authors *no*
@@ -320,8 +325,21 @@ impl CheckboxWidget {
     /// Report the requested value without touching any of this widget's own
     /// state: `!checked` normally, and `true` from the mixed state (Radix
     /// resolves an indeterminate box upward — see the [module docs](self)).
+    ///
+    /// **`checked && indeterminate` is the one combination Radix's own model
+    /// cannot hold** (its `checked` prop is `true`/`false`/`"indeterminate"`,
+    /// never `"indeterminate"` *and* `true` at once), but this port's two
+    /// independent booleans can represent it. Resolving it upward to `true`
+    /// there — the ordinary mixed-state rule — would report the value the app
+    /// already holds, an activation the app can observe no effect from.
+    /// Indeterminate still outranks `checked` everywhere it is *painted or
+    /// announced* (see [`filled`](Self::filled) and the semantics node); only
+    /// this exit path treats the two independently, falling through to
+    /// `!checked` so the control always has somewhere left to go.
     fn request_toggle(&mut self, ctx: &mut EventCtx) {
-        let next = if self.indeterminate {
+        let next = if self.indeterminate && self.checked {
+            !self.checked
+        } else if self.indeterminate {
             true
         } else {
             !self.checked
@@ -744,21 +762,60 @@ mod tests {
     }
 
     /// Radix resolves a mixed box **upward**: activating it asks for `true`,
-    /// never `!checked`, whichever boolean the mixed value sits on top of.
+    /// never `!checked` — but only where Radix's own model can actually sit
+    /// (`checked = false`, mixed on top). `checked = true` together with
+    /// `indeterminate` is a combination Radix's three-value `checked` prop
+    /// cannot represent at all, so it is not "whichever boolean the mixed
+    /// value sits on top of" here — see
+    /// `checked_and_indeterminate_together_round_trips_out` below.
     #[test]
     fn activating_an_indeterminate_box_asks_for_true() {
-        for checked in [false, true] {
-            let mut w = mixed_widget(checked);
-            let mut state = Toggles::default();
-            dispatch(&mut w, &mut state, &pointer(PointerPhase::Down, 8.0, 8.0));
-            dispatch(&mut w, &mut state, &pointer(PointerPhase::Up, 8.0, 8.0));
-            assert_eq!(state.last, Some(true), "checked = {checked}");
-            assert!(w.indeterminate, "the app owns the mixed state too");
+        let mut w = mixed_widget(false);
+        let mut state = Toggles::default();
+        dispatch(&mut w, &mut state, &pointer(PointerPhase::Down, 8.0, 8.0));
+        dispatch(&mut w, &mut state, &pointer(PointerPhase::Up, 8.0, 8.0));
+        assert_eq!(state.last, Some(true));
+        assert!(w.indeterminate, "the app owns the mixed state too");
 
-            dispatch(&mut w, &mut state, &space());
-            assert_eq!(state.last, Some(true), "the key path agrees");
-            assert_eq!(state.count, 2);
-        }
+        dispatch(&mut w, &mut state, &space());
+        assert_eq!(state.last, Some(true), "the key path agrees");
+        assert_eq!(state.count, 2);
+    }
+
+    /// `checked && indeterminate` is representable here even though Radix's
+    /// own `checked` prop can never hold both at once. Resolving it upward to
+    /// `true` (the ordinary mixed-state rule) would report the value the app
+    /// already holds — an activation with no observable effect, leaving the
+    /// control unclickable-out. It reports `!checked` instead, so pressing it
+    /// always has somewhere left to go, and a second press from the resulting
+    /// plain-unchecked state behaves exactly like any other checkbox.
+    #[test]
+    fn checked_and_indeterminate_together_round_trips_out() {
+        let mut w = mixed_widget(true);
+        let mut state = Toggles::default();
+        dispatch(&mut w, &mut state, &pointer(PointerPhase::Down, 8.0, 8.0));
+        dispatch(&mut w, &mut state, &pointer(PointerPhase::Up, 8.0, 8.0));
+        assert_eq!(
+            state.last,
+            Some(false),
+            "reporting `true` would echo the app's own already-held value"
+        );
+        assert!(w.checked && w.indeterminate, "still controlled by the app");
+
+        dispatch(&mut w, &mut state, &space());
+        assert_eq!(state.last, Some(false), "the key path agrees");
+        assert_eq!(state.count, 2);
+
+        // The app takes the hint and clears both props: an ordinary checkbox
+        // from here on.
+        let mut plain = widget(false, false);
+        dispatch(
+            &mut plain,
+            &mut state,
+            &pointer(PointerPhase::Down, 8.0, 8.0),
+        );
+        dispatch(&mut plain, &mut state, &pointer(PointerPhase::Up, 8.0, 8.0));
+        assert_eq!(state.last, Some(true));
     }
 
     #[test]

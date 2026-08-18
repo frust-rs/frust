@@ -483,7 +483,15 @@ impl ResizablePanelGroupWidget {
         // grow to, and what the trailing panel may shrink to.
         let lower = (low_min - low).max(high - high_max);
         let upper = (low_max - low).min(high - high_min);
-        let delta = delta.clamp(lower.min(upper), upper.max(lower));
+        if lower > upper {
+            // One of the two fractions already sits outside its own
+            // `(min, max)` (author-supplied sizes can do this), so no `delta`
+            // is legal — sorting `lower`/`upper` instead would silently admit
+            // exactly the illegal range this bound exists to reject. Refuse
+            // the move rather than legalize a size the app never asked for.
+            return next;
+        }
+        let delta = delta.clamp(lower, upper);
         next[handle] = low + delta;
         next[handle + 1] = high - delta;
         next
@@ -1109,6 +1117,52 @@ mod tests {
             &pointer(PointerPhase::Move, seam + 10_000.0, 100.0),
         );
         assert!((state.sizes[0] - 0.6).abs() < 1e-9, "max_size holds");
+    }
+
+    #[test]
+    fn contradictory_author_bounds_refuse_every_move_instead_of_legalizing_one() {
+        // Both panels cap at 0.4, but a two-panel group's fractions always sum
+        // to 1 — the author's own bounds are jointly infeasible, so the seed
+        // already leaves each panel's fraction (0.5) above its own `max_size`.
+        // A drag from here must refuse rather than accept a `delta` that
+        // sorting `(lower, upper)` would otherwise silently legalize.
+        let view: ResizablePanelGroupView<Layouts> = resizable_panel_group(vec![
+            resizable_panel(Block).max_size(0.4),
+            resizable_panel(Block).max_size(0.4),
+        ])
+        .on_layout(|s: &mut Layouts, sizes: Vec<f64>| {
+            s.sizes = sizes.clone();
+            s.reports.push(sizes);
+        });
+        let (mut w, size) = laid_out(&view);
+        assert_eq!(
+            w.fractions,
+            vec![0.5, 0.5],
+            "the seed already violates max_size"
+        );
+        let seam = w.handle_offset(0);
+        let mut state = Layouts::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            size,
+            &pointer(PointerPhase::Down, seam, 100.0),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            size,
+            &pointer(PointerPhase::Move, seam + 20.0, 100.0),
+        );
+        assert_eq!(
+            w.fractions,
+            vec![0.5, 0.5],
+            "the move is refused, not partly admitted"
+        );
+        assert!(
+            state.reports.is_empty(),
+            "no layout is reported when the move was refused"
+        );
     }
 
     #[test]
