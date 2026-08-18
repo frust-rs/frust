@@ -12,6 +12,9 @@ use frust_core::{
 use kurbo::{Point, Size};
 
 /// Per-edge inset amounts, in logical pixels.
+///
+/// Negative insets clamp to zero; intentional overflow/bleed is a decorated-box concern,
+/// not Padding's.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EdgeInsets {
     /// Inset from the left edge.
@@ -46,11 +49,13 @@ impl EdgeInsets {
     }
 
     /// Total horizontal inset (`left + right`).
+    #[allow(dead_code)]
     fn horizontal(&self) -> f64 {
         self.left + self.right
     }
 
     /// Total vertical inset (`top + bottom`).
+    #[allow(dead_code)]
     fn vertical(&self) -> f64 {
         self.top + self.bottom
     }
@@ -109,8 +114,14 @@ impl<State: 'static> View<State> for PaddingView<State> {
 
 impl Widget for PaddingWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        let h = self.insets.horizontal();
-        let v = self.insets.vertical();
+        // Clamp insets to zero to prevent negative values from expanding child
+        // constraints or placing the child at negative coordinates.
+        let left = self.insets.left.max(0.0);
+        let top = self.insets.top.max(0.0);
+        let right = self.insets.right.max(0.0);
+        let bottom = self.insets.bottom.max(0.0);
+        let h = left + right;
+        let v = top + bottom;
         // Deflate the constraints by the insets (never below zero — insets larger
         // than the available space collapse the child to nothing).
         let child_bc = BoxConstraints::new(
@@ -124,8 +135,7 @@ impl Widget for PaddingWidget {
             ),
         );
         let child_size = self.child.layout_child(ctx, &child_bc);
-        self.child
-            .set_origin(Point::new(self.insets.left, self.insets.top));
+        self.child.set_origin(Point::new(left, top));
         bc.constrain(Size::new(child_size.width + h, child_size.height + v))
     }
 
@@ -187,6 +197,45 @@ mod tests {
         let size = w.layout(&mut lctx, &BoxConstraints::loose(Size::new(50.0, 50.0)));
         assert_eq!(w.child.size(), Size::ZERO);
         assert_eq!(size, Size::new(50.0, 50.0));
+    }
+
+    #[test]
+    fn negative_insets_clamp_to_zero() {
+        // Negative insets should behave identically to zero insets: the child size
+        // stays the same and is placed at the origin.
+        let view_negative: PaddingView<()> = Padding(
+            EdgeInsets {
+                left: -5.0,
+                top: -10.0,
+                right: -15.0,
+                bottom: -20.0,
+            },
+            leaf(40.0, 20.0),
+        );
+        let view_zero: PaddingView<()> = Padding(EdgeInsets::all(0.0), leaf(40.0, 20.0));
+
+        let mut w_negative = build(&view_negative);
+        let mut w_zero = build(&view_zero);
+        let mut lctx = LayoutCtx::new();
+
+        let size_negative =
+            w_negative.layout(&mut lctx, &BoxConstraints::loose(Size::new(500.0, 500.0)));
+        let size_zero = w_zero.layout(&mut lctx, &BoxConstraints::loose(Size::new(500.0, 500.0)));
+
+        assert_eq!(
+            size_negative, size_zero,
+            "negative and zero insets should produce the same size"
+        );
+        assert_eq!(
+            w_negative.child.origin(),
+            w_zero.child.origin(),
+            "negative and zero insets should place child at the same origin"
+        );
+        assert_eq!(
+            w_negative.child.size(),
+            w_zero.child.size(),
+            "negative and zero insets should give child the same size"
+        );
     }
 
     // -- Capture routing (review R1: a captured child must keep receiving
