@@ -1505,4 +1505,159 @@ mod tests {
             "the painted-but-inert page's navigator kept its stack"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // A design-claim stress test: wiring-order independence between two
+    // `Role::Navigator` peers. `Registrant::key`'s own doc states the
+    // premise plainly — "a nested navigator always wires after the navigator
+    // hosting it, so the highest `birth` among `Navigator` peers is the
+    // innermost one" — and the two tests above this section
+    // (`an_overlay_host_survives_an_inner_navigator_wiring_twice_per_pass`,
+    // `an_init_registered_backhandler_does_not_outrank_a_later_overlay_host`)
+    // already prove that premise does NOT hold for wire order in general
+    // (`Role::Host` is decoupled from it on purpose), but only for a `Host`
+    // vs. a `Navigator`. Nothing pins the analogous case for two `Navigator`
+    // peers — this section does. `refresh_interest`/`Role`/`registrant_ids`
+    // are crate-private, so this composition cannot be built from an
+    // integration test the way the rest of the shell matrix is.
+    // -----------------------------------------------------------------------
+
+    /// `inner` gets an explicit [`BackHandler`], built and FIRST wired before
+    /// `outer` (its eventual host) has any view at all — the
+    /// `Component::init` shape — and `track()`ed every rebuild from then on,
+    /// so its earliest `birth` is never dropped by the one-cycle prune even
+    /// while its own navigator widget doesn't exist yet (a bare, never-tracked
+    /// pre-registration IS pruned before outer's page ever mounts inner for
+    /// real, which self-heals the ordering — tried first, and not what this
+    /// test pins). The REST of the composition is the honest structural
+    /// nesting the shell matrix uses elsewhere: outer's plain root, then a
+    /// page it pushes that hosts `inner`'s real navigator. With BOTH
+    /// navigators poppable, the innermost-first rule says `inner` must win.
+    ///
+    /// **Observed vs. designed:** a `Role::Navigator` peer's sort key is
+    /// `u64::MAX - birth`, and `birth` never changes after a registrant's
+    /// FIRST wire (only `seq` refreshes) — so pinning `inner`'s birth ahead of
+    /// `outer`'s gives `inner` the numerically LARGER key, and `route_back`'s
+    /// first-match search finds `outer` first. `outer` wins, inverting the
+    /// documented "structurally innermost wins" rule for this ordering. This
+    /// is a real, reachable divergence between the documented rule (nesting
+    /// depth) and its actual implementation (raw wire sequence), not a test
+    /// bug — see the `#[ignore]` reason for the acceptance criterion this
+    /// pins for future ranking work.
+    #[test]
+    #[ignore = "pins a design case that FAILS against current ranking: an inner \
+                navigator whose explicit BackHandler wires (and keeps tracking) \
+                before its outer host's first view exists (the Component::init \
+                shape) loses the innermost-first tie-break to the outer \
+                navigator instead of winning it — Registrant::key ranks \
+                Role::Navigator peers by raw wire sequence (birth), not by \
+                structural nesting depth. Expected to start passing once \
+                ranking accounts for nesting depth rather than birth order \
+                alone; rerun with `cargo test -p frust --lib \
+                wiring_order_does_not_flip -- --ignored` to observe the \
+                current failure."]
+    fn wiring_order_does_not_flip_the_innermost_navigator_when_it_is_still_poppable() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let outer: NavigatorController<()> = NavigatorController::new();
+        let inner: NavigatorController<()> = NavigatorController::new();
+
+        // `Component::init`: inner's explicit handler wires FIRST, before
+        // outer's own view exists.
+        let inner_back = BackHandler::new(inner.clone());
+        assert_eq!(registrant_ids(), vec![inner.id()], "inner wired alone");
+
+        let mut app: AppLogic = {
+            let outer_c = outer.clone();
+            Box::new(move |_: &mut ()| {
+                // Tracked every pass, exactly like Huddle's own
+                // `state.back.track()` — this is what keeps inner's early
+                // birth from ever being pruned as stale.
+                inner_back.track();
+                auto_wire(&outer_c);
+                raw_navigator(&outer_c, page)
+            })
+        };
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        root.rebuild(&mut app, &mut ());
+        assert_eq!(outer.depth(), 1, "outer starts at its own root");
+
+        {
+            let inner_for_push = inner.clone();
+            outer.push(move || {
+                auto_wire(&inner_for_push);
+                any(raw_navigator(&inner_for_push, page))
+            });
+        }
+        root.rebuild(&mut app, &mut ());
+        assert_eq!(outer.depth(), 2, "outer pushed the page hosting inner");
+
+        // The case-5 shape: BOTH navigators poppable.
+        inner.push(page);
+        root.rebuild(&mut app, &mut ());
+        assert_eq!((outer.depth(), inner.depth()), (2, 2));
+
+        push_back_press();
+        root.rebuild(&mut app, &mut ());
+        assert_eq!(
+            inner.depth(),
+            1,
+            "the structurally-innermost navigator should win the tie \
+             regardless of which one registered first"
+        );
+        assert_eq!(
+            outer.depth(),
+            2,
+            "and the outer stack should stay untouched"
+        );
+    }
+
+    /// The harmless half of the same stress test: at inner depth 1 (default
+    /// `BackPolicy::Pop`, no interest either way), wire order cannot matter
+    /// because ranking is never even consulted — `route_back` only compares
+    /// registrants that both claim interest, and `inner` claims none here.
+    /// Unlike its sibling above, this one is expected to (and does) pass
+    /// against unchanged code.
+    #[test]
+    fn wiring_order_is_irrelevant_when_the_inner_navigator_has_no_interest() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let outer: NavigatorController<()> = NavigatorController::new();
+        let inner: NavigatorController<()> = NavigatorController::new();
+
+        let inner_back = BackHandler::new(inner.clone());
+
+        let mut app: AppLogic = {
+            let outer_c = outer.clone();
+            Box::new(move |_: &mut ()| {
+                inner_back.track();
+                auto_wire(&outer_c);
+                raw_navigator(&outer_c, page)
+            })
+        };
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        root.rebuild(&mut app, &mut ());
+
+        {
+            let inner_for_push = inner.clone();
+            outer.push(move || {
+                auto_wire(&inner_for_push);
+                any(raw_navigator(&inner_for_push, page))
+            });
+        }
+        root.rebuild(&mut app, &mut ());
+        assert_eq!(
+            (outer.depth(), inner.depth()),
+            (2, 1),
+            "outer poppable, inner still at its own root"
+        );
+
+        push_back_press();
+        root.rebuild(&mut app, &mut ());
+        assert_eq!(outer.depth(), 1, "outer popped its own shell page");
+    }
 }
