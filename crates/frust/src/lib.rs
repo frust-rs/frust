@@ -100,14 +100,15 @@ pub use frust_core::view::{AnyView, View, any};
 pub use frust_widgets::{
     Align, AlignView, Alignment, Axis, BackPolicy, Button, ButtonStyle, ButtonView, Checkbox,
     CheckboxView, ChildKey, Column, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView,
-    GestureDetector, GestureDetectorView, HeroView, Icon, IconData, IconSource, IconView,
-    IconWidget, Image, ImageError, ImageFit, ImageSource, ImageView, ListView, ListViewWidget,
-    MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView, Padding, PaddingView,
-    PageBuilder, PageTransition, PageVisibility, PopResult, PushOptions, Radio, RadioView,
-    RadioWidget, ResultCallback, Row, SafeAreaView, ScrollInfo, ScrollView, SizedBox, SizedBoxView,
-    Slider, SliderView, Stack, StackView, TextInput, TextInputView, TextView, Timing,
-    TransitionSpec, TransitionState, VisibilityCallback, button, checkbox, flexible, hero, icon,
-    inflexible, keyed, list_view, radio, safe_area, scroll_view, slider, text, text_input,
+    GestureDetector, GestureDetectorView, HeroView, Icon, IconButton, IconButtonView, IconData,
+    IconSource, IconView, IconWidget, Image, ImageError, ImageFit, ImageSource, ImageView,
+    ListView, ListViewWidget, MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView,
+    Padding, PaddingView, PageBuilder, PageTransition, PageVisibility, PopResult, PushOptions,
+    Radio, RadioView, RadioWidget, ResultCallback, Row, SafeAreaView, ScrollInfo, ScrollView,
+    SizedBox, SizedBoxView, Slider, SliderView, Stack, StackView, TextInput, TextInputView,
+    TextView, Timing, TransitionSpec, TransitionState, VisibilityCallback, button, checkbox,
+    flexible, hero, icon, icon_button, inflexible, keyed, list_view, radio, safe_area, scroll_view,
+    slider, text, text_input,
 };
 
 /// Platform-view embedding (platform-views feature): reserve

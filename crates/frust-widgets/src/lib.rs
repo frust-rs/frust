@@ -34,6 +34,7 @@ mod checkbox;
 mod flex;
 mod gesture;
 mod icon;
+mod icon_button;
 pub mod icons;
 mod image;
 mod list_view;
@@ -61,6 +62,7 @@ pub use flex::{
 };
 pub use gesture::{GestureDetector, GestureDetectorView, GestureDetectorWidget};
 pub use icon::{Icon, IconData, IconSource, IconView, IconWidget, icon};
+pub use icon_button::{IconButton, IconButtonView, IconButtonWidget, icon_button};
 pub use image::{Image, ImageError, ImageFit, ImageSource, ImageView, ImageWidget};
 pub use list_view::{ListView, ListViewWidget, list_view};
 pub use nav::hero::{HeroView, HeroWidget, hero};

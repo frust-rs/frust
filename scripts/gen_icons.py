@@ -156,6 +156,11 @@ STARTER_SET: list[tuple[str, str]] = [
     ("SCAN_MARK", "qr_code_scanner"),
     ("GLOBE", "public"),
     ("PLUG", "cable"),
+    # -- directional arrows and a copy mark, for the baseline icon_button ---
+    ("ARROW_UPWARD", "arrow_upward"),
+    ("ARROW_DOWNWARD", "arrow_downward"),
+    ("ARROW_FORWARD", "arrow_forward"),
+    ("CONTENT_COPY", "content_copy"),
 ]
 
 MODULE_HEADER = '''\
