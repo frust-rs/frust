@@ -23,9 +23,13 @@ use peniko::Brush;
 use crate::layout::TextLayout;
 use crate::shape_cache::{DEFAULT_CAPACITY, ShapeCache, ShapeCacheStats, ShapeKey};
 use crate::style::{
-    TextStyle, to_parley_align, to_parley_family, to_parley_line_height, to_parley_style,
-    to_parley_weight,
+    TextOverflow, TextStyle, to_parley_align, to_parley_family, to_parley_line_height,
+    to_parley_style, to_parley_weight,
 };
+
+/// The single character [`TextOverflow::Ellipsis`] appends/substitutes —
+/// U+2026 HORIZONTAL ELLIPSIS, one glyph rather than three ASCII periods.
+const ELLIPSIS: char = '\u{2026}';
 
 /// A font family registered via [`TextContext::register_fonts`], reported back
 /// to the caller so it can resolve widget styles against the exact name(s)
@@ -174,6 +178,137 @@ impl TextContext {
 
         self.shape_cache.insert(key, layout.clone(), max_width);
         TextLayout::new(layout)
+    }
+
+    /// Lays out `text` exactly like [`Self::layout`], then caps it to
+    /// `max_lines` (when `Some`), applying `overflow` to whatever is cut.
+    ///
+    /// `max_lines = None` delegates straight to [`Self::layout`] — the
+    /// zero-cost, behavior-unchanged path every existing caller keeps taking.
+    /// parley 0.11 has no native `max_lines`/ellipsis support, so a bounded
+    /// call does the shaping twice on the truncating path: once to measure
+    /// the full text, once more (in [`Self::layout`], so still
+    /// shape-cache-backed) to shape the truncated result — post-shaping
+    /// measure-and-truncate, not a parley feature.
+    ///
+    /// # Algorithm
+    ///
+    /// A layout overflows `max_lines` in one of two ways parley itself
+    /// exposes no direct query for, so both are checked explicitly against
+    /// the full (untruncated) layout:
+    /// - **extra lines**: line-breaking produced more than `max_lines`
+    ///   lines (wrapping, or `max_lines` hard `\n` breaks in the source).
+    /// - **an unbreakable overrun**: exactly `max_lines` lines came out, but
+    ///   the last visible one is itself wider than `max_width` — a run with
+    ///   no break opportunity (one long unspaced word) that parley lets
+    ///   overflow rather than force-break.
+    ///
+    /// Neither condition holds → the text already fits; both overflow modes
+    /// return the full layout unchanged (this is also why an exact-fit line,
+    /// width `== max_width`, never gets truncated: the comparison is a
+    /// strict `>`).
+    ///
+    /// On overflow, [`TextOverflow::Clip`] only ever drops whole trailing
+    /// lines — the source text is cut at the end of line `max_lines - 1`'s
+    /// span and reshaped; an unbreakable-overrun-only case (no extra lines
+    /// to drop) is left untouched, since Clip never character-trims.
+    /// [`TextOverflow::Ellipsis`] does the same line drop, then further
+    /// truncates the last visible line's own text via
+    /// [`Self::truncate_last_line`] and appends [`ELLIPSIS`], before
+    /// reshaping the whole (earlier lines + truncated last line) string —
+    /// which is also why earlier lines reliably survive verbatim: parley's
+    /// line-breaker is greedy/left-to-right, so shortening what follows a
+    /// line never changes how that line itself broke.
+    pub fn layout_bounded(
+        &mut self,
+        text: &str,
+        style: &TextStyle,
+        max_width: Option<f32>,
+        max_lines: Option<usize>,
+        overflow: TextOverflow,
+    ) -> TextLayout {
+        let Some(max_lines) = max_lines else {
+            return self.layout(text, style, max_width);
+        };
+        if max_lines == 0 {
+            // No visible lines at all — never index `max_lines - 1` below.
+            return self.layout("", style, max_width);
+        }
+
+        let full = self.layout(text, style, max_width);
+        let last_visible = max_lines - 1;
+        let has_extra_lines = full.line_count() > max_lines;
+        let Some(last_line) = full.line_info(last_visible) else {
+            // Fewer than `max_lines` lines exist at all: nothing overflowed.
+            return full;
+        };
+        let width_overflows = matches!(max_width, Some(w) if last_line.width > w);
+
+        if !has_extra_lines && !width_overflows {
+            return full;
+        }
+
+        match overflow {
+            TextOverflow::Clip => {
+                if !has_extra_lines {
+                    // Only an unbreakable-run width overrun, no extra lines
+                    // to drop — Clip never character-trims a line.
+                    return full;
+                }
+                // `trim_end`: a line's own text range can include the very
+                // whitespace/`\n` that ends it (parley attributes a hard
+                // break's newline to the line it terminates), so a naive cut
+                // could leave a trailing `\n` in the reshaped text — which
+                // parley reads as *another* hard break, silently growing the
+                // line count back past `max_lines`.
+                let cut = text[..last_line.range.end].trim_end();
+                self.layout(cut, style, max_width)
+            }
+            TextOverflow::Ellipsis => {
+                let before = &text[..last_line.range.start];
+                // See the `Clip` arm above for why trailing whitespace/`\n`
+                // must not survive into a reshaped fragment.
+                let line_text = text[last_line.range.start..last_line.range.end].trim_end();
+                let truncated_last = match max_width {
+                    Some(w) => self.truncate_last_line(line_text, style, w),
+                    // No width to truncate against — keep the whole line,
+                    // just mark it cut.
+                    None => format!("{line_text}{ELLIPSIS}"),
+                };
+                let final_text = format!("{before}{truncated_last}");
+                self.layout(&final_text, style, max_width)
+            }
+        }
+    }
+
+    /// The [`TextOverflow::Ellipsis`] truncation walk: finds the longest
+    /// prefix of `line_text` (in char-boundary steps, longest first) such
+    /// that `prefix + '…'`, measured alone as a single unwrapped line, has a
+    /// width `<= max_width`. Falls back to a bare `'…'` if nothing fits
+    /// (never returns an empty string with no overflow marker at all).
+    ///
+    /// Linear rather than binary search, deliberately: kerning/ligature
+    /// reshaping around a truncation point is not provably monotonic in
+    /// every font, so a binary search could converge one character off in
+    /// an adversarial font; this is the muxr `clipped_label` precedent's own
+    /// shape — proven in production, and correct regardless of font
+    /// quirks. Scanning longest-prefix-first also means the common case
+    /// (already close to fitting; a handful of characters over) converges
+    /// in only a few measurements rather than walking the whole line.
+    fn truncate_last_line(&mut self, line_text: &str, style: &TextStyle, max_width: f32) -> String {
+        let mut boundaries: Vec<usize> = line_text.char_indices().map(|(i, _)| i).collect();
+        boundaries.push(line_text.len());
+
+        for &b in boundaries.iter().rev() {
+            let candidate = format!("{}{ELLIPSIS}", &line_text[..b]);
+            let width = self.layout(&candidate, style, None).size().width;
+            if width <= f64::from(max_width) {
+                return candidate;
+            }
+        }
+        // Even a bare ellipsis doesn't fit — best effort, still signal the
+        // truncation rather than silently rendering nothing.
+        ELLIPSIS.to_string()
     }
 
     /// The shape cache's instrumentation counters (shapes performed,
@@ -691,5 +826,275 @@ mod tests {
             line_min_x(&mut cx, TWO_LINES, &aligned_style(TextAlign::Start), 400.0);
         assert_eq!(default_x, explicit_start_x);
         assert!(default_x.iter().all(|x| x.abs() < 0.5));
+    }
+
+    // --- max_lines / TextOverflow truncation ---
+
+    /// A long, multi-word phrase that reliably soft-wraps to several lines
+    /// under a narrow `max_width` (shared with this file's other wrap tests).
+    const WRAPPING_TEXT: &str = "Hello from Frust, the pure Rust mobile UI toolkit";
+
+    /// Groups a [`TextLayout`]'s painted glyphs by line (glyphs sharing a
+    /// `y` are the same line — the coordinate contract [`line_min_x`] also
+    /// relies on) and returns each line's minimum `x`, in line order.
+    fn min_x_per_line(layout: &TextLayout) -> Vec<f32> {
+        let runs = layout.to_scene_runs(kurbo::Point::ORIGIN);
+        let mut by_y: Vec<(f32, f32)> = Vec::new();
+        for run in &runs {
+            for g in &run.glyphs {
+                match by_y.iter_mut().find(|(y, _)| (*y - g.y).abs() < 0.01) {
+                    Some((_, min_x)) => *min_x = min_x.min(g.x),
+                    None => by_y.push((g.y, g.x)),
+                }
+            }
+        }
+        by_y.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        by_y.into_iter().map(|(_, x)| x).collect()
+    }
+
+    #[test]
+    fn layout_bounded_with_no_max_lines_matches_plain_layout() {
+        // The zero-cost, unchanged-behavior contract: `max_lines: None`
+        // delegates straight to `layout`, so no existing caller (none of
+        // which pass `max_lines`) can regress.
+        let mut cx = TextContext::new();
+        let s = style(16.0);
+        let plain = cx.layout(WRAPPING_TEXT, &s, Some(200.0)).size();
+        let bounded = cx
+            .layout_bounded(WRAPPING_TEXT, &s, Some(200.0), None, TextOverflow::Ellipsis)
+            .size();
+        assert_eq!(plain, bounded);
+    }
+
+    #[test]
+    fn single_line_fits_is_left_unmodified() {
+        // "fits": comfortable width, well under the box — no truncation, no
+        // ellipsis; byte-for-byte the same shape as a plain `layout` call.
+        let mut cx = TextContext::new();
+        let s = style(16.0);
+        let text = "short";
+        let plain = cx.layout(text, &s, Some(400.0)).size();
+        let bounded = cx
+            .layout_bounded(text, &s, Some(400.0), Some(1), TextOverflow::Ellipsis)
+            .size();
+        assert_eq!(plain, bounded);
+    }
+
+    #[test]
+    fn single_line_exact_fit_is_not_truncated() {
+        // The `>` (not `>=`) boundary: a width equal to the line's own
+        // natural width is a fit, not an overflow.
+        let mut cx = TextContext::new();
+        let s = style(16.0);
+        let text = "exact";
+        let natural = cx.layout(text, &s, None).size().width;
+        // `ceil()` keeps the bound at or a hair above the natural width —
+        // avoids f64->f32 rounding noise making a bit-identical bound look
+        // like a sub-pixel overflow.
+        let max_width = natural.ceil() as f32;
+        let bounded = cx.layout_bounded(text, &s, Some(max_width), Some(1), TextOverflow::Ellipsis);
+        assert_eq!(bounded.line_count(), 1);
+        assert_eq!(
+            bounded.size().width,
+            cx.layout(text, &s, Some(max_width)).size().width,
+            "an exactly-fitting line must render identically to an untruncated layout"
+        );
+    }
+
+    #[test]
+    fn single_line_overflow_truncates_and_fits_the_bound() {
+        // `max_lines(1)` forces a phrase that would otherwise soft-wrap onto
+        // one truncated line.
+        let mut cx = TextContext::new();
+        let s = style(16.0);
+        let max_width = 80.0;
+
+        let plain = cx.layout(WRAPPING_TEXT, &s, Some(max_width));
+        assert!(
+            plain.line_count() > 1,
+            "fixture sanity: expected this phrase to soft-wrap at {max_width}px, got {} line(s)",
+            plain.line_count()
+        );
+
+        let bounded = cx.layout_bounded(
+            WRAPPING_TEXT,
+            &s,
+            Some(max_width),
+            Some(1),
+            TextOverflow::Ellipsis,
+        );
+        assert_eq!(bounded.line_count(), 1, "max_lines(1) must yield one line");
+        let width = bounded.line_info(0).expect("one line").width;
+        assert!(
+            width <= max_width,
+            "the truncated+ellipsized line must fit the bound: {width} > {max_width}"
+        );
+    }
+
+    #[test]
+    fn max_lines_two_wrapped_truncates_only_the_last_visible_line() {
+        let mut cx = TextContext::new();
+        let s = style(16.0);
+        let max_width = 60.0;
+
+        let plain = cx.layout(WRAPPING_TEXT, &s, Some(max_width));
+        assert!(
+            plain.line_count() > 2,
+            "fixture sanity: expected >2 wrapped lines at {max_width}px, got {}",
+            plain.line_count()
+        );
+        let plain_first_line_width = plain.line_info(0).expect("line 0").width;
+
+        let bounded = cx.layout_bounded(
+            WRAPPING_TEXT,
+            &s,
+            Some(max_width),
+            Some(2),
+            TextOverflow::Ellipsis,
+        );
+        assert_eq!(bounded.line_count(), 2, "max_lines(2) must yield two lines");
+        assert_eq!(
+            bounded.line_info(0).expect("line 0").width,
+            plain_first_line_width,
+            "the greedy line-breaker's earlier line must survive the truncation \
+             of a later line verbatim"
+        );
+        let last_width = bounded.line_info(1).expect("line 1").width;
+        assert!(
+            last_width <= max_width,
+            "the truncated+ellipsized last visible line must fit the bound: \
+             {last_width} > {max_width}"
+        );
+    }
+
+    #[test]
+    fn clip_drops_trailing_lines_without_touching_the_last_visible_line() {
+        let mut cx = TextContext::new();
+        let s = style(16.0);
+        let max_width = 60.0;
+
+        let plain = cx.layout(WRAPPING_TEXT, &s, Some(max_width));
+        assert!(plain.line_count() > 1, "fixture sanity");
+        let plain_first_line_width = plain.line_info(0).expect("line 0").width;
+
+        let clipped = cx.layout_bounded(
+            WRAPPING_TEXT,
+            &s,
+            Some(max_width),
+            Some(1),
+            TextOverflow::Clip,
+        );
+        assert_eq!(clipped.line_count(), 1);
+        assert_eq!(
+            clipped.line_info(0).expect("line 0").width,
+            plain_first_line_width,
+            "Clip drops trailing lines but never character-trims the last \
+             visible one — its content, and so its width, must be identical \
+             to the untruncated layout's own first line"
+        );
+
+        let ellipsized = cx.layout_bounded(
+            WRAPPING_TEXT,
+            &s,
+            Some(max_width),
+            Some(1),
+            TextOverflow::Ellipsis,
+        );
+        assert_eq!(ellipsized.line_count(), 1);
+        // Ellipsis appends '…', which Clip never does — the two modes' last
+        // lines for the same overflowing input must not coincide.
+        assert_ne!(
+            clipped.line_info(0).expect("line 0").width,
+            ellipsized.line_info(0).expect("line 0").width,
+            "Clip and Ellipsis must produce visibly different last lines for \
+             the same overflowing input"
+        );
+    }
+
+    #[test]
+    fn ellipsis_wider_than_the_box_still_renders_without_panicking() {
+        let mut cx = TextContext::new();
+        let s = style(16.0);
+        // Narrower than a single glyph at this size — even a bare '…' can't
+        // fit; the truncation walk must still return *something* rather than
+        // panicking or yielding an empty layout.
+        let bounded = cx.layout_bounded(
+            WRAPPING_TEXT,
+            &s,
+            Some(1.0),
+            Some(1),
+            TextOverflow::Ellipsis,
+        );
+        assert_eq!(bounded.line_count(), 1);
+        assert!(
+            bounded.size().width > 0.0,
+            "a best-effort bare ellipsis must still paint something"
+        );
+    }
+
+    #[test]
+    fn empty_string_is_not_truncated() {
+        let mut cx = TextContext::new();
+        let s = style(16.0);
+        let bounded = cx.layout_bounded("", &s, Some(80.0), Some(1), TextOverflow::Ellipsis);
+        assert_eq!(bounded.size().width, 0.0);
+    }
+
+    #[test]
+    fn max_lines_zero_yields_an_empty_layout() {
+        let mut cx = TextContext::new();
+        let s = style(16.0);
+        let bounded = cx.layout_bounded(
+            WRAPPING_TEXT,
+            &s,
+            Some(80.0),
+            Some(0),
+            TextOverflow::Ellipsis,
+        );
+        assert_eq!(bounded.size().width, 0.0);
+    }
+
+    #[test]
+    fn ellipsis_truncation_preserves_center_alignment() {
+        // Hard-broken lines with generous width headroom, so the centering
+        // offset can't be swamped by the truncation search converging on a
+        // near-max-width candidate (see `max_lines_two_wrapped_...` above for
+        // the width-tight case) — the same robust shape as this file's other
+        // alignment tests (`TWO_LINES` at 400px).
+        let mut cx = TextContext::new();
+        let text = "A\nBBBBBBBBBB\nCCCCCCCCCC";
+        let max_width = 400.0;
+
+        let start = cx.layout_bounded(
+            text,
+            &aligned_style(TextAlign::Start),
+            Some(max_width),
+            Some(2),
+            TextOverflow::Ellipsis,
+        );
+        let center = cx.layout_bounded(
+            text,
+            &aligned_style(TextAlign::Center),
+            Some(max_width),
+            Some(2),
+            TextOverflow::Ellipsis,
+        );
+
+        assert_eq!(start.line_count(), 2);
+        assert_eq!(center.line_count(), 2);
+
+        let start_x = min_x_per_line(&start);
+        let center_x = min_x_per_line(&center);
+        assert_eq!(start_x.len(), 2);
+        assert_eq!(center_x.len(), 2);
+
+        assert!(
+            start_x[1].abs() < 0.5,
+            "start-aligned truncated line must hug the left edge: {start_x:?}"
+        );
+        assert!(
+            center_x[1] > start_x[1] + 1.0,
+            "center-aligned truncated line must move off the left edge: {center_x:?}"
+        );
     }
 }

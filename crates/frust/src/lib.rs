@@ -465,8 +465,8 @@ pub mod authoring {
     pub mod text {
         pub use frust_text::{EditOp, EditingState, EditingStateBytes, TextEditor};
         pub use frust_text::{
-            FamilyName, FontFamily, FontStyle, FontWeight, GenericSlot, LineHeight, TextContext,
-            TextLayout, TextStyle,
+            FamilyName, FontFamily, FontStyle, FontWeight, GenericSlot, LineHeight, TextAlign,
+            TextContext, TextLayout, TextOverflow, TextStyle,
         };
         /// Types named in [`TextContext`]'s own public signatures —
         /// `register_fonts() -> Result<Vec<RegisteredFamily>, FontError>` and

@@ -189,6 +189,30 @@ pub enum TextAlign {
     Justify,
 }
 
+/// How text that overflows a bounded [`TextContext::layout_bounded`]
+/// (`max_lines`) is handled.
+///
+/// Mirrors Flutter's `TextOverflow.clip`/`TextOverflow.ellipsis` shape (a
+/// deliberately small subset — no `fade`/`visible`). Only meaningful
+/// alongside `max_lines`: with no line cap, neither variant changes
+/// anything (there is nothing to overflow past).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum TextOverflow {
+    /// Drop whole lines past `max_lines` outright; the last visible line's
+    /// own text is left exactly as the line-breaker assigned it, even if it
+    /// is itself wider than the box (an unbreakable run with no wrap
+    /// opportunity) — Frust does not character-trim in this mode. Default,
+    /// and a no-op when `max_lines` is unset (today's behavior).
+    #[default]
+    Clip,
+    /// Same line-dropping as [`Self::Clip`], plus: the last visible line is
+    /// character-truncated (UTF-8/char-boundary safe) and has `'…'`
+    /// appended so it fits the layout's `max_width`. With an unbounded
+    /// `max_width`, there is no width to truncate against, so the last
+    /// visible line's full text is kept with `'…'` simply appended.
+    Ellipsis,
+}
+
 /// Line height: how much vertical space each line of text occupies.
 ///
 /// Mirrors parley's `LineHeight` semantics (see `parley::LineHeight`)

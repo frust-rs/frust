@@ -78,6 +78,32 @@ fn inset_vocabulary_resolves() {
     let _ = std::mem::size_of::<WindowEdgeInsets>();
 }
 
+/// `frust::authoring::text::TextAlign`/`TextOverflow` must be nameable —
+/// before this seam, `TextView::align`/`::overflow` took a type an app could
+/// call but never construct (`TextAlign` was absent from the `text`
+/// pub-use list entirely; `TextOverflow` is the same-shaped gap for the
+/// `max_lines`/overflow builder methods).
+#[test]
+fn text_align_and_overflow_resolve_through_the_facade() {
+    use frust::authoring::text::{TextAlign, TextOverflow};
+    let _: TextAlign = TextAlign::Center;
+    let _: TextOverflow = TextOverflow::Ellipsis;
+}
+
+/// `TextView::max_lines`/`::overflow` are reachable through the flat
+/// `frust::text`/`frust::TextView` facade surface (not just `authoring`),
+/// composed with `.align()` — the exact combination `TextAlign`'s
+/// prior absence from the facade made unreachable without a direct
+/// `frust-text` dependency.
+#[test]
+fn text_view_truncation_builders_resolve_through_the_facade() {
+    use frust::authoring::text::{TextAlign, TextOverflow};
+    let _view = frust::text("hi")
+        .align(TextAlign::Center)
+        .max_lines(2)
+        .overflow(TextOverflow::Ellipsis);
+}
+
 /// A custom image-painting widget can obtain an `&ImageData` from an
 /// `ImageSource` using only `frust::authoring` imports — both types are
 /// reachable through the facade without reaching for `frust_widgets` or

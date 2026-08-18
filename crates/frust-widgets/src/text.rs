@@ -12,7 +12,8 @@ use frust_core::{
     Widget,
 };
 use frust_text::{
-    FontFamily, FontStyle, FontWeight, LineHeight, TextAlign, TextContext, TextLayout, TextStyle,
+    FontFamily, FontStyle, FontWeight, LineHeight, TextAlign, TextContext, TextLayout,
+    TextOverflow, TextStyle,
 };
 use frust_theme::Theme;
 use kurbo::Size;
@@ -78,6 +79,13 @@ pub struct TextView {
     color_explicit: bool,
     /// The themed default color role used when `color_explicit` is `false`.
     role: ThemeTextColor,
+    /// The maximum number of lines to render, set via [`Self::max_lines`].
+    /// `None` (default) is unbounded — today's behavior.
+    max_lines: Option<usize>,
+    /// How content past `max_lines` is handled, set via [`Self::overflow`].
+    /// Only meaningful alongside `max_lines`; defaults to
+    /// [`TextOverflow::Clip`], a no-op with no `max_lines` set.
+    overflow: TextOverflow,
 }
 
 /// Create a text view rendering `content` with default styling (16px). Its glyph
@@ -89,6 +97,8 @@ pub fn text(content: impl Into<String>) -> TextView {
         style: TextStyle::default(),
         color_explicit: false,
         role: ThemeTextColor::OnSurface,
+        max_lines: None,
+        overflow: TextOverflow::default(),
     }
 }
 
@@ -157,6 +167,21 @@ impl TextView {
         self
     }
 
+    /// Cap the rendered line count. Content past the limit is handled per
+    /// [`Self::overflow`] (default [`TextOverflow::Clip`]: extra lines are
+    /// dropped, nothing else changes). `0` renders nothing.
+    pub fn max_lines(mut self, max_lines: usize) -> Self {
+        self.max_lines = Some(max_lines);
+        self
+    }
+
+    /// Set how content past [`Self::max_lines`] is handled. A no-op without
+    /// `max_lines` set — there is nothing to overflow past.
+    pub fn overflow(mut self, overflow: TextOverflow) -> Self {
+        self.overflow = overflow;
+        self
+    }
+
     /// Set the themed default color role used when no explicit color was set
     /// (e.g. [`crate::Button`] labels its text [`ThemeTextColor::OnPrimary`] so it
     /// reads against the primary-filled button).
@@ -179,6 +204,8 @@ impl<State: 'static> View<State> for TextView {
             style: self.style.clone(),
             color_explicit: self.color_explicit,
             role: self.role,
+            max_lines: self.max_lines,
+            overflow: self.overflow,
             layout: None,
             laid_out_max_width: None,
             laid_out_style: None,
@@ -210,6 +237,15 @@ impl<State: 'static> View<State> for TextView {
             element.layout = None;
             flags |= ChangeFlags::LAYOUT;
         }
+        // Truncation inputs feed into shaping the same way content/style do
+        // (`layout_bounded` reshapes on overflow) — a change here must
+        // invalidate the cache exactly like those.
+        if prev.max_lines != self.max_lines || prev.overflow != self.overflow {
+            element.max_lines = self.max_lines;
+            element.overflow = self.overflow;
+            element.layout = None;
+            flags |= ChangeFlags::LAYOUT;
+        }
         flags
     }
 }
@@ -223,6 +259,10 @@ pub struct TextWidget {
     color_explicit: bool,
     /// The themed default color role used when `color_explicit` is `false`.
     role: ThemeTextColor,
+    /// The maximum rendered line count — see [`TextView::max_lines`].
+    max_lines: Option<usize>,
+    /// How content past `max_lines` is handled — see [`TextView::overflow`].
+    overflow: TextOverflow,
     /// `None` until the first layout pass, or after a content/style change
     /// invalidates it.
     layout: Option<TextLayout>,
@@ -299,7 +339,13 @@ impl Widget for TextWidget {
         }
 
         let text_ctx = ctx.text_context::<TextContext>();
-        let layout = text_ctx.layout(&self.content, &style, max_width);
+        let layout = text_ctx.layout_bounded(
+            &self.content,
+            &style,
+            max_width,
+            self.max_lines,
+            self.overflow,
+        );
         let size = bc.constrain(layout.size());
         self.layout = Some(layout);
         self.laid_out_max_width = max_width;
@@ -339,7 +385,9 @@ mod tests {
             .letter_spacing(2.0)
             .line_height(LineHeight::Absolute(30.0))
             .align(TextAlign::Center)
-            .color(Color::from_rgb8(1, 2, 3));
+            .color(Color::from_rgb8(1, 2, 3))
+            .max_lines(2)
+            .overflow(frust_text::TextOverflow::Ellipsis);
 
         assert_eq!(view.style.size, 20.0);
         assert_eq!(view.style.weight, FontWeight::MEDIUM);
@@ -349,6 +397,15 @@ mod tests {
         assert_eq!(view.style.line_height, LineHeight::Absolute(30.0));
         assert_eq!(view.style.align, TextAlign::Center);
         assert_eq!(view.style.color, Color::from_rgb8(1, 2, 3));
+        assert_eq!(view.max_lines, Some(2));
+        assert_eq!(view.overflow, frust_text::TextOverflow::Ellipsis);
+    }
+
+    #[test]
+    fn default_max_lines_and_overflow_are_unbounded_clip() {
+        let view = text("x");
+        assert_eq!(view.max_lines, None);
+        assert_eq!(view.overflow, frust_text::TextOverflow::Clip);
     }
 
     #[test]
@@ -584,6 +641,84 @@ mod tests {
         assert!(
             right_x[0] > right_x[1] + 1.0,
             "the shorter line's right-aligned left edge must sit further right: {right_x:?}"
+        );
+    }
+
+    // --- max_lines / TextOverflow, end-to-end through the widget ---
+
+    use frust_text::TextOverflow;
+
+    #[test]
+    fn max_lines_truncates_wrapped_content_to_one_line() {
+        let content = "Hello from Frust, the pure Rust mobile UI toolkit";
+        let bc = BoxConstraints::loose(Size::new(80.0, 200.0));
+
+        let unbounded = line_min_x(&painted_runs(text(content), bc));
+        assert!(
+            unbounded.len() > 1,
+            "fixture sanity: expected this phrase to wrap at 80px, got {} line(s)",
+            unbounded.len()
+        );
+
+        let bounded = line_min_x(&painted_runs(
+            text(content).max_lines(1).overflow(TextOverflow::Ellipsis),
+            bc,
+        ));
+        assert_eq!(
+            bounded.len(),
+            1,
+            "max_lines(1) must render exactly one line"
+        );
+    }
+
+    #[test]
+    fn clip_overflow_also_drops_extra_lines() {
+        // Clip is the default overflow — `.max_lines()` alone must already
+        // cap the rendered line count, with no `.overflow()` call needed.
+        let content = "Hello from Frust, the pure Rust mobile UI toolkit";
+        let bc = BoxConstraints::loose(Size::new(80.0, 200.0));
+
+        let clipped = line_min_x(&painted_runs(text(content).max_lines(1), bc));
+        assert_eq!(clipped.len(), 1);
+    }
+
+    #[test]
+    fn changing_max_lines_between_rebuilds_invalidates_the_cached_shape() {
+        // `TextWidget::layout`'s fast path skips reshaping when nothing that
+        // affects shaping changed; `max_lines`/`overflow` must be wired into
+        // that invalidation the same way content/style already are, or a
+        // rebuild that only changes the line cap would keep painting the
+        // stale (differently-truncated) layout.
+        let content = "Hello from Frust, the pure Rust mobile UI toolkit";
+        let bc = BoxConstraints::loose(Size::new(80.0, 200.0));
+
+        let view_a = text(content).max_lines(1).overflow(TextOverflow::Ellipsis);
+        let mut widget = View::<()>::build(&view_a, &mut frust_core::BuildCtx::new(&mut 0u64));
+        {
+            let mut tcx = TextContext::new();
+            let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+            widget.layout(&mut lctx, &bc);
+        }
+
+        let view_b = text(content).max_lines(2).overflow(TextOverflow::Ellipsis);
+        View::<()>::rebuild(
+            &view_b,
+            &view_a,
+            &mut widget,
+            &mut frust_core::BuildCtx::new(&mut 0u64),
+        );
+
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+        widget.layout(&mut lctx, &bc);
+        let mut rec = GlyphRunRecorder::default();
+        let mut pctx = PaintCtx::new(Point::ZERO, bc.max());
+        widget.paint(&mut pctx, &mut rec);
+        assert_eq!(
+            line_min_x(&rec.runs).len(),
+            2,
+            "the rebuild must have re-shaped against the new max_lines(2), \
+             not replayed the max_lines(1) cache"
         );
     }
 
