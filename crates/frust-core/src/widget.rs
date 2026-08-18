@@ -1824,6 +1824,17 @@ pub struct ChildPod {
     /// why this field is also what `Drop` reports on (see the `Drop` impl and
     /// `mark_hover_orphaned`).
     hover_epoch: u64,
+    /// The identity of the [`RenderRoot`](crate::app::RenderRoot) whose pass
+    /// stamped `hover_epoch`, recorded with it and never cleared either. `0` until
+    /// a claim first passes through.
+    ///
+    /// Epoch counters are per-root and all start at `1`, so two roots on one
+    /// thread produce colliding integers by construction. Only `Drop` reads this:
+    /// it is what tells this pod's own root's live link from another root's
+    /// identically-numbered epoch, so a dying pod can never end a hover it was
+    /// never part of. The event/paint comparisons need no such qualifier — a pod
+    /// is only ever visited by the root that owns its tree.
+    hover_root: u64,
     /// This pod's persistent semantics base id, lazily assigned on
     /// the pod's first [`ChildPod::semantics_child`] visit from the
     /// [`RenderRoot`](crate::app::RenderRoot) allocator and reused for the whole
@@ -1874,12 +1885,16 @@ impl Drop for ChildPod {
     /// `crate::event::mark_hover_orphaned` for the full rationale and the
     /// "only when the link was live" invariant this comparison enforces.
     ///
+    /// The comparison is against the published `(root, epoch)` pair, not the epoch
+    /// alone: per-root counters collide, so an unqualified match would let a pod
+    /// of one root end another root's live hover (see `hover_root`).
+    ///
     /// Costs one predictable branch on a `u64` field per pod dropped; the
     /// thread-local read happens only for the pod chain that has actually held a
     /// claim at some point.
     fn drop(&mut self) {
-        if self.hover_epoch != 0 && self.hover_epoch == crate::event::live_hover_epoch() {
-            crate::event::mark_hover_orphaned();
+        if crate::event::live_hover_link_is(self.hover_root, self.hover_epoch) {
+            crate::event::mark_hover_orphaned(self.hover_root);
         }
     }
 }
@@ -1905,6 +1920,7 @@ impl ChildPod {
             active: false,
             focused: false,
             hover_epoch: 0,
+            hover_root: 0,
             semantics_id: Cell::new(None),
             debug_label: None,
             inspect_id: Cell::new(None),
@@ -2273,8 +2289,12 @@ impl ChildPod {
         // Stamp the claim onto this pod so the whole path from the claimant up to
         // the root carries the epoch the next paint compares against. Never
         // cleared: a stale stamp is stranded by the next epoch advance instead.
+        // The running root's identity rides along, so this pod's destructor can
+        // tell its own root's live link from another root's identical epoch
+        // integer (see `hover_root`).
         if hover_claimed {
             self.hover_epoch = claim_epoch;
+            self.hover_root = ctx.hover_root();
         }
         // Focus is the second recorded path, maintained exactly like `active`: a
         // `focus_requested` bubble records this child as the focused one; a
