@@ -477,7 +477,7 @@ mod tests {
         let outcome = h
             .root
             .event(&mut h.state, &pointer(PointerPhase::Down, row.x, row.y));
-        assert!(!outcome.handled, "a closing menu swallows nothing");
+        assert!(outcome.handled, "a closing menu swallows a press that lands on it");
         assert_eq!(h.state.selected, Vec::<usize>::new());
 
         assert!(
