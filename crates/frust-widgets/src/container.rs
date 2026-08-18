@@ -11,7 +11,9 @@
 //! - [`container`] — the **single-child wrapper** family (replaces
 //!   `FilledBox`, a panel, `term_box`): wraps `child`, hugging it exactly (the
 //!   container's own size is always the child's size — decoration never grows
-//!   the box). Chain `.fill(...)`/`.radius(...)`/`.border(...)`.
+//!   the box) unless `.size_centered(...)` overrides that (see "Sizing + a
+//!   child" below). Chain `.fill(...)`/`.radius(...)`/`.border(...)`/
+//!   `.border_style(...)`/`.glow(...)`.
 //! - [`colored_box`] — the **childless leaf/background** family (replaces
 //!   `FillBox`, `AppBackground`): no content, so it needs `.expand()` (fill
 //!   the available space — the full-bleed background case) or `.size(w, h)`
@@ -39,21 +41,33 @@
 //! `.expand()`/`.size(...)` only take effect while the container is
 //! childless — once `.child(...)` attaches content, layout always hugs it
 //! (the [`container`]/`FilledBox` case), the same way `Padding`/`SizedBox`'s
-//! own child-hugging paths behave. Combining a fixed/expanded box with an
-//! *un*-hugged, centered child (`SizedBox`'s "grow past the child" shape) is
-//! deliberately deferred — see `docs/LIMITATIONS.md`/the arc's own task
-//! record for the full v1 knob boundary (also deferred: dashed border,
-//! per-corner radius, glow/shadow, left-accent, bottom-rule, bleed).
+//! own child-hugging paths behave. [`ContainerView::size_centered`] is the one
+//! exception, added for the `Panel::fixed` shape: it forces the container to a
+//! fixed `(width, height)` **with a child attached**, loosening the child's own
+//! constraint to that box (mirroring [`crate::Align`]'s `bc.loosen()` child
+//! pass) and centering it in the free space — `SizedBox`'s general "grow past
+//! the child" case for an arbitrary alignment stays deferred; this is the one
+//! fixed-size-plus-centered-child shape this module picks up. See
+//! `docs/LIMITATIONS.md`/the arc's own task record for the remaining v1 knob
+//! boundary (still deferred: left-accent, bottom-rule, bleed — compose those
+//! as app-side layering over a plain `Container` instead).
 //!
 //! # Paint discipline
 //!
-//! Fill paints first, then the border strokes *inside* the container's own
-//! bounds — inset by half the stroke width, since a stroke is centered on its
-//! path — mirroring [`crate::button::ButtonWidget`]'s and
-//! `material::card`'s outlined variant's identical discipline. Both use the
-//! shared uniform-radius [`frust_core::PaintScene::fill_rounded_rect`]. A
-//! container with neither `.fill` nor `.border` set paints nothing of its
-//! own — the paint pass is a pure pass-through to the child in that case.
+//! Paint order is glow, then fill, then border, then the child — an
+//! elevation-style shadow reads from *beneath* the shape it casts, mirroring
+//! `material::card`'s `Elevated` variant's `draw_shadow`-then-`fill` order.
+//! The border then strokes *inside* the container's own bounds — inset by
+//! half the stroke width, since a stroke is centered on its path — mirroring
+//! [`crate::button::ButtonWidget`]'s and `material::card`'s outlined variant's
+//! identical discipline. Fill uses
+//! [`frust_core::PaintScene::fill_rounded_rect_radii`] (per-corner, with the
+//! uniform case its `From<f64>` case of [`CornerRadii`]); the border strokes a
+//! `kurbo::RoundedRect` built from the *same* per-corner radii (inset by half
+//! the stroke width per corner) so a per-corner fill and its border trace
+//! identical corners — see [`ContainerView::radius`]. A container with none of
+//! `.fill`/`.border`/`.glow` set paints nothing of its own — the paint pass is
+//! a pure pass-through to the child in that case.
 //!
 //! # Semantics
 //!
@@ -63,8 +77,8 @@
 //! group node. A childless container has nothing to forward.
 
 use frust_core::{
-    AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget, any,
+    AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, CornerRadii, DashPattern, EventCtx,
+    EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget, any,
 };
 use kurbo::{Point, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
@@ -80,8 +94,23 @@ const BORDER_TOLERANCE: f64 = 0.1;
 /// `AppBackground` used before this widget existed (see the module docs).
 const EXPAND_INTRINSIC: f64 = 1.0e7;
 
-/// How a childless [`ContainerView`] sizes itself — ignored once a child is
-/// attached (see the module docs' "Sizing + a child" section).
+/// A border's stroke style, set via [`ContainerView::border_style`]. Solid by
+/// default; [`ContainerView::border`] alone (with no `.border_style` call)
+/// keeps the pre-existing solid-only behavior unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum BorderStyle {
+    /// A continuous stroke — [`frust_core::PaintScene::stroke_path`].
+    #[default]
+    Solid,
+    /// A dashed stroke — [`frust_core::PaintScene::stroke_path_dashed`],
+    /// which breaks the same rounded-rect path this module builds for
+    /// [`BorderStyle::Solid`] into the pattern's on/off runs.
+    Dashed(DashPattern),
+}
+
+/// How a childless [`ContainerView`] sizes itself, or (via
+/// [`Sizing::FixedCentered`] only) a `.size_centered`-forced size with a child
+/// attached — see the module docs' "Sizing + a child" section.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Sizing {
     /// Collapse to the incoming minimum constraint — the default, matching
@@ -91,16 +120,27 @@ enum Sizing {
     /// case) via [`EXPAND_INTRINSIC`].
     Expand,
     /// A fixed `(width, height)`, clamped into the incoming constraints (the
-    /// `FillBox`/swatch case).
+    /// `FillBox`/swatch case). With a child attached, layout still hugs the
+    /// child instead (see the module docs) — this variant only takes effect
+    /// childless.
     Fixed(f64, f64),
+    /// A fixed `(width, height)`, clamped into the incoming constraints, with
+    /// a child centered inside the free space — [`ContainerView::size_centered`].
+    /// Unlike [`Sizing::Fixed`], this variant takes effect *with* a child
+    /// attached (the `Panel::fixed` case); childless it behaves like `Fixed`.
+    FixedCentered(f64, f64),
 }
 
 /// A declarative decorated box. See the [module docs](self).
 pub struct ContainerView<State: 'static> {
     child: Option<AnyView<State>>,
     fill: Option<Color>,
-    radius: f64,
+    radius: CornerRadii,
     border: Option<(Color, f64)>,
+    border_style: BorderStyle,
+    /// Ambient glow/shadow: `(color, std_dev, spread)` — see
+    /// [`ContainerView::glow`].
+    glow: Option<(Color, f64, f64)>,
     sizing: Sizing,
 }
 
@@ -110,8 +150,10 @@ pub fn container<State: 'static, V: View<State>>(child: V) -> ContainerView<Stat
     ContainerView {
         child: Some(any(child)),
         fill: None,
-        radius: 0.0,
+        radius: CornerRadii::default(),
         border: None,
+        border_style: BorderStyle::default(),
+        glow: None,
         sizing: Sizing::Hug,
     }
 }
@@ -122,8 +164,10 @@ pub fn colored_box<State: 'static>() -> ContainerView<State> {
     ContainerView {
         child: None,
         fill: None,
-        radius: 0.0,
+        radius: CornerRadii::default(),
         border: None,
+        border_style: BorderStyle::default(),
+        glow: None,
         sizing: Sizing::Hug,
     }
 }
@@ -144,18 +188,76 @@ impl<State: 'static> ContainerView<State> {
         self
     }
 
-    /// Uniform corner radius for the fill and border, in logical px. `0.0`
-    /// (square corners) by default.
-    pub fn radius(mut self, radius: f64) -> Self {
-        self.radius = radius;
+    /// Corner radius for the fill and border, in logical px. Accepts
+    /// `impl Into<`[`CornerRadii`]`>` rather than a second `.radius_corners(...)`
+    /// method: [`CornerRadii`] already implements `From<f64>` for the uniform
+    /// case, so the existing `.radius(8.0)` call keeps working exactly as
+    /// before while `.radius(CornerRadii::new(tl, tr, br, bl))` picks up the
+    /// per-corner case (a bottom-anchored sheet with only its top corners
+    /// rounded, a segmented control's end caps) for free — one method, no
+    /// ergonomics lost either way. Square corners
+    /// (`CornerRadii::default()`) by default.
+    pub fn radius(mut self, radius: impl Into<CornerRadii>) -> Self {
+        self.radius = radius.into();
         self
     }
 
     /// Paint a `width`-px border in `color`, stroked fully inside the
     /// container's own bounds — see the module docs' "Paint discipline"
-    /// section. No border by default.
+    /// section. No border by default. Solid unless overridden with
+    /// [`ContainerView::border_style`].
     pub fn border(mut self, color: Color, width: f64) -> Self {
         self.border = Some((color, width));
+        self
+    }
+
+    /// Set the border's stroke style — [`BorderStyle::Solid`] (the default,
+    /// so this call is only needed for [`BorderStyle::Dashed`]) or
+    /// [`BorderStyle::Dashed`] with an explicit [`DashPattern`]. Has no
+    /// effect without a `.border(...)` call — there is no stroke to style.
+    pub fn border_style(mut self, style: BorderStyle) -> Self {
+        self.border_style = style;
+        self
+    }
+
+    /// Paint a gaussian-blurred ambient glow/shadow beneath the fill and
+    /// border, via [`frust_core::PaintScene::draw_shadow`] — an
+    /// elevation-style knob, not a directional drop shadow (see below). No
+    /// glow by default.
+    ///
+    /// # Mapping to CSS `box-shadow` terms
+    ///
+    /// `.glow(color, std_dev, spread)` maps loosely onto
+    /// `box-shadow: 0 0 <blur> <spread> <color>` (an un-offset, centered
+    /// shadow — see the note on offset below):
+    ///
+    /// - `color` — the shadow's color, alpha included (CSS `<color>`).
+    /// - `std_dev` — the Gaussian's standard deviation. CSS's `blur-radius` is
+    ///   *twice* the standard deviation (CSS Backgrounds and Borders 3
+    ///   § 7.2.1), so a blur token translates in as `std_dev = blur / 2.0` —
+    ///   the same halving `frust_material::card`/`frust_shadcn::style::draw_shadow`
+    ///   already apply at their own call sites.
+    /// - `spread` — grows (positive) or shrinks (negative) the shadow's rect
+    ///   symmetrically on every side *before* blurring. `draw_shadow` itself
+    ///   has no spread parameter (`frust_shadcn::style::draw_shadow`'s own doc
+    ///   drops it for the same reason), so this module computes the inflated
+    ///   rect directly — `origin` shifts by `-spread` on each axis, `size`
+    ///   grows by `2.0 * spread`, clamped to non-negative before reaching
+    ///   `draw_shadow`.
+    /// - offset-x/offset-y are **not modeled**: `.glow` is a centered ambient
+    ///   glow, not a directional drop shadow like `material::card`'s
+    ///   `Elevated` variant (which offsets `origin.y` by the shadow rung's
+    ///   `y_offset`). A caller wanting a directional shadow composes an
+    ///   explicit `PaintScene::draw_shadow` call instead, following that
+    ///   precedent.
+    ///
+    /// A per-corner [`ContainerView::radius`] lowers through
+    /// [`CornerRadii::largest`] for this call — `draw_shadow` takes a single
+    /// `f64` radius, the same fallback
+    /// [`Command::BlurredRoundedRect`](frust_scene::Command::BlurredRoundedRect)'s
+    /// own doc names for a per-corner shadow caster.
+    pub fn glow(mut self, color: Color, std_dev: f64, spread: f64) -> Self {
+        self.glow = Some((color, std_dev, spread));
         self
     }
 
@@ -168,10 +270,26 @@ impl<State: 'static> ContainerView<State> {
     }
 
     /// Force a fixed `(width, height)`, clamped into the incoming
-    /// constraints — the `FillBox`/swatch case. Childless only; see the
-    /// module docs' "Sizing + a child" section.
+    /// constraints — the `FillBox`/swatch case. Childless only (a child stays
+    /// hugged tight); use [`ContainerView::size_centered`] for a fixed size
+    /// with a centered child. See the module docs' "Sizing + a child" section.
     pub fn size(mut self, width: f64, height: f64) -> Self {
         self.sizing = Sizing::Fixed(width, height);
+        self
+    }
+
+    /// Force a fixed `(width, height)`, clamped into the incoming
+    /// constraints, **with an attached child centered inside the free
+    /// space** — the `Panel::fixed` case (a settings panel/dialog/card that
+    /// wants a fixed footprint but lets its content size itself rather than
+    /// being stretched to fill it). Unlike [`ContainerView::size`], this
+    /// loosens the child's own constraint to `(width, height)` (mirroring
+    /// [`crate::Align`]'s child pass) instead of hugging it tight, then
+    /// centers the child in whatever free space remains — see the module
+    /// docs' "Sizing + a child" section. Childless, this behaves exactly like
+    /// [`ContainerView::size`].
+    pub fn size_centered(mut self, width: f64, height: f64) -> Self {
+        self.sizing = Sizing::FixedCentered(width, height);
         self
     }
 }
@@ -180,8 +298,10 @@ impl<State: 'static> ContainerView<State> {
 pub struct ContainerWidget {
     child: Option<ChildPod>,
     fill: Option<Color>,
-    radius: f64,
+    radius: CornerRadii,
     border: Option<(Color, f64)>,
+    border_style: BorderStyle,
+    glow: Option<(Color, f64, f64)>,
     sizing: Sizing,
 }
 
@@ -197,6 +317,8 @@ impl<State: 'static> View<State> for ContainerView<State> {
             fill: self.fill,
             radius: self.radius,
             border: self.border,
+            border_style: self.border_style,
+            glow: self.glow,
             sizing: self.sizing,
         }
     }
@@ -208,10 +330,17 @@ impl<State: 'static> View<State> for ContainerView<State> {
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         let mut flags = ChangeFlags::NONE;
-        if prev.fill != self.fill || prev.radius != self.radius || prev.border != self.border {
+        if prev.fill != self.fill
+            || prev.radius != self.radius
+            || prev.border != self.border
+            || prev.border_style != self.border_style
+            || prev.glow != self.glow
+        {
             element.fill = self.fill;
             element.radius = self.radius;
             element.border = self.border;
+            element.border_style = self.border_style;
+            element.glow = self.glow;
             flags |= ChangeFlags::PAINT;
         }
         if prev.sizing != self.sizing {
@@ -243,21 +372,48 @@ impl<State: 'static> View<State> for ContainerView<State> {
     }
 }
 
+/// Insets each of `radii`'s four corners by `inset` (e.g. half a border's
+/// stroke width), clamped to non-negative — the per-corner generalization of
+/// the uniform `(self.radius - half).max(0.0)` inset the border path always
+/// applied, so a per-corner fill and its border stroke agree on every corner.
+fn inset_radii(radii: CornerRadii, inset: f64) -> CornerRadii {
+    CornerRadii::new(
+        (radii.top_left - inset).max(0.0),
+        (radii.top_right - inset).max(0.0),
+        (radii.bottom_right - inset).max(0.0),
+        (radii.bottom_left - inset).max(0.0),
+    )
+}
+
 impl Widget for ContainerWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         match &mut self.child {
             Some(pod) => {
-                // Always hug the child exactly — decoration never grows the
-                // box (see the module docs' "Sizing + a child" section).
-                let child_size = pod.layout_child(ctx, bc);
-                pod.set_origin(Point::ZERO);
-                bc.constrain(child_size)
+                if let Sizing::FixedCentered(w, h) = self.sizing {
+                    // Force the fixed size, then loosen the child's own
+                    // constraint to it (mirrors `Align`'s `bc.loosen()` child
+                    // pass) and center the child in the free space — the
+                    // `Panel::fixed` case (see the module docs).
+                    let own_size = bc.constrain(Size::new(w, h));
+                    let child_size = pod.layout_child(ctx, &BoxConstraints::loose(own_size));
+                    let x = ((own_size.width - child_size.width) / 2.0).max(0.0);
+                    let y = ((own_size.height - child_size.height) / 2.0).max(0.0);
+                    pod.set_origin(Point::new(x, y));
+                    own_size
+                } else {
+                    // Always hug the child exactly — decoration never grows
+                    // the box (see the module docs' "Sizing + a child"
+                    // section).
+                    let child_size = pod.layout_child(ctx, bc);
+                    pod.set_origin(Point::ZERO);
+                    bc.constrain(child_size)
+                }
             }
             None => {
                 let intrinsic = match self.sizing {
                     Sizing::Hug => bc.min(),
                     Sizing::Expand => Size::new(EXPAND_INTRINSIC, EXPAND_INTRINSIC),
-                    Sizing::Fixed(w, h) => Size::new(w, h),
+                    Sizing::Fixed(w, h) | Sizing::FixedCentered(w, h) => Size::new(w, h),
                 };
                 bc.constrain(intrinsic)
             }
@@ -267,24 +423,53 @@ impl Widget for ContainerWidget {
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let origin = ctx.origin();
         let size = ctx.size();
+        // Glow paints first — an elevation-style shadow reads from beneath
+        // the shape it casts (see the module docs' "Paint discipline"
+        // section).
+        if let Some((color, std_dev, spread)) = self.glow {
+            let shadow_origin = Point::new(origin.x - spread, origin.y - spread);
+            let shadow_size = Size::new(
+                (size.width + 2.0 * spread).max(0.0),
+                (size.height + 2.0 * spread).max(0.0),
+            );
+            scene.draw_shadow(
+                shadow_origin,
+                shadow_size,
+                self.radius.largest(),
+                std_dev,
+                color,
+            );
+        }
         if let Some(fill) = self.fill {
-            scene.fill_rounded_rect(origin, size, self.radius, fill);
+            scene.fill_rounded_rect_radii(origin, size, self.radius, fill);
         }
         if let Some((color, width)) = self.border {
             // Inset by half the stroke width so the border paints fully
             // inside the container's own bounds (a stroke is centered on its
             // path) — mirrors `Button`'s/`material::card`'s outlined-variant
-            // precedent.
+            // precedent, generalized per corner via `inset_radii` so the
+            // border agrees with a per-corner fill.
             let half = width / 2.0;
+            let radii = inset_radii(self.radius, half);
             let rr = RoundedRect::new(
                 half,
                 half,
                 size.width - half,
                 size.height - half,
-                (self.radius - half).max(0.0),
+                (
+                    radii.top_left,
+                    radii.top_right,
+                    radii.bottom_right,
+                    radii.bottom_left,
+                ),
             );
             let path = rr.to_path(BORDER_TOLERANCE);
-            scene.stroke_path(origin, &path, width, &Brush::Solid(color));
+            match self.border_style {
+                BorderStyle::Solid => scene.stroke_path(origin, &path, width, &Brush::Solid(color)),
+                BorderStyle::Dashed(dash) => {
+                    scene.stroke_path_dashed(origin, &path, width, dash, &Brush::Solid(color))
+                }
+            }
         }
         if let Some(pod) = &mut self.child {
             pod.paint_child(ctx, scene);

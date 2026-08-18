@@ -32,6 +32,7 @@ pub mod authoring;
 mod button;
 mod checkbox;
 mod container;
+mod divider;
 mod flex;
 mod gesture;
 mod icon;
@@ -57,7 +58,8 @@ use std::hash::{Hash, Hasher};
 pub use align::{Align, AlignView, AlignWidget, Alignment};
 pub use button::{Button, ButtonStyle, ButtonView, ButtonWidget, button};
 pub use checkbox::{Checkbox, CheckboxView, CheckboxWidget, checkbox};
-pub use container::{ContainerView, ContainerWidget, colored_box, container};
+pub use container::{BorderStyle, ContainerView, ContainerWidget, colored_box, container};
+pub use divider::{DividerView, DividerWidget, divider};
 pub use flex::{
     Axis, Column, CrossAxisAlignment, FlexChild, FlexView, FlexWidget, MainAxisAlignment, Row,
     flexible, inflexible, keyed,
