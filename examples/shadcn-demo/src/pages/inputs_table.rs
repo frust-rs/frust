@@ -1,13 +1,17 @@
 //! Inputs & Table: text entry, grouped inputs, native select, a labelled
-//! field, a data table, an attachment card, chat bubbles, and a scroll area
-//! long enough to actually need its thumb.
+//! field, one-time-code entry, a data table, an attachment card, chat bubbles,
+//! and a scroll area long enough to actually need its thumb.
+//!
+//! The full data-table recipe (sorting, filtering, paging, selection, column
+//! visibility) lives on its own page; the table here is the plain component.
 
-use frust::{AnyView, Column, Component, ScrollInfo, SizedBox, View, any, component, text};
+use frust::{AnyView, Column, Component, Row, ScrollInfo, SizedBox, View, any, component, text};
 use frust_shadcn::{
-    AttachmentSize, AttachmentState, BubbleAlign, BubbleVariant, FieldOrientation, attachment,
-    attachment_actions, attachment_content, attachment_description, attachment_media,
+    AttachmentSize, AttachmentState, BubbleAlign, BubbleVariant, FieldOrientation, InputOtpMode,
+    attachment, attachment_actions, attachment_content, attachment_description, attachment_media,
     attachment_title, bubble, button, field, input, input_group, input_group_button,
-    input_group_text, native_select, scroll_area, table, table_cell, table_row, textarea,
+    input_group_text, input_otp, native_select, scroll_area, table, table_cell, table_row,
+    textarea,
 };
 
 use crate::AppState;
@@ -17,6 +21,9 @@ pub struct State {
     pub bio: String,
     pub search: String,
     pub country: Option<usize>,
+    pub otp: String,
+    pub otp_alpha: String,
+    pub otp_completed: Option<String>,
     pub scroll_offset: f64,
     pub scroll_max: f64,
 }
@@ -28,6 +35,9 @@ impl Default for State {
             bio: "Mathematician and writer.".to_string(),
             search: String::new(),
             country: Some(0),
+            otp: "12".to_string(),
+            otp_alpha: String::new(),
+            otp_completed: None,
             scroll_offset: 0.0,
             scroll_max: 0.0,
         }
@@ -45,6 +55,9 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
     let bio = state.bio.clone();
     let search = state.search.clone();
     let country = state.country;
+    let otp = state.otp.clone();
+    let otp_alpha = state.otp_alpha.clone();
+    let otp_completed = state.otp_completed.clone();
     let scroll_offset = state.scroll_offset;
     let scroll_max = state.scroll_max;
 
@@ -110,6 +123,41 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
              here as a stand-in. The full dropdown is the select component on \
              the Anchored page.",
         )),
+        gap(),
+        // --- One-time code: the whole group is ONE focusable control ---
+        any(crate::nav::caption(
+            "input_otp \u{2014} click a slot to focus the group, then type: digits \
+             fill forward, Backspace clears back, the arrows/Home/End move the \
+             active slot, and the active empty slot blinks a caret (static under \
+             reduced motion). There is no paste path \u{2014} frust surfaces no \
+             clipboard event to a widget.",
+        )),
+        any(SizedBox(None, Some(8.0))),
+        any(Row(vec![
+            any(input_otp(otp, 6, |s: &mut AppState, v: String| {
+                s.inputs_table.otp = v;
+            })
+            .groups(vec![3, 3])
+            .on_complete(|s: &mut AppState, code: String| {
+                s.inputs_table.otp_completed = Some(code);
+            })
+            .label("Six-digit code")),
+            any(SizedBox(Some(24.0), None)),
+            any(input_otp(otp_alpha, 4, |s: &mut AppState, v: String| {
+                s.inputs_table.otp_alpha = v;
+            })
+            .mode(InputOtpMode::Alphanumeric)
+            .label("Four-character code")),
+            any(SizedBox(Some(24.0), None)),
+            any(input_otp("42", 4, |_: &mut AppState, _: String| {})
+                .disabled(true)
+                .label("Disabled code")),
+        ])),
+        any(SizedBox(None, Some(8.0))),
+        any(crate::nav::caption(match otp_completed {
+            Some(code) => format!("on_complete fired with {code}"),
+            None => "on_complete has not fired yet (fill all six digits).".to_string(),
+        })),
         gap(),
         // --- Table ---
         any(table(vec![
