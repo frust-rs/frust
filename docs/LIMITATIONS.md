@@ -2662,3 +2662,51 @@ compose instead of re-implementing.
 **Evidence**: `plugins/shadcn/src/components/message_scroller.rs` (its own offset/fling/glide state
 machines and the module docs' seam rationale); `crates/frust-widgets/src/scroll.rs` (no external
 write/read offset surface).
+
+---
+
+### `nav-swipe-depth-staleness` — `depth()`/`can_pop()` are stale for the duration of an in-flight interactive swipe
+
+**Observed**: from the left-edge steal (`begin_interactive_pop`) to the settle-frame publish, both
+`NavigatorController::depth()`/`can_pop()` and the route-state observable
+(`route_stack()`/`RouteObserver`) still report the pre-swipe stack — up to the whole drag,
+unbounded in wall time because a finger can hold. A cancelled swipe makes that pre-swipe read
+retroactively correct rather than something to retract.
+
+**Applies to**: any consumer reading `depth`/`can_pop`/the route-state observable while an edge-swipe
+pop is in flight, in any app using the baseline `Navigator`/`Router`.
+
+**Why accepted, not fixed**: back arbitration itself is unaffected — `back_interest` is re-read live
+at press time, so a stale `depth` never actually mis-pops. The route-state observable was
+deliberately designed to publish only on settle (a committed-mutation contract, not a live drag
+readout); frame-accurate drag chrome already has `NavigatorController::transition()`
+(`is_pop`/`progress`/`interactive`) for that window. This is a pre-existing `depth`/`can_pop` gap
+the new observable inherits and documents rather than fixes.
+
+**Evidence**: `crates/frust-widgets/src/nav/route_state.rs` module docs' Staleness contract;
+`crates/frust-widgets/src/nav/navigator.rs`'s `depth`/`can_pop`/`back_interest` doc comments.
+
+---
+
+### `nav-back-wiring-order-case9` — an inner navigator's explicit `BackHandler`, wired before its outer host exists, loses the innermost-first tie-break
+
+**Observed**: `Registrant::key` ranks `Role::Navigator` peers by raw wire sequence (`birth`), not
+structural nesting depth. When an inner navigator's explicit `BackHandler` wires (and keeps
+tracking) before its outer host's first view exists — the `Component::init` shape — it loses the
+innermost-first back-press tie-break to the outer navigator instead of winning it, inverting the
+documented "structurally innermost wins" rule for that one wiring order.
+
+**Applies to**: an app that constructs a `BackHandler` for a nested navigator in `Component::init`,
+ahead of the outer navigator's own first `build`. `shell_route`'s nested-navigator composition is
+**not** affected: its inner navigator's own `navigator(...)` call is always mounted by the shell
+page's builder, so it necessarily wires after the outer (enclosing) navigator already has a view —
+the pathological order cannot arise from `shell_route` alone.
+
+**Why accepted, not fixed**: pinned by an `#[ignore]`d test
+(`wiring_order_does_not_flip_the_innermost_navigator_when_it_is_still_poppable`) as the acceptance
+criterion for a future ranking fix (nesting depth instead of birth order); not blocking because the
+only known reachable trigger is a hand-built `Component::init` pre-registration, not anything the
+shipped `shell_route`/`navigator` composition produces.
+
+**Evidence**: `crates/frust/src/back_glue.rs`'s `#[ignore]`d test and its inline design-claim
+rationale (search `wiring_order_does_not_flip`).

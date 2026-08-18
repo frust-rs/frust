@@ -340,6 +340,11 @@ widget in `frust-widgets`:
   widget code only ever sees a resolved `WindowInsets` in logical px
   (`docs/SHELLS_ARCHITECTURE.md`'s cross-cutting host-signal flow).
 
+- **A self-sizing chrome widget consumes its own window inset exactly once, in its own
+  `layout`, never pre-inset by its container** (`Scaffold`'s R-B4-inset: `app_bar`/`bottom_bar`
+  self-size for top/bottom this way, so a bar that doesn't self-inset must wrap itself in
+  `safe_area(...)` instead — see `docs/WIDGETS_ARCHITECTURE.md`'s Scaffold flow).
+
 - **A `Cancel` arm must never call `EventCtx::state_mut`.** It may only clear internal flags
   (`self.pressed`/`self.captured`/`self.armed`) and request a redraw. A structural container
   rebuild can synthesize a `Cancel` to a still-captured child delivered over a throwaway

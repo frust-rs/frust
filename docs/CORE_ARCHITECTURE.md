@@ -96,7 +96,10 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
 - `Component::init`/`teardown` creates/disposes a per-instance reactive `Owner` nested under its
   parent's.
 - The `frust` facade re-exports core/widgets/theme/reactive as one flat API, bridging widgets and
-  reactive via its own glue modules so neither depends on the other.
+  reactive via its own glue modules so neither depends on the other — e.g. `router_glue`'s
+  `RouteObserver`, a `Copy`/`Send`/`Sync` reactive face over `frust-widgets`' signal-free route-state
+  publish (`NavigatorView::on_route_change`), reachable via `provide_context` and attached with
+  `.observe(view)`; `RouterDeepLinks::routes()` hands out the one wired to its own router.
 - `frust-paths`' dir/atomic-write helpers back GPU pipeline-cache persistence and preference
   storage in the shells and plugins that consume it.
 - A compile-time `Send` assertion on `Scene` guards a future render-thread split.
@@ -231,4 +234,5 @@ reads the resolved cursor via `RenderRoot::cursor()` — see
 | `App` / `app!` / `run` / `Component` | The facade's canonical entry surface binding a root `Component` to all platforms |
 | `WindowMetrics` / `Orientation` | Window shape delivered as a plain `provide_context` value (not a signal) — see "Window Metrics and Context Delivery" |
 | `RwSignal` / `Memo` (re-exported) | Facade-flat reactive primitives app state is typed with |
+| `RouteObserver` | Facade-level reactive face over a navigator's published route stack — see Data Flow |
 | `ImeState` / `ImeContentType` / `EditingState` | IME surface state: focus, caret, editing text, and a content-type hint (Normal/Password/NoSuggestions/Terminal) the shell uses to configure the platform IME. **Residual exposure:** the core publishes the real text even for secret fields; leak-closure depends on shells honouring the hint and has not yet been device-verified. `Debug` impl redacts text to prevent accidental logging. |
