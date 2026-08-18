@@ -79,8 +79,8 @@ use frust::authoring::text::{FontWeight, TextStyle};
 use frust::authoring::{
     Action, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
     ErasedArgCallback, EventCtx, EventResult, InputEvent, Key, LayoutCtx, PaintCtx, PaintScene,
-    Point, PointerPhase, Role, RoundedRect, SemanticsCtx, Shape, Size, Vec2, View, Widget, any,
-    build_child, erase_callback_arg, rebuild_child, route_event, route_event_single,
+    Point, PointerEvent, PointerPhase, Role, RoundedRect, SemanticsCtx, Shape, Size, Vec2, View,
+    Widget, any, build_child, erase_callback_arg, rebuild_child, route_event, route_event_single,
     teardown_child, visit_children,
 };
 use frust::{
@@ -90,7 +90,7 @@ use frust::{
 
 use crate::components::input::FALLBACK;
 use crate::components::native_select::activates;
-use crate::hit::inside;
+use crate::hit::{inside, presses};
 use crate::style::{
     ACTIVE_CURSOR, BORDER_WIDTH, DISABLED_CURSOR, PATH_TOLERANCE, SHADOW_SM, TEXT_SM, TEXT_XS,
     disabled_tint, draw_focus_ring, draw_shadow, ring_color, scale_alpha,
@@ -968,7 +968,7 @@ impl Widget for SidebarWidget {
             && self.rail
             && (self.rail_captured || self.over_rail(p.position, ctx.size()))
         {
-            return self.rail_event(ctx, p.phase, p.position);
+            return self.rail_event(ctx, p);
         }
         route_event(&mut self.pods, ctx, event)
     }
@@ -996,14 +996,9 @@ impl Widget for SidebarWidget {
 impl SidebarWidget {
     /// The rail's own pointer handling — the band's press/hover/cursor contract,
     /// split out so [`Widget::event`] reads as the one routing decision it makes.
-    fn rail_event(
-        &mut self,
-        ctx: &mut EventCtx,
-        phase: PointerPhase,
-        position: Point,
-    ) -> EventResult {
-        let size = ctx.size();
-        match phase {
+    fn rail_event(&mut self, ctx: &mut EventCtx, p: &PointerEvent) -> EventResult {
+        let (size, position) = (ctx.size(), p.position);
+        match p.phase {
             PointerPhase::Move => {
                 if self.rail_captured {
                     ctx.set_cursor(CursorIcon::ColResize);
@@ -1029,7 +1024,7 @@ impl SidebarWidget {
                 EventResult::Ignored
             }
             PointerPhase::Down => {
-                if !self.over_rail(position, size) {
+                if !presses(p) || !self.over_rail(position, size) {
                     return EventResult::Ignored;
                 }
                 self.rail_pressed = true;
@@ -1755,7 +1750,7 @@ impl Widget for SidebarTriggerWidget {
                 EventResult::Ignored
             }
             PointerPhase::Down => {
-                if !inside(p.position, size) {
+                if !presses(p) || !inside(p.position, size) {
                     return EventResult::Ignored;
                 }
                 self.pressed = true;
@@ -2279,7 +2274,7 @@ impl Widget for SidebarMenuButtonWidget {
                 EventResult::Ignored
             }
             PointerPhase::Down => {
-                if self.disabled || !inside(p.position, size) {
+                if self.disabled || !presses(p) || !inside(p.position, size) {
                     return EventResult::Ignored;
                 }
                 self.pressed = true;
@@ -2516,7 +2511,7 @@ impl Widget for SidebarActionWidget {
                 EventResult::Ignored
             }
             PointerPhase::Down => {
-                if !inside(p.position, size) {
+                if !presses(p) || !inside(p.position, size) {
                     return EventResult::Ignored;
                 }
                 self.pressed = true;
@@ -3364,6 +3359,38 @@ mod tests {
         let bare = panel(Cfg::default()).wired(false, Rc::new(|_: &mut AppState, _| {}));
         let mut w = build_widget(&bare);
         assert_eq!(layout_widget(&mut w, &panel_bc(), None).width, 0.0);
+    }
+
+    #[test]
+    fn a_secondary_press_on_the_rail_neither_toggles_nor_captures() {
+        let cfg = Cfg {
+            rail: true,
+            ..Cfg::default()
+        };
+        let mut h = Harness::new(cfg, true, false);
+        let on_rail = SIDEBAR_WIDTH - RAIL_WIDTH / 2.0;
+
+        h.root.event(
+            &mut h.state,
+            &InputEvent::Pointer(PointerEvent {
+                phase: PointerPhase::Down,
+                position: Point::new(on_rail, 300.0),
+                button: PointerButton::Secondary,
+            }),
+        );
+        assert!(
+            !h.root.is_pointer_captured(),
+            "a right-click must leave the root uncaptured — a capture it can \
+             never release is what wedges the whole shell"
+        );
+        h.pointer(PointerPhase::Up, on_rail, 300.0);
+        assert!(h.state.requests.is_empty());
+
+        // The primary press still toggles through the same band.
+        h.pointer(PointerPhase::Down, on_rail, 300.0);
+        assert!(h.root.is_pointer_captured());
+        h.pointer(PointerPhase::Up, on_rail, 300.0);
+        assert_eq!(h.state.requests, vec![false]);
     }
 
     #[test]

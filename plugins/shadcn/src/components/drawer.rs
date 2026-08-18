@@ -272,8 +272,8 @@ mod tests {
     use crate::overlay::modal::tests::{Block, Recorder, WINDOW, escape, ft_ms, pointer};
     use frust::Brightness;
     use frust::authoring::{
-        BoxConstraints, CursorIcon, EventCtx, InputEvent, LayoutCtx, PaintCtx, Point, PointerPhase,
-        Size, Widget, any, text::TextContext,
+        BoxConstraints, CursorIcon, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, Point,
+        PointerButton, PointerEvent, PointerPhase, Size, Widget, any, text::TextContext,
     };
     use frust_core::RenderRoot;
     use std::any::Any;
@@ -322,6 +322,28 @@ mod tests {
         let state_any: &mut dyn Any = state;
         let mut ctx = EventCtx::new(state_any, Point::ZERO, WINDOW);
         w.event(&mut ctx, event);
+    }
+
+    /// The same event on the secondary (right) button.
+    fn secondary(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: PointerButton::Secondary,
+        })
+    }
+
+    /// [`dispatch`], also reporting whether the event was consumed and whether
+    /// the widget asked for the pointer.
+    fn dispatch_probe(
+        w: &mut ModalWidget,
+        state: &mut Flags,
+        event: &InputEvent,
+    ) -> (EventResult, bool) {
+        let state_any: &mut dyn Any = state;
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, WINDOW);
+        let result = w.event(&mut ctx, event);
+        (result, ctx.is_pointer_captured())
     }
 
     #[test]
@@ -385,6 +407,60 @@ mod tests {
 
         dispatch(&mut w, &mut state, &escape());
         assert_eq!(state.dismissed, 3);
+    }
+
+    #[test]
+    fn a_secondary_press_is_swallowed_but_drags_and_dismisses_nothing() {
+        let mut w = build(&sample(DrawerSide::Bottom));
+        layout(&mut w);
+        settle(&mut w);
+        let mut state = Flags::default();
+        let handle = w.handle_rect().unwrap().center();
+
+        let (result, captured) = dispatch_probe(
+            &mut w,
+            &mut state,
+            &secondary(PointerPhase::Down, handle.x, handle.y),
+        );
+        assert_eq!(
+            result,
+            EventResult::Handled,
+            "the barrier still blocks the page behind it, whatever button pressed"
+        );
+        assert!(!captured, "but it opens no drag and takes no capture");
+        dispatch(
+            &mut w,
+            &mut state,
+            &secondary(PointerPhase::Move, handle.x, handle.y + 60.0),
+        );
+        assert_eq!(w.progress(), 1.0, "the panel never followed the pointer");
+        dispatch(
+            &mut w,
+            &mut state,
+            &secondary(PointerPhase::Up, handle.x, handle.y),
+        );
+        assert_eq!(state.dismissed, 0);
+
+        // The scrim swallows a secondary press the same way, and dismisses on
+        // neither half of it.
+        let (result, _) =
+            dispatch_probe(&mut w, &mut state, &secondary(PointerPhase::Down, 5.0, 5.0));
+        assert_eq!(result, EventResult::Handled);
+        dispatch(&mut w, &mut state, &secondary(PointerPhase::Up, 5.0, 5.0));
+        assert_eq!(state.dismissed, 0);
+
+        // The primary gesture still dismisses off the handle.
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, handle.x, handle.y),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Up, handle.x, handle.y),
+        );
+        assert_eq!(state.dismissed, 1);
     }
 
     /// The `(axis, closing direction)` a drawer on `side` drags along: `+1`

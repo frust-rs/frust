@@ -75,7 +75,7 @@ use frust::authoring::{
 use frust::{AnimationController, Curve, Theme};
 use std::time::Duration;
 
-use crate::hit::inside;
+use crate::hit::{inside, presses};
 use crate::overlay::{
     AnchoredOverlayView, AnchoredOverlayWidget, OverlayAlign, OverlayAnchor, OverlayPlacement,
     OverlaySide, anchor as capture_anchor, anchored,
@@ -661,7 +661,7 @@ impl Widget for PopoverTriggerWidget {
         };
         let inside = inside(p.position, ctx.size());
         match p.phase {
-            PointerPhase::Down if inside => {
+            PointerPhase::Down if inside && presses(p) => {
                 self.captured = true;
                 ctx.capture_pointer();
                 // Focus is what routes Escape to the overlay's host afterwards.

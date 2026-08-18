@@ -62,6 +62,7 @@ use frust::authoring::{
     visit_children,
 };
 
+use crate::hit::presses;
 use crate::style::{self, PATH_TOLERANCE};
 
 /// The painted handle's thickness, in logical px (`w-px`).
@@ -756,6 +757,9 @@ impl Widget for ResizablePanelGroupWidget {
                 let main = self.main_of(p.position);
                 match p.phase {
                     PointerPhase::Down => {
+                        if !presses(p) {
+                            return EventResult::Ignored;
+                        }
                         let Some(handle) = self.handle_at(main) else {
                             return EventResult::Ignored;
                         };

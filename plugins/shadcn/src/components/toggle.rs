@@ -61,7 +61,7 @@ use frust::authoring::{
     text::{FontWeight, TextStyle},
 };
 
-use crate::hit::inside;
+use crate::hit::{inside, presses};
 use crate::style::{self, PATH_TOLERANCE, precedence_fill, precedence_ink};
 use crate::text::{LabelRun, SHAPING_INK};
 use crate::tokens::ShadcnTokens;
@@ -454,7 +454,7 @@ impl Widget for ToggleWidget {
                 let size = ctx.size();
                 match p.phase {
                     PointerPhase::Down => {
-                        if !inside(p.position, size) {
+                        if !presses(p) || !inside(p.position, size) {
                             return EventResult::Ignored;
                         }
                         self.captured = true;

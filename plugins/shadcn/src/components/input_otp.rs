@@ -77,7 +77,7 @@ use frust::authoring::{
 };
 use frust::{FrameTime, Theme};
 
-use crate::hit::inside;
+use crate::hit::{inside, presses};
 use crate::style::{self, PATH_TOLERANCE};
 use crate::text::{LabelRun, SHAPING_INK};
 use crate::tokens::ShadcnTokens;
@@ -685,7 +685,7 @@ impl Widget for InputOtpWidget {
                 let size = ctx.size();
                 match p.phase {
                     PointerPhase::Down => {
-                        if self.disabled || !inside(p.position, size) {
+                        if self.disabled || !presses(p) || !inside(p.position, size) {
                             return EventResult::Ignored;
                         }
                         self.captured = true;

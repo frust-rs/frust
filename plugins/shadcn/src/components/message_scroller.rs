@@ -82,7 +82,7 @@ use frust::input::{
 use frust::{AnimationController, Curve, FrameTime, Theme};
 
 use crate::components::input::FALLBACK;
-use crate::hit::inside;
+use crate::hit::{inside, presses};
 use crate::style::{self, PATH_TOLERANCE};
 use crate::tokens::ShadcnTokens;
 
@@ -598,6 +598,9 @@ impl Widget for MessageScrollerWidget {
         let position = p.position;
         match p.phase {
             PointerPhase::Down => {
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 if self.hits_button(position) {
                     self.button_pressed = true;
                     self.button_captured = true;

@@ -41,7 +41,7 @@ use frust::authoring::{
     SemanticsCtx, Shape, Size, Vec2, View, Widget, erase_callback,
 };
 
-use crate::hit::inside;
+use crate::hit::{inside, presses};
 use crate::style::{
     ACTIVE_CURSOR, BORDER_WIDTH, HOVER_SECONDARY_ALPHA, HOVER_SOLID_ALPHA, PATH_TOLERANCE,
     SHADOW_XS, TEXT_SM, TEXT_XS, disabled_tint, draw_focus_ring, draw_shadow, focus_border,
@@ -411,7 +411,7 @@ impl Widget for ButtonWidget {
         let size = ctx.size();
         match p.phase {
             PointerPhase::Down => {
-                if !inside(p.position, size) {
+                if !presses(p) || !inside(p.position, size) {
                     return EventResult::Ignored;
                 }
                 self.pressed = true;
@@ -497,6 +497,15 @@ mod tests {
             phase,
             position: Point::new(x, y),
             button: frust::authoring::PointerButton::Primary,
+        })
+    }
+
+    /// The same event on the secondary (right) button.
+    fn secondary_ev(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(frust::authoring::PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: frust::authoring::PointerButton::Secondary,
         })
     }
 
@@ -615,6 +624,36 @@ mod tests {
         );
         assert!(!w.captured);
         assert_eq!(state.presses, 0);
+    }
+
+    #[test]
+    fn a_secondary_press_neither_presses_nor_captures_nor_fires() {
+        let view = button::<Counter>("Go", |s| s.presses += 1);
+        let mut w = build(&view);
+        let size = layout(&mut w, None);
+        let mut state = Counter::default();
+
+        dispatch(
+            &mut w,
+            &mut state,
+            size,
+            &secondary_ev(PointerPhase::Down, 5.0, 5.0),
+        );
+        assert!(!w.pressed, "no pressed chrome on a right-click");
+        assert!(!w.captured, "and no capture to wedge the shell with");
+        dispatch(
+            &mut w,
+            &mut state,
+            size,
+            &secondary_ev(PointerPhase::Up, 5.0, 5.0),
+        );
+        assert_eq!(state.presses, 0);
+
+        // The primary gesture is untouched by the guard.
+        dispatch(&mut w, &mut state, size, &ev(PointerPhase::Down, 5.0, 5.0));
+        assert!(w.pressed);
+        dispatch(&mut w, &mut state, size, &ev(PointerPhase::Up, 5.0, 5.0));
+        assert_eq!(state.presses, 1);
     }
 
     #[test]

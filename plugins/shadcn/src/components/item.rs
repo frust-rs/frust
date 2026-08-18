@@ -34,7 +34,7 @@ use frust::authoring::{
 use frust::{Theme, text};
 use peniko::Color;
 
-use crate::hit::inside;
+use crate::hit::{inside, presses};
 use crate::style;
 
 /// `itemVariants`' `variant` axis. `Default` = shadcn's `default`.
@@ -288,6 +288,9 @@ impl Widget for ItemWidget {
         };
         match p.phase {
             PointerPhase::Down => {
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 self.pressed = true;
                 self.captured = true;
                 ctx.capture_pointer();

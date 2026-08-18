@@ -614,6 +614,12 @@ impl Widget for AnchoredOverlayWidget {
         };
         match p.phase {
             PointerPhase::Down => {
+                // Deliberately button-agnostic, unlike every press machine in
+                // the catalog: a light dismiss is not a press. The browser this
+                // ports from closes an open popover/menu on a right-click
+                // outside it exactly as on a left-click, and the host captures
+                // nothing here — it only fires the app's dismiss callback — so
+                // the primary-only press rule has nothing to protect.
                 if !self.rect.contains(p.position)
                     && let Some(on_dismiss) = self.on_dismiss.as_mut()
                 {

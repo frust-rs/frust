@@ -40,7 +40,7 @@ use frust::{Theme, text};
 use crate::components::input::{
     FALLBACK, FieldChrome, input_border, paint_field_border, resolve_field_border,
 };
-use crate::hit::inside;
+use crate::hit::{inside, presses};
 use crate::style;
 
 /// Right inset of the chevron's box: `right-3.5`.
@@ -388,6 +388,9 @@ impl Widget for NativeSelectWidget {
         }
         match p.phase {
             PointerPhase::Down => {
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 self.pressed = true;
                 self.captured = true;
                 ctx.capture_pointer();

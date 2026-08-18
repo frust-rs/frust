@@ -73,6 +73,7 @@ use frust::{
 
 use crate::components::native_select::draw_chevron;
 use crate::components::popover::{MENU_PADDING, PanelHandle, PanelStyle, PanelView, panel};
+use crate::hit::presses;
 use crate::overlay::{
     AnchoredOverlayView, AnchoredOverlayWidget, OverlayAlign, OverlayAnchor, OverlayPlacement,
     OverlaySide, SIDE_OFFSET, anchored,
@@ -788,6 +789,14 @@ impl MenuListWidget {
     /// The `Widget::event` pointer arm: hover latching (with submenu
     /// open/close), press-to-highlight, and release-to-select.
     fn handle_pointer(&mut self, ctx: &mut EventCtx, size: Size, p: &PointerEvent) -> EventResult {
+        // Only a primary press operates the list. The whole gesture is refused,
+        // `Up` included, because a release resolves against the highlight rather
+        // than a capture flag — a secondary release would otherwise select
+        // whatever row a hover had highlighted. The hover pass (`Move`), which
+        // is also what opens a submenu, is untouched.
+        if !presses(p) && p.phase != PointerPhase::Move {
+            return EventResult::Ignored;
+        }
         let row = self.row_at(p.position, size);
         match p.phase {
             PointerPhase::Move => {

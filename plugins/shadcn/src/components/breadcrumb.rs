@@ -36,7 +36,7 @@ use frust::{Theme, text};
 use kurbo::{Line, Shape};
 use peniko::Color;
 
-use crate::hit::inside;
+use crate::hit::{inside, presses};
 use crate::style;
 use crate::text::{LabelRun, SHAPING_INK};
 
@@ -273,7 +273,7 @@ impl Widget for BreadcrumbLinkWidget {
         };
         match p.phase {
             PointerPhase::Down => {
-                if !inside(p.position, ctx.size()) {
+                if !presses(p) || !inside(p.position, ctx.size()) {
                     return EventResult::Ignored;
                 }
                 self.captured = true;

@@ -71,7 +71,7 @@ use frust::authoring::{
 };
 use frust::{Brightness, Theme};
 
-use crate::hit::inside;
+use crate::hit::{inside, presses};
 use crate::style::{self, PATH_TOLERANCE};
 
 /// Box edge, in logical px (`size-4`).
@@ -429,7 +429,7 @@ impl Widget for CheckboxWidget {
                 let size = ctx.size();
                 match p.phase {
                     PointerPhase::Down => {
-                        if self.disabled || !inside(p.position, size) {
+                        if self.disabled || !presses(p) || !inside(p.position, size) {
                             return EventResult::Ignored;
                         }
                         self.captured = true;
@@ -583,6 +583,15 @@ mod tests {
             phase,
             position: Point::new(x, y),
             button: PointerButton::Primary,
+        })
+    }
+
+    /// The same event on the secondary (right) button.
+    fn secondary(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: PointerButton::Secondary,
         })
     }
 
@@ -750,6 +759,24 @@ mod tests {
             assert_eq!(state.last, Some(true), "the key path agrees");
             assert_eq!(state.count, 2);
         }
+    }
+
+    #[test]
+    fn a_secondary_press_never_captures_or_toggles() {
+        let mut w = widget(false, false);
+        let mut state = Toggles::default();
+        assert_eq!(
+            dispatch(&mut w, &mut state, &secondary(PointerPhase::Down, 8.0, 8.0)),
+            EventResult::Ignored
+        );
+        assert!(!w.captured, "no capture for the shell to get stuck on");
+        dispatch(&mut w, &mut state, &secondary(PointerPhase::Up, 8.0, 8.0));
+        assert_eq!(state.count, 0);
+
+        // The primary gesture still toggles.
+        dispatch(&mut w, &mut state, &pointer(PointerPhase::Down, 8.0, 8.0));
+        dispatch(&mut w, &mut state, &pointer(PointerPhase::Up, 8.0, 8.0));
+        assert_eq!(state.count, 1);
     }
 
     #[test]

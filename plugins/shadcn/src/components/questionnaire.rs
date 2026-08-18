@@ -105,6 +105,7 @@ use frust::{
     Axis, ColorScheme, CrossAxisAlignment, FlexView, SizedBox, Theme, inflexible, text, text_input,
 };
 
+use crate::hit::presses;
 use crate::style::{self, PATH_TOLERANCE};
 use crate::text::{LabelRun, SHAPING_INK};
 use crate::tokens::{ShadcnRadius, ShadcnTokens, color_scheme_light, mono_family};
@@ -1271,6 +1272,9 @@ impl QuestionnaireWidget {
                 EventResult::Ignored
             }
             PointerPhase::Down => {
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 let Some(target) = self.target_at(p.position) else {
                     return EventResult::Ignored;
                 };

@@ -28,7 +28,7 @@ use frust::authoring::{
     SemanticsCtx, Shape, Size, Vec2, View, Widget, erase_callback,
 };
 
-use crate::hit::inside;
+use crate::hit::{inside, presses};
 use crate::style::{
     ACTIVE_CURSOR, BORDER_WIDTH, HOVER_SOLID_ALPHA, PATH_TOLERANCE, TEXT_XS, draw_focus_ring,
     focus_border, ring_color, with_alpha,
@@ -307,7 +307,7 @@ impl Widget for BadgeWidget {
         let size = ctx.size();
         match p.phase {
             PointerPhase::Down => {
-                if !inside(p.position, size) {
+                if !presses(p) || !inside(p.position, size) {
                     return EventResult::Ignored;
                 }
                 self.pressed = true;

@@ -89,6 +89,7 @@ use frust::{
     SizedBox, Theme, flexible, inflexible, text, text_input,
 };
 
+use crate::hit::presses;
 use crate::overlay::modal::MAX_WIDTH_LG;
 use crate::overlay::{self, ModalConfig, ModalContent, ModalView, ModalWidget, modal};
 use crate::style::{self, PATH_TOLERANCE};
@@ -587,6 +588,15 @@ impl CommandWidget {
         size: Size,
         p: &PointerEvent,
     ) -> EventResult {
+        // Only a primary press operates the palette. The whole gesture is
+        // refused, `Up` included, because a release resolves against the
+        // highlight rather than a capture flag — a secondary release would
+        // otherwise select whatever row a hover had highlighted. The hover pass
+        // (`Move`) is untouched, and refusing before the routing below keeps a
+        // secondary press off the field too.
+        if !presses(p) && p.phase != PointerPhase::Move {
+            return EventResult::Ignored;
+        }
         // The input row is the field's; the list is this widget's.
         if p.position.y < INPUT_HEIGHT || self.pods[0].is_active() {
             return route_event_single(&mut self.pods[0], ctx, event);

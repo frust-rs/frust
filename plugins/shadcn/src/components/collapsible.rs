@@ -37,7 +37,7 @@ use frust::authoring::{
 use frust::{AnimationController, Curve, Theme};
 
 use crate::components::native_select::activates;
-use crate::hit::inside;
+use crate::hit::{inside, presses};
 use crate::style;
 use crate::tokens::ShadcnTokens;
 
@@ -336,7 +336,7 @@ impl Widget for CollapsibleWidget {
                 EventResult::Handled
             }
             PointerPhase::Down => {
-                if self.disabled || !self.over_trigger(p.position, size) {
+                if self.disabled || !presses(p) || !self.over_trigger(p.position, size) {
                     return EventResult::Ignored;
                 }
                 self.pressed = true;

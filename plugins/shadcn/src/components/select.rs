@@ -69,7 +69,7 @@ use crate::components::input::{
 };
 use crate::components::native_select::{activates, draw_chevron};
 use crate::components::popover::{PanelHandle, PanelStyle};
-use crate::hit::inside;
+use crate::hit::{inside, presses};
 use crate::overlay::{
     AnchoredOverlayView, AnchoredOverlayWidget, OverlayAlign, OverlayAnchor, OverlayPlacement,
     OverlaySide, anchored,
@@ -591,7 +591,7 @@ impl Widget for SelectTriggerWidget {
         }
         let over = inside(p.position, ctx.size());
         match p.phase {
-            PointerPhase::Down if over => {
+            PointerPhase::Down if over && presses(p) => {
                 self.captured = true;
                 ctx.capture_pointer();
                 // Focus is what makes the ring appear, routes Space/Enter here,

@@ -131,6 +131,7 @@ use frust::{
 use kurbo::RoundedRectRadii;
 
 use super::{OverlaySide, finite_or_zero};
+use crate::hit::presses;
 use crate::style::{self, PATH_TOLERANCE, ShadcnShadow};
 use crate::tokens::ShadcnTokens;
 
@@ -1571,6 +1572,15 @@ impl Widget for ModalWidget {
         let InputEvent::Pointer(p) = event else {
             return EventResult::Ignored;
         };
+        // A secondary press is swallowed like every other one — a modal blocks
+        // the page behind it whatever button pressed — but it operates nothing:
+        // no close-button press, no drag, no scrim-dismiss arming. Only the
+        // primary button does any of that (the catalog's press rule), and the
+        // panel's own content, routed above, has already had its chance at the
+        // event (a context menu inside the panel still opens).
+        if !presses(p) && p.phase != PointerPhase::Move {
+            return EventResult::Handled;
+        }
         let (close, handle) = (self.close_rect(), self.handle_rect());
         match p.phase {
             PointerPhase::Move => {

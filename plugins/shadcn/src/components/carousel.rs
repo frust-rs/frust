@@ -74,7 +74,7 @@ use frust::authoring::{
 use frust::input::TOUCH_SLOP;
 use frust::{AnimationController, Curve, Theme};
 
-use crate::hit::inside;
+use crate::hit::{inside, presses};
 use crate::style::{self, PATH_TOLERANCE};
 
 /// Gap between items, in logical px (`-ml-4` on the row plus `pl-4` on each
@@ -760,6 +760,7 @@ impl Widget for CarouselWidget {
         // and a press on one is never a drag.
         if let InputEvent::Pointer(p) = event
             && p.phase == PointerPhase::Down
+            && presses(p)
             && let Some(control) = self.control_at(p.position)
         {
             if !self.control_enabled(control) {
@@ -800,7 +801,7 @@ impl Widget for CarouselWidget {
             }
             InputEvent::Pointer(p) => match p.phase {
                 PointerPhase::Down => {
-                    if !self.in_viewport(p.position, size) || self.pods.is_empty() {
+                    if !presses(p) || !self.in_viewport(p.position, size) || self.pods.is_empty() {
                         return EventResult::Ignored;
                     }
                     let main = self.main_of(p.position);

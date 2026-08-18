@@ -258,6 +258,7 @@ where
         scene: Scene::new(),
         cursor: Point::ZERO,
         modifiers: Modifiers::default(),
+        secondary_down_delivered: false,
         compose: ComposeLatch::default(),
         ime_sync: ImeSync::default(),
         cursor_icon: CursorIcon::Default,
@@ -514,25 +515,59 @@ fn map_mouse_button(button: MouseButton) -> Option<PointerButton> {
     }
 }
 
-/// Whether a mapped button's press/release should reach the tree at all,
-/// given whether a pointer gesture is currently captured
-/// ([`RenderRoot::is_pointer_captured`]).
+/// Whether a mapped button's press/release should reach the tree at all, given
+/// the phase, whether a pointer gesture is currently captured
+/// ([`RenderRoot::is_pointer_captured`]), and the delivery latch this gate owns
+/// (`ShellHandler::secondary_down_delivered`, threaded in by `&mut`).
 ///
-/// `RenderRoot` tracks capture as a single root-level flag, not one per
-/// button, and nothing but a Primary press opens a gesture today. Routing a
-/// stray right-click through the capturing widget mid-drag would hand it a
-/// `Down`/`Up` transition it never asked for, and a Secondary `Up` would
-/// clear the flag out from under a still-live Primary gesture — capture
-/// release is phase-only, not button-checked (see `RenderRoot::event`). So
-/// the conservative call: while captured, a Secondary event is dropped
-/// outright rather than routed to the capturer. A capture can only be
-/// Primary's own today, so this never costs a real gesture — only a second
-/// button pressed mid-drag, which nothing renders feedback for anyway.
+/// Primary is never gated: it is the button a capture belongs to, and its whole
+/// gesture must reach the tree.
 ///
-/// Pulled out as a free function so the drop decision stays pure and
-/// directly unit-testable, without a live `RenderRoot`.
-fn mouse_button_should_dispatch(button: PointerButton, pointer_captured: bool) -> bool {
-    !(button == PointerButton::Secondary && pointer_captured)
+/// Secondary is gated to keep two invariants at once:
+///
+/// - **A secondary press never disturbs a live capture.** `RenderRoot` tracks
+///   capture as a single root-level flag, not one per button, and releases it
+///   on phase alone — never button-checked (see `RenderRoot::event`). A
+///   secondary `Down` routed to a mid-drag capturer would hand it a transition
+///   it never asked for, and a secondary `Up` would clear the flag out from
+///   under a still-live primary gesture. So a secondary `Down` arriving while
+///   captured is dropped.
+/// - **Pairing: the tree never sees an unpaired secondary event.** A widget's
+///   press contract is a `Down` followed by its own `Up`, so dropping a release
+///   whose press *was* delivered is as wrong as delivering a release whose press
+///   was not — a stateless "drop while captured" rule does exactly that when a
+///   capture opens between the two (a right-click that opened a context menu
+///   whose `Up` then vanishes, leaving the menu's own press state armed). The
+///   latch therefore records what happened to the `Down`, and the `Up` follows
+///   it regardless of what the capture flag says by then.
+///
+/// Pulled out as a free function so the decision stays directly unit-testable
+/// without a live `RenderRoot`, the same shape as [`map_scroll_delta`].
+fn mouse_button_should_dispatch(
+    button: PointerButton,
+    phase: PointerPhase,
+    pointer_captured: bool,
+    secondary_down_delivered: &mut bool,
+) -> bool {
+    if button != PointerButton::Secondary {
+        return true;
+    }
+    match phase {
+        PointerPhase::Down => {
+            let deliver = !pointer_captured;
+            *secondary_down_delivered = deliver;
+            deliver
+        }
+        PointerPhase::Up => {
+            let deliver = *secondary_down_delivered;
+            *secondary_down_delivered = false;
+            deliver
+        }
+        // `MouseInput` is the only caller and produces just the two phases
+        // above; a pointer `Move`/`Cancel` is built elsewhere (`CursorMoved`
+        // makes its own Primary event) and never reaches this gate.
+        PointerPhase::Move | PointerPhase::Cancel => true,
+    }
 }
 
 /// Map a winit [`WinitNamedKey`] to our editing-semantics [`NamedKey`] set,
@@ -816,6 +851,10 @@ struct ShellHandler<State: 'static, Logic, V: View<State>, E> {
     /// delivers *before* the `KeyboardInput` that uses it, so this is always
     /// current by the time a key event is mapped.
     modifiers: Modifiers,
+    /// Whether the last secondary (right) `Down` was actually dispatched to the
+    /// tree — the latch [`mouse_button_should_dispatch`] pairs a secondary
+    /// release against, so the tree never sees an unpaired one.
+    secondary_down_delivered: bool,
     /// Tracks whether an IME preedit composition is in progress, so
     /// `KeyboardInput`-derived `Character` events can be deduped against it.
     compose: ComposeLatch,
@@ -1498,17 +1537,23 @@ where
             // Primary (left) and secondary (right) buttons; Middle/Back/Forward
             // are ignored until those gestures are specced (`map_mouse_button`).
             // The press/release position is the last `CursorMoved` position
-            // (winit carries none on the event). A captured Secondary event is
-            // dropped rather than routed to the capturer — see
-            // `mouse_button_should_dispatch` for why.
+            // (winit carries none on the event). A Secondary press that arrives
+            // while a gesture is captured is dropped, and its release follows
+            // whatever happened to its press — see
+            // `mouse_button_should_dispatch` for both invariants.
             WindowEvent::MouseInput { state, button, .. } => {
+                let phase = match state {
+                    ElementState::Pressed => PointerPhase::Down,
+                    ElementState::Released => PointerPhase::Up,
+                };
                 if let Some(mapped_button) = map_mouse_button(button)
-                    && mouse_button_should_dispatch(mapped_button, self.root.is_pointer_captured())
+                    && mouse_button_should_dispatch(
+                        mapped_button,
+                        phase,
+                        self.root.is_pointer_captured(),
+                        &mut self.secondary_down_delivered,
+                    )
                 {
-                    let phase = match state {
-                        ElementState::Pressed => PointerPhase::Down,
-                        ElementState::Released => PointerPhase::Up,
-                    };
                     self.dispatch(
                         &window,
                         InputEvent::Pointer(PointerEvent {
@@ -1914,30 +1959,81 @@ mod tests {
 
     // --- mouse_button_should_dispatch ---
 
-    #[test]
-    fn secondary_dispatches_uncaptured() {
-        assert!(mouse_button_should_dispatch(
-            PointerButton::Secondary,
-            false
-        ));
+    /// One secondary press/release through the gate, against a caller-owned
+    /// latch — the shape `WindowEvent::MouseInput` calls it in.
+    fn secondary(phase: PointerPhase, captured: bool, latch: &mut bool) -> bool {
+        mouse_button_should_dispatch(PointerButton::Secondary, phase, captured, latch)
     }
 
     #[test]
-    fn secondary_is_dropped_while_captured() {
-        // The pinned choice: a right-click mid-drag must not disturb the
-        // Primary capture it can never have opened.
-        assert!(!mouse_button_should_dispatch(
-            PointerButton::Secondary,
-            true
-        ));
+    fn an_uncaptured_secondary_press_and_its_release_both_dispatch() {
+        let mut latch = false;
+        assert!(secondary(PointerPhase::Down, false, &mut latch));
+        assert!(secondary(PointerPhase::Up, false, &mut latch));
+        // The latch is spent by the release it paired.
+        assert!(!latch);
     }
 
     #[test]
-    fn primary_always_dispatches_captured_or_not() {
-        // Primary is the only button that can hold the capture today, so its
-        // own `Down`/`Up`/`Move` must never be the one this gate drops.
-        assert!(mouse_button_should_dispatch(PointerButton::Primary, false));
-        assert!(mouse_button_should_dispatch(PointerButton::Primary, true));
+    fn a_secondary_press_is_dropped_while_captured_and_so_is_its_release() {
+        // A right-click mid-drag must not disturb the Primary capture it can
+        // never have opened — and dropping the press means dropping the
+        // release too, or the tree sees an `Up` with no `Down`.
+        let mut latch = false;
+        assert!(!secondary(PointerPhase::Down, true, &mut latch));
+        assert!(!secondary(PointerPhase::Up, true, &mut latch));
+        assert!(!secondary(PointerPhase::Up, false, &mut latch));
+    }
+
+    #[test]
+    fn a_delivered_secondary_press_gets_its_release_even_if_a_capture_opened() {
+        // The pairing invariant, and the wedge this gate exists to prevent: the
+        // press was delivered while nothing was captured, something captured in
+        // between (the widget it opened, or an unrelated one), and the release
+        // must still land — otherwise the capture never closes.
+        let mut latch = false;
+        assert!(secondary(PointerPhase::Down, false, &mut latch));
+        assert!(secondary(PointerPhase::Up, true, &mut latch));
+        assert!(!latch);
+    }
+
+    #[test]
+    fn a_secondary_release_without_a_delivered_press_never_dispatches() {
+        // A release arriving with a cold latch (a press consumed by a native
+        // menu, or one that landed before the window was focused) is not the
+        // second half of anything.
+        let mut latch = false;
+        assert!(!secondary(PointerPhase::Up, false, &mut latch));
+        assert!(!secondary(PointerPhase::Up, true, &mut latch));
+    }
+
+    #[test]
+    fn a_second_secondary_press_re_arms_the_latch_rather_than_stacking() {
+        // Two presses in a row (a release lost to the platform) leave the latch
+        // describing the *last* press, so exactly one release is ever paired.
+        let mut latch = false;
+        assert!(secondary(PointerPhase::Down, false, &mut latch));
+        assert!(!secondary(PointerPhase::Down, true, &mut latch));
+        assert!(!secondary(PointerPhase::Up, false, &mut latch));
+    }
+
+    #[test]
+    fn primary_always_dispatches_captured_or_not_and_leaves_the_latch_alone() {
+        // Primary is the button a capture belongs to, so its own `Down`/`Up`
+        // must never be the one this gate drops — and a Primary gesture must
+        // not disturb a secondary press waiting for its release.
+        let mut latch = true;
+        for captured in [false, true] {
+            for phase in [PointerPhase::Down, PointerPhase::Up] {
+                assert!(mouse_button_should_dispatch(
+                    PointerButton::Primary,
+                    phase,
+                    captured,
+                    &mut latch
+                ));
+            }
+        }
+        assert!(latch);
     }
 
     // --- map_scroll_delta ---
