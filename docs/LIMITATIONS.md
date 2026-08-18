@@ -2647,3 +2647,28 @@ future round rather than a permanent exclusion.
 **Evidence**: `workflow/plans/research/shadcn-round-2/RESEARCH.md`'s component sweep ("DEFERRED:
 calendar … NOT-PORTABLE-AS-IS: menubar, navigation-menu … form … sonner … chart … direction").
 
+
+---
+
+### `scroll-view-no-external-offset-seam` — offset-derived scroll surfaces must re-implement scroll physics instead of composing over `ScrollView`
+
+**Observed**: the baseline scroll surface exposes neither an offset-write path usable outside event
+dispatch (needed to advance a fling/glide during *paint*, or to pin a live edge during *layout*) nor
+a wrapper-readable offset (needed to derive stickiness/distance-from-end state). `frust-shadcn`'s
+`message_scroller` therefore owns its own offset field, wheel/drag consumption, and fling/glide
+physics in parallel with `ScrollView`'s — two independent scroll-gesture implementations whose feel
+(slop thresholds, wheel line height, decay curves) must be kept consistent by hand.
+
+**Applies to**: any "sticky bottom" or offset-derived-state scroll surface, in any catalog; a
+baseline `ScrollView` feel/physics tuning has no mechanism to propagate into the parallel copy and
+will silently drift.
+
+**Why accepted**: the two missing seams are baseline `ScrollView` API design work, not something a
+facade-only plugin can add; the parallel implementation was the honest v1 route and is tested on its
+own terms. The remedy path is a baseline seam pair — an external offset-write valid outside a
+dispatch, and a read seam for wrappers — after which `message_scroller` (and any successor) can
+compose instead of re-implementing.
+
+**Evidence**: `plugins/shadcn/src/components/message_scroller.rs` (its own offset/fling/glide state
+machines and the module docs' seam rationale); `crates/frust-widgets/src/scroll.rs` (no external
+write/read offset surface).
