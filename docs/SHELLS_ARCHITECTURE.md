@@ -163,7 +163,7 @@ vocabulary — and must not diverge in behavior.
 |---------|-------|---------|-------|
 | App identity | resolved app name titles the application menu (configured name → bundle display name → executable stem → default) | `app_id` becomes the process AppUserModelID, claimed before the first window exists so the taskbar honors it | `app_id` becomes the Wayland `app_id` and X11 `WM_CLASS`, via winit's `with_name` |
 | Icon | not attached (macOS wants an application icon, which the bundle carries) | both `ICON_SMALL` (titlebar/alt-tab) and `ICON_BIG` (taskbar) | X11 window icon; Wayland has no window-icon protocol and sources it from the `.desktop` entry instead |
-| Menu | always builds the standard application menu (About/Hide/Hide Others/Show All/Quit) and appends the app's spec after it, so even a menu-less app gets a conventional bar with a working ⌘Q | builds only the app's own spec, with `TranslateAcceleratorW` accelerators; a role this platform cannot perform is dropped rather than faked | none — the menu is widget-drawn |
+| Menu | always builds the standard application menu (About/Hide/Hide Others/Show All/Quit) and appends the app's spec after it, so even a menu-less app gets a conventional bar with a working ⌘Q | builds only the app's own spec, with `TranslateAcceleratorW` accelerators; a role this platform cannot perform is dropped rather than faked, and the quit role is realized by the shell itself (an owned item mapped to `WM_CLOSE` — muda's predefined quit is inert under winit) | none — the menu is widget-drawn |
 | Theme | winit handles it | titlebar brightness follows the app's resolved theme through winit's `Window::set_theme`, re-issued on every change the core signals; a resolution arriving before the window exists is held pending | winit handles it |
 | Close / quit | `quit_on_last_window_closed = false` hides the window and keeps the loop running; a Dock re-activation brings it back | default exit-on-close | default exit-on-close |
 | Activation policy | winit's, deliberately: it sets `NSApplicationActivationPolicy` while launching, so a competing call here could only disagree with it | n/a | n/a |
@@ -314,10 +314,15 @@ The desktop tier is unevenly proven, and the gap is tracked rather than assumed 
 
 - **macOS** — runtime-verified on hardware: real windows, the app-named menu bar, ⌘Q by both menu
   and accelerator, Hide/Show All, and close-then-Dock-click reopen.
-- **Windows and Linux** — proven by cross-target compilation only, plus every native call site
-  read against its vendored source. Owed: the Windows titlebar/taskbar/menu/accelerator pass and a
-  non-headless Linux `app_id`/icon pass. See [LIMITATIONS.md](LIMITATIONS.md)
-  `desktop-shells-runtime-unverified`, `desktop-windows-accelerator-compile-only` and
+- **Windows** — runtime-verified on hardware (2026-08-19, Windows 11): titlebar/taskbar icon,
+  AppUserModelID identity, titlebar theming, menu-bar activation delivery, accelerators, and
+  quit. The pass caught two real defects, both fixed: muda's predefined quit dead-ends under
+  winit's pump (the quit role is now an owned item the handler maps to `WM_CLOSE`), and an
+  accelerator only enters the `HACCEL` if its submenu is attached before the item is appended
+  (build order is load-bearing) — both documented at their `menu.rs` sites.
+- **Linux** — proven by cross-target compilation only, plus every native call site read against
+  its vendored source. Owed: a non-headless `app_id`/icon pass. See
+  [LIMITATIONS.md](LIMITATIONS.md) `desktop-shells-runtime-unverified` and
   `desktop-windows-titlebar-theme-revert`.
 
 Multi-window is out of scope at this tier — every desktop shell manages exactly one window

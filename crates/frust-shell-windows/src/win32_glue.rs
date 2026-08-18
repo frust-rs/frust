@@ -193,6 +193,28 @@ pub(crate) fn attach_menu_to_hwnd(menu: &muda::Menu, hwnd: isize) -> bool {
     }
 }
 
+/// Post `WM_CLOSE` to `hwnd` — the quit intercept's exit route (see
+/// `menu::install_event_handler`): winit surfaces the message as
+/// `CloseRequested`, so the shell's one close decision covers quit too.
+///
+/// A `0` target (no menu installed, or already torn down) is ignored: a quit
+/// activation cannot outlive its menu's window by more than a queue's worth of
+/// dispatch, and closing nothing is the right response to that race.
+#[cfg(target_os = "windows")]
+pub(crate) fn post_close(hwnd: isize) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+
+    if hwnd == 0 {
+        return;
+    }
+    // SAFETY: `PostMessageW` is sound for any window handle value — an invalid
+    // one fails with a `FALSE` return rather than faulting. `hwnd` came out of
+    // `window_hwnd` below at menu install time.
+    if unsafe { PostMessageW(hwnd as _, WM_CLOSE, 0, 0) } == 0 {
+        log::warn!("frust-shell-windows: could not deliver the menu quit's WM_CLOSE");
+    }
+}
+
 /// The window's `HWND`, as the `isize` muda's Win32 entry points take.
 ///
 /// `None` (logged) if winit reports anything but a Win32 handle — which cannot

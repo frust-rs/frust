@@ -1864,7 +1864,7 @@ dependencies; review R2-M1 and R2-M6 (workflow/reviews/i18n-plugin/REVIEW-r2.md)
 
 ---
 
-### `desktop-shells-runtime-unverified` — the Windows and Linux desktop shells are compile-gated only, never launched
+### `desktop-shells-runtime-unverified` — the Linux desktop shell is compile-gated only, never launched
 
 **Observed**: Phase A's `frust-shell-macos`/`-windows`/`-linux` (menu bar, lifecycle, window
 icon/identity) were built and integrated from a headless Linux host — proven only via cross-target
@@ -1874,13 +1874,20 @@ native `cargo check --workspace` here). **macOS** is no longer in this gap: the 
 gate (2026-08-15, `macbook-gate-r1`, 15/15 checks passed) launched real windows and verified the
 menu bar with the app-named items, ⌘Q via both the menu and the accelerator, Hide/Show All,
 close-then-Dock-click reopen from the inactive state, and the zero-config preview — all with no
-functional bugs found. Still owed: **Windows** — titlebar+taskbar icon, `AppUserModelID` grouping,
-dark titlebar following the app theme, the native menu bar, and accelerators (Ed's Windows 11 PC
-pass). **Linux** — Wayland `app_id`/X11 `WM_CLASS` pairing and the window icon (a non-headless
-Linux session; rides Phase B's `.desktop` milestone).
+functional bugs found. **Windows** is no longer in this gap either: the Windows 11 gate
+(2026-08-19, `examples/shadcn-demo` built natively with MSVC on hardware) verified the
+titlebar+taskbar icon, the `AppUserModelID` taskbar identity, the dark titlebar following the app
+theme, native menu-bar activation delivery, a declared accelerator firing its item (proven by
+injected-keystroke probe against the live window), and quit — and caught two real defects, both
+fixed and re-verified in the same round: the quit role dead-ended in muda's `PostQuitMessage`
+(now an owned item the handler maps to `WM_CLOSE`), and submenu accelerators never entered the
+`HACCEL` because items were appended before the submenu was attached (build order is
+load-bearing; both contracts are documented at their `frust-shell-windows/src/menu.rs` sites).
+Still owed: **Linux** — Wayland `app_id`/X11 `WM_CLASS` pairing and the window icon (a
+non-headless Linux session; rides Phase B's `.desktop` milestone).
 
-**Applies to**: any app built with a Phase A desktop shell on Windows or Linux, until the matching
-device pass runs.
+**Applies to**: any app built with a Phase A desktop shell on Linux, until the matching device
+pass runs.
 
 **Why accepted**: PLAN.md's Edge Cases documented this verification asymmetry before the phase
 started (only Linux hardware was on hand); the cross-target compile gates are the strongest proof
@@ -1892,27 +1899,8 @@ than guessed.
 sections); `workflow/plans/features/desktop-shells/phase-a/TASKS.md` Build State (Wave 3
 integration-verify cross-target matrix); macOS runtime verification —
 `workflow/plans/features/desktop-shells/phase-a/followups/macbook-gate-r1/TASKS.md` (gate table
-G4, G5, G9, G12, G15).
-
----
-
-### `desktop-windows-accelerator-compile-only` — the Windows menu-accelerator path is the riskiest compile-only claim
-
-**Observed**: `frust-shell-windows`'s keyboard-accelerator wiring
-(`EventLoopBuilderExtWindows::with_msg_hook` installing a closure that calls
-`TranslateAcceleratorW` against the menu's published `HACCEL`) is verified only by reading the
-vendored winit/windows-sys source — never run on Windows.
-
-**Applies to**: any `MenuSpec` item declaring an `accelerator` string on Windows.
-
-**Why accepted**: designed to degrade, not break. The hook holds an `Rc<Cell<isize>>` HACCEL slot
-that starts at `0` and is cleared on drop; while it is `0` (before menu install, after a refused
-install, or after the menu is dropped) the hook returns `false` for every message and winit's
-normal `TranslateMessage`/`DispatchMessageW` path runs exactly as if no hook existed — the failure
-mode is a working menu bar with no keyboard shortcuts, never a broken message loop.
-
-**Evidence**: desktop-shells Phase A task 04 completion summary (Notable Decisions #3,
-Risks/Limitations #1–#2).
+G4, G5, G9, G12, G15); Windows runtime verification — the 2026-08-19 gate, landed with the
+menu-quit and accelerator-registration fixes that narrowed this entry.
 
 ---
 
@@ -1928,16 +1916,18 @@ removes the `applied == wanted` latch so every core-signaled brightness change r
 does not close a revert that happens *between* those changes — most notably while an app override
 is active: the core's override-wins rule holds `self.theme.brightness` steady across a platform
 `ThemeChanged`, so the edge-gate that drives `take_pending` may not re-fire at all while the
-mismatch persists.
+mismatch persists. The 2026-08-19 Windows-11 gate probed the headline sequence by hand — the
+system theme flipped while an app override held — and observed **no** revert (build 26200); the
+residual window is timing-dependent and stays open at this winit pin.
 
 **Applies to**: `frust-shell-windows` apps using an OS-native (non-`with_theme`) titlebar with
 either the system-follow path or an app-forced brightness override, on any winit 0.30.13 build.
 
 **Why accepted**: no winit-level fix exists to consume (the bug is in winit, not fixable from this
 crate alone); a full fix needs shell-owned system-theme detection (e.g. polling the registry key
-winit itself would consult) rather than reacting to winit's event stream, which is deferred pending
-the Windows runtime gate (`desktop-shells-runtime-unverified`) that would let it be verified against
-a real WM_SETTINGCHANGE sequence.
+winit itself would consult) rather than reacting to winit's event stream — and it stays deferred:
+the Windows runtime gate's manual `WM_SETTINGCHANGE` probe did not reproduce a revert, so the
+detector would be built against a case no one can currently trigger.
 
 **Evidence**: `crates/frust-shell-windows/src/theme.rs` module docs ("The residual gap this round
 does not close"); desktop-shells Phase A fix-round-1 task F2.
