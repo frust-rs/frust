@@ -52,6 +52,35 @@
 //! boundary (still deferred: left-accent, bottom-rule, bleed — compose those
 //! as app-side layering over a plain `Container` instead).
 //!
+//! ## `.expand()` under an unbounded axis
+//!
+//! A childless `.expand()`ed container fills the incoming max **per axis**,
+//! not as a single "fill everything" gesture: a bounded axis fills to that
+//! bound as expected, but an *unbounded* axis (`max == f64::INFINITY`) —
+//! the shape `Flex`'s inflexible-child intrinsic-probe pass, `ScrollView`'s
+//! content layout, and `ListView`'s row layout all hand a child when
+//! measuring its natural extent along that axis — **collapses to
+//! `bc.min()`** on that axis instead of growing without bound.
+//! [`frust_core::BoxConstraints::constrain`]'s clamp cannot be relied on to
+//! cap this case: `x.clamp(min, f64::INFINITY)` never lowers `x`, so any
+//! finite "large enough" sentinel size would leak through unclamped and
+//! report a fictitious intrinsic size to the caller (a `Flex` probing an
+//! `.expand()`ed inflexible child would allocate room for it as if it were
+//! ~10,000,000px wide). Collapsing to `bc.min()` — typically `0` under a
+//! loose probe — is the sane floor: an unbounded expand has no real
+//! "available space" to fill, so it reports the smallest size the incoming
+//! constraint still allows, exactly like [`crate::sized::SizedBox`]'s
+//! childless-spacer default. See [`ContainerWidget::layout`]'s
+//! `Sizing::Expand` arm and `tests/container_layout.rs`'s
+//! `childless_expand_collapses_to_min_under_an_unbounded_axis`/
+//! `colored_box_expand_inside_a_flex_intrinsic_pass_does_not_report_the_old_sentinel`.
+//!
+//! With a child attached, `.expand()` has no effect at all (layout always
+//! hugs the child regardless of `sizing`, per the section above) — so the
+//! child's own measured size is what a `Flex`/`ScrollView`/`ListView`
+//! intrinsic probe already sees in that case; there is no separate
+//! expand-with-child collapse rule to apply.
+//!
 //! # Paint discipline
 //!
 //! Paint order is glow, then fill, then border, then the child — an
@@ -87,13 +116,6 @@ use peniko::{Brush, Color};
 /// `material::card`'s / `Button`'s identical precedent).
 const BORDER_TOLERANCE: f64 = 0.1;
 
-/// Declared larger than any real viewport (logical px) so
-/// [`BoxConstraints::constrain`] always clamps a childless `.expand()`ed
-/// container down to the incoming max — the same trick
-/// `examples/glyph-catalog`/`examples/playground`'s hand-rolled
-/// `AppBackground` used before this widget existed (see the module docs).
-const EXPAND_INTRINSIC: f64 = 1.0e7;
-
 /// A border's stroke style, set via [`ContainerView::border_style`]. Solid by
 /// default; [`ContainerView::border`] alone (with no `.border_style` call)
 /// keeps the pre-existing solid-only behavior unchanged.
@@ -117,7 +139,10 @@ enum Sizing {
     /// `SizedBox`'s childless-spacer precedent.
     Hug,
     /// Fill the incoming max constraint on both axes (the `AppBackground`
-    /// case) via [`EXPAND_INTRINSIC`].
+    /// case) — per-axis, so a bounded axis fills to its max while an
+    /// unbounded one (`max == f64::INFINITY`) collapses to `bc.min()` on
+    /// that axis instead of growing without limit. See
+    /// [`ContainerWidget::layout`]'s `Sizing::Expand` arm.
     Expand,
     /// A fixed `(width, height)`, clamped into the incoming constraints (the
     /// `FillBox`/swatch case). With a child attached, layout still hugs the
@@ -385,6 +410,16 @@ fn inset_radii(radii: CornerRadii, inset: f64) -> CornerRadii {
     )
 }
 
+/// One axis of a childless `.expand()`ed container's intrinsic size: `max`
+/// when it is a real bound, else `min` — the fallback for an unbounded axis
+/// (`max == f64::INFINITY`), where `BoxConstraints::constrain`'s clamp is a
+/// no-op (`x.clamp(min, INFINITY)` never lowers `x`) and can't be relied on
+/// to cap an arbitrary sentinel the way it caps a genuinely bounded axis. See
+/// [`Sizing::Expand`]'s doc for why `min` (not e.g. zero) is the right floor.
+fn collapse_or_fill(max: f64, min: f64) -> f64 {
+    if max.is_finite() { max } else { min }
+}
+
 impl Widget for ContainerWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         match &mut self.child {
@@ -412,7 +447,19 @@ impl Widget for ContainerWidget {
             None => {
                 let intrinsic = match self.sizing {
                     Sizing::Hug => bc.min(),
-                    Sizing::Expand => Size::new(EXPAND_INTRINSIC, EXPAND_INTRINSIC),
+                    // Fill the incoming max, per axis — except an unbounded
+                    // axis (`max == INFINITY`, the intrinsic-probe shape
+                    // `Flex`'s inflexible-child pass/`ScrollView`/`ListView`
+                    // hand a childless expanding box), which collapses to
+                    // `bc.min()` on that axis instead of reporting an
+                    // arbitrary sentinel. `bc.constrain` below is then a
+                    // no-op on a bounded axis (the chosen value already sits
+                    // at `bc.max()`) and only does real clamping work when
+                    // `bc.min() > 0` on the collapsed axis.
+                    Sizing::Expand => Size::new(
+                        collapse_or_fill(bc.max().width, bc.min().width),
+                        collapse_or_fill(bc.max().height, bc.min().height),
+                    ),
                     Sizing::Fixed(w, h) | Sizing::FixedCentered(w, h) => Size::new(w, h),
                 };
                 bc.constrain(intrinsic)

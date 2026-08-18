@@ -15,9 +15,9 @@ use std::any::Any;
 use frust_core::accesskit::Role;
 use frust_core::{
     BoxConstraints, BuildCtx, ChangeFlags, CornerRadii, DashPattern, LayoutCtx, PaintCtx,
-    PaintScene, RenderRoot, View, Widget,
+    PaintScene, RenderRoot, View, Widget, any,
 };
-use frust_widgets::{BorderStyle, colored_box, container, divider, text};
+use frust_widgets::{BorderStyle, Column, colored_box, container, divider, text};
 use kurbo::{BezPath, Point, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
 
@@ -225,6 +225,83 @@ fn childless_expand_fills_a_tight_constraint_too() {
     let mut lctx = LayoutCtx::new();
     let size = w.layout(&mut lctx, &BoxConstraints::tight(Size::new(200.0, 100.0)));
     assert_eq!(size, Size::new(200.0, 100.0));
+}
+
+// ---------------------------------------------------------------------------
+// Infinite-max fill axes (cfx2, Arc C fix round 1): `BoxConstraints::constrain`'s
+// clamp is a no-op when `max == f64::INFINITY`, so `.expand()` must collapse to
+// `bc.min()` on an unbounded axis rather than reporting the old 1e7
+// `EXPAND_INTRINSIC` sentinel — the real shape `Flex`'s inflexible-child
+// intrinsic-probe pass (`flex.rs:341`), `ScrollView`'s content layout
+// (`scroll.rs:621`), and `ListView`'s row layout (`list_view.rs:1720`) all hand a
+// childless expanding box.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn childless_expand_collapses_to_min_under_an_unbounded_axis() {
+    // Both axes unbounded (no enclosing bound at all): `.expand()` collapses
+    // to the incoming minimum on both, not a large sentinel.
+    let view: frust_widgets::ContainerView<()> = colored_box().fill(Color::WHITE).expand();
+    let mut w = build(&view);
+    let mut lctx = LayoutCtx::new();
+    let bc = BoxConstraints::new(Size::new(5.0, 8.0), Size::new(f64::INFINITY, f64::INFINITY));
+    let size = w.layout(&mut lctx, &bc);
+    assert_eq!(
+        size,
+        Size::new(5.0, 8.0),
+        "both axes unbounded: `.expand()` collapses to `bc.min()` on both, \
+         not a large sentinel"
+    );
+}
+
+#[test]
+fn childless_expand_fills_the_bounded_axis_and_collapses_the_unbounded_one() {
+    // A mixed case: width bounded (fills to it, the normal `.expand()`
+    // behavior), height unbounded (collapses to its minimum instead).
+    let view: frust_widgets::ContainerView<()> = colored_box().fill(Color::WHITE).expand();
+    let mut w = build(&view);
+    let mut lctx = LayoutCtx::new();
+    let bc = BoxConstraints::new(Size::new(0.0, 3.0), Size::new(320.0, f64::INFINITY));
+    let size = w.layout(&mut lctx, &bc);
+    assert_eq!(size, Size::new(320.0, 3.0));
+}
+
+#[test]
+fn expand_with_child_returns_the_childs_measured_size_under_an_unbounded_axis() {
+    // `.expand()` has no effect once a child is attached (layout always
+    // hugs the child — see the module docs' "Sizing + a child" section), so
+    // under a fully unbounded incoming constraint the container reports the
+    // child's own measured size on both axes, never a large sentinel.
+    let view: frust_widgets::ContainerView<()> = container(leaf(40.0, 20.0)).expand();
+    let mut w = build(&view);
+    let mut lctx = LayoutCtx::new();
+    let bc = BoxConstraints::new(Size::ZERO, Size::new(f64::INFINITY, f64::INFINITY));
+    let size = w.layout(&mut lctx, &bc);
+    assert_eq!(size, Size::new(40.0, 20.0));
+}
+
+#[test]
+fn colored_box_expand_inside_a_flex_intrinsic_pass_does_not_report_the_old_sentinel() {
+    // `Column`'s inflexible-child pass (`flex.rs`) probes each inflexible
+    // child under an unbounded main axis (`0..INFINITY`) to measure its
+    // natural size — the same "intrinsic probe" shape `ScrollView`/
+    // `ListView` hand a childless expanding box on their own unbounded
+    // content axis. A childless `.expand()`ed `colored_box` sitting in that
+    // slot must collapse to its measured minimum (zero here) on the probed
+    // main axis, not leak the old 1e7 `EXPAND_INTRINSIC` sentinel into the
+    // flex's main-axis allocation.
+    let view: frust_widgets::FlexView<()> =
+        Column(vec![any(colored_box().fill(Color::WHITE).expand())]);
+    let mut w = build(&view);
+    let mut lctx = LayoutCtx::new();
+    let size = w.layout(&mut lctx, &BoxConstraints::loose(Size::new(320.0, 640.0)));
+    assert_eq!(
+        size,
+        Size::new(320.0, 0.0),
+        "the Column's cross axis (width) still fills to its bound, but the \
+         probed main axis (height) collapses to zero instead of leaking the \
+         old EXPAND_INTRINSIC sentinel into the flex's main-axis allocation"
+    );
 }
 
 #[test]

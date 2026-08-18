@@ -13,14 +13,24 @@
 //! inside) and takes a fixed `.thickness(...)` on the **height** — its own
 //! main axis, in the sense that a `Column`'s main axis is vertical.
 //! [`DividerView::vertical`] flips both: fixed thickness on width, fills the
-//! incoming max height (the typical `Row`-of-panels separator). Either way
-//! sizing uses the same "declare an intrinsic far larger than any real
-//! viewport and let `BoxConstraints::constrain` clamp it to the incoming
-//! max" trick [`crate::container`]'s `.expand()` uses (see that module's
-//! `EXPAND_INTRINSIC` for the full rationale) — so a divider dropped into an
-//! unbounded axis (no enclosing `Column`/`Row` constraining it) collapses to
-//! its thickness on *both* axes rather than growing unbounded, exactly as
-//! `BoxConstraints::constrain` already guarantees for `Container`.
+//! incoming max height (the typical `Row`-of-panels separator).
+//!
+//! The fill axis uses the incoming `bc.max()` when it is a real bound, but
+//! **collapses to `bc.min()`** (usually `0`) when that axis is unbounded
+//! (`max == f64::INFINITY`) — the shape `Flex`'s inflexible-child
+//! intrinsic-probe pass, `ScrollView`'s content layout, and `ListView`'s row
+//! layout all hand a child measuring its natural extent along that axis. A
+//! fixed "larger than any real viewport" sentinel cannot stand in for the
+//! fill axis here: `BoxConstraints::constrain`'s clamp is a no-op against an
+//! infinite max (`x.clamp(min, f64::INFINITY)` never lowers `x`), so any
+//! such sentinel would leak through unclamped and report a fictitious
+//! multi-thousand-pixel divider to the caller. So a divider dropped into a
+//! genuinely unbounded axis (no enclosing `Column`/`Row`/other bound
+//! constraining it) is effectively invisible on that axis — `0`-width (or
+//! `0`-height) under a loose incoming minimum — rather than growing
+//! unbounded; the thickness axis is unaffected either way. See
+//! [`crate::container`]'s `.expand()` doc for the same collapse rule, shared
+//! with `Container`'s childless expand case.
 //!
 //! # Color: required, no `Theme` dependency
 //!
@@ -47,11 +57,6 @@ use peniko::Color;
 /// `Divider` spec and the Human Interface Guidelines' hairline separator
 /// both converge on 1px at 1x scale).
 const DEFAULT_THICKNESS: f64 = 1.0;
-
-/// Declared larger than any real viewport (logical px), the same
-/// "fill the available space" trick [`crate::container`]'s
-/// `EXPAND_INTRINSIC` uses — see that module's doc for the full rationale.
-const EXPAND_INTRINSIC: f64 = 1.0e7;
 
 /// A declarative hairline separator. See the [module docs](self).
 pub struct DividerView {
@@ -136,10 +141,16 @@ impl<State: 'static> View<State> for DividerView {
 
 impl Widget for DividerWidget {
     fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        // Fill axis: the incoming max when it's a real bound, else collapse
+        // to the incoming min (see the module docs' "Sizing" section) —
+        // `BoxConstraints::constrain`'s clamp can't be relied on to cap an
+        // unbounded max, so a finite "large enough" intrinsic would leak
+        // straight through unclamped.
+        let fill = |max: f64, min: f64| if max.is_finite() { max } else { min };
         let intrinsic = if self.vertical {
-            Size::new(self.thickness, EXPAND_INTRINSIC)
+            Size::new(self.thickness, fill(bc.max().height, bc.min().height))
         } else {
-            Size::new(EXPAND_INTRINSIC, self.thickness)
+            Size::new(fill(bc.max().width, bc.min().width), self.thickness)
         };
         bc.constrain(intrinsic)
     }
@@ -201,19 +212,33 @@ mod tests {
     }
 
     #[test]
-    fn an_unbounded_fill_axis_falls_back_to_the_intrinsic_constant() {
+    fn an_unbounded_fill_axis_collapses_to_the_incoming_minimum() {
         // No enclosing Column/Row bounding the fill axis (width, here):
-        // `BoxConstraints::constrain` clamps `EXPAND_INTRINSIC` between the
-        // incoming `[0, INFINITY]` range, which leaves it unchanged — the
-        // same "no real max to clamp against" edge `Container::expand` shares
-        // (see `container.rs`'s `EXPAND_INTRINSIC` doc). The thickness axis
-        // (height) is unaffected either way.
+        // `BoxConstraints::constrain`'s clamp is a no-op against an infinite
+        // max, so the fill axis instead collapses to `bc.min()` (zero under
+        // a loose incoming constraint) — the same "no real max to fill"
+        // fallback `Container::expand` shares (see `container.rs`'s module
+        // doc). The thickness axis (height) is unaffected either way.
         let view = divider(Color::BLACK);
         let mut w = build(&view);
         let mut lctx = LayoutCtx::new();
         let bc = BoxConstraints::loose(Size::new(f64::INFINITY, 200.0));
         let size = w.layout(&mut lctx, &bc);
-        assert_eq!(size, Size::new(EXPAND_INTRINSIC, DEFAULT_THICKNESS));
+        assert_eq!(size, Size::new(0.0, DEFAULT_THICKNESS));
+    }
+
+    #[test]
+    fn an_unbounded_fill_axis_collapses_to_a_nonzero_incoming_minimum() {
+        // A non-zero `bc.min()` on the unbounded axis is honored, not
+        // silently zeroed — the collapse target is genuinely `bc.min()`,
+        // not a hardcoded zero. The thickness axis (width, here) stays
+        // loose enough that its own minimum doesn't also force it.
+        let view = divider(Color::BLACK).vertical();
+        let mut w = build(&view);
+        let mut lctx = LayoutCtx::new();
+        let bc = BoxConstraints::new(Size::new(0.0, 12.0), Size::new(500.0, f64::INFINITY));
+        let size = w.layout(&mut lctx, &bc);
+        assert_eq!(size, Size::new(DEFAULT_THICKNESS, 12.0));
     }
 
     // ---- Paint ---------------------------------------------------------
