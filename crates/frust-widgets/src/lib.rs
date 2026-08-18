@@ -43,6 +43,7 @@ mod padding;
 mod platform_view;
 mod radio;
 mod safe_area;
+mod scaffold;
 mod scroll;
 mod sized;
 mod slider;
@@ -83,6 +84,7 @@ pub use platform_view::{
 };
 pub use radio::{Radio, RadioView, RadioWidget, radio};
 pub use safe_area::{SafeAreaView, SafeAreaWidget, safe_area};
+pub use scaffold::{ScaffoldView, ScaffoldWidget, scaffold};
 pub use scroll::{ScrollInfo, ScrollView, ScrollWidget, scroll_view};
 pub use sized::{SizedBox, SizedBoxView, SizedBoxWidget};
 pub use slider::{Slider, SliderView, SliderWidget, slider};

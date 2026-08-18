@@ -104,10 +104,11 @@ pub use frust_widgets::{
     IconWidget, Image, ImageError, ImageFit, ImageSource, ImageView, ListView, ListViewWidget,
     MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView, Padding, PaddingView,
     PageBuilder, PageTransition, PageVisibility, PopResult, PushOptions, Radio, RadioView,
-    RadioWidget, ResultCallback, Row, SafeAreaView, ScrollInfo, ScrollView, SizedBox, SizedBoxView,
-    Slider, SliderView, Stack, StackView, TextInput, TextInputView, TextView, Timing,
+    RadioWidget, ResultCallback, Row, SafeAreaView, ScaffoldView, ScrollInfo, ScrollView, SizedBox,
+    SizedBoxView, Slider, SliderView, Stack, StackView, TextInput, TextInputView, TextView, Timing,
     TransitionSpec, TransitionState, VisibilityCallback, button, checkbox, flexible, hero, icon,
-    inflexible, keyed, list_view, radio, safe_area, scroll_view, slider, text, text_input,
+    inflexible, keyed, list_view, radio, safe_area, scaffold, scroll_view, slider, text,
+    text_input,
 };
 
 /// Platform-view embedding (platform-views feature): reserve
