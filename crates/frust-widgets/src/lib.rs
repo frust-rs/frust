@@ -75,7 +75,7 @@ pub use nav::route::{NavRequest, NavWaker, RouteNavigator};
 pub use nav::route_state::{NavChange, RouteStack};
 pub use nav::router::{
     DEFAULT_REDIRECT_LIMIT, ErrorBuilder, Redirect, Resolution, ResolvedPage, Route, RouteBuilder,
-    Router,
+    Router, shell_route,
 };
 pub use nav::transition::{PageTransition, Timing, TransitionSpec, TransitionState};
 pub use padding::{EdgeInsets, Padding, PaddingView, PaddingWidget};

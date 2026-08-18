@@ -199,10 +199,16 @@ pub use frust_widgets::icons;
 /// builders. [`RouterDeepLinks::track`] drains it every rebuild, so a request
 /// queued in an event handler (on any thread — the queue never panics
 /// off-thread) applies on the next frame.
+///
+/// [`shell_route`] is the nested-navigator binding: its children resolve onto a
+/// second [`NavigatorController`] the app owns and its own page — the chrome
+/// wrapping that inner navigator — stays retained while they do, so navigating
+/// between siblings inside the shell never rebuilds the chrome. See its docs
+/// for the keep rule and the per-verb table.
 pub use frust_widgets::{
     DEFAULT_REDIRECT_LIMIT, ErrorBuilder, Location, NavChange, NavRequest, NavWaker, PathPattern,
     Redirect, Resolution, ResolvedPage, Route, RouteBuilder, RouteNavigator, RouteParams,
-    RouteStack, Router,
+    RouteStack, Router, shell_route,
 };
 
 /// The page-transition **resolve/drive** path: the framework's own reduce-
