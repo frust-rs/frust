@@ -238,7 +238,10 @@ the bare theme cap regardless of any longer per-request interval (see
   reactive `Owner.with` wrap, so handlers see root-level contexts (`Theme`, `WindowMetrics`,
   root-component `init`-installed values). `frust-reactive` is a leaf crate and cannot wrap
   itself. The pass is deliberately **not tracked** — entering a tracked scope resets dependencies
-  and clears the dirty flag, which would unsubscribe the frame loop from pending wakes.
+  and clears the dirty flag, which would unsubscribe the frame loop from pending wakes. Desktop
+  forwards the secondary mouse button as `PointerButton::Secondary` through a delivery-latched
+  gate — an Up dispatches iff its Down did — guaranteeing every Down/Up pair reaches `AppTree`
+  paired even under pointer capture.
 - **Window metrics** (logical size, scale, derived orientation, insets snapshot) are published
   from the points where the window's shape actually changes, guarded by the shared
   `WindowMetricsPublisher` against per-frame churn (see
