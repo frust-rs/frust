@@ -86,6 +86,13 @@ pub struct DashPattern {
     pub phase: f64,
 }
 
+/// Minimum total dash period (on + off) in logical pixels for a pattern to be
+/// rendered as dashed. Below this, the dash segments would be too small to see
+/// and the period becomes too dense to efficiently expand at encode time, so
+/// the pattern falls back to a solid stroke. This is the threshold below which
+/// a dash pattern is visually indistinguishable from a solid stroke anyway.
+const DASH_PERIOD_EPSILON: f64 = 0.1;
+
 impl DashPattern {
     /// An `on`/`off` cycle starting at phase 0.
     pub const fn new(on: f64, off: f64) -> Self {
@@ -107,13 +114,17 @@ impl DashPattern {
     /// A non-positive or non-finite length has no dashed interpretation (a zero
     /// `off` is a solid line; a zero `on` paints nothing, which a caller never
     /// means by "dashed"), so `frust-render` strokes such a path solid rather
-    /// than feeding a degenerate cycle to the dash iterator.
+    /// than feeding a degenerate cycle to the dash iterator. Additionally, a
+    /// period (on + off) smaller than [`DASH_PERIOD_EPSILON`] is too dense to
+    /// efficiently expand at encode time and is visually indistinguishable from
+    /// a solid stroke anyway, so the pattern falls back to solid.
     pub fn is_effective(&self) -> bool {
         self.on.is_finite()
             && self.off.is_finite()
             && self.phase.is_finite()
             && self.on > 0.0
             && self.off > 0.0
+            && (self.on + self.off) >= DASH_PERIOD_EPSILON
     }
 }
 
@@ -401,5 +412,30 @@ mod tests {
                 .with_phase(f64::NAN)
                 .is_effective()
         );
+    }
+
+    #[test]
+    fn tiny_period_dash_patterns_are_not_effective() {
+        // A pattern with a vanishingly small period (on + off) below the
+        // epsilon is not effective, falling back to solid stroke. This prevents
+        // the dash iterator from expanding into astronomically many segments.
+        assert!(!DashPattern::new(1e-9, 1e-9).is_effective());
+        assert!(!DashPattern::new(0.01, 0.01).is_effective()); // period 0.02 < 0.1
+        assert!(!DashPattern::new(0.04, 0.05).is_effective()); // period 0.09 < 0.1
+    }
+
+    #[test]
+    fn dash_pattern_at_epsilon_boundary_is_effective() {
+        // At the epsilon boundary, the pattern is exactly effective (not strict <).
+        assert!(DashPattern::new(0.05, 0.05).is_effective()); // period exactly 0.1
+        assert!(DashPattern::new(0.03, 0.07).is_effective()); // period exactly 0.1
+    }
+
+    #[test]
+    fn normal_dash_patterns_remain_effective() {
+        // Normal-sized patterns well above epsilon remain effective.
+        assert!(DashPattern::new(1.0, 0.5).is_effective());
+        assert!(DashPattern::new(4.0, 2.0).is_effective());
+        assert!(DashPattern::new(10.0, 10.0).is_effective());
     }
 }
