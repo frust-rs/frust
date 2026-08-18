@@ -18,6 +18,15 @@
 //! [`crate::overlay::modal`]'s chrome, configured here; this module contributes
 //! the side mapping and the slot vocabulary.
 //!
+//! # No swipe-to-dismiss
+//!
+//! `SheetContent` is a Radix **dialog**, not vaul's drawer: upstream it has no
+//! drag gesture at all, so this port leaves [`crate::overlay::ModalConfig`]'s
+//! `drag` off and the panel is dismissed by the scrim, the close X, or Escape
+//! only. What it does inherit from the shared host is the **staged exit** —
+//! every one of those three reverses the `slide-in-from-<side>` it entered with
+//! before the dismissal fires (see [`crate::overlay::modal`]).
+//!
 //! # Slots
 //!
 //! Same child-composing shape as [`crate::dialog`]'s (see its module docs), with
@@ -156,10 +165,20 @@ impl<State: 'static> SheetView<State> {
         self
     }
 
-    /// Set the dismiss callback — a scrim tap, the close X, or Escape.
-    /// [`show_sheet`] wires this to `controller.pop()`.
+    /// Set the **unstaged** dismiss callback — a scrim tap, the close X, or
+    /// Escape — used only when no [`on_close`](Self::on_close) hook is wired
+    /// (see [`crate::overlay::modal`]'s exit-motion contract). [`show_sheet`]
+    /// wires both.
     pub fn on_dismiss<F: Fn(&mut State) + 'static>(mut self, on_dismiss: F) -> Self {
         self.inner = self.inner.on_dismiss(on_dismiss);
+        self
+    }
+
+    /// Set the state-free close hook fired once the exit ramp has settled —
+    /// what a `Stack`-mounted sheet wires instead of `on_dismiss` to animate
+    /// out. [`show_sheet`] wires this to `controller.pop()`.
+    pub fn on_close<F: Fn() + 'static>(mut self, on_close: F) -> Self {
+        self.inner = self.inner.on_close(on_close);
         self
     }
 }
@@ -207,7 +226,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::overlay::modal::tests::{Block, Recorder, WINDOW, ft_ms, pointer};
+    use crate::overlay::modal::tests::{Block, Recorder, WINDOW, escape, ft_ms, pointer};
     use crate::overlay::modal::{EDGE_FRACTION, MAX_WIDTH_SM};
     use frust::authoring::{
         BoxConstraints, EventCtx, InputEvent, LayoutCtx, PaintCtx, Point, PointerPhase, Size,
@@ -215,6 +234,7 @@ mod tests {
     };
     use frust::{Brightness, FrameTime};
     use std::any::Any;
+    use std::cell::Cell;
 
     #[derive(Default)]
     struct Flags {
@@ -336,6 +356,66 @@ mod tests {
         assert_eq!(color, theme.scheme().outline);
         assert!(bbox.width() < 1e-9, "a vertical rule, not a rectangle");
         assert!((bbox.x0 - w.panel_rect().x0 - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn every_side_reverses_its_own_slide_before_closing_and_none_of_them_drags() {
+        for side in [
+            SheetSide::Top,
+            SheetSide::Right,
+            SheetSide::Bottom,
+            SheetSide::Left,
+        ] {
+            let closed = Rc::new(Cell::new(0u32));
+            let hook = closed.clone();
+            let mut w = build(&sample(side).on_close(move || hook.set(hook.get() + 1)));
+            layout(&mut w);
+            settle(&mut w);
+            let open = w.panel_rect();
+            let mut state = Flags::default();
+
+            // A drag on the panel is inert here — the sheet is dialog-family.
+            let c = open.center();
+            dispatch(&mut w, &mut state, &pointer(PointerPhase::Down, c.x, c.y));
+            dispatch(
+                &mut w,
+                &mut state,
+                &pointer(PointerPhase::Move, c.x + 80.0, c.y + 80.0),
+            );
+            assert_eq!(w.panel_rect(), open, "{side:?} does not follow a drag");
+            dispatch(
+                &mut w,
+                &mut state,
+                &pointer(PointerPhase::Up, c.x + 80.0, c.y + 80.0),
+            );
+            assert_eq!(closed.get(), 0, "and a released drag dismisses nothing");
+
+            // Escape stages the exit: the panel slides back out of its edge
+            // before the close fires.
+            dispatch(&mut w, &mut state, &escape());
+            assert_eq!(closed.get(), 0, "deferred behind the ramp");
+            let paint = |w: &mut ModalWidget, ms: f64| {
+                let mut ctx = PaintCtx::for_test(Point::ORIGIN, WINDOW, ft_ms(ms));
+                w.paint(&mut ctx, &mut Recorder::default());
+                layout(w);
+            };
+            paint(&mut w, 3000.0);
+            paint(&mut w, 3000.0 + 250.0);
+            let mid = w.panel_rect();
+            assert!(
+                w.progress() > 0.0 && w.progress() < 1.0,
+                "{side:?} mid-exit"
+            );
+            match side {
+                SheetSide::Top => assert!(mid.y0 < open.y0),
+                SheetSide::Bottom => assert!(mid.y0 > open.y0),
+                SheetSide::Left => assert!(mid.x0 < open.x0),
+                SheetSide::Right => assert!(mid.x0 > open.x0),
+            }
+            paint(&mut w, 5000.0);
+            assert_eq!(closed.get(), 1, "{side:?} closed at the settle");
+            assert_eq!(state.dismissed, 0);
+        }
     }
 
     #[test]

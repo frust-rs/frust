@@ -29,13 +29,22 @@
 //! * the **close button** — the `absolute top-4 right-4` X, when
 //!   [`ModalConfig::close_button`] is on;
 //! * the **drag handle** — the drawer's `h-2 w-[100px]` bar, when
-//!   [`ModalConfig::handle`] is on. It is a *button* in v1: press and release on
-//!   it dismisses. Drag-to-close (vaul's own gesture) is deferred.
+//!   [`ModalConfig::handle`] is on. A press and release on it dismisses; with
+//!   [`ModalConfig::drag`] on it is also the drag affordance (below).
 //!
 //! plus **Escape**, once the modal holds focus — claimed on every `Down`, the
 //! `frust_material::dialog` opt-in, with the same documented gap: there is no
 //! auto-focus-on-appear hook in the framework, so a caller must complete one
 //! pointer interaction with the modal before Escape does anything.
+//!
+//! # The barrier swallows keys too
+//!
+//! The panel is a modal barrier for *every* input class, not just pointers: a
+//! key the content did not take is reported [`EventResult::Handled`] rather
+//! than falling through to whatever sits behind the modal. Content-first
+//! routing is unchanged — a focused field inside the panel sees every
+//! keystroke, and only what it declines reaches the barrier, where Escape
+//! dismisses and everything else is absorbed.
 //!
 //! # Entrance motion
 //!
@@ -50,23 +59,72 @@
 //! scrim fades with either.
 //!
 //! `Theme.motion.reduce_motion` collapses both to a jump: the ramp is stopped
-//! and progress snaps to `1.0` on the first paint, one frame after the modal
-//! mounts (the pass that sets it is a paint, and the geometry it feeds is a
-//! layout) — so a reduced-motion modal appears whole on its second frame rather
-//! than animating on its first.
+//! and progress snaps to its rest value on the first paint, one frame after the
+//! modal mounts (the pass that sets it is a paint, and the geometry it feeds is
+//! a layout) — so a reduced-motion modal appears whole on its second frame
+//! rather than animating on its first.
+//!
+//! # Exit motion, and why the close hook is state-free
+//!
+//! Every dismiss trigger — scrim tap, Escape, the close X, the handle, a
+//! drag past its threshold — stages an **exit** instead of firing the app's
+//! dismissal on the spot: the same `progress` ramp runs back down to `0.0`
+//! (fade-zoom reverses its alpha and scale, a slide reverses its edge offset,
+//! the scrim fades with either), the barrier keeps swallowing input the whole
+//! way, a second trigger mid-exit is a no-op, and only when the ramp settles is
+//! the dismissal fired — from `paint`, which is sound because
+//! [`NavigatorController::pop`] merely *enqueues* an op applied on the next
+//! rebuild (the `frust_material::sheet`/`frust_glyph::dialog` precedent; the
+//! same paint asks for one more frame so that rebuild is guaranteed to come).
+//!
+//! Firing from paint is why the staged path's callback is
+//! [`ModalView::on_close`] — a plain `Fn()` — and not the `Fn(&mut State)`
+//! [`ModalView::on_dismiss`] takes: `PaintCtx` carries no app state.
+//! [`show_modal`] wires `on_close` to `controller.pop()` for every component,
+//! so the navigator path animates out with no app involvement, and app state
+//! rides the navigator's own `on_result` (delivered with `&mut State` after the
+//! pop) exactly as before. **A modal with no `on_close` wired** — a `Stack`
+//! mount that only set `on_dismiss` — keeps the immediate, unstaged dismissal:
+//! there is no state-bearing pass to defer into, so staging one would leave an
+//! invisible barrier standing. `reduce_motion` collapses the exit the same way
+//! it collapses the entrance: progress jumps to `0.0` on the next paint and the
+//! close fires there, with no ramp.
+//!
+//! # Drag-to-close and snap points (the drawer's gesture)
+//!
+//! [`ModalConfig::drag`] turns an edge-pinned panel into vaul's draggable
+//! drawer: a press on the handle — or anywhere on the panel the content did not
+//! take — captures, each move scrubs `progress` along the panel's own axis so
+//! the panel tracks the pointer (the scrim dims with it), and the release picks
+//! the nearest resting point, with a fast flick ([`FLING_VELOCITY`]) nudging to
+//! the next one in the direction of travel. Landing on `0.0` continues into the
+//! exit ramp above rather than snapping shut. A press that never passes
+//! [`TOUCH_SLOP`] is a *tap*: on the handle it dismisses, anywhere else it is
+//! swallowed like any other barrier press.
+//!
+//! [`ModalView::snap_points`] is Base UI's contract: a value in `0..=1` is a
+//! fraction of the panel's own extent, a value above `1` is logical px. The
+//! drawer opens to the **first** point (fully open with none given), and the
+//! resting set the release snaps to is those points plus `0.0` (closed) — so
+//! with no snap points at all the two candidates are `0.0` and `1.0` and
+//! "nearest" is exactly the conventional drag-past-the-midpoint commit.
+//! The panel is laid out at its full extent and translated to expose the
+//! active fraction (vaul's own transform model), so a partially-open drawer
+//! carries a proportionally lighter scrim rather than a full-strength one.
 
 use std::rc::Rc;
 use std::time::Duration;
 
 use frust::authoring::{
     Affine, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
-    ErasedCallback, EventCtx, EventResult, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx,
-    PaintScene, Point, PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size,
+    CursorIcon, ErasedCallback, EventCtx, EventResult, InputEvent, Key, LayoutCtx, NamedKey,
+    PaintCtx, PaintScene, Point, PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size,
     ThemeTextColor, View, Widget, any, build_child, erase_callback, rebuild_child,
     route_event_single, teardown_child, text::FontWeight, visit_children,
 };
+use frust::input::{TOUCH_SLOP, VelocityTracker};
 use frust::{
-    AnimationController, CrossAxisAlignment, Curve, EdgeInsets, FlexChild, FlexView,
+    AnimationController, CrossAxisAlignment, Curve, EdgeInsets, FlexChild, FlexView, FrameTime,
     NavigatorController, Padding, PopResult, SizedBox, Theme, TransitionSpec, flexible, inflexible,
     text,
 };
@@ -98,8 +156,19 @@ const FADE_ZOOM_MS: u64 = 200;
 const SLIDE_MS: u64 = 500;
 /// `zoom-in-95`: the scale a fade-zoom entrance starts from.
 const ZOOM_FROM: f64 = 0.95;
-/// Progress difference below which an entrance counts as settled.
+/// Progress difference below which a ramp counts as settled.
 const PROGRESS_EPSILON: f64 = 1e-4;
+
+/// Release speed, in logical px/s along the drag axis, at or above which a
+/// drawer drag commits in the direction it was flung rather than to whichever
+/// resting point is nearest.
+///
+/// **Community-approximate**: the drag gesture is vaul's runtime behavior, not
+/// a Tailwind class, so the vendored class list pins no value for it. 400 px/s
+/// (0.4 px/ms) is a deliberate flick — an order of magnitude above
+/// `frust::input::FLING_STOP`'s 30 px/s "this fling is over" floor, and well
+/// under the speed of a full-screen swipe.
+pub const FLING_VELOCITY: f64 = 400.0;
 
 /// `top-4 right-4` — the close button's inset from the panel's top/right edges.
 const CLOSE_INSET: f64 = 16.0;
@@ -306,6 +375,11 @@ pub struct ModalConfig {
     pub close_button: bool,
     /// Whether the drag-handle bar is shown (and dismisses on release).
     pub handle: bool,
+    /// Whether the panel can be dragged along its own edge axis to close — the
+    /// drawer's gesture (see the [module docs](self)). Meaningful only for a
+    /// [`ModalGeometry::Edge`] panel; the dialog family and the sheet leave it
+    /// off, matching their Radix-dialog sources.
+    pub drag: bool,
     /// The accessibility role.
     pub role: ModalRole,
 }
@@ -323,6 +397,7 @@ impl ModalConfig {
             scrim_dismiss: true,
             close_button: false,
             handle: false,
+            drag: false,
             role: ModalRole::Dialog,
         }
     }
@@ -355,6 +430,7 @@ impl ModalConfig {
             scrim_dismiss: true,
             close_button: false,
             handle: false,
+            drag: false,
             role: ModalRole::Dialog,
         }
     }
@@ -416,6 +492,12 @@ impl ModalConfig {
         self
     }
 
+    /// Enable or disable drag-to-close (see [`ModalConfig::drag`]).
+    pub fn drag(mut self, drag: bool) -> Self {
+        self.drag = drag;
+        self
+    }
+
     /// Set the accessibility role.
     pub fn role(mut self, role: ModalRole) -> Self {
         self.role = role;
@@ -426,13 +508,24 @@ impl ModalConfig {
 /// A view-held, typed dismiss callback (erased on build).
 type OnDismiss<State> = Rc<dyn Fn(&mut State)>;
 
+/// A state-free close hook, fired from `paint` when an exit ramp settles (see
+/// the [module docs](self)).
+pub type OnClose = Rc<dyn Fn()>;
+
 /// A modal component that [`show_modal`] can wire a navigator pop into.
 ///
 /// Every modal builder in the catalog implements it by storing the callback in
 /// its own `on_dismiss` slot; the trait exists so one push helper serves all
 /// five rather than each component re-deriving the same
 /// `push_transparent_for_result` call.
-pub trait ModalContent<State: 'static>: View<State> + Sized + 'static {
+///
+/// Its element is the shared [`ModalWidget`] by definition — a modal component
+/// *is* a pre-configured modal host — which is what lets [`show_modal`] install
+/// the staged-exit close hook on whatever component it was handed without a
+/// per-component setter.
+pub trait ModalContent<State: 'static>:
+    View<State, Element = ModalWidget> + Sized + 'static
+{
     /// Install the dismiss callback, replacing any the builder already set.
     fn on_modal_dismiss(self, on_dismiss: OnDismiss<State>) -> Self;
 }
@@ -450,6 +543,8 @@ pub fn modal<State: 'static, V: View<State>>(content: V, config: ModalConfig) ->
         config,
         label: None,
         on_dismiss: None,
+        on_close: None,
+        snap_points: Vec::new(),
     }
 }
 
@@ -464,6 +559,8 @@ pub struct ModalView<State: 'static> {
     pub(crate) config: ModalConfig,
     pub(crate) label: Option<String>,
     pub(crate) on_dismiss: Option<OnDismiss<State>>,
+    pub(crate) on_close: Option<OnClose>,
+    pub(crate) snap_points: Vec<f64>,
 }
 
 impl<State: 'static> ModalView<State> {
@@ -473,10 +570,30 @@ impl<State: 'static> ModalView<State> {
         self
     }
 
-    /// Set the dismiss callback — a scrim tap, the close X, the handle, or
-    /// Escape. [`show_modal`] wires this to `controller.pop()`.
+    /// Set the **unstaged** dismiss callback — a scrim tap, the close X, the
+    /// handle, or Escape, delivered with `&mut State` during the event pass.
+    ///
+    /// Used only when no [`on_close`](Self::on_close) hook is wired: with one,
+    /// the dismissal is staged behind the exit ramp and fired from `paint`,
+    /// where no app state exists (see the [module docs](self)).
     pub fn on_dismiss<F: Fn(&mut State) + 'static>(mut self, on_dismiss: F) -> Self {
         self.on_dismiss = Some(Rc::new(on_dismiss));
+        self
+    }
+
+    /// Set the state-free close hook fired when the exit ramp settles — the
+    /// staged-dismissal path. [`show_modal`] wires this to `controller.pop()`;
+    /// a `Stack`-mounted modal wires its own (a signal write, a navigator pop).
+    pub fn on_close<F: Fn() + 'static>(mut self, on_close: F) -> Self {
+        self.on_close = Some(Rc::new(on_close));
+        self
+    }
+
+    /// Set the drawer's snap points: `0..=1` a fraction of the panel's own
+    /// extent, above `1` logical px (Base UI's contract — see the
+    /// [module docs](self)). The panel opens to the first point.
+    pub fn snap_points(mut self, points: &[f64]) -> Self {
+        self.snap_points = points.to_vec();
         self
     }
 }
@@ -496,8 +613,14 @@ impl<State: 'static> ModalContent<State> for ModalView<State> {
 /// [`PopResult`], overriding any `on_dismiss` the builder set); an action inside
 /// the content pops with a value via `controller.pop_with_result(..)`. The
 /// navigator transition is [`TransitionSpec::NONE`] on purpose: the modal stages
-/// its own entrance ([`ModalEntrance`]), so a page transition on top of it would
-/// animate the same thing twice.
+/// its own entrance *and exit* ([`ModalEntrance`]), so a page transition on top
+/// of it would animate the same thing twice.
+///
+/// The pop is wired **twice, by design**: as the staged
+/// [`ModalView::on_close`] hook the exit ramp fires on settle (the path every
+/// dismissal actually takes here), and as the unstaged
+/// [`ModalContent::on_modal_dismiss`] callback, which only runs for a config
+/// with no entrance to reverse. Exactly one of the two fires per dismissal.
 pub fn show_modal<State, V, B, R>(controller: &NavigatorController<State>, build: B, on_result: R)
 where
     State: 'static,
@@ -506,14 +629,57 @@ where
     R: Fn(&mut State, PopResult) + 'static,
 {
     let dismiss_ctrl = controller.clone();
+    let close_ctrl = controller.clone();
     controller.push_transparent_for_result(
         move || {
             let ctrl = dismiss_ctrl.clone();
-            any::<State, _>(build().on_modal_dismiss(Rc::new(move |_state: &mut State| ctrl.pop())))
+            let close = close_ctrl.clone();
+            any::<State, _>(StagedExit {
+                inner: build().on_modal_dismiss(Rc::new(move |_state: &mut State| ctrl.pop())),
+                on_close: Rc::new(move || close.pop()) as OnClose,
+            })
         },
         TransitionSpec::NONE,
         on_result,
     );
+}
+
+/// A modal component with the staged-exit close hook installed on the
+/// [`ModalWidget`] it builds.
+///
+/// [`show_modal`] is generic over all five modal components, so it cannot reach
+/// the [`ModalView`] each of them wraps privately; every one of them *does*
+/// build the shared [`ModalWidget`] ([`ModalContent`]'s element bound), so this
+/// thin pass-through installs the hook on the built widget instead — the same
+/// place [`ModalView`]'s own `on_close` lands, and last writer wins.
+struct StagedExit<V> {
+    inner: V,
+    on_close: OnClose,
+}
+
+impl<State: 'static, V: View<State, Element = ModalWidget>> View<State> for StagedExit<V> {
+    type Element = ModalWidget;
+
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> ModalWidget {
+        let mut widget = self.inner.build(ctx);
+        widget.on_close = Some(self.on_close.clone());
+        widget
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut ModalWidget,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        let flags = self.inner.rebuild(&prev.inner, element, ctx);
+        element.on_close = Some(self.on_close.clone());
+        flags
+    }
+
+    fn teardown(&self, element: &mut ModalWidget, ctx: &mut BuildCtx<'_>) {
+        self.inner.teardown(element, ctx);
+    }
 }
 
 /// Interleave `children` with `gap`-sized spacers, as inflexible flex children.
@@ -609,15 +775,24 @@ pub struct ModalWidget {
     config: ModalConfig,
     label: Option<String>,
     on_dismiss: Option<ErasedCallback>,
+    /// The state-free close hook the exit ramp fires on settle (see the module
+    /// docs); `None` leaves dismissal unstaged.
+    on_close: Option<OnClose>,
+    /// The drawer's resting points, as authored (see [`ModalView::snap_points`]).
+    snap_points: Vec<f64>,
     /// The panel rect in the widget's own coordinate space (computed at layout,
     /// hit-tested at event time).
     panel: Rect,
-    /// The entrance ramp, and the progress `layout` last used.
+    /// The ramp driver, the endpoints it interpolates between, and the progress
+    /// `layout` last used: `progress = from + (to − from) · anim.value()`.
     anim: AnimationController,
+    ramp: (f64, f64),
     progress: f64,
     /// Whether the first paint has seeded the ramp (see the module docs'
     /// `reduce_motion` note).
     started: bool,
+    /// Whether the running ramp ends in a dismissal.
+    exiting: bool,
     /// A scrim/panel-background press is in flight (the modal barrier).
     scrim_captured: bool,
     /// Whether that press started outside the panel — only an outside press
@@ -629,6 +804,19 @@ pub struct ModalWidget {
     /// The drag handle's latched hover/press state.
     handle_hovered: bool,
     handle_captured: bool,
+    /// A drag along the panel's own axis is in flight, where it started (axis
+    /// position and the progress it began from), whether it began on the handle,
+    /// and whether it has passed [`TOUCH_SLOP`] into a real drag.
+    drag_captured: bool,
+    drag_start: f64,
+    drag_from: f64,
+    drag_on_handle: bool,
+    drag_moved: bool,
+    /// The release-velocity estimator, clocked from the last painted frame —
+    /// pointer events carry no timestamp of their own (`frust_widgets::scroll`'s
+    /// precedent).
+    tracker: VelocityTracker,
+    last_frame_time: FrameTime,
 }
 
 impl ModalWidget {
@@ -659,10 +847,263 @@ impl ModalWidget {
         })
     }
 
-    /// The entrance ramp's progress: `0.0` off-screen/transparent, `1.0` at
-    /// rest.
+    /// The ramp's progress: `0.0` off-screen/transparent, `1.0` fully shown.
     pub fn progress(&self) -> f64 {
         self.progress
+    }
+
+    /// Whether an exit ramp is running (the panel is on its way out, and the
+    /// barrier is still swallowing input).
+    pub fn is_exiting(&self) -> bool {
+        self.exiting
+    }
+
+    /// The progress an open panel rests at: the first snap point, or fully
+    /// open with none authored.
+    pub fn open_progress(&self) -> f64 {
+        self.snap_points
+            .first()
+            .map_or(1.0, |p| self.normalize_snap(*p))
+    }
+
+    /// A snap point in progress space: `0..=1` is already a fraction of the
+    /// panel's extent, anything larger is logical px against that extent
+    /// (Base UI's contract). Clamped into `0..=1`, and treated as fully open
+    /// while no extent has been laid out yet.
+    fn normalize_snap(&self, point: f64) -> f64 {
+        if point <= 1.0 {
+            return point.clamp(0.0, 1.0);
+        }
+        let extent = self.extent();
+        if extent <= 0.0 {
+            return 1.0;
+        }
+        (point / extent).clamp(0.0, 1.0)
+    }
+
+    /// The resting points a release snaps to, ascending: every snap point plus
+    /// `0.0` (closed). With none authored the set is `{0.0, 1.0}`, so "nearest"
+    /// is the drag-past-the-midpoint commit.
+    fn snap_targets(&self) -> Vec<f64> {
+        let mut targets: Vec<f64> = std::iter::once(0.0)
+            .chain(self.snap_points.iter().map(|p| self.normalize_snap(*p)))
+            .collect();
+        if targets.len() == 1 {
+            targets.push(1.0);
+        }
+        targets.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        targets
+    }
+
+    /// The panel's extent along its own slide axis (its thickness).
+    fn extent(&self) -> f64 {
+        match self.config.geometry {
+            ModalGeometry::Edge { side, .. } if side.is_vertical() => self.panel.height(),
+            ModalGeometry::Edge { .. } => self.panel.width(),
+            ModalGeometry::Centered { .. } => 0.0,
+        }
+    }
+
+    /// The panel's slide axis, and which way along it closes: `+1.0` when the
+    /// panel leaves toward growing coordinates (bottom/right), `-1.0` otherwise.
+    fn close_sign(&self) -> f64 {
+        match self.config.geometry {
+            ModalGeometry::Edge {
+                side: OverlaySide::Bottom | OverlaySide::Right,
+                ..
+            } => 1.0,
+            _ => -1.0,
+        }
+    }
+
+    /// `position` projected onto the panel's slide axis.
+    fn axis_pos(&self, position: Point) -> f64 {
+        match self.config.geometry {
+            ModalGeometry::Edge { side, .. } if side.is_vertical() => position.y,
+            _ => position.x,
+        }
+    }
+
+    /// The last painted frame time in milliseconds — the event pass's clock,
+    /// since a pointer event carries none.
+    fn event_time_ms(&self) -> f64 {
+        self.last_frame_time.as_secs_f64() * 1000.0
+    }
+
+    /// Whether this modal can be dismissed at all (either channel wired).
+    fn dismissable(&self) -> bool {
+        self.on_dismiss.is_some() || self.on_close.is_some()
+    }
+
+    /// Start a ramp from the current progress to `to`, over the entrance's own
+    /// duration scaled by how much of the travel is left (a half-open panel
+    /// closes in half the time) and eased by its own curve.
+    fn begin_ramp(&mut self, to: f64, exiting: bool) {
+        let from = self.progress;
+        self.ramp = (from, to);
+        self.exiting = exiting;
+        let fraction = (to - from).abs().clamp(0.0, 1.0);
+        let duration = self.config.entrance.duration().mul_f64(fraction);
+        self.anim = AnimationController::new(duration).with_curve(self.config.entrance.curve());
+        self.anim.forward();
+        self.started = true;
+    }
+
+    /// The progress the running ramp is at.
+    fn ramp_value(&self) -> f64 {
+        let (from, to) = self.ramp;
+        from + (to - from) * self.anim.value_clamped()
+    }
+
+    /// Ask for the pass a moving ramp needs: a relayout when the motion moves
+    /// the panel's geometry (`request_layout` implies a frame), a bare frame
+    /// otherwise.
+    fn request_continuation(&self, ctx: &mut PaintCtx) {
+        if self.config.entrance.is_layout_affecting() {
+            ctx.request_layout();
+        } else {
+            ctx.request_frame();
+        }
+    }
+
+    /// Stage the dismissal: run the entrance ramp backwards and fire the close
+    /// hook when it settles.
+    ///
+    /// Falls back to firing [`ModalView::on_dismiss`] on the spot when there is
+    /// nothing to stage — no close hook to fire from `paint`, or no entrance to
+    /// reverse. A trigger arriving while an exit is already running is a no-op.
+    fn request_dismiss(&mut self, ctx: &mut EventCtx) {
+        if self.exiting {
+            return;
+        }
+        let stageable = self.on_close.is_some() && self.config.entrance != ModalEntrance::None;
+        if !stageable {
+            if let Some(on_dismiss) = self.on_dismiss.as_mut() {
+                on_dismiss(ctx);
+            } else if let Some(on_close) = &self.on_close {
+                on_close();
+            }
+            return;
+        }
+        self.begin_ramp(0.0, true);
+        ctx.request_redraw();
+    }
+
+    /// Move the panel to `progress` without animating — the drag scrub. The
+    /// panel keeps the extent layout gave it and only its origin moves, so no
+    /// relayout is owed.
+    ///
+    /// A live drag takes the panel over from whatever ramp was running,
+    /// including an exit: catching a closing drawer cancels its dismissal, and
+    /// the release decides again from where the finger left it.
+    fn scrub(&mut self, ctx: &mut EventCtx, progress: f64) {
+        if (progress - self.progress).abs() < PROGRESS_EPSILON {
+            return;
+        }
+        self.anim.stop();
+        self.exiting = false;
+        self.progress = progress;
+        self.ramp = (progress, progress);
+        self.reposition(ctx.size());
+        ctx.request_redraw();
+    }
+
+    /// Re-place an edge-pinned panel (and its content) for the current
+    /// progress, inside an area of `area`.
+    fn reposition(&mut self, area: Size) {
+        let ModalGeometry::Edge { side, .. } = self.config.geometry else {
+            return;
+        };
+        let size = self.panel.size();
+        let origin = edge_origin(side, area, size, self.progress);
+        self.panel = Rect::from_origin_size(origin, size);
+        self.content.set_origin(origin);
+    }
+
+    /// Open a drag from `position`, remembering where along the axis it started
+    /// and what progress it started from.
+    fn begin_drag(&mut self, ctx: &mut EventCtx, position: Point, on_handle: bool) {
+        self.drag_captured = true;
+        self.drag_on_handle = on_handle;
+        self.drag_moved = false;
+        self.drag_start = self.axis_pos(position);
+        self.drag_from = self.progress;
+        self.tracker.clear();
+        self.tracker.record(self.event_time_ms(), self.drag_start);
+        ctx.capture_pointer();
+    }
+
+    /// Track a captured drag: sample the velocity, and once the gesture has
+    /// passed [`TOUCH_SLOP`] scrub the panel to follow the pointer.
+    ///
+    /// The scrub measures from the `Down`, slop included — unlike
+    /// `frust_widgets::scroll`, which re-baselines when it *takes the gesture
+    /// over* from a child. Nothing is taken over here (the panel captured the
+    /// press outright; the slop only separates a tap from a drag), so
+    /// re-baselining would leave the panel trailing the finger by 18px for the
+    /// rest of the gesture.
+    fn drag_move(&mut self, ctx: &mut EventCtx, position: Point) {
+        let axis = self.axis_pos(position);
+        self.tracker.record(self.event_time_ms(), axis);
+        let delta = axis - self.drag_start;
+        if !self.drag_moved && delta.abs() > TOUCH_SLOP {
+            self.drag_moved = true;
+        }
+        if !self.drag_moved {
+            return;
+        }
+        let extent = self.extent();
+        if extent <= 0.0 {
+            return;
+        }
+        // Dragging toward the closing edge lowers progress; the panel can be
+        // pushed no further open than its own furthest resting point.
+        let open = self.snap_targets().last().copied().unwrap_or(1.0);
+        let target = self.drag_from - self.close_sign() * delta / extent;
+        self.scrub(ctx, target.clamp(0.0, open));
+    }
+
+    /// The resting point a release settles to: the nearest one, or — past
+    /// [`FLING_VELOCITY`] — the next one along the direction of travel.
+    fn release_target(&self, velocity: f64) -> f64 {
+        let targets = self.snap_targets();
+        let nearest = |p: f64| {
+            targets
+                .iter()
+                .copied()
+                .min_by(|a, b| {
+                    (a - p)
+                        .abs()
+                        .partial_cmp(&(b - p).abs())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or(0.0)
+        };
+        if velocity.abs() >= FLING_VELOCITY {
+            // A flick toward the closing edge takes the next point down, one
+            // away from it the next point up.
+            let opening = velocity * self.close_sign() < 0.0;
+            let next = if opening {
+                targets.iter().copied().find(|t| *t > self.progress)
+            } else {
+                targets.iter().rev().copied().find(|t| *t < self.progress)
+            };
+            if let Some(next) = next {
+                return next;
+            }
+        }
+        nearest(self.progress)
+    }
+
+    /// Settle a released drag: continue into the exit ramp when it landed
+    /// closed, otherwise ramp back to the point it snapped to.
+    fn settle_drag(&mut self, ctx: &mut EventCtx, target: f64) {
+        if target <= PROGRESS_EPSILON {
+            self.request_dismiss(ctx);
+        } else {
+            self.begin_ramp(target, false);
+            ctx.request_redraw();
+        }
     }
 
     /// The handle's painted bar (a subset of its hit box — see [`CLOSE_HIT`]).
@@ -674,13 +1115,6 @@ impl ModalWidget {
             ),
             Size::new(HANDLE_WIDTH, HANDLE_HEIGHT),
         )
-    }
-
-    /// Fire the dismiss callback, if one is wired.
-    fn dismiss(&mut self, ctx: &mut EventCtx) {
-        if let Some(on_dismiss) = self.on_dismiss.as_mut() {
-            on_dismiss(ctx);
-        }
     }
 }
 
@@ -694,17 +1128,31 @@ impl<State: 'static> View<State> for ModalView<State> {
             config: self.config,
             label: self.label.clone(),
             on_dismiss: self.on_dismiss.as_ref().map(erase_callback),
+            on_close: self.on_close.clone(),
+            snap_points: self.snap_points.clone(),
             panel: Rect::ZERO,
             anim: AnimationController::new(self.config.entrance.duration())
                 .with_curve(self.config.entrance.curve()),
+            // The entrance's target resolves on the first paint, not here: a
+            // snap point in logical px needs the extent layout has yet to
+            // measure.
+            ramp: (0.0, 1.0),
             progress: if settled { 1.0 } else { 0.0 },
             started: settled,
+            exiting: false,
             scrim_captured: false,
             scrim_down_outside: false,
             close_hovered: false,
             close_captured: false,
             handle_hovered: false,
             handle_captured: false,
+            drag_captured: false,
+            drag_start: 0.0,
+            drag_from: 0.0,
+            drag_on_handle: false,
+            drag_moved: false,
+            tracker: VelocityTracker::new(),
+            last_frame_time: FrameTime::ZERO,
         }
     }
 
@@ -723,9 +1171,18 @@ impl<State: 'static> View<State> for ModalView<State> {
             element.label = self.label.clone();
             flags |= ChangeFlags::PAINT;
         }
-        // Closures aren't comparable, so the dismiss adapter is reinstalled
-        // unconditionally (cheap — what every interactive widget does).
+        if element.snap_points != self.snap_points {
+            element.snap_points = self.snap_points.clone();
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        // Closures aren't comparable, so both dismiss adapters are reinstalled
+        // unconditionally (cheap — what every interactive widget does). A
+        // `None` here never clears a hook `show_modal`'s own pass-through
+        // installed: that wrapper reinstalls after this rebuild returns.
         element.on_dismiss = self.on_dismiss.as_ref().map(erase_callback);
+        if self.on_close.is_some() {
+            element.on_close = self.on_close.clone();
+        }
         flags
     }
 
@@ -801,19 +1258,32 @@ fn layout_panel(
             if extent != ModalExtent::Content {
                 content.layout_child(ctx, &BoxConstraints::tight(size));
             }
-            // The slide: at `progress == 0` the panel sits entirely outside its
-            // own edge, at `1.0` it is flush against it.
-            let out = thickness * (1.0 - progress);
-            let origin = match side {
-                OverlaySide::Top => Point::new(0.0, -out),
-                OverlaySide::Bottom => Point::new(0.0, area.height - thickness + out),
-                OverlaySide::Left => Point::new(-out, 0.0),
-                OverlaySide::Right => Point::new(area.width - thickness + out, 0.0),
-            };
+            let origin = edge_origin(side, area, size, progress);
             let panel = Rect::from_origin_size(origin, size);
             content.set_origin(panel.origin());
             panel
         }
+    }
+}
+
+/// Where an edge-pinned panel of `size` sits inside `area` at `progress`: at
+/// `0.0` entirely outside its own edge, at `1.0` flush against it, in between
+/// the fraction of it the slide (or a drag) has brought in.
+///
+/// Shared by [`layout_panel`] and the drag scrub, which moves the panel between
+/// layout passes and must place it identically.
+fn edge_origin(side: OverlaySide, area: Size, size: Size, progress: f64) -> Point {
+    let thickness = if side.is_vertical() {
+        size.height
+    } else {
+        size.width
+    };
+    let out = thickness * (1.0 - progress);
+    match side {
+        OverlaySide::Top => Point::new(0.0, -out),
+        OverlaySide::Bottom => Point::new(0.0, area.height - thickness + out),
+        OverlaySide::Left => Point::new(-out, 0.0),
+        OverlaySide::Right => Point::new(area.width - thickness + out, 0.0),
     }
 }
 
@@ -921,9 +1391,15 @@ impl Widget for ModalWidget {
             )
         };
 
-        // Advance (or collapse) the entrance.
+        // The event pass has no clock of its own; this is the one it reads.
+        self.last_frame_time = now;
+
+        // Advance (or collapse) the running ramp. The entrance's target
+        // resolves here, on the first paint, because a snap point in logical px
+        // needs the extent the layout before it measured.
         if !self.started {
             self.started = true;
+            self.ramp = (0.0, self.open_progress());
             if !reduce_motion {
                 self.anim.forward();
             }
@@ -932,7 +1408,7 @@ impl Widget for ModalWidget {
             if self.anim.is_animating() {
                 self.anim.stop();
             }
-            1.0
+            self.ramp.1
         } else if self.anim.is_animating() {
             if self.anim.advance(now) {
                 // `advance`'s first call after `forward()` only seeds the
@@ -940,26 +1416,25 @@ impl Widget for ModalWidget {
                 // to be requested on every truthy advance, not just the ones
                 // that moved `progress`, or a slide's seeding paint never
                 // schedules the frame that would carry it off zero.
-                if self.config.entrance.is_layout_affecting() {
-                    // The slide moves the panel, so the geometry must be
-                    // recomputed — `request_layout` implies a frame.
-                    ctx.request_layout();
-                } else {
-                    // Paint-only motion (the fade/zoom): a plain frame request.
-                    ctx.request_frame();
-                }
+                self.request_continuation(ctx);
             }
-            self.anim.value_clamped()
+            self.ramp_value()
         } else {
             self.progress
         };
         if (next - self.progress).abs() > PROGRESS_EPSILON {
             self.progress = next;
-            if self.config.entrance.is_layout_affecting() {
-                // The slide moves the panel, so the geometry must be recomputed
-                // — `request_layout` implies a frame.
-                ctx.request_layout();
-            } else {
+            self.request_continuation(ctx);
+        }
+        // A settled exit is where the deferred dismissal is finally fired. The
+        // hook only *enqueues* a navigator pop (it writes no tracked signal),
+        // so this paint asks for the frame whose rebuild drains it — otherwise
+        // a `ControlFlow::Wait` desktop shell idles and the modal never leaves.
+        if self.exiting && !self.anim.is_animating() && self.progress <= PROGRESS_EPSILON {
+            self.exiting = false;
+            self.progress = 0.0;
+            if let Some(on_close) = &self.on_close {
+                on_close();
                 ctx.request_frame();
             }
         }
@@ -1070,16 +1545,28 @@ impl Widget for ModalWidget {
             ctx.request_focus();
         }
         // Content first: an action inside the panel owns its own events, and
-        // this widget's own hover claims come after the routing.
-        if route_event_single(&mut self.content, ctx, event) == EventResult::Handled {
+        // this widget's own hover claims come after the routing — *unless* this
+        // widget already holds the gesture. A capture recorded here (a barrier
+        // press, a live drag) means the content declined the `Down` that opened
+        // it, so re-routing its `Move`s would let a control the pointer happens
+        // to travel over steal a drag mid-flight. Broadcasts and focus-routed
+        // events are never short-circuited.
+        let captured = self.close_captured
+            || self.handle_captured
+            || self.scrim_captured
+            || self.drag_captured;
+        let own_gesture = captured && matches!(event, InputEvent::Pointer(_));
+        if !own_gesture && route_event_single(&mut self.content, ctx, event) == EventResult::Handled
+        {
             return EventResult::Handled;
         }
         if let InputEvent::Key(key) = event {
-            if key.key == Key::Named(NamedKey::Escape) && self.on_dismiss.is_some() {
-                self.dismiss(ctx);
-                return EventResult::Handled;
+            if key.key == Key::Named(NamedKey::Escape) && self.dismissable() {
+                self.request_dismiss(ctx);
             }
-            return EventResult::Ignored;
+            // The barrier swallows every other key too: nothing behind a modal
+            // may act on a keystroke its content declined.
+            return EventResult::Handled;
         }
         let InputEvent::Pointer(p) = event else {
             return EventResult::Ignored;
@@ -1087,8 +1574,14 @@ impl Widget for ModalWidget {
         let (close, handle) = (self.close_rect(), self.handle_rect());
         match p.phase {
             PointerPhase::Move => {
+                if self.drag_captured {
+                    // A captured drag re-asks for its cursor from its own arm,
+                    // so the shape survives the pointer leaving the panel.
+                    ctx.set_cursor(CursorIcon::Grabbing);
+                    self.drag_move(ctx, p.position);
+                    return EventResult::Handled;
+                }
                 if self.close_captured || self.handle_captured || self.scrim_captured {
-                    // A captured drag re-asks for its cursor from its own arm.
                     if self.close_captured || self.handle_captured {
                         ctx.set_cursor(style::ACTIVE_CURSOR);
                     }
@@ -1099,7 +1592,12 @@ impl Widget for ModalWidget {
                 if over_close || over_handle {
                     // Claimed *after* the content routing above.
                     ctx.claim_hover();
-                    ctx.set_cursor(style::ACTIVE_CURSOR);
+                    if over_handle && self.config.drag {
+                        // A draggable handle advertises the gesture.
+                        ctx.set_cursor(CursorIcon::Grab);
+                    } else {
+                        ctx.set_cursor(style::ACTIVE_CURSOR);
+                    }
                 }
                 if self.close_hovered != over_close {
                     self.close_hovered = over_close;
@@ -1115,6 +1613,14 @@ impl Widget for ModalWidget {
                 if hit(close, p.position) {
                     self.close_captured = true;
                     ctx.capture_pointer();
+                    return EventResult::Handled;
+                }
+                // A draggable panel takes the press as a drag — from the handle
+                // or from the panel's own surface — and still resolves it as a
+                // tap if it never moves.
+                if self.config.drag && (hit(handle, p.position) || self.panel.contains(p.position))
+                {
+                    self.begin_drag(ctx, p.position, hit(handle, p.position));
                     return EventResult::Handled;
                 }
                 if hit(handle, p.position) {
@@ -1133,15 +1639,30 @@ impl Widget for ModalWidget {
                 if self.close_captured {
                     self.close_captured = false;
                     if hit(close, p.position) {
-                        self.dismiss(ctx);
+                        self.request_dismiss(ctx);
                     }
                     return EventResult::Handled;
                 }
                 if self.handle_captured {
                     self.handle_captured = false;
                     if hit(handle, p.position) {
-                        self.dismiss(ctx);
+                        self.request_dismiss(ctx);
                     }
+                    return EventResult::Handled;
+                }
+                if self.drag_captured {
+                    self.drag_captured = false;
+                    if !self.drag_moved {
+                        // A tap, not a drag: on the handle it dismisses (vaul's
+                        // own click-to-close), on the panel it is an ordinary
+                        // swallowed barrier press.
+                        if self.drag_on_handle && hit(handle, p.position) {
+                            self.request_dismiss(ctx);
+                        }
+                        return EventResult::Handled;
+                    }
+                    let target = self.release_target(self.tracker.velocity());
+                    self.settle_drag(ctx, target);
                     return EventResult::Handled;
                 }
                 if !self.scrim_captured {
@@ -1150,15 +1671,23 @@ impl Widget for ModalWidget {
                 self.scrim_captured = false;
                 let released_outside = !self.panel.contains(p.position);
                 if self.config.scrim_dismiss && self.scrim_down_outside && released_outside {
-                    self.dismiss(ctx);
+                    self.request_dismiss(ctx);
                 }
                 EventResult::Handled
             }
             PointerPhase::Cancel => {
-                // A `Cancel` arm never touches app state — flags only.
+                // A `Cancel` arm never touches app state — flags only, plus the
+                // ramp back to where the drag started.
                 self.close_captured = false;
                 self.handle_captured = false;
                 self.scrim_captured = false;
+                if self.drag_captured {
+                    self.drag_captured = false;
+                    if self.drag_moved {
+                        self.begin_ramp(self.drag_from, false);
+                        ctx.request_redraw();
+                    }
+                }
                 EventResult::Handled
             }
         }
@@ -1189,6 +1718,7 @@ pub(crate) mod tests {
     use frust::{Brightness, FrameTime};
     use frust_core::RenderRoot;
     use std::any::Any;
+    use std::cell::Cell;
 
     /// The window every modal test lays out in.
     pub(crate) const WINDOW: Size = Size::new(400.0, 600.0);
@@ -1346,6 +1876,32 @@ pub(crate) mod tests {
 
     fn view(config: ModalConfig) -> ModalView<Flags> {
         modal(Block(Size::new(200.0, 120.0)), config).on_dismiss(|s: &mut Flags| s.dismissed += 1)
+    }
+
+    /// A modal wired the way [`show_modal`] wires one: a state-free close hook
+    /// (here a counter) alongside the unstaged `on_dismiss`, so the staged exit
+    /// path is the one taken.
+    fn staged(config: ModalConfig) -> (ModalView<Flags>, Rc<Cell<u32>>) {
+        let closed = Rc::new(Cell::new(0u32));
+        let hook = closed.clone();
+        let view = view(config).on_close(move || hook.set(hook.get() + 1));
+        (view, closed)
+    }
+
+    /// Paint one frame at `ms` and return what it drew.
+    fn frame(w: &mut ModalWidget, ms: f64) -> Recorder {
+        let mut rec = Recorder::default();
+        let mut ctx = PaintCtx::for_test(Point::ORIGIN, WINDOW, ft_ms(ms));
+        w.paint(&mut ctx, &mut rec);
+        rec
+    }
+
+    /// Paint (and relay out) until the running ramp is over.
+    fn run_ramp(w: &mut ModalWidget, from_ms: f64) {
+        frame(w, from_ms);
+        layout(w);
+        frame(w, from_ms + 2000.0);
+        layout(w);
     }
 
     fn settled(config: ModalConfig) -> ModalConfig {
@@ -1667,6 +2223,433 @@ pub(crate) mod tests {
         assert!(
             !ctx.needs_layout(),
             "a non-layout-affecting entrance must not also request a layout pass"
+        );
+    }
+
+    // ---- The staged exit ----------------------------------------------------
+
+    #[test]
+    fn a_dismiss_ramps_the_panel_out_and_closes_only_when_it_settles() {
+        let (view, closed) = staged(ModalConfig::centered(MAX_WIDTH_LG));
+        let mut w = build(&view);
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+        assert!((w.progress() - 1.0).abs() < 1e-9, "entered");
+
+        let mut state = Flags::default();
+        dispatch(&mut w, &mut state, &pointer(PointerPhase::Down, 5.0, 5.0));
+        dispatch(&mut w, &mut state, &pointer(PointerPhase::Up, 5.0, 5.0));
+        assert_eq!(state.dismissed, 0, "the unstaged callback stays unused");
+        assert_eq!(closed.get(), 0, "and the close is deferred");
+        assert!(w.is_exiting());
+
+        // Mid-ramp: still visible, still nothing fired.
+        frame(&mut w, 3000.0);
+        let mid = frame(&mut w, 3000.0 + FADE_ZOOM_MS as f64 / 2.0);
+        assert!(w.progress() > 0.0 && w.progress() < 1.0, "{}", w.progress());
+        let alpha = mid.layers[0];
+        assert!(alpha > 0.0 && alpha < 1.0, "the panel fades out: {alpha}");
+        assert!(
+            mid.rects[0].2.components[3] < crate::overlay::SCRIM_ALPHA,
+            "and the scrim rides the ramp down"
+        );
+        assert_eq!(closed.get(), 0);
+
+        // Settled: progress at zero, and the close fires exactly once.
+        frame(&mut w, 3000.0 + FADE_ZOOM_MS as f64 * 2.0);
+        assert_eq!(w.progress(), 0.0);
+        assert_eq!(closed.get(), 1);
+        assert!(!w.is_exiting());
+        assert_eq!(state.dismissed, 0);
+    }
+
+    #[test]
+    fn the_exit_keeps_asking_for_the_pass_its_own_motion_needs() {
+        // The mirror of the two seeding-paint tests above, for the exit ramp: a
+        // slide moves the panel's geometry and needs a relayout, a fade/zoom is
+        // paint-only and must not ask for one.
+        for (config, layout_affecting) in [
+            (ModalConfig::edge(OverlaySide::Bottom), true),
+            (ModalConfig::centered(MAX_WIDTH_LG), false),
+        ] {
+            let (view, _closed) = staged(config);
+            let mut w = build(&view);
+            layout(&mut w);
+            run_ramp(&mut w, 0.0);
+            let mut state = Flags::default();
+            dispatch(&mut w, &mut state, &pointer(PointerPhase::Down, 5.0, 5.0));
+            dispatch(&mut w, &mut state, &pointer(PointerPhase::Up, 5.0, 5.0));
+
+            let mut ctx = PaintCtx::for_test(Point::ORIGIN, WINDOW, ft_ms(3000.0));
+            w.paint(&mut ctx, &mut Recorder::default());
+            assert!(
+                ctx.needs_frame(),
+                "the exit's seeding paint schedules its own continuation"
+            );
+            assert_eq!(
+                ctx.needs_layout(),
+                layout_affecting,
+                "only a layout-affecting exit asks for a layout pass"
+            );
+        }
+    }
+
+    #[test]
+    fn reduce_motion_closes_on_the_spot_with_no_ramp() {
+        let mut theme = crate::theme().with_brightness(Brightness::Light);
+        theme.motion.reduce_motion = true;
+        let (view, closed) = staged(ModalConfig::centered(MAX_WIDTH_LG));
+        let mut w = build(&view);
+        let size = layout(&mut w);
+        let paint = |w: &mut ModalWidget, ms: f64| {
+            let mut ctx =
+                PaintCtx::for_test(Point::ORIGIN, size, ft_ms(ms)).with_theme(&theme as &dyn Any);
+            w.paint(&mut ctx, &mut Recorder::default());
+        };
+        paint(&mut w, 0.0);
+        assert!((w.progress() - 1.0).abs() < 1e-9, "no entrance ramp");
+
+        let mut state = Flags::default();
+        dispatch(&mut w, &mut state, &escape());
+        paint(&mut w, 16.0);
+        assert_eq!(w.progress(), 0.0, "the exit is a jump, not a ramp");
+        assert_eq!(closed.get(), 1);
+    }
+
+    #[test]
+    fn a_second_dismiss_while_exiting_is_a_no_op() {
+        let (view, closed) = staged(ModalConfig::centered(MAX_WIDTH_LG));
+        let mut w = build(&view);
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+        let mut state = Flags::default();
+        dispatch(&mut w, &mut state, &escape());
+        let first = w.progress();
+        frame(&mut w, 3000.0);
+        frame(&mut w, 3000.0 + FADE_ZOOM_MS as f64 / 2.0);
+        let mid = w.progress();
+        assert!(mid < first, "the ramp is running");
+
+        // A second trigger neither restarts the ramp nor fires anything.
+        dispatch(&mut w, &mut state, &escape());
+        assert_eq!(w.progress(), mid, "the ramp is untouched");
+        frame(&mut w, 3000.0 + FADE_ZOOM_MS as f64 * 2.0);
+        assert_eq!(closed.get(), 1, "one close for two triggers");
+        assert_eq!(state.dismissed, 0);
+    }
+
+    #[test]
+    fn without_a_close_hook_the_dismissal_stays_unstaged() {
+        // A `Stack`-mounted modal that only wired `on_dismiss` has no
+        // state-bearing pass to defer into, so it keeps the immediate path
+        // rather than leaving an invisible barrier standing.
+        let mut w = build(&view(ModalConfig::centered(MAX_WIDTH_LG)));
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+        let mut state = Flags::default();
+        dispatch(&mut w, &mut state, &escape());
+        assert_eq!(state.dismissed, 1);
+        assert!(!w.is_exiting());
+        assert!((w.progress() - 1.0).abs() < 1e-9, "nothing animates out");
+    }
+
+    #[test]
+    fn the_barrier_swallows_a_key_the_content_did_not_take() {
+        let mut w = build(&view(settled(ModalConfig::centered(MAX_WIDTH_LG))));
+        layout(&mut w);
+        let mut state = Flags::default();
+        let tab = InputEvent::Key(KeyEvent {
+            key: Key::Named(NamedKey::Tab),
+            modifiers: Modifiers::default(),
+            repeat: false,
+        });
+        assert_eq!(
+            dispatch(&mut w, &mut state, &tab),
+            EventResult::Handled,
+            "a modal barrier absorbs keys as well as pointers"
+        );
+        assert_eq!(state.dismissed, 0, "and only Escape dismisses");
+    }
+
+    // ---- Drag-to-close and snap points --------------------------------------
+
+    /// A bottom drawer's chrome: content-tall, capped, draggable, handled.
+    fn drawer_config() -> ModalConfig {
+        ModalConfig::edge(OverlaySide::Bottom)
+            .corners(ModalCorners::Top)
+            .handle(true)
+            .drag(true)
+    }
+
+    /// Build an entered, draggable bottom panel plus its close counter.
+    fn dragged() -> (ModalWidget, Rc<Cell<u32>>) {
+        let (view, closed) = staged(drawer_config());
+        let mut w = build(&view);
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+        (w, closed)
+    }
+
+    #[test]
+    fn a_drag_past_the_midpoint_closes_and_a_shorter_one_springs_back() {
+        for (travel, closes) in [(100.0, true), (30.0, false)] {
+            let (mut w, closed) = dragged();
+            let extent = w.panel_rect().height();
+            let start = w.handle_rect().unwrap().center();
+            let mut state = Flags::default();
+            dispatch(
+                &mut w,
+                &mut state,
+                &pointer(PointerPhase::Down, start.x, start.y),
+            );
+            dispatch(
+                &mut w,
+                &mut state,
+                &pointer(PointerPhase::Move, start.x, start.y + travel),
+            );
+            // The panel tracks the pointer: progress falls by the fraction of
+            // its own extent the drag covered.
+            let expected = 1.0 - travel / extent;
+            assert!(
+                (w.progress() - expected).abs() < 1e-9,
+                "{travel} → {}",
+                w.progress()
+            );
+            assert!(
+                w.panel_rect().y0 > 0.0 && w.panel_rect().y1 > WINDOW.height,
+                "the panel followed it down"
+            );
+            dispatch(
+                &mut w,
+                &mut state,
+                &pointer(PointerPhase::Up, start.x, start.y + travel),
+            );
+            run_ramp(&mut w, 3000.0);
+            if closes {
+                assert_eq!(closed.get(), 1, "past the midpoint it commits");
+                assert_eq!(w.progress(), 0.0);
+            } else {
+                assert_eq!(closed.get(), 0, "short of it, it settles back open");
+                assert!((w.progress() - 1.0).abs() < 1e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn a_flick_toward_the_edge_closes_from_anywhere() {
+        // A tall panel, so the flick's own travel stays a small fraction of the
+        // extent and the *speed* is what decides.
+        let closed = Rc::new(Cell::new(0u32));
+        let hook = closed.clone();
+        let mut w = build(
+            &modal(Block(Size::new(200.0, 400.0)), drawer_config())
+                .on_close(move || hook.set(hook.get() + 1)),
+        );
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+        let start = w.handle_rect().unwrap().center();
+        let mut state = Flags::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, start.x, start.y),
+        );
+        // A short, fast flick: 40px between two frames 16ms apart is 2500 px/s,
+        // well past `FLING_VELOCITY`, while the panel is still nearly open.
+        frame(&mut w, 3000.0);
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Move, start.x, start.y + 40.0),
+        );
+        frame(&mut w, 3016.0);
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Move, start.x, start.y + 80.0),
+        );
+        assert!(w.progress() > 0.5, "still mostly open: {}", w.progress());
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Up, start.x, start.y + 80.0),
+        );
+        run_ramp(&mut w, 4000.0);
+        assert_eq!(closed.get(), 1, "the flick committed to the close");
+    }
+
+    #[test]
+    fn catching_a_closing_drawer_cancels_its_dismissal() {
+        let (mut w, closed) = dragged();
+        let mut state = Flags::default();
+        let handle = w.handle_rect().unwrap().center();
+        dispatch(&mut w, &mut state, &escape());
+        frame(&mut w, 3000.0);
+        frame(&mut w, 3000.0 + SLIDE_MS as f64 / 4.0);
+        assert!(w.is_exiting() && w.progress() < 1.0);
+
+        // Grabbing the panel mid-exit and pulling it back open wins.
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, handle.x, handle.y),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Move, handle.x, handle.y - 60.0),
+        );
+        assert!(!w.is_exiting(), "the drag owns the panel now");
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Up, handle.x, handle.y - 60.0),
+        );
+        run_ramp(&mut w, 4000.0);
+        assert_eq!(closed.get(), 0, "nothing closed");
+        assert!((w.progress() - 1.0).abs() < 1e-9, "back open");
+    }
+
+    #[test]
+    fn a_cancelled_drag_returns_to_where_it_started() {
+        let (mut w, closed) = dragged();
+        let start = w.handle_rect().unwrap().center();
+        let mut state = Flags::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, start.x, start.y),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Move, start.x, start.y + 90.0),
+        );
+        assert!(w.progress() < 1.0);
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Cancel, start.x, start.y + 90.0),
+        );
+        run_ramp(&mut w, 3000.0);
+        assert!((w.progress() - 1.0).abs() < 1e-9, "restored");
+        assert_eq!(closed.get(), 0);
+    }
+
+    #[test]
+    fn a_tap_on_a_draggable_handle_still_dismisses_but_one_on_the_panel_does_not() {
+        let (mut w, closed) = dragged();
+        let mut state = Flags::default();
+        let handle = w.handle_rect().unwrap().center();
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, handle.x, handle.y),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Up, handle.x, handle.y),
+        );
+        run_ramp(&mut w, 3000.0);
+        assert_eq!(closed.get(), 1);
+
+        let (mut w, closed) = dragged();
+        let body = w.panel_rect().center();
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, body.x, body.y),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Up, body.x, body.y),
+        );
+        run_ramp(&mut w, 3000.0);
+        assert_eq!(
+            closed.get(),
+            0,
+            "the panel surface is a barrier, not a button"
+        );
+        assert!((w.progress() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn snap_points_open_at_the_first_and_the_release_takes_the_nearest() {
+        // Halfway and fully open, the way a Base UI drawer authors them.
+        let (view, closed) = staged(drawer_config());
+        let mut w = build(&view.snap_points(&[0.5, 1.0]));
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+        assert!(
+            (w.progress() - 0.5).abs() < 1e-9,
+            "opens at the first point: {}",
+            w.progress()
+        );
+        let extent = w.panel_rect().height();
+        assert!(
+            (w.panel_rect().y0 - (WINDOW.height - extent * 0.5)).abs() < 1e-9,
+            "and shows exactly that fraction of itself"
+        );
+
+        // Dragged up most of the way: the release snaps to the point above.
+        let start = w.handle_rect().unwrap().center();
+        let mut state = Flags::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, start.x, start.y),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Move, start.x, start.y - extent * 0.4),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Up, start.x, start.y - extent * 0.4),
+        );
+        run_ramp(&mut w, 3000.0);
+        assert!((w.progress() - 1.0).abs() < 1e-9, "{}", w.progress());
+        assert_eq!(closed.get(), 0);
+
+        // Below the lowest point, `0.0` is the nearest: it closes.
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Down, start.x, start.y),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Move, start.x, start.y + extent * 0.85),
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &pointer(PointerPhase::Up, start.x, start.y + extent * 0.85),
+        );
+        run_ramp(&mut w, 6000.0);
+        assert_eq!(closed.get(), 1);
+    }
+
+    #[test]
+    fn a_snap_point_above_one_is_logical_px_against_the_extent() {
+        let (view, _closed) = staged(drawer_config());
+        let mut w = build(&view.snap_points(&[60.0]));
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+        let extent = w.panel_rect().height();
+        assert!(
+            (w.progress() - 60.0 / extent).abs() < 1e-9,
+            "{}",
+            w.progress()
+        );
+        assert!(
+            (w.panel_rect().y0 - (WINDOW.height - 60.0)).abs() < 1e-9,
+            "60 logical px of the drawer are on screen"
         );
     }
 

@@ -151,11 +151,21 @@ impl<State: 'static> AlertDialogView<State> {
         self
     }
 
-    /// Set the dismiss callback — Escape only, since neither a scrim tap nor a
-    /// close X exists here. [`show_alert_dialog`] wires it to
-    /// `controller.pop()`.
+    /// Set the **unstaged** dismiss callback — Escape only, since neither a
+    /// scrim tap nor a close X exists here — used when no
+    /// [`on_close`](Self::on_close) hook is wired (see
+    /// [`crate::overlay::modal`]'s exit-motion contract).
+    /// [`show_alert_dialog`] wires both.
     pub fn on_dismiss<F: Fn(&mut State) + 'static>(mut self, on_dismiss: F) -> Self {
         self.inner = self.inner.on_dismiss(on_dismiss);
+        self
+    }
+
+    /// Set the state-free close hook fired once the exit ramp has settled — an
+    /// Escape on a `Stack`-mounted alert dialog fades and zooms it back out
+    /// before this runs. [`show_alert_dialog`] wires it to `controller.pop()`.
+    pub fn on_close<F: Fn() + 'static>(mut self, on_close: F) -> Self {
+        self.inner = self.inner.on_close(on_close);
         self
     }
 }
@@ -206,13 +216,15 @@ pub fn show_alert_dialog<State, B, R>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::overlay::modal::tests::{Block, WINDOW, escape, pointer};
+    use crate::overlay::modal::tests::{Block, Recorder, WINDOW, escape, pointer};
+    use frust::FrameTime;
     use frust::authoring::{
-        BoxConstraints, EventCtx, InputEvent, LayoutCtx, Point, PointerPhase, Role, Size, Widget,
-        any, text::TextContext,
+        BoxConstraints, EventCtx, InputEvent, LayoutCtx, PaintCtx, Point, PointerPhase, Role, Size,
+        Widget, any, text::TextContext,
     };
     use frust_core::RenderRoot;
     use std::any::Any;
+    use std::cell::Cell;
 
     #[derive(Default)]
     struct Flags {
@@ -263,6 +275,38 @@ mod tests {
         );
         dispatch(&mut w, &mut state, &escape());
         assert_eq!(state.dismissed, 1);
+    }
+
+    #[test]
+    fn escape_stages_the_exit_and_closes_only_at_the_settle() {
+        let closed = Rc::new(Cell::new(0u32));
+        let hook = closed.clone();
+        let mut w = build(&sample().on_close(move || hook.set(hook.get() + 1)));
+        let size = layout(&mut w);
+        let paint = |w: &mut ModalWidget, ms: f64| {
+            let mut ctx = PaintCtx::for_test(
+                Point::ORIGIN,
+                size,
+                FrameTime::from_nanos((ms * 1e6) as u64),
+            );
+            w.paint(&mut ctx, &mut Recorder::default());
+        };
+        paint(&mut w, 0.0);
+        paint(&mut w, 1000.0);
+        assert!((w.progress() - 1.0).abs() < 1e-9);
+
+        let mut state = Flags::default();
+        dispatch(&mut w, &mut state, &escape());
+        assert!(w.is_exiting());
+        assert_eq!(closed.get(), 0, "deferred behind the ramp");
+        paint(&mut w, 2000.0);
+        paint(&mut w, 2100.0);
+        assert!(w.progress() > 0.0 && w.progress() < 1.0, "mid-exit");
+        assert_eq!(closed.get(), 0);
+        paint(&mut w, 3000.0);
+        assert_eq!(w.progress(), 0.0);
+        assert_eq!(closed.get(), 1);
+        assert_eq!(state.dismissed, 0, "the staged hook, not the raw callback");
     }
 
     #[test]

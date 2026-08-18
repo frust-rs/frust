@@ -393,6 +393,21 @@ mod tests {
             self.pass();
         }
 
+        /// Paint the staged exit ramp out: the first frame seeds its clock, the
+        /// second is past its duration, and the close hook fires there — the
+        /// pop it enqueues is drained by the rebuild that follows.
+        fn settle_exit(&mut self) {
+            self.root.paint(
+                &mut Recorder::default(),
+                FrameTime::from_nanos(2_000_000_000),
+            );
+            self.root.paint(
+                &mut Recorder::default(),
+                FrameTime::from_nanos(3_000_000_000),
+            );
+            self.pass();
+        }
+
         fn event(&mut self, event: &InputEvent) {
             self.root.event(&mut self.state, event);
         }
@@ -419,6 +434,11 @@ mod tests {
         h.settle();
         h.event(&pointer(PointerPhase::Down, 5.0, 5.0));
         h.event(&pointer(PointerPhase::Up, 5.0, 5.0));
+        // The tap stages the exit rather than popping on the spot…
+        h.flush();
+        assert!(h.state.results.is_empty(), "still animating out");
+        // …and the pop lands when the ramp settles.
+        h.settle_exit();
         h.flush();
         assert_eq!(h.state.results, vec![None]);
     }
@@ -501,8 +521,12 @@ mod tests {
         h.event(&pointer(PointerPhase::Up, center.x, center.y));
         h.flush();
         assert!(h.state.results.is_empty());
-        // …and Escape now travels the focus chain to the dialog.
+        // …and Escape now travels the focus chain to the dialog, staging the
+        // same exit a scrim tap does.
         h.event(&escape());
+        h.flush();
+        assert!(h.state.results.is_empty(), "still animating out");
+        h.settle_exit();
         h.flush();
         assert_eq!(h.state.results, vec![None]);
     }
