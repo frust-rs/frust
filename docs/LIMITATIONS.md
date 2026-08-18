@@ -2647,33 +2647,3 @@ future round rather than a permanent exclusion.
 **Evidence**: `workflow/plans/research/shadcn-round-2/RESEARCH.md`'s component sweep ("DEFERRED:
 calendar … NOT-PORTABLE-AS-IS: menubar, navigation-menu … form … sonner … chart … direction").
 
----
-
-### `non-shadcn-widgets-press-on-any-button` — baseline and material/glyph/cupertino widgets press and capture on any pointer button, not just the primary one
-
-**Observed**: `frust_shadcn` now guards every press/capture/activation state machine to
-`PointerButton::Primary` (`hit::presses`, applied at 37 capture sites across the catalog), and the
-desktop shell pairs Secondary Down/Up delivery (a delivery latch in `app_handler.rs` — an Up is
-dispatched iff its Down was) so a right-click can never wedge a widget's capture, framework-wide.
-Neither guard extends to the widgets that predate it: `frust-widgets`' interactive baseline
-(button, textinput, scroll, checkbox, radio, slider, gesture, …) and the material/glyph/cupertino
-catalogs still start a press and capture the pointer from `PointerPhase::Down` unconditionally,
-with no check on `PointerEvent::button` — a right-click still activates those controls exactly like
-a left-click. This is not the wedge class F1 fixed (the shell's delivery latch still pairs every
-Down/Up regardless of button, so capture always releases); it is wrong *activation semantics*: a
-context-menu gesture fires the widget's primary action instead of being left for a context-menu
-consumer.
-
-**Applies to**: every interactive widget in `frust-widgets` and in the `frust_material`,
-`frust_glyph`, and `frust_cupertino` catalogs. Not `frust_shadcn`, which is guarded.
-
-**Why accepted**: the remedy is mechanical and already proven — the same `PointerButton::Primary`
-guard sweep F1 applied across `frust_shadcn`'s 37 sites — but has not yet been run against the
-other three catalogs; recorded here as the accepted current state pending that sweep.
-
-**Evidence**: `crates/frust-widgets/src/button.rs`'s `Widget::event` `PointerPhase::Down` arm (sets
-`pressed`/`captured` and calls `ctx.capture_pointer()` with no `p.button` check) as the baseline
-reference; `plugins/shadcn/src/hit.rs`'s `presses` as the guarded reference implementation;
-`crates/frust-shell-desktop/src/app_handler.rs`'s Secondary delivery-latch gate
-(`mouse_button_should_dispatch`); shadcn-round-2 fix commit `c6f20614` ("primary-only press guards +
-delivery-paired secondary gate").
