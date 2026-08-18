@@ -599,6 +599,10 @@ impl<State: 'static> ModalView<State> {
     /// Set the state-free close hook fired when the exit ramp settles — the
     /// staged-dismissal path. [`show_modal`] wires this to `controller.pop()`;
     /// a `Stack`-mounted modal wires its own (a signal write, a navigator pop).
+    ///
+    /// Pinned at `build`: a directly constructed (non-staged) `ModalView`'s
+    /// later rebuilds neither update nor clear this hook once installed —
+    /// see [`ModalWidget`]'s `on_close` field doc for why.
     pub fn on_close<F: Fn() + 'static>(mut self, on_close: F) -> Self {
         self.on_close = Some(Rc::new(on_close));
         self
@@ -669,7 +673,10 @@ where
 /// the [`ModalView`] each of them wraps privately; every one of them *does*
 /// build the shared [`ModalWidget`] ([`ModalContent`]'s element bound), so this
 /// thin pass-through installs the hook on the built widget instead — the same
-/// place [`ModalView`]'s own `on_close` lands, and last writer wins.
+/// place [`ModalView`]'s own `on_close` lands. [`ModalView::rebuild`] never
+/// writes this field itself, so `StagedExit::rebuild`'s own reinstall below
+/// (which runs *after* `inner.rebuild`) is the sole rebuild-time writer on
+/// this path — it always wins rather than merely winning last.
 struct StagedExit<V> {
     inner: V,
     on_close: OnClose,
@@ -795,6 +802,16 @@ pub struct ModalWidget {
     on_dismiss: Option<ErasedCallback>,
     /// The state-free close hook the exit ramp fires on settle (see the module
     /// docs); `None` leaves dismissal unstaged.
+    ///
+    /// Installed at [`ModalView::build`] and, on the staged navigator path,
+    /// reinstalled after every rebuild by [`StagedExit`] — the sole
+    /// rebuild-time writer. [`ModalView::rebuild`] itself never touches this
+    /// field: a directly constructed, non-staged `ModalView` (one no
+    /// `StagedExit` wraps) therefore has its `on_close` pinned at whatever
+    /// `build` installed for the widget's whole mounted lifetime — a later
+    /// rebuild neither updates nor clears it, since only the staged wrapper
+    /// needs a live reinstall (its own hook is a fixed `controller.pop()`
+    /// closure that never changes across rebuilds anyway).
     on_close: Option<OnClose>,
     /// The drawer's resting points, as authored (see [`ModalView::snap_points`]).
     snap_points: Vec<f64>,
@@ -811,6 +828,15 @@ pub struct ModalWidget {
     started: bool,
     /// Whether the running ramp ends in a dismissal.
     exiting: bool,
+    /// One-shot latch set the instant `on_close` fires (settle or the
+    /// immediate no-ramp path in [`Self::request_dismiss`]). Terminal for
+    /// this widget's mounted lifetime: the hook only *enqueues* a navigator
+    /// pop, so the widget stays mounted and still a barrier for one or more
+    /// frames after firing, during which a further dismiss trigger must not
+    /// re-fire it — that would pop whatever page is now underneath this one.
+    /// `request_dismiss` refuses every trigger once set; nothing ever clears
+    /// it back to `false`.
+    closed: bool,
     /// A scrim/panel-background press is in flight (the modal barrier).
     scrim_captured: bool,
     /// Whether that press started outside the panel — only an outside press
@@ -1001,9 +1027,13 @@ impl ModalWidget {
     ///
     /// Falls back to firing [`ModalView::on_dismiss`] on the spot when there is
     /// nothing to stage — no close hook to fire from `paint`, or no entrance to
-    /// reverse. A trigger arriving while an exit is already running is a no-op.
+    /// reverse. A trigger arriving while an exit is already running, or after
+    /// `on_close` has already fired once ([`Self::closed`]), is a no-op — the
+    /// latter guards a trigger landing between the enqueued pop and the
+    /// rebuild that drains it, when the widget is still mounted and would
+    /// otherwise stage (or immediately fire) a second, spurious close.
     fn request_dismiss(&mut self, ctx: &mut EventCtx) {
-        if self.exiting {
+        if self.exiting || self.closed {
             return;
         }
         let stageable = self.on_close.is_some() && self.config.entrance != ModalEntrance::None;
@@ -1011,6 +1041,7 @@ impl ModalWidget {
             if let Some(on_dismiss) = self.on_dismiss.as_mut() {
                 on_dismiss(ctx);
             } else if let Some(on_close) = &self.on_close {
+                self.closed = true;
                 on_close();
             }
             return;
@@ -1183,6 +1214,7 @@ impl<State: 'static> View<State> for ModalView<State> {
             progress: if settled { 1.0 } else { 0.0 },
             started: settled,
             exiting: false,
+            closed: false,
             scrim_captured: false,
             scrim_down_outside: false,
             close_hovered: false,
@@ -1218,14 +1250,11 @@ impl<State: 'static> View<State> for ModalView<State> {
             element.snap_points = self.snap_points.clone();
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
-        // Closures aren't comparable, so both dismiss adapters are reinstalled
-        // unconditionally (cheap — what every interactive widget does). A
-        // `None` here never clears a hook `show_modal`'s own pass-through
-        // installed: that wrapper reinstalls after this rebuild returns.
+        // `on_dismiss` is reinstalled unconditionally (cheap — closures
+        // aren't comparable, so this is what every interactive widget does).
+        // `on_close` is deliberately left untouched here — see the field's
+        // doc comment on `ModalWidget::on_close` for why.
         element.on_dismiss = self.on_dismiss.as_ref().map(erase_callback);
-        if self.on_close.is_some() {
-            element.on_close = self.on_close.clone();
-        }
         flags
     }
 
@@ -1477,6 +1506,7 @@ impl Widget for ModalWidget {
             self.exiting = false;
             self.progress = 0.0;
             if let Some(on_close) = &self.on_close {
+                self.closed = true;
                 on_close();
                 ctx.request_frame();
             }
@@ -1914,6 +1944,11 @@ pub(crate) mod tests {
         View::<Flags>::build(view, &mut BuildCtx::new(&mut counter))
     }
 
+    fn rebuild(view: &ModalView<Flags>, prev: &ModalView<Flags>, w: &mut ModalWidget) {
+        let mut counter = 0u64;
+        View::<Flags>::rebuild(view, prev, w, &mut BuildCtx::new(&mut counter));
+    }
+
     fn layout(w: &mut ModalWidget) -> Size {
         let mut tcx = TextContext::new();
         let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
@@ -2316,6 +2351,75 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_staged_close_hook_survives_a_rebuild_and_still_fires_exactly_once() {
+        // `ModalView::rebuild` no longer writes `element.on_close` at all (see
+        // its doc comment); `StagedExit::rebuild` — which runs `inner.rebuild`
+        // first and reinstalls its own hook after — must still be the writer
+        // that wins on the staged (`show_modal`) path, through as many
+        // rebuilds as the page sees before it's popped.
+        let closed = Rc::new(Cell::new(0u32));
+        let config = ModalConfig::centered(MAX_WIDTH_LG);
+        let hook1 = closed.clone();
+        let v1 = StagedExit {
+            inner: view(config),
+            on_close: Rc::new(move || hook1.set(hook1.get() + 1)) as OnClose,
+        };
+        let mut counter = 0u64;
+        let mut w = View::<Flags>::build(&v1, &mut BuildCtx::new(&mut counter));
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+
+        // A second rebuild pass through the wrapper, as the navigator's pushed
+        // page sees on every frame it stays mounted.
+        let hook2 = closed.clone();
+        let v2 = StagedExit {
+            inner: view(config),
+            on_close: Rc::new(move || hook2.set(hook2.get() + 1)) as OnClose,
+        };
+        View::<Flags>::rebuild(&v2, &v1, &mut w, &mut BuildCtx::new(&mut counter));
+
+        let mut state = Flags::default();
+        dispatch(&mut w, &mut state, &escape());
+        frame(&mut w, 3000.0);
+        frame(&mut w, 3000.0 + FADE_ZOOM_MS as f64 * 2.0);
+        assert_eq!(
+            closed.get(),
+            1,
+            "the reinstalled hook still fires exactly once"
+        );
+    }
+
+    #[test]
+    fn a_rebuild_never_resurrects_or_clears_a_bare_modal_views_on_close_hook() {
+        // Pinned behavior, not last-writer-wins: a directly constructed,
+        // non-staged `ModalView`'s `on_close` is installed once at `build`
+        // and never touched by a later `rebuild` — see `ModalWidget::on_close`
+        // and `ModalView::on_close`'s doc comments. A rebuild carrying `None`
+        // must not clear the hook the widget already has installed.
+        let closed = Rc::new(Cell::new(0u32));
+        let hook = closed.clone();
+        let v1 =
+            view(ModalConfig::centered(MAX_WIDTH_LG)).on_close(move || hook.set(hook.get() + 1));
+        let mut w = build(&v1);
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+
+        // Rebuild with a view whose own `on_close` is unset.
+        let v2 = view(ModalConfig::centered(MAX_WIDTH_LG));
+        rebuild(&v2, &v1, &mut w);
+
+        let mut state = Flags::default();
+        dispatch(&mut w, &mut state, &escape());
+        frame(&mut w, 3000.0);
+        frame(&mut w, 3000.0 + FADE_ZOOM_MS as f64 * 2.0);
+        assert_eq!(
+            closed.get(),
+            1,
+            "the build-time hook is still installed and still fires — pinned, not cleared"
+        );
+    }
+
+    #[test]
     fn the_exit_keeps_asking_for_the_pass_its_own_motion_needs() {
         // The mirror of the two seeding-paint tests above, for the exit ramp: a
         // slide moves the panel's geometry and needs a relayout, a fade/zoom is
@@ -2387,6 +2491,34 @@ pub(crate) mod tests {
         assert_eq!(w.progress(), mid, "the ramp is untouched");
         frame(&mut w, 3000.0 + FADE_ZOOM_MS as f64 * 2.0);
         assert_eq!(closed.get(), 1, "one close for two triggers");
+        assert_eq!(state.dismissed, 0);
+    }
+
+    #[test]
+    fn a_dismiss_trigger_after_settle_does_not_fire_on_close_again() {
+        // The bug this regresses: `on_close` only *enqueues* `controller.pop()`,
+        // so the widget stays mounted — and still a barrier — for at least one
+        // frame after the exit ramp settles. A trigger landing in that window
+        // used to re-enter `request_dismiss` with `progress` already at zero: a
+        // zero-duration ramp that settled on its very next paint, firing
+        // `on_close` a second time and popping the page underneath this modal.
+        let (view, closed) = staged(ModalConfig::centered(MAX_WIDTH_LG));
+        let mut w = build(&view);
+        layout(&mut w);
+        run_ramp(&mut w, 0.0);
+        let mut state = Flags::default();
+        dispatch(&mut w, &mut state, &escape());
+        frame(&mut w, 3000.0);
+        frame(&mut w, 3000.0 + FADE_ZOOM_MS as f64 * 2.0);
+        assert_eq!(w.progress(), 0.0, "settled closed");
+        assert_eq!(closed.get(), 1, "on_close fired once on settle");
+        assert!(!w.is_exiting());
+
+        // The enqueued pop hasn't drained yet, so the widget is still
+        // mounted. A further dismiss trigger must be a pure no-op.
+        dispatch(&mut w, &mut state, &escape());
+        frame(&mut w, 3000.0 + FADE_ZOOM_MS as f64 * 4.0);
+        assert_eq!(closed.get(), 1, "on_close does not fire a second time");
         assert_eq!(state.dismissed, 0);
     }
 
