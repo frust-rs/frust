@@ -565,12 +565,20 @@ pub use back_glue::{BackHandler, attach_back_handler};
 /// frust::app!(App);
 /// # fn main() {}
 /// ```
+///
+/// Also sets the platform-aware edge-swipe default
+/// ([`NavigatorView::platform_pop_swipe`]) to `cfg!(target_os = "ios")`: the
+/// interactive pop-swipe is on by default on iOS and off on Android/desktop
+/// (where the system/window-manager back gesture already exists), with no
+/// app-side wiring. An app can still override it per navigator
+/// ([`NavigatorView::pop_swipe`]) or per page
+/// ([`frust_widgets::PushOptions::pop_swipe`]).
 pub fn navigator<State: 'static>(
     controller: &NavigatorController<State>,
     initial: impl Fn() -> AnyView<State> + 'static,
 ) -> NavigatorView<State> {
     back_glue::auto_wire(controller);
-    frust_widgets::navigator(controller, initial)
+    frust_widgets::navigator(controller, initial).platform_pop_swipe(cfg!(target_os = "ios"))
 }
 
 /// Build a **root overlay host** driven by `controller`, wrapping the app's
@@ -632,12 +640,18 @@ pub fn navigator<State: 'static>(
 /// frust::app!(App);
 /// # fn main() {}
 /// ```
+///
+/// Also sets the platform-aware edge-swipe default like [`navigator`] does,
+/// though it never actually changes the host's own behaviour: `overlay_host`
+/// pins an *explicit* [`NavigatorView::pop_swipe(false)`](NavigatorView::pop_swipe)
+/// (an edge swipe must never dismiss an overlay), which outranks the platform
+/// slot by construction.
 pub fn overlay_host<State: 'static>(
     controller: &NavigatorController<State>,
     app: impl Fn() -> AnyView<State> + 'static,
 ) -> NavigatorView<State> {
     back_glue::auto_wire_overlay_host(controller);
-    frust_widgets::overlay_host(controller, app)
+    frust_widgets::overlay_host(controller, app).platform_pop_swipe(cfg!(target_os = "ios"))
 }
 
 /// Router ⇄ deep-link auto-wiring: [`router_with_deep_links`]/
