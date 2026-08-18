@@ -59,6 +59,7 @@ use frust::authoring::{
 use kurbo::{Point, Rect, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
 
+use super::press::presses;
 use super::state_layer::StateLayer;
 
 /// Content padding on all four edges, in logical px (M3 card spec).
@@ -382,6 +383,9 @@ impl Widget for CardWidget {
             .expect("on_press is set whenever interactive is true");
         match p.phase {
             PointerPhase::Down => {
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 self.pressed = true;
                 self.captured = true;
                 self.state_layer.set_pressed(true);

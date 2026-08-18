@@ -53,6 +53,7 @@ use frust::authoring::{
 use kurbo::{Point, Rect, Size};
 use peniko::Color;
 
+use super::press::presses;
 use super::state_layer::StateLayer;
 use frust::authoring::ThemeTextColor;
 use frust::text;
@@ -458,6 +459,9 @@ impl Widget for ListItemWidget {
             .expect("on_press is set whenever interactive is true");
         match p.phase {
             PointerPhase::Down => {
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 self.pressed = true;
                 self.captured = true;
                 self.state_layer.set_pressed(true);
@@ -649,6 +653,15 @@ mod tests {
         })
     }
 
+    /// The same event on the secondary (right) button.
+    fn secondary_ev(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(frust::authoring::PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: frust::authoring::PointerButton::Secondary,
+        })
+    }
+
     #[test]
     fn interactive_row_fires_on_up_inside() {
         let view: ListItem<Counter> =
@@ -657,6 +670,33 @@ mod tests {
         let mut state = Counter::default();
         dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 10.0, 10.0));
         assert!(w.captured);
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(state.presses, 1);
+    }
+
+    #[test]
+    fn a_secondary_press_never_presses_captures_or_fires() {
+        let view: ListItem<Counter> =
+            list_item("Tap me").on_press(|s: &mut Counter| s.presses += 1);
+        let mut w = build(&view);
+        let mut state = Counter::default();
+        let r = dispatch(
+            &mut w,
+            &mut state,
+            &secondary_ev(PointerPhase::Down, 10.0, 10.0),
+        );
+        assert_eq!(r, EventResult::Ignored);
+        assert!(!w.pressed, "no pressed state layer on a right-click");
+        assert!(!w.captured, "and no capture for the shell to wedge on");
+        dispatch(
+            &mut w,
+            &mut state,
+            &secondary_ev(PointerPhase::Up, 10.0, 10.0),
+        );
+        assert_eq!(state.presses, 0);
+
+        // The primary gesture is untouched by the guard.
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 10.0, 10.0));
         dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 10.0, 10.0));
         assert_eq!(state.presses, 1);
     }

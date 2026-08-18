@@ -56,6 +56,7 @@ use frust::{ShapeScale, Theme};
 use kurbo::{Point, Rect, Size};
 use peniko::Color;
 
+use super::press::presses;
 use super::state_layer::StateLayer;
 use frust::authoring::ThemeTextColor;
 
@@ -533,6 +534,9 @@ impl Widget for FabWidget {
         };
         match p.phase {
             PointerPhase::Down => {
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 self.pressed = true;
                 self.captured = true;
                 self.state_layer.set_pressed(true);

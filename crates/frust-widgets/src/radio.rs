@@ -31,6 +31,7 @@ use frust_theme::Theme;
 use kurbo::{Point, Size};
 use peniko::{Brush, Color};
 
+use crate::authoring::presses;
 use crate::text;
 
 /// Outer diameter of the radio ring, in logical px (matches
@@ -224,6 +225,9 @@ impl Widget for RadioWidget {
         };
         match p.phase {
             PointerPhase::Down => {
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 self.pressed = true;
                 self.captured = true;
                 ctx.capture_pointer();

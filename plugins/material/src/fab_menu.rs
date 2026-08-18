@@ -100,6 +100,8 @@ use peniko::Color;
 
 use frust::authoring::ThemeTextColor;
 
+use super::press::presses;
+
 /// Container size of the trigger FAB, in logical px — matches [`super::fab`]'s
 /// regular-tier `REGULAR_CONTAINER` (androidx `FabBaselineTokens.ContainerWidth`).
 const MAIN_CONTAINER: f64 = 56.0;
@@ -693,6 +695,17 @@ impl Widget for FabMenuWidget {
                     // a claim-once guard, it kills the session on the second
                     // tap (claim-once-hygiene review, 2026-08-06).
                     ctx.request_focus();
+                    // Only a primary press arms the trigger. A secondary press
+                    // is a context gesture: still swallowed while the menu is
+                    // open (its scrim is a modal barrier), simply ignored while
+                    // it is closed.
+                    if !presses(p) {
+                        return if self.open {
+                            EventResult::Handled
+                        } else {
+                            EventResult::Ignored
+                        };
+                    }
                     self.armed = Some(Target::Fab);
                     self.pressed_inside = true;
                     ctx.capture_pointer();
@@ -706,6 +719,12 @@ impl Widget for FabMenuWidget {
                 // also claims focus on every Down — see the trigger arm's
                 // comment above for why.
                 ctx.request_focus();
+                // The open menu's scrim is a modal barrier: it swallows a
+                // secondary press like any other, but arms neither an item nor
+                // a scrim dismiss from it.
+                if !presses(p) {
+                    return EventResult::Handled;
+                }
                 if let Some(i) = self.item_rects.iter().position(|r| r.contains(p.position)) {
                     self.armed = Some(Target::Item(i));
                 } else {

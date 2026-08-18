@@ -58,6 +58,7 @@ use frust::{SpringDesc, Theme};
 use kurbo::{BezPath, Point, Rect, RoundedRect, RoundedRectRadii, Shape, Size};
 use peniko::{Brush, Color};
 
+use super::press::presses;
 use super::shape_morph::{RoundedPolygon, morph_path};
 use super::state_layer::PRESSED_OPACITY;
 use frust::authoring::ThemeTextColor;
@@ -426,6 +427,9 @@ impl Widget for ButtonGroupWidget {
         };
         match p.phase {
             PointerPhase::Down => {
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 let Some(i) = self.member_at(p.position) else {
                     return EventResult::Ignored;
                 };

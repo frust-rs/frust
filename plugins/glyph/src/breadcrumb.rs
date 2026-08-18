@@ -28,6 +28,8 @@ use frust::authoring::{
 use kurbo::{Point, Rect, Size};
 use peniko::Color;
 
+use crate::press::presses;
+
 /// Gap between adjacent crumbs and separators, logical px (`.breadcrumb{gap:8px}`).
 const CRUMB_GAP: f64 = 8.0;
 /// Crumb + separator font size, logical px (`.breadcrumb{font-size:11.5px}`).
@@ -312,6 +314,7 @@ impl Widget for BreadcrumbWidget {
             return EventResult::Ignored;
         };
         match p.phase {
+            PointerPhase::Down if !presses(p) => EventResult::Ignored,
             PointerPhase::Down => match self.hit_index(p.position) {
                 Some(i) => {
                     self.pressed = Some(i);

@@ -305,7 +305,7 @@ use frust_core::{
 use kurbo::{Point, Size};
 
 use crate::ChildKey;
-use crate::authoring::ErasedCallback;
+use crate::authoring::{ErasedCallback, presses};
 use crate::scroll::{OVERSCROLL_RESISTANCE, SETTLE_DECAY, SETTLE_STOP_PX, crossed_refresh_trigger};
 
 /// Extra items materialized above and below the visible window, so a small
@@ -1871,6 +1871,14 @@ impl ListViewWidget {
             }
             InputEvent::Pointer(p) => match p.phase {
                 PointerPhase::Down => {
+                    // Only a primary press arms a drag. A secondary press is a
+                    // context gesture: it still reaches the realized rows (a
+                    // context-menu consumer in a row must see it), but opens no
+                    // capture and can never start a scroll — the `ScrollView`
+                    // rule, applied to the windowing list.
+                    if !presses(p) {
+                        return crate::authoring::route_event(&mut self.children, ctx, event);
+                    }
                     self.scrolling = false;
                     self.down_active = true;
                     self.fling = None;

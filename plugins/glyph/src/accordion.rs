@@ -56,6 +56,8 @@ use frust::{ShapeScale, Theme};
 use kurbo::{Point, Rect, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
 
+use crate::press::presses;
+
 /// Corner-rounding tolerance for the container border stroke.
 const PATH_TOLERANCE: f64 = 0.1;
 /// Header horizontal padding, in logical px.
@@ -445,7 +447,9 @@ impl Widget for AccordionWidget {
         let in_header = p.position.y < self.header_height;
         match p.phase {
             PointerPhase::Down => {
-                if in_header && self.on_toggle.is_some() {
+                // Only a primary press works the header toggle; a secondary
+                // press falls through to the body like an out-of-header one.
+                if presses(p) && in_header && self.on_toggle.is_some() {
                     self.pressed = true;
                     self.captured = true;
                     ctx.capture_pointer();

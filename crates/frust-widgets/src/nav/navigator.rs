@@ -2058,7 +2058,10 @@ impl<State: 'static> NavigatorWidget<State> {
                 // still sees the Down and may capture; a later steal sends the page
                 // a synthetic Cancel. No buffering/re-dispatch — children see Down
                 // first.
-                self.edge.armed = self.pop_swipe_enabled
+                // Only a primary press arms the swipe: a secondary press is a
+                // context gesture, never the start of an interactive pop.
+                self.edge.armed = crate::authoring::presses(p)
+                    && self.pop_swipe_enabled
                     && self.pages.len() > 1
                     && p.position.x <= EDGE_SWIPE_ZONE_DP;
                 if self.edge.armed {

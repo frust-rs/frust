@@ -83,6 +83,8 @@ use frust::{
 use kurbo::{Point, Rect, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
 
+use crate::press::presses;
+
 /// Panel width, in logical px.
 ///
 /// **Community-approximate**: iOS does not publish an exact alert width; ~270pt
@@ -596,6 +598,14 @@ impl<State: 'static> Widget for CupertinoAlertDialogWidget<State> {
                 // add a claim-once guard, it kills the session on the second
                 // tap.
                 ctx.request_focus();
+                // The barrier swallows a secondary press like every other one —
+                // it blocks the page behind it whatever button pressed — but it
+                // arms nothing, so a right-click can neither pick an action row
+                // nor dismiss. (The focus re-claim above stays button-agnostic:
+                // any `Down` bubbling no claim is a blur at the root.)
+                if !presses(p) {
+                    return EventResult::Handled;
+                }
                 self.captured = true;
                 ctx.capture_pointer();
                 EventResult::Handled
@@ -695,6 +705,15 @@ mod tests {
             phase,
             position: Point::new(x, y),
             button: PointerButton::Primary,
+        })
+    }
+
+    /// The same event on the secondary (right) button.
+    fn secondary_ev(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: PointerButton::Secondary,
         })
     }
 
@@ -966,6 +985,17 @@ mod tests {
                 .event(&mut self.state, &ev(PointerPhase::Up, x, y));
         }
 
+        /// The same gesture on the secondary (right) button, reporting whether
+        /// the barrier consumed its `Down`.
+        fn secondary_tap(&mut self, x: f64, y: f64) -> bool {
+            let down = self
+                .root
+                .event(&mut self.state, &secondary_ev(PointerPhase::Down, x, y));
+            self.root
+                .event(&mut self.state, &secondary_ev(PointerPhase::Up, x, y));
+            down.handled
+        }
+
         fn action_center(&self, idx: usize) -> (f64, f64) {
             let r = self.probe.action_rects[idx];
             ((r.x0 + r.x1) / 2.0, (r.y0 + r.y1) / 2.0)
@@ -1009,6 +1039,38 @@ mod tests {
             nav.state.received, None,
             "a dismiss carries no action index"
         );
+    }
+
+    #[test]
+    fn a_secondary_scrim_press_is_swallowed_but_never_dismisses() {
+        let mut nav = ModalHarness::new();
+        nav.show();
+        nav.settle();
+        // The same top-left scrim point a primary tap dismisses from.
+        let swallowed = nav.secondary_tap(5.0, 5.0);
+        nav.drain();
+        assert!(
+            swallowed,
+            "the barrier still swallows it — the page behind stays blocked"
+        );
+        assert_eq!(nav.state.calls, 0, "a right-click never dismisses");
+
+        // The primary scrim tap still dismisses.
+        nav.tap(5.0, 5.0);
+        nav.drain();
+        assert_eq!(nav.state.calls, 1);
+    }
+
+    #[test]
+    fn a_secondary_press_on_an_action_row_never_picks_it() {
+        let mut nav = ModalHarness::new();
+        nav.show();
+        nav.settle();
+        let (cx, cy) = nav.action_center(1);
+        nav.secondary_tap(cx, cy);
+        nav.drain();
+        assert_eq!(nav.state.calls, 0, "no pop, so no on_result");
+        assert_eq!(nav.state.received, None);
     }
 
     #[test]

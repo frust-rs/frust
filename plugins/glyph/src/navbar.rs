@@ -42,6 +42,8 @@ use frust::{ShapeScale, Theme};
 use kurbo::{Point, Rect, Size};
 use peniko::{Brush, Color};
 
+use crate::press::presses;
+
 /// Container vertical padding, logical px (`.bottom-nav-demo{padding:12px 8px}`
 /// → 12px vertical; the 8px horizontal padding emerges from the even
 /// slot-centering below, so it is not a separate metric here).
@@ -438,6 +440,7 @@ impl Widget for GlyphNavBarWidget {
             return EventResult::Ignored;
         };
         match p.phase {
+            PointerPhase::Down if !presses(p) => EventResult::Ignored,
             PointerPhase::Down => match self.hit_index(p.position) {
                 Some(i) => {
                     self.pressed = Some(i);
@@ -576,6 +579,15 @@ mod tests {
         })
     }
 
+    /// The same event on the secondary (right) button.
+    fn secondary_ev(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(frust_core::PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: PointerButton::Secondary,
+        })
+    }
+
     #[test]
     fn layout_distributes_slots_evenly_across_width() {
         let view: GlyphNavBarView<Vec<usize>> = glyph_nav_bar(items(), 0, |_s, _i| {});
@@ -641,6 +653,38 @@ mod tests {
         w.event(&mut ctx, &ev(PointerPhase::Up, 200.0, w.height / 2.0));
         assert_eq!(log, vec![2]);
         assert_eq!(w.selected, 0);
+    }
+
+    #[test]
+    fn a_secondary_press_never_captures_or_reports_an_index() {
+        let view: GlyphNavBarView<Vec<usize>> =
+            glyph_nav_bar(items(), 0, |s: &mut Vec<usize>, i| s.push(i));
+        let mut counter = 0u64;
+        let mut w = View::<Vec<usize>>::build(&view, &mut BuildCtx::new(&mut counter));
+        layout(&mut w, Size::new(360.0, 100.0), None);
+        let mut log: Vec<usize> = Vec::new();
+        let y = w.height / 2.0;
+        let send = |w: &mut GlyphNavBarWidget, log: &mut Vec<usize>, e: &InputEvent| {
+            let state_any: &mut dyn Any = log;
+            let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(360.0, w.height));
+            w.event(&mut ctx, e)
+        };
+
+        let r = send(
+            &mut w,
+            &mut log,
+            &secondary_ev(PointerPhase::Down, 200.0, y),
+        );
+        assert_eq!(r, EventResult::Ignored);
+        assert_eq!(w.captured, None, "no capture for the shell to wedge on");
+        assert_eq!(w.pressed, None, "and no pressed chrome");
+        send(&mut w, &mut log, &secondary_ev(PointerPhase::Up, 200.0, y));
+        assert!(log.is_empty());
+
+        // The primary tap is untouched by the guard.
+        send(&mut w, &mut log, &ev(PointerPhase::Down, 200.0, y));
+        send(&mut w, &mut log, &ev(PointerPhase::Up, 200.0, y));
+        assert_eq!(log, vec![2]);
     }
 
     #[test]

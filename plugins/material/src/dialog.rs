@@ -93,6 +93,8 @@ use frust::authoring::ThemeTextColor;
 use frust::text;
 use frust::{NavigatorController, PageTransition, PopResult, TransitionSpec};
 
+use super::press::presses;
+
 /// Scrim opacity behind a modal dialog (M3 spec: 32%).
 const SCRIM_ALPHA: f32 = 0.32;
 /// Panel padding on all four edges, in logical px (M3 basic-dialog spec).
@@ -577,6 +579,14 @@ impl Widget for DialogWidget {
         };
         match p.phase {
             PointerPhase::Down => {
+                // The barrier swallows a secondary press like every other one —
+                // it blocks the page behind it whatever button pressed — but it
+                // arms no scrim dismiss from it, so a right-click can never
+                // close the dialog. (The focus re-claim above stays
+                // button-agnostic: any `Down` bubbling no claim is a blur.)
+                if !presses(p) {
+                    return EventResult::Handled;
+                }
                 self.scrim_captured = true;
                 self.scrim_down_outside = !self.panel.contains(p.position);
                 ctx.capture_pointer();
@@ -666,6 +676,15 @@ mod tests {
             phase,
             position: Point::new(x, y),
             button: PointerButton::Primary,
+        })
+    }
+
+    /// The same event on the secondary (right) button.
+    fn secondary_ev(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: PointerButton::Secondary,
         })
     }
 
@@ -903,6 +922,42 @@ mod tests {
             &ev(PointerPhase::Up, center.x, center.y),
         );
         assert_eq!(state.dismissed, 0, "a tap on the panel does not dismiss");
+    }
+
+    #[test]
+    fn a_secondary_scrim_press_is_swallowed_but_never_dismisses() {
+        let view: DialogView<Flag> = dialog()
+            .title("Hi")
+            .on_dismiss(|s: &mut Flag| s.dismissed += 1);
+        let mut w = build(&view);
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        w.layout(&mut lctx, &BoxConstraints::tight(Size::new(400.0, 600.0)));
+
+        let mut state = Flag::default();
+        // The same top-left scrim point a primary press dismisses from.
+        let r = dispatch(
+            &mut w,
+            &mut state,
+            &secondary_ev(PointerPhase::Down, 5.0, 5.0),
+        );
+        assert_eq!(
+            r,
+            EventResult::Handled,
+            "the barrier still swallows it — the page behind stays blocked"
+        );
+        assert!(!w.scrim_captured, "but arms no scrim dismiss");
+        dispatch(
+            &mut w,
+            &mut state,
+            &secondary_ev(PointerPhase::Up, 5.0, 5.0),
+        );
+        assert_eq!(state.dismissed, 0, "a right-click never closes the dialog");
+
+        // The primary scrim tap still dismisses.
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 5.0, 5.0));
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 5.0, 5.0));
+        assert_eq!(state.dismissed, 1);
     }
 
     // --- Navigator integration: scrim tap pops with an empty result. ---

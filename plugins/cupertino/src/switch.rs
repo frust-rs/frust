@@ -69,6 +69,8 @@ use frust::{AnimationController, Brightness, GlassMaterial, SpringDesc, Theme, T
 use kurbo::{Point, Size};
 use peniko::{Brush, Color, Gradient};
 
+use crate::press::presses;
+
 /// Track width, in logical px.
 ///
 /// **Kit-cited** (retrieved 2026-07-18): the Apple iOS 27 UI Kit's
@@ -381,6 +383,9 @@ impl Widget for CupertinoSwitchWidget {
         };
         match p.phase {
             PointerPhase::Down => {
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 self.captured = true;
                 ctx.capture_pointer();
                 ctx.request_redraw();
@@ -457,10 +462,44 @@ mod tests {
         })
     }
 
+    /// The same event on the secondary (right) button.
+    fn secondary_ev(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(frust::authoring::PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: frust::authoring::PointerButton::Secondary,
+        })
+    }
+
     fn dispatch(w: &mut CupertinoSwitchWidget, state: &mut ToggleState, event: &InputEvent) {
         let state_any: &mut dyn Any = state;
         let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(TRACK_W, TRACK_H));
         w.event(&mut ctx, event);
+    }
+
+    #[test]
+    fn a_secondary_press_never_captures_or_toggles() {
+        let mut w = widget(false);
+        let mut state = ToggleState::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            &secondary_ev(PointerPhase::Down, 10.0, 14.0),
+        );
+        assert!(!w.captured, "no capture for the shell to wedge on");
+        dispatch(
+            &mut w,
+            &mut state,
+            &secondary_ev(PointerPhase::Up, 10.0, 14.0),
+        );
+        assert_eq!(state.toggles, 0);
+
+        // The primary gesture still toggles.
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Down, 10.0, 14.0));
+        assert!(w.captured);
+        dispatch(&mut w, &mut state, &ev(PointerPhase::Up, 10.0, 14.0));
+        assert_eq!(state.toggles, 1);
+        assert_eq!(state.last, Some(true));
     }
 
     #[test]

@@ -44,7 +44,7 @@ use frust_core::{
 };
 use kurbo::{Point, Rect, Size};
 
-use crate::authoring::{ErasedArgCallback, ErasedCallback};
+use crate::authoring::{ErasedArgCallback, ErasedCallback, presses};
 
 /// iOS-style rubber-band resistance applied to the past-edge portion of a drag:
 /// the visible out-of-range displacement is `raw_excess * OVERSCROLL_RESISTANCE`.
@@ -460,6 +460,14 @@ impl ScrollWidget {
             }
             InputEvent::Pointer(p) => match p.phase {
                 PointerPhase::Down => {
+                    // Only a primary press arms a drag. A secondary press is a
+                    // context gesture: it still reaches the child (a
+                    // context-menu consumer inside the viewport must see it),
+                    // but opens no capture and can never start a scroll. The
+                    // wheel arm above is unaffected — it carries no button.
+                    if !presses(p) {
+                        return self.child.event_child(ctx, event);
+                    }
                     self.scrolling = false;
                     self.down_active = true;
                     self.fling = None;

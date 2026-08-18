@@ -90,6 +90,8 @@ use frust::{
 use kurbo::{Point, Rect, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
 
+use crate::press::presses;
+
 /// Content height of the iOS tab bar, in logical px (source: Apple HIG — the
 /// standard tab bar content band is 49pt, excluding the home-indicator safe
 /// area a shell adds; see the [module docs](self)'s safe-area note).
@@ -409,6 +411,9 @@ impl Widget for TabItemWidget {
         };
         match p.phase {
             PointerPhase::Down => {
+                if !presses(p) {
+                    return EventResult::Ignored;
+                }
                 self.captured = true;
                 ctx.capture_pointer();
                 EventResult::Handled
