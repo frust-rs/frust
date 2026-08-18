@@ -31,6 +31,17 @@ use crate::style::{
 /// U+2026 HORIZONTAL ELLIPSIS, one glyph rather than three ASCII periods.
 const ELLIPSIS: char = '\u{2026}';
 
+/// The hard cap on how many candidate measurements one
+/// [`TextContext::truncate_last_line`] call may perform.
+///
+/// The seek starts from a width-proportional estimate and normally converges
+/// in a handful of measurements; the cap is what makes the *worst* case a
+/// constant rather than a function of the line's length — an ellipsized
+/// 500-character session id can never cost 500 shaping passes on the UI
+/// thread. On exhaustion the longest candidate measured as fitting so far
+/// wins (see that fn's docs).
+const MAX_TRUNCATION_MEASUREMENTS: usize = 32;
+
 /// A font family registered via [`TextContext::register_fonts`], reported back
 /// to the caller so it can resolve widget styles against the exact name(s)
 /// fontique assigned.
@@ -99,6 +110,87 @@ pub struct TextContext {
     /// its watermark into that append-only record. Bumped by
     /// [`Self::sync_app_fonts`] and [`Self::register_fonts`].
     app_fonts_applied: usize,
+    /// How many [`Self::measure_uncached`] passes this context has run — the
+    /// observable hook the truncation walk's measurement bound is asserted
+    /// against (an uncached measure is invisible to [`ShapeCacheStats`], which
+    /// is the whole point of it).
+    #[cfg(test)]
+    measurements: usize,
+}
+
+/// Pushes `style` onto a fresh parley builder as its default run properties.
+///
+/// Shared by the caching [`TextContext::layout`] and the throwaway
+/// [`TextContext::measure_uncached`] so the two can never drift into shaping
+/// the same string against different fonts.
+fn push_style_defaults(builder: &mut parley::RangedBuilder<'_, Brush>, style: &TextStyle) {
+    // SystemUi resolves to the platform UI font (e.g. San Francisco on
+    // macOS) with no registration.
+    builder.push_default(to_parley_family(&style.family));
+    builder.push_default(StyleProperty::FontSize(style.size));
+    builder.push_default(StyleProperty::FontWeight(to_parley_weight(style.weight)));
+    builder.push_default(StyleProperty::FontStyle(to_parley_style(style.style)));
+    builder.push_default(StyleProperty::LetterSpacing(style.letter_spacing));
+    builder.push_default(StyleProperty::LineHeight(to_parley_line_height(
+        style.line_height,
+    )));
+    builder.push_default(StyleProperty::Brush(Brush::Solid(style.color)));
+}
+
+/// The number of lines a layout actually puts content on, discounting the
+/// empty line parley emits after a text-terminating `'\n'`.
+///
+/// parley attributes a hard break's newline to the line it terminates and then
+/// opens a further, zero-width line for the caret position after it — so
+/// `"Hello\n"` reports two lines while painting one. Counting that phantom
+/// line as overflow is what made `text("Hello\n").max_lines(1)` render
+/// "Hello…": a false ellipsis on text that fits. Only a *trailing* empty line
+/// at `text_len` is discounted; an empty line in the middle of the text
+/// (`"a\n\nb"`) is a real blank line the caller asked for.
+fn visible_line_count(layout: &TextLayout, text_len: usize) -> usize {
+    let count = layout.line_count();
+    if count <= 1 {
+        return count;
+    }
+    match layout.line_info(count - 1) {
+        Some(last) if last.range.is_empty() && last.range.end >= text_len => count - 1,
+        _ => count,
+    }
+}
+
+/// The truncation candidate for the prefix of `line_text` ending at byte
+/// `end`: that prefix plus [`ELLIPSIS`].
+///
+/// `end` is always one of `line_text`'s own `char_indices` boundaries, so the
+/// slice is in bounds by construction; `get` keeps an out-of-bounds/mid-char
+/// index a graceful degradation to the bare ellipsis rather than a panic.
+fn ellipsized(line_text: &str, end: usize) -> String {
+    format!("{}{ELLIPSIS}", line_text.get(..end).unwrap_or_default())
+}
+
+/// `span` scaled by `target / measured`, floored and clamped to `0..=span`.
+///
+/// The truncation seek's start estimate: `span` characters spanning `measured`
+/// pixels put roughly `span * target / measured` of them inside `target`. A
+/// degenerate `measured` (zero, negative, or non-finite — an unmeasurable
+/// line) falls back to the whole `span`, which merely starts the linear walk
+/// where an exhaustive longest-prefix-first scan would have.
+fn proportional_estimate(span: usize, target: f32, measured: f32) -> usize {
+    if measured <= 0.0 || !measured.is_finite() || !target.is_finite() {
+        return span;
+    }
+    if target <= 0.0 {
+        return 0;
+    }
+    let span_f = span as f64;
+    let estimate = (span_f * f64::from(target) / f64::from(measured)).floor();
+    if estimate <= 0.0 {
+        0
+    } else if estimate >= span_f {
+        span
+    } else {
+        estimate as usize
+    }
 }
 
 impl TextContext {
@@ -118,6 +210,8 @@ impl TextContext {
             layout_ctx: parley::LayoutContext::new(),
             shape_cache: ShapeCache::new(DEFAULT_CAPACITY),
             app_fonts_applied: 0,
+            #[cfg(test)]
+            measurements: 0,
         };
         cx.sync_app_fonts();
         cx
@@ -153,18 +247,7 @@ impl TextContext {
         let mut builder = self
             .layout_ctx
             .ranged_builder(&mut self.font_ctx, text, 1.0, true);
-
-        // SystemUi resolves to the platform UI font (e.g. San Francisco on
-        // macOS) with no registration; see the task's verified-parley notes.
-        builder.push_default(to_parley_family(&style.family));
-        builder.push_default(StyleProperty::FontSize(style.size));
-        builder.push_default(StyleProperty::FontWeight(to_parley_weight(style.weight)));
-        builder.push_default(StyleProperty::FontStyle(to_parley_style(style.style)));
-        builder.push_default(StyleProperty::LetterSpacing(style.letter_spacing));
-        builder.push_default(StyleProperty::LineHeight(to_parley_line_height(
-            style.line_height,
-        )));
-        builder.push_default(StyleProperty::Brush(Brush::Solid(style.color)));
+        push_style_defaults(&mut builder, style);
 
         let mut layout = builder.build(text);
         layout.break_all_lines(max_width);
@@ -180,16 +263,50 @@ impl TextContext {
         TextLayout::new(layout)
     }
 
+    /// Measures `text` as one unwrapped line, **without touching the shape
+    /// cache** — no lookup, and crucially no insert.
+    ///
+    /// The truncation walk measures throwaway candidate strings that will
+    /// never be laid out again; routing them through [`Self::layout`] would
+    /// insert every one of them into the bounded LRU and evict that many live
+    /// entries app-wide — a whole-cache flush for a long line, on top of the
+    /// shaping cost. Shaping here is the same parley build [`Self::layout`]
+    /// performs minus the cache insert and the alignment pass (alignment moves
+    /// lines within a bounded width; it cannot change an unbounded line's
+    /// advance, which is all this returns).
+    fn measure_uncached(&mut self, text: &str, style: &TextStyle) -> f32 {
+        #[cfg(test)]
+        {
+            self.measurements += 1;
+        }
+        let mut builder = self
+            .layout_ctx
+            .ranged_builder(&mut self.font_ctx, text, 1.0, true);
+        push_style_defaults(&mut builder, style);
+        let mut layout = builder.build(text);
+        layout.break_all_lines(None);
+        layout.width()
+    }
+
+    /// How many uncached measurements ([`Self::measure_uncached`]) this
+    /// context has performed since it was built.
+    #[cfg(test)]
+    fn measurement_count(&self) -> usize {
+        self.measurements
+    }
+
     /// Lays out `text` exactly like [`Self::layout`], then caps it to
     /// `max_lines` (when `Some`), applying `overflow` to whatever is cut.
     ///
     /// `max_lines = None` delegates straight to [`Self::layout`] — the
     /// zero-cost, behavior-unchanged path every existing caller keeps taking.
     /// parley 0.11 has no native `max_lines`/ellipsis support, so a bounded
-    /// call does the shaping twice on the truncating path: once to measure
-    /// the full text, once more (in [`Self::layout`], so still
+    /// call does two *cached* shaping passes on the truncating path: once to
+    /// measure the full text, once more (in [`Self::layout`], so still
     /// shape-cache-backed) to shape the truncated result — post-shaping
-    /// measure-and-truncate, not a parley feature.
+    /// measure-and-truncate, not a parley feature. The ellipsis walk in
+    /// between adds only bounded, cache-invisible measurements
+    /// ([`Self::measure_uncached`]).
     ///
     /// # Algorithm
     ///
@@ -197,7 +314,9 @@ impl TextContext {
     /// exposes no direct query for, so both are checked explicitly against
     /// the full (untruncated) layout:
     /// - **extra lines**: line-breaking produced more than `max_lines`
-    ///   lines (wrapping, or `max_lines` hard `\n` breaks in the source).
+    ///   *content* lines (wrapping, or `max_lines` hard `\n` breaks in the
+    ///   source) — see [`visible_line_count`] for why the raw line count is
+    ///   not that number when the text ends in `\n`.
     /// - **an unbreakable overrun**: exactly `max_lines` lines came out, but
     ///   the last visible one is itself wider than `max_width` — a run with
     ///   no break opportunity (one long unspaced word) that parley lets
@@ -237,7 +356,7 @@ impl TextContext {
 
         let full = self.layout(text, style, max_width);
         let last_visible = max_lines - 1;
-        let has_extra_lines = full.line_count() > max_lines;
+        let has_extra_lines = visible_line_count(&full, text.len()) > max_lines;
         let Some(last_line) = full.line_info(last_visible) else {
             // Fewer than `max_lines` lines exist at all: nothing overflowed.
             return full;
@@ -261,16 +380,29 @@ impl TextContext {
                 // could leave a trailing `\n` in the reshaped text — which
                 // parley reads as *another* hard break, silently growing the
                 // line count back past `max_lines`.
-                let cut = text[..last_line.range.end].trim_end();
-                self.layout(cut, style, max_width)
+                //
+                // `get` (not `[..]`): the index is parley-derived, and a
+                // truncated layout is a far better failure mode for a caller
+                // than a panic if it ever stops landing on a char boundary of
+                // *this* string — see the fn docs' slicing contract.
+                let Some(cut) = text.get(..last_line.range.end) else {
+                    return full;
+                };
+                self.layout(cut.trim_end(), style, max_width)
             }
             TextOverflow::Ellipsis => {
-                let before = &text[..last_line.range.start];
-                // See the `Clip` arm above for why trailing whitespace/`\n`
-                // must not survive into a reshaped fragment.
-                let line_text = text[last_line.range.start..last_line.range.end].trim_end();
+                // See the `Clip` arm above for the `get` and `trim_end`
+                // rationale (a trailing `\n` must not survive into a reshaped
+                // fragment).
+                let (Some(before), Some(line_text)) = (
+                    text.get(..last_line.range.start),
+                    text.get(last_line.range.start..last_line.range.end),
+                ) else {
+                    return full;
+                };
+                let line_text = line_text.trim_end();
                 let truncated_last = match max_width {
-                    Some(w) => self.truncate_last_line(line_text, style, w),
+                    Some(w) => self.truncate_last_line(line_text, style, w, last_line.width),
                     // No width to truncate against — keep the whole line,
                     // just mark it cut.
                     None => format!("{line_text}{ELLIPSIS}"),
@@ -281,34 +413,109 @@ impl TextContext {
         }
     }
 
-    /// The [`TextOverflow::Ellipsis`] truncation walk: finds the longest
-    /// prefix of `line_text` (in char-boundary steps, longest first) such
-    /// that `prefix + '…'`, measured alone as a single unwrapped line, has a
-    /// width `<= max_width`. Falls back to a bare `'…'` if nothing fits
-    /// (never returns an empty string with no overflow marker at all).
+    /// The [`TextOverflow::Ellipsis`] truncation walk: returns a prefix of
+    /// `line_text` (cut on a char boundary) plus `'…'`, measured alone as a
+    /// single unwrapped line to be no wider than `max_width`. Falls back to a
+    /// bare `'…'` if not even that fits (never returns an empty string with no
+    /// overflow marker at all). `line_width` is the line's already-measured
+    /// natural advance — the seek's scale reference, not a bound.
     ///
-    /// Linear rather than binary search, deliberately: kerning/ligature
-    /// reshaping around a truncation point is not provably monotonic in
-    /// every font, so a binary search could converge one character off in
-    /// an adversarial font; this is the muxr `clipped_label` precedent's own
-    /// shape — proven in production, and correct regardless of font
-    /// quirks. Scanning longest-prefix-first also means the common case
-    /// (already close to fitting; a handful of characters over) converges
-    /// in only a few measurements rather than walking the whole line.
-    fn truncate_last_line(&mut self, line_text: &str, style: &TextStyle, max_width: f32) -> String {
-        let mut boundaries: Vec<usize> = line_text.char_indices().map(|(i, _)| i).collect();
-        boundaries.push(line_text.len());
+    /// # Bounded seek
+    ///
+    /// The walk *starts near the answer* rather than at one end: the ellipsis
+    /// is measured once, and the first candidate is the width-proportional
+    /// character estimate `chars * (max_width - ellipsis) / line_width`. One
+    /// proportional re-estimate from that candidate's own measured prefix
+    /// width follows (which lands a line mixing very narrow and very wide
+    /// glyphs within a few characters of the answer), and only then a linear,
+    /// one-character-at-a-time correction in whichever direction the probe
+    /// pointed.
+    ///
+    /// The correction stays *linear* deliberately: kerning/ligature reshaping
+    /// around a truncation point is not provably monotonic in every font, so a
+    /// binary search could converge one character off in an adversarial font.
+    /// This is the muxr `clipped_label` precedent's walk — only its starting
+    /// point is estimated instead of being the whole string.
+    ///
+    /// # Cost bound
+    ///
+    /// Every measurement goes through [`Self::measure_uncached`], and the walk
+    /// performs at most [`MAX_TRUNCATION_MEASUREMENTS`] of them. Both halves
+    /// matter: a longest-prefix-first scan of an unbreakable token (a URL,
+    /// hash, or session id wider than its box — the primary ellipsis case)
+    /// cost one *cached* shaping pass per character, i.e. `O(len²)` work on
+    /// the UI thread plus `len` inserts that evicted the shape cache's live
+    /// entries app-wide. On cap exhaustion the longest candidate measured as
+    /// fitting so far wins (the bare `'…'` in the worst case): the seek never
+    /// loops unbounded, and never returns a candidate it did not measure as
+    /// fitting.
+    fn truncate_last_line(
+        &mut self,
+        line_text: &str,
+        style: &TextStyle,
+        max_width: f32,
+        line_width: f32,
+    ) -> String {
+        let mut budget = MAX_TRUNCATION_MEASUREMENTS;
 
-        for &b in boundaries.iter().rev() {
-            let candidate = format!("{}{ELLIPSIS}", &line_text[..b]);
-            let width = self.layout(&candidate, style, None).size().width;
-            if width <= f64::from(max_width) {
-                return candidate;
+        // The empty-prefix candidate first: it is both the fallback and the
+        // headroom every other candidate is measured against.
+        let ellipsis_width = self.measure_uncached(&ellipsized(line_text, 0), style);
+        budget -= 1;
+        if ellipsis_width > max_width {
+            // Even a bare ellipsis overflows — best effort, still signal the
+            // truncation rather than silently rendering nothing.
+            return ELLIPSIS.to_string();
+        }
+        let available = max_width - ellipsis_width;
+
+        // `ends[i]` is the byte length of the prefix holding the line's first
+        // `i` characters; `ends[longest]` is the whole line.
+        let mut ends: Vec<usize> = line_text.char_indices().map(|(i, _)| i).collect();
+        ends.push(line_text.len());
+        let longest = ends.len() - 1;
+
+        let mut cursor = proportional_estimate(longest, available, line_width);
+        let mut width = self.measure_uncached(&ellipsized(line_text, ends[cursor]), style);
+        budget -= 1;
+        // One re-estimate from what the probe actually measured, so a line
+        // whose glyph widths are nowhere near uniform still starts the linear
+        // walk close to the answer.
+        if budget > 0 && cursor > 0 {
+            let refined = proportional_estimate(cursor, available, width - ellipsis_width);
+            if refined != cursor {
+                cursor = refined;
+                width = self.measure_uncached(&ellipsized(line_text, ends[cursor]), style);
+                budget -= 1;
             }
         }
-        // Even a bare ellipsis doesn't fit — best effort, still signal the
-        // truncation rather than silently rendering nothing.
-        ELLIPSIS.to_string()
+
+        // The empty prefix is known to fit (checked above), so a fitting
+        // answer always exists no matter where the budget runs out.
+        let mut best = 0;
+        if width <= max_width {
+            best = cursor;
+            // Grow a character at a time while candidates keep fitting.
+            while best < longest && budget > 0 {
+                budget -= 1;
+                let next = best + 1;
+                if self.measure_uncached(&ellipsized(line_text, ends[next]), style) > max_width {
+                    break;
+                }
+                best = next;
+            }
+        } else {
+            // Shrink a character at a time until one fits.
+            while cursor > 0 && budget > 0 {
+                budget -= 1;
+                cursor -= 1;
+                if self.measure_uncached(&ellipsized(line_text, ends[cursor]), style) <= max_width {
+                    best = cursor;
+                    break;
+                }
+            }
+        }
+        ellipsized(line_text, ends[best])
     }
 
     /// The shape cache's instrumentation counters (shapes performed,
@@ -1052,6 +1259,298 @@ mod tests {
             TextOverflow::Ellipsis,
         );
         assert_eq!(bounded.size().width, 0.0);
+    }
+
+    // --- Bounded ellipsis seek ---
+
+    /// A 500-character unbreakable token: the primary ellipsis case (a URL,
+    /// hash, or session id far wider than its box), and the input the
+    /// pre-bound walk shaped once per character.
+    fn long_token() -> String {
+        // Mixed-width characters, so the walk's proportional estimate can't
+        // be trivially exact.
+        "aWi".repeat(167)[..500].to_string()
+    }
+
+    /// The exhaustive longest-fitting-prefix scan (every char boundary,
+    /// longest first) that the bounded seek approximates — the reference
+    /// implementation for the seek's quality, kept only here.
+    fn exhaustive_truncation(line: &str, s: &TextStyle, max_width: f32) -> String {
+        let mut cx = TextContext::new();
+        let mut ends: Vec<usize> = line.char_indices().map(|(i, _)| i).collect();
+        ends.push(line.len());
+        for &end in ends.iter().rev() {
+            let candidate = format!("{}{ELLIPSIS}", &line[..end]);
+            if cx.layout(&candidate, s, None).size().width <= f64::from(max_width) {
+                return candidate;
+            }
+        }
+        ELLIPSIS.to_string()
+    }
+
+    #[test]
+    fn a_long_unbreakable_token_truncates_within_the_measurement_cap() {
+        // The O(n²)-on-the-UI-thread defect: one full shaping pass per
+        // character of the overflowing line. The bound is a constant now, and
+        // none of those measurements may reach the shape cache.
+        let mut cx = TextContext::new();
+        let s = style(16.0);
+        let token = long_token();
+        let max_width = 80.0;
+
+        let bounded =
+            cx.layout_bounded(&token, &s, Some(max_width), Some(1), TextOverflow::Ellipsis);
+
+        assert_eq!(bounded.line_count(), 1);
+        let width = bounded.line_info(0).expect("one line").width;
+        assert!(
+            width <= max_width,
+            "the truncated line must still fit the bound: {width} > {max_width}"
+        );
+        assert!(
+            cx.measurement_count() <= MAX_TRUNCATION_MEASUREMENTS,
+            "the seek must stay inside its cap: {} measurements for a {}-char token",
+            cx.measurement_count(),
+            token.chars().count()
+        );
+        let stats = cx.shape_cache_stats();
+        assert_eq!(
+            stats.shapes, 2,
+            "only the full and the final truncated layout may be cached — every \
+             candidate measurement is uncached"
+        );
+        assert_eq!(stats.evictions, 0);
+    }
+
+    #[test]
+    fn the_truncation_walk_never_evicts_live_cache_entries() {
+        // The cache-flush half of the same defect: with the LRU full, a
+        // per-candidate insert evicted one live entry per character.
+        let mut cx = TextContext::new();
+        let s = style(16.0);
+        for i in 0..DEFAULT_CAPACITY {
+            let _ = cx.layout(&format!("live entry {i}"), &s, None);
+        }
+        let evictions_before = cx.shape_cache_stats().evictions;
+
+        let _ = cx.layout_bounded(
+            &long_token(),
+            &s,
+            Some(60.0),
+            Some(1),
+            TextOverflow::Ellipsis,
+        );
+
+        assert_eq!(
+            cx.shape_cache_stats().evictions - evictions_before,
+            2,
+            "a full cache may only lose the two entries the two legitimate \
+             (full + final) inserts displace"
+        );
+    }
+
+    #[test]
+    fn the_bounded_seek_matches_an_exhaustive_longest_prefix_scan() {
+        // The bound must not cost accuracy: the seek's cut is the same one the
+        // exhaustive scan finds, including for a line whose glyph widths are
+        // nowhere near uniform (the case a single proportional estimate would
+        // land far from).
+        let s = style(16.0);
+        let lines = [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "iiiiiiiiiiiiiiiiiiiiWWWWWWWWWWWWWWWWWWWW",
+            "WWWWWWWWWWWWWWWWWWWWiiiiiiiiiiiiiiiiiiii",
+            "https://example.com/a/very/long/path?q=1",
+            &long_token(),
+        ];
+        let mut worst = 0;
+        for line in lines {
+            for max_width in [12.0_f32, 40.0, 160.0, 400.0] {
+                let mut cx = TextContext::new();
+                let line_width = cx.layout(line, &s, None).size().width as f32;
+                let got = cx.truncate_last_line(line, &s, max_width, line_width);
+                let want = exhaustive_truncation(line, &s, max_width);
+                assert_eq!(
+                    got, want,
+                    "bounded seek disagreed with the exhaustive scan for \
+                     {max_width}px of {line:?}"
+                );
+                worst = worst.max(cx.measurement_count());
+            }
+        }
+        // Comfortably inside the cap (12 on the reference host), so the
+        // agreement above is real convergence, not a capped coincidence.
+        assert!(
+            worst <= MAX_TRUNCATION_MEASUREMENTS,
+            "worst seek across the fixtures took {worst} measurements"
+        );
+    }
+
+    #[test]
+    fn the_seek_returns_a_fitting_candidate_even_when_the_cap_is_exhausted() {
+        // Cap exhaustion is a quality fallback, never a correctness one: the
+        // returned candidate is always one measured as fitting. Forced here by
+        // a line whose natural width lies about where the fitting prefix ends
+        // (a deliberately misleading `line_width`).
+        let mut cx = TextContext::new();
+        let s = style(16.0);
+        let line = "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW";
+        let max_width = 60.0;
+
+        let got = cx.truncate_last_line(line, &s, max_width, 1.0);
+
+        assert!(
+            cx.measurement_count() <= MAX_TRUNCATION_MEASUREMENTS,
+            "the cap binds even when the estimate is useless: {}",
+            cx.measurement_count()
+        );
+        assert!(got.ends_with(ELLIPSIS));
+        let width = cx.layout(&got, &s, None).size().width;
+        assert!(
+            width <= f64::from(max_width),
+            "a cap-exhausted seek must still return a measured-fitting candidate: \
+             {width} > {max_width}"
+        );
+    }
+
+    // --- Trailing-newline discount ---
+
+    #[test]
+    fn a_text_terminating_newline_is_not_an_extra_line() {
+        // parley opens a zero-width line after a terminal '\n'; counting it as
+        // overflow rendered "Hello…" for `text("Hello\n").max_lines(1)`.
+        let s = style(16.0);
+        for overflow in [TextOverflow::Ellipsis, TextOverflow::Clip] {
+            let mut cx = TextContext::new();
+            let fitting = cx
+                .layout("Hello", &s, Some(400.0))
+                .line_info(0)
+                .expect("one line")
+                .width;
+            let with_ellipsis = cx
+                .layout(&format!("Hello{ELLIPSIS}"), &s, Some(400.0))
+                .line_info(0)
+                .expect("one line")
+                .width;
+
+            let bounded = cx.layout_bounded("Hello\n", &s, Some(400.0), Some(1), overflow);
+            let got = bounded.line_info(0).expect("one content line").width;
+
+            assert_eq!(
+                got, fitting,
+                "{overflow:?}: text that fits must render verbatim despite its \
+                 trailing newline"
+            );
+            assert_ne!(
+                got, with_ellipsis,
+                "{overflow:?}: no ellipsis may be appended to text that fits"
+            );
+            assert_eq!(
+                cx.measurement_count(),
+                0,
+                "{overflow:?}: a fitting line must not enter the truncation walk"
+            );
+        }
+    }
+
+    #[test]
+    fn a_trailing_newline_after_several_lines_is_discounted_too() {
+        let s = style(16.0);
+        for overflow in [TextOverflow::Ellipsis, TextOverflow::Clip] {
+            let mut cx = TextContext::new();
+            let plain = cx
+                .layout("A\nBB", &s, Some(400.0))
+                .line_info(1)
+                .expect("two lines")
+                .width;
+            let bounded = cx.layout_bounded("A\nBB\n", &s, Some(400.0), Some(2), overflow);
+            assert_eq!(
+                bounded.line_info(1).expect("two content lines").width,
+                plain,
+                "{overflow:?}: two content lines plus a terminal newline fit \
+                 max_lines(2)"
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_extra_line_still_truncates_when_the_text_ends_in_a_newline() {
+        // The discount must not swallow genuine overflow.
+        let mut cx = TextContext::new();
+        let s = style(16.0);
+        let clipped = cx.layout_bounded("A\nBB\n", &s, Some(400.0), Some(1), TextOverflow::Clip);
+        assert_eq!(
+            clipped.line_count(),
+            1,
+            "the second content line is dropped"
+        );
+        assert_eq!(
+            clipped.size().width,
+            cx.layout("A", &s, Some(400.0)).size().width
+        );
+
+        let ellipsized =
+            cx.layout_bounded("A\nBB\n", &s, Some(400.0), Some(1), TextOverflow::Ellipsis);
+        assert_eq!(ellipsized.line_count(), 1);
+        assert!(
+            ellipsized.size().width > clipped.size().width,
+            "Ellipsis must append '…' to the surviving line"
+        );
+    }
+
+    #[test]
+    fn a_blank_line_inside_the_text_is_a_real_line() {
+        // Only a *trailing* empty line is phantom: "a\n\nb" genuinely paints a
+        // blank second line the caller asked for, so all three count.
+        let mut cx = TextContext::new();
+        let s = style(16.0);
+        let fits = cx.layout_bounded("a\n\nb", &s, Some(400.0), Some(3), TextOverflow::Ellipsis);
+        assert_eq!(
+            fits.line_count(),
+            3,
+            "three content lines (one blank) fit max_lines(3) untouched"
+        );
+        assert_eq!(
+            cx.measurement_count(),
+            0,
+            "no truncation walk for text that fits"
+        );
+
+        let capped = cx.layout_bounded("a\n\nb", &s, Some(400.0), Some(2), TextOverflow::Clip);
+        assert!(
+            capped.line_count() < 3,
+            "the blank line occupies one of the two, so 'b' overflows"
+        );
+    }
+
+    // --- Multi-byte truncation boundaries ---
+
+    #[test]
+    fn multi_byte_text_truncates_on_char_boundaries_without_panicking() {
+        // Every byte index in the truncation path is parley-derived or
+        // char-boundary-derived; a mid-char slice would panic on this input.
+        let s = style(16.0);
+        let texts = [
+            "日本語のテキストです、これは折り返しの確認用の文章です",
+            "🙂🎉😀🚀🌍🙂🎉😀🚀🌍🙂🎉😀🚀🌍",
+            "Grüße aus München — Übergrößenträger",
+        ];
+        for text in texts {
+            for overflow in [TextOverflow::Ellipsis, TextOverflow::Clip] {
+                for max_width in [20.0_f32, 70.0] {
+                    let mut cx = TextContext::new();
+                    let bounded = cx.layout_bounded(text, &s, Some(max_width), Some(1), overflow);
+                    assert_eq!(bounded.line_count(), 1, "{text:?} at {max_width}px");
+                    if overflow == TextOverflow::Ellipsis {
+                        let width = bounded.line_info(0).expect("one line").width;
+                        assert!(
+                            width <= max_width,
+                            "{text:?}: truncated width {width} exceeds {max_width}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
