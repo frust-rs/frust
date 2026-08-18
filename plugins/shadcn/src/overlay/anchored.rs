@@ -37,17 +37,22 @@
 //! * **Kept-mounted** (what an exit animation needs): the app mounts the host
 //!   *unconditionally* and hands the flag down through
 //!   [`AnchoredOverlayView::open`]. A closed host lays its content out, paints
-//!   nothing once the exit ramp settles, and is completely input-transparent —
-//!   so it costs one layout of the content per frame and nothing else.
+//!   nothing once the exit ramp settles, and claims no focus, dismisses on
+//!   nothing and claims no hover the whole way — the only input it still
+//!   answers is a `Down` landing on the still-fading content itself (the
+//!   *Exit-ramp swallow* bullet below), so once that ramp settles it costs one
+//!   layout of the content per frame and nothing else.
 //!
 //! The framework has no seam for keeping a conditionally-mounted view alive past
 //! the rebuild that unmounts it, so an exit ramp is only possible for a widget
 //! that **stays mounted with `open == false`**. A rebuild that unmounts the host
 //! mid-ramp simply truncates the exit; nothing breaks, the panel just vanishes.
 //!
-//! A closed host claims no focus, dismisses on nothing, consumes no press and
-//! publishes no semantics. Its placement math runs regardless, so
-//! [`AnchoredOverlayWidget::content_rect`] stays truthful for the whole ramp.
+//! A closed host claims no focus, dismisses on nothing and publishes no
+//! semantics. Its placement math runs regardless, so
+//! [`AnchoredOverlayWidget::content_rect`] stays truthful for the whole
+//! ramp — which is also what makes the exit-ramp swallow below possible: a
+//! closed host still knows exactly where its (still fading) content sits.
 //!
 //! # Coordinate spaces
 //!
@@ -78,6 +83,16 @@
 //!   [`EventResult::Ignored`] and the host claims no hover of its own, so a
 //!   hover-driven overlay (tooltip, hover-card) can still see its trigger's
 //!   hover end underneath the host.
+//! - **Exit-ramp swallow**: while a kept-mounted host is closed but its
+//!   content is still visually present (mid the panel's own exit ramp — see
+//!   `PanelWidget` in [`crate::components::popover`]), a `Down` landing inside
+//!   [`AnchoredOverlayWidget::content_rect`] is still consumed — absorbed by
+//!   the content itself, forwarded nowhere further and re-arming no dismissal
+//!   — rather than falling through to whatever the page has underneath. It
+//!   claims no hover and no focus. A `Down` outside the content, and every
+//!   press once the ramp has fully settled, passes straight through — the
+//!   click that closed the overlay already reached the page, and that stays
+//!   true for anything *outside* the content's own bounds.
 
 use std::rc::Rc;
 
@@ -573,14 +588,26 @@ impl Widget for AnchoredOverlayWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        // A closed (or closing) kept-mounted host is input-transparent: it
-        // claims no focus, dismisses on nothing and swallows no press, so the
-        // click that closed it — and every one after — reaches the page below
-        // while the content plays its exit ramp. A broadcast still reaches the
-        // content, which is what keeps its pods live.
+        // A closed (or closing) kept-mounted host claims no focus and
+        // dismisses on nothing: light dismiss and Escape are off for good the
+        // moment `open` flips, and no press claims hover. A broadcast still
+        // reaches the content, which is what keeps its pods live. A `Down` is
+        // also still routed to the content — `route_event_single` hit-tests it
+        // against `content_rect` first, so one landing outside is never even
+        // forwarded — so a kept-mounted panel still mid-exit-ramp can swallow
+        // a press that lands on it rather than letting it fall through to
+        // whatever the page has underneath (the module docs' exit-ramp
+        // swallow); the content itself decides whether it still has anything
+        // left to swallow, and a closed one that was never open — or one whose
+        // ramp has fully settled — has nothing to and lets it straight through.
+        // Move, Up, Cancel and Key stay exactly as input-transparent as before.
         if !self.open {
             if event.is_broadcast() {
                 self.content.event_child(ctx, event);
+                return EventResult::Ignored;
+            }
+            if matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Down) {
+                return route_event_single(&mut self.content, ctx, event);
             }
             return EventResult::Ignored;
         }
