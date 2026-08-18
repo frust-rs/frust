@@ -22,6 +22,10 @@
 //!
 //! The panel keeps the card open while the pointer is over it — the layer records
 //! that in the shared latch, and the trigger treats it as hover of its own.
+//!
+//! Because the layer is mounted permanently, the card gets its
+//! `data-[state=closed]:fade-out-0` exit for free — see [`crate::tooltip`]'s
+//! exit-ramp section, which owns the whole ramp for both components.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -50,7 +54,11 @@ impl PanelStyle {
             min_width: 0.0,
             anchor: None,
             shadow: style::SHADOW_MD,
+            // The layer above composites the card's whole fade, in both
+            // directions, so the panel runs no ramp of its own and is present
+            // for every frame the layer paints it on.
             entrance: false,
+            open: true,
         }
     }
 }
@@ -236,6 +244,39 @@ mod tests {
         h.frame(gone);
         h.frame(gone + HOVER_CARD_CLOSE_DELAY_MS as f64 + 16.0);
         assert!(!h.hover.is_open());
+    }
+
+    #[test]
+    fn the_card_fades_out_once_its_close_delay_runs_down() {
+        let mut h = Harness::new();
+        h.event(pointer(PointerPhase::Move, 10.0, 10.0));
+        h.frame(0.0);
+        h.frame(TOOLTIP_DELAY_MS as f64);
+        let settled = TOOLTIP_DELAY_MS as f64 + 400.0;
+        h.paint_at(settled);
+
+        // Off both the trigger and the panel, then past the grace period.
+        h.event(pointer(PointerPhase::Move, 380.0, 560.0));
+        h.frame(settled);
+        let closed = settled + HOVER_CARD_CLOSE_DELAY_MS as f64 + 16.0;
+        h.frame(closed);
+        assert!(!h.hover.is_open(), "the grace period is over");
+
+        let theme = light();
+        let bg = |rec: &Recorder| {
+            rec.rrects
+                .iter()
+                .any(|(_, _, _, c)| *c == theme.scheme().surface_container_high)
+        };
+        let mid = h.paint_at(closed + 100.0);
+        assert!(bg(&mid), "the card is still on screen through the fade");
+        assert!(mid.layers[0] > 0.0 && mid.layers[0] < 1.0);
+        assert!(
+            mid.transforms.is_empty(),
+            "a plain fade-out, like the tooltip's"
+        );
+        let gone = h.paint_at(closed + 400.0);
+        assert!(!bg(&gone), "and gone at settle");
     }
 
     #[test]

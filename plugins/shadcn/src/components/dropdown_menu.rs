@@ -1134,11 +1134,14 @@ impl Widget for MenuListWidget {
 /// A declarative shadcn dropdown menu. See [`dropdown_menu`].
 pub struct DropdownMenuView<State: 'static> {
     inner: AnchoredOverlayView<State>,
+    style: PanelHandle,
     placement: OverlayPlacement,
 }
 
 /// Build a dropdown-menu panel over `items`, to be mounted while the app's own
-/// open flag is set (see [`crate::popover`] for the mount contract).
+/// open flag is set — or kept mounted with the flag handed to
+/// [`DropdownMenuView::open`] for an exit ramp (see [`crate::popover`] for both
+/// mount contracts).
 ///
 /// `on_select(state, index)` reports an activation, with `index` counted
 /// depth-first over the item tree (see the [module docs](self)).
@@ -1147,11 +1150,17 @@ pub fn dropdown_menu<State: 'static, F: Fn(&mut State, usize) + 'static>(
     on_select: F,
 ) -> DropdownMenuView<State> {
     let style: PanelHandle = Rc::new(RefCell::new(PanelStyle::menu()));
-    let content = menu_panel(items, MenuListStyle::menu(), style, Rc::new(on_select));
+    let content = menu_panel(
+        items,
+        MenuListStyle::menu(),
+        style.clone(),
+        Rc::new(on_select),
+    );
     // A menu lines up with the trigger's leading edge, not its centre.
     let placement = OverlayPlacement::default().align(OverlayAlign::Start);
     DropdownMenuView {
         inner: anchored(content).placement(placement),
+        style,
         placement,
     }
 }
@@ -1179,6 +1188,18 @@ impl<State: 'static> DropdownMenuView<State> {
     pub fn offset(mut self, offset: f64) -> Self {
         self.placement.offset = offset;
         self.apply_placement()
+    }
+
+    /// Hand a **kept-mounted** menu the app's open flag, so closing it plays the
+    /// panel's exit ramp instead of vanishing (see [`crate::popover`]).
+    ///
+    /// The default is `true`: a mounted menu is an open one. A selection still
+    /// reports through `on_select` on the release that made it — only the pixels
+    /// linger, and an open submenu fades out inside its parent.
+    pub fn open(mut self, open: bool) -> Self {
+        self.style.borrow_mut().open = open;
+        self.inner = self.inner.open(open);
+        self
     }
 
     /// Set the open-change callback: a press outside the menu or a focus-routed
@@ -1640,6 +1661,132 @@ mod tests {
         let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
         let size = w.layout(&mut lctx, &BoxConstraints::loose(WINDOW));
         assert_eq!(size.width, MIN_MENU_WIDTH, "min-w-[8rem]");
+    }
+
+    /// `duration-200`, the shared ramp the panel exits over.
+    const RAMP_MS: f64 = 200.0;
+
+    /// A kept-mounted menu: always in the tree, handed the app's flag, which is
+    /// the mount an exit ramp needs (see [`crate::overlay::anchored`]).
+    struct KeptHarness {
+        root: RenderRoot<AppState, frust::StackView<AppState>>,
+        state: AppState,
+        tcx: TextContext,
+        anchor: OverlayAnchor,
+        open: bool,
+        clock: f64,
+    }
+
+    impl KeptHarness {
+        fn new() -> Self {
+            let anchor = OverlayAnchor::new();
+            anchor.set(Rect::new(20.0, 20.0, 100.0, 56.0));
+            let mut h = KeptHarness {
+                root: RenderRoot::new(),
+                state: AppState::default(),
+                tcx: TextContext::new(),
+                anchor,
+                open: true,
+                clock: 0.0,
+            };
+            h.root.set_theme(Box::new(light()));
+            h.pass();
+            h
+        }
+
+        fn pass(&mut self) {
+            let anchor = self.anchor.clone();
+            let open = self.open;
+            let mut logic = move |_s: &mut AppState| {
+                frust::Stack(vec![any(dropdown_menu(items(), |s: &mut AppState, i| {
+                    s.selected.push(i)
+                })
+                .anchor(&anchor)
+                .open(open)
+                .on_open_change(|s: &mut AppState, o| s.opens.push(o)))])
+            };
+            self.root.rebuild(&mut logic, &mut self.state);
+            self.root
+                .layout_with_text(WINDOW, &mut self.tcx as &mut dyn Any);
+            let now = self.clock;
+            self.root.paint(&mut Recorder::default(), ft_ms(now));
+        }
+
+        fn paint_at(&mut self, ms: f64) -> Recorder {
+            self.clock = ms;
+            let mut rec = Recorder::default();
+            self.root.paint(&mut rec, ft_ms(ms));
+            rec
+        }
+
+        /// The centre of `Profile`, the first selectable row — under the panel's
+        /// `p-1` and the `My Account` group label above it.
+        fn first_item_row(&self) -> Point {
+            let anchor = self.anchor.rect();
+            Point::new(
+                anchor.x0 + 20.0,
+                anchor.y1 + SIDE_OFFSET + MENU_PADDING + 24.0 + 14.0,
+            )
+        }
+
+        /// Whether the panel's `bg-popover` box was drawn.
+        fn painted(rec: &Recorder) -> bool {
+            let theme = light();
+            rec.rrects
+                .iter()
+                .any(|(_, _, _, c)| *c == theme.scheme().surface_container_high)
+        }
+    }
+
+    #[test]
+    fn a_kept_mounted_menu_paints_out_its_exit_and_consumes_nothing_meanwhile() {
+        let mut h = KeptHarness::new();
+        h.paint_at(RAMP_MS * 2.0);
+        assert!(KeptHarness::painted(&h.paint_at(RAMP_MS * 2.0)));
+        let panel = h.first_item_row();
+
+        // The app closes it; the widget stays mounted and ramps out.
+        h.open = false;
+        h.pass();
+        let start = h.clock;
+        let mid = h.paint_at(start + RAMP_MS / 2.0);
+        assert!(KeptHarness::painted(&mid), "still on screen");
+        assert!(mid.layers[0] > 0.0 && mid.layers[0] < 1.0);
+
+        // A press over the closing panel reaches the page under it.
+        let before = h.state.opens.len();
+        let outcome = h
+            .root
+            .event(&mut h.state, &pointer(PointerPhase::Down, panel.x, panel.y));
+        assert!(!outcome.handled, "a closing menu swallows nothing");
+        assert_eq!(h.state.selected, Vec::<usize>::new(), "and selects nothing");
+        assert_eq!(h.state.opens.len(), before, "and dismisses nothing");
+
+        assert!(
+            !KeptHarness::painted(&h.paint_at(start + RAMP_MS * 2.0)),
+            "gone at settle"
+        );
+    }
+
+    #[test]
+    fn a_kept_mounted_menu_that_reopens_is_live_again() {
+        let mut h = KeptHarness::new();
+        h.paint_at(RAMP_MS * 2.0);
+        h.open = false;
+        h.pass();
+        h.paint_at(h.clock + RAMP_MS * 2.0);
+        assert!(!KeptHarness::painted(&h.paint_at(h.clock)));
+
+        h.open = true;
+        h.pass();
+        let reopened = h.paint_at(h.clock + RAMP_MS * 2.0);
+        assert!(KeptHarness::painted(&reopened), "the entrance ran again");
+        let row = h.first_item_row();
+        h.root
+            .event(&mut h.state, &pointer(PointerPhase::Down, row.x, row.y));
+        h.root
+            .event(&mut h.state, &pointer(PointerPhase::Up, row.x, row.y));
+        assert_eq!(h.state.selected, vec![1], "`Profile`, the first item row");
     }
 
     #[test]

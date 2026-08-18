@@ -27,9 +27,10 @@
 //!
 //! `selected` is an index into `options` and the widget never moves it: a commit
 //! is reported through `on_select` and the app feeds the new value back down.
-//! Open/close is the app's too — it mounts [`select`] while its own flag is set
-//! (see [`crate::popover`] for the mount contract), and [`select_trigger`]
-//! reports the toggle.
+//! Open/close is the app's too — it mounts [`select`] while its own flag is set,
+//! or keeps it mounted and hands the flag to [`SelectView::open`] so a close
+//! plays the panel's exit ramp (see [`crate::popover`] for both mount
+//! contracts) — and [`select_trigger`] reports the toggle.
 //!
 //! # What the panel takes from its trigger
 //!
@@ -197,8 +198,9 @@ fn rows_for(
 /// Build a select list over `options`, showing `options[selected]` as checked and
 /// reporting a commit through `on_select(state, option_index)`.
 ///
-/// Mount it while the app's own open flag is set, anchored to the trigger's
-/// captured rect (see the [module docs](self)).
+/// Mount it while the app's own open flag is set, or keep it mounted and hand
+/// the flag to [`SelectView::open`] for an exit ramp — anchored to the trigger's
+/// captured rect either way (see the [module docs](self)).
 pub fn select<State: 'static, F: Fn(&mut State, usize) + 'static>(
     options: Vec<SelectOption>,
     selected: Option<usize>,
@@ -250,6 +252,18 @@ impl<State: 'static> SelectView<State> {
     pub fn offset(mut self, offset: f64) -> Self {
         self.placement.offset = offset;
         self.apply_placement()
+    }
+
+    /// Hand a **kept-mounted** list the app's open flag, so closing it plays the
+    /// panel's exit ramp instead of vanishing (see [`crate::popover`]).
+    ///
+    /// The default is `true`: a mounted list is an open one. A commit still
+    /// reports through `on_select` on the press that made it — only the pixels
+    /// linger.
+    pub fn open(mut self, open: bool) -> Self {
+        self.style.borrow_mut().open = open;
+        self.inner = self.inner.open(open);
+        self
     }
 
     /// Set the open-change callback: a press outside the list or a focus-routed
@@ -677,20 +691,37 @@ mod tests {
         ]
     }
 
+    /// `duration-200`, the shared ramp the panel exits over.
+    const RAMP_MS: f64 = 200.0;
+
     struct Harness {
         root: RenderRoot<AppState, frust::StackView<AppState>>,
         state: AppState,
         tcx: TextContext,
         anchor: OverlayAnchor,
+        /// Whether the list is kept mounted and handed the flag (the mount an
+        /// exit ramp needs) rather than mounted only while open.
+        kept: bool,
+        clock: f64,
     }
 
     impl Harness {
         fn new() -> Self {
+            Self::with_mount(false)
+        }
+
+        fn kept_mounted() -> Self {
+            Self::with_mount(true)
+        }
+
+        fn with_mount(kept: bool) -> Self {
             let mut h = Harness {
                 root: RenderRoot::new(),
                 state: AppState::default(),
                 tcx: TextContext::new(),
                 anchor: OverlayAnchor::new(),
+                kept,
+                clock: 0.0,
             };
             h.root.set_theme(Box::new(light()));
             h.pass();
@@ -699,6 +730,7 @@ mod tests {
 
         fn pass(&mut self) {
             let anchor = self.anchor.clone();
+            let kept = self.kept;
             let mut logic = move |state: &mut AppState| {
                 let trigger = select_trigger(&anchor, options(), state.selected)
                     .placeholder("Select a fruit")
@@ -708,7 +740,7 @@ mod tests {
                         s.open = open;
                     });
                 let mut children = vec![any(trigger)];
-                if state.open {
+                if kept || state.open {
                     children.push(any(select(
                         options(),
                         state.selected,
@@ -719,6 +751,7 @@ mod tests {
                         },
                     )
                     .anchor(&anchor)
+                    .open(state.open)
                     .on_open_change(|s: &mut AppState, open| {
                         s.opens.push(open);
                         s.open = open;
@@ -729,7 +762,24 @@ mod tests {
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
                 .layout_with_text(WINDOW, &mut self.tcx as &mut dyn Any);
-            self.root.paint(&mut Recorder::default(), ft_ms(0.0));
+            let now = self.clock;
+            self.root.paint(&mut Recorder::default(), ft_ms(now));
+        }
+
+        /// Paint at `ms` without rebuilding — the ramp's own frames.
+        fn paint_at(&mut self, ms: f64) -> Recorder {
+            self.clock = ms;
+            let mut rec = Recorder::default();
+            self.root.paint(&mut rec, ft_ms(ms));
+            rec
+        }
+
+        /// Whether the list's `bg-popover` panel was drawn.
+        fn panel_painted(rec: &Recorder) -> bool {
+            let theme = light();
+            rec.rrects
+                .iter()
+                .any(|(_, _, _, c)| *c == theme.scheme().surface_container_high)
         }
 
         fn event(&mut self, event: InputEvent) {
@@ -832,6 +882,38 @@ mod tests {
             h.state.commits,
             vec![3],
             "`Carrot`: the disabled option and the second group label are skipped"
+        );
+    }
+
+    #[test]
+    fn a_commit_reports_at_once_and_the_kept_mounted_list_paints_itself_out() {
+        let mut h = Harness::kept_mounted();
+        h.click(40.0, 18.0);
+        h.paint_at(RAMP_MS * 2.0);
+        assert!(Harness::panel_painted(&h.paint_at(h.clock)));
+
+        // Selecting commits and closes on the release itself.
+        let row = first_row(&h);
+        h.click(row.x, row.y);
+        assert_eq!(h.state.commits, vec![0], "`Apple`, reported at once");
+        assert!(!h.state.open, "and the app is already closed");
+
+        let start = h.clock;
+        let mid = h.paint_at(start + RAMP_MS / 2.0);
+        assert!(Harness::panel_painted(&mid), "the list is still on screen");
+        assert!(mid.layers[0] > 0.0 && mid.layers[0] < 1.0);
+
+        // Nothing lands on the closing list.
+        let before = h.state.commits.len();
+        let outcome = h
+            .root
+            .event(&mut h.state, &pointer(PointerPhase::Down, row.x, row.y));
+        assert!(!outcome.handled, "a closing list swallows nothing");
+        assert_eq!(h.state.commits.len(), before);
+
+        assert!(
+            !Harness::panel_painted(&h.paint_at(start + RAMP_MS * 2.0)),
+            "gone at settle"
         );
     }
 

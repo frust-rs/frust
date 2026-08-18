@@ -54,6 +54,20 @@
 //! instantly) has no equivalent here: each trigger owns its own latch, and there
 //! is no provider to share a skip window through.
 //!
+//! # The exit ramp
+//!
+//! `data-[state=closed]:fade-out-0` is a plain fade with no zoom riding along,
+//! and it costs this component nothing to run: the layer is **already mounted
+//! permanently**, so the frames the ramp needs are there whether the latch is
+//! set or not. A close starts the fade, the layer paints the whole way down, and
+//! it stops painting entirely once the presence settles at zero. A hover
+//! returning mid-fade picks the entrance up from wherever the presence had got
+//! to, and `reduce_motion` collapses both directions to a jump.
+//!
+//! A closing panel consumes nothing, exactly as an open one does not — the layer
+//! is input-transparent by contract — and its `over_panel` grip is dropped with
+//! the latch, so a fading panel cannot hold its own card open.
+//!
 //! # Touch
 //!
 //! Touch has no hover, so a tooltip never opens on a touch device.
@@ -515,11 +529,12 @@ pub struct TooltipLayerWidget {
     /// [`crate::overlay::anchored`](crate::overlay::AnchoredOverlayWidget) keeps.
     anchor_used: Rect,
     host_origin: Point,
-    /// Whether the panel was showing on the last paint (an edge restarts the
-    /// entrance).
+    /// Whether the panel was showing on the last paint (an edge starts a ramp,
+    /// in whichever direction the edge went).
     was_open: bool,
     anim: AnimationController,
-    progress: f64,
+    /// How present the panel is: `0.0` gone, `1.0` settled.
+    presence: f64,
 }
 
 impl TooltipLayerWidget {
@@ -528,9 +543,51 @@ impl TooltipLayerWidget {
         self.rect
     }
 
-    /// The entrance ramp's progress.
+    /// How present the panel is — `0.0` gone, `1.0` settled.
     pub fn progress(&self) -> f64 {
-        self.progress
+        self.presence
+    }
+
+    /// Take this paint's ramp decision, returning the presence to paint at.
+    ///
+    /// The entrance is `fade-in-0 zoom-in-95`; the exit is
+    /// `data-[state=closed]:fade-out-0` — a plain fade, with no zoom riding
+    /// along, which is why the caller consults `open` before pushing the
+    /// transform.
+    fn ramp(&mut self, ctx: &mut PaintCtx, open: bool, reduce_motion: bool) -> f64 {
+        if open != self.was_open {
+            self.was_open = open;
+            if reduce_motion {
+                self.anim.stop();
+                self.presence = if open { 1.0 } else { 0.0 };
+            } else if open {
+                // Both start from the controller's current value, so a hover
+                // returning mid-fade-out picks the entrance up from there.
+                self.anim.forward();
+            } else {
+                self.anim.reverse();
+            }
+        }
+        if reduce_motion {
+            // `reduce_motion` collapses either direction to a jump. The open and
+            // close delays above are timing, not motion, and are untouched.
+            if self.anim.is_animating() {
+                self.anim.stop();
+            }
+            self.presence = if open { 1.0 } else { 0.0 };
+        } else if self.anim.is_animating() {
+            if self.anim.advance(ctx.frame_time()) {
+                ctx.request_frame();
+            }
+            let next = self.anim.value_clamped();
+            if (next - self.presence).abs() > PROGRESS_EPSILON {
+                // One more frame to paint the value just computed — including
+                // the settled one the final advance lands on.
+                ctx.request_frame();
+            }
+            self.presence = next;
+        }
+        self.presence
     }
 }
 
@@ -549,7 +606,7 @@ impl<State: 'static> View<State> for TooltipLayerView<State> {
             was_open: false,
             anim: AnimationController::new(Duration::from_millis(ENTRANCE_MS))
                 .with_curve(Curve::EaseOut),
-            progress: 0.0,
+            presence: 0.0,
         }
     }
 
@@ -603,15 +660,15 @@ impl Widget for TooltipLayerWidget {
             self.host_origin = ctx.origin();
             ctx.request_layout();
         }
-        if !self.hover.is_open() {
-            // Closed: paint nothing, and let the ramp start from the beginning on
-            // the next open.
-            self.was_open = false;
-            self.progress = 0.0;
-            self.anim.stop();
+        let open = self.hover.is_open();
+        // Settled closed: paint nothing. The layer stays mounted, costing a
+        // layout of its content and this check. `was_open` is part of the test
+        // because a latch that closes on the frame after it opened leaves the
+        // presence at zero with the edge still owed — skipping the ramp there
+        // would strand `was_open` set and the next open would never start.
+        if !open && !self.was_open && self.presence <= 0.0 {
             return;
         }
-        let now = ctx.frame_time();
         let (reduce_motion, fill) = {
             let theme = Theme::from_paint_ctx(ctx);
             (
@@ -619,51 +676,37 @@ impl Widget for TooltipLayerWidget {
                 crate::overlay::foreground(theme),
             )
         };
-        if !self.was_open {
-            self.was_open = true;
-            self.progress = if reduce_motion { 1.0 } else { 0.0 };
-            if !reduce_motion {
-                self.anim.forward();
-            }
+        let presence = self.ramp(ctx, open, reduce_motion);
+        if !open && presence <= 0.0 {
+            // The fade-out has just settled.
+            return;
         }
-        if reduce_motion {
-            // `reduce_motion` collapses the entrance to a jump. The delays above
-            // are timing, not motion, and are untouched.
-            if self.anim.is_animating() {
-                self.anim.stop();
-            }
-            self.progress = 1.0;
-        } else if self.anim.is_animating() {
-            if self.anim.advance(now) {
-                ctx.request_frame();
-            }
-            let next = self.anim.value_clamped();
-            if (next - self.progress).abs() > PROGRESS_EPSILON {
-                self.progress = next;
-                ctx.request_frame();
-            }
-        }
-        let progress = self.progress;
 
         let origin = ctx.origin();
         let panel = self.rect + origin.to_vec2();
-        let entering = progress < 1.0;
-        if entering {
-            scene.push_layer(panel.origin(), panel.size(), progress as f32);
-            let c = panel.center();
-            let scale = ZOOM_FROM + (1.0 - ZOOM_FROM) * progress;
-            scene.push_transform(
-                Affine::translate(c.to_vec2())
-                    * Affine::scale(scale)
-                    * Affine::translate(-c.to_vec2()),
-            );
+        let ramping = presence < 1.0;
+        if ramping {
+            scene.push_layer(panel.origin(), panel.size(), presence as f32);
+            if open {
+                // `zoom-in-95` rides the entrance only — upstream's exit is
+                // `fade-out-0` with no zoom of its own.
+                let c = panel.center();
+                let scale = ZOOM_FROM + (1.0 - ZOOM_FROM) * presence;
+                scene.push_transform(
+                    Affine::translate(c.to_vec2())
+                        * Affine::scale(scale)
+                        * Affine::translate(-c.to_vec2()),
+                );
+            }
         }
         if self.arrow == TooltipArrow::Tip {
             draw_arrow(scene, panel, self.anchor_used - origin.to_vec2(), fill);
         }
         self.content.paint_child(ctx, scene);
-        if entering {
-            scene.pop_transform();
+        if ramping {
+            if open {
+                scene.pop_transform();
+            }
             scene.pop_layer();
         }
     }
@@ -999,6 +1042,127 @@ mod tests {
         let jumped = h.paint_at(TOOLTIP_DELAY_MS as f64);
         assert!(h.hover.is_open(), "the delay is timing, not motion");
         assert!(jumped.layers.is_empty(), "and the entrance is a jump");
+    }
+
+    impl Harness {
+        /// Open the tooltip and settle its entrance, returning the frame time
+        /// the panel is fully present at.
+        fn opened(&mut self) -> f64 {
+            self.event(pointer(PointerPhase::Move, 10.0, 10.0));
+            self.frame(0.0);
+            self.frame(TOOLTIP_DELAY_MS as f64);
+            let settled = TOOLTIP_DELAY_MS as f64 + ENTRANCE_MS as f64 * 2.0;
+            self.paint_at(settled);
+            settled
+        }
+
+        /// Move the pointer off the trigger and run the frame that closes the
+        /// latch, returning that frame's time.
+        fn unhovered(&mut self, from: f64) -> f64 {
+            self.event(pointer(PointerPhase::Move, 300.0, 300.0));
+            let closed = from + 16.0;
+            self.frame(closed);
+            closed
+        }
+    }
+
+    #[test]
+    fn the_panel_fades_out_when_the_hover_ends_and_then_stops_painting() {
+        let mut h = Harness::new();
+        let settled = h.opened();
+        assert!(h.hover.is_open());
+        let closed = h.unhovered(settled);
+        assert!(!h.hover.is_open(), "the latch drops on the same frame");
+
+        let mid = h.paint_at(closed + ENTRANCE_MS as f64 / 2.0);
+        assert!(!mid.rrects.is_empty(), "the panel is still on screen");
+        assert!(
+            mid.layers[0] > 0.0 && mid.layers[0] < 1.0,
+            "at a partial alpha"
+        );
+        assert!(
+            mid.transforms.is_empty(),
+            "a plain fade-out — the zoom rides the entrance only"
+        );
+        let later = h.paint_at(closed + ENTRANCE_MS as f64 * 0.75);
+        assert!(later.layers[0] < mid.layers[0], "presence is decreasing");
+
+        let gone = h.paint_at(closed + ENTRANCE_MS as f64 * 2.0);
+        assert!(gone.rrects.is_empty(), "nothing painted at settle");
+        // And it stays gone.
+        assert!(
+            h.paint_at(closed + ENTRANCE_MS as f64 * 4.0)
+                .rrects
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn re_hovering_mid_fade_out_picks_the_entrance_back_up_from_there() {
+        let mut h = Harness::new();
+        let settled = h.opened();
+        let closed = h.unhovered(settled);
+        let mid = h.paint_at(closed + ENTRANCE_MS as f64 / 2.0);
+        let interrupted = mid.layers[0];
+
+        // Back on the trigger: the latch re-opens (the trigger is past its own
+        // delay while the pointer is on it again from `Closing`/`Idle`).
+        h.event(pointer(PointerPhase::Move, 10.0, 10.0));
+        h.frame(closed + ENTRANCE_MS as f64 / 2.0);
+        h.frame(closed + ENTRANCE_MS as f64 / 2.0 + TOOLTIP_DELAY_MS as f64);
+        assert!(h.hover.is_open());
+        let resumed = h.paint_at(closed + ENTRANCE_MS as f64 / 2.0 + TOOLTIP_DELAY_MS as f64);
+        assert_eq!(
+            resumed.layers[0], interrupted,
+            "the entrance resumes at the presence the fade-out reached"
+        );
+    }
+
+    #[test]
+    fn a_latch_that_closes_on_the_frame_after_it_opened_still_reopens() {
+        // The narrow window the ramp has to survive: the panel opened but never
+        // got a frame to ramp in, so it is closing from a presence of zero.
+        let mut h = Harness::new();
+        h.event(pointer(PointerPhase::Move, 10.0, 10.0));
+        h.frame(0.0);
+        h.frame(TOOLTIP_DELAY_MS as f64);
+        assert!(h.hover.is_open());
+        h.event(pointer(PointerPhase::Move, 300.0, 300.0));
+        h.frame(TOOLTIP_DELAY_MS as f64 + 16.0);
+        assert!(!h.hover.is_open());
+
+        // Back on the trigger: the entrance must run properly this time.
+        let base = TOOLTIP_DELAY_MS as f64 + 16.0;
+        h.event(pointer(PointerPhase::Move, 10.0, 10.0));
+        h.frame(base);
+        h.frame(base + TOOLTIP_DELAY_MS as f64);
+        assert!(h.hover.is_open());
+        let settled = h.paint_at(base + TOOLTIP_DELAY_MS as f64 + ENTRANCE_MS as f64 * 2.0);
+        assert!(
+            !settled.rrects.is_empty(),
+            "the panel is on screen again, fully composited"
+        );
+        assert!(settled.layers.is_empty(), "the entrance ran to completion");
+    }
+
+    #[test]
+    fn reduce_motion_takes_the_panel_away_on_the_frame_the_hover_ends() {
+        let mut reduced = light();
+        reduced.motion.reduce_motion = true;
+        let mut h = Harness::new();
+        h.root.set_theme(Box::new(reduced));
+        h.event(pointer(PointerPhase::Move, 10.0, 10.0));
+        h.frame(0.0);
+        h.frame(TOOLTIP_DELAY_MS as f64);
+        assert!(!h.paint_at(TOOLTIP_DELAY_MS as f64).rrects.is_empty());
+
+        h.event(pointer(PointerPhase::Move, 300.0, 300.0));
+        let closed = TOOLTIP_DELAY_MS as f64 + 16.0;
+        h.frame(closed);
+        assert!(
+            h.paint_at(closed).rrects.is_empty(),
+            "no fade-out at all — gone the frame the latch drops"
+        );
     }
 
     #[test]

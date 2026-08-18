@@ -25,6 +25,30 @@
 //! 3. [`anchored`] — the host itself: a full-area widget holding one content
 //!    child, positioned by [`place`], light-dismissing on a press outside it.
 //!
+//! # Mounting, and what an exit animation costs
+//!
+//! There are two ways to drive an anchored overlay, and they differ only in what
+//! happens on the way *out*:
+//!
+//! * **Mount-on-open** (the simplest): the app mounts the host while its own flag
+//!   is set and drops it when the flag clears. The overlay appears with its
+//!   entrance ramp and disappears instantly, because the widget it would have
+//!   ramped in is gone by the next frame.
+//! * **Kept-mounted** (what an exit animation needs): the app mounts the host
+//!   *unconditionally* and hands the flag down through
+//!   [`AnchoredOverlayView::open`]. A closed host lays its content out, paints
+//!   nothing once the exit ramp settles, and is completely input-transparent —
+//!   so it costs one layout of the content per frame and nothing else.
+//!
+//! The framework has no seam for keeping a conditionally-mounted view alive past
+//! the rebuild that unmounts it, so an exit ramp is only possible for a widget
+//! that **stays mounted with `open == false`**. A rebuild that unmounts the host
+//! mid-ramp simply truncates the exit; nothing breaks, the panel just vanishes.
+//!
+//! A closed host claims no focus, dismisses on nothing, consumes no press and
+//! publishes no semantics. Its placement math runs regardless, so
+//! [`AnchoredOverlayWidget::content_rect`] stays truthful for the whole ramp.
+//!
 //! # Coordinate spaces
 //!
 //! The anchor is captured in absolute window coordinates; the host places
@@ -392,6 +416,7 @@ pub fn anchored<State: 'static, V: View<State>>(content: V) -> AnchoredOverlayVi
         content: any(content),
         anchor: OverlayAnchor::new(),
         placement: OverlayPlacement::default(),
+        open: true,
         on_dismiss: None,
     }
 }
@@ -401,6 +426,7 @@ pub struct AnchoredOverlayView<State: 'static> {
     content: AnyView<State>,
     anchor: OverlayAnchor,
     placement: OverlayPlacement,
+    open: bool,
     on_dismiss: Option<OnDismiss<State>>,
 }
 
@@ -417,6 +443,14 @@ impl<State: 'static> AnchoredOverlayView<State> {
         self
     }
 
+    /// Tell a kept-mounted host whether it is open (see the [module
+    /// docs](self)). The default is `true`, which is the mount-on-open contract:
+    /// a mounted host is an open one.
+    pub fn open(mut self, open: bool) -> Self {
+        self.open = open;
+        self
+    }
+
     /// Set the dismiss callback: a press outside the placed content, or Escape
     /// once the host holds focus.
     pub fn on_dismiss<F: Fn(&mut State) + 'static>(mut self, on_dismiss: F) -> Self {
@@ -430,6 +464,9 @@ pub struct AnchoredOverlayWidget {
     content: ChildPod,
     anchor: OverlayAnchor,
     placement: OverlayPlacement,
+    /// Whether the overlay is open. `false` makes the host inert without
+    /// unmounting it — the kept-mounted pattern the module docs describe.
+    open: bool,
     on_dismiss: Option<ErasedCallback>,
     /// The placed content rect, in this host's own coordinate space.
     rect: Rect,
@@ -444,8 +481,16 @@ pub struct AnchoredOverlayWidget {
 impl AnchoredOverlayWidget {
     /// The placed content rect in the host's own coordinate space — what the
     /// light-dismiss hit test compares against.
+    ///
+    /// Placement runs whether the host is open or not, so this stays truthful
+    /// while a kept-mounted overlay plays its exit ramp.
     pub fn content_rect(&self) -> Rect {
         self.rect
+    }
+
+    /// Whether the host is open (see [`AnchoredOverlayView::open`]).
+    pub fn is_open(&self) -> bool {
+        self.open
     }
 }
 
@@ -457,6 +502,7 @@ impl<State: 'static> View<State> for AnchoredOverlayView<State> {
             content: build_child(&self.content, ctx),
             anchor: self.anchor.clone(),
             placement: self.placement,
+            open: self.open,
             on_dismiss: self.on_dismiss.as_ref().map(erase_callback),
             rect: Rect::ZERO,
             anchor_used: Rect::ZERO,
@@ -474,6 +520,11 @@ impl<State: 'static> View<State> for AnchoredOverlayView<State> {
         if element.placement != self.placement {
             element.placement = self.placement;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        if element.open != self.open {
+            element.open = self.open;
+            // The paint is what starts the content's exit (or entrance) ramp.
+            flags |= ChangeFlags::PAINT;
         }
         element.anchor = self.anchor.clone();
         // Closures aren't comparable, so the dismiss adapter is reinstalled
@@ -522,6 +573,17 @@ impl Widget for AnchoredOverlayWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        // A closed (or closing) kept-mounted host is input-transparent: it
+        // claims no focus, dismisses on nothing and swallows no press, so the
+        // click that closed it — and every one after — reaches the page below
+        // while the content plays its exit ramp. A broadcast still reaches the
+        // content, which is what keeps its pods live.
+        if !self.open {
+            if event.is_broadcast() {
+                self.content.event_child(ctx, event);
+            }
+            return EventResult::Ignored;
+        }
         // Claim focus on every `Down`, before the routing below — the
         // `frust_material::dialog` opt-in that makes Escape reachable at all,
         // and claimed even when the content consumes the press (a control
@@ -569,8 +631,11 @@ impl Widget for AnchoredOverlayWidget {
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
         // The host contributes no node of its own — the content (a menu, a
-        // tooltip) carries the role worth reporting.
-        self.content.semantics_child(ctx);
+        // tooltip) carries the role worth reporting. A closed host reports
+        // nothing: a panel on its way out is not there to be read.
+        if self.open {
+            self.content.semantics_child(ctx);
+        }
     }
 
     visit_children!(content);

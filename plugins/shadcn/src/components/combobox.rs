@@ -75,6 +75,7 @@ impl PanelStyle {
             anchor: None,
             shadow: style::SHADOW_MD,
             entrance: true,
+            open: true,
         }
     }
 }
@@ -106,8 +107,9 @@ pub struct ComboboxView<State: 'static> {
 /// `on_select(state, index)` reports an activation, with `index` counted into
 /// `items` as given (not into the filtered rows).
 ///
-/// Mount it while the app's own open flag is set (see [`crate::popover`] for the
-/// mount contract).
+/// Mount it while the app's own open flag is set, or keep it mounted and hand
+/// the flag to [`ComboboxView::open`] for an exit ramp (see [`crate::popover`]
+/// for both mount contracts).
 pub fn combobox<State: 'static, F, G>(
     items: Vec<ComboboxItem>,
     query: impl Into<String>,
@@ -159,6 +161,17 @@ impl<State: 'static> ComboboxView<State> {
     /// Override the panel's [`COMBOBOX_WIDTH`].
     pub fn width(self, width: f64) -> Self {
         self.style.borrow_mut().width = Some(width);
+        self
+    }
+
+    /// Hand a **kept-mounted** combobox the app's open flag, so closing it plays
+    /// the popover panel's exit ramp instead of vanishing (see
+    /// [`crate::popover`]).
+    ///
+    /// The default is `true`: a mounted panel is an open one.
+    pub fn open(mut self, open: bool) -> Self {
+        self.style.borrow_mut().open = open;
+        self.inner = self.inner.open(open);
         self
     }
 
@@ -228,20 +241,37 @@ mod tests {
         ]
     }
 
+    /// `duration-200`, the shared ramp the panel exits over.
+    const RAMP_MS: f64 = 200.0;
+
     struct Harness {
         root: RenderRoot<AppState, frust::StackView<AppState>>,
         state: AppState,
         tcx: TextContext,
         anchor: OverlayAnchor,
+        /// Whether the panel is kept mounted and handed the flag (the mount an
+        /// exit ramp needs) rather than mounted only while open.
+        kept: bool,
+        clock: f64,
     }
 
     impl Harness {
         fn new() -> Self {
+            Self::with_mount(false)
+        }
+
+        fn kept_mounted() -> Self {
+            Self::with_mount(true)
+        }
+
+        fn with_mount(kept: bool) -> Self {
             let mut h = Harness {
                 root: RenderRoot::new(),
                 state: AppState::default(),
                 tcx: TextContext::new(),
                 anchor: OverlayAnchor::new(),
+                kept,
+                clock: 0.0,
             };
             h.root.set_theme(Box::new(light()));
             h.pass();
@@ -250,6 +280,7 @@ mod tests {
 
         fn pass(&mut self) {
             let anchor = self.anchor.clone();
+            let kept = self.kept;
             let mut logic = move |state: &mut AppState| {
                 let label = state
                     .value
@@ -262,7 +293,7 @@ mod tests {
                         s.open = open;
                     });
                 let mut children = vec![any(trigger)];
-                if state.open {
+                if kept || state.open {
                     children.push(any(combobox(
                         items(),
                         state.query.clone(),
@@ -274,6 +305,7 @@ mod tests {
                         },
                     )
                     .anchor(&anchor)
+                    .open(state.open)
                     .on_open_change(|s: &mut AppState, open| {
                         s.opens.push(open);
                         s.open = open;
@@ -284,7 +316,24 @@ mod tests {
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
                 .layout_with_text(WINDOW, &mut self.tcx as &mut dyn Any);
-            self.root.paint(&mut Recorder::default(), ft_ms(0.0));
+            let now = self.clock;
+            self.root.paint(&mut Recorder::default(), ft_ms(now));
+        }
+
+        /// Paint at `ms` without rebuilding — the ramp's own frames.
+        fn paint_at(&mut self, ms: f64) -> Recorder {
+            self.clock = ms;
+            let mut rec = Recorder::default();
+            self.root.paint(&mut rec, ft_ms(ms));
+            rec
+        }
+
+        /// Whether the palette's `bg-popover` panel was drawn.
+        fn panel_painted(rec: &Recorder) -> bool {
+            let theme = light();
+            rec.rrects
+                .iter()
+                .any(|(_, _, _, c)| *c == theme.scheme().surface_container_high)
         }
 
         fn event(&mut self, event: InputEvent) {
@@ -354,6 +403,36 @@ mod tests {
             h.state.commits,
             vec![3],
             "the substring filter leaves `Remix` alone at the top"
+        );
+    }
+
+    #[test]
+    fn a_kept_mounted_panel_paints_out_its_exit_and_takes_no_input_meanwhile() {
+        let mut h = Harness::kept_mounted();
+        h.click(40.0, 18.0);
+        h.paint_at(RAMP_MS * 2.0);
+        assert!(Harness::panel_painted(&h.paint_at(h.clock)));
+
+        let row = h.first_row();
+        h.click(row.x, row.y);
+        assert_eq!(h.state.commits, vec![0], "the commit reports at once");
+        assert!(!h.state.open);
+
+        let start = h.clock;
+        let mid = h.paint_at(start + RAMP_MS / 2.0);
+        assert!(Harness::panel_painted(&mid), "still on screen");
+        assert!(mid.layers[0] > 0.0 && mid.layers[0] < 1.0);
+
+        let before = h.state.commits.len();
+        let outcome = h
+            .root
+            .event(&mut h.state, &pointer(PointerPhase::Down, row.x, row.y));
+        assert!(!outcome.handled, "a closing panel swallows nothing");
+        assert_eq!(h.state.commits.len(), before);
+
+        assert!(
+            !Harness::panel_painted(&h.paint_at(start + RAMP_MS * 2.0)),
+            "gone at settle"
         );
     }
 
