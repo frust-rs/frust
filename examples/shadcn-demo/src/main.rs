@@ -19,25 +19,21 @@
 //! 1. the root gets the window's own tight constraints;
 //! 2. `sidebar_provider` splits that row and lays the inset out tight
 //!    (`rest × height`);
-//! 3. `sidebar_inset` hands its child `width` tight and `0..=height`;
-//! 4. **but** the inset wraps its children in a plain `Column`, whose
-//!    inflexible children are laid out under an *unbounded* main axis — so the
-//!    finite height stops there;
-//! 5. [`shell_body`] re-tightens it: one `SizedBox` at the window's own logical
-//!    height (read from [`frust::WindowMetrics`]), holding a vertical `FlexView`
-//!    whose flexible page slot therefore gets a tight, finite height;
-//! 6. a page then either scrolls inside that slot ([`scroll_slot`]) or hosts
+//! 3. `sidebar_inset` hands its child `width` tight and `0..=height`, and —
+//!    for the single child every call site passes — through with nothing in
+//!    between (`sidebar_inset`'s rustdoc);
+//! 4. [`shell_body`]'s `FlexView` therefore receives that same finite
+//!    `0..=height` and gives its flexible page slot a tight, finite share of
+//!    it;
+//! 5. a page then either scrolls inside that slot ([`scroll_slot`]) or hosts
 //!    overlays against it — never both in that order.
-//!
-//! Step 5 is this app's workaround for step 4, not a framework requirement.
 
 mod nav;
 mod pages;
 
 use frust::{
     AnyView, Axis, Component, CrossAxisAlignment, DesktopConfig, EdgeInsets, FlexView,
-    MenuItemSpec, MenuRole, MenuSpec, Padding, SizedBox, View, WindowMetrics, any, flexible,
-    inflexible, scroll_view, use_context,
+    MenuItemSpec, MenuRole, MenuSpec, Padding, View, any, flexible, inflexible, scroll_view,
 };
 use frust_shadcn::{sidebar_inset, sidebar_provider};
 
@@ -79,11 +75,6 @@ impl Default for AppState {
     }
 }
 
-/// The height the shell falls back to before the first `WindowMetrics` publish
-/// (and on any host that publishes none) — the desktop shell's own default
-/// window height.
-const FALLBACK_SHELL_HEIGHT: f64 = 720.0;
-
 /// The gallery's ordinary page slot: 24px of padding inside a vertical
 /// scroll view.
 ///
@@ -94,29 +85,18 @@ pub fn scroll_slot(content: AnyView<AppState>) -> AnyView<AppState> {
     any(scroll_view(Padding(EdgeInsets::all(24.0), content)))
 }
 
-/// The inset's content: the top bar over a page slot with a **finite** height.
-///
-/// See the module docs for why the height is restated here rather than
-/// inherited — `sidebar_inset`'s own `Column` wrapper lays an inflexible child
-/// out under an unbounded main axis, so a page hosted through it would see an
-/// infinite height and every scroll surface and overlay host below it would
-/// collapse.
-fn shell_body(
-    page: Page,
-    open: bool,
-    height: f64,
-    content: AnyView<AppState>,
-) -> impl View<AppState> + use<> {
-    SizedBox::<AppState>(None, Some(height)).child(
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(any(nav::top_bar(page, open))),
-                flexible(1, content),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Stretch),
+/// The inset's content: the top bar over a page slot that fills whatever
+/// **finite** height `sidebar_inset` hands this `FlexView` (see the module
+/// docs' constraint chain).
+fn shell_body(page: Page, open: bool, content: AnyView<AppState>) -> impl View<AppState> + use<> {
+    FlexView::new(
+        Axis::Vertical,
+        vec![
+            inflexible(any(nav::top_bar(page, open))),
+            flexible(1, content),
+        ],
     )
+    .cross_axis(CrossAxisAlignment::Stretch)
 }
 
 #[derive(Default)]
@@ -132,8 +112,6 @@ impl Component for ShadcnDemoApp {
     fn build(&self, state: &mut AppState) -> AnyView<AppState> {
         let page = state.page;
         let open = state.sidebar_open;
-        let height =
-            use_context::<WindowMetrics>().map_or(FALLBACK_SHELL_HEIGHT, |m| m.size.height);
 
         // Four pages own their own bounded-constraint layout: the two overlay
         // hosts (a navigator, a full-area `Stack`), the data table (a `Stack`
@@ -159,7 +137,7 @@ impl Component for ShadcnDemoApp {
 
         any(sidebar_provider(
             nav::shell_sidebar(state),
-            sidebar_inset(vec![any(shell_body(page, open, height, content))]),
+            sidebar_inset(vec![any(shell_body(page, open, content))]),
             open,
             |s: &mut AppState, next: bool| {
                 s.sidebar_open = next;

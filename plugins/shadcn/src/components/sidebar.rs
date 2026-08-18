@@ -1075,9 +1075,25 @@ pub struct SidebarInsetView<State: 'static> {
 /// Under [`SidebarVariant::Inset`] it also takes the card look the variant is
 /// named for — `m-2 rounded-xl shadow-sm`, with the margin dropped on the edge
 /// facing the panel (whose own `p-2` supplies that gap).
+///
+/// **The single-child case (every shipped call site) receives the inset's own
+/// bounded constraints directly** — [`SidebarInsetWidget::layout`] always hands
+/// its child a finite `0..=height` on the main axis, and a lone child is laid
+/// out against that box with nothing in between. A multi-child call falls back
+/// to stacking the children in a plain [`Column`], whose *inflexible* children
+/// are laid out under an unbounded main axis (`FlexWidget`'s documented
+/// shrink-wrap semantics) — wrapping more than one child that itself hosts a
+/// `scroll_view` or an overlay host is unsupported; give `sidebar_inset` a
+/// single child (composing internally, e.g. with `Column`/`FlexView`) instead.
 pub fn sidebar_inset<State: 'static>(children: Vec<AnyView<State>>) -> SidebarInsetView<State> {
+    let mut children = children;
+    let child = if children.len() == 1 {
+        children.remove(0)
+    } else {
+        any(Column(children))
+    };
     SidebarInsetView {
-        child: any(Column(children)),
+        child,
         variant: SidebarVariant::default(),
         side: SidebarSide::default(),
     }
@@ -2573,6 +2589,7 @@ mod tests {
     use frust::{Brightness, CursorIcon, FrameTime};
     use frust_core::RenderRoot;
     use std::any::Any;
+    use std::cell::Cell;
 
     const WINDOW: Size = Size::new(900.0, 600.0);
     /// Header/footer height used by the harness shell, so slot origins are
@@ -2687,6 +2704,43 @@ mod tests {
     impl Widget for BlockWidget {
         fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
             bc.constrain(self.0)
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+    }
+
+    /// A leaf that records the [`BoxConstraints`] it was laid out under, so a
+    /// test can pin what a `sidebar_inset` child actually receives.
+    struct ConstraintProbe {
+        captured: Rc<Cell<BoxConstraints>>,
+    }
+
+    /// The retained half of [`ConstraintProbe`].
+    struct ConstraintProbeWidget {
+        captured: Rc<Cell<BoxConstraints>>,
+    }
+
+    impl<S: 'static> View<S> for ConstraintProbe {
+        type Element = ConstraintProbeWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> ConstraintProbeWidget {
+            ConstraintProbeWidget {
+                captured: self.captured.clone(),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            element: &mut ConstraintProbeWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            element.captured = self.captured.clone();
+            ChangeFlags::NONE
+        }
+    }
+
+    impl Widget for ConstraintProbeWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.captured.set(*bc);
+            bc.constrain(Size::ZERO)
         }
         fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
     }
@@ -3217,6 +3271,36 @@ mod tests {
         let size = layout_widget(&mut plain, &BoxConstraints::tight(WINDOW), Some(&theme));
         let rec = paint_widget(&mut plain, size, Some(&theme));
         assert_eq!(rec.rrects_in(theme.scheme().surface), 0);
+    }
+
+    #[test]
+    fn the_inset_hands_a_single_child_a_finite_max_height() {
+        // Regression test for the bug class where `sidebar_inset` wrapped its
+        // child in a plain `Column`: `FlexWidget`'s inflexible-child pass hands
+        // out `f64::INFINITY` on the main axis regardless of the `Column`'s own
+        // received constraints, so a scroll surface or overlay host nested
+        // under the inset saw an unbounded height. A single child (every
+        // shipped call site) must instead see the inset's own finite bound.
+        let captured = Rc::new(Cell::new(BoxConstraints::tight(Size::ZERO)));
+        let probe = ConstraintProbe {
+            captured: captured.clone(),
+        };
+        let view = sidebar_inset::<()>(vec![any(probe)]);
+        let mut counter = 0u64;
+        let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
+
+        layout_widget(
+            &mut w,
+            &BoxConstraints::new(Size::new(400.0, 0.0), Size::new(400.0, 300.0)),
+            None,
+        );
+
+        let bc = captured.get();
+        assert!(
+            bc.max().height.is_finite(),
+            "a sidebar_inset single child must be laid out under a bounded main-axis height"
+        );
+        assert_eq!(bc.max().height, 300.0);
     }
 
     // ---- Menu rows --------------------------------------------------------
