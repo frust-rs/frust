@@ -908,7 +908,10 @@ mod tests {
         let outcome = h
             .root
             .event(&mut h.state, &pointer(PointerPhase::Down, row.x, row.y));
-        assert!(outcome.handled, "a closing list swallows a press that lands on it");
+        assert!(
+            outcome.handled,
+            "a closing list swallows a press that lands on it"
+        );
         assert_eq!(h.state.commits.len(), before);
 
         assert!(
