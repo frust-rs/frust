@@ -50,9 +50,10 @@ is a person-driven check:
 ## Per-OS desktop shell gate (macOS + Windows + Linux)
 
 A hardware gate for the native integration the shared winit core cannot cover, run against an app
-configured with an app name, reverse-DNS id, window icon and menu spec. macOS is closed; Windows
-and Linux are still owed (see [LIMITATIONS.md](LIMITATIONS.md) `desktop-shells-runtime-unverified`
-for exactly which checks remain). Per host:
+configured with an app name, reverse-DNS id, window icon and menu spec. macOS and Windows are
+closed (Windows 2026-08-19, via `examples/shadcn-demo` built natively with MSVC); Linux is still
+owed (see [LIMITATIONS.md](LIMITATIONS.md) `desktop-shells-runtime-unverified` for exactly which
+checks remain). Per host:
 
 - **macOS:** menu bar shows the app-named application menu; ⌘Q and the menu Quit both exit;
   Hide/Show All work; closing with `quit_on_last_window_closed = false` hides the window and a
@@ -70,7 +71,7 @@ LAW; re-run the row's tripwire after touching it, and never run a blind `cargo u
 
 | Pin | Why | Tripwire |
 |---|---|---|
-| `muda 0.19` minor | `frust-shell-macos`'/`frust-shell-windows`'s native menu-bar bindings (`NSMenu`/`HMENU` built from `DesktopConfig::menu_spec`). Pins `objc2 0.6.1` + `objc2-app-kit 0.3.x`, unifying with this workspace's existing `objc2` family; muda's own `gtk`/`libxdo` deps live behind a Linux/BSD-only target table internally, so this pin resolves no GTK dependency on macOS/Windows — `frust-shell-linux` deliberately never depends on it | `cargo check --target aarch64-apple-darwin -p frust-shell-macos && cargo check --target x86_64-pc-windows-gnu -p frust-shell-windows`, plus `cargo tree -d` (watch for muda bumping its `objc2` lineage) |
+| `muda 0.19` minor | `frust-shell-macos`'/`frust-shell-windows`'s native menu-bar bindings (`NSMenu`/`HMENU` built from `DesktopConfig::menu_spec`). Pins `objc2 0.6.1` + `objc2-app-kit 0.3.x`, unifying with this workspace's existing `objc2` family; muda's own `gtk`/`libxdo` deps live behind a Linux/BSD-only target table internally, so this pin resolves no GTK dependency on macOS/Windows — `frust-shell-linux` deliberately never depends on it | `cargo check --target aarch64-apple-darwin -p frust-shell-macos && cargo check --target x86_64-pc-windows-gnu -p frust-shell-windows`, plus `cargo tree -d` (watch for muda bumping its `objc2` lineage); on a bump, re-verify two Windows contracts this pin's internals carry (`frust-shell-windows/src/menu.rs`): submenu accelerators register into the root `HACCEL` only while the submenu is attached (attach-then-fill order), and the predefined quit stays unused (it calls `PostQuitMessage`, inert under winit) |
 | `windows-sys 0.61` minor | `frust-shell-windows`'s Win32 bindings (`SetCurrentProcessExplicitAppUserModelID`, `TranslateAcceleratorW`/`HACCEL`/`MSG`). Resolved empirically, not guessed: muda 0.19.3's own `>=0.60, <=0.61` constraint picks `0.61.2`, the minor already dominant in this lockfile. No features declared at the workspace level — each consuming crate selects its own list (`frust-shell-windows/Cargo.toml`: `Win32_UI_Shell`, `Win32_UI_WindowsAndMessaging`) | `cargo check --target x86_64-pc-windows-gnu -p frust-shell-windows`; `cargo tree -d --target x86_64-pc-windows-msvc` — watch for a third `windows-sys` minor appearing beyond the pre-existing `0.52.0`/`0.61.2` pair |
 
 `objc2-app-kit 0.3` (the `NSApplication`/`NSResponder` slice `frust-shell-macos` names directly,

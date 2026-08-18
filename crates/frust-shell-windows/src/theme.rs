@@ -59,8 +59,9 @@
 //! and this module is never told anything happened. Nothing in this module
 //! can detect that drift on its own — there is no OS-side signal reaching it
 //! to react to. Closing that requires shell-owned system-theme detection
-//! (e.g. polling the registry key winit itself would consult), which is
-//! deferred pending the Windows runtime gate; see `docs/LIMITATIONS.md`'s
+//! (e.g. polling the registry key winit itself would consult), which stays
+//! deferred — the 2026-08-19 Windows runtime gate's manual probe did not
+//! reproduce the revert; see `docs/LIMITATIONS.md`'s
 //! `desktop-windows-titlebar-theme-revert` entry.
 
 use frust_theme::Brightness;
