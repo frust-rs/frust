@@ -52,7 +52,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other unit
 | `plugins/glyph` | The Glyph design-system plugin (`frust-glyph`): terminal-native, dark-first, monospace-led widget catalog — including its own switch-class control (`toggle`), since baseline `frust-widgets` deliberately ships no `Switch` — plus its bundled OFL monospace fonts |
 | `plugins/material` | The Material 3 (+Expressive) design-system plugin (`frust-material`) |
 | `plugins/cupertino` | The Cupertino (iOS-styled) design-system plugin (`frust-cupertino`), including its own "Liquid Glass" `GlassScale` recipe |
-| `plugins/shadcn` | The shadcn/ui design-system plugin (`frust-shadcn`), the tier's first external-origin catalog: a port of shadcn/ui v4 (48 components), its own token system (vendored `neutral` base plus six sibling palettes folded onto the baseline `ColorScheme`, a `ShadcnTokens` extension for the roles it has no baseline analogue for), an `overlay` hosting seam for its anchored and modal panel families, and its own bundled Inter + JetBrains Mono variable fonts |
+| `plugins/shadcn` | The shadcn/ui design-system plugin (`frust-shadcn`), the tier's first external-origin catalog: a port of shadcn/ui v4 (55 components, incl. an app-shell `sidebar`, a `message`/`message_scroller` chat pair, and a `questionnaire` step-sequence form), its own token system (vendored `neutral` base plus six sibling palettes folded onto the baseline `ColorScheme`, a `ShadcnTokens` extension for the roles it has no baseline analogue for), an `overlay` hosting seam for its anchored and modal panel families — every modal component animates its exit, and every anchored panel takes a prop-driven `.open(bool)` for the same (see *Design-System Plugins* below) — and its own bundled Inter + JetBrains Mono variable fonts |
 
 ## Desktop Backend Status
 
@@ -173,6 +173,15 @@ toolkit they all build against). Their shared charter:
   panel over `NavigatorController::push_transparent_for_result` — dialog, alert-dialog, sheet,
   drawer, command). Every other component paints inside its own box; only these reach through this
   seam.
+- **Both overlay hosts animate their exit, not just their entrance.** The `modal` host stages every
+  dismiss (scrim tap, Escape, close button, drag) as a reverse ramp and fires the app's dismissal
+  only once it settles; the drawer additionally supports drag-to-close on all four pinned edges with
+  a velocity-flick threshold and Base UI-style snap points. The `anchored` host takes the same shape
+  through a builder-level `.open(bool)`: an app that wants an exit ramp must keep the host mounted
+  and toggle `open` rather than unmount it, since the framework has no seam for keeping a
+  conditionally-mounted view alive past the rebuild that drops it (the *kept-mounted pattern*,
+  documented in `overlay/anchored.rs`; see `shadcn-anchored-exit-needs-kept-mounted` in
+  [LIMITATIONS.md](LIMITATIONS.md)).
 
 ## Data Flow
 

@@ -2425,34 +2425,20 @@ modelled.").
 
 ---
 
-### `shadcn-desktop-interaction-gaps` — three named v1 narrowings in the shadcn port's desktop interaction
+### `shadcn-select-no-typeahead-fixed-height` — select/combobox have no type-ahead and a fixed dropdown height
 
-**Observed**: three deliberate v1 gaps in `frust-shadcn`, each named in the component's own source
-rather than found later:
+**Observed**: a v1 gap in `frust-shadcn`'s `select`/`combobox`, named in the component's own source.
+Radix's jump-to-typed-match behavior is not ported; `SELECT_MAX_HEIGHT` is a 300px constant rather
+than measured from the host's available space (no such measurement reaches a plugin-tier widget
+today).
 
-1. **Context menu unreachable live on desktop.** `context_menu_trigger` opens on
-   `PointerButton::Secondary`, which the component drives correctly from a test — but
-   `frust-shell-desktop` forwards only `MouseButton::Left` from winit (`app_handler.rs`, "Primary
-   (left) button only in v1"), so no desktop app today can generate a `Secondary` press to open one
-   with. A shell change, not a component change, is the remedy path.
-2. **Drawer drag-to-close not implemented.** The drawer's `h-2 w-[100px]` handle (vaul's own drag
-   affordance upstream) is a *button* here in v1 — press-and-release dismisses; there is no drag
-   gesture.
-3. **Select has no type-ahead and a fixed dropdown height.** Radix's jump-to-typed-match behavior
-   is not ported; `SELECT_MAX_HEIGHT` is a 300px constant rather than measured from the host's
-   available space (no such measurement reaches a plugin-tier widget today).
+**Applies to**: `frust_shadcn::select`/`combobox`.
 
-**Applies to**: `frust_shadcn::context_menu`, `drawer`, and `select`/`combobox`.
+**Why accepted**: a named, structural v1 boundary at the point in the source it lives (a doc comment
+and a named constant), not a gap found by later testing; deferred interaction work with no
+upstream-parity requirement forcing it into v1.
 
-**Why accepted**: each is a named, structural v1 boundary at the point in the source it lives
-(a doc comment or a named constant), not a gap found by later testing; (1) is blocked on a shell
-change outside this crate's own scope, (2) and (3) are deferred interaction work with no
-upstream-parity requirement forcing them into v1.
-
-**Evidence**: `plugins/shadcn/src/components/context_menu.rs` module docs ("Secondary-button
-reach"); `crates/frust-shell-desktop/src/app_handler.rs` ("Primary (left) button only in v1");
-`plugins/shadcn/src/overlay/modal.rs` (`ModalConfig::handle` doc comment, "It is a *button* in
-v1"); `plugins/shadcn/src/components/select.rs` module docs ("No type-ahead" and
+**Evidence**: `plugins/shadcn/src/components/select.rs` module docs ("No type-ahead" and
 `SELECT_MAX_HEIGHT`).
 
 ---
@@ -2514,8 +2500,8 @@ same module is properly `State`-generic. An app with `State != ()` cannot place 
 direct child; it needs a `Component`-boundary indirection (a nested component whose own `State` is
 `()`) to embed one.
 
-**Applies to**: `frust_shadcn::bubble` only — no other component in the 48-component catalog has
-this asymmetry.
+**Applies to**: `frust_shadcn::bubble` only — no other component in the 55-component catalog has
+this asymmetry, `message`/`message_scroller` included.
 
 **Why accepted**: a chat bubble has no callbacks to carry `State` for in the first place; the fix
 (a `State`-generic signature matching every sibling) is a small, low-risk cleanup with no
@@ -2534,7 +2520,7 @@ gap.
 the 44px mobile tap-target convention, including `HEIGHT_LG`, the roomiest rung the ladder offers.
 There is no larger size to opt into and no density mechanism that widens one.
 
-**Applies to**: every sized control in the 48-component catalog that reads the ladder (button,
+**Applies to**: every sized control in the 55-component catalog that reads the ladder (button,
 input, select trigger, and every component built on them); every platform this crate targets,
 touch and pointer alike — the metrics are fixed, not resolved per input modality.
 
@@ -2554,3 +2540,135 @@ is a natural adopter; that is the remedy path, recorded here rather than invente
 **Evidence**: `plugins/shadcn/src/style.rs` (`HEIGHT_XS`/`HEIGHT_SM`/`HEIGHT_DEFAULT`/`HEIGHT_LG`
 doc comments and the `control_heights_are_the_shadcn_size_ladder` pinning test);
 `plugins/shadcn/src/lib.rs`'s Charter section ("Desktop-first, mobile-friendly").
+
+---
+
+### `shadcn-sidebar-inset-breaks-bounded-constraints` — `sidebar_inset` silently drops the bounded-height chain a host was passing down
+
+**Observed**: `sidebar_inset`'s content wrapper is a plain `Column`, whose inflexible children are
+laid out under an *unbounded* main axis — so a finite height the app shell delivered up to that
+point (root → `sidebar_provider` → `sidebar_inset`, each tight or bounded) is lost the moment it
+enters the inset, regardless of how carefully the caller bounded everything above it. Anything
+inside that depends on a finite height — a `scroll_view`, or any of the overlay hosts, both of which
+read an unbounded max height as "no space at all" — breaks silently unless the app re-tightens
+itself. `examples/shadcn-demo` hits this in its own app shell and works around it with one
+`SizedBox` sized from `frust::WindowMetrics`, placed immediately inside the inset.
+
+**Applies to**: `frust_shadcn::sidebar_inset` and everything mounted inside it — every app that
+builds a sidebar-shelled layout with a scrolling or overlay-hosting page.
+
+**Why accepted**: recorded as a component gap rather than a component fix — the demo's workaround
+(one `SizedBox` re-tightening the slot) fully covers today's callers, and the two candidate fixes
+(giving the inset's own children a `flexible(1)` wrapper, or exposing a bounded-passthrough variant)
+are plugin-tier follow-up work, not yet built.
+
+**Evidence**: `plugins/shadcn/src/components/sidebar.rs` (`sidebar_inset`'s `Column` wrapper);
+`examples/shadcn-demo/src/main.rs` module docs ("The constraint chain, end to end") and
+`shell_body`'s re-tightening `SizedBox`; `workflow/plans/features/shadcn-round-2/tasks/11-demo-expansion.md` completion summary ("sidebar_inset BREAKS
+the bounded-constraint chain … suggested fix: flexible(1) wrapper or pass-through form").
+
+---
+
+### `shadcn-sidebar-v1-residuals` — three named v1 narrowings in the shadcn sidebar port
+
+**Observed**: three deliberate v1 gaps in `frust_shadcn::sidebar`, each named in the component's own
+source rather than found later:
+
+1. **No mobile sheet fallback.** Upstream swaps the whole panel for a `Sheet` under a 768px media
+   query; there is no media/size seam a view can branch on before layout here, so the port is
+   desktop-only — a mobile app composes `frust_shadcn::sheet` itself.
+2. **No icon-mode tooltips.** `SidebarMenuButton`'s upstream `tooltip` prop shows the label in a
+   hover card while the rail is collapsed to icon width; skipped for now (the label still serves as
+   the button's accessible name, so a collapsed rail is not mute, just unlabelled visually).
+3. **No composed sub-menu disclosure.** The module docs recommend composing `collapsible` with
+   `sidebar_menu_button` as the trigger and `sidebar_menu_sub` as the content for a collapsible
+   sub-menu, but the demo's attempt found the menu button's own press handling eats the trigger
+   press before `collapsible` sees it — the documented composition does not actually toggle, and the
+   demo ships its sub-list permanently open instead.
+
+**Applies to**: `frust_shadcn::sidebar` only.
+
+**Why accepted**: (1) and (2) are named, structural v1 boundaries with a documented workaround; (3)
+is a composition gap tracked here pending a fix to the button/collapsible press interaction, rather
+than a hand-rolled sub-menu special case.
+
+**Evidence**: `plugins/shadcn/src/components/sidebar.rs` module docs ("Not in this port" — mobile
+sheet, icon-mode tooltips, sub-menu disclosure); `workflow/plans/features/shadcn-round-2/tasks/11-demo-expansion.md` completion summary ("No composed
+disclosure for sidebar_menu_sub … sub-list permanently open in demo").
+
+---
+
+### `shadcn-anchored-exit-needs-kept-mounted` — an anchored overlay's exit ramp requires the app to keep it mounted
+
+**Observed**: `frust_shadcn::overlay::anchored` drives its exit ramp from a builder-level
+`.open(bool)`, not from mount/unmount — the framework has no seam for keeping a conditionally-mounted
+view alive past the rebuild that unmounts it, so an exit animation is only reachable for a host the
+app mounts *unconditionally* and toggles closed via `open(false)` (the *kept-mounted pattern*). An
+app that instead mounts the host only while its own flag is set and drops it when the flag clears
+gets the entrance ramp but no exit — the widget is gone by the next frame, so any in-flight ramp is
+simply truncated.
+
+**Applies to**: every component built on `frust_shadcn::overlay::anchored` (popover, tooltip,
+hover-card, dropdown/context menu, select, combobox) — the `modal` host is unaffected, since its
+exit is staged through the navigator's own pop-result machinery instead of a mount flag.
+
+**Why accepted**: this is the framework-level trade the pattern makes explicit, not an oversight — a
+kept-mounted host costs one layout of its content per frame while closed and nothing else, which the
+crate accepts as the price of a real exit ramp with no framework support for outliving a rebuild.
+
+**Evidence**: `plugins/shadcn/src/overlay/anchored.rs` module docs ("Mounting, and what an exit
+animation costs" — "The framework has no seam for keeping a conditionally-mounted view alive past
+the rebuild that unmounts it").
+
+---
+
+### `shadcn-otp-table-button-api-gaps` — three named API-surface gaps in `input_otp`, `table`, and `button`
+
+**Observed**: three deliberate v1 narrowings, each named in the component's own source:
+
+1. **`input_otp` has no paste.** Upstream's real `<input>` gets the platform's paste for free; frust
+   delivers no clipboard event a widget can read, so a multi-character paste into an OTP field is
+   not supported — only typed entry.
+2. **`table`'s header/footer are label strings, not views.** `TableView::header`/`footer` take
+   `Vec<String>`, since upstream's head/footer cells are markup this port never generalized to
+   arbitrary content. A tri-state "select all" checkbox or a sortable-header control therefore
+   cannot live in the header row itself — the demo's data-table page fakes one by prepending a
+   normal body-styled row instead, at the cost of the header's own chrome and semantics.
+3. **`button` has no icon-view slot.** `ButtonSize::Icon`/`IconSm`/`IconLg` size a button to a fixed
+   square, but the label is a plain `String` with nowhere to put an icon view — an icon-only button
+   (e.g. a row's `⋮` menu trigger) has to fake it with a literal glyph character.
+
+**Applies to**: `frust_shadcn::input_otp`, `table`, and `button` respectively.
+
+**Why accepted**: each is a named v1 narrowing recorded at the point it was found rather than a
+regression; a real fix (a clipboard paste event, view-typed table header/footer cells, an icon-view
+button slot) is plugin/framework follow-up work with no caller forcing it in yet.
+
+**Evidence**: `plugins/shadcn/src/components/input_otp.rs` module docs ("No paste"); the `table`
+module doc's header/footer type (`Vec<String>`); `plugins/shadcn/src/components/button.rs`'s
+`ButtonView::label: String` field; `workflow/plans/features/shadcn-round-2/tasks/11-demo-expansion.md` completion summary (items 2 and 4).
+
+---
+
+### `shadcn-components-not-ported` — six upstream shadcn/ui components are not portable as-is, one is deferred
+
+**Observed**: the shadcn/ui v4 registry sweep behind this catalog found seven components with no
+port plan, split into two classes:
+
+- **Deferred**: `calendar` — depends on `react-day-picker`; porting it needs its own date-widget
+  design plus a new dependency, and version pins are LAW here, so it is deferred rather than rushed.
+- **Not portable as-is**, each for a dependency this catalog cannot carry: `menubar` and
+  `navigation-menu` (built on Radix primitives with no frust analogue), `form` (built on
+  `react-hook-form`), `sonner` (wraps an external toast library), `chart` (wraps `recharts`), and
+  `direction` (a Radix RTL context provider with nothing to provide to).
+
+**Applies to**: `frust_shadcn` — these seven names do not exist anywhere in the 55-component catalog.
+
+**Why accepted**: each is a named dependency boundary, not an oversight — every one of the six
+"not portable" components is a thin wrapper over a JS-ecosystem library or a Radix-only primitive
+with no frust equivalent to port against; `calendar`'s gap is scope (a real date-widget design) and
+policy (no drive-by dependency addition), not a dependency wall, so it is the one candidate for a
+future round rather than a permanent exclusion.
+
+**Evidence**: `workflow/plans/research/shadcn-round-2/RESEARCH.md`'s component sweep ("DEFERRED:
+calendar … NOT-PORTABLE-AS-IS: menubar, navigation-menu … form … sonner … chart … direction").

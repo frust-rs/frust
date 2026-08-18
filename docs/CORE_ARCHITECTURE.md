@@ -185,7 +185,12 @@ stamp (`hover_epoch()`, no setter) rather than a flag: a claim stamps the live e
 chain, and a link counts as hovered only while its stamp still matches the live epoch, ANDed with
 the chain exactly like focus. `RenderRoot::event` advances the epoch once per hover pass — an
 uncaptured `Move` (which may record a claim) or the `Down`/`Up`/`Cancel` that ends a hover outright
-— which strands the previous claimant's stamp with no leave event or explicit clearing required.
+— which strands the previous claimant's stamp with no leave event or explicit clearing required. A
+structural rebuild that drops the pod holding the *live* claim (not merely a stale, already-stranded
+one) has no hover pass to strand it with — `RenderRoot::rebuild` releases it explicitly instead, via
+the same thread-local mark/drain shape (`mark_hover_orphaned`/`take_hover_orphaned`) as the
+focus-orphan release above, so an unmounted claimant can never leave the root's hover mirror standing
+on a widget that no longer exists.
 
 What is recorded is a **path**, so `EventCtx::is_hovered`/`PaintCtx::is_hovered` answer "this
 widget or a descendant of it holds the link" (CSS `:hover` semantics — an enclosing container reads
@@ -200,9 +205,13 @@ Interaction Semantics for the consumer contract.
 The cursor is hover's sibling channel and deliberately not derived from it: `EventCtx::set_cursor`
 writes a per-pass, thread-local request that `RenderRoot::event` resolves into the cached `cursor`
 field on any pointer `Move` (captured included, so a drag keeps its own shape), last writer wins,
-and absence resolves to `CursorIcon::Default`. Every other pass leaves `cursor` standing. A shell
-reads it via `RenderRoot::cursor()` — see [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md) for the
-desktop-only apply path.
+and absence resolves to `CursorIcon::Default`. Every other pass leaves `cursor` standing. The request
+slot is bracketed per pass by a `CursorPass` guard rather than a bare clear/take pair, so a dispatch
+that re-enters `RenderRoot::event` (nothing in this workspace does today, but the guard makes it safe
+regardless) resolves its own nested pass independently and hands the slot back to the enclosing one
+on exit, instead of the inner pass clobbering a request the outer pass had already collected. A shell
+reads the resolved cursor via `RenderRoot::cursor()` — see
+[SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md) for the desktop-only apply path.
 
 ## Key Types
 
