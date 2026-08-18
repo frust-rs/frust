@@ -26,12 +26,9 @@
 //! # Secondary-button reach
 //!
 //! `PointerEvent::button` carries [`PointerButton::Secondary`], which is what
-//! this trigger matches on, so the component is complete against the framework's
-//! own input vocabulary and drives from a test verbatim. The **desktop shell**
-//! does not yet translate a right mouse button into it — `frust-shell-desktop`
-//! forwards `MouseButton::Left` only — so on a desktop app today the trigger sees
-//! no secondary press to open on. That is a shell gap, not a component one:
-//! nothing here needs to change when the shell starts forwarding the button.
+//! this trigger matches on: on desktop, `frust-shell-desktop` forwards the
+//! right mouse button as a secondary press, so a right-click over the trigger
+//! area opens the menu at the pointer.
 //!
 //! Touch has no secondary button at all, and long-press-opens-a-context-menu is
 //! not modelled: a touch device sees no context menu from this component.
