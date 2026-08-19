@@ -72,6 +72,7 @@ pub mod navbar;
 mod press;
 pub mod progress;
 pub mod radio;
+pub mod segmented_button;
 pub mod shape_morph;
 pub mod shapes;
 pub mod sheet;
@@ -131,6 +132,10 @@ pub use progress::{
     LinearProgressView, LinearProgressWidget, ProgressValue, circular_progress, linear_progress,
 };
 pub use radio::{Radio, RadioView, RadioWidget, radio};
+pub use segmented_button::{
+    MAX_SEGMENTS, MIN_SEGMENTS, Segment, SegmentedButton, SegmentedButtonView,
+    SegmentedButtonWidget, segment, segmented_button,
+};
 pub use shape_morph::morph_path;
 pub use shapes::{CornerRounding, RoundedPolygon};
 pub use sheet::{BottomSheetView, BottomSheetWidget, bottom_sheet, show_bottom_sheet};
