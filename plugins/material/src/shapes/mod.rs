@@ -17,9 +17,9 @@
 //! `lib/src/shapes/`'s `corner_rounding.dart`, `cubic.dart`, `features.dart`,
 //! `point.dart`, `rounded_polygon.dart`, and the polygon-relevant half of
 //! `utils.dart`. The morph half (`morph.dart`, `feature_mapping.dart`,
-//! `polygon_measure.dart`, `float_mapping.dart`) is deliberately **not** ported
-//! here; the types below are shaped so it can be layered on top without
-//! reopening them.
+//! `polygon_measure.dart`, `float_mapping.dart`) is ported alongside it as
+//! [`Morph`], which layers on top of these types without reopening them and
+//! carries its own name map and deviation list.
 //!
 //! ## Dart → Rust name map
 //!
@@ -72,8 +72,10 @@
 //!
 //! Full attribution ships in the crate's `NOTICE`.
 
+mod morph;
 mod rounded_polygon;
 
+pub use morph::Morph;
 pub use rounded_polygon::{
     CornerRounding, Cubic, DISTANCE_EPSILON, Feature, FeatureKind, PillStarParams, RoundedPolygon,
     StarParams,
