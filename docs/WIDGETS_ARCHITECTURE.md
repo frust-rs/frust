@@ -18,7 +18,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how WIDGETS relates to the other unit
 | Module | Responsibility |
 |--------|-----------------|
 | `frust-widgets::authoring` | Public container/callback toolkit every widget in the crate builds from, instead of touching `frust-core` primitives directly — reachable by app code as `frust::authoring` (the facade's re-export, CORE unit); also carries the `VisitPods` trait / `visit_children!` macro, the crate's introspection seam (see *Data Flow*) |
-| `frust-widgets` (baseline) | Baseline layout containers and interactive leaf widgets (text, forms, gestures, scrolling, a virtualized `ListView`) |
+| `frust-widgets` (baseline) | Baseline layout containers and interactive leaf widgets (text, forms, gestures, scrolling, a virtualized `ListView`, a four-slot `Scaffold`) |
 | `frust-widgets::motion` | Implicit-animation and transition-pattern vocabulary |
 | `frust-widgets::nav` | Imperative page-stack navigator, declarative router, and shared-element hero transitions |
 | `frust-widgets::platform_view` | Native-sibling compositing slot and input-shield wrapper for translucent surfaces |
@@ -99,6 +99,30 @@ build from.
     requests wake the shell and apply in the next rebuild before the navigator reconciles.
   - **Route params:** Query parameters merge **under** path segment captures; path captures take precedence
     over query params of the same name, and named-route `path_for_name` round-trips unused params as query.
+  - **Route-state observable (R-B1):** `NavigatorController::route_stack()`/`route_generation()` publish a
+    `RouteStack` (route identities bottom→top, depth, generation) and a diffed `NavChange`
+    (Initial/Push/Pop/Replace/Reset) from every committed-mutation site inside `publish_state()`. Staleness
+    contract: an in-flight interactive edge-swipe pop is uncommitted, so the observable still reports the
+    pre-swipe stack until the settle-frame publish; a cancelled swipe publishes nothing (the pre-swipe stack
+    was already correct). Frame-accurate drag chrome wants `NavigatorController::transition()` instead.
+  - **shell_route (nested navigators):** `shell_route(inner, builder, children)` is a pathless route binding
+    a subtree to a second `NavigatorController` the app owns — the shell page stays retained on the enclosing
+    stack while its children resolve onto `inner` (go_router's `ShellRoute`). A chain crossing the boundary
+    splits there, one structural op per controller; the **keep rule** makes in-shell navigation issue zero
+    ops on the enclosing controller once the shell page is already placed, so it and its retained inner
+    navigator are never dropped. A deep link resolved before the shell page exists pre-queues its inner
+    segment onto `inner`'s op queue and drains on `inner`'s first `build` — no flash, no second navigation.
+    Chrome inside the shell page reads the **inner** navigator's `route_stack()` (or the facade's
+    `RouteObserver` over it) for live in-shell state, never the enclosing stack, since a keep-ruled
+    navigation never restamps the shell page's own route entry.
+  - **Gesture policy (interactive edge-swipe):** `NavigatorWidget::swipe_armable` gates arming on
+    `BackPolicy` — a `DismissAnimated` or `Veto` top page refuses to arm outright (arm-refusal, not a
+    dismiss-signal bump) — and resolves the navigator-wide default by rank: page override
+    (`PushOptions::pop_swipe`) > navigator explicit (`NavigatorView::pop_swipe`) > platform slot
+    (`platform_pop_swipe`) > preset default (on for `PageTransition::IosPush`, off otherwise); the facade
+    sets the platform slot from `cfg!(target_os = "ios")`. **R-B3-inner:** a left-edge `Down` does not
+    capture, so a nested navigator underneath can arm too; the outer navigator only defers at the `Move`
+    steal, after reading back the inner's claim — both navigators legitimately arm on `Down`.
   - **overlay_host() constructor:** A `NavigatorView` with pop_swipe disabled and no-op transition
     (not a new widget). Back-button interest is arbitrated by **rank taken from the wiring entry
     point**, never from when or how often a controller wires: an overlay host always outranks a plain
@@ -126,6 +150,12 @@ build from.
     CODE_STANDARDS.md. Back arbitration's reach check (above) derives from this same
     `input_routed_pages()` set, so it is the single reach definition shared by input, semantics, and
     back.
+- Scaffold flow: `scaffold(body)` assembles the four fixed chrome slots (`app_bar`/`body`/`bottom_bar`/`fab`)
+  most screens compose around, theme-agnostic (a design system's own bar/nav-bar/FAB widgets plug into the
+  slots from app code). **R-B4-inset:** the Scaffold itself consumes no window inset — `app_bar` and
+  `bottom_bar` self-size for the top/bottom inset the same way (reading `ctx.window_insets()` in their own
+  `layout`), and `body` is never pre-inset; `fab` is the one slot the Scaffold insets on the caller's behalf,
+  floating above `bottom_bar` when present and off the raw window edge otherwise.
 - Platform-view flow: `platform_view()`/`shield()` publish native-compositing slots and input-shield
   rects each frame for the shell layer to reconcile against native views.
 
@@ -142,6 +172,10 @@ build from.
 | `ListView` / `ListViewWidget` | Baseline virtualized list: windowed rebuild-time materialization, positional or keyed (`ChildKey`) row identity, optional variable extents, refresh/overscroll parity with `ScrollView` |
 | `NavigatorController::transition()` / `TransitionState` / `PageVisibility` | Navigation state observation seams |
 | `RouteNavigator` / `NavRequest` | Off-thread-safe navigation handle (Arc-backed plain data, no reactive types) |
+| `NavigatorController::route_stack()` / `RouteStack` / `NavChange` | Route-state observable: page stack as route identities, diffed change label — see Data Flow |
+| `shell_route()` | Pathless route binding a subtree to a second, app-owned `NavigatorController` — nested-navigator ("shell") composition |
+| `BackPolicy` | Per-page back-press disposition (`Pop`/`DismissAnimated`/`Veto`) gating both a back press and edge-swipe arming |
+| `scaffold()` / `ScaffoldView` | Four-slot screen layout (`app_bar`/`body`/`bottom_bar`/`fab`), self-sizing inset consumption (R-B4-inset) |
 
 ## Architectural Facts & Constraints
 
@@ -244,11 +278,3 @@ Virtualization exists because eager materialization doesn't scale: an in-repo ho
 staying flat against item count while an eagerly-built `ScrollView`+`Column` scales roughly
 linearly; a CI-durable structural assertion in the same file pins the windowed-materialization fact
 itself (not the timing) at `N = 10,000`.
-
-### Recent Additions (Batch 2)
-**Navigator observation:** `TransitionState` and `PageVisibility` seams; `overlay_host()` constructor;
-R23 semantics forwarding. **Routing:** route params now merge query under path captures, and
-`RouteNavigator` allows off-thread navigation. **Widgets:** `frust_glyph::sheet` (modal overlay with
-staged dismiss and scrim fade, now `plugins/glyph`); `button` disabled state; `TextInput` read-only
-mode and `content_type` IME hints; `TextView` alignment control; `EmptyStateView` and `MenuEntry`
-icon slots; badge `Info` variant with warning border.

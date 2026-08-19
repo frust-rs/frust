@@ -104,10 +104,11 @@ pub use frust_widgets::{
     IconWidget, Image, ImageError, ImageFit, ImageSource, ImageView, ListView, ListViewWidget,
     MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView, Padding, PaddingView,
     PageBuilder, PageTransition, PageVisibility, PopResult, PushOptions, Radio, RadioView,
-    RadioWidget, ResultCallback, Row, SafeAreaView, ScrollInfo, ScrollView, SizedBox, SizedBoxView,
-    Slider, SliderView, Stack, StackView, TextInput, TextInputView, TextView, Timing,
+    RadioWidget, ResultCallback, Row, SafeAreaView, ScaffoldView, ScrollInfo, ScrollView, SizedBox,
+    SizedBoxView, Slider, SliderView, Stack, StackView, TextInput, TextInputView, TextView, Timing,
     TransitionSpec, TransitionState, VisibilityCallback, button, checkbox, flexible, hero, icon,
-    inflexible, keyed, list_view, radio, safe_area, scroll_view, slider, text, text_input,
+    inflexible, keyed, list_view, radio, safe_area, scaffold, scroll_view, slider, text,
+    text_input,
 };
 
 /// Platform-view embedding (platform-views feature): reserve
@@ -198,9 +199,16 @@ pub use frust_widgets::icons;
 /// builders. [`RouterDeepLinks::track`] drains it every rebuild, so a request
 /// queued in an event handler (on any thread — the queue never panics
 /// off-thread) applies on the next frame.
+///
+/// [`shell_route`] is the nested-navigator binding: its children resolve onto a
+/// second [`NavigatorController`] the app owns and its own page — the chrome
+/// wrapping that inner navigator — stays retained while they do, so navigating
+/// between siblings inside the shell never rebuilds the chrome. See its docs
+/// for the keep rule and the per-verb table.
 pub use frust_widgets::{
-    DEFAULT_REDIRECT_LIMIT, ErrorBuilder, Location, NavRequest, NavWaker, PathPattern, Redirect,
-    Resolution, ResolvedPage, Route, RouteBuilder, RouteNavigator, RouteParams, Router,
+    DEFAULT_REDIRECT_LIMIT, ErrorBuilder, Location, NavChange, NavRequest, NavWaker, PathPattern,
+    Redirect, Resolution, ResolvedPage, Route, RouteBuilder, RouteNavigator, RouteParams,
+    RouteStack, Router, shell_route,
 };
 
 /// The page-transition **resolve/drive** path: the framework's own reduce-
@@ -502,6 +510,7 @@ pub use kurbo;
 pub use peniko;
 
 mod back_glue;
+mod route_state;
 mod router_glue;
 
 /// Android back-press ⇄ navigator auto-wiring:
@@ -562,12 +571,20 @@ pub use back_glue::{BackHandler, attach_back_handler};
 /// frust::app!(App);
 /// # fn main() {}
 /// ```
+///
+/// Also sets the platform-aware edge-swipe default
+/// ([`NavigatorView::platform_pop_swipe`]) to `cfg!(target_os = "ios")`: the
+/// interactive pop-swipe is on by default on iOS and off on Android/desktop
+/// (where the system/window-manager back gesture already exists), with no
+/// app-side wiring. An app can still override it per navigator
+/// ([`NavigatorView::pop_swipe`]) or per page
+/// ([`frust_widgets::PushOptions::pop_swipe`]).
 pub fn navigator<State: 'static>(
     controller: &NavigatorController<State>,
     initial: impl Fn() -> AnyView<State> + 'static,
 ) -> NavigatorView<State> {
     back_glue::auto_wire(controller);
-    frust_widgets::navigator(controller, initial)
+    frust_widgets::navigator(controller, initial).platform_pop_swipe(cfg!(target_os = "ios"))
 }
 
 /// Build a **root overlay host** driven by `controller`, wrapping the app's
@@ -629,12 +646,18 @@ pub fn navigator<State: 'static>(
 /// frust::app!(App);
 /// # fn main() {}
 /// ```
+///
+/// Also sets the platform-aware edge-swipe default like [`navigator`] does,
+/// though it never actually changes the host's own behaviour: `overlay_host`
+/// pins an *explicit* [`NavigatorView::pop_swipe(false)`](NavigatorView::pop_swipe)
+/// (an edge swipe must never dismiss an overlay), which outranks the platform
+/// slot by construction.
 pub fn overlay_host<State: 'static>(
     controller: &NavigatorController<State>,
     app: impl Fn() -> AnyView<State> + 'static,
 ) -> NavigatorView<State> {
     back_glue::auto_wire_overlay_host(controller);
-    frust_widgets::overlay_host(controller, app)
+    frust_widgets::overlay_host(controller, app).platform_pop_swipe(cfg!(target_os = "ios"))
 }
 
 /// Router ⇄ deep-link auto-wiring: [`router_with_deep_links`]/
@@ -645,6 +668,17 @@ pub fn overlay_host<State: 'static>(
 /// facade that sees both `frust-widgets`' `Router` and `frust-reactive`'s
 /// deep-link source together; neither underlying crate depends on the other.
 pub use router_glue::{RouterDeepLinks, router_with_deep_links};
+
+/// The reactive route-state observable: [`RouteObserver`] is the signal
+/// face over `frust_widgets`' signal-free `RouteStack`/[`NavChange`] — the
+/// counterpart to [`RouteNavigator`] (*intent*, queued requests) that reads
+/// *fact* (the last-published stack) instead. Construct once (typically in
+/// `Component::init`) and attach with
+/// [`observe`](RouteObserver::observe)`(navigator(...))`;
+/// [`RouterDeepLinks::routes`] hands out the one it wired for a router-driven
+/// navigator. See `route_state`'s module docs for why this bridge lives in
+/// the facade rather than `frust-widgets`.
+pub use route_state::RouteObserver;
 
 /// The design-token vocabulary: the [`Theme`] bundle plus its
 /// component token tables, flat-re-exported from `frust-theme` so app code

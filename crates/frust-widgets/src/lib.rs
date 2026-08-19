@@ -43,6 +43,7 @@ mod padding;
 mod platform_view;
 mod radio;
 mod safe_area;
+mod scaffold;
 mod scroll;
 mod sized;
 mod slider;
@@ -66,14 +67,15 @@ pub use list_view::{ListView, ListViewWidget, list_view};
 pub use nav::hero::{HeroView, HeroWidget, hero};
 pub use nav::navigator::{
     BackPolicy, NavigatorController, NavigatorId, NavigatorView, NavigatorWidget, PageBuilder,
-    PageVisibility, PopResult, PushOptions, ResultCallback, VisibilityCallback, navigator,
-    overlay_host,
+    PageVisibility, PopResult, PushOptions, ReplaceOptions, ResultCallback, RouteChangeCallback,
+    VisibilityCallback, navigator, overlay_host,
 };
 pub use nav::path::{Location, PathPattern, RouteParams};
 pub use nav::route::{NavRequest, NavWaker, RouteNavigator};
+pub use nav::route_state::{NavChange, RouteStack};
 pub use nav::router::{
     DEFAULT_REDIRECT_LIMIT, ErrorBuilder, Redirect, Resolution, ResolvedPage, Route, RouteBuilder,
-    Router,
+    Router, shell_route,
 };
 pub use nav::transition::{PageTransition, Timing, TransitionSpec, TransitionState};
 pub use padding::{EdgeInsets, Padding, PaddingView, PaddingWidget};
@@ -82,6 +84,7 @@ pub use platform_view::{
 };
 pub use radio::{Radio, RadioView, RadioWidget, radio};
 pub use safe_area::{SafeAreaView, SafeAreaWidget, safe_area};
+pub use scaffold::{ScaffoldView, ScaffoldWidget, scaffold};
 pub use scroll::{ScrollInfo, ScrollView, ScrollWidget, scroll_view};
 pub use sized::{SizedBox, SizedBoxView, SizedBoxWidget};
 pub use slider::{Slider, SliderView, SliderWidget, slider};

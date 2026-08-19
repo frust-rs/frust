@@ -55,6 +55,27 @@
 //! emits params it could not substitute into a segment as query parameters, and
 //! resolution now reads them back.
 //!
+//! # Shell routes (nested navigators)
+//!
+//! [`shell_route`] binds a route's **children** to a second
+//! [`NavigatorController`] the app owns: the shell route's own page is built on
+//! the enclosing controller and *retained* while its children resolve onto the
+//! inner one (go_router's `ShellRoute`). A resolved chain that crosses a shell
+//! boundary is therefore **split** — the segment up to and including the shell
+//! page applies to the enclosing controller, the segment below it to the
+//! shell's inner controller — instead of flattening onto the single controller
+//! the router was built with. A chain that crosses no shell still flattens
+//! exactly as it always did.
+//!
+//! The **keep rule** is the point: when the shell page is already on the
+//! enclosing stack, a navigation *within* its subtree issues **zero** ops
+//! there. Replacing that page would drop the retained inner navigator and
+//! every page in it, which is the whole thing a shell exists to prevent.
+//! "Already placed?" is answered by the published route stack
+//! ([`NavigatorController::route_stack`]) — fact, not the op queue's intent —
+//! plus this router's own record of a placement it queued in this same frame
+//! (see [`shell_route`] for the full table and the staleness note).
+//!
 //! # Deferred (documented seams)
 //!
 //! * **Full arbitrary-depth stack reset for `go`.** The [`NavigatorController`]
@@ -63,17 +84,24 @@
 //!   the replaced page's state — correct for the common flat case and for the
 //!   depth-1 root case. Resetting a deeper stack to a shorter chain (dropping
 //!   pages *below* the top) needs a controller reset op; recorded for a later
-//!   navigator revision rather than reaching across into `navigator.rs`.
-//! * **ShellRoute-style wrappers.** Nested routes compose paths and build one page
-//!   per chain route today; a parent route that *wraps* its child's page in shared
-//!   chrome is left for a future addition.
+//!   navigator revision rather than reaching across into `navigator.rs`. A shell
+//!   chain does not widen this: each segment is placed with the same
+//!   replace-top-and-push-the-rest rule, one controller at a time.
+//! * **Shell-aware [`pop`](Router::pop).** `Router::pop` pops the router's *own*
+//!   controller, shell or no shell. Popping "one page, wherever the user
+//!   actually is" is back arbitration's job, not the router's — the facade's
+//!   back handler routes a press to the innermost navigator that claims
+//!   interest, and an inner navigator at depth 1 claims none, so the press
+//!   falls through and pops the shell page itself. See [`shell_route`]'s
+//!   *Back* section.
 
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use frust_core::{AnyView, any};
 
-use super::navigator::NavigatorController;
+use super::navigator::{NavigatorController, NavigatorId, PushOptions, ReplaceOptions};
 use super::path::{Location, PathPattern, RouteParams, encode_segment};
 use super::route::{NavRequest, RouteNavigator};
 
@@ -107,6 +135,11 @@ pub struct Route<State: 'static> {
     builder: RouteBuilder<State>,
     redirect: Option<Redirect>,
     children: Vec<Route<State>>,
+    /// Set only by [`shell_route`]: the controller this route's **children**
+    /// resolve onto. `None` (every route built with [`Route::new`]) means the
+    /// children resolve onto the same controller this route's own page does,
+    /// i.e. the chain flattens.
+    shell: Option<NavigatorController<State>>,
 }
 
 impl<State: 'static> Route<State> {
@@ -122,6 +155,7 @@ impl<State: 'static> Route<State> {
             builder: Rc::new(builder),
             redirect: None,
             children: Vec::new(),
+            shell: None,
         }
     }
 
@@ -152,6 +186,107 @@ impl<State: 'static> Route<State> {
     }
 }
 
+/// A **shell route**: a pathless route whose `children` resolve onto `inner`, a
+/// second [`NavigatorController`] the app owns, while this route's own page
+/// stays retained on the enclosing stack (go_router's `ShellRoute`).
+///
+/// `builder` builds the shell page — chrome plus the inner navigator, e.g.
+/// `scaffold(any(navigator(&inner, || …))).app_bar(…)` — and **must** mount a
+/// [`navigator`](super::navigator::navigator) driven by the *same* `inner`
+/// clone; that navigator is where the children land.
+///
+/// ```ignore
+/// // The app owns `inner` in its `Component::State`, exactly like the outer one.
+/// Router::with_controller(&outer, vec![
+///     Route::new("/", connect_page),               // declared BEFORE the shell
+///     shell_route(&inner, shell_page, vec![
+///         Route::new("/sessions", sessions_page),
+///         Route::new("/terminal", terminal_page),
+///     ]),
+/// ])
+/// ```
+///
+/// # Pathless, and why order matters
+///
+/// A shell route consumes no path segments (like go_router's `ShellRoute`,
+/// which has no `path` at all), so its children keep flat public paths. A
+/// zero-consuming route also matches the *empty* segment list, so a root route
+/// (`/`) must be declared **before** the shell — [`Router::resolve`] takes the
+/// first match. To scope a shell under a prefix, nest it: a
+/// `Route::new("/dash").child(shell_route(…))` puts `/dash`'s own page on the
+/// enclosing stack ahead of the shell page.
+///
+/// # How a chain that crosses this route is applied
+///
+/// The resolved chain splits at the boundary. With the shell page already on
+/// the enclosing stack — the **keep rule** — the enclosing controller gets
+/// **zero ops**, because replacing that page would drop the retained inner
+/// navigator and every page in it:
+///
+/// | Verb | Enclosing controller | Inner controller |
+/// |---|---|---|
+/// | [`go`](Router::go) | shell already placed → **keep** (zero ops); else replace the top with the shell page and push the rest | replace the top with the leaf |
+/// | [`push`](Router::push) | shell already placed → **keep**; else *push* the shell page (the page below — a `/` connect screen, say — is retained) | push the leaf |
+/// | [`replace`](Router::replace) | as `go`'s rule | replace the top with the leaf |
+/// | [`pop`](Router::pop) | pops the router's own controller — see the [module docs](self)' deferred note | — |
+///
+/// One structural op per controller per navigation, so nothing here rests on
+/// stacking two transitions in one `apply_ops` pass.
+///
+/// **A placement resets the verb below it.** When the shell page has to be
+/// placed, the inner navigator is brand new — its stack is just the root page
+/// its `navigator(…)` call names — so there is no in-shell history to stack
+/// onto and every segment below the placement applies as a `go` (replace)
+/// whatever the caller asked for. That is what makes `push("/sessions")` from a
+/// bar-less `/` land as `[/, shell]` outside and `[sessions]` (depth 1) inside,
+/// so a back press at `/sessions` leaves the shell instead of popping to a
+/// placeholder root.
+///
+/// # Matched state reaching the shell page
+///
+/// `builder` receives the resolved chain's merged [`RouteParams`] like any
+/// other route — but only as of the navigation that *placed* it. A navigation
+/// within the shell issues no op on the enclosing controller by design, so the
+/// shell page is neither rebuilt from a new builder nor restamped: its
+/// published route entry keeps naming the location that placed it. Live
+/// in-shell state is read from the **inner** navigator instead — its own
+/// [`route_stack`](NavigatorController::route_stack) (or the facade's
+/// `RouteObserver` over it), which is authoritative at every publish. Chrome
+/// inside the shell page (a title bar) reads that, never the enclosing stack.
+///
+/// # Deep links landing mid-shell
+///
+/// A `go` that runs before the shell page exists — a cold-start deep link
+/// resolved from `Component::init` — queues the inner segment's ops on `inner`
+/// while it has no widget at all. They are drained by the inner navigator's
+/// *first* `build` (the same pre-first-frame drain a top-level controller
+/// gets), so the shell's first painted frame is already the linked child: no
+/// flash, no second navigation. If a shell page defers mounting its navigator
+/// (rendering a loading state first), the ops simply wait on the queue and land
+/// on whichever build mounts it.
+///
+/// # Back
+///
+/// Nothing here wires back. The shell page's builder mounts the inner
+/// navigator, so the inner navigator wires *after* the enclosing one and the
+/// facade's innermost-first arbitration reaches it first: back pops the inner
+/// stack while it is poppable, and an inner navigator at depth 1 claims no
+/// interest, so the press falls through and pops the shell page itself.
+pub fn shell_route<State: 'static>(
+    inner: &NavigatorController<State>,
+    builder: impl Fn(&RouteParams) -> AnyView<State> + 'static,
+    children: Vec<Route<State>>,
+) -> Route<State> {
+    Route {
+        path: String::new(),
+        name: None,
+        builder: Rc::new(builder),
+        redirect: None,
+        children,
+        shell: Some(inner.clone()),
+    }
+}
+
 /// One resolved page in a [`Resolution::Matched`] chain: the route's builder,
 /// the params handed to it (query merged under the path captures — see the
 /// [module docs](self)), and the resolved location they came from.
@@ -161,6 +296,11 @@ pub struct ResolvedPage<State: 'static> {
     builder: RouteBuilder<State>,
     params: RouteParams,
     location: Location,
+    /// The [`shell_route`] binding of the route this page came from: the
+    /// controller every page *below* it in the chain applies to. `None` for
+    /// every ordinary route, which is what keeps a non-shell chain flattening
+    /// onto one controller.
+    shell: Option<NavigatorController<State>>,
 }
 
 impl<State: 'static> ResolvedPage<State> {
@@ -232,6 +372,24 @@ impl<State: 'static> Resolution<State> {
     }
 }
 
+/// Which navigation verb a resolved chain is being applied under — the row
+/// selector in [`shell_route`]'s application table, and what lets `go`/`push`/
+/// `replace` share one chain-splitting path instead of three copies of it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Verb {
+    Go,
+    Push,
+    Replace,
+}
+
+/// One piece of a chain split at its [`shell_route`] boundaries: the pages that
+/// apply to `controller`. Segment 0's controller is the router's own; each
+/// later segment's is the inner controller of the shell that opened it.
+struct Segment<State: 'static> {
+    controller: NavigatorController<State>,
+    pages: Vec<ResolvedPage<State>>,
+}
+
 /// A declarative router over a [`navigator`](super::navigator). See the [module
 /// docs](self).
 pub struct Router<State: 'static> {
@@ -244,6 +402,21 @@ pub struct Router<State: 'static> {
     /// [module docs](self)' "Reaching the router from a screen"). Owned here,
     /// handed out by clone; drained by [`pump`](Self::pump).
     route_nav: RouteNavigator,
+    /// Shell pages this router has **queued** but whose target controller has
+    /// not published them yet, keyed by the shell's inner-controller id and
+    /// valued by that target's [`route_generation`](NavigatorController::route_generation)
+    /// at queue time.
+    ///
+    /// The keep rule reads committed state (the published route stack), which
+    /// is the right authority — but it leaves one gap the router alone can
+    /// close: two shell-crossing navigations applied in the *same* frame, before
+    /// any rebuild, would each see a stack without the shell page and each queue
+    /// one, leaving two shell pages driving a single inner controller. An entry
+    /// here is honoured only while the recorded generation still matches, so it
+    /// self-invalidates on the very publish that makes the stack authoritative —
+    /// it is a note about this router's own queued intent, never a second copy
+    /// of the stack.
+    pending_shells: RefCell<HashMap<NavigatorId, u64>>,
 }
 
 impl<State: 'static> Router<State> {
@@ -266,6 +439,7 @@ impl<State: 'static> Router<State> {
             error_builder: Rc::new(default_error_page),
             redirect_limit: DEFAULT_REDIRECT_LIMIT,
             route_nav: RouteNavigator::new(),
+            pending_shells: RefCell::new(HashMap::new()),
         }
     }
 
@@ -352,6 +526,7 @@ impl<State: 'static> Router<State> {
                     builder: route.builder.clone(),
                     params: merged.clone(),
                     location: loc.clone(),
+                    shell: route.shell.clone(),
                 })
                 .collect();
             return Resolution::Matched {
@@ -415,57 +590,261 @@ impl<State: 'static> Router<State> {
     /// Reset the stack to the matched chain (replace semantics — the current top's
     /// state is dropped). See the [module docs](self)'s deferred note on
     /// arbitrary-depth reset.
+    ///
+    /// Each resolved page is stamped with its own [`ResolvedPage::location`]
+    /// (`R-B1`) — [`NavigatorController::route_stack`] tracks the
+    /// resulting page-to-route mapping, so no consumer needs to re-derive it.
+    ///
+    /// A chain crossing a [`shell_route`] boundary is split across the two
+    /// controllers instead, under the keep rule — see [`shell_route`]'s table.
     pub fn go(&self, location: &str) {
-        match self.resolved(location) {
-            Resolution::Matched { pages, .. } => {
-                let mut pages = pages.into_iter();
-                if let Some(first) = pages.next() {
-                    self.controller.replace(first.into_page_builder());
-                }
-                for page in pages {
-                    self.controller.push(page.into_page_builder());
-                }
-            }
-            Resolution::Error { location } => {
-                self.controller.replace(self.error_page_builder(location));
-            }
-        }
+        self.apply(self.resolved(location), Verb::Go);
     }
 
     /// Push the matched leaf page onto the stack (the page below is retained).
+    ///
+    /// Stamps the leaf's [`ResolvedPage::location`] — see [`go`](Self::go)'s doc.
+    /// Across a [`shell_route`] boundary the leaf lands on the shell's inner
+    /// controller — see [`shell_route`]'s table.
     pub fn push(&self, location: &str) {
-        match self.resolved(location) {
-            Resolution::Matched { pages, .. } => {
-                if let Some(leaf) = pages.into_iter().next_back() {
-                    self.controller.push(leaf.into_page_builder());
-                }
-            }
-            Resolution::Error { location } => {
-                self.controller.push(self.error_page_builder(location));
-            }
-        }
+        self.apply(self.resolved(location), Verb::Push);
     }
 
     /// Replace the top page with the matched leaf (the top's state is dropped;
     /// the stack depth is unchanged). [`go`](Self::go)'s single-page case, minus
     /// the chain push — the op a [`NavRequest::Replace`] applies.
+    ///
+    /// Stamps the leaf's [`ResolvedPage::location`] — see [`go`](Self::go)'s doc.
+    /// Across a [`shell_route`] boundary the replaced top is the shell's inner
+    /// one — see [`shell_route`]'s table.
     pub fn replace(&self, location: &str) {
-        match self.resolved(location) {
+        self.apply(self.resolved(location), Verb::Replace);
+    }
+
+    /// Pop the top page of the router's **own** controller (a no-op on the root
+    /// page — see [`NavigatorController::pop`]).
+    ///
+    /// Deliberately not shell-aware: popping "one page, wherever the user
+    /// actually is" is back arbitration's job (the facade's back handler routes
+    /// a press innermost-first), not the router's. See the [module docs](self)'
+    /// deferred note and [`shell_route`]'s *Back* section.
+    pub fn pop(&self) {
+        self.controller.pop();
+    }
+
+    // --- Chain application (flat and shell-split) ---
+
+    /// Apply a [`Resolution`] under `verb`. A chain that crosses no shell
+    /// boundary is one segment and takes [`apply_flat`](Self::apply_flat) — the
+    /// flatten-onto-one-controller behaviour, unchanged. A chain that *does*
+    /// cross one takes [`apply_shell_chain`](Self::apply_shell_chain).
+    fn apply(&self, resolution: Resolution<State>, verb: Verb) {
+        match resolution {
             Resolution::Matched { pages, .. } => {
-                if let Some(leaf) = pages.into_iter().next_back() {
-                    self.controller.replace(leaf.into_page_builder());
+                let mut segments = self.split_chain(pages);
+                if segments.len() == 1 {
+                    let segment = segments.pop().expect("a chain has at least one segment");
+                    Self::apply_flat(&segment.controller, segment.pages, verb);
+                } else {
+                    self.apply_shell_chain(segments, verb);
                 }
             }
-            Resolution::Error { location } => {
-                self.controller.replace(self.error_page_builder(location));
+            Resolution::Error { location } => match verb {
+                Verb::Push => self.controller.push(self.error_page_builder(location)),
+                Verb::Go | Verb::Replace => {
+                    self.controller.replace(self.error_page_builder(location))
+                }
+            },
+        }
+    }
+
+    /// Cut the resolved chain after every page whose route carries a
+    /// [`shell_route`] binding: segment 0 applies to this router's own
+    /// controller, segment 1 to the first shell's inner controller, and so on.
+    /// A chain crossing no shell yields exactly one segment.
+    ///
+    /// A shell route matched as the chain *leaf* (its own path, with no child
+    /// consuming the rest) opens a trailing segment with no pages — kept, so
+    /// the shell page is still placed while its inner navigator is left showing
+    /// whatever it already had.
+    fn split_chain(&self, pages: Vec<ResolvedPage<State>>) -> Vec<Segment<State>> {
+        let mut segments = vec![Segment {
+            controller: self.controller.clone(),
+            pages: Vec::new(),
+        }];
+        for page in pages {
+            let inner = page.shell.clone();
+            segments
+                .last_mut()
+                .expect("segments is seeded with the outer segment")
+                .pages
+                .push(page);
+            if let Some(inner) = inner {
+                segments.push(Segment {
+                    controller: inner,
+                    pages: Vec::new(),
+                });
+            }
+        }
+        segments
+    }
+
+    /// Apply a chain that crosses at least one shell boundary: each segment to
+    /// its own controller, under the keep rule (see [`shell_route`]'s table).
+    fn apply_shell_chain(&self, segments: Vec<Segment<State>>, verb: Verb) {
+        // The inner controller each boundary opens, indexed by boundary — the
+        // identity the keep rule compares an already-placed shell page against.
+        let shells: Vec<NavigatorId> = segments
+            .iter()
+            .skip(1)
+            .map(|segment| segment.controller.id())
+            .collect();
+        let last = segments.len() - 1;
+        // While every enclosing shell page was kept, the caller's verb applies
+        // as written. The first placement flips this: everything below a
+        // freshly placed shell page is a new subtree with no history to stack
+        // onto, so it resets (see `shell_route`'s "a placement resets the verb
+        // below it").
+        let mut enclosing_kept = true;
+
+        for (index, segment) in segments.into_iter().enumerate() {
+            let effective = if enclosing_kept { verb } else { Verb::Go };
+            if index == last {
+                Self::apply_flat(&segment.controller, segment.pages, effective);
+                continue;
+            }
+
+            let shell = shells[index];
+            if enclosing_kept && self.shell_is_placed(&segment.controller, index, shell) {
+                continue;
+            }
+            enclosing_kept = false;
+            self.pending_shells
+                .borrow_mut()
+                .insert(shell, segment.controller.route_generation());
+            Self::place_segment(&segment.controller, segment.pages, effective);
+        }
+    }
+
+    /// The keep rule's question: is the page of the shell that opens boundary
+    /// `boundary` already on `target`'s stack?
+    ///
+    /// Answered against the **published** route stack — the committed fact, per
+    /// `route_state`'s intent-vs-fact split — by re-matching each entry's
+    /// location through the route table and asking whether that chain crosses
+    /// the same shell at the same boundary. Re-matching (rather than comparing
+    /// locations) is what keeps a pathless shell honest: the shell page is
+    /// stamped with the location that placed it, and every one of its children
+    /// resolves through the same shell.
+    ///
+    /// "On the stack", not "on top": a page the app pushed *over* the shell
+    /// leaves the shell page retained beneath it, and placing a second one
+    /// there would put two live navigators on one controller. The in-shell
+    /// navigation lands under the covering page instead, and is what the user
+    /// sees when they pop back to it.
+    ///
+    /// Matching is redirect-free ([`match_chain`](Self::match_chain), not
+    /// [`resolve`](Self::resolve)): this identifies the route that *produced* an
+    /// existing page, which a redirect installed later must not reinterpret.
+    fn shell_is_placed(
+        &self,
+        target: &NavigatorController<State>,
+        boundary: usize,
+        shell: NavigatorId,
+    ) -> bool {
+        let stack = target.route_stack();
+        let committed = stack
+            .entries()
+            .iter()
+            .flatten()
+            .any(|location| self.shell_at(location, boundary) == Some(shell));
+        if committed {
+            return true;
+        }
+        // Queued but not yet published — this router's own placement from
+        // earlier in the same frame (see `pending_shells`).
+        self.pending_shells.borrow().get(&shell) == Some(&stack.generation())
+    }
+
+    /// The inner-controller id of the `boundary`-th shell the chain matching
+    /// `location` crosses, or `None` if it crosses fewer.
+    fn shell_at(&self, location: &Location, boundary: usize) -> Option<NavigatorId> {
+        let (chain, _) = self.match_chain(location)?;
+        chain
+            .iter()
+            .filter_map(|route| route.shell.as_ref())
+            .nth(boundary)
+            .map(|controller| controller.id())
+    }
+
+    /// Apply one segment's pages to `controller` with the flat, single-controller
+    /// semantics `go`/`push`/`replace` have always had — the behaviour a chain
+    /// crossing no shell keeps byte-for-byte.
+    fn apply_flat(
+        controller: &NavigatorController<State>,
+        pages: Vec<ResolvedPage<State>>,
+        verb: Verb,
+    ) {
+        match verb {
+            Verb::Go => {
+                let mut pages = pages.into_iter();
+                if let Some(first) = pages.next() {
+                    let route = first.location().clone();
+                    controller.replace_with_options(
+                        first.into_page_builder(),
+                        ReplaceOptions::opaque().route(route),
+                    );
+                }
+                for page in pages {
+                    let route = page.location().clone();
+                    controller.push_with_options(
+                        page.into_page_builder(),
+                        PushOptions::opaque().route(route),
+                    );
+                }
+            }
+            Verb::Push => {
+                if let Some(leaf) = pages.into_iter().next_back() {
+                    let route = leaf.location().clone();
+                    controller.push_with_options(
+                        leaf.into_page_builder(),
+                        PushOptions::opaque().route(route),
+                    );
+                }
+            }
+            Verb::Replace => {
+                if let Some(leaf) = pages.into_iter().next_back() {
+                    let route = leaf.location().clone();
+                    controller.replace_with_options(
+                        leaf.into_page_builder(),
+                        ReplaceOptions::opaque().route(route),
+                    );
+                }
             }
         }
     }
 
-    /// Pop the top page (a no-op on the root page — see
-    /// [`NavigatorController::pop`]).
-    pub fn pop(&self) {
-        self.controller.pop();
+    /// Place a shell-carrying segment (its pages end with the shell page) on
+    /// `controller`. A `push` stacks the whole segment so the page it came from
+    /// is retained beneath the shell; a `go`/`replace` applies the flat `go`
+    /// rule (replace the top, push the rest).
+    fn place_segment(
+        controller: &NavigatorController<State>,
+        pages: Vec<ResolvedPage<State>>,
+        verb: Verb,
+    ) {
+        match verb {
+            Verb::Push => {
+                for page in pages {
+                    let route = page.location().clone();
+                    controller.push_with_options(
+                        page.into_page_builder(),
+                        PushOptions::opaque().route(route),
+                    );
+                }
+            }
+            Verb::Go | Verb::Replace => Self::apply_flat(controller, pages, Verb::Go),
+        }
     }
 
     /// The single entry point a deep link resolves through — same reset semantics
@@ -662,6 +1041,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::super::navigator::{NavigatorView, navigator};
+    use super::super::route_state::NavChange;
 
     fn params(pairs: &[(&str, &str)]) -> RouteParams {
         pairs
@@ -1120,6 +1500,63 @@ mod tests {
         );
     }
 
+    // ================= Route-state stamping =================
+
+    #[test]
+    fn go_push_replace_all_stamp_the_resolved_location_onto_the_route_stack() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let router: Router<()> = Router::with_controller(
+            &controller,
+            vec![
+                Route::new("/home", |_| sized(10.0, 10.0)),
+                Route::new("/detail", |_| sized(20.0, 20.0)),
+                Route::new("/other", |_| sized(30.0, 30.0)),
+            ],
+        );
+
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut ()| navigator(&ctrl, || sized(10.0, 10.0))
+        };
+        let mut state = ();
+        // No `.root_route(...)`: the very first page is seeded by `router.go`
+        // below, not the navigator's own initial builder.
+        root.rebuild(&mut app, &mut state);
+
+        router.go("/home");
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            controller.route_stack().entries(),
+            &[Some(Location::parse("/home"))],
+            "Router::go stamps the resolved location via ReplaceOptions::route"
+        );
+
+        router.push("/detail");
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            controller.route_stack().entries(),
+            &[
+                Some(Location::parse("/home")),
+                Some(Location::parse("/detail"))
+            ],
+            "Router::push stamps the resolved location via PushOptions::route"
+        );
+        assert_eq!(controller.route_stack().change(), NavChange::Push);
+
+        router.replace("/other");
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            controller.route_stack().entries(),
+            &[
+                Some(Location::parse("/home")),
+                Some(Location::parse("/other"))
+            ],
+            "Router::replace stamps the resolved location via ReplaceOptions::route"
+        );
+        assert_eq!(controller.route_stack().change(), NavChange::Replace);
+    }
+
     // ================= RouteNavigator seam (pump) =================
 
     /// The `app_logic` closure [`RenderRoot::rebuild`] drives, boxed so
@@ -1300,5 +1737,369 @@ mod tests {
         first.push("/detail");
         second.replace("/other");
         assert_eq!(h.frame(), vec![(Point::ZERO, Size::new(30.0, 30.0))]);
+    }
+
+    // ================= Shell routes =================
+
+    /// A leaf counting how many times it was **built** (never how often it was
+    /// rebuilt) — the keep rule's tripwire. A retained widget is rebuilt in
+    /// place; one whose page was replaced is built again from scratch, taking
+    /// the shell's inner navigator (and every page in it) with it.
+    struct BuildCounter {
+        builds: Rc<Cell<u32>>,
+    }
+    struct BuildCounterWidget;
+    impl<S: 'static> View<S> for BuildCounter {
+        type Element = BuildCounterWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> BuildCounterWidget {
+            self.builds.set(self.builds.get() + 1);
+            BuildCounterWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut BuildCounterWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+    impl Widget for BuildCounterWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::ZERO)
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+    }
+
+    /// The shell shape this whole construct exists for: a `/` root declared
+    /// **before** a pathless shell (so it keeps the empty segment list) whose
+    /// children are the screens that live inside the shell's chrome.
+    struct ShellHarness {
+        router: Router<()>,
+        outer: NavigatorController<()>,
+        inner: NavigatorController<()>,
+        root: RenderRoot<(), NavigatorView<()>>,
+        app: AppLogic,
+        /// Builds of the shell page's chrome — see [`BuildCounter`].
+        shell_builds: Rc<Cell<u32>>,
+    }
+
+    impl ShellHarness {
+        fn new() -> Self {
+            let outer: NavigatorController<()> = NavigatorController::new();
+            let inner: NavigatorController<()> = NavigatorController::new();
+            let shell_builds = Rc::new(Cell::new(0u32));
+
+            let shell_page = {
+                let inner = inner.clone();
+                let builds = shell_builds.clone();
+                move |_: &RouteParams| {
+                    let inner = inner.clone();
+                    let builds = builds.clone();
+                    any(crate::Column(vec![
+                        any(BuildCounter { builds }),
+                        any(navigator(&inner, || sized(11.0, 11.0))),
+                    ]))
+                }
+            };
+            let routes = vec![
+                Route::new("/", |_| sized(10.0, 10.0)),
+                shell_route(
+                    &inner,
+                    shell_page,
+                    vec![
+                        Route::new("/sessions", |_| sized(20.0, 20.0)),
+                        Route::new("/terminal", |_| sized(30.0, 30.0)),
+                    ],
+                ),
+            ];
+            let router =
+                Router::with_controller(&outer, routes).error_builder(|_| sized(99.0, 99.0));
+            let app: AppLogic = {
+                let c = outer.clone();
+                Box::new(move |_: &mut ()| navigator(&c, || sized(10.0, 10.0)))
+            };
+            let mut harness = ShellHarness {
+                router,
+                outer,
+                inner,
+                root: RenderRoot::new(),
+                app,
+                shell_builds,
+            };
+            harness.rebuild();
+            harness
+        }
+
+        fn rebuild(&mut self) {
+            self.root.rebuild(&mut self.app, &mut ());
+        }
+
+        /// The locations each controller's published stack currently holds.
+        fn stacks(&self) -> (Vec<String>, Vec<String>) {
+            (paths(&self.outer), paths(&self.inner))
+        }
+    }
+
+    /// The published route stack of `controller` as plain paths (a route-less
+    /// page reads as `-`), which is what every shell assertion below compares.
+    fn paths(controller: &NavigatorController<()>) -> Vec<String> {
+        controller
+            .route_stack()
+            .entries()
+            .iter()
+            .map(|entry| match entry {
+                Some(location) => location.path.clone(),
+                None => "-".to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_shell_chain_splits_the_outer_page_from_the_inner_leaf() {
+        let mut h = ShellHarness::new();
+        h.router.go("/terminal");
+        h.rebuild();
+
+        let (outer, inner) = h.stacks();
+        assert_eq!(
+            outer,
+            vec!["/terminal".to_string()],
+            "the outer controller got the SHELL page (stamped with the location \
+             that placed it), never the leaf"
+        );
+        assert_eq!(
+            inner,
+            vec!["/terminal".to_string()],
+            "the leaf landed on the shell's inner controller"
+        );
+        assert_eq!(h.inner.depth(), 1, "the inner leaf replaced its root");
+        assert!(h.inner.is_mounted(), "the shell page mounted its navigator");
+        assert_eq!(h.shell_builds.get(), 1, "the shell page was built once");
+    }
+
+    #[test]
+    fn a_sibling_navigation_inside_the_shell_issues_zero_outer_ops() {
+        // THE keep rule: re-navigating within the shell's subtree must not
+        // touch the outer stack, because replacing the shell page would drop
+        // the retained inner navigator and every page in it.
+        let mut h = ShellHarness::new();
+        h.router.go("/sessions");
+        h.rebuild();
+        let outer_generation = h.outer.route_generation();
+        assert_eq!(h.shell_builds.get(), 1);
+
+        h.router.go("/terminal");
+        h.rebuild();
+
+        assert_eq!(
+            h.outer.route_generation(),
+            outer_generation,
+            "no outer op ran at all — an unchanged stack publishes nothing"
+        );
+        assert_eq!(
+            h.shell_builds.get(),
+            1,
+            "the shell page's widget was retained, not rebuilt"
+        );
+        assert_eq!(
+            h.stacks().1,
+            vec!["/terminal".to_string()],
+            "only the inner navigator moved"
+        );
+        assert_eq!(
+            h.stacks().0,
+            vec!["/sessions".to_string()],
+            "the outer entry keeps naming the location that PLACED the shell — \
+             live in-shell state is read from the inner navigator"
+        );
+    }
+
+    #[test]
+    fn a_push_inside_a_placed_shell_stacks_on_the_inner_navigator() {
+        let mut h = ShellHarness::new();
+        h.router.go("/sessions");
+        h.rebuild();
+
+        h.router.push("/terminal");
+        h.rebuild();
+        assert_eq!(h.outer.depth(), 1, "the outer stack never moved");
+        assert_eq!(
+            h.stacks().1,
+            vec!["/sessions".to_string(), "/terminal".to_string()],
+            "the leaf stacked inside the shell"
+        );
+        assert_eq!(h.shell_builds.get(), 1);
+    }
+
+    #[test]
+    fn a_push_that_must_place_the_shell_retains_the_page_below_and_resets_the_inner() {
+        // muxr's connect → shell shape: the page the user came from stays on
+        // the outer stack (so back leaves the shell), and the freshly created
+        // inner navigator lands at depth 1 rather than stacking the leaf over
+        // a placeholder root.
+        let mut h = ShellHarness::new();
+        h.router.go("/");
+        h.rebuild();
+        assert_eq!(h.stacks().0, vec!["/".to_string()]);
+
+        h.router.push("/sessions");
+        h.rebuild();
+        assert_eq!(
+            h.stacks().0,
+            vec!["/".to_string(), "/sessions".to_string()],
+            "the shell page stacked over the root page, which is retained"
+        );
+        assert_eq!(
+            h.inner.depth(),
+            1,
+            "the fresh inner navigator is at its root"
+        );
+        assert_eq!(h.stacks().1, vec!["/sessions".to_string()]);
+    }
+
+    #[test]
+    fn a_page_pushed_over_the_shell_still_counts_as_placed() {
+        // The shell page is retained BELOW an outer push, so a navigation into
+        // its subtree must not place a second one (two live navigators on one
+        // controller); it lands under the covering page instead.
+        let mut h = ShellHarness::new();
+        h.router.go("/sessions");
+        h.rebuild();
+        h.outer.push(|| sized(77.0, 77.0));
+        h.rebuild();
+        assert_eq!(h.outer.depth(), 2);
+
+        h.router.go("/terminal");
+        h.rebuild();
+        assert_eq!(h.outer.depth(), 2, "no second shell page was placed");
+        assert_eq!(h.shell_builds.get(), 1);
+        assert_eq!(h.stacks().1, vec!["/terminal".to_string()]);
+    }
+
+    #[test]
+    fn two_shell_navigations_in_one_frame_place_the_shell_page_once() {
+        // The intent-vs-fact gap: the second navigation resolves before any
+        // rebuild published the first one's placement, so the committed stack
+        // alone cannot answer the keep rule.
+        let mut h = ShellHarness::new();
+        h.router.go("/");
+        h.rebuild();
+
+        h.router.push("/sessions");
+        h.router.push("/terminal");
+        h.rebuild();
+
+        assert_eq!(
+            h.stacks().0,
+            vec!["/".to_string(), "/sessions".to_string()],
+            "exactly one shell page, placed by the first navigation"
+        );
+        assert_eq!(
+            h.stacks().1,
+            vec!["/sessions".to_string(), "/terminal".to_string()],
+            "both in-shell ops landed on the one inner navigator"
+        );
+        assert_eq!(h.shell_builds.get(), 1);
+    }
+
+    #[test]
+    fn the_root_route_beats_a_pathless_shell_for_the_empty_location() {
+        // A zero-consuming shell also matches the empty segment list, so `/`
+        // must be declared before it — `match_routes` takes the first match.
+        let mut h = ShellHarness::new();
+        h.router.go("/");
+        h.rebuild();
+        assert_eq!(h.stacks().0, vec!["/".to_string()]);
+        assert!(
+            !h.inner.is_mounted(),
+            "the shell was never placed, so its navigator never mounted"
+        );
+    }
+
+    #[test]
+    fn a_redirect_out_of_the_shell_splits_the_post_redirect_chain() {
+        // A guard bouncing a child out of its shell resolves BEFORE the split,
+        // so the shell page is never placed at all.
+        let outer: NavigatorController<()> = NavigatorController::new();
+        let inner: NavigatorController<()> = NavigatorController::new();
+        let router = {
+            let inner_for_shell = inner.clone();
+            Router::with_controller(
+                &outer,
+                vec![
+                    Route::new("/", |_| sized(10.0, 10.0)),
+                    shell_route(
+                        &inner,
+                        move |_| {
+                            let inner = inner_for_shell.clone();
+                            any(navigator(&inner, || sized(11.0, 11.0)))
+                        },
+                        vec![
+                            Route::new("/sessions", |_| sized(20.0, 20.0))
+                                .redirect(|_| Some("/".to_string())),
+                        ],
+                    ),
+                ],
+            )
+        };
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app: AppLogic = {
+            let c = outer.clone();
+            Box::new(move |_: &mut ()| navigator(&c, || sized(10.0, 10.0)))
+        };
+        root.rebuild(&mut app, &mut ());
+
+        router.go("/sessions");
+        root.rebuild(&mut app, &mut ());
+        assert_eq!(paths(&outer), vec!["/".to_string()], "the redirect won");
+        assert!(!inner.is_mounted(), "no shell page, no inner navigator");
+    }
+
+    #[test]
+    fn a_non_shell_chain_still_flattens_onto_one_controller() {
+        // The no-regression half: a nested chain with no shell binding lands
+        // entirely on the router's own controller, exactly as before.
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let router: Router<()> = Router::with_controller(
+            &controller,
+            vec![
+                Route::new("/home", |_| sized(10.0, 10.0)),
+                Route::new("/users", |_| sized(20.0, 20.0))
+                    .child(Route::new(":id", |_| sized(30.0, 30.0))),
+            ],
+        );
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app: AppLogic = {
+            let c = controller.clone();
+            Box::new(move |_: &mut ()| navigator(&c, || sized(10.0, 10.0)))
+        };
+        root.rebuild(&mut app, &mut ());
+
+        router.go("/users/42");
+        root.rebuild(&mut app, &mut ());
+        assert_eq!(
+            paths(&controller),
+            vec!["/users/42".to_string(), "/users/42".to_string()],
+            "go replaced the top with the chain root and pushed the rest — both \
+             pages on the one controller"
+        );
+
+        router.push("/users/7");
+        root.rebuild(&mut app, &mut ());
+        assert_eq!(
+            controller.depth(),
+            3,
+            "push stacked the leaf alone, unchanged"
+        );
+
+        router.replace("/home");
+        root.rebuild(&mut app, &mut ());
+        assert_eq!(
+            paths(&controller).last().map(String::as_str),
+            Some("/home"),
+            "replace swapped the top alone, unchanged"
+        );
+        assert_eq!(controller.depth(), 3);
     }
 }

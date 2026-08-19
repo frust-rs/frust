@@ -18,10 +18,15 @@
 //! * [`route`] — [`RouteNavigator`](route::RouteNavigator), the `Send + Sync`
 //!   navigation-request queue a screen reaches through `provide_context` (the
 //!   router itself cannot ride context — it holds `Rc`s).
+//! * [`route_state`] — [`RouteStack`](route_state::RouteStack)/
+//!   [`NavChange`](route_state::NavChange): the signal-free route-state
+//!   observable published by [`navigator`]'s `publish_state` after every
+//!   committed stack mutation.
 
 pub mod hero;
 pub mod navigator;
 pub mod path;
 pub mod route;
+pub mod route_state;
 pub mod router;
 pub mod transition;
