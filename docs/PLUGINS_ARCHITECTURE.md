@@ -157,7 +157,7 @@ toolkit they all build against). Their shared charter:
   instead, but the shape is the same); `frust_glyph::install()`, `frust_material::install()`, and
   `frust_shadcn::install()` additionally call `frust::register_app_fonts` for their bundled fonts —
   Glyph's OFL monospace faces (Space Mono, IBM Plex Mono, `plugins/glyph/fonts/`), Material's
-  bundled Roboto Flex (OFL-1.1) and Roboto Mono (Apache-2.0, `plugins/material/fonts/`), shadcn's
+  bundled Roboto Flex (OFL-1.1) and Roboto Mono (OFL-1.1, `plugins/material/fonts/`), shadcn's
   bundled Inter Variable and JetBrains Mono Variable (OFL-1.1, no Reserved Font Name,
   `plugins/shadcn/fonts/`) — each registered unconditionally, not behind a feature, since none of
   the three crates has a feature to gate them with. A call after shell construction takes effect

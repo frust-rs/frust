@@ -2743,3 +2743,94 @@ alongside the `CornerRadii`/`DashPattern` primitives rather than blocking on it.
 
 **Evidence**: `crates/frust-render/src/convert.rs`'s shared command-walk decode of
 `Command::BlurredRoundedRect` (`radii.largest()` call site and its regression test).
+
+---
+
+### `material-from-seed-diverges-from-baked-baseline` — `theme_from_seed`/`from_seed(#6750A4)` is not pixel-identical to `baseline()`
+
+**Observed**: `frust_material::from_seed`/`theme_from_seed` ports current
+`material-color-utilities` 0.11.1, while `baseline()` transcribes Google's
+published Material 3 reference palette (material-web tokens v0.192) — two
+different sources of truth for the same seed color. Seeding `from_seed` with
+`#6750A4` (the reference seed `baseline()` itself was built from) does not
+reproduce `baseline()` exactly: the error ramp differs (`#BA1A1A` from MCU vs
+`#B3261E` baked), and roughly half the remaining roles drift by ±1 RGB step.
+
+**Applies to**: any app calling both `baseline()` and `theme_from_seed`/
+`from_seed(#6750A4)` and expecting identical output, or switching a theme
+from one to the other at runtime.
+
+**Why accepted**: this is correct interop behavior, not a bug — `from_seed`
+matches a Flutter app seeded identically via current MCU, which is the point
+of exposing it. The divergence from `baseline()` is pinned deliberately by an
+explicit table test (`from_seed_diverges_from_the_baked_baseline_only_as_recorded`,
+`plugins/material/src/tokens/hct.rs`) rather than fixed, since "fixing" it
+would mean rebaking `baseline()` off MCU output and breaking the documented
+reference-palette contract instead. Consequence: an app switching
+`baseline()` → `theme_from_seed(#6750A4)` sees a subtle recolor across roughly
+half its roles plus a visibly different error red.
+
+**Evidence**: `plugins/material/src/tokens/hct.rs`'s
+`from_seed_diverges_from_the_baked_baseline_only_as_recorded` test; Material
+3 Expressive Phase 1 wave 2 record
+(`workflow/plans/features/material-3-expressive/phase-1/TASKS.md`); review
+round 0 Major 4 (`workflow/reviews/features/material-3-expressive-phase-1/REVIEW.md`).
+
+---
+
+### `frust-text-no-variable-font-axes` — no seam for variable-font axes beyond weight
+
+**Observed**: `frust-text::TextStyle` carries no variations/width field
+(`crates/frust-text/src/style.rs:246-264`), and the parley translation pushes
+only `FontWeight`/`FontStyle`/`FontSize`/`LetterSpacing`/`LineHeight` as
+default run properties — no `FontVariations` or `FontWidth`
+(`crates/frust-text/src/context.rs:129-137`) — even though the pinned parley
+0.11.1 supports both (`style/mod.rs:77,85`). This is a seam gap in
+frust-text, not a limitation of the underlying shaping engine.
+
+**Applies to**: any catalog or app wanting to drive a variable font's `wdth`
+(width) or custom axes (e.g. Roboto Flex's `GRAD`/`ROND`) from `TextStyle`.
+Concretely, `frust_material`'s M3E emphasized type scale approximates the
+reference's uniform `wght600+GRAD50` axis preset with a per-role weight
+step-up instead, and wdth/ROND-based type styles (Condensed/Wide/Round) are
+unexpressible — a future material3-demo theme page degrades to a plain
+Regular/Emphasized toggle.
+
+**Why accepted**: out of scope for the Material 3 Expressive Phase 1
+foundations work, which spiked the gap rather than closing it (adding the
+seam is a `frust-text` API change, not a `frust_material` one). Deferred to
+whichever future work needs the axis, tracked here so the degrade is
+discoverable rather than silently baked into the type scale.
+
+**Evidence**: `crates/frust-text/src/style.rs:246-264` (`TextStyle`, no
+variations/width field); `crates/frust-text/src/context.rs:129-137`
+(`push_style_defaults`, no `FontVariations`/`FontWidth` push); pinned
+parley 0.11.1 `style/mod.rs:77,85`; Material 3 Expressive Phase 1 wave 3
+record (`workflow/plans/features/material-3-expressive/phase-1/TASKS.md`).
+
+---
+
+### `material-elevation-single-shadow-layer` — M3E's two-layer shadow model collapses to one `ShadowSpec` per level
+
+**Observed**: the Material 3 Expressive reference elevation model pairs a key
+shadow (30% alpha, offset = dp/2, blur = dp) with an ambient shadow (15%
+alpha, offset = dp, blur = dp*2) at every level. `frust-theme`'s `Elevation`
+type contract carries one `ShadowSpec` per `ElevationLevel`, so
+`frust_material::elevation()` ships the documented single-layer mapping
+instead (`plugins/material/src/tokens/metrics.rs`) — the dp values themselves
+match the reference exactly; only the two-layer shadow stack is unexpressible.
+
+**Applies to**: any app using `frust_material`'s baseline elevation table;
+the visual softness of a reference-accurate stacked shadow is approximated by
+one shadow layer at every level.
+
+**Why accepted**: `Elevation`/`ShadowSpec` is a shared `frust-theme` contract
+also used by Cupertino and shadcn — widening it to a shadow list is a
+cross-catalog type change, not something Phase 1's foundations work took on
+speculatively. The dp table itself is exact; only the shadow decomposition is
+narrowed.
+
+**Evidence**: `plugins/material/src/tokens/metrics.rs` (module doc's two-layer
+model description and the single-`ShadowSpec` `elevation_level` constructor);
+Material 3 Expressive Phase 1 wave 3 record
+(`workflow/plans/features/material-3-expressive/phase-1/TASKS.md`).
