@@ -127,7 +127,6 @@
 //! [`cull_covered_builds`](NavigatorView::cull_covered_builds) (the cell is shared
 //! and live, not a per-wire snapshot).
 
-use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -135,11 +134,16 @@ use std::rc::Rc;
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EditingState, EventCtx, EventResult,
     FrameTime, HeroDirective, HeroFrames, ImeState, InputEvent, LayoutCtx, PaintCtx, PaintScene,
-    PointerPhase, SemanticsCtx, SpringDesc, TOUCH_SLOP, VelocityTracker, View, Widget,
+    PointerPhase, SemanticsCtx, SpringDesc, TOUCH_SLOP, View, Widget,
 };
 use frust_theme::Theme;
 use kurbo::{Affine, Point, Rect, Size, Vec2};
 
+use super::ambient::{
+    ambient_page_reach, ambient_swipe_claim, host_reachable, with_page_reach, with_swipe_claim,
+};
+use super::edge_swipe::{EDGE_SWIPE_ZONE_DP, EdgeSwipe};
+use super::options::NavOp;
 use super::path::Location;
 use super::route_state::RouteStack;
 use super::transition::{
@@ -147,1295 +151,17 @@ use super::transition::{
     make_driver, resolve_layers, resolve_spec, settle_driver,
 };
 
-// --- Edge-swipe tuning constants (see per-constant approximation notes) ------
-
-/// Left-edge activation zone width for the interactive pop-swipe, in logical px.
-///
-/// **Community-approximate**: UIKit's
-/// `interactivePopGestureRecognizer` edge zone is not a published constant;
-/// ~20dp is the value the community-reverse-engineered reimplementations
-/// converge on. A `Down` at `x <= EDGE_SWIPE_ZONE_DP` (with a poppable stack)
-/// arms the gesture.
-const EDGE_SWIPE_ZONE_DP: f64 = 20.0;
-
-/// Progress past which a *released* edge-swipe completes the pop; at or below
-/// it, the pop cancels and the page springs back.
-///
-/// The standard halfway commit point — Flutter's `CupertinoPageRoute` uses the
-/// same 0.5 threshold for its interactive back gesture.
-const EDGE_SWIPE_COMMIT_PROGRESS: f64 = 0.5;
-
-/// Release x-velocity (logical px/s) past which an edge-swipe completes the pop
-/// regardless of how far it dragged (a fast flick from near the edge still
-/// pops).
-///
-/// **Community-approximate**: matches Flutter's Cupertino commit velocity
-/// (~1300 pt/s); UIKit's exact interactive-pop fling threshold is private.
-const EDGE_SWIPE_FLING_VELOCITY: f64 = 1300.0;
-
-/// A page builder: a cheap closure that produces the page's view, re-run every
-/// rebuild so a retained page's content still reconciles against live app state
-/// (the pod, and thus the page's internal widget state, is preserved across the
-/// rebuild — only the view descriptor is rebuilt).
-pub type PageBuilder<State> = Rc<dyn Fn() -> AnyView<State>>;
-
-/// A pusher-registered result callback: invoked with `&mut State` when the page it
-/// was registered against is popped, carrying the [`PopResult`] the pop supplied.
-pub type ResultCallback<State> = Rc<dyn Fn(&mut State, PopResult)>;
-
-/// Where a retained page sits in the stack right now — the vocabulary
-/// [`PushOptions::on_visibility`]/[`NavigatorView::on_root_visibility`] report.
-///
-/// Derived from exactly the state layout and paint already cull against (see
-/// [`NavigatorWidget::visibility_of`]); there is deliberately no second notion of
-/// "visible" anywhere in the navigator.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum PageVisibility {
-    /// Topmost: laid out, painted, and the ONLY page routed input.
-    #[default]
-    Current,
-    /// Painted (a transparent page — a dialog/sheet/palette — sits above it) but
-    /// routed no input.
-    Visible,
-    /// Fully covered by an opaque page: retained (its widget state survives), but
-    /// neither laid out nor painted.
-    Covered,
-}
-
-/// A page-visibility observer, registered per page via
-/// [`PushOptions::on_visibility`] (or [`NavigatorView::on_root_visibility`] for
-/// the root page). Fired by the navigator from a rebuild whenever the page's
-/// [`PageVisibility`] changes — never twice with the same value.
-pub type VisibilityCallback = Rc<dyn Fn(PageVisibility)>;
-
-/// A route-change observer, registered navigator-wide via
-/// [`NavigatorView::on_route_change`]. Fired from [`NavigatorWidget::publish_state`]
-/// only when the published [`RouteStack`] actually changed — see
-/// `route_state`'s module docs.
-pub type RouteChangeCallback = Rc<dyn Fn(&RouteStack)>;
-
-// --- Back reach: the ambient "is the hosting page input-routed?" seam --------
-
-thread_local! {
-    /// The stack of per-page **back-reach** cells for the page builders currently
-    /// on the call stack — the ambient seam a *nested* navigator learns its
-    /// hosting page's input reachability through (rule **R23**: navigator reach
-    /// follows input routing, exactly).
-    ///
-    /// A navigator pushes the reach cell of the page whose builder / reconcile it
-    /// is about to run ([`with_page_reach`]) and pops it again afterwards, so any
-    /// navigator built anywhere inside that page's subtree — at any depth, through
-    /// any container — reads it with [`ambient_page_reach`]. A stack rather than a
-    /// single slot because navigators nest: each level restores its parent's cell.
-    ///
-    /// Reactive-free by construction (`frust-widgets` carries no `reactive_graph`
-    /// dependency): a plain `Rc<Cell<bool>>`, the same idiom as `depth`/
-    /// `back_interest`/`transition`, never a signal. UI-thread-affine for the same
-    /// reason those are — the cells are `Rc`-backed and only ever touched from a
-    /// build pass.
-    static PAGE_REACH: RefCell<Vec<Rc<Cell<bool>>>> = const { RefCell::new(Vec::new()) };
-}
-
-/// Pops [`PAGE_REACH`] on drop so an unwinding page builder cannot leave a stale
-/// scope behind for the rest of the thread's life.
-struct PageReachGuard;
-
-impl Drop for PageReachGuard {
-    fn drop(&mut self) {
-        PAGE_REACH.with(|stack| {
-            stack.borrow_mut().pop();
-        });
-    }
-}
-
-/// Run `f` with `reach` installed as the ambient page-reach cell — i.e. declare
-/// "everything built in here lives on the page this cell describes".
-///
-/// The [`PAGE_REACH`] borrow is released *before* `f` runs, so `f` may nest
-/// another `with_page_reach` (a navigator inside a page inside a navigator) or
-/// call [`ambient_page_reach`] freely.
-fn with_page_reach<R>(reach: &Rc<Cell<bool>>, f: impl FnOnce() -> R) -> R {
-    PAGE_REACH.with(|stack| stack.borrow_mut().push(Rc::clone(reach)));
-    let _guard = PageReachGuard;
-    f()
-}
-
-/// The reach cell of the page currently being built/reconciled, or `None` at the
-/// top level (a root navigator, whose reach is unconditional).
-fn ambient_page_reach() -> Option<Rc<Cell<bool>>> {
-    PAGE_REACH.with(|stack| stack.borrow().last().cloned())
-}
-
-// --- R-B3-inner: the ambient "did anything below me arm an edge-swipe on this
-// Down?" seam ------------------------------------------------------------
-
-thread_local! {
-    /// The stack of per-navigator **swipe-claim** cells for the navigators
-    /// currently routing a left-edge `Down` (`R-B3-inner`, mirrors
-    /// [`PAGE_REACH`]/[`with_page_reach`]).
-    ///
-    /// A left-edge `Down` does not capture: the outer navigator only records
-    /// `edge.armed` and forwards it through [`route_top`](NavigatorWidget::route_top)
-    /// (children see `Down` first), so a nested navigator's own `event_at` runs
-    /// underneath — and may *also* arm. Preemption is not decided at `Down`; it
-    /// is decided later, at the decisive `Move` steal site, where the OUTER
-    /// navigator — upstream in parent→child routing — reaches its steal branch
-    /// before the inner ever sees the event. So a navigator pushes its own
-    /// claim cell before forwarding `Down` ([`with_swipe_claim`]), reads it back
-    /// once forwarding returns (`edge.inner_claimed`), and propagates the
-    /// combined result into whatever cell is now ambient
-    /// ([`ambient_swipe_claim`]) — its own host navigator's, if any — so a
-    /// third nesting level defers too.
-    ///
-    /// A stack (not a single slot) for the same reason `PAGE_REACH` is one:
-    /// navigators nest, and each level must see its own immediate host's cell,
-    /// not some ancestor's.
-    static SWIPE_CLAIM: RefCell<Vec<Rc<Cell<bool>>>> = const { RefCell::new(Vec::new()) };
-}
-
-/// Pops [`SWIPE_CLAIM`] on drop, mirroring [`PageReachGuard`].
-struct SwipeClaimGuard;
-
-impl Drop for SwipeClaimGuard {
-    fn drop(&mut self) {
-        SWIPE_CLAIM.with(|stack| {
-            stack.borrow_mut().pop();
-        });
-    }
-}
-
-/// Run `f` (a `Down` forward through [`route_top`](NavigatorWidget::route_top))
-/// with `claim` installed as the ambient swipe-claim cell, so any navigator
-/// reached underneath can report "I armed" into it via [`ambient_swipe_claim`].
-///
-/// The borrow is released before `f` runs, so `f` may itself nest another
-/// `with_swipe_claim` call (a third level of navigator nesting).
-fn with_swipe_claim<R>(claim: &Rc<Cell<bool>>, f: impl FnOnce() -> R) -> R {
-    SWIPE_CLAIM.with(|stack| stack.borrow_mut().push(Rc::clone(claim)));
-    let _guard = SwipeClaimGuard;
-    f()
-}
-
-/// The swipe-claim cell of the navigator currently forwarding a `Down` through
-/// [`route_top`](NavigatorWidget::route_top), or `None` if no navigator is (a
-/// top-level navigator's `Down` handling, or any non-`Down` event).
-fn ambient_swipe_claim() -> Option<Rc<Cell<bool>>> {
-    SWIPE_CLAIM.with(|stack| stack.borrow().last().cloned())
-}
-
-/// Whether a navigator hosted under `host_reach` is itself reachable: `true` at
-/// the top level (no hosting page), otherwise whatever the hosting page's cell
-/// currently says.
-fn host_reachable(host_reach: Option<&Rc<Cell<bool>>>) -> bool {
-    host_reach.is_none_or(|cell| cell.get())
-}
-
-/// The value a [`pop`](NavigatorController::pop_with_result) hands back to the
-/// pusher's [`ResultCallback`], type-erased so a page can return any `'static`
-/// payload (mirroring Flutter's `Navigator.pop(result)` → `push(...).then(...)`).
-///
-/// Empty by default ([`PopResult::empty`]); recover a typed payload with
-/// [`PopResult::take`].
-pub struct PopResult(Option<Box<dyn Any>>);
-
-impl PopResult {
-    /// A result carrying no payload (a plain back-navigation).
-    pub fn empty() -> Self {
-        PopResult(None)
-    }
-
-    /// A result carrying `value`, recoverable by the pusher with
-    /// [`PopResult::take`].
-    pub fn of<T: Any>(value: T) -> Self {
-        PopResult(Some(Box::new(value)))
-    }
-
-    /// Whether this result carries no payload.
-    pub fn is_empty(&self) -> bool {
-        self.0.is_none()
-    }
-
-    /// Recover the payload as `T`, consuming the result. `None` if the result was
-    /// empty or carries a different concrete type.
-    pub fn take<T: Any>(self) -> Option<T> {
-        self.0
-            .and_then(|boxed| boxed.downcast::<T>().ok())
-            .map(|boxed| *boxed)
-    }
-}
-
-impl std::fmt::Debug for PopResult {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PopResult")
-            .field("has_payload", &self.0.is_some())
-            .finish()
-    }
-}
-
-/// How a page participates in a back press routed through
-/// [`NavigatorController::request_back`] (Android hardware/gesture back, via
-/// the facade's back-press wiring). A page declares its policy when pushed via
-/// [`PushOptions::back`]; every existing push defaults to [`Pop`](Self::Pop).
-///
-/// This is *internal* routing vocabulary — the user-facing overlay builder is
-/// `dismissable(bool)`, which maps `true → DismissAnimated` and
-/// `false → Veto` when the overlay pushes its transparent page.
-///
-/// # The DismissAnimated observation seam
-///
-/// A [`DismissAnimated`](Self::DismissAnimated) page does *not* pop on the back
-/// press itself; instead the navigator increments the page's
-/// [`dismiss_signal`](PushOptions::dismiss_signal) generation counter, which the
-/// page's own widget subtree observes (comparing the shared `Rc<Cell<u64>>`
-/// against a last-seen value on its next paint/event) and turns into its own
-/// `begin_exit` staging — the overlay then pops *itself* on exit completion via
-/// its existing on-close path. This keeps `frust-widgets` reactive-free (a plain
-/// shared cell, mirroring [`NavigatorController::depth`]'s
-/// `Rc<Cell<usize>>`) — no `frust-reactive` dependency crosses into this crate.
-/// An overlay helper (`show_command_palette`/`show_dialog`/`show_bottom_sheet`)
-/// wires the seam by creating one cell, handing a clone to the overlay widget it
-/// builds *and* into [`PushOptions::dismiss_signal`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BackPolicy {
-    /// The default: a back press pops this page (the normal
-    /// [`pop`](NavigatorController::pop) path, transitions preserved). A back
-    /// press at the root (this being the only page) is a safe no-op.
-    Pop,
-    /// A dismissable overlay: a back press fires the page's
-    /// [`dismiss_signal`](PushOptions::dismiss_signal) (see the seam above)
-    /// rather than popping — the stack is unchanged immediately, and the overlay
-    /// animates its own exit before popping itself.
-    DismissAnimated,
-    /// A non-dismissable overlay (a modal barrier): a back press is *consumed*
-    /// (the page claims it, so it never bubbles to the platform) but does
-    /// nothing — the stack is unchanged and no signal fires.
-    Veto,
-}
-
-/// Options for [`NavigatorController::push_with_options`], carrying a pushed
-/// page's opacity, back-press [`BackPolicy`], optional per-op transition
-/// override, optional result callback, and (for a
-/// [`DismissAnimated`](BackPolicy::DismissAnimated) overlay) the shared
-/// dismiss-signal cell the navigator bumps on a back request.
-///
-/// Construct with [`opaque`](Self::opaque)/[`transparent`](Self::transparent),
-/// then chain the builder setters. The existing `push*` methods are unchanged —
-/// they push with [`BackPolicy::Pop`] and no dismiss signal.
-pub struct PushOptions<State: 'static> {
-    opaque: bool,
-    back: BackPolicy,
-    transition: Option<TransitionSpec>,
-    on_result: Option<ResultCallback<State>>,
-    dismiss_signal: Option<Rc<Cell<u64>>>,
-    on_visibility: Option<VisibilityCallback>,
-    route: Option<Location>,
-    pop_swipe: Option<bool>,
-}
-
-impl<State: 'static> PushOptions<State> {
-    /// Options for an **opaque** page (the page below is culled while covered).
-    /// Defaults: [`BackPolicy::Pop`], navigator-default transition, no result
-    /// callback, no dismiss signal.
-    pub fn opaque() -> Self {
-        Self {
-            opaque: true,
-            back: BackPolicy::Pop,
-            transition: None,
-            on_result: None,
-            dismiss_signal: None,
-            on_visibility: None,
-            route: None,
-            pop_swipe: None,
-        }
-    }
-
-    /// Options for a **transparent** page (e.g. a dialog/sheet/palette overlay —
-    /// the page below stays visible). Same defaults as [`opaque`](Self::opaque)
-    /// otherwise.
-    pub fn transparent() -> Self {
-        Self {
-            opaque: false,
-            ..Self::opaque()
-        }
-    }
-
-    /// Set the page's back-press [`BackPolicy`] (default [`BackPolicy::Pop`]).
-    pub fn back(mut self, policy: BackPolicy) -> Self {
-        self.back = policy;
-        self
-    }
-
-    /// Override the navigator's default transition for this push only.
-    pub fn transition(mut self, spec: TransitionSpec) -> Self {
-        self.transition = Some(spec);
-        self
-    }
-
-    /// Register a result callback invoked with `&mut State` when this page is
-    /// later popped (carrying the pop's [`PopResult`]) — the same delivery the
-    /// [`push_for_result`](NavigatorController::push_for_result) path uses.
-    pub fn on_result(mut self, callback: impl Fn(&mut State, PopResult) + 'static) -> Self {
-        self.on_result = Some(Rc::new(callback));
-        self
-    }
-
-    /// Supply the shared generation cell the navigator increments when a
-    /// [`DismissAnimated`](BackPolicy::DismissAnimated) back press routes to this
-    /// page (see [`BackPolicy`]'s observation seam). Ignored for the other
-    /// policies.
-    pub fn dismiss_signal(mut self, signal: Rc<Cell<u64>>) -> Self {
-        self.dismiss_signal = Some(signal);
-        self
-    }
-
-    /// Observe this page's [`PageVisibility`]: fired once at push (with
-    /// [`Current`](PageVisibility::Current)) and on every subsequent change,
-    /// **never twice with the same value**. This is the seam a screen
-    /// pauses/resumes polling, a timer, or a camera session from.
-    ///
-    /// # Why it is a callback, not a published cell
-    ///
-    /// A covered page is neither painted nor (under
-    /// [`NavigatorView::cull_covered_builds`]) rebuilt, so it has **no pass in
-    /// which to poll** anything. The seam therefore has to push. It is shaped
-    /// exactly like [`on_result`](Self::on_result)/
-    /// [`dismiss_signal`](Self::dismiss_signal): a plain `Rc<dyn Fn>` slot, no
-    /// signal — `frust-widgets` is reactive-free.
-    ///
-    /// # No `&mut State`
-    ///
-    /// The callback receives **no** `&mut State`, unlike
-    /// [`on_result`](Self::on_result). It fires from a rebuild (a `BuildCtx`),
-    /// which carries no erased app state, and it fires *synchronously* there:
-    /// nothing is queued, so a covered page learns it is covered on the frame it
-    /// happens. Capture what you need (a signal, an `Rc<Cell<_>>`, a controller
-    /// handle) in the closure instead.
-    ///
-    /// (`on_result` does defer — it needs `&mut State` — but it is no longer
-    /// waiting on user input to be delivered: the rebuild that queues it also
-    /// dispatches the `InputEvent::Housekeeping` broadcast that flushes it, so
-    /// both seams now land on the same frame. See the [module docs](self).)
-    ///
-    /// # "No cleanup on cover" is the contract, not a bug
-    ///
-    /// A covering push does **not** fire the page's `on_cleanup` and must never
-    /// start to: the page stays mounted so its widget state survives the cover
-    /// (the retained-page-state guarantee the whole navigator rests on — see the
-    /// [module docs](self)' paint-culling section). This seam exists precisely so
-    /// a page can release its *own* resources on
-    /// [`Covered`](PageVisibility::Covered) and re-acquire them on
-    /// [`Current`](PageVisibility::Current), without the navigator disposing
-    /// anything.
-    ///
-    /// Calling back into the [`NavigatorController`] from here is safe: a
-    /// `push`/`pop` only *records* an op, drained at the next rebuild.
-    pub fn on_visibility(mut self, f: impl Fn(PageVisibility) + 'static) -> Self {
-        self.on_visibility = Some(Rc::new(f));
-        self
-    }
-
-    /// Stamp this page's route identity (`R-B1`): the [`Location`] it was
-    /// pushed with, published on the navigator's [`RouteStack`] and never
-    /// derived from depth. Omit for a page pushed as a bare builder (an
-    /// overlay/dialog) — it then publishes a `None` entry, which
-    /// [`RouteStack::current_route`] skips.
-    pub fn route(mut self, location: Location) -> Self {
-        self.route = Some(location);
-        self
-    }
-
-    /// Override this page's edge-swipe eligibility, ranked above every other
-    /// gesture-policy slot: page → navigator explicit
-    /// ([`NavigatorView::pop_swipe`]) → platform
-    /// ([`NavigatorView::platform_pop_swipe`]) → preset-derived default. Still
-    /// subject to [`BackPolicy`]: a [`DismissAnimated`](BackPolicy::DismissAnimated)
-    /// or [`Veto`](BackPolicy::Veto) page never arms the gesture regardless of
-    /// this override (see [`NavigatorWidget::swipe_armable`]).
-    pub fn pop_swipe(mut self, enabled: bool) -> Self {
-        self.pop_swipe = Some(enabled);
-        self
-    }
-}
-
-/// Options for [`NavigatorController::replace_with_options`] — opacity, an
-/// optional per-op transition override, and the route identity attached
-/// to the replacement page. A smaller sibling of [`PushOptions`]: a replaced
-/// page has no pusher-side use for a result callback, a `BackPolicy`, a
-/// dismiss signal, or a visibility observer, since it does not sit *under*
-/// anything it could be dismissed back to.
-pub struct ReplaceOptions {
-    opaque: bool,
-    transition: Option<TransitionSpec>,
-    route: Option<Location>,
-}
-
-impl ReplaceOptions {
-    /// Options for an **opaque** replacement page (the shipped
-    /// [`NavigatorController::replace`] default).
-    pub fn opaque() -> Self {
-        Self {
-            opaque: true,
-            transition: None,
-            route: None,
-        }
-    }
-
-    /// Options for a **transparent** replacement page.
-    pub fn transparent() -> Self {
-        Self {
-            opaque: false,
-            ..Self::opaque()
-        }
-    }
-
-    /// Override the navigator's default transition for this replace only.
-    pub fn transition(mut self, spec: TransitionSpec) -> Self {
-        self.transition = Some(spec);
-        self
-    }
-
-    /// Stamp the replacement page's route identity — see
-    /// [`PushOptions::route`].
-    pub fn route(mut self, location: Location) -> Self {
-        self.route = Some(location);
-        self
-    }
-}
-
-/// One queued navigation op, recorded by the [`NavigatorController`] and drained
-/// (in order) by [`NavigatorView::rebuild`].
-enum NavOp<State: 'static> {
-    /// Push a new page on top of the stack.
-    Push {
-        builder: PageBuilder<State>,
-        opaque: bool,
-        on_result: Option<ResultCallback<State>>,
-        /// Per-op transition override (`None` → the navigator's default).
-        transition: Option<TransitionSpec>,
-        /// How a back press treats this page (default [`BackPolicy::Pop`]).
-        back: BackPolicy,
-        /// The shared generation cell bumped on a
-        /// [`DismissAnimated`](BackPolicy::DismissAnimated) back press.
-        dismiss_signal: Option<Rc<Cell<u64>>>,
-        /// The page-visibility observer registered by
-        /// [`PushOptions::on_visibility`], if any.
-        on_visibility: Option<VisibilityCallback>,
-        /// The route identity from [`PushOptions::route`], `None` for a
-        /// bare-builder overlay/dialog push.
-        route: Option<Location>,
-        /// The per-route edge-swipe override from [`PushOptions::pop_swipe`],
-        /// `None` for every `push*` method other than
-        /// [`push_with_options`](NavigatorController::push_with_options).
-        pop_swipe: Option<bool>,
-    },
-    /// Pop the top page (never the last/root page), delivering `result` to the
-    /// popped page's pusher-registered callback. A pop *reverses* the popped
-    /// page's own stored transition (no override slot).
-    Pop { result: PopResult },
-    /// Route a back press through the top page's [`BackPolicy`]:
-    /// [`Pop`](BackPolicy::Pop) pops, [`DismissAnimated`](BackPolicy::DismissAnimated)
-    /// fires the page's dismiss signal, [`Veto`](BackPolicy::Veto) consumes it.
-    RequestBack,
-    /// Replace the top page in place.
-    Replace {
-        builder: PageBuilder<State>,
-        opaque: bool,
-        /// Per-op transition override (`None` → the navigator's default).
-        transition: Option<TransitionSpec>,
-        /// The route identity from [`ReplaceOptions::route`], `None` for
-        /// a plain [`NavigatorController::replace`]/`replace_with`.
-        route: Option<Location>,
-    },
-}
-
-/// An opaque identity for the navigator a [`NavigatorController`] drives: every
-/// clone of one controller reports the same value, and two independently
-/// constructed controllers never do.
-///
-/// The seam a *multi-navigator* registry keys on — the facade's back-press
-/// arbitration (rule **R44-back**) holds one entry per registered controller and
-/// needs to tell "this controller again" from "a second controller", which it
-/// cannot do through the op queue or the published cells.
-///
-/// **Uniqueness holds among *live* controllers only.** The value is derived from
-/// the address of the shared op queue, so a holder that wants the identity to
-/// stay meaningful must keep a controller clone alive alongside it (as the
-/// facade's registry does) — otherwise a freed allocation could be reused and
-/// two ids collide.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct NavigatorId(usize);
-
-/// The app-state handle to a [`navigator`]: a cloneable op queue an app keeps in
-/// its `Component::State` and drives with [`push`](Self::push)/[`pop`](Self::pop)/
-/// [`replace`](Self::replace). Every clone shares one queue (`Rc`), so the handle
-/// the view carries and the handle event handlers call are the same.
-///
-/// Ops are *recorded*, not applied — the [`NavigatorWidget`] drains and applies
-/// them at its next rebuild (see the [module docs](self)).
-pub struct NavigatorController<State: 'static> {
-    ops: Rc<RefCell<Vec<NavOp<State>>>>,
-    /// The current page-stack **depth**, published by the attached
-    /// [`NavigatorWidget`] on every `build`/`rebuild`/`apply_ops`. The widget
-    /// owns the authoritative stack; this shared cell is
-    /// the read seam [`depth`](Self::depth)/[`can_pop`](Self::can_pop) expose so
-    /// the facade's back handler (and app code) can ask "would a pop do
-    /// anything?" without reaching into the widget. `0` until a widget attaches.
-    ///
-    /// `frust-widgets` stays reactive-free: this is a plain `Rc<Cell<_>>`,
-    /// not a signal — a shell/facade polls it at rebuild time (see the timing
-    /// note in `frust-reactive::back`).
-    depth: Rc<Cell<usize>>,
-    /// Whether a back press should be *claimed* by the navigator ahead-of-time
-    /// (predictive-back parity) — published by the attached
-    /// [`NavigatorWidget`] alongside [`depth`](Self::depth). `true` iff the stack
-    /// is poppable (`depth > 1`) **or** the top page's [`BackPolicy`] is not
-    /// [`Pop`](BackPolicy::Pop) (a dismissable/veto overlay claims back even at
-    /// the root) — **and** the page hosting this navigator is itself
-    /// input-reachable (the R23 gate; see
-    /// [`NavigatorWidget::reachable`], always satisfied for a top-level
-    /// navigator). This is the signal the facade's back handler computes
-    /// `handles_back` from — it differs from [`can_pop`](Self::can_pop) exactly
-    /// in the depth-1-with-overlay case, where a raw pop would do nothing but the
-    /// overlay still owns the press. Same plain `Rc<Cell<_>>` (reactive-free)
-    /// polled-at-rebuild contract as `depth`.
-    back_interest: Rc<Cell<bool>>,
-    /// The published snapshot of the navigator's single in-flight page
-    /// transition, written by the attached [`NavigatorWidget`] at every
-    /// transition edge *and* on every paint frame that advances the driver. The
-    /// read seam is [`transition`](Self::transition), whose doc carries the
-    /// timing contract.
-    ///
-    /// Same reactive-free idiom as [`depth`](Self::depth)/
-    /// [`back_interest`](Self::back_interest) — a plain `Rc<Cell<_>>` of `Copy`
-    /// data, never a signal. Unlike those two it is published from *paint* as
-    /// well as build, which is what makes a frame-exact read possible.
-    transition: Rc<Cell<TransitionState>>,
-    /// How many live [`NavigatorWidget`]s currently render this controller's
-    /// stack — incremented by [`NavigatorView::build`] and (if a live widget's
-    /// controller is swapped) by [`NavigatorView::rebuild`]; decremented by
-    /// `teardown` and by that same swap handling for the controller being
-    /// swapped *away from*. Read through [`is_mounted`](Self::is_mounted).
-    ///
-    /// A **liveness** seam, not a published-state one: the three cells above
-    /// answer "what does the stack look like?", this one answers "is this
-    /// navigator in the retained tree at all?". The facade's back arbitration
-    /// needs the latter to tell a navigator that merely did not wire this pass
-    /// from one whose screen was torn down (see `frust::back_glue`'s R44-back
-    /// prune). A count, not a bool, so a reconcile that builds the replacement
-    /// widget before tearing down the old one never reads as unmounted.
-    ///
-    /// **The widget never decrements this cell by looking `self.controller` up
-    /// again** — [`NavigatorWidget`] holds its own clone (`mounted`, alongside
-    /// `depth`/`back_interest`/`transition`), rebound only at `build` and at a
-    /// controller-swap `rebuild`, and every decrement goes through that field.
-    /// A `NavigatorView`'s `self.controller` is whatever the app currently
-    /// hands it — after a swap that is already the *new* controller — so
-    /// `teardown` reading it instead would double-unmount the new one and never
-    /// correct the old one, exactly the structural gap this field closes (see
-    /// [`NavigatorView::rebuild`]'s controller-swap comment).
-    ///
-    /// Same reactive-free `Rc<Cell<_>>` idiom as the rest of the controller.
-    mounted: Rc<Cell<usize>>,
-    /// The [`PageEntry::reach`] cell of the page **hosting** this navigator,
-    /// bound by the attached [`NavigatorWidget`] at `build`/`rebuild`; `None`
-    /// for a top-level navigator (and until a widget attaches).
-    ///
-    /// The R23 back-reach gate [`back_interest`](Self::back_interest) reads
-    /// *live*, rather than a value baked into the published cell: the page
-    /// hosting a nested navigator can stop being input-routed on a pass in which
-    /// that navigator does not rebuild at all (a page frozen by
-    /// [`cull_covered_builds`](NavigatorView::cull_covered_builds), or one
-    /// stashed out of the stack by a pop transition), and a baked-in value would
-    /// go stale exactly there — the worst case for this gate.
-    ///
-    /// A `RefCell` slot around a plain `Rc<Cell<bool>>`, like `ops` — a
-    /// *binding* that moves when the widget re-captures its host, wrapping the
-    /// same reactive-free cell idiom as the published state.
-    host_reach: Rc<RefCell<Option<Rc<Cell<bool>>>>>,
-    /// The published route-state snapshot — a fourth published slot
-    /// beside `depth`/`back_interest`/`transition`, written by
-    /// [`NavigatorWidget::publish_state`] after every committed stack
-    /// mutation (see `route_state`'s module docs for the staleness contract
-    /// and why an in-flight interactive edge swipe does not publish here).
-    ///
-    /// `RefCell`, not `Cell`: the payload (`RouteStack`) is not `Copy` —
-    /// precedented on this same type by [`ops`](Self::ops) and
-    /// [`host_reach`](Self::host_reach).
-    route_stack: Rc<RefCell<RouteStack>>,
-}
-
-impl<State: 'static> Clone for NavigatorController<State> {
-    fn clone(&self) -> Self {
-        Self {
-            ops: Rc::clone(&self.ops),
-            depth: Rc::clone(&self.depth),
-            back_interest: Rc::clone(&self.back_interest),
-            transition: Rc::clone(&self.transition),
-            mounted: Rc::clone(&self.mounted),
-            host_reach: Rc::clone(&self.host_reach),
-            route_stack: Rc::clone(&self.route_stack),
-        }
-    }
-}
-
-impl<State: 'static> Default for NavigatorController<State> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<State: 'static> NavigatorController<State> {
-    /// A fresh controller with an empty op queue.
-    pub fn new() -> Self {
-        Self {
-            ops: Rc::new(RefCell::new(Vec::new())),
-            depth: Rc::new(Cell::new(0)),
-            back_interest: Rc::new(Cell::new(false)),
-            transition: Rc::new(Cell::new(TransitionState::default())),
-            mounted: Rc::new(Cell::new(0)),
-            host_reach: Rc::new(RefCell::new(None)),
-            route_stack: Rc::new(RefCell::new(RouteStack::default())),
-        }
-    }
-
-    /// Bind (or re-bind) the hosting page's reach cell — called by the attached
-    /// [`NavigatorWidget`] from `build` and every `rebuild` with whatever
-    /// [`ambient_page_reach`] says at that point, so the binding follows the
-    /// navigator if its subtree ever moves between pages.
-    ///
-    /// Deliberately not public: reach is derived by the navigator hosting this
-    /// one, never declared by an app.
-    fn bind_host_reach(&self, reach: Option<Rc<Cell<bool>>>) {
-        *self.host_reach.borrow_mut() = reach;
-    }
-
-    /// Whether the page hosting this navigator is input-routed right now — the
-    /// **R23 back-reach gate**, read live (see
-    /// [`host_reach`](Self::host_reach)). `true` for a top-level navigator and
-    /// before a widget attaches.
-    fn host_reachable(&self) -> bool {
-        host_reachable(self.host_reach.borrow().as_ref())
-    }
-
-    /// Whether a live [`NavigatorWidget`] currently renders this controller's
-    /// stack — i.e. whether this navigator is in the retained tree *right now*.
-    ///
-    /// `false` before the first `build` and again after the widget's `teardown`
-    /// (a screen with its own nested navigator, popped). Unlike
-    /// [`depth`](Self::depth)/[`back_interest`](Self::back_interest) this is not
-    /// an advisory snapshot of the stack: it is exact at every point after the
-    /// widget's `build` began, because `build`/`teardown` write it directly.
-    ///
-    /// The facade's back arbitration is the intended consumer: a registered
-    /// controller that is still mounted is still part of the tree, so it must
-    /// keep its place in the arbitration list even on a pass in which it did not
-    /// re-wire; one that is no longer mounted can be released.
-    pub fn is_mounted(&self) -> bool {
-        self.mounted.get() > 0
-    }
-
-    /// Record that a [`NavigatorWidget`] attached to this controller. Called at
-    /// the very top of [`NavigatorView::build`], *before* the root page builder
-    /// runs: that builder may itself wire a nested navigator, and the facade's
-    /// back arbitration must already see this navigator as mounted by then.
-    fn mount(&self) {
-        self.mounted.set(self.mounted.get() + 1);
-    }
-
-    // No `unmount` method here deliberately: unmounting always goes through
-    // the widget-owned `mounted` cell (`unmount_cell`, below), never back
-    // through a `NavigatorController` reference — see the `mounted` field
-    // doc's structural-pairing note and `NavigatorView::rebuild`'s
-    // controller-swap handling.
-
-    /// This controller's [`NavigatorId`] — stable across clones, distinct per
-    /// independently constructed controller. See [`NavigatorId`] for the
-    /// liveness caveat.
-    pub fn id(&self) -> NavigatorId {
-        NavigatorId(Rc::as_ptr(&self.ops) as *const u8 as usize)
-    }
-
-    /// The current page-stack depth of the navigator this controller drives, as
-    /// last published by that navigator's `build`/`rebuild`, or `0` if no
-    /// navigator is attached yet.
-    ///
-    /// **Advisory**: this reflects the depth at the last rebuild, so a query
-    /// racing a same-frame stack change sees the previous value (the
-    /// rebuild-time refresh contract — see [`can_pop`](Self::can_pop) and
-    /// `frust-reactive::back`'s timing note).
-    pub fn depth(&self) -> usize {
-        self.depth.get()
-    }
-
-    /// Whether a [`pop`](Self::pop) would actually remove a page — `true` iff
-    /// the navigator has more than one page ([`depth`](Self::depth)` > 1`).
-    ///
-    /// **Advisory**, for exactly the Android back contract: the
-    /// facade's back handler reads this to decide whether a back press pops or
-    /// bubbles to the platform, and publishes it as
-    /// `frust-reactive::set_handles_back`. The authoritative guard stays the
-    /// widget's own `len > 1` check in [`apply_ops`](NavigatorWidget) — a pop at
-    /// the root remains a safe no-op even if this raced stale, so a
-    /// mis-predicted root-level back never removes the last page.
-    pub fn can_pop(&self) -> bool {
-        self.depth.get() > 1
-    }
-
-    /// Whether the navigator claims the next back press ahead-of-time
-    /// (predictive-back parity) — `true` iff the stack is poppable
-    /// **or** the top page declares a non-[`Pop`](BackPolicy::Pop) policy (a
-    /// dismissable/veto overlay). The facade's back handler reads this
-    /// (in preference to [`can_pop`](Self::can_pop)) to compute the shell's
-    /// `handles_back`, so a dismissable overlay at the root still consumes back
-    /// rather than exiting the app.
-    ///
-    /// # Nested navigators: reach follows input routing (R23)
-    ///
-    /// A navigator hosted on a page its own host navigator routes **no input**
-    /// to (a covered page, or the page under a transparent overlay) reports
-    /// `false` here regardless of its own stack: back arbitration reaches
-    /// exactly as far as input does, so a press can never pop an off-screen
-    /// stack while the visible page stays put. Unconditional `true` for the
-    /// reach term at the top level, so a single-navigator app is unaffected.
-    ///
-    /// **Advisory**, published at the last rebuild like [`depth`](Self::depth) —
-    /// a query racing a same-frame stack change sees the previous value; the
-    /// navigator's own [`request_back`](Self::request_back) routing stays
-    /// authoritative regardless (see `frust-reactive::back`'s timing note).
-    pub fn back_interest(&self) -> bool {
-        // The published cell answers for this navigator's own stack; the reach
-        // gate is ANDed HERE (live) rather than baked into the cell, because the
-        // hosting page can stop being input-routed on a pass in which this
-        // navigator never rebuilds — see `host_reach`.
-        self.back_interest.get() && self.host_reachable()
-    }
-
-    /// The navigator's current [`TransitionState`] — the observation seam chrome
-    /// *outside* the navigator subtree (an app bar, a tab bar, a progress
-    /// indicator) drives its own motion from. [`TransitionState::default`] (an
-    /// at-rest depth-0 snapshot) until a navigator attaches.
-    ///
-    /// Published on the **controller**, not the widget, deliberately: chrome that
-    /// wants to match page motion is a *sibling* of the navigator, not a
-    /// descendant, so it can never reach the widget — but it can hold a
-    /// controller clone, exactly as it already does to `push`.
-    ///
-    /// # The timing contract
-    ///
-    /// The progress driver advances in exactly one place — `paint`, off
-    /// `PaintCtx::frame_time` (the No-`Instant::now()` rule in
-    /// `docs/REVIEW_FOCUS.md` forbids any other clock in `frust-widgets`).
-    /// Therefore:
-    ///
-    /// - **A read during your own `Widget::paint`, from a widget painted *after*
-    ///   the navigator, is exact for the current frame.** In a root
-    ///   `Stack(vec![navigator_subtree, chrome])`, `StackWidget::paint` walks its
-    ///   children in order, so `chrome` paints second and reads the value the
-    ///   navigator wrote microseconds earlier **in the same frame**. This is the
-    ///   frame-perfect path; it is the one to use for choreography.
-    /// - **A read during `Component::build` (or any `View::build`/`rebuild`) is
-    ///   always exactly one frame stale** for `progress`, because build precedes
-    ///   paint. Fine for "is a transition running?"; wrong for choreography.
-    /// - **The [`active`](TransitionState::active) edges are the exception.**
-    ///   Both `start_transition` and `finalize_transition` publish from a
-    ///   `BuildCtx` pass, so a build-time reader that builds *after* the navigator
-    ///   sees `active` flip on the very frame it happens. Only intermediate
-    ///   `progress` lags.
-    ///
-    /// The navigator already requests a frame for every frame a transition runs,
-    /// so a paint-time observer needs no wake of its own.
-    pub fn transition(&self) -> TransitionState {
-        self.transition.get()
-    }
-
-    /// The navigator's currently published route-state snapshot — a
-    /// clone, authoritative as of the last publish (see `route_state`'s
-    /// module docs' staleness contract, in particular the interactive-swipe
-    /// window).
-    pub fn route_stack(&self) -> RouteStack {
-        self.route_stack.borrow().clone()
-    }
-
-    /// The route stack's current generation — an O(1) change gate equivalent
-    /// to `route_stack().generation()` but without cloning the whole
-    /// snapshot.
-    pub fn route_generation(&self) -> u64 {
-        self.route_stack.borrow().generation()
-    }
-
-    /// Push an **opaque** page built by `builder` on top of the stack, using the
-    /// navigator's default transition (instant unless the navigator sets one).
-    pub fn push(&self, builder: impl Fn() -> AnyView<State> + 'static) {
-        self.push_impl(builder, true, None, None);
-    }
-
-    /// Push an **opaque** page with an explicit [`TransitionSpec`], overriding the
-    /// navigator's default for this push only. The spec is stored on the pushed
-    /// page and *reversed* when it is later popped.
-    pub fn push_with(
-        &self,
-        builder: impl Fn() -> AnyView<State> + 'static,
-        transition: TransitionSpec,
-    ) {
-        self.push_impl(builder, true, None, Some(transition));
-    }
-
-    /// Push a **transparent** page (e.g. a dialog/overlay) — the page below it
-    /// stays visible and painted (see [module docs](self)'s paint culling).
-    pub fn push_transparent(&self, builder: impl Fn() -> AnyView<State> + 'static) {
-        self.push_impl(builder, false, None, None);
-    }
-
-    /// Push an opaque page and register `on_result`, invoked with `&mut State`
-    /// when *this* page is later popped (carrying the pop's [`PopResult`]).
-    ///
-    /// The callback is delivered at the start of the [`NavigatorWidget::event`]
-    /// pass after the pop's rebuild — the first point after the pop where the
-    /// erased app state is in scope (a rebuild carries only a `BuildCtx`).
-    pub fn push_for_result(
-        &self,
-        builder: impl Fn() -> AnyView<State> + 'static,
-        on_result: impl Fn(&mut State, PopResult) + 'static,
-    ) {
-        self.push_impl(builder, true, Some(Rc::new(on_result)), None);
-    }
-
-    /// Push a **transparent** page (e.g. a dialog/bottom sheet) with an explicit
-    /// [`TransitionSpec`] (e.g. [`PageTransition::M3FadeThrough`] for a dialog,
-    /// [`PageTransition::SlideUp`] for a bottom sheet — a design system's own
-    /// dialog/sheet helpers are the shipped callers),
-    /// and register `on_result`, invoked with `&mut State` when *this* page is
-    /// later popped (carrying the pop's [`PopResult`]) — the modal-with-a-result
-    /// combination [`push_transparent`](Self::push_transparent) and
-    /// [`push_for_result`](Self::push_for_result) each cover only half of.
-    ///
-    /// ```ignore
-    /// // A confirm dialog that reports whether the user confirmed:
-    /// controller.push_transparent_for_result(
-    ///     || dialog_view(),
-    ///     TransitionSpec::duration(PageTransition::M3FadeThrough),
-    ///     |state: &mut State, result: PopResult| {
-    ///         state.confirmed = result.take::<bool>().unwrap_or(false);
-    ///     },
-    /// );
-    /// ```
-    ///
-    /// The callback is delivered the same way [`push_for_result`](Self::push_for_result)'s
-    /// is: at the start of the [`NavigatorWidget::event`] pass after the pop's
-    /// rebuild.
-    pub fn push_transparent_for_result(
-        &self,
-        builder: impl Fn() -> AnyView<State> + 'static,
-        transition: TransitionSpec,
-        on_result: impl Fn(&mut State, PopResult) + 'static,
-    ) {
-        self.push_impl(builder, false, Some(Rc::new(on_result)), Some(transition));
-    }
-
-    /// Push a page with an explicit [`PushOptions`] — the full-control variant
-    /// carrying a back-press [`BackPolicy`] (and, for a
-    /// [`DismissAnimated`](BackPolicy::DismissAnimated) overlay, its dismiss
-    /// signal) alongside opacity/transition/result. The dismissable-overlay
-    /// helpers push through this; every other `push*` method
-    /// pushes with [`BackPolicy::Pop`].
-    pub fn push_with_options(
-        &self,
-        builder: impl Fn() -> AnyView<State> + 'static,
-        options: PushOptions<State>,
-    ) {
-        self.enqueue(NavOp::Push {
-            builder: Rc::new(builder),
-            opaque: options.opaque,
-            on_result: options.on_result,
-            transition: options.transition,
-            back: options.back,
-            dismiss_signal: options.dismiss_signal,
-            on_visibility: options.on_visibility,
-            route: options.route,
-            pop_swipe: options.pop_swipe,
-        });
-    }
-
-    /// Shared push-op construction every `push*` method above funnels through —
-    /// the five public variants differ only in which of `opaque`/`on_result`/
-    /// `transition` they fix vs. expose. All push with [`BackPolicy::Pop`] and
-    /// no dismiss signal, and no visibility observer; a page wanting any of those
-    /// uses [`push_with_options`](Self::push_with_options).
-    fn push_impl(
-        &self,
-        builder: impl Fn() -> AnyView<State> + 'static,
-        opaque: bool,
-        on_result: Option<ResultCallback<State>>,
-        transition: Option<TransitionSpec>,
-    ) {
-        self.enqueue(NavOp::Push {
-            builder: Rc::new(builder),
-            opaque,
-            on_result,
-            transition,
-            back: BackPolicy::Pop,
-            dismiss_signal: None,
-            on_visibility: None,
-            route: None,
-            pop_swipe: None,
-        });
-    }
-
-    /// Pop the top page with no result payload (a plain back-navigation). A pop
-    /// of the last/root page is ignored (a navigator always keeps one page).
-    pub fn pop(&self) {
-        self.enqueue(NavOp::Pop {
-            result: PopResult::empty(),
-        });
-    }
-
-    /// Pop the top page, handing `result` to its pusher-registered
-    /// [`push_for_result`](Self::push_for_result) callback.
-    pub fn pop_with_result(&self, result: PopResult) {
-        self.enqueue(NavOp::Pop { result });
-    }
-
-    /// Route a back press through the top page's [`BackPolicy`] (the
-    /// entry the facade's back handler drives instead of a bare
-    /// [`pop`](Self::pop)):
-    ///
-    /// - [`Pop`](BackPolicy::Pop) → a normal pop (transitions preserved; a safe
-    ///   no-op at the root);
-    /// - [`DismissAnimated`](BackPolicy::DismissAnimated) → fires the top page's
-    ///   dismiss signal (stack unchanged; the overlay animates its own exit and
-    ///   pops itself), see [`BackPolicy`]'s observation seam;
-    /// - [`Veto`](BackPolicy::Veto) → the press is consumed but nothing happens.
-    ///
-    /// Recorded like every other op and applied at the next rebuild (never
-    /// self-mutating mid-event). Whether this call *would* claim the press is
-    /// [`back_interest`](Self::back_interest).
-    pub fn request_back(&self) {
-        self.enqueue(NavOp::RequestBack);
-    }
-
-    /// Replace the top page in place with an opaque page built by `builder`,
-    /// using the navigator's default transition.
-    pub fn replace(&self, builder: impl Fn() -> AnyView<State> + 'static) {
-        self.enqueue(NavOp::Replace {
-            builder: Rc::new(builder),
-            opaque: true,
-            transition: None,
-            route: None,
-        });
-    }
-
-    /// Replace the top page with an explicit [`TransitionSpec`], overriding the
-    /// navigator's default for this replace only.
-    pub fn replace_with(
-        &self,
-        builder: impl Fn() -> AnyView<State> + 'static,
-        transition: TransitionSpec,
-    ) {
-        self.enqueue(NavOp::Replace {
-            builder: Rc::new(builder),
-            opaque: true,
-            transition: Some(transition),
-            route: None,
-        });
-    }
-
-    /// Replace the top page with an explicit [`ReplaceOptions`] — the
-    /// full-control variant carrying a route identity alongside opacity
-    /// and transition. [`Router::go`](super::router::Router::go)/
-    /// [`Router::replace`](super::router::Router::replace) push through this.
-    pub fn replace_with_options(
-        &self,
-        builder: impl Fn() -> AnyView<State> + 'static,
-        options: ReplaceOptions,
-    ) {
-        self.enqueue(NavOp::Replace {
-            builder: Rc::new(builder),
-            opaque: options.opaque,
-            transition: options.transition,
-            route: options.route,
-        });
-    }
-
-    /// Record `op`, then raise [`frust_core::mark_pending_result_flush`] so the
-    /// next tick's mobile frame gate `Run`s and reaches the rebuild that drains
-    /// it — the same guarantee [`finalize_transition`](NavigatorWidget::finalize_transition)
-    /// already gives a pop-result callback, reused here for a different reason:
-    /// this flag is not just "a callback needs `&mut State`", it is the shell's
-    /// one thread-affine "something is owed, run the next frame regardless of
-    /// what else is dirty" side channel, and a queued op recorded from outside
-    /// any input/signal path (a `spawn_local` continuation, e.g.) needs exactly
-    /// that with no callback involved at all. Without it a page could mount and
-    /// sit unpainted until whatever input happened to arrive next forced a
-    /// frame — see the [module docs](self).
-    ///
-    /// Unconditional, on every op, deliberately, even though the shared flag's
-    /// other reader (`RenderRoot::rebuild`'s pending-flush convergence loop)
-    /// cannot tell "just force a run" apart from "a callback is genuinely
-    /// owed": the frame that applies a queued op also pays one extra, empty
-    /// `app_logic` + view-diff pass it did not strictly need. That pass is
-    /// bounded (never more than one here, since nothing re-raises the flag for
-    /// a plain structural op) and lands only on the frame a nav op was actually
-    /// queued, not on every frame — a cost this crate's authoring toolkit
-    /// already treats as affordable (rebuilds are cheap by construction) and a
-    /// small, known price next to the bug it replaces: a page mounted with zero
-    /// frames painted for 15+ seconds.
-    fn enqueue(&self, op: NavOp<State>) {
-        self.ops.borrow_mut().push(op);
-        frust_core::mark_pending_result_flush();
-    }
-
-    /// Take the queued ops (leaving the queue empty). Called by
-    /// [`NavigatorView::rebuild`]/`build`.
-    fn drain(&self) -> Vec<NavOp<State>> {
-        std::mem::take(&mut *self.ops.borrow_mut())
-    }
-}
-
-/// A declarative navigator. See the [module docs](self).
-pub struct NavigatorView<State: 'static> {
-    controller: NavigatorController<State>,
-    initial: PageBuilder<State>,
-    /// The transition applied to a push/replace that supplies no per-op override.
-    /// Defaults to [`TransitionSpec::NONE`] (instant switches).
-    default_transition: TransitionSpec,
-    /// Explicit override for the interactive edge-swipe back gesture — the
-    /// highest-ranked slot in [`resolve_pop_swipe`](Self::resolve_pop_swipe)'s
-    /// resolution (page → navigator explicit → platform → preset). `None`
-    /// defers to [`platform_pop_swipe`](Self::platform_pop_swipe), and past
-    /// that to the default transition preset — on for
-    /// [`PageTransition::IosPush`], off otherwise.
-    pop_swipe: Option<bool>,
-    /// **Facade-only** platform-derived default, ranked below an explicit
-    /// [`pop_swipe`](Self::pop_swipe) override and above the preset-derived
-    /// fallback. `frust-widgets` carries no `cfg(target_os)` of its own — this
-    /// is the plain setter the facade calls with `cfg!(target_os = "ios")`
-    /// (`crates/frust/src/lib.rs`'s `navigator`/`overlay_host` wrappers).
-    /// `None` until set.
-    platform_pop_swipe: Option<bool>,
-    /// The ROOT page's [`PageVisibility`] observer (the root has no
-    /// [`PushOptions`] to carry one). Installed on the root page entry at
-    /// `build`, like the root's [`BackPolicy`] — not live-refreshed.
-    root_visibility: Option<VisibilityCallback>,
-    /// Whether a [`Covered`](PageVisibility::Covered) page stops re-running its
-    /// builder. Default `false` — the shipped behaviour.
-    cull_covered_builds: bool,
-    /// The ROOT page's route identity — the root has no [`PushOptions`]
-    /// to carry [`PushOptions::route`], so this mirrors
-    /// [`root_visibility`](Self::root_visibility)'s shape. Installed on the
-    /// root page entry at `build`, like the root's [`BackPolicy`].
-    root_route: Option<Location>,
-    /// Navigator-wide route-change observer — see
-    /// [`on_route_change`](Self::on_route_change). Unlike `root_visibility`
-    /// this is refreshed on every rebuild (live-configurable, like
-    /// `default_transition`), since it observes the whole navigator rather
-    /// than one page.
-    route_change: Option<RouteChangeCallback>,
-}
-
-impl<State: 'static> NavigatorView<State> {
-    /// Set the default page transition applied to every push/replace that does
-    /// not carry its own [`push_with`](NavigatorController::push_with)/
-    /// [`replace_with`](NavigatorController::replace_with) override.
-    pub fn transition(mut self, spec: TransitionSpec) -> Self {
-        self.default_transition = spec;
-        self
-    }
-
-    /// Explicitly enable or disable the interactive edge-swipe back gesture,
-    /// outranking both [`platform_pop_swipe`](Self::platform_pop_swipe) and the
-    /// preset-derived default (on for [`PageTransition::IosPush`], off
-    /// otherwise). The gesture pops the top page with a left-edge drag: drag
-    /// progress reverses the popped page's transition, and release completes
-    /// or cancels the pop by progress/velocity. A page may still narrow this
-    /// further with [`PushOptions::pop_swipe`] (the highest-ranked slot) or
-    /// refuse it outright via a non-[`Pop`](BackPolicy::Pop) `BackPolicy` (see
-    /// [`NavigatorWidget::swipe_armable`]).
-    pub fn pop_swipe(mut self, enabled: bool) -> Self {
-        self.pop_swipe = Some(enabled);
-        self
-    }
-
-    /// Set the platform-derived edge-swipe default — ranked below an explicit
-    /// [`pop_swipe`](Self::pop_swipe) override and above the preset-derived
-    /// fallback. `frust-widgets` carries no `cfg(target_os)` of its own; this
-    /// is the plain setter the facade calls (`crates/frust/src/lib.rs`) with
-    /// `cfg!(target_os = "ios")`, so an app using `frust::navigator` gets an
-    /// iOS-on / Android-and-desktop-off default with zero app-side wiring.
-    pub fn platform_pop_swipe(mut self, enabled: bool) -> Self {
-        self.platform_pop_swipe = Some(enabled);
-        self
-    }
-
-    /// Observe the **root** page's [`PageVisibility`] — the same seam
-    /// [`PushOptions::on_visibility`] gives a pushed page, for the one page that
-    /// has no `PushOptions`. Fired once with
-    /// [`Current`](PageVisibility::Current) on the navigator's first build, then
-    /// on every change (e.g. [`Covered`](PageVisibility::Covered) when an opaque
-    /// page is pushed over it).
-    ///
-    /// Read [`PushOptions::on_visibility`]'s doc for the full contract: no
-    /// `&mut State`, no duplicate values, and — importantly — **no `on_cleanup`
-    /// on cover**; the root page stays mounted with its widget state intact.
-    ///
-    /// The callback is captured at the navigator's first `build` (like the root
-    /// page's builder itself) and is not refreshed on later rebuilds.
-    pub fn on_root_visibility(mut self, f: impl Fn(PageVisibility) + 'static) -> Self {
-        self.root_visibility = Some(Rc::new(f));
-        self
-    }
-
-    /// Skip re-running the builder (and the child reconcile) for pages that are
-    /// [`Covered`](PageVisibility::Covered).
-    ///
-    /// **Default `false`** — the shipped behaviour, where every retained page
-    /// reconciles every frame whether covered or not. Making covered builds stop
-    /// is a real behaviour change (an app may rely on a covered page's builder
-    /// running against live state), so it is strictly opt-in.
-    ///
-    /// Two ordering rules hold when enabled, and neither needs a wake mechanism:
-    ///
-    /// - **A revealed page rebuilds in the same pass that revealed it.** Ops are
-    ///   applied — and a settled transition finalized — *before* the per-page
-    ///   reconcile loop in [`NavigatorView::rebuild`], so by the time the loop
-    ///   asks [`visibility_of`](NavigatorWidget::visibility_of) the revealed page
-    ///   is no longer `Covered`. There is no cross-frame gap to bridge.
-    /// - **The frame on which a page *becomes* `Covered` still rebuilds it.** The
-    ///   cull decision reads the page's visibility as of the *previous* reconcile,
-    ///   so a page gets exactly one final reconcile after its
-    ///   `on_visibility(Covered)` fires — a page staging teardown UI on cover can
-    ///   still render it.
-    pub fn cull_covered_builds(mut self, enabled: bool) -> Self {
-        self.cull_covered_builds = enabled;
-        self
-    }
-
-    /// Stamp the ROOT page's route identity — see
-    /// [`PushOptions::route`], the pushed-page equivalent.
-    pub fn root_route(mut self, location: Location) -> Self {
-        self.root_route = Some(location);
-        self
-    }
-
-    /// Observe this navigator's route-state, navigator-wide: fired from
-    /// [`NavigatorWidget::publish_state`] only when the published
-    /// [`RouteStack`] actually changes (an unchanged stack across N rebuilds
-    /// fires it zero times) — never with `&mut State` (it fires from a
-    /// rebuild), exactly like [`PushOptions::on_visibility`]'s contract. The
-    /// facade's reactive route-observer bridges this into signals (see
-    /// `docs/WIDGETS_ARCHITECTURE.md`'s reactive-free note): capture a plain
-    /// `Rc<Cell<_>>` here, don't reach for app state.
-    pub fn on_route_change(mut self, f: impl Fn(&RouteStack) + 'static) -> Self {
-        self.route_change = Some(Rc::new(f));
-        self
-    }
-
-    /// Resolve the navigator-wide edge-swipe default: the explicit override if
-    /// set, else [`platform_pop_swipe`](Self::platform_pop_swipe) if set, else
-    /// on for the iOS-push preset (the transition the swipe is designed around)
-    /// and off for every other default. A page's own
-    /// [`PushOptions::pop_swipe`] outranks this at the arm site — see
-    /// [`NavigatorWidget::swipe_armable`], which is what `event_at` actually
-    /// consults.
-    fn resolve_pop_swipe(&self) -> bool {
-        self.pop_swipe
-            .or(self.platform_pop_swipe)
-            .unwrap_or(self.default_transition.preset == PageTransition::IosPush)
-    }
-}
-
-/// Build a [`NavigatorView`] driven by `controller`, whose initial (root) page is
-/// produced by `initial`. The app-facing entry point (see [module docs](self)).
-pub fn navigator<State: 'static>(
-    controller: &NavigatorController<State>,
-    initial: impl Fn() -> AnyView<State> + 'static,
-) -> NavigatorView<State> {
-    NavigatorView {
-        controller: controller.clone(),
-        initial: Rc::new(initial),
-        default_transition: TransitionSpec::NONE,
-        pop_swipe: None,
-        platform_pop_swipe: None,
-        root_visibility: None,
-        cull_covered_builds: false,
-        root_route: None,
-        route_change: None,
-    }
-}
-
-/// The **root overlay host**: a navigator whose root page is the whole app —
-/// chrome, tab shell, inner navigator and all — and whose pushed pages are the
-/// app's modals. Because the host sits *above* every piece of chrome, an overlay
-/// pushed here dims and blocks chrome that an overlay on an inner navigator
-/// cannot reach.
-///
-/// It is a [`navigator`] with two defaults changed and nothing else:
-///
-/// * **[`pop_swipe(false)`](NavigatorView::pop_swipe)** — an edge swipe must
-///   never dismiss an overlay.
-/// * **[`TransitionSpec::NONE`]** — each overlay widget stages its *own*
-///   enter/exit (the contract the dialog/sheet catalogs already rely on), so the
-///   host must not animate the page swap underneath them.
-///
-/// Everything else is the ordinary navigator, deliberately: dismiss-signal
-/// routing, [`PushOptions`]/[`BackPolicy`], per-overlay
-/// [`on_result`](PushOptions::on_result), the keyboard drop on a page switch,
-/// and the capture-cancel + focus-clear are inherited rather than re-invented.
-///
-/// ```no_run
-/// # use frust_widgets::{NavigatorController, overlay_host, text};
-/// # use frust_core::any;
-/// # let controller: NavigatorController<()> = NavigatorController::new();
-/// # let app_root = || any(text("the whole app: chrome, tabs, inner navigator"));
-/// // Wrap the app's existing root view; nothing inside it changes.
-/// let root = overlay_host(&controller, move || app_root());
-/// # let _ = root;
-/// ```
-///
-/// # The host owns no scrim
-///
-/// The per-page-paints-its-own-scrim convention is preserved verbatim: the host
-/// is purely structural and paints nothing of its own. An overlay page already
-/// fills `ctx.origin()..ctx.size()` with its scrim, and at the root that rect
-/// *is* the window — so the catalogs' dialogs and sheets need no change to dim
-/// the whole app.
-///
-/// # Chrome inertness is not new code
-///
-/// [`NavigatorWidget::event`](Widget::event) routes to
-/// [`input_routed_pages`](NavigatorWidget::input_routed_pages) — the top page
-/// only — so with an overlay up the entire app root, chrome included, receives
-/// nothing. The accessibility tree says the same thing through the same
-/// function under rule R23 (see [`semantics`](Widget::semantics)), so there is
-/// no second reachability path to keep in sync.
-///
-/// # Back arbitration
-///
-/// With a root host *and* an inner navigator there are two back registrants. The
-/// facade's back glue (`frust::back_glue`) routes a press to the first
-/// registrant claiming [`back_interest`](NavigatorController::back_interest),
-/// ranked host-first and then innermost-first among plain navigators — so a
-/// press with a root overlay open reaches the host, and a press with none open
-/// falls through to the inner navigator (a host at depth 1 with the default
-/// [`BackPolicy::Pop`] claims nothing). An open overlay additionally silences
-/// the inner navigator outright: the host's root page — the whole app — is no
-/// longer input-routed, so under the R23 back-reach gate (see the module docs)
-/// nothing inside it claims the press either.
-pub fn overlay_host<State: 'static>(
-    controller: &NavigatorController<State>,
-    app: impl Fn() -> AnyView<State> + 'static,
-) -> NavigatorView<State> {
-    navigator(controller, app)
-        // Both are stated explicitly rather than left to the `navigator`
-        // defaults: they are the host's *contract*, not a coincidence of what
-        // `navigator` happens to default to.
-        .pop_swipe(false)
-        .transition(TransitionSpec::NONE)
-}
+pub use super::controller::NavigatorController;
+pub use super::options::{
+    BackPolicy, NavigatorId, PageBuilder, PageVisibility, PopResult, PushOptions, ReplaceOptions,
+    ResultCallback, RouteChangeCallback, VisibilityCallback,
+};
+pub use super::view::{NavigatorView, navigator, overlay_host};
 
 /// One retained page in the [`NavigatorWidget`]'s stack: its builder (re-run each
 /// rebuild), the last view it produced (for reconciliation), the retained child
 /// pod, its opacity, and the pusher's result callback (fired when this page pops).
-struct PageEntry<State: 'static> {
+pub(super) struct PageEntry<State: 'static> {
     builder: PageBuilder<State>,
     view: AnyView<State>,
     pod: ChildPod,
@@ -1444,12 +170,12 @@ struct PageEntry<State: 'static> {
     /// The transition this page was pushed/replaced with — *reversed* when the
     /// page is later popped (a pop animates the popped page's own transition
     /// backwards, Flutter-parity: a route carries its transition).
-    transition: TransitionSpec,
+    pub(super) transition: TransitionSpec,
     /// How a back press routed through
     /// [`request_back`](NavigatorController::request_back) treats this page.
     /// Pushed pages set it via [`PushOptions::back`]; the root and
     /// replaced pages default to [`BackPolicy::Pop`].
-    back: BackPolicy,
+    pub(super) back: BackPolicy,
     /// The shared generation cell a
     /// [`DismissAnimated`](BackPolicy::DismissAnimated) back press increments so
     /// the page's own widget subtree observes it (see [`BackPolicy`]'s seam).
@@ -1482,7 +208,7 @@ struct PageEntry<State: 'static> {
     /// resolution. `None` for the root page and for any page pushed/replaced
     /// without one, deferring to the navigator's own resolved default
     /// (`pop_swipe_enabled`).
-    pop_swipe: Option<bool>,
+    pub(super) pop_swipe: Option<bool>,
     /// Whether an input event can reach **this page**, all the way up: this
     /// navigator is itself reachable AND this page is in
     /// [`input_routed_pages`](NavigatorWidget::input_routed_pages). Republished
@@ -1497,7 +223,7 @@ struct PageEntry<State: 'static> {
     /// than a snapshot: a page frozen by
     /// [`cull_covered_builds`](NavigatorView::cull_covered_builds) still reports
     /// truthfully.
-    reach: Rc<Cell<bool>>,
+    pub(super) reach: Rc<Cell<bool>>,
 }
 
 /// The single in-flight page transition a [`NavigatorWidget`] owns (Flutter
@@ -1505,42 +231,42 @@ struct PageEntry<State: 'static> {
 /// [`TransitionDriver`] with the retained *leaving* page, when the op removed it
 /// from the stack (pop/replace); a push's leaving page stays in the stack below
 /// the new top, so `stashed` is `None` there.
-struct ActiveTransition<State: 'static> {
+pub(super) struct ActiveTransition<State: 'static> {
     /// Drives `0.0..=1.0`; advanced from `PaintCtx::frame_time` during paint.
-    driver: TransitionDriver,
+    pub(super) driver: TransitionDriver,
     /// The visual preset (slide/fade/parallax geometry).
-    preset: PageTransition,
+    pub(super) preset: PageTransition,
     /// Direction: `true` reverses the horizontal motion + paint order (a pop).
-    is_pop: bool,
+    pub(super) is_pop: bool,
     /// The removed page retained until settle (pop/replace). `None` for a push,
     /// whose leaving page is still in the stack at `len - 2`.
-    stashed: Option<PageEntry<State>>,
+    pub(super) stashed: Option<PageEntry<State>>,
     /// The spring a manual [`settle`](NavigatorWidget::settle_transition) uses
     /// when the timing mode is duration-based (a duration has no spring).
-    settle_spring: SpringDesc,
+    pub(super) settle_spring: SpringDesc,
     /// Set by paint when the driver reaches rest; the next rebuild finalizes the
     /// transition (tears down `stashed`, resumes culling).
-    settled: bool,
+    pub(super) settled: bool,
     /// This transition is being driven by an interactive edge-swipe: its
     /// progress is `Held` by the drag, then settled on release. An
     /// interactive pop stashed the top page *without* queuing its result
     /// callback (a swipe may still cancel), so finalize does the completion
     /// bookkeeping the [`NavOp::Pop`] path did eagerly.
-    interactive: bool,
+    pub(super) interactive: bool,
     /// Set when an interactive pop was *cancelled* (settled toward `0.0`): finalize
     /// pushes the stashed page back onto the stack instead of tearing it down (the
     /// page was never really popped). See [`NavigatorWidget::finalize_transition`].
-    restore_on_finalize: bool,
+    pub(super) restore_on_finalize: bool,
     /// Shared-element ("hero") state. Page-local rects of the tagged
     /// heroes discovered on the **leaving** page during the previous transition
     /// paint, keyed by tag. `layout`/`paint` capture these each frame; the next
     /// frame reads them to place the morph overlay. Empty until the first paint
     /// discovers any (so the morph starts a frame into the flight — the rects
     /// are static page layout, so the delay is invisible).
-    hero_leaving: HashMap<String, Rect>,
+    pub(super) hero_leaving: HashMap<String, Rect>,
     /// Page-local hero rects discovered on the **entering** page — the morph
     /// target endpoint. See [`hero_leaving`](ActiveTransition::hero_leaving).
-    hero_entering: HashMap<String, Rect>,
+    pub(super) hero_entering: HashMap<String, Rect>,
     /// The unresolved [`TransitionSpec`] awaiting theme resolution on the first
     /// paint — the LAZY driver seam mirroring [`motion::switcher`](crate::motion).
     /// A programmatic transition is staged in a `BuildCtx`
@@ -1555,46 +281,7 @@ struct ActiveTransition<State: 'static> {
     /// theme-timed). With no theme threaded the `make_driver` fallback built at
     /// `start_transition` (M3 defaults) stands — the unthemed behavior
     /// `docs/CODE_STANDARDS.md` mandates.
-    pending_spec: Option<TransitionSpec>,
-}
-
-/// The interactive edge-swipe gesture state. Mirrors
-/// [`ScrollWidget`](crate::ScrollWidget)'s arm/steal model: `armed` on a
-/// left-edge `Down`, promoted to `active` (an interactive pop in flight) once a
-/// decisive horizontal drag steals the gesture from the page.
-struct EdgeSwipe {
-    /// A left-edge `Down` on a poppable stack armed the gesture, but the slop has
-    /// not yet been crossed. Disarmed by a vertical/leftward drag or `Up`.
-    armed: bool,
-    /// The gesture stole from the page and is driving a held pop transition; the
-    /// navigator owns the pointer stream until release.
-    active: bool,
-    /// The `Down` position the drag delta is measured from.
-    down_start: Point,
-    /// Trailing-window x-velocity tracker for the release fling decision.
-    tracker: VelocityTracker,
-    /// **R-B3-inner.** Whether a navigator reached by forwarding the most
-    /// recent `Down` through [`route_top`](NavigatorWidget::route_top) also
-    /// armed (directly or, through the same propagation, at a third nesting
-    /// level). Recorded at `Down` (via [`with_swipe_claim`]/
-    /// [`ambient_swipe_claim`]) and consulted at the `Move` steal site: if set,
-    /// this navigator defers — an inner navigator on the same `Down` is
-    /// upstream of nobody, so it is the one that gets to steal. Cleared with
-    /// the rest of this state on `Up`/`Cancel` and on any structural op that
-    /// disarms.
-    inner_claimed: bool,
-}
-
-impl EdgeSwipe {
-    fn new() -> Self {
-        Self {
-            armed: false,
-            active: false,
-            down_start: Point::ZERO,
-            tracker: VelocityTracker::new(),
-            inner_claimed: false,
-        }
-    }
+    pub(super) pending_spec: Option<TransitionSpec>,
 }
 
 impl<State: 'static> crate::authoring::VisitPods for PageEntry<State> {
@@ -1614,7 +301,7 @@ impl<State: 'static> crate::authoring::VisitPods for ActiveTransition<State> {
 /// The retained widget for a [`NavigatorView`]: owns the page stack and applies
 /// the [`NavigatorController`]'s queued ops at rebuild. See the [module docs](self).
 pub struct NavigatorWidget<State: 'static> {
-    pages: Vec<PageEntry<State>>,
+    pub(super) pages: Vec<PageEntry<State>>,
     /// Pop-result callbacks awaiting `&mut State` — flushed at the start of the
     /// next [`event`](NavigatorWidget::event) pass, which the queuing rebuild
     /// guarantees itself by raising
@@ -1622,19 +309,19 @@ pub struct NavigatorWidget<State: 'static> {
     pending_results: Vec<(ResultCallback<State>, PopResult)>,
     /// Set on every stack mutation; the next paint publishes a cleared IME surface
     /// and clears this, so the platform keyboard hides deterministically.
-    needs_ime_clear: bool,
+    pub(super) needs_ime_clear: bool,
     /// The navigator's default transition (per-op overrides win). Refreshed from
     /// the view on rebuild so an app can change it live.
     default_transition: TransitionSpec,
     /// The single in-flight transition, if any. `None` between
     /// transitions — the common case, where paint/layout cull normally.
-    transition: Option<ActiveTransition<State>>,
+    pub(super) transition: Option<ActiveTransition<State>>,
     /// Whether the interactive edge-swipe back gesture is enabled.
     /// Resolved from the view each rebuild — default-on for the iOS-push preset,
     /// or explicitly via [`NavigatorView::pop_swipe`].
-    pop_swipe_enabled: bool,
+    pub(super) pop_swipe_enabled: bool,
     /// The in-progress edge-swipe gesture state.
-    edge: EdgeSwipe,
+    pub(super) edge: EdgeSwipe,
     /// The most recent frame time seen during [`paint`](NavigatorWidget::paint),
     /// reused as the event-pass timestamp for velocity tracking — the event pass
     /// carries no clock of its own (time is provided only at paint). The
@@ -1925,7 +612,7 @@ impl<State: 'static> NavigatorWidget<State> {
     /// edge-swipe [`begin_interactive_pop`](Self::begin_interactive_pop) — the
     /// first two of the publication points listed on
     /// [`NavigatorController::transition`].
-    fn publish_transition_start(
+    pub(super) fn publish_transition_start(
         &self,
         from_depth: usize,
         progress: f64,
@@ -1948,7 +635,7 @@ impl<State: 'static> NavigatorWidget<State> {
     /// Update the published progress of the in-flight transition, leaving every
     /// other field alone. `interactive` is set alongside it (a drag holds the
     /// progress; a release hands it back to a spring).
-    fn publish_transition_progress(&self, progress: f64, interactive: Option<bool>) {
+    pub(super) fn publish_transition_progress(&self, progress: f64, interactive: Option<bool>) {
         let mut t = self.transition_state.get();
         t.progress = progress;
         if let Some(interactive) = interactive {
@@ -1964,7 +651,7 @@ impl<State: 'static> NavigatorWidget<State> {
     /// widget's state machine must not fire on a later `Up`); focus is a reflected
     /// pod flag, so clearing it is enough (no widget-internal blur to drive) — the
     /// same asymmetry the container reconcilers document.
-    fn cancel_top(&mut self) {
+    pub(super) fn cancel_top(&mut self) {
         if let Some(top) = self.pages.last_mut() {
             if top.pod.is_active() {
                 crate::authoring::cancel_pod(&mut top.pod);
@@ -2008,7 +695,7 @@ impl<State: 'static> NavigatorWidget<State> {
     /// `cancel_top` clears this very flag, so every caller reads it *first*;
     /// reading after would report `false` unconditionally and suppress a clear
     /// that was genuinely owed.
-    fn top_pod_focused(&self) -> bool {
+    pub(super) fn top_pod_focused(&self) -> bool {
         self.pages.last().is_some_and(|p| p.pod.is_focused())
     }
 
@@ -2181,173 +868,6 @@ impl<State: 'static> NavigatorWidget<State> {
         self.last_frame_time.as_secs_f64() * 1000.0
     }
 
-    /// Steal the gesture from the top page into an interactive pop.
-    ///
-    /// Mirrors the [`NavOp::Pop`] animated-pop structure but built entirely in the
-    /// event pass (no `BuildCtx`): the top page's in-flight capture is
-    /// synthetically cancelled ([`cancel_top`](Self::cancel_top) — the covered
-    /// widget's press machine must not fire on a later `Up`), then the page is
-    /// popped into a **held** pop transition the drag drives via
-    /// [`set_transition_progress`](Self::set_transition_progress). Building/tearing
-    /// pods is deferred: the stashed page's teardown (or restore) happens at
-    /// finalize, which runs at rebuild with a `BuildCtx` in scope.
-    ///
-    /// The pusher's result callback is intentionally *not* queued here — a swipe
-    /// may still cancel; it fires only if the pop later completes (see
-    /// [`finalize_transition`](Self::finalize_transition)).
-    fn begin_interactive_pop(&mut self, initial_progress: f64) {
-        debug_assert!(self.pages.len() > 1, "steal requires a poppable stack");
-        debug_assert!(
-            self.transition.is_none(),
-            "steal requires no active transition"
-        );
-        // The outgoing page's own focus link, read before `cancel_top` drops it
-        // (see `top_pod_focused`).
-        let outgoing_focused = self.top_pod_focused();
-        self.cancel_top();
-        let popped = self.pages.pop().expect("depth > 1 checked before steal");
-        // Out of `self.pages`, so out of `publish_reach`'s sight — same
-        // stashed-page rule `start_transition` applies (a cancelled swipe's
-        // finalize restores it, followed by an explicit `publish_state`).
-        popped.reach.set(false);
-        let from_depth = self.pages.len() + 1;
-        let spec = popped.transition;
-        // The swipe animates the popped page's own preset; a page pushed without an
-        // animated transition still swipes with the iOS-push geometry (a swipe is
-        // inherently an iOS-style interaction). The timing only supplies the
-        // fallback settle spring — the drag itself holds progress.
-        let preset = if spec.is_animated() {
-            spec.preset
-        } else {
-            PageTransition::IosPush
-        };
-        let (_driver, settle_spring) = make_driver(spec.timing);
-        let held = initial_progress.clamp(0.0, 1.0);
-        self.transition = Some(ActiveTransition {
-            driver: TransitionDriver::Held { value: held },
-            preset,
-            is_pop: true,
-            stashed: Some(popped),
-            settle_spring,
-            settled: false,
-            interactive: true,
-            restore_on_finalize: false,
-            hero_leaving: HashMap::new(),
-            hero_entering: HashMap::new(),
-            // The swipe drives a held progress, not a theme-timed driver, so
-            // there is no deferred timing to resolve at paint.
-            pending_spec: None,
-        });
-        // Publication point: an interactive pop starts at whatever progress the
-        // drag has already reached, and is flagged `interactive` until release.
-        // Unlike `start_transition` this runs in the EVENT pass, so a build-time
-        // observer sees the edge on the next frame's build (the paint-time reader
-        // still sees it this frame).
-        self.publish_transition_start(from_depth, held, true, true);
-        // Gate the queued IME clear on the popped page's own focus link
-        // (`top_pod_focused`). **Pod-flag-only — the sanctioned fallback**: this
-        // is the one producer built entirely in the EVENT pass (see this
-        // method's doc), so no `BuildCtx` exists here to AND the live chain onto.
-        // `EventCtx::has_focus()` is deliberately *not* substituted: it carries
-        // this navigator's own pod flag as its parent recorded it, one link — not
-        // the root-down chain `BuildCtx::has_focus` composes — and reusing the
-        // name for a weaker value is how the two get confused later.
-        //
-        // Residual, bounded: a *stale* page-pod flag (set, but under an ancestor
-        // link some container already cleared) still clears here — an
-        // unconditional clear, but for this navigator alone. It cannot reach an
-        // unrelated subtree's session, because a stale flag on a page pod means
-        // focus was previously inside THIS navigator. In practice the window is
-        // narrower still: the `Down` that arms an edge swipe is itself a
-        // blur-on-outside-tap for anything it does not land in, so by the time a
-        // steal happens the root has usually already released the session and
-        // `RenderRoot::paint`'s `focus_active` guard makes the publish inert.
-        if outgoing_focused {
-            self.needs_ime_clear = true;
-        }
-    }
-
-    /// Settle a released interactive pop toward completion (`1.0`) or cancellation
-    /// (`0.0`), springing from the held progress with initial `progress_velocity`
-    /// (progress units/s). A cancel flags the transition for
-    /// [restore](Self::finalize_transition) rather than teardown.
-    fn settle_interactive(&mut self, complete: bool, progress_velocity: f64) {
-        let Some(t) = self.transition.as_mut() else {
-            return;
-        };
-        let from = t.driver.value();
-        let target = if complete { 1.0 } else { 0.0 };
-        t.driver = settle_driver(t.settle_spring, from, progress_velocity, target);
-        t.settled = false;
-        t.restore_on_finalize = !complete;
-        // The edge-swipe's own release path, publishing exactly what the public
-        // `settle_transition` seam does: a spring, not a finger, drives it now.
-        self.publish_transition_progress(from, Some(false));
-    }
-
-    /// Drive an in-progress interactive edge-swipe from a pointer event:
-    /// `Move` maps drag-x to held progress; `Up` settles by progress/velocity;
-    /// `Cancel` (system gesture steal) cancels the pop with no state mutation.
-    ///
-    /// This runs *before* the mid-transition input block in
-    /// [`event_at`](Self::event_at) — the swipe owns the pointer stream and must
-    /// keep receiving moves/releases even though a (held) transition is present.
-    fn drive_edge_swipe(
-        &mut self,
-        ctx: &mut EventCtx<'_>,
-        event: &InputEvent,
-        t_ms: f64,
-    ) -> EventResult {
-        let InputEvent::Pointer(p) = event else {
-            // Only pointer events drive a swipe; ignore anything else while active.
-            return EventResult::Ignored;
-        };
-        let width = ctx.size().width.max(1.0);
-        match p.phase {
-            PointerPhase::Move => {
-                self.edge.tracker.record(t_ms, p.position.x);
-                let dx = p.position.x - self.edge.down_start.x;
-                let progress = (dx / width).clamp(0.0, 1.0);
-                self.set_transition_progress(progress);
-                ctx.request_redraw();
-                EventResult::Handled
-            }
-            PointerPhase::Up => {
-                let finger_v = self.edge.tracker.velocity();
-                let progress = self
-                    .transition
-                    .as_ref()
-                    .map(|t| t.driver.value())
-                    .unwrap_or(0.0);
-                // Complete if dragged past the commit point, or flicked rightward
-                // fast enough — the low-progress high-velocity case.
-                let complete =
-                    progress > EDGE_SWIPE_COMMIT_PROGRESS || finger_v > EDGE_SWIPE_FLING_VELOCITY;
-                // The spring drives *progress*, so convert the px/s finger velocity
-                // into progress/s by the drag axis length.
-                self.settle_interactive(complete, finger_v / width);
-                self.edge.active = false;
-                self.edge.armed = false;
-                self.edge.inner_claimed = false;
-                ctx.request_redraw();
-                EventResult::Handled
-            }
-            PointerPhase::Cancel => {
-                // System cancel mid-drag = cancel path: spring back and restore the
-                // page. No state mutation here (the `()` Cancel tripwire contract).
-                self.settle_interactive(false, 0.0);
-                self.edge.active = false;
-                self.edge.armed = false;
-                self.edge.inner_claimed = false;
-                ctx.request_redraw();
-                EventResult::Handled
-            }
-            // A stray extra Down during a drive: swallow it (the navigator owns the
-            // stream), don't re-enter arming.
-            PointerPhase::Down => EventResult::Handled,
-        }
-    }
-
     /// The set of pages an input event can reach, as an index range into
     /// `self.pages` (ascending = bottom-to-top).
     ///
@@ -2380,36 +900,6 @@ impl<State: 'static> NavigatorWidget<State> {
             }
         }
         EventResult::Ignored
-    }
-
-    /// Whether the CURRENT top page honours the edge-swipe gesture at all,
-    /// independent of the geometric arm test (edge zone / slop / direction).
-    ///
-    /// Two gates, both page-scoped: (1) [`BackPolicy`] — a
-    /// [`DismissAnimated`](BackPolicy::DismissAnimated) page (a dismiss
-    /// *question*, not a normal pop) or a [`Veto`](BackPolicy::Veto) page must
-    /// never be scrub-popped by the gesture, so a non-[`Pop`](BackPolicy::Pop)
-    /// top refuses to arm outright — arm-refusal, not a dismiss-signal bump
-    /// (see the design rationale this mirrors: a swipe *scrubs* the popped
-    /// page's own transition in reverse, and a `DismissAnimated` page does not
-    /// leave on back, so bumping its signal instead would drag it most of the
-    /// way off-screen and snap back while a dialog appears — a lying
-    /// affordance; refusing to arm instead leaves the whole pointer stream
-    /// with the page, so an edge-anchored gesture inside it keeps working).
-    /// (2) [`PushOptions::pop_swipe`] — this page's own override, if any, wins
-    /// over the navigator's resolved default (`pop_swipe_enabled`).
-    ///
-    /// Consulted both at `Down` (the initial arm) and re-consulted at the
-    /// `Move` steal site (a push landed between `Down` and the decisive `Move`
-    /// can put a page this call no longer honours on top). `false` on an
-    /// empty stack (defensive; the navigator always keeps one page).
-    fn swipe_armable(&self) -> bool {
-        match self.pages.last() {
-            Some(top) => {
-                top.back == BackPolicy::Pop && top.pop_swipe.unwrap_or(self.pop_swipe_enabled)
-            }
-            None => false,
-        }
     }
 
     /// The event body with an explicit timestamp so velocity math is deterministic
@@ -3551,12 +2041,14 @@ fn cleared_ime_state() -> ImeState {
 
 #[cfg(test)]
 mod tests {
+    use super::super::edge_swipe::EDGE_SWIPE_COMMIT_PROGRESS;
     use super::super::route_state::NavChange;
     use super::*;
     use crate::test_support::RecordingScene;
     use crate::{Column, FlexView, Stack};
     use frust_core::{FrameTime, PointerButton, PointerEvent, PointerPhase, RenderRoot, any};
     use kurbo::Rect;
+    use std::any::Any;
     use std::cell::Cell;
 
     fn down(x: f64, y: f64) -> InputEvent {
