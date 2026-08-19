@@ -1,0 +1,153 @@
+Third-Party and Vendored Code
+================================================================================
+
+This package is a Rust port of material_3_expressive and includes source code
+vendored or ported from other projects. Vendored code is marked in module headers
+(e.g., "Ported from", "Vendored from") with upstream attribution, version, and
+license. The notices below preserve the original copyrights and license terms.
+
+The package itself is licensed under the MIT License; see the LICENSE field in
+Cargo.toml or the workspace root's LICENSE file.
+
+Unless a different license is stated in a subsection below, vendored MIT
+components use the same MIT License terms as the workspace.
+
+================================================================================
+MIT License — Root Crate
+================================================================================
+
+This crate contains a Rust port of material_3_expressive v1.0.8.
+
+Copyright (c) 2026 Paa Developments <paa.code.me@gmail.com>
+  Original upstream: https://github.com/paadevelopments/material_3_expressive
+  License: MIT
+
+================================================================================
+MIT License — Additional Copyright Holders (Vendored Components)
+================================================================================
+
+Copyright (c) 2025 Emily Moonstone
+  Upstream: https://github.com/EmilyMoonstone/material_3_expressive
+  Ported to Rust for: icon buttons, navigation bar, navigation rail,
+                      progress indicators, loading indicator wrapper
+  Reference: The original Dart components in material_3_expressive
+
+Copyright (c) 2026 Mudit Purohit
+  Upstream: https://github.com/Mudit200408/m3e_buttons
+  Ported to Rust for: buttons, split buttons, toggle button groups
+  Reference: The original Dart components in material_3_expressive
+
+Copyright (c) 2024 Mudit Purohit
+  Upstream: https://github.com/Mudit200408/m3e_dropdown_menu
+  Ported to Rust for: dropdown menus
+  Reference: The original Dart components in material_3_expressive
+
+Copyright (c) 2026 Mudit Purohit
+  Upstream: https://github.com/Mudit200408/m3e_expandable
+  Ported to Rust for: expandable list items
+  Reference: The original Dart components in material_3_expressive
+
+Copyright (c) 2025 Álvaro N
+  Upstream: https://github.com/alvaronp/expressive-refresh
+  Ported to Rust for: refresh indicator
+  Reference: The original Dart component in material_3_expressive
+
+Copyright (c) 2024 Paa <paa.code.me@gmail.com>
+  Upstream: https://github.com/paadevelopments/m3_carousel
+  Ported to Rust for: carousel view layout (itself derived from Flutter
+                      CarouselView; see BSD notice below)
+  Reference: The original Dart component in material_3_expressive
+
+Copyright (c) 2025 Agbama Gifted
+  Upstream: https://github.com/agbamadavidtaiwo/material_new_shapes
+  Ported to Rust for: Material 3 shape tokens (RoundedCornerShape,
+                      CutCornerShape)
+  License: MIT
+  Lineage note: Based on androidx.graphics.shapes (see Apache 2.0 section below)
+
+================================================================================
+BSD 3-Clause License — The Flutter Authors
+================================================================================
+
+Copyright 2014 The Flutter Authors. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above
+      copyright notice, this list of conditions and the following
+      disclaimer in the documentation and/or other materials provided
+      with the distribution.
+    * Neither the name of Google Inc. nor the names of its
+      contributors may be used to endorse or promote products derived
+      from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Applies to the carousel view component (src/components/carousel/):
+The carousel view is ported from m3_carousel, which itself is derived from
+Flutter's CarouselView.
+
+================================================================================
+Apache License, Version 2.0 — The Android Open Source Project
+================================================================================
+
+Copyright (c) 2024 The Android Open Source Project
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+Applies to:
+- Shape token implementation (src/tokens/shapes/): ported from
+  androidx.graphics.shapes and the material_new_shapes package, which carry
+  Apache-2.0 lineage from androidx.
+- Loading indicator (when implemented): ported from
+  androidx.compose.material3 LoadingIndicator.kt via material_3_expressive.
+- Future Material Icons path data (src/icons.rs, when implemented): Apache-2.0,
+  generated from Google's Material Design icons.
+
+Per Apache License, Section 4(d), any Derivative Works distributed must
+include a readable copy of the attribution notices contained within this
+NOTICE file, excluding notices that do not pertain to the Derivative Work.
+
+================================================================================
+OFL 1.1 License — Roboto Flex Font
+================================================================================
+
+The Roboto Flex font family is licensed under the SIL Open Font License, Version 1.1.
+See FONTS-LICENSE for the complete OFL 1.1 text.
+
+================================================================================
+Module Attribution Header Convention
+================================================================================
+
+Each module that ports or vendors upstream code includes a header block
+(2–4 lines) documenting the upstream source, version/revision, license, and
+any porting decisions. Example:
+
+    // Ported from material_3_expressive v1.0.8 (MIT, © 2026 Paa Developments)
+    // Upstream: https://github.com/paadevelopments/material_3_expressive
+    // No license changes; shape semantics preserved from Dart port.
+
+This convention is used by later design-system phases and plugin revisions
+to maintain clear lineage tracking across vendored code.

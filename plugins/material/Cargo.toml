@@ -9,6 +9,8 @@ name = "frust-material"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+# NOTICE: see NOTICE for third-party attributions (vendored components,
+# material_new_shapes, Material Icons lineage, fonts pointer)
 license.workspace = true
 
 [dependencies]
