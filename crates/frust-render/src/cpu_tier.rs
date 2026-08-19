@@ -38,7 +38,7 @@
 //!   glyph runs) maps onto a direct `vello_cpu` equivalent.
 
 use frust_scene::{GlyphRun, Scene};
-use kurbo::{Affine, BezPath, Line, Point, Rect, RoundedRect, Shape, Stroke};
+use kurbo::{Affine, BezPath, Line, Point, Rect, RoundedRect, RoundedRectRadii, Shape, Stroke};
 use peniko::{Brush, Color, Fill, ImageData};
 
 use crate::convert::{SceneSink, encode_into};
@@ -202,9 +202,9 @@ impl SceneSink for CpuSink<'_> {
         transform: Affine,
         brush: &Brush,
         rect: &Rect,
-        radius: f64,
+        radii: RoundedRectRadii,
     ) {
-        let path = RoundedRect::from_rect(*rect, radius).to_path(FLATTEN_TOLERANCE);
+        let path = RoundedRect::from_rect(*rect, radii).to_path(FLATTEN_TOLERANCE);
         self.ctx.set_transform(transform);
         self.ctx.set_fill_rule(style);
         set_brush(self.ctx, brush);
@@ -240,8 +240,8 @@ impl SceneSink for CpuSink<'_> {
         self.ctx.push_clip_layer(&rect.to_path(FLATTEN_TOLERANCE));
     }
 
-    fn push_clip_rounded(&mut self, transform: Affine, rect: &Rect, radius: f64) {
-        let path = RoundedRect::from_rect(*rect, radius).to_path(FLATTEN_TOLERANCE);
+    fn push_clip_rounded(&mut self, transform: Affine, rect: &Rect, radii: RoundedRectRadii) {
+        let path = RoundedRect::from_rect(*rect, radii).to_path(FLATTEN_TOLERANCE);
         self.ctx.set_transform(transform);
         self.ctx.push_clip_layer(&path);
     }
@@ -349,7 +349,7 @@ impl SceneSink for CpuSink<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frust_scene::SceneBuilder;
+    use frust_scene::{CornerRadii, DashPattern, SceneBuilder};
     use peniko::color::palette::css::{BLUE, GREEN, RED};
 
     /// Opaque-red premultiplied bytes are just (255, 0, 0, 255).
@@ -478,6 +478,44 @@ mod tests {
             builder.stroke_path(path, 1.0, Brush::Solid(RED));
             builder.pop_layer();
             builder.pop_clip();
+        }
+
+        let mut renderer = CpuTierRenderer::new(20, 20);
+        let bytes = renderer.render(&scene, Color::WHITE, 20, 20);
+        assert_eq!(bytes.len(), 20 * 20 * 4);
+    }
+
+    #[test]
+    fn per_corner_and_dashed_commands_rasterize_without_panicking() {
+        // The CPU tier decodes through the same walk as the GPU one, so it sees
+        // per-corner radii (as a `kurbo::RoundedRect` path) and pre-expanded dash
+        // sub-paths; both must rasterize here too, not just on vello.
+        let mut scene = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut scene);
+            let radii = CornerRadii::new(6.0, 0.0, 3.0, 1.0);
+            builder.push_clip_rounded_radii(Rect::new(0.0, 0.0, 20.0, 20.0), radii);
+            builder.fill_rounded_rect_radii(
+                Rect::new(2.0, 2.0, 16.0, 16.0),
+                radii,
+                Brush::Solid(RED),
+            );
+            builder.draw_blurred_rounded_rect_radii(
+                Rect::new(1.0, 1.0, 18.0, 18.0),
+                radii,
+                2.0,
+                Color::BLACK,
+            );
+            builder.pop_clip();
+            let mut path = BezPath::new();
+            path.move_to((0.0, 10.0));
+            path.line_to((20.0, 10.0));
+            builder.stroke_path_dashed(
+                path,
+                1.0,
+                DashPattern::new(3.0, 2.0).with_phase(1.0),
+                Brush::Solid(BLUE),
+            );
         }
 
         let mut renderer = CpuTierRenderer::new(20, 20);

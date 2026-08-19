@@ -330,6 +330,30 @@ pub const PLUG: IconSource = IconSource {
     design: D,
 };
 
+/// `arrow_upward`
+pub const ARROW_UPWARD: IconSource = IconSource {
+    d: "M 11 20 v -12.175 L 5.4 13.425 l -1.4 -1.425 8 -8 8 8 -1.4 1.425 -5.6 -5.6 v 12.175 h -2 Z",
+    design: D,
+};
+
+/// `arrow_downward`
+pub const ARROW_DOWNWARD: IconSource = IconSource {
+    d: "M 11 4 v 12.175 L 5.4 10.575 l -1.4 1.425 8 8 8 -8 -1.4 -1.425 -5.6 5.6 v -12.175 h -2 Z",
+    design: D,
+};
+
+/// `arrow_forward`
+pub const ARROW_FORWARD: IconSource = IconSource {
+    d: "M 16.175 13 H 4 v -2 h 12.175 L 10.575 5.4 l 1.425 -1.4 8 8 -8 8 -1.425 -1.4 5.6 -5.6 Z",
+    design: D,
+};
+
+/// `content_copy`
+pub const CONTENT_COPY: IconSource = IconSource {
+    d: "M 9 18 q -0.825 0 -1.4125 -0.5875 T 7 16 v -12 q 0 -0.825 0.5875 -1.4125 T 9 2 h 9 q 0.825 0 1.4125 0.5875 T 20 4 v 12 q 0 0.825 -0.5875 1.4125 T 18 18 H 9 Z m 0 -2 h 9 v -12 H 9 v 12 Z M 5 22 q -0.825 0 -1.4125 -0.5875 T 3 20 v -14 h 2 v 14 h 11 v 2 H 5 Z m 4 -6 v -12 12 Z",
+    design: D,
+};
+
 /// Every generated [`IconSource`] in this module, for exhaustive
 /// iteration (e.g. a parse-validation test, or a picker gallery).
 pub const ALL: &[IconSource] = &[
@@ -382,4 +406,8 @@ pub const ALL: &[IconSource] = &[
     SCAN_MARK,
     GLOBE,
     PLUG,
+    ARROW_UPWARD,
+    ARROW_DOWNWARD,
+    ARROW_FORWARD,
+    CONTENT_COPY,
 ];

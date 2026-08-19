@@ -31,9 +31,12 @@ mod align;
 pub mod authoring;
 mod button;
 mod checkbox;
+mod container;
+mod divider;
 mod flex;
 mod gesture;
 mod icon;
+mod icon_button;
 pub mod icons;
 mod image;
 mod list_view;
@@ -56,12 +59,15 @@ use std::hash::{Hash, Hasher};
 pub use align::{Align, AlignView, AlignWidget, Alignment};
 pub use button::{Button, ButtonStyle, ButtonView, ButtonWidget, button};
 pub use checkbox::{Checkbox, CheckboxView, CheckboxWidget, checkbox};
+pub use container::{BorderStyle, ContainerView, ContainerWidget, colored_box, container};
+pub use divider::{DividerView, DividerWidget, divider};
 pub use flex::{
     Axis, Column, CrossAxisAlignment, FlexChild, FlexView, FlexWidget, MainAxisAlignment, Row,
     flexible, inflexible, keyed,
 };
 pub use gesture::{GestureDetector, GestureDetectorView, GestureDetectorWidget};
 pub use icon::{Icon, IconData, IconSource, IconView, IconWidget, icon};
+pub use icon_button::{IconButton, IconButtonView, IconButtonWidget, icon_button};
 pub use image::{Image, ImageError, ImageFit, ImageSource, ImageView, ImageWidget};
 pub use list_view::{ListView, ListViewWidget, list_view};
 pub use nav::hero::{HeroView, HeroWidget, hero};

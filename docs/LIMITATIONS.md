@@ -2720,3 +2720,26 @@ shipped `shell_route`/`navigator` composition produces.
 
 **Evidence**: `crates/frust/src/back_glue.rs`'s `#[ignore]`d test and its inline design-claim
 rationale (search `wiring_order_does_not_flip`).
+---
+
+### `render-blurred-shadow-corner-collapse` — a per-corner blurred shadow rounds to its largest corner
+
+**Observed**: `Command::BlurredRoundedRect` carries a per-corner `CornerRadii`, but both render
+backends' blurred-rect primitive (vello's `draw_blurred_rounded_rect`, `vello_cpu`'s
+`fill_blurred_rounded_rect`) accepts only one radius. The shared command walk collapses the four
+corners via `CornerRadii::largest()` before handing off to either sink, so a shadow behind geometry
+with mixed corner radii (e.g. two sharp corners, two rounded) renders with all four shadow corners at
+the largest configured radius instead of each corner independently.
+
+**Applies to**: any glow/shadow paint (`ContainerView`'s `glow`, or a direct `PaintScene` caller)
+whose `CornerRadii` are non-uniform. The fill, border, and clip paths stay exact per-corner —
+`Command::RoundedRect`/`PushClipRounded` both lower every corner individually; only the blur is
+affected.
+
+**Why accepted**: neither backend exposes a per-corner blurred-rect primitive; matching one would
+mean hand-rolling the blur pass rather than composing the existing one. The visual delta is confined
+to the soft, low-opacity shadow rather than the crisp geometry, so it shipped as a v1 approximation
+alongside the `CornerRadii`/`DashPattern` primitives rather than blocking on it.
+
+**Evidence**: `crates/frust-render/src/convert.rs`'s shared command-walk decode of
+`Command::BlurredRoundedRect` (`radii.largest()` call site and its regression test).

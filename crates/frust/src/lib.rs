@@ -98,17 +98,18 @@ pub use frust_core::view::{AnyView, View, any};
 // `BackPolicy::DismissAnimated` + dismiss-signal example — an app-authored
 // modal staging its own exit on Android back instead of vanishing.
 pub use frust_widgets::{
-    Align, AlignView, Alignment, Axis, BackPolicy, Button, ButtonStyle, ButtonView, Checkbox,
-    CheckboxView, ChildKey, Column, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView,
-    GestureDetector, GestureDetectorView, HeroView, Icon, IconData, IconSource, IconView,
-    IconWidget, Image, ImageError, ImageFit, ImageSource, ImageView, ListView, ListViewWidget,
-    MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView, Padding, PaddingView,
-    PageBuilder, PageTransition, PageVisibility, PopResult, PushOptions, Radio, RadioView,
-    RadioWidget, ResultCallback, Row, SafeAreaView, ScaffoldView, ScrollInfo, ScrollView, SizedBox,
-    SizedBoxView, Slider, SliderView, Stack, StackView, TextInput, TextInputView, TextView, Timing,
-    TransitionSpec, TransitionState, VisibilityCallback, button, checkbox, flexible, hero, icon,
-    inflexible, keyed, list_view, radio, safe_area, scaffold, scroll_view, slider, text,
-    text_input,
+    Align, AlignView, Alignment, Axis, BackPolicy, BorderStyle, Button, ButtonStyle, ButtonView,
+    Checkbox, CheckboxView, ChildKey, Column, ContainerView, ContainerWidget, CrossAxisAlignment,
+    DividerView, DividerWidget, EdgeInsets, FlexChild, FlexView, GestureDetector,
+    GestureDetectorView, HeroView, Icon, IconButton, IconButtonView, IconData, IconSource,
+    IconView, IconWidget, Image, ImageError, ImageFit, ImageSource, ImageView, ListView,
+    ListViewWidget, MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView, Padding,
+    PaddingView, PageBuilder, PageTransition, PageVisibility, PopResult, PushOptions, Radio,
+    RadioView, RadioWidget, ResultCallback, Row, SafeAreaView, ScaffoldView, ScrollInfo,
+    ScrollView, SizedBox, SizedBoxView, Slider, SliderView, Stack, StackView, TextInput,
+    TextInputView, TextView, Timing, TransitionSpec, TransitionState, VisibilityCallback, button,
+    checkbox, colored_box, container, divider, flexible, hero, icon, icon_button, inflexible,
+    keyed, list_view, radio, safe_area, scaffold, scroll_view, slider, text, text_input,
 };
 
 /// Platform-view embedding (platform-views feature): reserve
@@ -408,6 +409,14 @@ pub mod authoring {
         ScrollDelta, SemanticsCtx, SemanticsUpdate, TickClass, View, Widget, WidgetId, any,
     };
 
+    /// The paint vocabulary [`PaintScene`]'s per-corner and dashed methods name
+    /// — `fill_rounded_rect_radii`/`push_clip_rounded_radii` take a
+    /// [`CornerRadii`], `stroke_path_dashed` a [`DashPattern`]. Lifted for the
+    /// same reason [`WindowInsets`] is: a widget calling those methods cannot
+    /// otherwise name their arguments. Re-exported through `frust-core`'s paint
+    /// surface, so this is the same type [`scene::CornerRadii`] names.
+    pub use frust_core::{CornerRadii, DashPattern};
+
     /// The event-pass/IME-surface `EditingState` — see this module's own docs
     /// for the split against [`text::EditingState`](self::text::EditingState),
     /// `frust_text::editor`'s distinct, byte-indexed type. `ImeContentType` is
@@ -465,8 +474,8 @@ pub mod authoring {
     pub mod text {
         pub use frust_text::{EditOp, EditingState, EditingStateBytes, TextEditor};
         pub use frust_text::{
-            FamilyName, FontFamily, FontStyle, FontWeight, GenericSlot, LineHeight, TextContext,
-            TextLayout, TextStyle,
+            FamilyName, FontFamily, FontStyle, FontWeight, GenericSlot, LineHeight, TextAlign,
+            TextContext, TextLayout, TextOverflow, TextStyle,
         };
         /// Types named in [`TextContext`]'s own public signatures —
         /// `register_fonts() -> Result<Vec<RegisteredFamily>, FontError>` and
@@ -485,10 +494,16 @@ pub mod authoring {
     }
 
     /// The renderer-agnostic display list, for widgets painting below `PaintScene`.
+    ///
+    /// `CornerRadii`/`DashPattern` are the same types the flat
+    /// [`authoring::CornerRadii`](super::CornerRadii)/[`authoring::DashPattern`](super::DashPattern)
+    /// re-exports name — listed here too because they are named by
+    /// `Command::RoundedRect`/`PathStyle`, which a widget recording commands
+    /// directly has to match on.
     pub mod scene {
         pub use frust_scene::{
-            Command, FontHandle, Glyph, GlyphRun, PathStyle, Scene, SceneBuilder, ShaderProgram,
-            arc_path,
+            Command, CornerRadii, DashPattern, FontHandle, Glyph, GlyphRun, PathStyle, Scene,
+            SceneBuilder, ShaderProgram, arc_path,
         };
     }
 }

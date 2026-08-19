@@ -490,6 +490,26 @@ mod tests {
     }
 
     #[test]
+    fn the_icon_button_arc_additions_exist_and_are_in_all() {
+        // The two directional arrows the caret precedent doesn't cover, a
+        // third pointing forward, and a copy affordance — all four are
+        // present in the generated set and enumerable via `ALL`, not just
+        // reachable by name.
+        let additions = super::super::icons::ALL;
+        for (name, d) in [
+            ("ARROW_UPWARD", super::super::icons::ARROW_UPWARD.d),
+            ("ARROW_DOWNWARD", super::super::icons::ARROW_DOWNWARD.d),
+            ("ARROW_FORWARD", super::super::icons::ARROW_FORWARD.d),
+            ("CONTENT_COPY", super::super::icons::CONTENT_COPY.d),
+        ] {
+            assert!(
+                additions.iter().any(|source| source.d == d),
+                "icons::{name} is missing from icons::ALL"
+            );
+        }
+    }
+
+    #[test]
     fn generated_home_icon_is_usable_end_to_end() {
         // `icon(icons::HOME).size(28.0)`
         // builds and paints in a bare-core (no-theme) test.

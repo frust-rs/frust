@@ -4,11 +4,28 @@
 //! caches its measured size for the widget layout phase.
 
 use std::cell::RefCell;
+use std::ops::Range;
 
 use kurbo::{Affine, Point, Size};
 use peniko::Brush;
 
 use frust_scene::GlyphRun;
+
+/// A source-text byte range plus rendered width for one line of a
+/// [`TextLayout`], used only by [`crate::context::TextContext::layout_bounded`]'s
+/// truncation walk. `pub(crate)` — no `parley::layout::Line` leaks past
+/// [`TextLayout::line_info`].
+pub(crate) struct LineInfo {
+    /// The line's text range in the *original* source string passed to
+    /// [`crate::TextContext::layout`]/`layout_bounded` — parley's
+    /// line-breaker assigns each line a contiguous, non-overlapping span, so
+    /// concatenating every line's range in order reconstructs the source.
+    pub range: Range<usize>,
+    /// The line's rendered advance, excluding trailing whitespace (which
+    /// collapses at the line edge and would otherwise make a legitimately
+    /// fitting line look like it overflows).
+    pub width: f32,
+}
 
 /// A finished text layout: positioned glyph runs plus a cached measured size.
 ///
@@ -67,5 +84,24 @@ impl TextLayout {
                 ..run.clone()
             })
             .collect()
+    }
+
+    /// The number of lines in this layout — `0` only for an entirely empty
+    /// layout with no lines at all. `pub(crate)` — the `max_lines`/overflow
+    /// truncation walk in [`crate::context`] is the sole caller.
+    pub(crate) fn line_count(&self) -> usize {
+        self.layout.len()
+    }
+
+    /// The source text range and rendered (trailing-whitespace-excluded)
+    /// width of line `index`, or `None` if out of bounds. `pub(crate)` — see
+    /// [`Self::line_count`].
+    pub(crate) fn line_info(&self, index: usize) -> Option<LineInfo> {
+        let line = self.layout.get(index)?;
+        let metrics = line.metrics();
+        Some(LineInfo {
+            range: line.text_range(),
+            width: (metrics.advance - metrics.trailing_whitespace).max(0.0),
+        })
     }
 }

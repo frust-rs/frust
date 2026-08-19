@@ -16,6 +16,13 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+/// The per-corner radii and dash-pattern vocabulary [`PaintScene`]'s own
+/// signatures name, re-exported from `frust-scene` so a widget calling
+/// [`PaintScene::fill_rounded_rect_radii`]/[`PaintScene::push_clip_rounded_radii`]/
+/// [`PaintScene::stroke_path_dashed`] can name their arguments through the same
+/// paint surface it already paints through (mirrors the crate-root `accesskit`
+/// re-export).
+pub use frust_scene::{CornerRadii, DashPattern};
 use frust_scene::{GlyphRun, SceneBuilder, ShaderProgram};
 use kurbo::{Affine, BezPath, Point, Rect, Size};
 use peniko::{Brush, Color};
@@ -51,6 +58,27 @@ pub trait PaintScene {
     /// `SceneBuilder` implementation records a real rounded-rect command.
     fn fill_rounded_rect(&mut self, _origin: Point, _size: Size, _radius: f64, _color: Color) {}
 
+    /// Emit a filled axis-aligned rectangle with per-corner `radii` — the
+    /// shape a uniform [`PaintScene::fill_rounded_rect`] cannot express (a
+    /// bottom-anchored sheet with only its top corners rounded, a segmented
+    /// control's end caps).
+    ///
+    /// Defaulted to the uniform call with the *largest* corner rather than to a
+    /// no-op: a recorder scene that only implements `fill_rounded_rect` still
+    /// sees a rect painted here, in the spirit of
+    /// [`PaintScene::fill_rect_brush`]'s "see something rather than nothing"
+    /// fallback. The `SceneBuilder` implementation overrides it and records
+    /// every corner faithfully.
+    fn fill_rounded_rect_radii(
+        &mut self,
+        origin: Point,
+        size: Size,
+        radii: CornerRadii,
+        color: Color,
+    ) {
+        self.fill_rounded_rect(origin, size, radii.largest(), color);
+    }
+
     /// Stroke a straight line from `p0` to `p1` with the given `width` and solid
     /// `color`.
     ///
@@ -77,6 +105,18 @@ pub trait PaintScene {
     /// [`frust_scene::Command::PushClipRounded`]/[`frust_scene::Command::PopClip`]
     /// pair.
     fn push_clip_rounded(&mut self, _origin: Point, _size: Size, _radius: f64) {}
+
+    /// Push a clip with per-corner `radii` onto the backend clip stack, popped
+    /// by the same [`PaintScene::pop_clip`] as every other push.
+    ///
+    /// Defaulted to the uniform [`PaintScene::push_clip_rounded`] with the
+    /// largest corner rather than to a no-op — a defaulted *push* against an
+    /// implemented *pop* would unbalance a recorder scene's clip stack, so this
+    /// one delegates for correctness, not just for visibility (see
+    /// [`PaintScene::fill_rounded_rect_radii`]).
+    fn push_clip_rounded_radii(&mut self, origin: Point, size: Size, radii: CornerRadii) {
+        self.push_clip_rounded(origin, size, radii.largest());
+    }
 
     /// Pop the most recently pushed clip, rectangular or rounded. Defaulted to
     /// a no-op; see [`PaintScene::push_clip`].
@@ -235,6 +275,24 @@ pub trait PaintScene {
     /// [`PaintScene::fill_path`].
     fn stroke_path(&mut self, _origin: Point, _path: &BezPath, _width: f64, _brush: &Brush) {}
 
+    /// Stroke an arbitrary vector path at `origin` as a dashed line: the same
+    /// stroke [`PaintScene::stroke_path`] paints, broken into `dash`'s on/off
+    /// runs by the render crate at encode time.
+    ///
+    /// Defaulted to the solid [`PaintScene::stroke_path`] rather than to a
+    /// no-op — dashing is a visual refinement, so a scene that cannot express
+    /// it still draws the path.
+    fn stroke_path_dashed(
+        &mut self,
+        origin: Point,
+        path: &BezPath,
+        width: f64,
+        _dash: DashPattern,
+        brush: &Brush,
+    ) {
+        self.stroke_path(origin, path, width, brush);
+    }
+
     /// Push an affine `transform`, composed with the current one, onto the
     /// backend transform stack; subsequent draws are transformed until the
     /// matching [`PaintScene::pop_transform`].
@@ -270,6 +328,21 @@ impl PaintScene for SceneBuilder<'_> {
         SceneBuilder::fill_rounded_rect(self, rect_at(origin, size), radius, Brush::Solid(color));
     }
 
+    fn fill_rounded_rect_radii(
+        &mut self,
+        origin: Point,
+        size: Size,
+        radii: CornerRadii,
+        color: Color,
+    ) {
+        SceneBuilder::fill_rounded_rect_radii(
+            self,
+            rect_at(origin, size),
+            radii,
+            Brush::Solid(color),
+        );
+    }
+
     fn stroke_line(&mut self, p0: Point, p1: Point, width: f64, color: Color) {
         SceneBuilder::stroke_line(self, p0, p1, width, Brush::Solid(color));
     }
@@ -280,6 +353,10 @@ impl PaintScene for SceneBuilder<'_> {
 
     fn push_clip_rounded(&mut self, origin: Point, size: Size, radius: f64) {
         SceneBuilder::push_clip_rounded(self, rect_at(origin, size), radius);
+    }
+
+    fn push_clip_rounded_radii(&mut self, origin: Point, size: Size, radii: CornerRadii) {
+        SceneBuilder::push_clip_rounded_radii(self, rect_at(origin, size), radii);
     }
 
     fn pop_clip(&mut self) {
@@ -338,6 +415,17 @@ impl PaintScene for SceneBuilder<'_> {
 
     fn stroke_path(&mut self, origin: Point, path: &BezPath, width: f64, brush: &Brush) {
         SceneBuilder::stroke_path(self, path_at(origin, path), width, brush.clone());
+    }
+
+    fn stroke_path_dashed(
+        &mut self,
+        origin: Point,
+        path: &BezPath,
+        width: f64,
+        dash: DashPattern,
+        brush: &Brush,
+    ) {
+        SceneBuilder::stroke_path_dashed(self, path_at(origin, path), width, dash, brush.clone());
     }
 
     fn push_transform(&mut self, transform: Affine) {
@@ -3882,5 +3970,203 @@ mod tests {
         container.visit_children(&mut |child| ids.push(child.inspect_id()));
         assert_eq!(ids.len(), 2);
         assert_ne!(ids[0], ids[1]);
+    }
+
+    /// A recorder that implements only the *uniform* rounded methods and the
+    /// solid stroke — i.e. every pre-per-corner recorder scene in the wild —
+    /// so the per-corner/dashed trait defaults can be observed falling back.
+    #[derive(Default)]
+    struct UniformOnlyScene {
+        fills: Vec<(Point, Size, f64)>,
+        clips: Vec<(Point, Size, f64)>,
+        strokes: Vec<(Point, f64)>,
+        pops: usize,
+    }
+
+    impl PaintScene for UniformOnlyScene {
+        fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
+        fn draw_text(&mut self, _origin: Point, _text: &str) {}
+        fn fill_rounded_rect(&mut self, origin: Point, size: Size, radius: f64, _color: Color) {
+            self.fills.push((origin, size, radius));
+        }
+        fn push_clip_rounded(&mut self, origin: Point, size: Size, radius: f64) {
+            self.clips.push((origin, size, radius));
+        }
+        fn pop_clip(&mut self) {
+            self.pops += 1;
+        }
+        fn stroke_path(&mut self, origin: Point, _path: &BezPath, width: f64, _brush: &Brush) {
+            self.strokes.push((origin, width));
+        }
+    }
+
+    fn corner_probe_path() -> BezPath {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.line_to((10.0, 0.0));
+        path
+    }
+
+    #[test]
+    fn per_corner_paint_defaults_fall_back_to_the_uniform_methods() {
+        // A scene that predates per-corner radii still paints something, at the
+        // largest corner — and its clip stack stays balanced, which is why the
+        // push delegates rather than no-op'ing against a real `pop_clip`.
+        let mut scene = UniformOnlyScene::default();
+        let origin = Point::new(2.0, 3.0);
+        let size = Size::new(20.0, 10.0);
+        let radii = CornerRadii::new(4.0, 12.0, 0.0, 1.0);
+
+        scene.fill_rounded_rect_radii(origin, size, radii, Color::BLACK);
+        scene.push_clip_rounded_radii(origin, size, radii);
+        scene.pop_clip();
+
+        assert_eq!(scene.fills, vec![(origin, size, 12.0)]);
+        assert_eq!(scene.clips, vec![(origin, size, 12.0)]);
+        assert_eq!(scene.pops, 1);
+    }
+
+    #[test]
+    fn dashed_stroke_default_falls_back_to_the_solid_stroke() {
+        let mut scene = UniformOnlyScene::default();
+        let origin = Point::new(5.0, 6.0);
+        scene.stroke_path_dashed(
+            origin,
+            &corner_probe_path(),
+            2.0,
+            DashPattern::new(4.0, 2.0),
+            &Brush::Solid(Color::BLACK),
+        );
+
+        assert_eq!(scene.strokes, vec![(origin, 2.0)]);
+    }
+
+    #[test]
+    fn scene_builder_records_per_corner_radii_translated_by_origin() {
+        // The `SceneBuilder` impl overrides the defaults above: every corner
+        // reaches the command intact, under the same origin→rect convention the
+        // uniform methods use.
+        let mut scene = frust_scene::Scene::new();
+        let radii = CornerRadii::new(4.0, 12.0, 0.0, 1.0);
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            let paint: &mut dyn PaintScene = &mut builder;
+            paint.fill_rounded_rect_radii(
+                Point::new(2.0, 3.0),
+                Size::new(20.0, 10.0),
+                radii,
+                Color::BLACK,
+            );
+            paint.push_clip_rounded_radii(Point::new(0.0, 0.0), Size::new(5.0, 5.0), radii);
+            paint.pop_clip();
+        }
+
+        match &scene.commands()[0] {
+            frust_scene::Command::RoundedRect {
+                rect, radii: got, ..
+            } => {
+                assert_eq!(*rect, Rect::new(2.0, 3.0, 22.0, 13.0));
+                assert_eq!(*got, radii);
+            }
+            other => panic!("expected RoundedRect, got {other:?}"),
+        }
+        match &scene.commands()[1] {
+            frust_scene::Command::PushClipRounded { radii: got, .. } => assert_eq!(*got, radii),
+            other => panic!("expected PushClipRounded, got {other:?}"),
+        }
+        assert!(matches!(scene.commands()[2], frust_scene::Command::PopClip));
+    }
+
+    #[test]
+    fn scene_builder_records_a_dashed_stroke_translated_by_origin() {
+        let mut scene = frust_scene::Scene::new();
+        let dash = DashPattern::new(4.0, 2.0).with_phase(1.0);
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            let paint: &mut dyn PaintScene = &mut builder;
+            paint.stroke_path_dashed(
+                Point::new(5.0, 0.0),
+                &corner_probe_path(),
+                2.0,
+                dash,
+                &Brush::Solid(Color::BLACK),
+            );
+        }
+
+        match &scene.commands()[0] {
+            frust_scene::Command::Path { path, style, .. } => {
+                assert_eq!(
+                    *style,
+                    frust_scene::PathStyle::Stroke {
+                        width: 2.0,
+                        dash: Some(dash)
+                    }
+                );
+                // Same origin translation `stroke_path` applies.
+                assert_eq!(path.elements().len(), 2);
+                assert!(matches!(
+                    path.elements()[0],
+                    kurbo::PathEl::MoveTo(p) if p == Point::new(5.0, 0.0)
+                ));
+            }
+            other => panic!("expected Path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn uniform_paint_calls_still_encode_the_commands_they_always_did() {
+        // The additive contract: the uniform methods every existing call site
+        // uses keep producing the same commands, now spelled as four equal
+        // corners / an undashed stroke.
+        let mut scene = frust_scene::Scene::new();
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            let paint: &mut dyn PaintScene = &mut builder;
+            paint.fill_rounded_rect(
+                Point::new(0.0, 0.0),
+                Size::new(10.0, 10.0),
+                4.0,
+                Color::BLACK,
+            );
+            paint.push_clip_rounded(Point::new(0.0, 0.0), Size::new(10.0, 10.0), 4.0);
+            paint.pop_clip();
+            paint.draw_shadow(
+                Point::new(0.0, 0.0),
+                Size::new(10.0, 10.0),
+                4.0,
+                2.0,
+                Color::BLACK,
+            );
+            paint.stroke_path(
+                Point::new(0.0, 0.0),
+                &corner_probe_path(),
+                1.0,
+                &Brush::Solid(Color::BLACK),
+            );
+        }
+
+        let uniform = CornerRadii::uniform(4.0);
+        match &scene.commands()[0] {
+            frust_scene::Command::RoundedRect { radii, .. } => assert_eq!(*radii, uniform),
+            other => panic!("expected RoundedRect, got {other:?}"),
+        }
+        match &scene.commands()[1] {
+            frust_scene::Command::PushClipRounded { radii, .. } => assert_eq!(*radii, uniform),
+            other => panic!("expected PushClipRounded, got {other:?}"),
+        }
+        match &scene.commands()[3] {
+            frust_scene::Command::BlurredRoundedRect { radii, .. } => assert_eq!(*radii, uniform),
+            other => panic!("expected BlurredRoundedRect, got {other:?}"),
+        }
+        match &scene.commands()[4] {
+            frust_scene::Command::Path { style, .. } => assert_eq!(
+                *style,
+                frust_scene::PathStyle::Stroke {
+                    width: 1.0,
+                    dash: None
+                }
+            ),
+            other => panic!("expected Path, got {other:?}"),
+        }
     }
 }
