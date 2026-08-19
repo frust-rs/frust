@@ -177,11 +177,20 @@ pub struct MaterialSemanticColors {
     pub emphasis: Color,
     /// `onEmphasis` — content color on [`Self::emphasis`] (`scheme.onPrimary`).
     pub on_emphasis: Color,
-    /// `info` — informational role (`scheme.tertiary`).
+    /// `info` — informational role (`scheme.tertiary`). Same name, different
+    /// value from `frust::StatusPalette`'s `info` — see [module docs](self)
+    /// and [`super`]'s "Two semantic vocabularies" section: this is the
+    /// M3E-parity value, `StatusPalette`'s is the framework's own
+    /// community-approximate status trio, deliberately divergent.
     pub info: Color,
     /// `success` — independent semantic constant, not derived from `scheme`.
+    /// Same name as `frust::StatusPalette`'s `success` field; the two
+    /// vocabularies happen to agree in the light branch but diverge in dark
+    /// — coincidence, not a contract (see [`super`]'s module docs).
     pub success: Color,
     /// `warning` — independent semantic constant, not derived from `scheme`.
+    /// Same name, different value from `frust::StatusPalette`'s `warning` —
+    /// see [`super`]'s "Two semantic vocabularies" section.
     pub warning: Color,
     /// `danger` — destructive/error role (`scheme.error`).
     pub danger: Color,

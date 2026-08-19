@@ -77,9 +77,9 @@
 //! | `surfaceTint` | `ColorScheme::surface_tint` |
 //! | `emphasis` | `MaterialTokens.{light,dark}.emphasis` |
 //! | `onEmphasis` | `MaterialTokens.{light,dark}.on_emphasis` |
-//! | `info` | `MaterialTokens.{light,dark}.info` |
-//! | `success` | `MaterialTokens.{light,dark}.success` |
-//! | `warning` | `MaterialTokens.{light,dark}.warning` |
+//! | `info` | `MaterialTokens.{light,dark}.info` (M3E-parity value); also `StatusPalette.{light,dark}.info` (framework status trio — different vocabulary, different value, see below) |
+//! | `success` | `MaterialTokens.{light,dark}.success` (M3E-parity value); also `StatusPalette.{light,dark}.success` (framework status trio, see below) |
+//! | `warning` | `MaterialTokens.{light,dark}.warning` (M3E-parity value); also `StatusPalette.{light,dark}.warning` (framework status trio, see below) |
 //! | `danger` | `MaterialTokens.{light,dark}.danger` |
 //! | `surfaceStrong` | `MaterialTokens.{light,dark}.surface_strong` |
 //! | `onSurfaceStrong` | `MaterialTokens.{light,dark}.on_surface_strong` |
@@ -87,6 +87,39 @@
 //!
 //! (`brightness` is the reference's 44th constructor parameter, but it's a
 //! `Brightness` enum, not a `Color` — not part of the 43-role count.)
+//!
+//! # Two semantic vocabularies
+//!
+//! [`baseline`] attaches *both* [`MaterialTokens`] and a [`StatusPalette`]
+//! (via [`status_palette`]), and both carry `info`/`success`/`warning`
+//! fields — but they are two **different vocabularies that happen to share
+//! role names**, not one role table with two readers:
+//!
+//! - **[`MaterialTokens`]** carries the M3E reference's own semantic roles,
+//!   `info`/`success`/`warning` included — `info` is the reference's
+//!   `scheme.tertiary` alias exactly as `m3e_color_scheme.dart` defines it
+//!   (see [`color`]'s module docs), and `success`/`warning` are its two
+//!   independent constants, transcribed verbatim. **frust-material catalog
+//!   code (every widget in this crate) resolves `MaterialTokens`, never
+//!   `StatusPalette`** — it is the crate's one source of truth for M3E
+//!   parity.
+//! - **[`StatusPalette`]** (`frust::StatusPalette`, defined in
+//!   `frust-theme`) carries the framework-wide, community-approximate
+//!   status trio every baseline `frust-widgets` component (e.g. badge's
+//!   `Info` variant) resolves — a pre-existing contract this crate's
+//!   `status_palette()` supplies values for, unrelated to the M3E port.
+//!
+//! Their same-named fields hold **deliberately different values** (e.g.
+//! light `warning`: `MaterialTokens` `#EF6C00` vs. `StatusPalette`
+//! `#8A5300`; light `info`: `MaterialTokens` `#7D5260` (tertiary) vs.
+//! `StatusPalette` `#0061A4`) — see
+//! [`two_semantic_vocabularies_diverge_by_design`](tests::two_semantic_vocabularies_diverge_by_design)
+//! below, which pins both tables so a future reconciliation is a deliberate,
+//! test-editing act rather than an accidental drift. **Neither table takes
+//! precedence over the other**: there is no ladder to resolve because their
+//! consumers are disjoint — a frust-material component never reads
+//! `StatusPalette`, and a baseline `frust-widgets` component never reads
+//! `MaterialTokens`.
 
 mod color;
 mod extension;
@@ -124,10 +157,14 @@ pub const ROBOTO_MONO_FAMILY: &str = "Roboto Mono";
 /// The Material 3 baseline theme: baseline light/dark color schemes, the M3
 /// type scale (built from `TextStyle::default()`), the M3 shape scale, the M3
 /// elevation table, and the M3 Expressive motion scheme. Starts in
-/// [`Brightness::Light`]. Attaches [`status_palette`] and
-/// [`MaterialTokens::material`] as pre-populated extensions (see
-/// `Theme::extension`), so `extension::<StatusPalette>()` and
-/// `extension::<MaterialTokens>()` are always `Some` on this baseline.
+/// [`Brightness::Light`]. Attaches [`status_palette`],
+/// [`MaterialTokens::material`], and [`native_typefaces`] as pre-populated
+/// extensions (see `Theme::extension`), so `extension::<StatusPalette>()`,
+/// `extension::<MaterialTokens>()`, and `extension::<NativeTypefaces>()` are
+/// always `Some` on this baseline. See [module docs](self)'s "Two semantic
+/// vocabularies" section for why the first two both carry `info`/`success`/
+/// `warning` fields at different values — that is by design, not a
+/// conflict.
 pub fn baseline() -> Theme {
     let mut extensions = ThemeExtensions::new();
     extensions.insert(status_palette());
@@ -401,12 +438,66 @@ mod tests {
     }
 
     #[test]
-    fn baseline_attaches_both_extensions() {
+    fn baseline_attaches_all_three_extensions() {
         let theme = baseline();
         assert_eq!(theme.extension::<StatusPalette>(), Some(&status_palette()));
         assert_eq!(
             theme.extension::<MaterialTokens>(),
             Some(&MaterialTokens::material())
         );
+        assert_eq!(
+            theme.extension::<NativeTypefaces>(),
+            Some(&native_typefaces())
+        );
+    }
+
+    /// Pins both semantic-trio tables `baseline()` attaches — [`MaterialTokens`]
+    /// (M3E-parity `info`/`success`/`warning`) and [`StatusPalette`] (the
+    /// framework-wide status trio, via [`status_palette`]) — at their
+    /// deliberately different values. See [module docs](self)'s "Two semantic
+    /// vocabularies" section: these are two different vocabularies that
+    /// happen to share role names, neither overriding the other, each read
+    /// by disjoint consumers (frust-material catalog code reads only
+    /// `MaterialTokens`; baseline `frust-widgets` components read only
+    /// `StatusPalette`). If a future change makes these converge, that must
+    /// be a deliberate edit to *this* test, not an accidental drift.
+    #[test]
+    fn two_semantic_vocabularies_diverge_by_design() {
+        let material = MaterialTokens::material();
+        let status = status_palette();
+
+        // Light: warning.
+        assert_eq!(material.light.warning, Color::from_rgb8(0xEF, 0x6C, 0x00));
+        assert_eq!(status.light.warning, Color::from_rgb8(0x8A, 0x53, 0x00));
+        assert_ne!(material.light.warning, status.light.warning);
+
+        // Light: info (MaterialTokens aliases `tertiary`; StatusPalette does
+        // not).
+        assert_eq!(material.light.info, Color::from_rgb8(0x7D, 0x52, 0x60));
+        assert_eq!(status.light.info, Color::from_rgb8(0x00, 0x61, 0xA4));
+        assert_ne!(material.light.info, status.light.info);
+
+        // Dark: warning.
+        assert_eq!(material.dark.warning, Color::from_rgb8(0xFF, 0xB7, 0x4D));
+        assert_eq!(status.dark.warning, Color::from_rgb8(0xFF, 0xC4, 0x6B));
+        assert_ne!(material.dark.warning, status.dark.warning);
+
+        // Dark: info.
+        assert_eq!(material.dark.info, Color::from_rgb8(0xEF, 0xB8, 0xC8));
+        assert_eq!(status.dark.info, Color::from_rgb8(0x9F, 0xCA, 0xFF));
+        assert_ne!(material.dark.info, status.dark.info);
+
+        // success is the one role where the two vocabularies happen to
+        // agree in the light branch — still asserted explicitly so a
+        // divergence there is caught too, and to document that agreement is
+        // coincidence, not a contract.
+        assert_eq!(material.light.success, Color::from_rgb8(0x2E, 0x7D, 0x32));
+        assert_eq!(status.light.success, Color::from_rgb8(0x2E, 0x7D, 0x32));
+        assert_eq!(material.light.success, status.light.success);
+
+        // Dark success diverges like the other two roles.
+        assert_eq!(material.dark.success, Color::from_rgb8(0x81, 0xC7, 0x84));
+        assert_eq!(status.dark.success, Color::from_rgb8(0xA6, 0xF1, 0xA1));
+        assert_ne!(material.dark.success, status.dark.success);
     }
 }

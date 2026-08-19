@@ -2,8 +2,19 @@
 //! M3E color roles `ColorScheme` has no field for — `emphasis`/`onEmphasis`,
 //! `info`, `success`, `warning`, `danger`, `surfaceStrong`/`onSurfaceStrong`,
 //! and `outlineStrong`. See [`crate::tokens`]'s module docs for the full
-//! 43-role partition table and [`crate::tokens::color`]'s module docs for how
-//! each field here is sourced.
+//! 43-role partition table (and its "Two semantic vocabularies" section) and
+//! [`crate::tokens::color`]'s module docs for how each field here is
+//! sourced.
+//!
+//! **`info`/`success`/`warning` also name fields on `frust::StatusPalette`**
+//! (the framework-wide status trio baseline `frust-widgets` components
+//! resolve) — at deliberately different values. The two are different
+//! vocabularies that share role names by coincidence, not one role table
+//! with two readers: `MaterialTokens` is the M3E reference's own semantic
+//! set (this crate's catalog code resolves only this one), `StatusPalette`
+//! is the pre-existing framework contract (unrelated to the M3E port).
+//! Neither overrides the other. See [`crate::tokens`]'s module docs for the
+//! full rule and the value-pinning test.
 //!
 //! Mirrors `frust-shadcn`'s `ShadcnTokens` shape: a `Clone + Debug +
 //! PartialEq` payload carrying both brightnesses at once (a design-system
@@ -42,6 +53,12 @@ pub const FALLBACK_DANGER: Color = Color::from_rgb8(0xB3, 0x26, 0x1E);
 /// A `Theme` is cloned across the framework's two delivery paths, so an
 /// extension must be `Any + Send + Sync` — this is plain `Color`-only data
 /// and satisfies that for free.
+///
+/// **Vocabulary note**: [`super::baseline`] attaches this *and* a
+/// `frust::StatusPalette` (via [`super::status_palette`]), and both carry
+/// `info`/`success`/`warning` fields at different values. This is by design
+/// — see [module docs](self) — and frust-material catalog code must resolve
+/// this type, never `StatusPalette`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MaterialTokens {
     /// The nine semantic roles, light mode.
