@@ -74,6 +74,7 @@ pub mod radio;
 pub mod shape_morph;
 pub mod shapes;
 pub mod sheet;
+pub mod slider;
 pub mod split_button;
 pub mod state_layer;
 pub mod switch;
@@ -119,6 +120,10 @@ pub use radio::{Radio, RadioView, RadioWidget, radio};
 pub use shape_morph::morph_path;
 pub use shapes::{CornerRounding, RoundedPolygon};
 pub use sheet::{BottomSheetView, BottomSheetWidget, bottom_sheet, show_bottom_sheet};
+pub use slider::{
+    Slider, SliderIconPosition, SliderTrackIcons, SliderTrackKind, SliderView, SliderWidget,
+    centered_slider, slider,
+};
 pub use split_button::{SplitButton, SplitButtonView, SplitButtonWidget, split_button};
 pub use switch::{Switch, SwitchView, SwitchWidget, switch};
 pub use text_field::{TextField, TextFieldVariant, TextFieldView, TextFieldWidget, text_field};
