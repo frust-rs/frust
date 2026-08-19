@@ -121,8 +121,10 @@ Applies to:
 - Shape token implementation (src/shapes/: rounded_polygon.rs, morph.rs,
   catalog.rs): ported from androidx.graphics.shapes and the
   material_new_shapes package, which carry Apache-2.0 lineage from androidx.
-- Loading indicator (when implemented): ported from
+- Loading indicator rework (planned; not yet shipped): will be ported from
   androidx.compose.material3 LoadingIndicator.kt via material_3_expressive.
+  The current src/loading_indicator.rs is an in-house implementation with no
+  Compose lineage; this attribution activates when the ported rework lands.
 - Material Icons path data (src/icons.rs): Apache-2.0, vendored verbatim from
   Google's `material-design-icons` (`google/material-design-icons`), path
   data as SVG `d` attributes in a 24x24 design box.
