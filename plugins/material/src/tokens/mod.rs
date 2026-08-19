@@ -86,18 +86,20 @@ mod extension;
 mod fonts;
 mod hct;
 mod motion;
+mod type_scale;
 
 pub use color::{MaterialSemanticColors, color_scheme_dark, color_scheme_light};
 pub use extension::MaterialTokens;
 pub use fonts::font_data;
 pub use hct::{CorePalette, Hct, TonalPalette, from_seed, theme_from_seed};
 pub use motion::{MaterialMotion, MaterialSpring};
+pub use type_scale::type_scale;
 
-use frust::authoring::text::{FontWeight, LineHeight, TextStyle};
+use frust::authoring::text::TextStyle;
 use frust::{
     Brightness, CosmeticLoopRate, DesignLanguage, EasingSet, Elevation, ElevationLevel, FontFace,
     GlassScale, MotionDurations, MotionScheme, MotionSpring, NativeTypefaces, ShadowSpec,
-    ShapeScale, StatusColors, StatusPalette, SurfaceRole, Theme, ThemeExtensions, TypeScale,
+    ShapeScale, StatusColors, StatusPalette, SurfaceRole, Theme, ThemeExtensions,
 };
 use peniko::Color;
 
@@ -191,140 +193,6 @@ pub fn status_palette() -> StatusPalette {
             info_container: Color::from_rgb8(0x00, 0x4A, 0x76),
             on_info_container: Color::from_rgb8(0xD1, 0xE4, 0xFF),
         },
-    }
-}
-
-// ---- Type scale -------------------------------------------------------
-
-/// Source: <https://m3.material.io/styles/typography/type-scale-tokens>
-/// (verified 2026-07-17). Sizes are specified in sp; Frust treats sp and
-/// logical px 1:1 (see `frust-text`'s scale). Line heights are absolute
-/// logical pixels (`LineHeight::Absolute`, not a font-size-relative ratio) —
-/// M3 publishes them as fixed px values per token, not a ratio. Letter
-/// spacing is in logical pixels; `displayLarge`'s spacing is negative
-/// (tighter tracking at very large sizes).
-///
-/// `titleLarge` is weight 400 (Regular) per m3.material.io; a secondary
-/// source claims 500 — this module follows m3.material.io as the primary,
-/// more authoritative source.
-///
-/// [`TypeScale`] additionally carries 15 `_emphasized` variants (one per
-/// baseline role, 30 slots total) — the M3 Expressive emphasized scale.
-/// **Role-count resolution:** an earlier belief that emphasized variants were
-/// "15 baseline + 15 emphasized (30 total), applied to Display/Headline/Title
-/// roles" was contested — the "30 total" count was right but the
-/// "Display/Headline/Title only" scope was wrong. Verified directly against
-/// the primary source: Jetpack Compose Material3's generated token file
-/// (`androidx.compose.material3.tokens.TypographyTokens`/`TypeScaleTokens`,
-/// `VERSION: v0_103`,
-/// <https://github.com/androidx/androidx/blob/androidx-main/compose/material3/material3/src/commonMain/kotlin/androidx/compose/material3/tokens/TypeScaleTokens.kt>
-/// — Compose's `Typography` class doc comments enumerate an
-/// `*Emphasized` property for *all 15* baseline roles: `displayLarge`
-/// through `labelSmall`, not a Display/Headline/Title-only subset;
-/// retrieved/verified 2026-07-18). This module follows that: every one of
-/// the 15 baseline roles gets an emphasized sibling.
-///
-/// **M3 deltas** (from the same source): size and line height are unchanged
-/// between a role's baseline and emphasized token — only weight (and, for a
-/// handful of roles, letter spacing) shift. Weight always steps up one rung
-/// from the baseline token's own weight: Regular → Medium for every
-/// Regular-weight baseline role (`display_*`, `headline_*`, `title_large`,
-/// `body_*`), and Medium → Bold for every Medium-weight baseline role
-/// (`title_medium`, `title_small`, `label_*`) — so every emphasized style is
-/// guaranteed to differ from its base in weight. Letter spacing mostly
-/// matches the baseline value already in this module's tables; `body_large`
-/// is the one role whose emphasized tracking differs from its own baseline
-/// (0.5px baseline → 0.15px emphasized, matching the source's
-/// `BodyLargeEmphasizedTracking`).
-///
-/// One type-scale token's numeric shape: `(size_px, line_height_px,
-/// letter_spacing_px, weight)`.
-type TypeToken = (f32, f32, f32, FontWeight);
-
-const DISPLAY_LARGE: TypeToken = (57.0, 64.0, -0.25, FontWeight::REGULAR);
-const DISPLAY_MEDIUM: TypeToken = (45.0, 52.0, 0.0, FontWeight::REGULAR);
-const DISPLAY_SMALL: TypeToken = (36.0, 44.0, 0.0, FontWeight::REGULAR);
-const HEADLINE_LARGE: TypeToken = (32.0, 40.0, 0.0, FontWeight::REGULAR);
-const HEADLINE_MEDIUM: TypeToken = (28.0, 36.0, 0.0, FontWeight::REGULAR);
-const HEADLINE_SMALL: TypeToken = (24.0, 32.0, 0.0, FontWeight::REGULAR);
-const TITLE_LARGE: TypeToken = (22.0, 28.0, 0.0, FontWeight::REGULAR);
-const TITLE_MEDIUM: TypeToken = (16.0, 24.0, 0.15, FontWeight::MEDIUM);
-const TITLE_SMALL: TypeToken = (14.0, 20.0, 0.1, FontWeight::MEDIUM);
-const BODY_LARGE: TypeToken = (16.0, 24.0, 0.5, FontWeight::REGULAR);
-const BODY_MEDIUM: TypeToken = (14.0, 20.0, 0.25, FontWeight::REGULAR);
-const BODY_SMALL: TypeToken = (12.0, 16.0, 0.4, FontWeight::REGULAR);
-const LABEL_LARGE: TypeToken = (14.0, 20.0, 0.1, FontWeight::MEDIUM);
-const LABEL_MEDIUM: TypeToken = (12.0, 16.0, 0.5, FontWeight::MEDIUM);
-const LABEL_SMALL: TypeToken = (11.0, 16.0, 0.5, FontWeight::MEDIUM);
-
-// M3-Expressive emphasized tokens: same size/line-height as the matching
-// baseline `TypeToken` above in every case; weight steps up one rung from
-// the baseline role's own weight (Regular -> Medium, Medium -> Bold) and
-// letter spacing is the source's `*Emphasized*Tracking` value (see this
-// section's doc comment for the primary-source citation and resolution of
-// the contested Display/Headline/Title-only scope claim).
-const DISPLAY_LARGE_EMPHASIZED: TypeToken = (57.0, 64.0, 0.0, FontWeight::MEDIUM);
-const DISPLAY_MEDIUM_EMPHASIZED: TypeToken = (45.0, 52.0, 0.0, FontWeight::MEDIUM);
-const DISPLAY_SMALL_EMPHASIZED: TypeToken = (36.0, 44.0, 0.0, FontWeight::MEDIUM);
-const HEADLINE_LARGE_EMPHASIZED: TypeToken = (32.0, 40.0, 0.0, FontWeight::MEDIUM);
-const HEADLINE_MEDIUM_EMPHASIZED: TypeToken = (28.0, 36.0, 0.0, FontWeight::MEDIUM);
-const HEADLINE_SMALL_EMPHASIZED: TypeToken = (24.0, 32.0, 0.0, FontWeight::MEDIUM);
-const TITLE_LARGE_EMPHASIZED: TypeToken = (22.0, 28.0, 0.0, FontWeight::MEDIUM);
-const TITLE_MEDIUM_EMPHASIZED: TypeToken = (16.0, 24.0, 0.15, FontWeight::BOLD);
-const TITLE_SMALL_EMPHASIZED: TypeToken = (14.0, 20.0, 0.1, FontWeight::BOLD);
-const BODY_LARGE_EMPHASIZED: TypeToken = (16.0, 24.0, 0.15, FontWeight::MEDIUM);
-const BODY_MEDIUM_EMPHASIZED: TypeToken = (14.0, 20.0, 0.25, FontWeight::MEDIUM);
-const BODY_SMALL_EMPHASIZED: TypeToken = (12.0, 16.0, 0.4, FontWeight::MEDIUM);
-const LABEL_LARGE_EMPHASIZED: TypeToken = (14.0, 20.0, 0.1, FontWeight::BOLD);
-const LABEL_MEDIUM_EMPHASIZED: TypeToken = (12.0, 16.0, 0.5, FontWeight::BOLD);
-const LABEL_SMALL_EMPHASIZED: TypeToken = (11.0, 16.0, 0.5, FontWeight::BOLD);
-
-fn apply_type(base: &TextStyle, token: TypeToken) -> TextStyle {
-    let (size, line_height_px, letter_spacing, weight) = token;
-    TextStyle {
-        size,
-        weight,
-        letter_spacing,
-        line_height: LineHeight::Absolute(line_height_px),
-        ..base.clone()
-    }
-}
-
-/// Builds the Material 3 baseline type scale from `base` (its
-/// `family`/`style`/`color` are preserved on every token; only
-/// `size`/`weight`/`letter_spacing`/`line_height` are M3-specified).
-pub fn type_scale(base: &TextStyle) -> TypeScale {
-    TypeScale {
-        display_large: apply_type(base, DISPLAY_LARGE),
-        display_medium: apply_type(base, DISPLAY_MEDIUM),
-        display_small: apply_type(base, DISPLAY_SMALL),
-        headline_large: apply_type(base, HEADLINE_LARGE),
-        headline_medium: apply_type(base, HEADLINE_MEDIUM),
-        headline_small: apply_type(base, HEADLINE_SMALL),
-        title_large: apply_type(base, TITLE_LARGE),
-        title_medium: apply_type(base, TITLE_MEDIUM),
-        title_small: apply_type(base, TITLE_SMALL),
-        body_large: apply_type(base, BODY_LARGE),
-        body_medium: apply_type(base, BODY_MEDIUM),
-        body_small: apply_type(base, BODY_SMALL),
-        label_large: apply_type(base, LABEL_LARGE),
-        label_medium: apply_type(base, LABEL_MEDIUM),
-        label_small: apply_type(base, LABEL_SMALL),
-        display_large_emphasized: apply_type(base, DISPLAY_LARGE_EMPHASIZED),
-        display_medium_emphasized: apply_type(base, DISPLAY_MEDIUM_EMPHASIZED),
-        display_small_emphasized: apply_type(base, DISPLAY_SMALL_EMPHASIZED),
-        headline_large_emphasized: apply_type(base, HEADLINE_LARGE_EMPHASIZED),
-        headline_medium_emphasized: apply_type(base, HEADLINE_MEDIUM_EMPHASIZED),
-        headline_small_emphasized: apply_type(base, HEADLINE_SMALL_EMPHASIZED),
-        title_large_emphasized: apply_type(base, TITLE_LARGE_EMPHASIZED),
-        title_medium_emphasized: apply_type(base, TITLE_MEDIUM_EMPHASIZED),
-        title_small_emphasized: apply_type(base, TITLE_SMALL_EMPHASIZED),
-        body_large_emphasized: apply_type(base, BODY_LARGE_EMPHASIZED),
-        body_medium_emphasized: apply_type(base, BODY_MEDIUM_EMPHASIZED),
-        body_small_emphasized: apply_type(base, BODY_SMALL_EMPHASIZED),
-        label_large_emphasized: apply_type(base, LABEL_LARGE_EMPHASIZED),
-        label_medium_emphasized: apply_type(base, LABEL_MEDIUM_EMPHASIZED),
-        label_small_emphasized: apply_type(base, LABEL_SMALL_EMPHASIZED),
     }
 }
 
@@ -497,54 +365,6 @@ pub fn native_typefaces() -> NativeTypefaces {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn type_scale_display_large_matches_table() {
-        let scale = type_scale(&TextStyle::new(16.0, Color::BLACK));
-        assert_eq!(scale.display_large.size, 57.0);
-        assert_eq!(scale.display_large.line_height, LineHeight::Absolute(64.0));
-        assert_eq!(scale.display_large.letter_spacing, -0.25);
-        assert_eq!(scale.display_large.weight, FontWeight::REGULAR);
-    }
-
-    #[test]
-    fn type_scale_preserves_base_family_and_color() {
-        let base = TextStyle {
-            family: frust::authoring::text::FontFamily::named("Roboto"),
-            ..TextStyle::new(16.0, Color::from_rgb8(1, 2, 3))
-        };
-        let scale = type_scale(&base);
-        assert_eq!(scale.body_large.family, base.family);
-        assert_eq!(scale.body_large.color, base.color);
-    }
-
-    #[test]
-    fn type_scale_every_emphasized_role_differs_in_weight_from_its_base() {
-        let scale = type_scale(&TextStyle::new(16.0, Color::BLACK));
-        let pairs: [(&TextStyle, &TextStyle); 15] = [
-            (&scale.display_large, &scale.display_large_emphasized),
-            (&scale.display_medium, &scale.display_medium_emphasized),
-            (&scale.display_small, &scale.display_small_emphasized),
-            (&scale.headline_large, &scale.headline_large_emphasized),
-            (&scale.headline_medium, &scale.headline_medium_emphasized),
-            (&scale.headline_small, &scale.headline_small_emphasized),
-            (&scale.title_large, &scale.title_large_emphasized),
-            (&scale.title_medium, &scale.title_medium_emphasized),
-            (&scale.title_small, &scale.title_small_emphasized),
-            (&scale.body_large, &scale.body_large_emphasized),
-            (&scale.body_medium, &scale.body_medium_emphasized),
-            (&scale.body_small, &scale.body_small_emphasized),
-            (&scale.label_large, &scale.label_large_emphasized),
-            (&scale.label_medium, &scale.label_medium_emphasized),
-            (&scale.label_small, &scale.label_small_emphasized),
-        ];
-        for (b, emphasized) in pairs {
-            assert_ne!(
-                b.weight, emphasized.weight,
-                "expected emphasized weight to differ from base weight"
-            );
-        }
-    }
 
     #[test]
     fn shape_scale_matches_table() {
